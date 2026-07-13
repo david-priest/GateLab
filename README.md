@@ -46,6 +46,26 @@ the best file open and save experience.
 - Self-contained `.gatelab` workspace bundle (workspace + original FCS + Gating-ML), with
   open → edit → save-in-place and debounced autosave.
 
+## How GateLab compares with other tools
+
+GateLab's niche is an open-source, local browser workflow: it provides a full manual
+gating interface without requiring either R or a commercial desktop/cloud platform.
+
+| | GateLab | FlowJo | Cytobank | CytoExploreR / flowGate |
+|---|---|---|---|---|
+| Interface | Local browser app | Desktop GUI | Cloud GUI | R with interactive gating helpers |
+| Cost / license | Free, MIT, open source | Commercial | Commercial | Free, open source |
+| Workspace and data | Self-contained `.gatelab` bundle with FCS files and gates | `.wsp` workspace linked to local FCS; ACS can bundle both | Cloud experiment | `GatingSet` / R objects |
+| Gate exchange | Gating-ML 2.0 import and export | `.wsp` / `.wspt` workspace formats | Gating-ML 2.0 import and export | `flowWorkspace` / `CytoML` ecosystem |
+| R required | No | No | No | Yes |
+| Processing location | Local browser | Local desktop | Cloud | Local R session |
+| Best suited to | Open-source FCS gating with portable local workspaces | Established desktop cytometry workflows | Shared cloud-based experiments | Scriptable R / `flowWorkspace` pipelines |
+
+See the official documentation for [FlowJo workspace and export
+formats](https://docs.flowjo.com/flowjo/getting-acquainted/fj-export/),
+[Cytobank Gating-ML exchange](https://support.cytobank.org/hc/en-us/articles/204765618-Exporting-and-Importing-Gates-within-Cytobank-and-with-Gating-ML),
+and the Bioconductor [`flowGate` package](https://bioconductor.org/packages/flowGate/).
+
 ## Install and get started
 
 ### What you need
