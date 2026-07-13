@@ -1,0 +1,3 @@
+[submodule "vendor/GateLabR"]
+	path = vendor/GateLabR
+	url = https://github.com/david-priest/GateLabR

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-electron/
+release/
+*.log
+.DS_Store
+.vite/
+coverage/
+
+# TS build cache
+*.tsbuildinfo
+
+# local dev sample data (not committed)
+public/

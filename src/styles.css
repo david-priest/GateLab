@@ -1,0 +1,629 @@
+:root {
+  --bg: #ffffff;
+  --panel: #f5f7fa;
+  --line: #dde1e7;
+  --text: #1b2027;
+  --muted: #6b7280;
+  --accent: #2f80ed;
+  --workspace: #eef1f5; /* plot workspace behind the white plot card */
+  --active: #e4eefb; /* selected sample / row highlight */
+  --hover: #edf3fb;
+  --focus-ring: rgba(47, 128, 237, 0.42);
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+button, input, select { font: inherit; }
+button { transition: color 100ms ease, background-color 100ms ease, border-color 100ms ease, filter 100ms ease; }
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.gl-app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.gl-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.gl-header .gl-meta { color: var(--muted); font-size: 12px; }
+.gl-header .gl-error { color: #e0736b; font-size: 12px; }
+
+.gl-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.gl-btn:disabled { opacity: 0.5; cursor: default; }
+.gl-btn:hover:not(:disabled) { filter: brightness(0.94); }
+.gl-btn-danger { background: #d64545; }
+.gl-btn-block { width: 100%; text-align: center; }
+
+.gl-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* ── Left: samples panel ────────────────────────────────────────── */
+.gl-left {
+  width: 220px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+.gl-sample-list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+.gl-sample-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: var(--bg);
+}
+.gl-sample-row:hover { border-color: var(--line); }
+.gl-sample-row.active { border-color: var(--accent); background: var(--active); }
+.gl-sample-body { flex: 1; min-width: 0; }
+.gl-sample-remove {
+  flex-shrink: 0; width: 18px; height: 18px; line-height: 1; border: none; border-radius: 3px;
+  background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; opacity: 0.6;
+}
+.gl-sample-remove:hover { background: #f0d7d5; color: #c0392b; opacity: 1; }
+.gl-sample-name { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-sample-meta { font-size: 10px; color: var(--muted); margin-top: 2px; }
+.gl-hint { color: var(--muted); font-size: 12px; }
+
+/* ── Center: controls + plot workspace ──────────────────────────── */
+.gl-center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.gl-center.gl-empty { align-items: center; justify-content: center; color: var(--muted); }
+
+/* Center-column tab bar (Gating | Strategy | Illustration | Statistics | Scales) */
+.gl-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  flex-shrink: 0;
+}
+.gl-tab {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+.gl-tab:hover { color: var(--text); }
+.gl-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+
+/* Gating tab keeps the plot workspace as a flex column filling the center. */
+.gl-gating-tab { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+
+/* Non-gating tab panels: scrollable content area. */
+.gl-tab-panel { flex: 1; min-height: 0; overflow: auto; padding: 18px 22px; }
+/* Tabs whose single content region should fill the page (Scales / Strategy / Illustration). */
+.gl-tab-panel.gl-tab-fill { display: flex; flex-direction: column; overflow: hidden; }
+.gl-scales-section-grow { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.gl-grow-scroll { flex: 1; min-height: 0; overflow: auto; }
+.gl-tab-empty, .gl-tab-placeholder { color: var(--muted); }
+.gl-tab-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.gl-tab-title { font-size: 15px; font-weight: 600; margin: 0; color: var(--text); }
+.gl-tab-placeholder p { max-width: 46ch; line-height: 1.5; }
+.gl-tab-placeholder code { background: var(--active); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+
+/* Statistics tab controls */
+.gl-stats-opts { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 10px; }
+.gl-stats-opt-group { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gl-stats-opt-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; }
+.gl-check { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text); cursor: pointer; }
+.gl-check input { margin: 0; }
+.gl-mini-btn { font-size: 11px; padding: 2px 7px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--muted); cursor: pointer; }
+.gl-mini-btn:hover:not(:disabled) { border-color: #b9d4fb; background: var(--hover); color: var(--text); }
+.gl-mini-btn:disabled { opacity: 0.45; cursor: default; }
+.gl-stats-channels { margin-bottom: 12px; align-items: flex-start; }
+.gl-stats-chan-chips { display: flex; flex-wrap: wrap; gap: 4px; max-height: 84px; overflow: auto; }
+/* Strategy population selector: a vertical, tree-indented list (one population per row) instead of a
+   wrapping pill cloud — reads as the population hierarchy and matches the Illustration selectors. */
+.gl-strategy-poplist { flex-direction: column; flex-wrap: nowrap; align-items: flex-start; gap: 2px; max-height: 300px; }
+.gl-strategy-poplist .gl-chan-chip { text-align: left; }
+.gl-chan-chip {
+  font-size: 11px; padding: 2px 7px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg); color: var(--muted); cursor: pointer; white-space: nowrap;
+}
+.gl-chan-chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.gl-chan-chip:hover:not(:disabled):not(.active) { border-color: #b9d4fb; background: var(--hover); color: var(--text); }
+
+/* Statistics table */
+.gl-stats-scroll { overflow: auto; }
+.gl-stats-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.gl-stats-table th, .gl-stats-table td { padding: 5px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.gl-stats-table th { text-align: left; color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--bg); }
+.gl-stats-table tr.active { background: var(--active); }
+.gl-meta-section { margin-bottom: 26px; }
+.gl-meta-section + .gl-meta-section { padding-top: 20px; border-top: 1px solid var(--line); }
+.gl-stats-name { text-align: left; }
+/* Population-tree branching in the stats tables: zero the name cell's vertical padding + let the
+   connector SVG fill the row height (via .gl-stats-tree-cell height:100%) so the │ segments join. */
+.gl-stats-table td.gl-stats-name { padding-top: 0; padding-bottom: 0; height: 20px; }
+.gl-stats-tree-cell { display: flex; align-items: stretch; gap: 3px; height: 100%; min-height: 20px; }
+.gl-stats-tree-label { align-self: center; overflow: hidden; text-overflow: ellipsis; }
+.gl-stats-num { text-align: right; font-variant-numeric: tabular-nums; }
+/* Numeric column HEADERS must right-align to sit over their right-aligned numbers (the generic
+   `.gl-stats-table th { text-align:left }` otherwise wins by specificity and offsets them). */
+.gl-stats-table th.gl-stats-num { text-align: right; }
+/* Thin column dividers for the wide Stats / Metadata tables (readability). */
+.gl-stats-table th:not(:first-child), .gl-stats-table td:not(:first-child) { border-left: 1px solid var(--line); }
+
+/* Strategy / Illustration tabs */
+.gl-strategy-controls {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px;
+  font-size: 12px; color: var(--text);
+}
+.gl-field-inline { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+.gl-field-inline select, .gl-field-inline input {
+  background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 2px 5px; font-size: 12px;
+}
+.gl-field-inline input[type="number"] { width: 70px; }
+.gl-field-inline input[type="range"] { width: 96px; padding: 0; }
+.gl-ctl-sep { width: 1px; height: 18px; background: var(--line); }
+
+/* Compact, consistently-labelled control groups for dense analysis tabs. */
+.gl-control-sections {
+  display: grid; grid-template-columns: max-content minmax(300px, 1fr) max-content;
+  align-items: stretch; gap: 8px; margin-bottom: 12px;
+}
+.gl-control-section {
+  display: flex; flex-direction: column; gap: 6px; min-width: 0;
+  border: 1px solid var(--line); border-radius: 6px; background: #fbfcfe; padding: 7px 9px;
+}
+.gl-control-section-wide { flex: 1 1 390px; }
+.gl-control-section-label {
+  color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: 0.05em; line-height: 1;
+  text-transform: uppercase;
+}
+.gl-control-section-body { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; min-height: 22px; }
+.gl-prop-section-plot { grid-column: 1; grid-row: 1; }
+.gl-prop-section-data { grid-column: 2; grid-row: 1; }
+.gl-prop-section-export { grid-column: 3; grid-row: 1; }
+.gl-prop-section-appearance { grid-column: 1 / -1; grid-row: 2; }
+@media (max-width: 760px) {
+  .gl-control-sections { grid-template-columns: 1fr; }
+  .gl-prop-section-plot, .gl-prop-section-data, .gl-prop-section-export, .gl-prop-section-appearance {
+    grid-column: 1; grid-row: auto;
+  }
+}
+
+/* Illustration tab — multi-row control panel */
+.gl-illust-controls { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.gl-illust-row {
+  display: flex; align-items: center; gap: 10px 12px; flex-wrap: wrap;
+  font-size: 12px; color: var(--text);
+}
+.gl-illust-top-actions { margin-bottom: 2px; }
+.gl-illust-render.pending { background: #e6920a; }
+.gl-illust-render.pending:hover { background: #c07a08; }
+.gl-illust-pending { color: #a56805; font-size: 11px; font-weight: 600; }
+.gl-num-badge { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 30px; }
+.gl-pop-chip-wrap { display: inline-flex; align-items: center; gap: 3px; }
+.gl-pop-color { width: 20px; height: 18px; padding: 0; border: 1px solid var(--line); border-radius: 3px; background: none; cursor: pointer; }
+.gl-mini-grid-container { flex: 1; min-height: 0; overflow: auto; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
+.gl-mini-grid-container .mini-plot-cell { position: relative; }
+.gl-mini-grid-container .strategy-context-title { color: #334155; }
+.gl-mini-grid-container .illustration-row-header { font-weight: 600; color: #334155; margin: 8px 0 4px; }
+
+/* Scales tab */
+.gl-scales-section { margin-bottom: 22px; }
+.gl-section-header { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+.gl-comp-table { border-collapse: collapse; font-size: 10px; font-variant-numeric: tabular-nums; }
+.gl-comp-table th, .gl-comp-table td { border: 1px solid var(--line); padding: 2px 5px; text-align: right; white-space: nowrap; }
+.gl-comp-table thead th { position: sticky; top: 0; background: var(--bg); max-width: 90px; overflow: hidden; text-overflow: ellipsis; }
+.gl-comp-table tbody th { text-align: left; background: var(--bg); max-width: 130px; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.gl-comp-table td.diag { color: var(--muted); }
+.gl-comp-table td.spill { color: var(--text); }
+.gl-scales-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.gl-scales-table th, .gl-scales-table td { padding: 3px 8px; border-bottom: 1px solid var(--line); }
+.gl-scales-table th { text-align: left; color: var(--muted); position: sticky; top: 0; background: var(--bg); }
+.gl-scales-table tr.active { background: var(--active); }
+.gl-scale-input {
+  width: 74px; text-align: right; background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 4px; padding: 2px 5px; font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Padded light workspace; the white plot card centers inside it (no black void). */
+.gl-plot-area {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  min-height: 0;
+  min-width: 0;
+  background: var(--workspace);
+  overflow: auto;
+}
+
+.gl-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.gl-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.gl-controls select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+  max-width: 220px;
+}
+.gl-draw-tools { display: flex; gap: 4px; margin-left: 8px; padding-left: 8px; border-left: 1px solid var(--line); }
+.gl-modes { display: flex; gap: 4px; margin-left: auto; align-items: center; }
+.gl-contour-outer { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; margin-right: 4px; }
+.gl-contour-outer select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 2px 4px; font-size: 11px;
+}
+.gl-chip {
+  background: var(--bg);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.gl-chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.gl-chip:hover:not(:disabled):not(.active) { border-color: #b9d4fb; background: var(--hover); color: var(--text); }
+
+/* Square icon buttons (draw tools) */
+.gl-icon-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  background: var(--bg);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.gl-icon-chip:hover:not(.active) { border-color: var(--accent); color: var(--text); }
+.gl-icon-chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* Channel-scale (logicle W) controls row */
+.gl-scales {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 11px;
+}
+.gl-scales-label { color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px; }
+.gl-scale-row { display: flex; align-items: center; gap: 6px; }
+.gl-scale-axis { color: var(--muted); min-width: 90px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-scale-row input[type="range"] { width: 120px; accent-color: var(--accent); }
+.gl-scale-val { color: var(--text); font-variant-numeric: tabular-nums; min-width: 30px; }
+
+.gl-ranges { gap: 12px; flex-wrap: wrap; }
+.gl-range-row { display: flex; align-items: center; gap: 4px; }
+.gl-range-row input[type="number"] {
+  width: 62px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 2px 4px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.gl-range-dash { color: var(--muted); }
+
+/* Left-panel labeled field (e.g. Display → Max events). Never clips or wraps its label. */
+.gl-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.gl-field-input {
+  width: 84px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* Panel tab — channel rename */
+.gl-panel-hint { max-width: 720px; margin: 0 0 12px; }
+.gl-panel-table td, .gl-panel-table th { vertical-align: middle; }
+.gl-panel-table code { font-size: 11px; color: var(--muted); }
+.gl-panel-table tr.renamed { background: var(--active); }
+.gl-panel-edit { display: flex; align-items: center; gap: 6px; }
+.gl-panel-input { width: 220px; max-width: 40vw; text-align: left; }
+.gl-panel-input:disabled { opacity: 0.55; cursor: not-allowed; }
+.gl-pill-lock { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
+.gl-muted { color: var(--muted); }
+
+/* Metadata tab — editable per-sample grid */
+.gl-meta-table td, .gl-meta-table th { vertical-align: middle; }
+.gl-meta-col-head { display: flex; align-items: center; gap: 4px; }
+.gl-meta-hdr-input { width: 100px; text-align: left; font-weight: 600; }
+.gl-meta-del { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
+.gl-meta-del:hover { color: #d64545; }
+.gl-meta-cell { padding: 3px 6px; }
+.gl-meta-input { width: 108px; text-align: left; }
+
+/* Proportions tab — SVG composition chart */
+.gl-prop-chart-scroll { flex: 1; min-height: 0; overflow: auto; }
+.gl-prop-chart { display: flex; flex-direction: column; align-items: stretch; gap: 10px; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 10px; width: max-content; }
+.gl-prop-panels { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
+.gl-prop-panel { background: #fff; }
+.gl-prop-legend { display: grid; gap: 4px 12px; font-size: 11px; color: var(--text); border-top: 1px solid #e2e8f0; padding-top: 10px; min-width: 0; }
+.gl-prop-legend-item {
+  appearance: none; display: flex; align-items: center; gap: 6px; min-width: 0; width: 100%;
+  border: 1px solid transparent; border-radius: 4px; background: transparent; color: inherit;
+  padding: 2px 3px; text-align: left; cursor: pointer;
+}
+.gl-prop-legend-item:hover, .gl-prop-legend-item.highlighted { background: var(--hover); border-color: #b9d4fb; }
+.gl-prop-legend-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-prop-swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.2); flex: none; }
+.gl-prop-mark, .gl-prop-mark-group { transition: filter 80ms ease, opacity 120ms ease, stroke-width 80ms ease; }
+.gl-prop-mark:hover { filter: brightness(0.94); stroke: #334155; stroke-width: 1; }
+
+.gl-display-pops-banner { font-size: 11px; color: #2f80ed; background: #eaf2fe; border: 1px solid #b9d4fb; border-radius: 4px; padding: 1px 8px; }
+
+/* Division tab */
+.gl-division-container { flex: 1; min-height: 0; overflow: auto; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
+.gl-btn-apply { border-color: #2f80ed; color: #2f80ed; font-weight: 600; }
+
+.gl-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+/* The reused D3 targets this id and reads its clientWidth/Height. */
+#cytof-plot-container {
+  flex: none; /* size to the canvas cytof draws; centered by .gl-plot-area */
+  position: relative;
+  box-sizing: content-box; /* so the left gutter below is added OUTSIDE cytof's inline width:PLOT_W */
+  /* cytof pins the canvas/SVG at position:absolute;left:0, so container padding can't push
+     white to the left — but a left BORDER shifts the padding-box (canvas origin) rightward,
+     exposing a white gutter for the rotated Y-axis title so it no longer sits half over grey. */
+  border-left: 18px solid #fff;
+  background: #fff; /* the D3 renders on a white canvas like GateLabR */
+  box-shadow: 0 1px 10px rgba(0, 0, 0, 0.1);
+  /* no overflow:hidden — it clips the rotated Y-axis label */
+}
+
+/* ── Right sidebar: gate list + population tree ─────────────────── */
+.gl-side {
+  flex-shrink: 0;
+  position: relative;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.gl-side-resize {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 5;
+}
+.gl-side-resize:hover { background: var(--accent); opacity: 0.25; }
+.gl-side-section { display: flex; flex-direction: column; min-height: 0; }
+.gl-side-grow { flex: 1; margin-top: 10px; min-height: 0; }
+.gl-side-grow > #population_tree_container { flex: 1; min-height: 0; display: flex; }
+.gl-side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 5px;
+}
+.gl-side-title {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.gl-tools { display: flex; gap: 3px; }
+.gl-tool {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 1;
+}
+.gl-tool:hover:not(:disabled) { border-color: var(--accent); }
+.gl-tool:disabled { opacity: 0.35; cursor: default; }
+.gl-tool.danger:hover:not(:disabled) { border-color: #e0736b; }
+
+.gl-gateref-list {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 160px; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: 4px; padding: 6px;
+}
+.gl-gateref-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); }
+.gl-inherited { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 0; }
+
+/* Focusable container for arrow-key navigation (matches GateLabR). */
+#population_tree_container { outline: none; flex: 1; min-height: 0; }
+#population_tree_container:focus .population-tree-panel {
+  box-shadow: 0 0 0 2px rgba(47, 128, 237, 0.40);
+  border-color: #b9d4fb;
+}
+
+/* Light panels (ported from GateLabR custom.css) — islands in the dark shell. */
+.gate-list-panel, .population-tree-panel {
+  overflow-y: auto;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 4px;
+  background: #fafafa;
+  color: #222;
+  width: 100%;
+}
+.gate-list-panel { min-height: 120px; max-height: 220px; }
+.population-tree-panel { min-height: 200px; flex: 1; }
+
+.gate-card {
+  display: flex; align-items: center; padding: 1px 8px; margin: 0;
+  border-radius: 3px; cursor: pointer; border: 1px solid transparent;
+  font-size: 13px; line-height: 1.25;
+}
+.gate-card:hover { background: #eef; }
+.gate-card.selected { background: #dde8ff; border-color: #88a8ff; }
+.gate-card-select-col { flex: 0 0 16px; display: flex; align-items: center; justify-content: center; margin-right: 10px; }
+.gate-card-select { margin: 0; width: 13px; height: 13px; cursor: pointer; }
+.gate-color-swatch { width: 14px; height: 14px; border-radius: 2px; margin-right: 6px; flex-shrink: 0; }
+.gate-card-name { flex: 1; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gate-card-channels { color: #999; font-size: 10px; margin-left: 4px; white-space: nowrap; }
+.gate-card-info { color: #888; font-size: 11px; margin-left: 6px; white-space: nowrap; }
+
+.pop-row {
+  display: flex; align-items: center; padding: 3px 6px; margin: 1px 0;
+  border-radius: 3px; cursor: pointer; font-size: 13px;
+  border: 1px solid transparent; border-bottom: 1px solid #e0e0e0; gap: 6px;
+}
+.pop-row-select-col { flex: 0 0 18px; display: flex; align-items: center; justify-content: center; padding-top: 1px; }
+.pop-row-select { margin: 0; width: 13px; height: 13px; cursor: pointer; }
+.pop-row:hover { background: #eef; }
+.pop-row.active { background: #d6edff; border-color: #88b8ff; }
+.pop-row-indent { display: inline-block; flex: 0 0 auto; }
+/* Name column sizes to its content (tree + name) so the pills sit right after it,
+   instead of a fixed 40% that left a big gap. */
+.pop-row-name-col {
+  display: flex; align-items: center; flex: 0 1 auto;
+  /* A modest shared lane aligns pills for short labels; longer names consume
+     the reserve before moving the pills, and narrow panes relax the lane. */
+  min-width: clamp(128px, 34%, 150px); max-width: 55%;
+}
+.pop-row-name-col > svg { display: block; flex-shrink: 0; align-self: stretch; overflow: visible; }
+.pop-row-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Pills fill the middle and CLIP (never wrap, never cover the count/%). */
+.pop-row-gates-col { display: flex; align-items: center; flex: 1 1 auto; min-width: 0; overflow: hidden; }
+.pop-row-gates { display: flex; flex-wrap: nowrap; align-items: center; gap: 3px; min-height: 16px; overflow: hidden; }
+.pop-row-count { color: #666; font-size: 11px; margin-left: 2px; white-space: nowrap; flex-shrink: 0; }
+.pop-row-pct { color: #888; font-size: 10px; margin-left: 2px; white-space: nowrap; flex-shrink: 0; }
+
+.gate-ref-badge {
+  display: inline-block; padding: 0 5px; border-radius: 3px;
+  font-size: 10px; color: white; line-height: 16px; white-space: nowrap;
+}
+.gate-ref-badge.exclude { text-decoration: line-through; opacity: 0.7; }
+/* Selection ring is INSET (not an outer box-shadow): the pill containers clip with
+   overflow:hidden to keep long gate lists off the % column, which would clip an outer ring.
+   A white inner edge separates the ring from the pill colour; the blue reads as selected. */
+.gate-ref-badge.selected-gate {
+  box-shadow: inset 0 0 0 2px #2f80ed, inset 0 0 0 3px rgba(255,255,255,0.9);
+  font-weight: 700;
+}
+.pop-tree-gate-badge { cursor: pointer; transition: box-shadow 0.1s ease, filter 0.1s ease; }
+.pop-tree-gate-badge:hover { box-shadow: inset 0 0 0 1px rgba(0,0,0,0.25); }
+.pop-tree-gate-badge.selected-gate:hover {
+  box-shadow: inset 0 0 0 2px #2f80ed, inset 0 0 0 3px rgba(255,255,255,0.9);
+  filter: brightness(1.1);
+}
+
+/* ── Modals ─────────────────────────────────────────────────────── */
+.gl-modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+  display: flex; align-items: center; justify-content: center; z-index: 100;
+}
+.gl-modal {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 18px 20px; width: 380px; box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+}
+.gl-modal-title { font-weight: 600; font-size: 15px; margin-bottom: 12px; }
+.gl-modal-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; color: var(--muted); font-size: 12px; }
+.gl-modal-field input, .gl-modal-field select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 5px 7px; font-size: 13px;
+}
+.gl-modal-check { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 10px; }
+.gl-modal-note { color: var(--muted); font-size: 11px; margin: 4px 0 12px; }
+.gl-modal-warning { color: #7a3e00; background: #fff4df; border: 1px solid #e9bd72; border-radius: 4px; font-size: 12px; line-height: 1.4; margin: 4px 0 12px; padding: 8px 10px; }
+.gl-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.gl-btn-ghost {
+  background: transparent; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 5px; padding: 5px 12px; font-size: 12px; cursor: pointer;
+}
+.gl-btn-ghost:hover:not(:disabled) { background: var(--hover); border-color: #b9d4fb; color: var(--text); }
+.gl-btn-ghost:disabled { opacity: 0.45; cursor: default; }
