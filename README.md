@@ -48,8 +48,10 @@ the best file open and save experience.
 
 ## How GateLab compares with other tools
 
-GateLab's niche is an open-source, local browser workflow: it provides a full manual
-gating interface without requiring either R or a commercial desktop/cloud platform.
+GateLab is designed for researchers who want to leave proprietary cytometry software
+without giving up a familiar manual-gating workflow. It runs locally in the browser,
+uses portable self-contained workspaces and exchanges gates through Gating-ML—without
+requiring R or a commercial desktop/cloud platform.
 
 | | GateLab | FlowJo | Cytobank | CytoExploreR / flowGate |
 |---|---|---|---|---|
