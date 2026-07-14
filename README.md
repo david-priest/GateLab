@@ -35,8 +35,8 @@ the best file open and save experience.
 
 ## Features
 
-- Multi-sample workspace with a shared gating tree (add/remove FCS freely, FlowJo-style),
-  overlay / compare across samples.
+- Multi-sample workspace with a shared gating tree across freely added or removed FCS
+  files, with overlay / comparison across samples.
 - Interactive gating: rectangle / polygon / quadrant gates, drag-to-edit, boolean
   populations, a population tree with counts / %parent / %total.
 - Tabs: Gating, Strategy (single + multi-population back-gating), Illustration, Statistics,
@@ -67,6 +67,9 @@ See the official documentation for [FlowJo workspace and export
 formats](https://docs.flowjo.com/flowjo/getting-acquainted/fj-export/),
 [Cytobank Gating-ML exchange](https://support.cytobank.org/hc/en-us/articles/204765618-Exporting-and-Importing-Gates-within-Cytobank-and-with-Gating-ML),
 and the Bioconductor [`flowGate` package](https://bioconductor.org/packages/flowGate/).
+
+FlowJo is a trademark of Becton, Dickinson and Company. GateLab is an independent
+project and is not affiliated with or endorsed by BD or FlowJo.
 
 ## Install and get started
 
