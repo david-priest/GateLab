@@ -155,6 +155,7 @@ export default function App() {
   const [panelVersion, setPanelVersion] = useState(0); // bumps when a channel display label changes
   const [crud, setCrud] = useState<CrudModal | null>(null);
   const [importMsg, setImportMsg] = useState<string | null>(null);
+  const [leftWidth, setLeftWidth] = useState(220);
   const [sideWidth, setSideWidth] = useState(560);
   const [xRange, setXRange] = useState<[number, number] | null>(null);
   const [yRange, setYRange] = useState<[number, number] | null>(null);
@@ -319,6 +320,19 @@ export default function App() {
     const move = (ev: MouseEvent) => {
       const w = window.innerWidth - ev.clientX;
       setSideWidth(Math.max(320, Math.min(w, 900)));
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+  const startLeftResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const left = e.currentTarget.parentElement?.getBoundingClientRect().left ?? 0;
+    const move = (ev: MouseEvent) => {
+      setLeftWidth(Math.max(180, Math.min(ev.clientX - left, 480)));
     };
     const up = () => {
       window.removeEventListener("mousemove", move);
@@ -1317,7 +1331,8 @@ export default function App() {
       </header>
 
       <div className="gl-body">
-        <aside className="gl-left" aria-label="Samples and workspace">
+        <aside className="gl-left" style={{ width: leftWidth }} aria-label="Samples and workspace">
+          <div className="gl-left-resize" onMouseDown={startLeftResize} title="Drag to resize samples panel" />
           <div className="gl-side-title">Samples</div>
           <button
             className="gl-btn gl-btn-block"
@@ -1371,7 +1386,6 @@ export default function App() {
                         return next;
                       });
                     }}
-                    style={{ marginRight: 6 }}
                   />
                   <div className="gl-sample-body">
                     <div className="gl-sample-name">{entry.name}</div>

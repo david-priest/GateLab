@@ -73,8 +73,8 @@ select:focus-visible,
 
 /* ── Left: samples panel ────────────────────────────────────────── */
 .gl-left {
-  width: 220px;
   flex-shrink: 0;
+  position: relative;
   border-right: 1px solid var(--line);
   background: var(--panel);
   padding: 10px;
@@ -83,12 +83,30 @@ select:focus-visible,
   gap: 8px;
   min-height: 0;
 }
-.gl-sample-list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+.gl-left-resize {
+  position: absolute;
+  right: -4px;
+  top: 0;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 6;
+}
+.gl-left-resize:hover { background: var(--accent); opacity: 0.25; }
+.gl-sample-list {
+  display: flex;
+  flex: 1 1 120px;
+  min-height: 80px;
+  flex-direction: column;
+  gap: 3px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
 .gl-sample-row {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 6px 8px;
+  gap: 3px;
+  padding: 3px 5px;
   border-radius: 5px;
   cursor: pointer;
   border: 1px solid transparent;
@@ -97,13 +115,14 @@ select:focus-visible,
 .gl-sample-row:hover { border-color: var(--line); }
 .gl-sample-row.active { border-color: var(--accent); background: var(--active); }
 .gl-sample-body { flex: 1; min-width: 0; }
+.gl-sample-include { flex: none; width: 14px; height: 14px; margin: 0 2px 0 0; }
 .gl-sample-remove {
-  flex-shrink: 0; width: 18px; height: 18px; line-height: 1; border: none; border-radius: 3px;
+  flex-shrink: 0; width: 16px; height: 16px; line-height: 1; border: none; border-radius: 3px;
   background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; opacity: 0.6;
 }
 .gl-sample-remove:hover { background: #f0d7d5; color: #c0392b; opacity: 1; }
-.gl-sample-name { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gl-sample-meta { font-size: 10px; color: var(--muted); margin-top: 2px; }
+.gl-sample-name { font-size: 12px; font-weight: 500; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-sample-meta { font-size: 10px; line-height: 1.15; color: var(--muted); margin-top: 1px; }
 .gl-hint { color: var(--muted); font-size: 12px; }
 
 /* ── Center: controls + plot workspace ──────────────────────────── */
