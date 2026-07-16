@@ -35,22 +35,53 @@ export interface DivisionApi {
 let loaded = false;
 let cached: { CytofD3: CytofD3Api; bus: PlotBus } | null = null;
 
-// GateLab adaptation (kept OUT of the pristine vendored submodule): cytof caches the
-// contour by a fingerprint of the point data and pans purely by re-rendering with new
-// x_range/y_range — its d3-zoom transform `_zt` is always identity. So a range-only change
-// (our drag-to-pan) leaves the contour frozen at the old view while the gates redraw at the
-// new range (the "gates move over static data" bug). Extend the contour cache key with the
-// range so the contour rebuilds when the view is panned/zoomed.
-function patchCytof(src: string): string {
-  const needle = "pd.contour_threshold || 5];";
-  if (!src.includes(needle)) {
+// GateLab adaptations kept OUT of the pristine vendored submodule.
+export function patchCytofForGateLab(src: string): string {
+  let out = src;
+
+  // cytof caches contours by point data. Include the view range so pan/stretch cannot leave
+  // the density frozen while axes and gates move.
+  const contourNeedle = "pd.contour_threshold || 5];";
+  if (!out.includes(contourNeedle)) {
     console.warn("[GateLab] cytof contour-key patch did not match — contour may lag on pan.");
-    return src;
+  } else {
+    out = out.replace(
+      contourNeedle,
+      "pd.contour_threshold || 5, (pd.x_range||[]).join(','), (pd.y_range||[]).join(',')];",
+    );
   }
-  return src.replace(
-    needle,
-    "pd.contour_threshold || 5, (pd.x_range||[]).join(','), (pd.y_range||[]).join(',')];",
-  );
+
+  // A polygon closed on mousedown sets this guard to swallow that physical click. React can
+  // switch back to navigate before the click arrives, leaving the guard set; the first click of
+  // the next polygon was then lost. A mode change always starts a fresh drawing transaction.
+  const resetNeedle = "_polyVerts = []; _mouseData = null;\n        _rectStart = null; _rectCurrent = null;";
+  if (!out.includes(resetNeedle)) {
+    console.warn("[GateLab] cytof polygon-close guard patch did not match.");
+  } else {
+    out = out.replace(
+      resetNeedle,
+      "_polyVerts = []; _mouseData = null; _polyJustClosed = false;\n        _rectStart = null; _rectCurrent = null;",
+    );
+  }
+
+  // Saved gate fills have D3 drag handlers and cover large parts of the plot. While drawing,
+  // make the entire saved-gate layer transparent to pointer input so every click reaches the
+  // plot overlay. The preview itself is visual-only; close detection is coordinate based.
+  const modeNeedle = `_g.select('.cytof-overlay').style('cursor',
+            newMode === 'navigate' ? 'default' : 'crosshair');`;
+  if (!out.includes(modeNeedle)) {
+    console.warn("[GateLab] cytof draw-mode pointer patch did not match.");
+  } else {
+    out = out.replace(
+      modeNeedle,
+      `${modeNeedle}
+        _g.select('.gate-layer').style('pointer-events',
+            newMode === 'navigate' ? null : 'none');
+        _g.select('.draw-layer').style('pointer-events', 'none');`,
+    );
+  }
+
+  return out;
 }
 
 // GateLab adaptation (kept OUT of the pristine vendored submodule): mini_plot's contour uses a
@@ -79,7 +110,7 @@ export function loadPlots(): { CytofD3: CytofD3Api; bus: PlotBus } {
     // Indirect eval → runs in global scope so UMD/IIFE assignments land on window.
     const globalEval = eval;
     globalEval(d3Src); // → window.d3
-    globalEval(patchCytof(cytofSrc)); // → window.CytofD3 (+ registers updatePlot/setMode/... on window.Shiny)
+    globalEval(patchCytofForGateLab(cytofSrc)); // → window.CytofD3 (+ registers updatePlot/setMode/... on window.Shiny)
     globalEval(patchMiniPlot(miniSrc)); // → window.CytofMiniPlot (Strategy / Illustration grids)
     globalEval(divisionSrc); // → window.DivisionD3 (Division profiler)
     loaded = true;
