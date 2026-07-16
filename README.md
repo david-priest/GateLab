@@ -7,6 +7,10 @@ GateLab is a standalone reimplementation of
 plotting modules and reimplements its R analysis engine in TypeScript, so gating runs
 entirely in the browser with no R backend.
 
+## GateLab in action
+
+![Animated GateLab tour using a public human PBMC spectral-flow dataset, showing gating, strategy, illustration, proportions, metadata, and scales views.](docs/assets/gatelab-tour.gif)
+
 ## GateLab or GateLabR?
 
 GateLab and [GateLabR](https://github.com/david-priest/GateLabR) share the same gating
