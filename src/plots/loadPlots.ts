@@ -14,7 +14,7 @@ export interface CytofD3Api {
   render(payload: unknown, mode?: string): void;
   setMode(mode: string): void;
   clear(): void;
-  clearPendingEdit(gateId: string, seq: number): void;
+  clearPendingEdit(gateId: string, seq?: number): void;
 }
 
 /** mini_plot.js — the Strategy / Illustration grid renderer (window.CytofMiniPlot). */

@@ -272,7 +272,9 @@ export default function App() {
     const onMouseDown = (e: MouseEvent) => {
       if (pzRef.current.drawMode !== "navigate") return;
       const t = e.target as Element;
-      if (t.closest?.(".saved-gate")) return; // let cytof handle gate select/drag
+      // Gate gestures and clickable axis labels belong to cytof_plot.js. Starting our
+      // plot-wide pan listener on either can prevent or disturb the intended interaction.
+      if (t.closest?.(".saved-gate, .cytof-xlabel, .cytof-ylabel")) return;
       const rr = ranges();
       if (!rr) return;
       const r = rect();
