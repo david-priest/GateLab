@@ -259,4 +259,33 @@ describe("GatingPlot render lifecycle", () => {
     expect(previousSampleCallback).not.toHaveBeenCalled();
     expect(activeSampleCallback).toHaveBeenCalledWith({ axis: "x", selected: "CD19" });
   });
+
+  it("routes a quadrant drag through the latest workspace callback", () => {
+    const item = mountPlot();
+    const callbackFromEmptyWorkspace = vi.fn();
+    const callbackFromLoadedWorkspace = vi.fn();
+
+    act(() => item.root.render(
+      <GatingPlot
+        payload={{ points: [1], gates: [] }}
+        onQuadrantMove={callbackFromEmptyWorkspace}
+      />,
+    ));
+    act(() => item.root.render(
+      <GatingPlot
+        payload={{ points: [1], gates: [{ gate_id: "quadrant-1", center: [2, 3] }] }}
+        onQuadrantMove={callbackFromLoadedWorkspace}
+      />,
+    ));
+    act(() => plotBus.emit("gate_quadrant_move", {
+      gate_id: "quadrant-1",
+      center: [5, 7],
+    }));
+
+    expect(callbackFromEmptyWorkspace).not.toHaveBeenCalled();
+    expect(callbackFromLoadedWorkspace).toHaveBeenCalledWith({
+      gate_id: "quadrant-1",
+      center: [5, 7],
+    });
+  });
 });

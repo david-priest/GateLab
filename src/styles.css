@@ -480,6 +480,15 @@ select:focus-visible,
   /* no overflow:hidden — it clips the rotated Y-axis label */
 }
 
+/* Rectangle drawing preview: an open gate-like outline rather than SVG's default black fill. */
+#cytof-plot-container .rubber-band {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2px;
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
+}
+
 /* ── Right sidebar: gate list + population tree ─────────────────── */
 .gl-side {
   flex-shrink: 0;
