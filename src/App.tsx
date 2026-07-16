@@ -353,17 +353,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.gate_version, scalesVersion, compensationOn, instrumentMode, globalScales, mode, maxEvents, contourThreshold, xIdx, yIdx]);
 
-  // Guard against closing the tab/window with unsaved work.
-  useEffect(() => {
-    if (!dirty) return;
-    const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = ""; // required for the browser's native "Leave site?" prompt
-    };
-    window.addEventListener("beforeunload", onBeforeUnload);
-    return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [dirty]);
-
   // Autosave: debounced write to the OPEN workspace handle when dirty (needs an in-place handle;
   // Save As establishes one). Reads fresh state via a ref so late edits aren't lost.
   const buildWsRef = useRef<() => WorkspaceFile | null>(() => null);
