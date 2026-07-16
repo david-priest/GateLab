@@ -1,6 +1,12 @@
 # GateLab
 
-GateLab is a browser-based application for manually gating flow-cytometry and mass-cytometry (CyTOF) FCS files. It runs locally in your web browser: install the project once, start the app, then import FCS files and build a gating strategy—no R installation or server-side analysis is required.
+GateLab is a browser-based application for manually gating flow-cytometry and mass-cytometry (CyTOF) FCS files. It runs entirely in your web browser—no R installation or server-side analysis is required.
+
+## [Launch GateLab in your browser →](https://david-priest.github.io/GateLab/)
+
+No installation is required for the hosted app. Your FCS files and workspaces are
+processed locally in your browser and are not uploaded for analysis. GateLab can also be
+installed and run locally using the instructions below.
 
 GateLab is a standalone reimplementation of
 [GateLabR](https://github.com/david-priest/GateLabR) — it reuses GateLabR's vendored D3
@@ -23,7 +29,7 @@ data already lives:
 | Best starting point | FCS files | A `SingleCellExperiment` (or FCS files) |
 | Workspace | Self-contained `.gatelab` bundle | Gating metadata stored inside the SCE |
 | Downstream hand-off | FCS, Gating-ML, statistics and figures | Populations in `colData`, plus FCS, Gating-ML, statistics and figures |
-| Install | Node.js + `npm` | R + Bioconductor dependencies |
+| Install | Open the hosted app, or use Node.js + `npm` locally | R + Bioconductor dependencies |
 
 GateLab is a standalone TypeScript port for users who do not need an R environment. Its
 interactive plots reuse GateLabR's D3 modules, while its analysis engine independently
@@ -34,8 +40,9 @@ derived from GateLabR.
 
 ## Using GateLab
 
-GateLab runs locally in a modern web browser. Chrome or Microsoft Edge are recommended for
-the best file open and save experience.
+GateLab runs entirely in a modern web browser, either from the hosted app or from a local
+installation. Chrome or Microsoft Edge are recommended for the best file open and save
+experience.
 
 ## Features
 
@@ -81,7 +88,7 @@ and the Bioconductor [`flowGate` package](https://bioconductor.org/packages/flow
 FlowJo is a trademark of Becton, Dickinson and Company. GateLab is an independent
 project and is not affiliated with or endorsed by BD or FlowJo.
 
-## Install and get started
+## Local installation
 
 ### What you need
 
