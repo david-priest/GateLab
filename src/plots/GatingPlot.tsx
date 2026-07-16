@@ -28,6 +28,41 @@ interface Props {
   onGateLabelMove?: (e: { gate_id: string; label_offset: [number, number] }) => void;
 }
 
+interface GateEditEvent {
+  gate_id: string;
+  vertices: [number, number][];
+  seq?: number;
+}
+
+interface PendingGateEdit {
+  vertices: [number, number][];
+  seq?: number;
+}
+
+function sameCoordinate(a: unknown, b: number): boolean {
+  if (typeof a !== "number" || !Number.isFinite(a)) return false;
+  // display → gating → display is not necessarily bit-exact (notably logicle axes).
+  return Math.abs(a - b) <= 1e-6 + 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
+}
+
+function payloadContainsEdit(payload: object, gateId: string, edit: PendingGateEdit): boolean {
+  const gates = (payload as { gates?: unknown }).gates;
+  if (!Array.isArray(gates)) return false;
+  const gate = gates.find((item) =>
+    typeof item === "object" && item !== null &&
+    (item as { gate_id?: unknown }).gate_id === gateId,
+  ) as { vertices?: unknown } | undefined;
+  const vertices = gate?.vertices;
+  if (!Array.isArray(vertices) || vertices.length !== edit.vertices.length) {
+    return false;
+  }
+  return edit.vertices.every(([x, y], index) => {
+    const vertex = vertices[index];
+    return Array.isArray(vertex) && vertex.length >= 2 &&
+      sameCoordinate(vertex[0], x) && sameCoordinate(vertex[1], y);
+  });
+}
+
 let _seq = 1000;
 
 export function GatingPlot({
@@ -49,9 +84,26 @@ export function GatingPlot({
   const mountedRef = useRef(false);
   const frameRef = useRef<number | null>(null);
   const retryRef = useRef<number | null>(null);
+  const pendingGateEditsRef = useRef(new Map<string, PendingGateEdit>());
+  const callbacksRef = useRef({
+    onNewGate,
+    onGateEdit,
+    onQuadrantMove,
+    onGateSelect,
+    onAxisLabelClick,
+    onGateLabelMove,
+  });
   payloadRef.current = payload;
   modeRef.current = mode;
   visibleRef.current = visible;
+  callbacksRef.current = {
+    onNewGate,
+    onGateEdit,
+    onQuadrantMove,
+    onGateSelect,
+    onAxisLabelClick,
+    onGateLabelMove,
+  };
 
   const cancelScheduledPaint = () => {
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
@@ -106,6 +158,21 @@ export function GatingPlot({
       return;
     }
 
+    // cytof_plot.js keeps freshly dragged vertices in a pending latch so a queued render
+    // cannot restore stale geometry. React state commits asynchronously, so acknowledge an
+    // edit only from a paint holding the corresponding committed payload. Clearing here and
+    // immediately rendering that payload also makes its canonical label offset authoritative;
+    // the browser cannot paint any stale deferred flush between these synchronous calls.
+    // Clearing it in the gate_edit callback races the commit and causes the polygon to snap
+    // back to its old coordinates.
+    for (const [gateId, edit] of pendingGateEditsRef.current) {
+      if (!payloadContainsEdit(p, gateId, edit)) continue;
+      api.clearPendingEdit(gateId, edit.seq);
+      if (pendingGateEditsRef.current.get(gateId) === edit) {
+        pendingGateEditsRef.current.delete(gateId);
+      }
+    }
+
     api.render({ ...p, force_full: true, _plot_seq: ++_seq }, modeRef.current);
 
     // Rendering is synchronous. If the legacy engine did not initialise a usable canvas,
@@ -121,21 +188,28 @@ export function GatingPlot({
     apiRef.current = CytofD3;
 
     const offs = [
-      onNewGate && bus.on("new_gate", onNewGate as (v: unknown) => void),
+      bus.on("new_gate", (v: unknown) => callbacksRef.current.onNewGate?.(v as NewGate)),
       bus.on("gate_edit", (v: unknown) => {
-        const e = v as { gate_id: string; vertices: [number, number][]; seq?: number };
-        onGateEdit?.(e);
-        // Release cytof's pending-edit latch now that the store holds the new geometry
-        // (GateLab persists synchronously). Otherwise the dragged vertices stay cached in
-        // cytof's _pendingEdits and silently override the store after undo / on the next
-        // non-drag render — mirror app.R:4805's clearPendingEdit ack.
-        apiRef.current?.clearPendingEdit(e.gate_id, e.seq as number);
+        const e = v as GateEditEvent;
+        const handler = callbacksRef.current.onGateEdit;
+        if (!handler) {
+          apiRef.current?.clearPendingEdit(e.gate_id, e.seq);
+          return;
+        }
+        pendingGateEditsRef.current.set(e.gate_id, {
+          vertices: e.vertices.map(([x, y]) => [x, y]),
+          seq: e.seq,
+        });
+        handler(e);
       }),
-      onQuadrantMove && bus.on("gate_quadrant_move", onQuadrantMove as (v: unknown) => void),
-      onGateSelect && bus.on("gate_select", onGateSelect as (v: unknown) => void),
-      onAxisLabelClick && bus.on("axis_label_click", onAxisLabelClick as (v: unknown) => void),
-      onGateLabelMove && bus.on("gate_label_move", onGateLabelMove as (v: unknown) => void),
-    ].filter(Boolean) as (() => void)[];
+      bus.on("gate_quadrant_move", (v: unknown) =>
+        callbacksRef.current.onQuadrantMove?.(v as { gate_id: string; center: [number, number] })),
+      bus.on("gate_select", (v: unknown) => callbacksRef.current.onGateSelect?.(v as string)),
+      bus.on("axis_label_click", (v: unknown) =>
+        callbacksRef.current.onAxisLabelClick?.(v as { axis: "x" | "y"; selected: string })),
+      bus.on("gate_label_move", (v: unknown) =>
+        callbacksRef.current.onGateLabelMove?.(v as { gate_id: string; label_offset: [number, number] })),
+    ];
 
     // Observe the workspace (parent), not the container: cytof sizes the canvas from
     // the parent's width, and the container is now fit-content (it wouldn't resize when
@@ -151,6 +225,7 @@ export function GatingPlot({
     return () => {
       mountedRef.current = false;
       cancelScheduledPaint();
+      pendingGateEditsRef.current.clear();
       offs.forEach((off) => off());
       ro.disconnect();
     };

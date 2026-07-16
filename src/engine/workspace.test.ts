@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { strToU8, zipSync } from "fflate";
-import { packWorkspace, packWorkspaceReference, readWorkspaceBytes, validateWorkspace, type WorkspaceFile } from "./workspace";
+import {
+  packWorkspace,
+  packWorkspaceForStorage,
+  packWorkspaceReference,
+  readWorkspaceBytes,
+  validateWorkspace,
+  type WorkspaceFile,
+} from "./workspace";
 
 function makeWs(): WorkspaceFile {
   return {
@@ -41,7 +48,8 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
   const fcsByPath = { "data/0_run1.fcs": fcs0, "data/1_run2.fcs": fcs1 };
 
   it("bundled: recovers the JSON + every sample's FCS bytes", () => {
-    const { ws: back, fcsByPath: got } = readWorkspaceBytes(packWorkspace(ws, fcsByPath, "<xml/>"));
+    const { ws: back, fcsByPath: got, storage } = readWorkspaceBytes(packWorkspace(ws, fcsByPath, "<xml/>"));
+    expect(storage).toBe("bundle");
     expect(back).toEqual(ws);
     expect(Array.from(got!["data/0_run1.fcs"])).toEqual(Array.from(fcs0));
     expect(Array.from(got!["data/1_run2.fcs"])).toEqual(Array.from(fcs1));
@@ -53,9 +61,22 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     expect(packWorkspace(ws, fcsByPath)[0]).toBe(0x50);
     const ref = packWorkspaceReference(ws);
     expect(ref[0]).not.toBe(0x50);
-    const { ws: back, fcsByPath: got } = readWorkspaceBytes(ref);
+    const { ws: back, fcsByPath: got, storage } = readWorkspaceBytes(ref);
+    expect(storage).toBe("reference");
     expect(got).toBeNull(); // reference — FCS re-linked by the caller
     expect(back).toEqual(ws);
+  });
+
+  it("re-saves without converting a bundle into a reference workspace", () => {
+    const savedBundle = packWorkspaceForStorage(ws, fcsByPath, "bundle", "<xml/>");
+    const reopenedBundle = readWorkspaceBytes(savedBundle);
+    expect(savedBundle[0]).toBe(0x50);
+    expect(reopenedBundle.storage).toBe("bundle");
+    expect(Array.from(reopenedBundle.fcsByPath!["data/1_run2.fcs"])).toEqual(Array.from(fcs1));
+
+    const savedReference = packWorkspaceForStorage(ws, fcsByPath, "reference");
+    expect(savedReference[0]).not.toBe(0x50);
+    expect(readWorkspaceBytes(savedReference).storage).toBe("reference");
   });
 
   it("preserves per-sample W / compensation + shared scales/display/selection", () => {

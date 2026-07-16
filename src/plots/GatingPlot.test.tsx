@@ -18,10 +18,25 @@ const plot = vi.hoisted(() => ({
   clearPendingEdit: vi.fn(),
 }));
 
+const plotBus = vi.hoisted(() => {
+  const listeners: Record<string, ((value: unknown) => void)[]> = {};
+  return {
+    on: vi.fn((name: string, callback: (value: unknown) => void) => {
+      (listeners[name] ||= []).push(callback);
+      return () => {
+        listeners[name] = (listeners[name] || []).filter((item) => item !== callback);
+      };
+    }),
+    emit(name: string, value: unknown) {
+      for (const callback of listeners[name] || []) callback(value);
+    },
+  };
+});
+
 vi.mock("./loadPlots", () => ({
   loadPlots: () => ({
     CytofD3: plot,
-    bus: { on: vi.fn(() => vi.fn()) },
+    bus: plotBus,
   }),
 }));
 
@@ -67,6 +82,7 @@ beforeEach(() => {
   vi.stubGlobal("cancelAnimationFrame", (id: number) => window.clearTimeout(id));
   plot.render.mockClear();
   plot.setMode.mockClear();
+  plot.clearPendingEdit.mockClear();
 });
 
 afterEach(() => {
@@ -163,5 +179,113 @@ describe("GatingPlot render lifecycle", () => {
     flush();
     expect(plot.render).toHaveBeenCalledTimes(1);
     expect(plot.render.mock.calls[0][0]).toMatchObject({ version: "visible-latest" });
+  });
+
+  it("keeps dragged geometry pending until the current callback has committed and rendered it", () => {
+    const original: [number, number][] = [[1, 1], [3, 1], [2, 3]];
+    const moved: [number, number][] = [[5, 4], [7, 4], [6, 6]];
+    const staleCallback = vi.fn();
+    const currentCallback = vi.fn();
+    const item = mountPlot();
+
+    act(() => item.root.render(
+      <GatingPlot
+        payload={{ points: [1], gates: [{ gate_id: "gate-1", vertices: original }] }}
+        onGateEdit={staleCallback}
+      />,
+    ));
+    flush();
+
+    // Callback props change as App state / the active sample changes. The bus subscription
+    // must call the current callback rather than the closure captured when the plot mounted.
+    act(() => item.root.render(
+      <GatingPlot
+        payload={{ points: [1], gates: [{ gate_id: "gate-1", vertices: original }] }}
+        onGateEdit={currentCallback}
+      />,
+    ));
+
+    act(() => plotBus.emit("gate_edit", {
+      gate_id: "gate-1",
+      vertices: moved,
+      seq: 42,
+    }));
+
+    expect(staleCallback).not.toHaveBeenCalled();
+    expect(currentCallback).toHaveBeenCalledWith(expect.objectContaining({
+      gate_id: "gate-1",
+      vertices: moved,
+    }));
+    // Releasing here lets cytof_plot.js flush a queued render containing the old gate.
+    expect(plot.clearPendingEdit).not.toHaveBeenCalled();
+
+    act(() => item.root.render(
+      <GatingPlot
+        payload={{ points: [1], gates: [{ gate_id: "gate-1", vertices: original }] }}
+        onGateEdit={currentCallback}
+      />,
+    ));
+    flush();
+    expect(plot.clearPendingEdit).not.toHaveBeenCalled();
+
+    act(() => item.root.render(
+      <GatingPlot
+        payload={{ points: [1], gates: [{ gate_id: "gate-1", vertices: moved }] }}
+        onGateEdit={currentCallback}
+      />,
+    ));
+    flush();
+
+    expect(plot.clearPendingEdit).toHaveBeenCalledTimes(1);
+    expect(plot.clearPendingEdit).toHaveBeenCalledWith("gate-1", 42);
+    expect(plot.clearPendingEdit.mock.invocationCallOrder[0]).toBeLessThan(
+      plot.render.mock.invocationCallOrder.at(-1)!,
+    );
+  });
+
+  it("routes an axis-picker update through the latest sample callback", () => {
+    const item = mountPlot();
+    const previousSampleCallback = vi.fn();
+    const activeSampleCallback = vi.fn();
+
+    act(() => item.root.render(
+      <GatingPlot payload={{ points: [1] }} onAxisLabelClick={previousSampleCallback} />,
+    ));
+    act(() => item.root.render(
+      <GatingPlot payload={{ points: [1] }} onAxisLabelClick={activeSampleCallback} />,
+    ));
+    act(() => plotBus.emit("axis_label_click", { axis: "x", selected: "CD19" }));
+
+    expect(previousSampleCallback).not.toHaveBeenCalled();
+    expect(activeSampleCallback).toHaveBeenCalledWith({ axis: "x", selected: "CD19" });
+  });
+
+  it("routes a quadrant drag through the latest workspace callback", () => {
+    const item = mountPlot();
+    const callbackFromEmptyWorkspace = vi.fn();
+    const callbackFromLoadedWorkspace = vi.fn();
+
+    act(() => item.root.render(
+      <GatingPlot
+        payload={{ points: [1], gates: [] }}
+        onQuadrantMove={callbackFromEmptyWorkspace}
+      />,
+    ));
+    act(() => item.root.render(
+      <GatingPlot
+        payload={{ points: [1], gates: [{ gate_id: "quadrant-1", center: [2, 3] }] }}
+        onQuadrantMove={callbackFromLoadedWorkspace}
+      />,
+    ));
+    act(() => plotBus.emit("gate_quadrant_move", {
+      gate_id: "quadrant-1",
+      center: [5, 7],
+    }));
+
+    expect(callbackFromEmptyWorkspace).not.toHaveBeenCalled();
+    expect(callbackFromLoadedWorkspace).toHaveBeenCalledWith({
+      gate_id: "quadrant-1",
+      center: [5, 7],
+    });
   });
 });
