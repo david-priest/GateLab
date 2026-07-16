@@ -25,21 +25,47 @@ export interface ResolvedChannel {
   range: number;
 }
 
+/**
+ * FCS permits a descriptive $PnS marker that is not the parameter identity.
+ * Repeated markers must therefore not become repeated app keys: channel maps,
+ * gates, compensation, and exports all require a one-to-one identity. Use $PnN
+ * only when needed to disambiguate, then suffix malformed repeated $PnN values.
+ */
+function uniqueChannelKeys(channels: ResolvedChannel[]): ResolvedChannel[] {
+  const counts = new Map<string, number>();
+  for (const channel of channels) counts.set(channel.key, (counts.get(channel.key) ?? 0) + 1);
+
+  const withParameterNames = channels.map((channel) => {
+    if ((counts.get(channel.key) ?? 0) < 2 || channel.pnn === channel.key) return channel;
+    return { ...channel, key: `${channel.key} (${channel.pnn})` };
+  });
+
+  const used = new Set<string>();
+  return withParameterNames.map((channel) => {
+    const base = channel.key;
+    let key = base;
+    let suffix = 2;
+    while (used.has(key)) key = `${base} [${suffix++}]`;
+    used.add(key);
+    return key === channel.key ? channel : { ...channel, key };
+  });
+}
+
 const endsWithA = (s: string): boolean => /-A$/i.test(s);
 const suffixAHW = (s: string): boolean => /-(A|H|W)$/i.test(s);
 
 export function resolveChannels(fcs: FcsFile): ResolvedChannel[] {
   if (fcs.instrument !== "flow") {
     // CyTOF / other: keep all channels; prefer the marker when it's distinct.
-    return fcs.channels.map((c) => ({
+    return uniqueChannelKeys(fcs.channels.map((c) => ({
       key: c.marker && c.marker.trim() && c.marker.trim() !== c.name ? c.marker.trim() : c.name,
       pnn: c.name,
       marker: c.marker,
       columnIndex: c.index,
       range: c.range,
-    }));
+    })));
   }
-  return filterFlowChannels(fcs);
+  return uniqueChannelKeys(filterFlowChannels(fcs));
 }
 
 function keepAll(fcs: FcsFile): ResolvedChannel[] {

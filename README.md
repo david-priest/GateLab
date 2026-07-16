@@ -37,14 +37,20 @@ the best file open and save experience.
 
 - Multi-sample workspace with a shared gating tree across freely added or removed FCS
   files, with overlay / comparison across samples.
-- Interactive gating: rectangle / polygon / quadrant gates, drag-to-edit, boolean
-  populations, a population tree with counts / %parent / %total.
+- Interactive gating: rectangle / polygon / quadrant gates, drag-to-edit, positive
+  AND population hierarchies, and a population tree with counts / %parent / %total.
 - Tabs: Gating, Strategy (single + multi-population back-gating), Illustration, Statistics,
   Panel, Scales, Division profiler, Proportions, Metadata.
 - Import / export **Gating-ML 2.0** (GateLabR / Cytobank dialects); export populations as
   **FCS**; SVG / PDF figure export.
 - Self-contained `.gatelab` workspace bundle (workspace + original FCS + Gating-ML), with
   open → edit → save-in-place and debounced autosave.
+
+GateLab currently uses positive AND population logic. Gating-ML files containing NOT
+or OR populations, or gates whose channels cannot be matched to the loaded data, are
+rejected before import with the affected populations, gates, and channels named. This
+prevents partial imports from silently changing membership. Broader Boolean logic may
+be considered in a future update if there is user demand.
 
 ## How GateLab compares with other tools
 

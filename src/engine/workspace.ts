@@ -15,6 +15,8 @@ export interface WorkspaceSample {
   fileName: string;
   dataPath: string; // unique in-zip path (e.g. "data/0_run.fcs"); also the bundle lookup key
   logicleW: Record<string, number>; // per-sample user W overrides
+  scatterCofactor?: Record<string, number>; // per-sample flow-scatter arcsinh cofactors
+  cytofCofactor?: number; // per-sample global CyTOF arcsinh cofactor
   compensationOn: boolean; // per-sample
   instrumentMode?: "auto" | "flow" | "cytof"; // per-sample instrument override ('auto' = detected)
   labels?: Record<string, string>; // Panel-tab channel display names, keyed by identity key
@@ -94,20 +96,230 @@ export interface IllustrationPreset {
   config: IllustrationConfig;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function invalidWorkspace(detail: string): never {
+  throw new Error(`Invalid GateLab workspace: ${detail}`);
+}
+
+function finitePair(value: unknown): value is [number, number] {
+  return Array.isArray(value) && value.length === 2 && value.every((v) => typeof v === "number" && Number.isFinite(v));
+}
+
+function positiveNumericRecord(value: unknown): value is Record<string, number> {
+  return isRecord(value) && Object.entries(value).every(
+    ([key, entry]) => key.length > 0 && typeof entry === "number" && Number.isFinite(entry) && entry > 0,
+  );
+}
+
+/**
+ * Validate the persisted gating graph before it can be saved or applied.
+ *
+ * A dangling gate reference or inconsistent parent/children link changes population
+ * membership rather than merely affecting presentation, so corrupt graphs are rejected
+ * instead of being partially interpreted.
+ */
+export function validateWorkspace(ws: WorkspaceFile): true {
+  if (!isRecord(ws)) invalidWorkspace("the workspace payload is not an object.");
+  if (ws.format !== WORKSPACE_FORMAT || ws.version !== 2) {
+    invalidWorkspace("unsupported format or version.");
+  }
+  if (!Array.isArray(ws.samples) || ws.samples.length === 0) {
+    invalidWorkspace("at least one sample is required.");
+  }
+
+  const dataPaths = new Set<string>();
+  ws.samples.forEach((sample, i) => {
+    if (!isRecord(sample)) invalidWorkspace(`sample ${i + 1} is not an object.`);
+    if (typeof sample.fileName !== "string" || sample.fileName.trim().length === 0) {
+      invalidWorkspace(`sample ${i + 1} has no file name.`);
+    }
+    if (typeof sample.dataPath !== "string" || !sample.dataPath.startsWith("data/") ||
+        sample.dataPath.split("/").some((part) => part === "" || part === "..")) {
+      invalidWorkspace(`sample ${i + 1} has an unsafe or empty dataPath.`);
+    }
+    if (dataPaths.has(sample.dataPath)) invalidWorkspace(`duplicate sample dataPath "${sample.dataPath}".`);
+    dataPaths.add(sample.dataPath);
+    if (!isRecord(sample.logicleW) || typeof sample.compensationOn !== "boolean") {
+      invalidWorkspace(`sample ${i + 1} has invalid transform or compensation settings.`);
+    }
+    if (sample.scatterCofactor !== undefined && !positiveNumericRecord(sample.scatterCofactor)) {
+      invalidWorkspace(`sample ${i + 1} has invalid scatter cofactors.`);
+    }
+    if (sample.cytofCofactor !== undefined &&
+        (typeof sample.cytofCofactor !== "number" || !Number.isFinite(sample.cytofCofactor) || sample.cytofCofactor <= 0)) {
+      invalidWorkspace(`sample ${i + 1} has an invalid CyTOF cofactor.`);
+    }
+  });
+  if (!Number.isInteger(ws.activeSample) || ws.activeSample < 0 || ws.activeSample >= ws.samples.length) {
+    invalidWorkspace("activeSample is outside the sample list.");
+  }
+
+  if (!isRecord(ws.scales) || !isRecord(ws.scales.globalScales)) {
+    invalidWorkspace("shared scale settings are missing or invalid.");
+  }
+  for (const [channel, range] of Object.entries(ws.scales.globalScales)) {
+    if (!channel || !finitePair(range) || range[1] <= range[0]) {
+      invalidWorkspace(`shared scale for "${channel}" is invalid.`);
+    }
+  }
+  if (!isRecord(ws.display) || typeof ws.display.xChannel !== "string" || typeof ws.display.yChannel !== "string" ||
+      !["pseudocolor", "dots", "contour"].includes(ws.display.mode) ||
+      !Number.isFinite(ws.display.maxEvents) || ws.display.maxEvents < 0 ||
+      !Number.isFinite(ws.display.contourThreshold)) {
+    invalidWorkspace("display settings are missing or invalid.");
+  }
+
+  if (!isRecord(ws.gating)) invalidWorkspace("gating state is missing.");
+  const gates = ws.gating.gates;
+  const populations = ws.gating.populations;
+  if (!isRecord(gates)) invalidWorkspace("gates must be an object keyed by gate_id.");
+  if (!isRecord(populations)) invalidWorkspace("populations must be an object keyed by population_id.");
+
+  const gateIds = Object.keys(gates);
+  for (const [gateId, value] of Object.entries(gates)) {
+    if (!isRecord(value)) invalidWorkspace(`gate "${gateId}" is not an object.`);
+    const gate = value as unknown as Gate;
+    if (gate.gate_id !== gateId) invalidWorkspace(`gate map key "${gateId}" does not match its gate_id.`);
+    if (typeof gate.name !== "string" || gate.name.trim().length === 0) invalidWorkspace(`gate "${gateId}" has no name.`);
+    if (typeof gate.x_channel !== "string" || !gate.x_channel || typeof gate.y_channel !== "string" || !gate.y_channel) {
+      invalidWorkspace(`gate "${gateId}" has invalid channel identifiers.`);
+    }
+    if (gate.gate_type === "polygon" || gate.gate_type === "rectangle") {
+      const minVertices = gate.gate_type === "polygon" ? 3 : 2;
+      if (!Array.isArray(gate.vertices) || gate.vertices.length < minVertices || !gate.vertices.every(finitePair)) {
+        invalidWorkspace(`${gate.gate_type} gate "${gateId}" has invalid geometry.`);
+      }
+    } else if (gate.gate_type === "quadrant") {
+      if (!finitePair(gate.center)) invalidWorkspace(`quadrant gate "${gateId}" has an invalid center.`);
+    } else {
+      invalidWorkspace(`gate "${gateId}" has unsupported gate_type "${String((gate as { gate_type?: unknown }).gate_type)}".`);
+    }
+  }
+
+  const order = ws.gating.gate_order;
+  if (!Array.isArray(order) || !order.every((id) => typeof id === "string")) {
+    invalidWorkspace("gate_order must be an array of gate IDs.");
+  }
+  if (new Set(order).size !== order.length) invalidWorkspace("gate_order contains duplicate IDs.");
+  const gateSet = new Set(gateIds);
+  const orderSet = new Set(order);
+  const missingFromOrder = gateIds.filter((id) => !orderSet.has(id));
+  const unknownInOrder = order.filter((id) => !gateSet.has(id));
+  if (missingFromOrder.length || unknownInOrder.length) {
+    invalidWorkspace(
+      `gate_order does not match the gate map` +
+      `${missingFromOrder.length ? ` (missing: ${missingFromOrder.join(", ")})` : ""}` +
+      `${unknownInOrder.length ? ` (unknown: ${unknownInOrder.join(", ")})` : ""}.`,
+    );
+  }
+
+  const rootId = ws.gating.root_population_id;
+  if (typeof rootId !== "string" || rootId.length === 0 || !populations[rootId]) {
+    invalidWorkspace("root_population_id is missing or does not identify a population.");
+  }
+
+  const popIds = Object.keys(populations);
+  for (const [popId, value] of Object.entries(populations)) {
+    if (!isRecord(value)) invalidWorkspace(`population "${popId}" is not an object.`);
+    const pop = value as unknown as PopulationMap[string];
+    if (pop.population_id !== popId) invalidWorkspace(`population map key "${popId}" does not match its population_id.`);
+    if (typeof pop.name !== "string" || pop.name.trim().length === 0) invalidWorkspace(`population "${popId}" has no name.`);
+    if (pop.gate_logic !== "and" && pop.gate_logic !== "or") invalidWorkspace(`population "${popId}" has invalid gate_logic.`);
+    if (!Array.isArray(pop.children) || !pop.children.every((id) => typeof id === "string")) {
+      invalidWorkspace(`population "${popId}" has invalid children.`);
+    }
+    if (new Set(pop.children).size !== pop.children.length) invalidWorkspace(`population "${popId}" lists a child more than once.`);
+    if (!Array.isArray(pop.gate_refs)) invalidWorkspace(`population "${popId}" has invalid gate_refs.`);
+
+    if (popId === rootId) {
+      if (pop.parent_id !== null) invalidWorkspace("the root population must have parent_id = null.");
+      if (pop.gate_refs.length) invalidWorkspace("the root population cannot contain gate references.");
+    } else if (typeof pop.parent_id !== "string" || !populations[pop.parent_id]) {
+      invalidWorkspace(`population "${popId}" has a missing parent.`);
+    } else if (pop.parent_id === popId) {
+      invalidWorkspace(`population "${popId}" cannot be its own parent.`);
+    }
+
+    for (const childId of pop.children) {
+      const child = populations[childId];
+      if (!child) invalidWorkspace(`population "${popId}" refers to missing child "${childId}".`);
+      if (child.parent_id !== popId) invalidWorkspace(`parent/child links disagree for population "${childId}".`);
+    }
+
+    for (const ref of pop.gate_refs) {
+      if (!isRecord(ref) || typeof ref.gate_id !== "string" || !gates[ref.gate_id]) {
+        invalidWorkspace(`population "${popId}" has a dangling gate reference.`);
+      }
+      if (typeof ref.include !== "boolean") invalidWorkspace(`population "${popId}" has a gate reference without a boolean include value.`);
+      const gate = gates[ref.gate_id];
+      if (gate.gate_type === "quadrant") {
+        if (!Number.isInteger(ref.quadrant) || ref.quadrant! < 1 || ref.quadrant! > 4) {
+          invalidWorkspace(`population "${popId}" has an invalid quadrant reference.`);
+        }
+      } else if (ref.quadrant !== undefined && ref.quadrant !== null) {
+        invalidWorkspace(`population "${popId}" assigns a quadrant to a non-quadrant gate.`);
+      }
+    }
+  }
+
+  for (const popId of popIds) {
+    if (popId === rootId) continue;
+    const parentId = populations[popId].parent_id!;
+    if (!populations[parentId].children.includes(popId)) {
+      invalidWorkspace(`population "${popId}" is absent from its parent's children list.`);
+    }
+  }
+
+  const reached = new Set<string>();
+  const visiting = new Set<string>();
+  const walk = (popId: string): void => {
+    if (visiting.has(popId)) invalidWorkspace(`population hierarchy contains a cycle at "${popId}".`);
+    if (reached.has(popId)) return;
+    visiting.add(popId);
+    for (const childId of populations[popId].children) walk(childId);
+    visiting.delete(popId);
+    reached.add(popId);
+  };
+  walk(rootId);
+  const unreachable = popIds.filter((id) => !reached.has(id));
+  if (unreachable.length) invalidWorkspace(`population hierarchy contains unreachable nodes: ${unreachable.join(", ")}.`);
+
+  const activePop = ws.gating.active_population_id;
+  if (activePop !== null && (typeof activePop !== "string" || !populations[activePop])) {
+    invalidWorkspace("active_population_id does not identify a population.");
+  }
+  const selectedGate = ws.gating.selected_gate_id;
+  if (selectedGate !== null && (typeof selectedGate !== "string" || !gates[selectedGate])) {
+    invalidWorkspace("selected_gate_id does not identify a gate.");
+  }
+  return true;
+}
+
 /** Pack workspace JSON + each sample's FCS bytes (keyed by dataPath) into a bundled .gatelab zip. */
 export function packWorkspace(
   ws: WorkspaceFile,
   fcsByPath: Record<string, Uint8Array>,
   gatingMLXml?: string,
 ): Uint8Array {
+  validateWorkspace(ws);
   const files: Record<string, Uint8Array> = { "workspace.json": strToU8(JSON.stringify(ws, null, 2)) };
-  for (const [path, bytes] of Object.entries(fcsByPath)) files[path] = bytes;
+  for (const sample of ws.samples) {
+    const bytes = fcsByPath[sample.dataPath];
+    if (!(bytes instanceof Uint8Array)) {
+      invalidWorkspace(`bundled FCS data is missing for "${sample.fileName}" (${sample.dataPath}).`);
+    }
+    files[sample.dataPath] = bytes;
+  }
   if (gatingMLXml) files["gates.gatingml.xml"] = strToU8(gatingMLXml);
   return zipSync(files, { level: 6 });
 }
 
 /** A lightweight reference workspace — JSON only; the FCS files are re-linked from disk on open. */
 export function packWorkspaceReference(ws: WorkspaceFile): Uint8Array {
+  validateWorkspace(ws);
   return strToU8(JSON.stringify(ws, null, 2));
 }
 
@@ -159,11 +371,20 @@ export function readWorkspaceBytes(bytes: Uint8Array): {
     const raw = files["workspace.json"];
     if (!raw) throw new Error("Not a GateLab workspace: workspace.json is missing.");
     const ws = migrate(parseJson(strFromU8(raw)));
+    validateWorkspace(ws);
     const fcsByPath: Record<string, Uint8Array> = {};
-    for (const s of ws.samples) if (files[s.dataPath]) fcsByPath[s.dataPath] = files[s.dataPath];
+    const missing: string[] = [];
+    for (const s of ws.samples) {
+      if (files[s.dataPath]) fcsByPath[s.dataPath] = files[s.dataPath];
+      else missing.push(`${s.fileName} (${s.dataPath})`);
+    }
+    if (missing.length) {
+      throw new Error(`Invalid GateLab workspace: bundled FCS data is missing for ${missing.join(", ")}.`);
+    }
     return { ws, fcsByPath };
   }
   const ws = migrate(parseJson(strFromU8(bytes)));
+  validateWorkspace(ws);
   return { ws, fcsByPath: null };
 }
 

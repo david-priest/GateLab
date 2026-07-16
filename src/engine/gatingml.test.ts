@@ -118,3 +118,128 @@ describe("channel resolution", () => {
     expect([g.x_channel, g.y_channel].sort()).toEqual(["CD3", "CD45"]);
   });
 });
+
+describe("strict import safety", () => {
+  it("cancels instead of silently dropping unsupported gates or transforms", () => {
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+        xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations"
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
+        <transforms:transformation transforms:id="linear-1">
+          <transforms:linear transforms:T="100" transforms:A="0"/>
+        </transforms:transformation>
+        <gating:PolygonGate gating:id="poly-1">
+          <gating:dimension gating:transformation-ref="linear-1"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+          <gating:dimension gating:transformation-ref="linear-1"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+          <gating:vertex><gating:coordinate data-type:value="0"/><gating:coordinate data-type:value="0"/></gating:vertex>
+          <gating:vertex><gating:coordinate data-type:value="1"/><gating:coordinate data-type:value="0"/></gating:vertex>
+          <gating:vertex><gating:coordinate data-type:value="1"/><gating:coordinate data-type:value="1"/></gating:vertex>
+        </gating:PolygonGate>
+        <gating:EllipsoidGate gating:id="ellipse-1"/>
+      </gating:Gating-ML>`;
+
+    expect(() => importGatingML(xml, ["X", "Y"])).toThrow(/EllipsoidGate ellipse-1 is not supported/);
+    expect(() => importGatingML(xml, ["X", "Y"])).toThrow(/transformation linear-1/);
+  });
+
+  it("rejects flat NOT logic and names the affected population", () => {
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
+        <gating:RectangleGate gating:id="range-1" gating:name="Inside">
+          <gating:dimension gating:min="0" gating:max="1"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+        </gating:RectangleGate>
+        <gating:BooleanGate gating:id="not-1" gating:name="Outside">
+          <gating:not><gating:gateReference gating:ref="range-1"/></gating:not>
+        </gating:BooleanGate>
+      </gating:Gating-ML>`;
+
+    expect(() => importGatingML(xml, ["X"])).toThrow(
+      /Population "Outside" uses NOT logic; GateLab currently imports positive AND populations only/,
+    );
+    expect(() => importGatingML(xml, ["X"])).toThrow(
+      /No gates or populations were imported; the current workspace was not changed/,
+    );
+  });
+
+  it("rejects complemented references inside an AND population", () => {
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
+        <gating:RectangleGate gating:id="range-1" gating:name="Inside">
+          <gating:dimension gating:min="0" gating:max="1"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+        </gating:RectangleGate>
+        <gating:BooleanGate gating:id="and-not-1" gating:name="Outside">
+          <gating:and>
+            <gating:gateReference gating:ref="range-1" gating:complement="true"/>
+          </gating:and>
+        </gating:BooleanGate>
+      </gating:Gating-ML>`;
+
+    expect(() => importGatingML(xml, ["X"])).toThrow(/Population "Outside" uses NOT logic/);
+  });
+
+  it("rejects a complemented hierarchy population before import", () => {
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
+        <gating:RectangleGate gating:id="range-1" gating:name="Inside">
+          <gating:dimension gating:min="0" gating:max="1"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+        </gating:RectangleGate>
+        <gating:GatingHierarchy>
+          <gating:PopulationGatePair gating:gate-ref="range-1" gating:complement="true">
+            <gating:name>Outside</gating:name>
+          </gating:PopulationGatePair>
+        </gating:GatingHierarchy>
+      </gating:Gating-ML>`;
+
+    expect(() => importGatingML(xml, ["X"])).toThrow(/Population "Outside" uses NOT logic/);
+  });
+
+  it("rejects OR logic and names the affected population", () => {
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
+        <gating:RectangleGate gating:id="range-1" gating:name="Low">
+          <gating:dimension gating:min="0" gating:max="1"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+        </gating:RectangleGate>
+        <gating:RectangleGate gating:id="range-2" gating:name="High">
+          <gating:dimension gating:min="2" gating:max="3"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+        </gating:RectangleGate>
+        <gating:BooleanGate gating:id="or-1" gating:name="Low or high">
+          <gating:or>
+            <gating:gateReference gating:ref="range-1"/>
+            <gating:gateReference gating:ref="range-2"/>
+          </gating:or>
+        </gating:BooleanGate>
+      </gating:Gating-ML>`;
+
+    expect(() => importGatingML(xml, ["X"])).toThrow(/Population "Low or high" uses OR logic/);
+  });
+
+  it("rejects a missing gate channel instead of weakening an AND population", () => {
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
+        <gating:RectangleGate gating:id="present-1" gating:name="Present gate">
+          <gating:dimension gating:min="0" gating:max="1"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+        </gating:RectangleGate>
+        <gating:RectangleGate gating:id="missing-1" gating:name="Missing gate">
+          <gating:dimension gating:min="0" gating:max="1"><data-type:fcs-dimension data-type:name="Absent"/></gating:dimension>
+        </gating:RectangleGate>
+        <gating:BooleanGate gating:id="both-1" gating:name="Both gates">
+          <gating:and>
+            <gating:gateReference gating:ref="present-1"/>
+            <gating:gateReference gating:ref="missing-1"/>
+          </gating:and>
+        </gating:BooleanGate>
+      </gating:Gating-ML>`;
+
+    expect(() => importGatingML(xml, ["X"])).toThrow(
+      /Gate "Missing gate" \(missing-1\) references channel\(s\) not present in the loaded data: "Absent"/,
+    );
+    expect(() => importGatingML(xml, ["X"])).toThrow(
+      /Partial Gating-ML imports are not allowed because dropping a gate can change population membership/,
+    );
+  });
+});

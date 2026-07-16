@@ -104,7 +104,9 @@ export class Sample {
   // Transforms are built lazily per channel: a logicle transform sorts the full
   // column, so eagerly building all of them is O(nChannels · n·log n) — pathological
   // for wide spectral panels (100s of channels). Only displayed channels get built.
-  private readonly cytofCofactor: number;
+  private cytofCofactor: number;
+  /** User-set flow-scatter cofactors, keyed by resolved channel index. */
+  private readonly scatterCofactorOverride = new Map<number, number>();
   private readonly transformCache = new Map<number, ChannelTransform>();
   private readonly byName = new Map<string, number>();
   private readonly displayCache = new Map<number, Float32Array>();
@@ -227,7 +229,7 @@ export class Sample {
     } else if (isQcChannel(name)) {
       t = IDENTITY;
     } else if (isScatterChannel(name)) {
-      t = asinhTransform(150);
+      t = asinhTransform(this.currentScatterCofactor(idx));
     } else {
       const { t: tv } = this.logicleParams(idx);
       const w = this.wOverride.get(idx) ?? this.logicleParams(idx).w;
@@ -268,6 +270,30 @@ export class Sample {
   /** CyTOF arcsinh cofactor (for exporting the fasinh transform). */
   get arcsinhCofactor(): number {
     return this.cytofCofactor;
+  }
+  /** Restore the global CyTOF arcsinh cofactor carried by a workspace/Gating-ML file. */
+  setCytofCofactor(cofactor: number): void {
+    if (!Number.isFinite(cofactor) || cofactor <= 0 || cofactor === this.cytofCofactor) return;
+    this.cytofCofactor = cofactor;
+    if (this.instrument === "cytof") this.invalidateAll();
+  }
+  /** Current flow-scatter arcsinh cofactor (default 150). */
+  currentScatterCofactor(idx: number): number {
+    return this.scatterCofactorOverride.get(idx) ?? 150;
+  }
+  /** Override one flow-scatter cofactor; invalidates its display/gating caches. */
+  setScatterCofactor(idx: number, cofactor: number): void {
+    if (!Number.isFinite(cofactor) || cofactor <= 0) return;
+    this.scatterCofactorOverride.set(idx, cofactor);
+    this.invalidateChannel(idx);
+  }
+  /** User-set flow-scatter cofactors, keyed by channel key (for workspace save). */
+  scatterCofactorOverrides(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [idx, cofactor] of this.scatterCofactorOverride) {
+      out[this.channels[idx].key] = cofactor;
+    }
+    return out;
   }
   /** Current logicle W (user override or auto). */
   currentLogicleW(idx: number): number {
@@ -393,6 +419,18 @@ export class Sample {
     return this.gatingSpace === "raw" ? this.transform(idx).inverse(v) : v;
   }
 
+  /** Convert a compensated linear measurement into this app's display coordinates. */
+  rawToDisplay(channel: string, v: number): number {
+    const idx = this.byName.get(channel);
+    return idx === undefined ? v : this.transform(idx).forward(v);
+  }
+
+  /** Convert this app's display coordinate into compensated linear measurement space. */
+  displayToRaw(channel: string, v: number): number {
+    const idx = this.byName.get(channel);
+    return idx === undefined ? v : this.transform(idx).inverse(v);
+  }
+
   /** AssayData over gating columns, for getGateMask / applyGatingStrategy. */
   gatingData(): AssayData {
     return {
@@ -428,7 +466,7 @@ export class Sample {
     const inv = (v: number) => t.inverse(v);
     // Flow scatter (FSC/SSC): asinh display, raw-unit decade labels (1K/10K/100K).
     if (this.instrument === "flow" && isScatterChannel(name)) {
-      return scatterTicks(fwd, inv, axisRange, 150);
+      return scatterTicks(fwd, inv, axisRange, this.currentScatterCofactor(idx));
     }
     // Flow signal (fluorophore): logicle display, biexponential decade labels.
     if (t.kind === "logicle") {

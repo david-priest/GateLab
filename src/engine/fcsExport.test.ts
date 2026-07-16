@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import { parseFcs } from "./fcs";
+import { parseFcs, type FcsFile } from "./fcs";
 import { Sample } from "./sample";
 import {
   exportPopulationFcs,
@@ -18,6 +18,20 @@ function loadArrayBuffer(path: string): ArrayBuffer {
 }
 const toAB = (u8: Uint8Array): ArrayBuffer =>
   u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) as ArrayBuffer;
+
+function syntheticSample(channels: { name: string; values: number[] }[]): Sample {
+  const nEvents = channels[0]?.values.length ?? 0;
+  const fcs: FcsFile = {
+    version: "FCS3.1",
+    nEvents,
+    channels: channels.map((ch, index) => ({ index, name: ch.name, marker: null, bits: 32, range: 262144 })),
+    keywords: {},
+    columns: channels.map((ch) => Float32Array.from(ch.values)),
+    spillover: null,
+    instrument: "flow",
+  };
+  return new Sample(fcs);
+}
 
 describe("writeFcs — round-trips through parseFcs", () => {
   const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
@@ -63,6 +77,11 @@ describe("writeFcs — round-trips through parseFcs", () => {
   it("null mask exports every event", () => {
     const all = parseFcs(toAB(exportPopulationFcs(sample, null, "original")));
     expect(all.nEvents).toBe(nAll);
+  });
+
+  it("rejects a population mask with the wrong event count", () => {
+    expect(() => exportPopulationFcs(sample, new Uint8Array(nAll - 1), "original"))
+      .toThrow(/mask has .* events but the sample has/i);
   });
 
   it("writeFcs handles a tiny hand-built matrix exactly", () => {
@@ -168,6 +187,59 @@ describe("exportPopulationFcsCombined — concatenates masked events across samp
     const re = parseFcs(toAB(bytes));
     expect(re.nEvents).toBe(b.count);
     expect(re.channels.length).toBe(sampleB.channels.length);
+  });
+
+  it("aligns identical channel sets when sample column order differs", () => {
+    const first = syntheticSample([
+      { name: "A", values: [1, 2] },
+      { name: "B", values: [10, 20] },
+    ]);
+    const second = syntheticSample([
+      { name: "B", values: [30] },
+      { name: "A", values: [3] },
+    ]);
+    const bytes = exportPopulationFcsCombined([
+      { sample: first, name: "first.fcs", mask: Uint8Array.from([1, 1]) },
+      { sample: second, name: "second.fcs", mask: Uint8Array.from([1]) },
+    ]);
+    const re = parseFcs(toAB(bytes));
+    expect(re.channels.map((ch) => ch.name)).toEqual(["A", "B"]);
+    expect(Array.from(re.columns[0])).toEqual([1, 2, 3]);
+    expect(Array.from(re.columns[1])).toEqual([10, 20, 30]);
+  });
+
+  it("rejects a contributing sample with missing channels instead of omitting it", () => {
+    const full = syntheticSample([
+      { name: "A", values: [1] },
+      { name: "B", values: [2] },
+    ]);
+    const missing = syntheticSample([{ name: "A", values: [3] }]);
+    expect(() => exportPopulationFcsCombined([
+      { sample: full, name: "full.fcs", mask: Uint8Array.from([1]) },
+      { sample: missing, name: "missing.fcs", mask: Uint8Array.from([1]) },
+    ])).toThrow(/missing\.fcs.*missing: B.*split zip/i);
+  });
+
+  it("rejects a contributing sample with extra channels instead of dropping them", () => {
+    const narrow = syntheticSample([{ name: "A", values: [1] }]);
+    const extra = syntheticSample([
+      { name: "A", values: [2] },
+      { name: "B", values: [3] },
+    ]);
+    expect(() => exportPopulationFcsCombined([
+      { sample: narrow, name: "narrow.fcs", mask: Uint8Array.from([1]) },
+      { sample: extra, name: "extra.fcs", mask: Uint8Array.from([1]) },
+    ])).toThrow(/extra\.fcs.*extra: B.*split zip/i);
+  });
+
+  it("rejects wrong-length masks and an all-empty combined selection", () => {
+    const one = syntheticSample([{ name: "A", values: [1, 2] }]);
+    expect(() => exportPopulationFcsCombined([
+      { sample: one, name: "one.fcs", mask: Uint8Array.from([1]) },
+    ])).toThrow(/mask.*one\.fcs.*1 events.*2/i);
+    expect(() => exportPopulationFcsCombined([
+      { sample: one, name: "one.fcs", mask: new Uint8Array(2) },
+    ])).toThrow(/contains no events/i);
   });
 });
 

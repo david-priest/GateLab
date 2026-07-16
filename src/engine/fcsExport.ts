@@ -135,6 +135,9 @@ export function exportPopulationFcs(
   assay: FcsExportAssay = "original",
 ): Uint8Array {
   const n = sample.fcs.nEvents;
+  if (mask && mask.length !== n) {
+    throw new Error(`Cannot export FCS: population mask has ${mask.length} events but the sample has ${n}.`);
+  }
   const keep: number[] = [];
   if (mask) {
     for (let i = 0; i < n; i++) if (mask[i]) keep.push(i);
@@ -160,11 +163,10 @@ export function exportPopulationFcs(
   return writeFcs(columns, channels);
 }
 
-/** Count set bits in a mask restricted to a sample's event range. */
-function maskCount(mask: Uint8Array, n: number): number {
+/** Count set bits in an already length-validated mask. */
+function maskCount(mask: Uint8Array): number {
   let c = 0;
-  const lim = Math.min(mask.length, n);
-  for (let i = 0; i < lim; i++) if (mask[i]) c++;
+  for (let i = 0; i < mask.length; i++) if (mask[i]) c++;
   return c;
 }
 
@@ -175,47 +177,78 @@ function maskCount(mask: Uint8Array, n: number): number {
  *
  * Channel layout is fixed by the FIRST sample that contributes events (its stored channel
  * order + $PnN/$PnS). Subsequent samples are aligned to that layout BY CHANNEL KEY
- * (sample.index(key)), so column order differences between files don't matter. A sample is
- * skipped entirely (contributes no events) when:
- *   • its mask selects zero events in that sample's range, or
- *   • it lacks any of the reference channels (by key) — it can't be aligned safely.
+ * (sample.index(key)), so column order differences between files don't matter. Every sample
+ * that contributes events must have exactly the same channel-key set. A panel mismatch aborts
+ * the export rather than silently dropping a sample or a channel.
  * Event order is preserved within each sample; samples are concatenated in list order.
  */
 export function exportPopulationFcsCombined(
-  samples: { sample: Sample; mask: Uint8Array }[],
+  samples: { sample: Sample; mask: Uint8Array; name?: string }[],
   assay: FcsExportAssay = "original",
 ): Uint8Array {
+  for (const { sample, mask, name } of samples) {
+    if (mask.length !== sample.fcs.nEvents) {
+      const label = name?.trim() || "sample";
+      throw new Error(
+        `Cannot combine FCS export: population mask for "${label}" has ${mask.length} events but the sample has ${sample.fcs.nEvents}.`,
+      );
+    }
+  }
+
   // Reference channel layout = first sample with a non-empty mask.
   let refKeys: string[] | null = null;
   let refChannels: FcsExportChannel[] | null = null;
   for (const { sample, mask } of samples) {
-    if (maskCount(mask, sample.fcs.nEvents) === 0) continue;
+    if (maskCount(mask) === 0) continue;
     refKeys = sample.channels.map((ch) => ch.key);
+    if (new Set(refKeys).size !== refKeys.length) {
+      throw new Error("Cannot combine FCS export: the reference sample contains duplicate channel identifiers.");
+    }
     // $PnS = Panel-tab display label so renames reach the combined export (see exportPopulationFcs).
     refChannels = sample.channels.map((ch, idx) => ({ name: ch.pnn || ch.key, desc: sample.channelLabel(idx) }));
     break;
   }
 
   if (!refKeys || !refChannels) {
-    // Nothing to export — write an empty (0-event) frame with no channels.
-    return writeFcs([], []);
+    throw new Error("Cannot combine FCS export: the selected population contains no events in any sample.");
   }
 
   // One growing array of subset-column chunks per reference channel.
   const chunks: Float32Array[][] = refKeys.map(() => []);
+  const refSet = new Set(refKeys);
 
-  for (const { sample, mask } of samples) {
+  for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex++) {
+    const { sample, mask, name } = samples[sampleIndex];
     const n = sample.fcs.nEvents;
-    if (maskCount(mask, n) === 0) continue;
+    if (maskCount(mask) === 0) continue;
 
-    // Resolve each reference channel to this sample's stored index (by key). Skip the whole
-    // sample if any reference channel is missing here — can't align it.
+    const sampleKeys = sample.channels.map((ch) => ch.key);
+    const sampleSet = new Set(sampleKeys);
+    const missing = refKeys.filter((key) => !sampleSet.has(key));
+    const extra = sampleKeys.filter((key) => !refSet.has(key));
+    const duplicate = sampleKeys.filter((key, i) => sampleKeys.indexOf(key) !== i);
+    if (missing.length || extra.length || duplicate.length) {
+      const label = name?.trim() || `sample ${sampleIndex + 1}`;
+      const details = [
+        missing.length ? `missing: ${missing.join(", ")}` : "",
+        extra.length ? `extra: ${extra.join(", ")}` : "",
+        duplicate.length ? `duplicate: ${[...new Set(duplicate)].join(", ")}` : "",
+      ].filter(Boolean).join("; ");
+      throw new Error(
+        `Cannot combine FCS export: "${label}" has a different channel panel (${details}). ` +
+        `No partial file was written. Use “all (split zip)” for samples with different panels.`,
+      );
+    }
+
+    // Resolve each reference channel to this sample's stored index (by key). Exact set
+    // validation above guarantees every lookup succeeds; order may differ safely.
     const idxByRef = refKeys.map((key) => sample.index(key));
-    if (idxByRef.some((i) => i === undefined)) continue;
+    if (idxByRef.some((i) => i === undefined)) {
+      throw new Error("Cannot combine FCS export: internal channel alignment failed.");
+    }
 
     const keep: number[] = [];
-    const lim = Math.min(mask.length, n);
-    for (let i = 0; i < lim; i++) if (mask[i]) keep.push(i);
+    for (let i = 0; i < n; i++) if (mask[i]) keep.push(i);
     if (keep.length === 0) continue;
 
     idxByRef.forEach((idx, r) => {

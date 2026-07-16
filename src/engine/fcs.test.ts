@@ -13,6 +13,19 @@ function loadArrayBuffer(path: string): ArrayBuffer {
   return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
 }
 
+function replaceAsciiInPlace(buffer: ArrayBuffer, from: string, to: string): void {
+  if (from.length !== to.length) throw new Error("replacement must preserve byte offsets");
+  const bytes = new Uint8Array(buffer);
+  outer: for (let start = 0; start <= bytes.length - from.length; start++) {
+    for (let i = 0; i < from.length; i++) {
+      if (bytes[start + i] !== from.charCodeAt(i)) continue outer;
+    }
+    for (let i = 0; i < to.length; i++) bytes[start + i] = to.charCodeAt(i);
+    return;
+  }
+  throw new Error(`fixture text not found: ${from}`);
+}
+
 describe("parseFcs — Aria III (FCS3.1, big-endian float32)", () => {
   const fcs = parseFcs(loadArrayBuffer(ARIA_SMALL));
 
@@ -66,8 +79,10 @@ interface SynthOpts {
   datatype: "I" | "D";
   bits: number; // $PnB (per channel): 16 for I here, 64 for D
   channels: string[]; // $PnN names
+  markers?: Array<string | null>; // optional $PnS descriptions
   events: number[][]; // event-major rows
   littleEndian?: boolean;
+  dataOffsetsInText?: boolean; // zero HEADER DATA offsets; use $BEGINDATA/$ENDDATA
 }
 
 function buildFcs(opts: SynthOpts): ArrayBuffer {
@@ -89,14 +104,26 @@ function buildFcs(opts: SynthOpts): ArrayBuffer {
   opts.channels.forEach((nm, i) => {
     const p = i + 1;
     kv.push(`$P${p}N`, nm, `$P${p}B`, String(opts.bits), `$P${p}R`, "262144", `$P${p}E`, "0,0");
+    const marker = opts.markers?.[i];
+    if (marker !== undefined && marker !== null) kv.push(`$P${p}S`, marker);
   });
-  const textBody = delim + kv.join(delim) + delim;
+  if (opts.dataOffsetsInText) kv.push("$BEGINDATA", "00000000", "$ENDDATA", "00000000");
+  const encodeText = () => delim + kv.map((token) => token.replaceAll(delim, delim + delim)).join(delim) + delim;
+  let textBody = encodeText();
 
   const textStart = 256; // leave the standard header room + slack
-  const textEnd = textStart + textBody.length - 1; // inclusive index of last TEXT byte
-  const dataStart = textEnd + 1;
+  let textEnd = textStart + textBody.length - 1; // inclusive index of last TEXT byte
+  let dataStart = textEnd + 1;
   const dataBytes = tot * par * bytesPerVal;
-  const dataEnd = dataStart + dataBytes - 1;
+  let dataEnd = dataStart + dataBytes - 1;
+  if (opts.dataOffsetsInText) {
+    kv[kv.indexOf("$BEGINDATA") + 1] = String(dataStart).padStart(8, "0");
+    kv[kv.indexOf("$ENDDATA") + 1] = String(dataEnd).padStart(8, "0");
+    textBody = encodeText();
+    textEnd = textStart + textBody.length - 1;
+    dataStart = textEnd + 1;
+    dataEnd = dataStart + dataBytes - 1;
+  }
 
   const buf = new ArrayBuffer(dataEnd + 1);
   const u8 = new Uint8Array(buf);
@@ -109,8 +136,8 @@ function buildFcs(opts: SynthOpts): ArrayBuffer {
   putAscii("FCS3.1    ", 0); // 6-char version + 4 pad spaces (through byte 9)
   putAscii(pad8(textStart), 10);
   putAscii(pad8(textEnd), 18);
-  putAscii(pad8(dataStart), 26);
-  putAscii(pad8(dataEnd), 34);
+  putAscii(pad8(opts.dataOffsetsInText ? 0 : dataStart), 26);
+  putAscii(pad8(opts.dataOffsetsInText ? 0 : dataEnd), 34);
   // analysis start/end (42..57) left as spaces/zeros — unused here.
 
   putAscii(textBody, textStart);
@@ -122,15 +149,13 @@ function buildFcs(opts: SynthOpts): ArrayBuffer {
       if (opts.datatype === "D") {
         dv.setFloat64(off, v, le);
         off += 8;
-      } else if (opts.bits === 16) {
-        dv.setUint16(off, v, le);
-        off += 2;
-      } else if (opts.bits === 32) {
-        dv.setUint32(off, v, le);
-        off += 4;
       } else {
-        dv.setUint8(off, v);
-        off += 1;
+        const width = opts.bits / 8;
+        for (let byte = 0; byte < width; byte++) {
+          const power = le ? byte : width - byte - 1;
+          dv.setUint8(off + byte, Math.floor(v / (256 ** power)) % 256);
+        }
+        off += width;
       }
     }
   }
@@ -227,5 +252,56 @@ describe("parseFcs — synthetic $DATATYPE=I (32-bit int)", () => {
     for (let c = 0; c < 2; c++) {
       for (let e = 0; e < 2; e++) expect(fcs.columns[c][e]).toBe(events[e][c]);
     }
+  });
+});
+
+describe("parseFcs — rare but valid FCS encodings", () => {
+  it("decodes 24-bit unsigned integers in both byte orders", () => {
+    const events = [
+      [0x000001, 0x123456],
+      [0xabcdef, 0xffffff],
+    ];
+    for (const littleEndian of [true, false]) {
+      const fcs = parseFcs(buildFcs({
+        datatype: "I", bits: 24, channels: ["A", "B"], events, littleEndian,
+      }));
+      expect(fcs.columns[0]).toBeInstanceOf(Uint32Array);
+      expect(Array.from(fcs.columns[0])).toEqual([0x000001, 0xabcdef]);
+      expect(Array.from(fcs.columns[1])).toEqual([0x123456, 0xffffff]);
+    }
+  });
+
+  it("unescapes doubled TEXT delimiters in marker labels", () => {
+    const fcs = parseFcs(buildFcs({
+      datatype: "I", bits: 8, channels: ["V1-A"], markers: ["CD/3"], events: [[7]],
+    }));
+    expect(fcs.channels[0].marker).toBe("CD/3");
+    expect(Array.from(fcs.columns[0])).toEqual([7]);
+  });
+
+  it("uses $BEGINDATA/$ENDDATA when large-file HEADER offsets are zero", () => {
+    const fcs = parseFcs(buildFcs({
+      datatype: "I", bits: 16, channels: ["A", "B"],
+      events: [[10, 20], [300, 400]], dataOffsetsInText: true,
+    }));
+    expect(Array.from(fcs.columns[0])).toEqual([10, 300]);
+    expect(Array.from(fcs.columns[1])).toEqual([20, 400]);
+    expect(Number(fcs.keywords["$BEGINDATA"])).toBeGreaterThan(0);
+  });
+
+  it("accepts an empty dataset without manufacturing events", () => {
+    const fcs = parseFcs(buildFcs({
+      datatype: "I", bits: 8, channels: ["A", "B"], events: [],
+    }));
+    expect(fcs.nEvents).toBe(0);
+    expect(fcs.columns.map((column) => column.length)).toEqual([0, 0]);
+  });
+
+  it("rejects non-byte-aligned integer widths instead of misreading the stream", () => {
+    const buffer = buildFcs({
+      datatype: "I", bits: 16, channels: ["A"], events: [[123]],
+    });
+    replaceAsciiInPlace(buffer, "$P1B/16", "$P1B/12");
+    expect(() => parseFcs(buffer)).toThrow(/only byte-aligned integer widths/i);
   });
 });

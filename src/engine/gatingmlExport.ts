@@ -35,6 +35,36 @@ export interface GatingMLExportOpts {
   format?: GatingMLFormat;
   /** Timestamp for the export_timestamp field (injectable for deterministic tests). */
   timestamp?: string;
+  /** Explicit acknowledgement that quadrant gates and every dependent population branch are omitted. */
+  allowQuadrantOmission?: boolean;
+}
+
+export interface GatingMLQuadrantOmissions {
+  gateIds: string[];
+  populationIds: string[];
+}
+
+/** Identify the full semantic branch that must be omitted with unsupported quadrant gates. */
+export function analyzeGatingMLQuadrantOmissions(
+  gates: Record<string, Gate>,
+  populations: PopulationMap,
+): GatingMLQuadrantOmissions {
+  const gateIds = Object.values(gates)
+    .filter((gate) => gate.gate_type === "quadrant")
+    .map((gate) => gate.gate_id);
+  const quadrantIds = new Set(gateIds);
+  const populationIds = new Set<string>();
+  const addBranch = (populationId: string): void => {
+    if (populationIds.has(populationId)) return;
+    populationIds.add(populationId);
+    for (const childId of populations[populationId]?.children ?? []) addBranch(childId);
+  };
+  for (const population of Object.values(populations)) {
+    if (population.gate_refs.some((ref) => quadrantIds.has(ref.gate_id))) {
+      addBranch(population.population_id);
+    }
+  }
+  return { gateIds, populationIds: [...populationIds] };
 }
 
 // ── Low-level formatting ─────────────────────────────────────────────────────
@@ -98,7 +128,7 @@ function buildTransforms(sample: Sample): TransformRegistry {
     if (isQcChannel(key)) {
       chToTr.set(key, null);
     } else if (isScatterChannel(key)) {
-      const cf = 150;
+      const cf = sample.currentScatterCofactor(idx);
       const trId = `Tr_Fasinh_${Math.round(cf)}`;
       if (!trDefs.has(trId)) trDefs.set(trId, { type: "fasinh", T: cf * SINH1, M: LOG10E, A: 0 });
       chToTr.set(key, trId);
@@ -129,7 +159,7 @@ function scaleJson(trId: string | null | undefined, isFlow: boolean, cofactor: n
   } else if (trId.startsWith("Tr_Logicle_")) {
     flag = 5; arg = "4.5"; mn = -0.5; mx = 4.5;
   } else {
-    flag = 4; arg = "150"; mn = -2.0; mx = 12.0;
+    flag = 4; arg = String(cofactor); mn = -2.0; mx = 12.0;
   }
   return `{"flag":${flag},"argument":"${arg}","min":${fmtNum(mn)},"max":${fmtNum(mx)},"bins":256,"size":256}`;
 }
@@ -140,15 +170,16 @@ function definitionJson(
   xTr: string | null | undefined,
   yTr: string | null | undefined,
   isFlow: boolean,
-  cofactor: number,
+  xCofactor: number,
+  yCofactor: number,
 ): string {
   const xs = gate.vertices.map((v) => v[0]);
   const ys = gate.vertices.map((v) => v[1]);
   const mean = (a: number[]) => a.reduce((s, v) => s + v, 0) / a.length;
   const cx = mean(xs);
   const cy = mean(ys);
-  const sx = scaleJson(xTr, isFlow, cofactor);
-  const sy = scaleJson(yTr, isFlow, cofactor);
+  const sx = scaleJson(xTr, isFlow, xCofactor);
+  const sy = scaleJson(yTr, isFlow, yCofactor);
   const header = `"scale":{"x":${sx},"y":${sy}},"positive":false,"negative":false,"locked":false,"label":[${fmtNum(cx)},${fmtNum(cy)}]`;
   let geom: string;
   if (gate.gate_type === "rectangle") {
@@ -186,12 +217,18 @@ function customInfo(name: string, numericId: number, gateSeq: number, typeStr: s
   ];
 }
 
-function dimXml(dimName: string, trId: string | null | undefined, minVal?: number, maxVal?: number): string[] {
+function dimXml(
+  dimName: string,
+  trId: string | null | undefined,
+  compensationRef: "FCS" | "uncompensated",
+  minVal?: number,
+  maxVal?: number,
+): string[] {
   const tr = trId != null ? ` gating:transformation-ref="${trId}"` : "";
   const mn = minVal !== undefined ? ` gating:min="${fmtNum(minVal)}"` : "";
   const mx = maxVal !== undefined ? ` gating:max="${fmtNum(maxVal)}"` : "";
   return [
-    `    <gating:dimension gating:compensation-ref="FCS"${mn}${mx}${tr}>`,
+    `    <gating:dimension gating:compensation-ref="${compensationRef}"${mn}${mx}${tr}>`,
     `      <data-type:fcs-dimension data-type:name="${escAttr(dimName)}" />`,
     "    </gating:dimension>",
   ];
@@ -200,16 +237,17 @@ function dimXml(dimName: string, trId: string | null | undefined, minVal?: numbe
 function rectangleXml(
   gate: PolyRectGate, gmlId: string, numId: number, seq: number,
   xTr: string | null | undefined, yTr: string | null | undefined,
-  isFlow: boolean, cofactor: number, xName: string, yName: string,
+  isFlow: boolean, xCofactor: number, yCofactor: number, xName: string, yName: string,
+  xCompRef: "FCS" | "uncompensated", yCompRef: "FCS" | "uncompensated",
 ): string[] {
   const xs = gate.vertices.map((v) => v[0]);
   const ys = gate.vertices.map((v) => v[1]);
-  const def = definitionJson(gate, xTr, yTr, isFlow, cofactor);
+  const def = definitionJson(gate, xTr, yTr, isFlow, xCofactor, yCofactor);
   return [
     `  <gating:RectangleGate gating:id="${gmlId}">`,
     ...customInfo(gate.name, numId, seq, "RectangleGate", def),
-    ...dimXml(xName, xTr, Math.min(...xs), Math.max(...xs)),
-    ...dimXml(yName, yTr, Math.min(...ys), Math.max(...ys)),
+    ...dimXml(xName, xTr, xCompRef, Math.min(...xs), Math.max(...xs)),
+    ...dimXml(yName, yTr, yCompRef, Math.min(...ys), Math.max(...ys)),
     "  </gating:RectangleGate>",
   ];
 }
@@ -217,9 +255,10 @@ function rectangleXml(
 function polygonXml(
   gate: PolyRectGate, gmlId: string, numId: number, seq: number,
   xTr: string | null | undefined, yTr: string | null | undefined,
-  isFlow: boolean, cofactor: number, xName: string, yName: string,
+  isFlow: boolean, xCofactor: number, yCofactor: number, xName: string, yName: string,
+  xCompRef: "FCS" | "uncompensated", yCompRef: "FCS" | "uncompensated",
 ): string[] {
-  const def = definitionJson(gate, xTr, yTr, isFlow, cofactor);
+  const def = definitionJson(gate, xTr, yTr, isFlow, xCofactor, yCofactor);
   const vertLines = gate.vertices.flatMap((v) => [
     "    <gating:vertex>",
     `      <gating:coordinate data-type:value="${fmtNum(v[0])}" />`,
@@ -229,8 +268,8 @@ function polygonXml(
   return [
     `  <gating:PolygonGate gating:id="${gmlId}">`,
     ...customInfo(gate.name, numId, seq, "PolygonGate", def),
-    ...dimXml(xName, xTr),
-    ...dimXml(yName, yTr),
+    ...dimXml(xName, xTr, xCompRef),
+    ...dimXml(yName, yTr, yCompRef),
     ...vertLines,
     "  </gating:PolygonGate>",
   ];
@@ -244,10 +283,18 @@ function transformXml(trId: string, tr: TrDef): string[] {
   return [`  <transforms:transformation transforms:id="${trId}">`, body, "  </transforms:transformation>"];
 }
 
-/** gatelabr_scales JSON — per-channel W / cofactor + display range (lo/hi) so the display and the
- *  Scales-tab view window round-trip. */
-function buildScalesJson(sample: Sample, globalScales: Record<string, [number, number]> = {}): string | null {
-  type ScaleEntry = { w?: number; cofactor?: number; lo?: number; hi?: number };
+/** gatelabr_scales JSON — per-channel transforms + axis windows. Version 3 adds raw_lo/raw_hi in
+ *  compensated linear space, because GateLab's normalized logicle display is not numerically the
+ *  same as GateLabR/flowCore's display scale. Legacy lo/hi remain for older readers. */
+function buildScalesJson(sample: Sample, globalScales: Record<string, [number, number]> = {}): string {
+  type ScaleEntry = {
+    w?: number;
+    cofactor?: number;
+    lo?: number;
+    hi?: number;
+    raw_lo?: number;
+    raw_hi?: number;
+  };
   const channels: Record<string, ScaleEntry> = {};
   sample.channels.forEach((c, idx) => {
     const kind = sample.transformKind(idx);
@@ -255,17 +302,34 @@ function buildScalesJson(sample: Sample, globalScales: Record<string, [number, n
     if (kind === "logicle") {
       entry.w = round(clampW(sample.currentLogicleW(idx)), 6);
     } else if (kind === "asinh" && sample.instrument === "flow" && isScatterChannel(c.key)) {
-      entry.cofactor = 150;
+      entry.cofactor = round(sample.currentScatterCofactor(idx), 6);
     }
     const gs = globalScales[c.key];
     if (gs && Number.isFinite(gs[0]) && Number.isFinite(gs[1]) && gs[1] > gs[0]) {
       entry.lo = round(gs[0], 6);
       entry.hi = round(gs[1], 6);
+      const rawLo = sample.displayToRaw(c.key, gs[0]);
+      const rawHi = sample.displayToRaw(c.key, gs[1]);
+      if (Number.isFinite(rawLo) && Number.isFinite(rawHi) && rawHi > rawLo) {
+        entry.raw_lo = round(rawLo, 9);
+        entry.raw_hi = round(rawHi, 9);
+      }
     }
     if (Object.keys(entry).length) channels[c.key] = entry;
   });
-  if (Object.keys(channels).length === 0) return null;
-  return JSON.stringify({ version: 1, channels });
+  const compensationEnabled = sample.instrument === "flow" && sample.compensationEnabled;
+  const spillover = compensationEnabled ? sample.spillover : null;
+  return JSON.stringify({
+    version: 3,
+    ...(sample.instrument === "cytof" ? { cytof_cofactor: sample.arcsinhCofactor } : {}),
+    channels,
+    compensation: {
+      enabled: compensationEnabled,
+      reference: compensationEnabled ? "FCS" : "uncompensated",
+      channels: spillover?.channels ?? [],
+      ...(spillover ? { matrix: spillover.matrix } : {}),
+    },
+  });
 }
 
 // ── Main export ──────────────────────────────────────────────────────────────
@@ -274,6 +338,15 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
   const format = opts.format ?? "cytobank";
   const cytobankMode = format === "cytobank";
   if (!gates || Object.keys(gates).length === 0) throw new Error("No gates to export.");
+
+  const quadrantOmissions = analyzeGatingMLQuadrantOmissions(gates, populations);
+  if (quadrantOmissions.gateIds.length > 0 && !opts.allowQuadrantOmission) {
+    throw new Error(
+      `This workspace contains ${quadrantOmissions.gateIds.length} unsupported quadrant gate(s) and ` +
+      `${quadrantOmissions.populationIds.length} dependent population(s). ` +
+      "Export again only after explicitly accepting their omission; the .gatelab workspace preserves them in full.",
+    );
+  }
 
   const isFlow = sample.instrument === "flow";
   const cofactor = sample.arcsinhCofactor;
@@ -288,6 +361,16 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
 
   const { chToTr, trDefs } = buildTransforms(sample);
   const scalesJson = buildScalesJson(sample, opts.globalScales);
+  const compensationRefFor = (channelKey: string): "FCS" | "uncompensated" =>
+    isFlow && sample.compensationEnabled && sample.spillover?.channels.includes(channelKey)
+      ? "FCS"
+      : "uncompensated";
+  const axisCofactor = (channelKey: string): number => {
+    const idx = sample.index(channelKey);
+    return isFlow && idx !== undefined && isScatterChannel(channelKey)
+      ? sample.currentScatterCofactor(idx)
+      : cofactor;
+  };
 
   // Forward-transform a stored (gating-space) coordinate into export/display space.
   const toExport = (channelKey: string, v: number): number => {
@@ -305,12 +388,10 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
   const gateToGmlId = new Map<string, string>();
   const gateNumericId = new Map<string, number>();
   const gateSeq = new Map<string, number>();
-  let nQuadSkipped = 0;
   gate_order.forEach((gid, i) => {
     const g = gates[gid];
     if (!g) return;
     if (g.gate_type === "quadrant") {
-      nQuadSkipped++;
       return;
     }
     const numId = 180000000 + (i + 1);
@@ -331,10 +412,20 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     const yTr = chToTr.get(g.y_channel) ?? null;
     const xName = pnnFor(g.x_channel);
     const yName = pnnFor(g.y_channel);
+    const xCompRef = compensationRefFor(g.x_channel);
+    const yCompRef = compensationRefFor(g.y_channel);
+    const xCofactor = axisCofactor(g.x_channel);
+    const yCofactor = axisCofactor(g.y_channel);
     if (g.gate_type === "rectangle") {
-      gateLines.push(...rectangleXml(dg, gmlId, numId, i + 1, xTr, yTr, isFlow, cofactor, xName, yName));
+      gateLines.push(...rectangleXml(
+        dg, gmlId, numId, i + 1, xTr, yTr, isFlow, xCofactor, yCofactor,
+        xName, yName, xCompRef, yCompRef,
+      ));
     } else {
-      gateLines.push(...polygonXml(dg, gmlId, numId, i + 1, xTr, yTr, isFlow, cofactor, xName, yName));
+      gateLines.push(...polygonXml(
+        dg, gmlId, numId, i + 1, xTr, yTr, isFlow, xCofactor, yCofactor,
+        xName, yName, xCompRef, yCompRef,
+      ));
     }
   });
 
@@ -343,7 +434,8 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
   const popBoolGmlId = new Map<string, string>();
   const popToGml = new Map<string, string>(); // for the standard-mode hierarchy
   let nextBoolId = 36000000;
-  const popIds = Object.keys(populations);
+  const omittedPopulationIds = new Set(quadrantOmissions.populationIds);
+  const popIds = Object.keys(populations).filter((pid) => !omittedPopulationIds.has(pid));
   for (const pid of popIds) {
     if (pid === root_population_id) continue;
     const pop = populations[pid];
@@ -515,9 +607,9 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     `      <about>${escAttr(aboutStr)}</about>`,
     `      <export_timestamp>${timestamp}</export_timestamp>`,
     "    </cytobank>",
-    ...(scalesJson
-      ? ["    <gatelabr_scales>", `      <definition>${escText(scalesJson)}</definition>`, "    </gatelabr_scales>"]
-      : []),
+    "    <gatelabr_scales>",
+    `      <definition>${escText(scalesJson)}</definition>`,
+    "    </gatelabr_scales>",
     "  </data-type:custom_info>",
     ...[...trDefs.entries()].flatMap(([id, tr]) => transformXml(id, tr)),
     ...gateLines,
