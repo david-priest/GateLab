@@ -66,6 +66,31 @@ describe("resolveChannels — conventional flow (no unmixed)", () => {
     const keys = resolveChannels(fcs).map((c) => c.key);
     expect(keys).toEqual(["FSC-A", "CD3", "PE-A"]);
   });
+
+  it("uses $PnN to preserve identity when marker labels repeat", () => {
+    const fcs = mkFcs("flow", [
+      { name: "FSC-A", marker: null },
+      { name: "V1-A", marker: "CD3" },
+      { name: "V2-A", marker: " CD3 " },
+    ]);
+    const resolved = resolveChannels(fcs);
+    expect(resolved.map((c) => c.key)).toEqual(["FSC-A", "CD3 (V1-A)", "CD3 (V2-A)"]);
+    expect(new Set(resolved.map((c) => c.key)).size).toBe(resolved.length);
+    expect(resolved.map((c) => c.pnn)).toEqual(["FSC-A", "V1-A", "V2-A"]);
+  });
+});
+
+describe("resolveChannels — CyTOF duplicate markers", () => {
+  it("applies the same stable identity rule as flow", () => {
+    const fcs = mkFcs("cytof", [
+      { name: "Y89Di", marker: "CD3" },
+      { name: "Nd144Di", marker: "CD3" },
+      { name: "Time", marker: null },
+    ]);
+    expect(resolveChannels(fcs).map((c) => c.key)).toEqual([
+      "CD3 (Y89Di)", "CD3 (Nd144Di)", "Time",
+    ]);
+  });
 });
 
 const SPECTRAL = "/Users/davidpriest/Desktop/LP1p pbmc pre rec.fcs";

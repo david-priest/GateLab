@@ -14,7 +14,7 @@ import { resolvePartitionLevels, partitionAssign } from "./engine/factors";
 import { paletteColors, populationColor, UNGATED_COLOR, OVERLAY_PALETTES, type PaletteName } from "./engine/palettes";
 import { assignDivisionLevel, divisionPalette } from "./engine/division";
 import { encodeFloat32Base64, encodeUint8Base64 } from "./engine/encode";
-import { importGatingML } from "./engine/gatingml";
+import { importGatingML, resolveGatingMLCompensation, restoreGatingMLScaleState } from "./engine/gatingml";
 import { exportGatingML, type GatingMLFormat } from "./engine/gatingmlExport";
 import { exportPopulationFcs, exportPopulationFcsCombined, sanitizeFcsName, sanitizeFilePart, type FcsExportAssay } from "./engine/fcsExport";
 import { zipSync } from "fflate";
@@ -378,34 +378,57 @@ export default function App() {
       const pnnMap: Record<string, string> = {};
       for (const c of sample.channels) pnnMap[c.pnn] = c.key;
       const res = importGatingML(text, sample.channels.map((c) => c.key), pnnMap);
+      const comp = resolveGatingMLCompensation(
+        res.compensation,
+        res.compensation_refs,
+        sample.instrument === "flow",
+        sample.spillover,
+      );
+      if (comp.requiresConfirmation && !window.confirm(
+        "This Gating-ML file declares FCS compensation but does not carry GateLab's exact matrix record. " +
+        "Continue to use the spillover matrix embedded in the loaded FCS. If this is an older GateLab or " +
+        "GateLabR export, continue only if compensation was enabled when its gates were drawn.",
+      )) {
+        setError(null);
+        setImportMsg("Gating-ML import cancelled; the current strategy was not changed.");
+        return;
+      }
+      const compensationChanged = comp.target !== null && sample.compensationEnabled !== comp.target;
+      if (comp.target !== null) {
+        sample.setCompensation(comp.target);
+        if (sample.compensationEnabled !== comp.target) {
+          throw new Error("The FCS spillover matrix could not be applied, so the gating strategy was not imported.");
+        }
+        setCompensationOn(sample.compensationEnabled);
+        setXRange(null);
+        setYRange(null);
+      }
+      // v3 scale metadata carries axis endpoints in compensated linear space. Restore transforms
+      // first, then map those endpoints into GateLab's own display coordinates. Legacy lo/hi are
+      // deliberately not applied because GateLabR/flowCore uses a different logicle display scale.
+      const restoredScales = restoreGatingMLScaleState(sample, res.scales, res.cytof_cofactor);
+      const restoredRanges = Object.keys(restoredScales.ranges).length;
+      if (restoredRanges) {
+        setGlobalScales((current) => ({ ...current, ...restoredScales.ranges }));
+      }
+      if (restoredScales.transformsChanged || restoredRanges) {
+        setXRange(null);
+        setYRange(null);
+        bumpScales();
+      }
       dispatch({
         type: "importGating",
         gates: res.gates,
         gate_order: res.gate_order,
         populations: res.populations,
         root_population_id: res.root_population_id,
+        clearHistory: compensationChanged || restoredScales.transformsChanged,
       });
-      // Apply only the per-channel logicle W. The gatelabr_scales lo/hi (display view window) are
-      // deliberately NOT applied on import: GateLabR's logicle display coordinates can differ from
-      // GateLab's, so an imported hi (e.g. ~5.08) can sit far beyond a channel whose data spans only
-      // display ~1.3 — setting that as the axis range makes the decade ticks extrapolate to absurd
-      // values (inverse(5.08) ≈ 1e19). lo/hi still round-trip within the .gatelab workspace via
-      // scales.globalScales; re-enable here only once the display-coordinate convention is reconciled.
-      let appliedScales = false;
-      if (res.scales) {
-        for (const [key, sc] of Object.entries(res.scales)) {
-          const idx = sample.index(key);
-          if (idx === undefined || !sc) continue;
-          if (typeof sc.w === "number" && Number.isFinite(sc.w)) {
-            sample.setLogicleW(idx, sc.w);
-            appliedScales = true;
-          }
-        }
-      }
-      if (appliedScales) bumpScales();
       setError(null);
       setImportMsg(
         `Imported ${res.n_gates_imported} gates, ${res.n_pops_imported} populations` +
+          (comp.target === true ? " · FCS compensation enabled" : "") +
+          (comp.target === false ? " · compensation disabled" : "") +
           (res.skipped_channels.length
             ? ` · skipped channels: ${res.skipped_channels.join(", ")}`
             : ""),
@@ -426,6 +449,7 @@ export default function App() {
         sample,
         globalScales,
         format,
+        allowQuadrantOmission: true, // the export modal explicitly reports the omitted branches
       });
       const base = sanitizeFilePart((fileName || "gates").replace(/\.[^.]+$/, ""));
       downloadText(`${base}_gatingml_${format}.xml`, xml, "application/xml");
@@ -456,6 +480,7 @@ export default function App() {
         if (scope === "combined" && multiSample) {
           const items = samples.map((e) => ({
             sample: e.sample,
+            name: e.name,
             mask: popMaskFor(e.sample, popId) ?? new Uint8Array(e.sample.fcs.nEvents),
           }));
           out[`combined_${popName}.fcs`] = exportPopulationFcsCombined(items, assay);
@@ -803,6 +828,8 @@ export default function App() {
         fileName: e.name,
         dataPath: sampleDataPath(e.name, i),
         logicleW: e.sample.logicleWOverrides(),
+        scatterCofactor: e.sample.scatterCofactorOverrides(),
+        cytofCofactor: e.sample.arcsinhCofactor,
         compensationOn: e.sample.compensationEnabled,
         instrumentMode: e.sample.instrumentMode,
         labels: e.sample.labelOverrides(),
@@ -848,6 +875,7 @@ export default function App() {
         sample,
         globalScales,
         format: "standard",
+        allowQuadrantOmission: true, // the bundled workspace itself still preserves quadrants in full
       });
     } catch {
       return undefined;
@@ -875,9 +903,9 @@ export default function App() {
   async function saveWorkspaceAs() {
     const ws = buildWorkspaceFile();
     if (!ws) return;
-    const data = packWorkspaceReference(ws);
     const base = sanitizeFilePart((fileName || "workspace").replace(/\.[^.]+$/, ""));
     try {
+      const data = packWorkspaceReference(ws);
       if (supportsFileSystemAccess()) {
         const h = await saveAsHandle(
           `${base}.${WORKSPACE_EXT}`,
@@ -905,13 +933,13 @@ export default function App() {
   async function saveBundledCopy() {
     const ws = buildWorkspaceFile();
     if (!ws) return;
-    const fcsByPath: Record<string, Uint8Array> = {};
-    ws.samples.forEach((wss, i) => {
-      fcsByPath[wss.dataPath] = samples[i].bytes;
-    });
-    const zip = packWorkspace(ws, fcsByPath, bundleGatingML());
     const base = sanitizeFilePart((fileName || "workspace").replace(/\.[^.]+$/, ""));
     try {
+      const fcsByPath: Record<string, Uint8Array> = {};
+      ws.samples.forEach((wss, i) => {
+        fcsByPath[wss.dataPath] = samples[i].bytes;
+      });
+      const zip = packWorkspace(ws, fcsByPath, bundleGatingML());
       if (supportsFileSystemAccess()) {
         await saveAsHandle(
           `${base}-bundle.${WORKSPACE_EXT}`,
@@ -982,12 +1010,21 @@ export default function App() {
         }
         const entry = makeEntry(fcsB, wss.fileName, fcsH);
         if (!entry) continue;
+        if (wss.instrumentMode && wss.instrumentMode !== "auto") entry.sample.setInstrumentMode(wss.instrumentMode);
+        if (wss.compensationOn) entry.sample.setCompensation(true);
+        if (Number.isFinite(wss.cytofCofactor) && (wss.cytofCofactor ?? 0) > 0) {
+          entry.sample.setCytofCofactor(wss.cytofCofactor!);
+        }
         for (const [key, w] of Object.entries(wss.logicleW ?? {})) {
           const idx = entry.sample.index(key);
           if (idx !== undefined && Number.isFinite(w)) entry.sample.setLogicleW(idx, w);
         }
-        if (wss.instrumentMode && wss.instrumentMode !== "auto") entry.sample.setInstrumentMode(wss.instrumentMode);
-        if (wss.compensationOn) entry.sample.setCompensation(true);
+        for (const [key, cofactor] of Object.entries(wss.scatterCofactor ?? {})) {
+          const idx = entry.sample.index(key);
+          if (idx !== undefined && Number.isFinite(cofactor) && cofactor > 0) {
+            entry.sample.setScatterCofactor(idx, cofactor);
+          }
+        }
         entry.sample.applyLabelOverrides(wss.labels ?? {});
         if (wss.metadata && Object.keys(wss.metadata).length) nextMetadata[entry.id] = wss.metadata;
         if (wss.division) nextDivision[entry.id] = wss.division;
@@ -996,8 +1033,9 @@ export default function App() {
         entries.push(entry);
       }
 
-      if (entries.length === 0) {
-        setError(`Could not locate any data files for this workspace${missing.length ? ` (${missing.join(", ")})` : ""}.`);
+      if (entries.length !== ws.samples.length) {
+        const failed = missing.length ? ` Missing: ${missing.join(", ")}.` : "";
+        setError(`Could not load every data file declared by this workspace.${failed} The workspace was not opened.`);
         setBusy(false);
         return;
       }
@@ -1420,7 +1458,7 @@ export default function App() {
               </div>
               <button
                 className="gl-btn-ghost gl-btn-block"
-                title="Import a Gating-ML 2.0 file (e.g. from Cytobank) — the population tree is rebuilt from the gates"
+                title="Import Gating-ML 2.0 gates and positive AND populations (e.g. from Cytobank); files containing NOT/OR logic or unmatched channels are rejected without changing the workspace"
                 onClick={() => xmlRef.current?.click()}
               >
                 Import GatingML…

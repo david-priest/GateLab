@@ -6,7 +6,7 @@ import type { CoreState, Action } from "../store";
 import { wouldCreateCycle, type GateRef } from "../engine/models";
 import { populationTreeOrder } from "../engine/populations";
 import type { FcsExportAssay } from "../engine/fcsExport";
-import type { GatingMLFormat } from "../engine/gatingmlExport";
+import { analyzeGatingMLQuadrantOmissions, type GatingMLFormat } from "../engine/gatingmlExport";
 
 function ModalShell({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -30,12 +30,7 @@ export function GatingMlExportModal({
   onExport: (format: GatingMLFormat) => void;
 }) {
   const [format, setFormat] = useState<GatingMLFormat>("standard");
-  const quadrantIds = new Set(
-    Object.values(state.gates).filter((g) => g.gate_type === "quadrant").map((g) => g.gate_id),
-  );
-  const quadrantPopulations = Object.values(state.populations).filter((p) =>
-    p.gate_refs.some((r) => quadrantIds.has(r.gate_id)),
-  );
+  const quadrantOmissions = analyzeGatingMLQuadrantOmissions(state.gates, state.populations);
   const nestedOrPopulations = Object.values(state.populations).filter(
     (p) =>
       p.gate_logic === "or" &&
@@ -59,11 +54,12 @@ export function GatingMlExportModal({
           ? "Preserves the population hierarchy and AND/OR logic for GateLab and GateLabR."
           : "Uses Cytobank channel names and Boolean-gate metadata for Cytobank import."}
       </div>
-      {quadrantIds.size > 0 && (
+      {quadrantOmissions.gateIds.length > 0 && (
         <div className="gl-modal-warning" role="alert">
-          This workspace contains {quadrantIds.size} quadrant gate{quadrantIds.size === 1 ? "" : "s"}.
-          Quadrant gates and {quadrantPopulations.length} dependent population{quadrantPopulations.length === 1 ? "" : "s"}
-          {" "}will not be included in this GatingML file. The saved .gatelab workspace remains complete.
+          This workspace contains {quadrantOmissions.gateIds.length} quadrant gate{quadrantOmissions.gateIds.length === 1 ? "" : "s"}.
+          Quadrant gates and {quadrantOmissions.populationIds.length} dependent population{quadrantOmissions.populationIds.length === 1 ? "" : "s"},
+          including all descendants, will not be included in this GatingML file.
+          The saved .gatelab workspace remains complete.
         </div>
       )}
       {cytobankBlocked && (
@@ -186,6 +182,13 @@ export function FcsExportModal({
             <option value="split">all (split zip)</option>
           </select>
         </label>
+      )}
+      {samplesCount > 1 && scope === "combined" && (
+        <div className="gl-modal-note">
+          Combined export requires every sample containing selected events to have the same channels
+          (channel order may differ). If panels differ, choose “all (split zip)”; GateLab will not omit
+          samples or channels from a combined file.
+        </div>
       )}
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={onCancel}>Cancel</button>
@@ -327,12 +330,16 @@ export function EditPopModal({
   onCancel: () => void;
 }) {
   const pop = state.populations[popId];
-  const gateIds = state.gate_order.length ? state.gate_order : Object.keys(state.gates);
+  const orderedGateIds = state.gate_order.length ? state.gate_order : Object.keys(state.gates);
+  const gateIds = orderedGateIds.filter((gid) => state.gates[gid]?.gate_type !== "quadrant");
+  const lockedQuadrantRefs = (pop?.gate_refs ?? []).filter(
+    (ref) => state.gates[ref.gate_id]?.gate_type === "quadrant",
+  );
 
   const [name, setName] = useState(pop?.name ?? "");
   const [parentId, setParentId] = useState(pop?.parent_id ?? state.root_population_id ?? "");
   const [checked, setChecked] = useState<Set<string>>(
-    new Set((pop?.gate_refs ?? []).map((r) => r.gate_id)),
+    new Set((pop?.gate_refs ?? []).filter((r) => state.gates[r.gate_id]?.gate_type !== "quadrant").map((r) => r.gate_id)),
   );
 
   // Valid parents: any population that isn't this one or a descendant of it.
@@ -361,7 +368,10 @@ export function EditPopModal({
   if (!pop) return null;
 
   const commit = () => {
-    const gateRefs: GateRef[] = [...checked].map((gid) => ({ gate_id: gid, include: true }));
+    const gateRefs: GateRef[] = [
+      ...lockedQuadrantRefs.map((ref) => ({ ...ref })),
+      ...[...checked].map((gid) => ({ gate_id: gid, include: true })),
+    ];
     onConfirm({ type: "editPopulation", popId, name, parentId, gateRefs });
   };
 
@@ -405,6 +415,18 @@ export function EditPopModal({
 
       <div className="gl-modal-field" style={{ gap: 6 }}>
         Gates for this population:
+        {lockedQuadrantRefs.length > 0 && (
+          <div className="gl-inherited">
+            {lockedQuadrantRefs.map((ref) => {
+              const gate = state.gates[ref.gate_id];
+              return (
+                <span key={`${ref.gate_id}:${ref.quadrant}`} className="gate-ref-badge" style={{ background: gate.color, opacity: 0.75 }}>
+                  {gate.name} · quadrant {ref.quadrant} (locked)
+                </span>
+              );
+            })}
+          </div>
+        )}
         <div className="gl-gateref-list">
           {gateIds.length === 0 && <em style={{ color: "var(--muted)" }}>No gates yet.</em>}
           {gateIds.map((gid) => {
@@ -462,7 +484,8 @@ export function CreatePopModal({
       : state.root_population_id ?? "",
   );
   const [checked, setChecked] = useState<Set<string>>(new Set());
-  const ids = state.gate_order.length ? state.gate_order : Object.keys(state.gates);
+  const ids = (state.gate_order.length ? state.gate_order : Object.keys(state.gates))
+    .filter((gid) => state.gates[gid]?.gate_type !== "quadrant");
 
   const commit = () => {
     const popName = name.trim() || `Pop_${Object.keys(state.populations).length}`;

@@ -3,9 +3,12 @@
 //
 // GateLabR exports encode the population hierarchy as a <GatingHierarchy> of nested
 // <PopulationGatePair>s; Cytobank exports use flat <BooleanGate>s + custom_info
-// (gate_set_id, booleanExpression "pop_X"). Both are handled. Gate vertices live in
-// TRANSFORMED (display) space with a transformation-ref; we invert them back to the
-// gating space GateLab masks in (raw for flow, arcsinh for CyTOF).
+// (gate_set_id, booleanExpression "pop_X"). Both structures are handled, but the
+// current product policy imports positive AND populations only: files containing
+// NOT/complement or OR logic are rejected before any workspace state is replaced.
+// Gate vertices live in TRANSFORMED (display) space with a transformation-ref; we
+// invert them back to the gating space GateLab masks in (raw for flow, arcsinh for
+// CyTOF).
 
 import {
   newRootPopulation,
@@ -18,7 +21,9 @@ import {
   type PopulationMap,
   type Vertex,
 } from "./models";
-import { Logicle, isScatterChannel } from "./transforms";
+import type { DisplaySpillover } from "./compensation";
+import type { Sample } from "./sample";
+import { Logicle, isQcChannel, isScatterChannel } from "./transforms";
 
 const LN10 = Math.log(10);
 const uuid = () => crypto.randomUUID();
@@ -155,6 +160,7 @@ function parseTransforms(root: Element): Record<string, TransformDef> {
 interface GmlDim {
   channel: string;
   transformation_ref?: string;
+  compensation_ref?: string;
   min?: number;
   max?: number;
 }
@@ -168,6 +174,8 @@ function parseDimensions(gate: Element): GmlDim[] {
     const d: GmlDim = { channel: ch };
     const tr = attrLocal(dim, "transformation-ref");
     if (tr) d.transformation_ref = tr;
+    const comp = attrLocal(dim, "compensation-ref");
+    if (comp) d.compensation_ref = comp;
     const mn = num(attrLocal(dim, "min"));
     const mx = num(attrLocal(dim, "max"));
     if (hasNum(mn)) d.min = mn;
@@ -309,8 +317,12 @@ function parseGateNode(node: Element): RawGate | null {
 
   if (loc === "RectangleGate") {
     const dims = parseDimensions(node);
-    if (dims.length < 2) return null;
-    const [x, y] = dims;
+    if (dims.length < 1 || dims.length > 2) return null;
+    // Gating-ML range gates are encoded as a one-dimensional RectangleGate.
+    // The app's rectangle mask is two-dimensional, so repeating the same
+    // channel on both axes preserves the exact interval membership semantics.
+    const x = dims[0];
+    const y = dims[1] ?? dims[0];
     const xlo = x.min !== undefined && Number.isFinite(x.min) ? x.min : -1e9;
     const xhi = x.max !== undefined && Number.isFinite(x.max) ? x.max : 1e9;
     const ylo = y.min !== undefined && Number.isFinite(y.min) ? y.min : -1e9;
@@ -328,7 +340,7 @@ function parseGateNode(node: Element): RawGate | null {
         [xlo, yhi],
       ],
       channels: [x.channel, y.channel],
-      dims,
+      dims: [x, y],
     };
   }
 
@@ -389,6 +401,109 @@ function parseGateNode(node: Element): RawGate | null {
   return null;
 }
 
+function gateLabel(node: Element): string {
+  const id = attrLocal(node, "id");
+  const name = attrLocal(node, "name") ?? parseCytobankName(node);
+  const suffix = name && name !== id ? ` (${name})` : "";
+  return `${node.localName}${id ? ` ${id}` : ""}${suffix}`;
+}
+
+function throwImportProblems(problems: string[]): never {
+  const unique = [...new Set(problems)];
+  throw new Error(
+    "Gating-ML import cancelled because unsupported or invalid features were found:\n" +
+      unique.map((problem) => `- ${problem}`).join("\n") +
+      "\nNo gates or populations were imported; the current workspace was not changed.",
+  );
+}
+
+function pairPopulationName(pair: Element, rawGates: Record<string, RawGate>): string {
+  const nameNode = firstChildLocal(pair, "name");
+  const explicitName = (nameNode?.textContent ?? "").trim();
+  if (explicitName) return explicitName;
+  const gateRef = attrLocal(pair, "gate-ref");
+  return (gateRef && rawGates[gateRef]?.name) || gateRef || "Unnamed population";
+}
+
+/**
+ * GateLab deliberately authors and imports positive intersections only. Detect
+ * unsupported Boolean semantics while the XML is still detached from app state,
+ * and report the affected population names rather than silently dropping an
+ * operator and changing membership.
+ */
+function positiveAndLogicProblems(
+  rawGates: Record<string, RawGate>,
+  hierarchyNode: Element | null,
+): string[] {
+  const problems: string[] = [];
+  const namesByGate = new Map<string, string[]>();
+  const pairs = hierarchyNode
+    ? Array.from(hierarchyNode.getElementsByTagName("*")).filter(
+        (node) => node.localName === "PopulationGatePair",
+      )
+    : [];
+
+  for (const pair of pairs) {
+    const gateRef = attrLocal(pair, "gate-ref");
+    if (!gateRef) continue;
+    const names = namesByGate.get(gateRef) ?? [];
+    names.push(pairPopulationName(pair, rawGates));
+    namesByGate.set(gateRef, [...new Set(names)]);
+  }
+
+  const addProblem = (name: string, operation: "NOT" | "OR") => {
+    problems.push(
+      `Population ${JSON.stringify(name)} uses ${operation} logic; ` +
+        "GateLab currently imports positive AND populations only.",
+    );
+  };
+
+  for (const gate of Object.values(rawGates)) {
+    if (gate.gate_type !== "boolean") continue;
+    const names = namesByGate.get(gate.gml_id) ?? [gate.name];
+    if (gate.operation === "or") {
+      for (const name of names) addProblem(name, "OR");
+    }
+    if (gate.operation === "not" || (gate.refs ?? []).some((ref) => ref.complement)) {
+      for (const name of names) addProblem(name, "NOT");
+    }
+  }
+
+  for (const pair of pairs) {
+    if ((attrLocal(pair, "complement") ?? "false").toLowerCase() === "true") {
+      addProblem(pairPopulationName(pair, rawGates), "NOT");
+    }
+  }
+
+  return [...new Set(problems)];
+}
+
+function missingChannelProblems(
+  rawGates: Record<string, RawGate>,
+  sessionChannels: string[],
+  pnnToChannel: Record<string, string>,
+): string[] {
+  const problems: string[] = [];
+  for (const gate of Object.values(rawGates)) {
+    if (gate.gate_type === "boolean") continue;
+    const missing = [...new Set(gate.channels)].filter(
+      (channel) => resolveChannel(channel, sessionChannels, pnnToChannel) == null,
+    );
+    if (missing.length) {
+      problems.push(
+        `Gate ${JSON.stringify(gate.name)} (${gate.gml_id}) references channel(s) not present in the loaded data: ` +
+          missing.map((channel) => JSON.stringify(channel)).join(", ") + ".",
+      );
+    }
+  }
+  if (problems.length) {
+    problems.push(
+      "Partial Gating-ML imports are not allowed because dropping a gate can change population membership.",
+    );
+  }
+  return problems;
+}
+
 
 // ---------------------------------------------------------------------------
 // Main import
@@ -404,21 +519,264 @@ export interface GatingMLResult {
   skipped_channels: string[];
   source: "gatelabr" | "cytobank" | "generic";
   n_pops_imported: number;
-  scales: Record<string, { w?: number; cofactor?: number; lo?: number; hi?: number }> | null;
+  scales: Record<string, GatingMLScaleEntry> | null;
+  cytof_cofactor: number | null;
+  compensation: GatingMLCompensationState | null;
+  compensation_refs: GatingMLCompensationRef[];
 }
 
-function parseGatelabrScales(root: Element): GatingMLResult["scales"] {
+export interface GatingMLScaleEntry {
+  w?: number;
+  cofactor?: number;
+  lo?: number;
+  hi?: number;
+  /** Axis endpoints in compensated linear measurement space (portable across display implementations). */
+  raw_lo?: number;
+  raw_hi?: number;
+}
+
+export type GatingMLCompensationRef = "FCS" | "uncompensated";
+
+export interface GatingMLCompensationState {
+  enabled: boolean;
+  reference: GatingMLCompensationRef;
+  channels: string[];
+  matrix?: number[][];
+}
+
+export interface GatingMLCompensationResolution {
+  target: boolean | null;
+  source: "embedded" | "dimensions" | "none";
+  requiresConfirmation: boolean;
+}
+
+interface GatelabrState {
+  scales: GatingMLResult["scales"];
+  cytofCofactor: number | null;
+  compensation: GatingMLCompensationState | null;
+}
+
+function isNumericMatrix(value: unknown, size: number): value is number[][] {
+  return Array.isArray(value) && value.length === size && value.every(
+    (row) => Array.isArray(row) && row.length === size && row.every(
+      (entry) => typeof entry === "number" && Number.isFinite(entry),
+    ),
+  );
+}
+
+function parseScaleChannels(value: unknown): Record<string, GatingMLScaleEntry> | null {
+  if (value === undefined || value === null) return null;
+  if (Array.isArray(value) && value.length === 0) return null; // legacy GateLabR encoded empty lists as []
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Channel scale settings are malformed.");
+  }
+  const out: Record<string, GatingMLScaleEntry> = {};
+  const numericKeys: (keyof GatingMLScaleEntry)[] = ["w", "cofactor", "lo", "hi", "raw_lo", "raw_hi"];
+  for (const [channel, rawEntry] of Object.entries(value as Record<string, unknown>)) {
+    if (!channel || !rawEntry || typeof rawEntry !== "object" || Array.isArray(rawEntry)) {
+      throw new Error("A channel scale entry is malformed.");
+    }
+    const record = rawEntry as Record<string, unknown>;
+    const entry: GatingMLScaleEntry = {};
+    for (const key of numericKeys) {
+      if (record[key] === undefined) continue;
+      if (typeof record[key] !== "number" || !Number.isFinite(record[key])) {
+        throw new Error(`Scale ${key} for ${channel} is not finite.`);
+      }
+      entry[key] = record[key] as number;
+    }
+    if (entry.cofactor !== undefined && entry.cofactor <= 0) {
+      throw new Error(`Scale cofactor for ${channel} must be positive.`);
+    }
+    if ((entry.raw_lo === undefined) !== (entry.raw_hi === undefined) ||
+        (entry.raw_lo !== undefined && entry.raw_hi! <= entry.raw_lo)) {
+      throw new Error(`Raw scale range for ${channel} is malformed.`);
+    }
+    out[channel] = entry;
+  }
+  return out;
+}
+
+function parseGatelabrState(root: Element): GatelabrState {
   const ci = firstChildLocal(root, "custom_info");
   const gs = ci ? firstChildLocal(ci, "gatelabr_scales") : null;
   const def = gs ? firstChildLocal(gs, "definition") : null;
   const txt = def?.textContent?.trim();
-  if (!txt) return null;
+  if (!txt) return { scales: null, cytofCofactor: null, compensation: null };
   try {
-    const parsed = JSON.parse(txt);
-    return parsed?.channels ?? null;
+    const parsed: unknown = JSON.parse(txt);
+    if (!parsed || typeof parsed !== "object") {
+      return { scales: null, cytofCofactor: null, compensation: null };
+    }
+    const record = parsed as Record<string, unknown>;
+    const scales = parseScaleChannels(record.channels);
+    let cytofCofactor: number | null = null;
+    if (record.cytof_cofactor !== undefined) {
+      if (typeof record.cytof_cofactor !== "number" || !Number.isFinite(record.cytof_cofactor) ||
+          record.cytof_cofactor <= 0) {
+        throw new Error("CyTOF cofactor must be positive.");
+      }
+      cytofCofactor = record.cytof_cofactor;
+    }
+    if (record.compensation === undefined) return { scales, cytofCofactor, compensation: null };
+
+    const raw = record.compensation;
+    if (!raw || typeof raw !== "object") {
+      throw new Error("Invalid embedded GateLab compensation state.");
+    }
+    const comp = raw as Record<string, unknown>;
+    if (typeof comp.enabled !== "boolean") {
+      throw new Error("Invalid embedded GateLab compensation state: enabled must be true or false.");
+    }
+    if (comp.reference !== "FCS" && comp.reference !== "uncompensated") {
+      throw new Error("Invalid embedded GateLab compensation state: unsupported matrix reference.");
+    }
+    if (!Array.isArray(comp.channels) || !comp.channels.every((ch) => typeof ch === "string")) {
+      throw new Error("Invalid embedded GateLab compensation state: channel list is malformed.");
+    }
+    const channels = [...comp.channels] as string[];
+    if (new Set(channels).size !== channels.length) {
+      throw new Error("Invalid embedded GateLab compensation state: channel names are duplicated.");
+    }
+    let matrix: number[][] | undefined;
+    if (comp.matrix !== undefined) {
+      if (!isNumericMatrix(comp.matrix, channels.length)) {
+        throw new Error("Invalid embedded GateLab compensation state: spillover matrix is malformed.");
+      }
+      matrix = comp.matrix.map((row) => [...row]);
+    }
+    if (comp.enabled && (comp.reference !== "FCS" || channels.length < 2 || !matrix)) {
+      throw new Error("Invalid embedded GateLab compensation state: enabled compensation requires an FCS spillover matrix.");
+    }
+    return {
+      scales,
+      cytofCofactor,
+      compensation: { enabled: comp.enabled, reference: comp.reference, channels, ...(matrix ? { matrix } : {}) },
+    };
   } catch {
-    return null;
+    throw new Error("Invalid embedded GateLab scale or compensation metadata.");
   }
+}
+
+/** Restore portable transform/display state after Gating-ML compensation has been resolved. */
+export function restoreGatingMLScaleState(
+  sample: Sample,
+  scales: Record<string, GatingMLScaleEntry> | null,
+  cytofCofactor: number | null,
+): { ranges: Record<string, [number, number]>; transformsChanged: boolean } {
+  let transformsChanged = false;
+  if (sample.instrument === "cytof" && cytofCofactor !== null &&
+      sample.arcsinhCofactor !== cytofCofactor) {
+    sample.setCytofCofactor(cytofCofactor);
+    transformsChanged = true;
+  }
+
+  for (const [key, state] of Object.entries(scales ?? {})) {
+    const idx = sample.index(key);
+    if (idx === undefined) continue;
+    if (sample.instrument === "flow" && !isQcChannel(key) && !isScatterChannel(key) &&
+        state.w !== undefined && sample.currentLogicleW(idx) !== state.w) {
+      sample.setLogicleW(idx, state.w);
+      transformsChanged = true;
+    }
+    if (sample.instrument === "flow" && isScatterChannel(key) && state.cofactor !== undefined &&
+        sample.currentScatterCofactor(idx) !== state.cofactor) {
+      sample.setScatterCofactor(idx, state.cofactor);
+      transformsChanged = true;
+    }
+  }
+
+  const ranges: Record<string, [number, number]> = {};
+  for (const [key, state] of Object.entries(scales ?? {})) {
+    if (sample.index(key) === undefined || state.raw_lo === undefined || state.raw_hi === undefined) continue;
+    const lo = sample.rawToDisplay(key, state.raw_lo);
+    const hi = sample.rawToDisplay(key, state.raw_hi);
+    if (Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) ranges[key] = [lo, hi];
+  }
+  return { ranges, transformsChanged };
+}
+
+function parseCompensationRefs(rawGates: Record<string, RawGate>): GatingMLCompensationRef[] {
+  const refs = new Set<GatingMLCompensationRef>();
+  const unsupported = new Set<string>();
+  for (const gate of Object.values(rawGates)) {
+    if (gate.gate_type === "boolean") continue;
+    for (const dim of gate.dims ?? []) {
+      const value = dim.compensation_ref?.trim();
+      if (!value) continue;
+      if (value.toLowerCase() === "fcs") refs.add("FCS");
+      else if (value.toLowerCase() === "uncompensated") refs.add("uncompensated");
+      else unsupported.add(value);
+    }
+  }
+  if (unsupported.size) {
+    throw new Error(
+      `This Gating-ML file references unsupported compensation matrix ${[...unsupported].map((x) => `"${x}"`).join(", ")}. ` +
+      "GateLab can safely import FCS or uncompensated dimensions only.",
+    );
+  }
+  return [...refs];
+}
+
+function matricesMatch(expected: GatingMLCompensationState, actual: DisplaySpillover): boolean {
+  if (!expected.matrix || expected.channels.length !== actual.channels.length) return false;
+  const actualIndex = new Map(actual.channels.map((ch, i) => [ch, i]));
+  if (expected.channels.some((ch) => !actualIndex.has(ch))) return false;
+  for (let i = 0; i < expected.channels.length; i++) {
+    for (let j = 0; j < expected.channels.length; j++) {
+      const ai = actualIndex.get(expected.channels[i])!;
+      const aj = actualIndex.get(expected.channels[j])!;
+      const a = expected.matrix[i][j];
+      const b = actual.matrix[ai]?.[aj];
+      if (!Number.isFinite(b) || Math.abs(a - b) > 1e-8 * Math.max(1, Math.abs(a), Math.abs(b))) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/** Determine the data state required to evaluate imported gates without changing membership. */
+export function resolveGatingMLCompensation(
+  embedded: GatingMLCompensationState | null,
+  dimensionRefs: GatingMLCompensationRef[],
+  isFlow: boolean,
+  available: DisplaySpillover | null,
+): GatingMLCompensationResolution {
+  if (!isFlow) return { target: null, source: "none", requiresConfirmation: false };
+
+  if (embedded) {
+    if (!embedded.enabled) {
+      if (dimensionRefs.includes("FCS")) {
+        throw new Error("The embedded GateLab compensation state contradicts the Gating-ML dimension references.");
+      }
+      return { target: false, source: "embedded", requiresConfirmation: false };
+    }
+    if (!available) {
+      throw new Error(
+        "This gating strategy was created with FCS spillover compensation enabled, but the loaded FCS has no usable spillover matrix.",
+      );
+    }
+    if (!matricesMatch(embedded, available)) {
+      throw new Error(
+        "This gating strategy was created with a different FCS spillover matrix. Import was stopped to prevent changed population membership.",
+      );
+    }
+    return { target: true, source: "embedded", requiresConfirmation: false };
+  }
+
+  if (dimensionRefs.includes("FCS")) {
+    if (!available) {
+      throw new Error(
+        "This Gating-ML file requires FCS spillover compensation, but the loaded FCS has no usable spillover matrix.",
+      );
+    }
+    return { target: true, source: "dimensions", requiresConfirmation: true };
+  }
+  if (dimensionRefs.includes("uncompensated")) {
+    return { target: false, source: "dimensions", requiresConfirmation: false };
+  }
+  return { target: null, source: "none", requiresConfirmation: false };
 }
 
 export function importGatingML(
@@ -436,17 +794,113 @@ export function importGatingML(
   const rawGates: Record<string, RawGate> = {};
   const boolOrder: string[] = [];
   let hierarchyNode: Element | null = null;
+  const importProblems: string[] = [];
+  const supportedGateTypes = new Set(["RectangleGate", "PolygonGate", "BooleanGate"]);
 
   for (const el of Array.from(root.children)) {
     if (el.localName === "GatingHierarchy" && !hierarchyNode) {
       hierarchyNode = el;
       continue;
     }
+
+    if (el.localName.endsWith("Gate") && !supportedGateTypes.has(el.localName)) {
+      importProblems.push(`${gateLabel(el)} is not supported.`);
+      continue;
+    }
+    if (!supportedGateTypes.has(el.localName)) continue;
+
+    const id = attrLocal(el, "id");
+    if (!id) {
+      importProblems.push(`${el.localName} is missing its required id.`);
+      continue;
+    }
+    if (rawGates[id]) {
+      importProblems.push(`${el.localName} has duplicate id ${id}.`);
+      continue;
+    }
+
+    if (el.localName === "RectangleGate") {
+      const nDims = parseDimensions(el).length;
+      if (nDims < 1 || nDims > 2) {
+        importProblems.push(`${gateLabel(el)} has ${nDims} dimensions; only 1D ranges and 2D rectangles are supported.`);
+        continue;
+      }
+    } else if (el.localName === "PolygonGate") {
+      const nDims = parseDimensions(el).length;
+      const nVertices = childrenLocal(el, "vertex").length;
+      if (nDims !== 2 || nVertices < 3) {
+        importProblems.push(`${gateLabel(el)} must contain exactly 2 dimensions and at least 3 vertices.`);
+        continue;
+      }
+    } else if (el.localName === "BooleanGate") {
+      const operations = Array.from(el.children).filter((child) =>
+        child.localName === "and" || child.localName === "or" || child.localName === "not",
+      );
+      const refs = operations.length === 1 ? childrenLocal(operations[0], "gateReference") : [];
+      if (operations.length !== 1 || refs.length === 0) {
+        importProblems.push(`${gateLabel(el)} must contain one non-empty Boolean operation.`);
+        continue;
+      }
+      if (operations[0].localName === "not" && refs.length !== 1) {
+        importProblems.push(`${gateLabel(el)} uses NOT with ${refs.length} references; unary NOT requires exactly one.`);
+        continue;
+      }
+    }
+
     const g = parseGateNode(el);
-    if (!g || !g.gml_id) continue;
+    if (!g || !g.gml_id) {
+      importProblems.push(`${gateLabel(el)} could not be parsed.`);
+      continue;
+    }
     rawGates[g.gml_id] = g;
     if (g.gate_type === "boolean") boolOrder.push(g.gml_id);
   }
+  importProblems.push(...positiveAndLogicProblems(rawGates, hierarchyNode));
+  importProblems.push(...missingChannelProblems(rawGates, sessionChannels, pnnToChannel));
+  const gatelabrState = parseGatelabrState(root);
+  const compensationRefs = parseCompensationRefs(rawGates);
+
+  for (const gate of Object.values(rawGates)) {
+    for (const dim of gate.dims ?? []) {
+      const ref = dim.transformation_ref;
+      if (ref && !transforms[ref]) {
+        importProblems.push(`${gate.gml_id} references unsupported or missing transformation ${ref}.`);
+      }
+    }
+    if (gate.gate_type === "boolean") {
+      for (const ref of gate.refs ?? []) {
+        const target = rawGates[ref.gate_id];
+        if (!target) importProblems.push(`${gate.gml_id} references missing gate ${ref.gate_id}.`);
+        else if (target.gate_type === "boolean") {
+          // Cytobank/GateLab flat exports encode ancestry as a Boolean reference
+          // plus a matching pop_X parent in custom_info. That pattern is
+          // representable as a parent population followed by incremental gates.
+          const parentIndices = gate.pop_parent_indices ?? [];
+          const targetPosition = boolOrder.indexOf(ref.gate_id) + 1;
+          const targetGateSetId = target.gate_set_id;
+          const isFlatParentReference = !hierarchyNode && parentIndices.some((index) =>
+            index === targetPosition || (targetGateSetId != null && index === targetGateSetId),
+          );
+          if (!isFlatParentReference) {
+            importProblems.push(
+              `${gate.gml_id} contains a nested Boolean reference to ${ref.gate_id} that cannot be represented safely.`,
+            );
+          }
+        }
+      }
+    }
+  }
+
+  if (hierarchyNode) {
+    for (const pair of Array.from(hierarchyNode.getElementsByTagName("*"))) {
+      if (pair.localName !== "PopulationGatePair") continue;
+      const ref = attrLocal(pair, "gate-ref");
+      if (!ref) importProblems.push("A PopulationGatePair is missing gate-ref.");
+      else if (!rawGates[ref]) importProblems.push(`A PopulationGatePair references missing gate ${ref}.`);
+    }
+  }
+
+  if (importProblems.length) throwImportProblems(importProblems);
 
   const gmlToApp: Record<string, string> = {};
   const appGates: Record<string, Gate> = {};
@@ -542,9 +996,12 @@ export function importGatingML(
             const aid = gmlToApp[r.gate_id];
             if (!aid || aid === r.gate_id || seen.has(aid)) continue;
             seen.add(aid);
-            let include = !r.complement;
-            if (refGate.operation === "not") include = false;
+            let include = refGate.operation === "not" ? r.complement : !r.complement;
             gateRefs.push(newGateRef(aid, include));
+          }
+          if (complement) {
+            gateRefs = gateRefs.map((ref) => newGateRef(ref.gate_id, !ref.include, ref.quadrant));
+            if (refGate.operation !== "not") gateLogic = gateLogic === "and" ? "or" : "and";
           }
         } else {
           gateRefs = [newGateRef(gmlToApp[gateRefGml], !complement)];
@@ -575,7 +1032,10 @@ export function importGatingML(
     skipped_channels: [...new Set(unresolved)].sort(),
     source: detectSource(root),
     n_pops_imported: Math.max(0, Object.keys(populations).length - 1),
-    scales: parseGatelabrScales(root),
+    scales: gatelabrState.scales,
+    cytof_cofactor: gatelabrState.cytofCofactor,
+    compensation: gatelabrState.compensation,
+    compensation_refs: compensationRefs,
   };
 }
 
@@ -615,7 +1075,7 @@ function buildPopulationsFromBooleans(
       if (rg && rg.gate_type === "boolean") continue;
       if (!gmlToApp[rid]) continue;
       prim.push(rid);
-      inc[rid] = !r.complement;
+      inc[rid] = g.operation === "not" ? r.complement : !r.complement;
     }
     boolNames[bid] = g.name;
     boolPrim[bid] = [...new Set(prim)];

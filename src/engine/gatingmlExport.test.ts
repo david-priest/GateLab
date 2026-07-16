@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import { parseFcs } from "./fcs";
+import { parseFcs, type FcsFile } from "./fcs";
 import { Sample } from "./sample";
-import { exportGatingML } from "./gatingmlExport";
-import { importGatingML } from "./gatingml";
+import { analyzeGatingMLQuadrantOmissions, exportGatingML } from "./gatingmlExport";
+import { importGatingML, resolveGatingMLCompensation, restoreGatingMLScaleState } from "./gatingml";
+import { getGateMask } from "./gates";
 import {
   newRootPopulation,
   newPopulation,
@@ -26,7 +27,7 @@ function loadArrayBuffer(path: string): ArrayBuffer {
 const uuid = () => crypto.randomUUID();
 
 /** Build a small workspace: a scatter rectangle and a fluorophore polygon, with a
- *  parent→child population tree (child excludes the polygon). Returns raw-space gates. */
+ *  positive-AND parent→child population tree. Returns raw-space gates. */
 function buildWorkspace(sample: Sample) {
   // scatter x scatter (FSC-A x SSC-A → fasinh) and fluor x fluor (→ logicle)
   const scatterIdx = sample.channels.findIndex((_, i) => sample.transformKind(i) === "asinh");
@@ -87,10 +88,9 @@ function buildWorkspace(sample: Sample) {
   const pCells = newPopulation("Cells", [newGateRef(rect.gate_id, true)], root.population_id);
   pops[pCells.population_id] = pCells;
   pops = linkChildToParent(pops, pCells.population_id, root.population_id);
-  // child EXCLUDES the polygon → tests complement round-trip
-  const pNeg = newPopulation("PE-APC- of Cells", [newGateRef(poly.gate_id, false)], pCells.population_id);
-  pops[pNeg.population_id] = pNeg;
-  pops = linkChildToParent(pops, pNeg.population_id, pCells.population_id);
+  const pSignal = newPopulation("PE+APC+ of Cells", [newGateRef(poly.gate_id, true)], pCells.population_id);
+  pops[pSignal.population_id] = pSignal;
+  pops = linkChildToParent(pops, pSignal.population_id, pCells.population_id);
 
   return { gates, gate_order, populations: pops, root_population_id: root.population_id };
 }
@@ -145,17 +145,16 @@ describe("GatingML export → import round-trip (Aria III flow)", () => {
         }
       });
 
-      it("recovers the population tree with include/exclude", () => {
+      it("recovers the positive-AND population tree", () => {
         expect(back.n_pops_imported).toBe(2);
         const pops = Object.values(back.populations).filter((p) => p.parent_id !== null);
         const cells = pops.find((p) => p.name === "Cells");
-        const neg = pops.find((p) => p.name.startsWith("PE-APC-"));
+        const signal = pops.find((p) => p.name.startsWith("PE+APC+"));
         expect(cells).toBeDefined();
-        expect(neg).toBeDefined();
+        expect(signal).toBeDefined();
         // child's parent is the Cells population
-        expect(neg!.parent_id).toBe(cells!.population_id);
-        // the polygon ref is an EXCLUDE
-        expect(neg!.gate_refs[0].include).toBe(false);
+        expect(signal!.parent_id).toBe(cells!.population_id);
+        expect(signal!.gate_refs[0].include).toBe(true);
       });
 
       it("persists logicle W in gatelabr_scales", () => {
@@ -163,21 +162,183 @@ describe("GatingML export → import round-trip (Aria III flow)", () => {
         expect(back.scales).not.toBeNull();
       });
 
-      it("round-trips the display range (lo/hi) via gatelabr_scales", () => {
-        const chKey = sample.channels[0].key;
+      it("round-trips transform-neutral axis endpoints and a non-default scatter cofactor", () => {
+        const scatterIdx = sample.index("FSC-A")!;
+        sample.setScatterCofactor(scatterIdx, 300);
+        const chKey = sample.channels[scatterIdx].key;
+        const displayRange: [number, number] = [-1, 8];
         const xml2 = exportGatingML({
           ...ws, sample, format, timestamp: "2026-01-01T00:00:00",
-          globalScales: { [chKey]: [-12.5, 987.5] },
+          globalScales: { [chKey]: displayRange },
         });
         const back2 = importGatingML(xml2, sessionChannels, pnnMap);
-        expect(back2.scales?.[chKey]?.lo).toBeCloseTo(-12.5, 3);
-        expect(back2.scales?.[chKey]?.hi).toBeCloseTo(987.5, 3);
+        expect(xml2).toContain('"version":3');
+        expect(back2.scales?.[chKey]?.lo).toBeCloseTo(displayRange[0], 6); // legacy reader field
+        expect(back2.scales?.[chKey]?.hi).toBeCloseTo(displayRange[1], 6);
+        expect(back2.scales?.[chKey]?.raw_lo).toBeCloseTo(300 * Math.sinh(displayRange[0]), 6);
+        expect(back2.scales?.[chKey]?.raw_hi).toBeCloseTo(300 * Math.sinh(displayRange[1]), 3);
+
+        const destination = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+        const restored = restoreGatingMLScaleState(destination, back2.scales, back2.cytof_cofactor);
+        expect(destination.currentScatterCofactor(destination.index(chKey)!)).toBe(300);
+        expect(restored.ranges[chKey][0]).toBeCloseTo(displayRange[0], 6);
+        expect(restored.ranges[chKey][1]).toBeCloseTo(displayRange[1], 6);
       });
     });
   }
 });
 
-describe("GatingML Boolean OR fidelity", () => {
+describe("GatingML CyTOF cofactor/display fidelity", () => {
+  const mk = (values: number[]) => Float32Array.from(values);
+  const fcs: FcsFile = {
+    version: "FCS3.1",
+    nEvents: 6,
+    instrument: "cytof",
+    keywords: {},
+    spillover: null,
+    channels: [
+      { index: 0, name: "Time", marker: null, bits: 32, range: 1 },
+      { index: 1, name: "Ce140Di", marker: "CD3", bits: 32, range: 1 },
+      { index: 2, name: "Nd144Di", marker: "CD19", bits: 32, range: 1 },
+    ],
+    columns: [
+      mk([1, 2, 3, 4, 5, 6]),
+      mk([0, 10, 100, 1000, 5000, 10000]),
+      mk([0, 20, 200, 2000, 7000, 12000]),
+    ],
+  };
+
+  it("restores the producer's cofactor before evaluating imported display-space gates", () => {
+    const source = new Sample(fcs, { cytofCofactor: 10 });
+    const root = newRootPopulation();
+    const gate: Gate = {
+      gate_id: uuid(), name: "Double positive", gate_type: "rectangle",
+      x_channel: "CD3", y_channel: "CD19",
+      vertices: [[1, 1], [7, 1], [7, 7], [1, 7]],
+      color: "#377eb8", label_offset: null,
+    };
+    const pop = newPopulation("Double positive", [newGateRef(gate.gate_id)], root.population_id);
+    let populations: PopulationMap = { [root.population_id]: root, [pop.population_id]: pop };
+    populations = linkChildToParent(populations, pop.population_id, root.population_id);
+    const displayRange: [number, number] = [-0.5, 6];
+    const xml = exportGatingML({
+      gates: { [gate.gate_id]: gate }, gate_order: [gate.gate_id], populations,
+      root_population_id: root.population_id, sample: source, format: "standard",
+      globalScales: { CD3: displayRange },
+    });
+    const imported = importGatingML(xml, source.channelNames());
+    const destination = new Sample(fcs); // deliberately starts at the default cofactor 5
+    const restored = restoreGatingMLScaleState(destination, imported.scales, imported.cytof_cofactor);
+
+    expect(imported.cytof_cofactor).toBe(10);
+    expect(destination.arcsinhCofactor).toBe(10);
+    expect(restored.ranges.CD3[0]).toBeCloseTo(displayRange[0], 6);
+    expect(restored.ranges.CD3[1]).toBeCloseTo(displayRange[1], 6);
+    const importedGate = Object.values(imported.gates)[0];
+    expect(Array.from(getGateMask(importedGate, destination.gatingData())))
+      .toEqual(Array.from(getGateMask(gate, source.gatingData())));
+  });
+});
+
+describe("GatingML compensation-state fidelity", () => {
+  function fixture() {
+    const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+    const ws = buildWorkspace(sample);
+    const sessionChannels = sample.channels.map((c) => c.key);
+    const pnnMap = Object.fromEntries(sample.channels.map((c) => [c.pnn, c.key]));
+    return { sample, ws, sessionChannels, pnnMap };
+  }
+
+  it("exports uncompensated dimensions and restores compensation off", () => {
+    const { sample, ws, sessionChannels, pnnMap } = fixture();
+    const xml = exportGatingML({ ...ws, sample, format: "standard" });
+    const back = importGatingML(xml, sessionChannels, pnnMap);
+
+    expect(xml).toContain('gating:compensation-ref="uncompensated"');
+    expect(xml).not.toContain('gating:compensation-ref="FCS"');
+    expect(back.compensation).toEqual({
+      enabled: false,
+      reference: "uncompensated",
+      channels: [],
+    });
+    expect(back.compensation_refs).toEqual(["uncompensated"]);
+    expect(resolveGatingMLCompensation(
+      back.compensation, back.compensation_refs, true, sample.spillover,
+    )).toEqual({ target: false, source: "embedded", requiresConfirmation: false });
+  });
+
+  it("round-trips and verifies the exact embedded spillover matrix", () => {
+    const { sample, ws, sessionChannels, pnnMap } = fixture();
+    expect(sample.hasCompensation).toBe(true);
+    sample.setCompensation(true);
+    expect(sample.compensationEnabled).toBe(true);
+
+    const xml = exportGatingML({ ...ws, sample, format: "standard" });
+    const back = importGatingML(xml, sessionChannels, pnnMap);
+    expect(xml).toContain('gating:compensation-ref="FCS"');
+    expect(xml).toContain('gating:compensation-ref="uncompensated"');
+    expect(back.compensation?.enabled).toBe(true);
+    expect(back.compensation?.channels).toEqual(sample.spillover?.channels);
+    expect(back.compensation?.matrix).toEqual(sample.spillover?.matrix);
+    expect(resolveGatingMLCompensation(
+      back.compensation, back.compensation_refs, true, sample.spillover,
+    )).toEqual({ target: true, source: "embedded", requiresConfirmation: false });
+  });
+
+  it("blocks a GateLab file whose recorded spillover matrix differs", () => {
+    const { sample, ws, sessionChannels, pnnMap } = fixture();
+    sample.setCompensation(true);
+    const back = importGatingML(
+      exportGatingML({ ...ws, sample, format: "standard" }), sessionChannels, pnnMap,
+    );
+    const mismatched = {
+      ...sample.spillover!,
+      matrix: sample.spillover!.matrix.map((row) => [...row]),
+    };
+    mismatched.matrix[0][1] += 0.01;
+    expect(() => resolveGatingMLCompensation(
+      back.compensation, back.compensation_refs, true, mismatched,
+    )).toThrow(/different FCS spillover matrix/);
+  });
+
+  it("requires confirmation for third-party FCS compensation references", () => {
+    const { sample, ws, sessionChannels, pnnMap } = fixture();
+    sample.setCompensation(true);
+    const xml = exportGatingML({ ...ws, sample, format: "standard" }).replace(
+      /\s*<gatelabr_scales>[\s\S]*?<\/gatelabr_scales>/,
+      "",
+    );
+    const back = importGatingML(xml, sessionChannels, pnnMap);
+    expect(back.compensation).toBeNull();
+    expect(resolveGatingMLCompensation(
+      back.compensation, back.compensation_refs, true, sample.spillover,
+    )).toEqual({ target: true, source: "dimensions", requiresConfirmation: true });
+  });
+
+  it("rejects named compensation matrices that GateLab cannot evaluate", () => {
+    const { sample, ws, sessionChannels, pnnMap } = fixture();
+    sample.setCompensation(true);
+    const xml = exportGatingML({ ...ws, sample, format: "standard" }).replace(
+      'gating:compensation-ref="FCS"',
+      'gating:compensation-ref="vendor-matrix"',
+    );
+    expect(() => importGatingML(xml, sessionChannels, pnnMap)).toThrow(/unsupported compensation matrix/);
+  });
+
+  it("rejects contradictory embedded and per-dimension compensation state", () => {
+    const { sample, ws, sessionChannels, pnnMap } = fixture();
+    const xml = exportGatingML({ ...ws, sample, format: "standard" }).replace(
+      'gating:compensation-ref="uncompensated"',
+      'gating:compensation-ref="FCS"',
+    );
+    const back = importGatingML(xml, sessionChannels, pnnMap);
+    expect(() => resolveGatingMLCompensation(
+      back.compensation, back.compensation_refs, true, sample.spillover,
+    )).toThrow(/contradicts/);
+  });
+});
+
+describe("GatingML positive-AND import policy", () => {
   const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
   const sessionChannels = sample.channels.map((c) => c.key);
   const pnnMap = Object.fromEntries(sample.channels.map((c) => [c.pnn, c.key]));
@@ -197,19 +358,17 @@ describe("GatingML Boolean OR fidelity", () => {
   }
 
   for (const format of ["standard", "cytobank"] as const) {
-    it(`round-trips a root-level OR population in ${format} format`, () => {
+    it(`rejects a root-level OR population exported in ${format} format`, () => {
       const { ws } = rootOrWorkspace();
       const xml = exportGatingML({ ...ws, sample, format, timestamp: "2026-01-01T00:00:00" });
       expect(xml).toContain("<gating:or>");
-      const back = importGatingML(xml, sessionChannels, pnnMap);
-      const pop = Object.values(back.populations).find((p) => p.name === "Scatter OR signal");
-      expect(pop).toBeDefined();
-      expect(pop!.gate_logic).toBe("or");
-      expect(pop!.gate_refs).toHaveLength(2);
+      expect(() => importGatingML(xml, sessionChannels, pnnMap)).toThrow(
+        /Population "Scatter OR signal" uses OR logic/,
+      );
     });
   }
 
-  it("preserves a nested OR population in standard format", () => {
+  it("rejects a nested OR population in standard format", () => {
     const ws = buildWorkspace(sample);
     const parent = Object.values(ws.populations).find((p) => p.name === "Cells")!;
     const nested = newPopulation(
@@ -221,10 +380,9 @@ describe("GatingML Boolean OR fidelity", () => {
     ws.populations[nested.population_id] = nested;
     linkChildToParent(ws.populations, nested.population_id, parent.population_id);
     const xml = exportGatingML({ ...ws, sample, format: "standard" });
-    const back = importGatingML(xml, sessionChannels, pnnMap);
-    const pop = Object.values(back.populations).find((p) => p.name === "Nested OR");
-    expect(pop?.gate_logic).toBe("or");
-    expect(pop?.parent_id).not.toBe(back.root_population_id);
+    expect(() => importGatingML(xml, sessionChannels, pnnMap)).toThrow(
+      /Population "Nested OR" uses OR logic/,
+    );
   });
 
   it("blocks Cytobank-compatible export rather than corrupting a nested OR population", () => {
@@ -241,5 +399,42 @@ describe("GatingML Boolean OR fidelity", () => {
     expect(() => exportGatingML({ ...ws, sample, format: "cytobank" })).toThrow(
       /cannot safely represent the nested OR population "Nested OR"/,
     );
+  });
+
+  it("requires explicit quadrant omission and prunes the entire dependent branch", () => {
+    const ws = buildWorkspace(sample);
+    const quadrant: Gate = {
+      gate_id: "quadrant-1", name: "CD4 CD8 quadrants", gate_type: "quadrant",
+      x_channel: ws.gates[ws.gate_order[0]].x_channel,
+      y_channel: ws.gates[ws.gate_order[0]].y_channel,
+      center: [40000, 40000], color: "#984ea3", label_offset: null,
+    };
+    ws.gates[quadrant.gate_id] = quadrant;
+    ws.gate_order.push(quadrant.gate_id);
+    const quadrantPop = newPopulation(
+      "Quadrant population", [newGateRef(quadrant.gate_id, true, 2)], ws.root_population_id,
+    );
+    ws.populations[quadrantPop.population_id] = quadrantPop;
+    linkChildToParent(ws.populations, quadrantPop.population_id, ws.root_population_id);
+    const descendant = newPopulation(
+      "Quadrant descendant", [newGateRef(ws.gate_order[1])], quadrantPop.population_id,
+    );
+    ws.populations[descendant.population_id] = descendant;
+    linkChildToParent(ws.populations, descendant.population_id, quadrantPop.population_id);
+
+    const omissions = analyzeGatingMLQuadrantOmissions(ws.gates, ws.populations);
+    expect(new Set(omissions.populationIds)).toEqual(
+      new Set([quadrantPop.population_id, descendant.population_id]),
+    );
+    expect(() => exportGatingML({ ...ws, sample, format: "standard" })).toThrow(
+      /explicitly accepting their omission/i,
+    );
+    const xml = exportGatingML({
+      ...ws, sample, format: "standard", allowQuadrantOmission: true,
+    });
+    expect(xml).not.toContain("Quadrant population");
+    expect(xml).not.toContain("Quadrant descendant");
+    const back = importGatingML(xml, sessionChannels, pnnMap);
+    expect(Object.values(back.populations).some((pop) => pop.name.startsWith("Quadrant"))).toBe(false);
   });
 });

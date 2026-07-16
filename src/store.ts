@@ -140,6 +140,8 @@ export type Action =
       gate_order: string[];
       populations: PopulationMap;
       root_population_id: string;
+      /** Compensation lives outside CoreState; discard unsafe gate-only undo when its space changed. */
+      clearHistory?: boolean;
     }
   | {
       type: "loadWorkspace";
@@ -474,7 +476,7 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
       ensurePopColorSlots(importedPops, action.root_population_id);
       return {
         ...state,
-        ...pushUndo(state),
+        ...(action.clearHistory ? { undo: [], redo: [] } : pushUndo(state)),
         gates: action.gates,
         gate_order: action.gate_order,
         populations: importedPops,

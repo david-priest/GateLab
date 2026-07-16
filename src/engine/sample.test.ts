@@ -71,6 +71,16 @@ describe("Sample — flow (Aria III), raw gating space", () => {
     expect(s.gatingToDisplay("FSC-A", 150)).toBeCloseTo(Math.asinh(1), 6);
   });
 
+  it("restores a per-channel scatter cofactor and keeps raw/display conversion invertible", () => {
+    const local = new Sample(fcs);
+    const idx = local.index("FSC-A")!;
+    local.setScatterCofactor(idx, 300);
+    expect(local.currentScatterCofactor(idx)).toBe(300);
+    expect(local.rawToDisplay("FSC-A", 300)).toBeCloseTo(Math.asinh(1), 6);
+    expect(local.displayToRaw("FSC-A", Math.asinh(1))).toBeCloseTo(300, 6);
+    expect(local.scatterCofactorOverrides()).toEqual({ "FSC-A": 300 });
+  });
+
   it("defaultChannelIndices skips Time", () => {
     const [x, y] = s.defaultChannelIndices();
     expect(s.channels[x].key).not.toBe("Time");
@@ -131,6 +141,16 @@ describe("Sample — CyTOF, display gating space", () => {
     expect(cd3[3]).toBeCloseTo(Math.asinh(500 / 5), 6);
     const time = s.displayColumn(0);
     expect(Array.from(time)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("restores a non-default CyTOF cofactor and rebuilds display/gating columns", () => {
+    const local = new Sample(cytof);
+    const before = local.displayColumn(1)[3];
+    local.setCytofCofactor(10);
+    expect(local.arcsinhCofactor).toBe(10);
+    expect(local.displayColumn(1)[3]).toBeCloseTo(Math.asinh(500 / 10), 6);
+    expect(local.displayColumn(1)[3]).not.toBe(before);
+    expect(local.gatingColumn(1)[3]).toBeCloseTo(Math.asinh(500 / 10), 6);
   });
 
   it("gatingColumn equals displayColumn for CyTOF", () => {
