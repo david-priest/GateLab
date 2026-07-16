@@ -20,10 +20,12 @@ import { exportPopulationFcs, exportPopulationFcsCombined, sanitizeFcsName, sani
 import { zipSync } from "fflate";
 import {
   packWorkspace,
+  packWorkspaceForStorage,
   packWorkspaceReference,
   readWorkspaceBytes,
   WORKSPACE_EXT,
   type WorkspaceFile,
+  type WorkspaceStorage,
   type IllustrationConfig,
   type IllustrationPreset,
 } from "./engine/workspace";
@@ -143,6 +145,7 @@ export default function App() {
   const fileName = activeEntry?.name ?? "";
   const [wsHandle, setWsHandle] = useState<FileSystemFileHandle | null>(null);
   const [wsName, setWsName] = useState("");
+  const [wsStorage, setWsStorage] = useState<WorkspaceStorage>("reference");
   const [dirty, setDirty] = useState(false);
   const [xIdx, setXIdx] = useState(0);
   const [yIdx, setYIdx] = useState(1);
@@ -353,11 +356,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.gate_version, scalesVersion, compensationOn, instrumentMode, globalScales, mode, maxEvents, contourThreshold, xIdx, yIdx]);
 
-  // Autosave: debounced write to the OPEN workspace handle when dirty (needs an in-place handle;
-  // Save As establishes one). Reads fresh state via a ref so late edits aren't lost.
+  // Autosave lightweight reference workspaces only. Repacking every embedded FCS on each
+  // edit would stall large bundled workspaces; bundles retain their format via manual Save.
   const buildWsRef = useRef<() => WorkspaceFile | null>(() => null);
   useEffect(() => {
-    if (!dirty || !wsHandle) return;
+    if (!dirty || !wsHandle || wsStorage === "bundle") return;
     const t = setTimeout(async () => {
       const ws = buildWsRef.current();
       if (!ws) return;
@@ -371,7 +374,7 @@ export default function App() {
     }, 15000);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dirty, wsHandle, wsName]);
+  }, [dirty, wsHandle, wsName, wsStorage]);
   const fileRef = useRef<HTMLInputElement>(null);
   const xmlRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<HTMLInputElement>(null);
@@ -866,9 +869,16 @@ export default function App() {
     };
   }
   buildWsRef.current = buildWorkspaceFile; // keep the autosave builder fresh each render
-  const rememberAllHandles = () => {
-    for (const e of samples) if (e.handle) void rememberHandle("fcs:" + e.name, e.handle);
+  const rememberAllHandles = async () => {
+    await Promise.all(samples.flatMap((e) => e.handle ? [rememberHandle("fcs:" + e.name, e.handle)] : []));
   };
+  function currentFcsByPath(ws: WorkspaceFile): Record<string, Uint8Array> {
+    return Object.fromEntries(ws.samples.map((wss, i) => {
+      const entry = samples[i];
+      if (!entry) throw new Error(`The loaded data for ${wss.fileName} is unavailable.`);
+      return [wss.dataPath, entry.bytes];
+    }));
+  }
   function bundleGatingML(): string | undefined {
     if (!sample || !state.root_population_id || Object.keys(state.gates).length === 0) return undefined;
     try {
@@ -886,17 +896,21 @@ export default function App() {
       return undefined;
     }
   }
+  function packCurrentWorkspace(ws: WorkspaceFile): Uint8Array {
+    return packWorkspaceForStorage(ws, currentFcsByPath(ws), wsStorage, bundleGatingML());
+  }
 
-  // Save — in place to the current workspace file (lightweight reference JSON); Save As if none.
+  // Save in place without changing the current workspace's bundle/reference storage mode.
+  // If no writable workspace handle exists, fall back to Save As.
   async function saveWorkspace() {
     const ws = buildWorkspaceFile();
     if (!ws) return;
     try {
       if (supportsFileSystemAccess() && wsHandle) {
-        await writeHandle(wsHandle, packWorkspaceReference(ws) as BlobPart);
-        rememberAllHandles();
+        await writeHandle(wsHandle, packCurrentWorkspace(ws) as BlobPart);
+        await rememberAllHandles();
         setDirty(false);
-        setImportMsg(`Saved · ${wsName}`);
+        setImportMsg(`Saved ${wsStorage === "bundle" ? "bundle" : "workspace"} · ${wsName}`);
       } else {
         await saveWorkspaceAs();
       }
@@ -922,7 +936,8 @@ export default function App() {
           const f = await h.getFile();
           setWsHandle(h);
           setWsName(f.name);
-          rememberAllHandles();
+          setWsStorage("reference");
+          await rememberAllHandles();
           setDirty(false);
           setImportMsg(`Saved · ${f.name}`);
         }
@@ -940,11 +955,7 @@ export default function App() {
     if (!ws) return;
     const base = sanitizeFilePart((fileName || "workspace").replace(/\.[^.]+$/, ""));
     try {
-      const fcsByPath: Record<string, Uint8Array> = {};
-      ws.samples.forEach((wss, i) => {
-        fcsByPath[wss.dataPath] = samples[i].bytes;
-      });
-      const zip = packWorkspace(ws, fcsByPath, bundleGatingML());
+      const zip = packWorkspace(ws, currentFcsByPath(ws), bundleGatingML());
       if (supportsFileSystemAccess()) {
         await saveAsHandle(
           `${base}-bundle.${WORKSPACE_EXT}`,
@@ -994,7 +1005,7 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      const { ws, fcsByPath } = readWorkspaceBytes(bytes);
+      const { ws, fcsByPath, storage } = readWorkspaceBytes(bytes);
 
       // Build an entry for every sample (bundled bytes, else re-linked from disk).
       const entries: SampleEntry[] = [];
@@ -1072,6 +1083,7 @@ export default function App() {
       setYRange(null);
       setWsHandle(wsH);
       setWsName(wsFileName);
+      setWsStorage(storage);
       setDirty(false);
       dispatch({
         type: "loadWorkspace",
@@ -1085,6 +1097,7 @@ export default function App() {
       const nS = entries.length;
       setImportMsg(
         `Opened ${wsFileName || "workspace"} · ${nS} sample${nS > 1 ? "s" : ""}` +
+          ` · ${storage === "bundle" ? "self-contained bundle" : "linked FCS"}` +
           (missing.length ? ` · missing: ${missing.join(", ")}` : "") +
           ` · saved ${new Date(ws.savedAt).toLocaleString()}`,
       );
@@ -1421,7 +1434,9 @@ export default function App() {
             disabled={!sample}
             title={
               wsHandle
-                ? "Save gates/populations/scales/compensation back to the workspace file (in place)"
+                ? wsStorage === "bundle"
+                  ? "Save changes in place while preserving the embedded FCS data"
+                  : "Save gates/populations/scales/compensation back to the linked workspace file (in place)"
                 : "Choose a location and save the workspace"
             }
             onClick={saveWorkspace}

@@ -10,6 +10,7 @@ import type { DisplayMode } from "./sample";
 
 export const WORKSPACE_EXT = "gatelab";
 export const WORKSPACE_FORMAT = "gatelab-workspace";
+export type WorkspaceStorage = "bundle" | "reference";
 
 export interface WorkspaceSample {
   fileName: string;
@@ -323,6 +324,18 @@ export function packWorkspaceReference(ws: WorkspaceFile): Uint8Array {
   return strToU8(JSON.stringify(ws, null, 2));
 }
 
+/** Re-save a workspace without silently changing its storage format. */
+export function packWorkspaceForStorage(
+  ws: WorkspaceFile,
+  fcsByPath: Record<string, Uint8Array>,
+  storage: WorkspaceStorage,
+  gatingMLXml?: string,
+): Uint8Array {
+  return storage === "bundle"
+    ? packWorkspace(ws, fcsByPath, gatingMLXml)
+    : packWorkspaceReference(ws);
+}
+
 /** Migrate a parsed workspace to the current (v2, multi-sample) shape. */
 function migrate(raw: unknown): WorkspaceFile {
   const r = raw as Record<string, unknown>;
@@ -360,6 +373,7 @@ function migrate(raw: unknown): WorkspaceFile {
 export function readWorkspaceBytes(bytes: Uint8Array): {
   ws: WorkspaceFile;
   fcsByPath: Record<string, Uint8Array> | null;
+  storage: WorkspaceStorage;
 } {
   if (bytes[0] === 0x50 && bytes[1] === 0x4b) {
     let files: Record<string, Uint8Array>;
@@ -381,11 +395,11 @@ export function readWorkspaceBytes(bytes: Uint8Array): {
     if (missing.length) {
       throw new Error(`Invalid GateLab workspace: bundled FCS data is missing for ${missing.join(", ")}.`);
     }
-    return { ws, fcsByPath };
+    return { ws, fcsByPath, storage: "bundle" };
   }
   const ws = migrate(parseJson(strFromU8(bytes)));
   validateWorkspace(ws);
-  return { ws, fcsByPath: null };
+  return { ws, fcsByPath: null, storage: "reference" };
 }
 
 function parseJson(text: string): unknown {
