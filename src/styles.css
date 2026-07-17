@@ -495,6 +495,36 @@ select:focus-visible,
   /* no overflow:hidden — it clips the rotated Y-axis label */
 }
 
+/* Main gating-plot typography. The reused D3 renderer writes inline font sizes, so these
+   variable-backed rules intentionally use !important; GatingPlot repaints after a change so
+   its measured gate-label backgrounds remain in sync with the text. */
+#cytof-plot-container .x-axis .tick text,
+#cytof-plot-container .y-axis .tick text {
+  font-size: var(--gl-gating-font-tick) !important;
+}
+#cytof-plot-container .cytof-xlabel,
+#cytof-plot-container .cytof-ylabel {
+  font-size: var(--gl-gating-font-axis) !important;
+}
+#cytof-plot-container .cytof-title {
+  font-size: var(--gl-gating-font-title) !important;
+}
+#cytof-plot-container .gate-label > text {
+  font-size: var(--gl-gating-font-gate) !important;
+}
+#cytof-plot-container .gate-label > text > tspan + tspan,
+#cytof-plot-container .quadrant-gate text {
+  font-size: calc(var(--gl-gating-font-gate) - 1px) !important;
+}
+
+.gl-gating-fonts { gap: 12px; flex-wrap: wrap; }
+.gl-gating-fonts .gl-field-inline input[type="number"] {
+  width: 48px;
+  padding: 2px 4px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Rectangle drawing preview: an open gate-like outline rather than SVG's default black fill. */
 #cytof-plot-container .rubber-band {
   fill: none;

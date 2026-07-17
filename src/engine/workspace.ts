@@ -12,6 +12,13 @@ export const WORKSPACE_EXT = "gatelab";
 export const WORKSPACE_FORMAT = "gatelab-workspace";
 export type WorkspaceStorage = "bundle" | "reference";
 
+export interface GatingFontSizes {
+  tick: number;
+  axis: number;
+  title: number;
+  gate: number;
+}
+
 export interface WorkspaceSample {
   fileName: string;
   dataPath: string; // unique in-zip path (e.g. "data/0_run.fcs"); also the bundle lookup key
@@ -49,6 +56,8 @@ export interface WorkspaceFile {
     mode: DisplayMode;
     maxEvents: number;
     contourThreshold: number;
+    /** Main Gating plot typography. Optional for workspaces saved before these controls existed. */
+    fontSizes?: GatingFontSizes;
   };
   /** Illustration-tab settings + named presets (capture_illust_settings / illust_presets). */
   illustration?: IllustrationConfig;
@@ -185,6 +194,15 @@ export function validateWorkspace(ws: WorkspaceFile): true {
       !Number.isFinite(ws.display.maxEvents) || ws.display.maxEvents < 0 ||
       !Number.isFinite(ws.display.contourThreshold)) {
     invalidWorkspace("display settings are missing or invalid.");
+  }
+  if (ws.display.fontSizes !== undefined && (
+    !isRecord(ws.display.fontSizes) ||
+    !["tick", "axis", "title", "gate"].every((key) => {
+      const size = ws.display.fontSizes?.[key as keyof GatingFontSizes];
+      return typeof size === "number" && Number.isFinite(size) && size >= 6 && size <= 72;
+    })
+  )) {
+    invalidWorkspace("gating font sizes are invalid.");
   }
 
   if (!isRecord(ws.gating)) invalidWorkspace("gating state is missing.");

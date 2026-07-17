@@ -95,6 +95,42 @@ afterEach(() => {
 });
 
 describe("GatingPlot render lifecycle", () => {
+  it("applies configurable typography and repaints when a font size changes", () => {
+    const payload = { points: [1] };
+    let width = 800;
+    const host = document.createElement("div");
+    Object.defineProperty(host, "clientWidth", { configurable: true, get: () => width });
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const item = { host, root, setWidth: (next: number) => (width = next) };
+    mounted.push(item);
+
+    act(() => root.render(
+      <GatingPlot
+        payload={payload}
+        fontSizes={{ tick: 10, axis: 13, title: 9, gate: 11 }}
+      />,
+    ));
+    flush();
+
+    const container = host.querySelector<HTMLElement>("#cytof-plot-container")!;
+    expect(container.style.getPropertyValue("--gl-gating-font-tick")).toBe("10px");
+    expect(container.style.getPropertyValue("--gl-gating-font-axis")).toBe("13px");
+    expect(container.style.getPropertyValue("--gl-gating-font-title")).toBe("9px");
+    expect(container.style.getPropertyValue("--gl-gating-font-gate")).toBe("11px");
+
+    plot.render.mockClear();
+    act(() => root.render(
+      <GatingPlot
+        payload={payload}
+        fontSizes={{ tick: 14, axis: 13, title: 9, gate: 11 }}
+      />,
+    ));
+    flush();
+    expect(plot.render).toHaveBeenCalledTimes(1);
+    expect(container.style.getPropertyValue("--gl-gating-font-tick")).toBe("14px");
+  });
+
   it("renders when the host is laid out even though the empty plot container has zero width", () => {
     const { host } = mountPlot();
 
