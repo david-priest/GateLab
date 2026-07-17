@@ -5,8 +5,16 @@
 // re-renders are never swallowed by the engine's staleness guard. Plot → app inputs
 // (new_gate/gate_edit/…) are delivered through the shim to typed callbacks.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type CSSProperties } from "react";
 import { loadPlots, type CytofD3Api } from "./loadPlots";
+import type { GatingFontSizes } from "../engine/workspace";
+
+export const DEFAULT_GATING_FONT_SIZES: GatingFontSizes = {
+  tick: 12,
+  axis: 14,
+  title: 11,
+  gate: 12,
+};
 
 export interface NewGate {
   gate_type: "rectangle" | "polygon" | "quadrant";
@@ -20,6 +28,7 @@ interface Props {
   payload?: object | null;
   mode?: string;
   visible?: boolean;
+  fontSizes?: GatingFontSizes;
   onNewGate?: (g: NewGate) => void;
   onGateEdit?: (g: { gate_id: string; vertices: [number, number][] }) => void;
   onQuadrantMove?: (e: { gate_id: string; center: [number, number] }) => void;
@@ -69,6 +78,7 @@ export function GatingPlot({
   payload,
   mode = "navigate",
   visible = true,
+  fontSizes = DEFAULT_GATING_FONT_SIZES,
   onNewGate,
   onGateEdit,
   onQuadrantMove,
@@ -239,6 +249,13 @@ export function GatingPlot({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload]);
 
+  // Typography is CSS-driven, but a full repaint is still required because the reused D3
+  // renderer measures gate labels to size their coloured backgrounds.
+  useEffect(() => {
+    schedulePaint();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fontSizes.tick, fontSizes.axis, fontSizes.title, fontSizes.gate]);
+
   // The gating tab stays mounted while hidden. Wake the renderer explicitly when it is
   // selected again; do not rely on an incidental click or resize to reveal the plot.
   useEffect(() => {
@@ -253,5 +270,12 @@ export function GatingPlot({
     apiRef.current?.setMode(mode);
   }, [mode]);
 
-  return <div id="cytof-plot-container" ref={containerRef} className="gl-plot" />;
+  const fontStyle = {
+    "--gl-gating-font-tick": `${fontSizes.tick}px`,
+    "--gl-gating-font-axis": `${fontSizes.axis}px`,
+    "--gl-gating-font-title": `${fontSizes.title}px`,
+    "--gl-gating-font-gate": `${fontSizes.gate}px`,
+  } as CSSProperties;
+
+  return <div id="cytof-plot-container" ref={containerRef} className="gl-plot" style={fontStyle} />;
 }

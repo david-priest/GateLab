@@ -408,12 +408,156 @@ export function ProportionsChart({ plotType, model, catColors, averagePerUnit, p
   );
 }
 
-// Serialize the chart's SVG panels for download (PNG via canvas, SVG direct).
-function downloadChart(containerId: string, name: string, kind: "svg" | "png") {
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+interface ProportionsExport {
+  root: SVGSVGElement;
+  width: number;
+  height: number;
+}
+
+function svgDimension(svg: SVGSVGElement, name: "width" | "height"): number {
+  const direct = Number.parseFloat(svg.getAttribute(name) ?? "");
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const viewBox = svg.viewBox.baseVal;
+  return name === "width" ? viewBox.width : viewBox.height;
+}
+
+/**
+ * Compose the complete Proportions card as one self-contained SVG. The on-screen legend is
+ * deliberately HTML so it can provide linked hover/click behaviour; exports must redraw it as
+ * SVG alongside every facet panel rather than serializing only the first chart SVG.
+ */
+export function composeProportionsChartSvg(containerId: string): ProportionsExport | null {
   const container = document.getElementById(containerId);
-  const svg = container?.querySelector("svg");
-  if (!svg) return;
-  const xml = new XMLSerializer().serializeToString(svg);
+  if (!container) return null;
+  const panels = [...container.querySelectorAll<SVGSVGElement>("svg.gl-prop-panel")];
+  if (!panels.length) return null;
+
+  const containerRect = container.getBoundingClientRect();
+  const hasLiveLayout = containerRect.width > 0 && containerRect.height > 0;
+  const padding = 10;
+  const panelGap = 12;
+  const fallbackPanelSizes = panels.map((panel) => ({
+    width: svgDimension(panel, "width"),
+    height: svgDimension(panel, "height"),
+  }));
+  const fallbackPanelsWidth = fallbackPanelSizes.reduce((sum, size) => sum + size.width, 0)
+    + Math.max(0, panels.length - 1) * panelGap;
+  const fallbackPanelsHeight = Math.max(...fallbackPanelSizes.map((size) => size.height));
+
+  const legend = container.querySelector<HTMLElement>(".gl-prop-legend");
+  const legendItems = legend
+    ? [...legend.querySelectorAll<HTMLElement>(".gl-prop-legend-item")]
+    : [];
+  const legendColumns = Math.min(4, Math.max(1, Math.ceil(legendItems.length / 10)));
+  const legendFontSize = Number.parseFloat(legend?.style.fontSize ?? "") || 11;
+  const legendRowHeight = Math.max(18, legendFontSize + 7);
+  const legendRows = Math.max(1, Math.ceil(legendItems.length / legendColumns));
+  const fallbackInnerWidth = Math.max(360, fallbackPanelsWidth, legendColumns * 145);
+  const fallbackLegendTop = padding + fallbackPanelsHeight + 10;
+  const fallbackWidth = fallbackInnerWidth + padding * 2;
+  const fallbackHeight = fallbackLegendTop + 10 + legendRows * legendRowHeight + padding;
+  const width = Math.max(1, Math.ceil(hasLiveLayout ? containerRect.width : fallbackWidth));
+  const height = Math.max(1, Math.ceil(hasLiveLayout ? containerRect.height : fallbackHeight));
+
+  const root = document.createElementNS(SVG_NS, "svg");
+  root.setAttribute("xmlns", SVG_NS);
+  root.setAttribute("width", String(width));
+  root.setAttribute("height", String(height));
+  root.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  root.setAttribute("role", "img");
+  root.setAttribute("aria-label", "Proportions chart with legend");
+
+  const background = document.createElementNS(SVG_NS, "rect");
+  background.setAttribute("width", "100%");
+  background.setAttribute("height", "100%");
+  background.setAttribute("fill", "#ffffff");
+  root.appendChild(background);
+
+  let fallbackX = padding;
+  panels.forEach((panel, index) => {
+    const rect = panel.getBoundingClientRect();
+    const useRect = hasLiveLayout && rect.width > 0 && rect.height > 0;
+    const x = useRect ? rect.left - containerRect.left : fallbackX;
+    const y = useRect ? rect.top - containerRect.top : padding;
+    const group = document.createElementNS(SVG_NS, "g");
+    group.setAttribute("transform", `translate(${Math.round(x)},${Math.round(y)})`);
+    const clone = panel.cloneNode(true) as SVGSVGElement;
+    clone.setAttribute("x", "0");
+    clone.setAttribute("y", "0");
+    group.appendChild(clone);
+    root.appendChild(group);
+    fallbackX += fallbackPanelSizes[index].width + panelGap;
+  });
+
+  if (legend && legendItems.length) {
+    const legendRect = legend.getBoundingClientRect();
+    const useLegendRect = hasLiveLayout && legendRect.width > 0 && legendRect.height > 0;
+    const legendX = useLegendRect ? legendRect.left - containerRect.left : padding;
+    const legendTop = useLegendRect ? legendRect.top - containerRect.top : fallbackLegendTop;
+    const legendWidth = useLegendRect ? legendRect.width : width - padding * 2;
+
+    const divider = document.createElementNS(SVG_NS, "line");
+    divider.setAttribute("x1", String(Math.round(legendX)));
+    divider.setAttribute("x2", String(Math.round(legendX + legendWidth)));
+    divider.setAttribute("y1", String(Math.round(legendTop)));
+    divider.setAttribute("y2", String(Math.round(legendTop)));
+    divider.setAttribute("stroke", "#e2e8f0");
+    divider.setAttribute("stroke-width", "1");
+    root.appendChild(divider);
+
+    const fallbackColumnWidth = legendWidth / legendColumns;
+    legendItems.forEach((item, index) => {
+      const itemRect = item.getBoundingClientRect();
+      const useItemRect = useLegendRect && itemRect.width > 0 && itemRect.height > 0;
+      const column = index % legendColumns;
+      const row = Math.floor(index / legendColumns);
+      const itemX = useItemRect
+        ? itemRect.left - containerRect.left
+        : legendX + column * fallbackColumnWidth;
+      const itemY = useItemRect
+        ? itemRect.top - containerRect.top
+        : legendTop + 10 + row * legendRowHeight;
+      const itemHeight = useItemRect ? itemRect.height : legendRowHeight;
+      const swatch = item.querySelector<HTMLElement>(".gl-prop-swatch");
+      const label = item.querySelector<HTMLElement>(".gl-prop-legend-label")?.textContent?.trim() ?? "";
+      const color = swatch?.style.backgroundColor || swatch?.style.background || "#94a3b8";
+
+      const exportItem = document.createElementNS(SVG_NS, "g");
+      exportItem.setAttribute("class", "gl-prop-export-legend-item");
+      const exportSwatch = document.createElementNS(SVG_NS, "rect");
+      exportSwatch.setAttribute("x", String(Math.round(itemX)));
+      exportSwatch.setAttribute("y", String(Math.round(itemY + (itemHeight - 12) / 2)));
+      exportSwatch.setAttribute("width", "12");
+      exportSwatch.setAttribute("height", "12");
+      exportSwatch.setAttribute("rx", "2");
+      exportSwatch.setAttribute("fill", color);
+      exportSwatch.setAttribute("stroke", "rgba(0,0,0,0.2)");
+      exportItem.appendChild(exportSwatch);
+
+      const exportLabel = document.createElementNS(SVG_NS, "text");
+      exportLabel.setAttribute("x", String(Math.round(itemX + 18)));
+      exportLabel.setAttribute("y", String(Math.round(itemY + itemHeight / 2)));
+      exportLabel.setAttribute("dominant-baseline", "middle");
+      exportLabel.setAttribute("font-size", String(legendFontSize));
+      exportLabel.setAttribute("font-family", "Arial, Helvetica, sans-serif");
+      exportLabel.setAttribute("fill", "#334155");
+      exportLabel.textContent = label;
+      exportItem.appendChild(exportLabel);
+      root.appendChild(exportItem);
+    });
+  }
+
+  return { root, width, height };
+}
+
+// Serialize the complete chart for download (PNG via canvas, SVG direct).
+function downloadChart(containerId: string, name: string, kind: "svg" | "png") {
+  const composed = composeProportionsChartSvg(containerId);
+  if (!composed) return;
+  const { root, width, height } = composed;
+  const xml = new XMLSerializer().serializeToString(root);
   const blob = new Blob([`<?xml version="1.0"?>\n${xml}`], { type: "image/svg+xml" });
   if (kind === "svg") {
     triggerDownload(URL.createObjectURL(blob), `${name}.svg`);
@@ -424,21 +568,25 @@ function downloadChart(containerId: string, name: string, kind: "svg" | "png") {
   img.onload = () => {
     const scale = 2;
     const canvas = document.createElement("canvas");
-    canvas.width = img.width * scale;
-    canvas.height = img.height * scale;
+    canvas.width = width * scale;
+    canvas.height = height * scale;
     const ctx = canvas.getContext("2d")!;
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.scale(scale, scale);
-    ctx.drawImage(img, 0, 0);
+    ctx.drawImage(img, 0, 0, width, height);
     URL.revokeObjectURL(url);
     canvas.toBlob((b) => { if (b) triggerDownload(URL.createObjectURL(b), `${name}.png`); });
   };
+  img.onerror = () => URL.revokeObjectURL(url);
   img.src = url;
 }
 function triggerDownload(href: string, filename: string) {
   const a = document.createElement("a");
   a.href = href;
   a.download = filename;
+  document.body.appendChild(a);
   a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 1000);
 }

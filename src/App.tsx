@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import pkg from "../package.json";
 import { clearPersistedTabState } from "./ui/tabState";
-import { GatingPlot, type NewGate } from "./plots/GatingPlot";
+import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type NewGate } from "./plots/GatingPlot";
 import { buildPlotGates, type PlotGate } from "./plots/gatePayload";
 import { parseFcs } from "./engine/fcs";
 import { Sample, type DisplayMode, type OverlaySpec } from "./engine/sample";
@@ -37,6 +37,7 @@ import {
   WORKSPACE_EXT,
   type WorkspaceFile,
   type WorkspaceStorage,
+  type GatingFontSizes,
   type IllustrationConfig,
   type IllustrationPreset,
 } from "./engine/workspace";
@@ -202,6 +203,7 @@ export default function App() {
   const [maxEvents, setMaxEvents] = useState(50000); // 0 = all (no downsampling)
   const [activeTab, setActiveTab] = useState<TabId>("gating");
   const [pointAlpha, setPointAlpha] = useState(0.4); // main-plot point opacity (cytof point_alpha)
+  const [gatingFontSizes, setGatingFontSizes] = useState<GatingFontSizes>({ ...DEFAULT_GATING_FONT_SIZES });
   // Illustration-tab config, lifted to a ref so it survives the tab's unmount (persists across tab
   // switches) and can be saved to the workspace; plus named presets.
   const illustConfigRef = useRef<IllustrationConfig | null>(null);
@@ -392,7 +394,7 @@ export default function App() {
     }
     setDirty(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.gate_version, scalesVersion, compensationOn, instrumentMode, globalScales, mode, maxEvents, contourThreshold, xIdx, yIdx]);
+  }, [state.gate_version, scalesVersion, compensationOn, instrumentMode, globalScales, mode, maxEvents, contourThreshold, xIdx, yIdx, gatingFontSizes]);
 
   // Autosave lightweight reference workspaces only. Repacking every embedded FCS on each
   // edit would stall large bundled workspaces; bundles retain their format via manual Save.
@@ -1008,6 +1010,7 @@ export default function App() {
         mode,
         maxEvents,
         contourThreshold,
+        fontSizes: gatingFontSizes,
       },
       illustration: illustConfigRef.current ?? undefined,
       illustrationPresets,
@@ -1226,6 +1229,7 @@ export default function App() {
       setMode(ws.display?.mode ?? "pseudocolor");
       setMaxEvents(ws.display?.maxEvents ?? 50000);
       setContourThreshold(ws.display?.contourThreshold ?? 5);
+      setGatingFontSizes({ ...DEFAULT_GATING_FONT_SIZES, ...ws.display?.fontSizes });
       const [dx, dy] = active.defaultChannelIndices();
       setXIdx(active.index(ws.display?.xChannel ?? "") ?? dx);
       setYIdx(active.index(ws.display?.yChannel ?? "") ?? dy);
@@ -1853,6 +1857,33 @@ export default function App() {
                 drag to pan · shift-drag to stretch
               </span>
             </div>
+            <div className="gl-scales gl-gating-fonts" aria-label="Gating plot font sizes">
+              <span className="gl-scales-label">Fonts</span>
+              {([
+                ["Tick", "tick", 6, 24],
+                ["Axis", "axis", 6, 28],
+                ["Title", "title", 6, 28],
+                ["Gate", "gate", 6, 28],
+              ] as const).map(([label, key, min, max]) => (
+                <label key={key} className="gl-field-inline">
+                  {label}
+                  <input
+                    type="number"
+                    min={min}
+                    max={max}
+                    step={1}
+                    value={gatingFontSizes[key]}
+                    onChange={(e) => {
+                      const requested = Number.parseInt(e.target.value, 10);
+                      const next = Number.isFinite(requested)
+                        ? Math.max(min, Math.min(max, requested))
+                        : DEFAULT_GATING_FONT_SIZES[key];
+                      setGatingFontSizes((current) => ({ ...current, [key]: next }));
+                    }}
+                  />
+                </label>
+              ))}
+            </div>
             {(sample.isLogicleChannel(xIdx) || sample.isLogicleChannel(yIdx)) && (
               <div className="gl-scales">
                 <span className="gl-scales-label">Logicle W</span>
@@ -1902,6 +1933,7 @@ export default function App() {
                 payload={displayed}
                 mode={drawMode}
                 visible={activeTab === "gating"}
+                fontSizes={gatingFontSizes}
                 onNewGate={(g) => {
                   // cytof reports the drawn gate's channels as DISPLAY labels — translate back to
                   // identity keys so the gate stores/masks in identity space.
