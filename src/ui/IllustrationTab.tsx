@@ -22,10 +22,7 @@ import {
   type HeatmapScaleMode,
   type HeatmapSummaryStat,
 } from "../engine/heatmap";
-import {
-  ILLUSTRATION_PICKER_MAX_COLUMNS,
-  layoutIllustrationPicker,
-} from "./illustrationPickerColumns";
+import { MultiColumnChecklist } from "./MultiColumnChecklist";
 
 interface Props {
   sample: Sample;
@@ -53,41 +50,6 @@ function snapshotConfig(config: IllustrationConfig): IllustrationConfig {
 
 function configsMatch(a: IllustrationConfig, b: IllustrationConfig): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
-}
-
-const ILLUSTRATION_PICKER_MIN_COLUMN_WIDTH = 148;
-const ILLUSTRATION_PICKER_COLUMN_GAP = 1;
-
-function useIllustrationPickerColumnCount() {
-  const ref = useRef<HTMLDivElement>(null);
-  const [columnCount, setColumnCount] = useState(ILLUSTRATION_PICKER_MAX_COLUMNS);
-
-  useEffect(() => {
-    const element = ref.current;
-    if (!element) return;
-
-    const update = () => {
-      const width = element.getBoundingClientRect().width || element.clientWidth;
-      if (width <= 0) return;
-      const next = Math.max(
-        1,
-        Math.min(
-          ILLUSTRATION_PICKER_MAX_COLUMNS,
-          Math.floor((width + ILLUSTRATION_PICKER_COLUMN_GAP) /
-            (ILLUSTRATION_PICKER_MIN_COLUMN_WIDTH + ILLUSTRATION_PICKER_COLUMN_GAP)),
-        ),
-      );
-      setColumnCount((current) => (current === next ? current : next));
-    };
-
-    update();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(update);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
-
-  return { ref, columnCount };
 }
 
 export function IllustrationTab({ sample, state, derived, globalScales, defaultX, defaultY, configRef, presets, onSavePreset, onDeletePreset }: Props) {
@@ -149,12 +111,6 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
   const isHeatmap = plotType === "heatmap";
   const isContour = plotType === "biplot" && displayMode === "contour";
   const isRidgeline = isHistogram && histLayout === "ridgeline";
-  const channelPicker = useIllustrationPickerColumnCount();
-  const populationPicker = useIllustrationPickerColumnCount();
-  const channelLayout = layoutIllustrationPicker(allChannels, channelPicker.columnCount);
-  const populationLayout = layoutIllustrationPicker(order, populationPicker.columnCount, {
-    distribution: "fill-first",
-  });
 
   // Default colour = the population's STABLE slot (frozen: adding/removing a population never
   // reshuffles the others); a hand-picked popColors[popId] override still wins.
@@ -623,76 +579,53 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
 
       {/* Responsive, equal-height multi-column channel + population checklists. */}
       <div className="gl-illust-pickers">
-        <div ref={channelPicker.ref} className="gl-illust-picker">
-          <div className="gl-illust-picker-head">
+        <div className="gl-illust-picker">
+          <div className="gl-picker-head">
             <span className="gl-stats-opt-label">{isHeatmap ? "Channels" : "X channels"}</span>
-            <button className="gl-mini-btn gl-illust-picker-first-action" onClick={() => setXChannels(allChannels)}>All</button>
+            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setXChannels(allChannels)}>All</button>
             <button className="gl-mini-btn" onClick={() => setXChannels([defaultX])}>Reset</button>
           </div>
-          <div
-            className="gl-illust-picker-columns"
-            role="group"
-            aria-label={isHeatmap ? "Heatmap channels" : "Illustration X channels"}
-            style={{ gridTemplateColumns: `repeat(${channelLayout.columns.length}, minmax(0, 1fr))` }}
-          >
-            {channelLayout.columns.map((column, columnIndex) => (
-              <div
-                key={columnIndex}
-                className={`gl-illust-picker-column${channelLayout.lastColumnScrollable && columnIndex === channelLayout.columns.length - 1 ? " is-scrollable" : ""}`}
-              >
-                {column.map((channel) => {
-                  const label = sample.labelForKey(channel);
-                  return (
-                    <label key={channel} className="gl-illust-picker-item" title={label}>
-                      <input type="checkbox" checked={xChannels.includes(channel)} onChange={() => setXChannels((p) => toggle(p, channel))} />
-                      <span className="gl-illust-picker-label">{label}</span>
-                    </label>
-                  );
-                })}
-              </div>
-            ))}
-          </div>
+          <MultiColumnChecklist
+            items={allChannels}
+            ariaLabel={isHeatmap ? "Heatmap channels" : "Illustration X channels"}
+            selected={(channel) => xChannels.includes(channel)}
+            onToggle={(channel) => setXChannels((previous) => toggle(previous, channel))}
+            getKey={(channel) => channel}
+            getLabel={(channel) => sample.labelForKey(channel)}
+            visibleRows={15}
+            height={300}
+          />
         </div>
 
-        <div ref={populationPicker.ref} className="gl-illust-picker">
-          <div className="gl-illust-picker-head">
+        <div className="gl-illust-picker">
+          <div className="gl-picker-head">
             <span className="gl-stats-opt-label">Populations</span>
-            <button className="gl-mini-btn gl-illust-picker-first-action" onClick={() => setPopIds(order.map((o) => o.popId))}>All</button>
+            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setPopIds(order.map((o) => o.popId))}>All</button>
             <button className="gl-mini-btn" onClick={() => setPopIds([])}>None</button>
           </div>
-          <div
-            className="gl-illust-picker-columns"
-            role="group"
-            aria-label="Illustration populations"
-            style={{ gridTemplateColumns: `repeat(${populationLayout.columns.length}, minmax(0, 1fr))` }}
-          >
-            {populationLayout.columns.map((column, columnIndex) => (
-              <div
-                key={columnIndex}
-                className={`gl-illust-picker-column${populationLayout.lastColumnScrollable && columnIndex === populationLayout.columns.length - 1 ? " is-scrollable" : ""}`}
-              >
-                {column.map(({ popId, depth }) => {
-                  const on = popIds.includes(popId);
-                  const name = state.populations[popId]?.name ?? popId;
-                  return (
-                    <label key={popId} className="gl-illust-picker-item" style={{ paddingLeft: depth * 10 }} title={name}>
-                      <input type="checkbox" checked={on} onChange={() => setPopIds((p) => toggle(p, popId))} />
-                      <span className="gl-illust-picker-label">{name}</span>
-                      {on && !isHeatmap && (colorByPop || overlayPops) && (
-                        <input
-                          type="color"
-                          className="gl-pop-color"
-                          title="Population colour"
-                          value={colorFor(popId)}
-                          onChange={(e) => setPopColors((m) => ({ ...m, [popId]: e.target.value }))}
-                        />
-                      )}
-                    </label>
-                  );
-                })}
-              </div>
-            ))}
-          </div>
+          <MultiColumnChecklist
+            items={order}
+            ariaLabel="Illustration populations"
+            selected={({ popId }) => popIds.includes(popId)}
+            onToggle={({ popId }) => setPopIds((previous) => toggle(previous, popId))}
+            getKey={({ popId }) => popId}
+            getLabel={({ popId }) => state.populations[popId]?.name ?? popId}
+            getDepth={({ depth }) => depth}
+            distribution="fill-first"
+            visibleRows={15}
+            height={300}
+            renderTrailing={({ popId }) => (
+              popIds.includes(popId) && !isHeatmap && (colorByPop || overlayPops) ? (
+                <input
+                  type="color"
+                  className="gl-pop-color"
+                  title="Population colour"
+                  value={colorFor(popId)}
+                  onChange={(e) => setPopColors((colors) => ({ ...colors, [popId]: e.target.value }))}
+                />
+              ) : null
+            )}
+          />
         </div>
       </div>
 

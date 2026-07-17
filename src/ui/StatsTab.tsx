@@ -9,6 +9,7 @@ import type { Sample } from "../engine/sample";
 import { computePopulationStats, MFI_STATS, type StatType, type ValueSpace } from "../engine/stats";
 import { populationTreeOrder } from "../engine/populations";
 import { TreeConnectors } from "./TreeConnectors";
+import { MultiColumnChecklist } from "./MultiColumnChecklist";
 
 interface SampleRef {
   id: string;
@@ -60,6 +61,7 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
   };
   const anyMfi = MFI_STATS.some((s) => statTypes.has(s.key));
   const root = state.root_population_id ?? "";
+  const channelPickerRows = Math.min(10, Math.max(4, Math.ceil(allChannels.length / 4)));
 
   // Per-sample Derived: reuse the active sample's; recompute the others on demand.
   const derivedFor = (id: string): Derived => {
@@ -215,17 +217,21 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
       </div>
 
       {!isCompare && anyMfi && (
-        <div className="gl-stats-opt-group gl-stats-channels">
-          <span className="gl-stats-opt-label">Channels</span>
-          <button className="gl-mini-btn" onClick={() => setChannels(allChannels)}>All</button>
-          <button className="gl-mini-btn" onClick={() => setChannels([])}>None</button>
-          <div className="gl-stats-chan-chips">
-            {allChannels.map((ch) => (
-              <button key={ch} className={"gl-chan-chip" + (channels.includes(ch) ? " active" : "")} onClick={() => toggleChannel(ch)}>
-                {labelOf(ch)}
-              </button>
-            ))}
+        <div className="gl-stats-channel-picker">
+          <div className="gl-picker-head">
+            <span className="gl-stats-opt-label">Channels</span>
+            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setChannels(allChannels)}>All</button>
+            <button className="gl-mini-btn" onClick={() => setChannels([])}>None</button>
           </div>
+          <MultiColumnChecklist
+            items={allChannels}
+            ariaLabel="Statistics channels"
+            selected={(channel) => channels.includes(channel)}
+            onToggle={toggleChannel}
+            getKey={(channel) => channel}
+            getLabel={labelOf}
+            visibleRows={channelPickerRows}
+          />
         </div>
       )}
 

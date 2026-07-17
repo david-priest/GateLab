@@ -11,6 +11,7 @@ import { computeGatingStrategy, buildStrategyPayload } from "../engine/strategy"
 import { computeMultiPopStrategy, buildMultiStrategyPayload } from "../engine/multiStrategy";
 import { populationTreeOrder } from "../engine/populations";
 import { sanitizeFilePart } from "../engine/fcsExport";
+import { MultiColumnChecklist } from "./MultiColumnChecklist";
 
 interface Props {
   sample: Sample;
@@ -99,6 +100,7 @@ export function StrategyTab({ sample, state, derived, globalScales, configRef }:
   }, [bothViewsActive, displayMode]);
 
   const order = populationTreeOrder(state.populations, rootId);
+  const selectablePops = order.filter(({ popId: id }) => id !== rootId);
 
   // Render (reactive to controls + gate changes, debounced so rapid changes coalesce).
   useEffect(() => {
@@ -185,9 +187,8 @@ export function StrategyTab({ sample, state, derived, globalScales, configRef }:
             {m === "single" ? "Single" : "Multiple pops"}
           </label>
         ))}
-        <span className="gl-ctl-sep" />
-        {mode === "multi" && <span className="gl-hint">{multiPops.length} selected — pick below</span>}
         {mode === "single" && (<>
+        <span className="gl-ctl-sep" />
         <label className="gl-field-inline">
           Population
           <select value={popId} onChange={(e) => setPopId(e.target.value)}>
@@ -331,35 +332,27 @@ export function StrategyTab({ sample, state, derived, globalScales, configRef }:
         <label className="gl-field-inline">Gate<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 8)} /></label>
       </div>
 
-      {mode === "single" && (
-        <div className="gl-stats-opt-group gl-stats-channels">
-          <span className="gl-stats-opt-label">Population</span>
-          <span className="gl-hint">click to plot its gating strategy</span>
-          <div className="gl-stats-chan-chips gl-strategy-poplist">
-            {order.filter((o) => o.popId !== rootId).map(({ popId: id, depth }) => (
-              <button key={id} className={"gl-chan-chip" + (id === popId ? " active" : "")}
-                style={{ marginLeft: depth * 8 }}
-                onClick={() => setPopId(id)}>
-                {state.populations[id]?.name ?? id}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
       {mode === "multi" && (
-        <div className="gl-stats-opt-group gl-stats-channels">
-          <span className="gl-stats-opt-label">Populations</span>
-          <button className="gl-mini-btn" onClick={() => setMultiPops(order.filter((o) => o.popId !== rootId).map((o) => o.popId))}>All</button>
-          <button className="gl-mini-btn" onClick={() => setMultiPops([])}>None</button>
-          <div className="gl-stats-chan-chips gl-strategy-poplist">
-            {order.filter((o) => o.popId !== rootId).map(({ popId: id, depth }) => (
-              <button key={id} className={"gl-chan-chip" + (multiPops.includes(id) ? " active" : "")}
-                style={{ marginLeft: depth * 8 }}
-                onClick={() => setMultiPops((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]))}>
-                {state.populations[id]?.name ?? id}
-              </button>
-            ))}
+        <div className="gl-strategy-pop-picker">
+          <div className="gl-picker-head">
+            <span className="gl-stats-opt-label">Populations</span>
+            <span className="gl-hint">{multiPops.length} of {selectablePops.length} selected</span>
+            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setMultiPops(selectablePops.map(({ popId: id }) => id))}>All</button>
+            <button className="gl-mini-btn" onClick={() => setMultiPops([])}>None</button>
           </div>
+          <MultiColumnChecklist
+            items={selectablePops}
+            ariaLabel="Strategy populations"
+            selected={({ popId: id }) => multiPops.includes(id)}
+            onToggle={({ popId: id }) => setMultiPops((previous) => (
+              previous.includes(id) ? previous.filter((candidate) => candidate !== id) : [...previous, id]
+            ))}
+            getKey={({ popId: id }) => id}
+            getLabel={({ popId: id }) => state.populations[id]?.name ?? id}
+            getDepth={({ depth }) => depth}
+            distribution="fill-first"
+            visibleRows={6}
+          />
         </div>
       )}
       <div id="strategy-grid-container" ref={containerRef} className="gl-mini-grid-container" />

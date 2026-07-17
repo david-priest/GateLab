@@ -129,17 +129,17 @@ const MODES: { id: DisplayMode; label: string }[] = [
   { id: "contour", label: "Contour" },
 ];
 
-// Center-column tabs, mirroring GateLabR's tabsetPanel (v1 subset: no UMAP / Division /
-// Proportions). The left (samples/import/export) and right (gates/populations) panels are
+// Center-column tabs, mirroring GateLabR's tabsetPanel. The left (samples/import/export)
+// and right (gates/populations) panels are
 // shared across tabs — only the center switches, exactly as in GateLabR.
 type TabId = "gating" | "strategy" | "illustration" | "statistics" | "panel" | "scales" | "metadata" | "proportions" | "division";
 const TABS: { id: TabId; label: string }[] = [
   { id: "gating", label: "Gating" },
   { id: "strategy", label: "Strategy" },
   { id: "illustration", label: "Illustration" },
-  { id: "statistics", label: "Statistics" },
   { id: "proportions", label: "Proportions" },
   { id: "division", label: "Division" },
+  { id: "statistics", label: "Statistics" },
   { id: "metadata", label: "Metadata" },
   { id: "panel", label: "Panel" },
   { id: "scales", label: "Scales" },
