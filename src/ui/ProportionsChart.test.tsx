@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ProportionsChart } from "./ProportionsTab";
+import { composeProportionsChartSvg, ProportionsChart } from "./ProportionsTab";
 
 let root: Root;
 let host: HTMLDivElement;
@@ -37,6 +37,43 @@ afterEach(() => {
 });
 
 describe("Proportions legend interaction", () => {
+  it("includes the HTML legend in a self-contained export SVG", () => {
+    const composed = composeProportionsChartSvg("gl-prop-svg");
+
+    expect(composed).not.toBeNull();
+    expect(composed?.root.querySelectorAll("svg.gl-prop-panel")).toHaveLength(1);
+    expect(composed?.root.querySelectorAll(".gl-prop-export-legend-item")).toHaveLength(2);
+    expect(composed?.root.textContent).toContain("B cells");
+    expect(composed?.root.textContent).toContain("T cells");
+    expect(composed!.height).toBeGreaterThan(308);
+  });
+
+  it("includes every facet panel in the composed export", () => {
+    act(() => root.render(
+      <ProportionsChart
+        plotType="stacked"
+        model={{
+          catLevels: ["B cells", "T cells"],
+          perSample: [
+            { unit: "a.fcs", group: "control", facet: "donor A", catCounts: [60, 40] },
+            { unit: "b.fcs", group: "control", facet: "donor B", catCounts: [50, 50] },
+          ],
+          hasFacet: true,
+        }}
+        catColors={["#2f80ed", "#e15759"]}
+        palette="paired"
+        averagePerUnit
+        populations={{}}
+        fonts={{ tick: 9, axis: 10, legend: 11 }}
+      />,
+    ));
+
+    const composed = composeProportionsChartSvg("gl-prop-svg");
+    expect(composed?.root.querySelectorAll("svg.gl-prop-panel")).toHaveLength(2);
+    expect(composed?.root.textContent).toContain("donor A");
+    expect(composed?.root.textContent).toContain("donor B");
+  });
+
   it("links hover and pinned legend states to the matching chart marks", () => {
     const legend = [...host.querySelectorAll<HTMLButtonElement>(".gl-prop-legend-item")];
     const marks = [...host.querySelectorAll<SVGRectElement>(".gl-prop-mark")];
