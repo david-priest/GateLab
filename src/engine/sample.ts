@@ -12,6 +12,11 @@
 import type { FcsFile, NumericColumn } from "./fcs";
 import type { AssayData } from "./gates";
 import { resolveChannels, type ResolvedChannel } from "./channels";
+import type { MatrixChannelBinding } from "./compensationCompatibility";
+import type {
+  PersistedCompensatedLayerBinding,
+  PersistedTransformBinding,
+} from "./workspaceCompensation";
 import { encodeFloat32Base64, encodeUint8Base64 } from "./encode";
 import { robustAxisRange } from "./axisRange";
 import { logicleTicks, scatterTicks, type AxisTicks } from "./ticks";
@@ -105,6 +110,116 @@ export interface SampleOpts {
   cytofCofactor?: number;
 }
 
+export type AssayLayer = "original" | "compensated";
+
+/** One derived output column, identified only by exact FCS identity. */
+export interface CompensatedLayerColumn {
+  readonly pnn: string;
+  readonly fcsColumnIndex: number;
+  /** Apply workers transfer ownership of these arrays to Sample after a complete solve. */
+  readonly values: Float32Array;
+}
+
+export interface CompensatedLayerInput {
+  readonly metadata: PersistedCompensatedLayerBinding;
+  readonly columns: readonly CompensatedLayerColumn[];
+}
+
+export type ProfileCompensatedLayerMetadata = Readonly<
+  PersistedCompensatedLayerBinding & { readonly runtimeIdentity: "profile" }
+>;
+
+/**
+ * Compatibility state for today's synchronous embedded-$SPILLOVER toggle.
+ * It is intentionally not given invented profile/matrix hashes: the canonical
+ * SHA-256 boundary is asynchronous and belongs to imported/versioned profiles.
+ */
+export interface LegacyEmbeddedCompensatedLayerMetadata {
+  readonly runtimeIdentity: "legacy-embedded-fcs";
+  readonly kind: "flow-spillover";
+  readonly method: "matrix-inverse";
+  readonly includedPnns: readonly string[];
+  readonly channelBindings: readonly MatrixChannelBinding[];
+  readonly transformBinding: Readonly<{ kind: "flow-linear" }>;
+}
+
+export type CompensatedLayerMetadata =
+  | ProfileCompensatedLayerMetadata
+  | LegacyEmbeddedCompensatedLayerMetadata;
+
+export type CompensatedLayerStaleReason =
+  | "sample-kind-mismatch"
+  | "legacy-layer-unverifiable"
+  | "profile-id-mismatch"
+  | "profile-hash-mismatch"
+  | "matrix-hash-mismatch"
+  | "kind-mismatch"
+  | "method-mismatch"
+  | "included-pnns-mismatch"
+  | "channel-bindings-mismatch"
+  | "transform-binding-mismatch";
+
+export type CompensatedLayerStatus =
+  | Readonly<{ state: "missing" }>
+  | Readonly<{
+      state: "stale";
+      metadata: CompensatedLayerMetadata;
+      reasons: readonly CompensatedLayerStaleReason[];
+    }>
+  | Readonly<{ state: "ready"; metadata: CompensatedLayerMetadata }>;
+
+interface RuntimeCompensatedLayer {
+  readonly metadata: CompensatedLayerMetadata;
+  readonly columnsByFcsIndex: ReadonlyMap<number, Float32Array>;
+}
+
+const MISSING_COMPENSATED_LAYER = Object.freeze({ state: "missing" }) as CompensatedLayerStatus;
+
+function normalizePnn(value: string): string {
+  return value.trim().normalize("NFC");
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameChannelBindings(
+  left: readonly MatrixChannelBinding[],
+  right: readonly MatrixChannelBinding[],
+): boolean {
+  return left.length === right.length && left.every((binding, index) => {
+    const candidate = right[index];
+    return binding.pnn === candidate.pnn &&
+      binding.fcsColumnIndex === candidate.fcsColumnIndex &&
+      binding.matrixSourceIndex === candidate.matrixSourceIndex &&
+      binding.matrixReceiverIndex === candidate.matrixReceiverIndex &&
+      binding.included === candidate.included;
+  });
+}
+
+function sameTransformBinding(
+  left: PersistedTransformBinding,
+  right: PersistedTransformBinding,
+): boolean {
+  if (left.kind !== right.kind) return false;
+  return left.kind === "flow-linear" ||
+    (right.kind === "cytof-asinh" && left.cofactor === right.cofactor);
+}
+
+function freezeChannelBindings(
+  bindings: readonly MatrixChannelBinding[],
+): readonly MatrixChannelBinding[] {
+  return Object.freeze(bindings.map((binding) => Object.freeze({ ...binding })));
+}
+
+function freezeTransformBinding(
+  binding: PersistedTransformBinding,
+): PersistedTransformBinding {
+  return binding.kind === "flow-linear"
+    ? Object.freeze({ kind: "flow-linear" })
+    : Object.freeze({ kind: "cytof-asinh", cofactor: binding.cofactor });
+}
+
 export class Sample {
   readonly fcs: FcsFile;
   /** Auto-detected instrument (from channel names). The effective value can be overridden. */
@@ -154,37 +269,196 @@ export class Sample {
   }
 
   // ── Compensation ────────────────────────────────────────────────────────────
-  private compensationOn = false;
-  private compCache: Map<string, Float32Array> | null = null;
+  private _activeLayer: AssayLayer = "original";
+  private _dataRevision = 0;
+  private compensatedLayer: RuntimeCompensatedLayer | null = null;
+
+  /** The active linear-count layer used by display, gating, statistics, and plots. */
+  get activeLayer(): AssayLayer {
+    return this._activeLayer;
+  }
+
+  /** Monotonic identity for atomic assay-layer changes. */
+  get dataRevision(): number {
+    return this._dataRevision;
+  }
+
   /** True when the file carries a (non-identity) spillover that can be applied. */
   get hasCompensation(): boolean {
     return this.spillover !== null;
   }
+
+  /** Backward-compatible UI bridge; explicit consumers should use activeLayer/status. */
   get compensationEnabled(): boolean {
-    return this.compensationOn;
+    return this._activeLayer === "compensated";
   }
+
+  /** Metadata for the active Compensated layer, or null while Original is active. */
+  get activeCompensatedLayerMetadata(): CompensatedLayerMetadata | null {
+    return this._activeLayer === "compensated"
+      ? this.compensatedLayer?.metadata ?? null
+      : null;
+  }
+
+  /** True only for the legacy embedded-FCS layer understood by current Gating-ML I/O. */
+  get embeddedCompensationEnabled(): boolean {
+    return this.activeCompensatedLayerMetadata?.runtimeIdentity === "legacy-embedded-fcs";
+  }
+
+  /**
+   * Describe the installed layer and, when supplied, verify it is the exact
+   * persisted profile binding the caller expects. A legacy embedded layer is
+   * usable by the existing toggle but cannot impersonate a hashed profile.
+   */
+  compensatedLayerStatus(
+    expected?: PersistedCompensatedLayerBinding,
+  ): CompensatedLayerStatus {
+    const layer = this.compensatedLayer;
+    if (!layer) return MISSING_COMPENSATED_LAYER;
+
+    const reasons: CompensatedLayerStaleReason[] = [];
+    const metadata = layer.metadata;
+    const expectedInstrument = metadata.kind === "flow-spillover" ? "flow" : "cytof";
+    if (this.instrument !== expectedInstrument) reasons.push("sample-kind-mismatch");
+    if (
+      metadata.transformBinding.kind === "cytof-asinh" &&
+      metadata.transformBinding.cofactor !== this.cytofCofactor
+    ) {
+      reasons.push("transform-binding-mismatch");
+    }
+
+    if (expected) {
+      if (metadata.runtimeIdentity === "legacy-embedded-fcs") {
+        reasons.push("legacy-layer-unverifiable");
+      } else {
+        if (metadata.profileId !== expected.profileId) reasons.push("profile-id-mismatch");
+        if (metadata.profileHash !== expected.profileHash) reasons.push("profile-hash-mismatch");
+        if (metadata.matrixHash !== expected.matrixHash) reasons.push("matrix-hash-mismatch");
+        if (metadata.kind !== expected.kind) reasons.push("kind-mismatch");
+        if (metadata.method !== expected.method) reasons.push("method-mismatch");
+        if (!sameStrings(metadata.includedPnns, expected.includedPnns)) {
+          reasons.push("included-pnns-mismatch");
+        }
+        if (!sameChannelBindings(metadata.channelBindings, expected.channelBindings)) {
+          reasons.push("channel-bindings-mismatch");
+        }
+        if (!sameTransformBinding(metadata.transformBinding, expected.transformBinding)) {
+          reasons.push("transform-binding-mismatch");
+        }
+      }
+    }
+
+    return reasons.length > 0
+      ? Object.freeze({
+          state: "stale",
+          metadata,
+          reasons: Object.freeze(reasons),
+        })
+      : Object.freeze({ state: "ready", metadata });
+  }
+
+  /**
+   * Install a complete, already-solved profile result. Validation is
+   * transactional: no Sample state or cache changes until every binding and
+   * every value has passed the scientific identity boundary.
+   */
+  installCompensatedLayer(
+    input: CompensatedLayerInput,
+    options: Readonly<{ activeLayer?: AssayLayer }> = {},
+  ): void {
+    const metadata = this.freezeProfileMetadata(input.metadata);
+    const candidate = this.validateRuntimeLayer(metadata, input.columns);
+    const nextActive = options.activeLayer ?? this._activeLayer;
+    if (nextActive !== "original" && nextActive !== "compensated") {
+      throw new Error(`Invalid active assay layer '${String(nextActive)}'.`);
+    }
+    this.commitAssayLayerChange(candidate, nextActive);
+  }
+
+  /** Remove the derived layer; an active Compensated view returns to Original atomically. */
+  removeCompensatedLayer(): void {
+    if (!this.compensatedLayer) return;
+    this.commitAssayLayerChange(null, "original");
+  }
+
+  /** Switch which complete linear-count layer all Sample consumers read. */
+  setActiveLayer(
+    layer: AssayLayer,
+    expected?: PersistedCompensatedLayerBinding,
+  ): void {
+    if (layer !== "original" && layer !== "compensated") {
+      throw new Error(`Invalid active assay layer '${String(layer)}'.`);
+    }
+    if (layer === "compensated") {
+      const status = this.compensatedLayerStatus(expected);
+      if (status.state !== "ready") throw this.unavailableCompensatedLayerError(status);
+    }
+    if (layer === this._activeLayer) return;
+    this.commitAssayLayerChange(this.compensatedLayer, layer);
+  }
+
   /** Toggle spillover compensation (applied to raw fluor values before transforms). */
   setCompensation(on: boolean): void {
-    if (on === this.compensationOn) return;
-    if (on && this.spillover) {
-      const inv = invertMatrix(this.spillover.matrix);
-      if (inv) {
-        const fluor = this.spillover.channels.map((key) => {
-          const i = this.byName.get(key)!;
-          return this.fcs.columns[this.channels[i].columnIndex]; // uncompensated raw
-        });
-        const comp = compensate(fluor, inv);
-        this.compCache = new Map();
-        this.spillover.channels.forEach((key, i) => this.compCache!.set(key, comp[i]));
-      } else {
-        this.compCache = null; // singular → cannot compensate
-        on = false;
-      }
-    } else {
-      this.compCache = null;
+    if (
+      on &&
+      this.compensatedLayer?.metadata.runtimeIdentity === "profile"
+    ) {
+      throw new Error(
+        "Embedded FCS compensation cannot be enabled while a profile-derived layer is installed.",
+      );
     }
-    this.compensationOn = on;
-    this.invalidateAll();
+    if (on === this.compensationEnabled) return;
+    if (!on) {
+      if (this.compensatedLayer?.metadata.runtimeIdentity === "legacy-embedded-fcs") {
+        this.removeCompensatedLayer();
+      } else {
+        this.setActiveLayer("original");
+      }
+      return;
+    }
+
+    const installed = this.compensatedLayerStatus();
+    if (
+      installed.state === "ready" &&
+      installed.metadata.runtimeIdentity === "legacy-embedded-fcs"
+    ) {
+      this.setActiveLayer("compensated");
+      return;
+    }
+    if (!this.spillover || this.instrument !== "flow") return;
+
+    const inv = invertMatrix(this.spillover.matrix);
+    if (!inv) return; // singular: fail closed without changing state/caches/revision
+
+    const resolvedIndices = this.spillover.channels.map((key) => this.byName.get(key));
+    if (resolvedIndices.some((index) => index === undefined)) return;
+    const fluor = resolvedIndices.map((index) => this.originalColumnData(index!));
+    const compensated = compensate(fluor, inv);
+    const bindings = resolvedIndices.map((index, matrixIndex) => {
+      const channel = this.channels[index!];
+      return Object.freeze({
+        pnn: normalizePnn(channel.pnn),
+        fcsColumnIndex: channel.columnIndex,
+        matrixSourceIndex: matrixIndex,
+        matrixReceiverIndex: matrixIndex,
+        included: true,
+      });
+    });
+    const metadata: LegacyEmbeddedCompensatedLayerMetadata = Object.freeze({
+      runtimeIdentity: "legacy-embedded-fcs",
+      kind: "flow-spillover",
+      method: "matrix-inverse",
+      includedPnns: Object.freeze(bindings.map(({ pnn }) => pnn)),
+      channelBindings: Object.freeze(bindings),
+      transformBinding: Object.freeze({ kind: "flow-linear" }),
+    });
+    const columns = resolvedIndices.map((index, matrixIndex) => ({
+      pnn: normalizePnn(this.channels[index!].pnn),
+      fcsColumnIndex: this.channels[index!].columnIndex,
+      values: compensated[matrixIndex],
+    }));
+    const candidate = this.validateRuntimeLayer(metadata, columns);
+    this.commitAssayLayerChange(candidate, "compensated");
   }
   /** Force the instrument mode ('auto' = the detected value). Rebuilds all derived caches
    *  because the display transform + gating space depend on the instrument. Intended as a
@@ -192,7 +466,15 @@ export class Sample {
    *  gating space (raw vs display) also flips with it. */
   setInstrumentMode(mode: "auto" | "flow" | "cytof"): void {
     if (mode === this._instrumentMode) return;
+    const previousLayerStatus = this.compensatedLayerStatusKey();
     this._instrumentMode = mode;
+    if (
+      this._activeLayer === "compensated" &&
+      this.compensatedLayerStatus().state !== "ready"
+    ) {
+      this._activeLayer = "original";
+    }
+    if (this.compensatedLayerStatusKey() !== previousLayerStatus) this._dataRevision++;
     this.invalidateAll();
   }
   /** Drop every derived cache — raw data changed underneath (compensation / instrument change). */
@@ -204,25 +486,337 @@ export class Sample {
     this.logicleParamsCache.clear();
   }
 
-  /** Raw column for a resolved-channel index (compensated when compensation is on). */
-  private rawColumn(idx: number): NumericColumn {
-    if (this.compensationOn && this.compCache) {
-      const c = this.compCache.get(this.channels[idx].key);
-      if (c) return c;
+  private freezeProfileMetadata(
+    metadata: PersistedCompensatedLayerBinding,
+  ): ProfileCompensatedLayerMetadata {
+    if (!metadata || typeof metadata !== "object") {
+      throw new Error("Invalid compensated layer: profile metadata is required.");
     }
-    return this.fcs.columns[this.channels[idx].columnIndex];
+    if (typeof metadata.profileId !== "string" || metadata.profileId.trim().length === 0) {
+      throw new Error("Invalid compensated layer: profileId must be a non-blank string.");
+    }
+    const digest = /^sha256:[0-9a-f]{64}$/;
+    if (!digest.test(metadata.profileHash) || !digest.test(metadata.matrixHash)) {
+      throw new Error("Invalid compensated layer: profile and matrix SHA-256 hashes are required.");
+    }
+    if (
+      !Array.isArray(metadata.includedPnns) ||
+      !Array.isArray(metadata.channelBindings) ||
+      !metadata.transformBinding ||
+      typeof metadata.transformBinding !== "object"
+    ) {
+      throw new Error("Invalid compensated layer: profile bindings are incomplete.");
+    }
+    if (
+      metadata.transformBinding.kind !== "flow-linear" &&
+      metadata.transformBinding.kind !== "cytof-asinh"
+    ) {
+      throw new Error("Invalid compensated layer: unsupported transform binding.");
+    }
+    return Object.freeze({
+      runtimeIdentity: "profile",
+      profileId: metadata.profileId,
+      profileHash: metadata.profileHash,
+      matrixHash: metadata.matrixHash,
+      kind: metadata.kind,
+      method: metadata.method,
+      includedPnns: Object.freeze(Array.from(metadata.includedPnns)),
+      channelBindings: freezeChannelBindings(metadata.channelBindings),
+      transformBinding: freezeTransformBinding(metadata.transformBinding),
+    });
   }
-  /** Current linear column (compensated when compensation is enabled). */
+
+  private validateRuntimeLayer(
+    metadata: CompensatedLayerMetadata,
+    columns: readonly CompensatedLayerColumn[],
+  ): RuntimeCompensatedLayer {
+    if (metadata.kind !== "flow-spillover" && metadata.kind !== "cytof-spillover") {
+      throw new Error(`Invalid compensated layer: unsupported kind '${String(metadata.kind)}'.`);
+    }
+    if (metadata.method !== "matrix-inverse" && metadata.method !== "nnls") {
+      throw new Error(`Invalid compensated layer: unsupported method '${String(metadata.method)}'.`);
+    }
+    const expectedInstrument = metadata.kind === "flow-spillover" ? "flow" : "cytof";
+    const expectedMethod = metadata.kind === "flow-spillover" ? "matrix-inverse" : "nnls";
+    if (metadata.method !== expectedMethod) {
+      throw new Error(
+        `Invalid compensated layer: ${metadata.kind} requires method ${expectedMethod}.`,
+      );
+    }
+    if (this.instrument !== expectedInstrument) {
+      throw new Error(
+        `Invalid compensated layer: ${metadata.kind} cannot be installed on a ${this.instrument} sample.`,
+      );
+    }
+    if (
+      (metadata.kind === "flow-spillover" && metadata.transformBinding.kind !== "flow-linear") ||
+      (metadata.kind === "cytof-spillover" && metadata.transformBinding.kind !== "cytof-asinh")
+    ) {
+      throw new Error("Invalid compensated layer: transform binding does not match its modality.");
+    }
+    if (
+      metadata.transformBinding.kind === "cytof-asinh" &&
+      (!Number.isFinite(metadata.transformBinding.cofactor) ||
+        metadata.transformBinding.cofactor <= 0 ||
+        metadata.transformBinding.cofactor !== this.cytofCofactor)
+    ) {
+      throw new Error(
+        "Invalid compensated layer: CyTOF transform binding does not match the sample cofactor.",
+      );
+    }
+    if (!Array.isArray(metadata.includedPnns) || metadata.includedPnns.length === 0) {
+      throw new Error("Invalid compensated layer: at least one included $PnN is required.");
+    }
+    if (!Array.isArray(metadata.channelBindings) || !Array.isArray(columns)) {
+      throw new Error("Invalid compensated layer: bindings and output columns must be arrays.");
+    }
+    for (let index = 0; index < metadata.includedPnns.length; index++) {
+      if (!Object.prototype.hasOwnProperty.call(metadata.includedPnns, index)) {
+        throw new Error("Invalid compensated layer: included $PnNs must not contain sparse entries.");
+      }
+    }
+    for (let index = 0; index < metadata.channelBindings.length; index++) {
+      if (!Object.prototype.hasOwnProperty.call(metadata.channelBindings, index)) {
+        throw new Error("Invalid compensated layer: channel bindings must not contain sparse entries.");
+      }
+    }
+    for (let index = 0; index < columns.length; index++) {
+      if (!Object.prototype.hasOwnProperty.call(columns, index)) {
+        throw new Error("Invalid compensated layer: output columns must not contain sparse entries.");
+      }
+    }
+
+    const includedPnns = metadata.includedPnns.map((pnn) =>
+      typeof pnn === "string" ? normalizePnn(pnn) : ""
+    );
+    if (
+      includedPnns.some((pnn, index) => pnn.length === 0 || pnn !== metadata.includedPnns[index]) ||
+      new Set(includedPnns).size !== includedPnns.length
+    ) {
+      throw new Error("Invalid compensated layer: included $PnN identities must be canonical and unique.");
+    }
+
+    const includedBindings = new Map<string, MatrixChannelBinding>();
+    const seenBindingIndices = new Set<number>();
+    const seenBindingPnns = new Set<string>();
+    const seenReceiverIndices = new Set<number>();
+    const seenSourceIndices = new Set<number>();
+    let previousReceiverIndex = -1;
+    const sampleChannelsByPnn = new Map<string, ResolvedChannel[]>();
+    for (const channel of this.channels) {
+      const pnn = normalizePnn(channel.pnn);
+      const matches = sampleChannelsByPnn.get(pnn) ?? [];
+      matches.push(channel);
+      sampleChannelsByPnn.set(pnn, matches);
+    }
+    for (const binding of metadata.channelBindings) {
+      if (
+        !binding ||
+        typeof binding.pnn !== "string" ||
+        !Number.isSafeInteger(binding.fcsColumnIndex) ||
+        binding.fcsColumnIndex < 0 ||
+        !Number.isSafeInteger(binding.matrixReceiverIndex) ||
+        binding.matrixReceiverIndex < 0 ||
+        (binding.matrixSourceIndex !== null &&
+          (!Number.isSafeInteger(binding.matrixSourceIndex) || binding.matrixSourceIndex < 0)) ||
+        typeof binding.included !== "boolean"
+      ) {
+        throw new Error("Invalid compensated layer: malformed channel binding.");
+      }
+      const pnn = normalizePnn(binding.pnn);
+      if (pnn.length === 0 || pnn !== binding.pnn) {
+        throw new Error("Invalid compensated layer: binding $PnN identities must be canonical.");
+      }
+      if (seenBindingIndices.has(binding.fcsColumnIndex)) {
+        throw new Error("Invalid compensated layer: duplicate FCS column binding.");
+      }
+      if (seenBindingPnns.has(pnn)) {
+        throw new Error("Invalid compensated layer: duplicate $PnN binding.");
+      }
+      if (
+        seenReceiverIndices.has(binding.matrixReceiverIndex) ||
+        binding.matrixReceiverIndex <= previousReceiverIndex
+      ) {
+        throw new Error(
+          "Invalid compensated layer: matrix receiver bindings must be unique and ordered.",
+        );
+      }
+      if (
+        binding.matrixSourceIndex !== null &&
+        seenSourceIndices.has(binding.matrixSourceIndex)
+      ) {
+        throw new Error("Invalid compensated layer: duplicate matrix source binding.");
+      }
+      if (
+        metadata.kind === "flow-spillover" &&
+        (binding.matrixSourceIndex === null || !binding.included)
+      ) {
+        throw new Error(
+          "Invalid compensated layer: conventional-flow bindings must all be included source/receiver channels.",
+        );
+      }
+      seenBindingIndices.add(binding.fcsColumnIndex);
+      seenBindingPnns.add(pnn);
+      seenReceiverIndices.add(binding.matrixReceiverIndex);
+      previousReceiverIndex = binding.matrixReceiverIndex;
+      if (binding.matrixSourceIndex !== null) {
+        seenSourceIndices.add(binding.matrixSourceIndex);
+      }
+      const matchingSampleChannels = sampleChannelsByPnn.get(pnn) ?? [];
+      const channel = matchingSampleChannels[0];
+      if (matchingSampleChannels.length !== 1 || channel.columnIndex !== binding.fcsColumnIndex) {
+        throw new Error(
+          `Invalid compensated layer: exact $PnN/FCS binding '${pnn}' → ${binding.fcsColumnIndex} does not match this sample.`,
+        );
+      }
+      if (binding.included) {
+        if (includedBindings.has(pnn)) {
+          throw new Error("Invalid compensated layer: duplicate included $PnN binding.");
+        }
+        includedBindings.set(pnn, binding);
+      }
+    }
+    const includedBindingPnns = metadata.channelBindings
+      .filter(({ included }) => included)
+      .map(({ pnn }) => pnn);
+    if (
+      includedBindings.size !== includedPnns.length ||
+      !sameStrings(includedPnns, includedBindingPnns) ||
+      includedPnns.some((pnn) => !includedBindings.has(pnn))
+    ) {
+      throw new Error("Invalid compensated layer: included $PnNs and bindings do not match exactly.");
+    }
+    if (metadata.kind === "flow-spillover") {
+      const count = metadata.channelBindings.length;
+      const expectedIndices = Array.from({ length: count }, (_, index) => index);
+      const receiverIndices = metadata.channelBindings.map(({ matrixReceiverIndex }) =>
+        matrixReceiverIndex
+      );
+      const sourceIndices = metadata.channelBindings
+        .map(({ matrixSourceIndex }) => matrixSourceIndex!)
+        .sort((left, right) => left - right);
+      if (
+        !sameStrings(receiverIndices.map(String), expectedIndices.map(String)) ||
+        !sameStrings(sourceIndices.map(String), expectedIndices.map(String))
+      ) {
+        throw new Error(
+          "Invalid compensated layer: conventional-flow bindings must cover every matrix source and receiver exactly once.",
+        );
+      }
+    }
+
+    const columnsByFcsIndex = new Map<number, Float32Array>();
+    const outputPnns = new Set<string>();
+    for (const output of columns) {
+      if (
+        !output ||
+        typeof output.pnn !== "string" ||
+        !Number.isSafeInteger(output.fcsColumnIndex) ||
+        !(output.values instanceof Float32Array)
+      ) {
+        throw new Error("Invalid compensated layer: malformed output column.");
+      }
+      const pnn = normalizePnn(output.pnn);
+      const binding = includedBindings.get(pnn);
+      if (!binding || binding.fcsColumnIndex !== output.fcsColumnIndex) {
+        throw new Error(
+          `Invalid compensated layer: output '${pnn}' → ${output.fcsColumnIndex} is not an exact included binding.`,
+        );
+      }
+      if (columnsByFcsIndex.has(output.fcsColumnIndex) || outputPnns.has(pnn)) {
+        throw new Error("Invalid compensated layer: duplicate output column.");
+      }
+      if (output.values.length !== this.fcs.nEvents) {
+        throw new Error(
+          `Invalid compensated layer: output '${pnn}' has ${output.values.length} events; expected ${this.fcs.nEvents}.`,
+        );
+      }
+      for (let event = 0; event < output.values.length; event++) {
+        if (!Number.isFinite(output.values[event])) {
+          throw new Error(
+            `Invalid compensated layer: output '${pnn}' contains a non-finite value at event ${event + 1}.`,
+          );
+        }
+      }
+      columnsByFcsIndex.set(output.fcsColumnIndex, output.values);
+      outputPnns.add(pnn);
+    }
+    if (
+      columnsByFcsIndex.size !== includedBindings.size ||
+      includedPnns.some((pnn) => !outputPnns.has(pnn))
+    ) {
+      throw new Error("Invalid compensated layer: every included binding needs one complete output column.");
+    }
+    return Object.freeze({ metadata, columnsByFcsIndex });
+  }
+
+  private commitAssayLayerChange(
+    compensatedLayer: RuntimeCompensatedLayer | null,
+    activeLayer: AssayLayer,
+  ): void {
+    if (activeLayer === "compensated" && !compensatedLayer) {
+      throw new Error("Cannot activate Compensated: no complete layer is installed.");
+    }
+    this.compensatedLayer = compensatedLayer;
+    this._activeLayer = activeLayer;
+    this.invalidateAll();
+    this._dataRevision++;
+  }
+
+  private unavailableCompensatedLayerError(status: CompensatedLayerStatus): Error {
+    if (status.state === "missing") {
+      return new Error("Compensated assay layer is unavailable: no complete result is installed.");
+    }
+    if (status.state === "stale") {
+      return new Error(
+        `Compensated assay layer is stale: ${status.reasons.join(", ")}.`,
+      );
+    }
+    return new Error("Compensated assay layer is unavailable.");
+  }
+
+  private compensatedLayerStatusKey(): string {
+    const status = this.compensatedLayerStatus();
+    return status.state === "stale"
+      ? `stale:${status.reasons.join("|")}`
+      : status.state;
+  }
+
+  private resolvedChannel(idx: number): ResolvedChannel {
+    if (!Number.isSafeInteger(idx) || idx < 0 || idx >= this.channels.length) {
+      throw new RangeError(`Resolved channel index ${idx} is out of range.`);
+    }
+    return this.channels[idx];
+  }
+
+  /** Active linear column for a resolved-channel index. */
+  private activeLinearColumn(idx: number): NumericColumn {
+    if (this._activeLayer === "compensated") return this.compensatedColumnData(idx);
+    return this.originalColumnData(idx);
+  }
+
+  /** Current linear column from the active assay layer. */
   rawColumnData(idx: number): NumericColumn {
-    return this.rawColumn(idx);
+    return this.activeLinearColumn(idx);
   }
   /** Original stored FCS measurements, before compensation or display transforms. */
   originalColumnData(idx: number): NumericColumn {
-    return this.fcs.columns[this.channels[idx].columnIndex];
+    const channel = this.resolvedChannel(idx);
+    return this.fcs.columns[channel.columnIndex];
   }
-  /** Linear measurements after the sample's current compensation setting. */
-  compensatedColumnData(idx: number): NumericColumn {
-    return this.rawColumn(idx);
+  /**
+   * Installed compensated-count assay. Unmatched/excluded channels explicitly
+   * pass through Original only after a complete matching layer is ready.
+   */
+  compensatedColumnData(
+    idx: number,
+    expected?: PersistedCompensatedLayerBinding,
+  ): NumericColumn {
+    const channel = this.resolvedChannel(idx);
+    const status = this.compensatedLayerStatus(expected);
+    if (status.state !== "ready") throw this.unavailableCompensatedLayerError(status);
+    return this.compensatedLayer!.columnsByFcsIndex.get(channel.columnIndex) ??
+      this.fcs.columns[channel.columnIndex];
   }
 
   /** Auto-estimated {T, W} per channel (single sort), cached. */
@@ -233,7 +827,7 @@ export class Sample {
   private logicleParams(idx: number): { t: number; w: number } {
     let p = this.logicleParamsCache.get(idx);
     if (!p) {
-      p = estimateLogicleParams(this.rawColumn(idx));
+      p = estimateLogicleParams(this.activeLinearColumn(idx));
       this.logicleParamsCache.set(idx, p);
     }
     return p;
@@ -295,7 +889,15 @@ export class Sample {
   /** Restore the global CyTOF arcsinh cofactor carried by a workspace/Gating-ML file. */
   setCytofCofactor(cofactor: number): void {
     if (!Number.isFinite(cofactor) || cofactor <= 0 || cofactor === this.cytofCofactor) return;
+    const previousLayerStatus = this.compensatedLayerStatusKey();
     this.cytofCofactor = cofactor;
+    if (
+      this._activeLayer === "compensated" &&
+      this.compensatedLayerStatus().state !== "ready"
+    ) {
+      this._activeLayer = "original";
+    }
+    if (this.compensatedLayerStatusKey() !== previousLayerStatus) this._dataRevision++;
     if (this.instrument === "cytof") this.invalidateAll();
   }
   /** Current flow-scatter arcsinh cofactor (default 150). */
@@ -408,7 +1010,7 @@ export class Sample {
   displayColumn(idx: number): Float32Array {
     const hit = this.displayCache.get(idx);
     if (hit) return hit;
-    const raw = this.rawColumn(idx);
+    const raw = this.activeLinearColumn(idx);
     const t = this.transform(idx);
     const out = new Float32Array(raw.length);
     if (t.kind === "identity") out.set(raw);
@@ -419,7 +1021,7 @@ export class Sample {
 
   /** Gating-space column (masks run on this). Flow → raw; CyTOF → display. */
   gatingColumn(idx: number): NumericColumn {
-    if (this.gatingSpace === "raw") return this.rawColumn(idx);
+    if (this.gatingSpace === "raw") return this.activeLinearColumn(idx);
     const hit = this.gatingCache.get(idx);
     if (hit) return hit;
     const col = this.displayColumn(idx); // CyTOF gating == display

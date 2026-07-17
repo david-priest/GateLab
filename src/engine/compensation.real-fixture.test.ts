@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { compensate, invertMatrix } from "./compensation";
 import { parseFcs, type NumericColumn } from "./fcs";
+import { Sample } from "./sample";
 
 const FIXTURE_ROOT =
   process.env.GATELAB_COMP_FIXTURES ??
@@ -107,5 +108,34 @@ describe.runIf(hasFixtures)("flowCore Aria III compensation oracle", () => {
     );
 
     expect(firstMismatch(incorrectlyTransposed[0], firstExpected)).not.toBeNull();
+  });
+
+  it("the explicit Sample layer matches the complete flowCore reference", () => {
+    const raw = loadFcs(`${FIXTURE_ROOT}/sample_Bmem_purity_small.fcs`);
+    const reference = loadFcs(
+      `${FIXTURE_ROOT}/compensated_reference/sample_Bmem_purity_small_COMPENSATED.fcs`,
+    );
+    const sample = new Sample(raw);
+    const originalReferences = sample.channels.map((_, index) =>
+      sample.originalColumnData(index)
+    );
+    const originalValues = originalReferences.map((column) => Array.from(column));
+
+    sample.setCompensation(true);
+
+    expect(sample.activeLayer).toBe("compensated");
+    expect(sample.dataRevision).toBe(1);
+    for (let index = 0; index < sample.channels.length; index++) {
+      const pnn = sample.channels[index].pnn;
+      expect(
+        firstMismatch(
+          sample.compensatedColumnData(index),
+          namedColumn(reference.channels, reference.columns, pnn),
+        ),
+        `${pnn} differs at the Sample assay-layer boundary`,
+      ).toBeNull();
+      expect(sample.originalColumnData(index)).toBe(originalReferences[index]);
+      expect(Array.from(sample.originalColumnData(index))).toEqual(originalValues[index]);
+    }
   });
 });

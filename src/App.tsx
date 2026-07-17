@@ -680,6 +680,7 @@ export default function App() {
   function changeInstrumentMode(mode: "auto" | "flow" | "cytof") {
     if (!sample) return;
     sample.setInstrumentMode(mode);
+    setCompensationOn(sample.compensationEnabled);
     setInstrumentMode(mode);
     setXRange(null);
     setYRange(null);
