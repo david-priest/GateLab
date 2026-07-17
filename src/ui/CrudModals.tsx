@@ -7,6 +7,7 @@ import { wouldCreateCycle, type GateRef } from "../engine/models";
 import { populationTreeOrder } from "../engine/populations";
 import type { FcsExportAssay } from "../engine/fcsExport";
 import { analyzeGatingMLQuadrantOmissions, type GatingMLFormat } from "../engine/gatingmlExport";
+import type { GatingImportMode } from "../engine/gatingMerge";
 
 function ModalShell({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -16,6 +17,85 @@ function ModalShell({ title, children }: { title: string; children: React.ReactN
         {children}
       </div>
     </div>
+  );
+}
+
+/** Gating-ML import summary and explicit replace/merge strategy choice. */
+export function GatingMlImportModal({
+  nGates,
+  nPopulations,
+  sourceLabel,
+  currentRootName,
+  hasExistingStrategy,
+  mergeBlockedReason,
+  compensationNote,
+  compensationNeedsConfirmation,
+  onCancel,
+  onImport,
+}: {
+  nGates: number;
+  nPopulations: number;
+  sourceLabel: string;
+  currentRootName: string;
+  hasExistingStrategy: boolean;
+  mergeBlockedReason: string | null;
+  compensationNote: string | null;
+  compensationNeedsConfirmation: boolean;
+  onCancel: () => void;
+  onImport: (mode: GatingImportMode) => void;
+}) {
+  const [mode, setMode] = useState<GatingImportMode>(
+    hasExistingStrategy && !mergeBlockedReason ? "merge" : "replace",
+  );
+
+  return (
+    <ModalShell title="Import GatingML">
+      <div className="gl-modal-note">
+        Parsed {nGates} gate{nGates === 1 ? "" : "s"} and {nPopulations} population{nPopulations === 1 ? "" : "s"} from {sourceLabel}.
+      </div>
+      {compensationNote && (
+        <div className={compensationNeedsConfirmation ? "gl-modal-warning" : "gl-modal-note"} role={compensationNeedsConfirmation ? "alert" : undefined}>
+          {compensationNote}
+        </div>
+      )}
+      <div className="gl-modal-field">
+        <span>How should the imported strategy be applied?</span>
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 7, color: "var(--text)" }}>
+          <input
+            type="radio"
+            name="gatingml-import-mode"
+            value="merge"
+            checked={mode === "merge"}
+            disabled={mergeBlockedReason !== null}
+            onChange={() => setMode("merge")}
+          />
+          <span>
+            <strong>Merge with current strategy{hasExistingStrategy ? " (recommended)" : ""}</strong><br />
+            <span className="gl-modal-note">
+              Keep current gates and populations; add imported top-level populations beneath {currentRootName}. Scientific labels are preserved.
+            </span>
+          </span>
+        </label>
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 7, color: "var(--text)" }}>
+          <input
+            type="radio"
+            name="gatingml-import-mode"
+            value="replace"
+            checked={mode === "replace"}
+            onChange={() => setMode("replace")}
+          />
+          <span>
+            <strong>Replace current strategy</strong><br />
+            <span className="gl-modal-note">Remove the current gates and populations and use the imported hierarchy.</span>
+          </span>
+        </label>
+      </div>
+      {mergeBlockedReason && <div className="gl-modal-warning" role="alert">{mergeBlockedReason}</div>}
+      <div className="gl-modal-actions">
+        <button className="gl-btn-ghost" onClick={onCancel}>Cancel</button>
+        <button className="gl-btn" onClick={() => onImport(mode)}>Import</button>
+      </div>
+    </ModalShell>
   );
 }
 
