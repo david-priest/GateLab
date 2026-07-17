@@ -53,6 +53,12 @@ export interface SampleAssayBinding {
   readonly compensatedLayer: PersistedCompensatedLayerBinding | null;
 }
 
+export interface SampleAssayBindingValidationContext {
+  readonly sampleChannels?: readonly SamplePnnChannel[];
+  readonly instrumentKind?: "flow" | "cytof";
+  readonly expectedCytofCofactor?: number;
+}
+
 export type WorkspaceCompensationValidationCode =
   | "invalid-compensation-state"
   | "unsupported-compensation-schema"
@@ -450,11 +456,7 @@ function canonicalChannelBindings(
 export function validateSampleAssayBinding(
   untrusted: unknown,
   compensation: ValidatedWorkspaceCompensationState,
-  context: {
-    readonly sampleChannels?: readonly SamplePnnChannel[];
-    readonly instrumentKind?: "flow" | "cytof";
-    readonly expectedCytofCofactor?: number;
-  } = {},
+  context: SampleAssayBindingValidationContext = {},
 ): SampleAssayBinding {
   if (!isRecord(untrusted)) {
     invalid("invalid-assay-binding", "sample assay binding must be an object.");

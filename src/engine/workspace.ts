@@ -176,6 +176,14 @@ export function validateWorkspace(ws: WorkspaceFile): true {
         (typeof sample.cytofCofactor !== "number" || !Number.isFinite(sample.cytofCofactor) || sample.cytofCofactor <= 0)) {
       invalidWorkspace(`sample ${i + 1} has an invalid CyTOF cofactor.`);
     }
+    if (
+      sample.instrumentMode !== undefined &&
+      sample.instrumentMode !== "auto" &&
+      sample.instrumentMode !== "flow" &&
+      sample.instrumentMode !== "cytof"
+    ) {
+      invalidWorkspace(`sample ${i + 1} has an invalid instrument mode.`);
+    }
   });
   if (!Number.isInteger(ws.activeSample) || ws.activeSample < 0 || ws.activeSample >= ws.samples.length) {
     invalidWorkspace("activeSample is outside the sample list.");
@@ -368,11 +376,21 @@ export function packWorkspaceForStorage(
     : packWorkspaceReference(ws);
 }
 
-/** Migrate a parsed workspace to the current (v2, multi-sample) shape. */
-function migrate(raw: unknown): WorkspaceFile {
+/**
+ * Migrate only the explicitly supported v1/v2 formats to the live v2 model.
+ * A samples-shaped future workspace must never be mistaken for current state.
+ */
+export function migrateWorkspaceToV2(raw: unknown): WorkspaceFile {
+  if (!isRecord(raw) || raw.format !== WORKSPACE_FORMAT) {
+    throw new Error("Unrecognized workspace format.");
+  }
   const r = raw as Record<string, unknown>;
-  if (r?.format !== WORKSPACE_FORMAT) throw new Error("Unrecognized workspace format.");
-  if (Array.isArray(r.samples)) return raw as WorkspaceFile; // already v2
+  if (r.version === 2) return raw as unknown as WorkspaceFile;
+  if (r.version !== 1) {
+    throw new Error(
+      `Unsupported GateLab workspace version '${String(r.version)}'; this app can open versions 1 and 2.`,
+    );
+  }
   // v1 (single sample) → v2
   const s1 = (r.sample ?? {}) as { fileName?: string; dataPath?: string };
   const scales = (r.scales ?? {}) as { logicleW?: Record<string, number>; globalScales?: Record<string, [number, number]> };
@@ -417,7 +435,7 @@ export function readWorkspaceBytes(bytes: Uint8Array): {
     }
     const raw = files["workspace.json"];
     if (!raw) throw new Error("Not a GateLab workspace: workspace.json is missing.");
-    const ws = migrate(parseJson(strFromU8(raw)));
+    const ws = migrateWorkspaceToV2(parseJson(strFromU8(raw)));
     validateWorkspace(ws);
     const fcsByPath: Record<string, Uint8Array> = {};
     const missing: string[] = [];
@@ -430,7 +448,7 @@ export function readWorkspaceBytes(bytes: Uint8Array): {
     }
     return { ws, fcsByPath, storage: "bundle" };
   }
-  const ws = migrate(parseJson(strFromU8(bytes)));
+  const ws = migrateWorkspaceToV2(parseJson(strFromU8(bytes)));
   validateWorkspace(ws);
   return { ws, fcsByPath: null, storage: "reference" };
 }
