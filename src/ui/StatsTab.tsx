@@ -22,6 +22,8 @@ interface Props {
   state: CoreState;
   derived: Derived; // the active sample's derived (reused to avoid recomputing it)
   defaultChannels: string[];
+  /** Aggregate Sample revision snapshot; includes inactive samples used by compare/view modes. */
+  dataRevisionKey: string;
 }
 
 const BASE_STATS: { key: StatType; label: string }[] = [
@@ -37,7 +39,7 @@ const COMPARE_METRICS: { key: "count" | "pct_parent" | "pct_total"; label: strin
   { key: "pct_total", label: "% Total" },
 ];
 
-export function StatsTab({ samples, activeSampleId, state, derived, defaultChannels }: Props) {
+export function StatsTab({ samples, activeSampleId, state, derived, defaultChannels, dataRevisionKey }: Props) {
   const [viewSampleId, setViewSampleId] = useState<string>(() => activeSampleId ?? samples[0]?.id ?? "");
   const [statTypes, setStatTypes] = usePersistedTabState<Set<StatType>>(
     "stats.statTypes",
@@ -85,7 +87,7 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
       valueSpace,
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isCompare, viewEntry, activeSampleId, derived, state.populations, state.gate_version, root, channels, statTypes, valueSpace, anyMfi]);
+  }, [isCompare, viewEntry, activeSampleId, derived, state.populations, state.gate_version, root, channels, statTypes, valueSpace, anyMfi, dataRevisionKey]);
 
   // All-samples compare table: rows = populations, columns = samples, cell = one metric.
   const compare = useMemo(() => {
@@ -105,7 +107,7 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
     }));
     return { sampleNames: perSample.map((p) => p.name), rows };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isCompare, samples, activeSampleId, derived, state.populations, state.gate_version, compareMetric]);
+  }, [isCompare, samples, activeSampleId, derived, state.populations, state.gate_version, compareMetric, dataRevisionKey]);
 
   const toggleStat = (k: StatType) =>
     setStatTypes((prev) => {

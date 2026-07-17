@@ -5,13 +5,14 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const plot = vi.hoisted(() => ({
-  render: vi.fn((_payload: Record<string, unknown>, _mode?: string) => {
+  render: vi.fn((_payload: Record<string, unknown>, _mode?: string): boolean => {
     const container = document.getElementById("cytof-plot-container");
-    if (!container || container.querySelector("canvas")) return;
+    if (!container || container.querySelector("canvas")) return true;
     const canvas = document.createElement("canvas");
     canvas.width = 640;
     canvas.height = 480;
     container.appendChild(canvas);
+    return true;
   }),
   setMode: vi.fn(),
   clear: vi.fn(),
@@ -82,6 +83,7 @@ beforeEach(() => {
   vi.stubGlobal("cancelAnimationFrame", (id: number) => window.clearTimeout(id));
   plot.render.mockClear();
   plot.setMode.mockClear();
+  plot.clear.mockClear();
   plot.clearPendingEdit.mockClear();
 });
 
@@ -277,6 +279,188 @@ describe("GatingPlot render lifecycle", () => {
     expect(plot.clearPendingEdit.mock.invocationCallOrder[0]).toBeLessThan(
       plot.render.mock.invocationCallOrder.at(-1)!,
     );
+  });
+
+  it("rejects events from the previously painted interaction context until the new token is painted", () => {
+    const item = mountPlot();
+    const payload = { points: [1] };
+    const onNewGate = vi.fn();
+    const onGateEdit = vi.fn();
+    const onQuadrantMove = vi.fn();
+    const onGateSelect = vi.fn();
+    const onAxisLabelClick = vi.fn();
+    const onGateLabelMove = vi.fn();
+    const renderWithToken = (interactionToken: string) => (
+      <GatingPlot
+        payload={payload}
+        interactionToken={interactionToken}
+        onNewGate={onNewGate}
+        onGateEdit={onGateEdit}
+        onQuadrantMove={onQuadrantMove}
+        onGateSelect={onGateSelect}
+        onAxisLabelClick={onAxisLabelClick}
+        onGateLabelMove={onGateLabelMove}
+      />
+    );
+    const newGate = {
+      gate_type: "rectangle",
+      vertices: [[1, 1], [3, 3]],
+      x_channel: "X",
+      y_channel: "Y",
+    };
+    const gateEdit = {
+      gate_id: "gate-1",
+      vertices: [[5, 4], [7, 6]],
+      seq: 91,
+    };
+
+    act(() => item.root.render(renderWithToken("sample-a:revision-1")));
+    act(() => plotBus.emit("new_gate", newGate));
+    expect(onNewGate).not.toHaveBeenCalled();
+    flush();
+    expect(plot.render).toHaveBeenCalled();
+    plot.render.mockClear();
+    plot.clearPendingEdit.mockClear();
+
+    // React now describes context B, but the rAF paint has not run: the canvas still shows A.
+    // Keeping the payload object stable also proves that the token itself schedules the repaint.
+    act(() => item.root.render(renderWithToken("sample-b:revision-2")));
+    act(() => {
+      plotBus.emit("new_gate", newGate);
+      plotBus.emit("gate_edit", gateEdit);
+      plotBus.emit("gate_quadrant_move", { gate_id: "quadrant-1", center: [8, 9] });
+      plotBus.emit("gate_select", "gate-1");
+      plotBus.emit("axis_label_click", { axis: "x", selected: "CD19" });
+      plotBus.emit("gate_label_move", { gate_id: "gate-1", label_offset: [4, 5] });
+    });
+
+    expect(onNewGate).not.toHaveBeenCalled();
+    expect(onGateEdit).not.toHaveBeenCalled();
+    expect(onQuadrantMove).not.toHaveBeenCalled();
+    expect(onGateSelect).not.toHaveBeenCalled();
+    expect(onAxisLabelClick).not.toHaveBeenCalled();
+    expect(onGateLabelMove).not.toHaveBeenCalled();
+    expect(plot.clearPendingEdit).toHaveBeenCalledTimes(1);
+    expect(plot.clearPendingEdit).toHaveBeenCalledWith("gate-1", 91);
+    expect(plot.render).not.toHaveBeenCalled();
+
+    flush();
+    expect(plot.render).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      plotBus.emit("new_gate", newGate);
+      plotBus.emit("gate_edit", gateEdit);
+      plotBus.emit("gate_quadrant_move", { gate_id: "quadrant-1", center: [8, 9] });
+      plotBus.emit("gate_select", "gate-1");
+      plotBus.emit("axis_label_click", { axis: "x", selected: "CD19" });
+      plotBus.emit("gate_label_move", { gate_id: "gate-1", label_offset: [4, 5] });
+    });
+
+    expect(onNewGate).toHaveBeenCalledTimes(1);
+    expect(onGateEdit).toHaveBeenCalledTimes(1);
+    expect(onQuadrantMove).toHaveBeenCalledTimes(1);
+    expect(onGateSelect).toHaveBeenCalledTimes(1);
+    expect(onAxisLabelClick).toHaveBeenCalledTimes(1);
+    expect(onGateLabelMove).toHaveBeenCalledTimes(1);
+    expect(plot.clearPendingEdit).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not mark a deferred render as the painted interaction context", () => {
+    const item = mountPlot();
+    const payload = { points: [1] };
+    const onNewGate = vi.fn();
+    const renderWithToken = (interactionToken: string) => (
+      <GatingPlot
+        payload={payload}
+        interactionToken={interactionToken}
+        onNewGate={onNewGate}
+      />
+    );
+    const newGate = {
+      gate_type: "rectangle" as const,
+      vertices: [[1, 1], [3, 3]] as [number, number][],
+      x_channel: "X",
+      y_channel: "Y",
+    };
+
+    act(() => item.root.render(renderWithToken("sample-a")));
+    flush();
+    plot.render.mockClear();
+
+    // Mirrors cytof_plot.js returning without painting because a D3 drag is active.
+    plot.render.mockImplementationOnce(() => false);
+    act(() => item.root.render(renderWithToken("sample-b")));
+    flush();
+    expect(plot.render).toHaveBeenCalledTimes(1);
+
+    act(() => plotBus.emit("new_gate", newGate));
+    expect(onNewGate).not.toHaveBeenCalled();
+
+    // The wrapper retries; only the successful paint opens the new interaction context.
+    flush(120);
+    expect(plot.render).toHaveBeenCalledTimes(2);
+    act(() => plotBus.emit("new_gate", newGate));
+    expect(onNewGate).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears a pending gate edit before painting a different interaction context", () => {
+    const item = mountPlot();
+    const original: [number, number][] = [[1, 1], [3, 1], [2, 3]];
+    const moved: [number, number][] = [[5, 4], [7, 4], [6, 6]];
+    const onGateEdit = vi.fn();
+    const renderContext = (interactionToken: string, vertices: [number, number][]) => (
+      <GatingPlot
+        payload={{ points: [1], gates: [{ gate_id: "gate-1", vertices }] }}
+        interactionToken={interactionToken}
+        onGateEdit={onGateEdit}
+      />
+    );
+
+    act(() => item.root.render(renderContext("sample-a:original", original)));
+    flush();
+    plot.render.mockClear();
+    plot.clearPendingEdit.mockClear();
+
+    act(() => plotBus.emit("gate_edit", {
+      gate_id: "gate-1",
+      vertices: moved,
+      seq: 108,
+    }));
+    expect(onGateEdit).toHaveBeenCalledTimes(1);
+    expect(plot.clearPendingEdit).not.toHaveBeenCalled();
+
+    // Context B reuses the gate id but its payload cannot acknowledge A-space vertices.
+    act(() => item.root.render(renderContext("sample-b:compensated", original)));
+    flush();
+
+    expect(plot.clearPendingEdit).toHaveBeenCalledTimes(1);
+    expect(plot.clearPendingEdit).toHaveBeenCalledWith("gate-1", 108);
+    expect(plot.clearPendingEdit.mock.invocationCallOrder[0]).toBeLessThan(
+      plot.render.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("clears singleton renderer state when unmounted with a pending gate edit", () => {
+    const item = mountPlot();
+    const vertices: [number, number][] = [[1, 1], [3, 1], [2, 3]];
+    act(() => item.root.render(
+      <GatingPlot
+        payload={{ gates: [{ gate_id: "gate-1", vertices }] }}
+        interactionToken="workspace-a"
+        onGateEdit={() => undefined}
+      />,
+    ));
+    flush();
+    plot.clear.mockClear();
+
+    act(() => plotBus.emit("gate_edit", {
+      gate_id: "gate-1",
+      vertices: [[5, 4], [7, 4], [6, 6]],
+      seq: 109,
+    }));
+    act(() => item.root.render(<></>));
+
+    expect(plot.clear).toHaveBeenCalledTimes(1);
   });
 
   it("routes an axis-picker update through the latest sample callback", () => {

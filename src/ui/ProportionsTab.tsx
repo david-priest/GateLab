@@ -5,7 +5,7 @@
 // Facet come from per-sample metadata (or the sample name). Rendered as a custom SVG stacked bar
 // (composition per Group) or boxplot (per-unit fraction per Category, dodged by Group).
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { usePersistedTabState } from "./tabState";
 import { recompute, type CoreState, type Derived } from "../store";
 import type { Sample } from "../engine/sample";
@@ -25,6 +25,8 @@ interface Props {
   metadata: Record<string, Record<string, string>>;
   metadataColumns: MetadataColumn[];
   divisionProfiles: Record<string, DivisionProfileLike>;
+  /** Aggregate Sample revision snapshot; every sample contributes to the model. */
+  dataRevisionKey: string;
 }
 
 const SAMPLE_OPT = "__sample__";
@@ -35,10 +37,14 @@ function parseFactor(v: string): PerSampleFactor | null {
   return { kind: "metadata", field: v };
 }
 
-export function ProportionsTab({ samples, activeSampleId, state, derived, metadata, metadataColumns, divisionProfiles }: Props) {
+export function ProportionsTab({ samples, activeSampleId, state, derived, metadata, metadataColumns, divisionProfiles, dataRevisionKey }: Props) {
   const rootId = state.root_population_id ?? "";
   const order = populationTreeOrder(state.populations, rootId).filter(({ popId }) => popId !== rootId);
-  const hasDivision = samples.some((e) => divisionProfiles[e.id]);
+  const divisionSamples = useMemo(
+    () => samples.filter((entry) => divisionProfiles[entry.id]),
+    [samples, divisionProfiles, dataRevisionKey],
+  );
+  const hasDivision = divisionSamples.length > 0;
 
   const [categoryKind, setCategoryKind] = usePersistedTabState<"population" | "division">("prop.categoryKind", "population");
   const [plotType, setPlotType] = usePersistedTabState<"stacked" | "box">("prop.plotType", "stacked");
@@ -53,6 +59,10 @@ export function ProportionsTab({ samples, activeSampleId, state, derived, metada
   const [fontTick, setFontTick] = usePersistedTabState("prop.fontTick", 9);
   const [fontAxis, setFontAxis] = usePersistedTabState("prop.fontAxis", 10);
   const [fontLegend, setFontLegend] = usePersistedTabState("prop.fontLegend", 11);
+
+  useEffect(() => {
+    if (categoryKind === "division" && !hasDivision) setCategoryKind("population");
+  }, [categoryKind, hasDivision, setCategoryKind]);
 
   const derivedFor = (id: string): Derived => {
     const e = samples.find((s) => s.id === id);
@@ -74,9 +84,9 @@ export function ProportionsTab({ samples, activeSampleId, state, derived, metada
     };
 
     if (categoryKind === "division") {
-      const maxN = Math.max(0, ...samples.filter((e) => divisionProfiles[e.id]).map((e) => divisionProfiles[e.id].n));
+      const maxN = Math.max(0, ...divisionSamples.map((e) => divisionProfiles[e.id].n));
       const catLevels = divisionLevels(maxN);
-      const perSample: SampleComposition[] = samples.map((e) => ({
+      const perSample: SampleComposition[] = divisionSamples.map((e) => ({
         ...scalar(e),
         catCounts: divisionCountsFor(e.sample, divisionProfiles[e.id], maxN),
       }));
@@ -92,7 +102,7 @@ export function ProportionsTab({ samples, activeSampleId, state, derived, metada
     // `levels` (popId + depth) lets the chart nest daughter populations inside their parents.
     return { catLevels, perSample, hasFacet: !!facetSpec, levels: levels.map((l) => ({ popId: l.popId, depth: l.depth })) };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [samples, categoryKind, divisionProfiles, state.populations, state.gates, state.gate_version, rootId, selectedPops, includeUngated, groupSel, unitSel, facetSel, metadata, derived]);
+  }, [samples, divisionSamples, categoryKind, divisionProfiles, state.populations, state.gates, state.gate_version, rootId, selectedPops, includeUngated, groupSel, unitSel, facetSel, metadata, derived, dataRevisionKey]);
 
   const factorOptions = (
     <>
@@ -167,6 +177,11 @@ export function ProportionsTab({ samples, activeSampleId, state, derived, metada
 
       <div className="gl-prop-body" style={{ display: "flex", gap: 12, flex: 1, minHeight: 0 }}>
         <div className="gl-prop-chart-scroll" style={{ flex: 1, minWidth: 0 }}>
+          {categoryKind === "division" && divisionSamples.length < samples.length && (
+            <div className="gl-hint gl-panel-hint" role="status">
+              {samples.length - divisionSamples.length} sample{samples.length - divisionSamples.length === 1 ? "" : "s"} without a compatible division profile {samples.length - divisionSamples.length === 1 ? "is" : "are"} excluded.
+            </div>
+          )}
           {samples.length === 0 || nCat === 0 ? (
             <div className="gl-tab-empty">Select at least one population, and load samples with metadata.</div>
           ) : (

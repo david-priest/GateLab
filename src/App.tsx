@@ -81,6 +81,8 @@ import { StrategyTab, type StrategyConfig } from "./ui/StrategyTab";
 import { IllustrationTab } from "./ui/IllustrationTab";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
 import { NavigateIcon, RectIcon, PolyIcon, QuadIcon } from "./ui/icons";
+import { useSampleDataRevisionKey } from "./ui/useSampleDataRevisions";
+import { useContextualGlobalScales } from "./ui/useContextualGlobalScales";
 
 const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
 // A .gatelab file is either a JSON reference workspace or a ZIP bundle. Supplying the
@@ -106,6 +108,13 @@ interface PendingGatingMLImport {
   sampleId: string;
   mergeBlockedReason: string | null;
   compensationNote: string | null;
+}
+
+interface PendingNewGate {
+  gate: NewGate;
+  sampleId: string;
+  dataRevision: number;
+  coordinateBindingKeys: readonly [string, string];
 }
 
 /** Save data to a file the user downloads (local blob; user-initiated). */
@@ -166,31 +175,62 @@ const linkBtnStyle: React.CSSProperties = {
   background: "none", border: "none", padding: 0, cursor: "pointer", textDecoration: "underline", color: "inherit", font: "inherit",
 };
 
+function plotInteractionTokenFor(
+  sample: Sample | null,
+  sampleId: string | null,
+  xIdx: number,
+  yIdx: number,
+  gateVersion: number,
+  activePopulationId: string | null,
+  panelVersion: number,
+): string | null {
+  if (!sample || !sampleId) return null;
+  const xChannel = sample.channels[xIdx];
+  const yChannel = sample.channels[yIdx];
+  if (!xChannel || !yChannel) return null;
+  return JSON.stringify([
+    sampleId,
+    sample.dataRevision,
+    sample.displayTransformContextKey,
+    xChannel.key,
+    yChannel.key,
+    sample.displayCoordinateBindingKey(xChannel.key),
+    sample.displayCoordinateBindingKey(yChannel.key),
+    gateVersion,
+    activePopulationId,
+    panelVersion,
+  ]);
+}
+
 export default function App() {
   // Multiple samples share ONE gating tree (FlowJo-style): add/remove freely, one is active.
   const [samples, setSamples] = useState<SampleEntry[]>([]);
+  const sampleDataRevisionKey = useSampleDataRevisionKey(samples);
   const [activeSampleId, setActiveSampleId] = useState<string | null>(null);
   // Global sample filter (R's rv$sample_mask): samples excluded from the multi-sample analysis
   // tabs (Statistics / Proportions). New samples are included by default; default = all included.
   const [excludedSampleIds, setExcludedSampleIds] = useState<Set<string>>(new Set());
   const includedSamples = useMemo(
     () => samples.filter((s) => !excludedSampleIds.has(s.id)),
-    [samples, excludedSampleIds],
+    [samples, excludedSampleIds, sampleDataRevisionKey],
   );
   const activeEntry = samples.find((s) => s.id === activeSampleId) ?? null;
   const sample = activeEntry?.sample ?? null;
+  const activeDataRevision = sample?.dataRevision ?? 0;
+  const compensationOn = sample?.compensationEnabled ?? false;
   const fileName = activeEntry?.name ?? "";
   const [wsHandle, setWsHandle] = useState<FileSystemFileHandle | null>(null);
   const [wsName, setWsName] = useState("");
   const [wsStorage, setWsStorage] = useState<WorkspaceStorage>("reference");
   const [workspaceId, setWorkspaceId] = useState(makeWorkspaceId);
+  const [scaleCacheEpoch, setScaleCacheEpoch] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [xIdx, setXIdx] = useState(0);
   const [yIdx, setYIdx] = useState(1);
   const [mode, setMode] = useState<DisplayMode>("pseudocolor");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState<NewGate | null>(null);
+  const [pending, setPending] = useState<PendingNewGate | null>(null);
   const [drawMode, setDrawMode] = useState<DrawMode>("navigate");
   const [scalesVersion, setScalesVersion] = useState(0);
   const [panelVersion, setPanelVersion] = useState(0); // bumps when a channel display label changes
@@ -216,14 +256,16 @@ export default function App() {
   const [pendingGatingMlImport, setPendingGatingMlImport] = useState<PendingGatingMLImport | null>(null);
   const [gatingMlExportOpen, setGatingMlExportOpen] = useState(false);
   const [contourThreshold, setContourThreshold] = useState(5); // outer contour % of peak
-  const [compensationOn, setCompensationOn] = useState(false);
   const [instrumentMode, setInstrumentMode] = useState<"auto" | "flow" | "cytof">("auto"); // active sample's instrument override
   // Colour-by-factor overlay on the main plot (population partition / division level).
   const [overlayBy, setOverlayBy] = useState<"none" | "population" | "division">("none");
   const [overlayPalette, setOverlayPalette] = useState<PaletteName>("default");
   const [overlaySamples, setOverlaySamples] = useState(false); // overlay all loaded samples on the plot
-  // Global per-channel axis ranges (Scales tab) — used when that channel is displayed.
-  const [globalScales, setGlobalScales] = useState<Record<string, [number, number]>>({});
+  const activeDisplayContextKey = sample?.displayTransformContextKey ?? null;
+  // Fixed ranges are retained per exact assay/transform context rather than destroyed or reused
+  // in incompatible coordinates when the active layer changes.
+  const { globalScales, setGlobalScales, preserveScalesForContext } =
+    useContextualGlobalScales(activeDisplayContextKey, scaleCacheEpoch);
   // Per-sample metadata (Metadata tab): keyed by SampleEntry.id → { field: value }; ordered columns.
   const [metadata, setMetadata] = useState<Record<string, Record<string, string>>>({});
   const [metadataColumns, setMetadataColumns] = useState<MetadataColumn[]>([]);
@@ -232,14 +274,51 @@ export default function App() {
   const [populationMetaColumns, setPopulationMetaColumns] = useState<MetadataColumn[]>([]);
   // Per-sample division profiles (Division tab) → per-event Div0..DivN level, keyed by SampleEntry.id.
   const [divisionProfiles, setDivisionProfiles] = useState<Record<string, DivisionProfile>>({});
+  const compatibleDivisionProfiles = useMemo(
+    () => Object.fromEntries(Object.entries(divisionProfiles).filter(([sampleId, profile]) => {
+      const entry = samples.find((candidate) => candidate.id === sampleId);
+      if (!entry) return false;
+      try {
+        return profile.coordinateBindingKey === entry.sample.displayCoordinateBindingKey(profile.channelKey);
+      } catch {
+        return false;
+      }
+    })),
+    [divisionProfiles, samples, sampleDataRevisionKey, scalesVersion, instrumentMode],
+  );
   const bumpScales = () => setScalesVersion((v) => v + 1);
   const plotAreaRef = useRef<HTMLDivElement>(null);
   const pzRef = useRef({ sample, xIdx, yIdx, xRange, yRange, drawMode, mode, globalScales });
   pzRef.current = { sample, xIdx, yIdx, xRange, yRange, drawMode, mode, globalScales };
 
   // Reset the view range when the sample or displayed channel changes (→ auto range).
-  useEffect(() => setXRange(null), [sample, xIdx]);
-  useEffect(() => setYRange(null), [sample, yIdx]);
+  useEffect(() => setXRange(null), [sample, xIdx, activeDataRevision]);
+  useEffect(() => setYRange(null), [sample, yIdx, activeDataRevision]);
+
+  // Drawn vertices are display-space coordinates. Never convert them after the assay layer
+  // changes, because that would store a gate in a different coordinate system than the user drew.
+  useEffect(() => {
+    let coordinatesMatch = false;
+    if (pending && sample && pending.sampleId === activeSampleId) {
+      try {
+        coordinatesMatch =
+          pending.coordinateBindingKeys[0] === sample.displayCoordinateBindingKey(pending.gate.x_channel) &&
+          pending.coordinateBindingKeys[1] === sample.displayCoordinateBindingKey(pending.gate.y_channel);
+      } catch {
+        coordinatesMatch = false;
+      }
+    }
+    if (
+      pending &&
+      (pending.sampleId !== activeSampleId ||
+        pending.dataRevision !== activeDataRevision ||
+        !sample ||
+        !coordinatesMatch)
+    ) {
+      setPending(null);
+      setError("The data layer or display transform changed while the gate dialog was open. Please draw the gate again.");
+    }
+  }, [pending, sample, activeSampleId, activeDataRevision, instrumentMode, scalesVersion]);
   const skipDirtyRef = useRef(true);
 
   // Navigate-mode plot interaction, writing straight into the X/Y ranges so the Min/Max
@@ -394,7 +473,7 @@ export default function App() {
     }
     setDirty(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.gate_version, scalesVersion, compensationOn, instrumentMode, globalScales, mode, maxEvents, contourThreshold, xIdx, yIdx, gatingFontSizes]);
+  }, [state.gate_version, scalesVersion, sampleDataRevisionKey, instrumentMode, globalScales, mode, maxEvents, contourThreshold, xIdx, yIdx, gatingFontSizes]);
 
   // Autosave lightweight reference workspaces only. Repacking every embedded FCS on each
   // edit would stall large bundled workspaces; bundles retain their format via manual Save.
@@ -519,6 +598,7 @@ export default function App() {
     try {
       const res = pendingImport.result;
       const comp = pendingImport.compensation;
+      const displayContextBeforeImport = sample.displayTransformContextKey;
       const existingStrategy = state.root_population_id !== null && hasGatingStrategy({
         gates: state.gates,
         populations: state.populations,
@@ -543,7 +623,6 @@ export default function App() {
         if (sample.compensationEnabled !== comp.target) {
           throw new Error("The FCS spillover matrix could not be applied, so the gating strategy was not imported.");
         }
-        setCompensationOn(sample.compensationEnabled);
         setXRange(null);
         setYRange(null);
       }
@@ -553,7 +632,12 @@ export default function App() {
       const restoredScales = restoreGatingMLScaleState(sample, res.scales, res.cytof_cofactor);
       const restoredRanges = Object.keys(restoredScales.ranges).length;
       if (restoredRanges) {
-        setGlobalScales((current) => ({ ...current, ...restoredScales.ranges }));
+        const targetContext = sample.displayTransformContextKey;
+        const contextChanged = targetContext !== displayContextBeforeImport;
+        if (contextChanged) preserveScalesForContext(targetContext);
+        setGlobalScales((current) => contextChanged
+          ? { ...restoredScales.ranges }
+          : { ...current, ...restoredScales.ranges });
       }
       if (restoredScales.transformsChanged || restoredRanges) {
         setXRange(null);
@@ -669,7 +753,6 @@ export default function App() {
   function toggleCompensation(on: boolean) {
     if (!sample) return;
     sample.setCompensation(on);
-    setCompensationOn(sample.compensationEnabled); // stays false if the matrix is singular
     setXRange(null); // compensated display values changed → re-auto-range
     setYRange(null);
   }
@@ -680,7 +763,6 @@ export default function App() {
   function changeInstrumentMode(mode: "auto" | "flow" | "cytof") {
     if (!sample) return;
     sample.setInstrumentMode(mode);
-    setCompensationOn(sample.compensationEnabled);
     setInstrumentMode(mode);
     setXRange(null);
     setYRange(null);
@@ -878,6 +960,8 @@ export default function App() {
     if (!entry) return null;
     if (samples.length === 0) {
       setWorkspaceId(makeWorkspaceId());
+      setScaleCacheEpoch((epoch) => epoch + 1);
+      setGlobalScales({});
       setWsHandle(null);
       setWsName("");
       setWsStorage("reference");
@@ -891,7 +975,6 @@ export default function App() {
     setYIdx(ny);
     setXRange(null);
     setYRange(null);
-    setCompensationOn(false);
     setInstrumentMode(entry.sample.instrumentMode); // fresh sample → "auto"
     if (state.root_population_id === null) dispatch({ type: "loadSample", nEvents: entry.sample.fcs.nEvents });
     if (handle) void rememberHandle("fcs:" + name, handle);
@@ -921,7 +1004,6 @@ export default function App() {
     setYIdx(ny);
     setXRange(null);
     setYRange(null);
-    setCompensationOn(entry.sample.compensationEnabled);
     setInstrumentMode(entry.sample.instrumentMode);
   }
 
@@ -935,7 +1017,6 @@ export default function App() {
       skipDirtyRef.current = true;
       const na = next[0] ?? null;
       setActiveSampleId(na?.id ?? null);
-      setCompensationOn(na?.sample.compensationEnabled ?? false);
       setInstrumentMode(na?.sample.instrumentMode ?? "auto");
       if (na) {
         const [dx, dy] = na.sample.defaultChannelIndices();
@@ -1195,7 +1276,16 @@ export default function App() {
         }
         entry.sample.applyLabelOverrides(wss.labels ?? {});
         if (wss.metadata && Object.keys(wss.metadata).length) nextMetadata[entry.id] = wss.metadata;
-        if (wss.division) nextDivision[entry.id] = wss.division;
+        if (wss.division) {
+          const restoredCoordinateBinding = wss.division.coordinateBindingKey ??
+            (entry.sample.index(wss.division.channelKey) === undefined
+              ? `unavailable:${wss.division.channelKey}`
+              : entry.sample.displayCoordinateBindingKey(wss.division.channelKey));
+          nextDivision[entry.id] = {
+            ...wss.division,
+            coordinateBindingKey: restoredCoordinateBinding,
+          };
+        }
         entry.handle = fcsH;
         if (fcsH) void rememberHandle("fcs:" + wss.fileName, fcsH);
         entries.push(entry);
@@ -1213,6 +1303,8 @@ export default function App() {
       skipDirtyRef.current = true;
       const activeIdx = Math.min(Math.max(0, ws.activeSample), entries.length - 1);
       const active = entries[activeIdx].sample;
+      const targetDisplayContext = active.displayTransformContextKey;
+      preserveScalesForContext(targetDisplayContext);
       setSamples(entries);
       setActiveSampleId(entries[activeIdx].id);
       setMetadata(nextMetadata);
@@ -1224,8 +1316,8 @@ export default function App() {
       setIllustVersion((v) => v + 1); // remount IllustrationTab so it re-reads the restored config
       clearPersistedTabState(); // drop old selections so a new workspace's tabs start clean
       setDivisionProfiles(nextDivision);
+      setScaleCacheEpoch((epoch) => epoch + 1);
       setGlobalScales(ws.scales.globalScales ?? {});
-      setCompensationOn(active.compensationEnabled);
       setInstrumentMode(active.instrumentMode);
       setMode(ws.display?.mode ?? "pseudocolor");
       setMaxEvents(ws.display?.maxEvents ?? 50000);
@@ -1269,10 +1361,10 @@ export default function App() {
   // population clicks; only invalidate when the sample/gating inputs themselves change.
   const gatingDerived = useMemo(
     () => recomputeGating(sample, state),
-    // compensationOn/instrumentMode mutate the Sample's data/transforms in place (same ref),
-    // so they must explicitly invalidate the gating cache.
+    // Sample is mutable by design, so its explicit revision must invalidate gate geometry.
+    // instrumentMode remains separate because transform-only changes do not always revise data.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sample, state.gates, state.populations, state.root_population_id, state.gate_version, compensationOn, instrumentMode],
+    [sample, state.gates, state.populations, state.root_population_id, state.gate_version, activeDataRevision, instrumentMode],
   );
 
   const derived = useMemo(
@@ -1338,7 +1430,7 @@ export default function App() {
       return { colors, palette, labels: [...levels.map((l) => l.name), "ungated"] };
     }
     // division level (needs a profile on the active sample)
-    const prof = activeSampleId ? divisionProfiles[activeSampleId] : undefined;
+    const prof = activeSampleId ? compatibleDivisionProfiles[activeSampleId] : undefined;
     const idx = prof ? sample.index(prof.channelKey) : undefined;
     if (!prof || idx === undefined) return null;
     const dye = sample.displayColumn(idx);
@@ -1347,7 +1439,9 @@ export default function App() {
     for (let e = 0; e < n; e++) colors[e] = assignDivisionLevel(dye[e], prof.boundaries);
     return { colors, palette: divisionPalette(nLevels), labels: Array.from({ length: nLevels }, (_, i) => `Div${i}`) };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, overlayBy, overlayPalette, state.populations, state.root_population_id, state.gate_version, derived, activeSampleId, divisionProfiles]);
+  }, [sample, activeDataRevision, overlayBy, overlayPalette, state.populations, state.root_population_id, state.gate_version, derived, activeSampleId, compatibleDivisionProfiles]);
+
+  const overlaySampleRevisionKey = overlaySamples ? sampleDataRevisionKey : "";
 
   const payload = useMemo(() => {
     if (!sample) return null;
@@ -1413,9 +1507,10 @@ export default function App() {
       };
     }
     return base;
-    // scalesVersion/compensationOn: re-run when the display transform or comp changes.
+    // Active revision updates the current assay; the aggregate key is included only while
+    // plotting other samples so an inactive sample change does not rebuild the normal plot.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, xIdx, yIdx, mode, state.gates, state.gate_order, state.selected_gate_id, derived, scalesVersion, xRange, yRange, maxEvents, contourThreshold, compensationOn, instrumentMode, globalScales, overlaySpec, overlaySamples, samples, overlayPalette]);
+  }, [sample, activeDataRevision, xIdx, yIdx, mode, state.gates, state.gate_order, state.selected_gate_id, derived, scalesVersion, xRange, yRange, maxEvents, contourThreshold, instrumentMode, globalScales, overlaySpec, overlaySamples, overlaySampleRevisionKey, samples, overlayPalette]);
 
   // Swap channel identity keys → Panel display labels for what cytof_plot.js SHOWS (axis labels,
   // the axis-label picker, and each gate's channel match). The store keeps identity keys; incoming
@@ -1445,6 +1540,31 @@ export default function App() {
     if (!p?.color_labels?.length || !p.color_palette) return null;
     return p.color_labels.map((label, i) => ({ label, color: p.color_palette![i] ?? "#888888" }));
   }, [payload]);
+
+  const plotInteractionToken = useMemo(
+    () => plotInteractionTokenFor(
+      sample,
+      activeSampleId,
+      xIdx,
+      yIdx,
+      state.gate_version,
+      state.active_population_id,
+      panelVersion,
+    ),
+    // The explicit context/revision dependencies cover Sample's intentional mutability.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sample, activeSampleId, activeDataRevision, activeDisplayContextKey, xIdx, yIdx, state.gate_version, state.active_population_id, panelVersion, scalesVersion],
+  );
+  const plotInteractionIsCurrent = () =>
+    plotInteractionToken !== null && plotInteractionToken === plotInteractionTokenFor(
+      sample,
+      activeSampleId,
+      xIdx,
+      yIdx,
+      state.gate_version,
+      state.active_population_id,
+      panelVersion,
+    );
 
   return (
     <div className="gl-app">
@@ -1790,7 +1910,7 @@ export default function App() {
                   <select value={overlayBy} onChange={(e) => setOverlayBy(e.target.value as typeof overlayBy)}>
                     <option value="none">None</option>
                     <option value="population">Population</option>
-                    {activeSampleId && divisionProfiles[activeSampleId] && <option value="division">Division</option>}
+                    {activeSampleId && compatibleDivisionProfiles[activeSampleId] && <option value="division">Division</option>}
                   </select>
                 </label>
                 {(overlayBy !== "none" || overlaySamples) && (
@@ -1934,17 +2054,29 @@ export default function App() {
                 payload={displayed}
                 mode={drawMode}
                 visible={activeTab === "gating"}
+                interactionToken={plotInteractionToken ?? undefined}
                 fontSizes={gatingFontSizes}
                 onNewGate={(g) => {
+                  if (!plotInteractionIsCurrent()) return;
                   // cytof reports the drawn gate's channels as DISPLAY labels — translate back to
                   // identity keys so the gate stores/masks in identity space.
                   const gg = g as NewGate;
                   gg.x_channel = sample.keyForLabel(gg.x_channel);
                   gg.y_channel = sample.keyForLabel(gg.y_channel);
-                  setPending(gg);
+                  if (!activeSampleId) return;
+                  setPending({
+                    gate: gg,
+                    sampleId: activeSampleId,
+                    dataRevision: sample.dataRevision,
+                    coordinateBindingKeys: [
+                      sample.displayCoordinateBindingKey(gg.x_channel),
+                      sample.displayCoordinateBindingKey(gg.y_channel),
+                    ],
+                  });
                   setDrawMode("navigate"); // drawing done → back to navigate (like GateLabR)
                 }}
                 onGateEdit={(e) => {
+                  if (!plotInteractionIsCurrent()) return;
                   // Dragged poly/rect vertices come back in DISPLAY space on the current axes;
                   // convert to gating space via the gate's stored channel keys, then persist.
                   const g = state.gates[e.gate_id];
@@ -1956,6 +2088,7 @@ export default function App() {
                   dispatch({ type: "editGate", gateId: e.gate_id, vertices: verts });
                 }}
                 onQuadrantMove={(e) => {
+                  if (!plotInteractionIsCurrent()) return;
                   const g = state.gates[e.gate_id];
                   if (!g || g.gate_type !== "quadrant") return;
                   dispatch({
@@ -1964,16 +2097,21 @@ export default function App() {
                     center: [sample.displayToGating(g.x_channel, e.center[0]), sample.displayToGating(g.y_channel, e.center[1])],
                   });
                 }}
-                onGateSelect={(id) => uiDispatch({ type: "selectGate", gateId: id })}
+                onGateSelect={(id) => {
+                  if (!plotInteractionIsCurrent()) return;
+                  uiDispatch({ type: "selectGate", gateId: id });
+                }}
                 onAxisLabelClick={(e) => {
+                  if (!plotInteractionIsCurrent()) return;
                   const idx = sample.index(sample.keyForLabel(e.selected));
                   if (idx === undefined) return;
                   if (e.axis === "x") setXIdx(idx);
                   else setYIdx(idx);
                 }}
-                onGateLabelMove={(e) =>
-                  dispatch({ type: "moveGateLabel", gateId: e.gate_id, labelOffset: e.label_offset })
-                }
+                onGateLabelMove={(e) => {
+                  if (!plotInteractionIsCurrent()) return;
+                  dispatch({ type: "moveGateLabel", gateId: e.gate_id, labelOffset: e.label_offset });
+                }}
               />
             </div>
             {overlayLegend && (
@@ -2001,6 +2139,7 @@ export default function App() {
                 state={state}
                 derived={derived}
                 defaultChannels={[sample.channels[xIdx].key, sample.channels[yIdx].key]}
+                dataRevisionKey={sampleDataRevisionKey}
               />
             )}
             {activeTab === "proportions" && (
@@ -2011,7 +2150,8 @@ export default function App() {
                 derived={derived}
                 metadata={metadata}
                 metadataColumns={metadataColumns}
-                divisionProfiles={divisionProfiles}
+                divisionProfiles={compatibleDivisionProfiles}
+                dataRevisionKey={sampleDataRevisionKey}
               />
             )}
             {activeTab === "division" && (
@@ -2020,8 +2160,10 @@ export default function App() {
                 sample={sample}
                 sampleName={fileName}
                 derived={derived}
-                savedProfile={activeSampleId ? divisionProfiles[activeSampleId] ?? null : null}
+                savedProfile={activeSampleId ? compatibleDivisionProfiles[activeSampleId] ?? null : null}
+                profileStale={!!activeSampleId && !!divisionProfiles[activeSampleId] && !compatibleDivisionProfiles[activeSampleId]}
                 onApply={applyDivision}
+                dataRevision={activeDataRevision}
               />
             )}
             {activeTab === "metadata" && (
@@ -2056,7 +2198,7 @@ export default function App() {
               />
             )}
             {activeTab === "strategy" && (
-              <StrategyTab sample={sample} state={state} derived={derived} globalScales={globalScales} configRef={strategyConfigRef} />
+              <StrategyTab sample={sample} state={state} derived={derived} globalScales={globalScales} configRef={strategyConfigRef} dataRevision={activeDataRevision} />
             )}
             {activeTab === "illustration" && (
               <IllustrationTab
@@ -2071,6 +2213,7 @@ export default function App() {
                 presets={illustrationPresets}
                 onSavePreset={saveIllustrationPreset}
                 onDeletePreset={deleteIllustrationPreset}
+                dataRevision={activeDataRevision}
               />
             )}
             </ErrorBoundary>
@@ -2141,7 +2284,7 @@ export default function App() {
 
       {pending && sample && state.root_population_id && (
         <GateModals
-          pending={pending}
+          pending={pending.gate}
           sample={sample}
           populations={state.populations}
           activePopId={state.active_population_id}
@@ -2149,6 +2292,16 @@ export default function App() {
           nGates={Object.keys(state.gates).length}
           onCancel={() => setPending(null)}
           onConfirm={(a) => {
+            if (
+              pending.sampleId !== activeSampleId ||
+              pending.dataRevision !== sample.dataRevision ||
+              pending.coordinateBindingKeys[0] !== sample.displayCoordinateBindingKey(pending.gate.x_channel) ||
+              pending.coordinateBindingKeys[1] !== sample.displayCoordinateBindingKey(pending.gate.y_channel)
+            ) {
+              setPending(null);
+              setError("The data layer or display transform changed while the gate dialog was open. Please draw the gate again.");
+              return;
+            }
             uiDispatch(a);
             setPending(null);
           }}

@@ -11,7 +11,8 @@ import miniSrc from "../../vendor/GateLabR/inst/app/www/mini_plot.js?raw";
 import divisionSrc from "../../vendor/GateLabR/inst/app/www/division_plot.js?raw";
 
 export interface CytofD3Api {
-  render(payload: unknown, mode?: string): void;
+  /** True only when this call actually painted; false when the legacy engine deferred it. */
+  render(payload: unknown, mode?: string): boolean;
   setMode(mode: string): void;
   clear(): void;
   clearPendingEdit(gateId: string, seq?: number): void;
@@ -102,6 +103,63 @@ export function patchCytofForGateLab(src: string): string {
     );
   } else if (!out.includes("_g.select('.gate-layer').style('pointer-events'")) {
     console.warn("[GateLab] cytof draw-mode pointer patch did not match.");
+  }
+
+  // React must not accept plot interactions for a new sample/assay identity until that identity
+  // is actually visible. The legacy renderer silently queues render() while a gate drag is active,
+  // so a void return cannot distinguish a real paint from a deferred one. Give the wrapper an
+  // explicit acknowledgement without changing GateLabR's source copy.
+  const renderAckMarker = "// GateLab: report whether render() painted or deferred.";
+  if (!out.includes(renderAckMarker)) {
+    const renderAckPatches: [string, string][] = [
+      [
+        `    function render(plotData, mode) {
+        if (!plotData) return;`,
+        `    function render(plotData, mode) {
+        ${renderAckMarker}
+        if (!plotData) return false;`,
+      ],
+      [
+        "        if (!forced && _isStalePlot(plotData)) return;",
+        "        if (!forced && _isStalePlot(plotData)) return false;",
+      ],
+      [
+        `            return;
+        }
+
+        var ctnr = document.getElementById(CTNR);
+        if (!ctnr) return;`,
+        `            return false;
+        }
+
+        var ctnr = document.getElementById(CTNR);
+        if (!ctnr) return false;`,
+      ],
+      [
+        `            if (!_dragging) _drawGates(_zx(), _zy());
+            return;
+        }`,
+        `            if (!_dragging) _drawGates(_zx(), _zy());
+            return true;
+        }`,
+      ],
+      [
+        `        _redraw();
+    }
+
+    function setMode(mode) {`,
+        `        _redraw();
+        return true;
+    }
+
+    function setMode(mode) {`,
+      ],
+    ];
+    if (renderAckPatches.every(([needle]) => out.includes(needle))) {
+      for (const [needle, replacement] of renderAckPatches) out = out.replace(needle, replacement);
+    } else {
+      console.warn("[GateLab] cytof render-acknowledgement patch did not match.");
+    }
   }
 
   // Robust auto ranges intentionally leave a small tail off-scale. Keep those events visible

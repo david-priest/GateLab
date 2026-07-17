@@ -130,7 +130,7 @@ function fullSample(
     division: {
       channelKey: "A",
       boundaries: [1.5, 3.25, 7],
-      n: 4,
+      n: 3,
       colName: "A division",
     },
     ...overrides,
@@ -652,6 +652,14 @@ describe("uncompensated v3 validation", () => {
       "invalid-workspace-v3",
     );
     expect(modeError.message).toMatch(/instrument mode/i);
+
+    const badDivision = clone(migrateWorkspaceV2ToV3(workspaceV2()));
+    badDivision.samples[0].division!.boundaries = [1.5, 1.5, 7];
+    const divisionError = await expectV3Error(
+      validateWorkspaceV3(badDivision),
+      "invalid-workspace-v3",
+    );
+    expect(divisionError.message).toMatch(/division profile.*strictly increasing/i);
   });
 });
 

@@ -29,7 +29,7 @@ export interface WorkspaceSample {
   instrumentMode?: "auto" | "flow" | "cytof"; // per-sample instrument override ('auto' = detected)
   labels?: Record<string, string>; // Panel-tab channel display names, keyed by identity key
   metadata?: Record<string, string>; // per-sample metadata fields (Metadata tab)
-  division?: { channelKey: string; boundaries: number[]; n: number; colName: string }; // Division profile
+  division?: { channelKey: string; boundaries: number[]; n: number; colName: string; coordinateBindingKey?: string }; // Division profile
 }
 
 export interface WorkspaceFile {
@@ -135,6 +135,52 @@ function positiveNumericRecord(value: unknown): value is Record<string, number> 
   );
 }
 
+const DIVISION_PROFILE_KEYS = new Set([
+  "channelKey",
+  "boundaries",
+  "n",
+  "colName",
+  "coordinateBindingKey",
+]);
+
+function validateDivisionProfile(value: unknown, sampleIndex: number): void {
+  const label = `sample ${sampleIndex + 1} division profile`;
+  if (!isRecord(value)) invalidWorkspace(`${label} is not an object.`);
+  const extra = Object.keys(value).filter((key) => !DIVISION_PROFILE_KEYS.has(key));
+  if (extra.length > 0) {
+    invalidWorkspace(`${label} has unexpected fields: ${extra.join(", ")}.`);
+  }
+  if (typeof value.channelKey !== "string" || value.channelKey.trim().length === 0) {
+    invalidWorkspace(`${label} has an invalid channelKey.`);
+  }
+  if (typeof value.colName !== "string" || value.colName.trim().length === 0) {
+    invalidWorkspace(`${label} has an invalid colName.`);
+  }
+  if (!Number.isInteger(value.n) || (value.n as number) < 1 || (value.n as number) > 11) {
+    invalidWorkspace(`${label} must have an integer n from 1 to 11.`);
+  }
+  if (!Array.isArray(value.boundaries)) {
+    invalidWorkspace(`${label} boundaries must be an array.`);
+  }
+  const boundaries = value.boundaries as unknown[];
+  if (boundaries.length !== value.n) {
+    invalidWorkspace(`${label} boundary count must equal n.`);
+  }
+  for (let i = 0; i < boundaries.length; i++) {
+    if (!Object.prototype.hasOwnProperty.call(boundaries, i) ||
+        typeof boundaries[i] !== "number" || !Number.isFinite(boundaries[i])) {
+      invalidWorkspace(`${label} boundaries must be dense finite numbers.`);
+    }
+    if (i > 0 && (boundaries[i] as number) <= (boundaries[i - 1] as number)) {
+      invalidWorkspace(`${label} boundaries must be strictly increasing.`);
+    }
+  }
+  if (value.coordinateBindingKey !== undefined &&
+      (typeof value.coordinateBindingKey !== "string" || value.coordinateBindingKey.trim().length === 0)) {
+    invalidWorkspace(`${label} has an invalid coordinateBindingKey.`);
+  }
+}
+
 /**
  * Validate the persisted gating graph before it can be saved or applied.
  *
@@ -184,6 +230,7 @@ export function validateWorkspace(ws: WorkspaceFile): true {
     ) {
       invalidWorkspace(`sample ${i + 1} has an invalid instrument mode.`);
     }
+    if (sample.division !== undefined) validateDivisionProfile(sample.division, i);
   });
   if (!Number.isInteger(ws.activeSample) || ws.activeSample < 0 || ws.activeSample >= ws.samples.length) {
     invalidWorkspace("activeSample is outside the sample list.");

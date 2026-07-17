@@ -144,6 +144,102 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 describe("Sample explicit assay layers", () => {
+  it("publishes active-data and layer-status revisions separately and isolates observers", () => {
+    const sample = new Sample(flowFcs());
+    const dataRevisions: number[] = [];
+    const layerRevisions: number[] = [];
+    const throwingData = sample.subscribeDataRevision(() => {
+      throw new Error("observer failure");
+    });
+    const throwingLayer = sample.subscribeLayerRevision(() => {
+      throw new Error("observer failure");
+    });
+    const stopData = sample.subscribeDataRevision(() => dataRevisions.push(sample.dataRevision));
+    const stopLayer = sample.subscribeLayerRevision(() => layerRevisions.push(sample.layerRevision));
+
+    expect(sample.activeAssayBindingKey).toBe("original");
+    sample.installCompensatedLayer(flowLayer());
+    expect(sample.activeAssayBindingKey).toBe("original");
+    sample.setActiveLayer("compensated");
+    expect(sample.activeAssayBindingKey).toBe(`compensated:profile:${digest("a")}`);
+    sample.setActiveLayer("compensated"); // no-op
+    expect(() => sample.installCompensatedLayer({
+      metadata: flowBinding(),
+      columns: [{
+        pnn: "FL1-A",
+        fcsColumnIndex: 1,
+        values: Float32Array.from([1, 2]),
+      }],
+    })).toThrow();
+    sample.removeCompensatedLayer();
+    expect(sample.activeAssayBindingKey).toBe("original");
+
+    expect(dataRevisions).toEqual([1, 2]);
+    expect(layerRevisions).toEqual([1, 2, 3]);
+    expect(sample.dataRevision).toBe(2);
+    expect(sample.layerRevision).toBe(3);
+    stopData();
+    stopLayer();
+    throwingData();
+    throwingLayer();
+    sample.installCompensatedLayer(flowLayer());
+    expect(sample.dataRevision).toBe(2);
+    expect(sample.layerRevision).toBe(4);
+    expect(dataRevisions).toEqual([1, 2]);
+    expect(layerRevisions).toEqual([1, 2, 3]);
+  });
+
+  it("notifies after an incompatible context atomically falls back to Original", () => {
+    const sample = new Sample(cytofFcs());
+    const seen: Array<{ revision: number; layer: string; status: string }> = [];
+    sample.subscribeDataRevision(() => seen.push({
+      revision: sample.dataRevision,
+      layer: sample.activeLayer,
+      status: sample.compensatedLayerStatus().state,
+    }));
+    sample.installCompensatedLayer({
+      metadata: cytofBinding(),
+      columns: [
+        { pnn: "Y89Di", fcsColumnIndex: 1, values: Float32Array.from([5, 10, 15]) },
+        { pnn: "In113Di", fcsColumnIndex: 2, values: Float32Array.from([50, 100, 150]) },
+      ],
+    }, { activeLayer: "compensated" });
+    sample.setCytofCofactor(10);
+    sample.setCytofCofactor(10); // no-op
+
+    expect(seen).toEqual([
+      { revision: 1, layer: "compensated", status: "ready" },
+      { revision: 2, layer: "original", status: "stale" },
+    ]);
+  });
+
+  it("identifies the exact per-channel display coordinates used by annotations", () => {
+    const flow = new Sample(flowFcs());
+    const cd3 = flow.index("CD3")!;
+    const original = flow.displayCoordinateBindingKey("CD3");
+    const originalContext = flow.displayTransformContextKey;
+    flow.setLogicleW(cd3, 1.75);
+    expect(flow.displayCoordinateBindingKey("CD3")).not.toBe(original);
+    expect(flow.displayTransformContextKey).not.toBe(originalContext);
+    flow.resetLogicleW(cd3);
+    expect(flow.displayCoordinateBindingKey("CD3")).toBe(original);
+    expect(flow.displayTransformContextKey).toBe(originalContext);
+
+    flow.installCompensatedLayer(flowLayer());
+    expect(flow.displayCoordinateBindingKey("CD3")).toBe(original);
+    expect(flow.displayTransformContextKey).toBe(originalContext);
+    flow.setActiveLayer("compensated");
+    expect(flow.displayCoordinateBindingKey("CD3")).not.toBe(original);
+    expect(flow.displayTransformContextKey).not.toBe(originalContext);
+
+    const cytof = new Sample(cytofFcs());
+    const cytofOriginal = cytof.displayCoordinateBindingKey("CD45");
+    const cytofOriginalContext = cytof.displayTransformContextKey;
+    cytof.setCytofCofactor(10);
+    expect(cytof.displayCoordinateBindingKey("CD45")).not.toBe(cytofOriginal);
+    expect(cytof.displayTransformContextKey).not.toBe(cytofOriginalContext);
+  });
+
   it("starts in Original and refuses to label missing data as compensated", () => {
     const sample = new Sample(flowFcs());
     const displayBefore = sample.displayColumn(sample.index("CD3")!);
@@ -183,14 +279,40 @@ describe("Sample explicit assay layers", () => {
     expect(sample.compensatedColumnData(scatter)).toBe(sample.originalColumnData(scatter));
     expect(sample.rawColumnData(cd3)).toBe(originalCd3);
     expect(Array.from(sample.originalColumnData(cd3))).toEqual(originalBytes);
-    expect(sample.displayColumn(cd3)).not.toBe(displayBefore);
-    expect(Array.from(sample.displayColumn(cd3))).toEqual(Array.from(displayBefore));
-    expect(sample.dataRevision).toBe(1);
-    expect(spy).toHaveBeenCalledTimes(1);
+    expect(sample.displayColumn(cd3)).toBe(displayBefore);
+    expect(sample.dataRevision).toBe(0);
+    expect(sample.layerRevision).toBe(1);
+    expect(spy).not.toHaveBeenCalled();
 
     const exported = parseFcs(toArrayBuffer(exportPopulationFcs(sample, null, "compensated")));
     expect(Array.from(exported.columns[1])).toEqual([9, 18, 27, 36]);
     expect(Array.from(exported.columns[0])).toEqual(Array.from(sample.originalColumnData(scatter)));
+
+    const replacementBinding = flowBinding({
+      profileId: "flow-profile-b",
+      profileHash: digest("e"),
+      matrixHash: digest("f"),
+    });
+    sample.installCompensatedLayer({
+      metadata: replacementBinding,
+      columns: [
+        { pnn: "FL1-A", fcsColumnIndex: 1, values: Float32Array.from([8, 16, 24, 32]) },
+        { pnn: "FL2-A", fcsColumnIndex: 2, values: Float32Array.from([-2, -4, -6, -8]) },
+      ],
+    });
+    expect(sample.compensatedLayerStatus(replacementBinding).state).toBe("ready");
+    expect(Array.from(sample.compensatedColumnData(cd3))).toEqual([8, 16, 24, 32]);
+    expect(sample.displayColumn(cd3)).toBe(displayBefore);
+    expect(sample.dataRevision).toBe(0);
+    expect(sample.layerRevision).toBe(2);
+    expect(spy).not.toHaveBeenCalled();
+
+    sample.removeCompensatedLayer();
+    expect(sample.compensatedLayerStatus()).toEqual({ state: "missing" });
+    expect(sample.displayColumn(cd3)).toBe(displayBefore);
+    expect(sample.dataRevision).toBe(0);
+    expect(sample.layerRevision).toBe(3);
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it("routes every active linear/display/gating consumer through one layer switch", () => {
@@ -213,11 +335,13 @@ describe("Sample explicit assay layers", () => {
     expect(sample.displayRange(cd3)).not.toBe(inactiveRange);
     expect(sample.displayColumn(cd3)).not.toBe(displayOriginal);
     expect(sample.activeLayer).toBe("compensated");
-    expect(sample.dataRevision).toBe(2);
+    expect(sample.dataRevision).toBe(1);
+    expect(sample.layerRevision).toBe(2);
     expect(spy).toHaveBeenCalledTimes(1);
 
     sample.setActiveLayer("compensated");
-    expect(sample.dataRevision).toBe(2);
+    expect(sample.dataRevision).toBe(1);
+    expect(sample.layerRevision).toBe(2);
     expect(spy).toHaveBeenCalledTimes(1);
 
     sample.setActiveLayer("original");
@@ -225,8 +349,37 @@ describe("Sample explicit assay layers", () => {
     expect(sample.gatingColumn(cd3)).toBe(original);
     expect(gatingData.column("CD3")).toBe(original);
     expect(Array.from(sample.displayColumn(cd3))).toEqual(Array.from(displayOriginal));
-    expect(sample.dataRevision).toBe(3);
+    expect(sample.dataRevision).toBe(2);
+    expect(sample.layerRevision).toBe(3);
     expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidates active caches when the installed Compensated result is replaced", () => {
+    const sample = new Sample(flowFcs());
+    const cd3 = sample.index("CD3")!;
+    sample.installCompensatedLayer(flowLayer(), { activeLayer: "compensated" });
+    const firstDisplay = sample.displayColumn(cd3);
+    const spy = invalidationSpy(sample);
+    const replacementBinding = flowBinding({
+      profileId: "flow-profile-b",
+      profileHash: digest("e"),
+      matrixHash: digest("f"),
+    });
+
+    sample.installCompensatedLayer({
+      metadata: replacementBinding,
+      columns: [
+        { pnn: "FL1-A", fcsColumnIndex: 1, values: Float32Array.from([8, 16, 24, 32]) },
+        { pnn: "FL2-A", fcsColumnIndex: 2, values: Float32Array.from([-2, -4, -6, -8]) },
+      ],
+    });
+
+    expect(sample.activeLayer).toBe("compensated");
+    expect(Array.from(sample.rawColumnData(cd3))).toEqual([8, 16, 24, 32]);
+    expect(sample.displayColumn(cd3)).not.toBe(firstDisplay);
+    expect(sample.dataRevision).toBe(2);
+    expect(sample.layerRevision).toBe(2);
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 
   it("installs-and-activates and removes-and-restores atomically", () => {
@@ -285,7 +438,8 @@ describe("Sample explicit assay layers", () => {
     expect(sample.compensatedLayerStatus().state).toBe("ready");
     expect(() => sample.setActiveLayer("compensated", expectedOtherRevision)).toThrow("stale");
     expect(sample.activeLayer).toBe("original");
-    expect(sample.dataRevision).toBe(1);
+    expect(sample.dataRevision).toBe(0);
+    expect(sample.layerRevision).toBe(1);
   });
 
   it("never lets the legacy embedded toggle select a profile-derived layer", () => {
@@ -299,14 +453,16 @@ describe("Sample explicit assay layers", () => {
       "profile-derived layer is installed",
     );
     expect(sample.activeLayer).toBe("original");
-    expect(sample.dataRevision).toBe(1);
+    expect(sample.dataRevision).toBe(0);
+    expect(sample.layerRevision).toBe(1);
 
     sample.setActiveLayer("compensated", flowBinding());
     expect(() => sample.setCompensation(true)).toThrow(
       "profile-derived layer is installed",
     );
     expect(sample.activeLayer).toBe("compensated");
-    expect(sample.dataRevision).toBe(2);
+    expect(sample.dataRevision).toBe(1);
+    expect(sample.layerRevision).toBe(2);
   });
 
   it("blocks Gating-ML from mislabelling an active profile as embedded FCS compensation", () => {
@@ -630,19 +786,23 @@ describe("Sample explicit assay layers", () => {
       ],
     });
     expect(sample.activeLayer).toBe("original");
-    expect(sample.dataRevision).toBe(1);
+    expect(sample.dataRevision).toBe(0);
+    expect(sample.layerRevision).toBe(1);
 
     sample.setCytofCofactor(10);
     expect(sample.compensatedLayerStatus().state).toBe("stale");
-    expect(sample.dataRevision).toBe(2);
+    expect(sample.dataRevision).toBe(1);
+    expect(sample.layerRevision).toBe(2);
 
     sample.setCytofCofactor(5);
     expect(sample.compensatedLayerStatus(binding).state).toBe("ready");
-    expect(sample.dataRevision).toBe(3);
+    expect(sample.dataRevision).toBe(2);
+    expect(sample.layerRevision).toBe(3);
 
     sample.setInstrumentMode("flow");
     expect(sample.compensatedLayerStatus().state).toBe("stale");
-    expect(sample.dataRevision).toBe(4);
+    expect(sample.dataRevision).toBe(3);
+    expect(sample.layerRevision).toBe(4);
   });
 
   it("passes an explicitly excluded CyTOF receiver through in access and export", () => {

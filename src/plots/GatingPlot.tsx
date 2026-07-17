@@ -28,6 +28,12 @@ interface Props {
   payload?: object | null;
   mode?: string;
   visible?: boolean;
+  /**
+   * Identity of the sample/display coordinate system represented by `payload`.
+   * When supplied, plot events are ignored between a prop update and the paint
+   * that makes that identity visible on the canvas.
+   */
+  interactionToken?: string;
   fontSizes?: GatingFontSizes;
   onNewGate?: (g: NewGate) => void;
   onGateEdit?: (g: { gate_id: string; vertices: [number, number][] }) => void;
@@ -46,6 +52,8 @@ interface GateEditEvent {
 interface PendingGateEdit {
   vertices: [number, number][];
   seq?: number;
+  /** Canvas identity that emitted these display-space vertices. */
+  interactionToken?: string;
 }
 
 function sameCoordinate(a: unknown, b: number): boolean {
@@ -78,6 +86,7 @@ export function GatingPlot({
   payload,
   mode = "navigate",
   visible = true,
+  interactionToken,
   fontSizes = DEFAULT_GATING_FONT_SIZES,
   onNewGate,
   onGateEdit,
@@ -95,6 +104,8 @@ export function GatingPlot({
   const frameRef = useRef<number | null>(null);
   const retryRef = useRef<number | null>(null);
   const pendingGateEditsRef = useRef(new Map<string, PendingGateEdit>());
+  const desiredInteractionTokenRef = useRef(interactionToken);
+  const paintedInteractionTokenRef = useRef<string | undefined>(undefined);
   const callbacksRef = useRef({
     onNewGate,
     onGateEdit,
@@ -106,6 +117,7 @@ export function GatingPlot({
   payloadRef.current = payload;
   modeRef.current = mode;
   visibleRef.current = visible;
+  desiredInteractionTokenRef.current = interactionToken;
   callbacksRef.current = {
     onNewGate,
     onGateEdit,
@@ -120,6 +132,11 @@ export function GatingPlot({
     if (retryRef.current !== null) window.clearTimeout(retryRef.current);
     frameRef.current = null;
     retryRef.current = null;
+  };
+
+  const interactionIsCurrent = () => {
+    const desired = desiredInteractionTokenRef.current;
+    return desired === undefined || paintedInteractionTokenRef.current === desired;
   };
 
   const schedulePaint = (retry = false) => {
@@ -175,15 +192,27 @@ export function GatingPlot({
     // the browser cannot paint any stale deferred flush between these synchronous calls.
     // Clearing it in the gate_edit callback races the commit and causes the polygon to snap
     // back to its old coordinates.
+    const targetInteractionToken = desiredInteractionTokenRef.current;
     for (const [gateId, edit] of pendingGateEditsRef.current) {
-      if (!payloadContainsEdit(p, gateId, edit)) continue;
+      // A latch contains display-space vertices. It must never be merged into a payload for
+      // another sample/assay identity, even when that payload happens to reuse the same gate id.
+      const contextChanged = edit.interactionToken !== targetInteractionToken;
+      if (!contextChanged && !payloadContainsEdit(p, gateId, edit)) continue;
       api.clearPendingEdit(gateId, edit.seq);
       if (pendingGateEditsRef.current.get(gateId) === edit) {
         pendingGateEditsRef.current.delete(gateId);
       }
     }
 
-    api.render({ ...p, force_full: true, _plot_seq: ++_seq }, modeRef.current);
+    const paintedInteractionToken = desiredInteractionTokenRef.current;
+    const renderApplied = api.render({ ...p, force_full: true, _plot_seq: ++_seq }, modeRef.current);
+    if (!renderApplied) {
+      // cytof_plot.js queues renders while a gate drag is active. Keep rejecting events from
+      // the old canvas and retry until this wrapper itself observes a completed paint.
+      schedulePaint(true);
+      return;
+    }
+    paintedInteractionTokenRef.current = paintedInteractionToken;
 
     // Rendering is synchronous. If the legacy engine did not initialise a usable canvas,
     // keep the scheduler alive so a later layout pass can recover without a page refresh.
@@ -198,9 +227,17 @@ export function GatingPlot({
     apiRef.current = CytofD3;
 
     const offs = [
-      bus.on("new_gate", (v: unknown) => callbacksRef.current.onNewGate?.(v as NewGate)),
+      bus.on("new_gate", (v: unknown) => {
+        if (!interactionIsCurrent()) return;
+        callbacksRef.current.onNewGate?.(v as NewGate);
+      }),
       bus.on("gate_edit", (v: unknown) => {
         const e = v as GateEditEvent;
+        if (!interactionIsCurrent()) {
+          pendingGateEditsRef.current.delete(e.gate_id);
+          apiRef.current?.clearPendingEdit(e.gate_id, e.seq);
+          return;
+        }
         const handler = callbacksRef.current.onGateEdit;
         if (!handler) {
           apiRef.current?.clearPendingEdit(e.gate_id, e.seq);
@@ -209,16 +246,26 @@ export function GatingPlot({
         pendingGateEditsRef.current.set(e.gate_id, {
           vertices: e.vertices.map(([x, y]) => [x, y]),
           seq: e.seq,
+          interactionToken: paintedInteractionTokenRef.current,
         });
         handler(e);
       }),
-      bus.on("gate_quadrant_move", (v: unknown) =>
-        callbacksRef.current.onQuadrantMove?.(v as { gate_id: string; center: [number, number] })),
-      bus.on("gate_select", (v: unknown) => callbacksRef.current.onGateSelect?.(v as string)),
-      bus.on("axis_label_click", (v: unknown) =>
-        callbacksRef.current.onAxisLabelClick?.(v as { axis: "x" | "y"; selected: string })),
-      bus.on("gate_label_move", (v: unknown) =>
-        callbacksRef.current.onGateLabelMove?.(v as { gate_id: string; label_offset: [number, number] })),
+      bus.on("gate_quadrant_move", (v: unknown) => {
+        if (!interactionIsCurrent()) return;
+        callbacksRef.current.onQuadrantMove?.(v as { gate_id: string; center: [number, number] });
+      }),
+      bus.on("gate_select", (v: unknown) => {
+        if (!interactionIsCurrent()) return;
+        callbacksRef.current.onGateSelect?.(v as string);
+      }),
+      bus.on("axis_label_click", (v: unknown) => {
+        if (!interactionIsCurrent()) return;
+        callbacksRef.current.onAxisLabelClick?.(v as { axis: "x" | "y"; selected: string });
+      }),
+      bus.on("gate_label_move", (v: unknown) => {
+        if (!interactionIsCurrent()) return;
+        callbacksRef.current.onGateLabelMove?.(v as { gate_id: string; label_offset: [number, number] });
+      }),
     ];
 
     // Observe the workspace (parent), not the container: cytof sizes the canvas from
@@ -235,6 +282,10 @@ export function GatingPlot({
     return () => {
       mountedRef.current = false;
       cancelScheduledPaint();
+      // CytofD3 is a cached singleton. Clear its pending/deferred interaction state before
+      // this wrapper forgets the corresponding tokens, otherwise a later workspace remount
+      // that reuses a gate id could inherit display-space vertices from this canvas.
+      apiRef.current?.clear();
       pendingGateEditsRef.current.clear();
       offs.forEach((off) => off());
       ro.disconnect();
@@ -248,6 +299,13 @@ export function GatingPlot({
     else cancelScheduledPaint();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload]);
+
+  // A token can change while the payload object remains referentially stable. It still
+  // needs a paint before events may be interpreted in the new coordinate system.
+  useEffect(() => {
+    if (interactionToken !== undefined) schedulePaint();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactionToken]);
 
   // Typography is CSS-driven, but a full repaint is still required because the reused D3
   // renderer measures gate labels to size their coloured backgrounds.

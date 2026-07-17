@@ -37,6 +37,7 @@ interface Props {
   presets: IllustrationPreset[];
   onSavePreset: (name: string) => void;
   onDeletePreset: (name: string) => void;
+  dataRevision: number;
 }
 
 function snapshotConfig(config: IllustrationConfig): IllustrationConfig {
@@ -52,7 +53,7 @@ function configsMatch(a: IllustrationConfig, b: IllustrationConfig): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-export function IllustrationTab({ sample, state, derived, globalScales, defaultX, defaultY, configRef, presets, onSavePreset, onDeletePreset }: Props) {
+export function IllustrationTab({ sample, state, derived, globalScales, defaultX, defaultY, configRef, presets, onSavePreset, onDeletePreset, dataRevision }: Props) {
   const rootId = state.root_population_id ?? "";
   const order = populationTreeOrder(state.populations, rootId).filter(({ popId }) => popId !== rootId);
   const allChannels = sample.channels.map((c) => c.key);
@@ -238,7 +239,7 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     sample, renderedConfig, state.gates, state.gate_order, state.populations,
-    state.gate_version, globalScales, derived,
+    state.gate_version, globalScales, derived, dataRevision,
   ]);
 
   const toggle = <T,>(arr: T[], v: T): T[] => (arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);

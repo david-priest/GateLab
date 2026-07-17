@@ -16,13 +16,17 @@ export interface DivisionProfile {
   boundaries: number[];
   n: number;
   colName: string;
+  /** Exact assay + channel display-coordinate system in which boundaries were fitted. */
+  coordinateBindingKey: string;
 }
 interface Props {
   sample: Sample;
   sampleName: string;
   derived: Derived;
   savedProfile: DivisionProfile | null;
+  profileStale: boolean;
   onApply: (profile: DivisionProfile) => void;
+  dataRevision: number;
 }
 
 const guessChannel = (keys: string[], re: RegExp, fallback: number) => {
@@ -37,7 +41,7 @@ function strided(idx: number[], cap: number): number[] {
   return out;
 }
 
-export function DivisionTab({ sample, sampleName, derived, savedProfile, onApply }: Props) {
+export function DivisionTab({ sample, sampleName, derived, savedProfile, profileStale, onApply, dataRevision }: Props) {
   const keys = sample.channels.map((c) => c.key);
   const [dyeIdx, setDyeIdx] = useState(() => guessChannel(keys, /CFSE|CTV|CellTrace|Violet|Tag/i, 0));
   const [yMarker, setYMarker] = usePersistedTabState<string>("div.yMarker", ""); // "" = none
@@ -51,6 +55,7 @@ export function DivisionTab({ sample, sampleName, derived, savedProfile, onApply
   const [boundaries, setBoundaries] = useState<number[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
   const seqRef = useRef(0);
+  const dyeCoordinateBindingKey = sample.displayCoordinateBindingKey(keys[dyeIdx]);
 
   // Full active-population dye values (for range + seeding); subsampled only for the histogram draw.
   const maskedDye = useMemo(() => {
@@ -60,7 +65,7 @@ export function DivisionTab({ sample, sampleName, derived, savedProfile, onApply
     for (let i = 0; i < col.length; i++) if (!mask || mask[i]) out.push(col[i]);
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, dyeIdx, derived]);
+  }, [sample, dyeIdx, derived, dataRevision]);
 
   const autoRange = useMemo(() => computeAxisRange(maskedDye), [maskedDye]);
   const xRange: [number, number] = [
@@ -79,7 +84,7 @@ export function DivisionTab({ sample, sampleName, derived, savedProfile, onApply
       setBoundaries(seedDivisionBoundaries(maskedDye, n));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dyeIdx, sampleName]);
+  }, [dyeIdx, sampleName, dyeCoordinateBindingKey, savedProfile]);
 
   // Receive dragged boundaries from division_plot.js.
   useEffect(() => {
@@ -128,7 +133,7 @@ export function DivisionTab({ sample, sampleName, derived, savedProfile, onApply
     }, 180);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, dyeIdx, boundaries, bins, subsample, yMarker, pointAlpha, xRange[0], xRange[1], derived]);
+  }, [sample, dyeIdx, boundaries, bins, subsample, yMarker, pointAlpha, xRange[0], xRange[1], derived, dataRevision]);
 
   // Change # divisions IN PLACE (add at the dim end / drop the dimmest), preserving manual fits —
   // only reseed when there are no boundaries yet (R app.R:3859-3886), instead of a full reseed.
@@ -142,10 +147,18 @@ export function DivisionTab({ sample, sampleName, derived, savedProfile, onApply
     const d = dir * span * 0.02;
     setBoundaries((b) => b.map((x) => Math.max(xRange[0], Math.min(xRange[1], x + d))));
   };
+  const profileValid = boundaries.length === n && boundaries.every((value, index) =>
+    Number.isFinite(value) && (index === 0 || value > boundaries[index - 1]));
   // Apply writes the profile to the ACTIVE sample only (the button label says so). R's multi-sample
   // "Apply to selected" (app.R:4190-4218) is intentionally deferred until GateLab has a global
   // sample-inclusion set; it would then loop the selected samples here.
-  const apply = () => onApply({ channelKey: keys[dyeIdx], boundaries: [...boundaries].sort((a, b) => a - b), n, colName: colName.trim() || "div" });
+  const apply = () => onApply({
+    channelKey: keys[dyeIdx],
+    boundaries: [...boundaries].sort((a, b) => a - b),
+    n,
+    colName: colName.trim() || "div",
+    coordinateBindingKey: sample.displayCoordinateBindingKey(keys[dyeIdx]),
+  });
 
   return (
     <div className="gl-tab-panel">
@@ -184,13 +197,26 @@ export function DivisionTab({ sample, sampleName, derived, savedProfile, onApply
         <label className="gl-field-inline">Opacity<input type="range" min={0.02} max={1} step={0.05} value={pointAlpha} onChange={(e) => setPointAlpha(+e.target.value)} /></label>
         <span className="gl-ctl-sep" />
         <label className="gl-field-inline">Column<input type="text" value={colName} onChange={(e) => setColName(e.target.value)} style={{ width: 70 }} /></label>
-        <button className="gl-mini-btn gl-btn-apply" onClick={apply}>Apply to {sampleName}</button>
+        <button
+          className="gl-mini-btn gl-btn-apply"
+          onClick={apply}
+          disabled={!profileValid}
+          title={profileValid ? "" : "Re-seed or separate the division boundaries before applying"}
+        >
+          Apply to {sampleName}
+        </button>
       </div>
 
       <div className="gl-hint gl-panel-hint">
         Div0 = brightest (undivided); drag the black lines to fit the dilution peaks. Apply writes a
         per-event Div0..Div{n} level for <strong>{sampleName}</strong>, usable as a Proportions Category.
       </div>
+      {profileStale && (
+        <div className="gl-hint gl-panel-hint" role="alert">
+          The saved division profile was fitted in another data layer or display transform and is
+          not being applied. Re-fit the boundaries here, then apply them for the current view.
+        </div>
+      )}
       <div id="division-plot-container" ref={containerRef} className="gl-division-container" style={{ maxWidth: 820, flex: "none", overflow: "visible" }} />
     </div>
   );

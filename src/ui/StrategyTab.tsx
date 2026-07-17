@@ -18,6 +18,7 @@ interface Props {
   state: CoreState;
   derived: Derived;
   globalScales: Record<string, [number, number]>;
+  dataRevision: number;
   /** App-held ref so the controls survive a tab switch (the tab unmounts when you leave it). */
   configRef: MutableRefObject<StrategyConfig | null>;
 }
@@ -49,7 +50,7 @@ export interface StrategyConfig {
   fontGate: number;
 }
 
-export function StrategyTab({ sample, state, derived, globalScales, configRef }: Props) {
+export function StrategyTab({ sample, state, derived, globalScales, configRef, dataRevision }: Props) {
   const rootId = state.root_population_id ?? "";
   const c0 = configRef.current; // restore on (re)mount; null = first-ever
   const [mode, setMode] = useState<"single" | "multi">(c0?.mode ?? "single");
@@ -157,7 +158,7 @@ export function StrategyTab({ sample, state, derived, globalScales, configRef }:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, multiPops, sample, popId, fullPath, gateView, displayMode, maxEvents, allEvents, plotSize, nColumns, fitToColumns,
       pointSize, pointAlpha, contourThreshold, kdeBandwidth, pubStyle, gateLineWidth, fontTick, fontAxis, fontTitle, fontGate,
-      state.gates, state.gate_version, globalScales, derived]);
+      state.gates, state.gate_version, globalScales, derived, dataRevision]);
 
   const toggleGateView = (v: GateView) =>
     setGateView((prev) => {

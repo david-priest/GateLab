@@ -28,6 +28,21 @@ describe("GateLab cytof interaction patches", () => {
     warning.mockRestore();
   });
 
+  it("reports whether a render painted or was deferred by an active drag", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(patched).toContain("// GateLab: report whether render() painted or deferred.");
+    expect(patched).toContain("if (!plotData) return false;");
+    expect(patched).toMatch(/if \(_dragging\) \{[\s\S]*?return false;\n        \}\n\n        var ctnr/);
+    expect(patched).toMatch(/var ctnr = document\.getElementById\(CTNR\);\n        if \(!ctnr\) return false;/);
+    expect(patched.match(/if \(!ctnr\) return false;/g)).toHaveLength(1);
+    expect(patched).toMatch(/_redraw\(\);\n        return true;\n    \}/);
+
+    warning.mockRestore();
+  });
+
   it("piles off-scale events onto plot edges without clamping gate scales", () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const patched = patchCytofForGateLab(cytofSrc);

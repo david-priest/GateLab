@@ -132,6 +132,63 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     expect(readWorkspaceBytes(packWorkspaceReference(older)).ws.display.fontSizes).toBeUndefined();
   });
 
+  it("round-trips coordinate-bound division profiles while accepting legacy profiles without a binding", () => {
+    const bound = cloneWs(ws);
+    bound.samples[0].division = {
+      channelKey: "PE-A",
+      boundaries: [0.5, 1.5, 2.5],
+      n: 3,
+      colName: "division",
+      coordinateBindingKey: "[\"original\",\"flow\",\"PE-A\"]",
+    };
+    expect(validateWorkspace(bound)).toBe(true);
+    expect(readWorkspaceBytes(packWorkspaceReference(bound)).ws.samples[0].division)
+      .toEqual(bound.samples[0].division);
+
+    const legacy = cloneWs(ws);
+    legacy.samples[0].division = {
+      channelKey: "PE-A",
+      boundaries: [0.5, 1.5],
+      n: 2,
+      colName: "division",
+    };
+    expect(validateWorkspace(legacy)).toBe(true);
+    expect(readWorkspaceBytes(packWorkspaceReference(legacy)).ws.samples[0].division)
+      .toEqual(legacy.samples[0].division);
+  });
+
+  it.each([
+    ["a non-object", null],
+    ["unexpected fields", { channelKey: "PE-A", boundaries: [1], n: 1, colName: "div", extra: true }],
+    ["a blank channel", { channelKey: "  ", boundaries: [1], n: 1, colName: "div" }],
+    ["a blank column name", { channelKey: "PE-A", boundaries: [1], n: 1, colName: "  " }],
+    ["a non-array boundary set", { channelKey: "PE-A", boundaries: "1", n: 1, colName: "div" }],
+    ["a non-finite boundary", { channelKey: "PE-A", boundaries: [Number.POSITIVE_INFINITY], n: 1, colName: "div" }],
+    ["duplicate boundaries", { channelKey: "PE-A", boundaries: [1, 1], n: 2, colName: "div" }],
+    ["descending boundaries", { channelKey: "PE-A", boundaries: [2, 1], n: 2, colName: "div" }],
+    ["a non-integer n", { channelKey: "PE-A", boundaries: [1], n: 1.5, colName: "div" }],
+    ["an unsupported n", { channelKey: "PE-A", boundaries: Array.from({ length: 12 }, (_, i) => i), n: 12, colName: "div" }],
+    ["a boundary count inconsistent with n", { channelKey: "PE-A", boundaries: [1], n: 2, colName: "div" }],
+    ["a blank coordinate binding", { channelKey: "PE-A", boundaries: [1], n: 1, colName: "div", coordinateBindingKey: "  " }],
+    ["a non-string coordinate binding", { channelKey: "PE-A", boundaries: [1], n: 1, colName: "div", coordinateBindingKey: 42 }],
+  ] as const)("rejects division profiles with %s", (_label, division) => {
+    const corrupt = cloneWs(ws);
+    (corrupt.samples[0] as unknown as Record<string, unknown>).division = division;
+    expect(() => validateWorkspace(corrupt)).toThrow(/division profile/i);
+  });
+
+  it("rejects sparse division boundaries", () => {
+    const corrupt = cloneWs(ws);
+    const sparse = new Array<number>(1);
+    (corrupt.samples[0] as unknown as Record<string, unknown>).division = {
+      channelKey: "PE-A",
+      boundaries: sparse,
+      n: 1,
+      colName: "div",
+    };
+    expect(() => validateWorkspace(corrupt)).toThrow(/dense finite numbers/i);
+  });
+
   it("rejects a non-workspace file", () => {
     expect(() => readWorkspaceBytes(new Uint8Array([1, 2, 3]))).toThrow();
   });

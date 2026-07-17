@@ -271,16 +271,95 @@ export class Sample {
   // ── Compensation ────────────────────────────────────────────────────────────
   private _activeLayer: AssayLayer = "original";
   private _dataRevision = 0;
+  private _layerRevision = 0;
   private compensatedLayer: RuntimeCompensatedLayer | null = null;
+  private readonly dataRevisionListeners = new Set<() => void>();
+  private readonly layerRevisionListeners = new Set<() => void>();
 
   /** The active linear-count layer used by display, gating, statistics, and plots. */
   get activeLayer(): AssayLayer {
     return this._activeLayer;
   }
 
-  /** Monotonic identity for atomic assay-layer changes. */
+  /** Stable identity for display-space annotations derived from the active assay. */
+  get activeAssayBindingKey(): string {
+    if (this._activeLayer === "original") return "original";
+    const metadata = this.compensatedLayer?.metadata;
+    if (!metadata) return "compensated:unavailable";
+    return metadata.runtimeIdentity === "profile"
+      ? `compensated:profile:${metadata.profileHash}`
+      : "compensated:legacy-embedded-fcs";
+  }
+
+  /**
+   * Exact display-coordinate context shared by per-channel plot ranges.
+   *
+   * Unlike `displayCoordinateBindingKey`, this deliberately avoids constructing
+   * every channel transform (which can sort an entire signal column). For this Sample,
+   * it contains every setting that can change those transforms, plus the active assay
+   * identity, so UI state fitted in one context is never silently reused in another.
+   */
+  get displayTransformContextKey(): string {
+    const orderedOverrides = (source: ReadonlyMap<number, number>) =>
+      [...source.entries()]
+        .map(([index, value]) => [this.channels[index]?.key ?? `#${index}`, value] as const)
+        .sort(([left], [right]) => left.localeCompare(right));
+    return JSON.stringify([
+      this.activeAssayBindingKey,
+      this.instrument,
+      this.instrument === "cytof" ? this.cytofCofactor : null,
+      this.instrument === "flow" ? orderedOverrides(this.wOverride) : [],
+      this.instrument === "flow" ? orderedOverrides(this.scatterCofactorOverride) : [],
+    ]);
+  }
+
+  /** Exact active assay + display-transform identity for one channel's annotations. */
+  displayCoordinateBindingKey(channelKey: string): string {
+    const idx = this.byName.get(channelKey);
+    if (idx === undefined) throw new Error(`Unknown channel '${channelKey}'.`);
+    const channel = this.channels[idx];
+    const transform = this.transform(idx);
+    let transformBinding: readonly unknown[];
+    if (transform.kind === "identity") {
+      transformBinding = ["identity"];
+    } else if (this.instrument === "cytof") {
+      transformBinding = ["asinh", this.cytofCofactor];
+    } else if (isScatterChannel(channel.pnn) || isScatterChannel(channel.key)) {
+      transformBinding = ["asinh", this.currentScatterCofactor(idx)];
+    } else if (transform.kind === "logicle") {
+      transformBinding = ["logicle", this.logicleT(idx), this.currentLogicleW(idx)];
+    } else {
+      transformBinding = ["asinh-fallback", 150];
+    }
+    return JSON.stringify([
+      this.activeAssayBindingKey,
+      this.instrument,
+      channel.pnn,
+      channel.columnIndex,
+      transformBinding,
+    ]);
+  }
+
+  /** Monotonic identity for changes to values/coordinates read from the active assay. */
   get dataRevision(): number {
     return this._dataRevision;
+  }
+
+  /** Observe active-data revisions without exposing mutable Sample internals. */
+  subscribeDataRevision(listener: () => void): () => void {
+    this.dataRevisionListeners.add(listener);
+    return () => this.dataRevisionListeners.delete(listener);
+  }
+
+  /** Monotonic identity for installed-layer, readiness, or active-layer state changes. */
+  get layerRevision(): number {
+    return this._layerRevision;
+  }
+
+  /** Observe compensation-layer/status revisions without invalidating analytical consumers. */
+  subscribeLayerRevision(listener: () => void): () => void {
+    this.layerRevisionListeners.add(listener);
+    return () => this.layerRevisionListeners.delete(listener);
   }
 
   /** True when the file carries a (non-identity) spillover that can be applied. */
@@ -466,6 +545,8 @@ export class Sample {
    *  gating space (raw vs display) also flips with it. */
   setInstrumentMode(mode: "auto" | "flow" | "cytof"): void {
     if (mode === this._instrumentMode) return;
+    const previousInstrument = this.instrument;
+    const previousActiveLayer = this._activeLayer;
     const previousLayerStatus = this.compensatedLayerStatusKey();
     this._instrumentMode = mode;
     if (
@@ -474,8 +555,12 @@ export class Sample {
     ) {
       this._activeLayer = "original";
     }
-    if (this.compensatedLayerStatusKey() !== previousLayerStatus) this._dataRevision++;
-    this.invalidateAll();
+    const activeDataChanged = previousInstrument !== this.instrument ||
+      previousActiveLayer !== this._activeLayer;
+    const layerStateChanged = previousActiveLayer !== this._activeLayer ||
+      this.compensatedLayerStatusKey() !== previousLayerStatus;
+    if (activeDataChanged) this.invalidateAll();
+    this.publishRevisions(activeDataChanged, layerStateChanged);
   }
   /** Drop every derived cache — raw data changed underneath (compensation / instrument change). */
   private invalidateAll(): void {
@@ -757,10 +842,36 @@ export class Sample {
     if (activeLayer === "compensated" && !compensatedLayer) {
       throw new Error("Cannot activate Compensated: no complete layer is installed.");
     }
+    const installedLayerChanged = compensatedLayer !== this.compensatedLayer;
+    const activeLayerChanged = activeLayer !== this._activeLayer;
+    const activeDataChanged = activeLayerChanged ||
+      (activeLayer === "compensated" && installedLayerChanged);
+    if (!installedLayerChanged && !activeLayerChanged) return;
+
     this.compensatedLayer = compensatedLayer;
     this._activeLayer = activeLayer;
-    this.invalidateAll();
-    this._dataRevision++;
+    if (activeDataChanged) this.invalidateAll();
+    this.publishRevisions(activeDataChanged, true);
+  }
+
+  private publishRevisions(dataChanged: boolean, layerChanged: boolean): void {
+    if (!dataChanged && !layerChanged) return;
+    // Increment both identities before notifying either observer set so every callback sees
+    // one fully committed, internally consistent Sample state.
+    if (dataChanged) this._dataRevision++;
+    if (layerChanged) this._layerRevision++;
+
+    const notify = (listeners: ReadonlySet<() => void>) => {
+      for (const listener of listeners) {
+        try {
+          listener();
+        } catch {
+          // A UI observer cannot roll back an already committed scientific state change.
+        }
+      }
+    };
+    if (dataChanged) notify(this.dataRevisionListeners);
+    if (layerChanged) notify(this.layerRevisionListeners);
   }
 
   private unavailableCompensatedLayerError(status: CompensatedLayerStatus): Error {
@@ -889,6 +1000,7 @@ export class Sample {
   /** Restore the global CyTOF arcsinh cofactor carried by a workspace/Gating-ML file. */
   setCytofCofactor(cofactor: number): void {
     if (!Number.isFinite(cofactor) || cofactor <= 0 || cofactor === this.cytofCofactor) return;
+    const previousActiveLayer = this._activeLayer;
     const previousLayerStatus = this.compensatedLayerStatusKey();
     this.cytofCofactor = cofactor;
     if (
@@ -897,8 +1009,12 @@ export class Sample {
     ) {
       this._activeLayer = "original";
     }
-    if (this.compensatedLayerStatusKey() !== previousLayerStatus) this._dataRevision++;
-    if (this.instrument === "cytof") this.invalidateAll();
+    const activeDataChanged = this.instrument === "cytof" ||
+      previousActiveLayer !== this._activeLayer;
+    const layerStateChanged = previousActiveLayer !== this._activeLayer ||
+      this.compensatedLayerStatusKey() !== previousLayerStatus;
+    if (activeDataChanged) this.invalidateAll();
+    this.publishRevisions(activeDataChanged, layerStateChanged);
   }
   /** Current flow-scatter arcsinh cofactor (default 150). */
   currentScatterCofactor(idx: number): number {
