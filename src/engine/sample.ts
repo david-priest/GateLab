@@ -22,10 +22,13 @@ import { robustAxisRange } from "./axisRange";
 import { logicleTicks, scatterTicks, type AxisTicks } from "./ticks";
 import {
   extractDisplaySpillover,
-  invertMatrix,
-  compensate,
   type DisplaySpillover,
 } from "./compensation";
+import {
+  DEFAULT_FLOW_SOLVER_SETTINGS,
+  FlowCompensationError,
+  solveFlowCompensation,
+} from "./flowCompensationEngine";
 import {
   Logicle,
   isCytofRawChannel,
@@ -506,13 +509,31 @@ export class Sample {
     }
     if (!this.spillover || this.instrument !== "flow") return;
 
-    const inv = invertMatrix(this.spillover.matrix);
-    if (!inv) return; // singular: fail closed without changing state/caches/revision
-
     const resolvedIndices = this.spillover.channels.map((key) => this.byName.get(key));
     if (resolvedIndices.some((index) => index === undefined)) return;
     const fluor = resolvedIndices.map((index) => this.originalColumnData(index!));
-    const compensated = compensate(fluor, inv);
+    let compensated: readonly Float32Array[];
+    try {
+      const result = solveFlowCompensation(
+        fluor,
+        this.spillover.matrix,
+        DEFAULT_FLOW_SOLVER_SETTINGS,
+        {
+          output: "float32",
+          computeReconstructionResidual: false,
+          // The FCS parser has already materialised numeric columns, and validateRuntimeLayer()
+          // transactionally checks every final Float32 value before the layer can be installed.
+          validateMeasuredValues: false,
+        },
+      );
+      if (!result.columns.every((column) => column instanceof Float32Array)) {
+        throw new Error("Flow Apply did not return Float32 assay columns.");
+      }
+      compensated = result.columns as readonly Float32Array[];
+    } catch (error) {
+      if (error instanceof FlowCompensationError) return;
+      throw error;
+    }
     const bindings = resolvedIndices.map((index, matrixIndex) => {
       const channel = this.channels[index!];
       return Object.freeze({

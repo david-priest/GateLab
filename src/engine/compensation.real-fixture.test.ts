@@ -1,6 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { compensate, invertMatrix } from "./compensation";
+import {
+  DEFAULT_FLOW_SOLVER_SETTINGS,
+  solveFlowCompensation,
+} from "./flowCompensationEngine";
 import { parseFcs, type NumericColumn } from "./fcs";
 import { Sample } from "./sample";
 
@@ -66,11 +70,21 @@ describe.runIf(hasFixtures)("flowCore Aria III compensation oracle", () => {
         namedColumn(reference.channels, reference.columns, name),
       );
       const actual = compensate(measured, inverse!);
+      const exactEngine = solveFlowCompensation(
+        measured,
+        spillover.matrix,
+        DEFAULT_FLOW_SOLVER_SETTINGS,
+        { output: "float32", validateMeasuredValues: false },
+      ).columns;
 
       for (let channel = 0; channel < actual.length; channel++) {
         expect(
           firstMismatch(actual[channel], expected[channel]),
           `${spillover.channels[channel]} differs from the flowCore reference`,
+        ).toBeNull();
+        expect(
+          firstMismatch(exactEngine[channel], expected[channel]),
+          `${spillover.channels[channel]} differs through the exact flow engine`,
         ).toBeNull();
       }
 

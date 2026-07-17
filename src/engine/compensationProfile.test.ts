@@ -563,4 +563,24 @@ describe("stable compensation matrix and profile hashes", () => {
       } as unknown as CompensationProfileHashInput),
     ).toThrow("solverSettings");
   });
+
+  it("keeps the persisted v1 solver-setting acceptance boundary", () => {
+    const matrix = requireValid(validFlowInput(), "flow-spillover");
+    const canonical = canonicalizeCompensationProfileHashInput({
+      kind: "flow-spillover",
+      method: "matrix-inverse",
+      solverVersion: "legacy-flow-v1",
+      // Earlier v3 workspaces permitted any positive tolerance and threshold >= 1. The exact
+      // engine may refuse to execute nonsensical settings, but loading/hashing must stay stable.
+      solverSettings: {
+        singularTolerance: 2,
+        conditionWarningThreshold: 1,
+      },
+      matrix,
+    });
+    expect(canonical.solverSettings).toEqual([
+      { key: "conditionWarningThreshold", value: 1 },
+      { key: "singularTolerance", value: 2 },
+    ]);
+  });
 });

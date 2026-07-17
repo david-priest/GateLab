@@ -1,4 +1,9 @@
-import { invertMatrix } from "./compensation";
+import {
+  DEFAULT_FLOW_SOLVER_SETTINGS,
+  FlowCompensationError,
+  inspectFlowMatrix,
+  type FlowMatrixDiagnostics,
+} from "./flowCompensationEngine";
 
 export const COMPENSATION_MATRIX_SCHEMA = "gatelab.compensation-matrix.v1" as const;
 export const COMPENSATION_PROFILE_SCHEMA = "gatelab.compensation-profile.v1" as const;
@@ -6,7 +11,8 @@ export const COMPENSATION_MATRIX_ORIENTATION =
   "source-rows-receiver-columns" as const;
 
 const DIAGONAL_TOLERANCE = 1e-8;
-const ILL_CONDITIONED_THRESHOLD = 1e8;
+const ILL_CONDITIONED_THRESHOLD =
+  DEFAULT_FLOW_SOLVER_SETTINGS.conditionWarningThreshold;
 const textEncoder = new TextEncoder();
 
 export type CompensationKind = "flow-spillover" | "cytof-spillover";
@@ -153,21 +159,15 @@ function duplicateChannels(channels: readonly string[]): Set<string> {
   return duplicates;
 }
 
-function infinityNorm(matrix: readonly (readonly number[])[]): number {
-  let norm = 0;
-  for (const row of matrix) {
-    let sum = 0;
-    for (const value of row) sum += Math.abs(value);
-    norm = Math.max(norm, sum);
+function flowMatrixDiagnostics(
+  matrix: readonly (readonly number[])[],
+): FlowMatrixDiagnostics | null {
+  try {
+    return inspectFlowMatrix(matrix, DEFAULT_FLOW_SOLVER_SETTINGS);
+  } catch (error) {
+    if (error instanceof FlowCompensationError) return error.diagnostics;
+    throw error;
   }
-  return norm;
-}
-
-function conditionEstimate(matrix: readonly (readonly number[])[]): number | null {
-  const mutable = matrix.map((row) => Array.from(row));
-  const inverse = invertMatrix(mutable);
-  if (!inverse) return null;
-  return infinityNorm(matrix) * infinityNorm(inverse);
 }
 
 function issue(
@@ -399,14 +399,20 @@ export function validateAndCanonicalizeCompensationMatrix(
     copiedMatrix.every((row) => row.length === receivers.length);
   const coefficientsFinite = copiedMatrix.every((row) => row.every(Number.isFinite));
   if (kind === "flow-spillover" && isSquare && dimensionsValid && coefficientsFinite) {
-    estimatedCondition = conditionEstimate(copiedMatrix);
-    if (estimatedCondition == null) {
-      errors.push(issue("singular-matrix", "The flow spillover matrix is singular."));
-    } else if (estimatedCondition > ILL_CONDITIONED_THRESHOLD) {
+    const numerical = flowMatrixDiagnostics(copiedMatrix);
+    estimatedCondition = numerical?.conditionInfinity ?? null;
+    if (numerical == null || numerical.stability === "unstable") {
+      errors.push(
+        issue(
+          "singular-matrix",
+          "The flow spillover matrix is singular or numerically unstable.",
+        ),
+      );
+    } else if (numerical.conditionInfinity > ILL_CONDITIONED_THRESHOLD) {
       warnings.push(
         issue(
           "ill-conditioned-matrix",
-          `The estimated matrix condition number is ${estimatedCondition.toExponential(3)}; preview and Apply require careful review.`,
+          `The estimated matrix condition number is ${numerical.conditionInfinity.toExponential(3)}; preview and Apply require careful review.`,
         ),
       );
     }

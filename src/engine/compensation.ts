@@ -6,6 +6,11 @@
 // pass through untouched. An identity spillover (already-compensated / spectral-unmixed
 // export) is treated as "no compensation".
 
+import {
+  FlowCompensationError,
+  prepareFlowCompensation,
+} from "./flowCompensationEngine";
+
 export interface DisplaySpillover {
   channels: string[]; // display-name fluorochrome channels (in matrix order)
   matrix: number[][]; // channels.length × channels.length
@@ -48,27 +53,18 @@ export function extractDisplaySpillover(
   return { channels, matrix };
 }
 
-/** Invert a square matrix (Gauss–Jordan with partial pivoting). Null if singular. */
+/**
+ * Compatibility wrapper returning an LU-derived inverse. Null for malformed, singular, or
+ * numerically unsafe matrices. New preview/Apply code should use flowCompensationEngine so it
+ * also receives the stability and reconstruction diagnostics.
+ */
 export function invertMatrix(m: number[][]): number[][] | null {
-  const n = m.length;
-  if (n === 0 || m.some((r) => r.length !== n)) return null;
-  // augmented [m | I]
-  const a = m.map((row, i) => [...row.map(Number), ...Array.from({ length: n }, (_, j) => (i === j ? 1 : 0))]);
-  for (let col = 0; col < n; col++) {
-    let piv = col;
-    for (let r = col + 1; r < n; r++) if (Math.abs(a[r][col]) > Math.abs(a[piv][col])) piv = r;
-    if (Math.abs(a[piv][col]) < 1e-12) return null; // singular
-    if (piv !== col) { const t = a[col]; a[col] = a[piv]; a[piv] = t; }
-    const d = a[col][col];
-    for (let j = 0; j < 2 * n; j++) a[col][j] /= d;
-    for (let r = 0; r < n; r++) {
-      if (r === col) continue;
-      const f = a[r][col];
-      if (f === 0) continue;
-      for (let j = 0; j < 2 * n; j++) a[r][j] -= f * a[col][j];
-    }
+  try {
+    return prepareFlowCompensation(m).inverse.map((row) => Array.from(row));
+  } catch (error) {
+    if (error instanceof FlowCompensationError) return null;
+    throw error;
   }
-  return a.map((row) => row.slice(n));
 }
 
 /**
