@@ -104,6 +104,118 @@ export function patchCytofForGateLab(src: string): string {
     console.warn("[GateLab] cytof draw-mode pointer patch did not match.");
   }
 
+  // Robust auto ranges intentionally leave a small tail off-scale. Keep those events visible
+  // as a pile-up on the corresponding plot edge (the FlowJo/Cytobank convention), while the
+  // underlying scales remain unclamped so gates and pointer-coordinate inversion are untouched.
+  // GateLabR now carries this behavior natively; keep the compatibility patch only for an older
+  // pinned renderer so updating the submodule cannot apply the pile-up logic a second time.
+  const nativeOffscaleNeedle = "function _offscalePts()";
+  if (out.includes(nativeOffscaleNeedle)) return out;
+  const canvasMarker = "    // ── Canvas rendering ──────────────────────────────────────────────────────";
+  const clampHelperNeedle = "function _clampPointX(scale, value)";
+  if (out.includes(canvasMarker) && !out.includes(clampHelperNeedle)) {
+    out = out.replace(
+      canvasMarker,
+      `${canvasMarker}
+    function _clampPointX(scale, value) {
+        return Math.max(M.left + 1.5, Math.min(M.left + W - 1.5, scale(value) + M.left));
+    }
+    function _clampPointY(scale, value) {
+        return Math.max(M.top + 1.5, Math.min(M.top + H - 1.5, scale(value) + M.top));
+    }
+    function _clampBaseX(value) {
+        return Math.max(0, Math.min(W, _xBase(value)));
+    }
+    function _clampBaseY(value) {
+        return Math.max(0, Math.min(H, _yBase(value)));
+    }`,
+    );
+  } else if (!out.includes(clampHelperNeedle)) {
+    console.warn("[GateLab] cytof off-scale point helper patch did not match.");
+  }
+
+  const indexedPointNeedle = `var px = zx(x[i]) + M.left;
+            var py = zy(y[i]) + M.top;`;
+  const indexedPointPatch = `var px = _clampPointX(zx, x[i]);
+            var py = _clampPointY(zy, y[i]);`;
+  const indexedPointMatches = out.split(indexedPointNeedle).length - 1;
+  if (indexedPointMatches === 2) {
+    out = out.split(indexedPointNeedle).join(indexedPointPatch);
+  } else if (!out.includes(indexedPointPatch)) {
+    console.warn("[GateLab] cytof off-scale scatter/pseudocolor patch did not match.");
+  }
+
+  const overlayPointNeedle = `var px = zx(x[idx]) + M.left;
+                var py = zy(y[idx]) + M.top;`;
+  const overlayPointPatch = `var px = _clampPointX(zx, x[idx]);
+                var py = _clampPointY(zy, y[idx]);`;
+  if (out.includes(overlayPointNeedle)) {
+    out = out.replace(overlayPointNeedle, overlayPointPatch);
+  } else if (!out.includes(overlayPointPatch)) {
+    console.warn("[GateLab] cytof off-scale overlay patch did not match.");
+  }
+
+  const contourPointsNeedle = `    function _ptsInDomain() {
+        // Return base-scale pixel coords filtered to the plot area [0,W]×[0,H]
+        var x = _plotData.x, y = _plotData.y, pts = [];
+        for (var i = 0; i < x.length; i++) {
+            var px = _xBase(x[i]), py = _yBase(y[i]);
+            if (px >= 0 && px <= W && py >= 0 && py <= H) pts.push([px, py]);
+        }
+        return pts;
+    }`;
+  const contourPointsPatch = `${contourPointsNeedle}
+
+    function _offscalePts() {
+        // Keep off-scale tails out of the KDE (which would create artificial edge contours),
+        // but return clamped pixels so contour mode can draw them as boundary outlier dots.
+        var x = _plotData.x, y = _plotData.y, pts = [];
+        for (var i = 0; i < x.length; i++) {
+            var px = _xBase(x[i]), py = _yBase(y[i]);
+            if (px < 0 || px > W || py < 0 || py > H) {
+                pts.push([_clampBaseX(x[i]), _clampBaseY(y[i])]);
+            }
+        }
+        return pts;
+    }`;
+  if (out.includes(contourPointsNeedle)) {
+    out = out.replace(contourPointsNeedle, contourPointsPatch);
+  } else if (!out.includes(contourPointsPatch)) {
+    console.warn("[GateLab] cytof off-scale contour-point patch did not match.");
+  }
+
+  const emptyContourNeedle = "_contourCache = { contours: [], outlierPts: [] }; return;";
+  const emptyContourPatch = "_contourCache = { contours: [], outlierPts: _offscalePts() }; return;";
+  const emptyContourMatches = out.split(emptyContourNeedle).length - 1;
+  if (emptyContourMatches === 4) {
+    out = out.split(emptyContourNeedle).join(emptyContourPatch);
+  } else if (!out.includes(emptyContourPatch)) {
+    console.warn("[GateLab] cytof empty-contour off-scale patch did not match.");
+  }
+
+  const contourOutlierNeedle = `            var outlierPts = pts.filter(function (pt) {
+                var gx = Math.max(0, Math.min(offN - 1, Math.floor(pt[0] * oxS)));
+                var gy = Math.max(0, Math.min(offN - 1, Math.floor(pt[1] * oyS)));
+                return pixels[(gy * offN + gx) * 4] < 128;  // black = outside contour
+            });`;
+  const contourOutlierPatch = `${contourOutlierNeedle}
+            outlierPts = outlierPts.concat(_offscalePts());`;
+  if (out.includes(contourOutlierNeedle)) {
+    out = out.replace(contourOutlierNeedle, contourOutlierPatch);
+  } else if (!out.includes("outlierPts = outlierPts.concat(_offscalePts());")) {
+    console.warn("[GateLab] cytof contour outlier-pile patch did not match.");
+  }
+
+  const densityPointNeedle = `pxArr[i] = _xBase(x[i]);
+                pyArr[i] = _yBase(y[i]);`;
+  const densityPointPatch = `pxArr[i] = _clampBaseX(x[i]);
+                pyArr[i] = _clampBaseY(y[i]);`;
+  if (out.includes(densityPointNeedle)) {
+    out = out.replace(densityPointNeedle, densityPointPatch);
+  } else if (!out.includes(densityPointPatch)) {
+    console.warn("[GateLab] cytof off-scale density patch did not match.");
+  }
+
   return out;
 }
 

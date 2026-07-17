@@ -111,10 +111,12 @@ describe("Sample — flow (Aria III), raw gating space", () => {
     expect(s.isLogicleChannel(i)).toBe(true);
     const auto = s.autoLogicleW(i);
     const before = Array.from(s.displayColumn(i).slice(0, 20));
+    const rangeBefore = s.displayRange(i);
     s.setLogicleW(i, Math.min(auto + 0.4, 2.0));
     expect(s.currentLogicleW(i)).not.toBeCloseTo(auto, 6);
     const after = Array.from(s.displayColumn(i).slice(0, 20));
     expect(after).not.toEqual(before); // display recomputed with new W
+    expect(s.displayRange(i)).not.toEqual(rangeBefore); // robust range cache also recomputed
     s.resetLogicleW(i);
     expect(s.currentLogicleW(i)).toBeCloseTo(auto, 6);
     expect(Array.from(s.displayColumn(i).slice(0, 20))).toEqual(before);
