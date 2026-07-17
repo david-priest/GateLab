@@ -39,6 +39,28 @@ let cached: { CytofD3: CytofD3Api; bus: PlotBus } | null = null;
 export function patchCytofForGateLab(src: string): string {
   let out = src;
 
+  // In Shiny the plot bundle boots itself after a short delay, because the container may
+  // appear after the script. GateLab's React wrapper instead calls render() as soon as the
+  // first FCS payload is ready; render() initialises synchronously. Leaving the legacy timer
+  // active re-runs _init() ~100 ms later, replacing the freshly painted canvas with a blank
+  // one until the next user interaction happens to trigger a redraw.
+  const bootNeedle = `if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () {
+            setTimeout(_init, 100);
+        });
+    } else {
+        setTimeout(_init, 100);
+    }`;
+  const bootPatchedNeedle = "// GateLab: React owns initialisation;";
+  if (out.includes(bootNeedle)) {
+    out = out.replace(
+      bootNeedle,
+      `${bootPatchedNeedle} render() calls _init() synchronously when needed.`,
+    );
+  } else if (!out.includes(bootPatchedNeedle)) {
+    console.warn("[GateLab] cytof delayed-boot patch did not match — the first plot may be cleared.");
+  }
+
   // cytof caches contours by point data. Include the view range so pan/stretch cannot leave
   // the density frozen while axes and gates move.
   const contourNeedle = "pd.contour_threshold || 5];";
