@@ -60,6 +60,8 @@ export interface WorkspaceFile {
 
 /** Illustration-tab configuration (capture_illust_settings) — persisted per-workspace + as presets. */
 export interface IllustrationConfig {
+  /** Explicit plot family. Optional so workspaces saved before heatmaps remain valid. */
+  plotType?: "biplot" | "histogram" | "heatmap";
   popIds: string[];
   xChannels: string[];
   yChannel: string;
@@ -86,6 +88,11 @@ export interface IllustrationConfig {
   ridgeOverlap: number;
   ridgeColGap: number;
   ridgeGradient: boolean;
+  heatmapStat?: "median" | "mean";
+  heatmapScale?: "none" | "column_minmax" | "row_minmax" | "column_zscore";
+  heatmapPalette?: "heat" | "viridis" | "blue_white_yellow_red";
+  heatmapCellSize?: number;
+  heatmapShowValues?: boolean;
   fontTick: number;
   fontAxis: number;
   fontTitle: number;
