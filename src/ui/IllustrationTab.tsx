@@ -1,5 +1,6 @@
 // IllustrationTab.tsx — the Illustration tab, mirroring GateLabR feature-for-feature. A grid of
-// populations (rows) × x-channels (cols) on a shared y-channel (or histograms when y is empty),
+// populations (rows) × x-channels (cols) on a shared y-channel, histograms, or a
+// population-by-channel summary heatmap,
 // each cell showing that population's events with gate overlays — rendered via mini_plot.js
 // renderIllustrationGrid. Exposes every control GateLabR's Illustration tab has: biplot/histogram,
 // display mode + KDE contour smoothing, colour-by-population, overlay-per-channel, histogram fill /
@@ -15,6 +16,13 @@ import { exportGridPNG, exportGridSVG, exportGridPDF } from "../plots/gridExport
 import { buildIllustrationPayload } from "../engine/illustration";
 import { populationTreeOrder } from "../engine/populations";
 import { populationColor } from "../engine/palettes";
+import {
+  buildHeatmapPayload,
+  type HeatmapPalette,
+  type HeatmapScaleMode,
+  type HeatmapSummaryStat,
+} from "../engine/heatmap";
+import { MultiColumnChecklist } from "./MultiColumnChecklist";
 
 interface Props {
   sample: Sample;
@@ -51,9 +59,11 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
 
   // Restore from the App-held config on (re)mount; null = first-ever mount → prop-derived defaults.
   const c0 = configRef.current;
+  const initialPlotType = c0?.plotType ?? (c0?.yChannel === "" ? "histogram" : "biplot");
+  const [plotType, setPlotType] = useState<"biplot" | "histogram" | "heatmap">(initialPlotType);
   const [popIds, setPopIds] = useState<string[]>(() => (c0 ? c0.popIds : order.slice(0, 4).map((o) => o.popId)));
   const [xChannels, setXChannels] = useState<string[]>(() => (c0 ? c0.xChannels : [defaultX]));
-  const [yChannel, setYChannel] = useState(c0 ? c0.yChannel : defaultY);
+  const [yChannel, setYChannel] = useState(c0?.yChannel || defaultY);
   const [displayMode, setDisplayMode] = useState(c0?.displayMode ?? "pseudocolor");
   const [plotSize, setPlotSize] = useState(c0?.plotSize ?? 200);
   const [nColumns, setNColumns] = useState(c0?.nColumns ?? 4);
@@ -81,17 +91,25 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
   const [ridgeOverlap, setRidgeOverlap] = useState(c0?.ridgeOverlap ?? 0.7);
   const [ridgeColGap, setRidgeColGap] = useState(c0?.ridgeColGap ?? 8);
   const [ridgeGradient, setRidgeGradient] = useState(c0?.ridgeGradient ?? true);
+  // Heatmap summary / scaling
+  const [heatmapStat, setHeatmapStat] = useState<HeatmapSummaryStat>(c0?.heatmapStat ?? "median");
+  const [heatmapScale, setHeatmapScale] = useState<HeatmapScaleMode>(c0?.heatmapScale ?? "column_minmax");
+  const [heatmapPalette, setHeatmapPalette] = useState<HeatmapPalette>(c0?.heatmapPalette ?? "blue_white_yellow_red");
+  const [heatmapCellSize, setHeatmapCellSize] = useState(c0?.heatmapCellSize ?? 30);
+  const [heatmapShowValues, setHeatmapShowValues] = useState(c0?.heatmapShowValues ?? false);
   // Fonts
-  const [fontTick, setFontTick] = useState(c0?.fontTick ?? 8);
-  const [fontAxis, setFontAxis] = useState(c0?.fontAxis ?? 10);
-  const [fontTitle, setFontTitle] = useState(c0?.fontTitle ?? 10);
-  const [fontGate, setFontGate] = useState(c0?.fontGate ?? 8);
+  const [fontTick, setFontTick] = useState(c0?.fontTick ?? 9);
+  const [fontAxis, setFontAxis] = useState(c0?.fontAxis ?? 12);
+  const [fontTitle, setFontTitle] = useState(c0?.fontTitle ?? 12);
+  const [fontGate, setFontGate] = useState(c0?.fontGate ?? 10);
+  const [scaleFontsWithPlot, setScaleFontsWithPlot] = useState(c0?.scaleFontsWithPlot ?? true);
 
   const [selectedPreset, setSelectedPreset] = useState("");
   const [exportDpi, setExportDpi] = useState(300); // SVG/PDF export resolution (72–1200)
   const containerRef = useRef<HTMLDivElement>(null);
-  const isHistogram = yChannel === "";
-  const isContour = !isHistogram && displayMode === "contour";
+  const isHistogram = plotType === "histogram";
+  const isHeatmap = plotType === "heatmap";
+  const isContour = plotType === "biplot" && displayMode === "contour";
   const isRidgeline = isHistogram && histLayout === "ridgeline";
 
   // Default colour = the population's STABLE slot (frozen: adding/removing a population never
@@ -103,10 +121,11 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
   // Assemble the live config and mirror it into the App-held ref after every render, so the
   // settings survive a tab unmount (persist across tab switches) and App can save them.
   const currentConfig: IllustrationConfig = {
-    popIds, xChannels, yChannel, displayMode, plotSize, nColumns, fitToColumns, maxEvents, allEvents,
+    plotType, popIds, xChannels, yChannel, displayMode, plotSize, nColumns, fitToColumns, maxEvents, allEvents,
     colorByPop, overlayPops, popColors, pointSize, pointAlpha, contourThreshold, kdeBandwidth, pubStyle,
     gateLineWidth, histLineWidth, histFill, histFillAlpha, histOverlayMode, histLayout, ridgeOverlap,
-    ridgeColGap, ridgeGradient, fontTick, fontAxis, fontTitle, fontGate,
+    ridgeColGap, ridgeGradient, heatmapStat, heatmapScale, heatmapPalette, heatmapCellSize,
+    heatmapShowValues, fontTick, fontAxis, fontTitle, fontGate, scaleFontsWithPlot,
   };
   const [renderedConfig, setRenderedConfig] = useState<IllustrationConfig>(() => snapshotConfig(currentConfig));
   const renderPending = !configsMatch(currentConfig, renderedConfig);
@@ -116,6 +135,7 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
 
   // Apply a full config bundle (preset load).
   const applyConfig = (c: IllustrationConfig) => {
+    setPlotType(c.plotType ?? (c.yChannel === "" ? "histogram" : "biplot"));
     setPopIds(c.popIds); setXChannels(c.xChannels); setYChannel(c.yChannel);
     setDisplayMode(c.displayMode); setPlotSize(c.plotSize); setNColumns(c.nColumns);
     setFitToColumns(c.fitToColumns); setMaxEvents(c.maxEvents); setAllEvents(c.allEvents);
@@ -126,12 +146,17 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
     setHistLineWidth(c.histLineWidth); setHistFill(c.histFill); setHistFillAlpha(c.histFillAlpha);
     setHistOverlayMode(c.histOverlayMode); setHistLayout(c.histLayout); setRidgeOverlap(c.ridgeOverlap);
     setRidgeColGap(c.ridgeColGap); setRidgeGradient(c.ridgeGradient);
+    setHeatmapStat(c.heatmapStat ?? "median"); setHeatmapScale(c.heatmapScale ?? "column_minmax");
+    setHeatmapPalette(c.heatmapPalette ?? "blue_white_yellow_red");
+    setHeatmapCellSize(c.heatmapCellSize ?? 30); setHeatmapShowValues(c.heatmapShowValues ?? false);
     setFontTick(c.fontTick); setFontAxis(c.fontAxis); setFontTitle(c.fontTitle); setFontGate(c.fontGate);
+    setScaleFontsWithPlot(c.scaleFontsWithPlot ?? true);
   };
 
   useEffect(() => {
     if (!containerRef.current) return;
     const c = renderedConfig;
+    const renderedPlotType = c.plotType ?? (c.yChannel === "" ? "histogram" : "biplot");
     const cap = c.allEvents ? Infinity : c.maxEvents;
     const cols = c.nColumns || c.xChannels.length || 1;
     const renderedColorFor = (popId: string) =>
@@ -139,6 +164,36 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
         "default",
         state.populations[popId]?.colorSlot ?? Math.max(0, c.popIds.indexOf(popId)),
       );
+
+    if (renderedPlotType === "heatmap") {
+      const heatmap = buildHeatmapPayload(
+        sample,
+        state.populations,
+        derived.masks,
+        derived.stats.event_count,
+        c.popIds,
+        c.xChannels,
+        {
+          summaryStat: c.heatmapStat ?? "median",
+          scaleMode: c.heatmapScale ?? "column_minmax",
+          palette: c.heatmapPalette ?? "blue_white_yellow_red",
+          cellSize: c.heatmapCellSize ?? 30,
+          showValues: c.heatmapShowValues ?? false,
+        },
+      );
+      loadMiniPlots().renderIllustrationGrid("illustration-grid-container", {
+        containerId: "illustration-grid-container",
+        plot_type: "heatmap",
+        heatmap,
+        font_sizes: { tick: c.fontTick, axis_label: c.fontAxis, gate_label: c.fontGate, title: c.fontTitle },
+        scale_fonts_with_plot: c.scaleFontsWithPlot ?? true,
+      });
+      return;
+    }
+
+    const renderedYChannel = renderedPlotType === "biplot"
+      ? (c.yChannel || defaultY || sample.channels[0]?.key || null)
+      : null;
     const payload = buildIllustrationPayload(
       sample,
       state.gates,
@@ -148,7 +203,7 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
       derived.stats.event_count,
       c.popIds,
       c.xChannels,
-      c.yChannel || null,
+      renderedYChannel,
       globalScales,
       {
         displayMode: c.displayMode,
@@ -176,6 +231,7 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
         pubStyle: c.pubStyle,
         gateLineWidth: c.gateLineWidth,
         fontSizes: { tick: c.fontTick, axis_label: c.fontAxis, gate_label: c.fontGate, title: c.fontTitle },
+        scaleFontsWithPlot: c.scaleFontsWithPlot ?? true,
       },
     );
     loadMiniPlots().renderIllustrationGrid("illustration-grid-container", payload);
@@ -253,18 +309,26 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
           {/* Explicit plot-type toggle — histograms used to be reachable only by picking a "no Y"
               option buried in the Y-channel dropdown, which was undiscoverable. */}
           <span className="gl-stats-opt-label">Plot</span>
-          {[{ v: "biplot", l: "Biplot" }, { v: "histogram", l: "Histogram" }].map((pt) => (
+          {[
+            { v: "biplot", l: "Biplot" },
+            { v: "histogram", l: "Histogram" },
+            { v: "heatmap", l: "Heatmap" },
+          ].map((pt) => (
             <label key={pt.v} className="gl-check">
               <input
                 type="radio"
                 name="illust-plot-type"
-                checked={(pt.v === "histogram") === isHistogram}
-                onChange={() => setYChannel(pt.v === "histogram" ? "" : defaultY || allChannels[0] || "")}
+                checked={plotType === pt.v}
+                onChange={() => {
+                  const next = pt.v as "biplot" | "histogram" | "heatmap";
+                  setPlotType(next);
+                  if (next === "biplot" && !yChannel) setYChannel(defaultY || allChannels[0] || "");
+                }}
               />
               {pt.l}
             </label>
           ))}
-          {!isHistogram && (
+          {plotType === "biplot" && (
             <>
               <span className="gl-ctl-sep" />
               <label className="gl-field-inline">
@@ -277,7 +341,7 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
               </label>
             </>
           )}
-          {!isHistogram && (
+          {plotType === "biplot" && (
             <>
               <span className="gl-ctl-sep" />
               <span className="gl-stats-opt-label">Display</span>
@@ -329,10 +393,16 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
         </div>
 
         {/* Layout + sampling */}
-        <div className="gl-illust-row">
+        {!isHeatmap && <div className="gl-illust-row">
           <label className="gl-field-inline">
             Plot size
-            <input type="number" min={150} max={500} step={25} value={plotSize} onChange={(e) => setPlotSize(+e.target.value || 200)} />
+            <input
+              className="gl-size-slider"
+              type="range" min={150} max={500} step={25} value={plotSize}
+              title="Rendered panel size; click Render Illustration to apply"
+              onChange={(e) => setPlotSize(Math.max(150, Math.min(500, +e.target.value || 200)))}
+            />
+            <span className="gl-num-badge">{plotSize}px</span>
           </label>
           <label className="gl-field-inline">
             Columns
@@ -350,10 +420,10 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
             <input type="checkbox" checked={allEvents} onChange={(e) => setAllEvents(e.target.checked)} />
             All events
           </label>
-        </div>
+        </div>}
 
         {/* Population colouring */}
-        <div className="gl-illust-row">
+        {!isHeatmap && <div className="gl-illust-row">
           <label className="gl-check">
             <input type="checkbox" checked={colorByPop} onChange={(e) => setColorByPop(e.target.checked)} />
             Colour each population
@@ -362,10 +432,10 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
             <input type="checkbox" checked={overlayPops} onChange={(e) => setOverlayPops(e.target.checked)} />
             Overlay populations per channel
           </label>
-        </div>
+        </div>}
 
-        {/* Biplot points/style OR histogram styling */}
-        {!isHistogram ? (
+        {/* Plot-family-specific appearance */}
+        {plotType === "biplot" ? (
           <div className="gl-illust-row">
             <label className="gl-field-inline">
               Point size
@@ -390,7 +460,7 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
               <input type="number" min={0.5} max={5} step={0.25} value={gateLineWidth} onChange={num(setGateLineWidth, 1.5)} />
             </label>
           </div>
-        ) : (
+        ) : plotType === "histogram" ? (
           <>
             <div className="gl-illust-row">
               <label className="gl-field-inline">
@@ -439,15 +509,63 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
               </div>
             )}
           </>
+        ) : (
+          <div className="gl-illust-row">
+            <label className="gl-field-inline">
+              Summary
+              <select value={heatmapStat} onChange={(e) => setHeatmapStat(e.target.value as HeatmapSummaryStat)}>
+                <option value="median">Median</option>
+                <option value="mean">Mean</option>
+              </select>
+            </label>
+            <label className="gl-field-inline">
+              Scale
+              <select value={heatmapScale} onChange={(e) => setHeatmapScale(e.target.value as HeatmapScaleMode)}>
+                <option value="column_minmax">Per channel (0–1)</option>
+                <option value="row_minmax">Per population (0–1)</option>
+                <option value="column_zscore">Per-channel z-score</option>
+                <option value="none">None (transformed expression)</option>
+              </select>
+            </label>
+            <label className="gl-field-inline">
+              Palette
+              <select value={heatmapPalette} onChange={(e) => setHeatmapPalette(e.target.value as HeatmapPalette)}>
+                <option value="heat">Histogram heat (black→yellow)</option>
+                <option value="viridis">Viridis</option>
+                <option value="blue_white_yellow_red">RColorBrewer RdYlBu (blue→yellow→red)</option>
+              </select>
+            </label>
+            <label className="gl-field-inline">
+              Plot size
+              <input
+                className="gl-size-slider"
+                type="range" min={16} max={72} step={2} value={heatmapCellSize}
+                title="Heatmap cell size; click Render Illustration to apply"
+                onChange={(e) => setHeatmapCellSize(Math.max(16, Math.min(72, Math.round(+e.target.value) || 30)))}
+              />
+              <span className="gl-num-badge">{heatmapCellSize}px</span>
+            </label>
+            <label className="gl-check">
+              <input type="checkbox" checked={heatmapShowValues} onChange={(e) => setHeatmapShowValues(e.target.checked)} />
+              Show values
+            </label>
+            <span className="gl-illust-pending" style={{ color: "#64748b" }}>
+              Uses all events; empty populations are grey.
+            </span>
+          </div>
         )}
 
         {/* Fonts + export */}
         <div className="gl-illust-row">
           <span className="gl-stats-opt-label">Fonts</span>
-          <label className="gl-field-inline">Tick<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 8)} /></label>
-          <label className="gl-field-inline">Axis<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 10)} /></label>
-          <label className="gl-field-inline">Title<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 10)} /></label>
-          <label className="gl-field-inline">Gate<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 8)} /></label>
+          <label className="gl-field-inline">Tick<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 9)} /></label>
+          <label className="gl-field-inline">Axis<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 12)} /></label>
+          <label className="gl-field-inline">Title<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 12)} /></label>
+          <label className="gl-field-inline">Gate<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 10)} /></label>
+          <label className="gl-check" title="Scale these base font sizes with the rendered plot or heatmap cell size">
+            <input type="checkbox" checked={scaleFontsWithPlot} onChange={(e) => setScaleFontsWithPlot(e.target.checked)} />
+            Scale with plot
+          </label>
           <span className="gl-ctl-sep" />
           <label className="gl-field-inline" title="Export resolution for SVG/PDF (72–1200 DPI)">
             DPI
@@ -459,50 +577,55 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
         </div>
       </div>
 
-      {/* X channels + Populations side by side, each taller (more room, less scrolling). */}
-      <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-        <div className="gl-stats-opt-group gl-stats-channels" style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-            <span className="gl-stats-opt-label">X channels</span>
-            <button className="gl-mini-btn" style={{ marginLeft: "auto" }} onClick={() => setXChannels(allChannels)}>All</button>
+      {/* Responsive, equal-height multi-column channel + population checklists. */}
+      <div className="gl-illust-pickers">
+        <div className="gl-illust-picker">
+          <div className="gl-picker-head">
+            <span className="gl-stats-opt-label">{isHeatmap ? "Channels" : "X channels"}</span>
+            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setXChannels(allChannels)}>All</button>
             <button className="gl-mini-btn" onClick={() => setXChannels([defaultX])}>Reset</button>
           </div>
-          <div style={{ maxHeight: 300, overflow: "auto", border: "1px solid var(--gl-border, #ddd)", borderRadius: 4, padding: "2px 6px" }}>
-            {allChannels.map((c) => (
-              <label key={c} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", paddingTop: 1, paddingBottom: 1 }}>
-                <input type="checkbox" checked={xChannels.includes(c)} onChange={() => setXChannels((p) => toggle(p, c))} />
-                <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{sample.labelForKey(c)}</span>
-              </label>
-            ))}
-          </div>
+          <MultiColumnChecklist
+            items={allChannels}
+            ariaLabel={isHeatmap ? "Heatmap channels" : "Illustration X channels"}
+            selected={(channel) => xChannels.includes(channel)}
+            onToggle={(channel) => setXChannels((previous) => toggle(previous, channel))}
+            getKey={(channel) => channel}
+            getLabel={(channel) => sample.labelForKey(channel)}
+            visibleRows={15}
+            height={300}
+          />
         </div>
 
-        <div className="gl-stats-opt-group gl-stats-channels" style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+        <div className="gl-illust-picker">
+          <div className="gl-picker-head">
             <span className="gl-stats-opt-label">Populations</span>
-            <button className="gl-mini-btn" style={{ marginLeft: "auto" }} onClick={() => setPopIds(order.map((o) => o.popId))}>All</button>
+            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setPopIds(order.map((o) => o.popId))}>All</button>
             <button className="gl-mini-btn" onClick={() => setPopIds([])}>None</button>
           </div>
-          <div style={{ maxHeight: 300, overflow: "auto", border: "1px solid var(--gl-border, #ddd)", borderRadius: 4, padding: "2px 6px" }}>
-            {order.map(({ popId, depth }) => {
-              const on = popIds.includes(popId);
-              return (
-                <label key={popId} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", paddingTop: 1, paddingBottom: 1, paddingLeft: depth * 12 }}>
-                  <input type="checkbox" checked={on} onChange={() => setPopIds((p) => toggle(p, popId))} />
-                  <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}>{state.populations[popId]?.name ?? popId}</span>
-                  {on && (colorByPop || overlayPops) && (
-                    <input
-                      type="color"
-                      className="gl-pop-color"
-                      title="Population colour"
-                      value={colorFor(popId)}
-                      onChange={(e) => setPopColors((m) => ({ ...m, [popId]: e.target.value }))}
-                    />
-                  )}
-                </label>
-              );
-            })}
-          </div>
+          <MultiColumnChecklist
+            items={order}
+            ariaLabel="Illustration populations"
+            selected={({ popId }) => popIds.includes(popId)}
+            onToggle={({ popId }) => setPopIds((previous) => toggle(previous, popId))}
+            getKey={({ popId }) => popId}
+            getLabel={({ popId }) => state.populations[popId]?.name ?? popId}
+            getDepth={({ depth }) => depth}
+            distribution="fill-first"
+            visibleRows={15}
+            height={300}
+            renderTrailing={({ popId }) => (
+              popIds.includes(popId) && !isHeatmap && (colorByPop || overlayPops) ? (
+                <input
+                  type="color"
+                  className="gl-pop-color"
+                  title="Population colour"
+                  value={colorFor(popId)}
+                  onChange={(e) => setPopColors((colors) => ({ ...colors, [popId]: e.target.value }))}
+                />
+              ) : null
+            )}
+          />
         </div>
       </div>
 

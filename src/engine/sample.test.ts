@@ -13,6 +13,25 @@ function loadArrayBuffer(path: string): ArrayBuffer {
   return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
 }
 
+function syntheticFlow(channelNames: string[]): FcsFile {
+  return {
+    version: "FCS3.1",
+    nEvents: 3,
+    instrument: "flow",
+    keywords: {},
+    spillover: null,
+    channels: channelNames.map((name, index) => ({
+      index,
+      name,
+      marker: null,
+      bits: 32,
+      range: 262144,
+    })),
+    columns: channelNames.map((_, index) =>
+      Float32Array.from([100 + index, 200 + index, 300 + index])),
+  };
+}
+
 describe("Sample — flow (Aria III), raw gating space", () => {
   const fcs = parseFcs(loadArrayBuffer(ARIA_SMALL));
   const s = new Sample(fcs);
@@ -81,10 +100,10 @@ describe("Sample — flow (Aria III), raw gating space", () => {
     expect(local.scatterCofactorOverrides()).toEqual({ "FSC-A": 300 });
   });
 
-  it("defaultChannelIndices skips Time", () => {
+  it("opens flow data on FSC-A vs SSC-A", () => {
     const [x, y] = s.defaultChannelIndices();
-    expect(s.channels[x].key).not.toBe("Time");
-    expect(s.channels[y].key).not.toBe("Time");
+    expect(s.channels[x].key).toBe("FSC-A");
+    expect(s.channels[y].key).toBe("SSC-A");
   });
 
   it("logicle W override changes the display column, reset restores it", () => {
@@ -99,6 +118,26 @@ describe("Sample — flow (Aria III), raw gating space", () => {
     s.resetLogicleW(i);
     expect(s.currentLogicleW(i)).toBeCloseTo(auto, 6);
     expect(Array.from(s.displayColumn(i).slice(0, 20))).toEqual(before);
+  });
+});
+
+describe("Sample — default flow overview axes", () => {
+  it("prefers area scatter even when fluorescence and H/W channels appear first", () => {
+    const sample = new Sample(syntheticFlow([
+      "Time", "FITC-A", "FSC-H", "SSC-W", "SSC-A", "FSC-A",
+    ]));
+    const [x, y] = sample.defaultChannelIndices();
+
+    expect(sample.channels[x].key).toBe("FSC-A");
+    expect(sample.channels[y].key).toBe("SSC-A");
+  });
+
+  it("falls back to the available forward and side scatter variants", () => {
+    const sample = new Sample(syntheticFlow(["Time", "CD3-A", "SS LOG", "FS INT"]));
+    const [x, y] = sample.defaultChannelIndices();
+
+    expect(sample.channels[x].key).toBe("FS INT");
+    expect(sample.channels[y].key).toBe("SS LOG");
   });
 });
 
@@ -134,6 +173,12 @@ describe("Sample — CyTOF, display gating space", () => {
     expect(s.channels.map((c) => c.key)).toEqual(["Time", "CD3", "CD19", "CD27"]);
     expect(s.gatingToDisplay("CD3", 3.14)).toBe(3.14);
     expect(s.displayToGating("CD3", 3.14)).toBe(3.14);
+  });
+
+  it("keeps the first two non-QC markers as the CyTOF overview axes", () => {
+    const [x, y] = s.defaultChannelIndices();
+    expect(s.channels[x].key).toBe("CD3");
+    expect(s.channels[y].key).toBe("CD19");
   });
 
   it("metal displayColumn is asinh(raw/5); Time is raw", () => {

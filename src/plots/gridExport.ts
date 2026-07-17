@@ -54,7 +54,7 @@ function cellDataUrlAtDpi(cell: HTMLElement, dpi: number): string | null {
 
 /** Compose the grid into a single SVG element (per-cell vector axes/gates over a data layer
  *  re-rendered at `dpi`). Shared by the SVG download and the PDF export. */
-function composeGridSVG(gridId: string, dpi: number): { root: SVGSVGElement; width: number; height: number } | null {
+export function composeGridSVG(gridId: string, dpi: number): { root: SVGSVGElement; width: number; height: number } | null {
   const grid = document.getElementById(gridId);
   if (!grid) return null;
   const gridRect = grid.getBoundingClientRect();

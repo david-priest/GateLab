@@ -295,4 +295,71 @@ describe("store: gate + population flow", () => {
     expect((moved.gates[gid] as { center: [number, number] }).center).toEqual([2500, 2500]);
     expect(moved.gate_version).toBe(state.gate_version + 1);
   });
+
+  it("importGating merge retains the current hierarchy and selection and remains undoable", () => {
+    let { state } = withGate();
+    const existingGateId = state.gate_order[0];
+    const existingPopId = state.active_population_id!;
+    state = coreReducer(state, { type: "toggleGateSelect", gateId: existingGateId, checked: true });
+    state = coreReducer(state, { type: "togglePopSelect", popId: existingPopId, checked: true });
+
+    const importedGateId = "imported-gate";
+    const importedRootId = "imported-root";
+    const importedPopId = "imported-pop";
+    const merged = coreReducer(state, {
+      type: "importGating",
+      mode: "merge",
+      gates: {
+        [importedGateId]: {
+          gate_id: importedGateId,
+          name: "Imported",
+          gate_type: "rectangle",
+          x_channel: "FSC-A",
+          y_channel: "SSC-A",
+          vertices: [[0, 0], [10000, 10000]],
+          color: "#4daf4a",
+          label_offset: null,
+        },
+      },
+      gate_order: [importedGateId],
+      populations: {
+        [importedRootId]: {
+          population_id: importedRootId,
+          name: "All Events",
+          gate_refs: [],
+          gate_logic: "and",
+          parent_id: null,
+          children: [importedPopId],
+          event_count: null,
+          percent_of_parent: 100,
+        },
+        [importedPopId]: {
+          population_id: importedPopId,
+          name: "Imported population",
+          gate_refs: [{ gate_id: importedGateId, include: true }],
+          gate_logic: "and",
+          parent_id: importedRootId,
+          children: [],
+          event_count: null,
+          percent_of_parent: null,
+        },
+      },
+      root_population_id: importedRootId,
+    });
+
+    expect(merged.root_population_id).toBe(state.root_population_id);
+    expect(merged.active_population_id).toBe(existingPopId);
+    expect(merged.selected_gate_id).toBe(existingGateId);
+    expect(merged.selected_gate_ids).toEqual([existingGateId]);
+    expect(merged.selected_pop_ids).toEqual([existingPopId]);
+    expect(Object.keys(merged.gates)).toHaveLength(2);
+    expect(merged.populations[importedPopId].parent_id).toBe(state.root_population_id);
+    expect(merged.populations[state.root_population_id!].children).toEqual(
+      expect.arrayContaining([existingPopId, importedPopId]),
+    );
+
+    const undone = coreReducer(merged, { type: "undo" });
+    expect(Object.keys(undone.gates)).toEqual([existingGateId]);
+    expect(undone.populations[importedPopId]).toBeUndefined();
+  });
 });

@@ -14,8 +14,19 @@ import { resolvePartitionLevels, partitionAssign } from "./engine/factors";
 import { paletteColors, populationColor, UNGATED_COLOR, OVERLAY_PALETTES, type PaletteName } from "./engine/palettes";
 import { assignDivisionLevel, divisionPalette } from "./engine/division";
 import { encodeFloat32Base64, encodeUint8Base64 } from "./engine/encode";
-import { importGatingML, resolveGatingMLCompensation, restoreGatingMLScaleState } from "./engine/gatingml";
+import {
+  importGatingML,
+  resolveGatingMLCompensation,
+  restoreGatingMLScaleState,
+  type GatingMLCompensationResolution,
+  type GatingMLResult,
+} from "./engine/gatingml";
 import { exportGatingML, type GatingMLFormat } from "./engine/gatingmlExport";
+import {
+  gatingMergeSpaceConflict,
+  hasGatingStrategy,
+  type GatingImportMode,
+} from "./engine/gatingMerge";
 import { exportPopulationFcs, exportPopulationFcsCombined, sanitizeFcsName, sanitizeFilePart, type FcsExportAssay } from "./engine/fcsExport";
 import { zipSync } from "fflate";
 import {
@@ -39,6 +50,12 @@ import {
   recallHandle,
 } from "./engine/fsAccess";
 import {
+  AUTO_CHECKPOINT_INTERVAL_MS,
+  requestPersistentWorkspaceHistory,
+  saveWorkspaceCheckpoint,
+  type WorkspaceCheckpointReason,
+} from "./engine/workspaceHistory";
+import {
   coreReducer,
   initialCoreState,
   derivePopulationView,
@@ -50,7 +67,7 @@ import { GateList } from "./ui/GateList";
 import { PopulationTree } from "./ui/PopulationTree";
 import { GateModals } from "./ui/GateModals";
 import { GateToolbar, PopToolbar } from "./ui/Toolbars";
-import { RenameModal, CreatePopModal, EditPopModal, ConfirmModal, MovePopsModal, BulkRenameModal, FcsExportModal, GatingMlExportModal } from "./ui/CrudModals";
+import { RenameModal, CreatePopModal, EditPopModal, ConfirmModal, MovePopsModal, BulkRenameModal, FcsExportModal, GatingMlImportModal, GatingMlExportModal } from "./ui/CrudModals";
 import { StatsTab } from "./ui/StatsTab";
 import { PanelTab } from "./ui/PanelTab";
 import { MetadataTab } from "./ui/MetadataTab";
@@ -74,6 +91,14 @@ type CrudModal =
 
 type DrawMode = "navigate" | "draw-rect" | "draw-poly" | "draw-quadrant";
 
+interface PendingGatingMLImport {
+  result: GatingMLResult;
+  compensation: GatingMLCompensationResolution;
+  sampleId: string;
+  mergeBlockedReason: string | null;
+  compensationNote: string | null;
+}
+
 /** Save data to a file the user downloads (local blob; user-initiated). */
 function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
@@ -88,6 +113,9 @@ function downloadBlob(filename: string, blob: Blob) {
 const downloadText = (filename: string, text: string, mime: string) =>
   downloadBlob(filename, new Blob([text], { type: mime }));
 
+const makeWorkspaceId = (): string =>
+  globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
 const DRAW_TOOLS: { id: DrawMode; Icon: () => React.ReactElement; title: string }[] = [
   { id: "navigate", Icon: NavigateIcon, title: "Navigate (pan / zoom)" },
   { id: "draw-rect", Icon: RectIcon, title: "Rectangle gate — drag a box" },
@@ -101,17 +129,17 @@ const MODES: { id: DisplayMode; label: string }[] = [
   { id: "contour", label: "Contour" },
 ];
 
-// Center-column tabs, mirroring GateLabR's tabsetPanel (v1 subset: no UMAP / Division /
-// Proportions). The left (samples/import/export) and right (gates/populations) panels are
+// Center-column tabs, mirroring GateLabR's tabsetPanel. The left (samples/import/export)
+// and right (gates/populations) panels are
 // shared across tabs — only the center switches, exactly as in GateLabR.
 type TabId = "gating" | "strategy" | "illustration" | "statistics" | "panel" | "scales" | "metadata" | "proportions" | "division";
 const TABS: { id: TabId; label: string }[] = [
   { id: "gating", label: "Gating" },
   { id: "strategy", label: "Strategy" },
   { id: "illustration", label: "Illustration" },
-  { id: "statistics", label: "Statistics" },
   { id: "proportions", label: "Proportions" },
   { id: "division", label: "Division" },
+  { id: "statistics", label: "Statistics" },
   { id: "metadata", label: "Metadata" },
   { id: "panel", label: "Panel" },
   { id: "scales", label: "Scales" },
@@ -146,6 +174,7 @@ export default function App() {
   const [wsHandle, setWsHandle] = useState<FileSystemFileHandle | null>(null);
   const [wsName, setWsName] = useState("");
   const [wsStorage, setWsStorage] = useState<WorkspaceStorage>("reference");
+  const [workspaceId, setWorkspaceId] = useState(makeWorkspaceId);
   const [dirty, setDirty] = useState(false);
   const [xIdx, setXIdx] = useState(0);
   const [yIdx, setYIdx] = useState(1);
@@ -174,6 +203,7 @@ export default function App() {
   const [fcsAssay, setFcsAssay] = useState<FcsExportAssay>("original");
   const [fcsScope, setFcsScope] = useState<"active" | "combined" | "split">("active");
   const [fcsExportOpen, setFcsExportOpen] = useState(false);
+  const [pendingGatingMlImport, setPendingGatingMlImport] = useState<PendingGatingMLImport | null>(null);
   const [gatingMlExportOpen, setGatingMlExportOpen] = useState(false);
   const [contourThreshold, setContourThreshold] = useState(5); // outer contour % of peak
   const [compensationOn, setCompensationOn] = useState(false);
@@ -359,6 +389,37 @@ export default function App() {
   // Autosave lightweight reference workspaces only. Repacking every embedded FCS on each
   // edit would stall large bundled workspaces; bundles retain their format via manual Save.
   const buildWsRef = useRef<() => WorkspaceFile | null>(() => null);
+  const workspaceIdRef = useRef(workspaceId);
+  workspaceIdRef.current = workspaceId;
+  const pendingCheckpointReasonRef = useRef<WorkspaceCheckpointReason | null>(null);
+
+  const checkpointCurrentWorkspace = (reason: WorkspaceCheckpointReason): Promise<void> => {
+    const ws = buildWsRef.current();
+    const id = workspaceIdRef.current;
+    if (!ws || !id) return Promise.resolve();
+    return saveWorkspaceCheckpoint(id, ws, reason).then(() => undefined);
+  };
+
+  // Check every two minutes. Automatic checkpoints de-duplicate unchanged workspace JSON, so
+  // an idle app performs a small IndexedDB read but does not accumulate redundant snapshots.
+  useEffect(() => {
+    void requestPersistentWorkspaceHistory();
+    const timer = window.setInterval(() => {
+      void checkpointCurrentWorkspace("automatic");
+    }, AUTO_CHECKPOINT_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+    // This function reads only refs, which are refreshed on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Major imports queue their post-change checkpoint for the first committed React render.
+  useEffect(() => {
+    const reason = pendingCheckpointReasonRef.current;
+    if (!reason) return;
+    pendingCheckpointReasonRef.current = null;
+    void checkpointCurrentWorkspace(reason);
+  });
+
   useEffect(() => {
     if (!dirty || !wsHandle || wsStorage === "bundle") return;
     const t = setTimeout(async () => {
@@ -379,8 +440,8 @@ export default function App() {
   const xmlRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<HTMLInputElement>(null);
 
-  async function importGating(file: File) {
-    if (!sample) return;
+  async function prepareGatingImport(file: File) {
+    if (!sample || !activeSampleId) return;
     try {
       const text = await file.text();
       const pnnMap: Record<string, string> = {};
@@ -392,14 +453,79 @@ export default function App() {
         sample.instrument === "flow",
         sample.spillover,
       );
-      if (comp.requiresConfirmation && !window.confirm(
-        "This Gating-ML file declares FCS compensation but does not carry GateLab's exact matrix record. " +
-        "Continue to use the spillover matrix embedded in the loaded FCS. If this is an older GateLab or " +
-        "GateLabR export, continue only if compensation was enabled when its gates were drawn.",
-      )) {
-        setError(null);
-        setImportMsg("Gating-ML import cancelled; the current strategy was not changed.");
-        return;
+      const existingStrategy = state.root_population_id !== null && hasGatingStrategy({
+        gates: state.gates,
+        populations: state.populations,
+        root_population_id: state.root_population_id,
+      });
+      const mergeBlockedReason = gatingMergeSpaceConflict({
+        hasExistingStrategy: existingStrategy,
+        isFlow: sample.instrument === "flow",
+        currentCompensation: sample.compensationEnabled,
+        importedCompensationTarget: comp.target,
+        currentCytofCofactor: sample.arcsinhCofactor,
+        importedCytofCofactor: res.cytof_cofactor,
+      });
+      let compensationNote: string | null = null;
+      if (comp.target !== null) {
+        if (comp.source === "embedded") {
+          if (comp.target) {
+            compensationNote = sample.compensationEnabled
+              ? "The embedded spillover matrix exactly matches the loaded FCS; compensation is already enabled."
+              : "This strategy was gated with FCS compensation enabled. Its exact matrix matches the loaded FCS, so importing will enable compensation.";
+          } else {
+            compensationNote = sample.compensationEnabled
+              ? "This strategy was gated without compensation, so importing will disable the current compensation setting."
+              : "This strategy was gated without compensation; the current data are already uncompensated.";
+          }
+        } else if (comp.target) {
+          compensationNote =
+            "This file declares FCS compensation but does not contain GateLab's exact matrix record. " +
+            "Import will use the spillover matrix embedded in the loaded FCS. Continue only if compensation was enabled when these gates were drawn.";
+        } else if (sample.compensationEnabled) {
+          compensationNote = "This file declares uncompensated dimensions, so importing will disable the current compensation setting.";
+        }
+      }
+      setPendingGatingMlImport({
+        result: res,
+        compensation: comp,
+        sampleId: activeSampleId,
+        mergeBlockedReason,
+        compensationNote,
+      });
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function applyGatingImport(mode: GatingImportMode) {
+    const pendingImport = pendingGatingMlImport;
+    if (!sample || !pendingImport || pendingImport.sampleId !== activeSampleId) {
+      setPendingGatingMlImport(null);
+      setError("The active sample changed before Gating-ML import could be applied. Please import the file again.");
+      return;
+    }
+    try {
+      const res = pendingImport.result;
+      const comp = pendingImport.compensation;
+      const existingStrategy = state.root_population_id !== null && hasGatingStrategy({
+        gates: state.gates,
+        populations: state.populations,
+        root_population_id: state.root_population_id,
+      });
+      const mergeBlockedReason = gatingMergeSpaceConflict({
+        hasExistingStrategy: existingStrategy,
+        isFlow: sample.instrument === "flow",
+        currentCompensation: sample.compensationEnabled,
+        importedCompensationTarget: comp.target,
+        currentCytofCofactor: sample.arcsinhCofactor,
+        importedCytofCofactor: res.cytof_cofactor,
+      });
+      if (mode === "merge" && mergeBlockedReason) throw new Error(mergeBlockedReason);
+      if (mode === "replace") {
+        // Replacing the hierarchy is destructive; merge mode retains the current strategy.
+        await checkpointCurrentWorkspace("before-gatingml-replace");
       }
       const compensationChanged = comp.target !== null && sample.compensationEnabled !== comp.target;
       if (comp.target !== null) {
@@ -424,17 +550,21 @@ export default function App() {
         setYRange(null);
         bumpScales();
       }
+      pendingCheckpointReasonRef.current = "after-gatingml-import";
       dispatch({
         type: "importGating",
         gates: res.gates,
         gate_order: res.gate_order,
         populations: res.populations,
         root_population_id: res.root_population_id,
+        mode,
         clearHistory: compensationChanged || restoredScales.transformsChanged,
       });
+      setPendingGatingMlImport(null);
       setError(null);
       setImportMsg(
-        `Imported ${res.n_gates_imported} gates, ${res.n_pops_imported} populations` +
+        `${mode === "merge" ? "Merged" : "Imported"} ${res.n_gates_imported} gates, ${res.n_pops_imported} populations` +
+          (mode === "merge" ? " · existing strategy retained" : " · current strategy replaced") +
           (comp.target === true ? " · FCS compensation enabled" : "") +
           (comp.target === false ? " · compensation disabled" : "") +
           (res.skipped_channels.length
@@ -653,6 +783,7 @@ export default function App() {
         const have = new Set(cols.map((c) => c.name));
         return [...cols, ...parsed.columns.filter((c) => !have.has(c)).map((name) => ({ name }))];
       });
+      pendingCheckpointReasonRef.current = "after-metadata-import";
       setMetadata(nextMeta);
       setDirty(true);
       setImportMsg(
@@ -734,6 +865,13 @@ export default function App() {
   function addSample(bytes: Uint8Array, name: string, handle: FileSystemFileHandle | null): SampleEntry | null {
     const entry = makeEntry(bytes, name, handle);
     if (!entry) return null;
+    if (samples.length === 0) {
+      setWorkspaceId(makeWorkspaceId());
+      setWsHandle(null);
+      setWsName("");
+      setWsStorage("reference");
+    }
+    pendingCheckpointReasonRef.current = "after-fcs-import";
     skipDirtyRef.current = true;
     const [nx, ny] = channelsFor(entry.sample);
     setSamples((prev) => [...prev, entry]);
@@ -776,7 +914,8 @@ export default function App() {
     setInstrumentMode(entry.sample.instrumentMode);
   }
 
-  function removeSample(id: string) {
+  async function removeSample(id: string) {
+    await checkpointCurrentWorkspace("before-sample-remove");
     const next = samples.filter((s) => s.id !== id);
     const curX = sample?.channels[xIdx]?.key;
     const curY = sample?.channels[yIdx]?.key;
@@ -830,6 +969,7 @@ export default function App() {
     return {
       format: "gatelab-workspace",
       version: 2,
+      workspaceId,
       savedAt: new Date().toISOString(),
       app: "GateLab",
       samples: samples.map((e, i) => ({
@@ -1056,6 +1196,8 @@ export default function App() {
         return;
       }
 
+      await checkpointCurrentWorkspace("before-workspace-open");
+      pendingCheckpointReasonRef.current = "after-workspace-open";
       skipDirtyRef.current = true;
       const activeIdx = Math.min(Math.max(0, ws.activeSample), entries.length - 1);
       const active = entries[activeIdx].sample;
@@ -1084,6 +1226,7 @@ export default function App() {
       setWsHandle(wsH);
       setWsName(wsFileName);
       setWsStorage(storage);
+      setWorkspaceId(ws.workspaceId ?? makeWorkspaceId());
       setDirty(false);
       dispatch({
         type: "loadWorkspace",
@@ -1401,7 +1544,7 @@ export default function App() {
                     aria-label={`Remove ${entry.name}`}
                     onClick={(e) => {
                       e.stopPropagation();
-                      removeSample(entry.id);
+                      void removeSample(entry.id);
                     }}
                   >
                     ×
@@ -1478,7 +1621,7 @@ export default function App() {
               </div>
               <button
                 className="gl-btn-ghost gl-btn-block"
-                title="Import Gating-ML 2.0 gates and positive AND populations (e.g. from Cytobank); files containing NOT/OR logic or unmatched channels are rejected without changing the workspace"
+                title="Import Gating-ML 2.0 gates and positive AND populations, then choose whether to merge them into the current hierarchy or replace the current strategy"
                 onClick={() => xmlRef.current?.click()}
               >
                 Import GatingML…
@@ -1490,7 +1633,7 @@ export default function App() {
                 style={{ display: "none" }}
                 onChange={(e) => {
                   const f = e.target.files?.[0];
-                  if (f) importGating(f);
+                  if (f) prepareGatingImport(f);
                   e.target.value = "";
                 }}
               />
@@ -2012,7 +2155,10 @@ export default function App() {
               : `Delete ${crud.ids.length} population${crud.ids.length === 1 ? "" : "s"}? Their children are reparented upward; gates are kept. This can be undone.`
           }
           onCancel={() => setCrud(null)}
-          onConfirm={() => {
+          onConfirm={async () => {
+            await checkpointCurrentWorkspace(
+              crud.what === "gates" ? "before-gate-delete" : "before-population-delete",
+            );
             dispatch(crud.what === "gates" ? { type: "deleteGates", gateIds: crud.ids } : { type: "deletePopulations", popIds: crud.ids });
             setCrud(null);
           }}
@@ -2037,6 +2183,39 @@ export default function App() {
             dispatch({ type: "bulkRenamePopulations", mapping });
             setCrud(null);
           }}
+        />
+      )}
+      {pendingGatingMlImport && (
+        <GatingMlImportModal
+          nGates={pendingGatingMlImport.result.n_gates_imported}
+          nPopulations={pendingGatingMlImport.result.n_pops_imported}
+          sourceLabel={
+            pendingGatingMlImport.result.source === "gatelabr"
+              ? "a GateLab / GateLabR export"
+              : pendingGatingMlImport.result.source === "cytobank"
+                ? "a Cytobank Gating-ML file"
+                : "a Gating-ML file"
+          }
+          currentRootName={
+            state.root_population_id
+              ? state.populations[state.root_population_id]?.name ?? "the current root"
+              : "the current root"
+          }
+          hasExistingStrategy={
+            state.root_population_id !== null && hasGatingStrategy({
+              gates: state.gates,
+              populations: state.populations,
+              root_population_id: state.root_population_id,
+            })
+          }
+          mergeBlockedReason={pendingGatingMlImport.mergeBlockedReason}
+          compensationNote={pendingGatingMlImport.compensationNote}
+          compensationNeedsConfirmation={pendingGatingMlImport.compensation.requiresConfirmation}
+          onCancel={() => {
+            setPendingGatingMlImport(null);
+            setImportMsg("Gating-ML import cancelled; the current strategy was not changed.");
+          }}
+          onImport={applyGatingImport}
         />
       )}
       {fcsExportOpen && sample && (

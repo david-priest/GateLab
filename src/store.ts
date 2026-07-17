@@ -30,6 +30,7 @@ import {
   type GateCount,
   type GateMaskCache,
 } from "./engine/populations";
+import { mergeGatingStrategies, type GatingImportMode } from "./engine/gatingMerge";
 import type { Sample } from "./engine/sample";
 
 export interface CoreState {
@@ -140,6 +141,7 @@ export type Action =
       gate_order: string[];
       populations: PopulationMap;
       root_population_id: string;
+      mode?: GatingImportMode;
       /** Compensation lives outside CoreState; discard unsafe gate-only undo when its space changed. */
       clearHistory?: boolean;
     }
@@ -471,20 +473,47 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
     }
 
     case "importGating": {
+      const shouldMerge = action.mode === "merge" && state.root_population_id !== null &&
+        state.populations[state.root_population_id] !== undefined;
+      const graph = shouldMerge
+        ? mergeGatingStrategies(
+            {
+              gates: state.gates,
+              gate_order: state.gate_order,
+              populations: state.populations,
+              root_population_id: state.root_population_id!,
+            },
+            {
+              gates: action.gates,
+              gate_order: action.gate_order,
+              populations: action.populations,
+              root_population_id: action.root_population_id,
+            },
+          )
+        : action;
       // GatingML populations carry no colorSlot — backfill so imported pops get stable, frozen colours.
-      const importedPops = clonePops(action.populations);
-      ensurePopColorSlots(importedPops, action.root_population_id);
+      const importedPops = clonePops(graph.populations);
+      ensurePopColorSlots(importedPops, graph.root_population_id);
+      const activePopulationId = shouldMerge && state.active_population_id && importedPops[state.active_population_id]
+        ? state.active_population_id
+        : graph.root_population_id;
       return {
         ...state,
         ...(action.clearHistory ? { undo: [], redo: [] } : pushUndo(state)),
-        gates: action.gates,
-        gate_order: action.gate_order,
+        gates: graph.gates,
+        gate_order: graph.gate_order,
         populations: importedPops,
-        root_population_id: action.root_population_id,
-        active_population_id: action.root_population_id,
-        selected_gate_id: null,
-        selected_pop_ids: [],
-        selected_gate_ids: [],
+        root_population_id: graph.root_population_id,
+        active_population_id: activePopulationId,
+        selected_gate_id: shouldMerge && state.selected_gate_id && graph.gates[state.selected_gate_id]
+          ? state.selected_gate_id
+          : null,
+        selected_pop_ids: shouldMerge
+          ? state.selected_pop_ids.filter((id) => importedPops[id])
+          : [],
+        selected_gate_ids: shouldMerge
+          ? state.selected_gate_ids.filter((id) => graph.gates[id])
+          : [],
         gate_version: state.gate_version + 1,
       };
     }

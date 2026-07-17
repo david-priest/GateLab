@@ -123,6 +123,7 @@ export interface IllustrationOptions {
   pubStyle: boolean; // black gates, no label background
   gateLineWidth: number;
   fontSizes: IllustrationFontSizes;
+  scaleFontsWithPlot: boolean;
 }
 
 /** Assemble the object passed to CytofMiniPlot.renderIllustrationGrid. */
@@ -236,6 +237,7 @@ export function buildIllustrationPayload(
     ridge_col_gap: opts.ridgeColGap,
     ridge_gradient: opts.ridgeGradient,
     font_sizes: opts.fontSizes,
+    scale_fonts_with_plot: opts.scaleFontsWithPlot,
     gate_style: { pub_style: opts.pubStyle, line_width: opts.gateLineWidth },
   };
 }

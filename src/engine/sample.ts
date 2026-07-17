@@ -39,6 +39,26 @@ function asinhTransform(cf: number): ChannelTransform {
   return { kind: "asinh", forward: (v) => Math.asinh(v / cf), inverse: (v) => cf * Math.sinh(v) };
 }
 
+type ScatterRole = "forward" | "side" | "other";
+
+/** Classify a resolved flow channel by its original parameter name first. */
+function scatterRole(channel: ResolvedChannel): ScatterRole | null {
+  const names = [channel.pnn, channel.key];
+  if (!names.some((name) => isScatterChannel(name))) return null;
+  if (names.some((name) => /^(?:FSC|FS(?:[\s\-_]|$))/i.test(name))) return "forward";
+  if (names.some((name) => /^(?:SSC|SS(?:[\s\-_]|$))/i.test(name))) return "side";
+  return "other";
+}
+
+/** Area/integral scatter is the conventional overview view; height/width are fallbacks. */
+function scatterPreference(channel: ResolvedChannel): number {
+  const names = [channel.pnn, channel.key];
+  if (names.some((name) => /(?:^|[\s._-])A(?:$|[\s.)_-])|AREA|INT(?:EGRAL)?/i.test(name))) return 0;
+  if (names.some((name) => /(?:^|[\s._-])H(?:$|[\s.)_-])|HEIGHT/i.test(name))) return 1;
+  if (names.some((name) => /(?:^|[\s._-])W(?:$|[\s.)_-])|WIDTH/i.test(name))) return 2;
+  return 3;
+}
+
 export type DisplayMode = "pseudocolor" | "dots" | "contour";
 
 /** Max points drawn per plot; more are downsampled for speed (gating uses all events). */
@@ -610,14 +630,34 @@ export class Sample {
     };
   }
 
-  /** First two non-QC channels (resolved-channel indices; fall back to 0/1). */
+  /**
+   * Initial biplot axes. Flow opens on FSC vs SSC (area/integral preferred), matching
+   * the conventional first view of an FCS file; CyTOF keeps the first two non-QC markers.
+   */
   defaultChannelIndices(): [number, number] {
     const usable: number[] = [];
     this.channels.forEach((c, i) => {
       if (!isQcChannel(c.key)) usable.push(i);
     });
-    const x = usable[0] ?? 0;
-    const y = usable[1] ?? Math.min(1, this.channels.length - 1);
+
+    if (this.instrument !== "flow") {
+      const x = usable[0] ?? 0;
+      const y = usable[1] ?? Math.min(1, this.channels.length - 1);
+      return [x, y];
+    }
+
+    const scatter = usable
+      .map((index) => ({ index, role: scatterRole(this.channels[index]) }))
+      .filter((entry): entry is { index: number; role: ScatterRole } => entry.role !== null)
+      .sort((a, b) =>
+        scatterPreference(this.channels[a.index]) - scatterPreference(this.channels[b.index]) ||
+        a.index - b.index,
+      );
+    const forward = scatter.find((entry) => entry.role === "forward")?.index;
+    const side = scatter.find((entry) => entry.role === "side")?.index;
+    const x = forward ?? scatter[0]?.index ?? usable[0] ?? 0;
+    const y = side ?? scatter.find((entry) => entry.index !== x)?.index ??
+      usable.find((index) => index !== x) ?? Math.min(1, this.channels.length - 1);
     return [x, y];
   }
 }

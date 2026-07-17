@@ -52,6 +52,9 @@ experience.
   AND population hierarchies, and a population tree with counts / %parent / %total.
 - Tabs: Gating, Strategy (single + multi-population back-gating), Illustration, Statistics,
   Panel, Scales, Division profiler, Proportions, Metadata.
+- Illustration figures include biplot and histogram grids, stacked ridgelines, and
+  population-by-channel median / mean expression heatmaps with explicit scaling,
+  palette, cell-value, and vector-export controls.
 - Import / export **Gating-ML 2.0** (GateLabR / Cytobank dialects); export populations as
   **FCS**; SVG / PDF figure export.
 - Self-contained `.gatelab` workspace bundle (workspace + original FCS + Gating-ML), with
