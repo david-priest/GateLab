@@ -152,7 +152,9 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
   const channelPicker = useIllustrationPickerColumnCount();
   const populationPicker = useIllustrationPickerColumnCount();
   const channelLayout = layoutIllustrationPicker(allChannels, channelPicker.columnCount);
-  const populationLayout = layoutIllustrationPicker(order, populationPicker.columnCount);
+  const populationLayout = layoutIllustrationPicker(order, populationPicker.columnCount, {
+    distribution: "fill-first",
+  });
 
   // Default colour = the population's STABLE slot (frozen: adding/removing a population never
   // reshuffles the others); a hand-picked popColors[popId] override still wins.

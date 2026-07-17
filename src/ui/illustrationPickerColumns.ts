@@ -6,23 +6,29 @@ export interface IllustrationPickerLayout<T> {
   lastColumnScrollable: boolean;
 }
 
+export interface IllustrationPickerLayoutOptions {
+  visibleRows?: number;
+  distribution?: "balanced" | "fill-first";
+}
+
 /**
- * Spread a checklist across the available columns while preserving its reading order.
- * Once every column can hold a full visible page, keep the first columns fixed and put
- * any remaining items in the final scrollable column.
+ * Arrange a checklist across the available columns while preserving its reading order.
+ * Balanced lists use the available width immediately; fill-first lists complete each
+ * left-hand column before continuing right. Overflow stays in the final scrollable column.
  */
 export function layoutIllustrationPicker<T>(
   items: readonly T[],
   availableColumns: number,
-  visibleRows = ILLUSTRATION_PICKER_VISIBLE_ROWS,
+  options: IllustrationPickerLayoutOptions = {},
 ): IllustrationPickerLayout<T> {
+  const visibleRows = options.visibleRows ?? ILLUSTRATION_PICKER_VISIBLE_ROWS;
   const safeRows = Math.max(1, Math.floor(visibleRows));
   const safeAvailable = Math.max(1, Math.floor(availableColumns));
   const columnCount = Math.min(safeAvailable, Math.max(1, items.length));
   const lastColumnScrollable = items.length > columnCount * safeRows;
   const columns: T[][] = [];
 
-  if (lastColumnScrollable) {
+  if (lastColumnScrollable || options.distribution === "fill-first") {
     let offset = 0;
     for (let column = 0; column < columnCount - 1; column += 1) {
       columns.push(items.slice(offset, offset + safeRows));
