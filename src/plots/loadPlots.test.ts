@@ -11,7 +11,7 @@ describe("GateLab cytof interaction patches", () => {
     expect(patched).toContain("_mouseData = null; _polyJustClosed = false;");
     expect(patched).toContain("newMode === 'navigate' ? null : 'none'");
     expect(patched).toContain("_g.select('.draw-layer').style('pointer-events', 'none');");
-    expect(patched).toContain("(pd.x_range||[]).join(',')");
+    expect(patched).toMatch(/\(pd\.x_range\s*\|\|\s*\[\]\)\.join\(','\)/);
 
     warning.mockRestore();
   });

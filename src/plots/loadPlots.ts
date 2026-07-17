@@ -42,26 +42,27 @@ export function patchCytofForGateLab(src: string): string {
   // cytof caches contours by point data. Include the view range so pan/stretch cannot leave
   // the density frozen while axes and gates move.
   const contourNeedle = "pd.contour_threshold || 5];";
-  if (!out.includes(contourNeedle)) {
-    console.warn("[GateLab] cytof contour-key patch did not match — contour may lag on pan.");
-  } else {
+  const contourPatchedNeedle = "(pd.x_range || []).join(',')";
+  if (out.includes(contourNeedle)) {
     out = out.replace(
       contourNeedle,
       "pd.contour_threshold || 5, (pd.x_range||[]).join(','), (pd.y_range||[]).join(',')];",
     );
+  } else if (!out.includes(contourPatchedNeedle) && !out.includes("(pd.x_range||[]).join(',')")) {
+    console.warn("[GateLab] cytof contour-key patch did not match — contour may lag on pan.");
   }
 
   // A polygon closed on mousedown sets this guard to swallow that physical click. React can
   // switch back to navigate before the click arrives, leaving the guard set; the first click of
   // the next polygon was then lost. A mode change always starts a fresh drawing transaction.
   const resetNeedle = "_polyVerts = []; _mouseData = null;\n        _rectStart = null; _rectCurrent = null;";
-  if (!out.includes(resetNeedle)) {
-    console.warn("[GateLab] cytof polygon-close guard patch did not match.");
-  } else {
+  if (out.includes(resetNeedle)) {
     out = out.replace(
       resetNeedle,
       "_polyVerts = []; _mouseData = null; _polyJustClosed = false;\n        _rectStart = null; _rectCurrent = null;",
     );
+  } else if (!out.includes("_mouseData = null; _polyJustClosed = false;")) {
+    console.warn("[GateLab] cytof polygon-close guard patch did not match.");
   }
 
   // Saved gate fills have D3 drag handlers and cover large parts of the plot. While drawing,
@@ -69,9 +70,7 @@ export function patchCytofForGateLab(src: string): string {
   // plot overlay. The preview itself is visual-only; close detection is coordinate based.
   const modeNeedle = `_g.select('.cytof-overlay').style('cursor',
             newMode === 'navigate' ? 'default' : 'crosshair');`;
-  if (!out.includes(modeNeedle)) {
-    console.warn("[GateLab] cytof draw-mode pointer patch did not match.");
-  } else {
+  if (out.includes(modeNeedle)) {
     out = out.replace(
       modeNeedle,
       `${modeNeedle}
@@ -79,6 +78,8 @@ export function patchCytofForGateLab(src: string): string {
             newMode === 'navigate' ? null : 'none');
         _g.select('.draw-layer').style('pointer-events', 'none');`,
     );
+  } else if (!out.includes("_g.select('.gate-layer').style('pointer-events'")) {
+    console.warn("[GateLab] cytof draw-mode pointer patch did not match.");
   }
 
   return out;
@@ -91,10 +92,11 @@ export function patchCytofForGateLab(src: string): string {
 function patchMiniPlot(src: string): string {
   let out = src;
   const levelNeedle = "var nLevels = 18;";
+  const levelPatchedNeedle = "var nLevels = Math.max(6, Math.min(18, Math.round(18 * Math.min(W, H) / 270)));";
   const lineNeedle = "ctx.lineWidth = 1.0;";
   if (out.includes(levelNeedle)) {
-    out = out.replace(levelNeedle, "var nLevels = Math.max(6, Math.min(18, Math.round(18 * Math.min(W, H) / 270)));");
-  } else {
+    out = out.replace(levelNeedle, levelPatchedNeedle);
+  } else if (!out.includes(levelPatchedNeedle)) {
     console.warn("[GateLab] mini_plot contour-levels patch did not match.");
   }
   if (out.includes(lineNeedle)) {
