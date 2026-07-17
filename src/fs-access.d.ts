@@ -14,6 +14,7 @@ interface OpenFilePickerOptions {
   types?: FilePickerAcceptType[];
   multiple?: boolean;
   excludeAcceptAllOption?: boolean;
+  id?: string;
 }
 interface SaveFilePickerOptions {
   types?: FilePickerAcceptType[];
