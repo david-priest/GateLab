@@ -27,4 +27,33 @@ describe("GateLab cytof interaction patches", () => {
 
     warning.mockRestore();
   });
+
+  it("piles off-scale events onto plot edges without clamping gate scales", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(cytofSrc).not.toContain("function _clampPointX(scale, value)");
+    expect(patched).toContain("function _clampPointX(scale, value)");
+    expect(patched.match(/_clampPointX\(zx, x\[i\]\)/g)).toHaveLength(2);
+    expect(patched).toContain("_clampPointX(zx, x[idx])");
+    expect(patched).toContain("function _offscalePts()");
+    expect(patched).toContain("outlierPts = outlierPts.concat(_offscalePts());");
+    expect(patched).toContain("outlierPts: _offscalePts()");
+    expect(patched).toContain("pxArr[i] = _clampBaseX(x[i]);");
+    expect(patched).not.toContain("d3.scaleLinear().domain(xr).range([0, W]).clamp(true)");
+
+    warning.mockRestore();
+  });
+
+  it("does not duplicate edge-pile logic after GateLabR carries it natively", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const nativeRenderer = patchCytofForGateLab(cytofSrc);
+    const repatched = patchCytofForGateLab(nativeRenderer);
+
+    expect(repatched.match(/function _offscalePts\(\)/g)).toHaveLength(1);
+    expect(repatched.match(/outlierPts = outlierPts\.concat\(_offscalePts\(\)\);/g)).toHaveLength(1);
+
+    warning.mockRestore();
+  });
 });

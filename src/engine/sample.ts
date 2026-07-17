@@ -13,6 +13,7 @@ import type { FcsFile, NumericColumn } from "./fcs";
 import type { AssayData } from "./gates";
 import { resolveChannels, type ResolvedChannel } from "./channels";
 import { encodeFloat32Base64, encodeUint8Base64 } from "./encode";
+import { robustAxisRange } from "./axisRange";
 import { logicleTicks, scatterTicks, type AxisTicks } from "./ticks";
 import {
   extractDisplaySpillover,
@@ -339,6 +340,7 @@ export class Sample {
     this.transformCache.delete(idx);
     this.displayCache.delete(idx);
     this.gatingCache.delete(idx);
+    this.rangeCache.delete(idx);
   }
 
   index(channel: string): number | undefined {
@@ -462,11 +464,11 @@ export class Sample {
     };
   }
 
-  /** Auto display range for an axis (padded min/max), cached. */
+  /** Robust auto display range for an axis (0.1st–99.9th percentiles), cached. */
   displayRange(idx: number): [number, number] {
     const hit = this.rangeCache.get(idx);
     if (hit) return hit;
-    const r = paddedRange(this.displayColumn(idx));
+    const r = robustAxisRange(this.displayColumn(idx));
     this.rangeCache.set(idx, r);
     return r;
   }
@@ -660,18 +662,4 @@ export class Sample {
       usable.find((index) => index !== x) ?? Math.min(1, this.channels.length - 1);
     return [x, y];
   }
-}
-
-function paddedRange(v: Float32Array): [number, number] {
-  let lo = Infinity;
-  let hi = -Infinity;
-  for (let i = 0; i < v.length; i++) {
-    const x = v[i];
-    if (x < lo) lo = x;
-    if (x > hi) hi = x;
-  }
-  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
-  if (lo === hi) return [lo - 0.5, hi + 0.5];
-  const pad = (hi - lo) * 0.02;
-  return [lo - pad, hi + pad];
 }
