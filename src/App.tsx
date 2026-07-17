@@ -50,6 +50,12 @@ import {
   recallHandle,
 } from "./engine/fsAccess";
 import {
+  AUTO_CHECKPOINT_INTERVAL_MS,
+  requestPersistentWorkspaceHistory,
+  saveWorkspaceCheckpoint,
+  type WorkspaceCheckpointReason,
+} from "./engine/workspaceHistory";
+import {
   coreReducer,
   initialCoreState,
   derivePopulationView,
@@ -106,6 +112,9 @@ function downloadBlob(filename: string, blob: Blob) {
 }
 const downloadText = (filename: string, text: string, mime: string) =>
   downloadBlob(filename, new Blob([text], { type: mime }));
+
+const makeWorkspaceId = (): string =>
+  globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 const DRAW_TOOLS: { id: DrawMode; Icon: () => React.ReactElement; title: string }[] = [
   { id: "navigate", Icon: NavigateIcon, title: "Navigate (pan / zoom)" },
@@ -165,6 +174,7 @@ export default function App() {
   const [wsHandle, setWsHandle] = useState<FileSystemFileHandle | null>(null);
   const [wsName, setWsName] = useState("");
   const [wsStorage, setWsStorage] = useState<WorkspaceStorage>("reference");
+  const [workspaceId, setWorkspaceId] = useState(makeWorkspaceId);
   const [dirty, setDirty] = useState(false);
   const [xIdx, setXIdx] = useState(0);
   const [yIdx, setYIdx] = useState(1);
@@ -379,6 +389,37 @@ export default function App() {
   // Autosave lightweight reference workspaces only. Repacking every embedded FCS on each
   // edit would stall large bundled workspaces; bundles retain their format via manual Save.
   const buildWsRef = useRef<() => WorkspaceFile | null>(() => null);
+  const workspaceIdRef = useRef(workspaceId);
+  workspaceIdRef.current = workspaceId;
+  const pendingCheckpointReasonRef = useRef<WorkspaceCheckpointReason | null>(null);
+
+  const checkpointCurrentWorkspace = (reason: WorkspaceCheckpointReason): Promise<void> => {
+    const ws = buildWsRef.current();
+    const id = workspaceIdRef.current;
+    if (!ws || !id) return Promise.resolve();
+    return saveWorkspaceCheckpoint(id, ws, reason).then(() => undefined);
+  };
+
+  // Check every two minutes. Automatic checkpoints de-duplicate unchanged workspace JSON, so
+  // an idle app performs a small IndexedDB read but does not accumulate redundant snapshots.
+  useEffect(() => {
+    void requestPersistentWorkspaceHistory();
+    const timer = window.setInterval(() => {
+      void checkpointCurrentWorkspace("automatic");
+    }, AUTO_CHECKPOINT_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+    // This function reads only refs, which are refreshed on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Major imports queue their post-change checkpoint for the first committed React render.
+  useEffect(() => {
+    const reason = pendingCheckpointReasonRef.current;
+    if (!reason) return;
+    pendingCheckpointReasonRef.current = null;
+    void checkpointCurrentWorkspace(reason);
+  });
+
   useEffect(() => {
     if (!dirty || !wsHandle || wsStorage === "bundle") return;
     const t = setTimeout(async () => {
@@ -458,7 +499,7 @@ export default function App() {
     }
   }
 
-  function applyGatingImport(mode: GatingImportMode) {
+  async function applyGatingImport(mode: GatingImportMode) {
     const pendingImport = pendingGatingMlImport;
     if (!sample || !pendingImport || pendingImport.sampleId !== activeSampleId) {
       setPendingGatingMlImport(null);
@@ -482,6 +523,10 @@ export default function App() {
         importedCytofCofactor: res.cytof_cofactor,
       });
       if (mode === "merge" && mergeBlockedReason) throw new Error(mergeBlockedReason);
+      if (mode === "replace") {
+        // Replacing the hierarchy is destructive; merge mode retains the current strategy.
+        await checkpointCurrentWorkspace("before-gatingml-replace");
+      }
       const compensationChanged = comp.target !== null && sample.compensationEnabled !== comp.target;
       if (comp.target !== null) {
         sample.setCompensation(comp.target);
@@ -505,6 +550,7 @@ export default function App() {
         setYRange(null);
         bumpScales();
       }
+      pendingCheckpointReasonRef.current = "after-gatingml-import";
       dispatch({
         type: "importGating",
         gates: res.gates,
@@ -737,6 +783,7 @@ export default function App() {
         const have = new Set(cols.map((c) => c.name));
         return [...cols, ...parsed.columns.filter((c) => !have.has(c)).map((name) => ({ name }))];
       });
+      pendingCheckpointReasonRef.current = "after-metadata-import";
       setMetadata(nextMeta);
       setDirty(true);
       setImportMsg(
@@ -818,6 +865,13 @@ export default function App() {
   function addSample(bytes: Uint8Array, name: string, handle: FileSystemFileHandle | null): SampleEntry | null {
     const entry = makeEntry(bytes, name, handle);
     if (!entry) return null;
+    if (samples.length === 0) {
+      setWorkspaceId(makeWorkspaceId());
+      setWsHandle(null);
+      setWsName("");
+      setWsStorage("reference");
+    }
+    pendingCheckpointReasonRef.current = "after-fcs-import";
     skipDirtyRef.current = true;
     const [nx, ny] = channelsFor(entry.sample);
     setSamples((prev) => [...prev, entry]);
@@ -860,7 +914,8 @@ export default function App() {
     setInstrumentMode(entry.sample.instrumentMode);
   }
 
-  function removeSample(id: string) {
+  async function removeSample(id: string) {
+    await checkpointCurrentWorkspace("before-sample-remove");
     const next = samples.filter((s) => s.id !== id);
     const curX = sample?.channels[xIdx]?.key;
     const curY = sample?.channels[yIdx]?.key;
@@ -914,6 +969,7 @@ export default function App() {
     return {
       format: "gatelab-workspace",
       version: 2,
+      workspaceId,
       savedAt: new Date().toISOString(),
       app: "GateLab",
       samples: samples.map((e, i) => ({
@@ -1140,6 +1196,8 @@ export default function App() {
         return;
       }
 
+      await checkpointCurrentWorkspace("before-workspace-open");
+      pendingCheckpointReasonRef.current = "after-workspace-open";
       skipDirtyRef.current = true;
       const activeIdx = Math.min(Math.max(0, ws.activeSample), entries.length - 1);
       const active = entries[activeIdx].sample;
@@ -1168,6 +1226,7 @@ export default function App() {
       setWsHandle(wsH);
       setWsName(wsFileName);
       setWsStorage(storage);
+      setWorkspaceId(ws.workspaceId ?? makeWorkspaceId());
       setDirty(false);
       dispatch({
         type: "loadWorkspace",
@@ -1485,7 +1544,7 @@ export default function App() {
                     aria-label={`Remove ${entry.name}`}
                     onClick={(e) => {
                       e.stopPropagation();
-                      removeSample(entry.id);
+                      void removeSample(entry.id);
                     }}
                   >
                     ×
@@ -2096,7 +2155,10 @@ export default function App() {
               : `Delete ${crud.ids.length} population${crud.ids.length === 1 ? "" : "s"}? Their children are reparented upward; gates are kept. This can be undone.`
           }
           onCancel={() => setCrud(null)}
-          onConfirm={() => {
+          onConfirm={async () => {
+            await checkpointCurrentWorkspace(
+              crud.what === "gates" ? "before-gate-delete" : "before-population-delete",
+            );
             dispatch(crud.what === "gates" ? { type: "deleteGates", gateIds: crud.ids } : { type: "deletePopulations", popIds: crud.ids });
             setCrud(null);
           }}

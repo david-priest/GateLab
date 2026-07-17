@@ -28,6 +28,8 @@ export interface WorkspaceSample {
 export interface WorkspaceFile {
   format: typeof WORKSPACE_FORMAT;
   version: 2;
+  /** Stable lineage ID for browser-local checkpoints; optional for older workspaces. */
+  workspaceId?: string;
   savedAt: string;
   app: string;
   samples: WorkspaceSample[];
@@ -133,6 +135,9 @@ export function validateWorkspace(ws: WorkspaceFile): true {
   if (!isRecord(ws)) invalidWorkspace("the workspace payload is not an object.");
   if (ws.format !== WORKSPACE_FORMAT || ws.version !== 2) {
     invalidWorkspace("unsupported format or version.");
+  }
+  if (ws.workspaceId !== undefined && (typeof ws.workspaceId !== "string" || ws.workspaceId.trim().length === 0)) {
+    invalidWorkspace("workspaceId must be a non-empty string when present.");
   }
   if (!Array.isArray(ws.samples) || ws.samples.length === 0) {
     invalidWorkspace("at least one sample is required.");
@@ -355,6 +360,7 @@ function migrate(raw: unknown): WorkspaceFile {
   return {
     format: WORKSPACE_FORMAT,
     version: 2,
+    workspaceId: typeof r.workspaceId === "string" && r.workspaceId.trim() ? r.workspaceId : undefined,
     savedAt: (r.savedAt as string) ?? "",
     app: (r.app as string) ?? "GateLab",
     samples: [

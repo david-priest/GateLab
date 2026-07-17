@@ -13,6 +13,7 @@ function makeWs(): WorkspaceFile {
   return {
     format: "gatelab-workspace",
     version: 2,
+    workspaceId: "workspace-test-1",
     savedAt: "2026-01-01T00:00:00.000Z",
     app: "GateLab",
     samples: [
@@ -92,6 +93,7 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     expect(back.scales.globalScales["FSC-A"]).toEqual([0, 8]);
     expect(back.display.mode).toBe("contour");
     expect(back.gating.selected_gate_id).toBe("g1");
+    expect(back.workspaceId).toBe("workspace-test-1");
   });
 
   it("migrates a v1 (single-sample) workspace to v2 on read", () => {
@@ -157,6 +159,10 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     const badCofactor = cloneWs(ws);
     badCofactor.samples[0].scatterCofactor = { "FSC-A": 0 };
     expect(() => validateWorkspace(badCofactor)).toThrow(/scatter cofactors/i);
+
+    const badWorkspaceId = cloneWs(ws);
+    badWorkspaceId.workspaceId = "";
+    expect(() => validateWorkspace(badWorkspaceId)).toThrow(/workspaceId/i);
   });
 
   it("requires every declared FCS payload when writing or reading a bundle", () => {
