@@ -12,6 +12,11 @@ export interface PickedFile {
   name: string;
 }
 
+export interface PickFileOptions {
+  /** Stable purpose identifier so Chromium does not share picker state across workflows. */
+  id?: string;
+}
+
 async function readHandle(handle: FileSystemFileHandle): Promise<{ bytes: Uint8Array; name: string }> {
   const file = await handle.getFile();
   return { bytes: new Uint8Array(await file.arrayBuffer()), name: file.name };
@@ -28,9 +33,17 @@ export async function ensurePermission(handle: FileSystemFileHandle, mode: "read
 }
 
 /** Open-file picker → handle + bytes. Returns null if the user cancels. */
-export async function pickFile(accept: Record<string, string[]>, description: string): Promise<PickedFile | null> {
+export async function pickFile(
+  accept: Record<string, string[]>,
+  description: string,
+  options: PickFileOptions = {},
+): Promise<PickedFile | null> {
   try {
-    const [handle] = await window.showOpenFilePicker!({ types: [{ description, accept }], multiple: false });
+    const [handle] = await window.showOpenFilePicker!({
+      types: [{ description, accept }],
+      multiple: false,
+      ...(options.id ? { id: options.id } : {}),
+    });
     const { bytes, name } = await readHandle(handle);
     return { handle, bytes, name };
   } catch (e) {

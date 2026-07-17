@@ -81,6 +81,14 @@ import { IllustrationTab } from "./ui/IllustrationTab";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
 import { NavigateIcon, RectIcon, PolyIcon, QuadIcon } from "./ui/icons";
 
+const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
+// A .gatelab file is either a JSON reference workspace or a ZIP bundle. Supplying the
+// real formats avoids Chromium/macOS having to infer a custom extension from octet-stream.
+const WORKSPACE_FILE_ACCEPT = {
+  "application/json": [`.${WORKSPACE_EXT}`],
+  "application/zip": [`.${WORKSPACE_EXT}`],
+};
+
 type CrudModal =
   | { kind: "createPop" }
   | { kind: "renameGate"; id: string; initial: string }
@@ -950,7 +958,7 @@ export default function App() {
       return;
     }
     try {
-      const picked = await pickFile({ "application/octet-stream": [".fcs"] }, "FCS file");
+      const picked = await pickFile(FCS_FILE_ACCEPT, "FCS file", { id: "gatelab-open-fcs" });
       if (!picked) return;
       setBusy(true);
       addSample(picked.bytes, picked.name, picked.handle);
@@ -1118,7 +1126,7 @@ export default function App() {
       return;
     }
     try {
-      const picked = await pickFile({ "application/octet-stream": [`.${WORKSPACE_EXT}`] }, "GateLab workspace");
+      const picked = await pickFile(WORKSPACE_FILE_ACCEPT, "GateLab workspace", { id: "gatelab-open-workspace" });
       if (picked) await openWorkspaceFromBytes(picked.bytes, picked.handle, picked.name);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1135,7 +1143,7 @@ export default function App() {
     if (read) return { bytes: read.bytes, handle: h };
     if (supportsFileSystemAccess()) {
       setImportMsg(`Locate the data file: ${fileName}`);
-      const picked = await pickFile({ "application/octet-stream": [".fcs"] }, `Locate ${fileName}`);
+      const picked = await pickFile(FCS_FILE_ACCEPT, `Locate ${fileName}`, { id: "gatelab-relink-fcs" });
       if (picked) return { bytes: picked.bytes, handle: picked.handle };
     }
     return null;
