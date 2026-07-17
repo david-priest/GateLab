@@ -27,7 +27,11 @@ export type WorkspaceCheckpointReason =
   | "before-population-delete"
   | "before-sample-remove"
   | "after-fcs-import"
-  | "after-metadata-import";
+  | "after-metadata-import"
+  | "before-compensation-apply"
+  | "after-compensation-apply"
+  | "before-active-layer-change"
+  | "compensation-profile-import";
 
 export interface WorkspaceCheckpoint {
   id: string;
