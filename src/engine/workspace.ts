@@ -99,6 +99,8 @@ export interface IllustrationConfig {
   fontAxis: number;
   fontTitle: number;
   fontGate: number;
+  /** Scale the base font sizes with panel/cell size. Optional for older workspaces. */
+  scaleFontsWithPlot?: boolean;
 }
 
 export interface IllustrationPreset {

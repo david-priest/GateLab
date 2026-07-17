@@ -97,10 +97,11 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
   const [heatmapCellSize, setHeatmapCellSize] = useState(c0?.heatmapCellSize ?? 30);
   const [heatmapShowValues, setHeatmapShowValues] = useState(c0?.heatmapShowValues ?? false);
   // Fonts
-  const [fontTick, setFontTick] = useState(c0?.fontTick ?? 8);
-  const [fontAxis, setFontAxis] = useState(c0?.fontAxis ?? 10);
-  const [fontTitle, setFontTitle] = useState(c0?.fontTitle ?? 10);
-  const [fontGate, setFontGate] = useState(c0?.fontGate ?? 8);
+  const [fontTick, setFontTick] = useState(c0?.fontTick ?? 9);
+  const [fontAxis, setFontAxis] = useState(c0?.fontAxis ?? 12);
+  const [fontTitle, setFontTitle] = useState(c0?.fontTitle ?? 12);
+  const [fontGate, setFontGate] = useState(c0?.fontGate ?? 10);
+  const [scaleFontsWithPlot, setScaleFontsWithPlot] = useState(c0?.scaleFontsWithPlot ?? true);
 
   const [selectedPreset, setSelectedPreset] = useState("");
   const [exportDpi, setExportDpi] = useState(300); // SVG/PDF export resolution (72–1200)
@@ -123,7 +124,7 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
     colorByPop, overlayPops, popColors, pointSize, pointAlpha, contourThreshold, kdeBandwidth, pubStyle,
     gateLineWidth, histLineWidth, histFill, histFillAlpha, histOverlayMode, histLayout, ridgeOverlap,
     ridgeColGap, ridgeGradient, heatmapStat, heatmapScale, heatmapPalette, heatmapCellSize,
-    heatmapShowValues, fontTick, fontAxis, fontTitle, fontGate,
+    heatmapShowValues, fontTick, fontAxis, fontTitle, fontGate, scaleFontsWithPlot,
   };
   const [renderedConfig, setRenderedConfig] = useState<IllustrationConfig>(() => snapshotConfig(currentConfig));
   const renderPending = !configsMatch(currentConfig, renderedConfig);
@@ -148,6 +149,7 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
     setHeatmapPalette(c.heatmapPalette ?? "blue_white_yellow_red");
     setHeatmapCellSize(c.heatmapCellSize ?? 30); setHeatmapShowValues(c.heatmapShowValues ?? false);
     setFontTick(c.fontTick); setFontAxis(c.fontAxis); setFontTitle(c.fontTitle); setFontGate(c.fontGate);
+    setScaleFontsWithPlot(c.scaleFontsWithPlot ?? true);
   };
 
   useEffect(() => {
@@ -183,6 +185,7 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
         plot_type: "heatmap",
         heatmap,
         font_sizes: { tick: c.fontTick, axis_label: c.fontAxis, gate_label: c.fontGate, title: c.fontTitle },
+        scale_fonts_with_plot: c.scaleFontsWithPlot ?? true,
       });
       return;
     }
@@ -227,6 +230,7 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
         pubStyle: c.pubStyle,
         gateLineWidth: c.gateLineWidth,
         fontSizes: { tick: c.fontTick, axis_label: c.fontAxis, gate_label: c.fontGate, title: c.fontTitle },
+        scaleFontsWithPlot: c.scaleFontsWithPlot ?? true,
       },
     );
     loadMiniPlots().renderIllustrationGrid("illustration-grid-container", payload);
@@ -391,7 +395,13 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
         {!isHeatmap && <div className="gl-illust-row">
           <label className="gl-field-inline">
             Plot size
-            <input type="number" min={150} max={500} step={25} value={plotSize} onChange={(e) => setPlotSize(+e.target.value || 200)} />
+            <input
+              className="gl-size-slider"
+              type="range" min={150} max={500} step={25} value={plotSize}
+              title="Rendered panel size; click Render Illustration to apply"
+              onChange={(e) => setPlotSize(Math.max(150, Math.min(500, +e.target.value || 200)))}
+            />
+            <span className="gl-num-badge">{plotSize}px</span>
           </label>
           <label className="gl-field-inline">
             Columns
@@ -521,15 +531,18 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
               <select value={heatmapPalette} onChange={(e) => setHeatmapPalette(e.target.value as HeatmapPalette)}>
                 <option value="heat">Histogram heat (black→yellow)</option>
                 <option value="viridis">Viridis</option>
-                <option value="blue_white_yellow_red">Blue→white→yellow→red</option>
+                <option value="blue_white_yellow_red">RColorBrewer RdYlBu (blue→yellow→red)</option>
               </select>
             </label>
             <label className="gl-field-inline">
-              Cell size
+              Plot size
               <input
-                type="number" min={16} max={72} step={2} value={heatmapCellSize}
+                className="gl-size-slider"
+                type="range" min={16} max={72} step={2} value={heatmapCellSize}
+                title="Heatmap cell size; click Render Illustration to apply"
                 onChange={(e) => setHeatmapCellSize(Math.max(16, Math.min(72, Math.round(+e.target.value) || 30)))}
               />
+              <span className="gl-num-badge">{heatmapCellSize}px</span>
             </label>
             <label className="gl-check">
               <input type="checkbox" checked={heatmapShowValues} onChange={(e) => setHeatmapShowValues(e.target.checked)} />
@@ -544,10 +557,14 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
         {/* Fonts + export */}
         <div className="gl-illust-row">
           <span className="gl-stats-opt-label">Fonts</span>
-          <label className="gl-field-inline">Tick<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 8)} /></label>
-          <label className="gl-field-inline">Axis<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 10)} /></label>
-          <label className="gl-field-inline">Title<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 10)} /></label>
-          <label className="gl-field-inline">Gate<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 8)} /></label>
+          <label className="gl-field-inline">Tick<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 9)} /></label>
+          <label className="gl-field-inline">Axis<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 12)} /></label>
+          <label className="gl-field-inline">Title<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 12)} /></label>
+          <label className="gl-field-inline">Gate<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 10)} /></label>
+          <label className="gl-check" title="Scale these base font sizes with the rendered plot or heatmap cell size">
+            <input type="checkbox" checked={scaleFontsWithPlot} onChange={(e) => setScaleFontsWithPlot(e.target.checked)} />
+            Scale with plot
+          </label>
           <span className="gl-ctl-sep" />
           <label className="gl-field-inline" title="Export resolution for SVG/PDF (72–1200 DPI)">
             DPI

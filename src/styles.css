@@ -227,6 +227,7 @@ select:focus-visible,
 }
 .gl-field-inline input[type="number"] { width: 70px; }
 .gl-field-inline input[type="range"] { width: 96px; padding: 0; }
+.gl-field-inline input[type="range"].gl-size-slider { width: 140px; }
 .gl-ctl-sep { width: 1px; height: 18px; background: var(--line); }
 
 /* Compact, consistently-labelled control groups for dense analysis tabs. */
