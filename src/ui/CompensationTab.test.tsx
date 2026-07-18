@@ -9,7 +9,10 @@ import type { CompensationProfileRecord } from "../engine/compensationProfileRec
 import type { FcsFile } from "../engine/fcs";
 import { Sample, type CompensatedLayerInput } from "../engine/sample";
 import type { PersistedCompensatedLayerBinding } from "../engine/workspaceCompensation";
-import { CompensationTab } from "./CompensationTab";
+import {
+  CompensationTab,
+  type CompensationApplyUiStatus,
+} from "./CompensationTab";
 import { clearPersistedTabState } from "./tabState";
 
 const digest = (character: string): Sha256Digest =>
@@ -135,6 +138,8 @@ function renderTab(
     ) => Promise<void>;
     onCancelApply?: () => void;
     hasExistingGates?: boolean;
+    applyStatus?: CompensationApplyUiStatus | null;
+    visible?: boolean;
     stateKey?: string;
   }> = {},
 ) {
@@ -148,6 +153,8 @@ function renderTab(
       onApplyProfile={options.onApplyProfile}
       onCancelApply={options.onCancelApply}
       hasExistingGates={options.hasExistingGates}
+      applyStatus={options.applyStatus}
+      visible={options.visible}
       stateKey={stateKey}
     />,
   ));
@@ -361,6 +368,47 @@ describe("CompensationTab CyTOF import path", () => {
     expect(host.textContent).toContain("Exact matches2");
     expect(host.querySelectorAll<HTMLInputElement>('.gl-comp-channel-grid input:checked')).toHaveLength(2);
     expect(host.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("retains the imported matrix and selections while the persistent tab is hidden", async () => {
+    const sample = cytofSample();
+    const stateKey = "workspace-a:cytof-persistent";
+    renderTab(sample, { stateKey, visible: true });
+    await chooseMatrix();
+    const firstChannel = host.querySelector<HTMLInputElement>('.gl-comp-channel-grid input:checked')!;
+    act(() => firstChannel.click());
+    expect(host.querySelectorAll<HTMLInputElement>('.gl-comp-channel-grid input:checked')).toHaveLength(1);
+
+    renderTab(sample, { stateKey, visible: false });
+    expect(host.querySelector<HTMLElement>(".gl-compensation-tab")?.style.display).toBe("none");
+
+    renderTab(sample, { stateKey, visible: true });
+    expect(host.textContent).toContain("wing-lab.csv");
+    expect(host.querySelectorAll<HTMLInputElement>('.gl-comp-channel-grid input:checked')).toHaveLength(1);
+  });
+
+  it("reflects app-level progress and prevents matrix changes during a running Apply", async () => {
+    const sample = cytofSample();
+    const stateKey = "workspace-a:cytof-progress";
+    renderTab(sample, { stateKey });
+    await chooseMatrix();
+
+    renderTab(sample, {
+      stateKey,
+      applyStatus: {
+        phase: "applying",
+        profileName: "wing-lab",
+        fraction: 0.5,
+        processedEvents: 1,
+        totalEvents: 2,
+      },
+    });
+
+    expect(host.textContent).toContain("Applying… 50% (1 / 2 events)");
+    expect([...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Choose another matrix…")?.disabled).toBe(true);
+    expect([...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Cancel")).toBeDefined();
   });
 
   it("requires gate-coordinate acknowledgement and emits an immutable NNLS profile", async () => {

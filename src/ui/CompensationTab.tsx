@@ -40,7 +40,17 @@ interface Props {
   ) => Promise<void>;
   onCancelApply?: () => void;
   hasExistingGates?: boolean;
+  applyStatus?: CompensationApplyUiStatus | null;
+  visible?: boolean;
   stateKey: string;
+}
+
+export interface CompensationApplyUiStatus {
+  readonly phase: "preparing" | "applying" | "cancelling";
+  readonly profileName: string;
+  readonly fraction: number;
+  readonly processedEvents: number;
+  readonly totalEvents: number;
 }
 
 interface CytofMatrixDraft {
@@ -124,6 +134,8 @@ export function CompensationTab({
   onApplyProfile,
   onCancelApply,
   hasExistingGates = false,
+  applyStatus = null,
+  visible = true,
   stateKey,
 }: Props) {
   const installedStatus = sample.compensatedLayerStatus();
@@ -150,8 +162,20 @@ export function CompensationTab({
   const [gateRecomputeAcknowledged, setGateRecomputeAcknowledged] = useState(false);
   const [applyProgress, setApplyProgress] = useState<CompensationApplyProgress | null>(null);
   const [applyingProfile, setApplyingProfile] = useState(false);
+  const applySubmissionRef = useRef(false);
   const cytofFileRef = useRef<HTMLInputElement>(null);
   const matrixRef = useRef<HTMLTableElement>(null);
+  const applyBusy = applyingProfile || applyStatus !== null;
+  const visibleApplyProgress: CompensationApplyUiStatus | null = applyStatus ??
+    (applyProgress
+      ? {
+          phase: "applying",
+          profileName: cytofDraft?.fileName ?? "CyTOF compensation",
+          fraction: applyProgress.fraction,
+          processedEvents: applyProgress.processedEvents,
+          totalEvents: applyProgress.totalEvents,
+        }
+      : null);
 
   const samplePnnChannels = useMemo(
     () => sample.channels.map(({ pnn, columnIndex }) => ({ pnn, columnIndex })),
@@ -316,7 +340,13 @@ export function CompensationTab({
   };
 
   const applyCytofProfile = async () => {
-    if (!cytofDraft || !cytofCompatibility?.canApply || !onApplyProfile) return;
+    if (
+      applySubmissionRef.current ||
+      applyBusy ||
+      !cytofDraft ||
+      !cytofCompatibility?.canApply ||
+      !onApplyProfile
+    ) return;
     if (hasExistingGates && !gateRecomputeAcknowledged) {
       setCytofImportError(
         "Confirm that existing gate memberships will be recomputed in compensated coordinates before applying.",
@@ -326,6 +356,7 @@ export function CompensationTab({
     setCytofImportError(null);
     setActionMessage(null);
     setApplyProgress(null);
+    applySubmissionRef.current = true;
     setApplyingProfile(true);
     try {
       const suffix = globalThis.crypto?.randomUUID?.() ??
@@ -370,6 +401,7 @@ export function CompensationTab({
       if (/cancel/i.test(message)) setActionMessage("CyTOF compensation was cancelled; the previous assay was left unchanged.");
       else setCytofImportError(message);
     } finally {
+      applySubmissionRef.current = false;
       setApplyingProfile(false);
     }
   };
@@ -430,7 +462,11 @@ export function CompensationTab({
   };
 
   return (
-    <div className="gl-tab-panel gl-tab-fill gl-compensation-tab">
+    <div
+      className="gl-tab-panel gl-tab-fill gl-compensation-tab"
+      style={visible ? undefined : { display: "none" }}
+      aria-hidden={visible ? undefined : true}
+    >
       <div className="gl-comp-overview">
         <div className="gl-comp-overview-title">
           <h2 className="gl-tab-title">Compensation</h2>
@@ -481,7 +517,7 @@ export function CompensationTab({
               <button
                 type="button"
                 className={cytofDraft ? "gl-btn-ghost" : "gl-btn"}
-                disabled={applyingProfile}
+                disabled={applyBusy}
                 onClick={() => cytofFileRef.current?.click()}
               >
                 {cytofDraft ? "Choose another matrix…" : "Import matrix…"}
@@ -516,7 +552,7 @@ export function CompensationTab({
                   <button
                     type="button"
                     className="gl-mini-btn"
-                    disabled={applyingProfile}
+                    disabled={applyBusy}
                     onClick={() => setIncludedCytofChannels(new Set(cytofCompatibility.matchedChannels))}
                   >
                     All matched
@@ -524,7 +560,7 @@ export function CompensationTab({
                   <button
                     type="button"
                     className="gl-mini-btn"
-                    disabled={applyingProfile}
+                    disabled={applyBusy}
                     onClick={() => setIncludedCytofChannels(new Set())}
                   >
                     None
@@ -539,7 +575,7 @@ export function CompensationTab({
                       <input
                         type="checkbox"
                         checked={includedCytofChannels.has(pnn)}
-                        disabled={!matched || applyingProfile}
+                        disabled={!matched || applyBusy}
                         onChange={(event) => setCytofChannelIncluded(pnn, event.currentTarget.checked)}
                       />
                       <span>{channelDisplayForPnn(sample, pnn).combined}</span>
@@ -573,7 +609,7 @@ export function CompensationTab({
                   <input
                     type="checkbox"
                     checked={gateRecomputeAcknowledged}
-                    disabled={applyingProfile}
+                    disabled={applyBusy}
                     onChange={(event) => setGateRecomputeAcknowledged(event.currentTarget.checked)}
                   />
                   <span>
@@ -584,12 +620,21 @@ export function CompensationTab({
 
               <div className="gl-comp-apply-row">
                 <div>
-                  {applyingProfile && applyProgress
-                    ? `Applying… ${Math.round(applyProgress.fraction * 100)}% (${applyProgress.processedEvents.toLocaleString()} / ${applyProgress.totalEvents.toLocaleString()} events)`
+                  {applyBusy
+                    ? visibleApplyProgress
+                      ? `${visibleApplyProgress.phase === "cancelling" ? "Cancelling" : visibleApplyProgress.phase === "preparing" ? "Preparing" : "Applying"}… ${Math.round(visibleApplyProgress.fraction * 100)}% (${visibleApplyProgress.processedEvents.toLocaleString()} / ${visibleApplyProgress.totalEvents.toLocaleString()} events)`
+                      : "Preparing compensation…"
                     : "The Original assay is retained and can be restored at any time."}
                 </div>
-                {applyingProfile ? (
-                  <button type="button" className="gl-btn-ghost" onClick={onCancelApply}>Cancel</button>
+                {applyBusy ? (
+                  <button
+                    type="button"
+                    className="gl-btn-ghost"
+                    disabled={visibleApplyProgress?.phase === "cancelling"}
+                    onClick={onCancelApply}
+                  >
+                    {visibleApplyProgress?.phase === "cancelling" ? "Cancelling…" : "Cancel"}
+                  </button>
                 ) : (
                   <button
                     type="button"

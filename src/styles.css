@@ -52,6 +52,24 @@ select:focus-visible,
 .gl-header .gl-meta { color: var(--muted); font-size: 12px; }
 .gl-header .gl-error { color: #e0736b; font-size: 12px; }
 
+.gl-comp-apply-status-bar {
+  display: flex; align-items: center; gap: 10px; min-height: 38px; padding: 6px 12px;
+  border-bottom: 1px solid #a9c8ed; background: #edf5ff; color: #183f70;
+  font-size: 11px;
+}
+.gl-comp-apply-status-copy { display: flex; min-width: 0; flex-direction: column; line-height: 1.2; }
+.gl-comp-apply-status-copy strong { white-space: nowrap; }
+.gl-comp-apply-status-copy span {
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #506984; font-size: 10px;
+}
+.gl-comp-apply-status-bar progress { flex: 1 1 220px; min-width: 100px; max-width: 520px; }
+.gl-comp-apply-status-count { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 760px) {
+  .gl-comp-apply-status-copy span, .gl-comp-apply-status-count { display: none; }
+}
+
 .gl-btn {
   background: var(--accent);
   color: #fff;

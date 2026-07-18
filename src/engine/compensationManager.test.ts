@@ -642,13 +642,16 @@ describe("CompensationManager Apply", () => {
       yieldToEventLoop: () => Promise.resolve(),
     });
 
+    expect(manager.applyInProgress).toBe(false);
     const firstApply = manager.apply({ profile, targets: [{ sample: firstSample }] });
+    expect(manager.applyInProgress).toBe(true);
     const secondApply = manager.apply({ profile, targets: [{ sample: secondSample }] });
 
     await expect(secondApply).rejects.toMatchObject({ code: "apply-job-active" });
     await expect(firstApply).resolves.toMatchObject({
       profile: { profileId: profile.profileId },
     });
+    expect(manager.applyInProgress).toBe(false);
     expect(firstSample.compensatedLayerStatus().state).toBe("ready");
     expect(secondSample.compensatedLayerStatus().state).toBe("missing");
     manager.dispose();

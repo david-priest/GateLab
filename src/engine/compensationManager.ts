@@ -431,6 +431,11 @@ export class CompensationManager {
     this.yieldToEventLoop = options.yieldToEventLoop ?? defaultYieldToEventLoop;
   }
 
+  /** Synchronous UI guard covering both validation/reservation and active worker phases. */
+  get applyInProgress(): boolean {
+    return this.applyReservation !== null || this.activeApply !== null;
+  }
+
   /** Workspace replacement is an explicit scientific-identity boundary, not a tab lifecycle. */
   resetWorkspace(nextWorkspaceKey: string): void {
     this.assertUsable();

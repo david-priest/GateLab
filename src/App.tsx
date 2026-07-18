@@ -99,7 +99,10 @@ import { ProportionsTab } from "./ui/ProportionsTab";
 import { DivisionTab, type DivisionProfile } from "./ui/DivisionTab";
 import { parseMetadataTable, lookupMetadataRow, type MetadataColumn } from "./engine/metadata";
 import { ScalesTab } from "./ui/ScalesTab";
-import { CompensationTab } from "./ui/CompensationTab";
+import {
+  CompensationTab,
+  type CompensationApplyUiStatus,
+} from "./ui/CompensationTab";
 import { StrategyTab, type StrategyConfig } from "./ui/StrategyTab";
 import { IllustrationTab } from "./ui/IllustrationTab";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
@@ -254,6 +257,9 @@ export default function App() {
   if (compensationManagerRef.current === null) {
     compensationManagerRef.current = new CompensationManager({ workspaceKey: workspaceId });
   }
+  const compensationApplyGuardRef = useRef(false);
+  const [compensationApplyStatus, setCompensationApplyStatus] =
+    useState<CompensationApplyUiStatus | null>(null);
   const [scaleCacheEpoch, setScaleCacheEpoch] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [xIdx, setXIdx] = useState(0);
@@ -820,12 +826,34 @@ export default function App() {
     onProgress?: (progress: CompensationApplyProgress) => void,
   ): Promise<void> {
     if (!sample) throw new Error("No active sample is available for compensation.");
-    await checkpointCurrentWorkspace("before-compensation-apply");
+    const manager = compensationManagerRef.current!;
+    if (compensationApplyGuardRef.current || manager.applyInProgress) {
+      const message = "Compensation is already running. Follow or cancel the current job in the status bar before starting another Apply.";
+      setError(message);
+      throw new Error(message);
+    }
+    const targetSample = sample;
+    compensationApplyGuardRef.current = true;
+    setCompensationApplyStatus({
+      phase: "preparing",
+      profileName: profile.name,
+      fraction: 0,
+      processedEvents: 0,
+      totalEvents: targetSample.fcs.nEvents,
+    });
     try {
-      await compensationManagerRef.current!.apply({
+      await checkpointCurrentWorkspace("before-compensation-apply");
+      await manager.apply({
         profile,
-        targets: [{ sample, activeLayer: "compensated" }],
+        targets: [{ sample: targetSample, activeLayer: "compensated" }],
         onProgress: (progress) => {
+          setCompensationApplyStatus({
+            phase: "applying",
+            profileName: profile.name,
+            fraction: progress.fraction,
+            processedEvents: progress.processedEvents,
+            totalEvents: progress.totalEvents,
+          });
           setImportMsg(
             `CyTOF compensation · ${Math.round(progress.fraction * 100)}% · ${progress.processedEvents.toLocaleString()} / ${progress.totalEvents.toLocaleString()} events`,
           );
@@ -859,10 +887,16 @@ export default function App() {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(message);
       throw cause;
+    } finally {
+      compensationApplyGuardRef.current = false;
+      setCompensationApplyStatus(null);
     }
   }
 
   function cancelCompensationApply(): void {
+    setCompensationApplyStatus((current) => current
+      ? { ...current, phase: "cancelling" }
+      : current);
     compensationManagerRef.current!.cancelApply("Cancelled by the user.");
   }
 
@@ -1836,6 +1870,42 @@ export default function App() {
         </span>
       </header>
 
+      {compensationApplyStatus && (
+        <div className="gl-comp-apply-status-bar" role="status" aria-live="polite">
+          <div className="gl-comp-apply-status-copy">
+            <strong>
+              {compensationApplyStatus.phase === "cancelling"
+                ? "Cancelling CyTOF compensation"
+                : compensationApplyStatus.phase === "preparing"
+                  ? "Preparing CyTOF compensation"
+                  : "Applying CyTOF compensation"}
+            </strong>
+            <span title={compensationApplyStatus.profileName}>{compensationApplyStatus.profileName}</span>
+          </div>
+          <progress
+            aria-label="CyTOF compensation progress"
+            max={1}
+            value={compensationApplyStatus.fraction}
+          />
+          <span className="gl-comp-apply-status-count">
+            {Math.round(compensationApplyStatus.fraction * 100)}% · {compensationApplyStatus.processedEvents.toLocaleString()} / {compensationApplyStatus.totalEvents.toLocaleString()} events
+          </span>
+          {activeTab !== "compensation" && (
+            <button type="button" className="gl-mini-btn" onClick={() => setActiveTab("compensation")}>
+              View Compensation
+            </button>
+          )}
+          <button
+            type="button"
+            className="gl-mini-btn"
+            disabled={compensationApplyStatus.phase === "cancelling"}
+            onClick={cancelCompensationApply}
+          >
+            {compensationApplyStatus.phase === "cancelling" ? "Cancelling…" : "Cancel"}
+          </button>
+        </div>
+      )}
+
       <div className="gl-body">
         <aside className="gl-left" style={{ width: leftWidth }} aria-label="Samples and workspace">
           <div className="gl-left-resize" onMouseDown={startLeftResize} title="Drag to resize samples panel" />
@@ -2416,18 +2486,6 @@ export default function App() {
             {activeTab === "panel" && (
               <PanelTab key={panelVersion} sample={sample} onRename={renameChannel} onResetAll={resetAllLabels} />
             )}
-            {activeTab === "compensation" && (
-              <CompensationTab
-                key={`${workspaceId}:${activeSampleId ?? "none"}`}
-                sample={sample}
-                compensationOn={compensationOn}
-                onToggleCompensation={toggleCompensation}
-                onApplyProfile={applyCompensationProfile}
-                onCancelApply={cancelCompensationApply}
-                hasExistingGates={Object.keys(state.gates).length > 0}
-                stateKey={`${workspaceId}:${activeSampleId ?? "none"}`}
-              />
-            )}
             {activeTab === "scales" && (
               <ScalesTab
                 sample={sample}
@@ -2454,6 +2512,22 @@ export default function App() {
                 dataRevision={activeDataRevision}
               />
             )}
+            </ErrorBoundary>
+            {/* Matrix import and Apply are long-lived workflows. Keep this tab mounted while
+                hidden so switching tabs cannot discard its draft while its manager job runs. */}
+            <ErrorBoundary label="compensation">
+              <CompensationTab
+                key={`${workspaceId}:${activeSampleId ?? "none"}`}
+                sample={sample}
+                compensationOn={compensationOn}
+                onToggleCompensation={toggleCompensation}
+                onApplyProfile={applyCompensationProfile}
+                onCancelApply={cancelCompensationApply}
+                hasExistingGates={Object.keys(state.gates).length > 0}
+                applyStatus={compensationApplyStatus}
+                visible={activeTab === "compensation"}
+                stateKey={`${workspaceId}:${activeSampleId ?? "none"}`}
+              />
             </ErrorBoundary>
           </div>
         ) : (
