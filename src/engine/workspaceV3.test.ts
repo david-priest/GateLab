@@ -24,12 +24,19 @@ import {
   migrateWorkspaceV2ToV3,
   newEmptyWorkspaceCompensationState,
   newOriginalWorkspaceSampleAssay,
+  packWorkspaceV3,
+  packWorkspaceV3Reference,
   validateWorkspaceV3,
   type WorkspaceFileV3,
   type WorkspaceV3SampleRestoreContexts,
   type WorkspaceV3ValidationCode,
 } from "./workspaceV3";
-import { WORKSPACE_FORMAT, type WorkspaceFile, type WorkspaceSample } from "./workspace";
+import {
+  readWorkspaceEnvelope,
+  WORKSPACE_FORMAT,
+  type WorkspaceFile,
+  type WorkspaceSample,
+} from "./workspace";
 
 const CREATED = "2026-07-17T11:00:00.000Z";
 const FLOW_SETTINGS = {
@@ -664,6 +671,27 @@ describe("uncompensated v3 validation", () => {
 });
 
 describe("compensated v3 restoration", () => {
+  it("round-trips v3 profile state through bundled and reference storage envelopes", async () => {
+    const { workspace } = await compensatedWorkspace();
+    const flowBytes = Uint8Array.from([70, 67, 83, 1]);
+    const cytofBytes = Uint8Array.from([70, 67, 83, 2]);
+    const bundled = packWorkspaceV3(workspace, {
+      "data/flow.fcs": flowBytes,
+      "data/cytof.fcs": cytofBytes,
+    });
+    const bundleEnvelope = readWorkspaceEnvelope(bundled);
+
+    expect(bundleEnvelope.storage).toBe("bundle");
+    expect(bundleEnvelope.raw).toEqual(workspace);
+    expect(bundleEnvelope.fcsByPath?.["data/flow.fcs"]).toEqual(flowBytes);
+    expect(bundleEnvelope.fcsByPath?.["data/cytof.fcs"]).toEqual(cytofBytes);
+
+    const referenceEnvelope = readWorkspaceEnvelope(packWorkspaceV3Reference(workspace));
+    expect(referenceEnvelope.storage).toBe("reference");
+    expect(referenceEnvelope.raw).toEqual(workspace);
+    expect(referenceEnvelope.fcsByPath).toBeNull();
+  });
+
   it("restores exact flow and rectangular CyTOF layers from FCS PnN contexts", async () => {
     const { workspace, contexts } = await compensatedWorkspace();
 

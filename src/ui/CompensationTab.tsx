@@ -2,8 +2,31 @@ import {
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import {
+  reportMatrixCompatibility,
+  type MatrixCompatibilityReport,
+} from "../engine/compensationCompatibility";
+import {
+  parseCompensationMatrixTable,
+  type ParsedCompensationMatrixTable,
+} from "../engine/compensationMatrixImport";
+import {
+  validateAndCanonicalizeCompensationMatrix,
+  type CanonicalCompensationMatrix,
+  type MatrixValidationIssue,
+} from "../engine/compensationProfile";
+import {
+  createCompensationBaselineProfile,
+  type CompensationProfileRecord,
+} from "../engine/compensationProfileRecord";
+import {
+  CYTOF_NNLS_SOLVER_VERSION,
+  DEFAULT_CYTOF_NNLS_SETTINGS,
+} from "../engine/cytofCompensationEngine";
+import type { CompensationApplyProgress } from "../engine/compensationManager";
 import type { Sample } from "../engine/sample";
 import { usePersistedTabState } from "./tabState";
 
@@ -11,7 +34,20 @@ interface Props {
   sample: Sample;
   compensationOn: boolean;
   onToggleCompensation: (enabled: boolean) => boolean | void;
+  onApplyProfile?: (
+    profile: CompensationProfileRecord,
+    onProgress?: (progress: CompensationApplyProgress) => void,
+  ) => Promise<void>;
+  onCancelApply?: () => void;
+  hasExistingGates?: boolean;
   stateKey: string;
+}
+
+interface CytofMatrixDraft {
+  readonly fileName: string;
+  readonly parsed: ParsedCompensationMatrixTable;
+  readonly matrix: CanonicalCompensationMatrix;
+  readonly validationWarnings: readonly MatrixValidationIssue[];
 }
 
 type DrawerId = "evidence" | "review";
@@ -85,6 +121,9 @@ export function CompensationTab({
   sample,
   compensationOn,
   onToggleCompensation,
+  onApplyProfile,
+  onCancelApply,
+  hasExistingGates = false,
   stateKey,
 }: Props) {
   const installedStatus = sample.compensatedLayerStatus();
@@ -102,7 +141,31 @@ export function CompensationTab({
     { evidence: false, review: false },
   );
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [actionIsError, setActionIsError] = useState(false);
+  const [cytofDraft, setCytofDraft] = useState<CytofMatrixDraft | null>(null);
+  const [includedCytofChannels, setIncludedCytofChannels] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [cytofImportError, setCytofImportError] = useState<string | null>(null);
+  const [gateRecomputeAcknowledged, setGateRecomputeAcknowledged] = useState(false);
+  const [applyProgress, setApplyProgress] = useState<CompensationApplyProgress | null>(null);
+  const [applyingProfile, setApplyingProfile] = useState(false);
+  const cytofFileRef = useRef<HTMLInputElement>(null);
   const matrixRef = useRef<HTMLTableElement>(null);
+
+  const samplePnnChannels = useMemo(
+    () => sample.channels.map(({ pnn, columnIndex }) => ({ pnn, columnIndex })),
+    [sample],
+  );
+  const cytofCompatibility = useMemo<MatrixCompatibilityReport | null>(() => {
+    if (!cytofDraft) return null;
+    return reportMatrixCompatibility({
+      kind: "cytof-spillover",
+      matrix: cytofDraft.matrix,
+      sampleChannels: samplePnnChannels,
+      includedChannels: Array.from(includedCytofChannels),
+    });
+  }, [cytofDraft, includedCytofChannels, samplePnnChannels]);
 
   const channels = useMemo(
     () => spill?.channels.map((key) => channelDisplay(sample, key)) ?? [],
@@ -181,8 +244,8 @@ export function CompensationTab({
       ? "Flow linear inverse"
       : "Not configured";
   const channelCount = profileMetadata?.includedPnns.length ?? spill?.channels.length ?? 0;
-  // Only the legacy embedded-FCS toggle is persistence-safe in the current App workspace path.
-  const canToggle = spill !== null && !matrixHasNonFinite;
+  const canToggle = (spill !== null && !matrixHasNonFinite) ||
+    (profileMetadata !== null && installedStatus.state === "ready");
 
   const toggleDrawer = (id: DrawerId) => {
     setOpenDrawers((current) => ({ ...current, [id]: !current[id] }));
@@ -190,13 +253,124 @@ export function CompensationTab({
 
   const handleLayerToggle = () => {
     setActionMessage(null);
+    setActionIsError(false);
     try {
       const result = onToggleCompensation(!compensationOn);
       if (result === false) {
+        setActionIsError(true);
         setActionMessage("Compensation could not be applied. The current assay layer was left unchanged.");
       }
     } catch {
+      setActionIsError(true);
       setActionMessage("Compensation could not be applied. The current assay layer was left unchanged.");
+    }
+  };
+
+  const handleCytofMatrixFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    setCytofImportError(null);
+    setActionMessage(null);
+    setActionIsError(false);
+    setApplyProgress(null);
+    setGateRecomputeAcknowledged(false);
+    try {
+      const parsed = parseCompensationMatrixTable(await file.text());
+      const validated = validateAndCanonicalizeCompensationMatrix(
+        parsed.input,
+        "cytof-spillover",
+      );
+      if (!validated.ok) {
+        throw new Error(validated.errors.map(({ message }) => message).join(" "));
+      }
+      const sampleCounts = new Map<string, number>();
+      for (const { pnn } of samplePnnChannels) {
+        const exactPnn = pnn.trim().normalize("NFC");
+        sampleCounts.set(exactPnn, (sampleCounts.get(exactPnn) ?? 0) + 1);
+      }
+      const matched = validated.value.receiverChannels.filter(
+        (pnn) => sampleCounts.get(pnn) === 1,
+      );
+      setCytofDraft({
+        fileName: file.name,
+        parsed,
+        matrix: validated.value,
+        validationWarnings: validated.warnings,
+      });
+      setIncludedCytofChannels(new Set(matched));
+    } catch (cause) {
+      setCytofDraft(null);
+      setIncludedCytofChannels(new Set());
+      setCytofImportError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const setCytofChannelIncluded = (pnn: string, included: boolean) => {
+    setIncludedCytofChannels((current) => {
+      const next = new Set(current);
+      if (included) next.add(pnn);
+      else next.delete(pnn);
+      return next;
+    });
+  };
+
+  const applyCytofProfile = async () => {
+    if (!cytofDraft || !cytofCompatibility?.canApply || !onApplyProfile) return;
+    if (hasExistingGates && !gateRecomputeAcknowledged) {
+      setCytofImportError(
+        "Confirm that existing gate memberships will be recomputed in compensated coordinates before applying.",
+      );
+      return;
+    }
+    setCytofImportError(null);
+    setActionMessage(null);
+    setApplyProgress(null);
+    setApplyingProfile(true);
+    try {
+      const suffix = globalThis.crypto?.randomUUID?.() ??
+        `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const displayName = cytofDraft.fileName.replace(/\.(?:csv|tsv|txt)$/i, "") ||
+        "CyTOF compensation";
+      const profile = await createCompensationBaselineProfile(
+        {
+          kind: "cytof-spillover",
+          method: "nnls",
+          solverVersion: CYTOF_NNLS_SOLVER_VERSION,
+          solverSettings: DEFAULT_CYTOF_NNLS_SETTINGS,
+          matrix: cytofDraft.matrix,
+          includedChannels: Array.from(includedCytofChannels),
+        },
+        {
+          profileId: `cytof-${suffix}`,
+          name: displayName,
+          createdAt: new Date(),
+          origin: {
+            type: "uploaded",
+            fileName: cytofDraft.fileName,
+            format: cytofDraft.parsed.format.delimiter,
+            sourceColumnHeader: cytofDraft.parsed.format.sourceColumnHeader,
+          },
+          provenance: {
+            sourceDescription: "User-uploaded CyTOF spillover matrix",
+            estimationMethod: "Imported; coefficients preserved exactly",
+          },
+        },
+      );
+      await onApplyProfile(profile, setApplyProgress);
+      setActionMessage(
+        `Applied ${displayName} to ${includedCytofChannels.size} channel${includedCytofChannels.size === 1 ? "" : "s"}. Original measurements remain available.`,
+      );
+      setCytofDraft(null);
+      setIncludedCytofChannels(new Set());
+      setGateRecomputeAcknowledged(false);
+      setApplyProgress(null);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (/cancel/i.test(message)) setActionMessage("CyTOF compensation was cancelled; the previous assay was left unchanged.");
+      else setCytofImportError(message);
+    } finally {
+      setApplyingProfile(false);
     }
   };
 
@@ -275,12 +449,166 @@ export function CompensationTab({
           >
             {compensationOn
               ? "Use original measurements"
-              : "Apply embedded matrix"}
+              : profileMetadata
+                ? "Use compensated NNLS"
+                : "Apply embedded matrix"}
           </button>
         )}
       </div>
 
-      {actionMessage && <div className="gl-comp-error" role="alert">{actionMessage}</div>}
+      {actionMessage && (
+        <div className={actionIsError ? "gl-comp-error" : "gl-comp-status"} role={actionIsError ? "alert" : "status"}>
+          {actionMessage}
+        </div>
+      )}
+
+      {sample.instrument === "cytof" && (
+        <section className="gl-comp-cytof-import" aria-labelledby="comp-cytof-import-heading">
+          <div className="gl-comp-panel-head gl-comp-import-head">
+            <div>
+              <h3 id="comp-cytof-import-heading">CyTOF spillover matrix</h3>
+              <span>Linear counts → non-negative least squares → arcsinh display</span>
+            </div>
+            <div className="gl-comp-import-actions">
+              <input
+                ref={cytofFileRef}
+                type="file"
+                accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values,text/plain"
+                className="gl-sr-only"
+                aria-label="Choose CyTOF spillover matrix"
+                onChange={(event) => void handleCytofMatrixFile(event)}
+              />
+              <button
+                type="button"
+                className={cytofDraft ? "gl-btn-ghost" : "gl-btn"}
+                disabled={applyingProfile}
+                onClick={() => cytofFileRef.current?.click()}
+              >
+                {cytofDraft ? "Choose another matrix…" : "Import matrix…"}
+              </button>
+            </div>
+          </div>
+
+          {cytofImportError && <div className="gl-comp-error" role="alert">{cytofImportError}</div>}
+
+          {cytofDraft && cytofCompatibility && (
+            <div className="gl-comp-import-body">
+              <div className="gl-comp-import-summary">
+                <div>
+                  <strong>{cytofDraft.fileName}</strong>
+                  <span>
+                    {cytofDraft.matrix.sourceChannels.length} sources × {cytofDraft.matrix.receiverChannels.length} receivers
+                  </span>
+                </div>
+                <dl>
+                  <div><dt>Exact matches</dt><dd>{cytofCompatibility.matchedChannels.length}</dd></div>
+                  <div><dt>Included</dt><dd>{cytofCompatibility.includedChannels.length}</dd></div>
+                  <div><dt>Not in FCS</dt><dd>{cytofCompatibility.matrixOnlyChannels.length}</dd></div>
+                </dl>
+              </div>
+
+              <div className="gl-comp-channel-head">
+                <div>
+                  <h4>Channels included in NNLS</h4>
+                  <span>Exact, case-sensitive <code>$PnN</code> matching; unchecked channels pass through unchanged.</span>
+                </div>
+                <div>
+                  <button
+                    type="button"
+                    className="gl-mini-btn"
+                    disabled={applyingProfile}
+                    onClick={() => setIncludedCytofChannels(new Set(cytofCompatibility.matchedChannels))}
+                  >
+                    All matched
+                  </button>
+                  <button
+                    type="button"
+                    className="gl-mini-btn"
+                    disabled={applyingProfile}
+                    onClick={() => setIncludedCytofChannels(new Set())}
+                  >
+                    None
+                  </button>
+                </div>
+              </div>
+              <div className="gl-comp-channel-grid">
+                {cytofDraft.matrix.receiverChannels.map((pnn) => {
+                  const matched = cytofCompatibility.matchedChannels.includes(pnn);
+                  return (
+                    <label key={pnn} className={matched ? "" : "is-unavailable"} title={matched ? pnn : `${pnn} is not uniquely present in this FCS file`}>
+                      <input
+                        type="checkbox"
+                        checked={includedCytofChannels.has(pnn)}
+                        disabled={!matched || applyingProfile}
+                        onChange={(event) => setCytofChannelIncluded(pnn, event.currentTarget.checked)}
+                      />
+                      <span>{channelDisplayForPnn(sample, pnn).combined}</span>
+                      {!matched && <small>not matched</small>}
+                    </label>
+                  );
+                })}
+              </div>
+
+              {(cytofDraft.validationWarnings.length > 0 || cytofCompatibility.warnings.length > 0) && (
+                <div className="gl-comp-warning" role="status">
+                  <span>
+                    {cytofDraft.validationWarnings.length + cytofCompatibility.warnings.length} review item{
+                      cytofDraft.validationWarnings.length + cytofCompatibility.warnings.length === 1 ? "" : "s"
+                    }: {[
+                      ...cytofDraft.validationWarnings.map(({ message }) => message),
+                      ...cytofCompatibility.warnings.map(({ message }) => message),
+                    ].join(" ")}
+                  </span>
+                </div>
+              )}
+
+              {cytofCompatibility.blockers.length > 0 && (
+                <div className="gl-comp-error" role="alert">
+                  {cytofCompatibility.blockers.map(({ message }) => message).join(" ")}
+                </div>
+              )}
+
+              {hasExistingGates && (
+                <label className="gl-comp-gate-acknowledgement">
+                  <input
+                    type="checkbox"
+                    checked={gateRecomputeAcknowledged}
+                    disabled={applyingProfile}
+                    onChange={(event) => setGateRecomputeAcknowledged(event.currentTarget.checked)}
+                  />
+                  <span>
+                    I understand that existing gates are retained, but their memberships will be recomputed using the compensated coordinates.
+                  </span>
+                </label>
+              )}
+
+              <div className="gl-comp-apply-row">
+                <div>
+                  {applyingProfile && applyProgress
+                    ? `Applying… ${Math.round(applyProgress.fraction * 100)}% (${applyProgress.processedEvents.toLocaleString()} / ${applyProgress.totalEvents.toLocaleString()} events)`
+                    : "The Original assay is retained and can be restored at any time."}
+                </div>
+                {applyingProfile ? (
+                  <button type="button" className="gl-btn-ghost" onClick={onCancelApply}>Cancel</button>
+                ) : (
+                  <button
+                    type="button"
+                    className="gl-btn"
+                    disabled={
+                      !onApplyProfile ||
+                      !cytofCompatibility.canApply ||
+                      (hasExistingGates && !gateRecomputeAcknowledged)
+                    }
+                    onClick={() => void applyCytofProfile()}
+                  >
+                    Apply NNLS compensation
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
       {matrixHasNonFinite && (
         <div className="gl-comp-error" role="alert">

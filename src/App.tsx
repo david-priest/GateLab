@@ -34,6 +34,7 @@ import {
   packWorkspaceForStorage,
   packWorkspaceReference,
   readWorkspaceBytes,
+  readWorkspaceEnvelope,
   WORKSPACE_EXT,
   type WorkspaceFile,
   type WorkspaceStorage,
@@ -41,6 +42,27 @@ import {
   type IllustrationConfig,
   type IllustrationPreset,
 } from "./engine/workspace";
+import {
+  WORKSPACE_VERSION_3,
+  newEmptyWorkspaceCompensationState,
+  packWorkspaceV3,
+  packWorkspaceV3ForStorage,
+  packWorkspaceV3Reference,
+  validateWorkspaceV3,
+  type WorkspaceFileV3,
+  type WorkspaceV3SampleRestoreContexts,
+} from "./engine/workspaceV3";
+import {
+  SAMPLE_ASSAY_BINDING_SCHEMA,
+  type SampleAssayBinding,
+  type WorkspaceCompensationState,
+} from "./engine/workspaceCompensation";
+import {
+  CompensationCancelledError,
+  CompensationManager,
+  type CompensationApplyProgress,
+} from "./engine/compensationManager";
+import type { CompensationProfileRecord } from "./engine/compensationProfileRecord";
 import {
   supportsFileSystemAccess,
   pickFile,
@@ -102,6 +124,7 @@ type CrudModal =
   | { kind: "bulkRename" };
 
 type DrawMode = "navigate" | "draw-rect" | "draw-poly" | "draw-quadrant";
+type LiveWorkspaceFile = WorkspaceFile | WorkspaceFileV3;
 
 interface PendingGatingMLImport {
   result: GatingMLResult;
@@ -225,6 +248,12 @@ export default function App() {
   const [wsName, setWsName] = useState("");
   const [wsStorage, setWsStorage] = useState<WorkspaceStorage>("reference");
   const [workspaceId, setWorkspaceId] = useState(makeWorkspaceId);
+  const [workspaceCompensation, setWorkspaceCompensation] =
+    useState<WorkspaceCompensationState>(() => newEmptyWorkspaceCompensationState());
+  const compensationManagerRef = useRef<CompensationManager | null>(null);
+  if (compensationManagerRef.current === null) {
+    compensationManagerRef.current = new CompensationManager({ workspaceKey: workspaceId });
+  }
   const [scaleCacheEpoch, setScaleCacheEpoch] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [xIdx, setXIdx] = useState(0);
@@ -288,6 +317,10 @@ export default function App() {
     })),
     [divisionProfiles, samples, sampleDataRevisionKey, scalesVersion, instrumentMode],
   );
+
+  useEffect(() => {
+    compensationManagerRef.current!.resetWorkspace(workspaceId);
+  }, [workspaceId]);
   const bumpScales = () => setScalesVersion((v) => v + 1);
   const plotAreaRef = useRef<HTMLDivElement>(null);
   const pzRef = useRef({ sample, xIdx, yIdx, xRange, yRange, drawMode, mode, globalScales });
@@ -475,11 +508,11 @@ export default function App() {
     }
     setDirty(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.gate_version, scalesVersion, sampleDataRevisionKey, instrumentMode, globalScales, mode, maxEvents, contourThreshold, xIdx, yIdx, gatingFontSizes]);
+  }, [state.gate_version, scalesVersion, sampleDataRevisionKey, instrumentMode, globalScales, mode, maxEvents, contourThreshold, xIdx, yIdx, gatingFontSizes, workspaceCompensation]);
 
   // Autosave lightweight reference workspaces only. Repacking every embedded FCS on each
   // edit would stall large bundled workspaces; bundles retain their format via manual Save.
-  const buildWsRef = useRef<() => WorkspaceFile | null>(() => null);
+  const buildWsRef = useRef<() => LiveWorkspaceFile | null>(() => null);
   const workspaceIdRef = useRef(workspaceId);
   workspaceIdRef.current = workspaceId;
   const pendingCheckpointReasonRef = useRef<WorkspaceCheckpointReason | null>(null);
@@ -517,7 +550,7 @@ export default function App() {
       const ws = buildWsRef.current();
       if (!ws) return;
       try {
-        await writeHandle(wsHandle, packWorkspaceReference(ws) as BlobPart);
+        await writeHandle(wsHandle, packReferenceWorkspace(ws) as BlobPart);
         setDirty(false);
         setImportMsg(`Autosaved · ${wsName}`);
       } catch {
@@ -756,12 +789,18 @@ export default function App() {
     if (!sample) return false;
     const previousLayer = sample.activeLayer;
     try {
-      // The current App save/open path persists only the legacy embedded-FCS toggle. Profile
-      // activation stays unavailable until workspace-v3 profile/layer persistence is wired here.
-      sample.setCompensation(on);
+      // saveWorkspaceCheckpoint clones the workspace synchronously, so this captures the
+      // pre-switch assay binding even though IndexedDB persistence finishes asynchronously.
+      void checkpointCurrentWorkspace("before-active-layer-change");
+      const installed = sample.compensatedLayerStatus();
+      if (installed.state !== "missing" && installed.metadata.runtimeIdentity === "profile") {
+        sample.setActiveLayer(on ? "compensated" : "original");
+      } else {
+        sample.setCompensation(on);
+      }
       const applied = sample.compensationEnabled === on;
       if (!applied) {
-        setError("The embedded compensation matrix could not be applied because it is singular or incompatible with this sample.");
+        setError("The requested compensation layer could not be activated for this sample.");
         return false;
       }
       if (sample.activeLayer !== previousLayer) {
@@ -774,6 +813,57 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e));
       return false;
     }
+  }
+
+  async function applyCompensationProfile(
+    profile: CompensationProfileRecord,
+    onProgress?: (progress: CompensationApplyProgress) => void,
+  ): Promise<void> {
+    if (!sample) throw new Error("No active sample is available for compensation.");
+    await checkpointCurrentWorkspace("before-compensation-apply");
+    try {
+      await compensationManagerRef.current!.apply({
+        profile,
+        targets: [{ sample, activeLayer: "compensated" }],
+        onProgress: (progress) => {
+          setImportMsg(
+            `CyTOF compensation · ${Math.round(progress.fraction * 100)}% · ${progress.processedEvents.toLocaleString()} / ${progress.totalEvents.toLocaleString()} events`,
+          );
+          onProgress?.(progress);
+        },
+      });
+      setWorkspaceCompensation((current) => {
+        const exists = current.lineages.some(({ records }) =>
+          records.some(({ profileId }) => profileId === profile.profileId)
+        );
+        if (exists) return current;
+        return {
+          ...current,
+          lineages: [
+            ...current.lineages,
+            { baselineProfileId: profile.baselineProfileId, records: [profile] },
+          ],
+        };
+      });
+      setXRange(null);
+      setYRange(null);
+      setError(null);
+      setImportMsg(`Compensated with ${profile.name} · ${profile.scientific.includedChannels.length} channels`);
+      pendingCheckpointReasonRef.current = "after-compensation-apply";
+    } catch (cause) {
+      if (cause instanceof CompensationCancelledError) {
+        setError(null);
+        setImportMsg("CyTOF compensation cancelled · previous assay unchanged");
+        throw cause;
+      }
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+      throw cause;
+    }
+  }
+
+  function cancelCompensationApply(): void {
+    compensationManagerRef.current!.cancelApply("Cancelled by the user.");
   }
 
   // Force the active sample's instrument mode (recovery for a mis-detect). Rebuilds the
@@ -1075,9 +1165,9 @@ export default function App() {
   const sampleDataPath = (name: string, i: number) =>
     `data/${i}_${(name || "sample.fcs").replace(/[^A-Za-z0-9._-]/g, "_")}`;
 
-  function buildWorkspaceFile(): WorkspaceFile | null {
+  function buildWorkspaceFile(): LiveWorkspaceFile | null {
     if (samples.length === 0 || !sample) return null;
-    return {
+    const legacy: WorkspaceFile = {
       format: "gatelab-workspace",
       version: 2,
       workspaceId,
@@ -1119,17 +1209,69 @@ export default function App() {
       populationMetadata,
       populationMetaColumns,
     };
+    const needsV3 = workspaceCompensation.lineages.length > 0 || samples.some(({ sample: candidate }) => {
+      const status = candidate.compensatedLayerStatus();
+      return status.state !== "missing" && status.metadata.runtimeIdentity === "profile";
+    });
+    if (!needsV3) return legacy;
+
+    const knownProfiles = new Set(
+      workspaceCompensation.lineages.flatMap(({ records }) => records.map(({ profileId }) => profileId)),
+    );
+    const samplesV3 = legacy.samples.map((legacySample, index) => {
+      const runtimeSample = samples[index].sample;
+      const status = runtimeSample.compensatedLayerStatus();
+      let assay: SampleAssayBinding;
+      if (status.state === "missing") {
+        assay = {
+          schema: SAMPLE_ASSAY_BINDING_SCHEMA,
+          activeLayer: "original",
+          compensatedLayer: null,
+        };
+      } else if (status.metadata.runtimeIdentity !== "profile") {
+        throw new Error(
+          "This workspace mixes an imported compensation profile with legacy embedded-FCS compensation. Switch the embedded layer to Original before saving.",
+        );
+      } else {
+        if (status.state !== "ready") {
+          throw new Error("A stale compensation profile cannot be saved as an available assay layer.");
+        }
+        if (!knownProfiles.has(status.metadata.profileId)) {
+          throw new Error(`Compensation profile '${status.metadata.profileId}' is not stored in this workspace.`);
+        }
+        const { runtimeIdentity: _runtimeIdentity, ...persistedBinding } = status.metadata;
+        assay = {
+          schema: SAMPLE_ASSAY_BINDING_SCHEMA,
+          activeLayer: runtimeSample.activeLayer,
+          compensatedLayer: persistedBinding,
+        };
+      }
+      const { compensationOn: _legacyCompensationOn, ...common } = legacySample;
+      return { ...common, assay };
+    });
+    const { version: _legacyVersion, samples: _legacySamples, ...common } = legacy;
+    return {
+      ...common,
+      version: WORKSPACE_VERSION_3,
+      samples: samplesV3,
+      compensation: workspaceCompensation,
+    };
   }
   buildWsRef.current = buildWorkspaceFile; // keep the autosave builder fresh each render
   const rememberAllHandles = async () => {
     await Promise.all(samples.flatMap((e) => e.handle ? [rememberHandle("fcs:" + e.name, e.handle)] : []));
   };
-  function currentFcsByPath(ws: WorkspaceFile): Record<string, Uint8Array> {
+  function currentFcsByPath(ws: LiveWorkspaceFile): Record<string, Uint8Array> {
     return Object.fromEntries(ws.samples.map((wss, i) => {
       const entry = samples[i];
       if (!entry) throw new Error(`The loaded data for ${wss.fileName} is unavailable.`);
       return [wss.dataPath, entry.bytes];
     }));
+  }
+  function packReferenceWorkspace(ws: LiveWorkspaceFile): Uint8Array {
+    return ws.version === WORKSPACE_VERSION_3
+      ? packWorkspaceV3Reference(ws)
+      : packWorkspaceReference(ws);
   }
   function bundleGatingML(): string | undefined {
     if (!sample || !state.root_population_id || Object.keys(state.gates).length === 0) return undefined;
@@ -1148,8 +1290,10 @@ export default function App() {
       return undefined;
     }
   }
-  function packCurrentWorkspace(ws: WorkspaceFile): Uint8Array {
-    return packWorkspaceForStorage(ws, currentFcsByPath(ws), wsStorage, bundleGatingML());
+  function packCurrentWorkspace(ws: LiveWorkspaceFile): Uint8Array {
+    return ws.version === WORKSPACE_VERSION_3
+      ? packWorkspaceV3ForStorage(ws, currentFcsByPath(ws), wsStorage, bundleGatingML())
+      : packWorkspaceForStorage(ws, currentFcsByPath(ws), wsStorage, bundleGatingML());
   }
 
   // Save in place without changing the current workspace's bundle/reference storage mode.
@@ -1176,7 +1320,7 @@ export default function App() {
     if (!ws) return;
     const base = sanitizeFilePart((fileName || "workspace").replace(/\.[^.]+$/, ""));
     try {
-      const data = packWorkspaceReference(ws);
+      const data = packReferenceWorkspace(ws);
       if (supportsFileSystemAccess()) {
         const h = await saveAsHandle(
           `${base}.${WORKSPACE_EXT}`,
@@ -1207,7 +1351,9 @@ export default function App() {
     if (!ws) return;
     const base = sanitizeFilePart((fileName || "workspace").replace(/\.[^.]+$/, ""));
     try {
-      const zip = packWorkspace(ws, currentFcsByPath(ws), bundleGatingML());
+      const zip = ws.version === WORKSPACE_VERSION_3
+        ? packWorkspaceV3(ws, currentFcsByPath(ws), bundleGatingML())
+        : packWorkspace(ws, currentFcsByPath(ws), bundleGatingML());
       if (supportsFileSystemAccess()) {
         await saveAsHandle(
           `${base}-bundle.${WORKSPACE_EXT}`,
@@ -1257,7 +1403,22 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      const { ws, fcsByPath, storage } = readWorkspaceBytes(bytes);
+      const envelope = readWorkspaceEnvelope(bytes);
+      const raw = envelope.raw;
+      const rawVersion = raw != null && typeof raw === "object"
+        ? (raw as { version?: unknown }).version
+        : undefined;
+      let ws: LiveWorkspaceFile;
+      if (rawVersion === WORKSPACE_VERSION_3) {
+        const provisional = raw as Partial<WorkspaceFileV3>;
+        if (!Array.isArray(provisional.samples) || provisional.samples.length === 0) {
+          throw new Error("Invalid GateLab workspace v3: sample declarations are missing.");
+        }
+        ws = provisional as WorkspaceFileV3;
+      } else {
+        ws = readWorkspaceBytes(bytes).ws;
+      }
+      const { fcsByPath, storage } = envelope;
 
       // Build an entry for every sample (bundled bytes, else re-linked from disk).
       const entries: SampleEntry[] = [];
@@ -1265,6 +1426,9 @@ export default function App() {
       const nextDivision: Record<string, DivisionProfile> = {};
       const missing: string[] = [];
       for (const wss of ws.samples) {
+        if (typeof wss.fileName !== "string" || typeof wss.dataPath !== "string") {
+          throw new Error("Invalid GateLab workspace: a sample declaration is malformed.");
+        }
         let fcsB = fcsByPath?.[wss.dataPath] ?? null;
         let fcsH: FileSystemFileHandle | null = null;
         if (!fcsB) {
@@ -1278,11 +1442,40 @@ export default function App() {
         }
         const entry = makeEntry(fcsB, wss.fileName, fcsH);
         if (!entry) continue;
-        if (wss.instrumentMode && wss.instrumentMode !== "auto") entry.sample.setInstrumentMode(wss.instrumentMode);
-        if (wss.compensationOn) entry.sample.setCompensation(true);
+        if (wss.instrumentMode === "flow" || wss.instrumentMode === "cytof") {
+          entry.sample.setInstrumentMode(wss.instrumentMode);
+        }
         if (Number.isFinite(wss.cytofCofactor) && (wss.cytofCofactor ?? 0) > 0) {
           entry.sample.setCytofCofactor(wss.cytofCofactor!);
         }
+        entry.handle = fcsH;
+        if (fcsH) void rememberHandle("fcs:" + wss.fileName, fcsH);
+        entries.push(entry);
+      }
+
+      if (entries.length !== ws.samples.length) {
+        const failed = missing.length ? ` Missing: ${missing.join(", ")}.` : "";
+        setError(`Could not load every data file declared by this workspace.${failed} The workspace was not opened.`);
+        setBusy(false);
+        return;
+      }
+
+      if (rawVersion === WORKSPACE_VERSION_3) {
+        const contexts: WorkspaceV3SampleRestoreContexts = Object.freeze(
+          Object.fromEntries(ws.samples.map((wss, index) => [
+            wss.dataPath,
+            Object.freeze({
+              sampleChannels: entries[index].sample.channels,
+              instrumentKind: entries[index].sample.instrument,
+            }),
+          ])),
+        );
+        ws = await validateWorkspaceV3(raw, contexts);
+      }
+
+      for (let index = 0; index < ws.samples.length; index++) {
+        const wss = ws.samples[index];
+        const entry = entries[index];
         for (const [key, w] of Object.entries(wss.logicleW ?? {})) {
           const idx = entry.sample.index(key);
           if (idx !== undefined && Number.isFinite(w)) entry.sample.setLogicleW(idx, w);
@@ -1305,19 +1498,30 @@ export default function App() {
             coordinateBindingKey: restoredCoordinateBinding,
           };
         }
-        entry.handle = fcsH;
-        if (fcsH) void rememberHandle("fcs:" + wss.fileName, fcsH);
-        entries.push(entry);
-      }
-
-      if (entries.length !== ws.samples.length) {
-        const failed = missing.length ? ` Missing: ${missing.join(", ")}.` : "";
-        setError(`Could not load every data file declared by this workspace.${failed} The workspace was not opened.`);
-        setBusy(false);
-        return;
+        if (ws.version === 2 && "compensationOn" in wss && wss.compensationOn) {
+          entry.sample.setCompensation(true);
+        }
       }
 
       await checkpointCurrentWorkspace("before-workspace-open");
+      const nextWorkspaceId = ws.workspaceId ?? makeWorkspaceId();
+      compensationManagerRef.current!.resetWorkspace(nextWorkspaceId);
+      if (ws.version === WORKSPACE_VERSION_3) {
+        const profiles = ws.compensation.lineages.flatMap(({ records }) => records);
+        for (let index = 0; index < ws.samples.length; index++) {
+          const assay = ws.samples[index].assay;
+          if (assay.compensatedLayer === null) continue;
+          const profile = profiles.find(({ profileId }) => profileId === assay.compensatedLayer!.profileId);
+          if (!profile) {
+            throw new Error(`Workspace compensation profile '${assay.compensatedLayer.profileId}' is missing.`);
+          }
+          setImportMsg(`Restoring compensation · ${index + 1} of ${ws.samples.length}`);
+          await compensationManagerRef.current!.apply({
+            profile,
+            targets: [{ sample: entries[index].sample, activeLayer: assay.activeLayer }],
+          });
+        }
+      }
       pendingCheckpointReasonRef.current = "after-workspace-open";
       skipDirtyRef.current = true;
       const activeIdx = Math.min(Math.max(0, ws.activeSample), entries.length - 1);
@@ -1325,6 +1529,11 @@ export default function App() {
       const targetDisplayContext = active.displayTransformContextKey;
       preserveScalesForContext(targetDisplayContext);
       setSamples(entries);
+      setWorkspaceCompensation(
+        ws.version === WORKSPACE_VERSION_3
+          ? ws.compensation
+          : newEmptyWorkspaceCompensationState(),
+      );
       setActiveSampleId(entries[activeIdx].id);
       setMetadata(nextMetadata);
       setMetadataColumns(ws.metadataColumns ?? []);
@@ -1350,7 +1559,7 @@ export default function App() {
       setWsHandle(wsH);
       setWsName(wsFileName);
       setWsStorage(storage);
-      setWorkspaceId(ws.workspaceId ?? makeWorkspaceId());
+      setWorkspaceId(nextWorkspaceId);
       setDirty(false);
       dispatch({
         type: "loadWorkspace",
@@ -2213,6 +2422,9 @@ export default function App() {
                 sample={sample}
                 compensationOn={compensationOn}
                 onToggleCompensation={toggleCompensation}
+                onApplyProfile={applyCompensationProfile}
+                onCancelApply={cancelCompensationApply}
+                hasExistingGates={Object.keys(state.gates).length > 0}
                 stateKey={`${workspaceId}:${activeSampleId ?? "none"}`}
               />
             )}

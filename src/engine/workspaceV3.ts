@@ -1,4 +1,5 @@
 import type { SamplePnnChannel } from "./compensationCompatibility";
+import { strToU8, zipSync } from "fflate";
 import {
   createOriginalSampleAssayBinding,
   migrateLegacySampleAssayBinding,
@@ -13,6 +14,7 @@ import {
   validateWorkspace,
   WORKSPACE_FORMAT,
   type WorkspaceFile,
+  type WorkspaceStorage,
   type WorkspaceSample,
 } from "./workspace";
 
@@ -341,4 +343,55 @@ export function newEmptyWorkspaceCompensationState(): WorkspaceCompensationState
 
 export function newOriginalWorkspaceSampleAssay(): SampleAssayBinding {
   return createOriginalSampleAssayBinding();
+}
+
+function assertPackableV3(workspace: WorkspaceFileV3): void {
+  if (
+    workspace?.format !== WORKSPACE_FORMAT ||
+    workspace.version !== WORKSPACE_VERSION_3 ||
+    !Array.isArray(workspace.samples) ||
+    workspace.samples.length === 0 ||
+    workspace.compensation?.schema !== WORKSPACE_COMPENSATION_SCHEMA
+  ) {
+    throw new Error("Invalid GateLab workspace v3: cannot pack malformed state.");
+  }
+}
+
+/** Pack an already validated v3 workspace and its original FCS byte sources. */
+export function packWorkspaceV3(
+  workspace: WorkspaceFileV3,
+  fcsByPath: Record<string, Uint8Array>,
+  gatingMLXml?: string,
+): Uint8Array {
+  assertPackableV3(workspace);
+  const files: Record<string, Uint8Array> = {
+    "workspace.json": strToU8(JSON.stringify(workspace, null, 2)),
+  };
+  for (const sample of workspace.samples) {
+    const bytes = fcsByPath[sample.dataPath];
+    if (!(bytes instanceof Uint8Array)) {
+      throw new Error(
+        `Invalid GateLab workspace v3: bundled FCS data is missing for "${sample.fileName}" (${sample.dataPath}).`,
+      );
+    }
+    files[sample.dataPath] = bytes;
+  }
+  if (gatingMLXml) files["gates.gatingml.xml"] = strToU8(gatingMLXml);
+  return zipSync(files, { level: 6 });
+}
+
+export function packWorkspaceV3Reference(workspace: WorkspaceFileV3): Uint8Array {
+  assertPackableV3(workspace);
+  return strToU8(JSON.stringify(workspace, null, 2));
+}
+
+export function packWorkspaceV3ForStorage(
+  workspace: WorkspaceFileV3,
+  fcsByPath: Record<string, Uint8Array>,
+  storage: WorkspaceStorage,
+  gatingMLXml?: string,
+): Uint8Array {
+  return storage === "bundle"
+    ? packWorkspaceV3(workspace, fcsByPath, gatingMLXml)
+    : packWorkspaceV3Reference(workspace);
 }

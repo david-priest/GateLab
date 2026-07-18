@@ -12,6 +12,12 @@ export const WORKSPACE_EXT = "gatelab";
 export const WORKSPACE_FORMAT = "gatelab-workspace";
 export type WorkspaceStorage = "bundle" | "reference";
 
+export interface WorkspaceEnvelope {
+  readonly raw: unknown;
+  readonly fcsByPath: Record<string, Uint8Array> | null;
+  readonly storage: WorkspaceStorage;
+}
+
 export interface GatingFontSizes {
   tick: number;
   axis: number;
@@ -498,6 +504,46 @@ export function readWorkspaceBytes(bytes: Uint8Array): {
   const ws = migrateWorkspaceToV2(parseJson(strFromU8(bytes)));
   validateWorkspace(ws);
   return { ws, fcsByPath: null, storage: "reference" };
+}
+
+/**
+ * Decode the storage envelope without coercing a future/current workspace into v2.
+ * The App uses this first for v3 so exact sample/FCS contexts can be constructed before
+ * asynchronous compensation-profile validation.
+ */
+export function readWorkspaceEnvelope(bytes: Uint8Array): WorkspaceEnvelope {
+  if (bytes[0] === 0x50 && bytes[1] === 0x4b) {
+    let files: Record<string, Uint8Array>;
+    try {
+      files = unzipSync(bytes);
+    } catch {
+      throw new Error("Not a valid GateLab workspace (could not read the zip).");
+    }
+    const encoded = files["workspace.json"];
+    if (!encoded) throw new Error("Not a GateLab workspace: workspace.json is missing.");
+    const raw = parseJson(strFromU8(encoded));
+    if (!isRecord(raw) || !Array.isArray(raw.samples)) {
+      throw new Error("Not a GateLab workspace: sample declarations are missing.");
+    }
+    const fcsByPath: Record<string, Uint8Array> = {};
+    const missing: string[] = [];
+    for (const candidate of raw.samples) {
+      if (
+        !isRecord(candidate) ||
+        typeof candidate.fileName !== "string" ||
+        typeof candidate.dataPath !== "string"
+      ) {
+        throw new Error("Not a GateLab workspace: a sample declaration is malformed.");
+      }
+      if (files[candidate.dataPath]) fcsByPath[candidate.dataPath] = files[candidate.dataPath];
+      else missing.push(`${candidate.fileName} (${candidate.dataPath})`);
+    }
+    if (missing.length > 0) {
+      throw new Error(`Invalid GateLab workspace: bundled FCS data is missing for ${missing.join(", ")}.`);
+    }
+    return { raw, fcsByPath, storage: "bundle" };
+  }
+  return { raw: parseJson(strFromU8(bytes)), fcsByPath: null, storage: "reference" };
 }
 
 function parseJson(text: string): unknown {

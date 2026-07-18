@@ -4,6 +4,8 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Sha256Digest } from "../engine/compensationProfile";
+import type { CompensationApplyProgress } from "../engine/compensationManager";
+import type { CompensationProfileRecord } from "../engine/compensationProfileRecord";
 import type { FcsFile } from "../engine/fcs";
 import { Sample, type CompensatedLayerInput } from "../engine/sample";
 import type { PersistedCompensatedLayerBinding } from "../engine/workspaceCompensation";
@@ -127,6 +129,12 @@ function renderTab(
   options: Readonly<{
     compensationOn?: boolean;
     onToggle?: (enabled: boolean) => boolean | void;
+    onApplyProfile?: (
+      profile: CompensationProfileRecord,
+      onProgress?: (progress: CompensationApplyProgress) => void,
+    ) => Promise<void>;
+    onCancelApply?: () => void;
+    hasExistingGates?: boolean;
     stateKey?: string;
   }> = {},
 ) {
@@ -137,6 +145,9 @@ function renderTab(
       sample={sample}
       compensationOn={options.compensationOn ?? false}
       onToggleCompensation={options.onToggle ?? (() => {})}
+      onApplyProfile={options.onApplyProfile}
+      onCancelApply={options.onCancelApply}
+      hasExistingGates={options.hasExistingGates}
       stateKey={stateKey}
     />,
   ));
@@ -321,6 +332,80 @@ describe("CompensationTab common path", () => {
   });
 });
 
+describe("CompensationTab CyTOF import path", () => {
+  const matrixText = [
+    "channel,Y89Di,In113Di",
+    "Y89Di,1,0.1",
+    "In113Di,0.05,1",
+  ].join("\n");
+
+  async function chooseMatrix(): Promise<void> {
+    const input = host.querySelector<HTMLInputElement>('input[aria-label="Choose CyTOF spillover matrix"]')!;
+    const file = new File([matrixText], "wing-lab.csv", { type: "text/csv" });
+    if (typeof file.text !== "function") {
+      Object.defineProperty(file, "text", { value: async () => matrixText });
+    }
+    Object.defineProperty(input, "files", { configurable: true, value: [file] });
+    await act(async () => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+
+  it("imports a named matrix and defaults to exact matched $PnN channels", async () => {
+    renderTab(cytofSample(), { stateKey: "workspace-a:cytof-import" });
+    await chooseMatrix();
+
+    expect(host.textContent).toContain("wing-lab.csv");
+    expect(host.textContent).toContain("2 sources × 2 receivers");
+    expect(host.textContent).toContain("Exact matches2");
+    expect(host.querySelectorAll<HTMLInputElement>('.gl-comp-channel-grid input:checked')).toHaveLength(2);
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("requires gate-coordinate acknowledgement and emits an immutable NNLS profile", async () => {
+    vi.stubGlobal("crypto", {
+      randomUUID: () => "00000000-0000-4000-8000-000000000001",
+      subtle: {
+        digest: async () => new Uint8Array(32).buffer,
+      },
+    });
+    const applied = vi.fn(async (
+      _profile: CompensationProfileRecord,
+      _onProgress?: (progress: CompensationApplyProgress) => void,
+    ) => {});
+    renderTab(cytofSample(), {
+      stateKey: "workspace-a:cytof-apply",
+      hasExistingGates: true,
+      onApplyProfile: applied,
+    });
+    await chooseMatrix();
+
+    const apply = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Apply NNLS compensation")!;
+    expect(apply.disabled).toBe(true);
+    const acknowledgement = host.querySelector<HTMLInputElement>(".gl-comp-gate-acknowledgement input")!;
+    act(() => acknowledgement.click());
+    expect(apply.disabled).toBe(false);
+
+    await act(async () => {
+      apply.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(applied).toHaveBeenCalledTimes(1);
+    const profile = applied.mock.calls[0][0];
+    expect(profile.scientific.kind).toBe("cytof-spillover");
+    expect(profile.scientific.method).toBe("nnls");
+    expect(profile.scientific.includedChannels).toEqual(["In113Di", "Y89Di"]);
+    expect(profile.origin).toMatchObject({
+      type: "uploaded",
+      fileName: "wing-lab.csv",
+      format: "csv",
+    });
+    expect(host.textContent).toContain("Original measurements remain available");
+  });
+});
+
 describe("CompensationTab assay-layer fidelity", () => {
   it("preserves the embedded-matrix apply behavior and reflects the actual Sample state", () => {
     const sample = flowSample();
@@ -404,7 +489,7 @@ describe("CompensationTab assay-layer fidelity", () => {
     expect(sample.activeLayer).toBe("original");
   });
 
-  it("identifies an active CyTOF NNLS profile and never offers the legacy embedded action", () => {
+  it("identifies an active CyTOF NNLS profile and offers reversible assay switching", () => {
     const sample = cytofSample();
     sample.installCompensatedLayer(profileLayer(sample, "cytof-spillover"), { activeLayer: "compensated" });
     renderTab(sample, { compensationOn: true });
@@ -412,7 +497,7 @@ describe("CompensationTab assay-layer fidelity", () => {
     expect(host.textContent).toContain("Installed compensation profile");
     expect(host.textContent).toContain("CyTOF NNLS");
     expect(host.textContent).toContain("CyTOF compensation profile");
-    expect(host.textContent).not.toContain("Use original measurements");
+    expect(host.textContent).toContain("Use original measurements");
     expect(host.textContent).not.toContain("Apply embedded matrix");
     expect(host.textContent).not.toContain("Not configured");
   });
