@@ -8,6 +8,12 @@ import {
   type FlowReconstructionDiagnostics,
 } from "../engine/flowCompensationEngine";
 import {
+  CytofCompensationError,
+  compensateCytofRange,
+  prepareCytofNnls,
+  type CytofNnlsPlan,
+} from "../engine/cytofCompensationEngine";
+import {
   COMPENSATION_WORKER_PROTOCOL,
   responseTransferables,
   type ApplyChunkRequest,
@@ -53,7 +59,8 @@ interface ApplyJob {
   readonly jobToken: string;
   readonly profileHash: string;
   readonly bindingKey: string;
-  readonly plan: FlowCompensationPlan;
+  readonly method: "matrix-inverse" | "nnls";
+  readonly plan: FlowCompensationPlan | CytofNnlsPlan;
   readonly totalEvents: number;
   readonly channelCount: number;
   readonly byteBudget: number;
@@ -113,8 +120,10 @@ function quantile(sorted: readonly number[], probability: number): number {
   return sorted[lower] + fraction * (sorted[upper] - sorted[lower]);
 }
 
-function flowErrorCode(error: unknown): string {
-  return error instanceof FlowCompensationError ? error.code : "unexpected-worker-error";
+function compensationErrorCode(error: unknown): string {
+  return error instanceof FlowCompensationError || error instanceof CytofCompensationError
+    ? error.code
+    : "unexpected-worker-error";
 }
 
 function errorMessage(error: unknown): string {
@@ -337,7 +346,7 @@ export class CompensationWorkerRuntime {
       previewBindings = validateChannelBindings(request, request.sourceChannels.length);
     } catch (error) {
       this.emitError("preview", request.sessionId, request.sessionToken,
-        flowErrorCode(error), errorMessage(error), true);
+        compensationErrorCode(error), errorMessage(error), true);
       return;
     }
 
@@ -476,7 +485,7 @@ export class CompensationWorkerRuntime {
         "preview",
         guard.session.sessionId,
         guard.session.sessionToken,
-        flowErrorCode(error),
+        compensationErrorCode(error),
         errorMessage(error),
         true,
         guard.requestId,
@@ -650,9 +659,9 @@ export class CompensationWorkerRuntime {
         "invalid-apply-request", identityError, true);
       return;
     }
-    if (request.method !== "matrix-inverse") {
+    if (request.method !== "matrix-inverse" && request.method !== "nnls") {
       this.emitError("apply", request.jobId, request.jobToken,
-        "unsupported-method", "NNLS compensation is not implemented in this worker version.", true);
+        "unsupported-method", "The requested compensation method is not supported.", true);
       return;
     }
     if (
@@ -674,7 +683,9 @@ export class CompensationWorkerRuntime {
       return;
     }
     try {
-      const plan = prepareFlowCompensation(request.matrix, request.flowSettings);
+      const plan = request.method === "matrix-inverse"
+        ? prepareFlowCompensation(request.matrix, request.flowSettings)
+        : prepareCytofNnls(request.sourceChannels, request.matrix, request.nnlsSettings);
       if (plan.matrix.length !== request.channelCount) {
         throw new FlowCompensationError(
           "dimension-mismatch",
@@ -696,6 +707,7 @@ export class CompensationWorkerRuntime {
         jobToken: request.jobToken,
         profileHash: request.profileHash,
         bindingKey: request.bindingKey,
+        method: request.method,
         plan,
         totalEvents: request.totalEvents,
         channelCount: request.channelCount,
@@ -743,7 +755,7 @@ export class CompensationWorkerRuntime {
       }
     } catch (error) {
       this.emitError("apply", request.jobId, request.jobToken,
-        flowErrorCode(error), errorMessage(error), true);
+        compensationErrorCode(error), errorMessage(error), true);
     }
   }
 
@@ -843,13 +855,33 @@ export class CompensationWorkerRuntime {
           end,
           (event) => request.startEvent + event,
         );
-        compensateFlowRange(request.measuredColumns, job.plan, output, {
-          inputStart: start,
-          inputEnd: end,
-          outputStart: start,
-          validateMeasuredValues: false,
-          validateOutputValues: false,
-        });
+        if (job.method === "matrix-inverse") {
+          compensateFlowRange(
+            request.measuredColumns,
+            job.plan as FlowCompensationPlan,
+            output,
+            {
+              inputStart: start,
+              inputEnd: end,
+              outputStart: start,
+              validateMeasuredValues: false,
+              validateOutputValues: false,
+            },
+          );
+        } else {
+          compensateCytofRange(
+            request.measuredColumns,
+            job.plan as CytofNnlsPlan,
+            output,
+            {
+              inputStart: start,
+              inputEnd: end,
+              outputStart: start,
+              validateMeasuredValues: false,
+              validateOutputValues: false,
+            },
+          );
+        }
         this.assertFiniteOutputRange(output, start, end, (event) => request.startEvent + event);
         await this.applyCheckpoint(job);
       }
@@ -901,7 +933,7 @@ export class CompensationWorkerRuntime {
         "apply",
         job.jobId,
         job.jobToken,
-        flowErrorCode(error),
+        compensationErrorCode(error),
         errorMessage(error),
         true,
       );

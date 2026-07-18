@@ -45,6 +45,28 @@ function flowFcs(offset = 0): FcsFile {
   };
 }
 
+function cytofFcs(): FcsFile {
+  return {
+    version: "FCS3.1",
+    nEvents: 5,
+    instrument: "cytof",
+    keywords: {},
+    channels: [
+      { index: 0, name: "B", marker: "Marker B", bits: 32, range: 262_144 },
+      { index: 1, name: "C", marker: "Marker C", bits: 32, range: 262_144 },
+      { index: 2, name: "A", marker: "Marker A", bits: 32, range: 262_144 },
+      { index: 3, name: "D", marker: "Dump", bits: 32, range: 262_144 },
+    ],
+    columns: [
+      new Float32Array([11, 12, 13, 14, 15]),
+      new Float32Array([8, 2, 5, 4.6, 2.6]),
+      new Float32Array([5, 10, 0, 3, 8]),
+      new Float32Array([99, 98, 97, 96, 95]),
+    ],
+    spillover: null,
+  };
+}
+
 async function flowProfile(
   matrix: readonly (readonly number[])[] = [[1, 0.12], [0.04, 1]],
   sourceChannels: readonly string[] = ["FL1-A", "FL2-A"],
@@ -74,6 +96,41 @@ async function flowProfile(
       fileName: "spill.csv",
       format: "csv",
       sourceColumnHeader: "source",
+    },
+  });
+}
+
+async function cytofProfile(): Promise<CompensationProfileRecord> {
+  const canonical = validateAndCanonicalizeCompensationMatrix({
+    sourceChannels: ["A", "B"],
+    receiverChannels: ["A", "B", "C", "D"],
+    matrix: [
+      [1, 0.1, 0.2, 0.04],
+      [0.05, 1, 0.3, 0.02],
+    ],
+  }, "cytof-spillover");
+  if (!canonical.ok) throw new Error(canonical.errors.map(({ message }) => message).join(" "));
+  return createCompensationBaselineProfile({
+    kind: "cytof-spillover",
+    method: "nnls",
+    solverVersion: "lawson-hanson-v1",
+    solverSettings: {
+      tolerance: 1e-10,
+      kktTolerance: 1e-9,
+      maxIterations: 1000,
+      adaptationVersion: "identity-backed-v1",
+    },
+    matrix: canonical.value,
+    includedChannels: ["A", "C"],
+  }, {
+    profileId: "cytof-profile-1",
+    name: "CyTOF profile",
+    createdAt: "2026-07-18T00:00:00.000Z",
+    origin: {
+      type: "uploaded",
+      fileName: "cytof-spill.csv",
+      format: "csv",
+      sourceColumnHeader: "channel",
     },
   });
 }
@@ -247,6 +304,52 @@ describe("CompensationManager Apply", () => {
     expect(sample.layerRevision).toBe(1);
     expect(dataListener).toHaveBeenCalledTimes(1);
     expect(layerListener).toHaveBeenCalledTimes(1);
+    manager.dispose();
+  });
+
+  it("applies CyTOF NNLS with rectangular adaptation, exclusions, and receiver-only outputs", async () => {
+    const sample = new Sample(cytofFcs());
+    const profile = await cytofProfile();
+    const worker = new RuntimeWorker();
+    const manager = new CompensationManager({
+      workspaceKey: "workspace-cytof",
+      workerFactory: () => worker,
+      byteBudget: 48,
+      fixedWorkspaceBytes: 0,
+      copySliceEvents: 1,
+      yieldToEventLoop: () => Promise.resolve(),
+    });
+    const originalB = Float32Array.from(sample.fcs.columns[0]);
+    const originalD = Float32Array.from(sample.fcs.columns[3]);
+
+    const result = await manager.apply({ profile, targets: [{ sample }] });
+
+    const compensatedA = compensatedValues(sample, "A");
+    const compensatedC = compensatedValues(sample, "C");
+    const expectedA = [5, 10, 0, 3, 8];
+    const expectedC = [7, 0, 5, 4, 1];
+    for (let event = 0; event < expectedA.length; event++) {
+      expect(compensatedA[event]).toBeCloseTo(expectedA[event], 5);
+      expect(compensatedC[event]).toBeCloseTo(expectedC[event], 5);
+    }
+    expect(compensatedValues(sample, "B")).toEqual(originalB);
+    expect(compensatedValues(sample, "D")).toEqual(originalD);
+    expect(sample.activeLayer).toBe("compensated");
+    expect(result.targets[0].binding).toMatchObject({
+      kind: "cytof-spillover",
+      method: "nnls",
+      includedPnns: ["A", "C"],
+      transformBinding: { kind: "cytof-asinh", cofactor: 5 },
+    });
+    expect(result.targets[0].binding.channelBindings.find(({ pnn }) => pnn === "C"))
+      .toMatchObject({ matrixSourceIndex: null, included: true });
+    expect(worker.requests.find((request) => request.type === "start-apply"))
+      .toMatchObject({
+        method: "nnls",
+        sourceChannels: ["A", "C"],
+        receiverChannels: ["A", "C"],
+        matrix: [[1, 0.2], [0, 1]],
+      });
     manager.dispose();
   });
 

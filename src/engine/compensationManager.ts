@@ -4,6 +4,11 @@ import {
   type FlowSolverSettings,
 } from "./flowCompensationEngine";
 import {
+  CYTOF_NNLS_SOLVER_VERSION,
+  adaptCytofSpilloverMatrix,
+} from "./cytofCompensationEngine";
+import type { NnlsSolverSettingsInput } from "./compensationProfile";
+import {
   validateCompensationProfileRecord,
   type CompensationProfileRecord,
 } from "./compensationProfileRecord";
@@ -148,7 +153,9 @@ interface SampleSnapshot {
   readonly bindingFingerprint: string;
   readonly binding: PersistedCompensatedLayerBinding;
   readonly receiverResolvedIndices: readonly number[];
-  readonly sourceBindings: readonly MatrixChannelBinding[];
+  readonly solveChannels: readonly string[];
+  readonly solveMatrix: readonly (readonly number[])[];
+  readonly workerBindings: readonly CompensationWorkerChannelBinding[];
 }
 
 interface ActiveApply {
@@ -321,14 +328,7 @@ function workerBindingsForSnapshot(snapshot: SampleSnapshot): Readonly<{
   receiver: readonly CompensationWorkerChannelBinding[];
   source: readonly CompensationWorkerChannelBinding[];
 }> {
-  const receiver = Object.freeze(
-    snapshot.binding.channelBindings.map((binding) => Object.freeze({
-      pnn: binding.pnn,
-      fcsColumnIndex: binding.fcsColumnIndex,
-      matrixSourceIndex: binding.matrixSourceIndex!,
-      matrixReceiverIndex: binding.matrixReceiverIndex,
-    })),
-  );
+  const receiver = snapshot.workerBindings;
   return Object.freeze({
     receiver,
     source: Object.freeze(Array.from(receiver).sort(
@@ -353,6 +353,25 @@ function profileFlowSettings(profile: CompensationProfileRecord): FlowSolverSett
     );
   }
   return Object.freeze({ singularTolerance, conditionWarningThreshold });
+}
+
+function profileNnlsSettings(profile: CompensationProfileRecord): NnlsSolverSettingsInput {
+  const settings = Object.fromEntries(
+    profile.scientific.solverSettings.map(({ key, value }) => [key, value]),
+  );
+  const { tolerance, kktTolerance, maxIterations, adaptationVersion } = settings;
+  if (
+    typeof tolerance !== "number" ||
+    typeof kktTolerance !== "number" ||
+    typeof maxIterations !== "number" ||
+    typeof adaptationVersion !== "string"
+  ) {
+    throw new CompensationManagerError(
+      "unsupported-solver-settings",
+      "The CyTOF profile does not contain the exact NNLS settings required by this GateLab version.",
+    );
+  }
+  return Object.freeze({ tolerance, kktTolerance, maxIterations, adaptationVersion });
 }
 
 function workerError(response: Extract<CompensationWorkerResponse, { type: "worker-error" }>): Error {
@@ -725,7 +744,7 @@ export class CompensationManager {
     let profile: CompensationProfileRecord;
     let snapshots: SampleSnapshot[];
     try {
-      profile = await this.validateFlowProfile(stableRequest.profile);
+      profile = await this.validateProfile(stableRequest.profile);
       this.assertUsable();
       if (
         this.applyReservation !== reservation ||
@@ -854,7 +873,7 @@ export class CompensationManager {
     request: CompensationApplyRequest,
   ): Promise<SolvedApplyTarget> {
     const sample = snapshot.sample;
-    const channelCount = profile.scientific.matrix.sourceChannels.length;
+    const channelCount = snapshot.solveChannels.length;
     const plan = planCompensationChunks({
       totalEvents: sample.fcs.nEvents,
       channelCount,
@@ -911,16 +930,18 @@ export class CompensationManager {
       this.post({
         protocol: COMPENSATION_WORKER_PROTOCOL,
         type: "start-apply",
-        method: "matrix-inverse",
+        method: profile.scientific.method,
         jobId: workerIdentity.id,
         jobToken: workerIdentity.token,
         profileHash: profile.profileHash,
         bindingKey,
-        sourceChannels: profile.scientific.matrix.sourceChannels,
-        receiverChannels: profile.scientific.matrix.receiverChannels,
+        sourceChannels: snapshot.solveChannels,
+        receiverChannels: snapshot.solveChannels,
         channelBindings: receiverBindings,
-        matrix: profile.scientific.matrix.matrix,
-        flowSettings: profileFlowSettings(profile),
+        matrix: snapshot.solveMatrix,
+        ...(profile.scientific.kind === "flow-spillover"
+          ? { flowSettings: profileFlowSettings(profile) }
+          : { nnlsSettings: profileNnlsSettings(profile) }),
         totalEvents: sample.fcs.nEvents,
         channelCount,
         byteBudget: plan.transientByteBudget,
@@ -1117,20 +1138,47 @@ export class CompensationManager {
   }
 
   private async validateFlowProfile(input: CompensationProfileRecord): Promise<CompensationProfileRecord> {
-    const profile = await validateCompensationProfileRecord(input);
+    const profile = await this.validateProfile(input);
     if (profile.scientific.kind !== "flow-spillover" || profile.scientific.method !== "matrix-inverse") {
       throw new CompensationManagerError(
         "unsupported-compensation-method",
-        "This worker stage supports exact conventional-flow matrix-inverse profiles only.",
+        "Compensation preview currently supports conventional-flow matrix-inverse profiles only.",
       );
     }
-    if (profile.scientific.solverVersion !== FLOW_SOLVER_VERSION) {
+    return profile;
+  }
+
+  private async validateProfile(input: CompensationProfileRecord): Promise<CompensationProfileRecord> {
+    const profile = await validateCompensationProfileRecord(input);
+    if (profile.scientific.kind === "flow-spillover") {
+      if (profile.scientific.method !== "matrix-inverse") {
+        throw new CompensationManagerError(
+          "unsupported-compensation-method",
+          "Conventional-flow profiles require exact matrix inversion.",
+        );
+      }
+      if (profile.scientific.solverVersion !== FLOW_SOLVER_VERSION) {
+        throw new CompensationManagerError(
+          "unsupported-solver-version",
+          `Profile solver ${profile.scientific.solverVersion} cannot be labelled as ${FLOW_SOLVER_VERSION}.`,
+        );
+      }
+      profileFlowSettings(profile);
+      return profile;
+    }
+    if (profile.scientific.method !== "nnls") {
+      throw new CompensationManagerError(
+        "unsupported-compensation-method",
+        "CyTOF profiles require non-negative least squares.",
+      );
+    }
+    if (profile.scientific.solverVersion !== CYTOF_NNLS_SOLVER_VERSION) {
       throw new CompensationManagerError(
         "unsupported-solver-version",
-        `Profile solver ${profile.scientific.solverVersion} cannot be labelled as ${FLOW_SOLVER_VERSION}.`,
+        `Profile solver ${profile.scientific.solverVersion} cannot be labelled as ${CYTOF_NNLS_SOLVER_VERSION}.`,
       );
     }
-    profileFlowSettings(profile);
+    profileNnlsSettings(profile);
     return profile;
   }
 
@@ -1138,14 +1186,28 @@ export class CompensationManager {
     sample: Sample,
     profile: CompensationProfileRecord,
   ): SampleSnapshot {
-    if (sample.instrument !== "flow") {
-      throw new CompensationManagerError("sample-kind-mismatch", "A flow compensation profile requires a flow Sample.");
+    const profileKind = profile.scientific.kind;
+    const expectedInstrument = profileKind === "flow-spillover" ? "flow" : "cytof";
+    if (sample.instrument !== expectedInstrument) {
+      throw new CompensationManagerError(
+        "sample-kind-mismatch",
+        `A ${expectedInstrument} compensation profile requires a ${expectedInstrument} Sample.`,
+      );
     }
-    const report = reportMatrixCompatibility({
-      kind: "flow-spillover",
-      matrix: profile.scientific.matrix,
-      sampleChannels: sample.channels,
-    });
+    const report = reportMatrixCompatibility(
+      profileKind === "flow-spillover"
+        ? {
+            kind: "flow-spillover",
+            matrix: profile.scientific.matrix,
+            sampleChannels: sample.channels,
+          }
+        : {
+            kind: "cytof-spillover",
+            matrix: profile.scientific.matrix,
+            sampleChannels: sample.channels,
+            includedChannels: profile.scientific.includedChannels,
+          },
+    );
     if (!report.canApply) {
       throw new CompensationManagerError(
         "incompatible-sample",
@@ -1155,7 +1217,8 @@ export class CompensationManager {
     const orderedBindings = Array.from(report.bindings).sort(
       (left, right) => left.matrixReceiverIndex - right.matrixReceiverIndex,
     );
-    const receiverResolvedIndices = orderedBindings.map((binding) => {
+    const solveBindings = orderedBindings.filter(({ included }) => included);
+    const receiverResolvedIndices = solveBindings.map((binding) => {
       const resolved = sample.channels.findIndex(
         ({ pnn, columnIndex }) => pnn === binding.pnn && columnIndex === binding.fcsColumnIndex,
       );
@@ -1164,18 +1227,47 @@ export class CompensationManager {
       }
       return resolved;
     });
-    const sourceBindings = Array.from(orderedBindings).sort(
-      (left, right) => left.matrixSourceIndex! - right.matrixSourceIndex!,
-    );
+    const solveChannels = profileKind === "flow-spillover"
+      ? profile.scientific.matrix.receiverChannels
+      : profile.scientific.includedChannels;
+    if (
+      solveBindings.length !== solveChannels.length ||
+      solveBindings.some((binding, index) => binding.pnn !== solveChannels[index])
+    ) {
+      throw new CompensationManagerError(
+        "invalid-channel-binding",
+        "The included profile channels do not match the exact FCS receiver binding order.",
+      );
+    }
+    const workerBindings = Object.freeze(solveBindings.map((binding, solveIndex) =>
+      Object.freeze({
+        pnn: binding.pnn,
+        fcsColumnIndex: binding.fcsColumnIndex,
+        matrixSourceIndex: profileKind === "flow-spillover"
+          ? binding.matrixSourceIndex!
+          : solveIndex,
+        matrixReceiverIndex: profileKind === "flow-spillover"
+          ? binding.matrixReceiverIndex
+          : solveIndex,
+      }),
+    ));
+    const solveMatrix = profileKind === "flow-spillover"
+      ? profile.scientific.matrix.matrix
+      : adaptCytofSpilloverMatrix(
+          profile.scientific.matrix,
+          profile.scientific.includedChannels,
+        );
     const binding: PersistedCompensatedLayerBinding = Object.freeze({
       profileId: profile.profileId,
       profileHash: profile.profileHash,
       matrixHash: profile.matrixHash,
-      kind: "flow-spillover",
-      method: "matrix-inverse",
-      includedPnns: Object.freeze(orderedBindings.map(({ pnn }) => pnn)),
+      kind: profileKind,
+      method: profile.scientific.method,
+      includedPnns: Object.freeze(Array.from(solveChannels)),
       channelBindings: Object.freeze(orderedBindings),
-      transformBinding: Object.freeze({ kind: "flow-linear" }),
+      transformBinding: profileKind === "flow-spillover"
+        ? Object.freeze({ kind: "flow-linear" as const })
+        : Object.freeze({ kind: "cytof-asinh" as const, cofactor: sample.arcsinhCofactor }),
     });
     return Object.freeze({
       sample,
@@ -1188,7 +1280,9 @@ export class CompensationManager {
       bindingFingerprint: bindingsFingerprint(orderedBindings),
       binding,
       receiverResolvedIndices: Object.freeze(receiverResolvedIndices),
-      sourceBindings: Object.freeze(sourceBindings),
+      solveChannels: Object.freeze(Array.from(solveChannels)),
+      solveMatrix,
+      workerBindings,
     });
   }
 
@@ -1208,11 +1302,20 @@ export class CompensationManager {
       throw new CompensationManagerError("stale-sample", "The Sample changed while compensation was running.");
     }
     if (profile !== null) {
-      const report = reportMatrixCompatibility({
-        kind: "flow-spillover",
-        matrix: profile.scientific.matrix,
-        sampleChannels: sample.channels,
-      });
+      const report = reportMatrixCompatibility(
+        profile.scientific.kind === "flow-spillover"
+          ? {
+              kind: "flow-spillover",
+              matrix: profile.scientific.matrix,
+              sampleChannels: sample.channels,
+            }
+          : {
+              kind: "cytof-spillover",
+              matrix: profile.scientific.matrix,
+              sampleChannels: sample.channels,
+              includedChannels: profile.scientific.includedChannels,
+            },
+      );
       if (!report.canApply || snapshot.bindingFingerprint !== bindingsFingerprint(report.bindings)) {
         throw new CompensationManagerError("stale-channel-binding", "The exact matrix-to-FCS channel binding changed.");
       }

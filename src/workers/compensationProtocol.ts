@@ -4,6 +4,8 @@ import type {
   FlowReconstructionDiagnostics,
   FlowSolverSettings,
 } from "../engine/flowCompensationEngine";
+import type { CytofNnlsPlanDiagnostics } from "../engine/cytofCompensationEngine";
+import type { NnlsSolverSettingsInput } from "../engine/compensationProfile";
 
 export const COMPENSATION_WORKER_PROTOCOL =
   "gatelab.compensation-worker.v1" as const;
@@ -66,6 +68,7 @@ export interface StartApplyRequest extends WorkerRequestBase, ApplyIdentity {
   readonly channelBindings: readonly CompensationWorkerChannelBinding[];
   readonly matrix: readonly (readonly number[])[];
   readonly flowSettings?: FlowSolverSettings;
+  readonly nnlsSettings?: NnlsSolverSettingsInput;
   readonly totalEvents: number;
   readonly channelCount: number;
   /** Governs host-side chunk construction and is echoed for an auditable job receipt. */
@@ -129,7 +132,7 @@ export interface ApplyStartedResponse extends WorkerResponseBase, ApplyIdentity 
   readonly totalEvents: number;
   readonly channelCount: number;
   readonly byteBudget: number;
-  readonly diagnostics: FlowMatrixDiagnostics;
+  readonly diagnostics: FlowMatrixDiagnostics | CytofNnlsPlanDiagnostics;
   readonly receiverBindings: readonly CompensationWorkerChannelBinding[];
   readonly sourceBindings: readonly CompensationWorkerChannelBinding[];
 }

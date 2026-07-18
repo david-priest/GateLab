@@ -330,6 +330,48 @@ describe("compensation worker runtime", () => {
     )).toBe(true);
   });
 
+  it("runs CyTOF NNLS Apply through the same bounded worker protocol", async () => {
+    const measured = [
+      new Float64Array([10.4, 3, 0]),
+      new Float64Array([6, -2, 5]),
+    ] as const;
+    const responses: CompensationWorkerResponse[] = [];
+    const runtime = createCompensationWorkerRuntime({
+      emit: (response) => responses.push(response),
+      microbatchEvents: 1,
+    });
+
+    runtime.dispatch(applyStart(3, {
+      method: "nnls",
+      matrix: [
+        [1, 0.2],
+        [0.1, 1],
+      ],
+      nnlsSettings: {
+        tolerance: 1e-10,
+        kktTolerance: 1e-9,
+        maxIterations: 1000,
+        adaptationVersion: "identity-backed-v1",
+      },
+    }));
+    const started = await eventually(() => responseOfType(responses, "apply-started"));
+    expect(started.diagnostics).toMatchObject({
+      method: "nnls",
+      channelCount: 2,
+      adaptationVersion: "identity-backed-v1",
+    });
+
+    runtime.dispatch(applyChunk(0, 0, measured));
+    const chunk = await eventually(() => responseOfType(responses, "apply-chunk-complete"));
+    await eventually(() => responseOfType(responses, "apply-complete"));
+
+    expect(chunk.columns[0][0]).toBeCloseTo(10, 5);
+    expect(chunk.columns[1][0]).toBeCloseTo(4, 5);
+    expect(chunk.columns[0][1]).toBeCloseTo(2.5, 5);
+    expect(chunk.columns[1][1]).toBe(0);
+    expect(chunk.columns.flatMap((column) => Array.from(column)).every((value) => value >= 0)).toBe(true);
+  });
+
   it("keeps FCS, receiver, and source identities exact when the matrix axes are permuted", async () => {
     const sourceChannels = ["source-a", "source-b"] as const;
     const receiverChannels = ["source-b", "source-a"] as const;

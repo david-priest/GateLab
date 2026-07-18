@@ -135,6 +135,7 @@ export interface PrepareCompensatedLayerOptions {
 export interface CompensatedLayerOutputBinding {
   readonly pnn: string;
   readonly fcsColumnIndex: number;
+  /** Source index in the worker's effective square solve (adapted for CyTOF). */
   readonly matrixSourceIndex: number;
 }
 
@@ -604,14 +605,16 @@ export class Sample {
     }
     const expected = metadata.channelBindings
       .filter(({ included }) => included)
-      .map((binding) => {
-        if (binding.matrixSourceIndex === null) {
-          throw new Error("Invalid compensated staging: every output needs a matrix source.");
+      .map((binding, solveIndex) => {
+        if (metadata.kind === "flow-spillover" && binding.matrixSourceIndex === null) {
+          throw new Error("Invalid compensated staging: every flow output needs a matrix source.");
         }
         return Object.freeze({
           pnn: binding.pnn,
           fcsColumnIndex: binding.fcsColumnIndex,
-          matrixSourceIndex: binding.matrixSourceIndex,
+          matrixSourceIndex: metadata.kind === "cytof-spillover"
+            ? solveIndex
+            : binding.matrixSourceIndex!,
         });
       })
       .sort((left, right) => left.matrixSourceIndex - right.matrixSourceIndex);
