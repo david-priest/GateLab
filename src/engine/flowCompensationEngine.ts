@@ -54,6 +54,14 @@ export interface FlowSolveOptions {
   readonly validateMeasuredValues?: boolean;
 }
 
+export interface FlowRangeWriteOptions {
+  readonly inputStart?: number;
+  readonly inputEnd?: number;
+  readonly outputStart?: number;
+  readonly validateMeasuredValues?: boolean;
+  readonly validateOutputValues?: boolean;
+}
+
 export interface FlowSolveResult {
   readonly columns: readonly FlowNumericColumn[];
   readonly eventCount: number;
@@ -135,7 +143,9 @@ export type FlowCompensationErrorCode =
   | "singular-matrix"
   | "unstable-matrix"
   | "dimension-mismatch"
+  | "overlapping-buffer"
   | "non-finite-measured-value"
+  | "non-finite-output"
   | "invalid-edit";
 
 export class FlowCompensationError extends Error {
@@ -540,6 +550,37 @@ function measuredShape(
   return eventCount;
 }
 
+interface NumericByteRange {
+  readonly buffer: ArrayBufferLike;
+  readonly start: number;
+  readonly end: number;
+}
+
+function numericByteRange(
+  column: ArrayLike<number>,
+  startElement: number,
+  endElement: number,
+): NumericByteRange | null {
+  if (!ArrayBuffer.isView(column) || column instanceof DataView) return null;
+  const view = column as unknown as {
+    readonly buffer: ArrayBufferLike;
+    readonly byteOffset: number;
+    readonly BYTES_PER_ELEMENT: number;
+  };
+  if (!Number.isSafeInteger(view.BYTES_PER_ELEMENT) || view.BYTES_PER_ELEMENT <= 0) {
+    return null;
+  }
+  return {
+    buffer: view.buffer,
+    start: view.byteOffset + startElement * view.BYTES_PER_ELEMENT,
+    end: view.byteOffset + endElement * view.BYTES_PER_ELEMENT,
+  };
+}
+
+function byteRangesOverlap(left: NumericByteRange, right: NumericByteRange): boolean {
+  return left.buffer === right.buffer && left.start < right.end && right.start < left.end;
+}
+
 function calculateReconstruction(
   measuredColumns: readonly ArrayLike<number>[],
   compensatedColumns: readonly ArrayLike<number>[],
@@ -607,17 +648,14 @@ export function compensateFlowColumns(
     { length: plan.matrix.length },
     () => output === "float32" ? new Float32Array(eventCount) : new Float64Array(eventCount),
   );
-
-  // Preserve the ascending-k accumulation used by GateLab's validated flowCore bridge.
-  for (let event = 0; event < eventCount; event++) {
-    for (let source = 0; source < plan.matrix.length; source++) {
-      let value = 0;
-      for (let receiver = 0; receiver < plan.matrix.length; receiver++) {
-        value += measuredColumns[receiver][event] * plan.inverse[receiver][source];
-      }
-      columns[source][event] = value;
-    }
-  }
+  compensateFlowRange(measuredColumns, plan, columns, {
+    inputStart: 0,
+    inputEnd: eventCount,
+    outputStart: 0,
+    // measuredShape() already performed the optional complete validation above.
+    validateMeasuredValues: false,
+    validateOutputValues: true,
+  });
 
   const reconstruction = options.computeReconstructionResidual
     ? calculateReconstruction(measuredColumns, columns, plan.matrix)
@@ -628,6 +666,118 @@ export function compensateFlowColumns(
     factorization: plan,
     reconstruction,
   });
+}
+
+/**
+ * Solve a bounded event range directly into caller-owned output arrays. Workers use this to
+ * yield between small compute slices without changing the exact arithmetic or allocating an
+ * intermediate result for every slice.
+ */
+export function compensateFlowRange(
+  measuredColumns: readonly ArrayLike<number>[],
+  plan: FlowCompensationPlan,
+  outputColumns: readonly FlowNumericColumn[],
+  options: FlowRangeWriteOptions = {},
+): number {
+  const eventCount = measuredShape(measuredColumns, plan.matrix.length, false);
+  const inputStart = options.inputStart ?? 0;
+  const inputEnd = options.inputEnd ?? eventCount;
+  const outputStart = options.outputStart ?? inputStart;
+  if (
+    !Number.isSafeInteger(inputStart) ||
+    !Number.isSafeInteger(inputEnd) ||
+    !Number.isSafeInteger(outputStart) ||
+    inputStart < 0 ||
+    inputEnd < inputStart ||
+    inputEnd > eventCount ||
+    outputStart < 0
+  ) {
+    throw new FlowCompensationError(
+      "dimension-mismatch",
+      "Flow range bounds must identify a valid contiguous measured-event interval.",
+    );
+  }
+  if (outputColumns.length !== plan.matrix.length) {
+    throw new FlowCompensationError(
+      "dimension-mismatch",
+      `Flow range output requires ${plan.matrix.length} source columns.`,
+    );
+  }
+  const rangeLength = inputEnd - inputStart;
+  for (const column of outputColumns) {
+    if (
+      !(column instanceof Float32Array) &&
+      !(column instanceof Float64Array)
+    ) {
+      throw new FlowCompensationError(
+        "dimension-mismatch",
+        "Flow range outputs must be Float32Array or Float64Array columns.",
+      );
+    }
+    if (outputStart + rangeLength > column.length) {
+      throw new FlowCompensationError(
+        "dimension-mismatch",
+        "Flow range output columns are too short for the requested write interval.",
+      );
+    }
+  }
+
+  const measuredRanges = measuredColumns.map((column) =>
+    numericByteRange(column, inputStart, inputEnd)
+  );
+  const outputRanges = outputColumns.map((column) =>
+    numericByteRange(column, outputStart, outputStart + rangeLength)!
+  );
+  for (let source = 0; source < outputRanges.length; source++) {
+    for (let receiver = 0; receiver < measuredRanges.length; receiver++) {
+      const measuredRange = measuredRanges[receiver];
+      if (measuredRange !== null && byteRangesOverlap(outputRanges[source], measuredRange)) {
+        throw new FlowCompensationError(
+          "overlapping-buffer",
+          "Flow range input and output intervals must not overlap in memory.",
+        );
+      }
+    }
+    for (let otherSource = 0; otherSource < source; otherSource++) {
+      if (byteRangesOverlap(outputRanges[source], outputRanges[otherSource])) {
+        throw new FlowCompensationError(
+          "overlapping-buffer",
+          "Flow range output intervals must not overlap in memory.",
+        );
+      }
+    }
+  }
+
+  const validateMeasured = options.validateMeasuredValues ?? true;
+  const validateOutput = options.validateOutputValues ?? true;
+  for (let inputEvent = inputStart; inputEvent < inputEnd; inputEvent++) {
+    if (validateMeasured) {
+      for (let receiver = 0; receiver < plan.matrix.length; receiver++) {
+        if (!Number.isFinite(measuredColumns[receiver][inputEvent])) {
+          throw new FlowCompensationError(
+            "non-finite-measured-value",
+            `Measured value at receiver ${receiver + 1}, event ${inputEvent + 1} must be finite.`,
+          );
+        }
+      }
+    }
+    const outputEvent = outputStart + inputEvent - inputStart;
+    // Preserve the validated event/source/receiver accumulation order exactly.
+    for (let source = 0; source < plan.matrix.length; source++) {
+      let value = 0;
+      for (let receiver = 0; receiver < plan.matrix.length; receiver++) {
+        value += measuredColumns[receiver][inputEvent] * plan.inverse[receiver][source];
+      }
+      outputColumns[source][outputEvent] = value;
+      if (validateOutput && !Number.isFinite(outputColumns[source][outputEvent])) {
+        throw new FlowCompensationError(
+          "non-finite-output",
+          `Compensated value at source ${source + 1}, event ${inputEvent + 1} is not finite.`,
+        );
+      }
+    }
+  }
+  return rangeLength;
 }
 
 export function solveFlowCompensation(

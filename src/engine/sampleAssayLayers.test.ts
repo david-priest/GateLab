@@ -6,6 +6,10 @@ import { compensate, invertMatrix } from "./compensation";
 import {
   Sample,
   type CompensatedLayerInput,
+  type CompensatedLayerOutputBinding,
+  type CompensatedLayerStaging,
+  type CompensatedLayerStagingIdentity,
+  type PreparedCompensatedLayer,
 } from "./sample";
 import type { Sha256Digest } from "./compensationProfile";
 import type { PersistedCompensatedLayerBinding } from "./workspaceCompensation";
@@ -81,6 +85,55 @@ function flowLayer(
   };
 }
 
+function flowOutputBindings(): readonly CompensatedLayerOutputBinding[] {
+  return [
+    { pnn: "FL1-A", fcsColumnIndex: 1, matrixSourceIndex: 0 },
+    { pnn: "FL2-A", fcsColumnIndex: 2, matrixSourceIndex: 1 },
+  ];
+}
+
+function stagingIdentity(suffix = "1"): CompensatedLayerStagingIdentity {
+  return {
+    jobId: `apply-job-${suffix}`,
+    jobToken: `apply-token-${suffix}`,
+    bindingKey: `apply-binding-${suffix}`,
+  };
+}
+
+function appendFlowChunk(
+  sample: Sample,
+  staging: CompensatedLayerStaging,
+  identity: CompensatedLayerStagingIdentity,
+  startEvent: number,
+  columns: readonly Float32Array[],
+  outputBindings: readonly CompensatedLayerOutputBinding[] = flowOutputBindings(),
+): void {
+  sample.appendCompensatedLayerStagingChunk(staging, {
+    ...identity,
+    startEvent,
+    outputBindings,
+    columns,
+  });
+}
+
+function prepareStagedFlowLayer(
+  sample: Sample,
+  suffix: string,
+): PreparedCompensatedLayer {
+  const identity = stagingIdentity(suffix);
+  const staging = sample.beginCompensatedLayerStaging(
+    flowBinding(),
+    flowOutputBindings(),
+    identity,
+    { activeLayer: "compensated" },
+  );
+  appendFlowChunk(sample, staging, identity, 0, [
+    Float32Array.from([9, 18, 27, 36]),
+    Float32Array.from([-1, -2, -3, -4]),
+  ]);
+  return sample.finishCompensatedLayerStaging(staging, identity);
+}
+
 function cytofFcs(): FcsFile {
   return {
     version: "FCS3.1",
@@ -144,6 +197,279 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 describe("Sample explicit assay layers", () => {
+  it("copies finite worker chunks into private staging and commits exactly one transition", () => {
+    const sample = new Sample(flowFcs());
+    const identity = stagingIdentity();
+    const staging = sample.beginCompensatedLayerStaging(
+      flowBinding(),
+      flowOutputBindings(),
+      identity,
+      { activeLayer: "compensated" },
+    );
+    const dataListener = vi.fn();
+    const layerListener = vi.fn();
+    sample.subscribeDataRevision(dataListener);
+    sample.subscribeLayerRevision(layerListener);
+
+    const firstChunk = [
+      Float32Array.from([9, 18]),
+      Float32Array.from([-1, -2]),
+    ];
+    appendFlowChunk(sample, staging, identity, 0, firstChunk);
+    firstChunk[0].fill(999);
+    firstChunk[1].fill(999);
+    appendFlowChunk(sample, staging, identity, 2, [
+      Float32Array.from([27, 36]),
+      Float32Array.from([-3, -4]),
+    ]);
+
+    const prepared = sample.finishCompensatedLayerStaging(staging, identity);
+    expect(sample.activeLayer).toBe("original");
+    expect(sample.compensatedLayerStatus()).toEqual({ state: "missing" });
+    expect(Array.from(sample.rawColumnData(sample.index("CD3")!))).toEqual([10, 20, 30, 40]);
+    expect(Array.from(sample.rawColumnData(sample.index("CD19")!))).toEqual([1, 2, 3, 4]);
+    expect(sample.dataRevision).toBe(0);
+    expect(sample.layerRevision).toBe(0);
+    expect(dataListener).not.toHaveBeenCalled();
+    expect(layerListener).not.toHaveBeenCalled();
+
+    Sample.commitPreparedCompensatedLayers([prepared]);
+
+    expect(sample.activeLayer).toBe("compensated");
+    expect(sample.compensatedLayerStatus(flowBinding()).state).toBe("ready");
+    expect(Array.from(sample.rawColumnData(sample.index("CD3")!))).toEqual([9, 18, 27, 36]);
+    expect(Array.from(sample.rawColumnData(sample.index("CD19")!))).toEqual([-1, -2, -3, -4]);
+    expect(sample.dataRevision).toBe(1);
+    expect(sample.layerRevision).toBe(1);
+    expect(dataListener).toHaveBeenCalledTimes(1);
+    expect(layerListener).toHaveBeenCalledTimes(1);
+    expect(() => Sample.commitPreparedCompensatedLayers([prepared])).toThrow(
+      "forged or already committed",
+    );
+    expect(() => sample.finishCompensatedLayerStaging(staging, identity)).toThrow(
+      "already finished",
+    );
+  });
+
+  it("defensively snapshots caller-owned complete layers before preparation", () => {
+    const sample = new Sample(flowFcs());
+    const input = flowLayer();
+    const prepared = sample.prepareCompensatedLayer(input, {
+      activeLayer: "compensated",
+    });
+    input.columns[0].values.fill(999);
+    input.columns[1].values.fill(Number.NaN);
+    (input.metadata.includedPnns as string[])[0] = "mutated-after-prepare";
+
+    Sample.commitPreparedCompensatedLayers([prepared]);
+    expect(sample.compensatedLayerStatus(flowBinding()).state).toBe("ready");
+    expect(Array.from(sample.rawColumnData(sample.index("CD3")!))).toEqual([9, 18, 27, 36]);
+    expect(Array.from(sample.rawColumnData(sample.index("CD19")!))).toEqual([-1, -2, -3, -4]);
+  });
+
+  it("rejects forged staging tokens and mismatched job, binding, and chunk identities", () => {
+    const sample = new Sample(flowFcs());
+    const identity = stagingIdentity("identity");
+    const staging = sample.beginCompensatedLayerStaging(
+      flowBinding(),
+      flowOutputBindings(),
+      identity,
+      { activeLayer: "compensated" },
+    );
+    const firstHalf = [Float32Array.from([9, 18]), Float32Array.from([-1, -2])];
+
+    expect(() => appendFlowChunk(
+      sample,
+      {} as CompensatedLayerStaging,
+      identity,
+      0,
+      firstHalf,
+    )).toThrow("forged");
+    expect(() => appendFlowChunk(
+      sample,
+      staging,
+      { ...identity, jobToken: "wrong-token" },
+      0,
+      firstHalf,
+    )).toThrow("worker job identity mismatch");
+    expect(() => appendFlowChunk(
+      sample,
+      staging,
+      identity,
+      0,
+      firstHalf,
+      [...flowOutputBindings()].reverse(),
+    )).toThrow("source-order worker output mismatch");
+
+    appendFlowChunk(sample, staging, identity, 0, firstHalf);
+    expect(() => appendFlowChunk(sample, staging, identity, 0, firstHalf)).toThrow(
+      "contiguous and ordered",
+    );
+    expect(() => sample.finishCompensatedLayerStaging(
+      staging,
+      { ...identity, bindingKey: "wrong-binding" },
+    )).toThrow("worker job identity mismatch");
+    expect(() => sample.finishCompensatedLayerStaging(staging, identity)).toThrow(
+      "result is incomplete",
+    );
+
+    appendFlowChunk(sample, staging, identity, 2, [
+      Float32Array.from([27, 36]),
+      Float32Array.from([-3, -4]),
+    ]);
+    const prepared = sample.finishCompensatedLayerStaging(staging, identity);
+    Sample.commitPreparedCompensatedLayers([prepared]);
+    expect(sample.compensatedLayerStatus(flowBinding()).state).toBe("ready");
+
+    const aborted = sample.beginCompensatedLayerStaging(
+      flowBinding(),
+      flowOutputBindings(),
+      stagingIdentity("aborted"),
+    );
+    sample.abortCompensatedLayerStaging(aborted);
+    expect(() => appendFlowChunk(
+      sample,
+      aborted,
+      stagingIdentity("aborted"),
+      0,
+      firstHalf,
+    )).toThrow("aborted");
+  });
+
+  it("rejects a non-finite worker chunk before it can be staged or installed", () => {
+    const sample = new Sample(flowFcs());
+    const identity = stagingIdentity("non-finite");
+    const staging = sample.beginCompensatedLayerStaging(
+      flowBinding(),
+      flowOutputBindings(),
+      identity,
+      { activeLayer: "compensated" },
+    );
+
+    expect(() => appendFlowChunk(sample, staging, identity, 0, [
+      Float32Array.from([9, 18, 27, 36]),
+      Float32Array.from([-1, Number.NaN, -3, -4]),
+    ])).toThrow("non-finite value at event 2");
+    expect(() => appendFlowChunk(sample, staging, identity, 0, [
+      Float32Array.from([9, 18, 27, 36]),
+      Float32Array.from([-1, -2, -3, -4]),
+    ])).toThrow("aborted");
+    expect(sample.activeLayer).toBe("original");
+    expect(sample.compensatedLayerStatus()).toEqual({ state: "missing" });
+    expect(sample.dataRevision).toBe(0);
+    expect(sample.layerRevision).toBe(0);
+  });
+
+  it.runIf(typeof SharedArrayBuffer !== "undefined")(
+    "rejects concurrently mutable SharedArrayBuffer staging outputs",
+    () => {
+      const sample = new Sample(flowFcs());
+      const identity = stagingIdentity("shared-buffer");
+      const staging = sample.beginCompensatedLayerStaging(
+        flowBinding(),
+        flowOutputBindings(),
+        identity,
+      );
+      const sharedCd3 = new Float32Array(new SharedArrayBuffer(4 * Float32Array.BYTES_PER_ELEMENT));
+      sharedCd3.set([9, 18, 27, 36]);
+
+      expect(() => appendFlowChunk(sample, staging, identity, 0, [
+        sharedCd3,
+        Float32Array.from([-1, -2, -3, -4]),
+      ])).toThrow("SharedArrayBuffer worker outputs are not accepted");
+      sample.abortCompensatedLayerStaging(staging);
+      expect(sample.compensatedLayerStatus()).toEqual({ state: "missing" });
+
+      const direct = flowLayer();
+      const sharedDirect = new Float32Array(
+        new SharedArrayBuffer(4 * Float32Array.BYTES_PER_ELEMENT),
+      );
+      sharedDirect.set([9, 18, 27, 36]);
+      expect(() => sample.prepareCompensatedLayer({
+        metadata: direct.metadata,
+        columns: [
+          { ...direct.columns[0], values: sharedDirect },
+          direct.columns[1],
+        ],
+      })).toThrow("SharedArrayBuffer inputs are not accepted");
+    },
+  );
+
+  it("leaves every Sample untouched when a later prepared target becomes stale", () => {
+    const first = new Sample(flowFcs());
+    const second = new Sample(flowFcs());
+    const firstPrepared = prepareStagedFlowLayer(first, "first");
+    const secondPrepared = prepareStagedFlowLayer(second, "second");
+
+    // Display-transform edits intentionally do not publish assay revisions, so the complete
+    // captured context (not only revision counters) must make the second token stale.
+    second.setLogicleW(second.index("CD3")!, 1.75);
+
+    expect(() => Sample.commitPreparedCompensatedLayers([
+      firstPrepared,
+      secondPrepared,
+    ])).toThrow("context changed after preparation");
+    for (const sample of [first, second]) {
+      expect(sample.activeLayer).toBe("original");
+      expect(sample.compensatedLayerStatus()).toEqual({ state: "missing" });
+      expect(sample.dataRevision).toBe(0);
+      expect(sample.layerRevision).toBe(0);
+    }
+  });
+
+  it("makes every batched Sample consistent before notifying any listener", () => {
+    const first = new Sample(flowFcs());
+    const second = new Sample(flowFcs());
+    const prepared = [first, second].map((sample) =>
+      sample.prepareCompensatedLayer(flowLayer(), { activeLayer: "compensated" })
+    );
+    const observations: Array<readonly [string, number, number, string, number, number]> = [];
+    const observe = () => observations.push([
+      first.activeLayer,
+      first.dataRevision,
+      first.layerRevision,
+      second.activeLayer,
+      second.dataRevision,
+      second.layerRevision,
+    ]);
+    const firstData = vi.fn(observe);
+    const firstLayer = vi.fn(observe);
+    const secondData = vi.fn(observe);
+    const secondLayer = vi.fn(observe);
+    first.subscribeDataRevision(firstData);
+    first.subscribeLayerRevision(firstLayer);
+    second.subscribeDataRevision(secondData);
+    second.subscribeLayerRevision(secondLayer);
+
+    Sample.commitPreparedCompensatedLayers(prepared);
+
+    expect(observations).toEqual(Array.from({ length: 4 }, () => [
+      "compensated", 1, 1, "compensated", 1, 1,
+    ]));
+    expect(firstData).toHaveBeenCalledTimes(1);
+    expect(firstLayer).toHaveBeenCalledTimes(1);
+    expect(secondData).toHaveBeenCalledTimes(1);
+    expect(secondLayer).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects duplicate prepared targets before mutating the Sample", () => {
+    const sample = new Sample(flowFcs());
+    const first = sample.prepareCompensatedLayer(flowLayer(), {
+      activeLayer: "compensated",
+    });
+    const second = sample.prepareCompensatedLayer(flowLayer(), {
+      activeLayer: "compensated",
+    });
+
+    expect(() => Sample.commitPreparedCompensatedLayers([first, second])).toThrow(
+      "each Sample may appear only once",
+    );
+    expect(sample.activeLayer).toBe("original");
+    expect(sample.compensatedLayerStatus()).toEqual({ state: "missing" });
+    expect(sample.dataRevision).toBe(0);
+    expect(sample.layerRevision).toBe(0);
+  });
+
   it("publishes active-data and layer-status revisions separately and isolates observers", () => {
     const sample = new Sample(flowFcs());
     const dataRevisions: number[] = [];

@@ -128,6 +128,46 @@ export interface CompensatedLayerInput {
   readonly columns: readonly CompensatedLayerColumn[];
 }
 
+export interface PrepareCompensatedLayerOptions {
+  readonly activeLayer?: AssayLayer;
+}
+
+export interface CompensatedLayerOutputBinding {
+  readonly pnn: string;
+  readonly fcsColumnIndex: number;
+  readonly matrixSourceIndex: number;
+}
+
+export interface CompensatedLayerStagingIdentity {
+  readonly jobId: string;
+  readonly jobToken: string;
+  readonly bindingKey: string;
+}
+
+const COMPENSATED_LAYER_STAGING: unique symbol = Symbol(
+  "GateLab.CompensatedLayerStaging",
+);
+
+/** Opaque private-output transaction used while verified worker chunks are copied into Sample. */
+export type CompensatedLayerStaging = Readonly<{
+  readonly [COMPENSATED_LAYER_STAGING]: true;
+}>;
+
+export interface CompensatedLayerStagingChunk extends CompensatedLayerStagingIdentity {
+  readonly startEvent: number;
+  readonly outputBindings: readonly CompensatedLayerOutputBinding[];
+  readonly columns: readonly Float32Array[];
+}
+
+const PREPARED_COMPENSATED_LAYER: unique symbol = Symbol(
+  "GateLab.PreparedCompensatedLayer",
+);
+
+/** Opaque, single-use result of complete Sample-side validation. */
+export type PreparedCompensatedLayer = Readonly<{
+  readonly [PREPARED_COMPENSATED_LAYER]: true;
+}>;
+
 export type ProfileCompensatedLayerMetadata = Readonly<
   PersistedCompensatedLayerBinding & { readonly runtimeIdentity: "profile" }
 >;
@@ -175,6 +215,57 @@ interface RuntimeCompensatedLayer {
   readonly metadata: CompensatedLayerMetadata;
   readonly columnsByFcsIndex: ReadonlyMap<number, Float32Array>;
 }
+
+interface AssayPreparationContext {
+  readonly sample: Sample;
+  readonly fcs: FcsFile;
+  readonly eventCount: number;
+  readonly dataRevision: number;
+  readonly layerRevision: number;
+  readonly activeLayer: AssayLayer;
+  readonly compensatedLayer: RuntimeCompensatedLayer | null;
+  readonly instrumentMode: "auto" | "flow" | "cytof";
+  readonly instrument: "flow" | "cytof";
+  readonly cytofCofactor: number;
+  readonly displayTransformContextKey: string;
+}
+
+interface CompensatedLayerStagingRecord {
+  readonly sample: Sample;
+  readonly context: AssayPreparationContext;
+  readonly jobId: string;
+  readonly jobToken: string;
+  readonly bindingKey: string;
+  readonly outputBindings: readonly CompensatedLayerOutputBinding[];
+  readonly eventCount: number;
+  readonly compensatedLayer: RuntimeCompensatedLayer;
+  readonly activeLayer: AssayLayer;
+  processedEvents: number;
+}
+
+interface PreparedCompensatedLayerRecord {
+  readonly sample: Sample;
+  readonly context: AssayPreparationContext;
+  readonly compensatedLayer: RuntimeCompensatedLayer;
+  readonly activeLayer: AssayLayer;
+}
+
+interface AssayLayerChange {
+  readonly sample: Sample;
+  readonly compensatedLayer: RuntimeCompensatedLayer | null;
+  readonly activeLayer: AssayLayer;
+  readonly activeDataChanged: boolean;
+  readonly layerChanged: boolean;
+}
+
+const compensatedLayerStagings = new WeakMap<
+  CompensatedLayerStaging,
+  CompensatedLayerStagingRecord
+>();
+const preparedCompensatedLayers = new WeakMap<
+  PreparedCompensatedLayer,
+  PreparedCompensatedLayerRecord
+>();
 
 const MISSING_COMPENSATED_LAYER = Object.freeze({ state: "missing" }) as CompensatedLayerStatus;
 
@@ -440,21 +531,313 @@ export class Sample {
   }
 
   /**
+   * Fully validate one caller-owned layer without changing the installed or active assay. The
+   * validated values are defensively copied before an opaque prepared token is returned, so the
+   * caller cannot mutate scientific state between preparation and an atomic batch commit.
+   */
+  prepareCompensatedLayer(
+    input: CompensatedLayerInput,
+    options: PrepareCompensatedLayerOptions = {},
+  ): PreparedCompensatedLayer {
+    if (!input || typeof input !== "object") {
+      throw new Error("Invalid compensated layer: input is required.");
+    }
+    const metadata = this.freezeProfileMetadata(input.metadata);
+    const nextActive = options.activeLayer ?? this._activeLayer;
+    if (nextActive !== "original" && nextActive !== "compensated") {
+      throw new Error(`Invalid active assay layer '${String(nextActive)}'.`);
+    }
+
+    if (Array.isArray(input.columns)) {
+      for (const output of input.columns) {
+        if (
+          output &&
+          typeof SharedArrayBuffer !== "undefined" &&
+          output.values?.buffer instanceof SharedArrayBuffer
+        ) {
+          throw new Error(
+            "Invalid compensated layer: SharedArrayBuffer inputs are not accepted.",
+          );
+        }
+      }
+    }
+    this.validateRuntimeLayer(metadata, input.columns);
+    const ownedColumns = input.columns.map((output) => Object.freeze({
+      pnn: output.pnn,
+      fcsColumnIndex: output.fcsColumnIndex,
+      values: Float32Array.from(output.values),
+    }));
+    // Revalidate the owned snapshot as well as the caller's source so only finite copied
+    // values can cross the prepared-layer boundary.
+    const candidate = this.validateRuntimeLayer(metadata, ownedColumns);
+    return this.registerPreparedCompensatedLayer(candidate, nextActive);
+  }
+
+  /**
+   * Allocate a private, non-installed output transaction for one worker Apply job. The returned
+   * token exposes none of its destination arrays; every appended value is checked and copied.
+   */
+  beginCompensatedLayerStaging(
+    metadataInput: PersistedCompensatedLayerBinding,
+    outputBindingsInput: readonly CompensatedLayerOutputBinding[],
+    identity: CompensatedLayerStagingIdentity,
+    options: PrepareCompensatedLayerOptions = {},
+  ): CompensatedLayerStaging {
+    const metadata = this.freezeProfileMetadata(metadataInput);
+    const nextActive = options.activeLayer ?? this._activeLayer;
+    if (nextActive !== "original" && nextActive !== "compensated") {
+      throw new Error(`Invalid active assay layer '${String(nextActive)}'.`);
+    }
+    if (
+      !identity ||
+      typeof identity.jobId !== "string" ||
+      identity.jobId.trim().length === 0 ||
+      typeof identity.jobToken !== "string" ||
+      identity.jobToken.trim().length === 0 ||
+      typeof identity.bindingKey !== "string" ||
+      identity.bindingKey.trim().length === 0
+    ) {
+      throw new Error("Invalid compensated staging identity.");
+    }
+    if (!Array.isArray(outputBindingsInput)) {
+      throw new Error("Invalid compensated staging: output bindings must be an array.");
+    }
+    const expected = metadata.channelBindings
+      .filter(({ included }) => included)
+      .map((binding) => {
+        if (binding.matrixSourceIndex === null) {
+          throw new Error("Invalid compensated staging: every output needs a matrix source.");
+        }
+        return Object.freeze({
+          pnn: binding.pnn,
+          fcsColumnIndex: binding.fcsColumnIndex,
+          matrixSourceIndex: binding.matrixSourceIndex,
+        });
+      })
+      .sort((left, right) => left.matrixSourceIndex - right.matrixSourceIndex);
+    if (outputBindingsInput.length !== expected.length) {
+      throw new Error("Invalid compensated staging: output bindings do not match the profile.");
+    }
+    const outputBindings = expected.map((binding, index) => {
+      if (!Object.prototype.hasOwnProperty.call(outputBindingsInput, index)) {
+        throw new Error("Invalid compensated staging: output bindings must not be sparse.");
+      }
+      const supplied = outputBindingsInput[index];
+      if (
+        !supplied ||
+        supplied.pnn !== binding.pnn ||
+        supplied.fcsColumnIndex !== binding.fcsColumnIndex ||
+        supplied.matrixSourceIndex !== binding.matrixSourceIndex
+      ) {
+        throw new Error("Invalid compensated staging: source-order output identity mismatch.");
+      }
+      return binding;
+    });
+    const columns = outputBindings.map(({ pnn, fcsColumnIndex }) => Object.freeze({
+      pnn,
+      fcsColumnIndex,
+      values: new Float32Array(this.fcs.nEvents),
+    }));
+    const candidate = this.validateRuntimeLayer(metadata, columns, {
+      skipFiniteValidation: true,
+    });
+    const staging = Object.freeze({
+      [COMPENSATED_LAYER_STAGING]: true as const,
+    });
+    compensatedLayerStagings.set(staging, {
+      sample: this,
+      context: this.captureAssayPreparationContext(),
+      jobId: identity.jobId,
+      jobToken: identity.jobToken,
+      bindingKey: identity.bindingKey,
+      outputBindings: Object.freeze(outputBindings),
+      eventCount: this.fcs.nEvents,
+      compensatedLayer: candidate,
+      activeLayer: nextActive,
+      processedEvents: 0,
+    });
+    return staging;
+  }
+
+  /** Verify and copy one contiguous source-order worker segment into private staging arrays. */
+  appendCompensatedLayerStagingChunk(
+    staging: CompensatedLayerStaging,
+    chunk: CompensatedLayerStagingChunk,
+  ): void {
+    const record = compensatedLayerStagings.get(staging);
+    if (!record || record.sample !== this) {
+      throw new Error("Invalid compensated staging: forged, aborted, or already finished token.");
+    }
+    if (
+      !chunk ||
+      chunk.jobId !== record.jobId ||
+      chunk.jobToken !== record.jobToken ||
+      chunk.bindingKey !== record.bindingKey
+    ) {
+      throw new Error("Invalid compensated staging: worker job identity mismatch.");
+    }
+    if (!this.assayPreparationContextMatches(record.context)) {
+      compensatedLayerStagings.delete(staging);
+      throw new Error("Invalid compensated staging: Sample context changed during Apply.");
+    }
+    if (!Number.isSafeInteger(chunk.startEvent) || chunk.startEvent !== record.processedEvents) {
+      throw new Error("Invalid compensated staging: chunks must be contiguous and ordered.");
+    }
+    if (
+      !Array.isArray(chunk.outputBindings) ||
+      !Array.isArray(chunk.columns) ||
+      chunk.outputBindings.length !== record.outputBindings.length ||
+      chunk.columns.length !== record.outputBindings.length
+    ) {
+      throw new Error("Invalid compensated staging: malformed worker output columns.");
+    }
+    const eventCount = chunk.columns[0]?.length ?? 0;
+    if (
+      eventCount <= 0 ||
+      chunk.startEvent + eventCount > record.eventCount
+    ) {
+      throw new Error("Invalid compensated staging: worker chunk is empty or outside the sample.");
+    }
+    for (let source = 0; source < record.outputBindings.length; source++) {
+      if (
+        !Object.prototype.hasOwnProperty.call(chunk.outputBindings, source) ||
+        !Object.prototype.hasOwnProperty.call(chunk.columns, source)
+      ) {
+        throw new Error("Invalid compensated staging: worker output must not be sparse.");
+      }
+      const expected = record.outputBindings[source];
+      const supplied = chunk.outputBindings[source];
+      const column = chunk.columns[source];
+      if (
+        !supplied ||
+        supplied.pnn !== expected.pnn ||
+        supplied.fcsColumnIndex !== expected.fcsColumnIndex ||
+        supplied.matrixSourceIndex !== expected.matrixSourceIndex ||
+        !(column instanceof Float32Array) ||
+        column.length !== eventCount
+      ) {
+        throw new Error("Invalid compensated staging: source-order worker output mismatch.");
+      }
+      if (
+        typeof SharedArrayBuffer !== "undefined" &&
+        column.buffer instanceof SharedArrayBuffer
+      ) {
+        throw new Error(
+          "Invalid compensated staging: SharedArrayBuffer worker outputs are not accepted.",
+        );
+      }
+      for (let event = 0; event < eventCount; event++) {
+        if (!Number.isFinite(column[event])) {
+          compensatedLayerStagings.delete(staging);
+          throw new Error(
+            `Invalid compensated staging: output '${expected.pnn}' contains a non-finite value at event ${chunk.startEvent + event + 1}.`,
+          );
+        }
+      }
+    }
+    for (let source = 0; source < record.outputBindings.length; source++) {
+      const binding = record.outputBindings[source];
+      record.compensatedLayer.columnsByFcsIndex
+        .get(binding.fcsColumnIndex)!
+        .set(chunk.columns[source], chunk.startEvent);
+    }
+    record.processedEvents += eventCount;
+  }
+
+  /** Seal a complete private staging transaction into a batch-commit token. */
+  finishCompensatedLayerStaging(
+    staging: CompensatedLayerStaging,
+    identity: CompensatedLayerStagingIdentity,
+  ): PreparedCompensatedLayer {
+    const record = compensatedLayerStagings.get(staging);
+    if (!record || record.sample !== this) {
+      throw new Error("Invalid compensated staging: forged, aborted, or already finished token.");
+    }
+    if (
+      identity.jobId !== record.jobId ||
+      identity.jobToken !== record.jobToken ||
+      identity.bindingKey !== record.bindingKey
+    ) {
+      throw new Error("Invalid compensated staging: worker job identity mismatch.");
+    }
+    if (
+      record.processedEvents !== record.eventCount ||
+      !this.assayPreparationContextMatches(record.context)
+    ) {
+      throw new Error("Invalid compensated staging: result is incomplete or Sample context changed.");
+    }
+    compensatedLayerStagings.delete(staging);
+    return this.registerPreparedCompensatedLayer(
+      record.compensatedLayer,
+      record.activeLayer,
+      record.context,
+    );
+  }
+
+  abortCompensatedLayerStaging(staging: CompensatedLayerStaging): void {
+    const record = compensatedLayerStagings.get(staging);
+    if (record?.sample === this) compensatedLayerStagings.delete(staging);
+  }
+
+  /**
+   * Commit one or more prepared Samples as a batch. Every token and captured context is checked
+   * before the first mutation; all states and revisions advance before any observer is notified.
+   */
+  static commitPreparedCompensatedLayers(
+    preparedLayers: readonly PreparedCompensatedLayer[],
+  ): void {
+    if (!Array.isArray(preparedLayers)) {
+      throw new Error("Invalid prepared compensation batch: an array is required.");
+    }
+
+    const records: PreparedCompensatedLayerRecord[] = [];
+    const seenSamples = new Set<Sample>();
+    for (let index = 0; index < preparedLayers.length; index++) {
+      if (!Object.prototype.hasOwnProperty.call(preparedLayers, index)) {
+        throw new Error("Invalid prepared compensation batch: entries must not be sparse.");
+      }
+      const prepared = preparedLayers[index];
+      const record = preparedCompensatedLayers.get(prepared);
+      if (!record) {
+        throw new Error("Invalid prepared compensation batch: forged or already committed token.");
+      }
+      if (seenSamples.has(record.sample)) {
+        throw new Error("Invalid prepared compensation batch: each Sample may appear only once.");
+      }
+      seenSamples.add(record.sample);
+      records.push(record);
+    }
+
+    const changes: AssayLayerChange[] = [];
+    for (const record of records) {
+      if (!record.sample.assayPreparationContextMatches(record.context)) {
+        throw new Error("Cannot commit compensated layer: Sample context changed after preparation.");
+      }
+      changes.push(record.sample.describeAssayLayerChange(
+        record.compensatedLayer,
+        record.activeLayer,
+      ));
+    }
+
+    // Prepared tokens become single-use only once the entire batch has passed prevalidation.
+    for (const prepared of preparedLayers) preparedCompensatedLayers.delete(prepared);
+    for (const change of changes) change.sample.applyAssayLayerChange(change);
+    for (const change of changes) {
+      change.sample.notifyRevisions(change.activeDataChanged, change.layerChanged);
+    }
+  }
+
+  /**
    * Install a complete, already-solved profile result. Validation is
    * transactional: no Sample state or cache changes until every binding and
    * every value has passed the scientific identity boundary.
    */
   installCompensatedLayer(
     input: CompensatedLayerInput,
-    options: Readonly<{ activeLayer?: AssayLayer }> = {},
+    options: PrepareCompensatedLayerOptions = {},
   ): void {
-    const metadata = this.freezeProfileMetadata(input.metadata);
-    const candidate = this.validateRuntimeLayer(metadata, input.columns);
-    const nextActive = options.activeLayer ?? this._activeLayer;
-    if (nextActive !== "original" && nextActive !== "compensated") {
-      throw new Error(`Invalid active assay layer '${String(nextActive)}'.`);
-    }
-    this.commitAssayLayerChange(candidate, nextActive);
+    const prepared = this.prepareCompensatedLayer(input, options);
+    Sample.commitPreparedCompensatedLayers([prepared]);
   }
 
   /** Remove the derived layer; an active Compensated view returns to Original atomically. */
@@ -635,6 +1018,7 @@ export class Sample {
   private validateRuntimeLayer(
     metadata: CompensatedLayerMetadata,
     columns: readonly CompensatedLayerColumn[],
+    options: Readonly<{ skipFiniteValidation?: boolean }> = {},
   ): RuntimeCompensatedLayer {
     if (metadata.kind !== "flow-spillover" && metadata.kind !== "cytof-spillover") {
       throw new Error(`Invalid compensated layer: unsupported kind '${String(metadata.kind)}'.`);
@@ -837,11 +1221,13 @@ export class Sample {
           `Invalid compensated layer: output '${pnn}' has ${output.values.length} events; expected ${this.fcs.nEvents}.`,
         );
       }
-      for (let event = 0; event < output.values.length; event++) {
-        if (!Number.isFinite(output.values[event])) {
-          throw new Error(
-            `Invalid compensated layer: output '${pnn}' contains a non-finite value at event ${event + 1}.`,
-          );
+      if (!options.skipFiniteValidation) {
+        for (let event = 0; event < output.values.length; event++) {
+          if (!Number.isFinite(output.values[event])) {
+            throw new Error(
+              `Invalid compensated layer: output '${pnn}' contains a non-finite value at event ${event + 1}.`,
+            );
+          }
         }
       }
       columnsByFcsIndex.set(output.fcsColumnIndex, output.values);
@@ -856,10 +1242,66 @@ export class Sample {
     return Object.freeze({ metadata, columnsByFcsIndex });
   }
 
+  private captureAssayPreparationContext(): AssayPreparationContext {
+    return Object.freeze({
+      sample: this,
+      fcs: this.fcs,
+      eventCount: this.fcs.nEvents,
+      dataRevision: this._dataRevision,
+      layerRevision: this._layerRevision,
+      activeLayer: this._activeLayer,
+      compensatedLayer: this.compensatedLayer,
+      instrumentMode: this._instrumentMode,
+      instrument: this.instrument,
+      cytofCofactor: this.cytofCofactor,
+      displayTransformContextKey: this.displayTransformContextKey,
+    });
+  }
+
+  private assayPreparationContextMatches(context: AssayPreparationContext): boolean {
+    return context.sample === this &&
+      context.fcs === this.fcs &&
+      context.eventCount === this.fcs.nEvents &&
+      context.dataRevision === this._dataRevision &&
+      context.layerRevision === this._layerRevision &&
+      context.activeLayer === this._activeLayer &&
+      context.compensatedLayer === this.compensatedLayer &&
+      context.instrumentMode === this._instrumentMode &&
+      context.instrument === this.instrument &&
+      context.cytofCofactor === this.cytofCofactor &&
+      context.displayTransformContextKey === this.displayTransformContextKey;
+  }
+
+  private registerPreparedCompensatedLayer(
+    compensatedLayer: RuntimeCompensatedLayer,
+    activeLayer: AssayLayer,
+    context: AssayPreparationContext = this.captureAssayPreparationContext(),
+  ): PreparedCompensatedLayer {
+    const prepared = Object.freeze({
+      [PREPARED_COMPENSATED_LAYER]: true as const,
+    });
+    preparedCompensatedLayers.set(prepared, Object.freeze({
+      sample: this,
+      context,
+      compensatedLayer,
+      activeLayer,
+    }));
+    return prepared;
+  }
+
   private commitAssayLayerChange(
     compensatedLayer: RuntimeCompensatedLayer | null,
     activeLayer: AssayLayer,
   ): void {
+    const change = this.describeAssayLayerChange(compensatedLayer, activeLayer);
+    this.applyAssayLayerChange(change);
+    this.notifyRevisions(change.activeDataChanged, change.layerChanged);
+  }
+
+  private describeAssayLayerChange(
+    compensatedLayer: RuntimeCompensatedLayer | null,
+    activeLayer: AssayLayer,
+  ): AssayLayerChange {
     if (activeLayer === "compensated" && !compensatedLayer) {
       throw new Error("Cannot activate Compensated: no complete layer is installed.");
     }
@@ -867,12 +1309,22 @@ export class Sample {
     const activeLayerChanged = activeLayer !== this._activeLayer;
     const activeDataChanged = activeLayerChanged ||
       (activeLayer === "compensated" && installedLayerChanged);
-    if (!installedLayerChanged && !activeLayerChanged) return;
+    return Object.freeze({
+      sample: this,
+      compensatedLayer,
+      activeLayer,
+      activeDataChanged,
+      layerChanged: installedLayerChanged || activeLayerChanged,
+    });
+  }
 
-    this.compensatedLayer = compensatedLayer;
-    this._activeLayer = activeLayer;
-    if (activeDataChanged) this.invalidateAll();
-    this.publishRevisions(activeDataChanged, true);
+  private applyAssayLayerChange(change: AssayLayerChange): void {
+    if (!change.layerChanged) return;
+    this.compensatedLayer = change.compensatedLayer;
+    this._activeLayer = change.activeLayer;
+    if (change.activeDataChanged) this.invalidateAll();
+    if (change.activeDataChanged) this._dataRevision++;
+    this._layerRevision++;
   }
 
   private publishRevisions(dataChanged: boolean, layerChanged: boolean): void {
@@ -882,6 +1334,10 @@ export class Sample {
     if (dataChanged) this._dataRevision++;
     if (layerChanged) this._layerRevision++;
 
+    this.notifyRevisions(dataChanged, layerChanged);
+  }
+
+  private notifyRevisions(dataChanged: boolean, layerChanged: boolean): void {
     const notify = (listeners: ReadonlySet<() => void>) => {
       for (const listener of listeners) {
         try {
@@ -927,18 +1383,18 @@ export class Sample {
     return this.originalColumnData(idx);
   }
 
-  /** Current linear column from the active assay layer. */
+  /** Borrowed read-only view of the current linear column. Internal callers must not mutate it. */
   rawColumnData(idx: number): NumericColumn {
     return this.activeLinearColumn(idx);
   }
-  /** Original stored FCS measurements, before compensation or display transforms. */
+  /** Borrowed read-only view of stored FCS measurements. Internal callers must not mutate it. */
   originalColumnData(idx: number): NumericColumn {
     const channel = this.resolvedChannel(idx);
     return this.fcs.columns[channel.columnIndex];
   }
   /**
-   * Installed compensated-count assay. Unmatched/excluded channels explicitly
-   * pass through Original only after a complete matching layer is ready.
+   * Borrowed read-only view of the installed compensated-count assay. Unmatched/excluded
+   * channels pass through Original only after a complete matching layer is ready.
    */
   compensatedColumnData(
     idx: number,
