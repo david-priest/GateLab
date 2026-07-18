@@ -533,18 +533,32 @@ export default function App() {
 
   async function startNewWorkspace(): Promise<void> {
     setCrud(null);
+    if (compensationApplyGuardRef.current || compensationManagerRef.current!.applyInProgress) {
+      setError("Wait for the current compensation Apply to finish, or cancel it, before starting a new workspace.");
+      return;
+    }
     setBusy(true);
-    await checkpointCurrentWorkspace("before-new-workspace");
+    let checkpointWarning: string | null = null;
+    try {
+      await checkpointCurrentWorkspace("before-new-workspace");
+    } catch (cause) {
+      checkpointWarning = `New workspace started, but its local recovery checkpoint could not be written: ${cause instanceof Error ? cause.message : String(cause)}`;
+    }
 
     // Prevent the reset render from being mistaken for an edit to the new empty workspace.
     skipDirtyRef.current = true;
     pendingCheckpointReasonRef.current = null;
     clearPersistedTabState();
 
+    const nextWorkspaceId = makeWorkspaceId();
+    compensationManagerRef.current!.resetWorkspace(nextWorkspaceId);
     setSamples([]);
     setActiveSampleId(null);
     setExcludedSampleIds(new Set());
-    setWorkspaceId(makeWorkspaceId());
+    setWorkspaceId(nextWorkspaceId);
+    setWorkspaceCompensation(newEmptyWorkspaceCompensationState());
+    compensationApplyGuardRef.current = false;
+    setCompensationApplyStatus(null);
     setWsHandle(null);
     setWsName("");
     setWsStorage("reference");
@@ -561,8 +575,8 @@ export default function App() {
     setDrawMode("navigate");
     setActiveTab("gating");
 
-    setCompensationOn(false);
     setInstrumentMode("auto");
+    setScaleCacheEpoch((epoch) => epoch + 1);
     setGlobalScales({});
     setScalesVersion((version) => version + 1);
     setPanelVersion((version) => version + 1);
@@ -586,7 +600,7 @@ export default function App() {
     setGatingMlExportOpen(false);
     setFcsAssay("original");
     setFcsScope("active");
-    setError(null);
+    setError(checkpointWarning);
     dispatch({ type: "newWorkspace" });
     setDirty(false);
     setImportMsg("New workspace ready · add an FCS file to begin.");
@@ -2060,7 +2074,7 @@ export default function App() {
           )}
           <button
             className="gl-btn-ghost gl-btn-block"
-            disabled={busy || !sample}
+            disabled={busy || !sample || compensationApplyStatus !== null}
             title="Close the current data, gates, and workspace settings and begin an empty workspace"
             onClick={() => setCrud({ kind: "confirmNewWorkspace" })}
           >
@@ -2068,7 +2082,7 @@ export default function App() {
           </button>
           <button
             className="gl-btn-ghost gl-btn-block"
-            disabled={busy}
+            disabled={busy || compensationApplyStatus !== null}
             title="Open a saved .gatelab workspace (gates, populations, scales, compensation)"
             onClick={openWorkspace}
           >
