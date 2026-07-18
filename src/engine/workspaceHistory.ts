@@ -23,6 +23,7 @@ const WORKSPACE_CREATED_INDEX = "workspace-created";
 export type WorkspaceCheckpointReason =
   | "automatic"
   | "before-workspace-open"
+  | "before-new-workspace"
   | "after-workspace-open"
   | "before-gatingml-replace"
   | "after-gatingml-import"

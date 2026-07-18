@@ -50,6 +50,31 @@ function withGate(): { state: CoreState; sample: Sample } {
 }
 
 describe("store: gate + population flow", () => {
+  it("starts a genuinely empty workspace with no inherited selections or undo history", () => {
+    let { state } = withGate();
+    const gateId = state.gate_order[0];
+    const popId = state.active_population_id!;
+    state = coreReducer(state, { type: "toggleGateSelect", gateId, checked: true });
+    state = coreReducer(state, { type: "togglePopSelect", popId, checked: true });
+    const previousRevision = state.gate_version;
+
+    const fresh = coreReducer(state, { type: "newWorkspace" });
+
+    expect(fresh).toMatchObject({
+      gates: {},
+      gate_order: [],
+      populations: {},
+      root_population_id: null,
+      active_population_id: null,
+      selected_gate_id: null,
+      selected_gate_ids: [],
+      selected_pop_ids: [],
+      undo: [],
+      redo: [],
+      gate_version: previousRevision + 1,
+    });
+  });
+
   it("addGate with createPop makes a gate, a population, and sets active", () => {
     const { state } = withGate();
     expect(Object.keys(state.gates).length).toBe(1);

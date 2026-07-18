@@ -122,6 +122,7 @@ type CrudModal =
   | { kind: "createPop" }
   | { kind: "renameGate"; id: string; initial: string }
   | { kind: "editPop"; id: string }
+  | { kind: "confirmNewWorkspace" }
   | { kind: "confirmDelete"; what: "gates" | "pops"; ids: string[] }
   | { kind: "movePops"; ids: string[] }
   | { kind: "bulkRename" };
@@ -529,6 +530,68 @@ export default function App() {
     if (!ws || !id) return Promise.resolve();
     return saveWorkspaceCheckpoint(id, ws, reason).then(() => undefined);
   };
+
+  async function startNewWorkspace(): Promise<void> {
+    setCrud(null);
+    setBusy(true);
+    await checkpointCurrentWorkspace("before-new-workspace");
+
+    // Prevent the reset render from being mistaken for an edit to the new empty workspace.
+    skipDirtyRef.current = true;
+    pendingCheckpointReasonRef.current = null;
+    clearPersistedTabState();
+
+    setSamples([]);
+    setActiveSampleId(null);
+    setExcludedSampleIds(new Set());
+    setWorkspaceId(makeWorkspaceId());
+    setWsHandle(null);
+    setWsName("");
+    setWsStorage("reference");
+
+    setXIdx(0);
+    setYIdx(1);
+    setXRange(null);
+    setYRange(null);
+    setMode("pseudocolor");
+    setMaxEvents(50000);
+    setContourThreshold(5);
+    setPointAlpha(0.4);
+    setGatingFontSizes({ ...DEFAULT_GATING_FONT_SIZES });
+    setDrawMode("navigate");
+    setActiveTab("gating");
+
+    setCompensationOn(false);
+    setInstrumentMode("auto");
+    setGlobalScales({});
+    setScalesVersion((version) => version + 1);
+    setPanelVersion((version) => version + 1);
+    setOverlayBy("none");
+    setOverlayPalette("default");
+    setOverlaySamples(false);
+
+    illustConfigRef.current = null;
+    strategyConfigRef.current = null;
+    setIllustrationPresets([]);
+    setIllustVersion((version) => version + 1);
+    setMetadata({});
+    setMetadataColumns([]);
+    setPopulationMetadata({});
+    setPopulationMetaColumns([]);
+    setDivisionProfiles({});
+
+    setPending(null);
+    setPendingGatingMlImport(null);
+    setFcsExportOpen(false);
+    setGatingMlExportOpen(false);
+    setFcsAssay("original");
+    setFcsScope("active");
+    setError(null);
+    dispatch({ type: "newWorkspace" });
+    setDirty(false);
+    setImportMsg("New workspace ready · add an FCS file to begin.");
+    setBusy(false);
+  }
 
   // Check every two minutes. Automatic checkpoints de-duplicate unchanged workspace JSON, so
   // an idle app performs a small IndexedDB read but does not accumulate redundant snapshots.
@@ -1997,6 +2060,14 @@ export default function App() {
           )}
           <button
             className="gl-btn-ghost gl-btn-block"
+            disabled={busy || !sample}
+            title="Close the current data, gates, and workspace settings and begin an empty workspace"
+            onClick={() => setCrud({ kind: "confirmNewWorkspace" })}
+          >
+            New Workspace…
+          </button>
+          <button
+            className="gl-btn-ghost gl-btn-block"
             disabled={busy}
             title="Open a saved .gatelab workspace (gates, populations, scales, compensation)"
             onClick={openWorkspace}
@@ -2044,6 +2115,7 @@ export default function App() {
               if (f) await openWorkspaceFromBytes(new Uint8Array(await f.arrayBuffer()), null, f.name);
             }}
           />
+          {!sample && importMsg && <div className="gl-hint">{importMsg}</div>}
 
           {sample && (
             <>
@@ -2654,6 +2726,19 @@ export default function App() {
             dispatch(a);
             setCrud(null);
           }}
+        />
+      )}
+      {crud?.kind === "confirmNewWorkspace" && (
+        <ConfirmModal
+          title="Start a new workspace?"
+          message={
+            dirty || !wsHandle
+              ? "This closes the current samples, gates, populations, and settings. Unsaved work will no longer be in the current view; GateLab will keep a local recovery checkpoint. Save first if you want a normal workspace file."
+              : `Close ${wsName || "the current workspace"} and begin with an empty workspace? The saved file will not be changed.`
+          }
+          confirmLabel="Start New Workspace"
+          onCancel={() => setCrud(null)}
+          onConfirm={() => void startNewWorkspace()}
         />
       )}
       {crud?.kind === "confirmDelete" && (
