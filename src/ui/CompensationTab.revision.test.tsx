@@ -5,7 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FcsFile } from "../engine/fcs";
 import { Sample } from "../engine/sample";
-import { ScalesTab } from "./ScalesTab";
+import { CompensationTab } from "./CompensationTab";
+import { clearPersistedTabState } from "./tabState";
 import { useSampleDataRevisionKey, type SampleRevisionEntry } from "./useSampleDataRevisions";
 
 function compensatedFlowSample(): Sample {
@@ -37,6 +38,7 @@ let host: HTMLDivElement;
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  clearPersistedTabState();
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -45,10 +47,11 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   host.remove();
+  clearPersistedTabState();
   vi.unstubAllGlobals();
 });
 
-describe("ScalesTab Sample revisions", () => {
+describe("CompensationTab Sample revisions", () => {
   it("reflects external compensation changes without a manual React render", () => {
     const sample = compensatedFlowSample();
     const entries: SampleRevisionEntry[] = [{ id: "sample", sample }];
@@ -56,26 +59,30 @@ describe("ScalesTab Sample revisions", () => {
     function Harness() {
       useSampleDataRevisionKey(entries);
       return (
-        <ScalesTab
+        <CompensationTab
           sample={sample}
           compensationOn={sample.compensationEnabled}
-          onToggleCompensation={(enabled) => sample.setCompensation(enabled)}
-          globalScales={{}}
-          onSetGlobalScale={() => {}}
+          onToggleCompensation={(enabled) => {
+            sample.setCompensation(enabled);
+            return sample.compensationEnabled === enabled;
+          }}
+          stateKey="workspace:sample"
         />
       );
     }
 
+    const action = () => [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.includes("matrix") || button.textContent?.includes("original measurements"))!;
+
     act(() => root.render(<Harness />));
-    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
-    expect(checkbox.checked).toBe(false);
+    expect(action().textContent).toBe("Apply embedded matrix");
 
     act(() => sample.setCompensation(true));
     expect(sample.dataRevision).toBe(1);
-    expect(checkbox.checked).toBe(true);
+    expect(action().textContent).toBe("Use original measurements");
 
     act(() => sample.setCompensation(false));
     expect(sample.dataRevision).toBe(2);
-    expect(checkbox.checked).toBe(false);
+    expect(action().textContent).toBe("Apply embedded matrix");
   });
 });
