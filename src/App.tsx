@@ -77,6 +77,7 @@ import { ProportionsTab } from "./ui/ProportionsTab";
 import { DivisionTab, type DivisionProfile } from "./ui/DivisionTab";
 import { parseMetadataTable, lookupMetadataRow, type MetadataColumn } from "./engine/metadata";
 import { ScalesTab } from "./ui/ScalesTab";
+import { CompensationTab } from "./ui/CompensationTab";
 import { StrategyTab, type StrategyConfig } from "./ui/StrategyTab";
 import { IllustrationTab } from "./ui/IllustrationTab";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
@@ -150,7 +151,7 @@ const MODES: { id: DisplayMode; label: string }[] = [
 // Center-column tabs, mirroring GateLabR's tabsetPanel. The left (samples/import/export)
 // and right (gates/populations) panels are
 // shared across tabs — only the center switches, exactly as in GateLabR.
-type TabId = "gating" | "strategy" | "illustration" | "statistics" | "panel" | "scales" | "metadata" | "proportions" | "division";
+type TabId = "gating" | "strategy" | "illustration" | "statistics" | "panel" | "compensation" | "scales" | "metadata" | "proportions" | "division";
 const TABS: { id: TabId; label: string }[] = [
   { id: "gating", label: "Gating" },
   { id: "strategy", label: "Strategy" },
@@ -160,6 +161,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "statistics", label: "Statistics" },
   { id: "metadata", label: "Metadata" },
   { id: "panel", label: "Panel" },
+  { id: "compensation", label: "Compensation" },
   { id: "scales", label: "Scales" },
 ];
 
@@ -750,11 +752,28 @@ export default function App() {
     }
   }
 
-  function toggleCompensation(on: boolean) {
-    if (!sample) return;
-    sample.setCompensation(on);
-    setXRange(null); // compensated display values changed → re-auto-range
-    setYRange(null);
+  function toggleCompensation(on: boolean): boolean {
+    if (!sample) return false;
+    const previousLayer = sample.activeLayer;
+    try {
+      // The current App save/open path persists only the legacy embedded-FCS toggle. Profile
+      // activation stays unavailable until workspace-v3 profile/layer persistence is wired here.
+      sample.setCompensation(on);
+      const applied = sample.compensationEnabled === on;
+      if (!applied) {
+        setError("The embedded compensation matrix could not be applied because it is singular or incompatible with this sample.");
+        return false;
+      }
+      if (sample.activeLayer !== previousLayer) {
+        setXRange(null); // assay values changed → re-auto-range
+        setYRange(null);
+      }
+      setError(null);
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return false;
+    }
   }
 
   // Force the active sample's instrument mode (recovery for a mis-detect). Rebuilds the
@@ -2188,11 +2207,18 @@ export default function App() {
             {activeTab === "panel" && (
               <PanelTab key={panelVersion} sample={sample} onRename={renameChannel} onResetAll={resetAllLabels} />
             )}
-            {activeTab === "scales" && (
-              <ScalesTab
+            {activeTab === "compensation" && (
+              <CompensationTab
+                key={`${workspaceId}:${activeSampleId ?? "none"}`}
                 sample={sample}
                 compensationOn={compensationOn}
                 onToggleCompensation={toggleCompensation}
+                stateKey={`${workspaceId}:${activeSampleId ?? "none"}`}
+              />
+            )}
+            {activeTab === "scales" && (
+              <ScalesTab
+                sample={sample}
                 globalScales={globalScales}
                 onSetGlobalScale={setGlobalScale}
               />
@@ -2224,7 +2250,11 @@ export default function App() {
           </div>
         )}
 
-        <aside className="gl-side" style={{ width: sideWidth }} aria-label="Gates and populations">
+        <aside
+          className="gl-side"
+          style={{ width: sideWidth, display: activeTab === "compensation" ? "none" : undefined }}
+          aria-label="Gates and populations"
+        >
           <div className="gl-side-resize" onMouseDown={startResize} title="Drag to resize" />
           <div className="gl-side-section">
             <div className="gl-side-head">
