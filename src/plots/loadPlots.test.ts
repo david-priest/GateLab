@@ -43,12 +43,12 @@ describe("GateLab cytof interaction patches", () => {
     warning.mockRestore();
   });
 
-  it("piles off-scale events onto plot edges without clamping gate scales", () => {
+  it("uses the pinned native edge-pile behavior without clamping gate scales", () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const patched = patchCytofForGateLab(cytofSrc);
 
     expect(warning).not.toHaveBeenCalled();
-    expect(cytofSrc).not.toContain("function _clampPointX(scale, value)");
+    expect(cytofSrc).toContain("function _clampPointX(scale, value)");
     expect(patched).toContain("function _clampPointX(scale, value)");
     expect(patched.match(/_clampPointX\(zx, x\[i\]\)/g)).toHaveLength(2);
     expect(patched).toContain("_clampPointX(zx, x[idx])");

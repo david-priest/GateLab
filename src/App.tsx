@@ -7,6 +7,7 @@ import pkg from "../package.json";
 import { clearPersistedTabState } from "./ui/tabState";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type NewGate } from "./plots/GatingPlot";
 import { buildPlotGates, type PlotGate } from "./plots/gatePayload";
+import { includePlotGatesInAxisRange } from "./engine/axisRange";
 import { parseFcs } from "./engine/fcs";
 import { Sample, type DisplayMode, type OverlaySpec } from "./engine/sample";
 import { populationTreeOrder } from "./engine/populations";
@@ -63,6 +64,12 @@ import {
   type CompensationApplyProgress,
 } from "./engine/compensationManager";
 import type { CompensationProfileRecord } from "./engine/compensationProfileRecord";
+import {
+  digestFcsBytes,
+  installCachedCompensatedAssay,
+  readCachedCompensatedAssay,
+  writeCachedCompensatedAssay,
+} from "./engine/compensationCache";
 import {
   supportsFileSystemAccess,
   supportsDirectoryAccess,
@@ -329,6 +336,7 @@ export default function App() {
     compensationManagerRef.current = new CompensationManager({ workspaceKey: workspaceId });
   }
   const compensationApplyGuardRef = useRef(false);
+  const compensationRestoreCancelledRef = useRef(false);
   const [compensationApplyStatus, setCompensationApplyStatus] =
     useState<CompensationApplyUiStatus | null>(null);
   const [scaleCacheEpoch, setScaleCacheEpoch] = useState(0);
@@ -403,8 +411,16 @@ export default function App() {
   }, [workspaceId]);
   const bumpScales = () => setScalesVersion((v) => v + 1);
   const plotAreaRef = useRef<HTMLDivElement>(null);
-  const pzRef = useRef({ sample, xIdx, yIdx, xRange, yRange, drawMode, mode, globalScales });
-  pzRef.current = { sample, xIdx, yIdx, xRange, yRange, drawMode, mode, globalScales };
+  const pzRef = useRef({
+    sample, xIdx, yIdx, xRange, yRange, drawMode, mode, globalScales,
+    effectiveXRange: null as [number, number] | null,
+    effectiveYRange: null as [number, number] | null,
+  });
+  pzRef.current = {
+    sample, xIdx, yIdx, xRange, yRange, drawMode, mode, globalScales,
+    effectiveXRange: null,
+    effectiveYRange: null,
+  };
 
   // Reset the view range when the sample or displayed channel changes (→ auto range).
   useEffect(() => setXRange(null), [sample, xIdx, activeDataRevision]);
@@ -457,8 +473,8 @@ export default function App() {
       const xKey = p.sample.channels[p.xIdx].key;
       const yKey = p.sample.channels[p.yIdx].key;
       return {
-        xr: p.xRange ?? p.globalScales[xKey] ?? p.sample.displayRange(p.xIdx),
-        yr: p.yRange ?? p.globalScales[yKey] ?? p.sample.displayRange(p.yIdx),
+        xr: p.xRange ?? p.globalScales[xKey] ?? p.effectiveXRange ?? p.sample.displayRange(p.xIdx),
+        yr: p.yRange ?? p.globalScales[yKey] ?? p.effectiveYRange ?? p.sample.displayRange(p.yIdx),
       };
     };
     const clampF = (f: number) => Math.min(0.98, Math.max(0.02, f));
@@ -992,6 +1008,7 @@ export default function App() {
     compensationApplyGuardRef.current = true;
     setCompensationApplyStatus({
       phase: "preparing",
+      operation: "apply",
       profileName: profile.name,
       fraction: 0,
       processedEvents: 0,
@@ -999,12 +1016,13 @@ export default function App() {
     });
     try {
       await checkpointCurrentWorkspace("before-compensation-apply");
-      await manager.apply({
+      const result = await manager.apply({
         profile,
         targets: [{ sample: targetSample, activeLayer: "compensated" }],
         onProgress: (progress) => {
           setCompensationApplyStatus({
             phase: "applying",
+            operation: "apply",
             profileName: profile.name,
             fraction: progress.fraction,
             processedEvents: progress.processedEvents,
@@ -1016,6 +1034,15 @@ export default function App() {
           onProgress?.(progress);
         },
       });
+      const targetEntry = samples.find(({ sample: candidate }) => candidate === targetSample);
+      const appliedBinding = result.targets[0]?.binding;
+      if (targetEntry && appliedBinding) {
+        // Best-effort local acceleration. The saved profile remains the scientific source of
+        // truth when storage is unavailable or the derived assay exceeds the cache size cap.
+        void digestFcsBytes(targetEntry.bytes)
+          .then((fcsDigest) => writeCachedCompensatedAssay(fcsDigest, targetSample, appliedBinding))
+          .catch(() => undefined);
+      }
       setWorkspaceCompensation((current) => {
         const exists = current.lineages.some(({ records }) =>
           records.some(({ profileId }) => profileId === profile.profileId)
@@ -1050,6 +1077,9 @@ export default function App() {
   }
 
   function cancelCompensationApply(): void {
+    if (compensationApplyStatus?.operation === "restore") {
+      compensationRestoreCancelledRef.current = true;
+    }
     setCompensationApplyStatus((current) => current
       ? { ...current, phase: "cancelling" }
       : current);
@@ -1705,9 +1735,147 @@ export default function App() {
     return null;
   }
 
+  async function restoreSavedWorkspaceCompensation(
+    ws: WorkspaceFileV3,
+    entries: readonly SampleEntry[],
+  ): Promise<void> {
+    const manager = compensationManagerRef.current!;
+    if (compensationApplyGuardRef.current || manager.applyInProgress) {
+      throw new Error("Another compensation job is already running.");
+    }
+    const profiles = ws.compensation.lineages.flatMap(({ records }) => records);
+    const profileById = new Map(profiles.map((profile) => [profile.profileId, profile]));
+    const tasks = ws.samples.flatMap((workspaceSample, index) => {
+      const binding = workspaceSample.assay.compensatedLayer;
+      if (binding === null) return [];
+      const profile = profileById.get(binding.profileId);
+      if (!profile) {
+        throw new Error(`Workspace compensation profile '${binding.profileId}' is missing.`);
+      }
+      return [{ entry: entries[index], assay: workspaceSample.assay, binding, profile }];
+    });
+    if (tasks.length === 0) return;
+
+    const totalEvents = tasks.reduce((sum, task) => sum + task.entry.sample.fcs.nEvents, 0);
+    const profileNames = Array.from(new Set(tasks.map(({ profile }) => profile.name)));
+    const statusName = profileNames.length === 1
+      ? profileNames[0]
+      : `${tasks.length} saved compensated assays`;
+    const setRestoreStatus = (
+      phase: CompensationApplyUiStatus["phase"],
+      processedEvents: number,
+    ) => setCompensationApplyStatus({
+      phase,
+      operation: "restore",
+      profileName: statusName,
+      fraction: totalEvents === 0 ? 1 : processedEvents / totalEvents,
+      processedEvents,
+      totalEvents,
+    });
+    const assertNotCancelled = () => {
+      if (compensationRestoreCancelledRef.current) {
+        throw new CompensationCancelledError("Workspace compensation restore cancelled.");
+      }
+    };
+
+    compensationApplyGuardRef.current = true;
+    compensationRestoreCancelledRef.current = false;
+    setRestoreStatus("preparing", 0);
+    let completedEvents = 0;
+    const cacheMisses: Array<{
+      task: (typeof tasks)[number];
+      fcsDigest: Awaited<ReturnType<typeof digestFcsBytes>> | null;
+    }> = [];
+    try {
+      for (let index = 0; index < tasks.length; index++) {
+        const task = tasks[index];
+        assertNotCancelled();
+        setImportMsg(`Restoring saved compensation · checking local cache ${index + 1} of ${tasks.length}`);
+        let fcsDigest: Awaited<ReturnType<typeof digestFcsBytes>> | null = null;
+        try {
+          fcsDigest = await digestFcsBytes(task.entry.bytes);
+        } catch {
+          // Web Crypto/local storage is an acceleration only. Fall through to exact recomputation.
+        }
+        assertNotCancelled();
+        const cached = fcsDigest
+          ? await readCachedCompensatedAssay(
+              fcsDigest,
+              task.binding,
+              task.entry.sample.fcs.nEvents,
+            )
+          : null;
+        assertNotCancelled();
+        if (
+          cached &&
+          installCachedCompensatedAssay(
+            task.entry.sample,
+            cached,
+            task.binding,
+            task.assay.activeLayer,
+          )
+        ) {
+          completedEvents += task.entry.sample.fcs.nEvents;
+          setRestoreStatus("preparing", completedEvents);
+        } else {
+          cacheMisses.push({ task, fcsDigest });
+        }
+      }
+
+      const missesByProfile = new Map<string, typeof cacheMisses>();
+      for (const miss of cacheMisses) {
+        const group = missesByProfile.get(miss.task.profile.profileId) ?? [];
+        group.push(miss);
+        missesByProfile.set(miss.task.profile.profileId, group);
+      }
+
+      for (const misses of missesByProfile.values()) {
+        assertNotCancelled();
+        const groupStart = completedEvents;
+        const profile = misses[0].task.profile;
+        setImportMsg(`Restoring saved compensation · recomputing ${profile.name}`);
+        const result = await manager.apply({
+          profile,
+          targets: misses.map(({ task }) => ({
+            sample: task.entry.sample,
+            activeLayer: task.assay.activeLayer,
+          })),
+          onProgress: (progress) => {
+            const restoredEvents = groupStart + progress.processedEvents;
+            setRestoreStatus("applying", restoredEvents);
+            setImportMsg(
+              `Restoring saved compensation · ${Math.round(restoredEvents / totalEvents * 100)}%` +
+                ` · ${restoredEvents.toLocaleString()} / ${totalEvents.toLocaleString()} events`,
+            );
+          },
+        });
+        completedEvents = groupStart + misses.reduce(
+          (sum, { task }) => sum + task.entry.sample.fcs.nEvents,
+          0,
+        );
+        setRestoreStatus("applying", completedEvents);
+
+        for (const restored of result.targets) {
+          const miss = misses.find(({ task }) => task.entry.sample === restored.sample);
+          if (!miss?.fcsDigest) continue;
+          void writeCachedCompensatedAssay(
+            miss.fcsDigest,
+            restored.sample,
+            restored.binding,
+          ).catch(() => "unavailable");
+        }
+      }
+    } finally {
+      compensationApplyGuardRef.current = false;
+      compensationRestoreCancelledRef.current = false;
+      setCompensationApplyStatus(null);
+    }
+  }
+
   async function openWorkspaceFromBytes(bytes: Uint8Array, wsH: FileSystemFileHandle | null, wsFileName: string) {
     setBusy(true);
     setError(null);
+    let compensationWorkspaceReset = false;
     try {
       const envelope = readWorkspaceEnvelope(bytes);
       const raw = envelope.raw;
@@ -1812,21 +1980,9 @@ export default function App() {
       await checkpointCurrentWorkspace("before-workspace-open");
       const nextWorkspaceId = ws.workspaceId ?? makeWorkspaceId();
       compensationManagerRef.current!.resetWorkspace(nextWorkspaceId);
+      compensationWorkspaceReset = true;
       if (ws.version === WORKSPACE_VERSION_3) {
-        const profiles = ws.compensation.lineages.flatMap(({ records }) => records);
-        for (let index = 0; index < ws.samples.length; index++) {
-          const assay = ws.samples[index].assay;
-          if (assay.compensatedLayer === null) continue;
-          const profile = profiles.find(({ profileId }) => profileId === assay.compensatedLayer!.profileId);
-          if (!profile) {
-            throw new Error(`Workspace compensation profile '${assay.compensatedLayer.profileId}' is missing.`);
-          }
-          setImportMsg(`Restoring compensation · ${index + 1} of ${ws.samples.length}`);
-          await compensationManagerRef.current!.apply({
-            profile,
-            targets: [{ sample: entries[index].sample, activeLayer: assay.activeLayer }],
-          });
-        }
+        await restoreSavedWorkspaceCompensation(ws, entries);
       }
       pendingCheckpointReasonRef.current = "after-workspace-open";
       skipDirtyRef.current = true;
@@ -1884,7 +2040,13 @@ export default function App() {
           ` · saved ${new Date(ws.savedAt).toLocaleString()}`,
       );
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (compensationWorkspaceReset) compensationManagerRef.current!.resetWorkspace(workspaceId);
+      if (e instanceof CompensationCancelledError) {
+        setError(null);
+        setImportMsg("Workspace open cancelled · current workspace unchanged");
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       setBusy(false);
     }
@@ -1977,23 +2139,27 @@ export default function App() {
 
   const overlaySampleRevisionKey = overlaySamples ? sampleDataRevisionKey : "";
 
-  const payload = useMemo(() => {
-    if (!sample) return null;
-    const xName = sample.channels[xIdx].key;
-    const yName = sample.channels[yIdx].key;
-    const plotGates = buildPlotGates(
+  const mainPlotGates = useMemo(() => {
+    if (!sample) return [];
+    return buildPlotGates(
       sample,
       state.gates,
       state.gate_order,
       derived.gateCounts,
-      xName,
-      yName,
+      sample.channels[xIdx].key,
+      sample.channels[yIdx].key,
     );
+  }, [sample, state.gates, state.gate_order, derived.gateCounts, xIdx, yIdx]);
+
+  const payload = useMemo(() => {
+    if (!sample) return null;
+    const xName = sample.channels[xIdx].key;
+    const yName = sample.channels[yIdx].key;
     const base = sample.plotPayload(
       xIdx,
       yIdx,
       mode,
-      plotGates,
+      mainPlotGates,
       derived.displayMask ?? derived.activeMask, // union of checked pops, else active
       state.selected_gate_id,
       xRange ?? globalScales[xName] ?? null, // per-view → global channel scale → auto
@@ -2044,7 +2210,15 @@ export default function App() {
     // Active revision updates the current assay; the aggregate key is included only while
     // plotting other samples so an inactive sample change does not rebuild the normal plot.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, activeDataRevision, xIdx, yIdx, mode, state.gates, state.gate_order, state.selected_gate_id, derived, scalesVersion, xRange, yRange, maxEvents, contourThreshold, instrumentMode, globalScales, overlaySpec, overlaySamples, overlaySampleRevisionKey, samples, overlayPalette]);
+  }, [sample, activeDataRevision, xIdx, yIdx, mode, mainPlotGates, state.selected_gate_id, derived, scalesVersion, xRange, yRange, maxEvents, contourThreshold, instrumentMode, globalScales, overlaySpec, overlaySamples, overlaySampleRevisionKey, samples, overlayPalette]);
+
+  // Pointer navigation reads this mutable ref after render. Use the exact fitted payload range so
+  // the first drag cannot jump from a gate-aware auto range back to the data-only range.
+  pzRef.current = {
+    sample, xIdx, yIdx, xRange, yRange, drawMode, mode, globalScales,
+    effectiveXRange: payload?.x_range ?? null,
+    effectiveYRange: payload?.y_range ?? null,
+  };
 
   // Swap channel identity keys → Panel display labels for what cytof_plot.js SHOWS (axis labels,
   // the axis-label picker, and each gate's channel match). The store keeps identity keys; incoming
@@ -2165,23 +2339,31 @@ export default function App() {
         <div className="gl-comp-apply-status-bar" role="status" aria-live="polite">
           <div className="gl-comp-apply-status-copy">
             <strong>
-              {compensationApplyStatus.phase === "cancelling"
-                ? "Cancelling CyTOF compensation"
-                : compensationApplyStatus.phase === "preparing"
-                  ? "Preparing CyTOF compensation"
-                  : "Applying CyTOF compensation"}
+              {compensationApplyStatus.operation === "restore"
+                ? compensationApplyStatus.phase === "cancelling"
+                  ? "Cancelling workspace compensation restore"
+                  : compensationApplyStatus.phase === "preparing"
+                    ? "Checking saved compensation"
+                    : "Restoring saved compensation"
+                : compensationApplyStatus.phase === "cancelling"
+                  ? "Cancelling CyTOF compensation"
+                  : compensationApplyStatus.phase === "preparing"
+                    ? "Preparing CyTOF compensation"
+                    : "Applying CyTOF compensation"}
             </strong>
             <span title={compensationApplyStatus.profileName}>{compensationApplyStatus.profileName}</span>
           </div>
           <progress
-            aria-label="CyTOF compensation progress"
+            aria-label={compensationApplyStatus.operation === "restore"
+              ? "Saved compensation restore progress"
+              : "CyTOF compensation progress"}
             max={1}
             value={compensationApplyStatus.fraction}
           />
           <span className="gl-comp-apply-status-count">
             {Math.round(compensationApplyStatus.fraction * 100)}% · {compensationApplyStatus.processedEvents.toLocaleString()} / {compensationApplyStatus.totalEvents.toLocaleString()} events
           </span>
-          {activeTab !== "compensation" && (
+          {compensationApplyStatus.operation !== "restore" && activeTab !== "compensation" && (
             <button type="button" className="gl-mini-btn" onClick={() => setActiveTab("compensation")}>
               View Compensation
             </button>
@@ -2527,8 +2709,8 @@ export default function App() {
                 const r3 = (n: number) => Math.round(n * 1000) / 1000;
                 const xName = sample.channels[xIdx].key;
                 const yName = sample.channels[yIdx].key;
-                const effX = xRange ?? globalScales[xName] ?? sample.displayRange(xIdx);
-                const effY = yRange ?? globalScales[yName] ?? sample.displayRange(yIdx);
+                const effX = xRange ?? globalScales[xName] ?? payload?.x_range ?? sample.displayRange(xIdx);
+                const effY = yRange ?? globalScales[yName] ?? payload?.y_range ?? sample.displayRange(yIdx);
                 return (
                   <>
                     {/* Editing a Range sets the SHARED per-channel scale (globalScales), which the
@@ -2553,6 +2735,17 @@ export default function App() {
                   </>
                 );
               })()}
+              <button
+                type="button"
+                className="gl-mini-btn"
+                title="Fit the current view to the robust event distribution and every gate on these axes"
+                onClick={() => {
+                  setXRange(includePlotGatesInAxisRange(sample.displayRange(xIdx), mainPlotGates, "x"));
+                  setYRange(includePlotGatesInAxisRange(sample.displayRange(yIdx), mainPlotGates, "y"));
+                }}
+              >
+                Fit data + gates
+              </button>
               <button className="gl-tool" title="Reset X/Y to auto range (also clears the shared per-channel scale)"
                 aria-label="Reset X and Y ranges to auto"
                 onClick={() => {

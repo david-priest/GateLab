@@ -99,6 +99,9 @@ describe("App compensation lifecycle", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
+    expect([...host.querySelectorAll<HTMLButtonElement>("button")]
+      .some((button) => button.textContent?.trim() === "Fit data + gates")).toBe(true);
+
     const selector = host.querySelector<HTMLSelectElement>('select[aria-label="Active assay layer for all tabs"]')!;
     expect(selector.value).toBe("original");
     expect(selector.querySelector<HTMLOptionElement>('option[value="compensated"]')?.disabled).toBe(false);

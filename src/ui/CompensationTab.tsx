@@ -48,6 +48,8 @@ interface Props {
 
 export interface CompensationApplyUiStatus {
   readonly phase: "preparing" | "applying" | "cancelling";
+  /** Restore rehydrates a saved derived assay; omitted/"apply" is an interactive Apply. */
+  readonly operation?: "apply" | "restore";
   readonly profileName: string;
   readonly fraction: number;
   readonly processedEvents: number;

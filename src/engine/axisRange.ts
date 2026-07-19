@@ -12,6 +12,13 @@ const UPPER_QUANTILE = 0.999;
 const PADDING_FRACTION = 0.05;
 const MAX_QUANTILE_SAMPLES = 100_000;
 
+type PlotGateGeometry = Readonly<{
+  gate_type?: unknown;
+  vertices?: unknown;
+  center?: unknown;
+  label_offset?: unknown;
+}>;
+
 function finiteQuantileSample(values: ArrayLike<number>): number[] {
   const n = values.length;
   if (n === 0) return [];
@@ -53,4 +60,77 @@ export function robustAxisRange(values: ArrayLike<number>): [number, number] {
   const span = hi - lo;
   const padding = (span < 1e-10 ? 1 : span) * PADDING_FRACTION;
   return [lo - padding, hi + padding];
+}
+
+function finitePair(value: unknown): [number, number] | null {
+  if (!Array.isArray(value) || value.length < 2) return null;
+  const x = Number(value[0]);
+  const y = Number(value[1]);
+  return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
+}
+
+/**
+ * Keep visible gate geometry inside an automatically fitted data range.
+ *
+ * Robust data quantiles deliberately ignore rare events, but a gate is an intentional
+ * annotation rather than an outlier. After an assay-layer switch its display transform can
+ * move slightly beyond the newly fitted data range. Expand only the affected edge and add a
+ * small buffer so the gate line/handles do not sit on the plot border. Explicit user/global
+ * ranges bypass this helper in Sample.plotPayload and therefore remain authoritative.
+ */
+export function includePlotGatesInAxisRange(
+  baseRange: [number, number],
+  gates: readonly unknown[],
+  axis: "x" | "y",
+): [number, number] {
+  const axisIndex = axis === "x" ? 0 : 1;
+  const coordinates: number[] = [];
+
+  for (const value of gates) {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
+    const gate = value as PlotGateGeometry;
+    const vertices = Array.isArray(gate.vertices) ? gate.vertices : [];
+    const finiteVertices = vertices
+      .map(finitePair)
+      .filter((point): point is [number, number] => point !== null);
+    for (const point of finiteVertices) coordinates.push(point[axisIndex]);
+
+    const center = finitePair(gate.center);
+    if (center) coordinates.push(center[axisIndex]);
+
+    // A user-positioned label is part of the visible annotation. Auto-generated labels are
+    // also included, but only when a finite gate centroid exists.
+    const labelOffset = finitePair(gate.label_offset);
+    const anchorPoints = finiteVertices.length > 0
+      ? finiteVertices
+      : center
+        ? [center]
+        : [];
+    if (labelOffset && anchorPoints.length > 0) {
+      const anchor = anchorPoints.reduce((sum, point) => sum + point[axisIndex], 0) /
+        anchorPoints.length;
+      coordinates.push(anchor + labelOffset[axisIndex]);
+    }
+  }
+
+  if (coordinates.length === 0) return baseRange;
+  let lo = baseRange[0];
+  let hi = baseRange[1];
+  let expandedLow = false;
+  let expandedHigh = false;
+  for (const coordinate of coordinates) {
+    if (coordinate <= lo) {
+      lo = coordinate;
+      expandedLow = true;
+    }
+    if (coordinate >= hi) {
+      hi = coordinate;
+      expandedHigh = true;
+    }
+  }
+  if (!expandedLow && !expandedHigh) return baseRange;
+
+  const span = Math.max(1e-10, hi - lo);
+  const buffer = span * PADDING_FRACTION;
+  return [expandedLow ? lo - buffer : lo, expandedHigh ? hi + buffer : hi];
 }
