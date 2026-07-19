@@ -26,6 +26,12 @@ const wingLabMatrixPath =
 const wingLabFcsPath =
   process.env.GATELAB_WINGLAB_CYTOF_FCS ??
   "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/HyperIgM/260519 Second round of mass phenotyping/data/Tube2 FCS/FCS/Tube2_concat_23.fcs";
+const portalWorkspacePath =
+  "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/Portal.bio/Experiments/Portal-2026-07-02-A test3-diffTF-ko/data/portalbio3_Processed.gatelab";
+const portalFcsPath =
+  "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/Portal.bio/Experiments/Portal-2026-07-02-A test3-diffTF-ko/data/portalbio3_Processed.fcs";
+const desktopWingLabMatrixPath =
+  "/Users/davidpriest/Desktop/WingLab_QQ_beads_sm_full.csv";
 
 describe("local real compensation matrix import fixtures", () => {
   (existsSync(cytofMatrixPath) ? it : it.skip)(
@@ -127,6 +133,65 @@ describe("local real compensation matrix import fixtures", () => {
       compensateCytofRange(measured, plan, compensated);
       expect(compensated).toHaveLength(includedChannels.length);
       expect(compensated.every((column) => Array.from(column).every((value) => Number.isFinite(value) && value >= 0))).toBe(true);
+    },
+  );
+
+  (
+    existsSync(portalWorkspacePath) &&
+      existsSync(portalFcsPath) &&
+      existsSync(desktopWingLabMatrixPath)
+      ? it
+      : it.skip
+  )(
+    "solves the Portal.bio test-3 workspace source with the reviewed Desktop spill matrix",
+    () => {
+      const workspace = JSON.parse(readFileSync(portalWorkspacePath, "utf8")) as {
+        samples?: Array<{ dataPath?: string }>;
+      };
+      expect(workspace.samples?.[0]?.dataPath).toBe("data/0_portalbio3_Processed.fcs");
+
+      const parsed = parseCompensationMatrixTable(
+        readFileSync(desktopWingLabMatrixPath, "utf8"),
+      );
+      const validated = validateAndCanonicalizeCompensationMatrix(
+        parsed.input,
+        "cytof-spillover",
+      );
+      if (!validated.ok) {
+        throw new Error(validated.errors.map(({ message }) => message).join(" "));
+      }
+      expect(validated.value.sourceChannels).toHaveLength(50);
+      expect(validated.value.receiverChannels).toHaveLength(61);
+
+      const bytes = readFileSync(portalFcsPath);
+      const sample = new Sample(parseFcs(
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+      ));
+      expect(sample.instrument).toBe("cytof");
+      expect(sample.fcs.nEvents).toBe(107_334);
+      const pnns = new Set(sample.channels.map(({ pnn }) => pnn));
+      const included = validated.value.receiverChannels.filter((pnn) => pnns.has(pnn));
+      expect(included).toHaveLength(59);
+
+      const plan = prepareCytofNnls(
+        included,
+        adaptCytofSpilloverMatrix(validated.value, included),
+      );
+      const eventCount = 256;
+      const measured = included.map((pnn) => {
+        const index = sample.channels.findIndex((channel) => channel.pnn === pnn);
+        return Float64Array.from(sample.originalColumnData(index).subarray(0, eventCount));
+      });
+      const compensated = included.map(() => new Float64Array(eventCount));
+      compensateCytofRange(measured, plan, compensated);
+      expect(compensated.every((column) =>
+        Array.from(column).every((value) => Number.isFinite(value) && value >= 0)
+      )).toBe(true);
+      expect(compensated.some((column, channel) =>
+        Array.from(column).some((value, event) =>
+          Math.abs(value - measured[channel][event]) > 1e-6
+        )
+      )).toBe(true);
     },
   );
 

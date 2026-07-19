@@ -392,7 +392,7 @@ describe("stable compensation matrix and profile hashes", () => {
     const first = {
       kind: "cytof-spillover" as const,
       method: "nnls" as const,
-      solverVersion: "lawson-hanson-v1",
+      solverVersion: "coordinate-descent-qr-v1",
       solverSettings: NNLS_SOLVER_SETTINGS,
       matrix,
       includedChannels: ["C", "A", "B"],
@@ -407,7 +407,7 @@ describe("stable compensation matrix and profile hashes", () => {
         tolerance: 1e-10,
       },
     };
-    const upgraded = { ...first, solverVersion: "lawson-hanson-v2" };
+    const upgraded = { ...first, solverVersion: "coordinate-descent-qr-v2" };
     const retuned = {
       ...first,
       solverSettings: { ...first.solverSettings, tolerance: 1e-8 },
@@ -425,7 +425,7 @@ describe("stable compensation matrix and profile hashes", () => {
       await hashCompensationProfile(reorderedSettings),
     );
     expect(await hashCompensationProfile(first)).toBe(
-      "sha256:6bb78647a6cba62b781d7dc13dfe44bc02bcf1dcd93add993732a4a6933f8629",
+      "sha256:cda326aa52953b03cccd3668b857b1e51f01f9d77b21e6d9893f6d780328ece2",
     );
     expect(await hashCompensationProfile(first)).not.toBe(
       await hashCompensationProfile(upgraded),

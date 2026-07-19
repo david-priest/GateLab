@@ -34,6 +34,7 @@ import {
 const DEFAULT_BYTE_BUDGET = 64 * 1024 * 1024;
 const DEFAULT_FIXED_WORKSPACE_BYTES = 256 * 1024;
 const DEFAULT_COPY_SLICE_EVENTS = 8_192;
+const DEFAULT_MAX_EVENTS_PER_CHUNK = 8_192;
 const DEFAULT_MAX_PREVIEW_EVENTS = 20_000;
 const DEFAULT_PREVIEW_BYTE_BUDGET = 64 * 1024 * 1024;
 const ESTIMATED_PREVIEW_BYTES_PER_CHANNEL_EVENT = 5 * Float64Array.BYTES_PER_ELEMENT;
@@ -234,6 +235,7 @@ export function planCompensationChunks(input: Readonly<{
   channelCount: number;
   byteBudget?: number;
   fixedWorkspaceBytes?: number;
+  maxEventsPerChunk?: number;
 }>): CompensationChunkPlan {
   if (!Number.isSafeInteger(input.totalEvents) || input.totalEvents < 0) {
     throw new CompensationManagerError("invalid-event-count", "Compensation totalEvents must be a non-negative safe integer.");
@@ -260,7 +262,14 @@ export function planCompensationChunks(input: Readonly<{
       `Compensation needs at least ${fixedWorkspaceBytes + bytesPerEvent} bytes for one event across ${channelCount} channels.`,
     );
   }
-  const eventsPerChunk = Math.max(1, Math.floor(transientByteBudget / bytesPerEvent));
+  const maxEventsPerChunk = positiveSafeInteger(
+    input.maxEventsPerChunk ?? DEFAULT_MAX_EVENTS_PER_CHUNK,
+    "Compensation maximum events per chunk",
+  );
+  const eventsPerChunk = Math.max(
+    1,
+    Math.min(maxEventsPerChunk, Math.floor(transientByteBudget / bytesPerEvent)),
+  );
   return Object.freeze({
     totalByteBudget,
     fixedWorkspaceBytes,
@@ -961,6 +970,16 @@ export class CompensationManager {
           "The worker started with channel bindings that do not match the exact FCS/matrix mapping.",
         );
       }
+      request.onProgress?.(Object.freeze({
+        jobId: active.aggregateId,
+        sampleIndex,
+        sampleCount,
+        sampleProcessedEvents: 0,
+        sampleTotalEvents: sample.fcs.nEvents,
+        processedEvents: acceptedBefore,
+        totalEvents: aggregateTotal,
+        fraction: aggregateTotal === 0 ? 1 : acceptedBefore / aggregateTotal,
+      }));
       if (zeroEventComplete !== null) completeResponse = await zeroEventComplete;
 
       for (let chunkIndex = 0, start = 0; start < sample.fcs.nEvents; chunkIndex++) {

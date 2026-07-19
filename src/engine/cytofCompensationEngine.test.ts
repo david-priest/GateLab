@@ -20,7 +20,7 @@ function canonical(
   return result.value;
 }
 
-describe("CyTOF identity-backed Lawson-Hanson NNLS", () => {
+describe("CyTOF identity-backed NNLS", () => {
   it("uses source rows, receiver columns, and A = transpose(S)", () => {
     const plan = prepareCytofNnls(
       ["A", "B"],
@@ -106,5 +106,54 @@ describe("CyTOF identity-backed Lawson-Hanson NNLS", () => {
       expect.closeTo(2, 12),
       expect.closeTo(2, 12),
     ]));
+  });
+
+  it("satisfies the NNLS KKT conditions across varied sparse spill systems", () => {
+    const count = 8;
+    const matrix = Array.from({ length: count }, (_, source) =>
+      Array.from({ length: count }, (__, receiver) => {
+        if (source === receiver) return 1;
+        return (source * 11 + receiver * 7) % 5 === 0
+          ? ((source + receiver) % 4 + 1) * 0.0075
+          : 0;
+      }),
+    );
+    const plan = prepareCytofNnls(
+      Array.from({ length: count }, (_, index) => `Ch${index + 1}`),
+      matrix,
+    );
+
+    for (let event = 0; event < 40; event++) {
+      const measured = Float64Array.from({ length: count }, (_, channel) =>
+        ((event + 3) * (channel + 5) * 17) % 113 - (channel % 3 === 0 ? 7 : 0)
+      );
+      const output = new Float64Array(count);
+      const diagnostics = solveCytofNnlsEvent(plan, measured, output);
+      const measuredScale = Math.max(1, ...Array.from(measured, Math.abs));
+      const zeroThreshold = plan.settings.tolerance * measuredScale;
+      const kktThreshold = plan.settings.kktTolerance * measuredScale;
+      const residual = Float64Array.from({ length: count }, (_, receiver) => {
+        let reconstructed = 0;
+        for (let source = 0; source < count; source++) {
+          reconstructed += plan.design[receiver][source] * output[source];
+        }
+        return measured[receiver] - reconstructed;
+      });
+
+      expect(diagnostics.converged).toBe(true);
+      expect(diagnostics.kktViolation).toBeLessThanOrEqual(kktThreshold);
+      for (let source = 0; source < count; source++) {
+        let gradient = 0;
+        for (let receiver = 0; receiver < count; receiver++) {
+          gradient += plan.design[receiver][source] * residual[receiver];
+        }
+        expect(output[source]).toBeGreaterThanOrEqual(0);
+        if (output[source] > zeroThreshold) {
+          expect(Math.abs(gradient)).toBeLessThanOrEqual(kktThreshold);
+        } else {
+          expect(gradient).toBeLessThanOrEqual(kktThreshold);
+        }
+      }
+    }
   });
 });

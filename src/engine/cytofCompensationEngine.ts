@@ -4,7 +4,7 @@ import {
   type NnlsSolverSettingsInput,
 } from "./compensationProfile";
 
-export const CYTOF_NNLS_SOLVER_VERSION = "lawson-hanson-v1" as const;
+export const CYTOF_NNLS_SOLVER_VERSION = "coordinate-descent-qr-v1" as const;
 export const CYTOF_MATRIX_ADAPTATION_VERSION = "identity-backed-v1" as const;
 
 export const DEFAULT_CYTOF_NNLS_SETTINGS: Readonly<NnlsSolverSettingsInput> =
@@ -57,6 +57,8 @@ export interface CytofNnlsPlan {
   readonly matrix: readonly (readonly number[])[];
   /** A = transpose(matrix), used by min ||Ax-u||² with x >= 0. */
   readonly design: readonly (readonly number[])[];
+  /** AᵀA, used by the bounded coordinate solver without refactorising per event. */
+  readonly gram: readonly (readonly number[])[];
   readonly settings: Readonly<NnlsSolverSettingsInput>;
   readonly diagnostics: CytofNnlsPlanDiagnostics;
 }
@@ -208,6 +210,17 @@ export function prepareCytofNnls(
       Object.freeze(channels.map((__, source) => ownedMatrix[source][receiver])),
     ),
   );
+  const gram = Object.freeze(
+    channels.map((_, leftSource) =>
+      Object.freeze(channels.map((__, rightSource) => {
+        let value = 0;
+        for (let receiver = 0; receiver < channels.length; receiver++) {
+          value += design[receiver][leftSource] * design[receiver][rightSource];
+        }
+        return value;
+      })),
+    ),
+  );
   let coefficientMin = Number.POSITIVE_INFINITY;
   let coefficientMax = Number.NEGATIVE_INFINITY;
   for (const row of ownedMatrix) {
@@ -220,6 +233,7 @@ export function prepareCytofNnls(
     channels: Object.freeze(Array.from(channels)),
     matrix: ownedMatrix,
     design,
+    gram,
     settings: stableSettings,
     diagnostics: Object.freeze({
       method: "nnls" as const,
@@ -315,7 +329,7 @@ function solveActiveLeastSquares(
   return solution;
 }
 
-export function solveCytofNnlsEvent(
+function solveCytofNnlsEventQr(
   plan: CytofNnlsPlan,
   measured: ArrayLike<number>,
   output: Float64Array = new Float64Array(plan.channels.length),
@@ -464,6 +478,150 @@ export function solveCytofNnlsEvent(
   });
 }
 
+/**
+ * Solve one event by cyclic coordinate descent on the convex NNLS objective.
+ * The fixed AᵀA matrix is prepared once per profile; difficult or unusually
+ * conditioned events fall back to the QR block-pivot solver above.
+ */
+interface CytofCoordinateWorkspace {
+  readonly linear: Float64Array;
+  readonly gramTimesOutput: Float64Array;
+}
+
+function createCytofCoordinateWorkspace(count: number): CytofCoordinateWorkspace {
+  return {
+    linear: new Float64Array(count),
+    gramTimesOutput: new Float64Array(count),
+  };
+}
+
+function updateCytofCoordinate(
+  plan: CytofNnlsPlan,
+  source: number,
+  zeroThreshold: number,
+  output: Float64Array,
+  linear: Float64Array,
+  gramTimesOutput: Float64Array,
+): void {
+  let next = output[source] +
+    (linear[source] - gramTimesOutput[source]) / plan.gram[source][source];
+  if (next <= zeroThreshold) next = 0;
+  const delta = next - output[source];
+  if (delta === 0) return;
+  output[source] = next;
+  for (let target = 0; target < output.length; target++) {
+    gramTimesOutput[target] += plan.gram[target][source] * delta;
+  }
+}
+
+function solveCytofNnlsEventWithWorkspace(
+  plan: CytofNnlsPlan,
+  measured: ArrayLike<number>,
+  output: Float64Array,
+  workspace: CytofCoordinateWorkspace,
+  includeDiagnostics: boolean,
+): CytofNnlsEventDiagnostics | null {
+  const count = plan.channels.length;
+  if (measured.length !== count || output.length !== count) {
+    throw new CytofCompensationError(
+      "dimension-mismatch",
+      "CyTOF NNLS measured and output vectors must match the plan channel count.",
+    );
+  }
+
+  const { linear, gramTimesOutput } = workspace;
+  gramTimesOutput.fill(0);
+  let measuredScale = 1;
+  for (let receiver = 0; receiver < count; receiver++) {
+    if (!Number.isFinite(measured[receiver])) {
+      throw new CytofCompensationError(
+        "non-finite-input",
+        `CyTOF NNLS input channel ${receiver + 1} is non-finite.`,
+      );
+    }
+    measuredScale = Math.max(measuredScale, Math.abs(measured[receiver]));
+    output[receiver] = 0;
+  }
+  for (let source = 0; source < count; source++) {
+    linear[source] = dotColumn(plan.design, source, measured);
+  }
+  const kktThreshold = plan.settings.kktTolerance * measuredScale;
+  const zeroThreshold = plan.settings.tolerance * measuredScale;
+  const coordinateThreshold = Math.min(
+    kktThreshold,
+    plan.settings.tolerance * measuredScale * 1e-4,
+  );
+
+  for (let iteration = 1; iteration <= plan.settings.maxIterations; iteration++) {
+    for (let source = 0; source < count; source++) {
+      updateCytofCoordinate(
+        plan, source, zeroThreshold, output, linear, gramTimesOutput,
+      );
+    }
+    for (let source = count - 1; source >= 0; source--) {
+      updateCytofCoordinate(
+        plan, source, zeroThreshold, output, linear, gramTimesOutput,
+      );
+    }
+
+    let kktViolation = 0;
+    let activeSetSize = 0;
+    for (let source = 0; source < count; source++) {
+      const gradient = linear[source] - gramTimesOutput[source];
+      if (output[source] > zeroThreshold) {
+        activeSetSize++;
+        kktViolation = Math.max(kktViolation, Math.abs(gradient));
+      } else {
+        kktViolation = Math.max(kktViolation, Math.max(0, gradient));
+      }
+    }
+    if (Number.isFinite(kktViolation) && kktViolation <= coordinateThreshold) {
+      if (!includeDiagnostics) return null;
+      let residualSquares = 0;
+      for (let receiver = 0; receiver < count; receiver++) {
+        let reconstructed = 0;
+        for (let source = 0; source < count; source++) {
+          reconstructed += plan.design[receiver][source] * output[source];
+        }
+        const residual = measured[receiver] - reconstructed;
+        residualSquares += residual * residual;
+      }
+      for (let source = 0; source < count; source++) {
+        if (!Number.isFinite(output[source]) || output[source] < 0) {
+          throw new CytofCompensationError(
+            "non-finite-output",
+            `CyTOF NNLS output channel ${source + 1} is non-finite or negative.`,
+          );
+        }
+      }
+      return Object.freeze({
+        iterations: iteration,
+        activeSetSize,
+        residualNorm: Math.sqrt(residualSquares),
+        objective: residualSquares,
+        kktViolation,
+        converged: true as const,
+      });
+    }
+  }
+
+  return solveCytofNnlsEventQr(plan, measured, output);
+}
+
+export function solveCytofNnlsEvent(
+  plan: CytofNnlsPlan,
+  measured: ArrayLike<number>,
+  output: Float64Array = new Float64Array(plan.channels.length),
+): CytofNnlsEventDiagnostics {
+  return solveCytofNnlsEventWithWorkspace(
+    plan,
+    measured,
+    output,
+    createCytofCoordinateWorkspace(plan.channels.length),
+    true,
+  )!;
+}
+
 export function compensateCytofRange(
   measuredColumns: readonly Float64Array[],
   plan: CytofNnlsPlan,
@@ -512,6 +670,7 @@ export function compensateCytofRange(
   }
   const measured = new Float64Array(count);
   const solved = new Float64Array(count);
+  const workspace = createCytofCoordinateWorkspace(count);
   for (let event = inputStart; event < inputEnd; event++) {
     for (let channel = 0; channel < count; channel++) {
       const value = measuredColumns[channel][event];
@@ -523,7 +682,7 @@ export function compensateCytofRange(
       }
       measured[channel] = value;
     }
-    solveCytofNnlsEvent(plan, measured, solved);
+    solveCytofNnlsEventWithWorkspace(plan, measured, solved, workspace, false);
     const outputEvent = outputStart + event - inputStart;
     for (let channel = 0; channel < count; channel++) {
       const value = solved[channel];

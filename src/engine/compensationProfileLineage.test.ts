@@ -97,7 +97,7 @@ function cytofScientific(
   return {
     kind: "cytof-spillover",
     method: "nnls",
-    solverVersion: "lawson-hanson-v1",
+    solverVersion: "coordinate-descent-qr-v1",
     solverSettings: NNLS_SETTINGS,
     matrix: canonicalMatrix(
       {

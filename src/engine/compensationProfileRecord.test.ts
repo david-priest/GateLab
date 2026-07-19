@@ -70,7 +70,7 @@ function cytofScientific(
   return {
     kind: "cytof-spillover",
     method: "nnls",
-    solverVersion: "lawson-hanson-v1",
+    solverVersion: "coordinate-descent-qr-v1",
     solverSettings: NNLS_SETTINGS,
     matrix: canonicalMatrix(
       {
@@ -487,7 +487,7 @@ describe("compensation profile revisions and diffs", () => {
       root,
       {
         ...cytofScientific(["A", "C"], 0.25),
-        solverVersion: "lawson-hanson-v2",
+        solverVersion: "coordinate-descent-qr-v2",
         solverSettings: { ...NNLS_SETTINGS, tolerance: 1e-8 },
       } as CompensationProfileHashInput,
       {
@@ -514,8 +514,8 @@ describe("compensation profile revisions and diffs", () => {
     const inverse = diffCompensationProfiles(edited, reset);
     expect(inverse.includedChannelsAdded).toEqual(["B"]);
     expect(inverse.solverVersionChange).toEqual({
-      before: "lawson-hanson-v2",
-      after: "lawson-hanson-v1",
+      before: "coordinate-descent-qr-v2",
+      after: "coordinate-descent-qr-v1",
     });
     await expect(validateCompensationProfileRecord(reset)).resolves.toEqual(reset);
   });

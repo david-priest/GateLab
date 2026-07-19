@@ -113,7 +113,7 @@ async function cytofProfile(): Promise<CompensationProfileRecord> {
   return createCompensationBaselineProfile({
     kind: "cytof-spillover",
     method: "nnls",
-    solverVersion: "lawson-hanson-v1",
+    solverVersion: "coordinate-descent-qr-v1",
     solverSettings: {
       tolerance: 1e-10,
       kktTolerance: 1e-9,
@@ -248,6 +248,12 @@ describe("compensation chunk planning", () => {
     expect(plan.transientByteBudget).toBe(48);
     expect(plan.eventsPerChunk).toBe(2);
     expect(plan.chunkCount).toBe(6);
+    expect(planCompensationChunks({
+      totalEvents: 20_000,
+      channelCount: 2,
+      byteBudget: 64 * 1024 * 1024,
+      fixedWorkspaceBytes: 0,
+    })).toMatchObject({ eventsPerChunk: 8_192, chunkCount: 3 });
     expect(() => planCompensationChunks({
       totalEvents: 1,
       channelCount: 2,
@@ -299,7 +305,7 @@ describe("CompensationManager Apply", () => {
     expect(sample.fcs.columns[1]).toEqual(originalFl2);
     expect(worker.maxChunksInFlight).toBe(1);
     expect(worker.requests.filter(({ type }) => type === "apply-chunk")).toHaveLength(3);
-    expect(progress).toEqual([2, 4, 5]);
+    expect(progress).toEqual([0, 2, 4, 5]);
     expect(sample.dataRevision).toBe(1);
     expect(sample.layerRevision).toBe(1);
     expect(dataListener).toHaveBeenCalledTimes(1);
