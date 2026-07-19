@@ -162,6 +162,17 @@ const downloadText = (filename: string, text: string, mime: string) =>
 const makeWorkspaceId = (): string =>
   globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
+function findCompensationProfile(
+  compensation: WorkspaceCompensationState,
+  profileId: string,
+): CompensationProfileRecord | null {
+  for (const lineage of compensation.lineages) {
+    const profile = lineage.records.find((record) => record.profileId === profileId);
+    if (profile) return profile;
+  }
+  return null;
+}
+
 const DRAW_TOOLS: { id: DrawMode; Icon: () => React.ReactElement; title: string }[] = [
   { id: "navigate", Icon: NavigateIcon, title: "Navigate (pan / zoom)" },
   { id: "draw-rect", Icon: RectIcon, title: "Rectangle gate — drag a box" },
@@ -254,6 +265,22 @@ export default function App() {
   const [workspaceId, setWorkspaceId] = useState(makeWorkspaceId);
   const [workspaceCompensation, setWorkspaceCompensation] =
     useState<WorkspaceCompensationState>(() => newEmptyWorkspaceCompensationState());
+  const activeCompensatedStatus = sample?.compensatedLayerStatus() ?? null;
+  const activeCompensationProfile = useMemo(() => {
+    if (
+      !activeCompensatedStatus ||
+      activeCompensatedStatus.state === "missing" ||
+      activeCompensatedStatus.metadata.runtimeIdentity !== "profile"
+    ) return null;
+    return findCompensationProfile(
+      workspaceCompensation,
+      activeCompensatedStatus.metadata.profileId,
+    );
+  }, [activeCompensatedStatus, workspaceCompensation]);
+  const canUseCompensatedAssay = sample !== null && (
+    activeCompensatedStatus?.state === "ready" ||
+    (activeCompensatedStatus?.state === "missing" && sample.instrument === "flow" && sample.spillover !== null)
+  );
   const compensationManagerRef = useRef<CompensationManager | null>(null);
   if (compensationManagerRef.current === null) {
     compensationManagerRef.current = new CompensationManager({ workspaceKey: workspaceId });
@@ -889,6 +916,7 @@ export default function App() {
       if (sample.activeLayer !== previousLayer) {
         setXRange(null); // assay values changed → re-auto-range
         setYRange(null);
+        setDirty(true);
       }
       setError(null);
       return true;
@@ -1929,6 +1957,25 @@ export default function App() {
             </select>
           </span>
         )}
+        {sample && (
+          <label
+            className="gl-header-assay"
+            title="Active assay layer for every GateLab tab. Switching layers keeps gates but recomputes their memberships in the selected coordinate system."
+          >
+            <span>Assay</span>
+            <select
+              aria-label="Active assay layer for all tabs"
+              value={compensationOn ? "compensated" : "original"}
+              disabled={compensationApplyStatus !== null}
+              onChange={(event) => toggleCompensation(event.currentTarget.value === "compensated")}
+            >
+              <option value="original">Original</option>
+              <option value="compensated" disabled={!canUseCompensatedAssay}>
+                {activeCompensatedStatus?.state === "stale" ? "Compensated (unavailable)" : "Compensated"}
+              </option>
+            </select>
+          </label>
+        )}
         {error && <span className="gl-error">⚠ {error}</span>}
         <span
           className="gl-header-meta"
@@ -2606,11 +2653,11 @@ export default function App() {
                 key={`${workspaceId}:${activeSampleId ?? "none"}`}
                 sample={sample}
                 compensationOn={compensationOn}
-                onToggleCompensation={toggleCompensation}
                 onApplyProfile={applyCompensationProfile}
                 onCancelApply={cancelCompensationApply}
                 hasExistingGates={Object.keys(state.gates).length > 0}
                 applyStatus={compensationApplyStatus}
+                installedProfile={activeCompensationProfile}
                 visible={activeTab === "compensation"}
                 stateKey={`${workspaceId}:${activeSampleId ?? "none"}`}
               />

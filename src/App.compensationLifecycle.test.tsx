@@ -28,9 +28,32 @@ const syntheticCytofFcs: FcsFile = {
   spillover: null,
 };
 
+const syntheticFlowFcs: FcsFile = {
+  version: "FCS3.1",
+  nEvents: 3,
+  instrument: "flow",
+  keywords: {},
+  channels: [
+    { index: 0, name: "FSC-A", marker: null, bits: 32, range: 262144 },
+    { index: 1, name: "FL1-A", marker: "CD3", bits: 32, range: 262144 },
+    { index: 2, name: "FL2-A", marker: "CD19", bits: 32, range: 262144 },
+  ],
+  columns: [
+    Float32Array.from([10, 20, 30]),
+    Float32Array.from([100, 200, 300]),
+    Float32Array.from([25, 45, 65]),
+  ],
+  spillover: {
+    channels: ["FL1-A", "FL2-A"],
+    matrix: [[1, 0.1], [0.05, 1]],
+  },
+};
+
+let parsedFcs: FcsFile = syntheticCytofFcs;
+
 vi.mock("./engine/fcs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./engine/fcs")>();
-  return { ...actual, parseFcs: () => syntheticCytofFcs };
+  return { ...actual, parseFcs: () => parsedFcs };
 });
 
 import App from "./App";
@@ -45,6 +68,7 @@ let root: Root;
 let host: HTMLDivElement;
 
 beforeEach(() => {
+  parsedFcs = syntheticCytofFcs;
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -58,6 +82,40 @@ afterEach(() => {
 });
 
 describe("App compensation lifecycle", () => {
+  it("uses one global assay selector across every analysis tab", async () => {
+    parsedFcs = syntheticFlowFcs;
+    act(() => root.render(<App />));
+
+    const fcsInput = host.querySelector<HTMLInputElement>('input[type="file"][accept=".fcs"]')!;
+    const fcsFile = new File([Uint8Array.from([70, 67, 83])], "flow.fcs", {
+      type: "application/octet-stream",
+    });
+    Object.defineProperty(fcsFile, "arrayBuffer", {
+      value: async () => Uint8Array.from([70, 67, 83]).buffer,
+    });
+    Object.defineProperty(fcsInput, "files", { configurable: true, value: [fcsFile] });
+    await act(async () => {
+      fcsInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const selector = host.querySelector<HTMLSelectElement>('select[aria-label="Active assay layer for all tabs"]')!;
+    expect(selector.value).toBe("original");
+    expect(selector.querySelector<HTMLOptionElement>('option[value="compensated"]')?.disabled).toBe(false);
+    await act(async () => {
+      selector.value = "compensated";
+      selector.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(selector.value).toBe("compensated");
+
+    const statisticsTab = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((button) => button.textContent === "Statistics")!;
+    act(() => statisticsTab.click());
+    expect(selector.value).toBe("compensated");
+    expect(host.querySelectorAll('select[aria-label="Active assay layer for all tabs"]')).toHaveLength(1);
+  });
+
   it("keeps an imported matrix mounted across analysis-tab changes", async () => {
     act(() => root.render(<App />));
 

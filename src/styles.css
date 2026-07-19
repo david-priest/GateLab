@@ -49,8 +49,18 @@ select:focus-visible,
   align-items: center;
   gap: 12px;
 }
-.gl-header .gl-meta { color: var(--muted); font-size: 12px; }
+.gl-header .gl-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
 .gl-header .gl-error { color: #e0736b; font-size: 12px; }
+.gl-header-assay {
+  display: inline-flex; flex: none; align-items: center; gap: 5px; padding-left: 11px;
+  border-left: 1px solid var(--line); color: var(--muted); font-size: 10px;
+  font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+}
+.gl-header-assay select {
+  min-width: 112px; padding: 2px 22px 2px 6px; border: 1px solid #b9c2ce;
+  border-radius: 4px; background: var(--bg); color: var(--text); font-size: 11px;
+  font-weight: 500; letter-spacing: normal; text-transform: none;
+}
 
 .gl-comp-apply-status-bar {
   display: flex; align-items: center; gap: 10px; min-height: 38px; padding: 6px 12px;
@@ -327,6 +337,7 @@ select:focus-visible,
 .gl-comp-summary div { display: grid; grid-template-columns: auto auto; gap: 5px; align-items: baseline; }
 .gl-comp-summary dt { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
 .gl-comp-summary dd { margin: 0; font-size: 12px; }
+.gl-comp-global-layer-note { color: var(--muted); font-size: 10px; }
 .gl-comp-warning {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   color: #7a3e00; background: #fff8eb; border: 1px solid #e9bd72; border-radius: 5px;
@@ -444,9 +455,10 @@ select:focus-visible,
 .gl-comp-inspector-empty { display: grid; flex: 1; place-items: center; padding: 24px; color: var(--muted); font-size: 12px; }
 .gl-comp-profile-path { flex: 1; min-width: 0; min-height: 0; overflow: auto; }
 .gl-comp-profile-panel {
-  max-width: 760px; border: 1px solid var(--line); border-radius: 6px;
+  border: 1px solid var(--line); border-radius: 6px;
   background: var(--bg); overflow: hidden;
 }
+.gl-comp-installed-summary { flex: none; }
 .gl-comp-profile-summary {
   display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px;
   margin: 0; padding: 12px;
@@ -456,9 +468,25 @@ select:focus-visible,
   color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
 }
 .gl-comp-profile-summary dd { margin: 3px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.gl-comp-method-card {
+  display: grid; grid-template-columns: minmax(280px, 1.3fr) minmax(240px, 1fr); gap: 10px;
+  margin: 0 12px 10px; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: 5px; background: #fbfcfe;
+}
+.gl-comp-method-card > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.gl-comp-method-card span, .gl-comp-impact dt {
+  color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+}
+.gl-comp-method-card strong { font-size: 11px; }
+.gl-comp-method-card small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
+.gl-comp-impact { margin: 0 12px 10px; padding: 8px 10px; border: 1px solid #b9d4fb; border-radius: 5px; background: #f7fbff; }
+.gl-comp-impact-head h4 { margin: 0 0 2px; font-size: 11px; }
+.gl-comp-impact-head span { color: var(--muted); font-size: 9px; }
+.gl-comp-impact dl { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin: 8px 0 0; }
+.gl-comp-impact dd { margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-variant-numeric: tabular-nums; }
 .gl-comp-profile-channels {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 5px;
-  padding: 0 12px 12px;
+  max-height: 92px; overflow: auto; scrollbar-gutter: stable; padding: 0 12px 12px;
 }
 .gl-comp-profile-channels > span {
   display: flex; min-width: 0; flex-direction: column; padding: 5px 7px;
@@ -483,6 +511,10 @@ select:focus-visible,
 }
 .gl-comp-drawer-region h3 { margin: 0 0 5px; font-size: 12px; }
 .gl-comp-drawer-region p, .gl-comp-drawer-region ul { margin: 0; }
+.gl-comp-evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 18px; margin: 0; }
+.gl-comp-evidence-grid div { min-width: 0; }
+.gl-comp-evidence-grid dt { color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.gl-comp-evidence-grid dd { margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gl-comp-empty { flex: 1; display: grid; place-items: center; }
 @container compensation (max-width: 760px) {
   .gl-comp-common-path { grid-template-columns: 1fr; overflow: auto; }
@@ -490,6 +522,8 @@ select:focus-visible,
   .gl-comp-inspector { min-height: 220px; }
   .gl-comp-summary { flex-basis: 100%; order: 3; }
   .gl-comp-profile-summary { grid-template-columns: 1fr; }
+  .gl-comp-method-card { grid-template-columns: 1fr; }
+  .gl-comp-impact dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 /* Scales tab */

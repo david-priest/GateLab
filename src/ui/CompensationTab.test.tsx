@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, useState } from "react";
+import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Sha256Digest } from "../engine/compensationProfile";
@@ -131,7 +131,6 @@ function renderTab(
   sample: Sample,
   options: Readonly<{
     compensationOn?: boolean;
-    onToggle?: (enabled: boolean) => boolean | void;
     onApplyProfile?: (
       profile: CompensationProfileRecord,
       onProgress?: (progress: CompensationApplyProgress) => void,
@@ -139,6 +138,7 @@ function renderTab(
     onCancelApply?: () => void;
     hasExistingGates?: boolean;
     applyStatus?: CompensationApplyUiStatus | null;
+    installedProfile?: CompensationProfileRecord | null;
     visible?: boolean;
     stateKey?: string;
   }> = {},
@@ -149,11 +149,11 @@ function renderTab(
       key={stateKey}
       sample={sample}
       compensationOn={options.compensationOn ?? false}
-      onToggleCompensation={options.onToggle ?? (() => {})}
       onApplyProfile={options.onApplyProfile}
       onCancelApply={options.onCancelApply}
       hasExistingGates={options.hasExistingGates}
       applyStatus={options.applyStatus}
+      installedProfile={options.installedProfile}
       visible={options.visible}
       stateKey={stateKey}
     />,
@@ -166,7 +166,7 @@ describe("CompensationTab common path", () => {
 
     expect(host.querySelector(".gl-comp-matrix")).not.toBeNull();
     expect(host.textContent).toContain("Embedded compensation matrix");
-    expect(host.textContent).toContain("Apply embedded matrix");
+    expect(host.textContent).toContain("Select the assay for every tab in the top bar");
 
     const drawerButtons = [...host.querySelectorAll<HTMLButtonElement>(".gl-comp-drawer-toggle")];
     expect(drawerButtons.map((button) => button.textContent?.trim())).toEqual(["Evidence▸", "Review queue▸"]);
@@ -422,7 +422,8 @@ describe("CompensationTab CyTOF import path", () => {
       _profile: CompensationProfileRecord,
       _onProgress?: (progress: CompensationApplyProgress) => void,
     ) => {});
-    renderTab(cytofSample(), {
+    const sample = cytofSample();
+    renderTab(sample, {
       stateKey: "workspace-a:cytof-apply",
       hasExistingGates: true,
       onApplyProfile: applied,
@@ -451,77 +452,59 @@ describe("CompensationTab CyTOF import path", () => {
       format: "csv",
     });
     expect(host.textContent).toContain("Original measurements remain available");
+
+    const profileMatrix = profile.scientific.matrix;
+    const included = profile.scientific.includedChannels;
+    sample.installCompensatedLayer({
+      metadata: {
+        profileId: profile.profileId,
+        profileHash: profile.profileHash,
+        matrixHash: profile.matrixHash,
+        kind: profile.scientific.kind,
+        method: profile.scientific.method,
+        includedPnns: included,
+        channelBindings: included.map((pnn) => {
+          const channel = sample.channels.find((candidate) => candidate.pnn === pnn)!;
+          return {
+            pnn,
+            fcsColumnIndex: channel.columnIndex,
+            matrixSourceIndex: profileMatrix.sourceChannels.indexOf(pnn),
+            matrixReceiverIndex: profileMatrix.receiverChannels.indexOf(pnn),
+            included: true,
+          };
+        }),
+        transformBinding: { kind: "cytof-asinh", cofactor: 5 },
+      },
+      columns: included.map((pnn, index) => {
+        const channel = sample.channels.find((candidate) => candidate.pnn === pnn)!;
+        return {
+          pnn,
+          fcsColumnIndex: channel.columnIndex,
+          values: Float32Array.from({ length: sample.fcs.nEvents }, (_, event) =>
+            Math.max(0, sample.originalColumnData(sample.index(channel.key)!)[event] - (index + 1) * 3),
+          ),
+        };
+      }),
+    }, { activeLayer: "compensated" });
+    renderTab(sample, {
+      stateKey: "workspace-a:cytof-applied",
+      compensationOn: true,
+      installedProfile: profile,
+    });
+
+    expect(host.textContent).toContain("CyTOF compensation installed");
+    expect(host.textContent).toContain("wing-lab");
+    expect(host.textContent).toContain("Applied NNLS solve matrix");
+    expect(host.textContent).toContain("Original → Compensated impact");
+    expect(host.querySelectorAll(".gl-comp-matrix .gl-comp-cell")).toHaveLength(4);
   });
 });
 
 describe("CompensationTab assay-layer fidelity", () => {
-  it("preserves the embedded-matrix apply behavior and reflects the actual Sample state", () => {
-    const sample = flowSample();
-    function Harness() {
-      const [enabled, setEnabled] = useState(false);
-      return (
-        <CompensationTab
-          sample={sample}
-          compensationOn={enabled}
-          stateKey="workspace-a:sample-a"
-          onToggleCompensation={(next) => {
-            sample.setCompensation(next);
-            setEnabled(sample.compensationEnabled);
-            return sample.compensationEnabled === next;
-          }}
-        />
-      );
-    }
-
-    act(() => root.render(<Harness />));
-    const action = () => [...host.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.includes("matrix") || button.textContent?.includes("original measurements"))!;
-
-    expect(action().textContent).toContain("Apply embedded matrix");
-    act(() => action().click());
-    expect(sample.compensationEnabled).toBe(true);
-    expect(action().textContent).toContain("Use original measurements");
-
-    act(() => action().click());
-    expect(sample.compensationEnabled).toBe(false);
-    expect(action().textContent).toContain("Apply embedded matrix");
-  });
-
-  it("reports a singular embedded matrix without claiming that compensation was applied", () => {
-    const sample = flowSample({ matrix: [[1, 1], [1, 1]] });
-    function Harness() {
-      const [enabled, setEnabled] = useState(false);
-      return (
-        <CompensationTab
-          sample={sample}
-          compensationOn={enabled}
-          stateKey="workspace-a:singular"
-          onToggleCompensation={(next) => {
-            sample.setCompensation(next);
-            setEnabled(sample.compensationEnabled);
-            return sample.compensationEnabled === next;
-          }}
-        />
-      );
-    }
-
-    act(() => root.render(<Harness />));
-    const action = [...host.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent === "Apply embedded matrix")!;
-    act(() => action.click());
-
-    expect(sample.compensationEnabled).toBe(false);
-    expect(action.textContent).toBe("Apply embedded matrix");
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain("left unchanged");
-  });
-
-  it("catches an application exception and leaves the current layer visibly unchanged", () => {
-    renderTab(flowSample(), { onToggle: () => { throw new Error("profile conflict"); } });
-    const action = [...host.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent === "Apply embedded matrix")!;
-    act(() => action.click());
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain("left unchanged");
-    expect(host.textContent).toContain("Original measurements");
+  it("keeps assay selection out of the tab and points to the one global selector", () => {
+    renderTab(flowSample());
+    expect(host.textContent).toContain("Select the assay for every tab in the top bar");
+    expect(host.querySelector('select[aria-label="Active assay layer for all tabs"]')).toBeNull();
   });
 
   it("does not mislabel an imported flow profile as the embedded FCS matrix", () => {
@@ -531,7 +514,7 @@ describe("CompensationTab assay-layer fidelity", () => {
 
     expect(host.textContent).toContain("Installed compensation profile");
     expect(host.textContent).toContain("Flow linear inverse");
-    expect(host.textContent).not.toContain("Use compensated profile");
+    expect(host.textContent).toContain("Select the assay for every tab in the top bar");
     expect(host.textContent).not.toContain("Embedded compensation matrix");
     expect(host.textContent).toContain("flow-spillover-profile");
     expect(sample.activeLayer).toBe("original");
@@ -544,8 +527,8 @@ describe("CompensationTab assay-layer fidelity", () => {
 
     expect(host.textContent).toContain("Installed compensation profile");
     expect(host.textContent).toContain("CyTOF NNLS");
-    expect(host.textContent).toContain("CyTOF compensation profile");
-    expect(host.textContent).toContain("Use original measurements");
+    expect(host.textContent).toContain("CyTOF compensation installed");
+    expect(host.textContent).toContain("Select the assay for every tab in the top bar");
     expect(host.textContent).not.toContain("Apply embedded matrix");
     expect(host.textContent).not.toContain("Not configured");
   });
@@ -558,7 +541,7 @@ describe("CompensationTab assay-layer fidelity", () => {
 
     expect(sample.activeLayer).toBe("original");
     expect(host.textContent).toContain("Unavailable");
-    expect(host.textContent).not.toContain("Use compensated profile");
+    expect(host.textContent).not.toContain("Select the assay for every tab in the top bar");
     expect(host.querySelectorAll('[role="region"]')).toHaveLength(0);
     const review = [...host.querySelectorAll<HTMLButtonElement>(".gl-comp-drawer-toggle")]
       .find((button) => button.textContent?.includes("Review queue"))!;

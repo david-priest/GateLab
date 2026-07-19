@@ -62,27 +62,22 @@ describe("CompensationTab Sample revisions", () => {
         <CompensationTab
           sample={sample}
           compensationOn={sample.compensationEnabled}
-          onToggleCompensation={(enabled) => {
-            sample.setCompensation(enabled);
-            return sample.compensationEnabled === enabled;
-          }}
           stateKey="workspace:sample"
         />
       );
     }
 
-    const action = () => [...host.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.includes("matrix") || button.textContent?.includes("original measurements"))!;
+    const activeLayer = () => host.querySelector<HTMLElement>('.gl-comp-summary div:nth-child(2) dd')?.textContent;
 
     act(() => root.render(<Harness />));
-    expect(action().textContent).toBe("Apply embedded matrix");
+    expect(activeLayer()).toBe("Original measurements");
 
     act(() => sample.setCompensation(true));
     expect(sample.dataRevision).toBe(1);
-    expect(action().textContent).toBe("Use original measurements");
+    expect(activeLayer()).toBe("Compensated");
 
     act(() => sample.setCompensation(false));
     expect(sample.dataRevision).toBe(2);
-    expect(action().textContent).toBe("Apply embedded matrix");
+    expect(activeLayer()).toBe("Original measurements");
   });
 });

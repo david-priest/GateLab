@@ -23,6 +23,7 @@ import {
   type CompensationProfileRecord,
 } from "../engine/compensationProfileRecord";
 import {
+  adaptCytofSpilloverMatrix,
   CYTOF_NNLS_SOLVER_VERSION,
   DEFAULT_CYTOF_NNLS_SETTINGS,
 } from "../engine/cytofCompensationEngine";
@@ -33,7 +34,6 @@ import { usePersistedTabState } from "./tabState";
 interface Props {
   sample: Sample;
   compensationOn: boolean;
-  onToggleCompensation: (enabled: boolean) => boolean | void;
   onApplyProfile?: (
     profile: CompensationProfileRecord,
     onProgress?: (progress: CompensationApplyProgress) => void,
@@ -41,6 +41,7 @@ interface Props {
   onCancelApply?: () => void;
   hasExistingGates?: boolean;
   applyStatus?: CompensationApplyUiStatus | null;
+  installedProfile?: CompensationProfileRecord | null;
   visible?: boolean;
   stateKey: string;
 }
@@ -58,6 +59,26 @@ interface CytofMatrixDraft {
   readonly parsed: ParsedCompensationMatrixTable;
   readonly matrix: CanonicalCompensationMatrix;
   readonly validationWarnings: readonly MatrixValidationIssue[];
+}
+
+interface CompensationMatrixView {
+  readonly axisKeys: readonly string[];
+  readonly channels: readonly ReturnType<typeof channelDisplay>[];
+  readonly matrix: readonly (readonly number[])[];
+  readonly title: string;
+  readonly subtitle: string;
+  readonly coefficientNote: string;
+}
+
+interface CompensationImpactSummary {
+  readonly previewEvents: number;
+  readonly comparedValues: number;
+  readonly changedValues: number;
+  readonly medianAbsoluteDelta: number;
+  readonly maxAbsoluteDelta: number;
+  readonly zeroedNegativeValues: number;
+  readonly mostChangedChannel: string;
+  readonly mostChangedChannelMedianDelta: number;
 }
 
 type DrawerId = "evidence" | "review";
@@ -127,20 +148,94 @@ function axisLabel(channel: ReturnType<typeof channelDisplay>) {
   );
 }
 
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  values.sort((left, right) => left - right);
+  const middle = Math.floor(values.length / 2);
+  return values.length % 2 === 0
+    ? (values[middle - 1] + values[middle]) / 2
+    : values[middle];
+}
+
+function summarizeInstalledCompensation(
+  sample: Sample,
+  includedPnns: readonly string[],
+): CompensationImpactSummary | null {
+  const status = sample.compensatedLayerStatus();
+  if (status.state !== "ready" || includedPnns.length === 0 || sample.fcs.nEvents === 0) return null;
+  const indices = includedPnns.flatMap((pnn) => {
+    const index = sample.channels.findIndex((channel) => channel.pnn === pnn);
+    return index < 0 ? [] : [index];
+  });
+  if (indices.length === 0) return null;
+
+  const previewEvents = Math.min(2048, sample.fcs.nEvents);
+  const allDeltas: number[] = [];
+  let changedValues = 0;
+  let maxAbsoluteDelta = 0;
+  let zeroedNegativeValues = 0;
+  let mostChangedChannel = "";
+  let mostChangedChannelMedianDelta = -1;
+
+  for (const index of indices) {
+    const original = sample.originalColumnData(index);
+    const compensated = sample.compensatedColumnData(index);
+    const channelDeltas: number[] = [];
+    for (let previewIndex = 0; previewIndex < previewEvents; previewIndex++) {
+      const event = previewEvents === 1
+        ? 0
+        : Math.floor(previewIndex * (sample.fcs.nEvents - 1) / (previewEvents - 1));
+      const before = original[event];
+      const after = compensated[event];
+      const delta = Math.abs(after - before);
+      channelDeltas.push(delta);
+      allDeltas.push(delta);
+      if (delta > Math.max(1e-6, Math.abs(before) * 1e-6)) changedValues++;
+      if (before < 0 && after === 0) zeroedNegativeValues++;
+      maxAbsoluteDelta = Math.max(maxAbsoluteDelta, delta);
+    }
+    const channelMedian = median(channelDeltas);
+    if (channelMedian > mostChangedChannelMedianDelta) {
+      mostChangedChannelMedianDelta = channelMedian;
+      mostChangedChannel = channelDisplay(sample, sample.channels[index].key).combined;
+    }
+  }
+
+  return {
+    previewEvents,
+    comparedValues: allDeltas.length,
+    changedValues,
+    medianAbsoluteDelta: median(allDeltas),
+    maxAbsoluteDelta,
+    zeroedNegativeValues,
+    mostChangedChannel,
+    mostChangedChannelMedianDelta: Math.max(0, mostChangedChannelMedianDelta),
+  };
+}
+
+function profileOriginText(profile: CompensationProfileRecord): string {
+  if (profile.origin.type === "uploaded") return profile.origin.fileName;
+  if (profile.origin.type === "embedded-fcs") return `${profile.origin.fileName} · embedded FCS`;
+  return `${profile.origin.presetId} · bundled preset ${profile.origin.presetVersion}`;
+}
+
 export function CompensationTab({
   sample,
   compensationOn,
-  onToggleCompensation,
   onApplyProfile,
   onCancelApply,
   hasExistingGates = false,
   applyStatus = null,
+  installedProfile = null,
   visible = true,
   stateKey,
 }: Props) {
   const installedStatus = sample.compensatedLayerStatus();
   const installedMetadata = installedStatus.state === "missing" ? null : installedStatus.metadata;
   const profileMetadata = installedMetadata?.runtimeIdentity === "profile" ? installedMetadata : null;
+  const profileRecord = installedProfile?.profileId === profileMetadata?.profileId
+    ? installedProfile
+    : null;
   // A profile-derived result and the embedded FCS matrix are different scientific sources. Never
   // present the embedded matrix as the active profile's coefficients.
   const spill = !profileMetadata && sample.instrument === "flow" ? sample.spillover : null;
@@ -191,42 +286,75 @@ export function CompensationTab({
     });
   }, [cytofDraft, includedCytofChannels, samplePnnChannels]);
 
-  const channels = useMemo(
-    () => spill?.channels.map((key) => channelDisplay(sample, key)) ?? [],
-    [sample, spill],
-  );
+  const matrixView = useMemo<CompensationMatrixView | null>(() => {
+    if (spill) {
+      return {
+        axisKeys: spill.channels,
+        channels: spill.channels.map((key) => channelDisplay(sample, key)),
+        matrix: spill.matrix,
+        title: "Embedded compensation matrix",
+        subtitle: "Source rows ↓ · Receiver columns → · values are spillover percentages",
+        coefficientNote: "Applying the embedded matrix leaves its coefficients unchanged.",
+      };
+    }
+    if (!profileRecord || !profileMetadata) return null;
+    const axisPnns = profileMetadata.includedPnns;
+    const matrix = profileRecord.scientific.kind === "cytof-spillover"
+      ? adaptCytofSpilloverMatrix(profileRecord.scientific.matrix, axisPnns)
+      : axisPnns.map((sourcePnn) => {
+          const sourceIndex = profileRecord.scientific.matrix.sourceChannels.indexOf(sourcePnn);
+          return profileRecord.scientific.matrix.matrix[sourceIndex];
+        });
+    if (
+      matrix.length !== axisPnns.length ||
+      matrix.some((row) => !row || row.length !== axisPnns.length)
+    ) return null;
+    return {
+      axisKeys: axisPnns,
+      channels: axisPnns.map((pnn) => channelDisplayForPnn(sample, pnn)),
+      matrix,
+      title: profileRecord.scientific.kind === "cytof-spillover"
+        ? "Applied NNLS solve matrix"
+        : "Applied compensation matrix",
+      subtitle: profileRecord.scientific.kind === "cytof-spillover"
+        ? "Identity-backed source rows ↓ · Receiver columns → · exact matrix used by NNLS"
+        : "Source rows ↓ · Receiver columns → · exact installed coefficients",
+      coefficientNote: "This is the exact installed solve matrix. Original measurements remain stored separately.",
+    };
+  }, [profileMetadata, profileRecord, sample, spill]);
+  const channels = matrixView?.channels ?? [];
   const selectedPair = useMemo(() => {
-    if (!spill || !selectedPairKey) return null;
+    if (!matrixView || !selectedPairKey) return null;
     const [sourceKey, receiverKey] = selectedPairKey.split(PAIR_SEPARATOR);
-    const sourceIndex = spill.channels.indexOf(sourceKey);
-    const receiverIndex = spill.channels.indexOf(receiverKey);
+    const sourceIndex = matrixView.axisKeys.indexOf(sourceKey);
+    const receiverIndex = matrixView.axisKeys.indexOf(receiverKey);
     if (sourceIndex < 0 || receiverIndex < 0 || sourceIndex === receiverIndex) return null;
     return {
       sourceIndex,
       receiverIndex,
       source: channels[sourceIndex],
       receiver: channels[receiverIndex],
-      value: spill.matrix[sourceIndex][receiverIndex],
+      value: matrixView.matrix[sourceIndex][receiverIndex],
     };
-  }, [channels, selectedPairKey, spill]);
+  }, [channels, matrixView, selectedPairKey]);
   const unusualCoefficients = useMemo(() => {
-    if (!spill) return [];
+    if (!matrixView) return [];
     const found: string[] = [];
-    for (let source = 0; source < spill.matrix.length; source++) {
-      for (let receiver = 0; receiver < spill.matrix[source].length; receiver++) {
-        const value = spill.matrix[source][receiver];
+    for (let source = 0; source < matrixView.matrix.length; source++) {
+      for (let receiver = 0; receiver < matrixView.matrix[source].length; receiver++) {
+        const value = matrixView.matrix[source][receiver];
         if (source === receiver || !Number.isFinite(value) || value <= 1) continue;
         found.push(`${channels[source].combined} → ${channels[receiver].combined}`);
       }
     }
     return found;
-  }, [channels, spill]);
+  }, [channels, matrixView]);
   const matrixReviewItems = useMemo(() => {
-    if (!spill) return [];
+    if (!matrixView) return [];
     const found: string[] = [];
-    for (let source = 0; source < spill.matrix.length; source++) {
-      for (let receiver = 0; receiver < spill.matrix[source].length; receiver++) {
-        const value = spill.matrix[source][receiver];
+    for (let source = 0; source < matrixView.matrix.length; source++) {
+      for (let receiver = 0; receiver < matrixView.matrix[source].length; receiver++) {
+        const value = matrixView.matrix[source][receiver];
         const pair = `${channels[source].combined} → ${channels[receiver].combined}`;
         if (!Number.isFinite(value)) {
           found.push(`${pair}: non-finite coefficient (${String(value)})`);
@@ -240,14 +368,20 @@ export function CompensationTab({
       }
     }
     return found;
-  }, [channels, spill]);
+  }, [channels, matrixView]);
   const matrixHasNonFinite = useMemo(
-    () => spill?.matrix.some((row) => row.some((value) => !Number.isFinite(value))) ?? false,
-    [spill],
+    () => matrixView?.matrix.some((row) => row.some((value) => !Number.isFinite(value))) ?? false,
+    [matrixView],
   );
   const profileChannels = useMemo(
     () => profileMetadata?.includedPnns.map((pnn) => channelDisplayForPnn(sample, pnn)) ?? [],
     [profileMetadata, sample],
+  );
+  const impactSummary = useMemo(
+    () => profileMetadata && installedStatus.state === "ready"
+      ? summarizeInstalledCompensation(sample, profileMetadata.includedPnns)
+      : null,
+    [installedStatus.state, profileMetadata, sample],
   );
   const reviewItems = useMemo(() => {
     const items = [...matrixReviewItems];
@@ -258,7 +392,7 @@ export function CompensationTab({
   }, [installedStatus, matrixReviewItems]);
 
   const source = profileMetadata
-    ? "Installed compensation profile"
+    ? profileRecord?.name ?? "Installed compensation profile"
     : spill
       ? "Embedded FCS matrix"
       : "No compatible matrix";
@@ -273,21 +407,6 @@ export function CompensationTab({
 
   const toggleDrawer = (id: DrawerId) => {
     setOpenDrawers((current) => ({ ...current, [id]: !current[id] }));
-  };
-
-  const handleLayerToggle = () => {
-    setActionMessage(null);
-    setActionIsError(false);
-    try {
-      const result = onToggleCompensation(!compensationOn);
-      if (result === false) {
-        setActionIsError(true);
-        setActionMessage("Compensation could not be applied. The current assay layer was left unchanged.");
-      }
-    } catch {
-      setActionIsError(true);
-      setActionMessage("Compensation could not be applied. The current assay layer was left unchanged.");
-    }
   };
 
   const handleCytofMatrixFile = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -410,7 +529,7 @@ export function CompensationTab({
     const sourceChannel = channels[sourceIndex];
     const receiverChannel = channels[receiverIndex];
     if (!sourceChannel || !receiverChannel || sourceIndex === receiverIndex) return;
-    setSelectedPairKey(`${sourceChannel.key}${PAIR_SEPARATOR}${receiverChannel.key}`);
+    setSelectedPairKey(`${matrixView!.axisKeys[sourceIndex]}${PAIR_SEPARATOR}${matrixView!.axisKeys[receiverIndex]}`);
     matrixRef.current
       ?.querySelector<HTMLButtonElement>(
         `button[data-source-index="${sourceIndex}"][data-receiver-index="${receiverIndex}"]`,
@@ -423,7 +542,7 @@ export function CompensationTab({
     sourceIndex: number,
     receiverIndex: number,
   ) => {
-    const count = channels.length;
+    const count = matrixView?.axisKeys.length ?? 0;
     let nextSource = sourceIndex;
     let nextReceiver = receiverIndex;
     const step = (start: number, delta: -1 | 1, unavailable: number) => {
@@ -477,19 +596,7 @@ export function CompensationTab({
           <div><dt>Layer</dt><dd>{compensationOn ? "Compensated" : "Original measurements"}</dd></div>
           <div><dt>Channels</dt><dd>{channelCount}</dd></div>
         </dl>
-        {canToggle && (
-          <button
-            type="button"
-            className={compensationOn ? "gl-btn-ghost" : "gl-btn"}
-            onClick={handleLayerToggle}
-          >
-            {compensationOn
-              ? "Use original measurements"
-              : profileMetadata
-                ? "Use compensated NNLS"
-                : "Apply embedded matrix"}
-          </button>
-        )}
+        {canToggle && <span className="gl-comp-global-layer-note">Select the assay for every tab in the top bar.</span>}
       </div>
 
       {actionMessage && (
@@ -673,13 +780,79 @@ export function CompensationTab({
         </div>
       )}
 
-      {spill ? (
+      {profileMetadata && (
+        <section className="gl-comp-profile-panel gl-comp-installed-summary" aria-labelledby="comp-profile-heading">
+          <div className="gl-comp-panel-head">
+            <div>
+              <h3 id="comp-profile-heading">
+                {profileMetadata.kind === "cytof-spillover" ? "CyTOF" : "Flow"} compensation installed
+              </h3>
+              <span>Original and Compensated are complete, reversible assay layers</span>
+            </div>
+          </div>
+          <dl className="gl-comp-profile-summary">
+            <div><dt>Profile</dt><dd title={profileRecord?.name ?? profileMetadata.profileId}>{profileRecord?.name ?? profileMetadata.profileId}</dd></div>
+            <div><dt>Status</dt><dd>{installedStatus.state === "ready" ? "Ready" : "Unavailable"}</dd></div>
+            <div><dt>Method</dt><dd>{method}</dd></div>
+            <div><dt>Source</dt><dd title={profileRecord ? profileOriginText(profileRecord) : undefined}>{profileRecord ? profileOriginText(profileRecord) : "Stored workspace profile"}</dd></div>
+            <div><dt>Imported matrix</dt><dd>{profileRecord ? `${profileRecord.scientific.matrix.sourceChannels.length} × ${profileRecord.scientific.matrix.receiverChannels.length}` : "—"}</dd></div>
+            <div><dt>Solve channels</dt><dd>{profileMetadata.includedPnns.length} exact <code>$PnN</code> bindings</dd></div>
+          </dl>
+          {profileRecord && (
+            <div className="gl-comp-method-card" aria-label="Installed compensation method">
+              <div>
+                <span>Pipeline</span>
+                <strong>{profileRecord.scientific.kind === "cytof-spillover" ? "Original counts → NNLS → Compensated counts → arcsinh display" : "Original values → linear matrix inverse → Compensated values → display transform"}</strong>
+              </div>
+              <div>
+                <span>Solver</span>
+                <strong>{profileRecord.scientific.solverVersion}</strong>
+                <small>{profileRecord.scientific.solverSettings.map(({ key, value }) => `${key}=${String(value)}`).join(" · ")}</small>
+              </div>
+            </div>
+          )}
+          {impactSummary && (
+            <div className="gl-comp-impact" aria-label="Original versus Compensated preview">
+              <div className="gl-comp-impact-head">
+                <div>
+                  <h4>Original → Compensated impact</h4>
+                  <span>Deterministic preview of {impactSummary.previewEvents.toLocaleString()} evenly spaced events across {profileMetadata.includedPnns.length} solve channels</span>
+                </div>
+              </div>
+              <dl>
+                <div><dt>Values changed</dt><dd>{impactSummary.changedValues.toLocaleString()} / {impactSummary.comparedValues.toLocaleString()} ({percentText(impactSummary.changedValues / impactSummary.comparedValues, false, 4)})</dd></div>
+                <div><dt>Median |Δ|</dt><dd>{significantNumber(impactSummary.medianAbsoluteDelta, 5)}</dd></div>
+                <div><dt>Maximum |Δ|</dt><dd>{significantNumber(impactSummary.maxAbsoluteDelta, 5)}</dd></div>
+                <div><dt>Largest median shift</dt><dd title={impactSummary.mostChangedChannel}>{impactSummary.mostChangedChannel} · {significantNumber(impactSummary.mostChangedChannelMedianDelta, 5)}</dd></div>
+                {profileMetadata.kind === "cytof-spillover" && (
+                  <div><dt>Negative → zero</dt><dd>{impactSummary.zeroedNegativeValues.toLocaleString()} preview values</dd></div>
+                )}
+              </dl>
+            </div>
+          )}
+          <div className="gl-comp-profile-channels" aria-label="Profile channel bindings">
+            {profileChannels.map((channel) => (
+              <span key={channel.pnn} title={channel.combined}>
+                <strong>{channel.label}</strong>
+                {channel.pnn !== channel.label && <small>{channel.pnn}</small>}
+              </span>
+            ))}
+          </div>
+          {installedStatus.state === "stale" && (
+            <div className="gl-comp-warning" role="status">
+              This profile cannot be applied to the current sample context. Open the review queue for exact reasons.
+            </div>
+          )}
+        </section>
+      )}
+
+      {matrixView ? (
         <div className="gl-comp-common-path">
           <section className="gl-comp-matrix-panel" aria-labelledby="comp-matrix-heading">
             <div className="gl-comp-panel-head">
               <div>
-                <h3 id="comp-matrix-heading">Embedded compensation matrix</h3>
-                <span>Source rows ↓ · Receiver columns → · values are spillover percentages</span>
+                <h3 id="comp-matrix-heading">{matrixView.title}</h3>
+                <span>{matrixView.subtitle}</span>
               </div>
             </div>
             <div className="gl-comp-matrix-scroll">
@@ -707,8 +880,8 @@ export function CompensationTab({
                   </tr>
                 </thead>
                 <tbody>
-                  {spill.matrix.map((row, sourceIndex) => (
-                    <tr key={channels[sourceIndex].key}>
+                  {matrixView.matrix.map((row, sourceIndex) => (
+                    <tr key={matrixView.axisKeys[sourceIndex]}>
                       <th
                         scope="row"
                         title={channels[sourceIndex].combined}
@@ -744,9 +917,9 @@ export function CompensationTab({
                               }
                               style={alpha > 0 ? { backgroundColor: `rgba(47,128,237,${alpha})` } : undefined}
                               onFocus={() => {
-                                if (!diagonal) setSelectedPairKey(`${sourceChannel.key}${PAIR_SEPARATOR}${receiverChannel.key}`);
+                                if (!diagonal) setSelectedPairKey(`${matrixView.axisKeys[sourceIndex]}${PAIR_SEPARATOR}${matrixView.axisKeys[receiverIndex]}`);
                               }}
-                              onClick={() => setSelectedPairKey(`${sourceChannel.key}${PAIR_SEPARATOR}${receiverChannel.key}`)}
+                              onClick={() => setSelectedPairKey(`${matrixView.axisKeys[sourceIndex]}${PAIR_SEPARATOR}${matrixView.axisKeys[receiverIndex]}`)}
                               onKeyDown={(event) => handleMatrixKeyDown(event, sourceIndex, receiverIndex)}
                             >
                               {diagonal ? percentText(value) : percentText(value, true)}
@@ -780,40 +953,11 @@ export function CompensationTab({
                   <strong>{percentText(selectedPair.value, false, 10)}</strong>
                 </div>
                 <p className="gl-hint">
-                  Applying the embedded matrix leaves its coefficients unchanged. Select another off-diagonal cell to inspect its stored value.
+                  {matrixView.coefficientNote} Select another off-diagonal cell to inspect its stored value.
                 </p>
               </div>
             ) : (
               <div className="gl-comp-inspector-empty">No coefficient selected.</div>
-            )}
-          </section>
-        </div>
-      ) : profileMetadata ? (
-        <div className="gl-comp-profile-path">
-          <section className="gl-comp-profile-panel" aria-labelledby="comp-profile-heading">
-            <div className="gl-comp-panel-head">
-              <div>
-                <h3 id="comp-profile-heading">{profileMetadata.kind === "cytof-spillover" ? "CyTOF" : "Flow"} compensation profile</h3>
-                <span>Exact channel identities bound to this sample</span>
-              </div>
-            </div>
-            <dl className="gl-comp-profile-summary">
-              <div><dt>Profile</dt><dd>{profileMetadata.profileId}</dd></div>
-              <div><dt>Method</dt><dd>{method}</dd></div>
-              <div><dt>Status</dt><dd>{installedStatus.state === "ready" ? "Ready" : "Unavailable"}</dd></div>
-            </dl>
-            <div className="gl-comp-profile-channels" aria-label="Profile channel bindings">
-              {profileChannels.map((channel) => (
-                <span key={channel.pnn} title={channel.combined}>
-                  <strong>{channel.label}</strong>
-                  {channel.pnn !== channel.label && <small>{channel.pnn}</small>}
-                </span>
-              ))}
-            </div>
-            {installedStatus.state === "stale" && (
-              <div className="gl-comp-warning" role="status">
-                This profile cannot be applied to the current sample context. Open the review queue for exact reasons.
-              </div>
             )}
           </section>
         </div>
@@ -827,7 +971,7 @@ export function CompensationTab({
         </div>
       )}
 
-      {(spill || profileMetadata) && (
+      {(matrixView || profileMetadata) && (
         <div className="gl-comp-advanced" role="group" aria-label="Advanced compensation tools">
           <div className="gl-comp-drawer-buttons">
             {DRAWERS.map(({ id, label }) => (
@@ -849,7 +993,22 @@ export function CompensationTab({
             <section id="comp-drawer-evidence" role="region" aria-labelledby="comp-drawer-evidence-button" className="gl-comp-drawer-region">
               <h3>Matrix evidence</h3>
               {profileMetadata ? (
-                <p>{profileMetadata.profileId} · {method} · {profileMetadata.includedPnns.length} exact <code>$PnN</code> channel bindings · {installedStatus.state}.</p>
+                profileRecord ? (
+                  <dl className="gl-comp-evidence-grid">
+                    <div><dt>Profile ID</dt><dd>{profileRecord.profileId}</dd></div>
+                    <div><dt>Created</dt><dd>{new Date(profileRecord.createdAt).toLocaleString()}</dd></div>
+                    <div><dt>Matrix source</dt><dd>{profileOriginText(profileRecord)}</dd></div>
+                    <div><dt>Orientation</dt><dd>Source rows → receiver columns</dd></div>
+                    <div><dt>Imported dimensions</dt><dd>{profileRecord.scientific.matrix.sourceChannels.length} sources × {profileRecord.scientific.matrix.receiverChannels.length} receivers</dd></div>
+                    <div><dt>Applied solve</dt><dd>{profileMetadata.includedPnns.length} exact <code>$PnN</code> channels · {installedStatus.state}</dd></div>
+                    <div><dt>Matrix hash</dt><dd title={profileRecord.matrixHash}>{profileRecord.matrixHash.slice(0, 19)}…</dd></div>
+                    <div><dt>Profile hash</dt><dd title={profileRecord.profileHash}>{profileRecord.profileHash.slice(0, 19)}…</dd></div>
+                    <div><dt>Provenance</dt><dd>{profileRecord.provenance?.sourceDescription ?? "No additional source note supplied"}</dd></div>
+                    <div><dt>Estimation</dt><dd>{profileRecord.provenance?.estimationMethod ?? "Imported coefficients preserved exactly"}</dd></div>
+                  </dl>
+                ) : (
+                  <p>{profileMetadata.profileId} · {method} · {profileMetadata.includedPnns.length} exact <code>$PnN</code> channel bindings · {installedStatus.state}. The numerical profile record is not available in this live workspace state.</p>
+                )
               ) : (
                 <p>Embedded <code>$SPILLOVER</code> · {spill!.channels.length} matched channels · {matrixReviewItems.length || "no"} coefficient warning{matrixReviewItems.length === 1 ? "" : "s"}.</p>
               )}
