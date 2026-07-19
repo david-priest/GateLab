@@ -6,10 +6,38 @@
 export const supportsFileSystemAccess = (): boolean =>
   typeof window !== "undefined" && typeof window.showOpenFilePicker === "function" && typeof window.showSaveFilePicker === "function";
 
+interface DirectoryPickerWindow extends Window {
+  showDirectoryPicker?: (options?: { mode?: "read" | "readwrite"; id?: string }) => Promise<FileSystemDirectoryHandle>;
+}
+
+interface IterableDirectoryHandle extends FileSystemDirectoryHandle {
+  values(): AsyncIterableIterator<FileSystemHandle>;
+}
+
+const directoryPickerWindow = (): DirectoryPickerWindow => window as DirectoryPickerWindow;
+
+export const supportsDirectoryAccess = (): boolean =>
+  typeof window !== "undefined" && typeof directoryPickerWindow().showDirectoryPicker === "function";
+
 export interface PickedFile {
   handle: FileSystemFileHandle;
   bytes: Uint8Array;
   name: string;
+}
+
+/** A user-approved file that has not yet been read into GateLab's data model. */
+export interface PickedFileSource {
+  handle: FileSystemFileHandle;
+  file: File;
+  name: string;
+  /** Path below a selected source folder; just the filename for a normal file picker. */
+  relativePath: string;
+}
+
+export interface PickedDirectory {
+  handle: FileSystemDirectoryHandle;
+  name: string;
+  files: PickedFileSource[];
 }
 
 export interface PickFileOptions {
@@ -46,6 +74,69 @@ export async function pickFile(
     });
     const { bytes, name } = await readHandle(handle);
     return { handle, bytes, name };
+  } catch (e) {
+    if ((e as DOMException)?.name === "AbortError") return null;
+    throw e;
+  }
+}
+
+/** Open-file picker for a batch. Reading/parsing is deliberately left to the caller. */
+export async function pickFiles(
+  accept: Record<string, string[]>,
+  description: string,
+  options: PickFileOptions = {},
+): Promise<PickedFileSource[] | null> {
+  try {
+    const handles = await window.showOpenFilePicker!({
+      types: [{ description, accept }],
+      multiple: true,
+      ...(options.id ? { id: options.id } : {}),
+    });
+    return await Promise.all(handles.map(async (handle) => {
+      const file = await handle.getFile();
+      return { handle, file, name: file.name, relativePath: file.name };
+    }));
+  } catch (e) {
+    if ((e as DOMException)?.name === "AbortError") return null;
+    throw e;
+  }
+}
+
+/**
+ * Pick and enumerate a folder without reading file contents. GateLab imports a confirmed
+ * snapshot of the returned files; it does not silently mirror later folder changes.
+ */
+export async function pickDirectoryFiles(
+  extensions: readonly string[],
+  options: PickFileOptions = {},
+): Promise<PickedDirectory | null> {
+  try {
+    const handle = await directoryPickerWindow().showDirectoryPicker!({
+      mode: "read",
+      ...(options.id ? { id: options.id } : {}),
+    });
+    const allowed = new Set(extensions.map((extension) => extension.toLowerCase()));
+    const files: PickedFileSource[] = [];
+
+    const walk = async (directory: FileSystemDirectoryHandle, prefix: string): Promise<void> => {
+      for await (const entry of (directory as IterableDirectoryHandle).values()) {
+        const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.kind === "directory") {
+          await walk(entry as FileSystemDirectoryHandle, relativePath);
+          continue;
+        }
+        const dot = entry.name.lastIndexOf(".");
+        const extension = dot >= 0 ? entry.name.slice(dot).toLowerCase() : "";
+        if (!allowed.has(extension)) continue;
+        const fileHandle = entry as FileSystemFileHandle;
+        const file = await fileHandle.getFile();
+        files.push({ handle: fileHandle, file, name: file.name, relativePath });
+      }
+    };
+
+    await walk(handle, "");
+    files.sort((a, b) => a.relativePath.localeCompare(b.relativePath, undefined, { numeric: true }));
+    return { handle, name: handle.name, files };
   } catch (e) {
     if ((e as DOMException)?.name === "AbortError") return null;
     throw e;

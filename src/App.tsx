@@ -65,7 +65,10 @@ import {
 import type { CompensationProfileRecord } from "./engine/compensationProfileRecord";
 import {
   supportsFileSystemAccess,
+  supportsDirectoryAccess,
   pickFile,
+  pickFiles,
+  pickDirectoryFiles,
   writeHandle,
   saveAsHandle,
   readFromHandle,
@@ -105,6 +108,14 @@ import {
 } from "./ui/CompensationTab";
 import { StrategyTab, type StrategyConfig } from "./ui/StrategyTab";
 import { IllustrationTab } from "./ui/IllustrationTab";
+import {
+  FolderImportModal,
+  SampleManagerModal,
+  SampleNavigator,
+  type FolderImportItem,
+  type SampleImportProgress,
+  type SampleListItem,
+} from "./ui/SampleManager";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
 import { NavigateIcon, RectIcon, PolyIcon, QuadIcon } from "./ui/icons";
 import { useSampleDataRevisionKey } from "./ui/useSampleDataRevisions";
@@ -209,11 +220,21 @@ interface SampleEntry {
   sample: Sample;
   bytes: Uint8Array; // original FCS bytes (workspace bundling / re-parse)
   handle: FileSystemFileHandle | null; // File System Access handle (reference workspaces)
+  sourcePath?: string; // display-only path below a folder selected during this session
 }
 
-const linkBtnStyle: React.CSSProperties = {
-  background: "none", border: "none", padding: 0, cursor: "pointer", textDecoration: "underline", color: "inherit", font: "inherit",
-};
+interface FcsImportCandidate {
+  id: string;
+  name: string;
+  file: File;
+  handle: FileSystemFileHandle | null;
+  sourcePath?: string;
+}
+
+interface PendingFolderImport {
+  folderName: string;
+  candidates: FcsImportCandidate[];
+}
 
 function plotInteractionTokenFor(
   sample: Sample | null,
@@ -247,6 +268,7 @@ export default function App() {
   const [samples, setSamples] = useState<SampleEntry[]>([]);
   const sampleDataRevisionKey = useSampleDataRevisionKey(samples);
   const [activeSampleId, setActiveSampleId] = useState<string | null>(null);
+  const [pendingFolderImport, setPendingFolderImport] = useState<PendingFolderImport | null>(null);
   // Global sample filter (R's rv$sample_mask): samples excluded from the multi-sample analysis
   // tabs (Statistics / Proportions). New samples are included by default; default = all included.
   const [excludedSampleIds, setExcludedSampleIds] = useState<Set<string>>(new Set());
@@ -254,6 +276,27 @@ export default function App() {
     () => samples.filter((s) => !excludedSampleIds.has(s.id)),
     [samples, excludedSampleIds, sampleDataRevisionKey],
   );
+  const sampleListItems = useMemo<SampleListItem[]>(() => samples.map((entry) => ({
+    id: entry.id,
+    name: entry.name,
+    eventCount: entry.sample.fcs.nEvents,
+    channelCount: entry.sample.channels.length,
+    ...(entry.sourcePath ? { sourcePath: entry.sourcePath } : {}),
+  })), [samples, sampleDataRevisionKey]);
+  const folderImportItems = useMemo<FolderImportItem[]>(() => {
+    if (!pendingFolderImport) return [];
+    const existingNames = new Set(samples.map((entry) => entry.name.toLocaleLowerCase()));
+    const prefix = `${pendingFolderImport.folderName}/`;
+    return pendingFolderImport.candidates.map((candidate) => ({
+      id: candidate.id,
+      name: candidate.name,
+      relativePath: candidate.sourcePath?.startsWith(prefix)
+        ? candidate.sourcePath.slice(prefix.length)
+        : candidate.sourcePath ?? candidate.name,
+      size: candidate.file.size,
+      duplicateName: existingNames.has(candidate.name.toLocaleLowerCase()),
+    }));
+  }, [pendingFolderImport, samples]);
   const activeEntry = samples.find((s) => s.id === activeSampleId) ?? null;
   const sample = activeEntry?.sample ?? null;
   const activeDataRevision = sample?.dataRevision ?? 0;
@@ -294,6 +337,9 @@ export default function App() {
   const [yIdx, setYIdx] = useState(1);
   const [mode, setMode] = useState<DisplayMode>("pseudocolor");
   const [busy, setBusy] = useState(false);
+  const [sampleManagerOpen, setSampleManagerOpen] = useState(false);
+  const [sampleManagerSelection, setSampleManagerSelection] = useState<string[]>([]);
+  const [sampleImportProgress, setSampleImportProgress] = useState<SampleImportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingNewGate | null>(null);
   const [drawMode, setDrawMode] = useState<DrawMode>("navigate");
@@ -582,6 +628,10 @@ export default function App() {
     setSamples([]);
     setActiveSampleId(null);
     setExcludedSampleIds(new Set());
+    setSampleManagerOpen(false);
+    setSampleManagerSelection([]);
+    setPendingFolderImport(null);
+    setSampleImportProgress(null);
     setWorkspaceId(nextWorkspaceId);
     setWorkspaceCompensation(newEmptyWorkspaceCompensationState());
     compensationApplyGuardRef.current = false;
@@ -671,6 +721,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dirty, wsHandle, wsName, wsStorage]);
   const fileRef = useRef<HTMLInputElement>(null);
+  const folderRef = useRef<HTMLInputElement | null>(null);
   const xmlRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<HTMLInputElement>(null);
 
@@ -1192,20 +1243,41 @@ export default function App() {
     return [(cx !== undefined ? s.index(cx) : undefined) ?? dx, (cy !== undefined ? s.index(cy) : undefined) ?? dy];
   }
 
-  function makeEntry(bytes: Uint8Array, name: string, handle: FileSystemFileHandle | null): SampleEntry | null {
+  function createEntry(
+    bytes: Uint8Array,
+    name: string,
+    handle: FileSystemFileHandle | null,
+    sourcePath?: string,
+  ): SampleEntry {
+    const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    return {
+      id: crypto.randomUUID(),
+      name,
+      sample: new Sample(parseFcs(ab)),
+      bytes,
+      handle,
+      ...(sourcePath ? { sourcePath } : {}),
+    };
+  }
+
+  function makeEntry(
+    bytes: Uint8Array,
+    name: string,
+    handle: FileSystemFileHandle | null,
+    sourcePath?: string,
+  ): SampleEntry | null {
     try {
-      const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-      return { id: crypto.randomUUID(), name, sample: new Sample(parseFcs(ab)), bytes, handle };
+      return createEntry(bytes, name, handle, sourcePath);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       return null;
     }
   }
 
-  // Add a sample (append) — it joins the shared gating tree. The first sample seeds the tree.
-  function addSample(bytes: Uint8Array, name: string, handle: FileSystemFileHandle | null): SampleEntry | null {
-    const entry = makeEntry(bytes, name, handle);
-    if (!entry) return null;
+  // Append a parsed batch atomically. This avoids treating every member of a multi-file
+  // import as a separate first sample while React state updates are still queued.
+  function addSampleEntries(entries: readonly SampleEntry[]): void {
+    if (entries.length === 0) return;
     if (samples.length === 0) {
       setWorkspaceId(makeWorkspaceId());
       setScaleCacheEpoch((epoch) => epoch + 1);
@@ -1216,30 +1288,37 @@ export default function App() {
     }
     pendingCheckpointReasonRef.current = "after-fcs-import";
     skipDirtyRef.current = true;
-    const [nx, ny] = channelsFor(entry.sample);
-    setSamples((prev) => [...prev, entry]);
-    setActiveSampleId(entry.id);
+    const activeEntry = entries[entries.length - 1];
+    const [nx, ny] = channelsFor(activeEntry.sample);
+    setSamples((prev) => [...prev, ...entries]);
+    setActiveSampleId(activeEntry.id);
     setXIdx(nx);
     setYIdx(ny);
     setXRange(null);
     setYRange(null);
-    setInstrumentMode(entry.sample.instrumentMode); // fresh sample → "auto"
-    if (state.root_population_id === null) dispatch({ type: "loadSample", nEvents: entry.sample.fcs.nEvents });
-    if (handle) void rememberHandle("fcs:" + name, handle);
+    setInstrumentMode(activeEntry.sample.instrumentMode); // fresh sample → "auto"
+    if (state.root_population_id === null) {
+      dispatch({ type: "loadSample", nEvents: entries[0].sample.fcs.nEvents });
+    }
+    for (const entry of entries) {
+      if (entry.handle) void rememberHandle("fcs:" + entry.name, entry.handle);
+    }
     // Warn if an existing gate references a channel this sample lacks: getGateMask returns
     // an all-false mask (zero events) for such a gate, which would otherwise be a silent
     // zero on this sample — mirror R's validate_workspace_channels skip-and-warn.
-    const chKeys = new Set(entry.sample.channelNames());
-    const skipped = Object.values(state.gates)
-      .filter((g) => !chKeys.has(g.x_channel) || !chKeys.has(g.y_channel))
-      .map((g) => g.name);
-    if (skipped.length) {
+    const warnings = entries.flatMap((entry) => {
+      const chKeys = new Set(entry.sample.channelNames());
+      const skipped = Object.values(state.gates)
+        .filter((g) => !chKeys.has(g.x_channel) || !chKeys.has(g.y_channel))
+        .map((g) => g.name);
+      return skipped.length > 0 ? [`${entry.name}: ${skipped.join(", ")}`] : [];
+    });
+    if (warnings.length > 0) {
       setError(
-        `Sample "${name}" is missing channels for ${skipped.length} gate(s): ` +
-          `${skipped.join(", ")}. Those gates match no events in this sample.`,
+        `${warnings.length} imported sample${warnings.length === 1 ? " is" : "s are"} missing channels used by existing gates: ` +
+          `${warnings.join("; ")}. Those gates match no events in the affected samples.`,
       );
     }
-    return entry;
   }
 
   function selectSample(id: string) {
@@ -1255,13 +1334,41 @@ export default function App() {
     setInstrumentMode(entry.sample.instrumentMode);
   }
 
-  async function removeSample(id: string) {
+  function setSampleIncluded(id: string, included: boolean): void {
+    setExcludedSampleIds((previous) => {
+      const next = new Set(previous);
+      if (included) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function includeAllSamples(): void {
+    setExcludedSampleIds(new Set());
+  }
+
+  function includeNoSamples(): void {
+    setExcludedSampleIds(new Set(samples.map((entry) => entry.id)));
+  }
+
+  function invertIncludedSamples(): void {
+    setExcludedSampleIds((previous) => new Set(
+      samples.filter((entry) => !previous.has(entry.id)).map((entry) => entry.id),
+    ));
+  }
+
+  async function removeSamples(ids: readonly string[]) {
+    if (ids.length === 0) return;
     await checkpointCurrentWorkspace("before-sample-remove");
-    const next = samples.filter((s) => s.id !== id);
+    const removed = new Set(ids);
+    const next = samples.filter((entry) => !removed.has(entry.id));
     const curX = sample?.channels[xIdx]?.key;
     const curY = sample?.channels[yIdx]?.key;
     setSamples(next);
-    if (id === activeSampleId) {
+    setExcludedSampleIds((previous) => new Set([...previous].filter((id) => !removed.has(id))));
+    setMetadata((previous) => Object.fromEntries(Object.entries(previous).filter(([id]) => !removed.has(id))));
+    setDivisionProfiles((previous) => Object.fromEntries(Object.entries(previous).filter(([id]) => !removed.has(id))));
+    if (activeSampleId !== null && removed.has(activeSampleId)) {
       skipDirtyRef.current = true;
       const na = next[0] ?? null;
       setActiveSampleId(na?.id ?? null);
@@ -1274,30 +1381,90 @@ export default function App() {
         setYRange(null);
       }
     }
+    setImportMsg(`Removed ${ids.length} sample${ids.length === 1 ? "" : "s"} from the workspace.`);
   }
 
-  async function openFile(file: File) {
+  async function importFcsCandidates(candidates: readonly FcsImportCandidate[]): Promise<void> {
+    if (candidates.length === 0) return;
     setBusy(true);
     setError(null);
-    addSample(new Uint8Array((await file.arrayBuffer()).slice(0)), file.name, null);
-    setBusy(false);
+    const entries: SampleEntry[] = [];
+    const failures: string[] = [];
+    try {
+      for (let index = 0; index < candidates.length; index++) {
+        const candidate = candidates[index];
+        setSampleImportProgress({ current: index + 1, total: candidates.length, name: candidate.name });
+        try {
+          const bytes = new Uint8Array((await candidate.file.arrayBuffer()).slice(0));
+          entries.push(createEntry(bytes, candidate.name, candidate.handle, candidate.sourcePath));
+        } catch (cause) {
+          failures.push(`${candidate.name}: ${cause instanceof Error ? cause.message : String(cause)}`);
+        }
+        // Let progress paint and keep the browser responsive between synchronous FCS parses.
+        if (index < candidates.length - 1) {
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        }
+      }
+      addSampleEntries(entries);
+      if (entries.length > 0) {
+        setImportMsg(`Added ${entries.length} FCS file${entries.length === 1 ? "" : "s"} to the workspace.`);
+      }
+      if (failures.length > 0) {
+        setError(`${failures.length} FCS file${failures.length === 1 ? "" : "s"} could not be loaded: ${failures.join("; ")}`);
+      }
+    } finally {
+      setSampleImportProgress(null);
+      setBusy(false);
+    }
   }
 
-  // Open (add) FCS — File System Access picker (keeps a handle), or the input fallback.
+  // Open (add) one or more FCS files — native handles where supported, input fallback elsewhere.
   async function openFcs() {
     if (!supportsFileSystemAccess()) {
       fileRef.current?.click();
       return;
     }
     try {
-      const picked = await pickFile(FCS_FILE_ACCEPT, "FCS file", { id: "gatelab-open-fcs" });
-      if (!picked) return;
-      setBusy(true);
-      addSample(picked.bytes, picked.name, picked.handle);
-      setBusy(false);
+      const picked = await pickFiles(FCS_FILE_ACCEPT, "FCS files", { id: "gatelab-open-fcs" });
+      if (!picked || picked.length === 0) return;
+      await importFcsCandidates(picked.map((source) => ({
+        id: crypto.randomUUID(),
+        name: source.name,
+        file: source.file,
+        handle: source.handle,
+      })));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
+    }
+  }
+
+  function stageFolderImport(folderName: string, candidates: FcsImportCandidate[]): void {
+    if (candidates.length === 0) {
+      setError(`No .fcs files were found in ${folderName}.`);
+      return;
+    }
+    setPendingFolderImport({ folderName, candidates });
+  }
+
+  async function openFcsFolder(): Promise<void> {
+    if (!supportsDirectoryAccess()) {
+      folderRef.current?.click();
+      return;
+    }
+    setError(null);
+    try {
+      const picked = await pickDirectoryFiles([".fcs"], { id: "gatelab-open-fcs-folder" });
+      if (!picked) return;
+      stageFolderImport(picked.name, picked.files.map((source) => ({
+        id: crypto.randomUUID(),
+        name: source.name,
+        file: source.file,
+        handle: source.handle,
+        sourcePath: `${picked.name}/${source.relativePath}`,
+      })));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -2033,81 +2200,75 @@ export default function App() {
       <div className="gl-body">
         <aside className="gl-left" style={{ width: leftWidth }} aria-label="Samples and workspace">
           <div className="gl-left-resize" onMouseDown={startLeftResize} title="Drag to resize samples panel" />
-          <div className="gl-side-title">Samples</div>
-          <button
-            className="gl-btn gl-btn-block"
-            disabled={busy}
-            title="Load one or more .fcs files into the shared gating tree"
-            onClick={openFcs}
-          >
-            {busy ? "Loading…" : "+ Add FCS…"}
-          </button>
+          <SampleNavigator
+            items={sampleListItems}
+            activeId={activeSampleId}
+            excludedIds={excludedSampleIds}
+            busy={busy}
+            importProgress={sampleImportProgress}
+            onOpenFiles={() => void openFcs()}
+            onOpenFolder={() => void openFcsFolder()}
+            onManage={() => {
+              setSampleManagerSelection([]);
+              setSampleManagerOpen(true);
+            }}
+            onManageSample={(id) => {
+              setSampleManagerSelection([id]);
+              setSampleManagerOpen(true);
+            }}
+            onActivate={selectSample}
+            onToggleIncluded={setSampleIncluded}
+            onIncludeAll={includeAllSamples}
+            onIncludeNone={includeNoSamples}
+            onInvertIncluded={invertIncludedSamples}
+          />
           <input
             ref={fileRef}
             type="file"
             accept=".fcs"
+            multiple
             style={{ display: "none" }}
             onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) openFile(f);
+              const files = Array.from(e.target.files ?? []);
+              if (files.length > 0) {
+                void importFcsCandidates(files.map((file) => ({
+                  id: crypto.randomUUID(),
+                  name: file.name,
+                  file,
+                  handle: null,
+                })));
+              }
               e.target.value = "";
             }}
           />
-          {samples.length > 1 && (
-            <div className="gl-sample-filter" style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 11, opacity: 0.85, margin: "2px 0 4px" }}>
-              <span>{includedSamples.length} of {samples.length} in analyses</span>
-              <button type="button" style={linkBtnStyle} title="Include every sample in the Statistics / Proportions analyses" onClick={() => setExcludedSampleIds(new Set())}>all</button>
-              <button type="button" style={linkBtnStyle} title="Exclude every sample from the analyses" onClick={() => setExcludedSampleIds(new Set(samples.map((s) => s.id)))}>none</button>
-            </div>
-          )}
-          <div className="gl-sample-list">
-            {samples.length === 0 ? (
-              <em className="gl-hint">No files loaded.</em>
-            ) : (
-              samples.map((entry) => (
-                <div
-                  key={entry.id}
-                  className={"gl-sample-row" + (entry.id === activeSampleId ? " active" : "")}
-                  title={entry.name}
-                  onClick={() => selectSample(entry.id)}
-                >
-                  <input
-                    type="checkbox"
-                    className="gl-sample-include"
-                    title="Include this sample in the Statistics / Proportions analyses"
-                    checked={!excludedSampleIds.has(entry.id)}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => {
-                      const include = e.target.checked;
-                      setExcludedSampleIds((prev) => {
-                        const next = new Set(prev);
-                        if (include) next.delete(entry.id);
-                        else next.add(entry.id);
-                        return next;
-                      });
-                    }}
-                  />
-                  <div className="gl-sample-body">
-                    <div className="gl-sample-name">{entry.name}</div>
-                    <div className="gl-sample-meta">
-                      {entry.sample.fcs.nEvents.toLocaleString()} events · {entry.sample.channels.length} ch
-                    </div>
-                  </div>
-                  <button
-                    className="gl-sample-remove"
-                    title="Remove this sample"
-                    aria-label={`Remove ${entry.name}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void removeSample(entry.id);
-                    }}
-                  >
-                    ×
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
+          <input
+            ref={(node) => {
+              folderRef.current = node;
+              if (node) node.setAttribute("webkitdirectory", "");
+            }}
+            type="file"
+            accept=".fcs"
+            multiple
+            style={{ display: "none" }}
+            onChange={(event) => {
+              const files = Array.from(event.target.files ?? []);
+              if (files.length > 0) {
+                const rawRoot = files[0].webkitRelativePath.split("/")[0] || "Selected folder";
+                stageFolderImport(rawRoot, files.map((file) => {
+                  const pathParts = file.webkitRelativePath.split("/").filter(Boolean);
+                  const relativePath = pathParts.length > 1 ? pathParts.slice(1).join("/") : file.name;
+                  return {
+                    id: crypto.randomUUID(),
+                    name: file.name,
+                    file,
+                    handle: null,
+                    sourcePath: `${rawRoot}/${relativePath}`,
+                  };
+                }));
+              }
+              event.target.value = "";
+            }}
+          />
 
           <div className="gl-side-title" style={{ marginTop: 10 }}>
             Workspace
@@ -2730,6 +2891,42 @@ export default function App() {
           </div>
         </aside>
       </div>
+
+      {sampleManagerOpen && (
+        <SampleManagerModal
+          items={sampleListItems}
+          activeId={activeSampleId}
+          excludedIds={excludedSampleIds}
+          initialSelectedIds={sampleManagerSelection}
+          onClose={() => {
+            setSampleManagerOpen(false);
+            setSampleManagerSelection([]);
+          }}
+          onActivate={selectSample}
+          onToggleIncluded={setSampleIncluded}
+          onIncludeAll={includeAllSamples}
+          onIncludeNone={includeNoSamples}
+          onInvertIncluded={invertIncludedSamples}
+          onRemove={async (ids) => {
+            await removeSamples(ids);
+            setSampleManagerSelection([]);
+          }}
+        />
+      )}
+
+      {pendingFolderImport && (
+        <FolderImportModal
+          folderName={pendingFolderImport.folderName}
+          items={folderImportItems}
+          onCancel={() => setPendingFolderImport(null)}
+          onImport={(ids) => {
+            const selected = new Set(ids);
+            const candidates = pendingFolderImport.candidates.filter((candidate) => selected.has(candidate.id));
+            setPendingFolderImport(null);
+            void importFcsCandidates(candidates);
+          }}
+        />
+      )}
 
       {pending && sample && state.root_population_id && (
         <GateModals
