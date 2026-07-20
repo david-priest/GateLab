@@ -61,6 +61,15 @@ function testFile(name: string): File {
 }
 
 describe("App sample management", () => {
+  it("starts with the main left and right panes twenty percent wider", () => {
+    act(() => root.render(<App />));
+
+    expect(host.querySelector<HTMLElement>('[aria-label="Samples and workspace"]')?.style.width)
+      .toBe("264px");
+    expect(host.querySelector<HTMLElement>('[aria-label="Gates and populations"]')?.style.width)
+      .toBe("672px");
+  });
+
   it("imports a batch atomically and removes selected files through the manager", async () => {
     act(() => root.render(<App />));
     const fileInputs = host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]');

@@ -136,6 +136,8 @@ import { useSampleDataRevisionKey } from "./ui/useSampleDataRevisions";
 import { useContextualGlobalScales } from "./ui/useContextualGlobalScales";
 
 const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
+const INITIAL_LEFT_PANE_WIDTH = 264;
+const INITIAL_RIGHT_PANE_WIDTH = 672;
 // A .gatelab file is either a JSON reference workspace or a ZIP bundle. Supplying the
 // real formats avoids Chromium/macOS having to infer a custom extension from octet-stream.
 const WORKSPACE_FILE_ACCEPT = {
@@ -383,8 +385,8 @@ export default function App() {
   const [panelVersion, setPanelVersion] = useState(0); // bumps when a channel display label changes
   const [crud, setCrud] = useState<CrudModal | null>(null);
   const [importMsg, setImportMsg] = useState<string | null>(null);
-  const [leftWidth, setLeftWidth] = useState(220);
-  const [sideWidth, setSideWidth] = useState(560);
+  const [leftWidth, setLeftWidth] = useState(INITIAL_LEFT_PANE_WIDTH);
+  const [sideWidth, setSideWidth] = useState(INITIAL_RIGHT_PANE_WIDTH);
   const [xRange, setXRange] = useState<[number, number] | null>(null);
   const [yRange, setYRange] = useState<[number, number] | null>(null);
   const [maxEvents, setMaxEvents] = useState(50000); // 0 = all (no downsampling)
