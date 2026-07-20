@@ -75,6 +75,7 @@ describe("compensation comparison export", () => {
       populationName: "Live cells",
       filterLabel: "Flagged for follow-up",
       densitySmoothing: 6,
+      densityColorPower: 1.6,
     }, 0, 2);
 
     expect(page.querySelectorAll("image")).toHaveLength(2);

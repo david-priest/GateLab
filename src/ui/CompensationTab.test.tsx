@@ -157,6 +157,8 @@ function renderTab(
     onSolveCompensationSweep?: CompensationSweepSolver;
     visible?: boolean;
     stateKey?: string;
+    densityColorPower?: number;
+    onDensityColorPowerChange?: (value: number) => void;
   }> = {},
 ) {
   const stateKey = options.stateKey ?? "workspace-a:sample-a";
@@ -179,6 +181,8 @@ function renderTab(
       onSolveCompensationSweep={options.onSolveCompensationSweep}
       visible={options.visible}
       stateKey={stateKey}
+      densityColorPower={options.densityColorPower}
+      onDensityColorPowerChange={options.onDensityColorPowerChange}
     />,
   ));
 }
@@ -675,6 +679,7 @@ describe("CompensationTab CyTOF import path", () => {
       }),
     }, { activeLayer: "compensated" });
     const solveSweep = vi.fn<CompensationSweepSolver>(async () => []);
+    const changeDensityColorPower = vi.fn();
     renderTab(sample, {
       stateKey: "workspace-a:cytof-applied",
       compensationOn: true,
@@ -682,6 +687,8 @@ describe("CompensationTab CyTOF import path", () => {
       installedBaselineProfile: profile,
       onApplyProfile: applied,
       onSolveCompensationSweep: solveSweep,
+      densityColorPower: 1.8,
+      onDensityColorPowerChange: changeDensityColorPower,
     });
 
     expect(host.textContent).toContain("CyTOF compensation installed");
@@ -752,6 +759,14 @@ describe("CompensationTab CyTOF import path", () => {
       densitySmoothing.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(host.querySelector(".gl-comp-density-smoothing output")?.textContent).toBe("10");
+    const densityColour = host.querySelector<HTMLInputElement>('input[aria-label="Pseudocolour density contrast"]')!;
+    expect(densityColour.value).toBe("1.8");
+    expect(densityColour.closest("label")?.getAttribute("title")).toContain("changes colour mapping only");
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(densityColour, "2.2");
+      densityColour.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(changeDensityColorPower).toHaveBeenCalledWith(2.2);
     expect(host.querySelectorAll(".gl-comp-global-tile-head")).toHaveLength(2);
     expect(host.querySelector(".gl-comp-global-tile-head")?.textContent).toContain("CD45 → Barcode");
     expect(host.querySelector(".gl-comp-global-tile-head")?.textContent).toContain("10.0%");

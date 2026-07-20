@@ -564,6 +564,7 @@ input[type="number"]::-webkit-outer-spin-button {
 }
 .gl-comp-density-smoothing input { width: 100%; margin: 0; }
 .gl-comp-density-smoothing output { font-variant-numeric: tabular-nums; text-align: right; }
+.gl-comp-density-colour { flex: none; margin-left: 7px; }
 .gl-comp-staged-actions {
   display: flex; align-items: center; gap: 6px; margin-left: 0; color: #7a3e00; font-size: 10px;
 }
@@ -1717,3 +1718,20 @@ input[type="number"]::-webkit-outer-spin-button {
 }
 .gl-btn-ghost:hover:not(:disabled) { background: var(--hover); border-color: #b9d4fb; color: var(--text); }
 .gl-btn-ghost:disabled { opacity: 0.45; cursor: default; }
+
+.gl-density-colour-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.gl-density-colour-control input[type="range"] { width: 82px; }
+.gl-density-colour-control output {
+  min-width: 24px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}

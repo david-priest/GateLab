@@ -162,6 +162,25 @@ export function patchCytofForGateLab(src: string): string {
     }
   }
 
+  // GateLab exposes a shared pseudocolour transfer exponent. It affects only the mapping from
+  // estimated density to the jet palette: event positions, density bins, and event inclusion are
+  // unchanged. A value above one reserves yellow/red for the genuinely densest event cores.
+  const densityPowerSetupNeedle = `_ctx.globalAlpha = _plotData.point_alpha || 0.85;
+
+        for (var j = 0; j < n; j++) {`;
+  const densityPowerSetupPatch = `_ctx.globalAlpha = _plotData.point_alpha || 0.85;
+        var colourPower = Number(_plotData.density_color_power);
+        if (!isFinite(colourPower) || colourPower <= 0) colourPower = 1.6;
+
+        for (var j = 0; j < n; j++) {`;
+  const densityPowerNeedle = "var t = cache.densities[i] / cache.maxDens;";
+  const densityPowerPatch = "var t = Math.pow(Math.min(1, cache.densities[i] / cache.maxDens), colourPower);";
+  if (out.includes(densityPowerSetupNeedle)) out = out.replace(densityPowerSetupNeedle, densityPowerSetupPatch);
+  if (out.includes(densityPowerNeedle)) out = out.replace(densityPowerNeedle, densityPowerPatch);
+  if (!out.includes("_plotData.density_color_power") || !out.includes(densityPowerPatch)) {
+    console.warn("[GateLab] cytof pseudocolour-transfer patch did not match.");
+  }
+
   // Robust auto ranges intentionally leave a small tail off-scale. Keep those events visible
   // as a pile-up on the corresponding plot edge (the FlowJo/Cytobank convention), while the
   // underlying scales remain unclamped so gates and pointer-coordinate inversion are untouched.
@@ -414,6 +433,23 @@ export function patchMiniPlot(src: string): string {
   if (out.includes(densityCeilingNeedle)) out = out.replace(densityCeilingNeedle, densityCeilingPatch);
   if (out.includes(densityRatioNeedle)) out = out.replace(densityRatioNeedle, densityRatioPatch);
 
+  // The grid renderers unpack a top-level style payload into each mini-plot configuration. Keep
+  // the shared density transfer setting intact through that boundary for Strategy/Illustration.
+  const compactPointStyleNeedle = `point_alpha: pointAlpha,
+                point_size: pointSize,`;
+  const compactPointStylePatch = `point_alpha: pointAlpha,
+                density_color_power: data.density_color_power,
+                point_size: pointSize,`;
+  const alignedPointStyleNeedle = "point_alpha:     pointAlpha,";
+  const alignedPointStylePatch = `point_alpha:     pointAlpha,
+                    density_color_power: data.density_color_power,`;
+  if (out.includes(compactPointStyleNeedle)) out = out.replace(compactPointStyleNeedle, compactPointStylePatch);
+  if (out.includes(alignedPointStyleNeedle)) out = out.split(alignedPointStyleNeedle).join(alignedPointStylePatch);
+  out = out.replace(
+    "if (!isFinite(colourPower) || colourPower <= 0) colourPower = 1;",
+    "if (!isFinite(colourPower) || colourPower <= 0) colourPower = 1.6;",
+  );
+
   // Compensation biplots use a tighter label inset than publication-oriented mini-plots.
   // Keeping this configurable avoids changing Strategy and Illustration output.
   const titleFontNeedle = "var titleFs = (fs.title || 11) + 'px';";
@@ -457,6 +493,7 @@ export function patchMiniPlot(src: string): string {
     !out.includes(densityLookupPatch) ||
     !out.includes("var requestedCeiling = Number(densityColorCeiling);") ||
     !out.includes(densityRatioPatch) ||
+    !out.includes("density_color_power: data.density_color_power") ||
     !out.includes("H + axisLabelOffset") ||
     !out.includes("-axisLabelOffset") ||
     !out.includes("axisTickSize + 2") ||

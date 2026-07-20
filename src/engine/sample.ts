@@ -19,6 +19,7 @@ import type {
 } from "./workspaceCompensation";
 import { encodeFloat32Base64, encodeUint8Base64 } from "./encode";
 import { includePlotGatesInAxisRange, robustAxisRange } from "./axisRange";
+import { DEFAULT_DENSITY_COLOR_POWER } from "./pseudocolor";
 import { logicleTicks, scatterTicks, type AxisTicks } from "./ticks";
 import {
   extractDisplaySpillover,
@@ -82,6 +83,8 @@ export interface ScatterPayload {
   y_range: [number, number];
   display_mode: DisplayMode;
   point_alpha: number;
+  /** Density-to-palette exponent for pseudocolour rendering. */
+  density_color_power: number;
   /** Outer contour threshold as % of peak density (contour mode). */
   contour_threshold: number;
   n_events: number;
@@ -1836,6 +1839,7 @@ export class Sample {
       y_range: yr,
       display_mode: mode,
       point_alpha: 0.4,
+      density_color_power: DEFAULT_DENSITY_COLOR_POWER,
       contour_threshold: contourThreshold,
       n_events: plottedN, // true population size (title); plotted array may be capped
       gates,

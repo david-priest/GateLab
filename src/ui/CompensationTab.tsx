@@ -1,5 +1,7 @@
 import {
+  createContext,
   useEffect,
+  useContext,
   useMemo,
   useRef,
   useState,
@@ -8,6 +10,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
+import { DEFAULT_DENSITY_COLOR_POWER } from "../engine/pseudocolor";
 import {
   reportMatrixCompatibility,
   type MatrixCompatibilityReport,
@@ -71,6 +74,9 @@ import {
 import { CompensationComparisonExportDialog } from "./CompensationComparisonExportDialog";
 import { CompensationMatrixExportDialog } from "./CompensationMatrixExportDialog";
 import { usePersistedTabState } from "./tabState";
+import { DensityColourControl } from "./DensityColourControl";
+
+const DensityColorPowerContext = createContext(DEFAULT_DENSITY_COLOR_POWER);
 
 interface Props {
   sample: Sample;
@@ -94,6 +100,8 @@ interface Props {
   onCancelCompensationSweep?: () => void;
   visible?: boolean;
   stateKey: string;
+  densityColorPower?: number;
+  onDensityColorPowerChange?: (value: number) => void;
 }
 
 export interface CompensationReviewPopulation {
@@ -491,6 +499,7 @@ function DensityBiplot({
   densitySmoothing: number;
   showZeroPile?: boolean;
 }>) {
+  const densityColorPower = useContext(DensityColorPowerContext);
   const containerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const container = containerRef.current;
@@ -517,6 +526,7 @@ function DensityBiplot({
           densitySmoothingRadius,
         ),
         densitySmoothingRadius,
+        densityColorPower,
       });
     };
     const schedule = () => {
@@ -532,7 +542,7 @@ function DensityBiplot({
       resizeObserver?.disconnect();
       if (animationFrame !== null) cancelAnimationFrame(animationFrame);
     };
-  }, [densityColorCeiling, densitySmoothing, maximumSize, minimumSize, panel, preview, receiverLabel, sourceLabel, title]);
+  }, [densityColorCeiling, densityColorPower, densitySmoothing, maximumSize, minimumSize, panel, preview, receiverLabel, sourceLabel, title]);
   const zeroPercent = (count: number) => preview.eventCount > 0
     ? `${(count / preview.eventCount * 100).toFixed(1)}%`
     : "0.0%";
@@ -573,6 +583,7 @@ function CachedDensityBiplot({
   densityColorCeiling?: number;
   densitySmoothing: number;
 }>) {
+  const densityColorPower = useContext(DensityColorPowerContext);
   const containerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const container = containerRef.current;
@@ -602,6 +613,7 @@ function CachedDensityBiplot({
         size,
         densityColorCeiling: resolvedDensityColorCeiling,
         densitySmoothingRadius,
+        densityColorPower,
         canvasScale: 2,
       });
       const originalCanvas = container.querySelector("canvas");
@@ -617,6 +629,7 @@ function CachedDensityBiplot({
         size,
         densityColorCeiling: resolvedDensityColorCeiling,
         densitySmoothingRadius,
+        densityColorPower,
         canvasScale: 2,
       });
       const compensatedCanvas = compensatedHost.querySelector("canvas");
@@ -642,7 +655,7 @@ function CachedDensityBiplot({
       resizeObserver?.disconnect();
       cancelQueuedRender?.();
     };
-  }, [densityColorCeiling, densitySmoothing, maximumSize, minimumSize, preview, receiverLabel, sourceLabel, title]);
+  }, [densityColorCeiling, densityColorPower, densitySmoothing, maximumSize, minimumSize, preview, receiverLabel, sourceLabel, title]);
 
   return (
     <figure
@@ -1089,6 +1102,8 @@ export function CompensationTab({
   onCancelCompensationSweep,
   visible = true,
   stateKey,
+  densityColorPower = DEFAULT_DENSITY_COLOR_POWER,
+  onDensityColorPowerChange = () => undefined,
 }: Props) {
   const installedStatus = sample.compensatedLayerStatus();
   const installedMetadata = installedStatus.state === "missing" ? null : installedStatus.metadata;
@@ -2667,10 +2682,12 @@ export function CompensationTab({
       populationName: activeReviewPopulation?.name ?? "All Events",
       filterLabel: globalExportFilterLabel,
       densitySmoothing: resolvedDensitySmoothing,
+      densityColorPower,
     }, format, onProgress);
   };
 
   return (
+    <DensityColorPowerContext.Provider value={densityColorPower}>
     <div
       className="gl-tab-panel gl-tab-fill gl-compensation-tab"
       style={visible ? undefined : { display: "none" }}
@@ -2998,6 +3015,11 @@ export function CompensationTab({
             />
             <output>{resolvedDensitySmoothing}</output>
           </label>
+          <DensityColourControl
+            className="gl-comp-density-colour"
+            value={densityColorPower}
+            onChange={onDensityColorPowerChange}
+          />
           {Object.keys(stagedCoefficients).length > 0 && (
             <div className="gl-comp-staged-actions">
               <span>{Object.keys(stagedCoefficients).length} pending edit{Object.keys(stagedCoefficients).length === 1 ? "" : "s"}</span>
@@ -3811,5 +3833,6 @@ export function CompensationTab({
         />
       )}
     </div>
+    </DensityColorPowerContext.Provider>
   );
 }

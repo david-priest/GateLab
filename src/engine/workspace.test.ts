@@ -40,6 +40,7 @@ function makeWs(): WorkspaceFile {
       mode: "contour",
       maxEvents: 20000,
       contourThreshold: 10,
+      densityColorPower: 1.8,
       fontSizes: { tick: 12, axis: 14, title: 11, gate: 12 },
     },
     metadataColumns: [{ name: "condition", levels: ["unstim", "stim"] }, { name: "donor" }],
@@ -115,6 +116,7 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     expect(back.samples[1].compensationOn).toBe(false);
     expect(back.scales.globalScales["FSC-A"]).toEqual([0, 8]);
     expect(back.display.mode).toBe("contour");
+    expect(back.display.densityColorPower).toBe(1.8);
     expect(back.display.fontSizes).toEqual({ tick: 12, axis: 14, title: 11, gate: 12 });
     expect(back.gating.selected_gate_id).toBe("g1");
     expect(back.workspaceId).toBe("workspace-test-1");
@@ -144,8 +146,10 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
   it("accepts older v2 workspaces without gating font settings", () => {
     const older = cloneWs(ws);
     delete older.display.fontSizes;
+    delete older.display.densityColorPower;
     expect(validateWorkspace(older)).toBe(true);
     expect(readWorkspaceBytes(packWorkspaceReference(older)).ws.display.fontSizes).toBeUndefined();
+    expect(readWorkspaceBytes(packWorkspaceReference(older)).ws.display.densityColorPower).toBeUndefined();
   });
 
   it("round-trips coordinate-bound division profiles while accepting legacy profiles without a binding", () => {

@@ -178,6 +178,7 @@ describe("buildMultiStrategyPayload", () => {
       plotSize: 200,
       contourThreshold: 5,
       pointAlpha: 0.35,
+      densityColorPower: 1.6,
       pointSize: 1.2,
       kdeBandwidth: 0,
       pubStyle: false,
@@ -189,6 +190,7 @@ describe("buildMultiStrategyPayload", () => {
     expect(payload.containerId).toBe("strategy-grid-container");
     expect((payload.nodes as unknown[]).length).toBe(3);
     expect(payload.display_mode).toBe("pseudocolor");
+    expect(payload.density_color_power).toBe(1.6);
     expect(payload.plot_size).toBe(200);
     expect(payload.strategy_context_title).toBe("2 populations");
     expect(payload.strategy_context_title_font).toBe(11); // title(10) + 1

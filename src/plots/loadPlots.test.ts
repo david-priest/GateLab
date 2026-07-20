@@ -62,6 +62,19 @@ describe("GateLab cytof interaction patches", () => {
     warning.mockRestore();
   });
 
+  it("reserves warm pseudocolours for denser event cores without changing density", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(patched).toContain("var colourPower = Number(_plotData.density_color_power);");
+    expect(patched).toContain("colourPower = 1.6;");
+    expect(patched).toContain("Math.pow(Math.min(1, cache.densities[i] / cache.maxDens), colourPower)");
+    expect(() => new Function(patched)).not.toThrow();
+
+    warning.mockRestore();
+  });
+
   it("does not duplicate edge-pile logic after GateLabR carries it natively", () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const nativeRenderer = patchCytofForGateLab(cytofSrc);
@@ -93,6 +106,7 @@ describe("GateLab mini-plot density patches", () => {
     expect(patched).toContain("if (qd > 0) occupied.push(qd);");
     expect(patched).toContain("Math.floor(clipQ * (occupied.length - 1))");
     expect(patched).toContain("Math.pow(Math.min(1, densities[idx] / colourCeiling), colourPower)");
+    expect(patched).toContain("density_color_power: data.density_color_power");
     expect(patched).toContain("ctx.arc(px, py, dotR, 0, 6.2832)");
     expect(patched).toContain("H + axisLabelOffset");
     expect(patched).toContain("-axisLabelOffset");

@@ -107,6 +107,7 @@ export interface IllustrationOptions {
   fitToColumns: boolean;
   contourThreshold: number;
   pointAlpha: number;
+  densityColorPower: number;
   pointSize: number;
   kdeBandwidth: number; // contour smoothing (0 = auto)
   colorByPop: boolean;
@@ -223,6 +224,7 @@ export function buildIllustrationPayload(
     fit_to_columns: opts.fitToColumns,
     contour_threshold: opts.contourThreshold,
     point_alpha: opts.pointAlpha,
+    density_color_power: opts.densityColorPower,
     point_size: opts.pointSize,
     kde_bandwidth: opts.kdeBandwidth,
     color_by_population: opts.colorByPop,

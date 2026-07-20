@@ -70,6 +70,8 @@ export interface WorkspaceFile {
     mode: DisplayMode;
     maxEvents: number;
     contourThreshold: number;
+    /** Shared pseudocolour transfer exponent. Higher values reserve warm colours for denser cores. */
+    densityColorPower?: number;
     /** Main Gating plot typography. Optional for workspaces saved before these controls existed. */
     fontSizes?: GatingFontSizes;
   };
@@ -101,6 +103,8 @@ export interface IllustrationConfig {
   popColors: Record<string, string>;
   pointSize: number;
   pointAlpha: number;
+  /** Shared pseudocolour transfer exponent captured with illustration presets. */
+  densityColorPower?: number;
   contourThreshold: number;
   kdeBandwidth: number;
   pubStyle: boolean;

@@ -30,6 +30,7 @@ export interface CompensationComparisonExportMetadata {
   readonly populationName: string;
   readonly filterLabel: string;
   readonly densitySmoothing: number;
+  readonly densityColorPower: number;
 }
 
 export interface CompensationComparisonExportProgress {
@@ -106,6 +107,7 @@ function appendPlot(
   size: number,
   densitySmoothingRadius: number,
   densityColorCeiling: number,
+  densityColorPower: number,
 ): void {
   const host = document.createElement("div");
   renderCompensationDensityBiplotSurface(host, {
@@ -117,6 +119,7 @@ function appendPlot(
     size,
     densityColorCeiling,
     densitySmoothingRadius,
+    densityColorPower,
     canvasScale: 300 / 96,
   });
   const canvas = host.querySelector("canvas");
@@ -205,8 +208,8 @@ export function composeCompensationComparisonPageSvg(
       cardY + 14,
       { size: 8.5, fill: "#5f6d80", anchor: "end" },
     );
-    appendPlot(root, pair, preview, "original", plotsX, plotY, plotSize, smoothingRadius, densityColorCeiling);
-    appendPlot(root, pair, preview, "compensated", plotsX + plotSize + plotGap, plotY, plotSize, smoothingRadius, densityColorCeiling);
+    appendPlot(root, pair, preview, "original", plotsX, plotY, plotSize, smoothingRadius, densityColorCeiling, metadata.densityColorPower);
+    appendPlot(root, pair, preview, "compensated", plotsX + plotSize + plotGap, plotY, plotSize, smoothingRadius, densityColorCeiling, metadata.densityColorPower);
 
     if (row < 2) {
       const divider = document.createElementNS(SVG_NS, "line");

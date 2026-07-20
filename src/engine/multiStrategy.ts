@@ -408,6 +408,7 @@ export interface MultiStrategyPayloadOptions {
   plotSize: number;
   contourThreshold: number;
   pointAlpha: number;
+  densityColorPower: number;
   pointSize: number;
   kdeBandwidth: number;
   pubStyle: boolean; // black gates, no label background
@@ -431,6 +432,7 @@ export function buildMultiStrategyPayload(
     plot_size: opts.plotSize,
     contour_threshold: opts.contourThreshold,
     point_alpha: opts.pointAlpha,
+    density_color_power: opts.densityColorPower,
     point_size: opts.pointSize,
     kde_bandwidth: opts.kdeBandwidth,
     font_sizes: opts.fontSizes,

@@ -196,6 +196,7 @@ export interface StrategyPayloadOptions {
   fitToColumns: boolean;
   contourThreshold: number;
   pointAlpha: number;
+  densityColorPower: number;
   pointSize: number;
   kdeBandwidth: number; // contour smoothing (0 = auto)
   pubStyle: boolean; // black gates, no label background
@@ -304,6 +305,7 @@ export function buildStrategyPayload(
     fit_to_columns: opts.fitToColumns,
     contour_threshold: opts.contourThreshold,
     point_alpha: opts.pointAlpha,
+    density_color_power: opts.densityColorPower,
     point_size: opts.pointSize,
     kde_bandwidth: opts.kdeBandwidth,
     font_sizes: opts.fontSizes,

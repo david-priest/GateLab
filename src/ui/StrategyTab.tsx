@@ -12,6 +12,7 @@ import { computeMultiPopStrategy, buildMultiStrategyPayload } from "../engine/mu
 import { populationTreeOrder } from "../engine/populations";
 import { sanitizeFilePart } from "../engine/fcsExport";
 import { MultiColumnChecklist } from "./MultiColumnChecklist";
+import { DensityColourControl } from "./DensityColourControl";
 
 interface Props {
   sample: Sample;
@@ -21,6 +22,8 @@ interface Props {
   dataRevision: number;
   /** App-held ref so the controls survive a tab switch (the tab unmounts when you leave it). */
   configRef: MutableRefObject<StrategyConfig | null>;
+  densityColorPower: number;
+  onDensityColorPowerChange: (value: number) => void;
 }
 
 type GateView = "forward" | "back";
@@ -50,7 +53,16 @@ export interface StrategyConfig {
   fontGate: number;
 }
 
-export function StrategyTab({ sample, state, derived, globalScales, configRef, dataRevision }: Props) {
+export function StrategyTab({
+  sample,
+  state,
+  derived,
+  globalScales,
+  configRef,
+  dataRevision,
+  densityColorPower,
+  onDensityColorPowerChange,
+}: Props) {
   const rootId = state.root_population_id ?? "";
   const c0 = configRef.current; // restore on (re)mount; null = first-ever
   const [mode, setMode] = useState<"single" | "multi">(c0?.mode ?? "single");
@@ -121,6 +133,7 @@ export function StrategyTab({ sample, state, derived, globalScales, configRef, d
           plotSize,
           contourThreshold,
           pointAlpha,
+          densityColorPower,
           pointSize,
           kdeBandwidth,
           pubStyle,
@@ -145,6 +158,7 @@ export function StrategyTab({ sample, state, derived, globalScales, configRef, d
         fitToColumns,
         contourThreshold,
         pointAlpha,
+        densityColorPower,
         pointSize,
         kdeBandwidth,
         pubStyle,
@@ -157,7 +171,7 @@ export function StrategyTab({ sample, state, derived, globalScales, configRef, d
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, multiPops, sample, popId, fullPath, gateView, displayMode, maxEvents, allEvents, plotSize, nColumns, fitToColumns,
-      pointSize, pointAlpha, contourThreshold, kdeBandwidth, pubStyle, gateLineWidth, fontTick, fontAxis, fontTitle, fontGate,
+      pointSize, pointAlpha, densityColorPower, contourThreshold, kdeBandwidth, pubStyle, gateLineWidth, fontTick, fontAxis, fontTitle, fontGate,
       state.gates, state.gate_version, globalScales, derived, dataRevision]);
 
   const toggleGateView = (v: GateView) =>
@@ -275,6 +289,9 @@ export function StrategyTab({ sample, state, derived, globalScales, configRef, d
           <input type="range" min={0.05} max={1} step={0.05} value={pointAlpha} onChange={num(setPointAlpha, 0.35)} />
           <span className="gl-num-badge">{pointAlpha.toFixed(2)}</span>
         </label>
+        {displayMode === "pseudocolor" && (
+          <DensityColourControl value={densityColorPower} onChange={onDensityColorPowerChange} />
+        )}
         <label className="gl-field-inline">
           Contour %
           <input type="number" min={0} max={50} step={1} value={contourThreshold} onChange={num(setContourThreshold, 5)} />

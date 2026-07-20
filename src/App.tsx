@@ -135,6 +135,11 @@ import { ErrorBoundary } from "./ui/ErrorBoundary";
 import { NavigateIcon, RectIcon, PolyIcon, QuadIcon } from "./ui/icons";
 import { useSampleDataRevisionKey } from "./ui/useSampleDataRevisions";
 import { useContextualGlobalScales } from "./ui/useContextualGlobalScales";
+import {
+  DEFAULT_DENSITY_COLOR_POWER,
+  normalizeDensityColorPower,
+} from "./engine/pseudocolor";
+import { DensityColourControl } from "./ui/DensityColourControl";
 
 const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
 const INITIAL_LEFT_PANE_WIDTH = 264;
@@ -403,6 +408,10 @@ export default function App() {
   const [maxEvents, setMaxEvents] = useState(50000); // 0 = all (no downsampling)
   const [activeTab, setActiveTab] = useState<TabId>("gating");
   const [pointAlpha, setPointAlpha] = useState(0.4); // main-plot point opacity (cytof point_alpha)
+  const [densityColorPower, setDensityColorPower] = useState(DEFAULT_DENSITY_COLOR_POWER);
+  const changeDensityColorPower = useCallback((value: number) => {
+    setDensityColorPower(normalizeDensityColorPower(value));
+  }, []);
   const [gatingFontSizes, setGatingFontSizes] = useState<GatingFontSizes>({ ...DEFAULT_GATING_FONT_SIZES });
   // Illustration-tab config, lifted to a ref so it survives the tab's unmount (persists across tab
   // switches) and can be saved to the workspace; plus named presets.
@@ -649,7 +658,7 @@ export default function App() {
     }
     setDirty(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.gate_version, scalesVersion, sampleDataRevisionKey, instrumentMode, globalScales, mode, maxEvents, contourThreshold, xIdx, yIdx, gatingFontSizes, workspaceCompensation]);
+  }, [state.gate_version, scalesVersion, sampleDataRevisionKey, instrumentMode, globalScales, mode, maxEvents, contourThreshold, densityColorPower, xIdx, yIdx, gatingFontSizes, workspaceCompensation]);
 
   // Autosave lightweight reference workspaces only. Repacking every embedded FCS on each
   // edit would stall large bundled workspaces; bundles retain their format via manual Save.
@@ -709,6 +718,7 @@ export default function App() {
     setMaxEvents(50000);
     setContourThreshold(5);
     setPointAlpha(0.4);
+    setDensityColorPower(DEFAULT_DENSITY_COLOR_POWER);
     setGatingFontSizes({ ...DEFAULT_GATING_FONT_SIZES });
     setDrawMode("navigate");
     setActiveTab("gating");
@@ -1672,6 +1682,7 @@ export default function App() {
         mode,
         maxEvents,
         contourThreshold,
+        densityColorPower,
         fontSizes: gatingFontSizes,
       },
       illustration: illustConfigRef.current ?? undefined,
@@ -2314,6 +2325,7 @@ export default function App() {
       setMode(ws.display?.mode ?? "pseudocolor");
       setMaxEvents(ws.display?.maxEvents ?? 50000);
       setContourThreshold(ws.display?.contourThreshold ?? 5);
+      setDensityColorPower(normalizeDensityColorPower(ws.display?.densityColorPower));
       setGatingFontSizes({ ...DEFAULT_GATING_FONT_SIZES, ...ws.display?.fontSizes });
       const [dx, dy] = active.defaultChannelIndices();
       setXIdx(active.index(ws.display?.xChannel ?? "") ?? dx);
@@ -2542,6 +2554,7 @@ export default function App() {
     return {
       ...payload,
       point_alpha: pointAlpha, // user-adjustable opacity (was frozen at the payload's 0.4)
+      density_color_power: densityColorPower,
       color_labels: undefined, // suppress cytof's in-canvas legend — we render it below the plot
       x_label: lbl(payload.x_label),
       y_label: lbl(payload.y_label),
@@ -2553,7 +2566,7 @@ export default function App() {
       })),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [payload, sample, panelVersion, pointAlpha]);
+  }, [payload, sample, panelVersion, pointAlpha, densityColorPower]);
 
   // Colour-by overlay legend (population / division / sample) rendered OUTSIDE the plot.
   const overlayLegend = useMemo(() => {
@@ -2953,6 +2966,9 @@ export default function App() {
                   style={{ width: 72 }}
                 />
               </label>
+              {mode === "pseudocolor" && (
+                <DensityColourControl value={densityColorPower} onChange={changeDensityColorPower} />
+              )}
               <div className="gl-draw-tools">
                 {DRAW_TOOLS.map((t) => (
                   <button
@@ -3294,7 +3310,16 @@ export default function App() {
               />
             )}
             {activeTab === "strategy" && (
-              <StrategyTab sample={sample} state={state} derived={derived} globalScales={globalScales} configRef={strategyConfigRef} dataRevision={activeDataRevision} />
+              <StrategyTab
+                sample={sample}
+                state={state}
+                derived={derived}
+                globalScales={globalScales}
+                configRef={strategyConfigRef}
+                dataRevision={activeDataRevision}
+                densityColorPower={densityColorPower}
+                onDensityColorPowerChange={changeDensityColorPower}
+              />
             )}
             {activeTab === "illustration" && (
               <IllustrationTab
@@ -3310,6 +3335,8 @@ export default function App() {
                 onSavePreset={saveIllustrationPreset}
                 onDeletePreset={deleteIllustrationPreset}
                 dataRevision={activeDataRevision}
+                densityColorPower={densityColorPower}
+                onDensityColorPowerChange={changeDensityColorPower}
               />
             )}
             </ErrorBoundary>
@@ -3336,6 +3363,8 @@ export default function App() {
                 onCancelCompensationSweep={cancelCompensationSweep}
                 visible={activeTab === "compensation"}
                 stateKey={`${workspaceId}:${activeSampleId ?? "none"}`}
+                densityColorPower={densityColorPower}
+                onDensityColorPowerChange={changeDensityColorPower}
               />
             </ErrorBoundary>
           </div>
