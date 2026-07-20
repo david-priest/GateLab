@@ -40,11 +40,11 @@ select:focus-visible,
 input[type="number"] {
   --gl-number-step-fill: linear-gradient(#f5f7fa, #f5f7fa);
   min-height: 26px;
-  padding-right: 24px !important;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='26' viewBox='0 0 22 26'%3E%3Cpath d='M1.5 13h19M1.5 1v24M7 9l4-4 4 4M7 17l4 4 4-4' fill='none' stroke='%23485566' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"), var(--gl-number-step-fill) !important;
+  padding-right: 22px !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='26' viewBox='0 0 20 26'%3E%3Cpath d='M1.5 13h17M1.5 1v24M7 9.5l3-3 3 3M7 16.5l3 3 3-3' fill='none' stroke='%23485566' stroke-width='1.35' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"), var(--gl-number-step-fill) !important;
   background-repeat: no-repeat !important;
   background-position: right 1px center, right 1px center !important;
-  background-size: 22px 26px, 22px 26px !important;
+  background-size: 20px 26px, 20px 26px !important;
   -moz-appearance: textfield;
 }
 input[type="number"].gl-number-step-up-hover {
