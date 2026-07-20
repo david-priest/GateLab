@@ -62,13 +62,13 @@ export async function ensurePermission(handle: FileSystemFileHandle, mode: "read
 
 /** Open-file picker → handle + bytes. Returns null if the user cancels. */
 export async function pickFile(
-  accept: Record<string, string[]>,
+  accept: Record<string, string[]> | null,
   description: string,
   options: PickFileOptions = {},
 ): Promise<PickedFile | null> {
   try {
     const [handle] = await window.showOpenFilePicker!({
-      types: [{ description, accept }],
+      ...(accept ? { types: [{ description, accept }] } : {}),
       multiple: false,
       ...(options.id ? { id: options.id } : {}),
     });

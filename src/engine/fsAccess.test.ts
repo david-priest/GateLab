@@ -15,21 +15,16 @@ describe("pickFile", () => {
     vi.restoreAllMocks();
   });
 
-  it("passes a stable picker id and the complete workspace accept map on first open", async () => {
-    const accept = {
-      "application/json": [".gatelab"],
-      "application/zip": [".gatelab"],
-    };
+  it("opens custom workspaces without an unreliable native MIME filter on first open", async () => {
     const file = new File([new Uint8Array([0x50, 0x4b])], "example.gatelab");
     const handle = { getFile: vi.fn().mockResolvedValue(file) } as unknown as FileSystemFileHandle;
     const showOpenFilePicker = vi.fn().mockResolvedValue([handle]);
     Object.defineProperty(window, "showOpenFilePicker", { configurable: true, value: showOpenFilePicker });
 
-    const picked = await pickFile(accept, "GateLab workspace", { id: "gatelab-open-workspace" });
+    const picked = await pickFile(null, "GateLab workspace", { id: "gatelab-open-workspace" });
 
     expect(showOpenFilePicker).toHaveBeenCalledTimes(1);
     expect(showOpenFilePicker).toHaveBeenCalledWith({
-      types: [{ description: "GateLab workspace", accept }],
       multiple: false,
       id: "gatelab-open-workspace",
     });

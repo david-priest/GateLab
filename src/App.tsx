@@ -138,12 +138,6 @@ import { useContextualGlobalScales } from "./ui/useContextualGlobalScales";
 const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
 const INITIAL_LEFT_PANE_WIDTH = 264;
 const INITIAL_RIGHT_PANE_WIDTH = 672;
-// A .gatelab file is either a JSON reference workspace or a ZIP bundle. Supplying the
-// real formats avoids Chromium/macOS having to infer a custom extension from octet-stream.
-const WORKSPACE_FILE_ACCEPT = {
-  "application/json": [`.${WORKSPACE_EXT}`],
-  "application/zip": [`.${WORKSPACE_EXT}`],
-};
 
 type CrudModal =
   | { kind: "createPop" }
@@ -1844,7 +1838,11 @@ export default function App() {
       return;
     }
     try {
-      const picked = await pickFileSource(WORKSPACE_FILE_ACCEPT, "GateLab workspace", { id: "gatelab-open-workspace" });
+      // A .gatelab file can contain either JSON or ZIP data. macOS has no registered
+      // content type for the custom extension, and assigning it both MIME types makes
+      // Chromium's native filter intermittently disable valid files on first open.
+      // Leave this picker unfiltered and let the streaming workspace parser validate it.
+      const picked = await pickFileSource(null, "GateLab workspace", { id: "gatelab-open-workspace" });
       if (picked) await openWorkspaceFromFile(picked.file, picked.handle, picked.name);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
