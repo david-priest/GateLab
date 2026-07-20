@@ -132,6 +132,11 @@ export interface PrepareCompensatedLayerOptions {
   readonly activeLayer?: AssayLayer;
 }
 
+export interface BeginCompensatedLayerStagingOptions extends PrepareCompensatedLayerOptions {
+  /** Parallel workers may complete disjoint event ranges out of order. */
+  readonly allowOutOfOrderChunks?: boolean;
+}
+
 export interface CompensatedLayerOutputBinding {
   readonly pnn: string;
   readonly fcsColumnIndex: number;
@@ -241,6 +246,8 @@ interface CompensatedLayerStagingRecord {
   readonly eventCount: number;
   readonly compensatedLayer: RuntimeCompensatedLayer;
   readonly activeLayer: AssayLayer;
+  readonly allowOutOfOrderChunks: boolean;
+  readonly writtenRanges: Array<readonly [number, number]>;
   processedEvents: number;
 }
 
@@ -582,7 +589,7 @@ export class Sample {
     metadataInput: PersistedCompensatedLayerBinding,
     outputBindingsInput: readonly CompensatedLayerOutputBinding[],
     identity: CompensatedLayerStagingIdentity,
-    options: PrepareCompensatedLayerOptions = {},
+    options: BeginCompensatedLayerStagingOptions = {},
   ): CompensatedLayerStaging {
     const metadata = this.freezeProfileMetadata(metadataInput);
     const nextActive = options.activeLayer ?? this._activeLayer;
@@ -657,6 +664,8 @@ export class Sample {
       eventCount: this.fcs.nEvents,
       compensatedLayer: candidate,
       activeLayer: nextActive,
+      allowOutOfOrderChunks: options.allowOutOfOrderChunks === true,
+      writtenRanges: [],
       processedEvents: 0,
     });
     return staging;
@@ -683,8 +692,8 @@ export class Sample {
       compensatedLayerStagings.delete(staging);
       throw new Error("Invalid compensated staging: Sample context changed during Apply.");
     }
-    if (!Number.isSafeInteger(chunk.startEvent) || chunk.startEvent !== record.processedEvents) {
-      throw new Error("Invalid compensated staging: chunks must be contiguous and ordered.");
+    if (!Number.isSafeInteger(chunk.startEvent) || chunk.startEvent < 0) {
+      throw new Error("Invalid compensated staging: chunk start must be a non-negative safe integer.");
     }
     if (
       !Array.isArray(chunk.outputBindings) ||
@@ -738,12 +747,21 @@ export class Sample {
         }
       }
     }
+    const chunkEnd = chunk.startEvent + eventCount;
+    if (record.allowOutOfOrderChunks) {
+      if (record.writtenRanges.some(([start, end]) => chunk.startEvent < end && chunkEnd > start)) {
+        throw new Error("Invalid compensated staging: parallel chunks must not overlap.");
+      }
+    } else if (chunk.startEvent !== record.processedEvents) {
+      throw new Error("Invalid compensated staging: chunks must be contiguous and ordered.");
+    }
     for (let source = 0; source < record.outputBindings.length; source++) {
       const binding = record.outputBindings[source];
       record.compensatedLayer.columnsByFcsIndex
         .get(binding.fcsColumnIndex)!
         .set(chunk.columns[source], chunk.startEvent);
     }
+    record.writtenRanges.push(Object.freeze([chunk.startEvent, chunkEnd]));
     record.processedEvents += eventCount;
   }
 

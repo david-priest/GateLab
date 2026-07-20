@@ -37,6 +37,7 @@ const DEFAULT_COPY_SLICE_EVENTS = 8_192;
 const DEFAULT_MAX_EVENTS_PER_CHUNK = 8_192;
 const DEFAULT_MAX_PREVIEW_EVENTS = 20_000;
 const DEFAULT_PREVIEW_BYTE_BUDGET = 64 * 1024 * 1024;
+const DEFAULT_MAX_APPLY_WORKERS = 4;
 const ESTIMATED_PREVIEW_BYTES_PER_CHANNEL_EVENT = 5 * Float64Array.BYTES_PER_ELEMENT;
 
 export interface CompensationWorkerLike {
@@ -57,6 +58,13 @@ export interface CompensationChunkPlan {
   readonly chunkCount: number;
 }
 
+export interface CompensationWorkerPoolPlan {
+  readonly workerCount: number;
+  readonly totalByteBudget: number;
+  readonly perWorkerByteBudget: number;
+  readonly chunk: CompensationChunkPlan;
+}
+
 export interface CompensationManagerOptions {
   readonly workspaceKey?: string;
   readonly workerFactory?: CompensationWorkerFactory;
@@ -65,6 +73,8 @@ export interface CompensationManagerOptions {
   readonly copySliceEvents?: number;
   readonly maxPreviewEvents?: number;
   readonly previewByteBudget?: number;
+  /** Maximum event-parallel workers. Custom test workers default to one unless explicit. */
+  readonly workerPoolSize?: number;
   /** Test seam. Production yields to a macrotask so React and Cancel remain responsive. */
   readonly yieldToEventLoop?: () => Promise<void>;
 }
@@ -167,7 +177,11 @@ interface ActiveApply {
   readonly profileId: string;
   readonly profileGeneration: number;
   cancelled: boolean;
-  currentWorkerJob: Readonly<{ id: string; token: string }> | null;
+  currentWorkerJobs: Array<Readonly<{
+    id: string;
+    token: string;
+    worker: CompensationWorkerLike;
+  }>>;
 }
 
 interface ApplyReservation {
@@ -216,6 +230,13 @@ function defaultWorkerFactory(): CompensationWorkerLike {
 
 function defaultYieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function defaultWorkerPoolSize(): number {
+  const hardware = typeof navigator === "undefined" || !Number.isFinite(navigator.hardwareConcurrency)
+    ? 2
+    : Math.max(1, Math.floor(navigator.hardwareConcurrency));
+  return Math.max(1, Math.min(DEFAULT_MAX_APPLY_WORKERS, hardware - 1));
 }
 
 function positiveSafeInteger(value: number, label: string): number {
@@ -278,6 +299,65 @@ export function planCompensationChunks(input: Readonly<{
     eventsPerChunk,
     chunkCount: input.totalEvents === 0 ? 0 : Math.ceil(input.totalEvents / eventsPerChunk),
   });
+}
+
+/** Divide one aggregate transient-memory budget across a bounded worker pool. */
+export function planCompensationWorkerPool(input: Readonly<{
+  totalEvents: number;
+  channelCount: number;
+  maxWorkers: number;
+  byteBudget?: number;
+  fixedWorkspaceBytes?: number;
+  maxEventsPerChunk?: number;
+}>): CompensationWorkerPoolPlan {
+  if (!Number.isSafeInteger(input.totalEvents) || input.totalEvents < 0) {
+    throw new CompensationManagerError("invalid-event-count", "Compensation totalEvents must be a non-negative safe integer.");
+  }
+  const maxWorkers = positiveSafeInteger(input.maxWorkers, "Compensation worker count");
+  const totalByteBudget = positiveSafeInteger(
+    input.byteBudget ?? DEFAULT_BYTE_BUDGET,
+    "Compensation byte budget",
+  );
+  const fixedWorkspaceBytes = input.fixedWorkspaceBytes ?? DEFAULT_FIXED_WORKSPACE_BYTES;
+  if (!Number.isSafeInteger(fixedWorkspaceBytes) || fixedWorkspaceBytes < 0) {
+    throw new CompensationManagerError(
+      "invalid-memory-budget",
+      "Compensation fixed workspace must be a non-negative safe integer.",
+    );
+  }
+  let workerCount = input.totalEvents === 0 ? 1 : Math.min(maxWorkers, input.totalEvents);
+  let lastError: unknown = null;
+  while (workerCount >= 1) {
+    const perWorkerByteBudget = Math.floor(totalByteBudget / workerCount);
+    try {
+      const chunk = planCompensationChunks({
+        totalEvents: input.totalEvents,
+        channelCount: input.channelCount,
+        byteBudget: perWorkerByteBudget,
+        fixedWorkspaceBytes,
+        maxEventsPerChunk: input.maxEventsPerChunk,
+      });
+      const usefulWorkers = chunk.chunkCount === 0 ? 1 : Math.min(workerCount, chunk.chunkCount);
+      if (usefulWorkers < workerCount) {
+        workerCount = usefulWorkers;
+        continue;
+      }
+      return Object.freeze({
+        workerCount,
+        totalByteBudget,
+        perWorkerByteBudget,
+        chunk,
+      });
+    } catch (error) {
+      lastError = error;
+      workerCount--;
+    }
+  }
+  if (lastError instanceof Error) throw lastError;
+  throw new CompensationManagerError(
+    "invalid-memory-budget",
+    "No compensation worker can run within the aggregate memory budget.",
+  );
 }
 
 function channelSignature(sample: Sample): string {
@@ -390,7 +470,7 @@ function workerError(response: Extract<CompensationWorkerResponse, { type: "work
   );
 }
 
-/** Owns the single deterministic compensation worker independently of any rendered tab. */
+/** Owns one preview worker plus a bounded deterministic event-parallel Apply pool. */
 export class CompensationManager {
   private readonly workerFactory: CompensationWorkerFactory;
   private readonly defaultByteBudget: number;
@@ -398,8 +478,9 @@ export class CompensationManager {
   private readonly copySliceEvents: number;
   private readonly maxPreviewEvents: number;
   private readonly previewByteBudget: number;
+  private readonly maxApplyWorkers: number;
   private readonly yieldToEventLoop: () => Promise<void>;
-  private worker: CompensationWorkerLike | null = null;
+  private readonly workers: CompensationWorkerLike[] = [];
   private workerBroken = false;
   private readonly waiters = new Set<Waiter>();
   private readonly sampleGenerations = new WeakMap<Sample, number>();
@@ -436,6 +517,10 @@ export class CompensationManager {
     this.previewByteBudget = positiveSafeInteger(
       options.previewByteBudget ?? DEFAULT_PREVIEW_BYTE_BUDGET,
       "Compensation preview byte budget",
+    );
+    this.maxApplyWorkers = positiveSafeInteger(
+      options.workerPoolSize ?? (options.workerFactory ? 1 : defaultWorkerPoolSize()),
+      "Compensation worker pool size",
     );
     this.yieldToEventLoop = options.yieldToEventLoop ?? defaultYieldToEventLoop;
   }
@@ -784,7 +869,7 @@ export class CompensationManager {
       profileId: profile.profileId,
       profileGeneration: this.profileGenerations.get(profile.profileId) ?? 0,
       cancelled: false,
-      currentWorkerJob: null,
+      currentWorkerJobs: [],
     };
     this.activeApply = active;
     this.applyReservation = null;
@@ -826,14 +911,14 @@ export class CompensationManager {
         targets: Object.freeze(targetResults),
       });
     } catch (error) {
-      if (active.currentWorkerJob !== null) {
+      for (const job of active.currentWorkerJobs) {
         this.postIfAvailable({
           protocol: COMPENSATION_WORKER_PROTOCOL,
           type: "cancel",
           target: "apply",
-          id: active.currentWorkerJob.id,
-          token: active.currentWorkerJob.token,
-        });
+          id: job.id,
+          token: job.token,
+        }, job.worker);
       }
       throw error;
     } finally {
@@ -851,14 +936,14 @@ export class CompensationManager {
     const active = this.activeApply;
     if (active === null) return;
     active.cancelled = true;
-    if (active.currentWorkerJob !== null) {
+    for (const job of active.currentWorkerJobs) {
       this.postIfAvailable({
         protocol: COMPENSATION_WORKER_PROTOCOL,
         type: "cancel",
         target: "apply",
-        id: active.currentWorkerJob.id,
-        token: active.currentWorkerJob.token,
-      });
+        id: job.id,
+        token: job.token,
+      }, job.worker);
     }
     this.rejectWaitersByPrefix(
       `apply:${active.aggregateId}:`,
@@ -872,8 +957,8 @@ export class CompensationManager {
     this.cancelApply("The compensation manager was disposed.");
     this.disposed = true;
     this.rejectAllWaiters(new CompensationCancelledError("The compensation manager was disposed."));
-    this.worker?.terminate();
-    this.worker = null;
+    for (const worker of this.workers) worker.terminate();
+    this.workers.length = 0;
   }
 
   private async solveApplyTarget(
@@ -888,21 +973,18 @@ export class CompensationManager {
   ): Promise<SolvedApplyTarget> {
     const sample = snapshot.sample;
     const channelCount = snapshot.solveChannels.length;
-    const plan = planCompensationChunks({
+    const poolPlan = planCompensationWorkerPool({
       totalEvents: sample.fcs.nEvents,
       channelCount,
+      maxWorkers: this.maxApplyWorkers,
       byteBudget: request.byteBudget ?? this.defaultByteBudget,
       fixedWorkspaceBytes: request.fixedWorkspaceBytes ?? this.defaultFixedWorkspaceBytes,
     });
-    const workerIdentity = {
-      id: `${active.aggregateId}:sample:${sampleIndex}`,
-      token: `${active.token}:sample:${sampleIndex}`,
-    };
-    active.currentWorkerJob = workerIdentity;
+    const plan = poolPlan.chunk;
     const bindingKey = this.contextKey(profile, snapshot);
     const stagingIdentity: CompensatedLayerStagingIdentity = Object.freeze({
-      jobId: workerIdentity.id,
-      jobToken: workerIdentity.token,
+      jobId: `${active.aggregateId}:sample:${sampleIndex}:staging`,
+      jobToken: `${active.token}:sample:${sampleIndex}:staging`,
       bindingKey,
     });
     const workerBindings = workerBindingsForSnapshot(snapshot);
@@ -919,146 +1001,188 @@ export class CompensationManager {
       snapshot.binding,
       outputBindings,
       stagingIdentity,
-      { activeLayer: request.targets[sampleIndex].activeLayer ?? "compensated" },
+      {
+        activeLayer: request.targets[sampleIndex].activeLayer ?? "compensated",
+        allowOutOfOrderChunks: poolPlan.workerCount > 1,
+      },
     );
     const prefix = `apply:${active.aggregateId}:sample:${sampleIndex}:`;
-    try {
-      const startedPromise = this.waitFor(
-        (response): response is Extract<CompensationWorkerResponse, { type: "apply-started" }> =>
-          response.type === "apply-started" && response.jobId === workerIdentity.id &&
-          response.jobToken === workerIdentity.token && response.profileHash === profile.profileHash &&
-          response.bindingKey === bindingKey,
-        (response) => response.scope === "apply" && response.id === workerIdentity.id && response.token === workerIdentity.token,
-        `${prefix}start`,
-      );
-      const completeWait = () => this.waitFor(
-        (response): response is Extract<CompensationWorkerResponse, { type: "apply-complete" }> =>
-          response.type === "apply-complete" && response.jobId === workerIdentity.id &&
-          response.jobToken === workerIdentity.token && response.profileHash === profile.profileHash &&
-          response.bindingKey === bindingKey,
-        (response) => response.scope === "apply" && response.id === workerIdentity.id && response.token === workerIdentity.token,
-        `${prefix}complete`,
-      );
-      let completeResponse: Extract<CompensationWorkerResponse, { type: "apply-complete" }> | null = null;
-      const zeroEventComplete = sample.fcs.nEvents === 0 ? completeWait() : null;
-      this.post({
-        protocol: COMPENSATION_WORKER_PROTOCOL,
-        type: "start-apply",
-        method: profile.scientific.method,
-        jobId: workerIdentity.id,
-        jobToken: workerIdentity.token,
-        profileHash: profile.profileHash,
-        bindingKey,
-        sourceChannels: snapshot.solveChannels,
-        receiverChannels: snapshot.solveChannels,
-        channelBindings: receiverBindings,
-        matrix: snapshot.solveMatrix,
-        ...(profile.scientific.kind === "flow-spillover"
-          ? { flowSettings: profileFlowSettings(profile) }
-          : { nnlsSettings: profileNnlsSettings(profile) }),
-        totalEvents: sample.fcs.nEvents,
-        channelCount,
-        byteBudget: plan.transientByteBudget,
-      });
-      const started = await startedPromise;
-      if (
-        !sameWorkerBindings(started.receiverBindings, receiverBindings) ||
-        !sameWorkerBindings(started.sourceBindings, sourceBindings)
-      ) {
-        throw new CompensationManagerError(
-          "invalid-worker-binding",
-          "The worker started with channel bindings that do not match the exact FCS/matrix mapping.",
-        );
-      }
-      request.onProgress?.(Object.freeze({
-        jobId: active.aggregateId,
-        sampleIndex,
-        sampleCount,
-        sampleProcessedEvents: 0,
-        sampleTotalEvents: sample.fcs.nEvents,
-        processedEvents: acceptedBefore,
-        totalEvents: aggregateTotal,
-        fraction: aggregateTotal === 0 ? 1 : acceptedBefore / aggregateTotal,
+    const chunkRanges: Array<Readonly<{ start: number; end: number }>> = [];
+    for (let start = 0; start < sample.fcs.nEvents; start += plan.eventsPerChunk) {
+      chunkRanges.push(Object.freeze({
+        start,
+        end: Math.min(sample.fcs.nEvents, start + plan.eventsPerChunk),
       }));
-      if (zeroEventComplete !== null) completeResponse = await zeroEventComplete;
+    }
+    const workers = this.ensureWorkers(poolPlan.workerCount);
+    let chunkCursor = 0;
+    const lanes = workers.map((worker, laneIndex) => {
+      const baseCount = Math.floor(chunkRanges.length / workers.length);
+      const laneChunkCount = baseCount + (laneIndex < chunkRanges.length % workers.length ? 1 : 0);
+      const chunks = chunkRanges.slice(chunkCursor, chunkCursor + laneChunkCount);
+      chunkCursor += laneChunkCount;
+      const start = chunks[0]?.start ?? 0;
+      const end = chunks[chunks.length - 1]?.end ?? 0;
+      const identity = Object.freeze({
+        id: `${active.aggregateId}:sample:${sampleIndex}:lane:${laneIndex}`,
+        token: `${active.token}:sample:${sampleIndex}:lane:${laneIndex}`,
+        worker,
+      });
+      return Object.freeze({ worker, laneIndex, identity, chunks, start, end });
+    });
+    active.currentWorkerJobs = lanes.map(({ identity }) => identity);
+    let completedSampleEvents = 0;
 
-      for (let chunkIndex = 0, start = 0; start < sample.fcs.nEvents; chunkIndex++) {
-        this.assertApplyCurrent(active, profile);
-        this.assertSnapshotCurrent(snapshot, profile);
-        const end = Math.min(sample.fcs.nEvents, start + plan.eventsPerChunk);
-        const measuredColumns = await this.copyReceiverChunk(snapshot, start, end, active, profile);
-        this.assertSnapshotCurrent(snapshot, profile);
-        const chunkPromise = this.waitFor(
-          (response): response is ApplyChunkCompleteResponse =>
-            response.type === "apply-chunk-complete" &&
-            response.jobId === workerIdentity.id && response.jobToken === workerIdentity.token &&
-            response.profileHash === profile.profileHash && response.bindingKey === bindingKey &&
-            response.chunkIndex === chunkIndex && response.startEvent === start,
+    request.onProgress?.(Object.freeze({
+      jobId: active.aggregateId,
+      sampleIndex,
+      sampleCount,
+      sampleProcessedEvents: 0,
+      sampleTotalEvents: sample.fcs.nEvents,
+      processedEvents: acceptedBefore,
+      totalEvents: aggregateTotal,
+      fraction: aggregateTotal === 0 ? 1 : acceptedBefore / aggregateTotal,
+    }));
+
+    try {
+      await Promise.all(lanes.map(async (lane) => {
+        const workerIdentity = lane.identity;
+        const lanePrefix = `${prefix}lane:${lane.laneIndex}:`;
+        const laneEventCount = lane.end - lane.start;
+        const startedPromise = this.waitFor(
+          (response): response is Extract<CompensationWorkerResponse, { type: "apply-started" }> =>
+            response.type === "apply-started" && response.jobId === workerIdentity.id &&
+            response.jobToken === workerIdentity.token && response.profileHash === profile.profileHash &&
+            response.bindingKey === bindingKey,
           (response) => response.scope === "apply" && response.id === workerIdentity.id && response.token === workerIdentity.token,
-          `${prefix}chunk:${chunkIndex}`,
+          `${lanePrefix}start`,
         );
-        const isFinalChunk = end === sample.fcs.nEvents;
-        const finalComplete = isFinalChunk ? completeWait() : null;
-        this.post({
+        const completeWait = () => this.waitFor(
+          (response): response is Extract<CompensationWorkerResponse, { type: "apply-complete" }> =>
+            response.type === "apply-complete" && response.jobId === workerIdentity.id &&
+            response.jobToken === workerIdentity.token && response.profileHash === profile.profileHash &&
+            response.bindingKey === bindingKey,
+          (response) => response.scope === "apply" && response.id === workerIdentity.id && response.token === workerIdentity.token,
+          `${lanePrefix}complete`,
+        );
+        let completeResponse: Extract<CompensationWorkerResponse, { type: "apply-complete" }> | null = null;
+        const zeroEventComplete = laneEventCount === 0 ? completeWait() : null;
+        this.postToWorker(lane.worker, {
           protocol: COMPENSATION_WORKER_PROTOCOL,
-          type: "apply-chunk",
+          type: "start-apply",
+          method: profile.scientific.method,
           jobId: workerIdentity.id,
           jobToken: workerIdentity.token,
           profileHash: profile.profileHash,
           bindingKey,
-          chunkIndex,
-          startEvent: start,
-          measuredColumns,
+          sourceChannels: snapshot.solveChannels,
+          receiverChannels: snapshot.solveChannels,
+          channelBindings: receiverBindings,
+          matrix: snapshot.solveMatrix,
+          ...(profile.scientific.kind === "flow-spillover"
+            ? { flowSettings: profileFlowSettings(profile) }
+            : { nnlsSettings: profileNnlsSettings(profile) }),
+          eventOffset: lane.start,
+          totalEvents: laneEventCount,
+          channelCount,
+          byteBudget: plan.transientByteBudget,
         });
-        const [chunk, complete] = await Promise.all([
-          chunkPromise,
-          finalComplete ?? Promise.resolve(null),
-        ]);
-        if (complete !== null) completeResponse = complete;
-        this.assertApplyCurrent(active, profile);
-        this.assertSnapshotCurrent(snapshot, profile);
-        await this.verifyAndStageChunk(
-          chunk,
-          staging,
-          stagingIdentity,
-          sourceBindings,
-          outputBindings,
-          end - start,
-          active,
-          profile,
-          snapshot,
-        );
-        start = end;
-        const accepted = acceptedBefore + start;
-        request.onProgress?.(Object.freeze({
-          jobId: active.aggregateId,
-          sampleIndex,
-          sampleCount,
-          sampleProcessedEvents: start,
-          sampleTotalEvents: sample.fcs.nEvents,
-          processedEvents: accepted,
-          totalEvents: aggregateTotal,
-          fraction: aggregateTotal === 0 ? 1 : accepted / aggregateTotal,
-        }));
-      }
-      const complete = completeResponse;
-      if (complete === null) {
-        throw new CompensationManagerError("invalid-worker-result", "The worker did not publish a completion receipt.");
-      }
-      if (
-        complete.processedEvents !== sample.fcs.nEvents ||
-        complete.totalEvents !== sample.fcs.nEvents ||
-        (complete as { readonly allFinite?: unknown }).allFinite !== true ||
-        !sameWorkerBindings(complete.outputBindings, sourceBindings)
-      ) {
+        const started = await startedPromise;
+        if (
+          started.eventOffset !== lane.start ||
+          started.totalEvents !== laneEventCount ||
+          !sameWorkerBindings(started.receiverBindings, receiverBindings) ||
+          !sameWorkerBindings(started.sourceBindings, sourceBindings)
+        ) {
+          throw new CompensationManagerError(
+            "invalid-worker-binding",
+            "A compensation worker started with the wrong event partition or channel mapping.",
+          );
+        }
+        if (zeroEventComplete !== null) completeResponse = await zeroEventComplete;
+
+        for (let chunkIndex = 0; chunkIndex < lane.chunks.length; chunkIndex++) {
+          const { start, end } = lane.chunks[chunkIndex];
+          this.assertApplyCurrent(active, profile);
+          this.assertSnapshotCurrent(snapshot, profile);
+          const measuredColumns = await this.copyReceiverChunk(snapshot, start, end, active, profile);
+          this.assertSnapshotCurrent(snapshot, profile);
+          const chunkPromise = this.waitFor(
+            (response): response is ApplyChunkCompleteResponse =>
+              response.type === "apply-chunk-complete" &&
+              response.jobId === workerIdentity.id && response.jobToken === workerIdentity.token &&
+              response.profileHash === profile.profileHash && response.bindingKey === bindingKey &&
+              response.chunkIndex === chunkIndex && response.startEvent === start,
+            (response) => response.scope === "apply" && response.id === workerIdentity.id && response.token === workerIdentity.token,
+            `${lanePrefix}chunk:${chunkIndex}`,
+          );
+          const finalComplete = chunkIndex === lane.chunks.length - 1 ? completeWait() : null;
+          this.postToWorker(lane.worker, {
+            protocol: COMPENSATION_WORKER_PROTOCOL,
+            type: "apply-chunk",
+            jobId: workerIdentity.id,
+            jobToken: workerIdentity.token,
+            profileHash: profile.profileHash,
+            bindingKey,
+            chunkIndex,
+            startEvent: start,
+            measuredColumns,
+          });
+          const [chunk, complete] = await Promise.all([
+            chunkPromise,
+            finalComplete ?? Promise.resolve(null),
+          ]);
+          if (complete !== null) completeResponse = complete;
+          this.assertApplyCurrent(active, profile);
+          this.assertSnapshotCurrent(snapshot, profile);
+          await this.verifyAndStageChunk(
+            chunk,
+            staging,
+            stagingIdentity,
+            sourceBindings,
+            outputBindings,
+            end - start,
+            active,
+            profile,
+            snapshot,
+          );
+          completedSampleEvents += end - start;
+          const accepted = acceptedBefore + completedSampleEvents;
+          request.onProgress?.(Object.freeze({
+            jobId: active.aggregateId,
+            sampleIndex,
+            sampleCount,
+            sampleProcessedEvents: completedSampleEvents,
+            sampleTotalEvents: sample.fcs.nEvents,
+            processedEvents: accepted,
+            totalEvents: aggregateTotal,
+            fraction: aggregateTotal === 0 ? 1 : accepted / aggregateTotal,
+          }));
+        }
+        const complete = completeResponse;
+        if (
+          complete === null ||
+          complete.eventOffset !== lane.start ||
+          complete.processedEvents !== laneEventCount ||
+          complete.totalEvents !== laneEventCount ||
+          (complete as { readonly allFinite?: unknown }).allFinite !== true ||
+          !sameWorkerBindings(complete.outputBindings, sourceBindings)
+        ) {
+          throw new CompensationManagerError(
+            "invalid-worker-result",
+            "A worker completion receipt does not cover its exact event partition and source bindings.",
+          );
+        }
+      }));
+      if (completedSampleEvents !== sample.fcs.nEvents) {
         throw new CompensationManagerError(
           "invalid-worker-result",
-          "The worker completion receipt does not cover the complete sample and exact source bindings.",
+          "Parallel compensation did not cover the complete Sample.",
         );
       }
       this.assertSnapshotCurrent(snapshot, profile);
       const prepared = sample.finishCompensatedLayerStaging(staging, stagingIdentity);
-      active.currentWorkerJob = null;
+      active.currentWorkerJobs = [];
       return Object.freeze({
         result: Object.freeze({ sample, binding: snapshot.binding }),
         prepared,
@@ -1507,32 +1631,63 @@ export class CompensationManager {
   }
 
   private ensureWorker(): CompensationWorkerLike {
+    return this.ensureWorkers(1)[0];
+  }
+
+  private ensureWorkers(count: number): readonly CompensationWorkerLike[] {
     this.assertUsable();
-    if (this.worker !== null && !this.workerBroken) return this.worker;
-    this.worker?.terminate();
-    const worker = this.workerFactory();
-    worker.onmessage = (event) => this.handleWorkerMessage(event.data);
-    worker.onerror = (event) => {
-      this.workerBroken = true;
-      this.rejectAllWaiters(new CompensationManagerError(
-        "worker-exception",
-        event.message || "The compensation worker failed.",
-      ));
-      if (this.activeApply !== null) this.activeApply.cancelled = true;
-      this.preview = null;
-    };
-    this.worker = worker;
-    this.workerBroken = false;
-    return worker;
+    positiveSafeInteger(count, "Compensation worker count");
+    if (this.workerBroken) {
+      for (const worker of this.workers) worker.terminate();
+      this.workers.length = 0;
+      this.workerBroken = false;
+    }
+    while (this.workers.length < count) {
+      const worker = this.workerFactory();
+      if (this.workers.includes(worker)) {
+        throw new CompensationManagerError(
+          "invalid-worker-factory",
+          "The compensation worker factory must return a distinct worker for each pool lane.",
+        );
+      }
+      worker.onmessage = (event) => this.handleWorkerMessage(event.data);
+      worker.onerror = (event) => {
+        if (!this.workers.includes(worker)) return;
+        this.workerBroken = true;
+        const workers = this.workers.splice(0);
+        for (const candidate of workers) candidate.terminate();
+        this.rejectAllWaiters(new CompensationManagerError(
+          "worker-exception",
+          event.message || "A compensation worker failed.",
+        ));
+        if (this.activeApply !== null) this.activeApply.cancelled = true;
+        this.preview = null;
+      };
+      this.workers.push(worker);
+    }
+    return this.workers.slice(0, count);
   }
 
   private post(request: CompensationWorkerRequest): void {
-    this.ensureWorker().postMessage(request, requestTransferables(request));
+    this.postToWorker(this.ensureWorker(), request);
   }
 
-  private postIfAvailable(request: CompensationWorkerRequest): void {
-    if (this.disposed || this.worker === null || this.workerBroken) return;
-    this.worker.postMessage(request, requestTransferables(request));
+  private postToWorker(
+    worker: CompensationWorkerLike,
+    request: CompensationWorkerRequest,
+  ): void {
+    if (this.workerBroken || !this.workers.includes(worker)) {
+      throw new CompensationManagerError("worker-unavailable", "The selected compensation worker is unavailable.");
+    }
+    worker.postMessage(request, requestTransferables(request));
+  }
+
+  private postIfAvailable(
+    request: CompensationWorkerRequest,
+    worker: CompensationWorkerLike | undefined = this.workers[0],
+  ): void {
+    if (this.disposed || !worker || this.workerBroken || !this.workers.includes(worker)) return;
+    worker.postMessage(request, requestTransferables(request));
   }
 
   private handleWorkerMessage(response: CompensationWorkerResponse): void {

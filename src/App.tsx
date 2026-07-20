@@ -34,10 +34,12 @@ import {
   packWorkspace,
   packWorkspaceForStorage,
   packWorkspaceReference,
-  readWorkspaceBytes,
-  readWorkspaceEnvelope,
+  readWorkspaceEnvelopeFromFile,
+  migrateWorkspaceToV2,
+  validateWorkspace,
   WORKSPACE_EXT,
   type WorkspaceFile,
+  type WorkspaceEnvelope,
   type WorkspaceStorage,
   type GatingFontSizes,
   type IllustrationConfig,
@@ -45,11 +47,11 @@ import {
 } from "./engine/workspace";
 import {
   WORKSPACE_VERSION_3,
+  createPortableWorkspaceV3ArchivePlan,
   newEmptyWorkspaceCompensationState,
-  packWorkspaceV3,
-  packWorkspaceV3ForStorage,
   packWorkspaceV3Reference,
   validateWorkspaceV3,
+  writePortableWorkspaceV3Archive,
   type WorkspaceFileV3,
   type WorkspaceV3SampleRestoreContexts,
 } from "./engine/workspaceV3";
@@ -70,14 +72,18 @@ import {
   readCachedCompensatedAssay,
   writeCachedCompensatedAssay,
 } from "./engine/compensationCache";
+import { restorePortableAssayLayers } from "./engine/workspacePortableAssays";
 import {
   supportsFileSystemAccess,
   supportsDirectoryAccess,
   pickFile,
+  pickFileSource,
   pickFiles,
   pickDirectoryFiles,
   writeHandle,
+  writeHandleStream,
   saveAsHandle,
+  saveAsHandleStream,
   readFromHandle,
   rememberHandle,
   recallHandle,
@@ -1279,7 +1285,12 @@ export default function App() {
     handle: FileSystemFileHandle | null,
     sourcePath?: string,
   ): SampleEntry {
-    const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    // Workspace/FCS readers normally return an exact-owned ArrayBuffer. parseFcs is read-only, so
+    // reuse it instead of briefly duplicating a potentially multi-GB source file during import.
+    const ab = bytes.buffer instanceof ArrayBuffer &&
+        bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+      ? bytes.buffer
+      : bytes.slice().buffer;
     return {
       id: crypto.randomUUID(),
       name,
@@ -1604,6 +1615,17 @@ export default function App() {
       return [wss.dataPath, entry.bytes];
     }));
   }
+  function currentPortableSources(ws: WorkspaceFileV3) {
+    return ws.samples.map((workspaceSample, index) => {
+      const entry = samples[index];
+      if (!entry) throw new Error(`The loaded data for ${workspaceSample.fileName} is unavailable.`);
+      return Object.freeze({
+        dataPath: workspaceSample.dataPath,
+        fcsBytes: entry.bytes,
+        sample: entry.sample,
+      });
+    });
+  }
   function packReferenceWorkspace(ws: LiveWorkspaceFile): Uint8Array {
     return ws.version === WORKSPACE_VERSION_3
       ? packWorkspaceV3Reference(ws)
@@ -1626,10 +1648,21 @@ export default function App() {
       return undefined;
     }
   }
-  function packCurrentWorkspace(ws: LiveWorkspaceFile): Uint8Array {
-    return ws.version === WORKSPACE_VERSION_3
-      ? packWorkspaceV3ForStorage(ws, currentFcsByPath(ws), wsStorage, bundleGatingML())
-      : packWorkspaceForStorage(ws, currentFcsByPath(ws), wsStorage, bundleGatingML());
+  async function preparePortableBundle(ws: WorkspaceFileV3) {
+    setImportMsg("Preparing portable workspace · hashing source data");
+    return createPortableWorkspaceV3ArchivePlan(
+      ws,
+      currentPortableSources(ws),
+      bundleGatingML(),
+      {
+        onProgress: ({ phase, processedBytes, totalBytes }) => {
+          const percent = totalBytes === 0 ? 100 : Math.round(processedBytes / totalBytes * 100);
+          setImportMsg(
+            `Preparing portable workspace · ${phase === "hashing-fcs" ? "source FCS" : "compensated assay"} · ${percent}%`,
+          );
+        },
+      },
+    );
   }
 
   // Save in place without changing the current workspace's bundle/reference storage mode.
@@ -1637,9 +1670,27 @@ export default function App() {
   async function saveWorkspace() {
     const ws = buildWorkspaceFile();
     if (!ws) return;
+    setBusy(true);
     try {
       if (supportsFileSystemAccess() && wsHandle) {
-        await writeHandle(wsHandle, packCurrentWorkspace(ws) as BlobPart);
+        if (wsStorage === "bundle" && ws.version === WORKSPACE_VERSION_3) {
+          const plan = await preparePortableBundle(ws);
+          await writeHandleStream(wsHandle, async (write) => {
+            await writePortableWorkspaceV3Archive(plan, write, {
+              onProgress: ({ writtenPayloadBytes, totalPayloadBytes }) => {
+                const percent = totalPayloadBytes === 0
+                  ? 100
+                  : Math.round(writtenPayloadBytes / totalPayloadBytes * 100);
+                setImportMsg(`Saving portable workspace · ${percent}%`);
+              },
+            });
+          });
+        } else {
+          const data = ws.version === WORKSPACE_VERSION_3
+            ? packWorkspaceV3Reference(ws)
+            : packWorkspaceForStorage(ws, currentFcsByPath(ws), wsStorage, bundleGatingML());
+          await writeHandle(wsHandle, data as BlobPart);
+        }
         await rememberAllHandles();
         setDirty(false);
         setImportMsg(`Saved ${wsStorage === "bundle" ? "bundle" : "workspace"} · ${wsName}`);
@@ -1648,6 +1699,8 @@ export default function App() {
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -1686,22 +1739,61 @@ export default function App() {
     const ws = buildWorkspaceFile();
     if (!ws) return;
     const base = sanitizeFilePart((fileName || "workspace").replace(/\.[^.]+$/, ""));
+    setBusy(true);
     try {
-      const zip = ws.version === WORKSPACE_VERSION_3
-        ? packWorkspaceV3(ws, currentFcsByPath(ws), bundleGatingML())
-        : packWorkspace(ws, currentFcsByPath(ws), bundleGatingML());
-      if (supportsFileSystemAccess()) {
-        await saveAsHandle(
-          `${base}-bundle.${WORKSPACE_EXT}`,
-          { "application/zip": [`.${WORKSPACE_EXT}`] },
-          "GateLab workspace (self-contained)",
-          zip as BlobPart,
-        );
+      if (ws.version === WORKSPACE_VERSION_3) {
+        const plan = await preparePortableBundle(ws);
+        const progress = ({ writtenPayloadBytes, totalPayloadBytes }: {
+          writtenPayloadBytes: number;
+          totalPayloadBytes: number;
+        }) => {
+          const percent = totalPayloadBytes === 0
+            ? 100
+            : Math.round(writtenPayloadBytes / totalPayloadBytes * 100);
+          setImportMsg(`Saving portable workspace · ${percent}%`);
+        };
+        if (supportsFileSystemAccess()) {
+          const handle = await saveAsHandleStream(
+            `${base}-bundle.${WORKSPACE_EXT}`,
+            { "application/zip": [`.${WORKSPACE_EXT}`] },
+            "GateLab workspace (self-contained)",
+            async (write) => writePortableWorkspaceV3Archive(plan, write, { onProgress: progress }),
+          );
+          if (!handle) return;
+        } else {
+          const parts: BlobPart[] = [];
+          await writePortableWorkspaceV3Archive(plan, async (chunk) => {
+            parts.push(chunk as BlobPart);
+          }, { onProgress: progress });
+          downloadBlob(
+            `${base}-bundle.${WORKSPACE_EXT}`,
+            new Blob(parts, { type: "application/zip" }),
+          );
+        }
       } else {
-        downloadBlob(`${base}-bundle.${WORKSPACE_EXT}`, new Blob([zip as BlobPart], { type: "application/zip" }));
+        const zip = packWorkspace(ws, currentFcsByPath(ws), bundleGatingML());
+        if (supportsFileSystemAccess()) {
+          const handle = await saveAsHandle(
+            `${base}-bundle.${WORKSPACE_EXT}`,
+            { "application/zip": [`.${WORKSPACE_EXT}`] },
+            "GateLab workspace (self-contained)",
+            zip as BlobPart,
+          );
+          if (!handle) return;
+        } else {
+          downloadBlob(`${base}-bundle.${WORKSPACE_EXT}`, new Blob([zip as BlobPart], { type: "application/zip" }));
+        }
       }
+      setImportMsg(
+        `Saved portable bundle · ${base}-bundle.${WORKSPACE_EXT}` +
+          (ws.version === WORKSPACE_VERSION_3 && ws.samples.some(({ assay }) => assay.compensatedLayer !== null)
+            ? " · compensated assays embedded"
+            : ""),
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -1712,8 +1804,8 @@ export default function App() {
       return;
     }
     try {
-      const picked = await pickFile(WORKSPACE_FILE_ACCEPT, "GateLab workspace", { id: "gatelab-open-workspace" });
-      if (picked) await openWorkspaceFromBytes(picked.bytes, picked.handle, picked.name);
+      const picked = await pickFileSource(WORKSPACE_FILE_ACCEPT, "GateLab workspace", { id: "gatelab-open-workspace" });
+      if (picked) await openWorkspaceFromFile(picked.file, picked.handle, picked.name);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -1872,12 +1964,33 @@ export default function App() {
     }
   }
 
-  async function openWorkspaceFromBytes(bytes: Uint8Array, wsH: FileSystemFileHandle | null, wsFileName: string) {
+  async function openWorkspaceFromFile(
+    file: File,
+    wsH: FileSystemFileHandle | null,
+    wsFileName: string,
+  ) {
+    setBusy(true);
+    setError(null);
+    setImportMsg(`Opening ${wsFileName} · reading workspace`);
+    try {
+      const envelope = await readWorkspaceEnvelopeFromFile(file);
+      await openWorkspaceFromEnvelope(envelope, wsH, wsFileName);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openWorkspaceFromEnvelope(
+    envelope: WorkspaceEnvelope,
+    wsH: FileSystemFileHandle | null,
+    wsFileName: string,
+  ) {
     setBusy(true);
     setError(null);
     let compensationWorkspaceReset = false;
     try {
-      const envelope = readWorkspaceEnvelope(bytes);
       const raw = envelope.raw;
       const rawVersion = raw != null && typeof raw === "object"
         ? (raw as { version?: unknown }).version
@@ -1890,7 +2003,8 @@ export default function App() {
         }
         ws = provisional as WorkspaceFileV3;
       } else {
-        ws = readWorkspaceBytes(bytes).ws;
+        ws = migrateWorkspaceToV2(raw);
+        validateWorkspace(ws);
       }
       const { fcsByPath, storage } = envelope;
 
@@ -1982,7 +2096,67 @@ export default function App() {
       compensationManagerRef.current!.resetWorkspace(nextWorkspaceId);
       compensationWorkspaceReset = true;
       if (ws.version === WORKSPACE_VERSION_3) {
-        await restoreSavedWorkspaceCompensation(ws, entries);
+        if (envelope.portableAssays) {
+          const totalCompensatedEvents = ws.samples.reduce(
+            (total, workspaceSample, index) => total +
+              (workspaceSample.assay.compensatedLayer === null ? 0 : entries[index].sample.fcs.nEvents),
+            0,
+          );
+          const hasEmbeddedCompensation = totalCompensatedEvents > 0;
+          compensationApplyGuardRef.current = true;
+          compensationRestoreCancelledRef.current = false;
+          try {
+            const restored = await restorePortableAssayLayers(
+              envelope.portableAssays,
+              ws,
+              ws.samples.map((workspaceSample, index) => Object.freeze({
+                dataPath: workspaceSample.dataPath,
+                fcsBytes: entries[index].bytes,
+                sample: entries[index].sample,
+              })),
+              {
+                checkCancelled: () => {
+                  if (compensationRestoreCancelledRef.current) {
+                    throw new CompensationCancelledError("Workspace compensation restore cancelled.");
+                  }
+                },
+                onProgress: ({ processedBytes, totalBytes }) => {
+                  const fraction = totalBytes === 0 ? 1 : processedBytes / totalBytes;
+                  if (hasEmbeddedCompensation) {
+                    setCompensationApplyStatus({
+                      phase: "preparing",
+                      operation: "restore",
+                      profileName: "embedded compensated assays",
+                      fraction,
+                      processedEvents: Math.round(totalCompensatedEvents * fraction),
+                      totalEvents: totalCompensatedEvents,
+                    });
+                  }
+                  setImportMsg(
+                    `${hasEmbeddedCompensation ? "Restoring embedded compensation" : "Checking portable workspace data"}` +
+                      ` · ${Math.round(fraction * 100)}%`,
+                  );
+                },
+              },
+            );
+            for (let index = 0; index < ws.samples.length; index++) {
+              const binding = ws.samples[index].assay.compensatedLayer;
+              const fcsDigest = restored.sourceDigests[ws.samples[index].dataPath];
+              if (!binding || !fcsDigest) continue;
+              void writeCachedCompensatedAssay(
+                fcsDigest,
+                entries[index].sample,
+                binding,
+              ).catch(() => "unavailable");
+            }
+          } finally {
+            compensationApplyGuardRef.current = false;
+            compensationRestoreCancelledRef.current = false;
+            setCompensationApplyStatus(null);
+          }
+        } else {
+          await restoreSavedWorkspaceCompensation(ws, entries);
+        }
       }
       pendingCheckpointReasonRef.current = "after-workspace-open";
       skipDirtyRef.current = true;
@@ -2495,7 +2669,7 @@ export default function App() {
           <button
             className="gl-btn-ghost gl-btn-block"
             disabled={!sample}
-            title="Save the workspace to a new file (reference JSON — the FCS stays on disk)"
+            title="Save a lightweight reference workspace. Source FCS and compensated values are not embedded; use Save Portable Copy for a self-contained archive."
             onClick={saveWorkspaceAs}
           >
             Save As…
@@ -2503,10 +2677,10 @@ export default function App() {
           <button
             className="gl-btn-ghost gl-btn-block"
             disabled={!sample}
-            title="A self-contained .gatelab bundling the FCS inside — for sharing / archiving"
+            title="Save a self-contained .gatelab with the exact source FCS and any computed compensated assay, so it can reopen without rerunning compensation."
             onClick={saveBundledCopy}
           >
-            Save Bundled Copy…
+            Save Portable Copy…
           </button>
           <input
             ref={wsRef}
@@ -2516,7 +2690,7 @@ export default function App() {
             onChange={async (e) => {
               const f = e.target.files?.[0];
               e.target.value = "";
-              if (f) await openWorkspaceFromBytes(new Uint8Array(await f.arrayBuffer()), null, f.name);
+              if (f) await openWorkspaceFromFile(f, null, f.name);
             }}
           />
           {!sample && importMsg && <div className="gl-hint">{importMsg}</div>}

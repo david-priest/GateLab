@@ -7,6 +7,13 @@
 import { zipSync, unzipSync, strToU8, strFromU8 } from "fflate";
 import type { Gate, PopulationMap } from "./models";
 import type { DisplayMode } from "./sample";
+import { readZipFileEntries } from "./workspaceArchiveStream";
+import {
+  PORTABLE_ASSAY_MANIFEST_PATH,
+  parsePortableAssayManifest,
+  portableAssayExpectedFileSizes,
+  type PortableAssayArchiveEnvelope,
+} from "./workspacePortableAssays";
 
 export const WORKSPACE_EXT = "gatelab";
 export const WORKSPACE_FORMAT = "gatelab-workspace";
@@ -16,6 +23,7 @@ export interface WorkspaceEnvelope {
   readonly raw: unknown;
   readonly fcsByPath: Record<string, Uint8Array> | null;
   readonly storage: WorkspaceStorage;
+  readonly portableAssays: PortableAssayArchiveEnvelope | null;
 }
 
 export interface GatingFontSizes {
@@ -519,31 +527,118 @@ export function readWorkspaceEnvelope(bytes: Uint8Array): WorkspaceEnvelope {
     } catch {
       throw new Error("Not a valid GateLab workspace (could not read the zip).");
     }
-    const encoded = files["workspace.json"];
-    if (!encoded) throw new Error("Not a GateLab workspace: workspace.json is missing.");
-    const raw = parseJson(strFromU8(encoded));
-    if (!isRecord(raw) || !Array.isArray(raw.samples)) {
-      throw new Error("Not a GateLab workspace: sample declarations are missing.");
-    }
-    const fcsByPath: Record<string, Uint8Array> = {};
-    const missing: string[] = [];
-    for (const candidate of raw.samples) {
-      if (
-        !isRecord(candidate) ||
-        typeof candidate.fileName !== "string" ||
-        typeof candidate.dataPath !== "string"
-      ) {
-        throw new Error("Not a GateLab workspace: a sample declaration is malformed.");
-      }
-      if (files[candidate.dataPath]) fcsByPath[candidate.dataPath] = files[candidate.dataPath];
-      else missing.push(`${candidate.fileName} (${candidate.dataPath})`);
-    }
-    if (missing.length > 0) {
-      throw new Error(`Invalid GateLab workspace: bundled FCS data is missing for ${missing.join(", ")}.`);
-    }
-    return { raw, fcsByPath, storage: "bundle" };
+    return workspaceEnvelopeFromArchiveFiles(files);
   }
-  return { raw: parseJson(strFromU8(bytes)), fcsByPath: null, storage: "reference" };
+  return {
+    raw: parseJson(strFromU8(bytes)),
+    fcsByPath: null,
+    storage: "reference",
+    portableAssays: null,
+  };
+}
+
+function workspaceEnvelopeFromArchiveFiles(
+  files: Readonly<Record<string, Uint8Array>>,
+): WorkspaceEnvelope {
+  const encoded = files["workspace.json"];
+  if (!encoded) throw new Error("Not a GateLab workspace: workspace.json is missing.");
+  const raw = parseJson(strFromU8(encoded));
+  if (!isRecord(raw) || !Array.isArray(raw.samples)) {
+    throw new Error("Not a GateLab workspace: sample declarations are missing.");
+  }
+  const fcsByPath: Record<string, Uint8Array> = {};
+  const missing: string[] = [];
+  for (const candidate of raw.samples) {
+    if (
+      !isRecord(candidate) ||
+      typeof candidate.fileName !== "string" ||
+      typeof candidate.dataPath !== "string"
+    ) {
+      throw new Error("Not a GateLab workspace: a sample declaration is malformed.");
+    }
+    if (files[candidate.dataPath]) fcsByPath[candidate.dataPath] = files[candidate.dataPath];
+    else missing.push(`${candidate.fileName} (${candidate.dataPath})`);
+  }
+  if (missing.length > 0) {
+    throw new Error(`Invalid GateLab workspace: bundled FCS data is missing for ${missing.join(", ")}.`);
+  }
+
+  const encodedManifest = files[PORTABLE_ASSAY_MANIFEST_PATH];
+  let portableAssays: PortableAssayArchiveEnvelope | null = null;
+  if (encodedManifest) {
+    const manifest = parsePortableAssayManifest(encodedManifest);
+    const assayFiles: Record<string, Uint8Array> = {};
+    for (const sample of manifest.samples) {
+      for (const column of sample.assay?.columns ?? []) {
+        const columnBytes = files[column.path];
+        if (!columnBytes) {
+          throw new Error(`Invalid portable assay bundle: declared assay file '${column.path}' is missing.`);
+        }
+        assayFiles[column.path] = columnBytes;
+      }
+    }
+    for (const path of Object.keys(files)) {
+      if (
+        path.startsWith("assays/") &&
+        path !== PORTABLE_ASSAY_MANIFEST_PATH &&
+        !Object.prototype.hasOwnProperty.call(assayFiles, path)
+      ) {
+        throw new Error(`Invalid portable assay bundle: undeclared assay file '${path}' is present.`);
+      }
+    }
+    portableAssays = Object.freeze({ manifest, files: Object.freeze(assayFiles) });
+  }
+  return {
+    raw,
+    fcsByPath,
+    storage: "bundle",
+    portableAssays,
+  };
+}
+
+/**
+ * Stream a workspace File so a large bundle is never duplicated as one compressed Uint8Array.
+ * New bundles place their strict size manifest before FCS/assay payloads, allowing exact-size
+ * allocation; legacy bundles remain supported with a bounded compatibility path.
+ */
+export async function readWorkspaceEnvelopeFromFile(file: File): Promise<WorkspaceEnvelope> {
+  const signature = new Uint8Array(await file.slice(0, 2).arrayBuffer());
+  if (signature[0] !== 0x50 || signature[1] !== 0x4b) {
+    return readWorkspaceEnvelope(new Uint8Array(await file.arrayBuffer()));
+  }
+
+  const expectedSizes = new Map<string, number>();
+  const compatibilityOutputLimit = Math.min(
+    Number.MAX_SAFE_INTEGER,
+    Math.max(512 * 1024 * 1024, file.size * 32),
+  );
+  const files = await readZipFileEntries(file, {
+    select: (path) => path === "workspace.json" ||
+      path === PORTABLE_ASSAY_MANIFEST_PATH ||
+      path.startsWith("data/") ||
+      (path.startsWith("assays/") && path.endsWith(".f32")),
+    expectedSize: (path) => expectedSizes.get(path),
+    // Old deflated bundles have no leading size manifest. Permit their data payloads while
+    // retaining a tight cap for untrusted JSON metadata and unknown assay paths.
+    unknownEntryLimit: (path) => path.startsWith("data/")
+      ? compatibilityOutputLimit
+      : 64 * 1024 * 1024,
+    totalOutputLimit: compatibilityOutputLimit,
+    onEntry: (path, bytes) => {
+      if (path !== PORTABLE_ASSAY_MANIFEST_PATH) return;
+      const manifest = parsePortableAssayManifest(bytes);
+      const declaredSizes = portableAssayExpectedFileSizes(manifest);
+      let declaredPayloadBytes = 0;
+      for (const [entryPath, byteLength] of declaredSizes) {
+        declaredPayloadBytes += byteLength;
+        if (!Number.isSafeInteger(declaredPayloadBytes) || declaredPayloadBytes > file.size) {
+          throw new Error("Invalid portable assay bundle: declared payload exceeds the archive size.");
+        }
+        expectedSizes.set(entryPath, byteLength);
+      }
+    },
+  });
+  return workspaceEnvelopeFromArchiveFiles(files);
 }
 
 function parseJson(text: string): unknown {

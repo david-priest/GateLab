@@ -4,6 +4,7 @@ import {
   packWorkspace,
   packWorkspaceForStorage,
   packWorkspaceReference,
+  readWorkspaceEnvelopeFromFile,
   readWorkspaceBytes,
   validateWorkspace,
   type WorkspaceFile,
@@ -63,6 +64,21 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     expect(Array.from(got!["data/1_run2.fcs"])).toEqual(Array.from(fcs1));
     expect(back.samples.length).toBe(2);
     expect(back.activeSample).toBe(1);
+  });
+
+  it("streams a legacy deflated bundle without a portable-assay manifest", async () => {
+    const bytes = packWorkspace(ws, fcsByPath, "<xml/>");
+    const envelope = await readWorkspaceEnvelopeFromFile(new File(
+      [bytes.slice().buffer as ArrayBuffer],
+      "legacy-bundle.gatelab",
+      { type: "application/zip" },
+    ));
+
+    expect(envelope.storage).toBe("bundle");
+    expect(envelope.raw).toEqual(ws);
+    expect(envelope.portableAssays).toBeNull();
+    expect(envelope.fcsByPath?.[ws.samples[0].dataPath]).toEqual(fcs0);
+    expect(envelope.fcsByPath?.[ws.samples[1].dataPath]).toEqual(fcs1);
   });
 
   it("bundled zip starts with PK; reference is JSON", () => {

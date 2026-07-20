@@ -69,6 +69,9 @@ export interface StartApplyRequest extends WorkerRequestBase, ApplyIdentity {
   readonly matrix: readonly (readonly number[])[];
   readonly flowSettings?: FlowSolverSettings;
   readonly nnlsSettings?: NnlsSolverSettingsInput;
+  /** Global event offset of this worker's disjoint contiguous partition. Defaults to zero. */
+  readonly eventOffset?: number;
+  /** Event count in this worker partition, not necessarily the complete Sample. */
   readonly totalEvents: number;
   readonly channelCount: number;
   /** Governs host-side chunk construction and is echoed for an auditable job receipt. */
@@ -129,6 +132,7 @@ export interface PreviewSolvedResponse extends WorkerResponseBase, PreviewIdenti
 
 export interface ApplyStartedResponse extends WorkerResponseBase, ApplyIdentity {
   readonly type: "apply-started";
+  readonly eventOffset: number;
   readonly totalEvents: number;
   readonly channelCount: number;
   readonly byteBudget: number;
@@ -150,6 +154,7 @@ export interface ApplyChunkCompleteResponse extends WorkerResponseBase, ApplyIde
 
 export interface ApplyProgressResponse extends WorkerResponseBase, ApplyIdentity {
   readonly type: "apply-progress";
+  readonly eventOffset: number;
   readonly processedEvents: number;
   readonly totalEvents: number;
   readonly fraction: number;
@@ -159,6 +164,7 @@ export interface ApplyProgressResponse extends WorkerResponseBase, ApplyIdentity
 
 export interface ApplyCompleteResponse extends WorkerResponseBase, ApplyIdentity {
   readonly type: "apply-complete";
+  readonly eventOffset: number;
   readonly processedEvents: number;
   readonly totalEvents: number;
   readonly outputBindings: readonly CompensationWorkerChannelBinding[];

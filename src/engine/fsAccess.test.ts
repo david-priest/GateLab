@@ -1,7 +1,14 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { pickDirectoryFiles, pickFile, pickFiles } from "./fsAccess";
+import {
+  pickDirectoryFiles,
+  pickFile,
+  pickFileSource,
+  pickFiles,
+  saveAsHandleStream,
+  writeHandleStream,
+} from "./fsAccess";
 
 describe("pickFile", () => {
   afterEach(() => {
@@ -39,6 +46,85 @@ describe("pickFile", () => {
     });
 
     await expect(pickFile({ "application/json": [".gatelab"] }, "GateLab workspace")).resolves.toBeNull();
+  });
+
+  it("can retain a single File source without eagerly reading its bytes", async () => {
+    const file = new File([new Uint8Array([1, 2, 3])], "portable.gatelab");
+    const handle = { getFile: vi.fn().mockResolvedValue(file) } as unknown as FileSystemFileHandle;
+    Object.defineProperty(window, "showOpenFilePicker", {
+      configurable: true,
+      value: vi.fn().mockResolvedValue([handle]),
+    });
+
+    const picked = await pickFileSource(
+      { "application/zip": [".gatelab"] },
+      "GateLab workspace",
+      { id: "gatelab-open-workspace" },
+    );
+
+    expect(picked).toMatchObject({ handle, file, name: "portable.gatelab" });
+    expect(handle.getFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("streams ordered chunks to existing and newly selected file handles", async () => {
+    const writable = {
+      write: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      abort: vi.fn().mockResolvedValue(undefined),
+    };
+    const handle = {
+      queryPermission: vi.fn().mockResolvedValue("granted"),
+      createWritable: vi.fn().mockResolvedValue(writable),
+    } as unknown as FileSystemFileHandle;
+
+    await writeHandleStream(handle, async (write) => {
+      await write(Uint8Array.from([1, 2]));
+      await write(Uint8Array.from([3]));
+    });
+    expect(writable.write.mock.calls.map(([chunk]) => Array.from(chunk as Uint8Array)))
+      .toEqual([[1, 2], [3]]);
+    expect(writable.close).toHaveBeenCalledTimes(1);
+    expect(writable.abort).not.toHaveBeenCalled();
+
+    const secondWritable = {
+      write: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      abort: vi.fn().mockResolvedValue(undefined),
+    };
+    const secondHandle = {
+      createWritable: vi.fn().mockResolvedValue(secondWritable),
+    } as unknown as FileSystemFileHandle;
+    Object.defineProperty(window, "showSaveFilePicker", {
+      configurable: true,
+      value: vi.fn().mockResolvedValue(secondHandle),
+    });
+    await expect(saveAsHandleStream(
+      "portable.gatelab",
+      { "application/zip": [".gatelab"] },
+      "GateLab workspace",
+      async (write) => write(Uint8Array.from([4, 5])),
+    )).resolves.toBe(secondHandle);
+    expect(secondWritable.write).toHaveBeenCalledTimes(1);
+    expect(secondWritable.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts a partial streamed file when its producer fails", async () => {
+    const writable = {
+      write: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      abort: vi.fn().mockResolvedValue(undefined),
+    };
+    const handle = {
+      queryPermission: vi.fn().mockResolvedValue("granted"),
+      createWritable: vi.fn().mockResolvedValue(writable),
+    } as unknown as FileSystemFileHandle;
+
+    await expect(writeHandleStream(handle, async (write) => {
+      await write(Uint8Array.from([1, 2]));
+      throw new Error("synthetic archive failure");
+    })).rejects.toThrow("synthetic archive failure");
+    expect(writable.abort).toHaveBeenCalledTimes(1);
+    expect(writable.close).not.toHaveBeenCalled();
   });
 
   it("requests and returns every file from the multi-file picker", async () => {

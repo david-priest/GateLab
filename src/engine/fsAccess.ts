@@ -80,6 +80,26 @@ export async function pickFile(
   }
 }
 
+/** Open one file without eagerly duplicating it into a whole-file Uint8Array. */
+export async function pickFileSource(
+  accept: Record<string, string[]>,
+  description: string,
+  options: PickFileOptions = {},
+): Promise<PickedFileSource | null> {
+  try {
+    const [handle] = await window.showOpenFilePicker!({
+      types: [{ description, accept }],
+      multiple: false,
+      ...(options.id ? { id: options.id } : {}),
+    });
+    const file = await handle.getFile();
+    return { handle, file, name: file.name, relativePath: file.name };
+  } catch (e) {
+    if ((e as DOMException)?.name === "AbortError") return null;
+    throw e;
+  }
+}
+
 /** Open-file picker for a batch. Reading/parsing is deliberately left to the caller. */
 export async function pickFiles(
   accept: Record<string, string[]>,
@@ -151,6 +171,35 @@ export async function writeHandle(handle: FileSystemFileHandle, data: BlobPart):
   await w.close();
 }
 
+export type FileChunkProducer = (
+  write: (chunk: Uint8Array) => Promise<void>,
+) => Promise<void>;
+
+async function streamToHandle(
+  handle: FileSystemFileHandle,
+  produce: FileChunkProducer,
+): Promise<void> {
+  const writable = await handle.createWritable();
+  try {
+    await produce(async (chunk) => {
+      await writable.write(chunk as FileSystemWriteChunkType);
+    });
+    await writable.close();
+  } catch (error) {
+    await writable.abort(error).catch(() => undefined);
+    throw error;
+  }
+}
+
+/** Stream to an existing handle without constructing a complete in-memory Blob. */
+export async function writeHandleStream(
+  handle: FileSystemFileHandle,
+  produce: FileChunkProducer,
+): Promise<void> {
+  if (!(await ensurePermission(handle, "readwrite"))) throw new Error("Write permission was denied.");
+  await streamToHandle(handle, produce);
+}
+
 /** Save-file picker → write + return the new handle. Null if cancelled. */
 export async function saveAsHandle(
   suggestedName: string,
@@ -168,6 +217,24 @@ export async function saveAsHandle(
   const w = await handle.createWritable();
   await w.write(data);
   await w.close();
+  return handle;
+}
+
+/** Save-file picker with a chunk producer for large portable workspaces. */
+export async function saveAsHandleStream(
+  suggestedName: string,
+  accept: Record<string, string[]>,
+  description: string,
+  produce: FileChunkProducer,
+): Promise<FileSystemFileHandle | null> {
+  let handle: FileSystemFileHandle;
+  try {
+    handle = await window.showSaveFilePicker!({ suggestedName, types: [{ description, accept }] });
+  } catch (e) {
+    if ((e as DOMException)?.name === "AbortError") return null;
+    throw e;
+  }
+  await streamToHandle(handle, produce);
   return handle;
 }
 

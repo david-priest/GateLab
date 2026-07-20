@@ -3,6 +3,7 @@ import {
   CompensationCancelledError,
   CompensationManager,
   planCompensationChunks,
+  planCompensationWorkerPool,
   type CompensationWorkerLike,
 } from "./compensationManager";
 import {
@@ -143,12 +144,14 @@ class RuntimeWorker implements CompensationWorkerLike {
   chunksInFlight = 0;
   terminated = false;
   onRequest: ((request: CompensationWorkerRequest) => void) | null = null;
+  onResponse: ((response: CompensationWorkerResponse) => void) | null = null;
   private readonly runtime;
 
   constructor(yieldToEventLoop: () => Promise<void> = () => Promise.resolve()) {
     this.runtime = createCompensationWorkerRuntime({
       emit: (response) => {
         if (response.type === "apply-chunk-complete") this.chunksInFlight--;
+        this.onResponse?.(response);
         this.onmessage?.({ data: response } as MessageEvent<CompensationWorkerResponse>);
       },
       yieldToEventLoop,
@@ -261,9 +264,142 @@ describe("compensation chunk planning", () => {
       fixedWorkspaceBytes: 1_000,
     })).toThrow(/at least 1024 bytes/);
   });
+
+  it("bounds the aggregate memory budget while choosing only useful workers", () => {
+    expect(planCompensationWorkerPool({
+      totalEvents: 100,
+      channelCount: 2,
+      maxWorkers: 4,
+      byteBudget: 192,
+      fixedWorkspaceBytes: 0,
+    })).toMatchObject({
+      workerCount: 4,
+      totalByteBudget: 192,
+      perWorkerByteBudget: 48,
+      chunk: { eventsPerChunk: 2, bytesPerEvent: 24 },
+    });
+    expect(planCompensationWorkerPool({
+      totalEvents: 100,
+      channelCount: 2,
+      maxWorkers: 4,
+      byteBudget: 48,
+      fixedWorkspaceBytes: 0,
+    }).workerCount).toBe(2);
+    expect(planCompensationWorkerPool({
+      totalEvents: 1,
+      channelCount: 2,
+      maxWorkers: 4,
+      byteBudget: 96,
+      fixedWorkspaceBytes: 0,
+    }).workerCount).toBe(1);
+  });
 });
 
 describe("CompensationManager Apply", () => {
+  it("solves disjoint event partitions concurrently and installs them in exact event order", async () => {
+    const sample = new Sample(flowFcs());
+    const profile = await flowProfile();
+    const workers: RuntimeWorker[] = [];
+    const progress: number[] = [];
+    let chunksInFlight = 0;
+    let maxChunksInFlight = 0;
+    const manager = new CompensationManager({
+      workspaceKey: "workspace-parallel",
+      workerFactory: () => {
+        const worker = new RuntimeWorker(
+          () => new Promise((resolve) => setTimeout(resolve, 0)),
+        );
+        worker.onRequest = (request) => {
+          if (request.type !== "apply-chunk") return;
+          chunksInFlight++;
+          maxChunksInFlight = Math.max(maxChunksInFlight, chunksInFlight);
+        };
+        worker.onResponse = (response) => {
+          if (response.type === "apply-chunk-complete") chunksInFlight--;
+        };
+        workers.push(worker);
+        return worker;
+      },
+      workerPoolSize: 3,
+      byteBudget: 72,
+      fixedWorkspaceBytes: 0,
+      copySliceEvents: 1,
+      yieldToEventLoop: () => Promise.resolve(),
+    });
+    const originalFl1 = Float32Array.from(sample.fcs.columns[2]);
+    const originalFl2 = Float32Array.from(sample.fcs.columns[1]);
+
+    await manager.apply({
+      profile,
+      targets: [{ sample }],
+      onProgress: ({ sampleProcessedEvents }) => progress.push(sampleProcessedEvents),
+    });
+
+    const expected = compensateFlowColumns(
+      [Float64Array.from(originalFl1), Float64Array.from(originalFl2)],
+      prepareFlowCompensation(profile.scientific.matrix.matrix),
+      { output: "float32" },
+    );
+    expect(workers).toHaveLength(3);
+    expect(workers.map((worker) => worker.requests.find(
+      (request) => request.type === "start-apply",
+    ))).toMatchObject([
+      { eventOffset: 0, totalEvents: 2 },
+      { eventOffset: 2, totalEvents: 2 },
+      { eventOffset: 4, totalEvents: 1 },
+    ]);
+    expect(new Uint8Array(compensatedValues(sample, "FL1-A").buffer)).toEqual(
+      new Uint8Array(expected.columns[0].buffer),
+    );
+    expect(new Uint8Array(compensatedValues(sample, "FL2-A").buffer)).toEqual(
+      new Uint8Array(expected.columns[1].buffer),
+    );
+    expect(progress).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(maxChunksInFlight).toBeGreaterThan(1);
+    expect(workers.every(({ maxChunksInFlight }) => maxChunksInFlight === 1)).toBe(true);
+    manager.dispose();
+  });
+
+  it("cancels every active pool lane and discards all parallel staging", async () => {
+    const sample = new Sample(flowFcs());
+    const profile = await flowProfile();
+    const workers: RuntimeWorker[] = [];
+    let cancelled = false;
+    let manager!: CompensationManager;
+    manager = new CompensationManager({
+      workspaceKey: "workspace-parallel-cancel",
+      workerFactory: () => {
+        const worker = new RuntimeWorker(
+          () => new Promise((resolve) => setTimeout(resolve, 0)),
+        );
+        worker.onRequest = (request) => {
+          if (!cancelled && request.type === "apply-chunk") {
+            cancelled = true;
+            manager.cancelApply("parallel test cancellation");
+          }
+        };
+        workers.push(worker);
+        return worker;
+      },
+      workerPoolSize: 3,
+      byteBudget: 72,
+      fixedWorkspaceBytes: 0,
+      copySliceEvents: 1,
+      yieldToEventLoop: () => Promise.resolve(),
+    });
+
+    await expect(manager.apply({ profile, targets: [{ sample }] }))
+      .rejects.toBeInstanceOf(CompensationCancelledError);
+
+    expect(workers).toHaveLength(3);
+    expect(workers.every((worker) => worker.requests.some(
+      (request) => request.type === "cancel" && request.target === "apply",
+    ))).toBe(true);
+    expect(sample.compensatedLayerStatus().state).toBe("missing");
+    expect([sample.dataRevision, sample.layerRevision]).toEqual([0, 0]);
+    manager.dispose();
+  });
+
   it("uses immutable original values, exact PnN mapping, one chunk in flight, and source-order output", async () => {
     const sample = new Sample(flowFcs());
     const profile = await flowProfile();

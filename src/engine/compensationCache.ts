@@ -30,8 +30,8 @@ function bytesToHex(bytes: Uint8Array): string {
   return hex;
 }
 
-/** Exact identity of the original source data used to compute a derived assay. */
-export async function digestFcsBytes(bytes: Uint8Array): Promise<Sha256Digest> {
+/** Exact SHA-256 identity for an owned or borrowed byte view. */
+export async function digestBytesSha256(bytes: Uint8Array): Promise<Sha256Digest> {
   if (!globalThis.crypto?.subtle) {
     throw new Error("Compensation cache hashing requires Web Crypto (HTTPS or localhost).");
   }
@@ -42,6 +42,9 @@ export async function digestFcsBytes(bytes: Uint8Array): Promise<Sha256Digest> {
   const digest = await globalThis.crypto.subtle.digest("SHA-256", source);
   return `sha256:${bytesToHex(new Uint8Array(digest))}`;
 }
+
+/** Exact identity of the original source data used to compute a derived assay. */
+export const digestFcsBytes = digestBytesSha256;
 
 /** Stable exact scientific/runtime binding check stored alongside the derived columns. */
 export function compensatedBindingSignature(binding: PersistedCompensatedLayerBinding): string {

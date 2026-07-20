@@ -61,6 +61,7 @@ interface ApplyJob {
   readonly bindingKey: string;
   readonly method: "matrix-inverse" | "nnls";
   readonly plan: FlowCompensationPlan | CytofNnlsPlan;
+  readonly eventOffset: number;
   readonly totalEvents: number;
   readonly channelCount: number;
   readonly byteBudget: number;
@@ -665,6 +666,8 @@ export class CompensationWorkerRuntime {
       return;
     }
     if (
+      (request.eventOffset !== undefined &&
+        (!Number.isSafeInteger(request.eventOffset) || request.eventOffset < 0)) ||
       !Number.isSafeInteger(request.totalEvents) ||
       request.totalEvents < 0 ||
       !Number.isSafeInteger(request.channelCount) ||
@@ -709,6 +712,7 @@ export class CompensationWorkerRuntime {
         bindingKey: request.bindingKey,
         method: request.method,
         plan,
+        eventOffset: request.eventOffset ?? 0,
         totalEvents: request.totalEvents,
         channelCount: request.channelCount,
         byteBudget: request.byteBudget,
@@ -729,6 +733,7 @@ export class CompensationWorkerRuntime {
         jobToken: job.jobToken,
         profileHash: job.profileHash,
         bindingKey: job.bindingKey,
+        eventOffset: job.eventOffset,
         totalEvents: job.totalEvents,
         channelCount: job.channelCount,
         byteBudget: job.byteBudget,
@@ -746,6 +751,7 @@ export class CompensationWorkerRuntime {
           jobToken: job.jobToken,
           profileHash: job.profileHash,
           bindingKey: job.bindingKey,
+          eventOffset: job.eventOffset,
           processedEvents: 0,
           totalEvents: 0,
           outputBindings: job.sourceBindings,
@@ -791,7 +797,7 @@ export class CompensationWorkerRuntime {
       !Number.isSafeInteger(request.chunkIndex) ||
       request.chunkIndex !== job.nextChunkIndex ||
       !Number.isSafeInteger(request.startEvent) ||
-      request.startEvent !== job.processedEvents
+      request.startEvent !== job.eventOffset + job.processedEvents
     ) {
       this.emitError("apply", request.jobId, request.jobToken,
         "out-of-order-apply-chunk", "Apply chunks must be contiguous and strictly sequential.", true);
@@ -815,7 +821,7 @@ export class CompensationWorkerRuntime {
     if (
       eventCount <= 0 ||
       request.measuredColumns.some((column) => column.length !== eventCount) ||
-      request.startEvent + eventCount > job.totalEvents
+      request.startEvent + eventCount > job.eventOffset + job.totalEvents
     ) {
       this.emitError("apply", request.jobId, request.jobToken,
         "dimension-mismatch", "Apply chunks must contain equally sized columns within the declared total event count.", true);
@@ -912,6 +918,7 @@ export class CompensationWorkerRuntime {
           jobToken: job.jobToken,
           profileHash: job.profileHash,
           bindingKey: job.bindingKey,
+          eventOffset: job.eventOffset,
           processedEvents: job.processedEvents,
           totalEvents: job.totalEvents,
           outputBindings: job.sourceBindings,
@@ -948,6 +955,7 @@ export class CompensationWorkerRuntime {
       jobToken: job.jobToken,
       profileHash: job.profileHash,
       bindingKey: job.bindingKey,
+      eventOffset: job.eventOffset,
       processedEvents: job.processedEvents,
       totalEvents: job.totalEvents,
       fraction: job.totalEvents === 0 ? 1 : job.processedEvents / job.totalEvents,

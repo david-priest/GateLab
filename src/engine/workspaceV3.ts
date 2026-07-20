@@ -1,5 +1,17 @@
 import type { SamplePnnChannel } from "./compensationCompatibility";
 import { strToU8, zipSync } from "fflate";
+import type { Sample } from "./sample";
+import {
+  createPortableAssayArchivePlan,
+  PORTABLE_ASSAY_MANIFEST_PATH,
+  type PortableAssayPlanOptions,
+} from "./workspacePortableAssays";
+import {
+  writeStoredZip,
+  type StreamZipEntry,
+  type StreamZipWriteOptions,
+  type ZipChunkSink,
+} from "./workspaceArchiveStream";
 import {
   createOriginalSampleAssayBinding,
   migrateLegacySampleAssayBinding,
@@ -394,4 +406,54 @@ export function packWorkspaceV3ForStorage(
   return storage === "bundle"
     ? packWorkspaceV3(workspace, fcsByPath, gatingMLXml)
     : packWorkspaceV3Reference(workspace);
+}
+
+export interface PortableWorkspaceV3SampleSource {
+  readonly dataPath: string;
+  readonly fcsBytes: Uint8Array;
+  readonly sample: Sample;
+}
+
+export interface PortableWorkspaceV3ArchivePlan {
+  readonly entries: readonly StreamZipEntry[];
+  readonly payloadByteLength: number;
+  readonly embeddedAssayCount: number;
+}
+
+/** Build the hash-bound, self-contained v3 bundle plan without copying large FCS/assay arrays. */
+export async function createPortableWorkspaceV3ArchivePlan(
+  workspace: WorkspaceFileV3,
+  sources: readonly PortableWorkspaceV3SampleSource[],
+  gatingMLXml?: string,
+  options: PortableAssayPlanOptions = {},
+): Promise<PortableWorkspaceV3ArchivePlan> {
+  assertPackableV3(workspace);
+  const portable = await createPortableAssayArchivePlan(workspace, sources, options);
+  const entries: StreamZipEntry[] = [
+    Object.freeze({
+      path: "workspace.json",
+      bytes: strToU8(JSON.stringify(workspace, null, 2)),
+    }),
+    // The manifest precedes large payloads so streamed readers can allocate exact buffers.
+    Object.freeze({ path: PORTABLE_ASSAY_MANIFEST_PATH, bytes: portable.manifestBytes }),
+    ...portable.fcsFiles,
+  ];
+  if (gatingMLXml) {
+    entries.push(Object.freeze({ path: "gates.gatingml.xml", bytes: strToU8(gatingMLXml) }));
+  }
+  entries.push(...portable.assayFiles);
+  return Object.freeze({
+    entries: Object.freeze(entries),
+    payloadByteLength: entries.reduce((sum, entry) => sum + entry.bytes.byteLength, 0),
+    embeddedAssayCount: portable.manifest.samples.filter(({ assay }) => assay !== null).length,
+  });
+}
+
+/** Stream a portable bundle to disk or a Blob-part sink with bounded transient memory. */
+export async function writePortableWorkspaceV3Archive(
+  plan: PortableWorkspaceV3ArchivePlan,
+  sink: ZipChunkSink,
+  options: StreamZipWriteOptions = {},
+): Promise<void> {
+  await writeStoredZip(plan.entries, sink, options);
 }

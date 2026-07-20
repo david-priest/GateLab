@@ -251,6 +251,35 @@ describe("Sample explicit assay layers", () => {
     );
   });
 
+  it("accepts complete disjoint parallel ranges out of order but rejects overlap", () => {
+    const sample = new Sample(flowFcs());
+    const identity = stagingIdentity("parallel");
+    const staging = sample.beginCompensatedLayerStaging(
+      flowBinding(),
+      flowOutputBindings(),
+      identity,
+      { activeLayer: "compensated", allowOutOfOrderChunks: true },
+    );
+
+    appendFlowChunk(sample, staging, identity, 2, [
+      Float32Array.from([27, 36]),
+      Float32Array.from([-3, -4]),
+    ]);
+    expect(() => appendFlowChunk(sample, staging, identity, 1, [
+      Float32Array.from([18, 27]),
+      Float32Array.from([-2, -3]),
+    ])).toThrow("must not overlap");
+    appendFlowChunk(sample, staging, identity, 0, [
+      Float32Array.from([9, 18]),
+      Float32Array.from([-1, -2]),
+    ]);
+
+    const prepared = sample.finishCompensatedLayerStaging(staging, identity);
+    Sample.commitPreparedCompensatedLayers([prepared]);
+    expect(Array.from(sample.rawColumnData(sample.index("CD3")!))).toEqual([9, 18, 27, 36]);
+    expect(Array.from(sample.rawColumnData(sample.index("CD19")!))).toEqual([-1, -2, -3, -4]);
+  });
+
   it("defensively snapshots caller-owned complete layers before preparation", () => {
     const sample = new Sample(flowFcs());
     const input = flowLayer();

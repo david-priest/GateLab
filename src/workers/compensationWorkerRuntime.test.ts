@@ -330,6 +330,32 @@ describe("compensation worker runtime", () => {
     )).toBe(true);
   });
 
+  it("processes one exact non-zero event partition for a parallel host", async () => {
+    const measured = [
+      new Float64Array([100, 75, -20]),
+      new Float64Array([12, -5, 33]),
+    ] as const;
+    const responses: CompensationWorkerResponse[] = [];
+    const runtime = createCompensationWorkerRuntime({
+      emit: (response) => responses.push(response),
+      microbatchEvents: 1,
+    });
+
+    runtime.dispatch(applyStart(3, { eventOffset: 10 }));
+    const started = await eventually(() => responseOfType(responses, "apply-started"));
+    expect(started).toMatchObject({ eventOffset: 10, totalEvents: 3 });
+    runtime.dispatch(applyChunk(0, 10, measured.slice(0, 2).map((column) => column.slice(0, 2))));
+    await eventually(() => responses.find(
+      (response) => response.type === "apply-chunk-complete" && response.chunkIndex === 0,
+    ));
+    runtime.dispatch(applyChunk(1, 12, measured.map((column) => column.slice(2))));
+    const complete = await eventually(() => responseOfType(responses, "apply-complete"));
+
+    expect(complete).toMatchObject({ eventOffset: 10, processedEvents: 3, totalEvents: 3 });
+    expect(responses.filter((response) => response.type === "apply-chunk-complete")
+      .map((response) => response.startEvent)).toEqual([10, 12]);
+  });
+
   it("runs CyTOF NNLS Apply through the same bounded worker protocol", async () => {
     const measured = [
       new Float64Array([10.4, 3, 0]),
