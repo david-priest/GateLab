@@ -38,6 +38,7 @@ const DEFAULT_MAX_EVENTS_PER_CHUNK = 8_192;
 const DEFAULT_MAX_PREVIEW_EVENTS = 20_000;
 const DEFAULT_PREVIEW_BYTE_BUDGET = 64 * 1024 * 1024;
 const DEFAULT_MAX_APPLY_WORKERS = 4;
+const MAX_CONFIGURABLE_APPLY_WORKERS = 8;
 const ESTIMATED_PREVIEW_BYTES_PER_CHANNEL_EVENT = 5 * Float64Array.BYTES_PER_ELEMENT;
 
 export interface CompensationWorkerLike {
@@ -232,11 +233,16 @@ function defaultYieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function defaultWorkerPoolSize(): number {
+/** Logical workers available for event-parallel Apply while leaving one thread for the UI. */
+export function availableCompensationWorkerCount(): number {
   const hardware = typeof navigator === "undefined" || !Number.isFinite(navigator.hardwareConcurrency)
     ? 2
     : Math.max(1, Math.floor(navigator.hardwareConcurrency));
-  return Math.max(1, Math.min(DEFAULT_MAX_APPLY_WORKERS, hardware - 1));
+  return Math.max(1, Math.min(MAX_CONFIGURABLE_APPLY_WORKERS, hardware - 1));
+}
+
+function defaultWorkerPoolSize(): number {
+  return Math.min(DEFAULT_MAX_APPLY_WORKERS, availableCompensationWorkerCount());
 }
 
 function positiveSafeInteger(value: number, label: string): number {
@@ -244,6 +250,17 @@ function positiveSafeInteger(value: number, label: string): number {
     throw new CompensationManagerError("invalid-memory-budget", `${label} must be a positive safe integer.`);
   }
   return value;
+}
+
+function validApplyWorkerCount(value: number): number {
+  const count = positiveSafeInteger(value, "Compensation worker pool size");
+  if (count > MAX_CONFIGURABLE_APPLY_WORKERS) {
+    throw new CompensationManagerError(
+      "invalid-worker-count",
+      "Compensation supports at most " + MAX_CONFIGURABLE_APPLY_WORKERS + " event-parallel workers.",
+    );
+  }
+  return count;
 }
 
 /**
@@ -478,7 +495,7 @@ export class CompensationManager {
   private readonly copySliceEvents: number;
   private readonly maxPreviewEvents: number;
   private readonly previewByteBudget: number;
-  private readonly maxApplyWorkers: number;
+  private maxApplyWorkers: number;
   private readonly yieldToEventLoop: () => Promise<void>;
   private readonly workers: CompensationWorkerLike[] = [];
   private workerBroken = false;
@@ -518,9 +535,8 @@ export class CompensationManager {
       options.previewByteBudget ?? DEFAULT_PREVIEW_BYTE_BUDGET,
       "Compensation preview byte budget",
     );
-    this.maxApplyWorkers = positiveSafeInteger(
+    this.maxApplyWorkers = validApplyWorkerCount(
       options.workerPoolSize ?? (options.workerFactory ? 1 : defaultWorkerPoolSize()),
-      "Compensation worker pool size",
     );
     this.yieldToEventLoop = options.yieldToEventLoop ?? defaultYieldToEventLoop;
   }
@@ -528,6 +544,31 @@ export class CompensationManager {
   /** Synchronous UI guard covering both validation/reservation and active worker phases. */
   get applyInProgress(): boolean {
     return this.applyReservation !== null || this.activeApply !== null;
+  }
+
+  get applyWorkerPoolSize(): number {
+    return this.maxApplyWorkers;
+  }
+
+  /**
+   * Change the maximum number of event-parallel Apply workers. The aggregate transient-memory
+   * budget remains fixed and is divided across the selected pool; this does not multiply it.
+   */
+  setApplyWorkerPoolSize(count: number): void {
+    this.assertUsable();
+    const next = validApplyWorkerCount(count);
+    if (this.applyInProgress) {
+      throw new CompensationManagerError(
+        "apply-in-progress",
+        "The compensation worker count cannot change while Apply is running.",
+      );
+    }
+    this.maxApplyWorkers = next;
+    // Worker zero may own a preview session. Extra Apply lanes are idle when no Apply is active,
+    // so shrinking from the end preserves preview continuity and releases their resources.
+    while (this.workers.length > next) {
+      this.workers.pop()?.terminate();
+    }
   }
 
   /** Workspace replacement is an explicit scientific-identity boundary, not a tab lifecycle. */

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  availableCompensationWorkerCount,
   CompensationCancelledError,
   CompensationManager,
   planCompensationChunks,
@@ -240,6 +241,16 @@ function compensatedValues(sample: Sample, pnn: string): Float32Array {
 }
 
 describe("compensation chunk planning", () => {
+  it("caps the user-selectable worker count while reserving one logical thread for the UI", () => {
+    vi.stubGlobal("navigator", { hardwareConcurrency: 12 });
+    expect(availableCompensationWorkerCount()).toBe(8);
+    vi.stubGlobal("navigator", { hardwareConcurrency: 4 });
+    expect(availableCompensationWorkerCount()).toBe(3);
+    vi.stubGlobal("navigator", { hardwareConcurrency: 1 });
+    expect(availableCompensationWorkerCount()).toBe(1);
+    vi.unstubAllGlobals();
+  });
+
   it("accounts for Float64 input, Float32 output, and fixed solver workspace", () => {
     const plan = planCompensationChunks({
       totalEvents: 11,
@@ -357,6 +368,11 @@ describe("CompensationManager Apply", () => {
     expect(progress).toEqual([0, 1, 2, 3, 4, 5]);
     expect(maxChunksInFlight).toBeGreaterThan(1);
     expect(workers.every(({ maxChunksInFlight }) => maxChunksInFlight === 1)).toBe(true);
+    expect(manager.applyWorkerPoolSize).toBe(3);
+    manager.setApplyWorkerPoolSize(2);
+    expect(manager.applyWorkerPoolSize).toBe(2);
+    expect(workers.map(({ terminated }) => terminated)).toEqual([false, false, true]);
+    expect(() => manager.setApplyWorkerPoolSize(9)).toThrow(/at most 8/);
     manager.dispose();
   });
 

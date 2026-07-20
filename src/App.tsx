@@ -61,6 +61,7 @@ import {
   type WorkspaceCompensationState,
 } from "./engine/workspaceCompensation";
 import {
+  availableCompensationWorkerCount,
   CompensationCancelledError,
   CompensationManager,
   type CompensationApplyProgress,
@@ -185,6 +186,20 @@ const downloadText = (filename: string, text: string, mime: string) =>
 
 const makeWorkspaceId = (): string =>
   globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+const COMPENSATION_WORKER_STORAGE_KEY = "gatelab.compensation.applyWorkers";
+
+function initialCompensationWorkerCount(limit: number): number {
+  const fallback = Math.min(4, limit);
+  try {
+    const stored = Number(globalThis.localStorage?.getItem(COMPENSATION_WORKER_STORAGE_KEY));
+    return Number.isSafeInteger(stored) && stored >= 1
+      ? Math.min(limit, stored)
+      : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 function findCompensationProfile(
   compensation: WorkspaceCompensationState,
@@ -337,9 +352,16 @@ export default function App() {
     activeCompensatedStatus?.state === "ready" ||
     (activeCompensatedStatus?.state === "missing" && sample.instrument === "flow" && sample.spillover !== null)
   );
+  const compensationWorkerLimit = availableCompensationWorkerCount();
+  const [compensationWorkerCount, setCompensationWorkerCount] = useState(
+    () => initialCompensationWorkerCount(compensationWorkerLimit),
+  );
   const compensationManagerRef = useRef<CompensationManager | null>(null);
   if (compensationManagerRef.current === null) {
-    compensationManagerRef.current = new CompensationManager({ workspaceKey: workspaceId });
+    compensationManagerRef.current = new CompensationManager({
+      workspaceKey: workspaceId,
+      workerPoolSize: compensationWorkerCount,
+    });
   }
   const compensationApplyGuardRef = useRef(false);
   const compensationRestoreCancelledRef = useRef(false);
@@ -1090,6 +1112,22 @@ export default function App() {
       ? { ...current, phase: "cancelling" }
       : current);
     compensationManagerRef.current!.cancelApply("Cancelled by the user.");
+  }
+
+  function changeCompensationWorkerCount(requested: number): void {
+    const next = Math.max(1, Math.min(compensationWorkerLimit, Math.round(requested)));
+    try {
+      compensationManagerRef.current!.setApplyWorkerPoolSize(next);
+      setCompensationWorkerCount(next);
+      try {
+        globalThis.localStorage?.setItem(COMPENSATION_WORKER_STORAGE_KEY, String(next));
+      } catch {
+        // The in-memory choice still works when browser storage is unavailable.
+      }
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
   }
 
   // Force the active sample's instrument mode (recovery for a mis-detect). Rebuilds the
@@ -3186,6 +3224,9 @@ export default function App() {
                 hasExistingGates={Object.keys(state.gates).length > 0}
                 applyStatus={compensationApplyStatus}
                 installedProfile={activeCompensationProfile}
+                applyWorkerCount={compensationWorkerCount}
+                applyWorkerLimit={compensationWorkerLimit}
+                onApplyWorkerCountChange={changeCompensationWorkerCount}
                 visible={activeTab === "compensation"}
                 stateKey={`${workspaceId}:${activeSampleId ?? "none"}`}
               />

@@ -416,6 +416,16 @@ select:focus-visible,
 .gl-comp-summary div { display: grid; grid-template-columns: auto auto; gap: 5px; align-items: baseline; }
 .gl-comp-summary dt { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
 .gl-comp-summary dd { margin: 0; font-size: 12px; }
+.gl-comp-worker-control {
+  display: inline-flex; flex: none; align-items: center; gap: 5px;
+  color: var(--muted); font-size: 9px; white-space: nowrap;
+}
+.gl-comp-worker-control > span { font-weight: 700; letter-spacing: 0.035em; text-transform: uppercase; }
+.gl-comp-worker-control select {
+  min-width: 46px; height: 24px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg); color: var(--text); padding: 1px 4px; font-size: 11px;
+}
+.gl-comp-worker-control small { color: var(--muted); font-size: 9px; }
 .gl-comp-global-layer-note { color: var(--muted); font-size: 10px; }
 .gl-comp-warning {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;

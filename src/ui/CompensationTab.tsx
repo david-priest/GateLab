@@ -42,6 +42,9 @@ interface Props {
   hasExistingGates?: boolean;
   applyStatus?: CompensationApplyUiStatus | null;
   installedProfile?: CompensationProfileRecord | null;
+  applyWorkerCount?: number;
+  applyWorkerLimit?: number;
+  onApplyWorkerCountChange?: (count: number) => void;
   visible?: boolean;
   stateKey: string;
 }
@@ -229,6 +232,9 @@ export function CompensationTab({
   hasExistingGates = false,
   applyStatus = null,
   installedProfile = null,
+  applyWorkerCount,
+  applyWorkerLimit,
+  onApplyWorkerCountChange,
   visible = true,
   stateKey,
 }: Props) {
@@ -598,6 +604,25 @@ export function CompensationTab({
           <div><dt>Layer</dt><dd>{compensationOn ? "Compensated" : "Original measurements"}</dd></div>
           <div><dt>Channels</dt><dd>{channelCount}</dd></div>
         </dl>
+        {applyWorkerCount !== undefined && applyWorkerLimit !== undefined && onApplyWorkerCountChange && (
+          <label
+            className="gl-comp-worker-control"
+            title="Event-parallel Apply workers. The aggregate memory budget stays fixed; more workers are not always faster."
+          >
+            <span>Apply workers</span>
+            <select
+              aria-label="Compensation Apply worker count"
+              value={applyWorkerCount}
+              disabled={applyBusy}
+              onChange={(event) => onApplyWorkerCountChange(Number(event.currentTarget.value))}
+            >
+              {Array.from({ length: applyWorkerLimit }, (_, index) => index + 1).map((count) => (
+                <option key={count} value={count}>{count}</option>
+              ))}
+            </select>
+            <small>/ {applyWorkerLimit}</small>
+          </label>
+        )}
         {canToggle && <span className="gl-comp-global-layer-note">Select the assay for every tab in the top bar.</span>}
       </div>
 

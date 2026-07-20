@@ -139,6 +139,9 @@ function renderTab(
     hasExistingGates?: boolean;
     applyStatus?: CompensationApplyUiStatus | null;
     installedProfile?: CompensationProfileRecord | null;
+    applyWorkerCount?: number;
+    applyWorkerLimit?: number;
+    onApplyWorkerCountChange?: (count: number) => void;
     visible?: boolean;
     stateKey?: string;
   }> = {},
@@ -154,6 +157,9 @@ function renderTab(
       hasExistingGates={options.hasExistingGates}
       applyStatus={options.applyStatus}
       installedProfile={options.installedProfile}
+      applyWorkerCount={options.applyWorkerCount}
+      applyWorkerLimit={options.applyWorkerLimit}
+      onApplyWorkerCountChange={options.onApplyWorkerCountChange}
       visible={options.visible}
       stateKey={stateKey}
     />,
@@ -161,6 +167,41 @@ function renderTab(
 }
 
 describe("CompensationTab common path", () => {
+  it("surfaces the bounded Apply worker count and disables it while compensation runs", () => {
+    const onChange = vi.fn();
+    renderTab(flowSample(), {
+      applyWorkerCount: 4,
+      applyWorkerLimit: 8,
+      onApplyWorkerCountChange: onChange,
+    });
+    const selector = host.querySelector<HTMLSelectElement>(
+      'select[aria-label="Compensation Apply worker count"]',
+    )!;
+    expect(selector.value).toBe("4");
+    expect(selector.options).toHaveLength(8);
+    act(() => {
+      selector.value = "6";
+      selector.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onChange).toHaveBeenCalledWith(6);
+
+    renderTab(flowSample(), {
+      applyWorkerCount: 4,
+      applyWorkerLimit: 8,
+      onApplyWorkerCountChange: onChange,
+      applyStatus: {
+        phase: "applying",
+        profileName: "test",
+        fraction: 0.5,
+        processedEvents: 2,
+        totalEvents: 4,
+      },
+    });
+    expect(host.querySelector<HTMLSelectElement>(
+      'select[aria-label="Compensation Apply worker count"]',
+    )?.disabled).toBe(true);
+  });
+
   it("opens matrix-first with useful advanced regions closed and unmounted", () => {
     renderTab(flowSample());
 
