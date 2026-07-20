@@ -1,6 +1,6 @@
 export const DEFAULT_DENSITY_COLOR_POWER = 1.6;
 export const MIN_DENSITY_COLOR_POWER = 0.8;
-export const MAX_DENSITY_COLOR_POWER = 2.4;
+export const MAX_DENSITY_COLOR_POWER = 5;
 export const DENSITY_COLOR_POWER_STEP = 0.1;
 
 /**
@@ -21,4 +21,17 @@ export function densityColorFraction(densityFraction: number, power: number): nu
     ? Math.max(0, Math.min(1, densityFraction))
     : 0;
   return Math.pow(fraction, normalizeDensityColorPower(power));
+}
+
+/**
+ * A robust quantile ceiling deliberately clips the densest occupied cells. Without headroom,
+ * every clipped cell remains fully red regardless of the transfer exponent. Raise only those
+ * robust ceilings above the default setting so the saturated core contracts as advertised.
+ */
+export function robustDensityColorCeiling(baseCeiling: number, power: number): number {
+  const ceiling = Number.isFinite(baseCeiling) && baseCeiling > 0 ? baseCeiling : 1;
+  const resolvedPower = normalizeDensityColorPower(power);
+  return resolvedPower > DEFAULT_DENSITY_COLOR_POWER
+    ? ceiling * resolvedPower / DEFAULT_DENSITY_COLOR_POWER
+    : ceiling;
 }

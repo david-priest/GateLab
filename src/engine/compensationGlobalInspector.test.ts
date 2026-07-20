@@ -86,10 +86,12 @@ describe("global compensation inspector", () => {
     if (!pair.ready) return;
     const ceiling = compensationSharedDensityCeiling(pair.preview);
     const smootherCeiling = compensationSharedDensityCeiling(pair.preview, 0.95, 4);
+    const higherContrastCeiling = compensationSharedDensityCeiling(pair.preview, 0.95, 3, 2.4);
     expect(Number.isFinite(ceiling)).toBe(true);
     expect(ceiling).toBeGreaterThan(0);
     expect(Number.isFinite(smootherCeiling)).toBe(true);
     expect(smootherCeiling).toBeGreaterThan(0);
+    expect(higherContrastCeiling).toBeGreaterThan(ceiling);
   });
 
   it("keeps the apparent density blur stable as compensation plots resize", () => {

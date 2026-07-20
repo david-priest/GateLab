@@ -524,6 +524,7 @@ function DensityBiplot({
           preview,
           0.95,
           densitySmoothingRadius,
+          densityColorPower,
         ),
         densitySmoothingRadius,
         densityColorPower,
@@ -602,6 +603,7 @@ function CachedDensityBiplot({
         preview,
         0.95,
         densitySmoothingRadius,
+        densityColorPower,
       );
 
       renderCompensationDensityBiplotSurface(container, {

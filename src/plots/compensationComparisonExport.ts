@@ -184,7 +184,12 @@ export function composeCompensationComparisonPageSvg(
   pagePairs.forEach((pair, index) => {
     const preview = pair.buildPreview();
     const smoothingRadius = compensationDensitySmoothingRadiusForPlot(metadata.densitySmoothing, plotSize);
-    const densityColorCeiling = compensationSharedDensityCeiling(preview, 0.95, smoothingRadius);
+    const densityColorCeiling = compensationSharedDensityCeiling(
+      preview,
+      0.95,
+      smoothingRadius,
+      metadata.densityColorPower,
+    );
     const column = index % 2;
     const row = Math.floor(index / 2);
     const cardX = marginX + column * (columnWidth + columnGap);

@@ -335,8 +335,9 @@ export function patchMiniPlot(src: string): string {
   // Compensation biplots can contain a very large exact-zero pile. Scaling the colour ramp to
   // the single densest point makes every informative off-axis population faint. When explicitly
   // requested, match SpillQC's robust hexbin convention: cap the colour ceiling at a quantile of
-  // OCCUPIED density cells (not events), then apply an optional sqrt-like colour power. All events
-  // are still drawn; this changes only colour normalisation and cannot hide the zero pile.
+  // OCCUPIED density cells (not events), then apply the shared colour transfer. Compensation callers
+  // provide a power-adjusted shared ceiling so clipped red plateaus contract at higher settings.
+  // All events are still drawn; this changes only colour normalisation and cannot hide a zero pile.
   const pseudocolorCall = "_drawPseudocolor(ctx, x, y, xScale, yScale, M, W, H, dotR, cfgAlpha);";
   const robustPseudocolorCall = "_drawPseudocolor(ctx, x, y, xScale, yScale, M, W, H, dotR, cfgAlpha, cfg.density_clip_quantile, cfg.density_color_power, cfg.density_color_ceiling, cfg.density_smoothing);";
   const pseudocolorSignature = "function _drawPseudocolor(ctx, x, y, xScale, yScale, M, W, H, dotR, pointAlpha) {";

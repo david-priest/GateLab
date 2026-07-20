@@ -2,6 +2,10 @@ import {
   deterministicCompensationEventIndices,
   type CompensationDensityPanel,
 } from "./compensationPairPreview";
+import {
+  DEFAULT_DENSITY_COLOR_POWER,
+  robustDensityColorCeiling,
+} from "./pseudocolor";
 import type { Sample } from "./sample";
 
 export type CompensationInspectorLayer = "original" | "compensated";
@@ -321,9 +325,11 @@ export function compensationSharedDensityCeiling(
   preview: Pick<CompensationGlobalPairPreview, "original" | "compensated" | "xRange" | "yRange">,
   clipQuantile = 0.95,
   smoothingRadius = 3,
+  densityColorPower = DEFAULT_DENSITY_COLOR_POWER,
 ): number {
-  return Math.max(
+  const baseCeiling = Math.max(
     densityCeiling(preview.original, preview.xRange, preview.yRange, clipQuantile, smoothingRadius),
     densityCeiling(preview.compensated, preview.xRange, preview.yRange, clipQuantile, smoothingRadius),
   );
+  return robustDensityColorCeiling(baseCeiling, densityColorPower);
 }
