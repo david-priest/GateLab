@@ -57,6 +57,7 @@ export interface SolvePreviewRequest extends WorkerRequestBase, PreviewIdentity 
   readonly currentMatrix: readonly (readonly number[])[];
   readonly candidateMatrix: readonly (readonly number[])[];
   readonly flowSettings?: FlowSolverSettings;
+  readonly nnlsSettings?: NnlsSolverSettingsInput;
 }
 
 export interface StartApplyRequest extends WorkerRequestBase, ApplyIdentity {
@@ -124,8 +125,8 @@ export interface PreviewSolvedResponse extends WorkerResponseBase, PreviewIdenti
   readonly deltas: readonly Float64Array[];
   readonly impacts: readonly FlowChannelImpact[];
   readonly impactRanking: readonly FlowChannelImpact[];
-  readonly currentDiagnostics: FlowMatrixDiagnostics;
-  readonly candidateDiagnostics: FlowMatrixDiagnostics;
+  readonly currentDiagnostics: FlowMatrixDiagnostics | CytofNnlsPlanDiagnostics;
+  readonly candidateDiagnostics: FlowMatrixDiagnostics | CytofNnlsPlanDiagnostics;
   readonly currentReconstruction: FlowReconstructionDiagnostics | null;
   readonly candidateReconstruction: FlowReconstructionDiagnostics | null;
 }

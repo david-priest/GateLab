@@ -650,10 +650,11 @@ export class CompensationManager {
     this.previewPrimeReservation = reservation;
     let state: PreviewSessionState | null = null;
     try {
-      const profile = await this.validateFlowProfile(request.profile);
+      const profile = await this.validateProfile(request.profile);
       this.assertPreviewPrimeCurrent(reservation);
+      const snapshot = this.captureSampleSnapshot(sample, profile);
       const estimatedPreviewBytes = fixed.byteLength +
-        fixed.length * profile.scientific.matrix.sourceChannels.length *
+        fixed.length * snapshot.solveChannels.length *
           ESTIMATED_PREVIEW_BYTES_PER_CHANNEL_EVENT;
       if (!Number.isSafeInteger(estimatedPreviewBytes) || estimatedPreviewBytes > this.previewByteBudget) {
         throw new CompensationManagerError(
@@ -661,7 +662,6 @@ export class CompensationManager {
           `Compensation preview needs approximately ${estimatedPreviewBytes} bytes, above the ${this.previewByteBudget}-byte budget.`,
         );
       }
-      const snapshot = this.captureSampleSnapshot(sample, profile);
       const previewBindings = workerBindingsForSnapshot(snapshot);
       const identity = this.nextIdentity("preview");
       const bindingKey = this.contextKey(profile, snapshot);
@@ -697,13 +697,13 @@ export class CompensationManager {
         this.post({
           protocol: COMPENSATION_WORKER_PROTOCOL,
           type: "prime-preview",
-          method: "matrix-inverse",
+          method: profile.scientific.method,
           sessionId: state.sessionId,
           sessionToken: state.token,
           profileHash: profile.profileHash,
           bindingKey,
-          sourceChannels: profile.scientific.matrix.sourceChannels,
-          receiverChannels: profile.scientific.matrix.receiverChannels,
+          sourceChannels: snapshot.solveChannels,
+          receiverChannels: snapshot.solveChannels,
           channelBindings: previewBindings.receiver,
           fixedEventIndices: fixed,
           measuredColumns,
@@ -765,6 +765,15 @@ export class CompensationManager {
     const candidateSnapshot: readonly (readonly number[])[] = Object.freeze(
       candidateMatrix.map((row: readonly number[]) => Object.freeze(Array.from(row))),
     );
+    const candidateSolveMatrix = state.profile.scientific.kind === "flow-spillover"
+      ? candidateSnapshot
+      : adaptCytofSpilloverMatrix(
+          Object.freeze({
+            ...state.profile.scientific.matrix,
+            matrix: candidateSnapshot,
+          }),
+          state.profile.scientific.includedChannels,
+        );
     const requestId = `${state.sessionId}:request:${++state.requestSequence}`;
     const tag = `preview-solve:${requestId}`;
     state.pendingRequestTag = tag;
@@ -785,15 +794,17 @@ export class CompensationManager {
         this.post({
           protocol: COMPENSATION_WORKER_PROTOCOL,
           type: "solve-preview",
-          method: "matrix-inverse",
+          method: state.profile.scientific.method,
           sessionId: state.sessionId,
           sessionToken: state.token,
           profileHash: state.profile.profileHash,
           bindingKey: state.bindingKey,
           requestId,
-          currentMatrix: state.profile.scientific.matrix.matrix,
-          candidateMatrix: candidateSnapshot,
-          flowSettings: profileFlowSettings(state.profile),
+          currentMatrix: state.snapshot.solveMatrix,
+          candidateMatrix: candidateSolveMatrix,
+          ...(state.profile.scientific.kind === "flow-spillover"
+            ? { flowSettings: profileFlowSettings(state.profile) }
+            : { nnlsSettings: profileNnlsSettings(state.profile) }),
         });
       } catch (error) {
         void responsePromise.catch(() => undefined);
@@ -1324,17 +1335,6 @@ export class CompensationManager {
       });
       await this.yieldToEventLoop();
     }
-  }
-
-  private async validateFlowProfile(input: CompensationProfileRecord): Promise<CompensationProfileRecord> {
-    const profile = await this.validateProfile(input);
-    if (profile.scientific.kind !== "flow-spillover" || profile.scientific.method !== "matrix-inverse") {
-      throw new CompensationManagerError(
-        "unsupported-compensation-method",
-        "Compensation preview currently supports conventional-flow matrix-inverse profiles only.",
-      );
-    }
-    return profile;
   }
 
   private async validateProfile(input: CompensationProfileRecord): Promise<CompensationProfileRecord> {

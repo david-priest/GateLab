@@ -67,17 +67,17 @@ describe("CompensationTab Sample revisions", () => {
       );
     }
 
-    const activeLayer = () => host.querySelector<HTMLElement>('.gl-comp-summary div:nth-child(2) dd')?.textContent;
+    const activeLayer = () => host.querySelector<HTMLElement>(".gl-comp-summary")?.dataset.activeLayer;
 
     act(() => root.render(<Harness />));
-    expect(activeLayer()).toBe("Original measurements");
+    expect(activeLayer()).toBe("original");
 
     act(() => sample.setCompensation(true));
     expect(sample.dataRevision).toBe(1);
-    expect(activeLayer()).toBe("Compensated");
+    expect(activeLayer()).toBe("compensated");
 
     act(() => sample.setCompensation(false));
     expect(sample.dataRevision).toBe(2);
-    expect(activeLayer()).toBe("Original measurements");
+    expect(activeLayer()).toBe("original");
   });
 });

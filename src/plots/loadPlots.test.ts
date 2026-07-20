@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import cytofSrc from "../../vendor/GateLabR/inst/app/www/cytof_plot.js?raw";
-import { patchCytofForGateLab } from "./loadPlots";
+import miniSrc from "../../vendor/GateLabR/inst/app/www/mini_plot.js?raw";
+import { patchCytofForGateLab, patchMiniPlot } from "./loadPlots";
 
 describe("GateLab cytof interaction patches", () => {
   it("removes the delayed Shiny boot that clears GateLab's first painted FCS canvas", () => {
@@ -68,6 +69,36 @@ describe("GateLab cytof interaction patches", () => {
 
     expect(repatched.match(/function _offscalePts\(\)/g)).toHaveLength(1);
     expect(repatched.match(/outlierPts = outlierPts\.concat\(_offscalePts\(\)\);/g)).toHaveLength(1);
+
+    warning.mockRestore();
+  });
+});
+
+describe("GateLab mini-plot density patches", () => {
+  it("uses opt-in clipping, a gating-matched density kernel, and a shared ceiling without dropping events", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchMiniPlot(miniSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(miniSrc).not.toContain("density_clip_quantile");
+    expect(patched).toContain("cfg.density_clip_quantile, cfg.density_color_power, cfg.density_color_ceiling, cfg.density_smoothing");
+    expect(patched).toContain("var requestedMargins = cfg.plot_margins || {};");
+    expect(patched).toContain("var gridN = 256, pad = blurRadius, extSize = gridN + 2 * pad;");
+    expect(patched).toContain("Math.min(24, blurRadius)");
+    expect(patched).toContain("var integralGrid = new Float64Array(integralStride * integralStride);");
+    expect(patched).toContain("var densityGrid = blurred;");
+    expect(patched).toContain("densities[i] = densityGrid[gy * extSize + gx]");
+    expect(patched).toContain("var requestedCeiling = Number(densityColorCeiling);");
+    expect(patched).toContain("? requestedCeiling : maxDens;");
+    expect(patched).toContain("if (qd > 0) occupied.push(qd);");
+    expect(patched).toContain("Math.floor(clipQ * (occupied.length - 1))");
+    expect(patched).toContain("Math.pow(Math.min(1, densities[idx] / colourCeiling), colourPower)");
+    expect(patched).toContain("ctx.arc(px, py, dotR, 0, 6.2832)");
+    expect(patched).toContain("H + axisLabelOffset");
+    expect(patched).toContain("-axisLabelOffset");
+    expect(patched).toContain("axisTickSize + 2");
+    expect(patched).toContain("axisOuterTickSize === 0");
+    expect(() => new Function(patched)).not.toThrow();
 
     warning.mockRestore();
   });

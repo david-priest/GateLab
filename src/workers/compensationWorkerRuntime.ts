@@ -1,10 +1,10 @@
 import {
   FlowCompensationError,
   compensateFlowRange,
+  FlowCompensationPlan,
   matrixInfinityNorm,
   prepareFlowCompensation,
   type FlowChannelImpact,
-  type FlowCompensationPlan,
   type FlowReconstructionDiagnostics,
 } from "../engine/flowCompensationEngine";
 import {
@@ -43,6 +43,7 @@ interface PreviewSession {
   readonly sessionToken: string;
   readonly profileHash: string;
   readonly bindingKey: string;
+  readonly method: "matrix-inverse" | "nnls";
   readonly sourceChannels: readonly string[];
   readonly receiverChannels: readonly string[];
   readonly receiverBindings: readonly CompensationWorkerChannelBinding[];
@@ -293,9 +294,9 @@ export class CompensationWorkerRuntime {
         "invalid-preview-request", identityError, true);
       return;
     }
-    if (request.method !== "matrix-inverse") {
+    if (request.method !== "matrix-inverse" && request.method !== "nnls") {
       this.emitError("preview", request.sessionId, request.sessionToken,
-        "unsupported-method", "NNLS compensation is not implemented in this worker version.", true);
+        "unsupported-method", "The requested compensation preview method is not supported.", true);
       return;
     }
     if (this.hasActiveApplyJob()) {
@@ -361,6 +362,7 @@ export class CompensationWorkerRuntime {
       sessionToken: request.sessionToken,
       profileHash: request.profileHash,
       bindingKey: request.bindingKey,
+      method: request.method,
       sourceChannels: Object.freeze(Array.from(request.sourceChannels)),
       receiverChannels: Object.freeze(Array.from(request.receiverChannels)),
       receiverBindings: previewBindings.receiverBindings,
@@ -394,9 +396,9 @@ export class CompensationWorkerRuntime {
         request.requestId);
       return;
     }
-    if (request.method !== "matrix-inverse") {
+    if (request.method !== "matrix-inverse" && request.method !== "nnls") {
       this.emitError("preview", request.sessionId, request.sessionToken,
-        "unsupported-method", "NNLS compensation is not implemented in this worker version.", true,
+        "unsupported-method", "The requested compensation preview method is not supported.", true,
         request.requestId);
       return;
     }
@@ -410,6 +412,12 @@ export class CompensationWorkerRuntime {
     if (session === undefined || !this.matchesPreviewIdentity(session, request)) {
       this.emitError("preview", request.sessionId, request.sessionToken,
         "stale-preview-session", "The preview session is missing or its identity is stale.", true,
+        request.requestId);
+      return;
+    }
+    if (request.method !== session.method) {
+      this.emitError("preview", request.sessionId, request.sessionToken,
+        "stale-preview-session", "The preview method does not match the primed session.", true,
         request.requestId);
       return;
     }
@@ -439,8 +447,12 @@ export class CompensationWorkerRuntime {
           "Preview matrices must match the primed channel count.",
         );
       }
-      const currentPlan = prepareFlowCompensation(request.currentMatrix, request.flowSettings);
-      const candidatePlan = prepareFlowCompensation(request.candidateMatrix, request.flowSettings);
+      const currentPlan = request.method === "matrix-inverse"
+        ? prepareFlowCompensation(request.currentMatrix, request.flowSettings)
+        : prepareCytofNnls(guard.session.sourceChannels, request.currentMatrix, request.nnlsSettings);
+      const candidatePlan = request.method === "matrix-inverse"
+        ? prepareFlowCompensation(request.candidateMatrix, request.flowSettings)
+        : prepareCytofNnls(guard.session.sourceChannels, request.candidateMatrix, request.nnlsSettings);
       const currentColumns = await this.solvePreviewColumns(guard.session, currentPlan, guard);
       const candidateColumns = await this.solvePreviewColumns(guard.session, candidatePlan, guard);
       const comparison = await this.summarizePreview(currentColumns, candidateColumns, guard);
@@ -496,7 +508,7 @@ export class CompensationWorkerRuntime {
 
   private async solvePreviewColumns(
     session: PreviewSession,
-    plan: FlowCompensationPlan,
+    plan: FlowCompensationPlan | CytofNnlsPlan,
     guard: PreviewGuard,
   ): Promise<readonly Float64Array[]> {
     const eventCount = session.fixedEventIndices.length;
@@ -512,13 +524,23 @@ export class CompensationWorkerRuntime {
         end,
         (event) => session.fixedEventIndices[event],
       );
-      compensateFlowRange(session.measuredColumns, plan, output, {
-        inputStart: start,
-        inputEnd: end,
-        outputStart: start,
-        validateMeasuredValues: false,
-        validateOutputValues: false,
-      });
+      if (plan instanceof FlowCompensationPlan) {
+        compensateFlowRange(session.measuredColumns, plan, output, {
+          inputStart: start,
+          inputEnd: end,
+          outputStart: start,
+          validateMeasuredValues: false,
+          validateOutputValues: false,
+        });
+      } else {
+        compensateCytofRange(session.measuredColumns, plan, output, {
+          inputStart: start,
+          inputEnd: end,
+          outputStart: start,
+          validateMeasuredValues: false,
+          validateOutputValues: false,
+        });
+      }
       this.assertFiniteOutputRange(output, start, end, (event) => session.fixedEventIndices[event]);
       await this.previewCheckpoint(guard);
     }

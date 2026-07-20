@@ -11,6 +11,11 @@ import {
   compensateFlowColumns,
   prepareFlowCompensation,
 } from "./flowCompensationEngine";
+import {
+  adaptCytofSpilloverMatrix,
+  compensateCytofRange,
+  prepareCytofNnls,
+} from "./cytofCompensationEngine";
 import { validateAndCanonicalizeCompensationMatrix } from "./compensationProfile";
 import {
   createCompensationBaselineProfile,
@@ -909,6 +914,50 @@ describe("CompensationManager preview", () => {
     expect(sample.activeLayer).toBe("original");
     expect(sample.dataRevision).toBe(0);
     expect(sample.layerRevision).toBe(0);
+    manager.dispose();
+  });
+
+  it("runs an exact CyTOF NNLS candidate from the same frozen original events", async () => {
+    const sample = new Sample(cytofFcs());
+    const profile = await cytofProfile();
+    const worker = new RuntimeWorker();
+    const manager = new CompensationManager({
+      workspaceKey: "workspace-cytof-preview",
+      workerFactory: () => worker,
+      copySliceEvents: 1,
+      yieldToEventLoop: () => Promise.resolve(),
+    });
+    const fixedEventIndices = new Uint32Array([0, 2, 4]);
+    const candidateImported = profile.scientific.matrix.matrix.map((row) => Array.from(row));
+    candidateImported[0][2] = 0.4;
+    const primed = await manager.primePreview({ profile, sample, fixedEventIndices });
+    const solved = await manager.solvePreview(primed.sessionId, candidateImported);
+
+    const candidateAdapted = adaptCytofSpilloverMatrix(
+      { ...profile.scientific.matrix, matrix: candidateImported },
+      profile.scientific.includedChannels,
+    );
+    const measured = [
+      new Float64Array([5, 0, 8]),
+      new Float64Array([8, 5, 2.6]),
+    ];
+    const expected = measured.map(() => new Float64Array(fixedEventIndices.length));
+    compensateCytofRange(
+      measured,
+      prepareCytofNnls(profile.scientific.includedChannels, candidateAdapted),
+      expected,
+    );
+    expect(solved.sourceChannels).toEqual(["A", "C"]);
+    for (let channel = 0; channel < expected.length; channel++) {
+      for (let event = 0; event < fixedEventIndices.length; event++) {
+        expect(solved.candidateColumns[channel][event]).toBeCloseTo(expected[channel][event], 6);
+      }
+    }
+    expect(solved.candidateDiagnostics).toMatchObject({ method: "nnls", channelCount: 2 });
+    expect(worker.requests.find((request) => request.type === "prime-preview"))
+      .toMatchObject({ method: "nnls", sourceChannels: ["A", "C"] });
+    expect(sample.compensatedLayerStatus().state).toBe("missing");
+    expect([sample.dataRevision, sample.layerRevision]).toEqual([0, 0]);
     manager.dispose();
   });
 

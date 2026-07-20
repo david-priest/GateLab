@@ -816,7 +816,7 @@ describe("compensation worker runtime", () => {
     expect(overflowError.message).toMatch(/source 1, event 3/);
   });
 
-  it("returns structured protocol and unsupported-NNLS errors without poisoning later work", () => {
+  it("returns a structured protocol error without poisoning a later NNLS preview", async () => {
     const responses: CompensationWorkerResponse[] = [];
     const runtime = createCompensationWorkerRuntime({
       emit: (response) => responses.push(response),
@@ -824,13 +824,20 @@ describe("compensation worker runtime", () => {
 
     runtime.dispatch({ protocol: "obsolete", type: "prime-preview" });
     runtime.dispatch({ ...previewPrime([new Float64Array(1), new Float64Array(1)]), method: "nnls" });
+    runtime.dispatch({ ...previewSolve("nnls-preview"), method: "nnls" });
+    await eventually(() => responses.find(
+      (response) => response.type === "preview-solved" && response.requestId === "nnls-preview",
+    ));
 
-    expect(responses.map((response) => response.type)).toEqual(["worker-error", "worker-error"]);
+    expect(responses.map((response) => response.type)).toEqual([
+      "worker-error",
+      "preview-primed",
+      "preview-solved",
+    ]);
     const errors = responses.filter(
       (response): response is Extract<CompensationWorkerResponse, { type: "worker-error" }> =>
         response.type === "worker-error",
     );
     expect(errors[0]).toMatchObject({ scope: "protocol", code: "unsupported-protocol", recoverable: false });
-    expect(errors[1]).toMatchObject({ scope: "preview", code: "unsupported-method", recoverable: true });
   });
 });

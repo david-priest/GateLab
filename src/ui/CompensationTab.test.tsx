@@ -12,6 +12,8 @@ import type { PersistedCompensatedLayerBinding } from "../engine/workspaceCompen
 import {
   CompensationTab,
   type CompensationApplyUiStatus,
+  type CompensationReviewPopulation,
+  type CompensationSweepSolver,
 } from "./CompensationTab";
 import { clearPersistedTabState } from "./tabState";
 
@@ -111,10 +113,16 @@ function profileLayer(sample: Sample, kind: "flow-spillover" | "cytof-spillover"
 
 let root: Root;
 let host: HTMLDivElement;
+let scrollIntoViewMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   clearPersistedTabState();
+  scrollIntoViewMock = vi.fn();
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: scrollIntoViewMock,
+  });
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -124,6 +132,7 @@ afterEach(() => {
   act(() => root.unmount());
   host.remove();
   clearPersistedTabState();
+  Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
   vi.unstubAllGlobals();
 });
 
@@ -142,6 +151,10 @@ function renderTab(
     applyWorkerCount?: number;
     applyWorkerLimit?: number;
     onApplyWorkerCountChange?: (count: number) => void;
+    installedBaselineProfile?: CompensationProfileRecord | null;
+    reviewPopulations?: readonly CompensationReviewPopulation[];
+    reviewPopulationMasks?: Readonly<Record<string, Uint8Array>>;
+    onSolveCompensationSweep?: CompensationSweepSolver;
     visible?: boolean;
     stateKey?: string;
   }> = {},
@@ -160,6 +173,10 @@ function renderTab(
       applyWorkerCount={options.applyWorkerCount}
       applyWorkerLimit={options.applyWorkerLimit}
       onApplyWorkerCountChange={options.onApplyWorkerCountChange}
+      installedBaselineProfile={options.installedBaselineProfile}
+      reviewPopulations={options.reviewPopulations}
+      reviewPopulationMasks={options.reviewPopulationMasks}
+      onSolveCompensationSweep={options.onSolveCompensationSweep}
       visible={options.visible}
       stateKey={stateKey}
     />,
@@ -202,12 +219,45 @@ describe("CompensationTab common path", () => {
     )?.disabled).toBe(true);
   });
 
+  it("keeps one population selector in the tab header for every compensation view", () => {
+    const sample = flowSample();
+    renderTab(sample, {
+      stateKey: "workspace-a:population-scope",
+      reviewPopulations: [
+        { id: "live", name: "Live cells", depth: 0, eventCount: 2 },
+        { id: "t-cells", name: "T cells", depth: 1, eventCount: 1 },
+      ],
+      reviewPopulationMasks: {
+        live: Uint8Array.from([1, 1, 0, 0]),
+        "t-cells": Uint8Array.from([0, 1, 0, 0]),
+      },
+    });
+
+    const selector = host.querySelector<HTMLSelectElement>('select[aria-label="Compensation review population"]')!;
+    expect(selector).not.toBeNull();
+    expect(selector.closest(".gl-comp-overview")).not.toBeNull();
+    expect(host.querySelectorAll('select[aria-label="Compensation review population"]')).toHaveLength(1);
+
+    act(() => {
+      selector.value = "live";
+      selector.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(host.querySelector(".gl-comp-review-population")?.textContent).toContain("2 events");
+    expect(host.querySelector(".gl-comp-review-population")?.textContent).toContain("applies to biplots, attention ranking, and sweeps");
+
+    const attention = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((button) => button.textContent?.includes("Flagged"))!;
+    act(() => attention.click());
+    expect(host.querySelectorAll('select[aria-label="Compensation review population"]')).toHaveLength(1);
+    expect(host.querySelector<HTMLSelectElement>('select[aria-label="Compensation review population"]')?.value).toBe("live");
+  });
+
   it("opens matrix-first with useful advanced regions closed and unmounted", () => {
     renderTab(flowSample());
 
     expect(host.querySelector(".gl-comp-matrix")).not.toBeNull();
     expect(host.textContent).toContain("Embedded compensation matrix");
-    expect(host.textContent).toContain("Select the assay for every tab in the top bar");
+    expect(host.textContent).toContain("Assay selection in the top bar applies to every tab");
 
     const drawerButtons = [...host.querySelectorAll<HTMLButtonElement>(".gl-comp-drawer-toggle")];
     expect(drawerButtons.map((button) => button.textContent?.trim())).toEqual(["Evidence▸", "Review queue▸"]);
@@ -215,34 +265,67 @@ describe("CompensationTab common path", () => {
     expect(host.querySelectorAll('[role="region"]')).toHaveLength(0);
     expect(host.textContent).not.toContain("Propagation");
     expect(host.textContent).not.toContain("Biplot gallery");
+    expect([...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .map((button) => button.textContent?.trim())).toEqual([
+        "Matrix",
+        "Global inspector",
+        "Flagged",
+      ]);
   });
 
-  it("renders scientifically consistent percentages and visible immutable channel identities", () => {
+  it("renders scientifically consistent percentages and keeps immutable channel identities accessible", () => {
     const sample = flowSample();
     sample.setChannelLabel(sample.index("Marker 1")!, "Lymphocyte marker");
     sample.setChannelLabel(sample.index("Marker 2")!, "Lymphocyte marker");
     renderTab(sample);
 
     const matrix = host.querySelector(".gl-comp-matrix")!;
-    expect(matrix.textContent).toContain("100%");
-    expect(matrix.textContent).toContain("5%");
-    expect([...matrix.querySelectorAll(".gl-comp-axis-pnn")].map((node) => node.textContent)).toEqual(
-      expect.arrayContaining(["FL1-A", "FL2-A"]),
-    );
-    expect(matrix.textContent).toContain("Lymphocyte marker");
+    expect(matrix.textContent).toContain("100.0");
+    expect(matrix.textContent).toContain("5.0");
+    expect(host.querySelector(".gl-comp-row-labels")?.textContent).toContain("FL1-A");
+    expect(host.querySelector(".gl-comp-column-labels")?.textContent).toContain("FL2-A");
+    const labels = [...matrix.querySelectorAll<HTMLButtonElement>(".gl-comp-cell")]
+      .map((button) => button.getAttribute("aria-label"));
+    expect(labels).toEqual(expect.arrayContaining([
+      expect.stringContaining("Lymphocyte marker (FL1-A)"),
+      expect.stringContaining("Lymphocyte marker (FL2-A)"),
+    ]));
+  });
+
+  it("offers an exact fractional spill-matrix export with base-R import code", () => {
+    renderTab(flowSample({ coefficient: 0.029123456789012344 }));
+    const exportButton = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Export CSV…")!;
+    expect(exportButton).toBeDefined();
+
+    act(() => exportButton.click());
+    const dialog = host.querySelector<HTMLElement>('[role="dialog"][aria-labelledby="comp-export-title"]')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.textContent).toContain("exact fractions");
+    expect(dialog.textContent).toContain("Source channels are rows");
+    expect(dialog.textContent).toContain("embedded_FCS_spill_matrix.csv");
+    expect(dialog.textContent).toContain("row.names = 1");
+    expect(dialog.textContent).toContain("check.names = FALSE");
+    expect(dialog.textContent).toContain('storage.mode(spill) <- "double"');
+
+    const cancel = [...dialog.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Cancel")!;
+    act(() => cancel.click());
+    expect(host.querySelector('[role="dialog"][aria-labelledby="comp-export-title"]')).toBeNull();
   });
 
   it("preserves tiny, negative, and non-unit-diagonal values instead of rounding or inventing them", () => {
     renderTab(flowSample({ matrix: [[1, 0.000001], [-0.02, 0.95]] }));
     const matrix = host.querySelector(".gl-comp-matrix")!;
-    expect(matrix.textContent).toContain("0.0001%");
-    expect(matrix.textContent).toContain("-2%");
-    expect(matrix.textContent).toContain("95%");
+    expect(matrix.textContent).toContain("0.0");
+    expect(matrix.textContent).toContain("-2.0");
+    expect(matrix.textContent).toContain("95.0");
 
     const tiny = [...matrix.querySelectorAll<HTMLButtonElement>(".gl-comp-cell")]
       .find((button) => button.getAttribute("aria-label")?.includes("0.0001%"))!;
     act(() => tiny.click());
-    expect(host.querySelector(".gl-comp-pair-detail")?.textContent).toContain("0.0001%");
+    expect(host.querySelector(".gl-comp-coefficient-readout")?.getAttribute("title")).toContain("0.000001");
+    expect(host.querySelector(".gl-comp-pair-detail")?.textContent).toContain("0.0%");
     const review = [...host.querySelectorAll<HTMLButtonElement>(".gl-comp-drawer-toggle")]
       .find((button) => button.textContent?.includes("Review queue"))!;
     expect(review.textContent).toContain("(2)");
@@ -268,11 +351,57 @@ describe("CompensationTab common path", () => {
 
     expect(cell!.getAttribute("aria-pressed")).toBe("true");
     expect(cell!.classList.contains("selected")).toBe(true);
-    expect(host.querySelector(".gl-comp-pair-detail")?.textContent).toContain("5%");
+    expect(host.querySelector(".gl-comp-pair-detail")?.textContent).toContain("5.0%");
     expect(host.querySelector(".gl-comp-pair-detail")?.textContent).toContain("FL1-A");
     expect(host.querySelector(".gl-comp-pair-detail")?.textContent).toContain("FL2-A");
-    expect(host.querySelectorAll("th.is-selected-axis")).toHaveLength(2);
+    expect(host.querySelectorAll(".gl-comp-cell.is-selected-source")).toHaveLength(2);
+    expect(host.querySelectorAll(".gl-comp-cell.is-selected-receiver")).toHaveLength(2);
     expect(host.querySelectorAll('[role="region"]')).toHaveLength(0);
+  });
+
+  it("offers a keyboard-accessible inspector resizer and persists its width", () => {
+    const sample = flowSample();
+    renderTab(sample, { stateKey: "workspace-a:resizer" });
+    const commonPath = host.querySelector<HTMLElement>(".gl-comp-common-path")!;
+    const separator = host.querySelector<HTMLElement>('[role="separator"][aria-label="Resize compensation inspector"]')!;
+    commonPath.getBoundingClientRect = () => ({
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 1400,
+      bottom: 700,
+      width: 1400,
+      height: 700,
+      toJSON: () => ({}),
+    });
+
+    expect(commonPath.style.gridTemplateColumns).toContain("624px");
+    expect(separator.getAttribute("aria-valuenow")).toBe("624");
+    act(() => separator.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true })));
+    expect(commonPath.style.gridTemplateColumns).toContain("664px");
+    expect(separator.getAttribute("aria-valuenow")).toBe("664");
+
+    renderTab(sample, { stateKey: "workspace-a:resizer" });
+    expect(host.querySelector<HTMLElement>(".gl-comp-common-path")?.style.gridTemplateColumns).toContain("664px");
+  });
+
+  it("previews a cell and its crosshairs on hover without pinning it", () => {
+    renderTab(flowSample());
+    const cell = [...host.querySelectorAll<HTMLButtonElement>(".gl-comp-cell")]
+      .find((button) => !button.disabled && button.getAttribute("aria-label")?.includes("5%"))!;
+
+    act(() => cell.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+    expect(cell.getAttribute("aria-pressed")).toBe("false");
+    expect(cell.classList.contains("selected")).toBe(true);
+    expect(host.querySelector(".gl-comp-pair-detail")?.textContent).toContain("5.0%");
+    expect(host.querySelectorAll(".gl-comp-cell.is-selected-source")).toHaveLength(2);
+    expect(host.querySelectorAll(".gl-comp-cell.is-selected-receiver")).toHaveLength(2);
+    expect(host.textContent).toContain("Hover preview · click to pin this pair.");
+
+    act(() => cell.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body })));
+    expect(host.querySelector(".gl-comp-pair-detail")).toBeNull();
+    expect(cell.classList.contains("selected")).toBe(false);
   });
 
   it("uses a single roving tab stop and arrow/Home/End navigation in a six-channel matrix", () => {
@@ -317,11 +446,20 @@ describe("CompensationTab common path", () => {
 
   it("renders a 60-channel matrix with one keyboard entry point", () => {
     renderTab(flowSample({ channelCount: 60 }));
+    const matrix = host.querySelector<HTMLElement>(".gl-comp-matrix")!;
     const cells = [...host.querySelectorAll<HTMLButtonElement>(".gl-comp-cell")];
     const enabled = cells.filter((button) => !button.disabled);
+    expect(matrix.classList.contains("shows-values")).toBe(true);
+    expect(matrix.getAttribute("role")).toBe("grid");
+    expect(matrix.getAttribute("aria-rowcount")).toBe("60");
+    expect(matrix.getAttribute("aria-colcount")).toBe("60");
     expect(cells).toHaveLength(3600);
     expect(enabled).toHaveLength(3540);
     expect(enabled.filter((button) => button.tabIndex === 0)).toHaveLength(1);
+    expect(enabled.some((button) => button.textContent !== "")).toBe(true);
+    expect(enabled.every((button) => button.title.includes("→"))).toBe(true);
+    expect(host.querySelectorAll(".gl-comp-row-labels > div")).toHaveLength(60);
+    expect(host.querySelectorAll(".gl-comp-column-labels > div")).toHaveLength(60);
     expect(host.querySelectorAll('[role="region"]')).toHaveLength(0);
   });
 
@@ -453,10 +591,19 @@ describe("CompensationTab CyTOF import path", () => {
   });
 
   it("requires gate-coordinate acknowledgement and emits an immutable NNLS profile", async () => {
+    vi.stubGlobal("requestAnimationFrame", () => 1);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
     vi.stubGlobal("crypto", {
       randomUUID: () => "00000000-0000-4000-8000-000000000001",
       subtle: {
-        digest: async () => new Uint8Array(32).buffer,
+        digest: async (_algorithm: string, input: ArrayBuffer) => {
+          const bytes = new Uint8Array(input);
+          const output = new Uint8Array(32);
+          for (let index = 0; index < bytes.length; index++) {
+            output[index % output.length] = (output[index % output.length] * 31 + bytes[index] + index) & 0xff;
+          }
+          return output.buffer;
+        },
       },
     });
     const applied = vi.fn(async (
@@ -527,24 +674,291 @@ describe("CompensationTab CyTOF import path", () => {
         };
       }),
     }, { activeLayer: "compensated" });
+    const solveSweep = vi.fn<CompensationSweepSolver>(async () => []);
     renderTab(sample, {
       stateKey: "workspace-a:cytof-applied",
       compensationOn: true,
       installedProfile: profile,
+      installedBaselineProfile: profile,
+      onApplyProfile: applied,
+      onSolveCompensationSweep: solveSweep,
     });
 
     expect(host.textContent).toContain("CyTOF compensation installed");
     expect(host.textContent).toContain("wing-lab");
-    expect(host.textContent).toContain("Applied NNLS solve matrix");
+    expect(host.querySelector(".gl-comp-profile-pill")).not.toBeNull();
+    expect(host.querySelector(".gl-comp-installed-summary")).toBeNull();
+    expect(host.textContent).toContain("Uploaded spill matrix");
+    expect(host.textContent).not.toContain("Original → Compensated impact");
+    expect(host.querySelector(".gl-comp-profile-channels")).toBeNull();
+    expect([...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Replace matrix…")).toBeDefined();
+
+    const evidence = [...host.querySelectorAll<HTMLButtonElement>(".gl-comp-drawer-toggle")]
+      .find((button) => button.textContent?.includes("Evidence"))!;
+    act(() => evidence.click());
     expect(host.textContent).toContain("Original → Compensated impact");
     expect(host.querySelectorAll(".gl-comp-matrix .gl-comp-cell")).toHaveLength(4);
+
+    const workspaceTabs = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    const matrixTab = workspaceTabs.find((button) => button.textContent?.trim() === "Matrix")!;
+    const globalTab = workspaceTabs.find((button) => button.textContent?.trim() === "Global inspector")!;
+    expect(workspaceTabs.map((button) => button.textContent?.trim())).toEqual([
+      "Matrix",
+      "Global inspector",
+      "Flagged",
+    ]);
+    act(() => globalTab.click());
+    expect(host.querySelector(".gl-comp-global-inspector")).not.toBeNull();
+    const comparisonExportButton = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Export…")!;
+    expect(comparisonExportButton).toBeDefined();
+    act(() => comparisonExportButton.click());
+    const comparisonExportDialog = host.querySelector<HTMLElement>(
+      '[role="dialog"][aria-labelledby="comp-comparison-export-title"]',
+    )!;
+    expect(comparisonExportDialog).not.toBeNull();
+    expect(comparisonExportDialog.textContent).toContain("Original and Compensated");
+    expect(comparisonExportDialog.textContent).toContain("2 filtered pairs · both assays");
+    expect(comparisonExportDialog.textContent).toContain("1 A4 landscape page · six pairs per page");
+    expect(comparisonExportDialog.querySelectorAll('input[name="compensation-comparison-export-format"]')).toHaveLength(3);
+    const cancelComparisonExport = [...comparisonExportDialog.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Cancel")!;
+    act(() => cancelComparisonExport.click());
+    expect(host.querySelector('[role="dialog"][aria-labelledby="comp-comparison-export-title"]')).toBeNull();
+    expect(host.querySelector(".gl-comp-lock-pill")?.textContent).toBe("View locked");
+    expect(host.querySelector(".gl-comp-lock-pill")?.getAttribute("title")).toContain("same events, axes, transform, density bins, colour scale, and tile geometry");
+    const layerToggle = host.querySelector<HTMLButtonElement>(".gl-comp-layer-toggle")!;
+    const layerScope = host.querySelector<HTMLElement>(".gl-comp-global-inspector")!;
+    expect(layerToggle.textContent).toContain("Compensated");
+    expect(layerToggle.getAttribute("aria-pressed")).toBe("true");
+    expect(layerScope.dataset.inspectorLayer).toBe("compensated");
+    expect(host.querySelectorAll(".gl-comp-layer-toggle")).toHaveLength(1);
+    expect(host.querySelector(".gl-comp-inspector")).toBeNull();
+    const tilesBefore = [...host.querySelectorAll<HTMLElement>(".gl-comp-global-tile")];
+    expect(tilesBefore).toHaveLength(2);
+    expect(tilesBefore[0].style.width).toBe("160px");
+    const cachedSurfacesBefore = [...host.querySelectorAll<HTMLElement>(".gl-comp-cached-biplot")];
+    expect(cachedSurfacesBefore).toHaveLength(2);
+    expect(cachedSurfacesBefore.map((surface) => surface.dataset.cacheMode)).toEqual(["dual-canvas", "dual-canvas"]);
+    expect(cachedSurfacesBefore.every((surface) => surface.dataset.layer === undefined)).toBe(true);
+    expect(host.querySelector<HTMLInputElement>('input[aria-label="Global compensation plot size"]')?.min).toBe("120");
+    const densitySmoothing = host.querySelector<HTMLInputElement>('input[aria-label="Compensation biplot density smoothing"]')!;
+    expect(densitySmoothing.value).toBe("6");
+    expect(densitySmoothing.max).toBe("10");
+    expect(densitySmoothing.closest("label")?.getAttribute("title")).toContain("both assay layers always use the same setting");
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(densitySmoothing, "10");
+      densitySmoothing.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(host.querySelector(".gl-comp-density-smoothing output")?.textContent).toBe("10");
+    expect(host.querySelectorAll(".gl-comp-global-tile-head")).toHaveLength(2);
+    expect(host.querySelector(".gl-comp-global-tile-head")?.textContent).toContain("CD45 → Barcode");
+    expect(host.querySelector(".gl-comp-global-tile-head")?.textContent).toContain("10.0%");
+    expect(host.querySelector(".gl-comp-global-tile-foot")).toBeNull();
+    expect(host.textContent).not.toContain("fixed events · locked frame");
+    const lockedFrames = tilesBefore.map((tile) => ({
+      node: tile,
+      pair: tile.dataset.pairKey,
+      events: tile.dataset.eventSignature,
+      x: tile.dataset.xRange,
+      y: tile.dataset.yRange,
+      width: tile.style.width,
+    }));
+    act(() => layerToggle.click());
+    const tilesAfter = [...host.querySelectorAll<HTMLElement>(".gl-comp-global-tile")];
+    expect(layerToggle.textContent).toContain("Uncompensated");
+    expect(layerToggle.getAttribute("aria-pressed")).toBe("false");
+    expect(layerScope.dataset.inspectorLayer).toBe("original");
+    expect(tilesAfter.every((tile) => tile.dataset.layer === undefined)).toBe(true);
+    const cachedSurfacesAfter = [...host.querySelectorAll<HTMLElement>(".gl-comp-cached-biplot")];
+    expect(cachedSurfacesAfter).toEqual(cachedSurfacesBefore);
+    expect(cachedSurfacesAfter.every((surface) => surface.dataset.layer === undefined)).toBe(true);
+    expect(tilesAfter.map((tile) => ({
+      node: tile,
+      pair: tile.dataset.pairKey,
+      events: tile.dataset.eventSignature,
+      x: tile.dataset.xRange,
+      y: tile.dataset.yRange,
+      width: tile.style.width,
+    }))).toEqual(lockedFrames);
+    expect(sample.activeLayer).toBe("compensated");
+    act(() => layerToggle.click());
+    expect(layerToggle.textContent).toContain("Compensated");
+    expect(layerToggle.getAttribute("aria-pressed")).toBe("true");
+    expect(layerScope.dataset.inspectorLayer).toBe("compensated");
+
+    const openDetails = tilesAfter[0].querySelector<HTMLButtonElement>(".gl-comp-global-plot-button")!;
+    act(() => openDetails.click());
+    expect(host.querySelector(".gl-comp-inspector")).not.toBeNull();
+    expect(host.querySelector(".gl-comp-global-path")?.classList.contains("has-details")).toBe(true);
+    expect(host.querySelector(".gl-comp-mini-matrix")).not.toBeNull();
+    expect(host.querySelector(".gl-comp-inspector.is-global .gl-comp-biplot-note")).toBeNull();
+    const compactDetail = host.querySelector<HTMLElement>(".gl-comp-pair-detail.is-global")!;
+    const compactChildren = [...compactDetail.children];
+    const followupIndex = compactChildren.findIndex((node) => node.classList.contains("gl-comp-followup-toggle"));
+    const editorIndex = compactChildren.findIndex((node) => node.classList.contains("gl-comp-coefficient-editor"));
+    const biplotsIndex = compactChildren.findIndex((node) => node.classList.contains("gl-comp-biplot-comparison"));
+    const miniMatrixIndex = compactChildren.findIndex((node) => node.classList.contains("gl-comp-mini-matrix"));
+    expect(followupIndex).toBeGreaterThanOrEqual(0);
+    expect(editorIndex).toBeGreaterThanOrEqual(0);
+    expect(biplotsIndex).toBeGreaterThan(followupIndex);
+    expect(biplotsIndex).toBeGreaterThan(editorIndex);
+    expect(miniMatrixIndex).toBe(biplotsIndex + 1);
+    const miniMatrixSvg = host.querySelector<SVGSVGElement>(".gl-comp-mini-matrix svg")!;
+    vi.spyOn(miniMatrixSvg, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 160,
+      bottom: 66,
+      width: 160,
+      height: 66,
+      toJSON: () => ({}),
+    });
+    act(() => miniMatrixSvg.dispatchEvent(new MouseEvent("pointerdown", {
+      bubbles: true,
+      clientX: 77,
+      clientY: 53,
+    })));
+    expect(tilesBefore[1].classList.contains("is-selected")).toBe(true);
+    expect(scrollIntoViewMock).toHaveBeenCalledWith({ block: "center", inline: "center" });
+    expect(scrollIntoViewMock.mock.instances[scrollIntoViewMock.mock.instances.length - 1]).toBe(tilesBefore[1]);
+    const closeDetails = host.querySelector<HTMLButtonElement>('button[aria-label="Close global compensation pair details"]')!;
+    act(() => closeDetails.click());
+    expect(host.querySelector(".gl-comp-inspector")).toBeNull();
+    expect(host.querySelector(".gl-comp-global-tile")).toBe(tilesBefore[0]);
+
+    const layout = host.querySelector<HTMLSelectElement>('select[aria-label="Global compensation plot layout"]')!;
+    act(() => {
+      layout.value = "source";
+      layout.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(host.querySelector(".gl-comp-global-groups")?.getAttribute("data-layout")).toBe("source");
+    expect(host.querySelector(".gl-comp-global-group")?.textContent).toContain("Source");
+    act(() => {
+      layout.value = "receiver";
+      layout.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(host.querySelector(".gl-comp-global-groups")?.getAttribute("data-layout")).toBe("receiver");
+    expect(host.querySelector(".gl-comp-global-group")?.textContent).toContain("Receiver");
+    act(() => {
+      layout.value = "compact";
+      layout.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    const galleryFollowup = host.querySelector<HTMLInputElement>('.gl-comp-global-tile input[type="checkbox"]')!;
+    act(() => galleryFollowup.click());
+    expect([...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((button) => button.textContent?.includes("Flagged"))?.textContent).toContain("(1)");
+    act(() => galleryFollowup.click());
+    expect([...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((button) => button.textContent?.includes("Flagged"))?.textContent).not.toContain("(1)");
+    act(() => matrixTab.click());
+
+    const pair = host.querySelector<HTMLButtonElement>('button[data-source-index="0"][data-receiver-index="1"]')!;
+    act(() => pair.click());
+    const followup = host.querySelector<HTMLInputElement>(".gl-comp-followup-toggle input")!;
+    expect(followup.checked).toBe(false);
+    act(() => followup.click());
+    expect(followup.checked).toBe(true);
+
+    const attention = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((button) => button.textContent?.includes("Flagged"))!;
+    expect(attention.textContent).toContain("(1)");
+    act(() => attention.click());
+    expect(host.querySelectorAll(".gl-comp-inspector")).toHaveLength(1);
+    expect(host.querySelector(".gl-comp-inspector")?.textContent).toContain("Y89Di");
+    expect(host.querySelector(".gl-comp-attention-section")?.textContent).toContain("Flagged by you (1)");
+    const flaggedColumns = host.querySelector(".gl-comp-flagged-columns")!;
+    expect(flaggedColumns).not.toBeNull();
+    expect(flaggedColumns.querySelectorAll(":scope > .gl-comp-attention-section")).toHaveLength(2);
+    expect(flaggedColumns.children[0]?.textContent).toContain("Flagged by you");
+    expect(flaggedColumns.children[1]?.textContent).toContain("Conservative suggestions");
+    expect(host.querySelectorAll('select[aria-label="Compensation sweep workers"] option')).toHaveLength(4);
+    const evidenceMode = host.querySelector<HTMLSelectElement>('select[aria-label="Compensation evidence mode"]')!;
+    expect(evidenceMode.value).toBe("biological");
+    expect(host.textContent).toContain("Broad positive association is excluded");
+    act(() => {
+      evidenceMode.value = "control";
+      evidenceMode.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(host.textContent).toContain("Control-data suggestions");
+    act(() => {
+      evidenceMode.value = "biological";
+      evidenceMode.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(host.querySelector('select[aria-label="Follow-up source channel"]')).not.toBeNull();
+    expect([...host.querySelectorAll<HTMLButtonElement>("button")]
+      .some((button) => button.textContent === "Recompute suggestions")).toBe(true);
+    expect(host.textContent).toContain("Sweep workers are separate from full-Apply workers");
+    expect(host.textContent).toContain("Four exact candidates will be interpolated");
+    const nextFlagged = host.querySelector<HTMLButtonElement>('button[aria-label="Next flagged compensation pair"]')!;
+    const previousFlagged = host.querySelector<HTMLButtonElement>('button[aria-label="Previous flagged compensation pair"]')!;
+    expect(nextFlagged.disabled).toBe(false);
+    expect(previousFlagged.disabled).toBe(false);
+    expect(host.querySelector(".gl-comp-flag-navigation")?.textContent).toContain("1 / 1 flagged");
+
+    const recompute = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Recompute suggestions")!;
+    act(() => recompute.click());
+    expect(host.textContent).toContain("1 flagged pair was retained");
+    expect(host.querySelector<HTMLInputElement>(".gl-comp-followup-toggle input")?.checked).toBe(true);
+
+    const previewBounds = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Preview endpoints")!;
+    await act(async () => {
+      previewBounds.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(solveSweep).toHaveBeenCalledTimes(1);
+    expect(solveSweep.mock.calls[0][2]).toHaveLength(2);
+    expect(solveSweep.mock.calls[0][4]).toBe(1);
+
+    const workers = host.querySelector<HTMLSelectElement>('select[aria-label="Compensation sweep workers"]')!;
+    act(() => {
+      workers.value = "4";
+      workers.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const runSweep = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.includes("Run four-value sweeps"))!;
+    await act(async () => {
+      runSweep.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(solveSweep).toHaveBeenCalledTimes(2);
+    expect(solveSweep.mock.calls[1][2]).toHaveLength(4);
+    expect(solveSweep.mock.calls[1][4]).toBe(4);
+
+    const coefficientInput = host.querySelector<HTMLInputElement>(".gl-comp-coefficient-editor input")!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(coefficientInput, "12");
+      coefficientInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const stage = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Stage value")!;
+    act(() => stage.click());
+    expect(host.querySelector(".gl-comp-coefficient-history")?.textContent).toContain("Installed");
+    expect(host.querySelector(".gl-comp-coefficient-history")?.textContent).toContain("Staged12.0%");
+
+    const applyRevision = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Apply revised matrix")!;
+    await act(async () => {
+      applyRevision.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(applied).toHaveBeenCalledTimes(2);
+    expect(host.textContent).toContain("Retained 1 flagged pair for post-correction review");
+    expect(host.querySelector<HTMLInputElement>(".gl-comp-followup-toggle input")?.checked).toBe(true);
+    expect(attention.getAttribute("aria-selected")).toBe("true");
   });
 });
 
 describe("CompensationTab assay-layer fidelity", () => {
   it("keeps assay selection out of the tab and points to the one global selector", () => {
     renderTab(flowSample());
-    expect(host.textContent).toContain("Select the assay for every tab in the top bar");
+    expect(host.textContent).toContain("Assay selection in the top bar applies to every tab");
     expect(host.querySelector('select[aria-label="Active assay layer for all tabs"]')).toBeNull();
   });
 
@@ -555,7 +969,7 @@ describe("CompensationTab assay-layer fidelity", () => {
 
     expect(host.textContent).toContain("Installed compensation profile");
     expect(host.textContent).toContain("Flow linear inverse");
-    expect(host.textContent).toContain("Select the assay for every tab in the top bar");
+    expect(host.textContent).toContain("Assay selection in the top bar applies to every tab");
     expect(host.textContent).not.toContain("Embedded compensation matrix");
     expect(host.textContent).toContain("flow-spillover-profile");
     expect(sample.activeLayer).toBe("original");
@@ -569,7 +983,7 @@ describe("CompensationTab assay-layer fidelity", () => {
     expect(host.textContent).toContain("Installed compensation profile");
     expect(host.textContent).toContain("CyTOF NNLS");
     expect(host.textContent).toContain("CyTOF compensation installed");
-    expect(host.textContent).toContain("Select the assay for every tab in the top bar");
+    expect(host.textContent).toContain("Assay selection in the top bar applies to every tab");
     expect(host.textContent).not.toContain("Apply embedded matrix");
     expect(host.textContent).not.toContain("Not configured");
   });

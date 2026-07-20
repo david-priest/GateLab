@@ -2,7 +2,7 @@
 // GateLabR) with live counts. Drawing a gate opens the name/population modal; the plot
 // shows the active population's events plus its gates (display space).
 
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import pkg from "../package.json";
 import { clearPersistedTabState } from "./ui/tabState";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type NewGate } from "./plots/GatingPlot";
@@ -119,6 +119,7 @@ import { ScalesTab } from "./ui/ScalesTab";
 import {
   CompensationTab,
   type CompensationApplyUiStatus,
+  type CompensationSweepSolver,
 } from "./ui/CompensationTab";
 import { StrategyTab, type StrategyConfig } from "./ui/StrategyTab";
 import { IllustrationTab } from "./ui/IllustrationTab";
@@ -344,6 +345,13 @@ export default function App() {
       activeCompensatedStatus.metadata.profileId,
     );
   }, [activeCompensatedStatus, workspaceCompensation]);
+  const activeCompensationBaseline = useMemo(() => {
+    if (!activeCompensationProfile) return null;
+    return findCompensationProfile(
+      workspaceCompensation,
+      activeCompensationProfile.baselineProfileId,
+    );
+  }, [activeCompensationProfile, workspaceCompensation]);
   const canUseCompensatedAssay = sample !== null && (
     activeCompensatedStatus?.state === "ready" ||
     (activeCompensatedStatus?.state === "missing" && sample.instrument === "flow" && sample.spillover !== null)
@@ -359,6 +367,15 @@ export default function App() {
       workerPoolSize: compensationWorkerCount,
     });
   }
+  const compensationSweepManagersRef = useRef<CompensationManager[]>([]);
+  const cancelCompensationSweepManagers = useCallback((reason: string) => {
+    const managers = compensationSweepManagersRef.current;
+    compensationSweepManagersRef.current = [];
+    for (const manager of managers) {
+      manager.cancelPreview(reason);
+      manager.dispose();
+    }
+  }, []);
   const compensationApplyGuardRef = useRef(false);
   const compensationRestoreCancelledRef = useRef(false);
   const [compensationApplyStatus, setCompensationApplyStatus] =
@@ -431,8 +448,12 @@ export default function App() {
   );
 
   useEffect(() => {
+    cancelCompensationSweepManagers("The workspace changed.");
     compensationManagerRef.current!.resetWorkspace(workspaceId);
-  }, [workspaceId]);
+  }, [cancelCompensationSweepManagers, workspaceId]);
+  useEffect(() => () => {
+    cancelCompensationSweepManagers("GateLab closed.");
+  }, [cancelCompensationSweepManagers]);
   const bumpScales = () => setScalesVersion((v) => v + 1);
   const plotAreaRef = useRef<HTMLDivElement>(null);
   const pzRef = useRef({
@@ -1028,6 +1049,15 @@ export default function App() {
       setError(message);
       throw new Error(message);
     }
+    cancelCompensationSweepManagers("A full compensation Apply started.");
+    if (profile.recordType === "revision") {
+      const lineage = workspaceCompensation.lineages.find(
+        ({ baselineProfileId }) => baselineProfileId === profile.baselineProfileId,
+      );
+      if (!lineage || !lineage.records.some(({ profileId }) => profileId === profile.parentProfileId)) {
+        throw new Error("The compensation revision cannot be applied because its parent profile is missing from this workspace.");
+      }
+    }
     const targetSample = sample;
     compensationApplyGuardRef.current = true;
     setCompensationApplyStatus({
@@ -1072,6 +1102,17 @@ export default function App() {
           records.some(({ profileId }) => profileId === profile.profileId)
         );
         if (exists) return current;
+        const lineageIndex = current.lineages.findIndex(
+          ({ baselineProfileId }) => baselineProfileId === profile.baselineProfileId,
+        );
+        if (lineageIndex >= 0) {
+          return {
+            ...current,
+            lineages: current.lineages.map((lineage, index) => index === lineageIndex
+              ? { ...lineage, records: [...lineage.records, profile] }
+              : lineage),
+          };
+        }
         return {
           ...current,
           lineages: [
@@ -1125,6 +1166,55 @@ export default function App() {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }
+
+  const solveCompensationSweep = useCallback<CompensationSweepSolver>(async (
+    profile,
+    fixedEventIndices,
+    candidateMatrices,
+    onProgress,
+    requestedWorkerCount = 1,
+  ) => {
+    const targetSample = sample;
+    if (!targetSample) throw new Error("No active sample is available for a compensation sweep.");
+    if (compensationManagerRef.current!.applyInProgress || compensationApplyGuardRef.current) {
+      throw new Error("Wait for the current compensation Apply to finish before starting a sweep.");
+    }
+    cancelCompensationSweepManagers("A newer coefficient sweep started.");
+    if (candidateMatrices.length === 0) return Object.freeze([]);
+    const workerCount = Math.max(1, Math.min(4, candidateMatrices.length, Math.round(requestedWorkerCount) || 1));
+    const runId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const managers = Array.from({ length: workerCount }, (_, index) => new CompensationManager({
+      workspaceKey: `${workspaceIdRef.current}:sweep:${runId}:${index}`,
+    }));
+    compensationSweepManagersRef.current = managers;
+    const solved = new Array<Awaited<ReturnType<CompensationManager["solvePreview"]>>>(candidateMatrices.length);
+    let completed = 0;
+    try {
+      onProgress?.(0, candidateMatrices.length);
+      const primed = await Promise.all(managers.map((manager) => manager.primePreview({
+        profile,
+        sample: targetSample,
+        fixedEventIndices,
+      })));
+      await Promise.all(managers.map(async (manager, lane) => {
+        for (let index = lane; index < candidateMatrices.length; index += workerCount) {
+          solved[index] = await manager.solvePreview(primed[lane].sessionId, candidateMatrices[index]);
+          completed++;
+          onProgress?.(completed, candidateMatrices.length);
+        }
+      }));
+      return Object.freeze(solved);
+    } finally {
+      if (compensationSweepManagersRef.current === managers) {
+        compensationSweepManagersRef.current = [];
+      }
+      for (const manager of managers) manager.dispose();
+    }
+  }, [cancelCompensationSweepManagers, sample]);
+
+  const cancelCompensationSweep = useCallback(() => {
+    cancelCompensationSweepManagers("Cancelled by the user.");
+  }, [cancelCompensationSweepManagers]);
 
   // Force the active sample's instrument mode (recovery for a mis-detect). Rebuilds the
   // display/gating transforms, so ranges + the derived masks re-derive (instrumentMode is a
@@ -2302,6 +2392,17 @@ export default function App() {
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.populations, state.root_population_id, state.gate_version, derived]);
+  const compensationReviewPopulations = useMemo(() => {
+    const rootId = state.root_population_id ?? "";
+    return populationTreeOrder(state.populations, rootId)
+      .filter(({ popId }) => popId !== rootId)
+      .map(({ popId, depth }) => ({
+        id: popId,
+        name: state.populations[popId]?.name ?? popId,
+        depth: Math.max(0, depth - 1),
+        eventCount: derived.stats.event_count[popId] ?? 0,
+      }));
+  }, [derived.stats.event_count, state.populations, state.root_population_id]);
 
   // gate_list_click also switches the plot axes to the gate's channels (app.R:5030).
   const uiDispatch = (a: Action) => {
@@ -3218,6 +3319,7 @@ export default function App() {
               <CompensationTab
                 key={`${workspaceId}:${activeSampleId ?? "none"}`}
                 sample={sample}
+                sampleName={fileName}
                 compensationOn={compensationOn}
                 onApplyProfile={applyCompensationProfile}
                 onCancelApply={cancelCompensationApply}
@@ -3227,6 +3329,11 @@ export default function App() {
                 applyWorkerCount={compensationWorkerCount}
                 applyWorkerLimit={compensationWorkerLimit}
                 onApplyWorkerCountChange={changeCompensationWorkerCount}
+                installedBaselineProfile={activeCompensationBaseline}
+                reviewPopulations={compensationReviewPopulations}
+                reviewPopulationMasks={derived.masks}
+                onSolveCompensationSweep={solveCompensationSweep}
+                onCancelCompensationSweep={cancelCompensationSweep}
                 visible={activeTab === "compensation"}
                 stateKey={`${workspaceId}:${activeSampleId ?? "none"}`}
               />
