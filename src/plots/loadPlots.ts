@@ -314,7 +314,23 @@ export function patchMiniPlot(src: string): string {
             right: _resolvedMargin('right', 8, 2, 30),
             bottom: _resolvedMargin('bottom', 38, 24, 55),
             left: _resolvedMargin('left', 42, 28, 65)
-        };`;
+        };
+        // When the caller does NOT pin an explicit left margin (Strategy / Illustration grids),
+        // reserve enough left margin that the rotated y-axis TITLE clears the container's left edge
+        // at ANY font size. The title sits axisLabelOffset px left of the axis and its glyphs rise
+        // ~axisFs beyond that, so a fixed 42px margin clips it once the axis font grows. Widening
+        // M.left only TRANSLATES the whole y-axis group (labels + title) right — it never changes the
+        // title-vs-label spacing, so it cannot introduce an overlap. Compensation biplots pass an
+        // explicit left margin and are intentionally left untouched.
+        if (!isFinite(Number(requestedMargins.left)) && cfg.y && cfg.y.length) {
+            var _yTitleFs = Number((cfg.font_sizes || {}).axis_label);
+            if (!isFinite(_yTitleFs)) _yTitleFs = 11;
+            var _yTitleOffset = Number(cfg.axis_label_offset);
+            if (!isFinite(_yTitleOffset)) _yTitleOffset = 32;
+            _yTitleOffset = Math.max(14, Math.min(40, _yTitleOffset));
+            var _neededLeft = Math.ceil(_yTitleOffset + _yTitleFs + 4);
+            if (_neededLeft > M.left) M.left = Math.min(140, _neededLeft);
+        }`;
   if (out.includes(marginNeedle)) {
     out = out.replace(marginNeedle, marginPatch);
   } else if (!out.includes("var requestedMargins = cfg.plot_margins || {};")) {
