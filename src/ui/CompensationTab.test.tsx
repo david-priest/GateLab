@@ -9,9 +9,11 @@ import type { CompensationProfileRecord } from "../engine/compensationProfileRec
 import type { FcsFile } from "../engine/fcs";
 import { Sample, type CompensatedLayerInput } from "../engine/sample";
 import type { PersistedCompensatedLayerBinding } from "../engine/workspaceCompensation";
+import type { PreviewSolvedResponse } from "../workers/compensationProtocol";
 import {
   CompensationTab,
   type CompensationApplyUiStatus,
+  type CompensationCandidatePreviewSolver,
   type CompensationReviewPopulation,
   type CompensationSweepSolver,
 } from "./CompensationTab";
@@ -23,10 +25,12 @@ const digest = (character: string): Sha256Digest =>
 function flowSample(options: Readonly<{
   coefficient?: number;
   channelCount?: number;
+  eventCount?: number;
   matrix?: number[][];
   spillover?: boolean;
 }> = {}): Sample {
   const channelCount = options.channelCount ?? 2;
+  const eventCount = options.eventCount ?? 4;
   const fluorNames = Array.from({ length: channelCount }, (_, index) => `FL${index + 1}-A`);
   const markers = Array.from({ length: channelCount }, (_, index) => `Marker ${index + 1}`);
   const matrix = options.matrix ?? Array.from({ length: channelCount }, (_, source) =>
@@ -37,7 +41,7 @@ function flowSample(options: Readonly<{
     }));
   const fcs: FcsFile = {
     version: "FCS3.1",
-    nEvents: 4,
+    nEvents: eventCount,
     instrument: "flow",
     keywords: {},
     channels: [
@@ -51,8 +55,11 @@ function flowSample(options: Readonly<{
       })),
     ],
     columns: [
-      Float32Array.from([100, 200, 300, 400]),
-      ...fluorNames.map((_, index) => Float32Array.from([index, index + 10, index + 20, index + 30])),
+      Float32Array.from({ length: eventCount }, (_, event) => (event + 1) * 100),
+      ...fluorNames.map((_, index) => Float32Array.from(
+        { length: eventCount },
+        (_, event) => index + event * 10,
+      )),
     ],
     spillover: options.spillover === false ? null : { channels: fluorNames, matrix },
   };
@@ -111,6 +118,59 @@ function profileLayer(sample: Sample, kind: "flow-spillover" | "cytof-spillover"
   };
 }
 
+function installProfileLayer(sample: Sample, profile: CompensationProfileRecord): void {
+  const included = profile.scientific.kind === "flow-spillover"
+    ? profile.scientific.matrix.receiverChannels
+    : profile.scientific.includedChannels;
+  sample.installCompensatedLayer({
+    metadata: {
+      profileId: profile.profileId,
+      profileHash: profile.profileHash,
+      matrixHash: profile.matrixHash,
+      kind: profile.scientific.kind,
+      method: profile.scientific.method,
+      includedPnns: included,
+      channelBindings: profile.scientific.matrix.receiverChannels.map((pnn, receiverIndex) => {
+        const channel = sample.channels.find((candidate) => candidate.pnn === pnn)!;
+        return {
+          pnn,
+          fcsColumnIndex: channel.columnIndex,
+          matrixSourceIndex: profile.scientific.matrix.sourceChannels.indexOf(pnn),
+          matrixReceiverIndex: receiverIndex,
+          included: included.includes(pnn),
+        };
+      }),
+      transformBinding: profile.scientific.kind === "flow-spillover"
+        ? { kind: "flow-linear" }
+        : { kind: "cytof-asinh", cofactor: 5 },
+    },
+    columns: included.map((pnn) => {
+      const channel = sample.channels.find((candidate) => candidate.pnn === pnn)!;
+      return {
+        pnn,
+        fcsColumnIndex: channel.columnIndex,
+        values: Float32Array.from(sample.originalColumnData(sample.index(channel.key)!)),
+      };
+    }),
+  }, { activeLayer: "compensated" });
+}
+
+function stubDeterministicCrypto(): void {
+  vi.stubGlobal("crypto", {
+    randomUUID: () => "00000000-0000-4000-8000-000000000001",
+    subtle: {
+      digest: async (_algorithm: string, input: ArrayBuffer) => {
+        const bytes = new Uint8Array(input);
+        const output = new Uint8Array(32);
+        for (let index = 0; index < bytes.length; index++) {
+          output[index % output.length] = (output[index % output.length] * 31 + bytes[index] + index) & 0xff;
+        }
+        return output.buffer;
+      },
+    },
+  });
+}
+
 let root: Root;
 let host: HTMLDivElement;
 let scrollIntoViewMock: ReturnType<typeof vi.fn>;
@@ -154,6 +214,7 @@ function renderTab(
     installedBaselineProfile?: CompensationProfileRecord | null;
     reviewPopulations?: readonly CompensationReviewPopulation[];
     reviewPopulationMasks?: Readonly<Record<string, Uint8Array>>;
+    onPreviewCompensationCandidate?: CompensationCandidatePreviewSolver;
     onSolveCompensationSweep?: CompensationSweepSolver;
     visible?: boolean;
     stateKey?: string;
@@ -178,6 +239,7 @@ function renderTab(
       installedBaselineProfile={options.installedBaselineProfile}
       reviewPopulations={options.reviewPopulations}
       reviewPopulationMasks={options.reviewPopulationMasks}
+      onPreviewCompensationCandidate={options.onPreviewCompensationCandidate}
       onSolveCompensationSweep={options.onSolveCompensationSweep}
       visible={options.visible}
       stateKey={stateKey}
@@ -316,6 +378,239 @@ describe("CompensationTab common path", () => {
       .find((button) => button.textContent === "Cancel")!;
     act(() => cancel.click());
     expect(host.querySelector('[role="dialog"][aria-labelledby="comp-export-title"]')).toBeNull();
+  });
+
+  it("installs the exact embedded FCS matrix as an editable flow baseline", async () => {
+    stubDeterministicCrypto();
+    const sample = flowSample({ coefficient: 0.07125 });
+    sample.fcs.keywords.$SPILLOVER = "2,FL1-A,FL2-A,1,0.07125,0.02,1";
+    const applied = vi.fn(async (_profile: CompensationProfileRecord) => undefined);
+    renderTab(sample, {
+      stateKey: "workspace-a:flow-enable",
+      hasExistingGates: true,
+      onApplyProfile: applied,
+    });
+
+    const enable = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Enable matrix editing")!;
+    expect(enable.disabled).toBe(true);
+    const acknowledgement = host.querySelector<HTMLInputElement>(
+      ".gl-comp-flow-enable .gl-comp-gate-acknowledgement input",
+    )!;
+    act(() => acknowledgement.click());
+    expect(enable.disabled).toBe(false);
+
+    await act(async () => {
+      enable.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(applied).toHaveBeenCalledTimes(1);
+    const profile = applied.mock.calls[0][0];
+    expect(profile.recordType).toBe("baseline");
+    expect(profile.scientific.kind).toBe("flow-spillover");
+    expect(profile.scientific.method).toBe("matrix-inverse");
+    expect(profile.scientific.matrix.sourceChannels).toEqual(["FL1-A", "FL2-A"]);
+    expect(profile.scientific.matrix.matrix).toEqual([[1, 0.07125], [0.02, 1]]);
+    expect(profile.origin).toMatchObject({
+      type: "embedded-fcs",
+      keyword: "$SPILLOVER",
+    });
+    expect(host.textContent).toContain("exact embedded matrix is retained as the baseline");
+  });
+
+  it("edits flow coefficients from the matrix or Global inspector with the same live Original/Candidate preview", async () => {
+    stubDeterministicCrypto();
+    vi.stubGlobal("requestAnimationFrame", () => 1);
+    vi.stubGlobal("cancelAnimationFrame", () => undefined);
+    const sample = flowSample({ coefficient: 0.05, eventCount: 3_001 });
+    let profile: CompensationProfileRecord | null = null;
+    const captureProfile = vi.fn(async (candidate: CompensationProfileRecord) => {
+      profile = candidate;
+    });
+    renderTab(sample, {
+      stateKey: "workspace-a:flow-inline-setup",
+      onApplyProfile: captureProfile,
+    });
+    const enable = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Enable matrix editing")!;
+    await act(async () => {
+      enable.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(profile).not.toBeNull();
+    const installedProfile = profile!;
+    installProfileLayer(sample, installedProfile);
+
+    const previewCandidate = vi.fn<CompensationCandidatePreviewSolver>(async (
+      _profile,
+      fixedEventIndices,
+      _candidateMatrix,
+    ) => ({
+      type: "preview-solved",
+      protocol: "gatelab.compensation-worker.v1",
+      sessionId: "flow-preview",
+      sessionToken: "flow-token",
+      profileHash: installedProfile.profileHash,
+      bindingKey: "flow-binding",
+      requestId: "flow-preview:request:1",
+      eventCount: fixedEventIndices.length,
+      sourceChannels: ["FL1-A", "FL2-A"],
+      receiverBindings: [],
+      sourceBindings: [],
+      currentColumns: [
+        Float64Array.from(fixedEventIndices, (event) => event * 10),
+        Float64Array.from(fixedEventIndices, (event) => event * 9),
+      ],
+      candidateColumns: [
+        Float64Array.from(fixedEventIndices, (event) => event * 10),
+        Float64Array.from(fixedEventIndices, (event) => event * 8),
+      ],
+      deltas: [],
+      impacts: [],
+      impactRanking: [],
+      currentDiagnostics: {},
+      candidateDiagnostics: {},
+      currentReconstruction: null,
+      candidateReconstruction: null,
+    } as unknown as PreviewSolvedResponse));
+    renderTab(sample, {
+      stateKey: "workspace-a:flow-inline",
+      compensationOn: true,
+      installedProfile,
+      installedBaselineProfile: installedProfile,
+      onApplyProfile: captureProfile,
+      onPreviewCompensationCandidate: previewCandidate,
+    });
+
+    const editable = host.querySelector<HTMLInputElement>(
+      'input.gl-comp-cell-input[data-source-index="0"][data-receiver-index="1"]',
+    )!;
+    expect(editable).not.toBeNull();
+    expect(editable.value).toBe("5.0");
+    expect(editable.step).toBe("0.1");
+    expect(host.querySelectorAll(".gl-comp-cell-input")).toHaveLength(2);
+    expect(host.textContent).toContain("Edit cells directly (%)");
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(editable, "6.5");
+      editable.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 130));
+    });
+
+    expect(previewCandidate).toHaveBeenCalledTimes(1);
+    expect(previewCandidate.mock.calls[0][1]).toHaveLength(3_001);
+    expect(previewCandidate.mock.calls[0][2]).toEqual([[1, 0.065], [0.02, 1]]);
+    const previewLimit = host.querySelector<HTMLSelectElement>(
+      'select[aria-label="Compensation pair preview event count"]',
+    )!;
+    expect(previewLimit.value).toBe("15000");
+    expect([...previewLimit.options].some((option) => option.value === "all")).toBe(true);
+    expect(previewLimit.parentElement?.textContent).toContain("Showing 3,001 of 3,001");
+    const status = host.querySelector<HTMLElement>(".gl-comp-candidate-status")!;
+    expect(status).not.toBeNull();
+    expect(status.textContent).toContain("Original remains fixed");
+    expect(status.textContent).toContain("5.0% → 6.5%");
+    const comparison = host.querySelector<HTMLElement>(".gl-comp-biplot-panels")!;
+    expect(comparison.querySelectorAll(".gl-comp-biplot")).toHaveLength(2);
+    expect(comparison.querySelector('[aria-label^="Original density biplot"]')).not.toBeNull();
+    expect(comparison.querySelector('[aria-label^="Candidate density biplot"]')).not.toBeNull();
+    expect(host.querySelector(".gl-comp-candidate-preview")).toBeNull();
+    expect(host.querySelector(".gl-comp-candidate-status .gl-comp-layer-toggle")).toBeNull();
+    expect(previewCandidate).toHaveBeenCalledTimes(1);
+
+    const globalTab = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((button) => button.textContent === "Global inspector")!;
+    act(() => globalTab.click());
+    const selectedTile = host.querySelector<HTMLButtonElement>(".gl-comp-global-tile.is-selected .gl-comp-global-plot-button")!;
+    act(() => selectedTile.click());
+    expect(host.querySelector(".gl-comp-inspector.is-global")).not.toBeNull();
+    expect(host.querySelector('[aria-label^="Candidate density biplot"]')).not.toBeNull();
+    expect(host.querySelector(".gl-comp-candidate-status")?.textContent).toContain("gallery remains installed until Apply");
+
+    const globalCoefficient = host.querySelector<HTMLInputElement>(".gl-comp-coefficient-editor input")!;
+    expect([...host.querySelectorAll<HTMLButtonElement>("button")]
+      .some((button) => button.textContent === "Stage value")).toBe(false);
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(globalCoefficient, "7.0");
+      globalCoefficient.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 130));
+    });
+    expect(previewCandidate).toHaveBeenCalledTimes(2);
+    expect(previewCandidate.mock.calls[1][2]).toEqual([[1, 0.07], [0.02, 1]]);
+    expect(host.querySelector(".gl-comp-coefficient-history")?.textContent).toContain("Staged7.0%");
+
+    Object.defineProperty(globalCoefficient, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 0, right: 100, top: 0, bottom: 25, width: 100, height: 25 }),
+    });
+    const pointer = (type: string, clientY: number) => {
+      const event = new MouseEvent(type, { bubbles: true, button: 0, clientX: 50, clientY });
+      Object.defineProperty(event, "pointerId", { value: 1 });
+      return event;
+    };
+    act(() => {
+      globalCoefficient.dispatchEvent(pointer("pointerdown", 100));
+      globalCoefficient.dispatchEvent(pointer("pointermove", 92));
+      globalCoefficient.dispatchEvent(pointer("pointerup", 92));
+    });
+    expect(globalCoefficient.value).toBe("7.2");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 130));
+    });
+    expect(previewCandidate).toHaveBeenCalledTimes(3);
+    expect(previewCandidate.mock.calls[2][2][0][1]).toBeCloseTo(0.072, 10);
+    expect(previewCandidate.mock.calls[2][2][1]).toEqual([0.02, 1]);
+  });
+
+  it("uses concise editable percentages and exposes point alpha on the compensation toolbar", async () => {
+    stubDeterministicCrypto();
+    const sample = flowSample({ coefficient: 0.140497 });
+    let profile: CompensationProfileRecord | null = null;
+    renderTab(sample, {
+      stateKey: "workspace-a:flow-format-setup",
+      onApplyProfile: async (candidate) => { profile = candidate; },
+    });
+    const enable = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Enable matrix editing")!;
+    await act(async () => {
+      enable.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    installProfileLayer(sample, profile!);
+    renderTab(sample, {
+      stateKey: "workspace-a:flow-format",
+      compensationOn: true,
+      installedProfile: profile!,
+      installedBaselineProfile: profile!,
+    });
+
+    const coefficient = host.querySelector<HTMLInputElement>(
+      'input.gl-comp-cell-input[data-source-index="0"][data-receiver-index="1"]',
+    )!;
+    expect(coefficient.value).toBe("14.0");
+    const alpha = host.querySelector<HTMLInputElement>(
+      'input[aria-label="Compensation biplot point alpha"]',
+    )!;
+    expect(alpha.value).toBe("0.85");
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(alpha, "0.4");
+      alpha.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(host.querySelector(".gl-comp-point-alpha output")?.textContent).toBe("0.40");
+
+    const global = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((button) => button.textContent === "Global inspector")!;
+    act(() => global.click());
+    const filter = host.querySelector<HTMLSelectElement>(
+      'select[aria-label="Global compensation pair filter"]',
+    )!;
+    expect([...filter.options].map((option) => option.textContent))
+      .not.toContain("Physical CyTOF relationships");
   });
 
   it("preserves tiny, negative, and non-unit-diagonal values instead of rounding or inventing them", () => {
@@ -696,6 +991,10 @@ describe("CompensationTab CyTOF import path", () => {
     expect(host.querySelector(".gl-comp-profile-pill")).not.toBeNull();
     expect(host.querySelector(".gl-comp-installed-summary")).toBeNull();
     expect(host.textContent).toContain("Uploaded spill matrix");
+    expect(host.querySelector<HTMLSelectElement>(
+      'select[aria-label="Compensation pair preview event count"]',
+    )?.value).toBe("15000");
+    expect(host.querySelector(".gl-comp-preview-events")?.textContent).toContain("Showing 3 of 3");
     expect(host.textContent).not.toContain("Original → Compensated impact");
     expect(host.querySelector(".gl-comp-profile-channels")).toBeNull();
     expect([...host.querySelectorAll<HTMLButtonElement>("button")]
@@ -717,6 +1016,7 @@ describe("CompensationTab CyTOF import path", () => {
     ]);
     act(() => globalTab.click());
     expect(host.querySelector(".gl-comp-global-inspector")).not.toBeNull();
+    expect(host.querySelector(".gl-comp-global-count")?.textContent).toContain("3 / 3 events");
     const comparisonExportButton = [...host.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Export…")!;
     expect(comparisonExportButton).toBeDefined();

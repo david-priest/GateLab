@@ -17,6 +17,7 @@ export interface CompensationDensityPlotOptions {
   readonly densityColorCeiling?: number;
   readonly densitySmoothingRadius: number;
   readonly densityColorPower: number;
+  readonly pointAlpha: number;
   readonly canvasScale?: number;
 }
 
@@ -43,7 +44,7 @@ export function renderCompensationDensityBiplotSurface(
     y_label: options.receiverLabel,
     title: options.title,
     point_size: Math.max(0.55, Math.min(1.2, 1.15 * linearScale)),
-    point_alpha: 0.85,
+    point_alpha: options.pointAlpha,
     density_clip_quantile: 0.95,
     density_color_power: options.densityColorPower,
     density_color_ceiling: options.densityColorCeiling,

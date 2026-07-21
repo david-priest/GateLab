@@ -119,6 +119,7 @@ import { ScalesTab } from "./ui/ScalesTab";
 import {
   CompensationTab,
   type CompensationApplyUiStatus,
+  type CompensationCandidatePreviewSolver,
   type CompensationSweepSolver,
 } from "./ui/CompensationTab";
 import { StrategyTab, type StrategyConfig } from "./ui/StrategyTab";
@@ -372,6 +373,19 @@ export default function App() {
       workerPoolSize: compensationWorkerCount,
     });
   }
+  const compensationCandidatePreviewSessionRef = useRef<Readonly<{
+    key: string;
+    sessionId: string;
+  }> | null>(null);
+  const compensationCandidatePreviewPrimeRef = useRef<Readonly<{
+    key: string;
+    promise: ReturnType<CompensationManager["primePreview"]>;
+  }> | null>(null);
+  const cancelCompensationCandidatePreview = useCallback((reason: string) => {
+    compensationCandidatePreviewSessionRef.current = null;
+    compensationCandidatePreviewPrimeRef.current = null;
+    compensationManagerRef.current!.cancelPreview(reason);
+  }, []);
   const compensationSweepManagersRef = useRef<CompensationManager[]>([]);
   const cancelCompensationSweepManagers = useCallback((reason: string) => {
     const managers = compensationSweepManagersRef.current;
@@ -458,11 +472,13 @@ export default function App() {
 
   useEffect(() => {
     cancelCompensationSweepManagers("The workspace changed.");
+    cancelCompensationCandidatePreview("The workspace changed.");
     compensationManagerRef.current!.resetWorkspace(workspaceId);
-  }, [cancelCompensationSweepManagers, workspaceId]);
+  }, [cancelCompensationCandidatePreview, cancelCompensationSweepManagers, workspaceId]);
   useEffect(() => () => {
     cancelCompensationSweepManagers("GateLab closed.");
-  }, [cancelCompensationSweepManagers]);
+    cancelCompensationCandidatePreview("GateLab closed.");
+  }, [cancelCompensationCandidatePreview, cancelCompensationSweepManagers]);
   const bumpScales = () => setScalesVersion((v) => v + 1);
   const plotAreaRef = useRef<HTMLDivElement>(null);
   const pzRef = useRef({
@@ -1060,6 +1076,7 @@ export default function App() {
       throw new Error(message);
     }
     cancelCompensationSweepManagers("A full compensation Apply started.");
+    cancelCompensationCandidatePreview("A full compensation Apply started.");
     if (profile.recordType === "revision") {
       const lineage = workspaceCompensation.lineages.find(
         ({ baselineProfileId }) => baselineProfileId === profile.baselineProfileId,
@@ -1093,7 +1110,7 @@ export default function App() {
             totalEvents: progress.totalEvents,
           });
           setImportMsg(
-            `CyTOF compensation · ${Math.round(progress.fraction * 100)}% · ${progress.processedEvents.toLocaleString()} / ${progress.totalEvents.toLocaleString()} events`,
+            `Compensation · ${Math.round(progress.fraction * 100)}% · ${progress.processedEvents.toLocaleString()} / ${progress.totalEvents.toLocaleString()} events`,
           );
           onProgress?.(progress);
         },
@@ -1134,12 +1151,15 @@ export default function App() {
       setXRange(null);
       setYRange(null);
       setError(null);
-      setImportMsg(`Compensated with ${profile.name} · ${profile.scientific.includedChannels.length} channels`);
+      const appliedChannelCount = profile.scientific.kind === "flow-spillover"
+        ? profile.scientific.matrix.receiverChannels.length
+        : profile.scientific.includedChannels.length;
+      setImportMsg(`Compensated with ${profile.name} · ${appliedChannelCount} channels`);
       pendingCheckpointReasonRef.current = "after-compensation-apply";
     } catch (cause) {
       if (cause instanceof CompensationCancelledError) {
         setError(null);
-        setImportMsg("CyTOF compensation cancelled · previous assay unchanged");
+        setImportMsg("Compensation cancelled · previous assay unchanged");
         throw cause;
       }
       const message = cause instanceof Error ? cause.message : String(cause);
@@ -1176,6 +1196,69 @@ export default function App() {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }
+
+  const previewCompensationCandidate = useCallback<CompensationCandidatePreviewSolver>(async (
+    profile,
+    fixedEventIndices,
+    candidateMatrix,
+  ) => {
+    const targetSample = sample;
+    if (!targetSample) throw new Error("No active sample is available for a compensation preview.");
+    const manager = compensationManagerRef.current!;
+    if (manager.applyInProgress || compensationApplyGuardRef.current) {
+      throw new Error("Wait for the current compensation Apply to finish before previewing an edit.");
+    }
+    let eventChecksum = 2166136261;
+    for (const event of fixedEventIndices) {
+      eventChecksum ^= event;
+      eventChecksum = Math.imul(eventChecksum, 16777619) >>> 0;
+    }
+    const key = [
+      profile.profileHash,
+      targetSample.dataRevision,
+      targetSample.layerRevision,
+      targetSample.displayTransformContextKey,
+      fixedEventIndices.length,
+      fixedEventIndices[0] ?? "empty",
+      fixedEventIndices[fixedEventIndices.length - 1] ?? "empty",
+      eventChecksum.toString(16),
+    ].join(":");
+
+    let session = compensationCandidatePreviewSessionRef.current;
+    if (session?.key !== key) {
+      let pending = compensationCandidatePreviewPrimeRef.current;
+      if (pending?.key !== key) {
+        cancelCompensationCandidatePreview("The flow compensation preview context changed.");
+        pending = Object.freeze({
+          key,
+          promise: manager.primePreview({
+            profile,
+            sample: targetSample,
+            fixedEventIndices,
+          }),
+        });
+        compensationCandidatePreviewPrimeRef.current = pending;
+      }
+      try {
+        const primed = await pending.promise;
+        if (compensationCandidatePreviewPrimeRef.current !== pending) {
+          throw new CompensationCancelledError("A newer flow compensation preview was requested.");
+        }
+        session = Object.freeze({ key, sessionId: primed.sessionId });
+        compensationCandidatePreviewSessionRef.current = session;
+        compensationCandidatePreviewPrimeRef.current = null;
+      } catch (cause) {
+        if (compensationCandidatePreviewPrimeRef.current === pending) {
+          compensationCandidatePreviewPrimeRef.current = null;
+        }
+        throw cause;
+      }
+    }
+    if (!session || session.key !== key) {
+      throw new CompensationCancelledError("The flow compensation preview session is no longer current.");
+    }
+    return manager.solvePreview(session.sessionId, candidateMatrix);
+  }, [cancelCompensationCandidatePreview, sample]);
 
   const solveCompensationSweep = useCallback<CompensationSweepSolver>(async (
     profile,
@@ -3359,6 +3442,7 @@ export default function App() {
                 installedBaselineProfile={activeCompensationBaseline}
                 reviewPopulations={compensationReviewPopulations}
                 reviewPopulationMasks={derived.masks}
+                onPreviewCompensationCandidate={previewCompensationCandidate}
                 onSolveCompensationSweep={solveCompensationSweep}
                 onCancelCompensationSweep={cancelCompensationSweep}
                 visible={activeTab === "compensation"}

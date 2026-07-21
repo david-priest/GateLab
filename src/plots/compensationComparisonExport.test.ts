@@ -3,11 +3,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CompensationGlobalPairPreview } from "../engine/compensationGlobalInspector";
 
+const { renderSurfaceMock } = vi.hoisted(() => ({ renderSurfaceMock: vi.fn() }));
+
 vi.mock("./compensationDensityPlot", () => ({
   renderCompensationDensityBiplotSurface: (
     host: HTMLElement,
-    options: Readonly<{ title: string }>,
+    options: Readonly<{ title: string; pointAlpha: number }>,
   ) => {
+    renderSurfaceMock(options);
     const canvas = document.createElement("canvas");
     Object.defineProperty(canvas, "toDataURL", {
       configurable: true,
@@ -69,6 +72,7 @@ describe("compensation comparison export", () => {
   });
 
   it("composes clean paired Original and Compensated panels with scientific context", () => {
+    renderSurfaceMock.mockClear();
     const page = composeCompensationComparisonPageSvg([pair], {
       sampleName: "portal.bio test 3.fcs",
       profileName: "WingLab spill matrix",
@@ -76,6 +80,7 @@ describe("compensation comparison export", () => {
       filterLabel: "Flagged for follow-up",
       densitySmoothing: 6,
       densityColorPower: 1.6,
+      pointAlpha: 0.7,
     }, 0, 2);
 
     expect(page.querySelectorAll("image")).toHaveLength(2);
@@ -86,5 +91,7 @@ describe("compensation comparison export", () => {
     expect(page.textContent).toContain("Compensated");
     expect(page.textContent).toContain("Page 1 of 2");
     expect(page.textContent).toContain("same frozen events, axes, transform, density scale");
+    expect(renderSurfaceMock).toHaveBeenCalledTimes(2);
+    expect(renderSurfaceMock.mock.calls.every(([options]) => options.pointAlpha === 0.7)).toBe(true);
   });
 });

@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type InputHTMLAttributes,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
@@ -35,6 +36,10 @@ import {
   CYTOF_NNLS_SOLVER_VERSION,
   DEFAULT_CYTOF_NNLS_SETTINGS,
 } from "../engine/cytofCompensationEngine";
+import {
+  DEFAULT_FLOW_SOLVER_SETTINGS,
+  FLOW_SOLVER_VERSION,
+} from "../engine/flowCompensationEngine";
 import {
   cytofInteractionType,
   cytofMatrixForDisplay,
@@ -77,6 +82,7 @@ import { usePersistedTabState } from "./tabState";
 import { DensityColourControl } from "./DensityColourControl";
 
 const DensityColorPowerContext = createContext(DEFAULT_DENSITY_COLOR_POWER);
+const CompensationPointAlphaContext = createContext(0.85);
 
 interface Props {
   sample: Sample;
@@ -96,6 +102,7 @@ interface Props {
   installedBaselineProfile?: CompensationProfileRecord | null;
   reviewPopulations?: readonly CompensationReviewPopulation[];
   reviewPopulationMasks?: Readonly<Record<string, Uint8Array>>;
+  onPreviewCompensationCandidate?: CompensationCandidatePreviewSolver;
   onSolveCompensationSweep?: CompensationSweepSolver;
   onCancelCompensationSweep?: () => void;
   visible?: boolean;
@@ -118,6 +125,12 @@ export type CompensationSweepSolver = (
   onProgress?: (completed: number, total: number) => void,
   workerCount?: number,
 ) => Promise<readonly PreviewSolvedResponse[]>;
+
+export type CompensationCandidatePreviewSolver = (
+  profile: CompensationProfileRecord,
+  fixedEventIndices: Uint32Array,
+  candidateMatrix: readonly (readonly number[])[],
+) => Promise<PreviewSolvedResponse>;
 
 export interface CompensationApplyUiStatus {
   readonly phase: "preparing" | "applying" | "cancelling";
@@ -199,6 +212,20 @@ interface CompensationSweepBoundsDraft {
   readonly upperPercent: string;
 }
 
+type FlowCandidatePreviewState =
+  | { readonly state: "idle" }
+  | {
+      readonly state: "updating";
+      readonly pairKey: string;
+      readonly preview?: CompensationPairPreview;
+    }
+  | {
+      readonly state: "ready";
+      readonly pairKey: string;
+      readonly preview: CompensationPairPreview;
+    }
+  | { readonly state: "error"; readonly pairKey: string; readonly message: string };
+
 type CompensationWorkspaceView = "matrix" | "global" | "attention";
 type CompensationGlobalPairFilter = "relevant" | "nonzero" | "physical" | "flagged" | "all";
 type CompensationGlobalLayout = "compact" | "source" | "receiver";
@@ -222,6 +249,10 @@ const PAIR_SEPARATOR = "\u001f";
 const SWEEP_EVENT_LIMIT = 2_500;
 const BOUNDS_PREVIEW_EVENT_LIMIT = 400;
 const GLOBAL_INSPECTOR_EVENT_LIMIT = 2_500;
+const DEFAULT_PAIR_PREVIEW_EVENT_LIMIT = 15_000;
+const PAIR_PREVIEW_EVENT_LIMITS = [2_500, 5_000, 15_000, 50_000] as const;
+type PairPreviewEventLimit = typeof PAIR_PREVIEW_EVENT_LIMITS[number] | "all";
+const FLOW_INLINE_MATRIX_LIMIT = 24;
 const MAX_SWEEP_WORKERS = 4;
 const DEFAULT_INSPECTOR_WIDTH = 624;
 const EMPTY_POPULATION_MASKS: Readonly<Record<string, Uint8Array>> = Object.freeze({});
@@ -236,6 +267,143 @@ function significantNumber(value: number, significantDigits: number): string {
     Math.max(0, significantDigits - Math.floor(Math.log10(absolute)) - 1),
   );
   return value.toFixed(decimalPlaces).replace(/(?:\.0+|(\.\d*?[1-9])0+)$/, "$1");
+}
+
+function editableCoefficientPercent(value: number): string {
+  if (!Number.isFinite(value)) return String(value);
+  const percent = value * 100;
+  if (percent === 0) return "0.0";
+  const absolute = Math.abs(percent);
+  const digits = absolute >= 1 ? 1 : absolute >= 0.1 ? 2 : 3;
+  return percent.toFixed(digits);
+}
+
+function compensationProfileBaseName(name: string): string {
+  return name.replace(/(?: · (?:edited|revised))+$/u, "");
+}
+
+type ScrubbableNumberInputProps = Omit<
+  InputHTMLAttributes<HTMLInputElement>,
+  "type" | "value" | "onChange"
+> & Readonly<{
+  value: string;
+  onValueChange: (value: string) => void;
+  scrubStep?: number;
+}>;
+
+/**
+ * A normal editable number input with an additional vertical scrub gesture. Clicking still
+ * focuses the field; dragging its body upward/downward changes by one step per four pixels.
+ * The native stepper strip on the right is deliberately excluded from scrubbing.
+ */
+function ScrubbableNumberInput({
+  value,
+  onValueChange,
+  scrubStep,
+  className = "",
+  disabled,
+  min,
+  max,
+  step,
+  title,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onPointerCancel,
+  onLostPointerCapture,
+  ...rest
+}: ScrubbableNumberInputProps) {
+  const dragRef = useRef<Readonly<{
+    pointerId: number;
+    startY: number;
+    startValue: number;
+    step: number;
+    decimals: number;
+    lastSteps: number;
+  }> | null>(null);
+  const [scrubbing, setScrubbing] = useState(false);
+
+  const finishScrub = (event: ReactPointerEvent<HTMLInputElement>) => {
+    if (dragRef.current?.pointerId === event.pointerId) {
+      dragRef.current = null;
+      setScrubbing(false);
+      if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    }
+  };
+
+  return (
+    <input
+      {...rest}
+      type="number"
+      className={`gl-scrubbable-number${scrubbing ? " is-scrubbing" : ""}${className ? ` ${className}` : ""}`}
+      value={value}
+      disabled={disabled}
+      min={min}
+      max={max}
+      step={step}
+      title={title ?? "Type a value, use the arrows, or drag vertically to adjust"}
+      onChange={(event) => onValueChange(event.currentTarget.value)}
+      onPointerDown={(event) => {
+        onPointerDown?.(event);
+        if (event.defaultPrevented || disabled || event.button !== 0) return;
+        const bounds = event.currentTarget.getBoundingClientRect();
+        if (event.clientX >= bounds.right - 18) return;
+        const startValue = Number(value);
+        const resolvedStep = (scrubStep ?? Number(step)) || 0.1;
+        if (!Number.isFinite(startValue) || !(resolvedStep > 0)) return;
+        const stepText = String(resolvedStep);
+        const decimals = stepText.includes("e-")
+          ? Number(stepText.split("e-")[1])
+          : stepText.includes(".")
+            ? stepText.split(".")[1].length
+            : 0;
+        dragRef.current = {
+          pointerId: event.pointerId,
+          startY: event.clientY,
+          startValue,
+          step: resolvedStep,
+          decimals,
+          lastSteps: 0,
+        };
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+      }}
+      onPointerMove={(event) => {
+        onPointerMove?.(event);
+        const drag = dragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        const distance = drag.startY - event.clientY;
+        if (Math.abs(distance) < 3) return;
+        const steps = distance > 0 ? Math.floor(distance / 4) : Math.ceil(distance / 4);
+        if (steps === drag.lastSteps) return;
+        let next = drag.startValue + steps * drag.step;
+        const lower = min === undefined ? Number.NEGATIVE_INFINITY : Number(min);
+        const upper = max === undefined ? Number.POSITIVE_INFINITY : Number(max);
+        if (Number.isFinite(lower)) next = Math.max(lower, next);
+        if (Number.isFinite(upper)) next = Math.min(upper, next);
+        dragRef.current = { ...drag, lastSteps: steps };
+        setScrubbing(true);
+        onValueChange(next.toFixed(Math.min(10, drag.decimals)));
+        event.preventDefault();
+      }}
+      onPointerUp={(event) => {
+        onPointerUp?.(event);
+        finishScrub(event);
+      }}
+      onPointerCancel={(event) => {
+        onPointerCancel?.(event);
+        finishScrub(event);
+      }}
+      onLostPointerCapture={(event) => {
+        onLostPointerCapture?.(event);
+        if (dragRef.current?.pointerId === event.pointerId) {
+          dragRef.current = null;
+          setScrubbing(false);
+        }
+      }}
+    />
+  );
 }
 
 function percentText(value: number, zeroAsDot = false, significantDigits = 3): string {
@@ -500,6 +668,7 @@ function DensityBiplot({
   showZeroPile?: boolean;
 }>) {
   const densityColorPower = useContext(DensityColorPowerContext);
+  const pointAlpha = useContext(CompensationPointAlphaContext);
   const containerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const container = containerRef.current;
@@ -528,6 +697,7 @@ function DensityBiplot({
         ),
         densitySmoothingRadius,
         densityColorPower,
+        pointAlpha,
       });
     };
     const schedule = () => {
@@ -543,7 +713,7 @@ function DensityBiplot({
       resizeObserver?.disconnect();
       if (animationFrame !== null) cancelAnimationFrame(animationFrame);
     };
-  }, [densityColorCeiling, densityColorPower, densitySmoothing, maximumSize, minimumSize, panel, preview, receiverLabel, sourceLabel, title]);
+  }, [densityColorCeiling, densityColorPower, densitySmoothing, maximumSize, minimumSize, panel, pointAlpha, preview, receiverLabel, sourceLabel, title]);
   const zeroPercent = (count: number) => preview.eventCount > 0
     ? `${(count / preview.eventCount * 100).toFixed(1)}%`
     : "0.0%";
@@ -585,6 +755,7 @@ function CachedDensityBiplot({
   densitySmoothing: number;
 }>) {
   const densityColorPower = useContext(DensityColorPowerContext);
+  const pointAlpha = useContext(CompensationPointAlphaContext);
   const containerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const container = containerRef.current;
@@ -616,6 +787,7 @@ function CachedDensityBiplot({
         densityColorCeiling: resolvedDensityColorCeiling,
         densitySmoothingRadius,
         densityColorPower,
+        pointAlpha,
         canvasScale: 2,
       });
       const originalCanvas = container.querySelector("canvas");
@@ -632,6 +804,7 @@ function CachedDensityBiplot({
         densityColorCeiling: resolvedDensityColorCeiling,
         densitySmoothingRadius,
         densityColorPower,
+        pointAlpha,
         canvasScale: 2,
       });
       const compensatedCanvas = compensatedHost.querySelector("canvas");
@@ -657,7 +830,7 @@ function CachedDensityBiplot({
       resizeObserver?.disconnect();
       cancelQueuedRender?.();
     };
-  }, [densityColorCeiling, densityColorPower, densitySmoothing, maximumSize, minimumSize, preview, receiverLabel, sourceLabel, title]);
+  }, [densityColorCeiling, densityColorPower, densitySmoothing, maximumSize, minimumSize, pointAlpha, preview, receiverLabel, sourceLabel, title]);
 
   return (
     <figure
@@ -680,6 +853,7 @@ function CompensationPairBiplots({
   kind,
   densitySmoothing,
   compact = false,
+  compensatedTitle = "Compensated",
 }: Readonly<{
   preview: CompensationPairPreview;
   sourceLabel: string;
@@ -687,6 +861,7 @@ function CompensationPairBiplots({
   kind: "flow" | "cytof";
   densitySmoothing: number;
   compact?: boolean;
+  compensatedTitle?: string;
 }>) {
   const originalReceiverZero = preview.eventCount > 0
     ? preview.original.zeroPile.receiver / preview.eventCount * 100
@@ -715,7 +890,7 @@ function CompensationPairBiplots({
           showZeroPile={!compact}
         />
         <DensityBiplot
-          title="Compensated"
+          title={compensatedTitle}
           panel={preview.compensated}
           preview={preview}
           sourceLabel={sourceLabel}
@@ -733,7 +908,7 @@ function CompensationPairBiplots({
           </>
         ) : (
           <>
-            Residual tilt can be consistent with under- or over-compensation, but spreading error and biological co-expression can produce similar shapes. Use the matched Original/Compensated view as review evidence, not an automatic coefficient call.
+            Residual tilt can be consistent with under- or over-compensation, but spreading error and biological co-expression can produce similar shapes. Use the matched Original/{compensatedTitle} view as review evidence, not an automatic coefficient call.
           </>
         )}
       </div>}
@@ -1100,6 +1275,7 @@ export function CompensationTab({
   installedBaselineProfile = null,
   reviewPopulations = [],
   reviewPopulationMasks = EMPTY_POPULATION_MASKS,
+  onPreviewCompensationCandidate,
   onSolveCompensationSweep,
   onCancelCompensationSweep,
   visible = true,
@@ -1149,6 +1325,14 @@ export function CompensationTab({
     "compensation.densitySmoothing.v3",
     6,
   );
+  const [pointAlpha, setPointAlpha] = usePersistedTabState<number>(
+    "compensation.pointAlpha.v1",
+    0.85,
+  );
+  const [pairPreviewEventLimit, setPairPreviewEventLimit] = usePersistedTabState<PairPreviewEventLimit>(
+    "compensation.pairPreviewEventLimit.v1",
+    DEFAULT_PAIR_PREVIEW_EVENT_LIMIT,
+  );
   const [globalPairSearch, setGlobalPairSearch] = useState("");
   const [globalInspectorDetailsOpen, setGlobalInspectorDetailsOpen] = useState(false);
   const [pendingGlobalScrollPairKey, setPendingGlobalScrollPairKey] = useState<string | null>(null);
@@ -1176,6 +1360,8 @@ export function CompensationTab({
   const [manualReceiverKey, setManualReceiverKey] = useState("");
   const [attentionScanRevision, setAttentionScanRevision] = useState(0);
   const [stagedCoefficients, setStagedCoefficients] = useState<Record<string, number>>({});
+  const [matrixCellDraftPercents, setMatrixCellDraftPercents] = useState<Record<string, string>>({});
+  const [flowCandidatePreview, setFlowCandidatePreview] = useState<FlowCandidatePreviewState>({ state: "idle" });
   const [sweepResults, setSweepResults] = useState<Record<string, CompensationPairSweep>>({});
   const [boundsPreviewResults, setBoundsPreviewResults] = useState<Record<string, CompensationPairSweep>>({});
   const [boundsPreviewPairKey, setBoundsPreviewPairKey] = useState<string | null>(null);
@@ -1189,6 +1375,7 @@ export function CompensationTab({
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [comparisonExportDialogOpen, setComparisonExportDialogOpen] = useState(false);
   const sweepGenerationRef = useRef(0);
+  const candidatePreviewGenerationRef = useRef(0);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionIsError, setActionIsError] = useState(false);
   const [cytofDraft, setCytofDraft] = useState<CytofMatrixDraft | null>(null);
@@ -1199,6 +1386,7 @@ export function CompensationTab({
   const [gateRecomputeAcknowledged, setGateRecomputeAcknowledged] = useState(false);
   const [applyProgress, setApplyProgress] = useState<CompensationApplyProgress | null>(null);
   const [applyingProfile, setApplyingProfile] = useState(false);
+  const [localApplyProfileName, setLocalApplyProfileName] = useState<string | null>(null);
   const applySubmissionRef = useRef(false);
   const cytofFileRef = useRef<HTMLInputElement>(null);
   const matrixRef = useRef<HTMLDivElement>(null);
@@ -1208,7 +1396,7 @@ export function CompensationTab({
     (applyProgress
       ? {
           phase: "applying",
-          profileName: cytofDraft?.fileName ?? "CyTOF compensation",
+          profileName: localApplyProfileName ?? cytofDraft?.fileName ?? "Compensation",
           fraction: applyProgress.fraction,
           processedEvents: applyProgress.processedEvents,
           totalEvents: applyProgress.totalEvents,
@@ -1219,6 +1407,34 @@ export function CompensationTab({
     () => sample.channels.map(({ pnn, columnIndex }) => ({ pnn, columnIndex })),
     [sample],
   );
+  const embeddedFlowProfileMatrix = useMemo(() => {
+    if (!spill) return null;
+    const pnnChannels = spill.channels.map((key) => {
+      const index = sample.index(key);
+      return index === undefined ? null : sample.channels[index].pnn;
+    });
+    if (pnnChannels.some((pnn) => pnn === null)) {
+      return {
+        validation: null,
+        error: "The embedded matrix could not be mapped back to exact FCS channel identities.",
+        keyword: undefined,
+      } as const;
+    }
+    const validation = validateAndCanonicalizeCompensationMatrix({
+      sourceChannels: pnnChannels as string[],
+      receiverChannels: pnnChannels as string[],
+      matrix: spill.matrix,
+    }, "flow-spillover");
+    const keyword = (["$SPILLOVER", "$SPILL", "SPILL"] as const)
+      .find((candidate) => typeof sample.fcs.keywords[candidate] === "string");
+    return {
+      validation,
+      error: validation.ok
+        ? null
+        : `The embedded compensation matrix cannot be applied or edited. ${validation.errors.map(({ message }) => message).join(" ")}`,
+      keyword,
+    } as const;
+  }, [sample, spill]);
   const activeReviewPopulation = reviewPopulationId === "all"
     ? null
     : reviewPopulations.find(({ id }) => id === reviewPopulationId) ?? null;
@@ -1228,9 +1444,20 @@ export function CompensationTab({
   const reviewEventCount = reviewMask
     ? activeReviewPopulation?.eventCount ?? 0
     : sample.fcs.nEvents;
+  const resolvedPairPreviewEventLimit: PairPreviewEventLimit = pairPreviewEventLimit === "all"
+    ? "all"
+    : PAIR_PREVIEW_EVENT_LIMITS.includes(Number(pairPreviewEventLimit) as typeof PAIR_PREVIEW_EVENT_LIMITS[number])
+      ? Number(pairPreviewEventLimit) as typeof PAIR_PREVIEW_EVENT_LIMITS[number]
+      : DEFAULT_PAIR_PREVIEW_EVENT_LIMIT;
   const reviewBiplotEventIndices = useMemo(
-    () => deterministicCompensationEventIndices(sample.fcs.nEvents, 15_000, reviewMask),
-    [reviewMask, sample],
+    () => deterministicCompensationEventIndices(
+      sample.fcs.nEvents,
+      resolvedPairPreviewEventLimit === "all"
+        ? Math.max(1, sample.fcs.nEvents)
+        : resolvedPairPreviewEventLimit,
+      reviewMask,
+    ),
+    [resolvedPairPreviewEventLimit, reviewEventCount, reviewMask, sample],
   );
   const reviewEvidenceEventIndices = useMemo(
     () => deterministicCompensationEventIndices(sample.fcs.nEvents, 2_048, reviewMask),
@@ -1557,6 +1784,7 @@ export function CompensationTab({
   }`;
   const resolvedGlobalPlotSize = Math.max(120, Math.min(220, Math.round(globalPlotSize) || 120));
   const resolvedDensitySmoothing = Math.max(1, Math.min(10, Math.round(densitySmoothing) || 6));
+  const resolvedPointAlpha = Math.max(0.1, Math.min(1, Number(pointAlpha) || 0.85));
   const flaggedPairs = useMemo(() => {
     if (!profileRecord || !matrixView || installedStatus.state !== "ready") return [];
     return flaggedPairKeys.flatMap((pairKey): CompensationEvidenceCandidate[] => {
@@ -1719,6 +1947,91 @@ export function CompensationTab({
     }
     return Object.freeze(matrix.map((row) => Object.freeze(row)));
   }, [profileRecord, stagedCoefficients]);
+  useEffect(() => {
+    const editCount = Object.keys(stagedCoefficients).length;
+    if (
+      editCount === 0 ||
+      !profileRecord ||
+      profileRecord.scientific.kind !== "flow-spillover" ||
+      installedStatus.state !== "ready" ||
+      !workingProfileMatrix ||
+      !selectedPair ||
+      !onPreviewCompensationCandidate
+    ) {
+      candidatePreviewGenerationRef.current++;
+      setFlowCandidatePreview({ state: "idle" });
+      return;
+    }
+    // Preserve the exact same frozen event set before and after a matrix edit. A smaller
+    // candidate-only sample makes events appear to vanish when the Candidate panel arrives.
+    const fixedEventIndices = reviewBiplotEventIndices;
+    if (fixedEventIndices.length === 0) {
+      setFlowCandidatePreview({
+        state: "error",
+        pairKey: selectedPair.pairKey,
+        message: "The selected review population contains no events.",
+      });
+      return;
+    }
+    const generation = ++candidatePreviewGenerationRef.current;
+    const pairKey = selectedPair.pairKey;
+    setFlowCandidatePreview((current) => ({
+      state: "updating",
+      pairKey,
+      ...((current.state === "ready" || current.state === "updating") &&
+          current.pairKey === pairKey && current.preview
+        ? { preview: current.preview }
+        : {}),
+    }));
+    const timeout = window.setTimeout(() => {
+      void onPreviewCompensationCandidate(
+        profileRecord,
+        fixedEventIndices,
+        workingProfileMatrix,
+      ).then((response) => {
+        if (candidatePreviewGenerationRef.current !== generation) return;
+        const sourceOutput = response.sourceChannels.indexOf(selectedPair.source.pnn);
+        const receiverOutput = response.sourceChannels.indexOf(selectedPair.receiver.pnn);
+        if (sourceOutput < 0 || receiverOutput < 0) {
+          throw new Error("The preview result did not contain the selected flow channels.");
+        }
+        const candidate = buildSolvedCompensationPairPreview(
+          sample,
+          selectedPair.source.pnn,
+          selectedPair.receiver.pnn,
+          fixedEventIndices,
+          response.candidateColumns[sourceOutput],
+          response.candidateColumns[receiverOutput],
+          { totalEvents: reviewEventCount },
+        );
+        if (!candidate.ready) throw new Error(candidate.reason);
+        setFlowCandidatePreview({
+          state: "ready",
+          pairKey,
+          preview: candidate.preview,
+        });
+      }).catch((cause) => {
+        if (candidatePreviewGenerationRef.current !== generation) return;
+        const message = cause instanceof Error ? cause.message : String(cause);
+        if (/cancel|supersed|stale/i.test(message)) return;
+        setFlowCandidatePreview({ state: "error", pairKey, message });
+      });
+    }, 90);
+    return () => window.clearTimeout(timeout);
+  }, [
+    installedStatus.state,
+    onPreviewCompensationCandidate,
+    profileRecord,
+    reviewBiplotEventIndices,
+    reviewEventCount,
+    sample,
+    sample.dataRevision,
+    sample.displayTransformContextKey,
+    sample.layerRevision,
+    selectedPair,
+    stagedCoefficients,
+    workingProfileMatrix,
+  ]);
   const workingExportMatrix = useMemo(() => {
     if (!matrixView || Object.keys(stagedCoefficients).length === 0) return null;
     return {
@@ -1799,7 +2112,7 @@ export function CompensationTab({
       : "Not configured";
   const channelCount = profileMetadata?.includedPnns.length ?? spill?.channels.length ?? 0;
   const profileDisplaySource = profileRecord?.name ?? profileMetadata?.profileId ?? source;
-  const cleanedProfileSource = profileDisplaySource.replace(/(?: · edited)+$/u, "");
+  const cleanedProfileSource = compensationProfileBaseName(profileDisplaySource);
   const compactProfileSource = cleanedProfileSource !== profileDisplaySource || profileRecord?.recordType === "revision"
     ? `${cleanedProfileSource} · revised`
     : profileDisplaySource;
@@ -1817,12 +2130,36 @@ export function CompensationTab({
     }
     return maximum;
   }, [matrixView]);
+  const flowInlineMatrix = Boolean(
+    profileRecord?.scientific.kind === "flow-spillover" &&
+    installedStatus.state === "ready" &&
+    matrixView &&
+    Math.max(matrixView.sourceAxisKeys.length, matrixView.receiverAxisKeys.length) <= FLOW_INLINE_MATRIX_LIMIT,
+  );
   const matrixCellSize = matrixView
-    ? Math.max(13, Math.min(38, Math.floor(760 / Math.max(
-        matrixView.sourceAxisKeys.length,
-        matrixView.receiverAxisKeys.length,
-      ))))
+    ? flowInlineMatrix
+      ? Math.max(42, Math.min(54, Math.floor(960 / Math.max(
+          matrixView.sourceAxisKeys.length,
+          matrixView.receiverAxisKeys.length,
+        ))))
+      : Math.max(13, Math.min(38, Math.floor(760 / Math.max(
+          matrixView.sourceAxisKeys.length,
+          matrixView.receiverAxisKeys.length,
+        ))))
     : 13;
+
+  useEffect(() => {
+    setStagedCoefficients({});
+    setMatrixCellDraftPercents({});
+    setFlowCandidatePreview({ state: "idle" });
+    candidatePreviewGenerationRef.current++;
+  }, [profileRecord?.profileId]);
+
+  useEffect(() => {
+    if (matrixView?.kind === "flow" && globalPairFilter === "physical") {
+      setGlobalPairFilter("relevant");
+    }
+  }, [globalPairFilter, matrixView?.kind, setGlobalPairFilter]);
 
   const toggleDrawer = (id: DrawerId) => {
     setOpenDrawers((current) => ({ ...current, [id]: !current[id] }));
@@ -1933,6 +2270,7 @@ export function CompensationTab({
     setApplyProgress(null);
     applySubmissionRef.current = true;
     setApplyingProfile(true);
+    setLocalApplyProfileName(cytofDraft.fileName);
     try {
       const suffix = globalThis.crypto?.randomUUID?.() ??
         `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -1978,6 +2316,73 @@ export function CompensationTab({
     } finally {
       applySubmissionRef.current = false;
       setApplyingProfile(false);
+      setLocalApplyProfileName(null);
+    }
+  };
+
+  const enableEmbeddedFlowEditing = async () => {
+    if (
+      applySubmissionRef.current ||
+      applyBusy ||
+      !spill ||
+      !embeddedFlowProfileMatrix?.validation?.ok ||
+      !onApplyProfile
+    ) return;
+    if (hasExistingGates && !gateRecomputeAcknowledged) {
+      setActionIsError(true);
+      setActionMessage(
+        "Confirm that existing gate memberships will be recomputed in compensated coordinates before enabling matrix editing.",
+      );
+      return;
+    }
+    const displayName = `${sampleName.replace(/\.fcs$/i, "") || "Flow"} spillover`;
+    setActionMessage(null);
+    setActionIsError(false);
+    setApplyProgress(null);
+    applySubmissionRef.current = true;
+    setApplyingProfile(true);
+    setLocalApplyProfileName(displayName);
+    try {
+      const suffix = globalThis.crypto?.randomUUID?.() ??
+        `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const profile = await createCompensationBaselineProfile(
+        {
+          kind: "flow-spillover",
+          method: "matrix-inverse",
+          solverVersion: FLOW_SOLVER_VERSION,
+          solverSettings: DEFAULT_FLOW_SOLVER_SETTINGS,
+          matrix: embeddedFlowProfileMatrix.validation.value,
+        },
+        {
+          profileId: `flow-${suffix}`,
+          name: displayName,
+          createdAt: new Date(),
+          origin: {
+            type: "embedded-fcs",
+            fileName: sampleName,
+            ...(embeddedFlowProfileMatrix.keyword
+              ? { keyword: embeddedFlowProfileMatrix.keyword }
+              : {}),
+          },
+          provenance: {
+            sourceDescription: "Spillover matrix embedded in the source FCS file",
+            estimationMethod: "Imported from FCS; coefficients preserved exactly",
+          },
+        },
+      );
+      await onApplyProfile(profile, setApplyProgress);
+      setGateRecomputeAcknowledged(false);
+      setActionMessage(
+        "Flow matrix editing is ready. The exact embedded matrix is retained as the baseline, and Original measurements remain available.",
+      );
+    } catch (cause) {
+      setActionIsError(true);
+      setActionMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      applySubmissionRef.current = false;
+      setApplyingProfile(false);
+      setLocalApplyProfileName(null);
+      setApplyProgress(null);
     }
   };
 
@@ -2262,15 +2667,17 @@ export function CompensationTab({
 
   const applyStagedMatrix = async () => {
     if (!profileRecord || !workingProfileMatrix || !onApplyProfile || Object.keys(stagedCoefficients).length === 0) return;
+    const revisionName = `${compensationProfileBaseName(profileRecord.name)} · edited`;
     setActionMessage(null);
     setActionIsError(false);
     setApplyingProfile(true);
+    setLocalApplyProfileName(revisionName);
     setApplyProgress(null);
     try {
       const suffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const metadata = {
         profileId: `comp-edit-${suffix}`,
-        name: `${profileRecord.name} · edited`,
+        name: revisionName,
         createdAt: new Date(),
         note: `Edited ${Object.keys(stagedCoefficients).length} compensation coefficient${Object.keys(stagedCoefficients).length === 1 ? "" : "s"} in GateLab.`,
       };
@@ -2284,6 +2691,7 @@ export function CompensationTab({
           );
       await onApplyProfile(revised, setApplyProgress);
       setStagedCoefficients({});
+      setMatrixCellDraftPercents({});
       setSweepResults({});
       setBoundsPreviewResults({});
       setBoundsPreviewPairKey(null);
@@ -2295,7 +2703,7 @@ export function CompensationTab({
         setExpandedSweepPair(flaggedPairs[0].pairKey);
       }
       setActionMessage(
-        `Applied ${revised.name}. Original measurements and the complete compensation revision history remain available.` +
+        `Applied revised matrix for ${compensationProfileBaseName(revised.name)}. Original measurements and the complete compensation revision history remain available.` +
         (flaggedPairs.length > 0
           ? ` Retained ${flaggedPairs.length} flagged pair${flaggedPairs.length === 1 ? "" : "s"} for post-correction review.`
           : ""),
@@ -2305,6 +2713,7 @@ export function CompensationTab({
       setActionMessage(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setApplyingProfile(false);
+      setLocalApplyProfileName(null);
       setApplyProgress(null);
     }
   };
@@ -2381,6 +2790,19 @@ export function CompensationTab({
       : null;
     const installedCoefficient = selectedPair?.value ?? null;
     const stagedCoefficient = selectedPair ? stagedCoefficients[selectedPair.pairKey] : undefined;
+    const flowCandidateActive = Boolean(
+      selectedPair &&
+      profileRecord?.scientific.kind === "flow-spillover" &&
+      onPreviewCompensationCandidate &&
+      Object.keys(stagedCoefficients).length > 0,
+    );
+    const selectedFlowCandidatePreview = flowCandidatePreview.state !== "idle" &&
+        flowCandidatePreview.state !== "error" &&
+        flowCandidatePreview.pairKey === selectedPair?.pairKey
+      ? flowCandidatePreview.preview
+      : null;
+    const stableComparisonPreview = selectedFlowCandidatePreview ??
+      (selectedPairPreview?.ready ? selectedPairPreview.preview : null);
     const historyEntries: Array<Readonly<{ label: string; value: number }>> = [];
     if (
       baselineCoefficient !== null && installedCoefficient !== null &&
@@ -2494,32 +2916,75 @@ export function CompensationTab({
               <div className="gl-comp-coefficient-editor">
                 <label>
                   <span>Coefficient (%)</span>
-                  <input
-                    type="number"
+                  <ScrubbableNumberInput
                     step="0.1"
                     value={coefficientDraftPercent}
                     disabled={applyBusy}
-                    onChange={(event) => setCoefficientDraftPercent(event.currentTarget.value)}
+                    onValueChange={(value) => {
+                      setCoefficientDraftPercent(value);
+                      if (
+                        profileRecord.scientific.kind === "flow-spillover" &&
+                        value.trim() !== "" &&
+                        Number.isFinite(Number(value))
+                      ) {
+                        stageCoefficient(selectedPair.pairKey, Number(value) / 100);
+                      }
+                    }}
                   />
                 </label>
-                <button
-                  type="button"
-                  className="gl-mini-btn"
-                  disabled={applyBusy || !Number.isFinite(Number(coefficientDraftPercent)) || coefficientDraftPercent.trim() === ""}
-                  onClick={() => stageCoefficient(selectedPair.pairKey, Number(coefficientDraftPercent) / 100)}
-                >
-                  Stage value
-                </button>
+                {profileRecord.scientific.kind === "flow-spillover" ? (
+                  <small className="gl-comp-live-edit-hint">Type, use arrows, or drag ↕ · previews immediately</small>
+                ) : (
+                  <button
+                    type="button"
+                    className="gl-mini-btn"
+                    disabled={applyBusy || !Number.isFinite(Number(coefficientDraftPercent)) || coefficientDraftPercent.trim() === ""}
+                    onClick={() => stageCoefficient(selectedPair.pairKey, Number(coefficientDraftPercent) / 100)}
+                  >
+                    Stage value
+                  </button>
+                )}
                 {stagedCoefficients[selectedPair.pairKey] !== undefined && (
                   <button
                     type="button"
                     className="gl-mini-btn"
                     disabled={applyBusy}
-                    onClick={() => stageCoefficient(selectedPair.pairKey, selectedPair.value)}
+                    onClick={() => {
+                      stageCoefficient(selectedPair.pairKey, selectedPair.value);
+                      setMatrixCellDraftPercents((current) => {
+                        const next = { ...current };
+                        delete next[selectedPair.pairKey];
+                        return next;
+                      });
+                    }}
                   >
                     Reset
                   </button>
                 )}
+              </div>
+            )}
+            {flowCandidateActive && (
+              <div className={`gl-comp-candidate-status${compactGlobal ? " is-compact" : ""}`} aria-label="Flow compensation coefficient preview">
+                <div>
+                  <strong>Coefficient preview</strong>
+                  <span>
+                    Original remains fixed; the right panel shows the complete working matrix.
+                    {compactGlobal ? " The gallery remains installed until Apply." : ""}
+                  </span>
+                </div>
+                <em>
+                  {stagedCoefficient === undefined
+                    ? "Working matrix"
+                    : `${(selectedPair.value * 100).toFixed(1)}% → ${(stagedCoefficient * 100).toFixed(1)}%`}
+                </em>
+                {flowCandidatePreview.state === "updating" &&
+                  flowCandidatePreview.pairKey === selectedPair.pairKey && (
+                    <span role="status">Updating…</span>
+                  )}
+                {flowCandidatePreview.state === "error" &&
+                  flowCandidatePreview.pairKey === selectedPair.pairKey && (
+                    <span className="is-error" role="alert">{flowCandidatePreview.message}</span>
+                  )}
               </div>
             )}
             {selectedPair.interaction && selectedPair.interaction !== "other" && (
@@ -2527,16 +2992,17 @@ export function CompensationTab({
                 Physical relationship: <strong>{selectedPair.interaction}</strong>
               </div>
             )}
-            {compactGlobal && (selectedPairPreview?.ready ? (
+            {compactGlobal && (stableComparisonPreview ? (
               <CompensationPairBiplots
-                preview={selectedPairPreview.preview}
+                preview={stableComparisonPreview}
                 sourceLabel={selectedPair.source.label}
                 receiverLabel={selectedPair.receiver.label}
                 kind={matrixView!.kind}
                 densitySmoothing={resolvedDensitySmoothing}
                 compact
+                compensatedTitle={selectedFlowCandidatePreview ? "Candidate" : "Compensated"}
               />
-            ) : selectedPairPreview ? (
+            ) : selectedPairPreview && !selectedPairPreview.ready ? (
               <div className="gl-comp-biplot-unavailable">{selectedPairPreview.reason}</div>
             ) : null)}
             {compactGlobal && (
@@ -2551,17 +3017,20 @@ export function CompensationTab({
                 onSelect={selectGlobalPairFromMatrixMap}
               />
             )}
-            {!compactGlobal && (selectedPairPreview?.ready ? (
-              <CompensationPairBiplots
-                preview={selectedPairPreview.preview}
-                sourceLabel={selectedPair.source.label}
-                receiverLabel={selectedPair.receiver.label}
-                kind={matrixView!.kind}
-                densitySmoothing={resolvedDensitySmoothing}
-              />
-            ) : selectedPairPreview ? (
-              <div className="gl-comp-biplot-unavailable">{selectedPairPreview.reason}</div>
-            ) : null)}
+            {!compactGlobal && (
+              stableComparisonPreview ? (
+                <CompensationPairBiplots
+                  preview={stableComparisonPreview}
+                  sourceLabel={selectedPair.source.label}
+                  receiverLabel={selectedPair.receiver.label}
+                  kind={matrixView!.kind}
+                  densitySmoothing={resolvedDensitySmoothing}
+                  compensatedTitle={selectedFlowCandidatePreview ? "Candidate" : "Compensated"}
+                />
+              ) : selectedPairPreview && !selectedPairPreview.ready ? (
+                <div className="gl-comp-biplot-unavailable">{selectedPairPreview.reason}</div>
+              ) : null
+            )}
             {flagged && followupPair && boundsDraft && bounds && (
               <div className="gl-comp-bounds-tool">
                 <div>
@@ -2571,22 +3040,20 @@ export function CompensationTab({
                 <div className="gl-comp-bounds-inputs">
                   <label>
                     <span>Lower (%)</span>
-                    <input
-                      type="number"
+                    <ScrubbableNumberInput
                       step="0.1"
                       value={boundsDraft.lowerPercent}
                       disabled={applyBusy || sweepProgress !== null || boundsPreviewPairKey !== null}
-                      onChange={(event) => setSweepBoundDraft(selectedPair.pairKey, selectedPair.value, "lowerPercent", event.currentTarget.value)}
+                      onValueChange={(value) => setSweepBoundDraft(selectedPair.pairKey, selectedPair.value, "lowerPercent", value)}
                     />
                   </label>
                   <label>
                     <span>Upper (%)</span>
-                    <input
-                      type="number"
+                    <ScrubbableNumberInput
                       step="0.1"
                       value={boundsDraft.upperPercent}
                       disabled={applyBusy || sweepProgress !== null || boundsPreviewPairKey !== null}
-                      onChange={(event) => setSweepBoundDraft(selectedPair.pairKey, selectedPair.value, "upperPercent", event.currentTarget.value)}
+                      onValueChange={(value) => setSweepBoundDraft(selectedPair.pairKey, selectedPair.value, "upperPercent", value)}
                     />
                   </label>
                   <button
@@ -2685,11 +3152,13 @@ export function CompensationTab({
       filterLabel: globalExportFilterLabel,
       densitySmoothing: resolvedDensitySmoothing,
       densityColorPower,
+      pointAlpha: resolvedPointAlpha,
     }, format, onProgress);
   };
 
   return (
     <DensityColorPowerContext.Provider value={densityColorPower}>
+    <CompensationPointAlphaContext.Provider value={resolvedPointAlpha}>
     <div
       className="gl-tab-panel gl-tab-fill gl-compensation-tab"
       style={visible ? undefined : { display: "none" }}
@@ -2770,6 +3239,31 @@ export function CompensationTab({
             {reviewEventCount.toLocaleString()} event{reviewEventCount === 1 ? "" : "s"} · applies to biplots, attention ranking, and sweeps; membership frozen from the current assay
           </small>
         </label>
+        {workspaceView !== "global" && (
+          <label
+            className="gl-comp-preview-events"
+            title="Controls the frozen event set shown in the selected-pair Original and comparison biplots. Applying compensation still processes every event."
+          >
+            <span>Pair preview</span>
+            <select
+              aria-label="Compensation pair preview event count"
+              value={String(resolvedPairPreviewEventLimit)}
+              disabled={applyBusy}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                setPairPreviewEventLimit(value === "all" ? "all" : Number(value) as PairPreviewEventLimit);
+              }}
+            >
+              {PAIR_PREVIEW_EVENT_LIMITS.map((limit) => (
+                <option key={limit} value={limit}>{limit.toLocaleString()} events</option>
+              ))}
+              <option value="all">All available</option>
+            </select>
+            <small>
+              Showing {reviewBiplotEventIndices.length.toLocaleString()} of {reviewEventCount.toLocaleString()}; Apply always uses all events.
+            </small>
+          </label>
+        )}
         {canToggle && <span className="gl-comp-global-layer-note">Assay selection in the top bar applies to every tab.</span>}
       </div>
 
@@ -2788,6 +3282,54 @@ export function CompensationTab({
         <div className={actionIsError ? "gl-comp-error" : "gl-comp-status"} role={actionIsError ? "alert" : "status"}>
           {actionMessage}
         </div>
+      )}
+
+      {sample.instrument === "flow" && spill && !profileMetadata && (
+        <section className="gl-comp-flow-enable" aria-labelledby="comp-flow-enable-heading">
+          <div>
+            <strong id="comp-flow-enable-heading">Embedded FCS matrix</strong>
+            <span>
+              Install this exact matrix as the immutable baseline to edit coefficients and preview their effect.
+            </span>
+          </div>
+          {hasExistingGates && (
+            <label className="gl-comp-gate-acknowledgement is-compact">
+              <input
+                type="checkbox"
+                checked={gateRecomputeAcknowledged}
+                disabled={applyBusy}
+                onChange={(event) => setGateRecomputeAcknowledged(event.currentTarget.checked)}
+              />
+              <span>Recompute existing gate memberships in compensated coordinates.</span>
+            </label>
+          )}
+          {embeddedFlowProfileMatrix?.error ? (
+            <div className="gl-comp-error" role="alert">{embeddedFlowProfileMatrix.error}</div>
+          ) : applyBusy ? (
+            <div className="gl-comp-flow-enable-progress" role="status">
+              {visibleApplyProgress
+                ? `Preparing editor… ${Math.round(visibleApplyProgress.fraction * 100)}%`
+                : "Preparing editor…"}
+              <button
+                type="button"
+                className="gl-btn-ghost"
+                disabled={visibleApplyProgress?.phase === "cancelling"}
+                onClick={onCancelApply}
+              >
+                {visibleApplyProgress?.phase === "cancelling" ? "Cancelling…" : "Cancel"}
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="gl-btn"
+              disabled={!onApplyProfile || (hasExistingGates && !gateRecomputeAcknowledged)}
+              onClick={() => void enableEmbeddedFlowEditing()}
+            >
+              Enable matrix editing
+            </button>
+          )}
+        </section>
       )}
 
       {sample.instrument === "cytof" && (!profileMetadata || cytofDraft) && (
@@ -3017,6 +3559,22 @@ export function CompensationTab({
             />
             <output>{resolvedDensitySmoothing}</output>
           </label>
+          <label
+            className="gl-comp-point-alpha"
+            title="Point opacity for every compensation biplot"
+          >
+            <span>Point alpha</span>
+            <input
+              type="range"
+              min="0.1"
+              max="1"
+              step="0.05"
+              value={resolvedPointAlpha}
+              aria-label="Compensation biplot point alpha"
+              onChange={(event) => setPointAlpha(Number(event.currentTarget.value))}
+            />
+            <output>{resolvedPointAlpha.toFixed(2)}</output>
+          </label>
           <DensityColourControl
             className="gl-comp-density-colour"
             value={densityColorPower}
@@ -3031,6 +3589,7 @@ export function CompensationTab({
                 disabled={applyBusy}
                 onClick={() => {
                   setStagedCoefficients({});
+                  setMatrixCellDraftPercents({});
                   setActionMessage(null);
                 }}
               >
@@ -3062,6 +3621,9 @@ export function CompensationTab({
                 <span>{matrixView.subtitle}</span>
               </div>
               <div className="gl-comp-matrix-head-actions">
+                {flowInlineMatrix && (
+                  <span className="gl-comp-inline-edit-note">Edit cells directly (%)</span>
+                )}
                 <div className="gl-comp-matrix-legend" aria-label="Matrix colour key">
                   <span><i className="is-diagonal" aria-hidden="true" />Diagonal (self)</span>
                   <span><i className="is-positive" aria-hidden="true" />Positive spill</span>
@@ -3078,7 +3640,7 @@ export function CompensationTab({
             </div>
             <div className="gl-comp-matrix-scroll">
               <div
-                className="gl-comp-matrix-stage"
+                className={`gl-comp-matrix-stage${flowInlineMatrix ? " is-flow-inline" : ""}`}
                 style={{
                   width: 112 + matrixView.receiverAxisKeys.length * matrixCellSize,
                 }}
@@ -3180,6 +3742,54 @@ export function CompensationTab({
                             const interactionText = interaction && interaction !== "other" && interaction !== "self"
                               ? ` · ${interaction}`
                               : "";
+                            const cellDraftPercent = matrixCellDraftPercents[pairKey] ??
+                              editableCoefficientPercent(workingValue);
+                            if (flowInlineMatrix && !diagonal) {
+                              return (
+                                <ScrubbableNumberInput
+                                  key={receiverKey}
+                                  role="gridcell"
+                                  className={`gl-comp-cell gl-comp-cell-input${selected ? " selected" : ""}${pinned ? " is-pinned" : ""}${stagedValue === undefined ? "" : " is-staged"}${sourceSelected ? " is-selected-source" : ""}${receiverSelected ? " is-selected-receiver" : ""}`}
+                                  min="0"
+                                  step="0.1"
+                                  value={cellDraftPercent}
+                                  disabled={applyBusy}
+                                  data-source-index={sourceIndex}
+                                  data-receiver-index={receiverIndex}
+                                  aria-colindex={receiverIndex + 1}
+                                  aria-selected={pinned}
+                                  aria-label={`${sourceChannel.combined} source to ${receiverChannel.combined} receiver coefficient, percent${stagedValue === undefined ? "" : ", pending edit"}`}
+                                  title={`${sourceChannel.combined} → ${receiverChannel.combined} · type or drag vertically to edit spillover percentage${stagedValue === undefined ? "" : " · pending edit"}`}
+                                  style={backgroundColor ? { backgroundColor } : undefined}
+                                  onFocus={() => setSelectedPairKey(pairKey)}
+                                  onMouseEnter={() => setHoveredPairKey(pairKey)}
+                                  onMouseLeave={() => setHoveredPairKey((current) => current === pairKey ? null : current)}
+                                  onClick={() => setSelectedPairKey(pairKey)}
+                                  onValueChange={(next) => {
+                                    setSelectedPairKey(pairKey);
+                                    setMatrixCellDraftPercents((current) => ({ ...current, [pairKey]: next }));
+                                    if (next.trim() !== "" && Number.isFinite(Number(next))) {
+                                      stageCoefficient(pairKey, Number(next) / 100);
+                                    }
+                                  }}
+                                  onBlur={(event) => {
+                                    const next = event.currentTarget.value;
+                                    if (next.trim() === "" || !Number.isFinite(Number(next))) {
+                                      setMatrixCellDraftPercents((current) => {
+                                        const updated = { ...current };
+                                        delete updated[pairKey];
+                                        return updated;
+                                      });
+                                      return;
+                                    }
+                                    setMatrixCellDraftPercents((current) => ({
+                                      ...current,
+                                      [pairKey]: editableCoefficientPercent(Number(next) / 100),
+                                    }));
+                                  }}
+                                />
+                              );
+                            }
                             return (
                               <button
                                 type="button"
@@ -3260,7 +3870,9 @@ export function CompensationTab({
               >
                 <option value="relevant">Matrix-linked / relevant</option>
                 <option value="nonzero">Non-zero coefficients</option>
-                <option value="physical">Physical CyTOF relationships</option>
+                {matrixView.kind === "cytof" && (
+                  <option value="physical">Physical CyTOF relationships</option>
+                )}
                 <option value="flagged">Flagged for follow-up</option>
                 <option value="all">All included pairs</option>
               </select>
@@ -3305,8 +3917,13 @@ export function CompensationTab({
               >
                 Export…
               </button>
-              <span className="gl-comp-global-count">
-                {visibleGlobalInspectorCandidates.length.toLocaleString()} pair{visibleGlobalInspectorCandidates.length === 1 ? "" : "s"} · {activeReviewPopulation?.name ?? "All Events"}
+              <span
+                className="gl-comp-global-count"
+                title="The Global gallery uses one fixed representative event set so every pair and both assay layers remain directly comparable."
+              >
+                {visibleGlobalInspectorCandidates.length.toLocaleString()} pair{visibleGlobalInspectorCandidates.length === 1 ? "" : "s"}
+                {" · "}{globalInspectorEventIndices.length.toLocaleString()} / {reviewEventCount.toLocaleString()} events
+                {" · "}{activeReviewPopulation?.name ?? "All Events"}
               </span>
             </>}
           >
@@ -3558,9 +4175,9 @@ export function CompensationTab({
                               <div className="gl-comp-sweep-pair-body">
                                 <div className="gl-comp-inline-bounds">
                                   <span>Four values across</span>
-                                  <label>Lower (%)<input type="number" step="0.1" value={draft.lowerPercent} disabled={applyBusy || sweepProgress !== null || boundsPreviewPairKey !== null} onChange={(event) => setSweepBoundDraft(candidate.pairKey, candidate.coefficient, "lowerPercent", event.currentTarget.value)} /></label>
+                                  <label>Lower (%)<ScrubbableNumberInput step="0.1" value={draft.lowerPercent} disabled={applyBusy || sweepProgress !== null || boundsPreviewPairKey !== null} onValueChange={(value) => setSweepBoundDraft(candidate.pairKey, candidate.coefficient, "lowerPercent", value)} /></label>
                                   <span>to</span>
-                                  <label>Upper (%)<input type="number" step="0.1" value={draft.upperPercent} disabled={applyBusy || sweepProgress !== null || boundsPreviewPairKey !== null} onChange={(event) => setSweepBoundDraft(candidate.pairKey, candidate.coefficient, "upperPercent", event.currentTarget.value)} /></label>
+                                  <label>Upper (%)<ScrubbableNumberInput step="0.1" value={draft.upperPercent} disabled={applyBusy || sweepProgress !== null || boundsPreviewPairKey !== null} onValueChange={(value) => setSweepBoundDraft(candidate.pairKey, candidate.coefficient, "upperPercent", value)} /></label>
                                   {bounds.error && <small>{bounds.error}</small>}
                                 </div>
                                 {result ? (
@@ -3835,6 +4452,7 @@ export function CompensationTab({
         />
       )}
     </div>
+    </CompensationPointAlphaContext.Provider>
     </DensityColorPowerContext.Provider>
   );
 }
