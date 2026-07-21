@@ -4,6 +4,7 @@ import {
   packWorkspace,
   packWorkspaceForStorage,
   packWorkspaceReference,
+  readWorkspaceEnvelopeFromFile,
   readWorkspaceBytes,
   validateWorkspace,
   type WorkspaceFile,
@@ -39,6 +40,7 @@ function makeWs(): WorkspaceFile {
       mode: "contour",
       maxEvents: 20000,
       contourThreshold: 10,
+      densityColorPower: 1.8,
       fontSizes: { tick: 12, axis: 14, title: 11, gate: 12 },
     },
     metadataColumns: [{ name: "condition", levels: ["unstim", "stim"] }, { name: "donor" }],
@@ -63,6 +65,21 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     expect(Array.from(got!["data/1_run2.fcs"])).toEqual(Array.from(fcs1));
     expect(back.samples.length).toBe(2);
     expect(back.activeSample).toBe(1);
+  });
+
+  it("streams a legacy deflated bundle without a portable-assay manifest", async () => {
+    const bytes = packWorkspace(ws, fcsByPath, "<xml/>");
+    const envelope = await readWorkspaceEnvelopeFromFile(new File(
+      [bytes.slice().buffer as ArrayBuffer],
+      "legacy-bundle.gatelab",
+      { type: "application/zip" },
+    ));
+
+    expect(envelope.storage).toBe("bundle");
+    expect(envelope.raw).toEqual(ws);
+    expect(envelope.portableAssays).toBeNull();
+    expect(envelope.fcsByPath?.[ws.samples[0].dataPath]).toEqual(fcs0);
+    expect(envelope.fcsByPath?.[ws.samples[1].dataPath]).toEqual(fcs1);
   });
 
   it("bundled zip starts with PK; reference is JSON", () => {
@@ -99,6 +116,7 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     expect(back.samples[1].compensationOn).toBe(false);
     expect(back.scales.globalScales["FSC-A"]).toEqual([0, 8]);
     expect(back.display.mode).toBe("contour");
+    expect(back.display.densityColorPower).toBe(1.8);
     expect(back.display.fontSizes).toEqual({ tick: 12, axis: 14, title: 11, gate: 12 });
     expect(back.gating.selected_gate_id).toBe("g1");
     expect(back.workspaceId).toBe("workspace-test-1");
@@ -128,8 +146,67 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
   it("accepts older v2 workspaces without gating font settings", () => {
     const older = cloneWs(ws);
     delete older.display.fontSizes;
+    delete older.display.densityColorPower;
     expect(validateWorkspace(older)).toBe(true);
     expect(readWorkspaceBytes(packWorkspaceReference(older)).ws.display.fontSizes).toBeUndefined();
+    expect(readWorkspaceBytes(packWorkspaceReference(older)).ws.display.densityColorPower).toBeUndefined();
+  });
+
+  it("round-trips coordinate-bound division profiles while accepting legacy profiles without a binding", () => {
+    const bound = cloneWs(ws);
+    bound.samples[0].division = {
+      channelKey: "PE-A",
+      boundaries: [0.5, 1.5, 2.5],
+      n: 3,
+      colName: "division",
+      coordinateBindingKey: "[\"original\",\"flow\",\"PE-A\"]",
+    };
+    expect(validateWorkspace(bound)).toBe(true);
+    expect(readWorkspaceBytes(packWorkspaceReference(bound)).ws.samples[0].division)
+      .toEqual(bound.samples[0].division);
+
+    const legacy = cloneWs(ws);
+    legacy.samples[0].division = {
+      channelKey: "PE-A",
+      boundaries: [0.5, 1.5],
+      n: 2,
+      colName: "division",
+    };
+    expect(validateWorkspace(legacy)).toBe(true);
+    expect(readWorkspaceBytes(packWorkspaceReference(legacy)).ws.samples[0].division)
+      .toEqual(legacy.samples[0].division);
+  });
+
+  it.each([
+    ["a non-object", null],
+    ["unexpected fields", { channelKey: "PE-A", boundaries: [1], n: 1, colName: "div", extra: true }],
+    ["a blank channel", { channelKey: "  ", boundaries: [1], n: 1, colName: "div" }],
+    ["a blank column name", { channelKey: "PE-A", boundaries: [1], n: 1, colName: "  " }],
+    ["a non-array boundary set", { channelKey: "PE-A", boundaries: "1", n: 1, colName: "div" }],
+    ["a non-finite boundary", { channelKey: "PE-A", boundaries: [Number.POSITIVE_INFINITY], n: 1, colName: "div" }],
+    ["duplicate boundaries", { channelKey: "PE-A", boundaries: [1, 1], n: 2, colName: "div" }],
+    ["descending boundaries", { channelKey: "PE-A", boundaries: [2, 1], n: 2, colName: "div" }],
+    ["a non-integer n", { channelKey: "PE-A", boundaries: [1], n: 1.5, colName: "div" }],
+    ["an unsupported n", { channelKey: "PE-A", boundaries: Array.from({ length: 12 }, (_, i) => i), n: 12, colName: "div" }],
+    ["a boundary count inconsistent with n", { channelKey: "PE-A", boundaries: [1], n: 2, colName: "div" }],
+    ["a blank coordinate binding", { channelKey: "PE-A", boundaries: [1], n: 1, colName: "div", coordinateBindingKey: "  " }],
+    ["a non-string coordinate binding", { channelKey: "PE-A", boundaries: [1], n: 1, colName: "div", coordinateBindingKey: 42 }],
+  ] as const)("rejects division profiles with %s", (_label, division) => {
+    const corrupt = cloneWs(ws);
+    (corrupt.samples[0] as unknown as Record<string, unknown>).division = division;
+    expect(() => validateWorkspace(corrupt)).toThrow(/division profile/i);
+  });
+
+  it("rejects sparse division boundaries", () => {
+    const corrupt = cloneWs(ws);
+    const sparse = new Array<number>(1);
+    (corrupt.samples[0] as unknown as Record<string, unknown>).division = {
+      channelKey: "PE-A",
+      boundaries: sparse,
+      n: 1,
+      colName: "div",
+    };
+    expect(() => validateWorkspace(corrupt)).toThrow(/dense finite numbers/i);
   });
 
   it("rejects a non-workspace file", () => {

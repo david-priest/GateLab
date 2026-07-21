@@ -6,10 +6,38 @@
 export const supportsFileSystemAccess = (): boolean =>
   typeof window !== "undefined" && typeof window.showOpenFilePicker === "function" && typeof window.showSaveFilePicker === "function";
 
+interface DirectoryPickerWindow extends Window {
+  showDirectoryPicker?: (options?: { mode?: "read" | "readwrite"; id?: string }) => Promise<FileSystemDirectoryHandle>;
+}
+
+interface IterableDirectoryHandle extends FileSystemDirectoryHandle {
+  values(): AsyncIterableIterator<FileSystemHandle>;
+}
+
+const directoryPickerWindow = (): DirectoryPickerWindow => window as DirectoryPickerWindow;
+
+export const supportsDirectoryAccess = (): boolean =>
+  typeof window !== "undefined" && typeof directoryPickerWindow().showDirectoryPicker === "function";
+
 export interface PickedFile {
   handle: FileSystemFileHandle;
   bytes: Uint8Array;
   name: string;
+}
+
+/** A user-approved file that has not yet been read into GateLab's data model. */
+export interface PickedFileSource {
+  handle: FileSystemFileHandle;
+  file: File;
+  name: string;
+  /** Path below a selected source folder; just the filename for a normal file picker. */
+  relativePath: string;
+}
+
+export interface PickedDirectory {
+  handle: FileSystemDirectoryHandle;
+  name: string;
+  files: PickedFileSource[];
 }
 
 export interface PickFileOptions {
@@ -34,18 +62,101 @@ export async function ensurePermission(handle: FileSystemFileHandle, mode: "read
 
 /** Open-file picker → handle + bytes. Returns null if the user cancels. */
 export async function pickFile(
-  accept: Record<string, string[]>,
+  accept: Record<string, string[]> | null,
   description: string,
   options: PickFileOptions = {},
 ): Promise<PickedFile | null> {
   try {
     const [handle] = await window.showOpenFilePicker!({
-      types: [{ description, accept }],
+      ...(accept ? { types: [{ description, accept }] } : {}),
       multiple: false,
       ...(options.id ? { id: options.id } : {}),
     });
     const { bytes, name } = await readHandle(handle);
     return { handle, bytes, name };
+  } catch (e) {
+    if ((e as DOMException)?.name === "AbortError") return null;
+    throw e;
+  }
+}
+
+/** Open one file without eagerly duplicating it into a whole-file Uint8Array. */
+export async function pickFileSource(
+  accept: Record<string, string[]> | null,
+  description: string,
+  options: PickFileOptions = {},
+): Promise<PickedFileSource | null> {
+  try {
+    const [handle] = await window.showOpenFilePicker!({
+      ...(accept ? { types: [{ description, accept }] } : {}),
+      multiple: false,
+      ...(options.id ? { id: options.id } : {}),
+    });
+    const file = await handle.getFile();
+    return { handle, file, name: file.name, relativePath: file.name };
+  } catch (e) {
+    if ((e as DOMException)?.name === "AbortError") return null;
+    throw e;
+  }
+}
+
+/** Open-file picker for a batch. Reading/parsing is deliberately left to the caller. */
+export async function pickFiles(
+  accept: Record<string, string[]>,
+  description: string,
+  options: PickFileOptions = {},
+): Promise<PickedFileSource[] | null> {
+  try {
+    const handles = await window.showOpenFilePicker!({
+      types: [{ description, accept }],
+      multiple: true,
+      ...(options.id ? { id: options.id } : {}),
+    });
+    return await Promise.all(handles.map(async (handle) => {
+      const file = await handle.getFile();
+      return { handle, file, name: file.name, relativePath: file.name };
+    }));
+  } catch (e) {
+    if ((e as DOMException)?.name === "AbortError") return null;
+    throw e;
+  }
+}
+
+/**
+ * Pick and enumerate a folder without reading file contents. GateLab imports a confirmed
+ * snapshot of the returned files; it does not silently mirror later folder changes.
+ */
+export async function pickDirectoryFiles(
+  extensions: readonly string[],
+  options: PickFileOptions = {},
+): Promise<PickedDirectory | null> {
+  try {
+    const handle = await directoryPickerWindow().showDirectoryPicker!({
+      mode: "read",
+      ...(options.id ? { id: options.id } : {}),
+    });
+    const allowed = new Set(extensions.map((extension) => extension.toLowerCase()));
+    const files: PickedFileSource[] = [];
+
+    const walk = async (directory: FileSystemDirectoryHandle, prefix: string): Promise<void> => {
+      for await (const entry of (directory as IterableDirectoryHandle).values()) {
+        const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.kind === "directory") {
+          await walk(entry as FileSystemDirectoryHandle, relativePath);
+          continue;
+        }
+        const dot = entry.name.lastIndexOf(".");
+        const extension = dot >= 0 ? entry.name.slice(dot).toLowerCase() : "";
+        if (!allowed.has(extension)) continue;
+        const fileHandle = entry as FileSystemFileHandle;
+        const file = await fileHandle.getFile();
+        files.push({ handle: fileHandle, file, name: file.name, relativePath });
+      }
+    };
+
+    await walk(handle, "");
+    files.sort((a, b) => a.relativePath.localeCompare(b.relativePath, undefined, { numeric: true }));
+    return { handle, name: handle.name, files };
   } catch (e) {
     if ((e as DOMException)?.name === "AbortError") return null;
     throw e;
@@ -58,6 +169,35 @@ export async function writeHandle(handle: FileSystemFileHandle, data: BlobPart):
   const w = await handle.createWritable();
   await w.write(data);
   await w.close();
+}
+
+export type FileChunkProducer = (
+  write: (chunk: Uint8Array) => Promise<void>,
+) => Promise<void>;
+
+async function streamToHandle(
+  handle: FileSystemFileHandle,
+  produce: FileChunkProducer,
+): Promise<void> {
+  const writable = await handle.createWritable();
+  try {
+    await produce(async (chunk) => {
+      await writable.write(chunk as FileSystemWriteChunkType);
+    });
+    await writable.close();
+  } catch (error) {
+    await writable.abort(error).catch(() => undefined);
+    throw error;
+  }
+}
+
+/** Stream to an existing handle without constructing a complete in-memory Blob. */
+export async function writeHandleStream(
+  handle: FileSystemFileHandle,
+  produce: FileChunkProducer,
+): Promise<void> {
+  if (!(await ensurePermission(handle, "readwrite"))) throw new Error("Write permission was denied.");
+  await streamToHandle(handle, produce);
 }
 
 /** Save-file picker → write + return the new handle. Null if cancelled. */
@@ -77,6 +217,24 @@ export async function saveAsHandle(
   const w = await handle.createWritable();
   await w.write(data);
   await w.close();
+  return handle;
+}
+
+/** Save-file picker with a chunk producer for large portable workspaces. */
+export async function saveAsHandleStream(
+  suggestedName: string,
+  accept: Record<string, string[]>,
+  description: string,
+  produce: FileChunkProducer,
+): Promise<FileSystemFileHandle | null> {
+  let handle: FileSystemFileHandle;
+  try {
+    handle = await window.showSaveFilePicker!({ suggestedName, types: [{ description, accept }] });
+  } catch (e) {
+    if ((e as DOMException)?.name === "AbortError") return null;
+    throw e;
+  }
+  await streamToHandle(handle, produce);
   return handle;
 }
 

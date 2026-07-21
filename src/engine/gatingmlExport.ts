@@ -317,7 +317,7 @@ function buildScalesJson(sample: Sample, globalScales: Record<string, [number, n
     }
     if (Object.keys(entry).length) channels[c.key] = entry;
   });
-  const compensationEnabled = sample.instrument === "flow" && sample.compensationEnabled;
+  const compensationEnabled = sample.instrument === "flow" && sample.embeddedCompensationEnabled;
   const spillover = compensationEnabled ? sample.spillover : null;
   return JSON.stringify({
     version: 3,
@@ -338,6 +338,12 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
   const format = opts.format ?? "cytobank";
   const cytobankMode = format === "cytobank";
   if (!gates || Object.keys(gates).length === 0) throw new Error("No gates to export.");
+  if (sample.compensationEnabled && !sample.embeddedCompensationEnabled) {
+    throw new Error(
+      "Gating-ML export for an uploaded or edited compensation profile is not available yet; " +
+      "switch to Original or use the embedded FCS spillover layer.",
+    );
+  }
 
   const quadrantOmissions = analyzeGatingMLQuadrantOmissions(gates, populations);
   if (quadrantOmissions.gateIds.length > 0 && !opts.allowQuadrantOmission) {
@@ -362,7 +368,7 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
   const { chToTr, trDefs } = buildTransforms(sample);
   const scalesJson = buildScalesJson(sample, opts.globalScales);
   const compensationRefFor = (channelKey: string): "FCS" | "uncompensated" =>
-    isFlow && sample.compensationEnabled && sample.spillover?.channels.includes(channelKey)
+    isFlow && sample.embeddedCompensationEnabled && sample.spillover?.channels.includes(channelKey)
       ? "FCS"
       : "uncompensated";
   const axisCofactor = (channelKey: string): number => {

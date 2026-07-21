@@ -213,6 +213,22 @@ describe("Sample — CyTOF, display gating space", () => {
     expect(payload.n_events).toBe(3); // title/count still reports the full population
     expect(Array.from(plottedX)).toEqual([fullX[0], fullX[3]]); // ranks 0 and 2 of mask
   });
+
+  it("fits automatic axes around visible gates but preserves an explicit user range", () => {
+    const baseX = s.displayRange(1);
+    const baseY = s.displayRange(2);
+    const gateX = baseX[1] + 3;
+    const gates = [{ vertices: [[gateX, baseY[0]], [gateX + 1, baseY[1]]] }];
+
+    const automatic = s.plotPayload(1, 2, "dots", gates);
+    expect(automatic.x_range[1]).toBeGreaterThan(gateX + 1);
+
+    const explicitX: [number, number] = [0, 1];
+    const explicitY: [number, number] = [2, 3];
+    const explicit = s.plotPayload(1, 2, "dots", gates, null, null, explicitX, explicitY);
+    expect(explicit.x_range).toBe(explicitX);
+    expect(explicit.y_range).toBe(explicitY);
+  });
 });
 
 describe("Sample — singular spillover disables compensation", () => {

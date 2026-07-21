@@ -2,6 +2,9 @@
 // FCS event bytes remain in the user's source files and are never copied into IndexedDB.
 
 import { validateWorkspace, type WorkspaceFile } from "./workspace";
+import { WORKSPACE_VERSION_3, type WorkspaceFileV3 } from "./workspaceV3";
+
+export type CheckpointWorkspace = WorkspaceFile | WorkspaceFileV3;
 
 export const AUTO_CHECKPOINT_INTERVAL_MS = 2 * 60 * 1000;
 export const MAX_CHECKPOINTS_PER_WORKSPACE = 256;
@@ -20,6 +23,7 @@ const WORKSPACE_CREATED_INDEX = "workspace-created";
 export type WorkspaceCheckpointReason =
   | "automatic"
   | "before-workspace-open"
+  | "before-new-workspace"
   | "after-workspace-open"
   | "before-gatingml-replace"
   | "after-gatingml-import"
@@ -27,14 +31,18 @@ export type WorkspaceCheckpointReason =
   | "before-population-delete"
   | "before-sample-remove"
   | "after-fcs-import"
-  | "after-metadata-import";
+  | "after-metadata-import"
+  | "before-compensation-apply"
+  | "after-compensation-apply"
+  | "before-active-layer-change"
+  | "compensation-profile-import";
 
 export interface WorkspaceCheckpoint {
   id: string;
   workspaceId: string;
   createdAt: string;
   reason: WorkspaceCheckpointReason;
-  workspace: WorkspaceFile;
+  workspace: CheckpointWorkspace;
   summary: {
     samples: number;
     gates: number;
@@ -45,10 +53,10 @@ export interface WorkspaceCheckpoint {
 
 export type WorkspaceCheckpointSaveResult = "saved" | "duplicate" | "unavailable";
 
-function cloneWorkspace(workspace: WorkspaceFile): WorkspaceFile {
+function cloneWorkspace(workspace: CheckpointWorkspace): CheckpointWorkspace {
   // Workspace files are intentionally JSON-only. This both snapshots mutable input before the
   // asynchronous IndexedDB write and makes an accidental non-JSON/FCS payload impossible.
-  return JSON.parse(JSON.stringify(workspace)) as WorkspaceFile;
+  return JSON.parse(JSON.stringify(workspace)) as CheckpointWorkspace;
 }
 
 function randomId(): string {
@@ -56,7 +64,7 @@ function randomId(): string {
 }
 
 /** Stable comparison for checkpoint de-duplication; save timestamps are not workspace edits. */
-export function workspaceCheckpointSignature(workspace: WorkspaceFile): string {
+export function workspaceCheckpointSignature(workspace: CheckpointWorkspace): string {
   const normalized = cloneWorkspace(workspace);
   normalized.savedAt = "";
   return JSON.stringify(normalized);
@@ -65,7 +73,7 @@ export function workspaceCheckpointSignature(workspace: WorkspaceFile): string {
 /** Construct and synchronously snapshot a checkpoint before any destructive action proceeds. */
 export function createWorkspaceCheckpoint(
   workspaceId: string,
-  workspace: WorkspaceFile,
+  workspace: CheckpointWorkspace,
   reason: WorkspaceCheckpointReason,
   now = new Date(),
   id = randomId(),
@@ -73,7 +81,16 @@ export function createWorkspaceCheckpoint(
   if (!workspaceId.trim()) throw new Error("A workspace ID is required for local history.");
   const snapshot = cloneWorkspace(workspace);
   snapshot.workspaceId = workspaceId;
-  validateWorkspace(snapshot);
+  if (snapshot.version === 2) {
+    validateWorkspace(snapshot);
+  } else if (
+    snapshot.version !== WORKSPACE_VERSION_3 ||
+    !Array.isArray(snapshot.samples) ||
+    snapshot.samples.length === 0 ||
+    snapshot.compensation == null
+  ) {
+    throw new Error("A valid GateLab workspace v2/v3 is required for local history.");
+  }
   const json = JSON.stringify(snapshot);
   return {
     id,
@@ -229,7 +246,7 @@ async function persistWorkspaceCheckpoint(checkpoint: WorkspaceCheckpoint): Prom
 /** Save a lightweight checkpoint. The workspace is cloned synchronously before this returns. */
 export function saveWorkspaceCheckpoint(
   workspaceId: string,
-  workspace: WorkspaceFile,
+  workspace: CheckpointWorkspace,
   reason: WorkspaceCheckpointReason,
   now = new Date(),
 ): Promise<WorkspaceCheckpointSaveResult> {

@@ -89,6 +89,7 @@ function pushUndo(s: CoreState): Pick<CoreState, "undo" | "redo"> {
 }
 
 export type Action =
+  | { type: "newWorkspace" }
   | { type: "loadSample"; nEvents: number }
   | {
       type: "addGate";
@@ -159,6 +160,14 @@ export type Action =
 
 export function coreReducer(state: CoreState, action: Action): CoreState {
   switch (action.type) {
+    case "newWorkspace":
+      return {
+        ...initialCoreState(),
+        // Consumers key expensive derived state to this revision. Keep it monotonic so an
+        // empty replacement workspace cannot reuse plot/gating state from the previous one.
+        gate_version: state.gate_version + 1,
+      };
+
     case "loadSample": {
       const root = newRootPopulation(action.nEvents);
       return {

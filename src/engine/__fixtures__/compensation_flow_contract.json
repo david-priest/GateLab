@@ -1,0 +1,38 @@
+{
+  "schema": "gatelab.compensation-flow-contract.v1",
+  "orientation": "source-rows-receiver-columns",
+  "channels": ["A", "B", "C"],
+  "baseline": {
+    "spillover": [
+      [1, 0.2, 0],
+      [0, 1, 0.3],
+      [0, 0, 1]
+    ],
+    "compensatedEvents": [
+      [100, 0, 0],
+      [0, 50, 0],
+      [10, 20, 30]
+    ],
+    "measuredEvents": [
+      [100, 20, 0],
+      [0, 50, 15],
+      [10, 22, 36]
+    ]
+  },
+  "singleEdit": {
+    "source": "A",
+    "receiver": "B",
+    "oldValue": 0.2,
+    "newValue": 0.1,
+    "spillover": [
+      [1, 0.1, 0],
+      [0, 1, 0.3],
+      [0, 0, 1]
+    ],
+    "expectedCompensatedEvents": [
+      [100, 10, -3],
+      [0, 50, 0],
+      [10, 21, 29.7]
+    ]
+  }
+}

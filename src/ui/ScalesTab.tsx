@@ -1,77 +1,18 @@
-// ScalesTab.tsx — the Scales tab, mirroring GateLabR: (1) Compensation — apply/inspect the
-// embedded $SPILLOVER matrix before gating; (2) Global Channel Scales — a fixed per-channel
-// display axis range used when that channel is plotted (uniform axes across figures).
+// ScalesTab.tsx — global per-channel display axis ranges. Compensation now has its own tab so
+// transforms and assay-layer changes are not mixed into one control surface.
 
 import type { Sample } from "../engine/sample";
 
 interface Props {
   sample: Sample;
-  compensationOn: boolean;
-  onToggleCompensation: (on: boolean) => void;
   globalScales: Record<string, [number, number]>;
   onSetGlobalScale: (key: string, range: [number, number] | null) => void;
 }
 
-export function ScalesTab({ sample, compensationOn, onToggleCompensation, globalScales, onSetGlobalScale }: Props) {
-  const spill = sample.spillover;
-
+export function ScalesTab({ sample, globalScales, onSetGlobalScale }: Props) {
   return (
     <div className="gl-tab-panel gl-tab-fill">
       <h2 className="gl-tab-title">Scales</h2>
-
-      {/* ── Compensation ─────────────────────────────────────────── */}
-      <section className="gl-scales-section">
-        <div className="gl-section-header">Compensation</div>
-        {spill ? (
-          <>
-            <label className="gl-check" style={{ marginBottom: 8 }}>
-              <input
-                type="checkbox"
-                checked={compensationOn}
-                onChange={(e) => onToggleCompensation(e.target.checked)}
-              />
-              Apply spillover compensation (before gating) — {spill.channels.length} fluorochrome channels
-            </label>
-            <div className="gl-stats-scroll" style={{ maxHeight: 300 }}>
-              <table className="gl-comp-table">
-                <thead>
-                  <tr>
-                    <th></th>
-                    {spill.channels.map((c) => (
-                      <th key={c} title={c}>{sample.labelForKey(c)}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {spill.matrix.map((row, i) => (
-                    <tr key={i}>
-                      <th title={spill.channels[i]}>{sample.labelForKey(spill.channels[i])}</th>
-                      {row.map((v, j) => (
-                        <td
-                          key={j}
-                          className={i === j ? "diag" : v !== 0 ? "spill" : ""}
-                          style={i !== j && v > 0 ? { background: `rgba(47,128,237,${Math.min(0.5, v * 3)})` } : undefined}
-                        >
-                          {i === j ? "1" : v === 0 ? "·" : (v * 100).toFixed(1)}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <p className="gl-hint" style={{ marginTop: 6 }}>
-              Values are % spillover (off-diagonal). Applied as X·solve(S) to the raw fluorescence
-              values; scatter and QC channels pass through untouched.
-            </p>
-          </>
-        ) : (
-          <p className="gl-hint">
-            No embedded <code>$SPILLOVER</code> matrix in this file{" "}
-            {sample.instrument === "cytof" ? "(CyTOF — compensation not applicable)." : "(or it is identity / already compensated)."}
-          </p>
-        )}
-      </section>
 
       {/* ── Global Channel Scales ────────────────────────────────── */}
       <section className="gl-scales-section gl-scales-section-grow">

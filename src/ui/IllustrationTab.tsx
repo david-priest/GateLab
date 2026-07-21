@@ -23,6 +23,7 @@ import {
   type HeatmapSummaryStat,
 } from "../engine/heatmap";
 import { MultiColumnChecklist } from "./MultiColumnChecklist";
+import { DensityColourControl } from "./DensityColourControl";
 
 interface Props {
   sample: Sample;
@@ -37,6 +38,9 @@ interface Props {
   presets: IllustrationPreset[];
   onSavePreset: (name: string) => void;
   onDeletePreset: (name: string) => void;
+  dataRevision: number;
+  densityColorPower: number;
+  onDensityColorPowerChange: (value: number) => void;
 }
 
 function snapshotConfig(config: IllustrationConfig): IllustrationConfig {
@@ -52,7 +56,21 @@ function configsMatch(a: IllustrationConfig, b: IllustrationConfig): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-export function IllustrationTab({ sample, state, derived, globalScales, defaultX, defaultY, configRef, presets, onSavePreset, onDeletePreset }: Props) {
+export function IllustrationTab({
+  sample,
+  state,
+  derived,
+  globalScales,
+  defaultX,
+  defaultY,
+  configRef,
+  presets,
+  onSavePreset,
+  onDeletePreset,
+  dataRevision,
+  densityColorPower,
+  onDensityColorPowerChange,
+}: Props) {
   const rootId = state.root_population_id ?? "";
   const order = populationTreeOrder(state.populations, rootId).filter(({ popId }) => popId !== rootId);
   const allChannels = sample.channels.map((c) => c.key);
@@ -123,6 +141,7 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
   const currentConfig: IllustrationConfig = {
     plotType, popIds, xChannels, yChannel, displayMode, plotSize, nColumns, fitToColumns, maxEvents, allEvents,
     colorByPop, overlayPops, popColors, pointSize, pointAlpha, contourThreshold, kdeBandwidth, pubStyle,
+    densityColorPower,
     gateLineWidth, histLineWidth, histFill, histFillAlpha, histOverlayMode, histLayout, ridgeOverlap,
     ridgeColGap, ridgeGradient, heatmapStat, heatmapScale, heatmapPalette, heatmapCellSize,
     heatmapShowValues, fontTick, fontAxis, fontTitle, fontGate, scaleFontsWithPlot,
@@ -141,6 +160,7 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
     setFitToColumns(c.fitToColumns); setMaxEvents(c.maxEvents); setAllEvents(c.allEvents);
     setColorByPop(c.colorByPop); setOverlayPops(c.overlayPops); setPopColors(c.popColors);
     setPointSize(c.pointSize); setPointAlpha(c.pointAlpha); setContourThreshold(c.contourThreshold);
+    if (c.densityColorPower !== undefined) onDensityColorPowerChange(c.densityColorPower);
     if (c.kdeBandwidth > 0) manualKdeBandwidth.current = c.kdeBandwidth;
     setKdeBandwidth(c.kdeBandwidth); setPubStyle(c.pubStyle); setGateLineWidth(c.gateLineWidth);
     setHistLineWidth(c.histLineWidth); setHistFill(c.histFill); setHistFillAlpha(c.histFillAlpha);
@@ -213,6 +233,7 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
         fitToColumns: c.fitToColumns,
         contourThreshold: c.contourThreshold,
         pointAlpha: c.pointAlpha,
+        densityColorPower: c.densityColorPower ?? densityColorPower,
         pointSize: c.pointSize,
         kdeBandwidth: c.kdeBandwidth,
         colorByPop: c.colorByPop,
@@ -238,7 +259,7 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     sample, renderedConfig, state.gates, state.gate_order, state.populations,
-    state.gate_version, globalScales, derived,
+    state.gate_version, globalScales, derived, dataRevision,
   ]);
 
   const toggle = <T,>(arr: T[], v: T): T[] => (arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);
@@ -446,6 +467,9 @@ export function IllustrationTab({ sample, state, derived, globalScales, defaultX
               <input type="range" min={0.05} max={1} step={0.05} value={pointAlpha} onChange={num(setPointAlpha, 0.35)} />
               <span className="gl-num-badge">{pointAlpha.toFixed(2)}</span>
             </label>
+            {displayMode === "pseudocolor" && (
+              <DensityColourControl value={densityColorPower} onChange={onDensityColorPowerChange} />
+            )}
             <label className="gl-field-inline">
               Contour %
               <input type="number" min={0} max={50} step={1} value={contourThreshold} onChange={num(setContourThreshold, 5)} />

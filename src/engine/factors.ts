@@ -60,7 +60,13 @@ export function partitionCountsFor(
 }
 
 // ── Category: per-event division level (from a Division-tab profile) ───────────
-export interface DivisionProfileLike { channelKey: string; boundaries: number[]; n: number }
+export interface DivisionProfileLike {
+  channelKey: string;
+  boundaries: number[];
+  n: number;
+  /** Optional only for legacy callers; App filters profiles against the active Sample binding. */
+  coordinateBindingKey?: string;
+}
 
 /** Div0..DivN level names for the given max N. */
 export function divisionLevels(maxN: number): string[] {
