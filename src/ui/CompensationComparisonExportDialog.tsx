@@ -5,6 +5,7 @@ import {
   type CompensationComparisonExportFormat,
   type CompensationComparisonExportProgress,
 } from "../plots/compensationComparisonExport";
+import { useI18n } from "./i18n";
 
 interface Props {
   readonly sampleName: string;
@@ -36,6 +37,7 @@ export function CompensationComparisonExportDialog({
   onExport,
   onClose,
 }: Props) {
+  const { t } = useI18n();
   const [format, setFormat] = useState<CompensationComparisonExportFormat>("pdf");
   const [progress, setProgress] = useState<CompensationComparisonExportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -67,14 +69,14 @@ export function CompensationComparisonExportDialog({
         aria-modal="true"
         aria-labelledby="comp-comparison-export-title"
       >
-        <div className="gl-modal-title" id="comp-comparison-export-title">Export compensation comparison</div>
+        <div className="gl-modal-title" id="comp-comparison-export-title">{t("Export compensation comparison")}</div>
         <p className="gl-comp-export-intro">
           Export the currently filtered channel pairs as clean paired Original and Compensated biplots.
           Every pair retains the same frozen events, axes, transform, density scale, and edge piling in both panels.
         </p>
 
         <fieldset className="gl-comp-export-versions gl-comp-comparison-export-formats">
-          <legend>Format</legend>
+          <legend>{t("Format")}</legend>
           {FORMAT_DETAILS.map((option) => (
             <label key={option.format}>
               <input
@@ -91,24 +93,24 @@ export function CompensationComparisonExportDialog({
         </fieldset>
 
         <dl className="gl-comp-export-summary gl-comp-comparison-export-summary">
-          <div><dt>File</dt><dd title={fileName}>{fileName}</dd></div>
-          <div><dt>Scope</dt><dd>{pairCount.toLocaleString()} filtered pair{pairCount === 1 ? "" : "s"} · both assays</dd></div>
-          <div><dt>Pages</dt><dd>{pageCount.toLocaleString()} A4 landscape page{pageCount === 1 ? "" : "s"} · six pairs per page</dd></div>
-          <div><dt>Population</dt><dd title={populationName}>{populationName}</dd></div>
-          <div><dt>Filter</dt><dd title={filterLabel}>{filterLabel}</dd></div>
+          <div><dt>{t("File")}</dt><dd title={fileName}>{fileName}</dd></div>
+          <div><dt>{t("Scope")}</dt><dd>{pairCount.toLocaleString()} filtered pair{pairCount === 1 ? "" : "s"} · both assays</dd></div>
+          <div><dt>{t("Pages")}</dt><dd>{pageCount.toLocaleString()} A4 landscape page{pageCount === 1 ? "" : "s"} · six pairs per page</dd></div>
+          <div><dt>{t("Population")}</dt><dd title={populationName}>{populationName}</dd></div>
+          <div><dt>{t("Filter")}</dt><dd title={filterLabel}>{filterLabel}</dd></div>
         </dl>
 
         {progress && (
           <div className="gl-comp-comparison-export-progress" role="status" aria-live="polite">
             <progress max={Math.max(1, progress.totalPages)} value={progress.completedPages} />
-            <span>Rendering page {Math.min(progress.completedPages + 1, progress.totalPages)} of {progress.totalPages}</span>
+            <span>{t("Rendering page {current} of {total}", { current: Math.min(progress.completedPages + 1, progress.totalPages), total: progress.totalPages })}</span>
           </div>
         )}
         {error && <div className="gl-comp-warning" role="alert">{error}</div>}
         <div className="gl-modal-actions">
-          <button type="button" className="gl-btn-ghost" disabled={busy} onClick={onClose}>Cancel</button>
+          <button type="button" className="gl-btn-ghost" disabled={busy} onClick={onClose}>{t("Cancel")}</button>
           <button type="button" className="gl-btn" disabled={busy || pageCount === 0} onClick={() => void runExport()}>
-            {busy ? "Rendering…" : `Download ${format.toUpperCase()}`}
+            {busy ? t("Rendering…") : t("Download {format}", { format: format.toUpperCase() })}
           </button>
         </div>
       </div>

@@ -24,6 +24,7 @@ import {
 } from "../engine/heatmap";
 import { MultiColumnChecklist } from "./MultiColumnChecklist";
 import { DensityColourControl } from "./DensityColourControl";
+import { useI18n } from "./i18n";
 
 interface Props {
   sample: Sample;
@@ -71,6 +72,7 @@ export function IllustrationTab({
   densityColorPower,
   onDensityColorPowerChange,
 }: Props) {
+  const { t } = useI18n();
   const rootId = state.root_population_id ?? "";
   const order = populationTreeOrder(state.populations, rootId).filter(({ popId }) => popId !== rootId);
   const allChannels = sample.channels.map((c) => c.key);
@@ -277,16 +279,16 @@ export function IllustrationTab({
             title="Apply the current controls and rebuild the illustration"
             onClick={() => setRenderedConfig(snapshotConfig(currentConfig))}
           >
-            Render Illustration
+            {t("Render Illustration")}
           </button>
-          {renderPending && <span className="gl-illust-pending">Changes pending</span>}
+          {renderPending && <span className="gl-illust-pending">{t("Changes pending")}</span>}
         </div>
         {/* Named presets — save / load / delete the whole illustration config */}
         <div className="gl-illust-row">
           <label className="gl-field-inline">
-            Presets
+            {t("Presets")}
             <select value={selectedPreset} onChange={(e) => setSelectedPreset(e.target.value)}>
-              <option value="">— select —</option>
+              <option value="">{t("— select —")}</option>
               {presets.map((p) => (
                 <option key={p.name} value={p.name}>{p.name}</option>
               ))}
@@ -300,7 +302,7 @@ export function IllustrationTab({
               if (p) applyConfig(p.config);
             }}
           >
-            Load
+            {t("Load")}
           </button>
           <button
             className="gl-mini-btn"
@@ -312,7 +314,7 @@ export function IllustrationTab({
               }
             }}
           >
-            Save…
+            {t("Save…")}
           </button>
           <button
             className="gl-mini-btn"
@@ -322,14 +324,14 @@ export function IllustrationTab({
               setSelectedPreset("");
             }}
           >
-            Delete
+            {t("Delete")}
           </button>
         </div>
         {/* Plot type + display + contour smoothing */}
         <div className="gl-illust-row">
           {/* Explicit plot-type toggle — histograms used to be reachable only by picking a "no Y"
               option buried in the Y-channel dropdown, which was undiscoverable. */}
-          <span className="gl-stats-opt-label">Plot</span>
+          <span className="gl-stats-opt-label">{t("Plot")}</span>
           {[
             { v: "biplot", l: "Biplot" },
             { v: "histogram", l: "Histogram" },
@@ -346,14 +348,14 @@ export function IllustrationTab({
                   if (next === "biplot" && !yChannel) setYChannel(defaultY || allChannels[0] || "");
                 }}
               />
-              {pt.l}
+              {t(pt.l)}
             </label>
           ))}
           {plotType === "biplot" && (
             <>
               <span className="gl-ctl-sep" />
               <label className="gl-field-inline">
-                Y channel
+                {t("Y channel")}
                 <select value={yChannel} onChange={(e) => setYChannel(e.target.value)}>
                   {allChannels.map((c) => (
                     <option key={c} value={c}>{sample.labelForKey(c)}</option>
@@ -365,11 +367,11 @@ export function IllustrationTab({
           {plotType === "biplot" && (
             <>
               <span className="gl-ctl-sep" />
-              <span className="gl-stats-opt-label">Display</span>
+              <span className="gl-stats-opt-label">{t("Display")}</span>
               {[{ v: "scatter", l: "Scatter" }, { v: "pseudocolor", l: "Pseudo" }, { v: "contour", l: "Contour" }].map((m) => (
                 <label key={m.v} className="gl-check">
                   <input type="radio" name="illust-mode" checked={displayMode === m.v} onChange={() => setDisplayMode(m.v)} />
-                  {m.l}
+                  {t(m.l)}
                 </label>
               ))}
             </>
@@ -389,11 +391,11 @@ export function IllustrationTab({
                     }
                   }}
                 />
-                Auto smoothing
+                {t("Auto smoothing")}
               </label>
               {kdeBandwidth > 0 && (
                 <label className="gl-field-inline" title="Higher bandwidth gives stronger contour smoothing">
-                  Bandwidth
+                  {t("Bandwidth")}
                   <input
                     type="range"
                     min={0.2}
@@ -416,7 +418,7 @@ export function IllustrationTab({
         {/* Layout + sampling */}
         {!isHeatmap && <div className="gl-illust-row">
           <label className="gl-field-inline">
-            Plot size
+            {t("Plot size")}
             <input
               className="gl-size-slider"
               type="range" min={150} max={500} step={25} value={plotSize}
@@ -426,20 +428,20 @@ export function IllustrationTab({
             <span className="gl-num-badge">{plotSize}px</span>
           </label>
           <label className="gl-field-inline">
-            Columns
+            {t("Columns")}
             <input type="number" min={1} max={12} value={nColumns} onChange={(e) => setNColumns(Math.max(1, +e.target.value || 4))} />
           </label>
           <label className="gl-check">
             <input type="checkbox" checked={fitToColumns} onChange={(e) => setFitToColumns(e.target.checked)} />
-            Fit to columns
+            {t("Fit to columns")}
           </label>
           <label className="gl-field-inline">
-            Max events
+            {t("Max events")}
             <input type="number" min={0} step={1000} value={maxEvents} disabled={allEvents} onChange={(e) => setMaxEvents(Math.max(0, Math.floor(+e.target.value) || 0))} />
           </label>
           <label className="gl-check">
             <input type="checkbox" checked={allEvents} onChange={(e) => setAllEvents(e.target.checked)} />
-            All events
+            {t("All events")}
           </label>
         </div>}
 
@@ -459,11 +461,11 @@ export function IllustrationTab({
         {plotType === "biplot" ? (
           <div className="gl-illust-row">
             <label className="gl-field-inline">
-              Point size
+              {t("Point size")}
               <input type="number" min={0.1} max={5} step={0.1} value={pointSize} onChange={num(setPointSize, 1.2)} />
             </label>
             <label className="gl-field-inline">
-              Opacity
+              {t("Opacity")}
               <input type="range" min={0.05} max={1} step={0.05} value={pointAlpha} onChange={num(setPointAlpha, 0.35)} />
               <span className="gl-num-badge">{pointAlpha.toFixed(2)}</span>
             </label>
@@ -471,16 +473,16 @@ export function IllustrationTab({
               <DensityColourControl value={densityColorPower} onChange={onDensityColorPowerChange} />
             )}
             <label className="gl-field-inline">
-              Contour %
+              {t("Contour %")}
               <input type="number" min={0} max={50} step={1} value={contourThreshold} onChange={num(setContourThreshold, 5)} />
             </label>
             <span className="gl-ctl-sep" />
             <label className="gl-check">
               <input type="checkbox" checked={pubStyle} onChange={(e) => setPubStyle(e.target.checked)} />
-              Publication style
+              {t("Publication style")}
             </label>
             <label className="gl-field-inline">
-              Gate line
+              {t("Gate line")}
               <input type="number" min={0.5} max={5} step={0.25} value={gateLineWidth} onChange={num(setGateLineWidth, 1.5)} />
             </label>
           </div>
@@ -536,14 +538,14 @@ export function IllustrationTab({
         ) : (
           <div className="gl-illust-row">
             <label className="gl-field-inline">
-              Summary
+              {t("Summary")}
               <select value={heatmapStat} onChange={(e) => setHeatmapStat(e.target.value as HeatmapSummaryStat)}>
                 <option value="median">Median</option>
                 <option value="mean">Mean</option>
               </select>
             </label>
             <label className="gl-field-inline">
-              Scale
+              {t("Scale")}
               <select value={heatmapScale} onChange={(e) => setHeatmapScale(e.target.value as HeatmapScaleMode)}>
                 <option value="column_minmax">Per channel (0–1)</option>
                 <option value="row_minmax">Per population (0–1)</option>
@@ -552,7 +554,7 @@ export function IllustrationTab({
               </select>
             </label>
             <label className="gl-field-inline">
-              Palette
+              {t("Palette")}
               <select value={heatmapPalette} onChange={(e) => setHeatmapPalette(e.target.value as HeatmapPalette)}>
                 <option value="heat">Histogram heat (black→yellow)</option>
                 <option value="viridis">Viridis</option>
@@ -560,7 +562,7 @@ export function IllustrationTab({
               </select>
             </label>
             <label className="gl-field-inline">
-              Plot size
+              {t("Plot size")}
               <input
                 className="gl-size-slider"
                 type="range" min={16} max={72} step={2} value={heatmapCellSize}
@@ -571,7 +573,7 @@ export function IllustrationTab({
             </label>
             <label className="gl-check">
               <input type="checkbox" checked={heatmapShowValues} onChange={(e) => setHeatmapShowValues(e.target.checked)} />
-              Show values
+              {t("Show values")}
             </label>
             <span className="gl-illust-pending" style={{ color: "#64748b" }}>
               Uses all events; empty populations are grey.
@@ -581,11 +583,11 @@ export function IllustrationTab({
 
         {/* Fonts + export */}
         <div className="gl-illust-row">
-          <span className="gl-stats-opt-label">Fonts</span>
-          <label className="gl-field-inline">Tick<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 9)} /></label>
-          <label className="gl-field-inline">Axis<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 12)} /></label>
-          <label className="gl-field-inline">Title<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 12)} /></label>
-          <label className="gl-field-inline">Gate<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 10)} /></label>
+          <span className="gl-stats-opt-label">{t("Fonts")}</span>
+          <label className="gl-field-inline">{t("Tick")}<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 9)} /></label>
+          <label className="gl-field-inline">{t("Axis")}<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 12)} /></label>
+          <label className="gl-field-inline">{t("Title")}<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 12)} /></label>
+          <label className="gl-field-inline">{t("Gate")}<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 10)} /></label>
           <label className="gl-check" title="Scale these base font sizes with the rendered plot or heatmap cell size">
             <input type="checkbox" checked={scaleFontsWithPlot} onChange={(e) => setScaleFontsWithPlot(e.target.checked)} />
             Scale with plot
@@ -605,9 +607,9 @@ export function IllustrationTab({
       <div className="gl-illust-pickers">
         <div className="gl-illust-picker">
           <div className="gl-picker-head">
-            <span className="gl-stats-opt-label">{isHeatmap ? "Channels" : "X channels"}</span>
-            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setXChannels(allChannels)}>All</button>
-            <button className="gl-mini-btn" onClick={() => setXChannels([defaultX])}>Reset</button>
+            <span className="gl-stats-opt-label">{isHeatmap ? t("Channels") : t("X channels")}</span>
+            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setXChannels(allChannels)}>{t("All")}</button>
+            <button className="gl-mini-btn" onClick={() => setXChannels([defaultX])}>{t("Reset")}</button>
           </div>
           <MultiColumnChecklist
             items={allChannels}
@@ -623,9 +625,9 @@ export function IllustrationTab({
 
         <div className="gl-illust-picker">
           <div className="gl-picker-head">
-            <span className="gl-stats-opt-label">Populations</span>
-            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setPopIds(order.map((o) => o.popId))}>All</button>
-            <button className="gl-mini-btn" onClick={() => setPopIds([])}>None</button>
+            <span className="gl-stats-opt-label">{t("Populations")}</span>
+            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setPopIds(order.map((o) => o.popId))}>{t("All")}</button>
+            <button className="gl-mini-btn" onClick={() => setPopIds([])}>{t("None")}</button>
           </div>
           <MultiColumnChecklist
             items={order}

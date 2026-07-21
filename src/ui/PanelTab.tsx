@@ -6,6 +6,7 @@
 
 import { useState } from "react";
 import type { Sample } from "../engine/sample";
+import { useI18n } from "./i18n";
 
 interface Props {
   sample: Sample;
@@ -15,6 +16,7 @@ interface Props {
 }
 
 export function PanelTab({ sample, onRename, onResetAll }: Props) {
+  const { t } = useI18n();
   // Local draft so typing is smooth; commit on blur / Enter.
   const [draft, setDraft] = useState<Record<string, string>>({});
   const rows = sample.channels.map((c, i) => ({
@@ -43,24 +45,22 @@ export function PanelTab({ sample, onRename, onResetAll }: Props) {
   return (
     <div className="gl-tab-panel">
       <div className="gl-tab-head">
-        <h2 className="gl-tab-title">Panel — channel names</h2>
+        <h2 className="gl-tab-title">{t("Panel — channel names")}</h2>
         <button className="gl-btn-ghost" onClick={onResetAll} disabled={!anyRenamed}>
-          Reset all
+          {t("Reset all")}
         </button>
       </div>
       <p className="gl-hint gl-panel-hint">
-        Rename the display name (marker) for each channel. The FCS channel id (<code>$PnN</code>)
-        is fixed. Scatter and Time/QC channels are locked. Renames apply to every loaded sample and
-        are cosmetic — gates and statistics are unaffected.
+        {t("Rename the display name (marker) for each channel. The FCS channel id ($PnN) is fixed. Scatter and Time/QC channels are locked. Renames apply to every loaded sample and are cosmetic — gates and statistics are unaffected.")}
       </p>
 
       <div className="gl-stats-scroll">
         <table className="gl-stats-table gl-panel-table">
           <thead>
             <tr>
-              <th className="gl-stats-name">Channel ($PnN)</th>
-              <th className="gl-stats-name">Marker ($PnS)</th>
-              <th className="gl-stats-name">Display name</th>
+              <th className="gl-stats-name">{t("Channel ($PnN)")}</th>
+              <th className="gl-stats-name">{t("Marker ($PnS)")}</th>
+              <th className="gl-stats-name">{t("Display name")}</th>
             </tr>
           </thead>
           <tbody>
@@ -74,7 +74,7 @@ export function PanelTab({ sample, onRename, onResetAll }: Props) {
                       className="gl-field-input gl-panel-input"
                       value={draft[r.key] ?? r.label}
                       disabled={!r.renamable}
-                      title={r.renamable ? "" : "Locked (scatter / QC channel)"}
+                      title={r.renamable ? "" : t("Locked (scatter / QC channel)")}
                       onChange={(e) => setDraft((d) => ({ ...d, [r.key]: e.target.value }))}
                       onBlur={(e) => commit(r.key, e.currentTarget.value)}
                       onKeyDown={(e) => {
@@ -88,13 +88,13 @@ export function PanelTab({ sample, onRename, onResetAll }: Props) {
                     {r.renamed && (
                       <button
                         className="gl-mini-btn"
-                        title="Reset to default"
+                        title={t("Reset to default")}
                         onClick={() => onRename(r.key, "")}
                       >
                         ↺
                       </button>
                     )}
-                    {!r.renamable && <span className="gl-pill-lock">locked</span>}
+                    {!r.renamable && <span className="gl-pill-lock">{t("locked")}</span>}
                   </div>
                 </td>
               </tr>

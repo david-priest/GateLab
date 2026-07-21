@@ -7,6 +7,7 @@
 import React from "react";
 import type { CoreState, Derived, Action } from "../store";
 import { TreeConnectors } from "./TreeConnectors";
+import { useI18n } from "./i18n";
 
 interface Props {
   state: CoreState;
@@ -20,6 +21,7 @@ function focusTreeContainer() {
 }
 
 export function PopulationTree({ state, derived, dispatch }: Props) {
+  const { t } = useI18n();
   const { populations, root_population_id, active_population_id, selected_gate_id, selected_pop_ids, gates } = state;
   const stats = derived.stats;
   const checkedPops = new Set(selected_pop_ids);
@@ -27,7 +29,7 @@ export function PopulationTree({ state, derived, dispatch }: Props) {
   if (!root_population_id || Object.keys(populations).length === 0) {
     return (
       <div className="population-tree-panel">
-        <em style={{ color: "#999", fontSize: 12 }}>No data loaded.</em>
+        <em style={{ color: "#999", fontSize: 12 }}>{t("No data loaded.")}</em>
       </div>
     );
   }

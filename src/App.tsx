@@ -141,6 +141,7 @@ import {
   normalizeDensityColorPower,
 } from "./engine/pseudocolor";
 import { DensityColourControl } from "./ui/DensityColourControl";
+import { UI_LANGUAGE_OPTIONS, useI18n, type UiLanguage } from "./ui/i18n";
 
 const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
 const INITIAL_LEFT_PANE_WIDTH = 264;
@@ -295,6 +296,7 @@ function plotInteractionTokenFor(
 }
 
 export default function App() {
+  const { language, setLanguage, t } = useI18n();
   // Multiple samples share ONE gating tree (FlowJo-style): add/remove freely, one is active.
   const [samples, setSamples] = useState<SampleEntry[]>([]);
   const sampleDataRevisionKey = useSampleDataRevisionKey(samples);
@@ -2689,21 +2691,22 @@ export default function App() {
         <strong>GateLab</strong>
         {sample && (
           <span className="gl-meta">
-            {fileName} — {sample.fcs.nEvents.toLocaleString()} events ·{" "}
-            {sample.channels.length}
+            {fileName} — {t("{count} events", { count: sample.fcs.nEvents.toLocaleString() })} ·{" "}
             {sample.channels.length < sample.fcs.channels.length
-              ? ` of ${sample.fcs.channels.length}`
-              : ""}{" "}
-            ch ·{" "}
+              ? t("{shown} of {total} channels", {
+                  shown: sample.channels.length,
+                  total: sample.fcs.channels.length,
+                })
+              : t("{count} channels", { count: sample.channels.length })} ·{" "}
             <select
               title="Instrument mode — Auto uses channel-name detection; override if a file is mis-detected. Switch before gating (the gating space flips with it)."
               value={instrumentMode}
               onChange={(e) => changeInstrumentMode(e.target.value as "auto" | "flow" | "cytof")}
               style={{ fontSize: "inherit", padding: "0 2px", background: "transparent", border: "1px solid var(--gl-border, #ccc)", borderRadius: 3 }}
             >
-              <option value="auto">auto ({sample.detectedInstrument})</option>
+              <option value="auto">{t("auto ({instrument})", { instrument: sample.detectedInstrument })}</option>
               <option value="cytof">CyTOF</option>
-              <option value="flow">flow</option>
+              <option value="flow">{t("flow")}</option>
             </select>
           </span>
         )}
@@ -2712,16 +2715,16 @@ export default function App() {
             className="gl-header-assay"
             title="Active assay layer for every GateLab tab. Switching layers keeps gates but recomputes their memberships in the selected coordinate system."
           >
-            <span>Assay</span>
+            <span>{t("Assay")}</span>
             <select
               aria-label="Active assay layer for all tabs"
               value={compensationOn ? "compensated" : "original"}
               disabled={compensationApplyStatus !== null}
               onChange={(event) => toggleCompensation(event.currentTarget.value === "compensated")}
             >
-              <option value="original">Original</option>
+              <option value="original">{t("Original")}</option>
               <option value="compensated" disabled={!canUseCompensatedAssay}>
-                {activeCompensatedStatus?.state === "stale" ? "Compensated (unavailable)" : "Compensated"}
+                {activeCompensatedStatus?.state === "stale" ? t("Compensated (unavailable)") : t("Compensated")}
               </option>
             </select>
           </label>
@@ -2742,6 +2745,18 @@ export default function App() {
             repo
           </a>
         </span>
+        <label className="gl-header-language">
+          <span>{t("Language")}</span>
+          <select
+            aria-label={t("Language")}
+            value={language}
+            onChange={(event) => setLanguage(event.currentTarget.value as UiLanguage)}
+          >
+            {UI_LANGUAGE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </label>
       </header>
 
       {compensationApplyStatus && (
@@ -2774,7 +2789,7 @@ export default function App() {
           </span>
           {compensationApplyStatus.operation !== "restore" && activeTab !== "compensation" && (
             <button type="button" className="gl-mini-btn" onClick={() => setActiveTab("compensation")}>
-              View Compensation
+              {t("View Compensation")}
             </button>
           )}
           <button
@@ -2783,7 +2798,7 @@ export default function App() {
             disabled={compensationApplyStatus.phase === "cancelling"}
             onClick={cancelCompensationApply}
           >
-            {compensationApplyStatus.phase === "cancelling" ? "Cancelling…" : "Cancel"}
+            {compensationApplyStatus.phase === "cancelling" ? t("Cancelling…") : t("Cancel")}
           </button>
         </div>
       )}
@@ -2862,13 +2877,13 @@ export default function App() {
           />
 
           <div className="gl-side-title" style={{ marginTop: 10 }}>
-            Workspace
+            {t("Workspace")}
           </div>
           {wsName && (
             <div className="gl-hint" title={wsName} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {dirty ? "● " : ""}
               {wsName}
-              {dirty ? " (unsaved)" : ""}
+              {dirty ? ` (${t("unsaved")})` : ""}
             </div>
           )}
           <button
@@ -2877,7 +2892,7 @@ export default function App() {
             title="Close the current data, gates, and workspace settings and begin an empty workspace"
             onClick={() => setCrud({ kind: "confirmNewWorkspace" })}
           >
-            New Workspace…
+            {t("New Workspace…")}
           </button>
           <button
             className="gl-btn-ghost gl-btn-block"
@@ -2885,7 +2900,7 @@ export default function App() {
             title="Open a saved .gatelab workspace (gates, populations, scales, compensation)"
             onClick={openWorkspace}
           >
-            Open Workspace…
+            {t("Open Workspace…")}
           </button>
           <button
             className="gl-btn-ghost gl-btn-block"
@@ -2899,7 +2914,7 @@ export default function App() {
             }
             onClick={saveWorkspace}
           >
-            {wsHandle ? `Save${dirty ? " ●" : ""}` : "Save Workspace…"}
+            {wsHandle ? `${t("Save")}${dirty ? " ●" : ""}` : t("Save Workspace…")}
           </button>
           <button
             className="gl-btn-ghost gl-btn-block"
@@ -2907,7 +2922,7 @@ export default function App() {
             title="Save a lightweight reference workspace. Source FCS and compensated values are not embedded; use Save Portable Copy for a self-contained archive."
             onClick={saveWorkspaceAs}
           >
-            Save As…
+            {t("Save As…")}
           </button>
           <button
             className="gl-btn-ghost gl-btn-block"
@@ -2915,7 +2930,7 @@ export default function App() {
             title="Save a self-contained .gatelab with the exact source FCS and any computed compensated assay, so it can reopen without rerunning compensation."
             onClick={saveBundledCopy}
           >
-            Save Portable Copy…
+            {t("Save Portable Copy…")}
           </button>
           <input
             ref={wsRef}
@@ -2933,14 +2948,14 @@ export default function App() {
           {sample && (
             <>
               <div className="gl-side-title" style={{ marginTop: 10 }}>
-                Gating
+                {t("Gating")}
               </div>
               <button
                 className="gl-btn-ghost gl-btn-block"
                 title="Import Gating-ML 2.0 gates and positive AND populations, then choose whether to merge them into the current hierarchy or replace the current strategy"
                 onClick={() => xmlRef.current?.click()}
               >
-                Import GatingML…
+                {t("Import GatingML…")}
               </button>
               <input
                 ref={xmlRef}
@@ -2960,7 +2975,7 @@ export default function App() {
                 title="Open the GatingML export dialog: choose standard GateLab/GateLabR or Cytobank-compatible format and review fidelity warnings."
                 onClick={() => setGatingMlExportOpen(true)}
               >
-                Export GatingML…
+                {t("Export GatingML…")}
               </button>
               <button
                 className="gl-btn-ghost gl-btn-block"
@@ -2968,14 +2983,14 @@ export default function App() {
                 title="Open the FCS export dialog: choose populations, original/compensated/transformed values, and sample scope."
                 onClick={() => setFcsExportOpen(true)}
               >
-                Export FCS…
+                {t("Export FCS…")}
               </button>
 
               <div className="gl-side-title" style={{ marginTop: 10 }}>
-                Display
+                {t("Display")}
               </div>
               <label className="gl-field" title="Downsample the points drawn on the plot. Empty or 0 = plot all events (no downsampling). Counts/percentages always use every event.">
-                <span>Max events to plot</span>
+                <span>{t("Max events to plot")}</span>
                 <input
                   type="text"
                   inputMode="numeric"
@@ -2988,23 +3003,23 @@ export default function App() {
                   }}
                 />
               </label>
-              <div className="gl-hint">empty = all events (no downsampling)</div>
+              <div className="gl-hint">{t("empty = all events (no downsampling)")}</div>
             </>
           )}
         </aside>
 
         {sample ? (
-          <div className="gl-center" role="main" aria-label="Plot and analysis tabs">
+          <div className="gl-center" role="main" aria-label={t("Plot and analysis tabs")}>
             <div className="gl-tabs" role="tablist">
-              {TABS.map((t) => (
+              {TABS.map((tab) => (
                 <button
-                  key={t.id}
+                  key={tab.id}
                   role="tab"
-                  aria-selected={activeTab === t.id}
-                  className={"gl-tab" + (activeTab === t.id ? " active" : "")}
-                  onClick={() => setActiveTab(t.id)}
+                  aria-selected={activeTab === tab.id}
+                  className={"gl-tab" + (activeTab === tab.id ? " active" : "")}
+                  onClick={() => setActiveTab(tab.id)}
                 >
-                  {t.label}
+                  {t(tab.label)}
                 </button>
               ))}
             </div>
@@ -3037,7 +3052,7 @@ export default function App() {
                   ))}
                 </select>
               </label>
-              <label className="gl-alpha" title="Point opacity" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <label className="gl-alpha" title={t("Point opacity")} style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 α
                 <input
                   type="range"
@@ -3053,22 +3068,22 @@ export default function App() {
                 <DensityColourControl value={densityColorPower} onChange={changeDensityColorPower} />
               )}
               <div className="gl-draw-tools">
-                {DRAW_TOOLS.map((t) => (
+                {DRAW_TOOLS.map((tool) => (
                   <button
-                    key={t.id}
-                    className={"gl-icon-chip" + (drawMode === t.id ? " active" : "")}
-                    title={t.title}
-                    aria-label={t.title}
-                    onClick={() => setDrawMode(t.id)}
+                    key={tool.id}
+                    className={"gl-icon-chip" + (drawMode === tool.id ? " active" : "")}
+                    title={t(tool.title)}
+                    aria-label={t(tool.title)}
+                    onClick={() => setDrawMode(tool.id)}
                   >
-                    <t.Icon />
+                    <tool.Icon />
                   </button>
                 ))}
               </div>
               <div className="gl-modes">
                 {mode === "contour" && (
                   <label className="gl-contour-outer" title="Outer contour = this % of the peak density">
-                    Outer
+                    {t("Outer")}
                     <select
                       value={contourThreshold}
                       onChange={(e) => setContourThreshold(+e.target.value)}
@@ -3087,21 +3102,21 @@ export default function App() {
                     className={"gl-chip" + (mode === m.id ? " active" : "")}
                     onClick={() => setMode(m.id)}
                   >
-                    {m.label}
+                    {t(m.label)}
                   </button>
                 ))}
                 <span className="gl-ctl-sep" />
                 <label className="gl-field-inline">
-                  Colour by
+                  {t("Colour by")}
                   <select value={overlayBy} onChange={(e) => setOverlayBy(e.target.value as typeof overlayBy)}>
-                    <option value="none">None</option>
-                    <option value="population">Population</option>
-                    {activeSampleId && compatibleDivisionProfiles[activeSampleId] && <option value="division">Division</option>}
+                    <option value="none">{t("None")}</option>
+                    <option value="population">{t("Population")}</option>
+                    {activeSampleId && compatibleDivisionProfiles[activeSampleId] && <option value="division">{t("Division")}</option>}
                   </select>
                 </label>
                 {(overlayBy !== "none" || overlaySamples) && (
                   <label className="gl-field-inline">
-                    Palette
+                    {t("Palette")}
                     <select value={overlayPalette} onChange={(e) => setOverlayPalette(e.target.value as PaletteName)}>
                       {OVERLAY_PALETTES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
                     </select>
@@ -3110,13 +3125,13 @@ export default function App() {
                 {samples.length > 1 && (
                   <label className="gl-check" title="Plot all loaded samples together, coloured by sample">
                     <input type="checkbox" checked={overlaySamples} onChange={(e) => setOverlaySamples(e.target.checked)} />
-                    Overlay samples
+                    {t("Overlay samples")}
                   </label>
                 )}
               </div>
             </div>
             <div className="gl-scales gl-ranges">
-              <span className="gl-scales-label">Range</span>
+              <span className="gl-scales-label">{t("Range")}</span>
               {(() => {
                 const r3 = (n: number) => Math.round(n * 1000) / 1000;
                 const xName = sample.channels[xIdx].key;
@@ -3156,10 +3171,10 @@ export default function App() {
                   setYRange(includePlotGatesInAxisRange(sample.displayRange(yIdx), mainPlotGates, "y"));
                 }}
               >
-                Fit data + gates
+                {t("Fit data + gates")}
               </button>
               <button className="gl-tool" title="Reset X/Y to auto range (also clears the shared per-channel scale)"
-                aria-label="Reset X and Y ranges to auto"
+                aria-label={t("Reset X and Y ranges to auto")}
                 onClick={() => {
                   setXRange(null);
                   setYRange(null);
@@ -3168,15 +3183,15 @@ export default function App() {
                 }}>⟲</button>
               {derived.displayPopCount > 1 && (
                 <span className="gl-display-pops-banner">
-                  Displaying {derived.displayPopCount} populations (union)
+                  {t("Displaying {count} populations (union)", { count: derived.displayPopCount })}
                 </span>
               )}
               <span className="gl-hint" style={{ marginLeft: "auto" }}>
-                drag to pan · shift-drag to stretch
+                {t("drag to pan · shift-drag to stretch")}
               </span>
             </div>
             <div className="gl-scales gl-gating-fonts" aria-label="Gating plot font sizes">
-              <span className="gl-scales-label">Fonts</span>
+              <span className="gl-scales-label">{t("Fonts")}</span>
               {([
                 ["Tick", "tick", 6, 24],
                 ["Axis", "axis", 6, 28],
@@ -3184,7 +3199,7 @@ export default function App() {
                 ["Gate", "gate", 6, 28],
               ] as const).map(([label, key, min, max]) => (
                 <label key={key} className="gl-field-inline">
-                  {label}
+                  {t(label)}
                   <input
                     type="number"
                     min={min}
@@ -3204,7 +3219,7 @@ export default function App() {
             </div>
             {(sample.isLogicleChannel(xIdx) || sample.isLogicleChannel(yIdx)) && (
               <div className="gl-scales">
-                <span className="gl-scales-label">Logicle W</span>
+                <span className="gl-scales-label">{t("Logicle W")}</span>
                 {([
                   ["X", xIdx],
                   ["Y", yIdx],
@@ -3228,7 +3243,7 @@ export default function App() {
                       <span className="gl-scale-val">{sample.currentLogicleW(idx).toFixed(2)}</span>
                       <button
                         className="gl-tool"
-                        title="Reset to auto-estimated W"
+                        title={t("Reset to auto-estimated W")}
                         aria-label={`Reset ${axis} logicle W to auto`}
                         onClick={() => {
                           sample.resetLogicleW(idx);
@@ -3453,20 +3468,20 @@ export default function App() {
             </ErrorBoundary>
           </div>
         ) : (
-          <div className="gl-center gl-empty" role="main" aria-label="Plot and analysis tabs">
-            <p>Open an FCS file to begin.</p>
+          <div className="gl-center gl-empty" role="main" aria-label={t("Plot and analysis tabs")}>
+            <p>{t("Open an FCS file to begin.")}</p>
           </div>
         )}
 
         <aside
           className="gl-side"
           style={{ width: sideWidth, display: activeTab === "compensation" ? "none" : undefined }}
-          aria-label="Gates and populations"
+          aria-label={t("Gates and populations")}
         >
           <div className="gl-side-resize" onMouseDown={startResize} title="Drag to resize" />
           <div className="gl-side-section">
             <div className="gl-side-head">
-              <div className="gl-side-title">Gates</div>
+              <div className="gl-side-title">{t("Gates")}</div>
               <GateToolbar
                 state={state}
                 dispatch={dispatch}
@@ -3481,7 +3496,7 @@ export default function App() {
           </div>
           <div className="gl-side-section gl-side-grow">
             <div className="gl-side-head">
-              <div className="gl-side-title">Populations</div>
+              <div className="gl-side-title">{t("Populations")}</div>
               <PopToolbar
                 state={state}
                 dispatch={dispatch}

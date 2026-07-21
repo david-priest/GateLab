@@ -8,6 +8,7 @@
 import type { Sample } from "../engine/sample";
 import type { MetadataColumn } from "../engine/metadata";
 import { EditableMetaTable, type MetaRow } from "./EditableMetaTable";
+import { useI18n } from "./i18n";
 
 interface SampleRef {
   id: string;
@@ -38,6 +39,7 @@ export function MetadataTab({
   samples, metadata, columns, onSetCell, onAddColumn, onRenameColumn, onDeleteColumn, onImport,
   populationRows, populationMetadata, populationColumns, onSetPopCell, onAddPopColumn, onRenamePopColumn, onDeletePopColumn,
 }: Props) {
+  const { t } = useI18n();
   const sampleRows: MetaRow[] = samples.map((s) => ({
     id: s.id,
     name: s.name,
@@ -47,9 +49,9 @@ export function MetadataTab({
   return (
     <div className="gl-tab-panel">
       <EditableMetaTable
-        title="Sample metadata"
-        rowHeader="Sample"
-        fixedHeaders={["Events", "Ch", "Instr."]}
+        title={t("Sample metadata")}
+        rowHeader={t("Sample")}
+        fixedHeaders={[t("Events"), t("Ch"), t("Instr.")]}
         rows={sampleRows}
         columns={columns}
         values={metadata}
@@ -60,14 +62,14 @@ export function MetadataTab({
         onImport={onImport}
         templateFilename="metadata_template.csv"
         templateKeyHeader="filename"
-        hint="First column of an imported CSV/TSV must be the FCS file name; remaining columns become fields (joined by filename, extension-insensitive). Edit any cell inline. These fields drive the Proportions tab's Group / Unit / Facet."
-        emptyMessage="Load one or more FCS files to add sample metadata."
+        hint={t("First column of an imported CSV/TSV must be the FCS file name; remaining columns become fields (joined by filename, extension-insensitive). Edit any cell inline. These fields drive the Proportions tab's Group / Unit / Facet.")}
+        emptyMessage={t("Load one or more FCS files to add sample metadata.")}
       />
 
       <EditableMetaTable
-        title="Population metadata"
-        rowHeader="Population"
-        fixedHeaders={["Parent", "Count", "% Parent"]}
+        title={t("Population metadata")}
+        rowHeader={t("Population")}
+        fixedHeaders={[t("Parent"), t("Count"), t("% Parent")]}
         rows={populationRows}
         columns={populationColumns}
         values={populationMetadata}
@@ -77,8 +79,8 @@ export function MetadataTab({
         onDeleteColumn={onDeletePopColumn}
         templateFilename="population_metadata_template.csv"
         templateKeyHeader="population"
-        hint="Annotate each gated population (e.g. lineage, class, note). Values are keyed to the population, so they persist through renames. Derived Parent / Count / % Parent are read-only."
-        emptyMessage="Draw a gate to create populations, then annotate them here."
+        hint={t("Annotate each gated population (e.g. lineage, class, note). Values are keyed to the population, so they persist through renames. Derived Parent / Count / % Parent are read-only.")}
+        emptyMessage={t("Draw a gate to create populations, then annotate them here.")}
       />
     </div>
   );

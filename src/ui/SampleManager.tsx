@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useI18n } from "./i18n";
 
 export interface SampleListItem {
   id: string;
@@ -65,34 +66,39 @@ export function SampleNavigator({
   onIncludeNone: () => void;
   onInvertIncluded: () => void;
 }) {
+  const { language, t } = useI18n();
   const [query, setQuery] = useState("");
   const visible = useMemo(() => items.filter((item) => matchesQuery(item, query)), [items, query]);
   const includedCount = items.reduce((count, item) => count + Number(!excludedIds.has(item.id)), 0);
+  const localizedCompactNumber = useMemo(() => new Intl.NumberFormat(language === "ja" ? "ja-JP" : undefined, {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }), [language]);
 
   return (
-    <section className="gl-sample-navigator" aria-label="FCS samples">
+    <section className="gl-sample-navigator" aria-label={t("FCS samples")}>
       <div className="gl-sample-heading">
-        <div className="gl-side-title">Samples</div>
-        <span>{includedCount} / {items.length} included</span>
+        <div className="gl-side-title">{t("Samples")}</div>
+        <span>{t("{included} / {total} included", { included: includedCount, total: items.length })}</span>
       </div>
       <div className="gl-sample-add-actions">
         <button type="button" className="gl-btn gl-sample-add-primary" disabled={busy} onClick={onOpenFiles}>
-          + Files…
+          {t("+ Files…")}
         </button>
         <button type="button" className="gl-mini-btn" disabled={busy} onClick={onOpenFolder}>
-          + Folder…
+          {t("+ Folder…")}
         </button>
         <button type="button" className="gl-mini-btn" disabled={busy || items.length === 0} onClick={onManage}>
-          Manage…
+          {t("Manage…")}
         </button>
       </div>
 
       {items.length > 0 && (
-        <div className="gl-sample-inclusion-actions" aria-label="Analysis inclusion">
-          <span>Analyses</span>
-          <button type="button" onClick={onIncludeAll}>All</button>
-          <button type="button" onClick={onIncludeNone}>None</button>
-          <button type="button" onClick={onInvertIncluded}>Invert</button>
+        <div className="gl-sample-inclusion-actions" aria-label={t("Analysis inclusion")}>
+          <span>{t("Analyses")}</span>
+          <button type="button" onClick={onIncludeAll}>{t("All")}</button>
+          <button type="button" onClick={onIncludeNone}>{t("None")}</button>
+          <button type="button" onClick={onInvertIncluded}>{t("Invert")}</button>
         </div>
       )}
 
@@ -102,26 +108,26 @@ export function SampleNavigator({
           type="search"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search samples…"
-          aria-label="Search samples"
+          placeholder={t("Search samples…")}
+          aria-label={t("Search samples…")}
         />
       )}
 
       {importProgress && (
         <div className="gl-sample-import-progress" role="status" aria-live="polite">
           <div>
-            <span>Loading {importProgress.current} / {importProgress.total}</span>
+            <span>{t("Loading {current} / {total}", { current: importProgress.current, total: importProgress.total })}</span>
             <span title={importProgress.name}>{importProgress.name}</span>
           </div>
           <progress max={importProgress.total} value={Math.max(0, importProgress.current - 1)} />
         </div>
       )}
 
-      <div className="gl-sample-list" role="listbox" aria-label="Loaded FCS samples">
+      <div className="gl-sample-list" role="listbox" aria-label={t("Loaded FCS samples")}>
         {items.length === 0 ? (
-          <em className="gl-hint">No files loaded.</em>
+          <em className="gl-hint">{t("No files loaded.")}</em>
         ) : visible.length === 0 ? (
-          <em className="gl-hint">No samples match “{query}”.</em>
+          <em className="gl-hint">{t("No samples match “{query}”.", { query })}</em>
         ) : visible.map((item) => {
           const included = !excludedIds.has(item.id);
           const active = item.id === activeId;
@@ -145,8 +151,8 @@ export function SampleNavigator({
               <input
                 type="checkbox"
                 className="gl-sample-include"
-                title="Include this sample in multi-sample analyses"
-                aria-label={`Include ${item.name} in analyses`}
+                title={t("Include this sample in multi-sample analyses")}
+                aria-label={t("Include {name} in analyses", { name: item.name })}
                 checked={included}
                 onClick={(event) => event.stopPropagation()}
                 onChange={(event) => onToggleIncluded(item.id, event.target.checked)}
@@ -154,13 +160,13 @@ export function SampleNavigator({
               <span className="gl-sample-active-dot" aria-hidden="true" />
               <span className="gl-sample-name">{item.name}</span>
               <span className="gl-sample-meta" title={exactSummary}>
-                {compactNumber.format(item.eventCount)} · {item.channelCount}ch
+                {localizedCompactNumber.format(item.eventCount)} · {item.channelCount}ch
               </span>
               <button
                 type="button"
                 className="gl-sample-row-menu"
-                aria-label={`Manage ${item.name}`}
-                title="Manage this sample"
+                aria-label={t("Manage {name}", { name: item.name })}
+                title={t("Manage this sample")}
                 onClick={(event) => {
                   event.stopPropagation();
                   onManageSample(item.id);
@@ -212,6 +218,7 @@ export function SampleManagerModal({
   onInvertIncluded: () => void;
   onRemove: (ids: readonly string[]) => Promise<void>;
 }) {
+  const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set(initialSelectedIds));
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -232,38 +239,38 @@ export function SampleManagerModal({
   };
 
   return (
-    <ModalFrame title="Manage samples">
+    <ModalFrame title={t("Manage samples")}>
       <div className="gl-sample-manager-toolbar">
         <input
           type="search"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search filename or source…"
-          aria-label="Search managed samples"
+          placeholder={t("Search filename or source…")}
+          aria-label={t("Search managed samples")}
         />
-        <span>{items.length} files</span>
+        <span>{t("{count} files", { count: items.length })}</span>
       </div>
       <div className="gl-sample-manager-actions">
-        <span>Manage selection</span>
-        <button type="button" onClick={() => selectVisible(true)}>All visible</button>
-        <button type="button" onClick={() => selectVisible(false)}>None visible</button>
+        <span>{t("Manage selection")}</span>
+        <button type="button" onClick={() => selectVisible(true)}>{t("All visible")}</button>
+        <button type="button" onClick={() => selectVisible(false)}>{t("None visible")}</button>
         <span className="gl-sample-manager-separator" />
-        <span>Analyses</span>
-        <button type="button" onClick={onIncludeAll}>All</button>
-        <button type="button" onClick={onIncludeNone}>None</button>
-        <button type="button" onClick={onInvertIncluded}>Invert</button>
+        <span>{t("Analyses")}</span>
+        <button type="button" onClick={onIncludeAll}>{t("All")}</button>
+        <button type="button" onClick={onIncludeNone}>{t("None")}</button>
+        <button type="button" onClick={onInvertIncluded}>{t("Invert")}</button>
       </div>
       <div className="gl-sample-manager-table-wrap">
         <table className="gl-sample-manager-table">
           <thead>
             <tr>
-              <th aria-label="Select for management" />
-              <th>Active</th>
-              <th>Analyses</th>
-              <th>File</th>
-              <th>Events</th>
-              <th>Channels</th>
-              <th>Source</th>
+              <th aria-label={t("Select for management")} />
+              <th>{t("Active")}</th>
+              <th>{t("Analyses")}</th>
+              <th>{t("File")}</th>
+              <th>{t("Events")}</th>
+              <th>{t("Channels")}</th>
+              <th>{t("Source")}</th>
             </tr>
           </thead>
           <tbody>
@@ -272,7 +279,7 @@ export function SampleManagerModal({
                 <td>
                   <input
                     type="checkbox"
-                    aria-label={`Select ${item.name} for management`}
+                    aria-label={t("Select {name} for management", { name: item.name })}
                     checked={selectedIds.has(item.id)}
                     onChange={(event) => {
                       setConfirmRemove(false);
@@ -288,7 +295,7 @@ export function SampleManagerModal({
                   <input
                     type="radio"
                     name="active-managed-sample"
-                    aria-label={`Make ${item.name} active`}
+                    aria-label={t("Make {name} active", { name: item.name })}
                     checked={item.id === activeId}
                     onChange={() => onActivate(item.id)}
                   />
@@ -304,8 +311,8 @@ export function SampleManagerModal({
                 <td className="gl-sample-manager-file" title={item.name}>{item.name}</td>
                 <td>{item.eventCount.toLocaleString()}</td>
                 <td>{item.channelCount}</td>
-                <td className="gl-sample-manager-source" title={item.sourcePath ?? "Individually selected file"}>
-                  {item.sourcePath ?? "Individual file"}
+                <td className="gl-sample-manager-source" title={item.sourcePath ?? t("Individually selected file")}>
+                  {item.sourcePath ?? t("Individual file")}
                 </td>
               </tr>
             ))}
@@ -314,8 +321,8 @@ export function SampleManagerModal({
       </div>
       {confirmRemove ? (
         <div className="gl-sample-manager-confirm" role="alert">
-          <span>Remove {selectedIds.size} selected sample{selectedIds.size === 1 ? "" : "s"} from this workspace?</span>
-          <button type="button" className="gl-btn-ghost" onClick={() => setConfirmRemove(false)}>Cancel</button>
+          <span>{t("Remove {count} selected samples from this workspace?", { count: selectedIds.size })}</span>
+          <button type="button" className="gl-btn-ghost" onClick={() => setConfirmRemove(false)}>{t("Cancel")}</button>
           <button
             type="button"
             className="gl-btn gl-btn-danger"
@@ -328,7 +335,7 @@ export function SampleManagerModal({
               setConfirmRemove(false);
             }}
           >
-            {removing ? "Removing…" : "Remove"}
+            {removing ? t("Removing…") : t("Remove")}
           </button>
         </div>
       ) : (
@@ -339,9 +346,9 @@ export function SampleManagerModal({
             disabled={selectedIds.size === 0}
             onClick={() => setConfirmRemove(true)}
           >
-            Remove selected…
+            {t("Remove selected…")}
           </button>
-          <button type="button" className="gl-btn" onClick={onClose}>Done</button>
+          <button type="button" className="gl-btn" onClick={onClose}>{t("Done")}</button>
         </div>
       )}
     </ModalFrame>
@@ -359,6 +366,7 @@ export function FolderImportModal({
   onCancel: () => void;
   onImport: (ids: readonly string[]) => void;
 }) {
+  const { t } = useI18n();
   const onlyNested = items.length > 0 && items.every((item) => item.relativePath.includes("/"));
   const [includeSubfolders, setIncludeSubfolders] = useState(onlyNested);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set(
@@ -390,9 +398,9 @@ export function FolderImportModal({
   };
 
   return (
-    <ModalFrame title={`Import FCS folder · ${folderName}`}>
+    <ModalFrame title={t("Import FCS folder · {folder}", { folder: folderName })}>
       <div className="gl-folder-import-summary">
-        Found {items.length} FCS file{items.length === 1 ? "" : "s"}. Review this snapshot before adding it to the workspace.
+        {t("Found {count} FCS files. Review this snapshot before adding it to the workspace.", { count: items.length })}
       </div>
       <div className="gl-folder-import-actions">
         <label>
@@ -401,11 +409,11 @@ export function FolderImportModal({
             checked={includeSubfolders}
             onChange={(event) => changeSubfolders(event.target.checked)}
           />
-          Include subfolders
+          {t("Include subfolders")}
         </label>
-        <button type="button" onClick={() => setSelectedIds(new Set(eligible.map((item) => item.id)))}>All</button>
-        <button type="button" onClick={() => setSelectedIds(new Set())}>None</button>
-        <span>{selectedIds.size} selected · {compactNumber.format(selectedBytes)}B</span>
+        <button type="button" onClick={() => setSelectedIds(new Set(eligible.map((item) => item.id)))}>{t("All")}</button>
+        <button type="button" onClick={() => setSelectedIds(new Set())}>{t("None")}</button>
+        <span>{t("{count} selected · {size}B", { count: selectedIds.size, size: compactNumber.format(selectedBytes) })}</span>
       </div>
       <div className="gl-folder-import-list">
         {items.map((item) => {
@@ -426,20 +434,20 @@ export function FolderImportModal({
               />
               <span title={item.relativePath}>{item.relativePath}</span>
               <span>{compactNumber.format(item.size)}B</span>
-              {item.duplicateName && <span className="gl-folder-import-duplicate">name already loaded</span>}
+              {item.duplicateName && <span className="gl-folder-import-duplicate">{t("name already loaded")}</span>}
             </label>
           );
         })}
       </div>
       <div className="gl-modal-actions">
-        <button type="button" className="gl-btn-ghost" onClick={onCancel}>Cancel</button>
+        <button type="button" className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
         <button
           type="button"
           className="gl-btn"
           disabled={selectedIds.size === 0}
           onClick={() => onImport([...selectedIds])}
         >
-          Import {selectedIds.size} file{selectedIds.size === 1 ? "" : "s"}
+          {t("Import {count} files", { count: selectedIds.size })}
         </button>
       </div>
     </ModalFrame>

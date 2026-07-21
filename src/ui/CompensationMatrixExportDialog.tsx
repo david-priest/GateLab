@@ -6,6 +6,7 @@ import {
   serializeCompensationMatrixCsv,
   type CompensationMatrixExportVariant,
 } from "../engine/compensationMatrixExport";
+import { useI18n } from "./i18n";
 
 interface Props {
   readonly profileLabel: string;
@@ -24,6 +25,7 @@ export function CompensationMatrixExportDialog({
   pendingEditCount = 0,
   onClose,
 }: Props) {
+  const { t } = useI18n();
   const [variant, setVariant] = useState<CompensationMatrixExportVariant>("installed");
   const [message, setMessage] = useState<string | null>(null);
   const selectedMatrix = variant === "working" && workingMatrix
@@ -77,15 +79,14 @@ export function CompensationMatrixExportDialog({
         aria-modal="true"
         aria-labelledby="comp-export-title"
       >
-        <div className="gl-modal-title" id="comp-export-title">Export spill matrix</div>
+        <div className="gl-modal-title" id="comp-export-title">{t("Export spill matrix")}</div>
         <p className="gl-comp-export-intro">
-          Coefficients are exported as exact fractions, not the rounded percentages shown in the matrix.
-          Source channels are rows and receiver channels are columns. The CSV can be imported by GateLab or base R.
+          {t("Coefficients are exported as exact fractions, not the rounded percentages shown in the matrix. Source channels are rows and receiver channels are columns. The CSV can be imported by GateLab or base R.")}
         </p>
 
         {workingMatrix && pendingEditCount > 0 && (
           <fieldset className="gl-comp-export-versions">
-            <legend>Matrix version</legend>
+            <legend>{t("Matrix version")}</legend>
             <label>
               <input
                 type="radio"
@@ -94,7 +95,7 @@ export function CompensationMatrixExportDialog({
                 checked={variant === "installed"}
                 onChange={() => setVariant("installed")}
               />
-              <span><strong>{installedLabel}</strong><small>Current applied scientific record</small></span>
+              <span><strong>{installedLabel}</strong><small>{t("Current applied scientific record")}</small></span>
             </label>
             <label>
               <input
@@ -105,26 +106,26 @@ export function CompensationMatrixExportDialog({
                 onChange={() => setVariant("working")}
               />
               <span>
-                <strong>Working draft</strong>
-                <small>{pendingEditCount} pending edit{pendingEditCount === 1 ? "" : "s"}; not yet applied</small>
+                <strong>{t("Working draft")}</strong>
+                <small>{t("{count} pending edits; not yet applied", { count: pendingEditCount })}</small>
               </span>
             </label>
           </fieldset>
         )}
 
         <dl className="gl-comp-export-summary">
-          <div><dt>File</dt><dd>{fileName}</dd></div>
-          <div><dt>Dimensions</dt><dd>{selectedMatrix.sourceChannels.length} sources × {selectedMatrix.receiverChannels.length} receivers</dd></div>
-          <div><dt>Units</dt><dd>Fractions (2.9% is written as 0.029)</dd></div>
+          <div><dt>{t("File")}</dt><dd>{fileName}</dd></div>
+          <div><dt>{t("Dimensions")}</dt><dd>{t("{sources} sources × {receivers} receivers", { sources: selectedMatrix.sourceChannels.length, receivers: selectedMatrix.receiverChannels.length })}</dd></div>
+          <div><dt>{t("Units")}</dt><dd>{t("Fractions (2.9% is written as 0.029)")}</dd></div>
         </dl>
 
         <div className="gl-comp-export-r-head">
           <div>
-            <strong>Import in R</strong>
-            <span>Run after placing the CSV in the R working directory.</span>
+            <strong>{t("Import in R")}</strong>
+            <span>{t("Run after placing the CSV in the R working directory.")}</span>
           </div>
           <button type="button" className="gl-mini-btn" onClick={() => void copyRCode()}>
-            Copy R code
+            {t("Copy R code")}
           </button>
         </div>
         <pre className="gl-comp-export-code"><code>{rSnippet}</code></pre>
@@ -134,8 +135,8 @@ export function CompensationMatrixExportDialog({
           </div>
         )}
         <div className="gl-modal-actions">
-          <button type="button" className="gl-btn-ghost" onClick={onClose}>Cancel</button>
-          <button type="button" className="gl-btn" onClick={downloadCsv}>Download CSV</button>
+          <button type="button" className="gl-btn-ghost" onClick={onClose}>{t("Cancel")}</button>
+          <button type="button" className="gl-btn" onClick={downloadCsv}>{t("Download CSV")}</button>
         </div>
       </div>
     </div>
