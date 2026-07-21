@@ -40,6 +40,10 @@ select:focus-visible,
 input[type="number"] {
   --gl-number-step-fill: linear-gradient(#f5f7fa, #f5f7fa);
   min-height: 26px;
+  /* Editable numeric inputs read left-to-right; read-only stat/table columns keep their own
+     right/center alignment (they are <td>/<output>, not inputs). The compensation matrix cells
+     opt back into centred via `text-align: center !important`. */
+  text-align: left;
   padding-right: 22px !important;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='26' viewBox='0 0 20 26'%3E%3Cpath d='M1.5 13h17M1.5 1v24M7 9.5l3-3 3 3M7 16.5l3 3 3-3' fill='none' stroke='%23485566' stroke-width='1.35' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"), var(--gl-number-step-fill) !important;
   background-repeat: no-repeat !important;
@@ -856,7 +860,7 @@ input[type="number"]::-webkit-outer-spin-button {
   min-height: 0 !important; border-radius: 0; padding: 0 15px 0 2px !important;
   background-size: 14px 22px, 14px 22px !important;
   background-position: right center, right center !important;
-  color: #26384e; font-size: 9.5px; text-align: center; font-variant-numeric: tabular-nums;
+  color: #26384e; font-size: 9.5px; text-align: center !important; font-variant-numeric: tabular-nums;
 }
 .gl-comp-cell-input:hover:not(:disabled) { background-color: var(--hover) !important; }
 .gl-comp-cell-input.is-staged { color: #7a4b00; font-weight: 700; }
@@ -1250,7 +1254,7 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-scales-table th { text-align: left; color: var(--muted); position: sticky; top: 0; background: var(--bg); }
 .gl-scales-table tr.active { background: var(--active); }
 .gl-scale-input {
-  width: 74px; text-align: right; background: var(--bg); color: var(--text);
+  width: 74px; text-align: left; background: var(--bg); color: var(--text);
   border: 1px solid var(--line); border-radius: 4px; padding: 2px 5px; font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
@@ -1380,7 +1384,7 @@ input[type="number"]::-webkit-outer-spin-button {
   padding: 3px 6px;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  text-align: right;
+  text-align: left;
 }
 
 /* Panel tab — channel rename */
