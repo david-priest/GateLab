@@ -590,14 +590,14 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-comp-point-alpha {
   display: grid; width: 310px; grid-template-columns: auto minmax(195px, 1fr) 28px;
   flex: 0 0 310px;
-  align-items: center; gap: 4px; color: var(--muted); font-size: var(--gl-comp-font-sm);
+  align-items: center; gap: 4px; margin-left: 12px; color: var(--muted); font-size: var(--gl-comp-font-sm);
   white-space: nowrap;
 }
 .gl-comp-point-alpha input { width: 100%; margin: 0; }
 .gl-comp-point-alpha output { font-variant-numeric: tabular-nums; text-align: right; }
 .gl-comp-density-colour.gl-density-colour-control {
   display: grid; width: 325px; grid-template-columns: auto minmax(200px, 1fr) 28px;
-  align-items: center; gap: 4px; flex: 0 0 325px; margin-left: 7px;
+  align-items: center; gap: 4px; flex: 0 0 325px; margin-left: 12px;
 }
 .gl-comp-density-colour.gl-density-colour-control input[type="range"] { width: 100%; margin: 0; }
 .gl-comp-staged-actions {
@@ -1328,9 +1328,14 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-scale-val { color: var(--text); font-variant-numeric: tabular-nums; min-width: 30px; }
 
 .gl-ranges { gap: 12px; flex-wrap: wrap; }
-.gl-range-row { display: flex; align-items: center; gap: 4px; }
+.gl-range-row { display: flex; align-items: center; gap: 5px; }
+.gl-range-row .gl-scale-axis {
+  min-width: 14px;
+  max-width: 14px;
+  text-align: center;
+}
 .gl-range-row input[type="number"] {
-  width: 62px;
+  width: 78px;
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--line);

@@ -29,6 +29,27 @@ gh pr list -R david-priest/GateLab
 Stop if the tree contains unrelated WIP or if another public PR overlaps the change. Branch from
 the latest public `origin/master`; never push directly to `master` and never force-push.
 
+## Performance and stability invariant
+
+- New analysis features must not make gating, population selection, channel changes, or gate
+  editing slower. Measure representative interaction latency before and after substantial UI or
+  analysis work; reject unexplained regressions rather than accepting them as feature cost.
+- A tab kept mounted to preserve drafts may not rebuild expensive React trees, plots, masks, or
+  analysis datasets in response to updates from another tab. Isolate hidden trees explicitly and
+  add a regression proving that gating-only updates do not reach them.
+- Live previews, observers, timers, and speculative worker jobs must suspend or cancel when their
+  owning view is hidden. A user-started long-running operation such as Compensation Apply may
+  continue only deliberately, with visible global progress and cancellation controls.
+- For performance-sensitive releases, use a realistic large compensated workspace in the browser
+  and exercise gate selection, population switching, channel selection, vertex editing, and gate
+  dragging. `npm test` and a successful build do not replace this interaction smoke test.
+- Preserve gate coordinates, current selections, workspace state, and assay state across every
+  repaint or optimization. Speed fixes must not weaken the existing snap-back and fidelity tests.
+
+For interaction bugs, add regression coverage for the complete state transition—not merely the
+visual drag frame. Gate edits must remain committed after the D3 engine receives a subsequent
+React payload/repaint. When relevant, cover both workspace-loaded and newly created objects.
+
 ## Releasing merged GateLab-dev runtime changes
 
 1. Confirm the corresponding GateLab-dev PR is merged and identify its exact non-merge commits.
