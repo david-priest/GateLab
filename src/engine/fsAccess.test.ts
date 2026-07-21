@@ -15,13 +15,13 @@ describe("pickFile", () => {
     vi.restoreAllMocks();
   });
 
-  it("opens custom workspaces without an unreliable native MIME filter on first open", async () => {
+  it("opens custom workspace sources without an unreliable native MIME filter on first open", async () => {
     const file = new File([new Uint8Array([0x50, 0x4b])], "example.gatelab");
     const handle = { getFile: vi.fn().mockResolvedValue(file) } as unknown as FileSystemFileHandle;
     const showOpenFilePicker = vi.fn().mockResolvedValue([handle]);
     Object.defineProperty(window, "showOpenFilePicker", { configurable: true, value: showOpenFilePicker });
 
-    const picked = await pickFile(null, "GateLab workspace", { id: "gatelab-open-workspace" });
+    const picked = await pickFileSource(null, "GateLab workspace", { id: "gatelab-open-workspace" });
 
     expect(showOpenFilePicker).toHaveBeenCalledTimes(1);
     expect(showOpenFilePicker).toHaveBeenCalledWith({
@@ -29,7 +29,7 @@ describe("pickFile", () => {
       id: "gatelab-open-workspace",
     });
     expect(picked?.name).toBe("example.gatelab");
-    expect(Array.from(picked?.bytes ?? [])).toEqual([0x50, 0x4b]);
+    expect(picked?.file).toBe(file);
     expect(picked?.handle).toBe(handle);
   });
 

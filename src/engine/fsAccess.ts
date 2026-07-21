@@ -82,13 +82,13 @@ export async function pickFile(
 
 /** Open one file without eagerly duplicating it into a whole-file Uint8Array. */
 export async function pickFileSource(
-  accept: Record<string, string[]>,
+  accept: Record<string, string[]> | null,
   description: string,
   options: PickFileOptions = {},
 ): Promise<PickedFileSource | null> {
   try {
     const [handle] = await window.showOpenFilePicker!({
-      types: [{ description, accept }],
+      ...(accept ? { types: [{ description, accept }] } : {}),
       multiple: false,
       ...(options.id ? { id: options.id } : {}),
     });
