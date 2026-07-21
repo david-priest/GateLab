@@ -10,6 +10,7 @@ import { computePopulationStats, MFI_STATS, type StatType, type ValueSpace } fro
 import { populationTreeOrder } from "../engine/populations";
 import { TreeConnectors } from "./TreeConnectors";
 import { MultiColumnChecklist } from "./MultiColumnChecklist";
+import { useI18n } from "./i18n";
 
 interface SampleRef {
   id: string;
@@ -40,6 +41,7 @@ const COMPARE_METRICS: { key: "count" | "pct_parent" | "pct_total"; label: strin
 ];
 
 export function StatsTab({ samples, activeSampleId, state, derived, defaultChannels, dataRevisionKey }: Props) {
+  const { t } = useI18n();
   const [viewSampleId, setViewSampleId] = useState<string>(() => activeSampleId ?? samples[0]?.id ?? "");
   const [statTypes, setStatTypes] = usePersistedTabState<Set<StatType>>(
     "stats.statTypes",
@@ -158,59 +160,59 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
   };
 
   if (samples.length === 0 || (!isCompare && (!table || table.rows.length === 0))) {
-    return <div className="gl-tab-panel gl-tab-empty">No populations yet — draw a gate to populate the tree.</div>;
+    return <div className="gl-tab-panel gl-tab-empty">{t("No populations yet — draw a gate to populate the tree.")}</div>;
   }
 
   return (
     <div className="gl-tab-panel">
       <div className="gl-tab-head">
-        <h2 className="gl-tab-title">Population statistics</h2>
-        <button className="gl-btn-ghost" onClick={downloadCsv}>Download CSV</button>
+        <h2 className="gl-tab-title">{t("Population statistics")}</h2>
+        <button className="gl-btn-ghost" onClick={downloadCsv}>{t("Download CSV")}</button>
         <button className="gl-btn-ghost" onClick={copyCsv}>
-          {copied ? "Copied ✓" : "Copy CSV"}
+          {copied ? t("Copied ✓") : t("Copy CSV")}
         </button>
       </div>
 
       <div className="gl-stats-opts">
         <div className="gl-stats-opt-group">
-          <span className="gl-stats-opt-label">Sample</span>
+          <span className="gl-stats-opt-label">{t("Sample")}</span>
           <select value={viewSampleId} onChange={(e) => setViewSampleId(e.target.value)} className="gl-field-input" style={{ textAlign: "left", width: "auto" }}>
             {samples.map((e) => (
               <option key={e.id} value={e.id}>
                 {e.name}
-                {e.id === activeSampleId ? " (active)" : ""}
+                {e.id === activeSampleId ? ` (${t("active")})` : ""}
               </option>
             ))}
-            {samples.length > 1 && <option value={COMPARE}>All samples (compare)</option>}
+            {samples.length > 1 && <option value={COMPARE}>{t("All samples (compare)")}</option>}
           </select>
         </div>
         {isCompare ? (
           <div className="gl-stats-opt-group">
-            <span className="gl-stats-opt-label">Metric</span>
+            <span className="gl-stats-opt-label">{t("Metric")}</span>
             {COMPARE_METRICS.map((m) => (
               <label key={m.key} className="gl-check">
                 <input type="radio" name="cmp-metric" checked={compareMetric === m.key} onChange={() => setCompareMetric(m.key)} />
-                {m.label}
+                {t(m.label)}
               </label>
             ))}
           </div>
         ) : (
           <>
             <div className="gl-stats-opt-group">
-              <span className="gl-stats-opt-label">Statistics</span>
+              <span className="gl-stats-opt-label">{t("Statistics")}</span>
               {ALL_STAT_OPTS.map((s) => (
                 <label key={s.key} className="gl-check">
                   <input type="checkbox" checked={statTypes.has(s.key)} onChange={() => toggleStat(s.key)} />
-                  {s.label}
+                  {t(s.label)}
                 </label>
               ))}
             </div>
             <div className="gl-stats-opt-group">
-              <span className="gl-stats-opt-label">MFI space</span>
+              <span className="gl-stats-opt-label">{t("MFI space")}</span>
               {(["raw", "transformed"] as ValueSpace[]).map((v) => (
                 <label key={v} className="gl-check">
                   <input type="radio" name="mfi-space" checked={valueSpace === v} onChange={() => setValueSpace(v)} />
-                  {v === "raw" ? "Raw" : "Transformed"}
+                  {v === "raw" ? t("Raw") : t("Transformed")}
                 </label>
               ))}
             </div>
@@ -221,9 +223,9 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
       {!isCompare && anyMfi && (
         <div className="gl-stats-channel-picker">
           <div className="gl-picker-head">
-            <span className="gl-stats-opt-label">Channels</span>
-            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setChannels(allChannels)}>All</button>
-            <button className="gl-mini-btn" onClick={() => setChannels([])}>None</button>
+            <span className="gl-stats-opt-label">{t("Channels")}</span>
+            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setChannels(allChannels)}>{t("All")}</button>
+            <button className="gl-mini-btn" onClick={() => setChannels([])}>{t("None")}</button>
           </div>
           <MultiColumnChecklist
             items={allChannels}
@@ -242,7 +244,7 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
           <table className="gl-stats-table">
             <thead>
               <tr>
-                <th className="gl-stats-name">Population</th>
+                <th className="gl-stats-name">{t("Population")}</th>
                 {compare.sampleNames.map((n, i) => (
                   <th key={i} className="gl-stats-num" title={n}>{n}</th>
                 ))}
@@ -268,7 +270,7 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
           <table className="gl-stats-table">
             <thead>
               <tr>
-                <th className="gl-stats-name">Population</th>
+                <th className="gl-stats-name">{t("Population")}</th>
                 {table.columns.map((c) => (
                   <th key={c.key} className="gl-stats-num">{colHeader(c)}</th>
                 ))}

@@ -81,6 +81,7 @@ import { CompensationComparisonExportDialog } from "./CompensationComparisonExpo
 import { CompensationMatrixExportDialog } from "./CompensationMatrixExportDialog";
 import { usePersistedTabState } from "./tabState";
 import { DensityColourControl } from "./DensityColourControl";
+import { useI18n } from "./i18n";
 
 const DensityColorPowerContext = createContext(DEFAULT_DENSITY_COLOR_POWER);
 const CompensationPointAlphaContext = createContext(0.85);
@@ -1284,6 +1285,7 @@ function CompensationTabImpl({
   densityColorPower = DEFAULT_DENSITY_COLOR_POWER,
   onDensityColorPowerChange = () => undefined,
 }: Props) {
+  const { t } = useI18n();
   const installedStatus = sample.compensatedLayerStatus();
   const installedMetadata = installedStatus.state === "missing" ? null : installedStatus.metadata;
   const profileMetadata = installedMetadata?.runtimeIdentity === "profile" ? installedMetadata : null;
@@ -2811,16 +2813,16 @@ function CompensationTabImpl({
       baselineCoefficient !== null && installedCoefficient !== null &&
       (profileRecord?.recordType === "revision" || baselineCoefficient !== installedCoefficient)
     ) {
-      historyEntries.push({ label: "Baseline", value: baselineCoefficient });
+      historyEntries.push({ label: t("Baseline"), value: baselineCoefficient });
     }
-    if (installedCoefficient !== null) historyEntries.push({ label: "Installed", value: installedCoefficient });
-    if (stagedCoefficient !== undefined) historyEntries.push({ label: "Staged", value: stagedCoefficient });
+    if (installedCoefficient !== null) historyEntries.push({ label: t("Installed"), value: installedCoefficient });
+    if (stagedCoefficient !== undefined) historyEntries.push({ label: t("Staged"), value: stagedCoefficient });
     const flaggedPairIndex = flaggedPairs.findIndex(({ pairKey }) => pairKey === selectedPairKey);
     return (
       <section className={`gl-comp-inspector${compactGlobal ? " is-global" : ""}`} aria-labelledby="comp-selected-heading">
         <div className="gl-comp-panel-head gl-comp-inspector-head">
           <div>
-            <h3 id="comp-selected-heading">Selected coefficient</h3>
+            <h3 id="comp-selected-heading">{t("Selected coefficient")}</h3>
             {!compactGlobal && <span>
               {hoveredPairKey
                 ? "Hover preview · click to pin this pair."
@@ -3098,7 +3100,7 @@ function CompensationTabImpl({
             <p className="gl-hint">{matrixView!.coefficientNote}</p>
           </div>
         ) : (
-          <div className="gl-comp-inspector-empty">No coefficient selected.</div>
+          <div className="gl-comp-inspector-empty">{t("No coefficient selected.")}</div>
         )}
       </section>
     );
@@ -3169,7 +3171,7 @@ function CompensationTabImpl({
     >
       <div className={`gl-comp-overview${workspaceView === "global" ? " is-global-scan" : ""}`}>
         <div className="gl-comp-overview-title">
-          <h2 className="gl-tab-title">Compensation</h2>
+          <h2 className="gl-tab-title">{t("Compensation")}</h2>
           {!profileMetadata && <span className="gl-comp-method">{method}</span>}
         </div>
         {profileMetadata ? (
@@ -3182,8 +3184,8 @@ function CompensationTabImpl({
             <span className={`gl-comp-status-dot${installedStatus.state === "ready" ? " is-ready" : " is-stale"}`} aria-hidden="true" />
             <span className="gl-sr-only">{profileMetadata.kind === "cytof-spillover" ? "CyTOF" : "Flow"} compensation installed. Installed compensation profile. </span>
             <strong>{compactProfileSource}</strong>
-            <span>{method} · {channelCount} ch · {installedStatus.state === "ready" ? "Ready" : "Unavailable"}</span>
-            <em>{compensationOn ? "Comp active" : "Original active"}</em>
+            <span>{method} · {channelCount} ch · {installedStatus.state === "ready" ? t("Ready") : t("Unavailable")}</span>
+            <em>{compensationOn ? t("Comp active") : t("Original active")}</em>
           </div>
         ) : (
           <span
@@ -3201,7 +3203,7 @@ function CompensationTabImpl({
             disabled={applyBusy}
             onClick={() => cytofFileRef.current?.click()}
           >
-            Replace matrix…
+            {t("Replace matrix…")}
           </button>
         )}
         {applyWorkerCount !== undefined && applyWorkerLimit !== undefined && onApplyWorkerCountChange && (
@@ -3209,7 +3211,7 @@ function CompensationTabImpl({
             className="gl-comp-worker-control"
             title="Event-parallel Apply workers. The aggregate memory budget stays fixed; more workers are not always faster."
           >
-            <span>Apply workers</span>
+            <span>{t("Apply workers")}</span>
             <select
               aria-label="Compensation Apply worker count"
               value={applyWorkerCount}
@@ -3224,14 +3226,14 @@ function CompensationTabImpl({
           </label>
         )}
         <label className="gl-comp-review-population">
-          <span>Review population</span>
+          <span>{t("Review population")}</span>
           <select
             aria-label="Compensation review population"
             value={activeReviewPopulation?.id ?? "all"}
             disabled={sweepProgress !== null || boundsPreviewPairKey !== null}
             onChange={(event) => setReviewPopulationId(event.currentTarget.value)}
           >
-            <option value="all">All Events</option>
+            <option value="all">{t("All Events")}</option>
             {reviewPopulations.map((population) => (
               <option key={population.id} value={population.id}>
                 {`${"· ".repeat(population.depth)}${population.name} (${population.eventCount.toLocaleString()})`}
@@ -3247,7 +3249,7 @@ function CompensationTabImpl({
             className="gl-comp-preview-events"
             title="Controls the frozen event set shown in the selected-pair Original and comparison biplots. Applying compensation still processes every event."
           >
-            <span>Pair preview</span>
+            <span>{t("Pair preview")}</span>
             <select
               aria-label="Compensation pair preview event count"
               value={String(resolvedPairPreviewEventLimit)}
@@ -3260,14 +3262,14 @@ function CompensationTabImpl({
               {PAIR_PREVIEW_EVENT_LIMITS.map((limit) => (
                 <option key={limit} value={limit}>{limit.toLocaleString()} events</option>
               ))}
-              <option value="all">All available</option>
+              <option value="all">{t("All available")}</option>
             </select>
             <small>
               Showing {reviewBiplotEventIndices.length.toLocaleString()} of {reviewEventCount.toLocaleString()}; Apply always uses all events.
             </small>
           </label>
         )}
-        {canToggle && <span className="gl-comp-global-layer-note">Assay selection in the top bar applies to every tab.</span>}
+        {canToggle && <span className="gl-comp-global-layer-note">{t("Assay selection in the top bar applies to every tab.")}</span>}
       </div>
 
       {sample.instrument === "cytof" && (
@@ -3290,7 +3292,7 @@ function CompensationTabImpl({
       {sample.instrument === "flow" && spill && !profileMetadata && (
         <section className="gl-comp-flow-enable" aria-labelledby="comp-flow-enable-heading">
           <div>
-            <strong id="comp-flow-enable-heading">Embedded FCS matrix</strong>
+            <strong id="comp-flow-enable-heading">{t("Embedded FCS matrix")}</strong>
             <span>
               Install this exact matrix as the immutable baseline to edit coefficients and preview their effect.
             </span>
@@ -3329,7 +3331,7 @@ function CompensationTabImpl({
               disabled={!onApplyProfile || (hasExistingGates && !gateRecomputeAcknowledged)}
               onClick={() => void enableEmbeddedFlowEditing()}
             >
-              Enable matrix editing
+              {t("Enable matrix editing")}
             </button>
           )}
         </section>
@@ -3339,7 +3341,7 @@ function CompensationTabImpl({
         <section className="gl-comp-cytof-import" aria-labelledby="comp-cytof-import-heading">
           <div className="gl-comp-panel-head gl-comp-import-head">
             <div>
-              <h3 id="comp-cytof-import-heading">CyTOF spillover matrix</h3>
+              <h3 id="comp-cytof-import-heading">{t("CyTOF spillover matrix")}</h3>
               <span>Linear counts → non-negative least squares → arcsinh display</span>
             </div>
             <div className="gl-comp-import-actions">
@@ -3349,7 +3351,7 @@ function CompensationTabImpl({
                 disabled={applyBusy}
                 onClick={() => cytofFileRef.current?.click()}
               >
-                {cytofDraft ? "Choose another matrix…" : "Import matrix…"}
+                {cytofDraft ? t("Choose another matrix…") : t("Import matrix…")}
               </button>
             </div>
           </div>
@@ -3366,15 +3368,15 @@ function CompensationTabImpl({
                   </span>
                 </div>
                 <dl>
-                  <div><dt>Exact matches</dt><dd>{cytofCompatibility.matchedChannels.length}</dd></div>
-                  <div><dt>Included</dt><dd>{cytofCompatibility.includedChannels.length}</dd></div>
-                  <div><dt>Not in FCS</dt><dd>{cytofCompatibility.matrixOnlyChannels.length}</dd></div>
+                  <div><dt>{t("Exact matches")}</dt><dd>{cytofCompatibility.matchedChannels.length}</dd></div>
+                  <div><dt>{t("Included")}</dt><dd>{cytofCompatibility.includedChannels.length}</dd></div>
+                  <div><dt>{t("Not in FCS")}</dt><dd>{cytofCompatibility.matrixOnlyChannels.length}</dd></div>
                 </dl>
               </div>
 
               <div className="gl-comp-channel-head">
                 <div>
-                  <h4>Channels included in NNLS</h4>
+                  <h4>{t("Channels included in NNLS")}</h4>
                   <span>Exact, case-sensitive <code>$PnN</code> matching; unchecked channels pass through unchanged.</span>
                 </div>
                 <div>
@@ -3384,7 +3386,7 @@ function CompensationTabImpl({
                     disabled={applyBusy}
                     onClick={() => setIncludedCytofChannels(new Set(cytofCompatibility.matchedChannels))}
                   >
-                    All matched
+                    {t("All matched")}
                   </button>
                   <button
                     type="button"
@@ -3392,7 +3394,7 @@ function CompensationTabImpl({
                     disabled={applyBusy}
                     onClick={() => setIncludedCytofChannels(new Set())}
                   >
-                    None
+                    {t("None")}
                   </button>
                 </div>
               </div>
@@ -3408,7 +3410,7 @@ function CompensationTabImpl({
                         onChange={(event) => setCytofChannelIncluded(pnn, event.currentTarget.checked)}
                       />
                       <span>{channelDisplayForPnn(sample, pnn).combined}</span>
-                      {!matched && <small>not matched</small>}
+                      {!matched && <small>{t("not matched")}</small>}
                     </label>
                   );
                 })}
@@ -3453,7 +3455,7 @@ function CompensationTabImpl({
                     ? visibleApplyProgress
                       ? `${visibleApplyProgress.phase === "cancelling" ? "Cancelling" : visibleApplyProgress.phase === "preparing" ? "Preparing" : "Applying"}… ${Math.round(visibleApplyProgress.fraction * 100)}% (${visibleApplyProgress.processedEvents.toLocaleString()} / ${visibleApplyProgress.totalEvents.toLocaleString()} events)`
                       : "Preparing compensation…"
-                    : "The Original assay is retained and can be restored at any time."}
+                    : t("The Original assay is retained and can be restored at any time.")}
                 </div>
                 {applyBusy ? (
                   <button
@@ -3475,7 +3477,7 @@ function CompensationTabImpl({
                     }
                     onClick={() => void applyCytofProfile()}
                   >
-                    Apply NNLS compensation
+                    {t("Apply NNLS compensation")}
                   </button>
                 )}
               </div>
@@ -3520,7 +3522,7 @@ function CompensationTabImpl({
               setWorkspaceView("matrix");
             }}
           >
-            Matrix
+            {t("Matrix")}
           </button>
           <button
             type="button"
@@ -3532,7 +3534,7 @@ function CompensationTabImpl({
               setWorkspaceView("global");
             }}
           >
-            Global inspector
+            {t("Global inspector")}
           </button>
           <button
             type="button"
@@ -3544,13 +3546,13 @@ function CompensationTabImpl({
               setWorkspaceView("attention");
             }}
           >
-            Flagged{flaggedPairs.length > 0 ? ` (${flaggedPairs.length})` : ""}
+            {t("Flagged")}{flaggedPairs.length > 0 ? ` (${flaggedPairs.length})` : ""}
           </button>
           <label
             className="gl-comp-density-smoothing"
             title="Blur radius for every compensation biplot; both assay layers always use the same setting"
           >
-            <span>Density smooth</span>
+            <span>{t("Density smooth")}</span>
             <input
               type="range"
               min="1"
@@ -3566,7 +3568,7 @@ function CompensationTabImpl({
             className="gl-comp-point-alpha"
             title="Point opacity for every compensation biplot"
           >
-            <span>Point alpha</span>
+            <span>{t("Point alpha")}</span>
             <input
               type="range"
               min="0.1"
@@ -3596,7 +3598,7 @@ function CompensationTabImpl({
                   setActionMessage(null);
                 }}
               >
-                Discard
+                {t("Discard")}
               </button>
               <button
                 type="button"
@@ -3604,7 +3606,7 @@ function CompensationTabImpl({
                 disabled={applyBusy || sweepProgress !== null || boundsPreviewPairKey !== null || !onApplyProfile}
                 onClick={() => void applyStagedMatrix()}
               >
-                Apply revised matrix
+                {t("Apply revised matrix")}
               </button>
             </div>
           )}
@@ -3620,24 +3622,24 @@ function CompensationTabImpl({
           <section className="gl-comp-matrix-panel" aria-labelledby="comp-matrix-heading">
             <div className="gl-comp-panel-head gl-comp-matrix-head">
               <div>
-                <h3 id="comp-matrix-heading">{matrixView.title}</h3>
+                <h3 id="comp-matrix-heading">{t(matrixView.title)}</h3>
                 <span>{matrixView.subtitle}</span>
               </div>
               <div className="gl-comp-matrix-head-actions">
                 {flowInlineMatrix && (
-                  <span className="gl-comp-inline-edit-note">Edit cells directly (%)</span>
+                  <span className="gl-comp-inline-edit-note">{t("Edit cells directly (%)")}</span>
                 )}
-                <div className="gl-comp-matrix-legend" aria-label="Matrix colour key">
-                  <span><i className="is-diagonal" aria-hidden="true" />Diagonal (self)</span>
-                  <span><i className="is-positive" aria-hidden="true" />Positive spill</span>
-                  <span><i className="is-negative" aria-hidden="true" />Negative</span>
+                <div className="gl-comp-matrix-legend" aria-label={t("Matrix colour key")}>
+                  <span><i className="is-diagonal" aria-hidden="true" />{t("Diagonal (self)")}</span>
+                  <span><i className="is-positive" aria-hidden="true" />{t("Positive spill")}</span>
+                  <span><i className="is-negative" aria-hidden="true" />{t("Negative")}</span>
                 </div>
                 <button
                   type="button"
                   className="gl-mini-btn"
                   onClick={() => setExportDialogOpen(true)}
                 >
-                  Export CSV…
+                  {t("Export CSV…")}
                 </button>
               </div>
             </div>
@@ -3648,9 +3650,9 @@ function CompensationTabImpl({
                   width: 112 + matrixView.receiverAxisKeys.length * matrixCellSize,
                 }}
               >
-                <div className="gl-comp-matrix-axis gl-comp-matrix-receiver-axis">Receiver channels →</div>
+                <div className="gl-comp-matrix-axis gl-comp-matrix-receiver-axis">{t("Receiver channels →")}</div>
                 <div className="gl-comp-matrix-body">
-                  <div className="gl-comp-matrix-axis gl-comp-matrix-source-axis">Source channels ↓</div>
+                  <div className="gl-comp-matrix-axis gl-comp-matrix-source-axis">{t("Source channels ↓")}</div>
                   <div className="gl-comp-matrix-labelled">
                     <div className="gl-comp-matrix-corner" aria-hidden="true">%</div>
                     <div
@@ -4305,14 +4307,14 @@ function CompensationTabImpl({
                 aria-controls={`comp-drawer-${id}`}
                 onClick={() => toggleDrawer(id)}
               >
-                <span>{label}{id === "review" && reviewItems.length > 0 ? ` (${reviewItems.length})` : ""}</span>
+                <span>{t(label)}{id === "review" && reviewItems.length > 0 ? ` (${reviewItems.length})` : ""}</span>
                 <span aria-hidden="true">{openDrawers[id] ? "▾" : "▸"}</span>
               </button>
             ))}
           </div>
           {openDrawers.evidence && (
             <section id="comp-drawer-evidence" role="region" aria-labelledby="comp-drawer-evidence-button" className="gl-comp-drawer-region">
-              <h3>Matrix evidence</h3>
+              <h3>{t("Matrix evidence")}</h3>
               {profileMetadata ? (
                 profileRecord ? (
                   <>
@@ -4369,7 +4371,7 @@ function CompensationTabImpl({
           )}
           {openDrawers.review && (
             <section id="comp-drawer-review" role="region" aria-labelledby="comp-drawer-review-button" className="gl-comp-drawer-region">
-              <h3>Review queue</h3>
+              <h3>{t("Review queue")}</h3>
               <div className="gl-comp-review-section">
                 <h4>Matrix integrity</h4>
                 {reviewItems.length > 0 ? (

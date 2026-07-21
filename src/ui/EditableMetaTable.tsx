@@ -5,6 +5,7 @@
 
 import { useRef, useState } from "react";
 import type { MetadataColumn } from "../engine/metadata";
+import { useI18n } from "./i18n";
 
 export interface MetaRow {
   id: string; // join key: sample id or population id
@@ -35,6 +36,7 @@ export function EditableMetaTable({
   onSetCell, onAddColumn, onRenameColumn, onDeleteColumn, onImport,
   templateFilename, templateKeyHeader, hint, emptyMessage,
 }: Props) {
+  const { t } = useI18n();
   const fileRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState<Record<string, string>>({}); // "cell:id:field" | "hdr:field" → live text
   const cellKey = (id: string, f: string) => `cell:${id}:${f}`;
@@ -62,11 +64,11 @@ export function EditableMetaTable({
       <div className="gl-tab-head">
         <h2 className="gl-tab-title">{title}</h2>
         <div style={{ display: "flex", gap: 8 }}>
-          <button className="gl-btn-ghost" onClick={() => onAddColumn(`field${columns.length + 1}`)}>+ Field</button>
-          <button className="gl-btn-ghost" onClick={downloadTemplate}>Export template</button>
+          <button className="gl-btn-ghost" onClick={() => onAddColumn(`field${columns.length + 1}`)}>{t("+ Field")}</button>
+          <button className="gl-btn-ghost" onClick={downloadTemplate}>{t("Export template")}</button>
           {onImport && (
             <>
-              <button className="gl-btn-ghost" onClick={() => fileRef.current?.click()}>Import CSV/TSV…</button>
+              <button className="gl-btn-ghost" onClick={() => fileRef.current?.click()}>{t("Import CSV/TSV…")}</button>
               <input
                 ref={fileRef}
                 type="file"
@@ -99,7 +101,7 @@ export function EditableMetaTable({
                         onBlur={(e) => { const v = e.currentTarget.value.trim(); if (v && v !== c.name) onRenameColumn(c.name, v); clear(hdrKey(c.name)); }}
                         onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
                       />
-                      <button className="gl-meta-del" title="Delete field" onClick={() => onDeleteColumn(c.name)}>×</button>
+                      <button className="gl-meta-del" title={t("Delete field")} onClick={() => onDeleteColumn(c.name)}>×</button>
                     </div>
                   </th>
                 ))}

@@ -4,6 +4,7 @@
 // Card click → selectGate (gate_list_click). Checkbox → toggleGateSelect.
 
 import type { CoreState, Derived, Action } from "../store";
+import { useI18n } from "./i18n";
 
 interface Props {
   state: CoreState;
@@ -14,6 +15,7 @@ interface Props {
 }
 
 export function GateList({ state, derived, dispatch, labelForKey = (k) => k }: Props) {
+  const { t } = useI18n();
   const { gates, gate_order, selected_gate_id, selected_gate_ids } = state;
   const checked = new Set(selected_gate_ids);
   const ids = gate_order.length ? gate_order : Object.keys(gates);
@@ -21,7 +23,7 @@ export function GateList({ state, derived, dispatch, labelForKey = (k) => k }: P
   if (ids.length === 0) {
     return (
       <div className="gate-list-panel">
-        <em style={{ color: "#999", fontSize: 12 }}>No gates. Draw one using the toolbar.</em>
+        <em style={{ color: "#999", fontSize: 12 }}>{t("No gates. Draw one using the toolbar.")}</em>
       </div>
     );
   }
@@ -35,11 +37,11 @@ export function GateList({ state, derived, dispatch, labelForKey = (k) => k }: P
         const isQuad = gate.gate_type === "quadrant";
         const counts = derived.gateCounts[gid];
         const countText = isQuad
-          ? "4 populations"
+          ? t("4 populations")
           : counts && counts.event_count != null
             ? `${counts.event_count.toLocaleString()} (${counts.percent_of_parent}%)`
             : "";
-        const chText = `${labelForKey(gate.x_channel)} / ${labelForKey(gate.y_channel)}${isQuad ? "  · quadrant" : ""}`;
+        const chText = `${labelForKey(gate.x_channel)} / ${labelForKey(gate.y_channel)}${isQuad ? `  · ${t("quadrant")}` : ""}`;
         return (
           <div
             key={gid}

@@ -8,6 +8,7 @@ import type { NewGate } from "../plots/GatingPlot";
 import type { Sample } from "../engine/sample";
 import type { Action } from "../store";
 import type { PopulationMap, Vertex } from "../engine/models";
+import { useI18n } from "./i18n";
 
 interface Props {
   pending: NewGate;
@@ -122,9 +123,10 @@ function ParentSelect({
   value: string;
   onChange: (v: string) => void;
 }) {
+  const { t } = useI18n();
   return (
     <label className="gl-modal-field">
-      Parent population:
+      {t("Parent population:")}
       <select value={value} onChange={(e) => onChange(e.target.value)}>
         {choices.map((c) => (
           <option key={c.id} value={c.id}>
@@ -149,6 +151,7 @@ function GateModal({
   onCancel: () => void;
   onConfirm: (name: string, createPop: boolean, popName: string, parentId: string) => void;
 }) {
+  const { t } = useI18n();
   const [name, setName] = useState("");
   const [createPop, setCreatePop] = useState(false);
   const [popName, setPopName] = useState("");
@@ -161,9 +164,9 @@ function GateModal({
   };
 
   return (
-    <ModalShell title="Name this gate">
+    <ModalShell title={t("Name this gate")}>
       <label className="gl-modal-field">
-        Gate name:
+        {t("Gate name:")}
         <input
           autoFocus
           value={name}
@@ -175,12 +178,12 @@ function GateModal({
       </label>
       <label className="gl-modal-check">
         <input type="checkbox" checked={createPop} onChange={(e) => setCreatePop(e.target.checked)} />
-        Also create a population from this gate
+        {t("Also create a population from this gate")}
       </label>
       {createPop && (
         <>
           <label className="gl-modal-field">
-            New population name:
+            {t("New population name:")}
             <input
               value={popName}
               onChange={(e) => {
@@ -197,10 +200,10 @@ function GateModal({
       </div>
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={onCancel}>
-          Cancel
+          {t("Cancel")}
         </button>
         <button className="gl-btn" onClick={() => onConfirm(name, createPop, popName, parentId)}>
-          Create
+          {t("Create")}
         </button>
       </div>
     </ModalShell>
@@ -220,25 +223,25 @@ function QuadrantModal({
   onCancel: () => void;
   onConfirm: (prefix: string, parentId: string) => void;
 }) {
+  const { t } = useI18n();
   const [prefix, setPrefix] = useState("");
   const [parentId, setParentId] = useState(defaultParent);
   return (
-    <ModalShell title="Create quadrant gate">
+    <ModalShell title={t("Create quadrant gate")}>
       <div className="gl-modal-note">
-        Splits {pending.x_channel} × {pending.y_channel} into four quadrant populations at the
-        crosshair.
+        {t("Splits {x} × {y} into four quadrant populations at the crosshair.", { x: pending.x_channel, y: pending.y_channel })}
       </div>
       <label className="gl-modal-field">
-        Name prefix (optional):
+        {t("Name prefix (optional):")}
         <input autoFocus value={prefix} onChange={(e) => setPrefix(e.target.value)} />
       </label>
       <ParentSelect choices={parentChoices} value={parentId} onChange={setParentId} />
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={onCancel}>
-          Cancel
+          {t("Cancel")}
         </button>
         <button className="gl-btn" onClick={() => onConfirm(prefix, parentId)}>
-          Create 4 populations
+          {t("Create 4 populations")}
         </button>
       </div>
     </ModalShell>

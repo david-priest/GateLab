@@ -8,12 +8,14 @@ import { populationTreeOrder } from "../engine/populations";
 import type { FcsExportAssay } from "../engine/fcsExport";
 import { analyzeGatingMLQuadrantOmissions, type GatingMLFormat } from "../engine/gatingmlExport";
 import type { GatingImportMode } from "../engine/gatingMerge";
+import { useI18n } from "./i18n";
 
 function ModalShell({ title, children }: { title: string; children: React.ReactNode }) {
+  const { t } = useI18n();
   return (
     <div className="gl-modal-backdrop">
       <div className="gl-modal">
-        <div className="gl-modal-title">{title}</div>
+        <div className="gl-modal-title">{t(title)}</div>
         {children}
       </div>
     </div>
@@ -44,22 +46,21 @@ export function GatingMlImportModal({
   onCancel: () => void;
   onImport: (mode: GatingImportMode) => void;
 }) {
+  const { t } = useI18n();
   const [mode, setMode] = useState<GatingImportMode>(
     hasExistingStrategy && !mergeBlockedReason ? "merge" : "replace",
   );
 
   return (
     <ModalShell title="Import GatingML">
-      <div className="gl-modal-note">
-        Parsed {nGates} gate{nGates === 1 ? "" : "s"} and {nPopulations} population{nPopulations === 1 ? "" : "s"} from {sourceLabel}.
-      </div>
+      <div className="gl-modal-note">{t("Parsed {gates} gates and {populations} populations from {source}.", { gates: nGates, populations: nPopulations, source: sourceLabel })}</div>
       {compensationNote && (
         <div className={compensationNeedsConfirmation ? "gl-modal-warning" : "gl-modal-note"} role={compensationNeedsConfirmation ? "alert" : undefined}>
           {compensationNote}
         </div>
       )}
       <div className="gl-modal-field">
-        <span>How should the imported strategy be applied?</span>
+        <span>{t("How should the imported strategy be applied?")}</span>
         <label style={{ display: "flex", alignItems: "flex-start", gap: 7, color: "var(--text)" }}>
           <input
             type="radio"
@@ -70,9 +71,9 @@ export function GatingMlImportModal({
             onChange={() => setMode("merge")}
           />
           <span>
-            <strong>Merge with current strategy{hasExistingStrategy ? " (recommended)" : ""}</strong><br />
+            <strong>{t(hasExistingStrategy ? "Merge with current strategy (recommended)" : "Merge with current strategy")}</strong><br />
             <span className="gl-modal-note">
-              Keep current gates and populations; add imported top-level populations beneath {currentRootName}. Scientific labels are preserved.
+              {t("Keep current gates and populations; add imported top-level populations beneath {root}. Scientific labels are preserved.", { root: currentRootName })}
             </span>
           </span>
         </label>
@@ -85,15 +86,15 @@ export function GatingMlImportModal({
             onChange={() => setMode("replace")}
           />
           <span>
-            <strong>Replace current strategy</strong><br />
-            <span className="gl-modal-note">Remove the current gates and populations and use the imported hierarchy.</span>
+            <strong>{t("Replace current strategy")}</strong><br />
+            <span className="gl-modal-note">{t("Remove the current gates and populations and use the imported hierarchy.")}</span>
           </span>
         </label>
       </div>
       {mergeBlockedReason && <div className="gl-modal-warning" role="alert">{mergeBlockedReason}</div>}
       <div className="gl-modal-actions">
-        <button className="gl-btn-ghost" onClick={onCancel}>Cancel</button>
-        <button className="gl-btn" onClick={() => onImport(mode)}>Import</button>
+        <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
+        <button className="gl-btn" onClick={() => onImport(mode)}>{t("Import")}</button>
       </div>
     </ModalShell>
   );
@@ -109,6 +110,7 @@ export function GatingMlExportModal({
   onCancel: () => void;
   onExport: (format: GatingMLFormat) => void;
 }) {
+  const { t } = useI18n();
   const [format, setFormat] = useState<GatingMLFormat>("standard");
   const quadrantOmissions = analyzeGatingMLQuadrantOmissions(state.gates, state.populations);
   const nestedOrPopulations = Object.values(state.populations).filter(
@@ -123,16 +125,16 @@ export function GatingMlExportModal({
   return (
     <ModalShell title="Export GatingML">
       <label className="gl-modal-field">
-        <span>Format</span>
+        <span>{t("Format")}</span>
         <select value={format} onChange={(e) => setFormat(e.target.value as GatingMLFormat)}>
-          <option value="standard">Standard — GateLab / GateLabR interchange</option>
-          <option value="cytobank">Cytobank-compatible</option>
+          <option value="standard">{t("Standard — GateLab / GateLabR interchange")}</option>
+          <option value="cytobank">{t("Cytobank-compatible")}</option>
         </select>
       </label>
       <div className="gl-modal-note">
         {format === "standard"
-          ? "Preserves the population hierarchy and AND/OR logic for GateLab and GateLabR."
-          : "Uses Cytobank channel names and Boolean-gate metadata for Cytobank import."}
+          ? t("Preserves the population hierarchy and AND/OR logic for GateLab and GateLabR.")
+          : t("Uses Cytobank channel names and Boolean-gate metadata for Cytobank import.")}
       </div>
       {quadrantOmissions.gateIds.length > 0 && (
         <div className="gl-modal-warning" role="alert">
@@ -149,8 +151,8 @@ export function GatingMlExportModal({
         </div>
       )}
       <div className="gl-modal-actions">
-        <button className="gl-btn-ghost" onClick={onCancel}>Cancel</button>
-        <button className="gl-btn" disabled={cytobankBlocked} onClick={() => onExport(format)}>Export</button>
+        <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
+        <button className="gl-btn" disabled={cytobankBlocked} onClick={() => onExport(format)}>{t("Export")}</button>
       </div>
     </ModalShell>
   );
@@ -168,14 +170,15 @@ export function MovePopsModal({
   onCancel: () => void;
   onConfirm: (parentId: string) => void;
 }) {
+  const { t } = useI18n();
   const order = populationTreeOrder(state.populations, state.root_population_id ?? null);
   const moving = new Set(ids);
   const candidates = order.filter(({ popId }) => !moving.has(popId) && ids.every((id) => !wouldCreateCycle(state.populations, id, popId)));
   const [parentId, setParentId] = useState(candidates[0]?.popId ?? "");
   return (
-    <ModalShell title={`Move ${ids.length} population${ids.length === 1 ? "" : "s"}`}>
+    <ModalShell title={t("Move {count} populations", { count: ids.length })}>
       <label className="gl-modal-field">
-        <span>New parent</span>
+        <span>{t("New parent")}</span>
         <select value={parentId} onChange={(e) => setParentId(e.target.value)}>
           {candidates.map(({ popId, depth }) => (
             <option key={popId} value={popId}>{" ".repeat(depth * 2)}{state.populations[popId]?.name ?? popId}</option>
@@ -183,8 +186,8 @@ export function MovePopsModal({
         </select>
       </label>
       <div className="gl-modal-actions">
-        <button className="gl-btn-ghost" onClick={onCancel}>Cancel</button>
-        <button className="gl-btn" disabled={!parentId} onClick={() => parentId && onConfirm(parentId)}>Move</button>
+        <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
+        <button className="gl-btn" disabled={!parentId} onClick={() => parentId && onConfirm(parentId)}>{t("Move")}</button>
       </div>
     </ModalShell>
   );
@@ -208,6 +211,7 @@ export function FcsExportModal({
   onCancel: () => void;
   onExport: (popIds: string[], assay: FcsExportAssay, scope: "active" | "combined" | "split") => void;
 }) {
+  const { t } = useI18n();
   const order = populationTreeOrder(state.populations, state.root_population_id ?? null);
   const allIds = order.map((o) => o.popId);
   const [checked, setChecked] = useState<Set<string>>(() => new Set(initialPopIds));
@@ -224,13 +228,13 @@ export function FcsExportModal({
     <ModalShell title="Export FCS">
       <div className="gl-modal-field">
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-          <span>Populations</span>
-          <button className="gl-btn-ghost" style={{ marginLeft: "auto" }} onClick={() => setChecked(new Set(allIds))}>Select all</button>
-          <button className="gl-btn-ghost" onClick={() => setChecked(new Set())}>None</button>
-          <span style={{ opacity: 0.7, minWidth: 66, textAlign: "right" }}>{checked.size} selected</span>
+          <span>{t("Populations")}</span>
+          <button className="gl-btn-ghost" style={{ marginLeft: "auto" }} onClick={() => setChecked(new Set(allIds))}>{t("Select all")}</button>
+          <button className="gl-btn-ghost" onClick={() => setChecked(new Set())}>{t("None")}</button>
+          <span style={{ opacity: 0.7, minWidth: 66, textAlign: "right" }}>{t("{count} selected", { count: checked.size })}</span>
         </div>
         <div style={{ maxHeight: 260, overflow: "auto", border: "1px solid var(--gl-border, #ccc)", borderRadius: 4, padding: "4px 6px" }}>
-          {allIds.length === 0 && <em style={{ opacity: 0.6 }}>No populations.</em>}
+          {allIds.length === 0 && <em style={{ opacity: 0.6 }}>{t("No populations.")}</em>}
           {order.map(({ popId, depth }) => (
             <label key={popId} style={{ display: "flex", alignItems: "center", gap: 6, paddingLeft: depth * 14, cursor: "pointer" }}>
               <input type="checkbox" checked={checked.has(popId)} onChange={() => toggle(popId)} />
@@ -240,11 +244,11 @@ export function FcsExportModal({
         </div>
       </div>
       <label className="gl-modal-field">
-        <span>Values</span>
+        <span>{t("Values")}</span>
         <select value={assay} onChange={(e) => setAssay(e.target.value as FcsExportAssay)}>
-          <option value="original">Original measurements (uncompensated)</option>
-          <option value="compensated">Compensated linear measurements</option>
-          <option value="display">Transformed display values</option>
+          <option value="original">{t("Original measurements (uncompensated)")}</option>
+          <option value="compensated">{t("Compensated linear measurements")}</option>
+          <option value="display">{t("Transformed display values")}</option>
         </select>
       </label>
       <div className="gl-modal-note">
@@ -255,11 +259,11 @@ export function FcsExportModal({
       </div>
       {samplesCount > 1 && (
         <label className="gl-modal-field">
-          <span>Samples</span>
+          <span>{t("Samples")}</span>
           <select value={scope} onChange={(e) => setScope(e.target.value as typeof scope)}>
-            <option value="active">this sample</option>
-            <option value="combined">all (combined)</option>
-            <option value="split">all (split zip)</option>
+            <option value="active">{t("this sample")}</option>
+            <option value="combined">{t("all (combined)")}</option>
+            <option value="split">{t("all (split zip)")}</option>
           </select>
         </label>
       )}
@@ -271,9 +275,9 @@ export function FcsExportModal({
         </div>
       )}
       <div className="gl-modal-actions">
-        <button className="gl-btn-ghost" onClick={onCancel}>Cancel</button>
+        <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
         <button className="gl-btn" disabled={checked.size === 0} onClick={() => onExport([...checked], assay, scope)}>
-          Export{checked.size > 1 ? ` (${checked.size})` : ""}
+          {t("Export")}{checked.size > 1 ? ` (${checked.size})` : ""}
         </button>
       </div>
     </ModalShell>
@@ -290,6 +294,7 @@ export function BulkRenameModal({
   onCancel: () => void;
   onConfirm: (mapping: Record<string, string>) => void;
 }) {
+  const { t } = useI18n();
   const fileRef = useRef<HTMLInputElement>(null);
   const [err, setErr] = useState<string | null>(null);
   const names = populationTreeOrder(state.populations, state.root_population_id ?? null)
@@ -320,15 +325,15 @@ export function BulkRenameModal({
   return (
     <ModalShell title="Bulk-rename populations">
       <p style={{ fontSize: 12, color: "#555", margin: "2px 0 12px", lineHeight: 1.4 }}>
-        Download the template, edit the <code>new_population</code> column, and upload it. Rows are matched by current name.
+        {t("Download the template, edit the new_population column, and upload it. Rows are matched by current name.")}
       </p>
       {err && <p style={{ fontSize: 12, color: "#d64545" }}>{err}</p>}
       <input ref={fileRef} type="file" accept=".csv,.tsv,.txt" style={{ display: "none" }}
         onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); }} />
       <div className="gl-modal-actions">
-        <button className="gl-btn-ghost" onClick={downloadTemplate}>Template ↧</button>
-        <button className="gl-btn-ghost" onClick={onCancel}>Cancel</button>
-        <button className="gl-btn" onClick={() => fileRef.current?.click()}>Upload CSV…</button>
+        <button className="gl-btn-ghost" onClick={downloadTemplate}>{t("Template ↧")}</button>
+        <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
+        <button className="gl-btn" onClick={() => fileRef.current?.click()}>{t("Upload CSV…")}</button>
       </div>
     </ModalShell>
   );
@@ -347,12 +352,13 @@ export function ConfirmModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useI18n();
   return (
-    <ModalShell title={title}>
+    <ModalShell title={t(title)}>
       <p style={{ fontSize: 13, color: "#555", margin: "2px 0 14px", lineHeight: 1.4 }}>{message}</p>
       <div className="gl-modal-actions">
-        <button className="gl-btn-ghost" onClick={onCancel}>Cancel</button>
-        <button className="gl-btn gl-btn-danger" onClick={onConfirm}>{confirmLabel}</button>
+        <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
+        <button className="gl-btn gl-btn-danger" onClick={onConfirm}>{t(confirmLabel)}</button>
       </div>
     </ModalShell>
   );
@@ -369,14 +375,15 @@ export function RenameModal({
   onConfirm: (name: string) => void;
   onCancel: () => void;
 }) {
+  const { t } = useI18n();
   const [name, setName] = useState(initial);
   const commit = () => {
     if (name.trim()) onConfirm(name.trim());
   };
   return (
-    <ModalShell title={title}>
+    <ModalShell title={t(title)}>
       <label className="gl-modal-field">
-        New name:
+        {t("New name:")}
         <input
           autoFocus
           value={name}
@@ -388,10 +395,10 @@ export function RenameModal({
       </label>
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={onCancel}>
-          Cancel
+          {t("Cancel")}
         </button>
         <button className="gl-btn" onClick={commit}>
-          Rename
+          {t("Rename")}
         </button>
       </div>
     </ModalShell>
@@ -409,6 +416,7 @@ export function EditPopModal({
   onConfirm: (a: Action) => void;
   onCancel: () => void;
 }) {
+  const { t } = useI18n();
   const pop = state.populations[popId];
   const orderedGateIds = state.gate_order.length ? state.gate_order : Object.keys(state.gates);
   const gateIds = orderedGateIds.filter((gid) => state.gates[gid]?.gate_type !== "quadrant");
@@ -456,13 +464,13 @@ export function EditPopModal({
   };
 
   return (
-    <ModalShell title="Edit Population">
+    <ModalShell title={t("Edit Population")}>
       <label className="gl-modal-field">
-        Name:
+        {t("Name:")}
         <input autoFocus value={name} onChange={(e) => setName(e.target.value)} />
       </label>
       <label className="gl-modal-field">
-        Parent population:
+        {t("Parent population:")}
         <select value={parentId} onChange={(e) => setParentId(e.target.value)}>
           {parentChoices.map((c) => (
             <option key={c.id} value={c.id}>
@@ -474,7 +482,7 @@ export function EditPopModal({
 
       {inherited.length > 0 && (
         <div className="gl-modal-field" style={{ gap: 4 }}>
-          Inherited from parent chain:
+          {t("Inherited from parent chain:")}
           <div className="gl-inherited">
             {inherited.map((ir, i) => {
               const g = state.gates[ir.gateId];
@@ -494,7 +502,7 @@ export function EditPopModal({
       )}
 
       <div className="gl-modal-field" style={{ gap: 6 }}>
-        Gates for this population:
+        {t("Gates for this population:")}
         {lockedQuadrantRefs.length > 0 && (
           <div className="gl-inherited">
             {lockedQuadrantRefs.map((ref) => {
@@ -508,7 +516,7 @@ export function EditPopModal({
           </div>
         )}
         <div className="gl-gateref-list">
-          {gateIds.length === 0 && <em style={{ color: "var(--muted)" }}>No gates yet.</em>}
+          {gateIds.length === 0 && <em style={{ color: "var(--muted)" }}>{t("No gates yet.")}</em>}
           {gateIds.map((gid) => {
             const g = state.gates[gid];
             if (!g) return null;
@@ -534,10 +542,10 @@ export function EditPopModal({
 
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={onCancel}>
-          Cancel
+          {t("Cancel")}
         </button>
         <button className="gl-btn" onClick={commit}>
-          Save
+          {t("Save")}
         </button>
       </div>
     </ModalShell>
@@ -553,6 +561,7 @@ export function CreatePopModal({
   onConfirm: (a: Action) => void;
   onCancel: () => void;
 }) {
+  const { t } = useI18n();
   const parentChoices = useMemo(
     () => Object.keys(state.populations).map((id) => ({ id, name: state.populations[id].name })),
     [state.populations],
@@ -574,13 +583,13 @@ export function CreatePopModal({
   };
 
   return (
-    <ModalShell title="Create Population">
+    <ModalShell title={t("Create Population")}>
       <label className="gl-modal-field">
-        Population name:
+        {t("Population name:")}
         <input autoFocus value={name} onChange={(e) => setName(e.target.value)} />
       </label>
       <label className="gl-modal-field">
-        Parent population:
+        {t("Parent population:")}
         <select value={parentId} onChange={(e) => setParentId(e.target.value)}>
           {parentChoices.map((c) => (
             <option key={c.id} value={c.id}>
@@ -590,9 +599,9 @@ export function CreatePopModal({
         </select>
       </label>
       <div className="gl-modal-field" style={{ gap: 6 }}>
-        Gate references (AND logic):
+        {t("Gate references (AND logic):")}
         <div className="gl-gateref-list">
-          {ids.length === 0 && <em style={{ color: "var(--muted)" }}>No gates yet.</em>}
+          {ids.length === 0 && <em style={{ color: "var(--muted)" }}>{t("No gates yet.")}</em>}
           {ids.map((gid) => {
             const g = state.gates[gid];
             if (!g) return null;
@@ -617,10 +626,10 @@ export function CreatePopModal({
       </div>
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={onCancel}>
-          Cancel
+          {t("Cancel")}
         </button>
         <button className="gl-btn" onClick={commit}>
-          Create
+          {t("Create")}
         </button>
       </div>
     </ModalShell>

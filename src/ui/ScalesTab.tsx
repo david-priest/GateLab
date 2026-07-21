@@ -2,6 +2,7 @@
 // transforms and assay-layer changes are not mixed into one control surface.
 
 import type { Sample } from "../engine/sample";
+import { useI18n } from "./i18n";
 
 interface Props {
   sample: Sample;
@@ -10,27 +11,24 @@ interface Props {
 }
 
 export function ScalesTab({ sample, globalScales, onSetGlobalScale }: Props) {
+  const { t } = useI18n();
   return (
     <div className="gl-tab-panel gl-tab-fill">
-      <h2 className="gl-tab-title">Scales</h2>
+      <h2 className="gl-tab-title">{t("Scales")}</h2>
 
       {/* ── Global Channel Scales ────────────────────────────────── */}
       <section className="gl-scales-section gl-scales-section-grow">
-        <div className="gl-section-header">Global Channel Scales</div>
+        <div className="gl-section-header">{t("Global Channel Scales")}</div>
         <p className="gl-hint" style={{ marginBottom: 8 }}>
-          Min/Max are in <strong>display (transformed) units</strong> — the logicle scale for
-          fluorescence channels, arcsinh for scatter / CyTOF — <em>not</em> raw values, so they won't
-          match the axis's decade labels (100, 1K, 10K…, which are the raw values). A fixed range per
-          channel is used whenever that channel is plotted (blank = auto), keeping axes uniform across
-          panels. Pan/zoom on the Gating tab writes here too.
+          {t("Min/Max are in display (transformed) units — the logicle scale for fluorescence channels, arcsinh for scatter / CyTOF — not raw values, so they won't match the axis's decade labels (100, 1K, 10K…, which are the raw values). A fixed range per channel is used whenever that channel is plotted (blank = auto), keeping axes uniform across panels. Pan/zoom on the Gating tab writes here too.")}
         </p>
         <div className="gl-stats-scroll gl-grow-scroll" style={{ maxWidth: 460 }}>
           <table className="gl-scales-table">
             <thead>
               <tr>
-                <th className="gl-stats-name">Channel</th>
-                <th className="gl-stats-num">Min</th>
-                <th className="gl-stats-num">Max</th>
+                <th className="gl-stats-name">{t("Channel")}</th>
+                <th className="gl-stats-num">{t("Min")}</th>
+                <th className="gl-stats-num">{t("Max")}</th>
                 <th></th>
               </tr>
             </thead>
@@ -67,7 +65,7 @@ export function ScalesTab({ sample, globalScales, onSetGlobalScale }: Props) {
                     </td>
                     <td className="gl-stats-num">
                       {gs && (
-                        <button className="gl-mini-btn" title="Clear (revert to auto)" onClick={() => onSetGlobalScale(c.key, null)}>
+                        <button className="gl-mini-btn" title={t("Clear (revert to auto)")} onClick={() => onSetGlobalScale(c.key, null)}>
                           ×
                         </button>
                       )}

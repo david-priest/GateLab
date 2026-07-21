@@ -4,6 +4,7 @@ import {
   MIN_DENSITY_COLOR_POWER,
   normalizeDensityColorPower,
 } from "../engine/pseudocolor";
+import { useI18n } from "./i18n";
 
 interface Props {
   value: number;
@@ -13,13 +14,14 @@ interface Props {
 }
 
 export function DensityColourControl({ value, onChange, disabled = false, className = "" }: Props) {
+  const { t } = useI18n();
   const resolved = normalizeDensityColorPower(value);
   return (
     <label
       className={`gl-density-colour-control${className ? ` ${className}` : ""}`}
       title="Higher values reserve yellow and red for denser event cores; lower values bring warm colours in earlier. This changes colour mapping only."
     >
-      <span>Density colour</span>
+      <span>{t("Density colour")}</span>
       <input
         type="range"
         min={MIN_DENSITY_COLOR_POWER}

@@ -15,6 +15,7 @@ import { computeStackedBars, computeBoxes, perUnitProps, nestedBarLayout, type S
 import type { PopulationMap } from "../engine/models";
 import { OVERLAY_PALETTES, paletteColors, populationColor, UNGATED_COLOR, type PaletteName } from "../engine/palettes";
 import type { MetadataColumn } from "../engine/metadata";
+import { useI18n } from "./i18n";
 
 interface SampleRef { id: string; name: string; sample: Sample }
 interface Props {
@@ -38,6 +39,7 @@ function parseFactor(v: string): PerSampleFactor | null {
 }
 
 export function ProportionsTab({ samples, activeSampleId, state, derived, metadata, metadataColumns, divisionProfiles, dataRevisionKey }: Props) {
+  const { t } = useI18n();
   const rootId = state.root_population_id ?? "";
   const order = populationTreeOrder(state.populations, rootId).filter(({ popId }) => popId !== rootId);
   const divisionSamples = useMemo(
@@ -106,7 +108,7 @@ export function ProportionsTab({ samples, activeSampleId, state, derived, metada
 
   const factorOptions = (
     <>
-      <option value={SAMPLE_OPT}>(sample)</option>
+      <option value={SAMPLE_OPT}>{t("(sample)")}</option>
       {metadataColumns.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
     </>
   );
@@ -128,46 +130,46 @@ export function ProportionsTab({ samples, activeSampleId, state, derived, metada
     <div className="gl-tab-panel gl-tab-fill">
       <div className="gl-control-sections" aria-label="Proportions controls">
         <section className="gl-control-section gl-prop-section-plot" aria-labelledby="prop-plot-heading">
-          <span id="prop-plot-heading" className="gl-control-section-label">Plot</span>
+          <span id="prop-plot-heading" className="gl-control-section-label">{t("Plot")}</span>
           <div className="gl-control-section-body">
-            {(["stacked", "box"] as const).map((t) => (
-              <label key={t} className="gl-check">
-                <input type="radio" name="prop-type" checked={plotType === t} onChange={() => setPlotType(t)} />
-                {t === "stacked" ? "Stacked bar" : "Boxplot"}
+            {(["stacked", "box"] as const).map((type) => (
+              <label key={type} className="gl-check">
+                <input type="radio" name="prop-type" checked={plotType === type} onChange={() => setPlotType(type)} />
+                {type === "stacked" ? t("Stacked bar") : t("Boxplot")}
               </label>
             ))}
             <span className="gl-ctl-sep" />
-            <label className="gl-check"><input type="radio" name="prop-cat" checked={categoryKind === "population"} onChange={() => setCategoryKind("population")} />Population</label>
+            <label className="gl-check"><input type="radio" name="prop-cat" checked={categoryKind === "population"} onChange={() => setCategoryKind("population")} />{t("Population")}</label>
             <label className="gl-check" title={hasDivision ? "" : "Apply a division profile in the Division tab first"}>
-              <input type="radio" name="prop-cat" disabled={!hasDivision} checked={categoryKind === "division"} onChange={() => setCategoryKind("division")} />Division
+              <input type="radio" name="prop-cat" disabled={!hasDivision} checked={categoryKind === "division"} onChange={() => setCategoryKind("division")} />{t("Division")}
             </label>
           </div>
         </section>
 
         <section className="gl-control-section gl-control-section-wide gl-prop-section-data" aria-labelledby="prop-data-heading">
-          <span id="prop-data-heading" className="gl-control-section-label">Data</span>
+          <span id="prop-data-heading" className="gl-control-section-label">{t("Data")}</span>
           <div className="gl-control-section-body">
-            <label className="gl-field-inline">Group<select value={groupSel} onChange={(e) => setGroupSel(e.target.value)}>{factorOptions}</select></label>
-            <label className="gl-field-inline">Unit<select value={unitSel} onChange={(e) => setUnitSel(e.target.value)}>{factorOptions}</select></label>
-            <label className="gl-field-inline">Facet<select value={facetSel} onChange={(e) => setFacetSel(e.target.value)}><option value={NONE_OPT}>(none)</option>{metadataColumns.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}</select></label>
-            <label className="gl-check" title="Normalise within each unit before averaging across units"><input type="checkbox" checked={averagePerUnit} onChange={(e) => setAveragePerUnit(e.target.checked)} />Average per unit</label>
-            <label className="gl-check"><input type="checkbox" checked={includeUngated} onChange={(e) => setIncludeUngated(e.target.checked)} />Include ungated</label>
+            <label className="gl-field-inline">{t("Group")}<select value={groupSel} onChange={(e) => setGroupSel(e.target.value)}>{factorOptions}</select></label>
+            <label className="gl-field-inline">{t("Unit")}<select value={unitSel} onChange={(e) => setUnitSel(e.target.value)}>{factorOptions}</select></label>
+            <label className="gl-field-inline">{t("Facet")}<select value={facetSel} onChange={(e) => setFacetSel(e.target.value)}><option value={NONE_OPT}>{t("(none)")}</option>{metadataColumns.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}</select></label>
+            <label className="gl-check" title="Normalise within each unit before averaging across units"><input type="checkbox" checked={averagePerUnit} onChange={(e) => setAveragePerUnit(e.target.checked)} />{t("Average per unit")}</label>
+            <label className="gl-check"><input type="checkbox" checked={includeUngated} onChange={(e) => setIncludeUngated(e.target.checked)} />{t("Include ungated")}</label>
           </div>
         </section>
 
         <section className="gl-control-section gl-control-section-wide gl-prop-section-appearance" aria-labelledby="prop-appearance-heading">
-          <span id="prop-appearance-heading" className="gl-control-section-label">Appearance</span>
+          <span id="prop-appearance-heading" className="gl-control-section-label">{t("Appearance")}</span>
           <div className="gl-control-section-body">
-            <label className="gl-field-inline">Palette<select value={palette} onChange={(e) => setPalette(e.target.value as PaletteName)}>{OVERLAY_PALETTES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}</select></label>
+            <label className="gl-field-inline">{t("Palette")}<select value={palette} onChange={(e) => setPalette(e.target.value as PaletteName)}>{OVERLAY_PALETTES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}</select></label>
             <span className="gl-ctl-sep" />
-            <label className="gl-field-inline">Tick<input type="number" min={5} max={20} value={fontTick} onChange={(e) => setFontTick(Math.max(5, Math.min(20, +e.target.value || 9)))} /></label>
-            <label className="gl-field-inline">Axis<input type="number" min={5} max={24} value={fontAxis} onChange={(e) => setFontAxis(Math.max(5, Math.min(24, +e.target.value || 10)))} /></label>
-            <label className="gl-field-inline">Legend<input type="number" min={5} max={20} value={fontLegend} onChange={(e) => setFontLegend(Math.max(5, Math.min(20, +e.target.value || 11)))} /></label>
+            <label className="gl-field-inline">{t("Tick")}<input type="number" min={5} max={20} value={fontTick} onChange={(e) => setFontTick(Math.max(5, Math.min(20, +e.target.value || 9)))} /></label>
+            <label className="gl-field-inline">{t("Axis")}<input type="number" min={5} max={24} value={fontAxis} onChange={(e) => setFontAxis(Math.max(5, Math.min(24, +e.target.value || 10)))} /></label>
+            <label className="gl-field-inline">{t("Legend")}<input type="number" min={5} max={20} value={fontLegend} onChange={(e) => setFontLegend(Math.max(5, Math.min(20, +e.target.value || 11)))} /></label>
           </div>
         </section>
 
         <section className="gl-control-section gl-prop-section-export" aria-labelledby="prop-export-heading">
-          <span id="prop-export-heading" className="gl-control-section-label">Export</span>
+          <span id="prop-export-heading" className="gl-control-section-label">{t("Export")}</span>
           <div className="gl-control-section-body">
             <button className="gl-mini-btn" title="Export the current Proportions chart as PNG" onClick={() => exportSvg("png")}>PNG</button>
             <button className="gl-mini-btn" title="Export the current Proportions chart as SVG" onClick={() => exportSvg("svg")}>SVG</button>
@@ -192,9 +194,9 @@ export function ProportionsTab({ samples, activeSampleId, state, derived, metada
         {categoryKind === "population" && (
           <div className="gl-prop-poplist" style={{ width: 210, flex: "0 0 auto", display: "flex", flexDirection: "column", minHeight: 0, borderLeft: "1px solid var(--gl-border, #ddd)", paddingLeft: 8 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 600, marginBottom: 4 }}>
-              <span>Populations</span>
-              <button className="gl-mini-btn" style={{ marginLeft: "auto" }} onClick={() => setSelectedPops(order.map((o) => o.popId))}>All</button>
-              <button className="gl-mini-btn" onClick={() => setSelectedPops([])}>None</button>
+              <span>{t("Populations")}</span>
+              <button className="gl-mini-btn" style={{ marginLeft: "auto" }} onClick={() => setSelectedPops(order.map((o) => o.popId))}>{t("All")}</button>
+              <button className="gl-mini-btn" onClick={() => setSelectedPops([])}>{t("None")}</button>
             </div>
             <div style={{ overflow: "auto", flex: 1 }}>
               {order.map(({ popId, depth }) => (

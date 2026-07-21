@@ -13,6 +13,7 @@ import { populationTreeOrder } from "../engine/populations";
 import { sanitizeFilePart } from "../engine/fcsExport";
 import { MultiColumnChecklist } from "./MultiColumnChecklist";
 import { DensityColourControl } from "./DensityColourControl";
+import { useI18n } from "./i18n";
 
 interface Props {
   sample: Sample;
@@ -63,6 +64,7 @@ export function StrategyTab({
   densityColorPower,
   onDensityColorPowerChange,
 }: Props) {
+  const { t } = useI18n();
   const rootId = state.root_population_id ?? "";
   const c0 = configRef.current; // restore on (re)mount; null = first-ever
   const [mode, setMode] = useState<"single" | "multi">(c0?.mode ?? "single");
@@ -195,17 +197,17 @@ export function StrategyTab({
   return (
     <div className="gl-tab-panel gl-tab-fill">
       <div className="gl-strategy-controls">
-        <span className="gl-stats-opt-label">Mode</span>
+        <span className="gl-stats-opt-label">{t("Mode")}</span>
         {(["single", "multi"] as const).map((m) => (
           <label key={m} className="gl-check">
             <input type="radio" name="strat-scope" checked={mode === m} onChange={() => setMode(m)} />
-            {m === "single" ? "Single" : "Multiple pops"}
+            {m === "single" ? t("Single") : t("Multiple pops")}
           </label>
         ))}
         {mode === "single" && (<>
         <span className="gl-ctl-sep" />
         <label className="gl-field-inline">
-          Population
+          {t("Population")}
           <select value={popId} onChange={(e) => setPopId(e.target.value)}>
             {order.map(({ popId: id, depth }) => (
               <option key={id} value={id}>
@@ -217,32 +219,32 @@ export function StrategyTab({
         </label>
         <label className="gl-check">
           <input type="checkbox" checked={fullPath} onChange={(e) => setFullPath(e.target.checked)} />
-          Full path from root
+          {t("Full path from root")}
         </label>
         </>)}
 
         <span className="gl-ctl-sep" />
-        <span className="gl-stats-opt-label">Gate view</span>
+        <span className="gl-stats-opt-label">{t("Gate view")}</span>
         {(["forward", "back"] as GateView[]).map((v) => (
           <label key={v} className="gl-check">
             <input type="checkbox" checked={gateView.includes(v)} onChange={() => toggleGateView(v)} />
-            {v === "forward" ? "Forward" : "Back-gated"}
+            {v === "forward" ? t("Forward") : t("Back-gated")}
           </label>
         ))}
 
         <span className="gl-ctl-sep" />
-        <span className="gl-stats-opt-label">Display</span>
+        <span className="gl-stats-opt-label">{t("Display")}</span>
         {modeOpts.map((m) => (
           <label key={m.v} className="gl-check">
             <input type="radio" name="strat-mode" checked={displayMode === m.v} onChange={() => setDisplayMode(m.v)} />
-            {m.l}
+            {t(m.l)}
           </label>
         ))}
       </div>
 
       <div className="gl-strategy-controls">
         <label className="gl-field-inline">
-          Max events/panel
+          {t("Max events/panel")}
           <input
             type="number"
             min={0}
@@ -254,20 +256,20 @@ export function StrategyTab({
         </label>
         <label className="gl-check">
           <input type="checkbox" checked={allEvents} onChange={(e) => setAllEvents(e.target.checked)} />
-          All events
+          {t("All events")}
         </label>
         <span className="gl-ctl-sep" />
         <label className="gl-field-inline">
-          Plot size
+          {t("Plot size")}
           <input type="number" min={150} max={500} step={25} value={plotSize} onChange={(e) => setPlotSize(+e.target.value || 200)} />
         </label>
         <label className="gl-field-inline">
-          Columns
+          {t("Columns")}
           <input type="number" min={1} max={12} value={nColumns} onChange={(e) => setNColumns(Math.max(1, +e.target.value || 4))} />
         </label>
         <label className="gl-check">
           <input type="checkbox" checked={fitToColumns} onChange={(e) => setFitToColumns(e.target.checked)} />
-          Fit to columns
+          {t("Fit to columns")}
         </label>
         <span className="gl-ctl-sep" />
         <label className="gl-field-inline" title="Export resolution for SVG/PDF (72–1200 DPI)">
@@ -281,11 +283,11 @@ export function StrategyTab({
 
       <div className="gl-strategy-controls">
         <label className="gl-field-inline">
-          Point size
+          {t("Point size")}
           <input type="number" min={0.1} max={5} step={0.1} value={pointSize} onChange={num(setPointSize, 1.2)} />
         </label>
         <label className="gl-field-inline">
-          Opacity
+          {t("Opacity")}
           <input type="range" min={0.05} max={1} step={0.05} value={pointAlpha} onChange={num(setPointAlpha, 0.35)} />
           <span className="gl-num-badge">{pointAlpha.toFixed(2)}</span>
         </label>
@@ -293,7 +295,7 @@ export function StrategyTab({
           <DensityColourControl value={densityColorPower} onChange={onDensityColorPowerChange} />
         )}
         <label className="gl-field-inline">
-          Contour %
+          {t("Contour %")}
           <input type="number" min={0} max={50} step={1} value={contourThreshold} onChange={num(setContourThreshold, 5)} />
         </label>
         {isContour && (
@@ -311,11 +313,11 @@ export function StrategyTab({
                   }
                 }}
               />
-              Auto smoothing
+              {t("Auto smoothing")}
             </label>
             {kdeBandwidth > 0 && (
               <label className="gl-field-inline" title="Higher bandwidth gives stronger contour smoothing">
-                Bandwidth
+                {t("Bandwidth")}
                 <input
                   type="range"
                   min={0.2}
@@ -336,27 +338,27 @@ export function StrategyTab({
         <span className="gl-ctl-sep" />
         <label className="gl-check">
           <input type="checkbox" checked={pubStyle} onChange={(e) => setPubStyle(e.target.checked)} />
-          Publication style
+          {t("Publication style")}
         </label>
         <label className="gl-field-inline">
-          Gate line
+          {t("Gate line")}
           <input type="number" min={0.5} max={5} step={0.25} value={gateLineWidth} onChange={num(setGateLineWidth, 1.5)} />
         </label>
         <span className="gl-ctl-sep" />
-        <span className="gl-stats-opt-label">Fonts</span>
-        <label className="gl-field-inline">Tick<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 8)} /></label>
-        <label className="gl-field-inline">Axis<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 10)} /></label>
-        <label className="gl-field-inline">Title<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 10)} /></label>
-        <label className="gl-field-inline">Gate<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 8)} /></label>
+        <span className="gl-stats-opt-label">{t("Fonts")}</span>
+        <label className="gl-field-inline">{t("Tick")}<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 8)} /></label>
+        <label className="gl-field-inline">{t("Axis")}<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 10)} /></label>
+        <label className="gl-field-inline">{t("Title")}<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 10)} /></label>
+        <label className="gl-field-inline">{t("Gate")}<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 8)} /></label>
       </div>
 
       {mode === "multi" && (
         <div className="gl-strategy-pop-picker">
           <div className="gl-picker-head">
-            <span className="gl-stats-opt-label">Populations</span>
-            <span className="gl-hint">{multiPops.length} of {selectablePops.length} selected</span>
-            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setMultiPops(selectablePops.map(({ popId: id }) => id))}>All</button>
-            <button className="gl-mini-btn" onClick={() => setMultiPops([])}>None</button>
+            <span className="gl-stats-opt-label">{t("Populations")}</span>
+            <span className="gl-hint">{t("{selected} of {total} selected", { selected: multiPops.length, total: selectablePops.length })}</span>
+            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setMultiPops(selectablePops.map(({ popId: id }) => id))}>{t("All")}</button>
+            <button className="gl-mini-btn" onClick={() => setMultiPops([])}>{t("None")}</button>
           </div>
           <MultiColumnChecklist
             items={selectablePops}
