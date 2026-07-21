@@ -163,6 +163,10 @@ describe("compensation pair preview", () => {
     expect(result.preview.original.x.every((value) => value >= result.preview.xRange[0] && value <= result.preview.xRange[1])).toBe(true);
     expect(result.preview.xRange[1]).toBeGreaterThan(result.preview.xRange[0]);
     expect(result.preview.yRange[1]).toBeGreaterThan(result.preview.yRange[0]);
+    // CyTOF metal channels take linear ticks (channelTicks → null), exactly like the Gating tab —
+    // so the biplot axis matches Gating with no instrument special-casing.
+    expect(result.preview.xTicks).toBeNull();
+    expect(result.preview.yTicks).toBeNull();
   });
 
   it("explains when no compensated layer is installed", () => {

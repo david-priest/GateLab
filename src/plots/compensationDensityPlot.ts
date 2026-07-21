@@ -1,10 +1,14 @@
 import type { CompensationDensityPanel } from "../engine/compensationPairPreview";
+import type { AxisTicks } from "../engine/ticks";
 import { loadMiniPlots } from "./loadPlots";
 
 export interface CompensationPlotFrame {
   readonly eventCount: number;
   readonly xRange: readonly [number, number];
   readonly yRange: readonly [number, number];
+  /** FlowJo-style decade ticks (null → linear), so compensation biplots match the Gating tab. */
+  readonly xTicks?: AxisTicks | null;
+  readonly yTicks?: AxisTicks | null;
 }
 
 export interface CompensationDensityPlotOptions {
@@ -40,6 +44,10 @@ export function renderCompensationDensityBiplotSurface(
     y: options.panel.y,
     x_range: options.preview.xRange,
     y_range: options.preview.yRange,
+    x_is_logicle: !!options.preview.xTicks,
+    x_logicle_ticks: options.preview.xTicks ?? null,
+    y_is_logicle: !!options.preview.yTicks,
+    y_logicle_ticks: options.preview.yTicks ?? null,
     x_label: options.sourceLabel,
     y_label: options.receiverLabel,
     title: options.title,
@@ -49,7 +57,7 @@ export function renderCompensationDensityBiplotSurface(
     density_color_power: options.densityColorPower,
     density_color_ceiling: options.densityColorCeiling,
     density_smoothing: options.densitySmoothingRadius,
-    axis_label_offset: 20,
+    axis_label_offset: 24,
     axis_tick_size: 3,
     axis_outer_tick_size: 0,
     plot_margins: { top: 20, right: 2, bottom: 30, left: 31 },

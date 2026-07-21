@@ -38,6 +38,8 @@ const preview: CompensationGlobalPairPreview = {
   eventSignature: "3:fixed",
   xRange: [0, 4],
   yRange: [0, 5],
+  xTicks: null,
+  yTicks: null,
   original: { x: [0, 1, 2], y: [0, 2, 4], zeroPile: { source: 1, receiver: 1, corner: 1 } },
   compensated: { x: [0, 1, 2], y: [0, 1, 3], zeroPile: { source: 1, receiver: 1, corner: 1 } },
 };
