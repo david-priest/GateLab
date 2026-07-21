@@ -250,6 +250,39 @@ function renderTab(
 }
 
 describe("CompensationTab common path", () => {
+  it("does not rebuild the hidden compensation workspace for gating-only population updates", () => {
+    const sample = flowSample({ channelCount: 20, eventCount: 100 });
+    const statusSpy = vi.spyOn(sample, "compensatedLayerStatus");
+    const stateKey = "workspace-a:hidden-gating-performance";
+    renderTab(sample, {
+      stateKey,
+      visible: false,
+      reviewPopulations: [{ id: "gate-a", name: "Gate A", depth: 0, eventCount: 40 }],
+      reviewPopulationMasks: { "gate-a": new Uint8Array(100).fill(1, 0, 40) },
+    });
+    const callsAfterMount = statusSpy.mock.calls.length;
+    expect(host.querySelectorAll(".gl-comp-cell").length).toBeGreaterThan(300);
+
+    renderTab(sample, {
+      stateKey,
+      visible: false,
+      reviewPopulations: [{ id: "gate-a", name: "Gate A moved", depth: 0, eventCount: 55 }],
+      reviewPopulationMasks: { "gate-a": new Uint8Array(100).fill(1, 0, 55) },
+      hasExistingGates: true,
+    });
+    expect(statusSpy).toHaveBeenCalledTimes(callsAfterMount);
+
+    renderTab(sample, {
+      stateKey,
+      visible: true,
+      reviewPopulations: [{ id: "gate-a", name: "Gate A moved", depth: 0, eventCount: 55 }],
+      reviewPopulationMasks: { "gate-a": new Uint8Array(100).fill(1, 0, 55) },
+      hasExistingGates: true,
+    });
+    expect(statusSpy.mock.calls.length).toBeGreaterThan(callsAfterMount);
+    expect(host.querySelector('option[value="gate-a"]')?.textContent).toContain("Gate A moved");
+  });
+
   it("surfaces the bounded Apply worker count and disables it while compensation runs", () => {
     const onChange = vi.fn();
     renderTab(flowSample(), {
@@ -565,6 +598,24 @@ describe("CompensationTab common path", () => {
     expect(previewCandidate).toHaveBeenCalledTimes(3);
     expect(previewCandidate.mock.calls[2][2][0][1]).toBeCloseTo(0.072, 10);
     expect(previewCandidate.mock.calls[2][2][1]).toEqual([0.02, 1]);
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(globalCoefficient, "7.5");
+      globalCoefficient.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    renderTab(sample, {
+      stateKey: "workspace-a:flow-inline",
+      compensationOn: true,
+      installedProfile,
+      installedBaselineProfile: installedProfile,
+      onApplyProfile: captureProfile,
+      onPreviewCompensationCandidate: previewCandidate,
+      visible: false,
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 130));
+    });
+    expect(previewCandidate).toHaveBeenCalledTimes(3);
   });
 
   it("uses concise editable percentages and exposes point alpha on the compensation toolbar", async () => {

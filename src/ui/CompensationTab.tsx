@@ -1,5 +1,6 @@
 import {
   createContext,
+  memo,
   useEffect,
   useContext,
   useMemo,
@@ -1260,7 +1261,7 @@ function GlobalInspectorLayerScope({
   );
 }
 
-export function CompensationTab({
+function CompensationTabImpl({
   sample,
   sampleName = "sample.fcs",
   compensationOn,
@@ -1950,6 +1951,7 @@ export function CompensationTab({
   useEffect(() => {
     const editCount = Object.keys(stagedCoefficients).length;
     if (
+      !visible ||
       editCount === 0 ||
       !profileRecord ||
       profileRecord.scientific.kind !== "flow-spillover" ||
@@ -2030,6 +2032,7 @@ export function CompensationTab({
     sample.layerRevision,
     selectedPair,
     stagedCoefficients,
+    visible,
     workingProfileMatrix,
   ]);
   const workingExportMatrix = useMemo(() => {
@@ -4456,3 +4459,18 @@ export function CompensationTab({
     </DensityColorPowerContext.Provider>
   );
 }
+
+/**
+ * Compensation is deliberately kept mounted so an import, matrix draft, or in-flight Apply
+ * survives tab changes. While hidden, however, gating edits only change review populations and
+ * masks; rebuilding the large matrix/gallery tree for those updates can stall every interaction
+ * in the gating editor. A transition back to visible always renders with the latest props.
+ */
+function compensationTabPropsEqual(previous: Readonly<Props>, next: Readonly<Props>): boolean {
+  const previousVisible = previous.visible !== false;
+  const nextVisible = next.visible !== false;
+  if (previousVisible || nextVisible) return false;
+  return previous.sample === next.sample && previous.stateKey === next.stateKey;
+}
+
+export const CompensationTab = memo(CompensationTabImpl, compensationTabPropsEqual);
