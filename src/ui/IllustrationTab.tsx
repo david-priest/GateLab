@@ -130,6 +130,12 @@ export function IllustrationTab({
   const isHistogram = plotType === "histogram";
   const isHeatmap = plotType === "heatmap";
   const isContour = plotType === "biplot" && displayMode === "contour";
+  // Per-channel scaling (min-max or z-score) needs ≥2 populations to have a within-channel range;
+  // with one population every cell collapses to a single flat value (minmax → 0.5, z-score → 0).
+  const heatmapDegenerate =
+    isHeatmap &&
+    (heatmapScale === "column_minmax" || heatmapScale === "column_zscore") &&
+    popIds.length < 2;
   const isRidgeline = isHistogram && histLayout === "ridgeline";
 
   // Default colour = the population's STABLE slot (frozen: adding/removing a population never
@@ -578,6 +584,23 @@ export function IllustrationTab({
             <span className="gl-illust-pending" style={{ color: "#64748b" }}>
               Uses all events; empty populations are grey.
             </span>
+            {heatmapDegenerate && (
+              <div className="gl-comp-warning" role="status">
+                <span>
+                  {heatmapScale === "column_zscore" ? "Per-channel z-score" : "Per channel (0–1)"} needs
+                  at least two populations to have a within-channel range. With one population every cell
+                  collapses to a single flat value, giving an uninformative row. Switch to unscaled
+                  transformed expression, or add another population.
+                </span>
+                <button
+                  type="button"
+                  className="gl-mini-btn"
+                  onClick={() => setHeatmapScale("none")}
+                >
+                  Use transformed expression
+                </button>
+              </div>
+            )}
           </div>
         )}
 
