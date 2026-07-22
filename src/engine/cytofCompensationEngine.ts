@@ -6,6 +6,9 @@ import {
 
 export const CYTOF_NNLS_SOLVER_VERSION = "coordinate-descent-qr-v1" as const;
 export const CYTOF_MATRIX_ADAPTATION_VERSION = "identity-backed-v1" as const;
+// A short support-discovery pass is enough for ordinary CyTOF matrices. Exact QR polishing and
+// KKT review follow, so this limit controls work—not the accepted numerical tolerance.
+const CYTOF_COORDINATE_SWEEP_LIMIT = 8;
 
 export const DEFAULT_CYTOF_NNLS_SETTINGS: Readonly<NnlsSolverSettingsInput> =
   Object.freeze({
@@ -69,6 +72,26 @@ export interface CytofRangeOptions {
   readonly outputStart?: number;
   readonly validateMeasuredValues?: boolean;
   readonly validateOutputValues?: boolean;
+  /** Optional mutable diagnostic sink for profiling coordinate convergence vs QR fallback. */
+  readonly executionStats?: CytofNnlsExecutionStats;
+}
+
+export interface CytofNnlsExecutionStats {
+  coordinateConvergedEvents: number;
+  activeSetPolishedEvents: number;
+  qrFallbackEvents: number;
+  coordinateIterations: number;
+  maxCoordinateIterations: number;
+}
+
+export function createCytofNnlsExecutionStats(): CytofNnlsExecutionStats {
+  return {
+    coordinateConvergedEvents: 0,
+    activeSetPolishedEvents: 0,
+    qrFallbackEvents: 0,
+    coordinateIterations: 0,
+    maxCoordinateIterations: 0,
+  };
 }
 
 function finitePositive(value: number): boolean {
@@ -514,12 +537,103 @@ function updateCytofCoordinate(
   }
 }
 
+type CytofActiveSetPolishResult =
+  | Readonly<{ accepted: false }>
+  | Readonly<{
+      accepted: true;
+      diagnostics: CytofNnlsEventDiagnostics | null;
+    }>;
+
+/**
+ * Coordinate descent normally identifies the correct non-zero support quickly even when its
+ * last few gradient digits converge slowly. Solve that frozen support once with Householder QR,
+ * then accept only if the complete NNLS KKT conditions hold. Any uncertain support still falls
+ * through to the full Lawson-Hanson-style active-set solver.
+ */
+function polishCytofCoordinateActiveSet(
+  plan: CytofNnlsPlan,
+  measured: ArrayLike<number>,
+  output: Float64Array,
+  measuredScale: number,
+  coordinateIterations: number,
+  includeDiagnostics: boolean,
+): CytofActiveSetPolishResult {
+  const count = plan.channels.length;
+  const zeroThreshold = plan.settings.tolerance * measuredScale;
+  const kktThreshold = plan.settings.kktTolerance * measuredScale;
+  const activeIndices: number[] = [];
+  for (let source = 0; source < count; source++) {
+    if (output[source] > zeroThreshold) activeIndices.push(source);
+  }
+  if (activeIndices.length === 0) return { accepted: false };
+
+  let activeSolution: Float64Array;
+  try {
+    activeSolution = solveActiveLeastSquares(
+      plan.design,
+      measured,
+      activeIndices,
+      plan.settings.tolerance * Math.max(1, count),
+    );
+  } catch (error) {
+    if (error instanceof CytofCompensationError && error.code === "rank-deficient-active-set") {
+      return { accepted: false };
+    }
+    throw error;
+  }
+  if (activeSolution.some((value) => !Number.isFinite(value) || value <= zeroThreshold)) {
+    return { accepted: false };
+  }
+
+  output.fill(0);
+  const active = new Uint8Array(count);
+  for (let index = 0; index < activeIndices.length; index++) {
+    const source = activeIndices[index];
+    output[source] = activeSolution[index];
+    active[source] = 1;
+  }
+  const residual = new Float64Array(count);
+  let residualSquares = 0;
+  for (let receiver = 0; receiver < count; receiver++) {
+    let reconstructed = 0;
+    for (let source = 0; source < count; source++) {
+      reconstructed += plan.design[receiver][source] * output[source];
+    }
+    residual[receiver] = measured[receiver] - reconstructed;
+    residualSquares += residual[receiver] * residual[receiver];
+  }
+  let kktViolation = 0;
+  for (let source = 0; source < count; source++) {
+    const gradient = dotColumn(plan.design, source, residual);
+    kktViolation = active[source]
+      ? Math.max(kktViolation, Math.abs(gradient))
+      : Math.max(kktViolation, Math.max(0, gradient));
+  }
+  if (!Number.isFinite(kktViolation) || kktViolation > kktThreshold) {
+    return { accepted: false };
+  }
+  return {
+    accepted: true,
+    diagnostics: includeDiagnostics
+      ? Object.freeze({
+          iterations: coordinateIterations,
+          activeSetSize: activeIndices.length,
+          residualNorm: Math.sqrt(residualSquares),
+          objective: residualSquares,
+          kktViolation,
+          converged: true as const,
+        })
+      : null,
+  };
+}
+
 function solveCytofNnlsEventWithWorkspace(
   plan: CytofNnlsPlan,
   measured: ArrayLike<number>,
   output: Float64Array,
   workspace: CytofCoordinateWorkspace,
   includeDiagnostics: boolean,
+  executionStats?: CytofNnlsExecutionStats,
 ): CytofNnlsEventDiagnostics | null {
   const count = plan.channels.length;
   if (measured.length !== count || output.length !== count) {
@@ -551,8 +665,12 @@ function solveCytofNnlsEventWithWorkspace(
     kktThreshold,
     plan.settings.tolerance * measuredScale * 1e-4,
   );
+  const coordinateIterationLimit = Math.min(
+    plan.settings.maxIterations,
+    CYTOF_COORDINATE_SWEEP_LIMIT,
+  );
 
-  for (let iteration = 1; iteration <= plan.settings.maxIterations; iteration++) {
+  for (let iteration = 1; iteration <= coordinateIterationLimit; iteration++) {
     for (let source = 0; source < count; source++) {
       updateCytofCoordinate(
         plan, source, zeroThreshold, output, linear, gramTimesOutput,
@@ -576,6 +694,14 @@ function solveCytofNnlsEventWithWorkspace(
       }
     }
     if (Number.isFinite(kktViolation) && kktViolation <= coordinateThreshold) {
+      if (executionStats) {
+        executionStats.coordinateConvergedEvents++;
+        executionStats.coordinateIterations += iteration;
+        executionStats.maxCoordinateIterations = Math.max(
+          executionStats.maxCoordinateIterations,
+          iteration,
+        );
+      }
       if (!includeDiagnostics) return null;
       let residualSquares = 0;
       for (let receiver = 0; receiver < count; receiver++) {
@@ -605,6 +731,34 @@ function solveCytofNnlsEventWithWorkspace(
     }
   }
 
+  const polished = polishCytofCoordinateActiveSet(
+    plan,
+    measured,
+    output,
+    measuredScale,
+    coordinateIterationLimit,
+    includeDiagnostics,
+  );
+  if (polished.accepted) {
+    if (executionStats) {
+      executionStats.activeSetPolishedEvents++;
+      executionStats.coordinateIterations += coordinateIterationLimit;
+      executionStats.maxCoordinateIterations = Math.max(
+        executionStats.maxCoordinateIterations,
+        coordinateIterationLimit,
+      );
+    }
+    return polished.diagnostics;
+  }
+
+  if (executionStats) {
+    executionStats.qrFallbackEvents++;
+    executionStats.coordinateIterations += coordinateIterationLimit;
+    executionStats.maxCoordinateIterations = Math.max(
+      executionStats.maxCoordinateIterations,
+      coordinateIterationLimit,
+    );
+  }
   return solveCytofNnlsEventQr(plan, measured, output);
 }
 
@@ -619,6 +773,7 @@ export function solveCytofNnlsEvent(
     output,
     createCytofCoordinateWorkspace(plan.channels.length),
     true,
+    undefined,
   )!;
 }
 
@@ -682,7 +837,14 @@ export function compensateCytofRange(
       }
       measured[channel] = value;
     }
-    solveCytofNnlsEventWithWorkspace(plan, measured, solved, workspace, false);
+    solveCytofNnlsEventWithWorkspace(
+      plan,
+      measured,
+      solved,
+      workspace,
+      false,
+      options.executionStats,
+    );
     const outputEvent = outputStart + event - inputStart;
     for (let channel = 0; channel < count; channel++) {
       const value = solved[channel];

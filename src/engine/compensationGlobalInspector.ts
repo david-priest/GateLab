@@ -7,6 +7,7 @@ import {
   robustDensityColorCeiling,
 } from "./pseudocolor";
 import type { Sample } from "./sample";
+import type { AxisTicks } from "./ticks";
 
 export type CompensationInspectorLayer = "original" | "compensated";
 
@@ -14,6 +15,8 @@ interface CompensationInspectorChannelProjection {
   readonly key: string;
   readonly pnn: string;
   readonly range: readonly [number, number];
+  /** FlowJo-style decade ticks for this channel/range (null → linear); shared by both layers. */
+  readonly ticks: AxisTicks | null;
   readonly originalRaw: Float64Array;
   readonly compensatedRaw: Float64Array;
   readonly originalDisplay: Float64Array;
@@ -33,6 +36,8 @@ export interface CompensationGlobalPairPreview {
   readonly eventSignature: string;
   readonly xRange: readonly [number, number];
   readonly yRange: readonly [number, number];
+  readonly xTicks: AxisTicks | null;
+  readonly yTicks: AxisTicks | null;
   readonly original: CompensationDensityPanel;
   readonly compensated: CompensationDensityPanel;
 }
@@ -143,10 +148,12 @@ export function buildCompensationGlobalInspectorDataset(
       if (Number.isFinite(beforeDisplay)) rangeValues.push(beforeDisplay);
       if (Number.isFinite(afterDisplay)) rangeValues.push(afterDisplay);
     }
+    const range = robustSharedRange(rangeValues);
     const projection = Object.freeze({
       key: channel.key,
       pnn: channel.pnn,
-      range: robustSharedRange(rangeValues),
+      range,
+      ticks: sample.channelTicks(index, [range[0], range[1]]),
       originalRaw,
       compensatedRaw,
       originalDisplay,
@@ -228,6 +235,8 @@ export function buildCompensationGlobalPairPreview(
       eventSignature: dataset.eventSignature,
       xRange: source.range,
       yRange: receiver.range,
+      xTicks: source.ticks,
+      yTicks: receiver.ticks,
       original: lockedPanel(
         source.originalDisplay,
         receiver.originalDisplay,

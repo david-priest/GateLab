@@ -71,8 +71,7 @@ export function CompensationComparisonExportDialog({
       >
         <div className="gl-modal-title" id="comp-comparison-export-title">{t("Export compensation comparison")}</div>
         <p className="gl-comp-export-intro">
-          Export the currently filtered channel pairs as clean paired Original and Compensated biplots.
-          Every pair retains the same frozen events, axes, transform, density scale, and edge piling in both panels.
+          {t("Export the currently filtered channel pairs as clean paired Original and Compensated biplots. Every pair retains the same frozen events, axes, transform, density scale, and edge piling in both panels.")}
         </p>
 
         <fieldset className="gl-comp-export-versions gl-comp-comparison-export-formats">
@@ -87,15 +86,15 @@ export function CompensationComparisonExportDialog({
                 disabled={busy}
                 onChange={() => setFormat(option.format)}
               />
-              <span><strong>{option.title}</strong><small>{option.detail}</small></span>
+              <span><strong>{option.title}</strong><small>{t(option.detail)}</small></span>
             </label>
           ))}
         </fieldset>
 
         <dl className="gl-comp-export-summary gl-comp-comparison-export-summary">
           <div><dt>{t("File")}</dt><dd title={fileName}>{fileName}</dd></div>
-          <div><dt>{t("Scope")}</dt><dd>{pairCount.toLocaleString()} filtered pair{pairCount === 1 ? "" : "s"} · both assays</dd></div>
-          <div><dt>{t("Pages")}</dt><dd>{pageCount.toLocaleString()} A4 landscape page{pageCount === 1 ? "" : "s"} · six pairs per page</dd></div>
+          <div><dt>{t("Scope")}</dt><dd>{t(pairCount === 1 ? "{count} filtered pair · both assays" : "{count} filtered pairs · both assays", { count: pairCount.toLocaleString() })}</dd></div>
+          <div><dt>{t("Pages")}</dt><dd>{t(pageCount === 1 ? "{count} A4 landscape page · six pairs per page" : "{count} A4 landscape pages · six pairs per page", { count: pageCount.toLocaleString() })}</dd></div>
           <div><dt>{t("Population")}</dt><dd title={populationName}>{populationName}</dd></div>
           <div><dt>{t("Filter")}</dt><dd title={filterLabel}>{filterLabel}</dd></div>
         </dl>
@@ -106,7 +105,7 @@ export function CompensationComparisonExportDialog({
             <span>{t("Rendering page {current} of {total}", { current: Math.min(progress.completedPages + 1, progress.totalPages), total: progress.totalPages })}</span>
           </div>
         )}
-        {error && <div className="gl-comp-warning" role="alert">{error}</div>}
+        {error && <div className="gl-comp-warning" role="alert">{t(error)}</div>}
         <div className="gl-modal-actions">
           <button type="button" className="gl-btn-ghost" disabled={busy} onClick={onClose}>{t("Cancel")}</button>
           <button type="button" className="gl-btn" disabled={busy || pageCount === 0} onClick={() => void runExport()}>

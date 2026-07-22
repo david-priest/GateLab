@@ -45,6 +45,12 @@ describe("GateLab UI localization", () => {
   it("falls back to the English source for untranslated scientific text", () => {
     expect(translateUi("ja", "CD19-A")).toBe("CD19-A");
     expect(translateUi("ja", "Samples")).toBe("サンプル");
+    expect(translateUi("ja", "Per-channel z-score")).toBe("チャンネルごとのzスコア");
+    expect(translateUi(
+      "ja",
+      "{scale} needs at least two populations to have a within-channel range. With one population every cell collapses to a single flat value, giving an uninformative row. Switch to unscaled transformed expression, or add another population.",
+      { scale: "チャンネルごと（0–1）" },
+    )).toContain("チャンネルごと（0–1）");
   });
 
   it("switches to Japanese, persists the choice, and updates the document language", () => {

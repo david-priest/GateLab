@@ -160,7 +160,10 @@ interface SampleSnapshot {
   readonly layerRevision: number;
   readonly activeLayer: AssayLayer;
   readonly displayTransformContextKey: string;
-  readonly channelSignature: string;
+  readonly channelIdentities: readonly Readonly<{
+    readonly pnn: string;
+    readonly columnIndex: number;
+  }>[];
   readonly invalidationGeneration: number;
   readonly bindingFingerprint: string;
   readonly binding: PersistedCompensatedLayerBinding;
@@ -377,10 +380,6 @@ export function planCompensationWorkerPool(input: Readonly<{
   );
 }
 
-function channelSignature(sample: Sample): string {
-  return JSON.stringify(sample.channels.map(({ pnn, columnIndex }) => [pnn, columnIndex]));
-}
-
 function bindingsFingerprint(bindings: readonly MatrixChannelBinding[]): string {
   return JSON.stringify(bindings.map((binding) => [
     binding.pnn,
@@ -389,6 +388,18 @@ function bindingsFingerprint(bindings: readonly MatrixChannelBinding[]): string 
     binding.matrixReceiverIndex,
     binding.included,
   ]));
+}
+
+function sameSampleChannelIdentities(snapshot: SampleSnapshot, sample: Sample): boolean {
+  if (snapshot.channelIdentities.length !== sample.channels.length) return false;
+  for (let index = 0; index < snapshot.channelIdentities.length; index++) {
+    const expected = snapshot.channelIdentities[index];
+    const current = sample.channels[index];
+    if (!current || current.pnn !== expected.pnn || current.columnIndex !== expected.columnIndex) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function sameWorkerBinding(
@@ -1156,9 +1167,9 @@ export class CompensationManager {
         for (let chunkIndex = 0; chunkIndex < lane.chunks.length; chunkIndex++) {
           const { start, end } = lane.chunks[chunkIndex];
           this.assertApplyCurrent(active, profile);
-          this.assertSnapshotCurrent(snapshot, profile);
+          this.assertSnapshotIdentityCurrent(snapshot);
           const measuredColumns = await this.copyReceiverChunk(snapshot, start, end, active, profile);
-          this.assertSnapshotCurrent(snapshot, profile);
+          this.assertSnapshotIdentityCurrent(snapshot);
           const chunkPromise = this.waitFor(
             (response): response is ApplyChunkCompleteResponse =>
               response.type === "apply-chunk-complete" &&
@@ -1186,7 +1197,7 @@ export class CompensationManager {
           ]);
           if (complete !== null) completeResponse = complete;
           this.assertApplyCurrent(active, profile);
-          this.assertSnapshotCurrent(snapshot, profile);
+          this.assertSnapshotIdentityCurrent(snapshot);
           await this.verifyAndStageChunk(
             chunk,
             staging,
@@ -1255,7 +1266,7 @@ export class CompensationManager {
     const columns = snapshot.receiverResolvedIndices.map(() => new Float64Array(end - start));
     for (let offset = 0; offset < end - start; offset += this.copySliceEvents) {
       this.assertApplyCurrent(active, profile);
-      this.assertSnapshotCurrent(snapshot, profile);
+      this.assertSnapshotIdentityCurrent(snapshot);
       const sliceEnd = Math.min(end - start, offset + this.copySliceEvents);
       for (let receiver = 0; receiver < snapshot.receiverResolvedIndices.length; receiver++) {
         const source = snapshot.sample.originalColumnData(snapshot.receiverResolvedIndices[receiver]);
@@ -1325,7 +1336,7 @@ export class CompensationManager {
     }
     for (let start = 0; start < expectedEventCount; start += this.copySliceEvents) {
       this.assertApplyCurrent(active, profile);
-      this.assertSnapshotCurrent(snapshot, profile);
+      this.assertSnapshotIdentityCurrent(snapshot);
       const end = Math.min(expectedEventCount, start + this.copySliceEvents);
       snapshot.sample.appendCompensatedLayerStagingChunk(staging, {
         ...identity,
@@ -1464,7 +1475,9 @@ export class CompensationManager {
       layerRevision: sample.layerRevision,
       activeLayer: sample.activeLayer,
       displayTransformContextKey: sample.displayTransformContextKey,
-      channelSignature: channelSignature(sample),
+      channelIdentities: Object.freeze(sample.channels.map(({ pnn, columnIndex }) =>
+        Object.freeze({ pnn, columnIndex })
+      )),
       invalidationGeneration: this.sampleGenerations.get(sample) ?? 0,
       bindingFingerprint: bindingsFingerprint(orderedBindings),
       binding,
@@ -1479,15 +1492,9 @@ export class CompensationManager {
     snapshot: SampleSnapshot,
     profile: CompensationProfileRecord | null,
   ): void {
+    this.assertSnapshotIdentityCurrent(snapshot);
     const sample = snapshot.sample;
-    if (
-      snapshot.dataRevision !== sample.dataRevision ||
-      snapshot.layerRevision !== sample.layerRevision ||
-      snapshot.activeLayer !== sample.activeLayer ||
-      snapshot.displayTransformContextKey !== sample.displayTransformContextKey ||
-      snapshot.channelSignature !== channelSignature(sample) ||
-      snapshot.invalidationGeneration !== (this.sampleGenerations.get(sample) ?? 0)
-    ) {
+    if (snapshot.displayTransformContextKey !== sample.displayTransformContextKey) {
       throw new CompensationManagerError("stale-sample", "The Sample changed while compensation was running.");
     }
     if (profile !== null) {
@@ -1508,6 +1515,24 @@ export class CompensationManager {
       if (!report.canApply || snapshot.bindingFingerprint !== bindingsFingerprint(report.bindings)) {
         throw new CompensationManagerError("stale-channel-binding", "The exact matrix-to-FCS channel binding changed.");
       }
+    }
+  }
+
+  /**
+   * Allocation-free Apply hot-path guard. Full matrix validation is deliberately retained at
+   * capture, target boundaries, and transaction finalization; per-slice checks only need to
+   * reject changes to the exact Sample/workspace identity already validated for this snapshot.
+   */
+  private assertSnapshotIdentityCurrent(snapshot: SampleSnapshot): void {
+    const sample = snapshot.sample;
+    if (
+      snapshot.dataRevision !== sample.dataRevision ||
+      snapshot.layerRevision !== sample.layerRevision ||
+      snapshot.activeLayer !== sample.activeLayer ||
+      !sameSampleChannelIdentities(snapshot, sample) ||
+      snapshot.invalidationGeneration !== (this.sampleGenerations.get(sample) ?? 0)
+    ) {
+      throw new CompensationManagerError("stale-sample", "The Sample changed while compensation was running.");
     }
   }
 

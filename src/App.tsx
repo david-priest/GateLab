@@ -2,7 +2,7 @@
 // GateLabR) with live counts. Drawing a gate opens the name/population modal; the plot
 // shows the active population's events plus its gates (display space).
 
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import pkg from "../package.json";
 import { clearPersistedTabState } from "./ui/tabState";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type NewGate } from "./plots/GatingPlot";
@@ -116,11 +116,10 @@ import { ProportionsTab } from "./ui/ProportionsTab";
 import { DivisionTab, type DivisionProfile } from "./ui/DivisionTab";
 import { parseMetadataTable, lookupMetadataRow, type MetadataColumn } from "./engine/metadata";
 import { ScalesTab } from "./ui/ScalesTab";
-import {
-  CompensationTab,
-  type CompensationApplyUiStatus,
-  type CompensationCandidatePreviewSolver,
-  type CompensationSweepSolver,
+import type {
+  CompensationApplyUiStatus,
+  CompensationCandidatePreviewSolver,
+  CompensationSweepSolver,
 } from "./ui/CompensationTab";
 import { StrategyTab, type StrategyConfig } from "./ui/StrategyTab";
 import { IllustrationTab } from "./ui/IllustrationTab";
@@ -142,6 +141,11 @@ import {
 } from "./engine/pseudocolor";
 import { DensityColourControl } from "./ui/DensityColourControl";
 import { UI_LANGUAGE_OPTIONS, useI18n, type UiLanguage } from "./ui/i18n";
+
+const CompensationTab = lazy(async () => {
+  const module = await import("./ui/CompensationTab");
+  return { default: module.CompensationTab };
+});
 
 const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
 const INITIAL_LEFT_PANE_WIDTH = 264;
@@ -397,6 +401,10 @@ export default function App() {
       manager.dispose();
     }
   }, []);
+  const suspendCompensationBackgroundWork = useCallback(() => {
+    cancelCompensationSweepManagers("The Compensation tab was hidden.");
+    cancelCompensationCandidatePreview("The Compensation tab was hidden.");
+  }, [cancelCompensationCandidatePreview, cancelCompensationSweepManagers]);
   const compensationApplyGuardRef = useRef(false);
   const compensationRestoreCancelledRef = useRef(false);
   const [compensationApplyStatus, setCompensationApplyStatus] =
@@ -423,6 +431,19 @@ export default function App() {
   const [yRange, setYRange] = useState<[number, number] | null>(null);
   const [maxEvents, setMaxEvents] = useState(50000); // 0 = all (no downsampling)
   const [activeTab, setActiveTab] = useState<TabId>("gating");
+  const compensationTabStateKey = `${workspaceId}:${activeSampleId ?? "none"}`;
+  const [mountedCompensationStateKey, setMountedCompensationStateKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (activeTab === "compensation") {
+      setMountedCompensationStateKey(compensationTabStateKey);
+      return;
+    }
+    // A new workspace/sample has its own draft. Do not eagerly mount that large editor while the
+    // user is working elsewhere; it mounts on the first visit to Compensation.
+    setMountedCompensationStateKey((current) => current === compensationTabStateKey ? current : null);
+  }, [activeTab, compensationTabStateKey]);
+  const compensationTabMounted = activeTab === "compensation" ||
+    mountedCompensationStateKey === compensationTabStateKey;
   const [pointAlpha, setPointAlpha] = useState(0.4); // main-plot point opacity (cytof point_alpha)
   const [densityColorPower, setDensityColorPower] = useState(DEFAULT_DENSITY_COLOR_POWER);
   const changeDensityColorPower = useCallback((value: number) => {
@@ -695,7 +716,7 @@ export default function App() {
   async function startNewWorkspace(): Promise<void> {
     setCrud(null);
     if (compensationApplyGuardRef.current || compensationManagerRef.current!.applyInProgress) {
-      setError("Wait for the current compensation Apply to finish, or cancel it, before starting a new workspace.");
+      setError(t("Wait for the current compensation Apply to finish, or cancel it, before starting a new workspace."));
       return;
     }
     setBusy(true);
@@ -1050,7 +1071,7 @@ export default function App() {
       }
       const applied = sample.compensationEnabled === on;
       if (!applied) {
-        setError("The requested compensation layer could not be activated for this sample.");
+        setError(t("The requested compensation layer could not be activated for this sample."));
         return false;
       }
       if (sample.activeLayer !== previousLayer) {
@@ -1070,10 +1091,10 @@ export default function App() {
     profile: CompensationProfileRecord,
     onProgress?: (progress: CompensationApplyProgress) => void,
   ): Promise<void> {
-    if (!sample) throw new Error("No active sample is available for compensation.");
+    if (!sample) throw new Error(t("No active sample is available for compensation."));
     const manager = compensationManagerRef.current!;
     if (compensationApplyGuardRef.current || manager.applyInProgress) {
-      const message = "Compensation is already running. Follow or cancel the current job in the status bar before starting another Apply.";
+      const message = t("Compensation is already running. Follow or cancel the current job in the status bar before starting another Apply.");
       setError(message);
       throw new Error(message);
     }
@@ -1084,7 +1105,7 @@ export default function App() {
         ({ baselineProfileId }) => baselineProfileId === profile.baselineProfileId,
       );
       if (!lineage || !lineage.records.some(({ profileId }) => profileId === profile.parentProfileId)) {
-        throw new Error("The compensation revision cannot be applied because its parent profile is missing from this workspace.");
+        throw new Error(t("The compensation revision cannot be applied because its parent profile is missing from this workspace."));
       }
     }
     const targetSample = sample;
@@ -1111,9 +1132,11 @@ export default function App() {
             processedEvents: progress.processedEvents,
             totalEvents: progress.totalEvents,
           });
-          setImportMsg(
-            `Compensation · ${Math.round(progress.fraction * 100)}% · ${progress.processedEvents.toLocaleString()} / ${progress.totalEvents.toLocaleString()} events`,
-          );
+          setImportMsg(t("Compensation · {percent}% · {processed} / {total} events", {
+            percent: Math.round(progress.fraction * 100),
+            processed: progress.processedEvents.toLocaleString(),
+            total: progress.totalEvents.toLocaleString(),
+          }));
           onProgress?.(progress);
         },
       });
@@ -1156,12 +1179,12 @@ export default function App() {
       const appliedChannelCount = profile.scientific.kind === "flow-spillover"
         ? profile.scientific.matrix.receiverChannels.length
         : profile.scientific.includedChannels.length;
-      setImportMsg(`Compensated with ${profile.name} · ${appliedChannelCount} channels`);
+      setImportMsg(t("Compensated with {name} · {count} channels", { name: profile.name, count: appliedChannelCount }));
       pendingCheckpointReasonRef.current = "after-compensation-apply";
     } catch (cause) {
       if (cause instanceof CompensationCancelledError) {
         setError(null);
-        setImportMsg("Compensation cancelled · previous assay unchanged");
+        setImportMsg(t("Compensation cancelled · previous assay unchanged"));
         throw cause;
       }
       const message = cause instanceof Error ? cause.message : String(cause);
@@ -1619,8 +1642,23 @@ export default function App() {
 
   async function removeSamples(ids: readonly string[]) {
     if (ids.length === 0) return;
+    const manager = compensationManagerRef.current!;
+    const applyIsRunning = () => compensationApplyGuardRef.current || manager.applyInProgress;
+    if (applyIsRunning()) {
+      setError(t("Wait for the current compensation Apply to finish, or cancel it, before removing samples."));
+      return;
+    }
     await checkpointCurrentWorkspace("before-sample-remove");
+    // Check again after the asynchronous checkpoint. An Apply may have been started while
+    // IndexedDB was writing; sample membership must remain stable for its aggregate snapshot.
+    if (applyIsRunning()) {
+      setError(t("Wait for the current compensation Apply to finish, or cancel it, before removing samples."));
+      return;
+    }
     const removed = new Set(ids);
+    for (const entry of samples) {
+      if (removed.has(entry.id)) manager.invalidateSample(entry.sample);
+    }
     const next = samples.filter((entry) => !removed.has(entry.id));
     const curX = sample?.channels[xIdx]?.key;
     const curY = sample?.channels[yIdx]?.key;
@@ -2057,7 +2095,7 @@ export default function App() {
   ): Promise<void> {
     const manager = compensationManagerRef.current!;
     if (compensationApplyGuardRef.current || manager.applyInProgress) {
-      throw new Error("Another compensation job is already running.");
+      throw new Error(t("Another compensation job is already running."));
     }
     const profiles = ws.compensation.lineages.flatMap(({ records }) => records);
     const profileById = new Map(profiles.map((profile) => [profile.profileId, profile]));
@@ -2066,7 +2104,7 @@ export default function App() {
       if (binding === null) return [];
       const profile = profileById.get(binding.profileId);
       if (!profile) {
-        throw new Error(`Workspace compensation profile '${binding.profileId}' is missing.`);
+        throw new Error(t("Workspace compensation profile '{profile}' is missing.", { profile: binding.profileId }));
       }
       return [{ entry: entries[index], assay: workspaceSample.assay, binding, profile }];
     });
@@ -2076,7 +2114,7 @@ export default function App() {
     const profileNames = Array.from(new Set(tasks.map(({ profile }) => profile.name)));
     const statusName = profileNames.length === 1
       ? profileNames[0]
-      : `${tasks.length} saved compensated assays`;
+      : t("{count} saved compensated assays", { count: tasks.length });
     const setRestoreStatus = (
       phase: CompensationApplyUiStatus["phase"],
       processedEvents: number,
@@ -2090,7 +2128,7 @@ export default function App() {
     });
     const assertNotCancelled = () => {
       if (compensationRestoreCancelledRef.current) {
-        throw new CompensationCancelledError("Workspace compensation restore cancelled.");
+        throw new CompensationCancelledError(t("Workspace compensation restore cancelled."));
       }
     };
 
@@ -2106,7 +2144,10 @@ export default function App() {
       for (let index = 0; index < tasks.length; index++) {
         const task = tasks[index];
         assertNotCancelled();
-        setImportMsg(`Restoring saved compensation · checking local cache ${index + 1} of ${tasks.length}`);
+        setImportMsg(t("Restoring saved compensation · checking local cache {current} of {total}", {
+          current: index + 1,
+          total: tasks.length,
+        }));
         let fcsDigest: Awaited<ReturnType<typeof digestFcsBytes>> | null = null;
         try {
           fcsDigest = await digestFcsBytes(task.entry.bytes);
@@ -2149,7 +2190,7 @@ export default function App() {
         assertNotCancelled();
         const groupStart = completedEvents;
         const profile = misses[0].task.profile;
-        setImportMsg(`Restoring saved compensation · recomputing ${profile.name}`);
+        setImportMsg(t("Restoring saved compensation · recomputing {name}", { name: profile.name }));
         const result = await manager.apply({
           profile,
           targets: misses.map(({ task }) => ({
@@ -2159,10 +2200,11 @@ export default function App() {
           onProgress: (progress) => {
             const restoredEvents = groupStart + progress.processedEvents;
             setRestoreStatus("applying", restoredEvents);
-            setImportMsg(
-              `Restoring saved compensation · ${Math.round(restoredEvents / totalEvents * 100)}%` +
-                ` · ${restoredEvents.toLocaleString()} / ${totalEvents.toLocaleString()} events`,
-            );
+            setImportMsg(t("Restoring saved compensation · {percent}% · {processed} / {total} events", {
+              percent: Math.round(restoredEvents / totalEvents * 100),
+              processed: restoredEvents.toLocaleString(),
+              total: totalEvents.toLocaleString(),
+            }));
           },
         });
         completedEvents = groupStart + misses.reduce(
@@ -2713,11 +2755,11 @@ export default function App() {
         {sample && (
           <label
             className="gl-header-assay"
-            title="Active assay layer for every GateLab tab. Switching layers keeps gates but recomputes their memberships in the selected coordinate system."
+            title={t("Active assay layer for every GateLab tab. Switching layers keeps gates but recomputes their memberships in the selected coordinate system.")}
           >
             <span>{t("Assay")}</span>
             <select
-              aria-label="Active assay layer for all tabs"
+              aria-label={t("Active assay layer for all tabs")}
               value={compensationOn ? "compensated" : "original"}
               disabled={compensationApplyStatus !== null}
               onChange={(event) => toggleCompensation(event.currentTarget.value === "compensated")}
@@ -2729,7 +2771,7 @@ export default function App() {
             </select>
           </label>
         )}
-        {error && <span className="gl-error">⚠ {error}</span>}
+        {error && <span className="gl-error">⚠ {t(error)}</span>}
         <span
           className="gl-header-meta"
           style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap" }}
@@ -2763,7 +2805,7 @@ export default function App() {
         <div className="gl-comp-apply-status-bar" role="status" aria-live="polite">
           <div className="gl-comp-apply-status-copy">
             <strong>
-              {compensationApplyStatus.operation === "restore"
+              {t(compensationApplyStatus.operation === "restore"
                 ? compensationApplyStatus.phase === "cancelling"
                   ? "Cancelling workspace compensation restore"
                   : compensationApplyStatus.phase === "preparing"
@@ -2773,19 +2815,23 @@ export default function App() {
                   ? "Cancelling CyTOF compensation"
                   : compensationApplyStatus.phase === "preparing"
                     ? "Preparing CyTOF compensation"
-                    : "Applying CyTOF compensation"}
+                    : "Applying CyTOF compensation")}
             </strong>
             <span title={compensationApplyStatus.profileName}>{compensationApplyStatus.profileName}</span>
           </div>
           <progress
-            aria-label={compensationApplyStatus.operation === "restore"
+            aria-label={t(compensationApplyStatus.operation === "restore"
               ? "Saved compensation restore progress"
-              : "CyTOF compensation progress"}
+              : "CyTOF compensation progress")}
             max={1}
             value={compensationApplyStatus.fraction}
           />
           <span className="gl-comp-apply-status-count">
-            {Math.round(compensationApplyStatus.fraction * 100)}% · {compensationApplyStatus.processedEvents.toLocaleString()} / {compensationApplyStatus.totalEvents.toLocaleString()} events
+            {t("{percent}% · {processed} / {total} events", {
+              percent: Math.round(compensationApplyStatus.fraction * 100),
+              processed: compensationApplyStatus.processedEvents.toLocaleString(),
+              total: compensationApplyStatus.totalEvents.toLocaleString(),
+            })}
           </span>
           {compensationApplyStatus.operation !== "restore" && activeTab !== "compensation" && (
             <button type="button" className="gl-mini-btn" onClick={() => setActiveTab("compensation")}>
@@ -2943,7 +2989,7 @@ export default function App() {
               if (f) await openWorkspaceFromFile(f, null, f.name);
             }}
           />
-          {!sample && importMsg && <div className="gl-hint">{importMsg}</div>}
+          {!sample && importMsg && <div className="gl-hint">{t(importMsg)}</div>}
 
           {sample && (
             <>
@@ -2968,7 +3014,7 @@ export default function App() {
                   e.target.value = "";
                 }}
               />
-              {importMsg && <div className="gl-hint">{importMsg}</div>}
+              {importMsg && <div className="gl-hint">{t(importMsg)}</div>}
               <button
                 className="gl-btn-ghost gl-btn-block"
                 disabled={Object.keys(state.gates).length === 0}
@@ -3438,34 +3484,37 @@ export default function App() {
               />
             )}
             </ErrorBoundary>
-            {/* Matrix import and Apply are long-lived workflows. Keep this tab mounted while
-                hidden so switching tabs cannot discard its draft while its manager job runs. */}
-            <ErrorBoundary label="compensation">
-              <CompensationTab
-                key={`${workspaceId}:${activeSampleId ?? "none"}`}
-                sample={sample}
-                sampleName={fileName}
-                compensationOn={compensationOn}
-                onApplyProfile={applyCompensationProfile}
-                onCancelApply={cancelCompensationApply}
-                hasExistingGates={Object.keys(state.gates).length > 0}
-                applyStatus={compensationApplyStatus}
-                installedProfile={activeCompensationProfile}
-                applyWorkerCount={compensationWorkerCount}
-                applyWorkerLimit={compensationWorkerLimit}
-                onApplyWorkerCountChange={changeCompensationWorkerCount}
-                installedBaselineProfile={activeCompensationBaseline}
-                reviewPopulations={compensationReviewPopulations}
-                reviewPopulationMasks={derived.masks}
-                onPreviewCompensationCandidate={previewCompensationCandidate}
-                onSolveCompensationSweep={solveCompensationSweep}
-                onCancelCompensationSweep={cancelCompensationSweep}
-                visible={activeTab === "compensation"}
-                stateKey={`${workspaceId}:${activeSampleId ?? "none"}`}
-                densityColorPower={densityColorPower}
-                onDensityColorPowerChange={changeDensityColorPower}
-              />
-            </ErrorBoundary>
+            {/* Mount on first visit, then retain only CompensationTab's lightweight state keeper
+                off-tab. The matrix/gallery/canvas subtree is removed while gating stays active. */}
+            {compensationTabMounted && <ErrorBoundary label="compensation">
+              <Suspense fallback={<div className="gl-empty">{t("Loading compensation tools…")}</div>}>
+                <CompensationTab
+                  key={compensationTabStateKey}
+                  sample={sample}
+                  sampleName={fileName}
+                  compensationOn={compensationOn}
+                  onApplyProfile={applyCompensationProfile}
+                  onCancelApply={cancelCompensationApply}
+                  hasExistingGates={Object.keys(state.gates).length > 0}
+                  applyStatus={compensationApplyStatus}
+                  installedProfile={activeCompensationProfile}
+                  applyWorkerCount={compensationWorkerCount}
+                  applyWorkerLimit={compensationWorkerLimit}
+                  onApplyWorkerCountChange={changeCompensationWorkerCount}
+                  installedBaselineProfile={activeCompensationBaseline}
+                  reviewPopulations={compensationReviewPopulations}
+                  reviewPopulationMasks={derived.masks}
+                  onPreviewCompensationCandidate={previewCompensationCandidate}
+                  onSolveCompensationSweep={solveCompensationSweep}
+                  onCancelCompensationSweep={cancelCompensationSweep}
+                  onSuspendBackgroundWork={suspendCompensationBackgroundWork}
+                  visible={activeTab === "compensation"}
+                  stateKey={compensationTabStateKey}
+                  densityColorPower={densityColorPower}
+                  onDensityColorPowerChange={changeDensityColorPower}
+                />
+              </Suspense>
+            </ErrorBoundary>}
           </div>
         ) : (
           <div className="gl-center gl-empty" role="main" aria-label={t("Plot and analysis tabs")}>

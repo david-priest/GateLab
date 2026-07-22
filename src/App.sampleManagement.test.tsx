@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CompensationManager } from "./engine/compensationManager";
 import type { FcsFile } from "./engine/fcs";
 
 vi.mock("./plots/GatingPlot", () => ({
@@ -48,6 +49,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   host.remove();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   uuid = 0;
 });
@@ -71,6 +73,7 @@ describe("App sample management", () => {
   });
 
   it("imports a batch atomically and removes selected files through the manager", async () => {
+    const invalidateSample = vi.spyOn(CompensationManager.prototype, "invalidateSample");
     act(() => root.render(<App />));
     const fileInputs = host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]');
     expect(fileInputs).toHaveLength(2);
@@ -113,5 +116,39 @@ describe("App sample management", () => {
     expect(host.textContent).not.toContain("donor-a.fcs");
     expect(host.textContent).toContain("donor-b.fcs");
     expect(host.textContent).toContain("1 / 1 included");
+    expect(invalidateSample).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Apply target membership stable by blocking sample removal while Apply is active", async () => {
+    vi.spyOn(CompensationManager.prototype, "applyInProgress", "get").mockReturnValue(true);
+    const invalidateSample = vi.spyOn(CompensationManager.prototype, "invalidateSample");
+    act(() => root.render(<App />));
+    const directFileInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(directFileInput, "files", {
+      configurable: true,
+      value: [testFile("donor-a.fcs")],
+    });
+    await act(async () => {
+      directFileInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    act(() => [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Manage…")!.click());
+    act(() => host.querySelector<HTMLInputElement>(
+      'input[aria-label="Select donor-a.fcs for management"]',
+    )!.click());
+    act(() => [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Remove selected…")!.click());
+    await act(async () => {
+      [...host.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Remove")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(host.querySelectorAll<HTMLElement>('[role="option"]')).toHaveLength(1);
+    expect(host.textContent).toContain("Wait for the current compensation Apply to finish");
+    expect(invalidateSample).not.toHaveBeenCalled();
   });
 });

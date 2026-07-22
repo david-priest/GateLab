@@ -10,6 +10,14 @@ export type HeatmapSummaryStat = "median" | "mean";
 export type HeatmapScaleMode = "none" | "column_minmax" | "row_minmax" | "column_zscore";
 export type HeatmapPalette = "heat" | "viridis" | "blue_white_yellow_red";
 
+/** Per-channel comparisons collapse to a constant when fewer than two populations are shown. */
+export function heatmapScaleNeedsPopulationComparison(
+  mode: HeatmapScaleMode,
+  populationCount: number,
+): boolean {
+  return (mode === "column_minmax" || mode === "column_zscore") && populationCount < 2;
+}
+
 export interface HeatmapChannel {
   id: string;
   label: string;

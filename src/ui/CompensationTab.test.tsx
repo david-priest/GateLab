@@ -17,6 +17,7 @@ import {
   type CompensationReviewPopulation,
   type CompensationSweepSolver,
 } from "./CompensationTab";
+import { I18nProvider, type UiLanguage } from "./i18n";
 import { clearPersistedTabState } from "./tabState";
 
 const digest = (character: string): Sha256Digest =>
@@ -178,6 +179,7 @@ let scrollIntoViewMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   clearPersistedTabState();
+  window.localStorage.removeItem("gatelab.uiLanguage");
   scrollIntoViewMock = vi.fn();
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
     configurable: true,
@@ -192,6 +194,7 @@ afterEach(() => {
   act(() => root.unmount());
   host.remove();
   clearPersistedTabState();
+  window.localStorage.removeItem("gatelab.uiLanguage");
   Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
   vi.unstubAllGlobals();
 });
@@ -216,40 +219,73 @@ function renderTab(
     reviewPopulationMasks?: Readonly<Record<string, Uint8Array>>;
     onPreviewCompensationCandidate?: CompensationCandidatePreviewSolver;
     onSolveCompensationSweep?: CompensationSweepSolver;
+    onSuspendBackgroundWork?: () => void;
     visible?: boolean;
     stateKey?: string;
     densityColorPower?: number;
     onDensityColorPowerChange?: (value: number) => void;
+    language?: UiLanguage;
   }> = {},
 ) {
   const stateKey = options.stateKey ?? "workspace-a:sample-a";
+  if (options.language) window.localStorage.setItem("gatelab.uiLanguage", options.language);
   act(() => root.render(
-    <CompensationTab
-      key={stateKey}
-      sample={sample}
-      compensationOn={options.compensationOn ?? false}
-      onApplyProfile={options.onApplyProfile}
-      onCancelApply={options.onCancelApply}
-      hasExistingGates={options.hasExistingGates}
-      applyStatus={options.applyStatus}
-      installedProfile={options.installedProfile}
-      applyWorkerCount={options.applyWorkerCount}
-      applyWorkerLimit={options.applyWorkerLimit}
-      onApplyWorkerCountChange={options.onApplyWorkerCountChange}
-      installedBaselineProfile={options.installedBaselineProfile}
-      reviewPopulations={options.reviewPopulations}
-      reviewPopulationMasks={options.reviewPopulationMasks}
-      onPreviewCompensationCandidate={options.onPreviewCompensationCandidate}
-      onSolveCompensationSweep={options.onSolveCompensationSweep}
-      visible={options.visible}
-      stateKey={stateKey}
-      densityColorPower={options.densityColorPower}
-      onDensityColorPowerChange={options.onDensityColorPowerChange}
-    />,
+    <I18nProvider>
+      <CompensationTab
+        key={stateKey}
+        sample={sample}
+        compensationOn={options.compensationOn ?? false}
+        onApplyProfile={options.onApplyProfile}
+        onCancelApply={options.onCancelApply}
+        hasExistingGates={options.hasExistingGates}
+        applyStatus={options.applyStatus}
+        installedProfile={options.installedProfile}
+        applyWorkerCount={options.applyWorkerCount}
+        applyWorkerLimit={options.applyWorkerLimit}
+        onApplyWorkerCountChange={options.onApplyWorkerCountChange}
+        installedBaselineProfile={options.installedBaselineProfile}
+        reviewPopulations={options.reviewPopulations}
+        reviewPopulationMasks={options.reviewPopulationMasks}
+        onPreviewCompensationCandidate={options.onPreviewCompensationCandidate}
+        onSolveCompensationSweep={options.onSolveCompensationSweep}
+        onSuspendBackgroundWork={options.onSuspendBackgroundWork}
+        visible={options.visible}
+        stateKey={stateKey}
+        densityColorPower={options.densityColorPower}
+        onDensityColorPowerChange={options.onDensityColorPowerChange}
+      />
+    </I18nProvider>,
   ));
 }
 
 describe("CompensationTab common path", () => {
+  it("renders the Matrix, Global, Flagged, and export paths in Japanese", () => {
+    renderTab(flowSample(), { language: "ja", stateKey: "workspace-a:japanese" });
+    expect(host.textContent).toContain("補正");
+    expect(host.textContent).toContain("FCS内蔵マトリクス");
+    expect(host.textContent).toContain("受け側チャンネル");
+
+    const exportButton = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "CSVを書き出す…")!;
+    act(() => exportButton.click());
+    expect(host.querySelector('[role="dialog"]')?.textContent).toContain("スピルマトリクスを書き出す");
+    const cancel = [...host.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')]
+      .find((button) => button.textContent === "キャンセル")!;
+    act(() => cancel.click());
+
+    const tabs = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    const global = tabs.find((button) => button.textContent === "全体ビュー")!;
+    act(() => global.click());
+    expect(host.textContent).toContain("全体データビュー");
+    expect(host.textContent).toContain("表示固定");
+
+    const flagged = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((button) => button.textContent === "フラグ済み")!;
+    act(() => flagged.click());
+    expect(host.textContent).toContain("フラグ済みペア");
+    expect(host.textContent).toContain("エビデンスモード");
+    expect(host.querySelector('[aria-label="補正エビデンスモード"]')).not.toBeNull();
+  });
   it("does not rebuild the hidden compensation workspace for gating-only population updates", () => {
     const sample = flowSample({ channelCount: 20, eventCount: 100 });
     const statusSpy = vi.spyOn(sample, "compensatedLayerStatus");
@@ -261,7 +297,8 @@ describe("CompensationTab common path", () => {
       reviewPopulationMasks: { "gate-a": new Uint8Array(100).fill(1, 0, 40) },
     });
     const callsAfterMount = statusSpy.mock.calls.length;
-    expect(host.querySelectorAll(".gl-comp-cell").length).toBeGreaterThan(300);
+    expect(host.querySelector("[data-compensation-dormant='true']")).not.toBeNull();
+    expect(host.querySelectorAll(".gl-comp-cell")).toHaveLength(0);
 
     renderTab(sample, {
       stateKey,
@@ -280,7 +317,23 @@ describe("CompensationTab common path", () => {
       hasExistingGates: true,
     });
     expect(statusSpy.mock.calls.length).toBeGreaterThan(callsAfterMount);
+    expect(host.querySelectorAll(".gl-comp-cell").length).toBeGreaterThan(300);
     expect(host.querySelector('option[value="gate-a"]')?.textContent).toContain("Gate A moved");
+  });
+
+  it("suspends speculative background work when hidden without discarding editor state", () => {
+    const onSuspendBackgroundWork = vi.fn();
+    const sample = flowSample();
+    const stateKey = "workspace-a:suspend-background";
+    renderTab(sample, { stateKey, visible: true, onSuspendBackgroundWork });
+    expect(host.querySelector("[data-compensation-dormant='true']")).toBeNull();
+
+    renderTab(sample, { stateKey, visible: false, onSuspendBackgroundWork });
+    expect(onSuspendBackgroundWork).toHaveBeenCalledTimes(1);
+    expect(host.querySelector("[data-compensation-dormant='true']")).not.toBeNull();
+
+    renderTab(sample, { stateKey, visible: false, onSuspendBackgroundWork });
+    expect(onSuspendBackgroundWork).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces the bounded Apply worker count and disables it while compensation runs", () => {
@@ -910,6 +963,8 @@ describe("CompensationTab CyTOF import path", () => {
 
     renderTab(sample, { stateKey, visible: false });
     expect(host.querySelector<HTMLElement>(".gl-compensation-tab")?.style.display).toBe("none");
+    expect(host.querySelector("[data-compensation-dormant='true']")).not.toBeNull();
+    expect(host.querySelector(".gl-comp-channel-grid")).toBeNull();
 
     renderTab(sample, { stateKey, visible: true });
     expect(host.textContent).toContain("wing-lab.csv");

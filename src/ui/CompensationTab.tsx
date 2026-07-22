@@ -1,16 +1,12 @@
 import {
-  createContext,
   memo,
   useEffect,
-  useContext,
   useMemo,
   useRef,
   useState,
   type ChangeEvent,
-  type InputHTMLAttributes,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
-  type ReactNode,
 } from "react";
 import { DEFAULT_DENSITY_COLOR_POWER } from "../engine/pseudocolor";
 import {
@@ -50,7 +46,6 @@ import {
   buildCompensationPairPreview,
   buildSolvedCompensationPairPreview,
   deterministicCompensationEventIndices,
-  type CompensationDensityPanel,
   type CompensationPairEvidence,
   type CompensationPairPreview,
 } from "../engine/compensationPairPreview";
@@ -62,16 +57,11 @@ import {
 import {
   buildCompensationGlobalInspectorDataset,
   buildCompensationGlobalPairPreview,
-  compensationDensitySmoothingRadiusForPlot,
-  compensationSharedDensityCeiling,
   type CompensationGlobalInspectorDataset,
-  type CompensationGlobalPairPreview,
-  type CompensationInspectorLayer,
 } from "../engine/compensationGlobalInspector";
 import type { CompensationApplyProgress } from "../engine/compensationManager";
 import type { PreviewSolvedResponse } from "../workers/compensationProtocol";
 import type { Sample } from "../engine/sample";
-import { renderCompensationDensityBiplotSurface } from "../plots/compensationDensityPlot";
 import {
   exportCompensationComparison,
   type CompensationComparisonExportFormat,
@@ -82,9 +72,19 @@ import { CompensationMatrixExportDialog } from "./CompensationMatrixExportDialog
 import { usePersistedTabState } from "./tabState";
 import { DensityColourControl } from "./DensityColourControl";
 import { useI18n } from "./i18n";
-
-const DensityColorPowerContext = createContext(DEFAULT_DENSITY_COLOR_POWER);
-const CompensationPointAlphaContext = createContext(0.85);
+import { percentText, significantNumber } from "./compensationUiFormat";
+import { ScrubbableNumberInput } from "./ScrubbableNumberInput";
+import {
+  CompensationPairBiplots,
+  CompensationPointAlphaContext,
+  DensityBiplot,
+  DensityColorPowerContext,
+  GlobalCompensationPlotTile,
+  GlobalInspectorLayerScope,
+  MiniCompensationMatrix,
+  type CompensationGlobalPairCandidate,
+  type CompensationMatrixView,
+} from "./CompensationPlots";
 
 interface Props {
   sample: Sample;
@@ -107,6 +107,7 @@ interface Props {
   onPreviewCompensationCandidate?: CompensationCandidatePreviewSolver;
   onSolveCompensationSweep?: CompensationSweepSolver;
   onCancelCompensationSweep?: () => void;
+  onSuspendBackgroundWork?: () => void;
   visible?: boolean;
   stateKey: string;
   densityColorPower?: number;
@@ -151,18 +152,6 @@ interface CytofMatrixDraft {
   readonly validationWarnings: readonly MatrixValidationIssue[];
 }
 
-interface CompensationMatrixView {
-  readonly sourceAxisKeys: readonly string[];
-  readonly receiverAxisKeys: readonly string[];
-  readonly sourceChannels: readonly ReturnType<typeof channelDisplay>[];
-  readonly receiverChannels: readonly ReturnType<typeof channelDisplay>[];
-  readonly matrix: readonly (readonly number[])[];
-  readonly kind: "flow" | "cytof";
-  readonly title: string;
-  readonly subtitle: string;
-  readonly coefficientNote: string;
-}
-
 interface CompensationImpactSummary {
   readonly previewEvents: number;
   readonly comparedValues: number;
@@ -185,17 +174,6 @@ interface CompensationEvidenceCandidate {
   readonly physicalPrior: number;
   readonly evidence: CompensationPairEvidence;
   readonly relativePriority: number;
-}
-
-interface CompensationGlobalPairCandidate {
-  readonly sourceIndex: number;
-  readonly receiverIndex: number;
-  readonly pairKey: string;
-  readonly source: ReturnType<typeof channelDisplay>;
-  readonly receiver: ReturnType<typeof channelDisplay>;
-  readonly coefficient: number;
-  readonly interaction: CytofInteractionType | null;
-  readonly physicalPrior: number;
 }
 
 interface CompensationSweepValue {
@@ -259,18 +237,6 @@ const MAX_SWEEP_WORKERS = 4;
 const DEFAULT_INSPECTOR_WIDTH = 624;
 const EMPTY_POPULATION_MASKS: Readonly<Record<string, Uint8Array>> = Object.freeze({});
 
-function significantNumber(value: number, significantDigits: number): string {
-  if (!Number.isFinite(value)) return String(value);
-  if (Object.is(value, -0) || value === 0) return "0";
-  const absolute = Math.abs(value);
-  if (absolute >= 1e6 || absolute < 1e-8) return value.toExponential(Math.max(1, significantDigits - 1));
-  const decimalPlaces = Math.min(
-    10,
-    Math.max(0, significantDigits - Math.floor(Math.log10(absolute)) - 1),
-  );
-  return value.toFixed(decimalPlaces).replace(/(?:\.0+|(\.\d*?[1-9])0+)$/, "$1");
-}
-
 function editableCoefficientPercent(value: number): string {
   if (!Number.isFinite(value)) return String(value);
   const percent = value * 100;
@@ -282,136 +248,6 @@ function editableCoefficientPercent(value: number): string {
 
 function compensationProfileBaseName(name: string): string {
   return name.replace(/(?: · (?:edited|revised))+$/u, "");
-}
-
-type ScrubbableNumberInputProps = Omit<
-  InputHTMLAttributes<HTMLInputElement>,
-  "type" | "value" | "onChange"
-> & Readonly<{
-  value: string;
-  onValueChange: (value: string) => void;
-  scrubStep?: number;
-}>;
-
-/**
- * A normal editable number input with an additional vertical scrub gesture. Clicking still
- * focuses the field; dragging its body upward/downward changes by one step per four pixels.
- * The native stepper strip on the right is deliberately excluded from scrubbing.
- */
-function ScrubbableNumberInput({
-  value,
-  onValueChange,
-  scrubStep,
-  className = "",
-  disabled,
-  min,
-  max,
-  step,
-  title,
-  onPointerDown,
-  onPointerMove,
-  onPointerUp,
-  onPointerCancel,
-  onLostPointerCapture,
-  ...rest
-}: ScrubbableNumberInputProps) {
-  const dragRef = useRef<Readonly<{
-    pointerId: number;
-    startY: number;
-    startValue: number;
-    step: number;
-    decimals: number;
-    lastSteps: number;
-  }> | null>(null);
-  const [scrubbing, setScrubbing] = useState(false);
-
-  const finishScrub = (event: ReactPointerEvent<HTMLInputElement>) => {
-    if (dragRef.current?.pointerId === event.pointerId) {
-      dragRef.current = null;
-      setScrubbing(false);
-      if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
-    }
-  };
-
-  return (
-    <input
-      {...rest}
-      type="number"
-      className={`gl-scrubbable-number${scrubbing ? " is-scrubbing" : ""}${className ? ` ${className}` : ""}`}
-      value={value}
-      disabled={disabled}
-      min={min}
-      max={max}
-      step={step}
-      title={title ?? "Type a value, use the arrows, or drag vertically to adjust"}
-      onChange={(event) => onValueChange(event.currentTarget.value)}
-      onPointerDown={(event) => {
-        onPointerDown?.(event);
-        if (event.defaultPrevented || disabled || event.button !== 0) return;
-        const bounds = event.currentTarget.getBoundingClientRect();
-        if (event.clientX >= bounds.right - 18) return;
-        const startValue = Number(value);
-        const resolvedStep = (scrubStep ?? Number(step)) || 0.1;
-        if (!Number.isFinite(startValue) || !(resolvedStep > 0)) return;
-        const stepText = String(resolvedStep);
-        const decimals = stepText.includes("e-")
-          ? Number(stepText.split("e-")[1])
-          : stepText.includes(".")
-            ? stepText.split(".")[1].length
-            : 0;
-        dragRef.current = {
-          pointerId: event.pointerId,
-          startY: event.clientY,
-          startValue,
-          step: resolvedStep,
-          decimals,
-          lastSteps: 0,
-        };
-        event.currentTarget.setPointerCapture?.(event.pointerId);
-      }}
-      onPointerMove={(event) => {
-        onPointerMove?.(event);
-        const drag = dragRef.current;
-        if (!drag || drag.pointerId !== event.pointerId) return;
-        const distance = drag.startY - event.clientY;
-        if (Math.abs(distance) < 3) return;
-        const steps = distance > 0 ? Math.floor(distance / 4) : Math.ceil(distance / 4);
-        if (steps === drag.lastSteps) return;
-        let next = drag.startValue + steps * drag.step;
-        const lower = min === undefined ? Number.NEGATIVE_INFINITY : Number(min);
-        const upper = max === undefined ? Number.POSITIVE_INFINITY : Number(max);
-        if (Number.isFinite(lower)) next = Math.max(lower, next);
-        if (Number.isFinite(upper)) next = Math.min(upper, next);
-        dragRef.current = { ...drag, lastSteps: steps };
-        setScrubbing(true);
-        onValueChange(next.toFixed(Math.min(10, drag.decimals)));
-        event.preventDefault();
-      }}
-      onPointerUp={(event) => {
-        onPointerUp?.(event);
-        finishScrub(event);
-      }}
-      onPointerCancel={(event) => {
-        onPointerCancel?.(event);
-        finishScrub(event);
-      }}
-      onLostPointerCapture={(event) => {
-        onLostPointerCapture?.(event);
-        if (dragRef.current?.pointerId === event.pointerId) {
-          dragRef.current = null;
-          setScrubbing(false);
-        }
-      }}
-    />
-  );
-}
-
-function percentText(value: number, zeroAsDot = false, significantDigits = 3): string {
-  if (zeroAsDot && value === 0) return "·";
-  const percent = value * 100;
-  return `${significantNumber(percent, significantDigits)}%`;
 }
 
 function channelDisplay(sample: Sample, key: string): Readonly<{
@@ -601,665 +437,10 @@ function summarizeInstalledCompensation(
   };
 }
 
-function profileOriginText(profile: CompensationProfileRecord): string {
+function profileOriginText(profile: CompensationProfileRecord, translate: (source: string) => string): string {
   if (profile.origin.type === "uploaded") return profile.origin.fileName;
-  if (profile.origin.type === "embedded-fcs") return `${profile.origin.fileName} · embedded FCS`;
-  return `${profile.origin.presetId} · bundled preset ${profile.origin.presetVersion}`;
-}
-
-interface QueuedCompensationPlotRender {
-  cancelled: boolean;
-  readonly run: () => void;
-}
-
-const compensationPlotRenderQueue: QueuedCompensationPlotRender[] = [];
-let compensationPlotRenderScheduled = false;
-
-/** Keep dual-canvas cache construction cooperative so input events can run between plot pairs. */
-function enqueueCompensationPlotRender(run: () => void): () => void {
-  const queued: QueuedCompensationPlotRender = { cancelled: false, run };
-  compensationPlotRenderQueue.push(queued);
-  const scheduleNext = () => {
-    if (compensationPlotRenderScheduled) return;
-    compensationPlotRenderScheduled = true;
-    const flushOne = () => {
-      compensationPlotRenderScheduled = false;
-      let next = compensationPlotRenderQueue.shift();
-      while (next?.cancelled) next = compensationPlotRenderQueue.shift();
-      next?.run();
-      if (compensationPlotRenderQueue.length > 0) scheduleNext();
-    };
-    const idleWindow = window as Window & {
-      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
-    };
-    if (typeof idleWindow.requestIdleCallback === "function") {
-      idleWindow.requestIdleCallback(flushOne, { timeout: 50 });
-    } else if (typeof requestAnimationFrame === "function") {
-      requestAnimationFrame(flushOne);
-    } else {
-      setTimeout(flushOne, 0);
-    }
-  };
-  scheduleNext();
-  return () => {
-    queued.cancelled = true;
-  };
-}
-
-function DensityBiplot({
-  title,
-  panel,
-  preview,
-  sourceLabel,
-  receiverLabel,
-  minimumSize = 210,
-  maximumSize = 420,
-  densityColorCeiling,
-  densitySmoothing,
-  showZeroPile = true,
-}: Readonly<{
-  title: string;
-  panel: CompensationDensityPanel;
-  preview: CompensationPairPreview;
-  sourceLabel: string;
-  receiverLabel: string;
-  minimumSize?: number;
-  maximumSize?: number;
-  densityColorCeiling?: number;
-  densitySmoothing: number;
-  showZeroPile?: boolean;
-}>) {
-  const densityColorPower = useContext(DensityColorPowerContext);
-  const pointAlpha = useContext(CompensationPointAlphaContext);
-  const containerRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-    let animationFrame: number | null = null;
-    let lastSize = 0;
-    const render = () => {
-      animationFrame = null;
-      const available = container.parentElement?.clientWidth ?? 230;
-      const size = Math.max(minimumSize, Math.min(maximumSize, Math.floor(available)));
-      if (size === lastSize && container.childElementCount > 0) return;
-      lastSize = size;
-      const densitySmoothingRadius = compensationDensitySmoothingRadiusForPlot(densitySmoothing, size);
-      renderCompensationDensityBiplotSurface(container, {
-        title,
-        panel,
-        preview,
-        sourceLabel,
-        receiverLabel,
-        size,
-        densityColorCeiling: densityColorCeiling ?? compensationSharedDensityCeiling(
-          preview,
-          0.95,
-          densitySmoothingRadius,
-          densityColorPower,
-        ),
-        densitySmoothingRadius,
-        densityColorPower,
-        pointAlpha,
-      });
-    };
-    const schedule = () => {
-      if (animationFrame !== null) cancelAnimationFrame(animationFrame);
-      animationFrame = requestAnimationFrame(render);
-    };
-    schedule();
-    const resizeObserver = typeof ResizeObserver === "undefined"
-      ? null
-      : new ResizeObserver(schedule);
-    resizeObserver?.observe(container.parentElement ?? container);
-    return () => {
-      resizeObserver?.disconnect();
-      if (animationFrame !== null) cancelAnimationFrame(animationFrame);
-    };
-  }, [densityColorCeiling, densityColorPower, densitySmoothing, maximumSize, minimumSize, panel, pointAlpha, preview, receiverLabel, sourceLabel, title]);
-  const zeroPercent = (count: number) => preview.eventCount > 0
-    ? `${(count / preview.eventCount * 100).toFixed(1)}%`
-    : "0.0%";
-  const hasZeroPile = panel.zeroPile.source > 0 || panel.zeroPile.receiver > 0 || panel.zeroPile.corner > 0;
-  return (
-    <figure className="gl-comp-biplot" aria-label={`${title} density biplot; ${sourceLabel} on x, ${receiverLabel} on y`}>
-      <div ref={containerRef} className="gl-comp-biplot-surface" />
-      {showZeroPile && hasZeroPile && (
-        <figcaption className="gl-comp-zero-pile">
-          Exact zero · source {zeroPercent(panel.zeroPile.source)} · receiver {zeroPercent(panel.zeroPile.receiver)} · both {zeroPercent(panel.zeroPile.corner)}
-        </figcaption>
-      )}
-    </figure>
-  );
-}
-
-/**
- * Global-inspector plots retain one canvas per assay layer beneath a single shared SVG frame.
- * The uncompensated/compensated toggle therefore changes only CSS visibility; it never rebuilds
- * density bins, sorts events, or redraws axes while the user is flicking between layers.
- */
-function CachedDensityBiplot({
-  title,
-  preview,
-  sourceLabel,
-  receiverLabel,
-  minimumSize,
-  maximumSize,
-  densityColorCeiling,
-  densitySmoothing,
-}: Readonly<{
-  title: string;
-  preview: CompensationGlobalPairPreview;
-  sourceLabel: string;
-  receiverLabel: string;
-  minimumSize: number;
-  maximumSize: number;
-  densityColorCeiling?: number;
-  densitySmoothing: number;
-}>) {
-  const densityColorPower = useContext(DensityColorPowerContext);
-  const pointAlpha = useContext(CompensationPointAlphaContext);
-  const containerRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-    let cancelQueuedRender: (() => void) | null = null;
-    let lastSize = 0;
-    const render = () => {
-      cancelQueuedRender = null;
-      const available = container.parentElement?.clientWidth ?? minimumSize;
-      const size = Math.max(minimumSize, Math.min(maximumSize, Math.floor(available)));
-      if (size === lastSize && container.dataset.cacheReady === "true") return;
-      lastSize = size;
-      container.dataset.cacheReady = "false";
-      const densitySmoothingRadius = compensationDensitySmoothingRadiusForPlot(densitySmoothing, size);
-      const resolvedDensityColorCeiling = densityColorCeiling ?? compensationSharedDensityCeiling(
-        preview,
-        0.95,
-        densitySmoothingRadius,
-        densityColorPower,
-      );
-
-      renderCompensationDensityBiplotSurface(container, {
-        title,
-        panel: preview.original,
-        preview,
-        sourceLabel,
-        receiverLabel,
-        size,
-        densityColorCeiling: resolvedDensityColorCeiling,
-        densitySmoothingRadius,
-        densityColorPower,
-        pointAlpha,
-        canvasScale: 2,
-      });
-      const originalCanvas = container.querySelector("canvas");
-      const sharedFrame = container.querySelector("svg");
-
-      const compensatedHost = document.createElement("div");
-      renderCompensationDensityBiplotSurface(compensatedHost, {
-        title,
-        panel: preview.compensated,
-        preview,
-        sourceLabel,
-        receiverLabel,
-        size,
-        densityColorCeiling: resolvedDensityColorCeiling,
-        densitySmoothingRadius,
-        densityColorPower,
-        pointAlpha,
-        canvasScale: 2,
-      });
-      const compensatedCanvas = compensatedHost.querySelector("canvas");
-      if (!originalCanvas || !compensatedCanvas || !sharedFrame) return;
-
-      originalCanvas.classList.add("gl-comp-cached-canvas", "is-original");
-      originalCanvas.dataset.assayLayer = "original";
-      compensatedCanvas.classList.add("gl-comp-cached-canvas", "is-compensated");
-      compensatedCanvas.dataset.assayLayer = "compensated";
-      container.insertBefore(compensatedCanvas, sharedFrame);
-      container.dataset.cacheReady = "true";
-    };
-    const schedule = () => {
-      cancelQueuedRender?.();
-      cancelQueuedRender = enqueueCompensationPlotRender(render);
-    };
-    schedule();
-    const resizeObserver = typeof ResizeObserver === "undefined"
-      ? null
-      : new ResizeObserver(schedule);
-    resizeObserver?.observe(container.parentElement ?? container);
-    return () => {
-      resizeObserver?.disconnect();
-      cancelQueuedRender?.();
-    };
-  }, [densityColorCeiling, densityColorPower, densitySmoothing, maximumSize, minimumSize, pointAlpha, preview, receiverLabel, sourceLabel, title]);
-
-  return (
-    <figure
-      className="gl-comp-biplot"
-      aria-label={`Cached uncompensated and compensated density biplot; ${sourceLabel} on x, ${receiverLabel} on y`}
-    >
-      <div
-        ref={containerRef}
-        className="gl-comp-biplot-surface gl-comp-cached-biplot"
-        data-cache-mode="dual-canvas"
-      />
-    </figure>
-  );
-}
-
-function CompensationPairBiplots({
-  preview,
-  sourceLabel,
-  receiverLabel,
-  kind,
-  densitySmoothing,
-  compact = false,
-  compensatedTitle = "Compensated",
-}: Readonly<{
-  preview: CompensationPairPreview;
-  sourceLabel: string;
-  receiverLabel: string;
-  kind: "flow" | "cytof";
-  densitySmoothing: number;
-  compact?: boolean;
-  compensatedTitle?: string;
-}>) {
-  const originalReceiverZero = preview.eventCount > 0
-    ? preview.original.zeroPile.receiver / preview.eventCount * 100
-    : 0;
-  const compensatedReceiverZero = preview.eventCount > 0
-    ? preview.compensated.zeroPile.receiver / preview.eventCount * 100
-    : 0;
-  const zeroDelta = compensatedReceiverZero - originalReceiverZero;
-  return (
-    <div className={`gl-comp-biplot-comparison${compact ? " is-compact" : ""}`}>
-      {!compact && (
-        <div className="gl-comp-biplot-note">
-          Same {preview.eventCount.toLocaleString()} event{preview.eventCount === 1 ? "" : "s"}
-          {preview.totalEvents > preview.eventCount ? ` sampled from ${preview.totalEvents.toLocaleString()}` : ""}
-          {" · "}locked axes · off-scale events piled at edges · colour clipped at the 95th percentile of occupied density bins
-        </div>
-      )}
-      <div className="gl-comp-biplot-panels">
-        <DensityBiplot
-          title="Original"
-          panel={preview.original}
-          preview={preview}
-          sourceLabel={sourceLabel}
-          receiverLabel={receiverLabel}
-          densitySmoothing={densitySmoothing}
-          showZeroPile={!compact}
-        />
-        <DensityBiplot
-          title={compensatedTitle}
-          panel={preview.compensated}
-          preview={preview}
-          sourceLabel={sourceLabel}
-          receiverLabel={receiverLabel}
-          densitySmoothing={densitySmoothing}
-          showZeroPile={!compact}
-        />
-      </div>
-      {!compact && <div className="gl-comp-diagnostic-note">
-        {kind === "cytof" ? (
-          <>
-            Receiver events at exact zero: {originalReceiverZero.toFixed(1)}% → {compensatedReceiverZero.toFixed(1)}%
-            {` (${zeroDelta >= 0 ? "+" : ""}${zeroDelta.toFixed(1)} percentage points). `}
-            A rise can be consistent with NNLS over-subtraction, while a residual source-associated rise can be consistent with under-compensation. Neither is a verdict without a suitable negative/control population.
-          </>
-        ) : (
-          <>
-            Residual tilt can be consistent with under- or over-compensation, but spreading error and biological co-expression can produce similar shapes. Use the matched Original/{compensatedTitle} view as review evidence, not an automatic coefficient call.
-          </>
-        )}
-      </div>}
-      {!compact && (preview.evidence.status === "ready" ? (
-        <dl className="gl-comp-pair-evidence" aria-label="Conservative residual evidence">
-          <div>
-            <dt>Receiver-negative shift</dt>
-            <dd>{significantNumber(preview.evidence.normalizedNegativeShift ?? 0, 3)} MAD</dd>
-          </div>
-          <div>
-            <dt>Robust residual slope</dt>
-            <dd>{significantNumber(preview.evidence.residualSlope ?? 0, 4)}</dd>
-          </div>
-          {preview.evidence.upperTailExcessMad !== null && (
-            <div>
-              <dt>Upper-tail departure</dt>
-              <dd>{significantNumber(preview.evidence.upperTailExcessMad, 3)} MAD</dd>
-            </div>
-          )}
-          {preview.evidence.upperTailSlopeDeltaMad !== null && (
-            <div>
-              <dt>Tail slope change</dt>
-              <dd>{significantNumber(preview.evidence.upperTailSlopeDeltaMad, 3)} MAD</dd>
-            </div>
-          )}
-          <div>
-            <dt>Evidence groups</dt>
-            <dd>{preview.evidence.sourceHighEvents.toLocaleString()} source-high · {preview.evidence.sourceLowEvents.toLocaleString()} source-low</dd>
-          </div>
-        </dl>
-      ) : (
-        <div className="gl-comp-evidence-insufficient">
-          Residual screening needs distinct source-low/source-high groups and enough receiver-negative events; this pair remains available for visual review.
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function MiniCompensationMatrix({
-  matrixView,
-  sourceChannels,
-  receiverChannels,
-  selectedSourceIndex,
-  selectedReceiverIndex,
-  stagedCoefficients,
-  maximumAbsoluteOffDiagonal,
-  onSelect,
-}: Readonly<{
-  matrixView: CompensationMatrixView;
-  sourceChannels: readonly ReturnType<typeof channelDisplay>[];
-  receiverChannels: readonly ReturnType<typeof channelDisplay>[];
-  selectedSourceIndex: number;
-  selectedReceiverIndex: number;
-  stagedCoefficients: Readonly<Record<string, number>>;
-  maximumAbsoluteOffDiagonal: number;
-  onSelect: (pairKey: string) => void;
-}>) {
-  const cellSize = 6;
-  const labelLeft = 74;
-  const labelTop = 44;
-  const labelBottom = 10;
-  const matrixWidth = receiverChannels.length * cellSize;
-  const matrixHeight = sourceChannels.length * cellSize;
-  // A matching right gutter keeps the heatmap body horizontally centred. The bottom does
-  // not need to mirror the rotated labels above it; avoiding that empty gutter brings the
-  // matrix visibly up beneath its heading.
-  const viewWidth = labelLeft + matrixWidth + labelLeft;
-  const viewHeight = labelTop + matrixHeight + labelBottom;
-  const colouredCells = useMemo(() => {
-    const cells: Array<Readonly<{
-      sourceIndex: number;
-      receiverIndex: number;
-      pairKey: string;
-      value: number;
-      fill: string;
-      diagonal: boolean;
-    }>> = [];
-    for (let sourceIndex = 0; sourceIndex < matrixView.matrix.length; sourceIndex++) {
-      for (let receiverIndex = 0; receiverIndex < matrixView.matrix[sourceIndex].length; receiverIndex++) {
-        const sourceKey = matrixView.sourceAxisKeys[sourceIndex];
-        const receiverKey = matrixView.receiverAxisKeys[receiverIndex];
-        const pairKey = `${sourceKey}${PAIR_SEPARATOR}${receiverKey}`;
-        const value = stagedCoefficients[pairKey] ?? matrixView.matrix[sourceIndex][receiverIndex];
-        const diagonal = sourceKey === receiverKey;
-        if (!diagonal && (!Number.isFinite(value) || value === 0)) continue;
-        const relativeMagnitude = maximumAbsoluteOffDiagonal > 0 && Number.isFinite(value)
-          ? Math.min(1, Math.abs(value) / maximumAbsoluteOffDiagonal)
-          : 0;
-        const alpha = relativeMagnitude > 0 ? 0.12 + 0.82 * Math.sqrt(relativeMagnitude) : 0;
-        cells.push({
-          sourceIndex,
-          receiverIndex,
-          pairKey,
-          value,
-          diagonal,
-          fill: diagonal
-            ? "#cfd4db"
-            : !Number.isFinite(value)
-              ? "#ae3e3e"
-              : value < 0
-                ? `rgba(47,128,237,${alpha})`
-                : `rgba(211,47,47,${alpha})`,
-        });
-      }
-    }
-    return cells;
-  }, [matrixView, maximumAbsoluteOffDiagonal, stagedCoefficients]);
-  const handleSelect = (event: ReactPointerEvent<SVGSVGElement>) => {
-    const bounds = event.currentTarget.getBoundingClientRect();
-    if (!(bounds.width > 0) || !(bounds.height > 0)) return;
-    const x = (event.clientX - bounds.left) * viewWidth / bounds.width;
-    const y = (event.clientY - bounds.top) * viewHeight / bounds.height;
-    const receiverIndex = Math.floor((x - labelLeft) / cellSize);
-    const sourceIndex = Math.floor((y - labelTop) / cellSize);
-    if (
-      sourceIndex < 0 || sourceIndex >= sourceChannels.length ||
-      receiverIndex < 0 || receiverIndex >= receiverChannels.length ||
-      matrixView.sourceAxisKeys[sourceIndex] === matrixView.receiverAxisKeys[receiverIndex]
-    ) return;
-    onSelect(`${matrixView.sourceAxisKeys[sourceIndex]}${PAIR_SEPARATOR}${matrixView.receiverAxisKeys[receiverIndex]}`);
-  };
-  return (
-    <section className="gl-comp-mini-matrix" aria-labelledby="comp-mini-matrix-heading">
-      <div className="gl-comp-mini-matrix-head">
-        <strong id="comp-mini-matrix-heading">Matrix map</strong>
-        <span>Source ↓ · receiver → · click a cell</span>
-      </div>
-      <svg
-        width={viewWidth}
-        height={viewHeight}
-        viewBox={`0 0 ${viewWidth} ${viewHeight}`}
-        role="img"
-        aria-label={`Mini compensation matrix with ${sourceChannels.length} source rows and ${receiverChannels.length} receiver columns`}
-        onPointerDown={handleSelect}
-      >
-        <rect x={labelLeft} y={labelTop} width={matrixWidth} height={matrixHeight} fill="#f8fafc" stroke="#aeb8c6" strokeWidth="0.7" />
-        {receiverChannels.map((channel, receiverIndex) => (
-          <text
-            key={channel.key}
-            x={labelLeft + (receiverIndex + 0.55) * cellSize}
-            y={labelTop - 3}
-            transform={`rotate(-58 ${labelLeft + (receiverIndex + 0.55) * cellSize} ${labelTop - 3})`}
-            textAnchor="start"
-            className={receiverIndex === selectedReceiverIndex ? "is-selected" : undefined}
-          >
-            {channel.pnn}
-          </text>
-        ))}
-        {sourceChannels.map((channel, sourceIndex) => (
-          <text
-            key={channel.key}
-            x={labelLeft - 3}
-            y={labelTop + (sourceIndex + 0.72) * cellSize}
-            textAnchor="end"
-            className={sourceIndex === selectedSourceIndex ? "is-selected" : undefined}
-          >
-            {channel.pnn}
-          </text>
-        ))}
-        <rect
-          x={labelLeft}
-          y={labelTop + selectedSourceIndex * cellSize}
-          width={matrixWidth}
-          height={cellSize}
-          fill="rgba(47,128,237,0.08)"
-          pointerEvents="none"
-        />
-        <rect
-          x={labelLeft + selectedReceiverIndex * cellSize}
-          y={labelTop}
-          width={cellSize}
-          height={matrixHeight}
-          fill="rgba(47,128,237,0.08)"
-          pointerEvents="none"
-        />
-        {colouredCells.map((cell) => (
-          <rect
-            key={cell.pairKey}
-            x={labelLeft + cell.receiverIndex * cellSize}
-            y={labelTop + cell.sourceIndex * cellSize}
-            width={cellSize}
-            height={cellSize}
-            fill={cell.fill}
-            pointerEvents="none"
-          >
-            <title>
-              {cell.diagonal
-                ? `${sourceChannels[cell.sourceIndex].combined} · self`
-                : `${sourceChannels[cell.sourceIndex].combined} → ${receiverChannels[cell.receiverIndex].combined} · ${percentText(cell.value)}`}
-            </title>
-          </rect>
-        ))}
-        <rect
-          x={labelLeft + selectedReceiverIndex * cellSize}
-          y={labelTop + selectedSourceIndex * cellSize}
-          width={cellSize}
-          height={cellSize}
-          fill="none"
-          stroke="#2f80ed"
-          strokeWidth="1.4"
-          vectorEffect="non-scaling-stroke"
-          pointerEvents="none"
-        />
-      </svg>
-    </section>
-  );
-}
-
-function GlobalCompensationPlotTile({
-  dataset,
-  pair,
-  plotSize,
-  densitySmoothing,
-  flagged,
-  selected,
-  onSelect,
-  onFlag,
-}: Readonly<{
-  dataset: CompensationGlobalInspectorDataset;
-  pair: CompensationGlobalPairCandidate;
-  plotSize: number;
-  densitySmoothing: number;
-  flagged: boolean;
-  selected: boolean;
-  onSelect: () => void;
-  onFlag: (flagged: boolean) => void;
-}>) {
-  const tileRef = useRef<HTMLElement>(null);
-  const [renderPlot, setRenderPlot] = useState(() => typeof IntersectionObserver === "undefined");
-  useEffect(() => {
-    const tile = tileRef.current;
-    if (!tile || typeof IntersectionObserver === "undefined") {
-      setRenderPlot(true);
-      return;
-    }
-    const observer = new IntersectionObserver(
-      (entries) => setRenderPlot(entries.some((entry) => entry.isIntersecting)),
-      { rootMargin: "450px 0px" },
-    );
-    observer.observe(tile);
-    return () => observer.disconnect();
-  }, []);
-  const pairPreview = useMemo(
-    () => renderPlot
-      ? buildCompensationGlobalPairPreview(dataset, pair.source.key, pair.receiver.key)
-      : null,
-    [dataset, pair.receiver.key, pair.source.key, renderPlot],
-  );
-  const preview = pairPreview?.ready ? pairPreview.preview : null;
-  return (
-    <article
-      ref={tileRef}
-      className={`gl-comp-global-tile${selected ? " is-selected" : ""}${flagged ? " is-flagged" : ""}`}
-      data-pair-key={pair.pairKey}
-      data-event-signature={preview?.eventSignature}
-      data-x-range={preview ? `${preview.xRange[0]},${preview.xRange[1]}` : undefined}
-      data-y-range={preview ? `${preview.yRange[0]},${preview.yRange[1]}` : undefined}
-      style={{ width: plotSize, height: plotSize }}
-    >
-      <div className="gl-comp-global-tile-head">
-        <button
-          type="button"
-          onClick={onSelect}
-          title={`${pair.source.combined} → ${pair.receiver.combined}`}
-          aria-label={`Open details for ${pair.source.label} to ${pair.receiver.label}`}
-        >
-          <span>{pair.source.label} → {pair.receiver.label}</span>
-          <strong>{(pair.coefficient * 100).toFixed(1)}%</strong>
-        </button>
-        <label title="Keep this pair in Flagged">
-          <input
-            type="checkbox"
-            checked={flagged}
-            aria-label={`Flag global inspector pair ${pair.source.label} to ${pair.receiver.label} for follow-up`}
-            onChange={(event) => onFlag(event.currentTarget.checked)}
-          />
-        </label>
-      </div>
-      <button
-        type="button"
-        className="gl-comp-global-plot-button"
-        onClick={onSelect}
-        title={`${pair.source.combined} → ${pair.receiver.combined} · ${pair.interaction && pair.interaction !== "other" ? `${pair.interaction} · ` : ""}matrix ${(pair.coefficient * 100).toFixed(1)}%`}
-        aria-label={`Open details for ${pair.source.label} to ${pair.receiver.label}; matrix coefficient ${(pair.coefficient * 100).toFixed(1)}%`}
-      >
-        <div className="gl-comp-global-plot" style={{ width: plotSize, height: plotSize }}>
-          {preview ? (
-            <CachedDensityBiplot
-              title=""
-              preview={preview}
-              sourceLabel={pair.source.label}
-              receiverLabel={pair.receiver.label}
-              minimumSize={plotSize}
-              maximumSize={plotSize}
-              densitySmoothing={densitySmoothing}
-            />
-          ) : pairPreview && !pairPreview.ready ? (
-            <span>{pairPreview.reason}</span>
-          ) : (
-            <span aria-hidden="true" />
-          )}
-        </div>
-      </button>
-    </article>
-  );
-}
-
-/**
- * Own the rapid assay flip below the large CompensationTab state boundary. The plot gallery is
- * passed as an unchanged React node, so toggling updates one ancestor attribute and this button;
- * no tile component, canvas cache, density preview, or renderer effect is revisited.
- */
-function GlobalInspectorLayerScope({
-  stateKey,
-  header,
-  children,
-}: Readonly<{
-  stateKey: string;
-  header: ReactNode;
-  children: ReactNode;
-}>) {
-  const [layer, setLayer] = usePersistedTabState<CompensationInspectorLayer>(
-    `compensation.${stateKey}.globalInspectorLayer`,
-    "compensated",
-  );
-  return (
-    <section
-      className="gl-comp-global-inspector"
-      aria-labelledby="comp-global-inspector-heading"
-      data-inspector-layer={layer}
-    >
-      <div className="gl-comp-global-head">
-        {header}
-        <button
-          type="button"
-          className="gl-comp-layer-toggle"
-          aria-pressed={layer === "compensated"}
-          aria-label={`Showing ${layer === "original" ? "uncompensated" : "compensated"} data; click to show ${layer === "original" ? "compensated" : "uncompensated"} data`}
-          title="Toggle every plot between uncompensated and compensated data without changing its frame"
-          onClick={() => setLayer((current) => current === "original" ? "compensated" : "original")}
-        >
-          <span className="gl-comp-layer-toggle-track" aria-hidden="true"><i /></span>
-          <span>{layer === "original" ? "Uncompensated" : "Compensated"}</span>
-        </button>
-      </div>
-      {children}
-    </section>
-  );
+  if (profile.origin.type === "embedded-fcs") return `${profile.origin.fileName} · ${translate("embedded FCS")}`;
+  return `${profile.origin.presetId} · ${translate("bundled preset")} ${profile.origin.presetVersion}`;
 }
 
 function CompensationTabImpl({
@@ -1280,6 +461,7 @@ function CompensationTabImpl({
   onPreviewCompensationCandidate,
   onSolveCompensationSweep,
   onCancelCompensationSweep,
+  onSuspendBackgroundWork,
   visible = true,
   stateKey,
   densityColorPower = DEFAULT_DENSITY_COLOR_POWER,
@@ -1406,6 +588,19 @@ function CompensationTabImpl({
         }
       : null);
 
+  useEffect(() => {
+    if (visible) return;
+    // Applying compensation is an explicit, durable operation and deliberately continues in
+    // App. Pair previews and coefficient sweeps are speculative editor work: stop them as soon
+    // as the tab is hidden so they cannot compete with gating interactions for workers/CPU.
+    candidatePreviewGenerationRef.current++;
+    sweepGenerationRef.current++;
+    setFlowCandidatePreview({ state: "idle" });
+    setSweepProgress(null);
+    setBoundsPreviewPairKey(null);
+    onSuspendBackgroundWork?.();
+  }, [onSuspendBackgroundWork, visible]);
+
   const samplePnnChannels = useMemo(
     () => sample.channels.map(({ pnn, columnIndex }) => ({ pnn, columnIndex })),
     [sample],
@@ -1531,13 +726,16 @@ function CompensationTabImpl({
         ? "Uploaded spill matrix"
         : "Applied compensation matrix",
       subtitle: profileRecord.scientific.kind === "cytof-spillover"
-        ? `${displayMatrix.sourceChannels.length} source rows ↓ · ${displayMatrix.receiverChannels.length} receiver columns → · isotope-mass order`
+        ? t("{sources} source rows ↓ · {receivers} receiver columns → · isotope-mass order", {
+            sources: displayMatrix.sourceChannels.length,
+            receivers: displayMatrix.receiverChannels.length,
+          })
         : "Source rows ↓ · Receiver columns → · exact installed coefficients",
       coefficientNote: profileRecord.scientific.kind === "cytof-spillover"
         ? "This is the exact uploaded matrix. The NNLS solve uses its selected, matched channels; original measurements remain stored separately."
         : "This is the exact installed matrix. Original measurements remain stored separately.",
     };
-  }, [profileMetadata, profileRecord, sample, spill]);
+  }, [profileMetadata, profileRecord, sample, spill, t]);
   const sourceChannels = matrixView?.sourceChannels ?? [];
   const receiverChannels = matrixView?.receiverChannels ?? [];
   useEffect(() => {
@@ -1782,8 +980,8 @@ function CompensationTabImpl({
       : globalInspectorGroups.flatMap((group) => group.pairs),
     [globalInspectorGroups, globalLayout, visibleGlobalInspectorCandidates],
   );
-  const globalExportFilterLabel = `${GLOBAL_PAIR_FILTER_LABELS[globalPairFilter]}${
-    globalPairSearch.trim() ? ` · search “${globalPairSearch.trim()}”` : ""
+  const globalExportFilterLabel = `${t(GLOBAL_PAIR_FILTER_LABELS[globalPairFilter])}${
+    globalPairSearch.trim() ? t(" · search “{query}”", { query: globalPairSearch.trim() }) : ""
   }`;
   const resolvedGlobalPlotSize = Math.max(120, Math.min(220, Math.round(globalPlotSize) || 120));
   const resolvedDensitySmoothing = Math.max(1, Math.min(10, Math.round(densitySmoothing) || 6));
@@ -1973,7 +1171,7 @@ function CompensationTabImpl({
       setFlowCandidatePreview({
         state: "error",
         pairKey: selectedPair.pairKey,
-        message: "The selected review population contains no events.",
+        message: t("The selected review population contains no events."),
       });
       return;
     }
@@ -1997,7 +1195,7 @@ function CompensationTabImpl({
         const sourceOutput = response.sourceChannels.indexOf(selectedPair.source.pnn);
         const receiverOutput = response.sourceChannels.indexOf(selectedPair.receiver.pnn);
         if (sourceOutput < 0 || receiverOutput < 0) {
-          throw new Error("The preview result did not contain the selected flow channels.");
+          throw new Error(t("The preview result did not contain the selected flow channels."));
         }
         const candidate = buildSolvedCompensationPairPreview(
           sample,
@@ -2034,6 +1232,7 @@ function CompensationTabImpl({
     sample.layerRevision,
     selectedPair,
     stagedCoefficients,
+    t,
     visible,
     workingProfileMatrix,
   ]);
@@ -2115,11 +1314,12 @@ function CompensationTabImpl({
     : spill
       ? "Flow linear inverse"
       : "Not configured";
+  const displayMethod = t(method);
   const channelCount = profileMetadata?.includedPnns.length ?? spill?.channels.length ?? 0;
   const profileDisplaySource = profileRecord?.name ?? profileMetadata?.profileId ?? source;
   const cleanedProfileSource = compensationProfileBaseName(profileDisplaySource);
   const compactProfileSource = cleanedProfileSource !== profileDisplaySource || profileRecord?.recordType === "revision"
-    ? `${cleanedProfileSource} · revised`
+    ? `${cleanedProfileSource} · ${t("revised")}`
     : profileDisplaySource;
   const canToggle = (spill !== null && !matrixHasNonFinite) ||
     (profileMetadata !== null && installedStatus.state === "ready");
@@ -2266,7 +1466,7 @@ function CompensationTabImpl({
     ) return;
     if (hasExistingGates && !gateRecomputeAcknowledged) {
       setCytofImportError(
-        "Confirm that existing gate memberships will be recomputed in compensated coordinates before applying.",
+        t("Confirm that existing gate memberships will be recomputed in compensated coordinates before applying."),
       );
       return;
     }
@@ -2307,16 +1507,17 @@ function CompensationTabImpl({
         },
       );
       await onApplyProfile(profile, setApplyProgress);
-      setActionMessage(
-        `Applied ${displayName} to ${includedCytofChannels.size} channel${includedCytofChannels.size === 1 ? "" : "s"}. Original measurements remain available.`,
-      );
+      setActionMessage(t("Applied {name} to {count} channels. Original measurements remain available.", {
+        name: displayName,
+        count: includedCytofChannels.size,
+      }));
       setCytofDraft(null);
       setIncludedCytofChannels(new Set());
       setGateRecomputeAcknowledged(false);
       setApplyProgress(null);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
-      if (/cancel/i.test(message)) setActionMessage("CyTOF compensation was cancelled; the previous assay was left unchanged.");
+      if (/cancel/i.test(message)) setActionMessage(t("CyTOF compensation was cancelled; the previous assay was left unchanged."));
       else setCytofImportError(message);
     } finally {
       applySubmissionRef.current = false;
@@ -2336,7 +1537,7 @@ function CompensationTabImpl({
     if (hasExistingGates && !gateRecomputeAcknowledged) {
       setActionIsError(true);
       setActionMessage(
-        "Confirm that existing gate memberships will be recomputed in compensated coordinates before enabling matrix editing.",
+        t("Confirm that existing gate memberships will be recomputed in compensated coordinates before enabling matrix editing."),
       );
       return;
     }
@@ -2377,9 +1578,7 @@ function CompensationTabImpl({
       );
       await onApplyProfile(profile, setApplyProgress);
       setGateRecomputeAcknowledged(false);
-      setActionMessage(
-        "Flow matrix editing is ready. The exact embedded matrix is retained as the baseline, and Original measurements remain available.",
-      );
+      setActionMessage(t("Flow matrix editing is ready. The exact embedded matrix is retained as the baseline, and Original measurements remain available."));
     } catch (cause) {
       setActionIsError(true);
       setActionMessage(cause instanceof Error ? cause.message : String(cause));
@@ -2474,7 +1673,7 @@ function CompensationTabImpl({
     if (sourceIndex < 0 || receiverIndex < 0) return;
     if (profileRecord.scientific.kind === "cytof-spillover" && value < 0) {
       setActionIsError(true);
-      setActionMessage("CyTOF NNLS spill coefficients cannot be negative.");
+      setActionMessage(t("CyTOF NNLS spill coefficients cannot be negative."));
       return;
     }
     const baseline = profileRecord.scientific.matrix.matrix[sourceIndex][receiverIndex];
@@ -2485,7 +1684,11 @@ function CompensationTabImpl({
       return next;
     });
     setActionIsError(false);
-    setActionMessage(`Staged ${sourceKey} → ${receiverKey} at ${(value * 100).toFixed(2)}%. Apply the revised matrix to recompute the assay.`);
+    setActionMessage(t("Staged {source} → {receiver} at {value}%. Apply the revised matrix to recompute the assay.", {
+      source: sourceKey,
+      receiver: receiverKey,
+      value: (value * 100).toFixed(2),
+    }));
   };
 
   const buildPairSweepFromResponses = (
@@ -2554,7 +1757,7 @@ function CompensationTabImpl({
       reviewMask,
     );
     if (fixedEventIndices.length === 0) {
-      setSweepError("The selected review population contains no events.");
+      setSweepError(t("The selected review population contains no events."));
       return;
     }
     const generation = ++sweepGenerationRef.current;
@@ -2576,12 +1779,12 @@ function CompensationTabImpl({
       );
       if (sweepGenerationRef.current !== generation) return;
       const preview = buildPairSweepFromResponses(pair, values, responses, fixedEventIndices);
-      if (!preview) throw new Error("The fast bounds preview could not be built for this pair.");
+      if (!preview) throw new Error(t("The fast bounds preview could not be built for this pair."));
       setBoundsPreviewResults((current) => ({ ...current, [pair.pairKey]: preview }));
     } catch (cause) {
       if (sweepGenerationRef.current !== generation) return;
       const message = cause instanceof Error ? cause.message : String(cause);
-      setSweepError(/cancel/i.test(message) ? "Fast bounds preview cancelled." : message);
+      setSweepError(/cancel/i.test(message) ? t("Fast bounds preview cancelled.") : message);
     } finally {
       if (sweepGenerationRef.current === generation) setBoundsPreviewPairKey(null);
     }
@@ -2597,7 +1800,7 @@ function CompensationTabImpl({
       boundsPreviewPairKey !== null
     ) return;
     if (invalidSweepPairCount > 0) {
-      setSweepError(`Fix the sweep bounds for ${invalidSweepPairCount} flagged pair${invalidSweepPairCount === 1 ? "" : "s"} before running.`);
+      setSweepError(t("Fix the sweep bounds for {count} flagged pairs before running.", { count: invalidSweepPairCount }));
       return;
     }
     const fixedEventIndices = deterministicCompensationEventIndices(
@@ -2606,7 +1809,7 @@ function CompensationTabImpl({
       reviewMask,
     );
     if (fixedEventIndices.length === 0) {
-      setSweepError("The selected review population contains no events.");
+      setSweepError(t("The selected review population contains no events."));
       return;
     }
     const generation = ++sweepGenerationRef.current;
@@ -2638,7 +1841,7 @@ function CompensationTabImpl({
       );
       if (sweepGenerationRef.current !== generation) return;
       if (responses.length !== plans.length) {
-        throw new Error("The compensation worker returned an incomplete coefficient sweep.");
+        throw new Error(t("The compensation worker returned an incomplete coefficient sweep."));
       }
       const byPair: Record<string, CompensationPairSweep> = {};
       for (const pair of sweepEligiblePairs) {
@@ -2656,7 +1859,7 @@ function CompensationTabImpl({
     } catch (cause) {
       if (sweepGenerationRef.current !== generation) return;
       const message = cause instanceof Error ? cause.message : String(cause);
-      setSweepError(/cancel/i.test(message) ? "Exact coefficient sweep cancelled." : message);
+      setSweepError(/cancel/i.test(message) ? t("Exact coefficient sweep cancelled.") : message);
     } finally {
       if (sweepGenerationRef.current === generation) setSweepProgress(null);
     }
@@ -2667,7 +1870,7 @@ function CompensationTabImpl({
     onCancelCompensationSweep?.();
     setSweepProgress(null);
     setBoundsPreviewPairKey(null);
-    setSweepError("Exact coefficient sweep cancelled.");
+    setSweepError(t("Exact coefficient sweep cancelled."));
   };
 
   const applyStagedMatrix = async () => {
@@ -2707,12 +1910,15 @@ function CompensationTabImpl({
         setSelectedPairKey(flaggedPairs[0].pairKey);
         setExpandedSweepPair(flaggedPairs[0].pairKey);
       }
-      setActionMessage(
-        `Applied revised matrix for ${compensationProfileBaseName(revised.name)}. Original measurements and the complete compensation revision history remain available.` +
-        (flaggedPairs.length > 0
-          ? ` Retained ${flaggedPairs.length} flagged pair${flaggedPairs.length === 1 ? "" : "s"} for post-correction review.`
-          : ""),
-      );
+      setActionMessage(t("Applied revised matrix for {name}. Original measurements and the complete compensation revision history remain available.{flagged}", {
+        name: compensationProfileBaseName(revised.name),
+        flagged: flaggedPairs.length > 0
+          ? t(flaggedPairs.length === 1
+              ? " Retained {count} flagged pair for post-correction review."
+              : " Retained {count} flagged pairs for post-correction review.",
+            { count: flaggedPairs.length })
+          : "",
+      }));
     } catch (cause) {
       setActionIsError(true);
       setActionMessage(cause instanceof Error ? cause.message : String(cause));
@@ -2739,13 +1945,13 @@ function CompensationTabImpl({
     <div
       className="gl-comp-inspector-resize"
       role="separator"
-      aria-label="Resize compensation inspector"
+      aria-label={t("Resize compensation inspector")}
       aria-orientation="vertical"
       aria-valuemin={360}
       aria-valuemax={900}
       aria-valuenow={inspectorWidth}
       tabIndex={0}
-      title="Drag to resize the coefficient inspector; use Left/Right arrow keys for fine control"
+      title={t("Drag to resize the coefficient inspector; use Left/Right arrow keys for fine control")}
       onPointerDown={startInspectorResize}
       onKeyDown={handleInspectorResizeKeyDown}
     >
@@ -2824,19 +2030,19 @@ function CompensationTabImpl({
           <div>
             <h3 id="comp-selected-heading">{t("Selected coefficient")}</h3>
             {!compactGlobal && <span>
-              {hoveredPairKey
+              {t(hoveredPairKey
                 ? "Hover preview · click to pin this pair."
                 : selectedPairKey
                   ? "Pinned pair · hover another cell to compare."
-                  : "Select a matrix cell or follow-up pair."}
+                  : "Select a matrix cell or follow-up pair.")}
             </span>}
           </div>
           <div className="gl-comp-inspector-actions">
-            <div className="gl-comp-flag-navigation" aria-label="Flagged compensation pair navigation">
+            <div className="gl-comp-flag-navigation" aria-label={t("Flagged compensation pair navigation")}>
               <button
                 type="button"
                 className="gl-mini-btn"
-                aria-label="Previous flagged compensation pair"
+                aria-label={t("Previous flagged compensation pair")}
                 disabled={flaggedPairs.length === 0}
                 onClick={() => navigateFlaggedPair(-1)}
               >
@@ -2844,13 +2050,13 @@ function CompensationTabImpl({
               </button>
               <span>
                 {flaggedPairIndex >= 0
-                  ? `${flaggedPairIndex + 1} / ${flaggedPairs.length} flagged`
-                  : `${flaggedPairs.length} flagged`}
+                  ? t("{current} / {total} flagged", { current: flaggedPairIndex + 1, total: flaggedPairs.length })
+                  : t("{total} flagged", { total: flaggedPairs.length })}
               </span>
               <button
                 type="button"
                 className="gl-mini-btn"
-                aria-label="Next flagged compensation pair"
+                aria-label={t("Next flagged compensation pair")}
                 disabled={flaggedPairs.length === 0}
                 onClick={() => navigateFlaggedPair(1)}
               >
@@ -2861,8 +2067,8 @@ function CompensationTabImpl({
               <button
                 type="button"
                 className="gl-mini-btn gl-comp-inspector-close"
-                aria-label="Close global compensation pair details"
-                title="Close details and return to the full gallery"
+                aria-label={t("Close global compensation pair details")}
+                title={t("Close details and return to the full gallery")}
                 onClick={onClose}
               >
                 ×
@@ -2873,17 +2079,17 @@ function CompensationTabImpl({
         {selectedPair ? (
           <div className={`gl-comp-pair-detail${compactGlobal ? " is-global" : ""}`}>
             <div className="gl-comp-pair-route">
-              <div><span>Source</span><strong>{selectedPair.source.label}</strong><small>{selectedPair.source.pnn}</small></div>
+              <div><span>{t("Source channel")}</span><strong>{selectedPair.source.label}</strong><small>{selectedPair.source.pnn}</small></div>
               <span aria-hidden="true">→</span>
-              <div><span>Receiver</span><strong>{selectedPair.receiver.label}</strong><small>{selectedPair.receiver.pnn}</small></div>
+              <div><span>{t("Receiver")}</span><strong>{selectedPair.receiver.label}</strong><small>{selectedPair.receiver.pnn}</small></div>
             </div>
             {selectedAssessment && (
               <div
                 className={`gl-comp-evidence-badge is-${selectedAssessment.category}`}
-                title={selectedAssessment.detail}
+                title={t(selectedAssessment.detail)}
               >
-                <strong>{selectedAssessment.label}</strong>
-                <span>{selectedAssessment.detail}</span>
+                <strong>{t(selectedAssessment.label)}</strong>
+                <span>{t(selectedAssessment.detail)}</span>
               </div>
             )}
             <label className="gl-comp-followup-toggle">
@@ -2893,11 +2099,11 @@ function CompensationTabImpl({
                 disabled={!profileRecord || !includedProfileChannels.has(matrixView!.sourceAxisKeys[selectedPair.sourceIndex]) || !includedProfileChannels.has(matrixView!.receiverAxisKeys[selectedPair.receiverIndex])}
                 onChange={(event) => toggleFlaggedPair(selectedPair.pairKey, event.currentTarget.checked)}
               />
-              <span>Flag for follow-up</span>
-              <small>Add this pair to the curated Flagged queue.</small>
+              <span>{t("Flag for follow-up")}</span>
+              <small>{t("Add this pair to the curated Flagged queue.")}</small>
             </label>
-            <div className="gl-comp-coefficient-readout" title={`Stored fraction: ${significantNumber(selectedPair.value, 10)}`}>
-              <span>{stagedCoefficients[selectedPair.pairKey] === undefined ? "Matrix coefficient" : "Working coefficient"}</span>
+            <div className="gl-comp-coefficient-readout" title={t("Stored fraction: {value}", { value: significantNumber(selectedPair.value, 10) })}>
+              <span>{t(stagedCoefficients[selectedPair.pairKey] === undefined ? "Matrix coefficient" : "Working coefficient")}</span>
               <strong>
                 {Number.isFinite(stagedCoefficients[selectedPair.pairKey] ?? selectedPair.value)
                   ? `${((stagedCoefficients[selectedPair.pairKey] ?? selectedPair.value) * 100).toFixed(1)}%`
@@ -2905,11 +2111,11 @@ function CompensationTabImpl({
               </strong>
             </div>
             {historyEntries.length > 0 && (
-              <div className="gl-comp-coefficient-history" aria-label="Coefficient history">
+              <div className="gl-comp-coefficient-history" aria-label={t("Coefficient history")}>
                 {historyEntries.map((entry, index) => (
                   <div className="gl-comp-coefficient-history-step" key={`${entry.label}:${index}`}>
                     {index > 0 && <span aria-hidden="true">→</span>}
-                    <div title={`Exact fraction: ${significantNumber(entry.value, 10)}`}>
+                    <div title={t("Exact fraction: {value}", { value: significantNumber(entry.value, 10) })}>
                       <small>{entry.label}</small>
                       <strong>{(entry.value * 100).toFixed(1)}%</strong>
                     </div>
@@ -2920,7 +2126,7 @@ function CompensationTabImpl({
             {profileRecord && selectedPairKey === selectedPair.pairKey && !hoveredPairKey && (
               <div className="gl-comp-coefficient-editor">
                 <label>
-                  <span>Coefficient (%)</span>
+                  <span>{t("Coefficient (%)")}</span>
                   <ScrubbableNumberInput
                     step="0.1"
                     value={coefficientDraftPercent}
@@ -2938,7 +2144,7 @@ function CompensationTabImpl({
                   />
                 </label>
                 {profileRecord.scientific.kind === "flow-spillover" ? (
-                  <small className="gl-comp-live-edit-hint">Type, use arrows, or drag ↕ · previews immediately</small>
+                  <small className="gl-comp-live-edit-hint">{t("Type, use arrows, or drag ↕ · previews immediately")}</small>
                 ) : (
                   <button
                     type="button"
@@ -2946,7 +2152,7 @@ function CompensationTabImpl({
                     disabled={applyBusy || !Number.isFinite(Number(coefficientDraftPercent)) || coefficientDraftPercent.trim() === ""}
                     onClick={() => stageCoefficient(selectedPair.pairKey, Number(coefficientDraftPercent) / 100)}
                   >
-                    Stage value
+                    {t("Stage value")}
                   </button>
                 )}
                 {stagedCoefficients[selectedPair.pairKey] !== undefined && (
@@ -2963,38 +2169,38 @@ function CompensationTabImpl({
                       });
                     }}
                   >
-                    Reset
+                    {t("Reset")}
                   </button>
                 )}
               </div>
             )}
             {flowCandidateActive && (
-              <div className={`gl-comp-candidate-status${compactGlobal ? " is-compact" : ""}`} aria-label="Flow compensation coefficient preview">
+              <div className={`gl-comp-candidate-status${compactGlobal ? " is-compact" : ""}`} aria-label={t("Flow compensation coefficient preview")}>
                 <div>
-                  <strong>Coefficient preview</strong>
+                  <strong>{t("Coefficient preview")}</strong>
                   <span>
-                    Original remains fixed; the right panel shows the complete working matrix.
-                    {compactGlobal ? " The gallery remains installed until Apply." : ""}
+                    {t("Original remains fixed; the right panel shows the complete working matrix.")}
+                    {compactGlobal ? t(" The gallery remains installed until Apply.") : ""}
                   </span>
                 </div>
                 <em>
                   {stagedCoefficient === undefined
-                    ? "Working matrix"
+                    ? t("Working matrix")
                     : `${(selectedPair.value * 100).toFixed(1)}% → ${(stagedCoefficient * 100).toFixed(1)}%`}
                 </em>
                 {flowCandidatePreview.state === "updating" &&
                   flowCandidatePreview.pairKey === selectedPair.pairKey && (
-                    <span role="status">Updating…</span>
+                    <span role="status">{t("Updating…")}</span>
                   )}
                 {flowCandidatePreview.state === "error" &&
                   flowCandidatePreview.pairKey === selectedPair.pairKey && (
-                    <span className="is-error" role="alert">{flowCandidatePreview.message}</span>
+                    <span className="is-error" role="alert">{t(flowCandidatePreview.message)}</span>
                   )}
               </div>
             )}
             {selectedPair.interaction && selectedPair.interaction !== "other" && (
               <div className="gl-comp-interaction-type">
-                Physical relationship: <strong>{selectedPair.interaction}</strong>
+                {t("Physical relationship:")} <strong>{selectedPair.interaction}</strong>
               </div>
             )}
             {compactGlobal && (stableComparisonPreview ? (
@@ -3005,10 +2211,10 @@ function CompensationTabImpl({
                 kind={matrixView!.kind}
                 densitySmoothing={resolvedDensitySmoothing}
                 compact
-                compensatedTitle={selectedFlowCandidatePreview ? "Candidate" : "Compensated"}
+                compensatedTitle={t(selectedFlowCandidatePreview ? "Candidate" : "Compensated")}
               />
             ) : selectedPairPreview && !selectedPairPreview.ready ? (
-              <div className="gl-comp-biplot-unavailable">{selectedPairPreview.reason}</div>
+              <div className="gl-comp-biplot-unavailable">{t(selectedPairPreview.reason)}</div>
             ) : null)}
             {compactGlobal && (
               <MiniCompensationMatrix
@@ -3030,21 +2236,21 @@ function CompensationTabImpl({
                   receiverLabel={selectedPair.receiver.label}
                   kind={matrixView!.kind}
                   densitySmoothing={resolvedDensitySmoothing}
-                  compensatedTitle={selectedFlowCandidatePreview ? "Candidate" : "Compensated"}
+                  compensatedTitle={t(selectedFlowCandidatePreview ? "Candidate" : "Compensated")}
                 />
               ) : selectedPairPreview && !selectedPairPreview.ready ? (
-                <div className="gl-comp-biplot-unavailable">{selectedPairPreview.reason}</div>
+                <div className="gl-comp-biplot-unavailable">{t(selectedPairPreview.reason)}</div>
               ) : null
             )}
             {flagged && followupPair && boundsDraft && bounds && (
               <div className="gl-comp-bounds-tool">
                 <div>
-                  <strong>Sweep bounds</strong>
-                  <span>Four exact candidates will be interpolated across these endpoints.</span>
+                  <strong>{t("Sweep bounds")}</strong>
+                  <span>{t("Four exact candidates will be interpolated across these endpoints.")}</span>
                 </div>
                 <div className="gl-comp-bounds-inputs">
                   <label>
-                    <span>Lower (%)</span>
+                    <span>{t("Lower (%)")}</span>
                     <ScrubbableNumberInput
                       step="0.1"
                       value={boundsDraft.lowerPercent}
@@ -3053,7 +2259,7 @@ function CompensationTabImpl({
                     />
                   </label>
                   <label>
-                    <span>Upper (%)</span>
+                    <span>{t("Upper (%)")}</span>
                     <ScrubbableNumberInput
                       step="0.1"
                       value={boundsDraft.upperPercent}
@@ -3067,14 +2273,17 @@ function CompensationTabImpl({
                     disabled={applyBusy || sweepProgress !== null || boundsPreviewPairKey !== null || bounds.error !== null}
                     onClick={() => void previewSweepBounds(followupPair)}
                   >
-                    {boundsPreviewPairKey === selectedPair.pairKey ? "Previewing…" : "Preview endpoints"}
+                    {t(boundsPreviewPairKey === selectedPair.pairKey ? "Previewing…" : "Preview endpoints")}
                   </button>
                 </div>
                 {bounds.error ? (
-                  <div className="gl-comp-bounds-error">{bounds.error}</div>
+                  <div className="gl-comp-bounds-error">{t(bounds.error)}</div>
                 ) : (
                   <small>
-                    Fast preview: exact solver on {Math.min(reviewEventCount, BOUNDS_PREVIEW_EVENT_LIMIT).toLocaleString()} frozen events. Screening only; the four-option sweep uses up to {Math.min(reviewEventCount, SWEEP_EVENT_LIMIT).toLocaleString()} events.
+                    {t("Fast preview: exact solver on {preview} frozen events. Screening only; the four-option sweep uses up to {sweep} events.", {
+                      preview: Math.min(reviewEventCount, BOUNDS_PREVIEW_EVENT_LIMIT).toLocaleString(),
+                      sweep: Math.min(reviewEventCount, SWEEP_EVENT_LIMIT).toLocaleString(),
+                    })}
                   </small>
                 )}
                 {boundsPreview && (
@@ -3082,7 +2291,7 @@ function CompensationTabImpl({
                     {boundsPreview.values.map((value) => (
                       <div className={value.isCurrent ? "is-current" : undefined} key={`${selectedPair.pairKey}:bounds:${value.value}:${value.isCurrent}`}>
                         <DensityBiplot
-                          title={`${value.isCurrent ? "Current · " : ""}${(value.value * 100).toFixed(2)}%`}
+                          title={`${value.isCurrent ? `${t("Current")} · ` : ""}${(value.value * 100).toFixed(2)}%`}
                           panel={value.preview.compensated}
                           preview={value.preview}
                           sourceLabel={selectedPair.source.label}
@@ -3097,7 +2306,7 @@ function CompensationTabImpl({
                 )}
               </div>
             )}
-            <p className="gl-hint">{matrixView!.coefficientNote}</p>
+            <p className="gl-hint">{t(matrixView!.coefficientNote)}</p>
           </div>
         ) : (
           <div className="gl-comp-inspector-empty">{t("No coefficient selected.")}</div>
@@ -3152,8 +2361,8 @@ function CompensationTabImpl({
     }));
     await exportCompensationComparison(pairs, {
       sampleName,
-      profileName: profileRecord?.name ?? matrixView.title,
-      populationName: activeReviewPopulation?.name ?? "All Events",
+      profileName: profileRecord?.name ?? t(matrixView.title),
+      populationName: activeReviewPopulation?.name ?? t("All Events"),
       filterLabel: globalExportFilterLabel,
       densitySmoothing: resolvedDensitySmoothing,
       densityColorPower,
@@ -3161,39 +2370,67 @@ function CompensationTabImpl({
     }, format, onProgress);
   };
 
+  if (!visible) {
+    // Preserve this component's imported matrix, staged coefficients, and persisted controls,
+    // but unmount the matrix/gallery/canvas subtree. Hidden canvases can otherwise keep draining
+    // the cooperative render queue long after the user has returned to the gating editor.
+    return (
+      <div
+        className="gl-tab-panel gl-tab-fill gl-compensation-tab"
+        style={{ display: "none" }}
+        aria-hidden="true"
+        data-compensation-dormant="true"
+      />
+    );
+  }
+
   return (
     <DensityColorPowerContext.Provider value={densityColorPower}>
     <CompensationPointAlphaContext.Provider value={resolvedPointAlpha}>
     <div
       className="gl-tab-panel gl-tab-fill gl-compensation-tab"
-      style={visible ? undefined : { display: "none" }}
-      aria-hidden={visible ? undefined : true}
     >
       <div className={`gl-comp-overview${workspaceView === "global" ? " is-global-scan" : ""}`}>
         <div className="gl-comp-overview-title">
           <h2 className="gl-tab-title">{t("Compensation")}</h2>
-          {!profileMetadata && <span className="gl-comp-method">{method}</span>}
+          {!profileMetadata && <span className="gl-comp-method">{displayMethod}</span>}
         </div>
         {profileMetadata ? (
           <div
             id="comp-profile-heading"
             className={`gl-comp-profile-pill${installedStatus.state === "ready" ? " is-ready" : " is-stale"}`}
             role="status"
-            title={`${profileDisplaySource} · ${method} · ${channelCount} solve channels · ${installedStatus.state === "ready" ? "Ready" : "Unavailable"} · ${compensationOn ? "Compensated assay active" : "Original assay active"}`}
+            title={t("{source} · {method} · {count} solve channels · {status} · {assay}", {
+              source: profileDisplaySource,
+              method: displayMethod,
+              count: channelCount,
+              status: t(installedStatus.state === "ready" ? "Ready" : "Unavailable"),
+              assay: t(compensationOn ? "Compensated assay active" : "Original assay active"),
+            })}
           >
             <span className={`gl-comp-status-dot${installedStatus.state === "ready" ? " is-ready" : " is-stale"}`} aria-hidden="true" />
-            <span className="gl-sr-only">{profileMetadata.kind === "cytof-spillover" ? "CyTOF" : "Flow"} compensation installed. Installed compensation profile. </span>
+            <span className="gl-sr-only">{t("{kind} compensation installed. Installed compensation profile.", {
+              kind: profileMetadata.kind === "cytof-spillover" ? "CyTOF" : "Flow",
+            })} </span>
             <strong>{compactProfileSource}</strong>
-            <span>{method} · {channelCount} ch · {installedStatus.state === "ready" ? t("Ready") : t("Unavailable")}</span>
+            <span>{t("{method} · {count} ch · {status}", {
+              method: displayMethod,
+              count: channelCount,
+              status: installedStatus.state === "ready" ? t("Ready") : t("Unavailable"),
+            })}</span>
             <em>{compensationOn ? t("Comp active") : t("Original active")}</em>
           </div>
         ) : (
           <span
             className="gl-comp-summary"
-            aria-label="Compensation summary"
+            aria-label={t("Compensation summary")}
             data-active-layer={compensationOn ? "compensated" : "original"}
           >
-            {source} · {compensationOn ? "Compensated assay active" : "Original assay active"} · {channelCount} channel{channelCount === 1 ? "" : "s"}
+            {t("{source} · {assay} · {count} channels", {
+              source: t(source),
+              assay: t(compensationOn ? "Compensated assay active" : "Original assay active"),
+              count: channelCount,
+            })}
           </span>
         )}
         {profileMetadata && sample.instrument === "cytof" && (
@@ -3209,11 +2446,11 @@ function CompensationTabImpl({
         {applyWorkerCount !== undefined && applyWorkerLimit !== undefined && onApplyWorkerCountChange && (
           <label
             className="gl-comp-worker-control"
-            title="Event-parallel Apply workers. The aggregate memory budget stays fixed; more workers are not always faster."
+            title={t("Event-parallel Apply workers. The aggregate memory budget stays fixed; more workers are not always faster.")}
           >
             <span>{t("Apply workers")}</span>
             <select
-              aria-label="Compensation Apply worker count"
+              aria-label={t("Compensation Apply worker count")}
               value={applyWorkerCount}
               disabled={applyBusy}
               onChange={(event) => onApplyWorkerCountChange(Number(event.currentTarget.value))}
@@ -3228,7 +2465,7 @@ function CompensationTabImpl({
         <label className="gl-comp-review-population">
           <span>{t("Review population")}</span>
           <select
-            aria-label="Compensation review population"
+            aria-label={t("Compensation review population")}
             value={activeReviewPopulation?.id ?? "all"}
             disabled={sweepProgress !== null || boundsPreviewPairKey !== null}
             onChange={(event) => setReviewPopulationId(event.currentTarget.value)}
@@ -3240,18 +2477,18 @@ function CompensationTabImpl({
               </option>
             ))}
           </select>
-          <small>
-            {reviewEventCount.toLocaleString()} event{reviewEventCount === 1 ? "" : "s"} · applies to biplots, attention ranking, and sweeps; membership frozen from the current assay
-          </small>
+          <small>{t("{count} events · applies to biplots, attention ranking, and sweeps; membership frozen from the current assay", {
+            count: reviewEventCount.toLocaleString(),
+          })}</small>
         </label>
         {workspaceView !== "global" && (
           <label
             className="gl-comp-preview-events"
-            title="Controls the frozen event set shown in the selected-pair Original and comparison biplots. Applying compensation still processes every event."
+            title={t("Controls the frozen event set shown in the selected-pair Original and comparison biplots. Applying compensation still processes every event.")}
           >
             <span>{t("Pair preview")}</span>
             <select
-              aria-label="Compensation pair preview event count"
+              aria-label={t("Compensation pair preview event count")}
               value={String(resolvedPairPreviewEventLimit)}
               disabled={applyBusy}
               onChange={(event) => {
@@ -3260,13 +2497,14 @@ function CompensationTabImpl({
               }}
             >
               {PAIR_PREVIEW_EVENT_LIMITS.map((limit) => (
-                <option key={limit} value={limit}>{limit.toLocaleString()} events</option>
+                <option key={limit} value={limit}>{t("{count} events", { count: limit.toLocaleString() })}</option>
               ))}
               <option value="all">{t("All available")}</option>
             </select>
-            <small>
-              Showing {reviewBiplotEventIndices.length.toLocaleString()} of {reviewEventCount.toLocaleString()}; Apply always uses all events.
-            </small>
+            <small>{t("Showing {shown} of {total}; Apply always uses all events.", {
+              shown: reviewBiplotEventIndices.length.toLocaleString(),
+              total: reviewEventCount.toLocaleString(),
+            })}</small>
           </label>
         )}
         {canToggle && <span className="gl-comp-global-layer-note">{t("Assay selection in the top bar applies to every tab.")}</span>}
@@ -3278,14 +2516,14 @@ function CompensationTabImpl({
           type="file"
           accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values,text/plain"
           className="gl-sr-only"
-          aria-label="Choose CyTOF spillover matrix"
+          aria-label={t("Choose CyTOF spillover matrix")}
           onChange={(event) => void handleCytofMatrixFile(event)}
         />
       )}
 
       {actionMessage && (
         <div className={actionIsError ? "gl-comp-error" : "gl-comp-status"} role={actionIsError ? "alert" : "status"}>
-          {actionMessage}
+          {t(actionMessage)}
         </div>
       )}
 
@@ -3293,9 +2531,7 @@ function CompensationTabImpl({
         <section className="gl-comp-flow-enable" aria-labelledby="comp-flow-enable-heading">
           <div>
             <strong id="comp-flow-enable-heading">{t("Embedded FCS matrix")}</strong>
-            <span>
-              Install this exact matrix as the immutable baseline to edit coefficients and preview their effect.
-            </span>
+            <span>{t("Install this exact matrix as the immutable baseline to edit coefficients and preview their effect.")}</span>
           </div>
           {hasExistingGates && (
             <label className="gl-comp-gate-acknowledgement is-compact">
@@ -3305,7 +2541,7 @@ function CompensationTabImpl({
                 disabled={applyBusy}
                 onChange={(event) => setGateRecomputeAcknowledged(event.currentTarget.checked)}
               />
-              <span>Recompute existing gate memberships in compensated coordinates.</span>
+              <span>{t("Recompute existing gate memberships in compensated coordinates.")}</span>
             </label>
           )}
           {embeddedFlowProfileMatrix?.error ? (
@@ -3313,15 +2549,15 @@ function CompensationTabImpl({
           ) : applyBusy ? (
             <div className="gl-comp-flow-enable-progress" role="status">
               {visibleApplyProgress
-                ? `Preparing editor… ${Math.round(visibleApplyProgress.fraction * 100)}%`
-                : "Preparing editor…"}
+                ? t("Preparing editor… {percent}%", { percent: Math.round(visibleApplyProgress.fraction * 100) })
+                : t("Preparing editor…")}
               <button
                 type="button"
                 className="gl-btn-ghost"
                 disabled={visibleApplyProgress?.phase === "cancelling"}
                 onClick={onCancelApply}
               >
-                {visibleApplyProgress?.phase === "cancelling" ? "Cancelling…" : "Cancel"}
+                {t(visibleApplyProgress?.phase === "cancelling" ? "Cancelling…" : "Cancel")}
               </button>
             </div>
           ) : (
@@ -3342,7 +2578,7 @@ function CompensationTabImpl({
           <div className="gl-comp-panel-head gl-comp-import-head">
             <div>
               <h3 id="comp-cytof-import-heading">{t("CyTOF spillover matrix")}</h3>
-              <span>Linear counts → non-negative least squares → arcsinh display</span>
+              <span>{t("Linear counts → non-negative least squares → arcsinh display")}</span>
             </div>
             <div className="gl-comp-import-actions">
               <button
@@ -3356,16 +2592,17 @@ function CompensationTabImpl({
             </div>
           </div>
 
-          {cytofImportError && <div className="gl-comp-error" role="alert">{cytofImportError}</div>}
+          {cytofImportError && <div className="gl-comp-error" role="alert">{t(cytofImportError)}</div>}
 
           {cytofDraft && cytofCompatibility && (
             <div className="gl-comp-import-body">
               <div className="gl-comp-import-summary">
                 <div>
                   <strong>{cytofDraft.fileName}</strong>
-                  <span>
-                    {cytofDraft.matrix.sourceChannels.length} sources × {cytofDraft.matrix.receiverChannels.length} receivers
-                  </span>
+                  <span>{t("{sources} sources × {receivers} receivers", {
+                    sources: cytofDraft.matrix.sourceChannels.length,
+                    receivers: cytofDraft.matrix.receiverChannels.length,
+                  })}</span>
                 </div>
                 <dl>
                   <div><dt>{t("Exact matches")}</dt><dd>{cytofCompatibility.matchedChannels.length}</dd></div>
@@ -3377,7 +2614,7 @@ function CompensationTabImpl({
               <div className="gl-comp-channel-head">
                 <div>
                   <h4>{t("Channels included in NNLS")}</h4>
-                  <span>Exact, case-sensitive <code>$PnN</code> matching; unchecked channels pass through unchanged.</span>
+                  <span>{t("Exact, case-sensitive $PnN matching; unchecked channels pass through unchanged.")}</span>
                 </div>
                 <div>
                   <button
@@ -3402,7 +2639,7 @@ function CompensationTabImpl({
                 {cytofDraft.matrix.receiverChannels.map((pnn) => {
                   const matched = cytofCompatibility.matchedChannels.includes(pnn);
                   return (
-                    <label key={pnn} className={matched ? "" : "is-unavailable"} title={matched ? pnn : `${pnn} is not uniquely present in this FCS file`}>
+                    <label key={pnn} className={matched ? "" : "is-unavailable"} title={matched ? pnn : t("{channel} is not uniquely present in this FCS file", { channel: pnn })}>
                       <input
                         type="checkbox"
                         checked={includedCytofChannels.has(pnn)}
@@ -3419,19 +2656,20 @@ function CompensationTabImpl({
               {(cytofDraft.validationWarnings.length > 0 || cytofCompatibility.warnings.length > 0) && (
                 <div className="gl-comp-warning" role="status">
                   <span>
-                    {cytofDraft.validationWarnings.length + cytofCompatibility.warnings.length} review item{
-                      cytofDraft.validationWarnings.length + cytofCompatibility.warnings.length === 1 ? "" : "s"
-                    }: {[
+                    {t("{count} review items: {messages}", {
+                      count: cytofDraft.validationWarnings.length + cytofCompatibility.warnings.length,
+                      messages: [
                       ...cytofDraft.validationWarnings.map(({ message }) => message),
                       ...cytofCompatibility.warnings.map(({ message }) => message),
-                    ].join(" ")}
+                      ].map((message) => t(message)).join(" "),
+                    })}
                   </span>
                 </div>
               )}
 
               {cytofCompatibility.blockers.length > 0 && (
                 <div className="gl-comp-error" role="alert">
-                  {cytofCompatibility.blockers.map(({ message }) => message).join(" ")}
+                  {cytofCompatibility.blockers.map(({ message }) => t(message)).join(" ")}
                 </div>
               )}
 
@@ -3443,9 +2681,7 @@ function CompensationTabImpl({
                     disabled={applyBusy}
                     onChange={(event) => setGateRecomputeAcknowledged(event.currentTarget.checked)}
                   />
-                  <span>
-                    I understand that existing gates are retained, but their memberships will be recomputed using the compensated coordinates.
-                  </span>
+                  <span>{t("I understand that existing gates are retained, but their memberships will be recomputed using the compensated coordinates.")}</span>
                 </label>
               )}
 
@@ -3453,8 +2689,13 @@ function CompensationTabImpl({
                 <div>
                   {applyBusy
                     ? visibleApplyProgress
-                      ? `${visibleApplyProgress.phase === "cancelling" ? "Cancelling" : visibleApplyProgress.phase === "preparing" ? "Preparing" : "Applying"}… ${Math.round(visibleApplyProgress.fraction * 100)}% (${visibleApplyProgress.processedEvents.toLocaleString()} / ${visibleApplyProgress.totalEvents.toLocaleString()} events)`
-                      : "Preparing compensation…"
+                      ? t("{phase}… {percent}% ({processed} / {total} events)", {
+                          phase: t(visibleApplyProgress.phase === "cancelling" ? "Cancelling" : visibleApplyProgress.phase === "preparing" ? "Preparing" : "Applying"),
+                          percent: Math.round(visibleApplyProgress.fraction * 100),
+                          processed: visibleApplyProgress.processedEvents.toLocaleString(),
+                          total: visibleApplyProgress.totalEvents.toLocaleString(),
+                        })
+                      : t("Preparing compensation…")
                     : t("The Original assay is retained and can be restored at any time.")}
                 </div>
                 {applyBusy ? (
@@ -3464,7 +2705,7 @@ function CompensationTabImpl({
                     disabled={visibleApplyProgress?.phase === "cancelling"}
                     onClick={onCancelApply}
                   >
-                    {visibleApplyProgress?.phase === "cancelling" ? "Cancelling…" : "Cancel"}
+                    {t(visibleApplyProgress?.phase === "cancelling" ? "Cancelling…" : "Cancel")}
                   </button>
                 ) : (
                   <button
@@ -3488,30 +2729,29 @@ function CompensationTabImpl({
 
       {matrixHasNonFinite && (
         <div className="gl-comp-error" role="alert">
-          The embedded compensation matrix contains non-finite values and cannot be applied.
+          {t("The embedded compensation matrix contains non-finite values and cannot be applied.")}
         </div>
       )}
 
       {unusualCoefficients.length > 0 && (
         <div className="gl-comp-warning" role="status">
-          <span>
-            {unusualCoefficients.length} off-diagonal coefficient{unusualCoefficients.length === 1 ? " is" : "s are"} above 100%.
-            Review the matrix source before applying it.
-          </span>
+          <span>{t("{count} off-diagonal coefficients are above 100%. Review the matrix source before applying it.", {
+            count: unusualCoefficients.length,
+          })}</span>
           <button type="button" className="gl-mini-btn" onClick={() => setOpenDrawers((current) => ({ ...current, review: true }))}>
-            Review details
+            {t("Review details")}
           </button>
         </div>
       )}
 
       {profileMetadata && installedStatus.state === "stale" && (
         <div className="gl-comp-warning" role="status">
-          This profile cannot be applied to the current sample context. Open the review queue for exact reasons.
+          {t("This profile cannot be applied to the current sample context. Open the review queue for exact reasons.")}
         </div>
       )}
 
       {matrixView && (
-        <div className="gl-comp-workspace-tabs" role="tablist" aria-label="Compensation workspace">
+        <div className="gl-comp-workspace-tabs" role="tablist" aria-label={t("Compensation workspace")}>
           <button
             type="button"
             role="tab"
@@ -3550,7 +2790,7 @@ function CompensationTabImpl({
           </button>
           <label
             className="gl-comp-density-smoothing"
-            title="Blur radius for every compensation biplot; both assay layers always use the same setting"
+            title={t("Blur radius for every compensation biplot; both assay layers always use the same setting")}
           >
             <span>{t("Density smooth")}</span>
             <input
@@ -3559,14 +2799,14 @@ function CompensationTabImpl({
               max="10"
               step="1"
               value={resolvedDensitySmoothing}
-              aria-label="Compensation biplot density smoothing"
+              aria-label={t("Compensation biplot density smoothing")}
               onChange={(event) => setDensitySmoothing(Number(event.currentTarget.value))}
             />
             <output>{resolvedDensitySmoothing}</output>
           </label>
           <label
             className="gl-comp-point-alpha"
-            title="Point opacity for every compensation biplot"
+            title={t("Point opacity for every compensation biplot")}
           >
             <span>{t("Point alpha")}</span>
             <input
@@ -3575,7 +2815,7 @@ function CompensationTabImpl({
               max="1"
               step="0.05"
               value={resolvedPointAlpha}
-              aria-label="Compensation biplot point alpha"
+              aria-label={t("Compensation biplot point alpha")}
               onChange={(event) => setPointAlpha(Number(event.currentTarget.value))}
             />
             <output>{resolvedPointAlpha.toFixed(2)}</output>
@@ -3587,7 +2827,7 @@ function CompensationTabImpl({
           />
           {Object.keys(stagedCoefficients).length > 0 && (
             <div className="gl-comp-staged-actions">
-              <span>{Object.keys(stagedCoefficients).length} pending edit{Object.keys(stagedCoefficients).length === 1 ? "" : "s"}</span>
+              <span>{t("{count} pending edits", { count: Object.keys(stagedCoefficients).length })}</span>
               <button
                 type="button"
                 className="gl-mini-btn"
@@ -3623,7 +2863,7 @@ function CompensationTabImpl({
             <div className="gl-comp-panel-head gl-comp-matrix-head">
               <div>
                 <h3 id="comp-matrix-heading">{t(matrixView.title)}</h3>
-                <span>{matrixView.subtitle}</span>
+                <span>{t(matrixView.subtitle)}</span>
               </div>
               <div className="gl-comp-matrix-head-actions">
                 {flowInlineMatrix && (
@@ -3657,7 +2897,7 @@ function CompensationTabImpl({
                     <div className="gl-comp-matrix-corner" aria-hidden="true">%</div>
                     <div
                       className="gl-comp-column-labels"
-                      aria-label="Receiver channel labels"
+                      aria-label={t("Receiver channel labels")}
                       style={{
                         gridTemplateColumns: `repeat(${matrixView.receiverAxisKeys.length}, ${matrixCellSize}px)`,
                       }}
@@ -3674,7 +2914,7 @@ function CompensationTabImpl({
                     </div>
                     <div
                       className="gl-comp-row-labels"
-                      aria-label="Source channel labels"
+                      aria-label={t("Source channel labels")}
                       style={{
                         gridTemplateRows: `repeat(${matrixView.sourceAxisKeys.length}, ${matrixCellSize}px)`,
                       }}
@@ -3693,7 +2933,7 @@ function CompensationTabImpl({
                       ref={matrixRef}
                       className="gl-comp-matrix shows-values"
                       role="grid"
-                      aria-label="Compensation matrix; source rows and receiver columns"
+                      aria-label={t("Compensation matrix; source rows and receiver columns")}
                       aria-rowcount={matrixView.sourceAxisKeys.length}
                       aria-colcount={matrixView.receiverAxisKeys.length}
                       style={{
@@ -3763,8 +3003,16 @@ function CompensationTabImpl({
                                   data-receiver-index={receiverIndex}
                                   aria-colindex={receiverIndex + 1}
                                   aria-selected={pinned}
-                                  aria-label={`${sourceChannel.combined} source to ${receiverChannel.combined} receiver coefficient, percent${stagedValue === undefined ? "" : ", pending edit"}`}
-                                  title={`${sourceChannel.combined} → ${receiverChannel.combined} · type or drag vertically to edit spillover percentage${stagedValue === undefined ? "" : " · pending edit"}`}
+                                  aria-label={t("{source} source to {receiver} receiver coefficient, percent{pending}", {
+                                    source: sourceChannel.combined,
+                                    receiver: receiverChannel.combined,
+                                    pending: stagedValue === undefined ? "" : t(", pending edit"),
+                                  })}
+                                  title={t("{source} → {receiver} · type or drag vertically to edit spillover percentage{pending}", {
+                                    source: sourceChannel.combined,
+                                    receiver: receiverChannel.combined,
+                                    pending: stagedValue === undefined ? "" : t(" · pending edit"),
+                                  })}
                                   style={backgroundColor ? { backgroundColor } : undefined}
                                   onFocus={() => setSelectedPairKey(pairKey)}
                                   onMouseEnter={() => setHoveredPairKey(pairKey)}
@@ -3810,8 +3058,14 @@ function CompensationTabImpl({
                                 aria-pressed={diagonal ? undefined : pinned}
                                 aria-label={
                                   diagonal
-                                    ? `${sourceChannel.combined} diagonal: ${percentText(workingValue)}`
-                                    : `${sourceChannel.combined} source to ${receiverChannel.combined} receiver: ${percentText(workingValue)}${stagedValue === undefined ? "" : " (pending edit)"}${interactionText}`
+                                    ? t("{channel} diagonal: {value}", { channel: sourceChannel.combined, value: percentText(workingValue) })
+                                    : t("{source} source to {receiver} receiver: {value}{pending}{interaction}", {
+                                        source: sourceChannel.combined,
+                                        receiver: receiverChannel.combined,
+                                        value: percentText(workingValue),
+                                        pending: stagedValue === undefined ? "" : t(" (pending edit)"),
+                                        interaction: interactionText,
+                                      })
                                 }
                                 title={
                                   diagonal
@@ -3859,87 +3113,90 @@ function CompensationTabImpl({
             stateKey={stateKey}
             header={<>
               <div className="gl-comp-global-head-title">
-                <h3 id="comp-global-inspector-heading">Global data inspector</h3>
+                <h3 id="comp-global-inspector-heading">{t("Global data inspector")}</h3>
                 <span
                   className="gl-comp-lock-pill"
-                  title="The assay flip keeps the same events, axes, transform, density bins, colour scale, and tile geometry."
+                  title={t("The assay flip keeps the same events, axes, transform, density bins, colour scale, and tile geometry.")}
                 >
-                  View locked
+                  {t("View locked")}
                 </span>
               </div>
               <select
-                aria-label="Global compensation pair filter"
-                title="Choose which channel pairs appear"
+                aria-label={t("Global compensation pair filter")}
+                title={t("Choose which channel pairs appear")}
                 value={globalPairFilter}
                 onChange={(event) => setGlobalPairFilter(event.currentTarget.value as CompensationGlobalPairFilter)}
               >
-                <option value="relevant">Matrix-linked / relevant</option>
-                <option value="nonzero">Non-zero coefficients</option>
+                <option value="relevant">{t("Matrix-linked / relevant")}</option>
+                <option value="nonzero">{t("Non-zero coefficients")}</option>
                 {matrixView.kind === "cytof" && (
-                  <option value="physical">Physical CyTOF relationships</option>
+                  <option value="physical">{t("Physical CyTOF relationships")}</option>
                 )}
-                <option value="flagged">Flagged for follow-up</option>
-                <option value="all">All included pairs</option>
+                <option value="flagged">{t("Flagged for follow-up")}</option>
+                <option value="all">{t("All included pairs")}</option>
               </select>
               <select
                 className="gl-comp-global-layout"
-                aria-label="Global compensation plot layout"
-                title="Show one compressed gallery or organise channel pairs into labelled rows"
+                aria-label={t("Global compensation plot layout")}
+                title={t("Show one compressed gallery or organise channel pairs into labelled rows")}
                 value={globalLayout}
                 onChange={(event) => setGlobalLayout(event.currentTarget.value as CompensationGlobalLayout)}
               >
-                <option value="compact">Compact gallery</option>
-                <option value="source">Rows by source</option>
-                <option value="receiver">Rows by receiver</option>
+                <option value="compact">{t("Compact gallery")}</option>
+                <option value="source">{t("Rows by source")}</option>
+                <option value="receiver">{t("Rows by receiver")}</option>
               </select>
               <input
                 className="gl-comp-global-search"
                 type="search"
                 value={globalPairSearch}
-                placeholder="Find channel…"
-                aria-label="Search global compensation pairs"
+                placeholder={t("Find channel…")}
+                aria-label={t("Search global compensation pairs")}
                 onChange={(event) => setGlobalPairSearch(event.currentTarget.value)}
               />
               <label className="gl-comp-global-size">
-                <span className="gl-sr-only">Plot size</span>
+                <span className="gl-sr-only">{t("Plot size")}</span>
                 <input
                   type="range"
                   min="120"
                   max="220"
                   step="4"
                   value={resolvedGlobalPlotSize}
-                  aria-label="Global compensation plot size"
+                  aria-label={t("Global compensation plot size")}
                   onChange={(event) => setGlobalPlotSize(Number(event.currentTarget.value))}
                 />
-                <output>{resolvedGlobalPlotSize}px</output>
+                <output>{t("{size}px", { size: resolvedGlobalPlotSize })}</output>
               </label>
               <button
                 type="button"
                 className="gl-mini-btn gl-comp-global-export"
                 disabled={!globalInspectorDataset?.ready || visibleGlobalInspectorCandidates.length === 0}
-                title="Export the currently filtered pairs as locked Original and Compensated comparison pages"
+                title={t("Export the currently filtered pairs as locked Original and Compensated comparison pages")}
                 onClick={() => setComparisonExportDialogOpen(true)}
               >
-                Export…
+                {t("Export…")}
               </button>
               <span
                 className="gl-comp-global-count"
-                title="The Global gallery uses one fixed representative event set so every pair and both assay layers remain directly comparable."
+                title={t("The Global gallery uses one fixed representative event set so every pair and both assay layers remain directly comparable.")}
               >
-                {visibleGlobalInspectorCandidates.length.toLocaleString()} pair{visibleGlobalInspectorCandidates.length === 1 ? "" : "s"}
-                {" · "}{globalInspectorEventIndices.length.toLocaleString()} / {reviewEventCount.toLocaleString()} events
-                {" · "}{activeReviewPopulation?.name ?? "All Events"}
+                {t("{pairs} pairs · {shown} / {total} events · {population}", {
+                  pairs: visibleGlobalInspectorCandidates.length.toLocaleString(),
+                  shown: globalInspectorEventIndices.length.toLocaleString(),
+                  total: reviewEventCount.toLocaleString(),
+                  population: activeReviewPopulation?.name ?? t("All Events"),
+                })}
               </span>
             </>}
           >
 
             {!globalInspectorDataset ? (
-              <div className="gl-comp-global-empty">No matrix is available for the global inspector.</div>
+              <div className="gl-comp-global-empty">{t("No matrix is available for the global inspector.")}</div>
             ) : !globalInspectorDataset.ready ? (
-              <div className="gl-comp-global-empty">{globalInspectorDataset.reason}</div>
+              <div className="gl-comp-global-empty">{t(globalInspectorDataset.reason)}</div>
             ) : visibleGlobalInspectorCandidates.length === 0 ? (
               <div className="gl-comp-global-empty">
-                No pairs match the current filter. Choose another filter or clear the channel search.
+                {t("No pairs match the current filter. Choose another filter or clear the channel search.")}
               </div>
             ) : globalLayout === "compact" ? (
               <div
@@ -3958,10 +3215,10 @@ function CompensationTabImpl({
                 {globalInspectorGroups.map((group) => (
                   <section className="gl-comp-global-group" key={group.channel.key}>
                     <header>
-                      <span>{globalLayout === "source" ? "Source" : "Receiver"}</span>
+                      <span>{t(globalLayout === "source" ? "Source channel" : "Receiver")}</span>
                       <strong title={group.channel.combined}>{group.channel.label}</strong>
                       <small>{group.channel.pnn}</small>
-                      <em>{group.pairs.length} pair{group.pairs.length === 1 ? "" : "s"}</em>
+                      <em>{t("{count} pairs", { count: group.pairs.length })}</em>
                     </header>
                     <div className="gl-comp-global-group-plots">
                       {group.pairs.map((pair) =>
@@ -3984,17 +3241,14 @@ function CompensationTabImpl({
           <section className="gl-comp-attention gl-comp-attention-panel" aria-labelledby="comp-attention-heading">
             <div className="gl-comp-attention-head">
               <div>
-                <h3 id="comp-attention-heading">Flagged pairs</h3>
-                <p>
-                  This is your follow-up queue. Suggestions are a population-scoped evidence screen, not a verdict and not automatically included.
-                  Exact sweeps change one coefficient at a time across four user-bounded values using the same frozen events.
-                </p>
+                <h3 id="comp-attention-heading">{t("Flagged pairs")}</h3>
+                <p>{t("This is your follow-up queue. Suggestions are a population-scoped evidence screen, not a verdict and not automatically included. Exact sweeps change one coefficient at a time across four user-bounded values using the same frozen events.")}</p>
               </div>
               <div className="gl-comp-attention-actions">
                 <label>
-                  <span>Sweep workers</span>
+                  <span>{t("Sweep workers")}</span>
                   <select
-                    aria-label="Compensation sweep workers"
+                    aria-label={t("Compensation sweep workers")}
                     value={sweepWorkerCount}
                     disabled={sweepProgress !== null || boundsPreviewPairKey !== null}
                     onChange={(event) => setSweepWorkerCount(Number(event.currentTarget.value))}
@@ -4005,7 +3259,7 @@ function CompensationTabImpl({
                   </select>
                 </label>
                 {sweepProgress ? (
-                  <button type="button" className="gl-btn-ghost" onClick={cancelExactSweeps}>Cancel sweep</button>
+                  <button type="button" className="gl-btn-ghost" onClick={cancelExactSweeps}>{t("Cancel sweep")}</button>
                 ) : (
                   <button
                     type="button"
@@ -4013,19 +3267,22 @@ function CompensationTabImpl({
                     disabled={!profileRecord || !onSolveCompensationSweep || sweepEligiblePairs.length === 0 || invalidSweepPairCount > 0 || applyBusy || boundsPreviewPairKey !== null}
                     onClick={() => void runExactSweeps()}
                   >
-                    Run four-value sweeps ({sweepEligiblePairs.length})
+                    {t("Run four-value sweeps ({count})", { count: sweepEligiblePairs.length })}
                   </button>
                 )}
               </div>
             </div>
             <div className="gl-comp-attention-scope">
               <span>
-                Suggestions computed for <strong>{activeReviewPopulation?.name ?? "All Events"}</strong> from up to {Math.min(reviewEventCount, reviewEvidenceEventIndices.length).toLocaleString()} frozen events.
+                {t("Suggestions computed for {population} from up to {count} frozen events.", {
+                  population: activeReviewPopulation?.name ?? t("All Events"),
+                  count: Math.min(reviewEventCount, reviewEvidenceEventIndices.length).toLocaleString(),
+                })}
               </span>
               <label className="gl-comp-evidence-mode">
-                <span>Evidence mode</span>
+                <span>{t("Evidence mode")}</span>
                 <select
-                  aria-label="Compensation evidence mode"
+                  aria-label={t("Compensation evidence mode")}
                   value={evidenceMode}
                   disabled={applyBusy || sweepProgress !== null || boundsPreviewPairKey !== null}
                   onChange={(event) => {
@@ -4036,8 +3293,8 @@ function CompensationTabImpl({
                     setSweepError(null);
                   }}
                 >
-                  <option value="biological">Biological sample (conservative)</option>
-                  <option value="control">Single-stain / control</option>
+                  <option value="biological">{t("Biological sample (conservative)")}</option>
+                  <option value="control">{t("Single-stain / control")}</option>
                 </select>
               </label>
               <button
@@ -4051,39 +3308,47 @@ function CompensationTabImpl({
                   setSweepError(null);
                   setActionIsError(false);
                   setActionMessage(
-                    `Recomputed compensation suggestions for ${activeReviewPopulation?.name ?? "All Events"}. ` +
-                    `${flaggedPairs.length} flagged pair${flaggedPairs.length === 1 ? " was" : "s were"} retained.`,
+                    t(flaggedPairs.length === 1
+                      ? "Recomputed compensation suggestions for {population}. {count} flagged pair was retained."
+                      : "Recomputed compensation suggestions for {population}. {count} flagged pairs were retained.", {
+                      population: activeReviewPopulation?.name ?? t("All Events"),
+                      count: flaggedPairs.length,
+                    }),
                   );
                 }}
               >
-                Recompute suggestions
+                {t("Recompute suggestions")}
               </button>
               <small>
-                {evidenceMode === "biological"
+                {t(evidenceMode === "biological"
                   ? "Broad positive association is excluded because co-expression and cell size can mimic spill. High-tail shapes remain control-sensitive review prompts."
-                  : "Positive residual association may enter the shortlist only because you declared suitable control data."}
-                {" "}Sweep workers are separate from full-Apply workers.
+                  : "Positive residual association may enter the shortlist only because you declared suitable control data.")}
+                {" "}{t("Sweep workers are separate from full-Apply workers.")}
               </small>
             </div>
             {sweepProgress && (
               <div className="gl-comp-sweep-progress" role="status" aria-live="polite">
                 <progress max={Math.max(1, sweepProgress.total)} value={sweepProgress.completed} />
-                <span>{sweepProgress.completed} / {sweepProgress.total} exact candidate solves · {sweepWorkerCount} worker{sweepWorkerCount === 1 ? "" : "s"}</span>
+                <span>{t("{completed} / {total} exact candidate solves · {workers} workers", {
+                  completed: sweepProgress.completed,
+                  total: sweepProgress.total,
+                  workers: sweepWorkerCount,
+                })}</span>
               </div>
             )}
-            {sweepError && <div className="gl-comp-warning" role="status">{sweepError}</div>}
+            {sweepError && <div className="gl-comp-warning" role="status">{t(sweepError)}</div>}
             {!profileRecord ? (
               <div className="gl-comp-attention-empty">
-                Install a profile-derived compensation layer before curating or sweeping pairs. The embedded FCS matrix remains inspectable in the Matrix view.
+                {t("Install a profile-derived compensation layer before curating or sweeping pairs. The embedded FCS matrix remains inspectable in the Matrix view.")}
               </div>
             ) : (
               <>
-                <div className="gl-comp-manual-followup" role="group" aria-label="Add compensation pair for follow-up">
-                  <strong>Add a pair</strong>
+                <div className="gl-comp-manual-followup" role="group" aria-label={t("Add compensation pair for follow-up")}>
+                  <strong>{t("Add a pair")}</strong>
                   <label>
-                    <span>Source</span>
+                    <span>{t("Source channel")}</span>
                     <select
-                      aria-label="Follow-up source channel"
+                      aria-label={t("Follow-up source channel")}
                       value={manualSourceKey}
                       onChange={(event) => {
                         const nextSource = event.currentTarget.value;
@@ -4100,9 +3365,9 @@ function CompensationTabImpl({
                   </label>
                   <span aria-hidden="true">→</span>
                   <label>
-                    <span>Receiver</span>
+                    <span>{t("Receiver")}</span>
                     <select
-                      aria-label="Follow-up receiver channel"
+                      aria-label={t("Follow-up receiver channel")}
                       value={manualReceiverKey}
                       onChange={(event) => setManualReceiverKey(event.currentTarget.value)}
                     >
@@ -4117,7 +3382,7 @@ function CompensationTabImpl({
                     disabled={!manualSourceKey || !manualReceiverKey || manualSourceKey === manualReceiverKey}
                     onClick={addManualFollowupPair}
                   >
-                    Flag for follow-up
+                    {t("Flag for follow-up")}
                   </button>
                 </div>
 
@@ -4125,13 +3390,13 @@ function CompensationTabImpl({
                   <div className="gl-comp-attention-section">
                   <div className="gl-comp-attention-section-head">
                     <div>
-                      <h4>Flagged by you ({sweepEligiblePairs.length})</h4>
-                      <span>Only these pairs are included when you run sweeps.</span>
+                      <h4>{t("Flagged by you ({count})", { count: sweepEligiblePairs.length })}</h4>
+                      <span>{t("Only these pairs are included when you run sweeps.")}</span>
                     </div>
                   </div>
                   {sweepEligiblePairs.length === 0 ? (
                     <div className="gl-comp-attention-empty">
-                      No pairs are flagged yet. Tick “Flag for follow-up” in the inspector, add a pair above, or accept a suggestion below.
+                      {t("No pairs are flagged yet. Tick “Flag for follow-up” in the inspector, add a pair above, or accept a suggestion below.")}
                     </div>
                   ) : (
                     <div className="gl-comp-sweep-list">
@@ -4157,21 +3422,27 @@ function CompensationTabImpl({
                                   <strong>{candidate.source.label} → {candidate.receiver.label}</strong>
                                   <small>
                                     {candidate.interaction && candidate.interaction !== "other" ? `${candidate.interaction} · ` : ""}
-                                    installed {(candidate.coefficient * 100).toFixed(1)}%
+                                    {t("installed {value}%", { value: (candidate.coefficient * 100).toFixed(1) })}
                                   </small>
                                 </span>
                                 <span>
                                   {candidate.evidence.status === "ready"
-                                    ? <>shift {significantNumber(candidate.evidence.normalizedNegativeShift ?? 0, 3)} MAD · slope {significantNumber(candidate.evidence.residualSlope ?? 0, 4)}</>
-                                    : <>visual review · residual groups insufficient</>}
+                                    ? t("shift {shift} MAD · slope {slope}", {
+                                        shift: significantNumber(candidate.evidence.normalizedNegativeShift ?? 0, 3),
+                                        slope: significantNumber(candidate.evidence.residualSlope ?? 0, 4),
+                                      })
+                                    : t("visual review · residual groups insufficient")}
                                 </span>
                                 <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
                               </button>
-                              <label className="gl-comp-followup-list-toggle" title="Remove from follow-up queue">
+                              <label className="gl-comp-followup-list-toggle" title={t("Remove from follow-up queue")}>
                                 <input
                                   type="checkbox"
                                   checked
-                                  aria-label={`Flag ${candidate.source.label} to ${candidate.receiver.label} for follow-up`}
+                                  aria-label={t("Flag {source} to {receiver} for follow-up", {
+                                    source: candidate.source.label,
+                                    receiver: candidate.receiver.label,
+                                  })}
                                   onChange={(event) => toggleFlaggedPair(candidate.pairKey, event.currentTarget.checked)}
                                 />
                               </label>
@@ -4179,11 +3450,11 @@ function CompensationTabImpl({
                             {expanded && (
                               <div className="gl-comp-sweep-pair-body">
                                 <div className="gl-comp-inline-bounds">
-                                  <span>Four values across</span>
-                                  <label>Lower (%)<ScrubbableNumberInput step="0.1" value={draft.lowerPercent} disabled={applyBusy || sweepProgress !== null || boundsPreviewPairKey !== null} onValueChange={(value) => setSweepBoundDraft(candidate.pairKey, candidate.coefficient, "lowerPercent", value)} /></label>
-                                  <span>to</span>
-                                  <label>Upper (%)<ScrubbableNumberInput step="0.1" value={draft.upperPercent} disabled={applyBusy || sweepProgress !== null || boundsPreviewPairKey !== null} onValueChange={(value) => setSweepBoundDraft(candidate.pairKey, candidate.coefficient, "upperPercent", value)} /></label>
-                                  {bounds.error && <small>{bounds.error}</small>}
+                                  <span>{t("Four values across")}</span>
+                                  <label>{t("Lower (%)")}<ScrubbableNumberInput step="0.1" value={draft.lowerPercent} disabled={applyBusy || sweepProgress !== null || boundsPreviewPairKey !== null} onValueChange={(value) => setSweepBoundDraft(candidate.pairKey, candidate.coefficient, "lowerPercent", value)} /></label>
+                                  <span>{t("to")}</span>
+                                  <label>{t("Upper (%)")}<ScrubbableNumberInput step="0.1" value={draft.upperPercent} disabled={applyBusy || sweepProgress !== null || boundsPreviewPairKey !== null} onValueChange={(value) => setSweepBoundDraft(candidate.pairKey, candidate.coefficient, "upperPercent", value)} /></label>
+                                  {bounds.error && <small>{t(bounds.error)}</small>}
                                 </div>
                                 {result ? (
                                   <div className="gl-comp-sweep-values">
@@ -4193,7 +3464,7 @@ function CompensationTabImpl({
                                         key={`${candidate.pairKey}:${value.value}:${value.isCurrent}`}
                                       >
                                         <DensityBiplot
-                                          title={`${value.isCurrent ? "Current · " : ""}${(value.value * 100).toFixed(2)}%`}
+                                          title={`${value.isCurrent ? `${t("Current")} · ` : ""}${(value.value * 100).toFixed(2)}%`}
                                           panel={value.preview.compensated}
                                           preview={value.preview}
                                           sourceLabel={candidate.source.label}
@@ -4203,10 +3474,10 @@ function CompensationTabImpl({
                                           densitySmoothing={resolvedDensitySmoothing}
                                         />
                                         <dl>
-                                          <div><dt>Shift</dt><dd>{significantNumber(value.preview.evidence.normalizedNegativeShift ?? 0, 3)} MAD</dd></div>
-                                          <div><dt>Slope</dt><dd>{significantNumber(value.preview.evidence.residualSlope ?? 0, 4)}</dd></div>
+                                          <div><dt>{t("Shift")}</dt><dd>{t("{value} MAD", { value: significantNumber(value.preview.evidence.normalizedNegativeShift ?? 0, 3) })}</dd></div>
+                                          <div><dt>{t("Slope")}</dt><dd>{significantNumber(value.preview.evidence.residualSlope ?? 0, 4)}</dd></div>
                                           {matrixView.kind === "cytof" && (
-                                            <div><dt>Receiver zero</dt><dd>{(value.preview.compensated.zeroPile.receiver / Math.max(1, value.preview.eventCount) * 100).toFixed(1)}%</dd></div>
+                                            <div><dt>{t("Receiver zero")}</dt><dd>{(value.preview.compensated.zeroPile.receiver / Math.max(1, value.preview.eventCount) * 100).toFixed(1)}%</dd></div>
                                           )}
                                         </dl>
                                         <button
@@ -4215,13 +3486,13 @@ function CompensationTabImpl({
                                           disabled={applyBusy || value.isCurrent}
                                           onClick={() => stageCoefficient(candidate.pairKey, value.value)}
                                         >
-                                          {value.isCurrent ? "Installed" : stagedCoefficients[candidate.pairKey] === value.value ? "Staged" : "Use this value"}
+                                          {t(value.isCurrent ? "Installed" : stagedCoefficients[candidate.pairKey] === value.value ? "Staged" : "Use this value")}
                                         </button>
                                       </div>
                                     ))}
                                   </div>
                                 ) : (
-                                  <p>Set or fast-preview the endpoints in the inspector, then run the four-value exact sweep. Panels use the same events and locked axes.</p>
+                                  <p>{t("Set or fast-preview the endpoints in the inspector, then run the four-value exact sweep. Panels use the same events and locked axes.")}</p>
                                 )}
                               </div>
                             )}
@@ -4235,14 +3506,16 @@ function CompensationTabImpl({
                   <div className="gl-comp-attention-section gl-comp-suggestions">
                   <div className="gl-comp-attention-section-head">
                     <div>
-                      <h4>{evidenceMode === "biological" ? "Conservative suggestions" : "Control-data suggestions"} ({residualEvidenceReview.items.length})</h4>
-                      <span>
-                        {residualEvidenceReview.evaluableCount.toLocaleString()} evaluable of {residualEvidenceReview.screenedCount.toLocaleString()} screened pairs for {activeReviewPopulation?.name ?? "All Events"}. Inspect before flagging.
-                      </span>
+                      <h4>{t(evidenceMode === "biological" ? "Conservative suggestions" : "Control-data suggestions")} ({residualEvidenceReview.items.length})</h4>
+                      <span>{t("{evaluable} evaluable of {screened} screened pairs for {population}. Inspect before flagging.", {
+                        evaluable: residualEvidenceReview.evaluableCount.toLocaleString(),
+                        screened: residualEvidenceReview.screenedCount.toLocaleString(),
+                        population: activeReviewPopulation?.name ?? t("All Events"),
+                      })}</span>
                     </div>
                   </div>
                   {residualEvidenceReview.items.length === 0 ? (
-                    <div className="gl-comp-attention-empty">No pair met the residual-screen evidence requirements. Manual flagging remains available.</div>
+                    <div className="gl-comp-attention-empty">{t("No pair met the residual-screen evidence requirements. Manual flagging remains available.")}</div>
                   ) : (
                     <div className="gl-comp-suggestion-list">
                       {residualEvidenceReview.items.map((candidate) => {
@@ -4254,20 +3527,27 @@ function CompensationTabImpl({
                               onClick={() => setSelectedPairKey(candidate.pairKey)}
                             >
                               <strong>{candidate.source.label} → {candidate.receiver.label}</strong>
-                              <em className={`gl-comp-suggestion-badge is-${assessment.category}`}>{assessment.label}</em>
+                              <em className={`gl-comp-suggestion-badge is-${assessment.category}`}>{t(assessment.label)}</em>
                               <span>
                                 {candidate.interaction && candidate.interaction !== "other" ? `${candidate.interaction} · ` : ""}
-                                {(candidate.coefficient * 100).toFixed(1)}% · shift {significantNumber(candidate.evidence.normalizedNegativeShift ?? 0, 3)} MAD · slope {significantNumber(candidate.evidence.residualSlope ?? 0, 4)}
+                                {t("{coefficient}% · shift {shift} MAD · slope {slope}", {
+                                  coefficient: (candidate.coefficient * 100).toFixed(1),
+                                  shift: significantNumber(candidate.evidence.normalizedNegativeShift ?? 0, 3),
+                                  slope: significantNumber(candidate.evidence.residualSlope ?? 0, 4),
+                                })}
                               </span>
                             </button>
                             <label>
                               <input
                                 type="checkbox"
                                 checked={flaggedPairSet.has(candidate.pairKey)}
-                                aria-label={`Flag suggested ${candidate.source.label} to ${candidate.receiver.label} for follow-up`}
+                                aria-label={t("Flag suggested {source} to {receiver} for follow-up", {
+                                  source: candidate.source.label,
+                                  receiver: candidate.receiver.label,
+                                })}
                                 onChange={(event) => toggleFlaggedPair(candidate.pairKey, event.currentTarget.checked)}
                               />
-                              <span>Follow up</span>
+                              <span>{t("Follow up")}</span>
                             </label>
                           </article>
                         );
@@ -4285,17 +3565,17 @@ function CompensationTabImpl({
       ) : (
         <div className="gl-tab-placeholder gl-comp-empty">
           <p>
-            {profileMetadata
+            {t(profileMetadata
               ? "The compensated assay is installed, but its numerical profile record is unavailable for matrix inspection."
               : sample.instrument === "cytof"
                 ? "No CyTOF compensation profile is installed for this sample."
-                : "This sample has no compatible embedded compensation matrix or imported profile."}
+                : "This sample has no compatible embedded compensation matrix or imported profile.")}
           </p>
         </div>
       )}
 
       {(matrixView || profileMetadata) && (
-        <div className="gl-comp-advanced" role="group" aria-label="Advanced compensation tools">
+        <div className="gl-comp-advanced" role="group" aria-label={t("Advanced compensation tools")}>
           <div className="gl-comp-drawer-buttons">
             {DRAWERS.map(({ id, label }) => (
               <button
@@ -4319,53 +3599,70 @@ function CompensationTabImpl({
                 profileRecord ? (
                   <>
                     <dl className="gl-comp-evidence-grid">
-                      <div><dt>Profile ID</dt><dd>{profileRecord.profileId}</dd></div>
-                      <div><dt>Created</dt><dd>{new Date(profileRecord.createdAt).toLocaleString()}</dd></div>
-                      <div><dt>Matrix source</dt><dd>{profileOriginText(profileRecord)}</dd></div>
-                      <div><dt>Orientation</dt><dd>Source rows → receiver columns</dd></div>
-                      <div><dt>Imported dimensions</dt><dd>{profileRecord.scientific.matrix.sourceChannels.length} sources × {profileRecord.scientific.matrix.receiverChannels.length} receivers</dd></div>
-                      <div><dt>Applied solve</dt><dd>{profileMetadata.includedPnns.length} exact <code>$PnN</code> channels · {installedStatus.state}</dd></div>
-                      <div><dt>Matrix hash</dt><dd title={profileRecord.matrixHash}>{profileRecord.matrixHash.slice(0, 19)}…</dd></div>
-                      <div><dt>Profile hash</dt><dd title={profileRecord.profileHash}>{profileRecord.profileHash.slice(0, 19)}…</dd></div>
-                      <div><dt>Provenance</dt><dd>{profileRecord.provenance?.sourceDescription ?? "No additional source note supplied"}</dd></div>
-                      <div><dt>Estimation</dt><dd>{profileRecord.provenance?.estimationMethod ?? "Imported coefficients preserved exactly"}</dd></div>
+                      <div><dt>{t("Profile ID")}</dt><dd>{profileRecord.profileId}</dd></div>
+                      <div><dt>{t("Created")}</dt><dd>{new Date(profileRecord.createdAt).toLocaleString()}</dd></div>
+                      <div><dt>{t("Matrix source")}</dt><dd>{profileOriginText(profileRecord, t)}</dd></div>
+                      <div><dt>{t("Orientation")}</dt><dd>{t("Source rows → receiver columns")}</dd></div>
+                      <div><dt>{t("Imported dimensions")}</dt><dd>{t("{sources} sources × {receivers} receivers", {
+                        sources: profileRecord.scientific.matrix.sourceChannels.length,
+                        receivers: profileRecord.scientific.matrix.receiverChannels.length,
+                      })}</dd></div>
+                      <div><dt>{t("Applied solve")}</dt><dd>{t("{count} exact $PnN channels · {status}", {
+                        count: profileMetadata.includedPnns.length,
+                        status: installedStatus.state,
+                      })}</dd></div>
+                      <div><dt>{t("Matrix hash")}</dt><dd title={profileRecord.matrixHash}>{profileRecord.matrixHash.slice(0, 19)}…</dd></div>
+                      <div><dt>{t("Profile hash")}</dt><dd title={profileRecord.profileHash}>{profileRecord.profileHash.slice(0, 19)}…</dd></div>
+                      <div><dt>{t("Provenance")}</dt><dd>{t(profileRecord.provenance?.sourceDescription ?? "No additional source note supplied")}</dd></div>
+                      <div><dt>{t("Estimation")}</dt><dd>{t(profileRecord.provenance?.estimationMethod ?? "Imported coefficients preserved exactly")}</dd></div>
                     </dl>
-                    <div className="gl-comp-method-card" aria-label="Installed compensation method">
+                    <div className="gl-comp-method-card" aria-label={t("Installed compensation method")}>
                       <div>
-                        <span>Pipeline</span>
-                        <strong>{profileRecord.scientific.kind === "cytof-spillover" ? "Original counts → NNLS → Compensated counts → arcsinh display" : "Original values → linear matrix inverse → Compensated values → display transform"}</strong>
+                        <span>{t("Pipeline")}</span>
+                        <strong>{t(profileRecord.scientific.kind === "cytof-spillover" ? "Original counts → NNLS → Compensated counts → arcsinh display" : "Original values → linear matrix inverse → Compensated values → display transform")}</strong>
                       </div>
                       <div>
-                        <span>Solver</span>
+                        <span>{t("Solver")}</span>
                         <strong>{profileRecord.scientific.solverVersion}</strong>
                         <small>{profileRecord.scientific.solverSettings.map(({ key, value }) => `${key}=${String(value)}`).join(" · ")}</small>
                       </div>
                     </div>
                     {impactSummary && (
-                      <div className="gl-comp-impact" aria-label="Original versus Compensated preview">
+                      <div className="gl-comp-impact" aria-label={t("Original versus Compensated preview")}>
                         <div className="gl-comp-impact-head">
                           <div>
-                            <h4>Original → Compensated impact</h4>
-                            <span>Deterministic preview of {impactSummary.previewEvents.toLocaleString()} evenly spaced events across {profileMetadata.includedPnns.length} solve channels</span>
+                            <h4>{t("Original → Compensated impact")}</h4>
+                            <span>{t("Deterministic preview of {events} evenly spaced events across {channels} solve channels", {
+                              events: impactSummary.previewEvents.toLocaleString(),
+                              channels: profileMetadata.includedPnns.length,
+                            })}</span>
                           </div>
                         </div>
                         <dl>
-                          <div><dt>Values changed</dt><dd>{impactSummary.changedValues.toLocaleString()} / {impactSummary.comparedValues.toLocaleString()} ({percentText(impactSummary.changedValues / impactSummary.comparedValues, false, 4)})</dd></div>
-                          <div><dt>Median |Δ|</dt><dd>{significantNumber(impactSummary.medianAbsoluteDelta, 5)}</dd></div>
-                          <div><dt>Maximum |Δ|</dt><dd>{significantNumber(impactSummary.maxAbsoluteDelta, 5)}</dd></div>
-                          <div><dt>Largest median shift</dt><dd title={impactSummary.mostChangedChannel}>{impactSummary.mostChangedChannel} · {significantNumber(impactSummary.mostChangedChannelMedianDelta, 5)}</dd></div>
+                          <div><dt>{t("Values changed")}</dt><dd>{impactSummary.changedValues.toLocaleString()} / {impactSummary.comparedValues.toLocaleString()} ({percentText(impactSummary.changedValues / impactSummary.comparedValues, false, 4)})</dd></div>
+                          <div><dt>{t("Median |Δ|")}</dt><dd>{significantNumber(impactSummary.medianAbsoluteDelta, 5)}</dd></div>
+                          <div><dt>{t("Maximum |Δ|")}</dt><dd>{significantNumber(impactSummary.maxAbsoluteDelta, 5)}</dd></div>
+                          <div><dt>{t("Largest median shift")}</dt><dd title={impactSummary.mostChangedChannel}>{impactSummary.mostChangedChannel} · {significantNumber(impactSummary.mostChangedChannelMedianDelta, 5)}</dd></div>
                           {profileMetadata.kind === "cytof-spillover" && (
-                            <div><dt>Negative → zero</dt><dd>{impactSummary.zeroedNegativeValues.toLocaleString()} preview values</dd></div>
+                            <div><dt>{t("Negative → zero")}</dt><dd>{t("{count} preview values", { count: impactSummary.zeroedNegativeValues.toLocaleString() })}</dd></div>
                           )}
                         </dl>
                       </div>
                     )}
                   </>
                 ) : (
-                  <p>{profileMetadata.profileId} · {method} · {profileMetadata.includedPnns.length} exact <code>$PnN</code> channel bindings · {installedStatus.state}. The numerical profile record is not available in this live workspace state.</p>
+                  <p>{t("{profile} · {method} · {count} exact $PnN channel bindings · {status}. The numerical profile record is not available in this live workspace state.", {
+                    profile: profileMetadata.profileId,
+                    method: displayMethod,
+                    count: profileMetadata.includedPnns.length,
+                    status: installedStatus.state,
+                  })}</p>
                 )
               ) : (
-                <p>Embedded <code>$SPILLOVER</code> · {spill!.channels.length} matched channels · {matrixReviewItems.length || "no"} coefficient warning{matrixReviewItems.length === 1 ? "" : "s"}.</p>
+                <p>{t("Embedded $SPILLOVER · {channels} matched channels · {warnings} coefficient warnings.", {
+                  channels: spill!.channels.length,
+                  warnings: matrixReviewItems.length || t("no"),
+                })}</p>
               )}
             </section>
           )}
@@ -4373,28 +3670,26 @@ function CompensationTabImpl({
             <section id="comp-drawer-review" role="region" aria-labelledby="comp-drawer-review-button" className="gl-comp-drawer-region">
               <h3>{t("Review queue")}</h3>
               <div className="gl-comp-review-section">
-                <h4>Matrix integrity</h4>
+                <h4>{t("Matrix integrity")}</h4>
                 {reviewItems.length > 0 ? (
-                  <ul>{reviewItems.map((item) => <li key={item}>{item}</li>)}</ul>
+                  <ul>{reviewItems.map((item) => <li key={item}>{t(item)}</li>)}</ul>
                 ) : (
-                  <p>No matrix-level items currently require review.</p>
+                  <p>{t("No matrix-level items currently require review.")}</p>
                 )}
               </div>
               {installedStatus.state === "ready" && matrixView && (
                 <div className="gl-comp-review-section">
-                  <h4>Residual-evidence shortlist</h4>
-                  <p>
-                    Relative ranking of {residualEvidenceReview.screenedCount.toLocaleString()}
-                    {residualEvidenceReview.candidateCount > residualEvidenceReview.screenedCount
-                      ? <> of {residualEvidenceReview.candidateCount.toLocaleString()}</>
-                      : null} non-zero or physically plausible pair{residualEvidenceReview.candidateCount === 1 ? "" : "s"}.
-                    It combines receiver-negative population shift, robust residual slope,
-                    upper-tail departure{matrixView.kind === "cytof" ? ", and new exact-zero pile" : ""}.
-                    {evidenceMode === "biological"
+                  <h4>{t("Residual-evidence shortlist")}</h4>
+                  <p>{t("Relative ranking of {screened}{candidateSuffix} non-zero or physically plausible pairs. It combines receiver-negative population shift, robust residual slope, upper-tail departure{zeroSuffix}.{modeNote} A high rank is a prompt to inspect, not proof that a coefficient is wrong.", {
+                    screened: residualEvidenceReview.screenedCount.toLocaleString(),
+                    candidateSuffix: residualEvidenceReview.candidateCount > residualEvidenceReview.screenedCount
+                      ? t(" of {count}", { count: residualEvidenceReview.candidateCount.toLocaleString() })
+                      : "",
+                    zeroSuffix: matrixView.kind === "cytof" ? t(", and new exact-zero pile") : "",
+                    modeNote: t(evidenceMode === "biological"
                       ? " Broad positive association is excluded because biological co-expression and cell size can mimic spill."
-                      : " Positive residual association is enabled because control-data mode is active."}
-                    {" "}A high rank is a prompt to inspect, not proof that a coefficient is wrong.
-                  </p>
+                      : " Positive residual association is enabled because control-data mode is active."),
+                  })}</p>
                   {residualEvidenceReview.items.length > 0 ? (
                     <div className="gl-comp-review-candidates">
                       {residualEvidenceReview.items.map((candidate) => (
@@ -4409,13 +3704,16 @@ function CompensationTabImpl({
                               {candidate.interaction && candidate.interaction !== "other"
                                 ? <>{candidate.interaction} · </>
                                 : null}
-                              matrix {(candidate.coefficient * 100).toFixed(1)}%
+                              {t("matrix {value}%", { value: (candidate.coefficient * 100).toFixed(1) })}
                             </small>
                           </span>
                           <span>
-                            shift {significantNumber(candidate.evidence.normalizedNegativeShift ?? 0, 3)} MAD · slope {significantNumber(candidate.evidence.residualSlope ?? 0, 4)}
+                            {t("shift {shift} MAD · slope {slope}", {
+                              shift: significantNumber(candidate.evidence.normalizedNegativeShift ?? 0, 3),
+                              slope: significantNumber(candidate.evidence.residualSlope ?? 0, 4),
+                            })}
                             {matrixView.kind === "cytof" ? (
-                              <> · zero Δ {candidate.evidence.receiverZeroDeltaFraction >= 0 ? "+" : ""}{(candidate.evidence.receiverZeroDeltaFraction * 100).toFixed(1)} pp</>
+                              <> {t("· zero Δ {value} pp", { value: `${candidate.evidence.receiverZeroDeltaFraction >= 0 ? "+" : ""}${(candidate.evidence.receiverZeroDeltaFraction * 100).toFixed(1)}` })}</>
                             ) : null}
                           </span>
                         </button>
@@ -4423,7 +3721,7 @@ function CompensationTabImpl({
                     </div>
                   ) : (
                     <p>
-                      No pair had enough source-high, source-low, and receiver-negative events for this conservative screen. Visual inspection remains available from the matrix.
+                      {t("No pair had enough source-high, source-low, and receiver-negative events for this conservative screen. Visual inspection remains available from the matrix.")}
                     </p>
                   )}
                 </div>
@@ -4435,7 +3733,7 @@ function CompensationTabImpl({
       {exportDialogOpen && matrixView && (
         <CompensationMatrixExportDialog
           profileLabel={profileRecord?.name ?? "embedded_FCS"}
-          installedLabel={profileRecord ? "Installed matrix" : "Embedded FCS matrix"}
+          installedLabel={t(profileRecord ? "Installed matrix" : "Embedded FCS matrix")}
           installedMatrix={{
             sourceChannels: matrixView.sourceAxisKeys,
             receiverChannels: matrixView.receiverAxisKeys,
@@ -4449,7 +3747,7 @@ function CompensationTabImpl({
       {comparisonExportDialogOpen && (
         <CompensationComparisonExportDialog
           sampleName={sampleName}
-          populationName={activeReviewPopulation?.name ?? "All Events"}
+          populationName={activeReviewPopulation?.name ?? t("All Events")}
           filterLabel={globalExportFilterLabel}
           pairCount={orderedGlobalExportCandidates.length}
           onExport={exportGlobalComparison}
@@ -4463,10 +3761,10 @@ function CompensationTabImpl({
 }
 
 /**
- * Compensation is deliberately kept mounted so an import, matrix draft, or in-flight Apply
- * survives tab changes. While hidden, however, gating edits only change review populations and
- * masks; rebuilding the large matrix/gallery tree for those updates can stall every interaction
- * in the gating editor. A transition back to visible always renders with the latest props.
+ * Compensation's lightweight state keeper remains mounted after its first visit so imported
+ * matrices and staged edits survive tab changes. Its heavy child tree is unmounted while hidden,
+ * and gating-only population/mask changes do not render the state keeper. A transition back to
+ * visible always renders once with the latest props.
  */
 function compensationTabPropsEqual(previous: Readonly<Props>, next: Readonly<Props>): boolean {
   const previousVisible = previous.visible !== false;

@@ -99,6 +99,48 @@ function sampleWithResidualSlope(): Sample {
   return sample;
 }
 
+function flowSampleWithCompensation(): Sample {
+  const originalSource = Float32Array.from([-1_000, -100, 0, 100, 1_000, 10_000, 100_000]);
+  const originalReceiver = Float32Array.from([-500, -50, 0, 200, 2_000, 20_000, 200_000]);
+  const fcs: FcsFile = {
+    version: "FCS3.1",
+    nEvents: originalSource.length,
+    instrument: "flow",
+    keywords: {},
+    channels: [
+      { index: 0, name: "PE-A", marker: "CD3", bits: 32, range: 262_144 },
+      { index: 1, name: "APC-A", marker: "CD19", bits: 32, range: 262_144 },
+    ],
+    columns: [originalSource, originalReceiver],
+    spillover: null,
+  };
+  const sample = new Sample(fcs);
+  const binding: PersistedCompensatedLayerBinding = {
+    profileId: "flow-profile",
+    profileHash: `sha256:${"e".repeat(64)}`,
+    matrixHash: `sha256:${"f".repeat(64)}`,
+    kind: "flow-spillover",
+    method: "matrix-inverse",
+    includedPnns: ["PE-A", "APC-A"],
+    channelBindings: sample.channels.map((channel, index) => ({
+      pnn: channel.pnn,
+      fcsColumnIndex: channel.columnIndex,
+      matrixSourceIndex: index,
+      matrixReceiverIndex: index,
+      included: true,
+    })),
+    transformBinding: { kind: "flow-linear" },
+  };
+  sample.installCompensatedLayer({
+    metadata: binding,
+    columns: [
+      { pnn: "PE-A", fcsColumnIndex: 0, values: Float32Array.from(originalSource, (value) => value * 0.9) },
+      { pnn: "APC-A", fcsColumnIndex: 1, values: Float32Array.from(originalReceiver, (value) => value * 0.8) },
+    ],
+  });
+  return sample;
+}
+
 describe("compensation pair preview", () => {
   it("distinguishes a high-expression point/curve from broad linear association", () => {
     const eventCount = 2_400;
@@ -163,6 +205,26 @@ describe("compensation pair preview", () => {
     expect(result.preview.original.x.every((value) => value >= result.preview.xRange[0] && value <= result.preview.xRange[1])).toBe(true);
     expect(result.preview.xRange[1]).toBeGreaterThan(result.preview.xRange[0]);
     expect(result.preview.yRange[1]).toBeGreaterThan(result.preview.yRange[0]);
+    // CyTOF metal channels take linear ticks (channelTicks → null), exactly like the Gating tab —
+    // so the biplot axis matches Gating with no instrument special-casing.
+    expect(result.preview.xTicks).toBeNull();
+    expect(result.preview.yTicks).toBeNull();
+  });
+
+  it("uses the flow channel transform to supply shared FlowJo-style decade ticks", () => {
+    const result = buildCompensationPairPreview(
+      flowSampleWithCompensation(),
+      "PE-A",
+      "APC-A",
+    );
+    expect(result.ready).toBe(true);
+    if (!result.ready) return;
+    expect(result.preview.xTicks?.tick_mode).toBe("logicle");
+    expect(result.preview.yTicks?.tick_mode).toBe("logicle");
+    expect(result.preview.xTicks?.major_labels).toContain("0");
+    expect(result.preview.xTicks?.major_labels.some((label) => label === "1K" || label === "10K"))
+      .toBe(true);
+    expect(result.preview.original.x).toHaveLength(result.preview.compensated.x.length);
   });
 
   it("explains when no compensated layer is installed", () => {

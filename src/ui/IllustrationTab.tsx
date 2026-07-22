@@ -18,6 +18,7 @@ import { populationTreeOrder } from "../engine/populations";
 import { populationColor } from "../engine/palettes";
 import {
   buildHeatmapPayload,
+  heatmapScaleNeedsPopulationComparison,
   type HeatmapPalette,
   type HeatmapScaleMode,
   type HeatmapSummaryStat,
@@ -130,6 +131,11 @@ export function IllustrationTab({
   const isHistogram = plotType === "histogram";
   const isHeatmap = plotType === "heatmap";
   const isContour = plotType === "biplot" && displayMode === "contour";
+  // Per-channel scaling (min-max or z-score) needs ≥2 populations to have a within-channel range;
+  // with one population every cell collapses to a single flat value (minmax → 0.5, z-score → 0).
+  const heatmapDegenerate =
+    isHeatmap &&
+    heatmapScaleNeedsPopulationComparison(heatmapScale, popIds.length);
   const isRidgeline = isHistogram && histLayout === "ridgeline";
 
   // Default colour = the population's STABLE slot (frozen: adding/removing a population never
@@ -540,17 +546,17 @@ export function IllustrationTab({
             <label className="gl-field-inline">
               {t("Summary")}
               <select value={heatmapStat} onChange={(e) => setHeatmapStat(e.target.value as HeatmapSummaryStat)}>
-                <option value="median">Median</option>
-                <option value="mean">Mean</option>
+                <option value="median">{t("Median")}</option>
+                <option value="mean">{t("Mean")}</option>
               </select>
             </label>
             <label className="gl-field-inline">
               {t("Scale")}
               <select value={heatmapScale} onChange={(e) => setHeatmapScale(e.target.value as HeatmapScaleMode)}>
-                <option value="column_minmax">Per channel (0–1)</option>
-                <option value="row_minmax">Per population (0–1)</option>
-                <option value="column_zscore">Per-channel z-score</option>
-                <option value="none">None (transformed expression)</option>
+                <option value="column_minmax">{t("Per channel (0–1)")}</option>
+                <option value="row_minmax">{t("Per population (0–1)")}</option>
+                <option value="column_zscore">{t("Per-channel z-score")}</option>
+                <option value="none">{t("None (transformed expression)")}</option>
               </select>
             </label>
             <label className="gl-field-inline">
@@ -566,7 +572,7 @@ export function IllustrationTab({
               <input
                 className="gl-size-slider"
                 type="range" min={16} max={72} step={2} value={heatmapCellSize}
-                title="Heatmap cell size; click Render Illustration to apply"
+                title={t("Heatmap cell size; click Render Illustration to apply")}
                 onChange={(e) => setHeatmapCellSize(Math.max(16, Math.min(72, Math.round(+e.target.value) || 30)))}
               />
               <span className="gl-num-badge">{heatmapCellSize}px</span>
@@ -576,8 +582,29 @@ export function IllustrationTab({
               {t("Show values")}
             </label>
             <span className="gl-illust-pending" style={{ color: "#64748b" }}>
-              Uses all events; empty populations are grey.
+              {t("Uses all events; empty populations are grey.")}
             </span>
+            {heatmapDegenerate && (
+              <div className="gl-comp-warning" role="status">
+                <span>
+                  {t(
+                    "{scale} needs at least two populations to have a within-channel range. With one population every cell collapses to a single flat value, giving an uninformative row. Switch to unscaled transformed expression, or add another population.",
+                    {
+                      scale: t(heatmapScale === "column_zscore"
+                        ? "Per-channel z-score"
+                        : "Per channel (0–1)"),
+                    },
+                  )}
+                </span>
+                <button
+                  type="button"
+                  className="gl-mini-btn"
+                  onClick={() => setHeatmapScale("none")}
+                >
+                  {t("Use transformed expression")}
+                </button>
+              </div>
+            )}
           </div>
         )}
 

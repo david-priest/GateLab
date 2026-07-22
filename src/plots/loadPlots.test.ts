@@ -96,6 +96,7 @@ describe("GateLab mini-plot density patches", () => {
     expect(miniSrc).not.toContain("density_clip_quantile");
     expect(patched).toContain("cfg.density_clip_quantile, cfg.density_color_power, cfg.density_color_ceiling, cfg.density_smoothing");
     expect(patched).toContain("var requestedMargins = cfg.plot_margins || {};");
+    expect(patched).toContain("!isFinite(Number(requestedMargins.left)) && cfg.y_label");
     expect(patched).toContain("var gridN = 256, pad = blurRadius, extSize = gridN + 2 * pad;");
     expect(patched).toContain("Math.min(24, blurRadius)");
     expect(patched).toContain("var integralGrid = new Float64Array(integralStride * integralStride);");

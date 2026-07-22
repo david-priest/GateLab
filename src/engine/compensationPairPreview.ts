@@ -1,4 +1,5 @@
 import type { Sample } from "./sample";
+import type { AxisTicks } from "./ticks";
 
 export interface CompensationDensityPanel {
   readonly x: readonly number[];
@@ -16,6 +17,9 @@ export interface CompensationPairPreview {
   readonly totalEvents: number;
   readonly xRange: readonly [number, number];
   readonly yRange: readonly [number, number];
+  /** FlowJo-style decade ticks shared across Original/Compensated (null → linear, e.g. CyTOF). */
+  readonly xTicks: AxisTicks | null;
+  readonly yTicks: AxisTicks | null;
   readonly original: CompensationDensityPanel;
   readonly compensated: CompensationDensityPanel;
   /** Conservative residual evidence for review prioritisation; never an automatic verdict. */
@@ -416,6 +420,8 @@ export function buildCompensationPairPreview(
   }
   const xRange = robustSharedRange([...originalX, ...compensatedX]);
   const yRange = robustSharedRange([...originalY, ...compensatedY]);
+  const xTicks = sample.channelTicks(sourceIndex, [xRange[0], xRange[1]]);
+  const yTicks = sample.channelTicks(receiverIndex, [yRange[0], yRange[1]]);
   const originalPanel = clippedPanel(
     originalX,
     originalY,
@@ -441,6 +447,8 @@ export function buildCompensationPairPreview(
         : sample.fcs.nEvents,
       xRange,
       yRange,
+      xTicks,
+      yTicks,
       original: originalPanel,
       compensated: compensatedPanel,
       evidence: compensationPairEvidence(
@@ -523,6 +531,8 @@ export function buildSolvedCompensationPairPreview(
   }
   const xRange = options.xRange ?? robustSharedRange([...originalX, ...candidateX]);
   const yRange = options.yRange ?? robustSharedRange([...originalY, ...candidateY]);
+  const xTicks = sample.channelTicks(sourceIndex, [xRange[0], xRange[1]]);
+  const yTicks = sample.channelTicks(receiverIndex, [yRange[0], yRange[1]]);
   const originalPanel = clippedPanel(originalX, originalY, originalRawX, originalRawY, xRange, yRange);
   const candidatePanel = clippedPanel(candidateX, candidateY, candidateRawX, candidateRawY, xRange, yRange);
   return {
@@ -532,6 +542,8 @@ export function buildSolvedCompensationPairPreview(
       totalEvents: options.totalEvents ?? sample.fcs.nEvents,
       xRange,
       yRange,
+      xTicks,
+      yTicks,
       original: originalPanel,
       compensated: candidatePanel,
       evidence: compensationPairEvidence(
