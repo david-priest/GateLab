@@ -214,6 +214,8 @@ const JA: Readonly<Record<string, string>> = {
   "Bandwidth": "バンド幅",
   "Gate line": "ゲート線",
   "{selected} of {total} selected": "{total}中{selected}を選択",
+  "Hide {label}": "{label}を隠す",
+  "Show {label}": "{label}を表示",
   "Y channel": "Yチャンネル",
   "Changes pending": "未描画の変更あり",
   "— select —": "— 選択 —",
