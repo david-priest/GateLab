@@ -52,6 +52,47 @@ function compensatedSample(): Sample {
   return sample;
 }
 
+function compensatedFlowSample(): Sample {
+  const raw = Float32Array.from([-1_000, -100, 0, 100, 1_000, 10_000, 100_000]);
+  const fcs: FcsFile = {
+    version: "FCS3.1",
+    nEvents: raw.length,
+    instrument: "flow",
+    keywords: {},
+    channels: [
+      { index: 0, name: "PE-A", marker: "CD3", bits: 32, range: 262_144 },
+      { index: 1, name: "APC-A", marker: "CD19", bits: 32, range: 262_144 },
+    ],
+    columns: [raw, Float32Array.from(raw, (value) => value * 2)],
+    spillover: null,
+  };
+  const sample = new Sample(fcs);
+  const metadata: PersistedCompensatedLayerBinding = {
+    profileId: "flow-global-inspector",
+    profileHash: `sha256:${"e".repeat(64)}`,
+    matrixHash: `sha256:${"f".repeat(64)}`,
+    kind: "flow-spillover",
+    method: "matrix-inverse",
+    includedPnns: ["PE-A", "APC-A"],
+    channelBindings: sample.channels.map((channel, index) => ({
+      pnn: channel.pnn,
+      fcsColumnIndex: channel.columnIndex,
+      matrixSourceIndex: index,
+      matrixReceiverIndex: index,
+      included: true,
+    })),
+    transformBinding: { kind: "flow-linear" },
+  };
+  sample.installCompensatedLayer({
+    metadata,
+    columns: [
+      { pnn: "PE-A", fcsColumnIndex: 0, values: Float32Array.from(raw, (value) => value * 0.9) },
+      { pnn: "APC-A", fcsColumnIndex: 1, values: Float32Array.from(raw, (value) => value * 1.8) },
+    ],
+  }, { activeLayer: "compensated" });
+  return sample;
+}
+
 describe("global compensation inspector", () => {
   it("freezes one event sample and one set of axes for both assay layers", () => {
     const sample = compensatedSample();
@@ -71,6 +112,22 @@ describe("global compensation inspector", () => {
     expect(pair.preview.eventSignature).toBe(dataset.dataset.eventSignature);
     expect(pair.preview.xRange).toBe(dataset.dataset.channels.get("Y89Di")?.range);
     expect(pair.preview.yRange).toBe(dataset.dataset.channels.get("Cd106Di")?.range);
+  });
+
+  it("freezes transformed decade ticks with each flow channel projection", () => {
+    const dataset = buildCompensationGlobalInspectorDataset(
+      compensatedFlowSample(),
+      ["PE-A", "APC-A"],
+    );
+    expect(dataset.ready).toBe(true);
+    if (!dataset.ready) return;
+    const pair = buildCompensationGlobalPairPreview(dataset.dataset, "PE-A", "APC-A");
+    expect(pair.ready).toBe(true);
+    if (!pair.ready) return;
+    expect(pair.preview.xTicks?.tick_mode).toBe("logicle");
+    expect(pair.preview.yTicks?.tick_mode).toBe("logicle");
+    expect(pair.preview.xTicks).toBe(dataset.dataset.channels.get("PE-A")?.ticks);
+    expect(pair.preview.yTicks).toBe(dataset.dataset.channels.get("APC-A")?.ticks);
   });
 
   it("uses one finite colour ceiling for the Original/Compensated flip", () => {

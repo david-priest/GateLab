@@ -322,7 +322,7 @@ export function patchMiniPlot(src: string): string {
         // M.left only TRANSLATES the whole y-axis group (labels + title) right — it never changes the
         // title-vs-label spacing, so it cannot introduce an overlap. Compensation biplots pass an
         // explicit left margin and are intentionally left untouched.
-        if (!isFinite(Number(requestedMargins.left)) && cfg.y && cfg.y.length) {
+        if (!isFinite(Number(requestedMargins.left)) && cfg.y_label) {
             var _yTitleFs = Number((cfg.font_sizes || {}).axis_label);
             if (!isFinite(_yTitleFs)) _yTitleFs = 11;
             var _yTitleOffset = Number(cfg.axis_label_offset);

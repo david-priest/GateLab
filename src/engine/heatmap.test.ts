@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Sample } from "./sample";
 import type { PopulationMap } from "./models";
-import { buildHeatmapPayload, exactMedian, scaleHeatmapValues } from "./heatmap";
+import {
+  buildHeatmapPayload,
+  exactMedian,
+  heatmapScaleNeedsPopulationComparison,
+  scaleHeatmapValues,
+} from "./heatmap";
 
 describe("illustration heatmap", () => {
   it("calculates exact odd/even medians without sorting the caller's array", () => {
@@ -43,6 +48,14 @@ describe("illustration heatmap", () => {
     expect(z[1][0]).toBeCloseTo(1, 12);
     expect(z[2][0]).toBeCloseTo(0, 12);
     expect(z[0][2]).toBeNull();
+  });
+
+  it("identifies scale modes that become uninformative with one population", () => {
+    expect(heatmapScaleNeedsPopulationComparison("column_minmax", 1)).toBe(true);
+    expect(heatmapScaleNeedsPopulationComparison("column_zscore", 1)).toBe(true);
+    expect(heatmapScaleNeedsPopulationComparison("row_minmax", 1)).toBe(false);
+    expect(heatmapScaleNeedsPopulationComparison("none", 1)).toBe(false);
+    expect(heatmapScaleNeedsPopulationComparison("column_minmax", 2)).toBe(false);
   });
 
   it("builds ordered all-event median rows and keeps empty populations", () => {
