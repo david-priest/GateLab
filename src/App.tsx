@@ -397,6 +397,10 @@ export default function App() {
       manager.dispose();
     }
   }, []);
+  const suspendCompensationBackgroundWork = useCallback(() => {
+    cancelCompensationSweepManagers("The Compensation tab was hidden.");
+    cancelCompensationCandidatePreview("The Compensation tab was hidden.");
+  }, [cancelCompensationCandidatePreview, cancelCompensationSweepManagers]);
   const compensationApplyGuardRef = useRef(false);
   const compensationRestoreCancelledRef = useRef(false);
   const [compensationApplyStatus, setCompensationApplyStatus] =
@@ -423,6 +427,19 @@ export default function App() {
   const [yRange, setYRange] = useState<[number, number] | null>(null);
   const [maxEvents, setMaxEvents] = useState(50000); // 0 = all (no downsampling)
   const [activeTab, setActiveTab] = useState<TabId>("gating");
+  const compensationTabStateKey = `${workspaceId}:${activeSampleId ?? "none"}`;
+  const [mountedCompensationStateKey, setMountedCompensationStateKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (activeTab === "compensation") {
+      setMountedCompensationStateKey(compensationTabStateKey);
+      return;
+    }
+    // A new workspace/sample has its own draft. Do not eagerly mount that large editor while the
+    // user is working elsewhere; it mounts on the first visit to Compensation.
+    setMountedCompensationStateKey((current) => current === compensationTabStateKey ? current : null);
+  }, [activeTab, compensationTabStateKey]);
+  const compensationTabMounted = activeTab === "compensation" ||
+    mountedCompensationStateKey === compensationTabStateKey;
   const [pointAlpha, setPointAlpha] = useState(0.4); // main-plot point opacity (cytof point_alpha)
   const [densityColorPower, setDensityColorPower] = useState(DEFAULT_DENSITY_COLOR_POWER);
   const changeDensityColorPower = useCallback((value: number) => {
@@ -3438,11 +3455,11 @@ export default function App() {
               />
             )}
             </ErrorBoundary>
-            {/* Matrix import and Apply are long-lived workflows. Keep this tab mounted while
-                hidden so switching tabs cannot discard its draft while its manager job runs. */}
-            <ErrorBoundary label="compensation">
+            {/* Mount on first visit, then retain only CompensationTab's lightweight state keeper
+                off-tab. The matrix/gallery/canvas subtree is removed while gating stays active. */}
+            {compensationTabMounted && <ErrorBoundary label="compensation">
               <CompensationTab
-                key={`${workspaceId}:${activeSampleId ?? "none"}`}
+                key={compensationTabStateKey}
                 sample={sample}
                 sampleName={fileName}
                 compensationOn={compensationOn}
@@ -3460,12 +3477,13 @@ export default function App() {
                 onPreviewCompensationCandidate={previewCompensationCandidate}
                 onSolveCompensationSweep={solveCompensationSweep}
                 onCancelCompensationSweep={cancelCompensationSweep}
+                onSuspendBackgroundWork={suspendCompensationBackgroundWork}
                 visible={activeTab === "compensation"}
-                stateKey={`${workspaceId}:${activeSampleId ?? "none"}`}
+                stateKey={compensationTabStateKey}
                 densityColorPower={densityColorPower}
                 onDensityColorPowerChange={changeDensityColorPower}
               />
-            </ErrorBoundary>
+            </ErrorBoundary>}
           </div>
         ) : (
           <div className="gl-center gl-empty" role="main" aria-label={t("Plot and analysis tabs")}>

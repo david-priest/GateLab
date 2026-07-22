@@ -216,6 +216,7 @@ function renderTab(
     reviewPopulationMasks?: Readonly<Record<string, Uint8Array>>;
     onPreviewCompensationCandidate?: CompensationCandidatePreviewSolver;
     onSolveCompensationSweep?: CompensationSweepSolver;
+    onSuspendBackgroundWork?: () => void;
     visible?: boolean;
     stateKey?: string;
     densityColorPower?: number;
@@ -241,6 +242,7 @@ function renderTab(
       reviewPopulationMasks={options.reviewPopulationMasks}
       onPreviewCompensationCandidate={options.onPreviewCompensationCandidate}
       onSolveCompensationSweep={options.onSolveCompensationSweep}
+      onSuspendBackgroundWork={options.onSuspendBackgroundWork}
       visible={options.visible}
       stateKey={stateKey}
       densityColorPower={options.densityColorPower}
@@ -261,7 +263,8 @@ describe("CompensationTab common path", () => {
       reviewPopulationMasks: { "gate-a": new Uint8Array(100).fill(1, 0, 40) },
     });
     const callsAfterMount = statusSpy.mock.calls.length;
-    expect(host.querySelectorAll(".gl-comp-cell").length).toBeGreaterThan(300);
+    expect(host.querySelector("[data-compensation-dormant='true']")).not.toBeNull();
+    expect(host.querySelectorAll(".gl-comp-cell")).toHaveLength(0);
 
     renderTab(sample, {
       stateKey,
@@ -280,7 +283,23 @@ describe("CompensationTab common path", () => {
       hasExistingGates: true,
     });
     expect(statusSpy.mock.calls.length).toBeGreaterThan(callsAfterMount);
+    expect(host.querySelectorAll(".gl-comp-cell").length).toBeGreaterThan(300);
     expect(host.querySelector('option[value="gate-a"]')?.textContent).toContain("Gate A moved");
+  });
+
+  it("suspends speculative background work when hidden without discarding editor state", () => {
+    const onSuspendBackgroundWork = vi.fn();
+    const sample = flowSample();
+    const stateKey = "workspace-a:suspend-background";
+    renderTab(sample, { stateKey, visible: true, onSuspendBackgroundWork });
+    expect(host.querySelector("[data-compensation-dormant='true']")).toBeNull();
+
+    renderTab(sample, { stateKey, visible: false, onSuspendBackgroundWork });
+    expect(onSuspendBackgroundWork).toHaveBeenCalledTimes(1);
+    expect(host.querySelector("[data-compensation-dormant='true']")).not.toBeNull();
+
+    renderTab(sample, { stateKey, visible: false, onSuspendBackgroundWork });
+    expect(onSuspendBackgroundWork).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces the bounded Apply worker count and disables it while compensation runs", () => {
@@ -910,6 +929,8 @@ describe("CompensationTab CyTOF import path", () => {
 
     renderTab(sample, { stateKey, visible: false });
     expect(host.querySelector<HTMLElement>(".gl-compensation-tab")?.style.display).toBe("none");
+    expect(host.querySelector("[data-compensation-dormant='true']")).not.toBeNull();
+    expect(host.querySelector(".gl-comp-channel-grid")).toBeNull();
 
     renderTab(sample, { stateKey, visible: true });
     expect(host.textContent).toContain("wing-lab.csv");

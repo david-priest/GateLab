@@ -107,6 +107,7 @@ interface Props {
   onPreviewCompensationCandidate?: CompensationCandidatePreviewSolver;
   onSolveCompensationSweep?: CompensationSweepSolver;
   onCancelCompensationSweep?: () => void;
+  onSuspendBackgroundWork?: () => void;
   visible?: boolean;
   stateKey: string;
   densityColorPower?: number;
@@ -1280,6 +1281,7 @@ function CompensationTabImpl({
   onPreviewCompensationCandidate,
   onSolveCompensationSweep,
   onCancelCompensationSweep,
+  onSuspendBackgroundWork,
   visible = true,
   stateKey,
   densityColorPower = DEFAULT_DENSITY_COLOR_POWER,
@@ -1405,6 +1407,19 @@ function CompensationTabImpl({
           totalEvents: applyProgress.totalEvents,
         }
       : null);
+
+  useEffect(() => {
+    if (visible) return;
+    // Applying compensation is an explicit, durable operation and deliberately continues in
+    // App. Pair previews and coefficient sweeps are speculative editor work: stop them as soon
+    // as the tab is hidden so they cannot compete with gating interactions for workers/CPU.
+    candidatePreviewGenerationRef.current++;
+    sweepGenerationRef.current++;
+    setFlowCandidatePreview({ state: "idle" });
+    setSweepProgress(null);
+    setBoundsPreviewPairKey(null);
+    onSuspendBackgroundWork?.();
+  }, [onSuspendBackgroundWork, visible]);
 
   const samplePnnChannels = useMemo(
     () => sample.channels.map(({ pnn, columnIndex }) => ({ pnn, columnIndex })),
@@ -3161,13 +3176,25 @@ function CompensationTabImpl({
     }, format, onProgress);
   };
 
+  if (!visible) {
+    // Preserve this component's imported matrix, staged coefficients, and persisted controls,
+    // but unmount the matrix/gallery/canvas subtree. Hidden canvases can otherwise keep draining
+    // the cooperative render queue long after the user has returned to the gating editor.
+    return (
+      <div
+        className="gl-tab-panel gl-tab-fill gl-compensation-tab"
+        style={{ display: "none" }}
+        aria-hidden="true"
+        data-compensation-dormant="true"
+      />
+    );
+  }
+
   return (
     <DensityColorPowerContext.Provider value={densityColorPower}>
     <CompensationPointAlphaContext.Provider value={resolvedPointAlpha}>
     <div
       className="gl-tab-panel gl-tab-fill gl-compensation-tab"
-      style={visible ? undefined : { display: "none" }}
-      aria-hidden={visible ? undefined : true}
     >
       <div className={`gl-comp-overview${workspaceView === "global" ? " is-global-scan" : ""}`}>
         <div className="gl-comp-overview-title">
@@ -4463,10 +4490,10 @@ function CompensationTabImpl({
 }
 
 /**
- * Compensation is deliberately kept mounted so an import, matrix draft, or in-flight Apply
- * survives tab changes. While hidden, however, gating edits only change review populations and
- * masks; rebuilding the large matrix/gallery tree for those updates can stall every interaction
- * in the gating editor. A transition back to visible always renders with the latest props.
+ * Compensation's lightweight state keeper remains mounted after its first visit so imported
+ * matrices and staged edits survive tab changes. Its heavy child tree is unmounted while hidden,
+ * and gating-only population/mask changes do not render the state keeper. A transition back to
+ * visible always renders once with the latest props.
  */
 function compensationTabPropsEqual(previous: Readonly<Props>, next: Readonly<Props>): boolean {
   const previousVisible = previous.visible !== false;

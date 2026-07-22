@@ -137,6 +137,7 @@ describe("App compensation lifecycle", () => {
 
     const tab = (name: string) => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
       .find((button) => button.textContent === name)!;
+    expect(host.querySelector(".gl-compensation-tab")).toBeNull();
     act(() => tab("Compensation").click());
 
     const matrixInput = host.querySelector<HTMLInputElement>(
@@ -157,6 +158,8 @@ describe("App compensation lifecycle", () => {
 
     act(() => tab("Gating").click());
     expect(host.querySelector<HTMLElement>(".gl-compensation-tab")?.style.display).toBe("none");
+    expect(host.querySelector("[data-compensation-dormant='true']")).not.toBeNull();
+    expect(host.querySelector(".gl-comp-channel-grid")).toBeNull();
 
     act(() => tab("Compensation").click());
     expect(host.textContent).toContain("wing-lab.csv");
