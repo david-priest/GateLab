@@ -1638,8 +1638,23 @@ export default function App() {
 
   async function removeSamples(ids: readonly string[]) {
     if (ids.length === 0) return;
+    const manager = compensationManagerRef.current!;
+    const applyIsRunning = () => compensationApplyGuardRef.current || manager.applyInProgress;
+    if (applyIsRunning()) {
+      setError(t("Wait for the current compensation Apply to finish, or cancel it, before removing samples."));
+      return;
+    }
     await checkpointCurrentWorkspace("before-sample-remove");
+    // Check again after the asynchronous checkpoint. An Apply may have been started while
+    // IndexedDB was writing; sample membership must remain stable for its aggregate snapshot.
+    if (applyIsRunning()) {
+      setError(t("Wait for the current compensation Apply to finish, or cancel it, before removing samples."));
+      return;
+    }
     const removed = new Set(ids);
+    for (const entry of samples) {
+      if (removed.has(entry.id)) manager.invalidateSample(entry.sample);
+    }
     const next = samples.filter((entry) => !removed.has(entry.id));
     const curX = sample?.channels[xIdx]?.key;
     const curY = sample?.channels[yIdx]?.key;
