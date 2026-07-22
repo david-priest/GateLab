@@ -27,8 +27,9 @@ describe("compensation density plot frame", () => {
     });
 
     const config = renderMiniPlot.mock.calls[0][1];
-    expect(config.axis_label_offset).toBe(24);
+    expect(config.x_axis_label_offset).toBe(24);
+    expect(config.y_axis_label_offset).toBe(20);
     expect(config.font_sizes.axis_label).toBe(10);
-    expect(config.plot_margins.left).toBe(38);
+    expect(config.plot_margins.left).toBe(34);
   });
 });

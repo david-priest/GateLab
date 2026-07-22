@@ -37,9 +37,10 @@ export function renderCompensationDensityBiplotSurface(
   const linearScale = options.size / 220;
   const typographyScale = Math.sqrt(linearScale);
   const axisFontSize = Math.max(7, Math.min(11, 10 * typographyScale));
-  // The y title sits axisLabelOffset pixels left of the axis. Reserve its font height too so
+  // The y title sits yAxisLabelOffset pixels left of the axis. Reserve its font height too so
   // multi-character FlowJo ticks and the rotated title cannot touch the SVG boundary.
-  const leftMargin = Math.ceil(24 + axisFontSize + 4);
+  const yAxisLabelOffset = 20;
+  const leftMargin = Math.ceil(yAxisLabelOffset + axisFontSize + 4);
   loadMiniPlots().renderMiniPlot(container, {
     plot_size: options.size,
     canvas_scale: options.canvasScale ?? 3,
@@ -61,7 +62,8 @@ export function renderCompensationDensityBiplotSurface(
     density_color_power: options.densityColorPower,
     density_color_ceiling: options.densityColorCeiling,
     density_smoothing: options.densitySmoothingRadius,
-    axis_label_offset: 24,
+    x_axis_label_offset: 24,
+    y_axis_label_offset: yAxisLabelOffset,
     axis_tick_size: 3,
     axis_outer_tick_size: 0,
     plot_margins: { top: 20, right: 2, bottom: 30, left: leftMargin },

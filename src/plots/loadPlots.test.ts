@@ -109,8 +109,10 @@ describe("GateLab mini-plot density patches", () => {
     expect(patched).toContain("Math.pow(Math.min(1, densities[idx] / colourCeiling), colourPower)");
     expect(patched).toContain("density_color_power: data.density_color_power");
     expect(patched).toContain("ctx.arc(px, py, dotR, 0, 6.2832)");
-    expect(patched).toContain("H + axisLabelOffset");
-    expect(patched).toContain("-axisLabelOffset");
+    expect(patched).toContain("H + xAxisLabelOffset");
+    expect(patched).toContain("-yAxisLabelOffset");
+    expect(patched).toContain("cfg.x_axis_label_offset");
+    expect(patched).toContain("cfg.y_axis_label_offset");
     expect(patched).toContain("axisTickSize + 2");
     expect(patched).toContain("axisOuterTickSize === 0");
     expect(() => new Function(patched)).not.toThrow();
