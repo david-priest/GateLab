@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   adaptCytofSpilloverMatrix,
   compensateCytofRange,
+  createCytofNnlsExecutionStats,
   prepareCytofNnls,
   solveCytofNnlsEvent,
 } from "./cytofCompensationEngine";
@@ -106,6 +107,63 @@ describe("CyTOF identity-backed NNLS", () => {
       expect.closeTo(2, 12),
       expect.closeTo(2, 12),
     ]));
+  });
+
+  it("QR-polishes a coordinate-identified active set before using the full fallback", () => {
+    const plan = prepareCytofNnls(
+      ["A", "B", "C"],
+      [
+        [1, 0.5, 0.12],
+        [0.5, 1, 0.08],
+        [0.12, 0.08, 1],
+      ],
+    );
+    const measured = [
+      Float64Array.of(11.6),
+      Float64Array.of(7.4),
+      Float64Array.of(6.36),
+    ];
+    const output = measured.map(() => new Float64Array(1));
+    const stats = createCytofNnlsExecutionStats();
+
+    compensateCytofRange(measured, plan, output, { executionStats: stats });
+
+    expect(output.map((column) => column[0])).toEqual([
+      expect.closeTo(10, 12),
+      expect.closeTo(2, 12),
+      expect.closeTo(5, 12),
+    ]);
+    expect(stats).toEqual({
+      coordinateConvergedEvents: 0,
+      activeSetPolishedEvents: 1,
+      qrFallbackEvents: 0,
+      coordinateIterations: 8,
+      maxCoordinateIterations: 8,
+    });
+  });
+
+  it("retains the full active-set fallback when the coordinate support fails KKT review", () => {
+    const plan = prepareCytofNnls(
+      ["A", "B", "C"],
+      [
+        [1, 0.43, 0.04],
+        [0.44, 1, 0.1],
+        [0.39, 0.27, 1],
+      ],
+    );
+    const measured = [Float64Array.of(34), Float64Array.of(57), Float64Array.of(38)];
+    const output = measured.map(() => new Float64Array(1));
+    const stats = createCytofNnlsExecutionStats();
+
+    compensateCytofRange(measured, plan, output, { executionStats: stats });
+
+    expect(output.map((column) => column[0])).toEqual([
+      0,
+      expect.closeTo(48.014009963631224, 10),
+      expect.closeTo(33.18009159485496, 10),
+    ]);
+    expect(stats.qrFallbackEvents).toBe(1);
+    expect(stats.activeSetPolishedEvents).toBe(0);
   });
 
   it("satisfies the NNLS KKT conditions across varied sparse spill systems", () => {
