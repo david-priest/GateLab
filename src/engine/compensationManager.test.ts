@@ -651,6 +651,54 @@ describe("CompensationManager Apply", () => {
     manager.dispose();
   });
 
+  it("uses cheap identity guards per chunk and full compatibility checks only at Apply boundaries", async () => {
+    const sample = new Sample(flowFcs());
+    const profile = await flowProfile();
+    const manager = new CompensationManager({
+      workspaceKey: "workspace-apply-guard-cost",
+      workerFactory: () => new RuntimeWorker(),
+      byteBudget: 120,
+      fixedWorkspaceBytes: 0,
+      yieldToEventLoop: () => Promise.resolve(),
+    });
+    const internals = manager as unknown as {
+      assertSnapshotCurrent(snapshot: unknown, profile: CompensationProfileRecord | null): void;
+      assertSnapshotIdentityCurrent(snapshot: unknown): void;
+    };
+    const fullGuard = vi.spyOn(internals, "assertSnapshotCurrent");
+    const identityGuard = vi.spyOn(internals, "assertSnapshotIdentityCurrent");
+
+    await manager.apply({ profile, targets: [{ sample }] });
+
+    expect(fullGuard).toHaveBeenCalledTimes(3);
+    expect(identityGuard.mock.calls.length).toBeGreaterThan(fullGuard.mock.calls.length);
+    expect(sample.compensatedLayerStatus().state).toBe("ready");
+    manager.dispose();
+  });
+
+  it("rejects an exact channel-identity change through the cheap in-flight guard", async () => {
+    const sample = new Sample(flowFcs());
+    const profile = await flowProfile();
+    const worker = new RuntimeWorker();
+    const manager = new CompensationManager({
+      workspaceKey: "workspace-channel-identity-change",
+      workerFactory: () => worker,
+      byteBudget: 120,
+      fixedWorkspaceBytes: 0,
+      yieldToEventLoop: () => Promise.resolve(),
+    });
+    worker.onRequest = (request) => {
+      if (request.type !== "start-apply") return;
+      sample.channels[1].pnn = "FL2-A-mutated";
+    };
+
+    await expect(manager.apply({ profile, targets: [{ sample }] })).rejects.toMatchObject({
+      code: "stale-sample",
+    });
+    expect(sample.compensatedLayerStatus().state).toBe("missing");
+    manager.dispose();
+  });
+
   it("recreates a crashed worker and allows a clean retry", async () => {
     const sample = new Sample(flowFcs());
     const profile = await flowProfile();
