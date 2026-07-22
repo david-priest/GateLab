@@ -72,7 +72,11 @@ import { CompensationMatrixExportDialog } from "./CompensationMatrixExportDialog
 import { usePersistedTabState } from "./tabState";
 import { DensityColourControl } from "./DensityColourControl";
 import { useI18n } from "./i18n";
-import { percentText, significantNumber } from "./compensationUiFormat";
+import {
+  compensationMatrixCellAppearance,
+  percentText,
+  significantNumber,
+} from "./compensationUiFormat";
 import { ScrubbableNumberInput } from "./ScrubbableNumberInput";
 import {
   CompensationPairBiplots,
@@ -2963,19 +2967,11 @@ function CompensationTabImpl({
                             const interaction: CytofInteractionType | null = matrixView.kind === "cytof"
                               ? cytofInteractionType(sourceKey, receiverKey)
                               : null;
-                            const relativeMagnitude = matrixMaxAbsoluteOffDiagonal > 0 && Number.isFinite(workingValue)
-                              ? Math.min(1, Math.abs(workingValue) / matrixMaxAbsoluteOffDiagonal)
-                              : 0;
-                            const heatAlpha = relativeMagnitude > 0 ? 0.08 + 0.82 * Math.sqrt(relativeMagnitude) : 0;
-                            const backgroundColor = !Number.isFinite(workingValue)
-                              ? "#ae3e3e"
-                              : diagonal
-                                ? undefined
-                                : workingValue < 0
-                                  ? `rgba(47,128,237,${heatAlpha})`
-                                  : heatAlpha > 0
-                                    ? `rgba(211,47,47,${heatAlpha})`
-                                    : undefined;
+                            const cellAppearance = compensationMatrixCellAppearance(
+                              workingValue,
+                              matrixMaxAbsoluteOffDiagonal,
+                              diagonal,
+                            );
                             const firstReceiver = matrixView.receiverAxisKeys.findIndex((candidate) => candidate !== sourceKey);
                             const pinned = selectedPairKey === pairKey;
                             const defaultTabStop = selectedPairKey === null && sourceIndex === 0 && receiverIndex === firstReceiver;
@@ -3013,7 +3009,7 @@ function CompensationTabImpl({
                                     receiver: receiverChannel.combined,
                                     pending: stagedValue === undefined ? "" : t(" · pending edit"),
                                   })}
-                                  style={backgroundColor ? { backgroundColor } : undefined}
+                                  style={cellAppearance}
                                   onFocus={() => setSelectedPairKey(pairKey)}
                                   onMouseEnter={() => setHoveredPairKey(pairKey)}
                                   onMouseLeave={() => setHoveredPairKey((current) => current === pairKey ? null : current)}
@@ -3072,7 +3068,7 @@ function CompensationTabImpl({
                                     ? `${sourceChannel.combined} · self · ${percentText(workingValue)}`
                                     : `${sourceChannel.combined} → ${receiverChannel.combined} · ${percentText(workingValue)}${stagedValue === undefined ? "" : " · pending edit"}${interactionText}`
                                 }
-                                style={backgroundColor ? { backgroundColor } : undefined}
+                                style={cellAppearance}
                                 onFocus={() => {
                                   if (!diagonal) setSelectedPairKey(pairKey);
                                 }}

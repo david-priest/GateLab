@@ -474,6 +474,12 @@ export function patchMiniPlot(src: string): string {
         var axisLabelOffset = Number(cfg.axis_label_offset);
         if (!isFinite(axisLabelOffset)) axisLabelOffset = 32;
         axisLabelOffset = Math.max(14, Math.min(40, axisLabelOffset));
+        var xAxisLabelOffset = Number(cfg.x_axis_label_offset);
+        if (!isFinite(xAxisLabelOffset)) xAxisLabelOffset = axisLabelOffset;
+        xAxisLabelOffset = Math.max(14, Math.min(40, xAxisLabelOffset));
+        var yAxisLabelOffset = Number(cfg.y_axis_label_offset);
+        if (!isFinite(yAxisLabelOffset)) yAxisLabelOffset = axisLabelOffset;
+        yAxisLabelOffset = Math.max(14, Math.min(40, yAxisLabelOffset));
         var axisTickSize = Number(cfg.axis_tick_size);
         if (!isFinite(axisTickSize)) axisTickSize = 6;
         axisTickSize = Math.max(2, Math.min(8, axisTickSize));
@@ -497,8 +503,8 @@ export function patchMiniPlot(src: string): string {
                 yAxisSel.select('.domain').attr('d', 'M-0.5,' + (H + 0.5) + 'V0.5');
             }`;
   if (out.includes(titleFontNeedle)) out = out.replace(titleFontNeedle, axisOffsetPatch);
-  if (out.includes(xLabelNeedle)) out = out.replace(xLabelNeedle, ".attr('x', W / 2).attr('y', H + axisLabelOffset)");
-  if (out.includes(yLabelNeedle)) out = out.replace(yLabelNeedle, ".attr('x', -H / 2).attr('y', -axisLabelOffset)");
+  if (out.includes(xLabelNeedle)) out = out.replace(xLabelNeedle, ".attr('x', W / 2).attr('y', H + xAxisLabelOffset)");
+  if (out.includes(yLabelNeedle)) out = out.replace(yLabelNeedle, ".attr('x', -H / 2).attr('y', -yAxisLabelOffset)");
   if (out.includes(xTickNeedle)) out = out.replace(xTickNeedle, xTickPatch);
   if (out.includes(yTickNeedle)) out = out.replace(yTickNeedle, yTickPatch);
   if (
@@ -511,8 +517,8 @@ export function patchMiniPlot(src: string): string {
     !out.includes("var requestedCeiling = Number(densityColorCeiling);") ||
     !out.includes(densityRatioPatch) ||
     !out.includes("density_color_power: data.density_color_power") ||
-    !out.includes("H + axisLabelOffset") ||
-    !out.includes("-axisLabelOffset") ||
+    !out.includes("H + xAxisLabelOffset") ||
+    !out.includes("-yAxisLabelOffset") ||
     !out.includes("axisTickSize + 2") ||
     !out.includes("axisOuterTickSize === 0")
   ) {

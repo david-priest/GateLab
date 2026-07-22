@@ -24,6 +24,7 @@ import {
   type HeatmapSummaryStat,
 } from "../engine/heatmap";
 import { MultiColumnChecklist } from "./MultiColumnChecklist";
+import { CollapsiblePicker } from "./CollapsiblePicker";
 import { DensityColourControl } from "./DensityColourControl";
 import { useI18n } from "./i18n";
 
@@ -632,12 +633,17 @@ export function IllustrationTab({
 
       {/* Responsive, equal-height multi-column channel + population checklists. */}
       <div className="gl-illust-pickers">
-        <div className="gl-illust-picker">
-          <div className="gl-picker-head">
-            <span className="gl-stats-opt-label">{isHeatmap ? t("Channels") : t("X channels")}</span>
-            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setXChannels(allChannels)}>{t("All")}</button>
-            <button className="gl-mini-btn" onClick={() => setXChannels([defaultX])}>{t("Reset")}</button>
-          </div>
+        <CollapsiblePicker
+          className="gl-illust-picker"
+          label={isHeatmap ? t("Channels") : t("X channels")}
+          summary={t("{selected} of {total} selected", { selected: xChannels.length, total: allChannels.length })}
+          actions={(
+            <>
+              <button className="gl-mini-btn" onClick={() => setXChannels(allChannels)}>{t("All")}</button>
+              <button className="gl-mini-btn" onClick={() => setXChannels([defaultX])}>{t("Reset")}</button>
+            </>
+          )}
+        >
           <MultiColumnChecklist
             items={allChannels}
             ariaLabel={isHeatmap ? "Heatmap channels" : "Illustration X channels"}
@@ -648,14 +654,19 @@ export function IllustrationTab({
             visibleRows={15}
             height={300}
           />
-        </div>
+        </CollapsiblePicker>
 
-        <div className="gl-illust-picker">
-          <div className="gl-picker-head">
-            <span className="gl-stats-opt-label">{t("Populations")}</span>
-            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setPopIds(order.map((o) => o.popId))}>{t("All")}</button>
-            <button className="gl-mini-btn" onClick={() => setPopIds([])}>{t("None")}</button>
-          </div>
+        <CollapsiblePicker
+          className="gl-illust-picker"
+          label={t("Populations")}
+          summary={t("{selected} of {total} selected", { selected: popIds.length, total: order.length })}
+          actions={(
+            <>
+              <button className="gl-mini-btn" onClick={() => setPopIds(order.map((o) => o.popId))}>{t("All")}</button>
+              <button className="gl-mini-btn" onClick={() => setPopIds([])}>{t("None")}</button>
+            </>
+          )}
+        >
           <MultiColumnChecklist
             items={order}
             ariaLabel="Illustration populations"
@@ -679,7 +690,7 @@ export function IllustrationTab({
               ) : null
             )}
           />
-        </div>
+        </CollapsiblePicker>
       </div>
 
       <div id="illustration-grid-container" ref={containerRef} className="gl-mini-grid-container" />

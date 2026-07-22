@@ -12,6 +12,7 @@ import { computeMultiPopStrategy, buildMultiStrategyPayload } from "../engine/mu
 import { populationTreeOrder } from "../engine/populations";
 import { sanitizeFilePart } from "../engine/fcsExport";
 import { MultiColumnChecklist } from "./MultiColumnChecklist";
+import { CollapsiblePicker } from "./CollapsiblePicker";
 import { DensityColourControl } from "./DensityColourControl";
 import { useI18n } from "./i18n";
 
@@ -353,13 +354,17 @@ export function StrategyTab({
       </div>
 
       {mode === "multi" && (
-        <div className="gl-strategy-pop-picker">
-          <div className="gl-picker-head">
-            <span className="gl-stats-opt-label">{t("Populations")}</span>
-            <span className="gl-hint">{t("{selected} of {total} selected", { selected: multiPops.length, total: selectablePops.length })}</span>
-            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setMultiPops(selectablePops.map(({ popId: id }) => id))}>{t("All")}</button>
-            <button className="gl-mini-btn" onClick={() => setMultiPops([])}>{t("None")}</button>
-          </div>
+        <CollapsiblePicker
+          className="gl-strategy-pop-picker"
+          label={t("Populations")}
+          summary={t("{selected} of {total} selected", { selected: multiPops.length, total: selectablePops.length })}
+          actions={(
+            <>
+              <button className="gl-mini-btn" onClick={() => setMultiPops(selectablePops.map(({ popId: id }) => id))}>{t("All")}</button>
+              <button className="gl-mini-btn" onClick={() => setMultiPops([])}>{t("None")}</button>
+            </>
+          )}
+        >
           <MultiColumnChecklist
             items={selectablePops}
             ariaLabel="Strategy populations"
@@ -373,7 +378,7 @@ export function StrategyTab({
             distribution="fill-first"
             visibleRows={6}
           />
-        </div>
+        </CollapsiblePicker>
       )}
       <div id="strategy-grid-container" ref={containerRef} className="gl-mini-grid-container" />
     </div>
