@@ -1365,13 +1365,16 @@ export default function App() {
   // Panel tab: rename a channel's display label. Applies to every loaded sample that has the
   // channel (matched by identity `key`) so the shared gate tree stays consistent. Labels are
   // cosmetic — gates/masks/workspace key off `key`, never the label — so this can't break a gate.
-  const renameChannel = (key: string, label: string) => {
+  const renameChannels = (changes: readonly { key: string; label: string }[]) => {
     let changed = false;
     for (const e of samples) {
-      const i = e.sample.index(key);
-      if (i !== undefined) {
-        e.sample.setChannelLabel(i, label);
-        changed = true;
+      for (const { key, label } of changes) {
+        const i = e.sample.index(key);
+        if (i !== undefined) {
+          const before = e.sample.channelLabel(i);
+          e.sample.setChannelLabel(i, label);
+          if (e.sample.channelLabel(i) !== before) changed = true;
+        }
       }
     }
     if (changed) {
@@ -1379,6 +1382,7 @@ export default function App() {
       setDirty(true);
     }
   };
+  const renameChannel = (key: string, label: string) => renameChannels([{ key, label }]);
   const resetAllLabels = () => {
     let changed = false;
     for (const e of samples) {
@@ -3444,7 +3448,13 @@ export default function App() {
               />
             )}
             {activeTab === "panel" && (
-              <PanelTab key={panelVersion} sample={sample} onRename={renameChannel} onResetAll={resetAllLabels} />
+              <PanelTab
+                key={panelVersion}
+                sample={sample}
+                onRename={renameChannel}
+                onRenameMany={renameChannels}
+                onResetAll={resetAllLabels}
+              />
             )}
             {activeTab === "scales" && (
               <ScalesTab
