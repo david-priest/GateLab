@@ -195,7 +195,6 @@ export function DensityBiplot({
     </figure>
   );
 }
-
 /**
  * Global-inspector plots retain one canvas per assay layer beneath a single shared SVG frame.
  * The uncompensated/compensated toggle therefore changes only CSS visibility; it never rebuilds
@@ -764,4 +763,3 @@ export function GlobalInspectorLayerScope({
     </section>
   );
 }
-
