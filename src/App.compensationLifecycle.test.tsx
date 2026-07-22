@@ -139,17 +139,22 @@ describe("App compensation lifecycle", () => {
       .find((button) => button.textContent === name)!;
     expect(host.querySelector(".gl-compensation-tab")).toBeNull();
     act(() => tab("Compensation").click());
+    await act(async () => {
+      await vi.dynamicImportSettled();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
 
     const matrixInput = host.querySelector<HTMLInputElement>(
       'input[aria-label="Choose CyTOF spillover matrix"]',
-    )!;
+    );
+    expect(matrixInput, host.textContent ?? "").not.toBeNull();
     const matrixFile = new File([matrixText], "wing-lab.csv", { type: "text/csv" });
     if (typeof matrixFile.text !== "function") {
       Object.defineProperty(matrixFile, "text", { value: async () => matrixText });
     }
-    Object.defineProperty(matrixInput, "files", { configurable: true, value: [matrixFile] });
+    Object.defineProperty(matrixInput!, "files", { configurable: true, value: [matrixFile] });
     await act(async () => {
-      matrixInput.dispatchEvent(new Event("change", { bubbles: true }));
+      matrixInput!.dispatchEvent(new Event("change", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
@@ -162,6 +167,10 @@ describe("App compensation lifecycle", () => {
     expect(host.querySelector(".gl-comp-channel-grid")).toBeNull();
 
     act(() => tab("Compensation").click());
+    await act(async () => {
+      await vi.dynamicImportSettled();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
     expect(host.textContent).toContain("wing-lab.csv");
     expect(host.querySelectorAll<HTMLInputElement>('.gl-comp-channel-grid input:checked')).toHaveLength(2);
   });

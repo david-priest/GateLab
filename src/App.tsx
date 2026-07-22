@@ -2,7 +2,7 @@
 // GateLabR) with live counts. Drawing a gate opens the name/population modal; the plot
 // shows the active population's events plus its gates (display space).
 
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import pkg from "../package.json";
 import { clearPersistedTabState } from "./ui/tabState";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type NewGate } from "./plots/GatingPlot";
@@ -116,11 +116,10 @@ import { ProportionsTab } from "./ui/ProportionsTab";
 import { DivisionTab, type DivisionProfile } from "./ui/DivisionTab";
 import { parseMetadataTable, lookupMetadataRow, type MetadataColumn } from "./engine/metadata";
 import { ScalesTab } from "./ui/ScalesTab";
-import {
-  CompensationTab,
-  type CompensationApplyUiStatus,
-  type CompensationCandidatePreviewSolver,
-  type CompensationSweepSolver,
+import type {
+  CompensationApplyUiStatus,
+  CompensationCandidatePreviewSolver,
+  CompensationSweepSolver,
 } from "./ui/CompensationTab";
 import { StrategyTab, type StrategyConfig } from "./ui/StrategyTab";
 import { IllustrationTab } from "./ui/IllustrationTab";
@@ -142,6 +141,11 @@ import {
 } from "./engine/pseudocolor";
 import { DensityColourControl } from "./ui/DensityColourControl";
 import { UI_LANGUAGE_OPTIONS, useI18n, type UiLanguage } from "./ui/i18n";
+
+const CompensationTab = lazy(async () => {
+  const module = await import("./ui/CompensationTab");
+  return { default: module.CompensationTab };
+});
 
 const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
 const INITIAL_LEFT_PANE_WIDTH = 264;
@@ -3483,31 +3487,33 @@ export default function App() {
             {/* Mount on first visit, then retain only CompensationTab's lightweight state keeper
                 off-tab. The matrix/gallery/canvas subtree is removed while gating stays active. */}
             {compensationTabMounted && <ErrorBoundary label="compensation">
-              <CompensationTab
-                key={compensationTabStateKey}
-                sample={sample}
-                sampleName={fileName}
-                compensationOn={compensationOn}
-                onApplyProfile={applyCompensationProfile}
-                onCancelApply={cancelCompensationApply}
-                hasExistingGates={Object.keys(state.gates).length > 0}
-                applyStatus={compensationApplyStatus}
-                installedProfile={activeCompensationProfile}
-                applyWorkerCount={compensationWorkerCount}
-                applyWorkerLimit={compensationWorkerLimit}
-                onApplyWorkerCountChange={changeCompensationWorkerCount}
-                installedBaselineProfile={activeCompensationBaseline}
-                reviewPopulations={compensationReviewPopulations}
-                reviewPopulationMasks={derived.masks}
-                onPreviewCompensationCandidate={previewCompensationCandidate}
-                onSolveCompensationSweep={solveCompensationSweep}
-                onCancelCompensationSweep={cancelCompensationSweep}
-                onSuspendBackgroundWork={suspendCompensationBackgroundWork}
-                visible={activeTab === "compensation"}
-                stateKey={compensationTabStateKey}
-                densityColorPower={densityColorPower}
-                onDensityColorPowerChange={changeDensityColorPower}
-              />
+              <Suspense fallback={<div className="gl-empty">{t("Loading compensation tools…")}</div>}>
+                <CompensationTab
+                  key={compensationTabStateKey}
+                  sample={sample}
+                  sampleName={fileName}
+                  compensationOn={compensationOn}
+                  onApplyProfile={applyCompensationProfile}
+                  onCancelApply={cancelCompensationApply}
+                  hasExistingGates={Object.keys(state.gates).length > 0}
+                  applyStatus={compensationApplyStatus}
+                  installedProfile={activeCompensationProfile}
+                  applyWorkerCount={compensationWorkerCount}
+                  applyWorkerLimit={compensationWorkerLimit}
+                  onApplyWorkerCountChange={changeCompensationWorkerCount}
+                  installedBaselineProfile={activeCompensationBaseline}
+                  reviewPopulations={compensationReviewPopulations}
+                  reviewPopulationMasks={derived.masks}
+                  onPreviewCompensationCandidate={previewCompensationCandidate}
+                  onSolveCompensationSweep={solveCompensationSweep}
+                  onCancelCompensationSweep={cancelCompensationSweep}
+                  onSuspendBackgroundWork={suspendCompensationBackgroundWork}
+                  visible={activeTab === "compensation"}
+                  stateKey={compensationTabStateKey}
+                  densityColorPower={densityColorPower}
+                  onDensityColorPowerChange={changeDensityColorPower}
+                />
+              </Suspense>
             </ErrorBoundary>}
           </div>
         ) : (

@@ -713,6 +713,7 @@ const JA: Readonly<Record<string, string>> = {
   "{source} → {receiver} · {interaction}matrix {coefficient}%": "{source} → {receiver} · {interaction}マトリクス {coefficient}%",
   "Wait for the current compensation Apply to finish, or cancel it, before starting a new workspace.": "新しいワークスペースを開始する前に、現在の補正適用が完了するまで待つか、キャンセルしてください。",
   "Wait for the current compensation Apply to finish, or cancel it, before removing samples.": "サンプルを削除する前に、現在の補正適用が完了するまで待つか、キャンセルしてください。",
+  "Loading compensation tools…": "補正ツールを読み込んでいます…",
   "The requested compensation layer could not be activated for this sample.": "このサンプルでは指定した補正レイヤーを有効にできませんでした。",
   "No active sample is available for compensation.": "補正に使用できる選択中のサンプルがありません。",
   "Compensation is already running. Follow or cancel the current job in the status bar before starting another Apply.": "補正は既に実行中です。別の適用を始める前に、ステータスバーで現在のジョブを確認するかキャンセルしてください。",
