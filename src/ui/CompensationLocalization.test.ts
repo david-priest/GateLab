@@ -5,6 +5,8 @@ import { hasUiTranslation } from "./i18n";
 
 const COMPENSATION_UI_FILES = [
   "CompensationTab.tsx",
+  "CompensationPlots.tsx",
+  "ScrubbableNumberInput.tsx",
   "CompensationMatrixExportDialog.tsx",
   "CompensationComparisonExportDialog.tsx",
 ] as const;
