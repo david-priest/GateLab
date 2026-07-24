@@ -255,6 +255,22 @@ export async function readFromHandle(handle: FileSystemFileHandle): Promise<{ by
   }
 }
 
+/**
+ * Re-read a persisted handle only when the browser has already granted access.
+ * Workspace preflight uses this silent path so reopening a many-file workspace never
+ * produces one permission prompt per remembered FCS.
+ */
+export async function readFromHandleIfPermitted(
+  handle: FileSystemFileHandle,
+): Promise<{ bytes: Uint8Array; name: string } | null> {
+  try {
+    if ((await handle.queryPermission?.({ mode: "read" })) !== "granted") return null;
+    return await readHandle(handle);
+  } catch {
+    return null;
+  }
+}
+
 // ── IndexedDB handle store (FCS handles persist across sessions for reference workspaces) ──
 const DB_NAME = "gatelab";
 const STORE = "handles";

@@ -90,7 +90,7 @@ import {
   writeHandleStream,
   saveAsHandle,
   saveAsHandleStream,
-  readFromHandle,
+  readFromHandleIfPermitted,
   rememberHandle,
   recallHandle,
   type PickedFileSource,
@@ -2205,7 +2205,7 @@ export default function App() {
       };
     }
     const h = await recallHandle("fcs:" + fileName);
-    const read = h ? await readFromHandle(h) : null;
+    const read = h ? await readFromHandleIfPermitted(h) : null;
     if (
       read &&
       read.name.normalize("NFC").toLocaleLowerCase() ===
