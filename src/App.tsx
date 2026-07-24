@@ -39,6 +39,7 @@ import {
   exportPopulationFcs,
   exportPopulationFcsCombined,
   inspectCombinedFcsCompatibility,
+  passesPopulationFcsExportThreshold,
   sanitizeFcsName,
   sanitizeFilePart,
   type FcsExportAssay,
@@ -513,6 +514,7 @@ export default function App() {
   const [illustVersion, setIllustVersion] = useState(0); // bump to remount IllustrationTab on workspace load
   const [fcsAssay, setFcsAssay] = useState<FcsExportAssay>("original");
   const [fcsScope, setFcsScope] = useState<"active" | "combined" | "split">("split");
+  const [fcsMinimumEvents, setFcsMinimumEvents] = useState(0);
   const [fcsExportOpen, setFcsExportOpen] = useState(false);
   const [pendingGatingMlImport, setPendingGatingMlImport] = useState<PendingGatingMLImport | null>(null);
   const [gatingMlExportOpen, setGatingMlExportOpen] = useState(false);
@@ -1081,20 +1083,26 @@ export default function App() {
     }
   }
 
-  function exportFcs(assay: FcsExportAssay, scope: "active" | "combined" | "split", popIds: string[]) {
-    if (!sample || !activeEntry) return;
+  function exportFcs(
+    assay: FcsExportAssay,
+    scope: "active" | "combined" | "split",
+    popIds: string[],
+    minimumEvents: number,
+  ): boolean {
+    if (!sample || !activeEntry) return false;
     try {
       // popIds come from the export dialog. R exports N checkbox-selected populations; one → a
       // bare .fcs, many → a zip.
       if (popIds.length === 0) {
         setError("No population selected to export.");
-        return;
+        return false;
       }
       const scopedEntries = scope === "active" ? [activeEntry] : includedSamples;
       if (scopedEntries.length === 0) {
         setError("No checked FCS files are available for this export scope.");
-        return;
+        return false;
       }
+      const splitThreshold = Math.max(0, Math.floor(minimumEvents));
       const exportDerived = new Map<string, Derived>();
       for (const entry of scopedEntries) {
         exportDerived.set(
@@ -1126,6 +1134,8 @@ export default function App() {
           out[`combined_${popName}.fcs`] = exportPopulationFcsCombined(items, assay);
         } else if (scope === "split") {
           for (const e of scopedEntries) {
+            const eventCount = exportDerived.get(e.id)?.stats.event_count[popId];
+            if (!passesPopulationFcsExportThreshold(eventCount, splitThreshold)) continue;
             out[sanitizeFcsName(null, e.name, popName, null)] =
               exportPopulationFcs(e.sample, popMaskFor(e, popId), assay);
           }
@@ -1140,6 +1150,12 @@ export default function App() {
       if (popIds.length === 1) {
         const files = filesForPop(popIds[0]);
         const names = Object.keys(files);
+        if (names.length === 0) {
+          setError(
+            `No population × FCS combination contained more than ${splitThreshold.toLocaleString()} events.`,
+          );
+          return false;
+        }
         // One output → bare .fcs. Multiple checked files stay separate inside one zip.
         if (names.length === 1) {
           downloadBlob(names[0], new Blob([files[names[0]] as BlobPart], { type: "application/octet-stream" }));
@@ -1150,11 +1166,19 @@ export default function App() {
         // Several populations → one zip, each population's file(s) inside.
         const files: Record<string, Uint8Array> = {};
         for (const popId of popIds) Object.assign(files, filesForPop(popId));
+        if (Object.keys(files).length === 0) {
+          setError(
+            `No population × FCS combination contained more than ${splitThreshold.toLocaleString()} events.`,
+          );
+          return false;
+        }
         downloadBlob(`populations_${popIds.length}.zip`, new Blob([zipSync(files) as BlobPart], { type: "application/zip" }));
       }
       setError(null);
+      return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return false;
     }
   }
 
@@ -2914,7 +2938,8 @@ export default function App() {
     // putting it back into the synchronous gate-editing path.
     const inactiveGatingNeeded =
       activeTab === "illustration" ||
-      activeTab === "gating";
+      activeTab === "gating" ||
+      fcsExportOpen;
     if (!inactiveGatingNeeded || !sample) {
       setPendingIncludedGatingIds(new Set());
       return () => {
@@ -2974,6 +2999,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     activeTab,
+    fcsExportOpen,
     sample,
     activeSampleId,
     includedSamples,
@@ -3010,6 +3036,32 @@ export default function App() {
     return results;
   }, [
     includedSamples,
+    activeSampleId,
+    gatingDerived,
+    inactiveGatingCacheVersion,
+    state.gate_version,
+  ]);
+
+  const exportPopulationCountsBySample = useMemo(() => {
+    const counts = new Map<string, Readonly<Record<string, number | null>>>();
+    for (const entry of samples) {
+      if (entry.id === activeSampleId) {
+        counts.set(entry.id, gatingDerived.stats.event_count);
+        continue;
+      }
+      const cached = inactiveGatingCacheRef.current.get(entry.id);
+      if (
+        cached &&
+        cached.sample === entry.sample &&
+        cached.dataRevision === entry.sample.dataRevision &&
+        cached.gateVersion === state.gate_version
+      ) {
+        counts.set(entry.id, cached.gating.stats.event_count);
+      }
+    }
+    return counts;
+  }, [
+    samples,
     activeSampleId,
     gatingDerived,
     inactiveGatingCacheVersion,
@@ -4630,6 +4682,7 @@ export default function App() {
             eventCount: entry.sample.fcs.nEvents,
             active: entry.id === activeSampleId,
             checked: !excludedSampleIds.has(entry.id),
+            populationEventCounts: exportPopulationCountsBySample.get(entry.id) ?? null,
           }))}
           combinedCompatibility={combinedFcsCompatibility}
           initialPopIds={
@@ -4641,12 +4694,15 @@ export default function App() {
           }
           initialAssay={fcsAssay}
           initialScope={fcsScope}
+          initialMinimumEvents={fcsMinimumEvents}
           onCancel={() => setFcsExportOpen(false)}
-          onExport={(popIds, assay, scope) => {
+          onExport={(popIds, assay, scope, minimumEvents) => {
             setFcsAssay(assay);
             setFcsScope(scope);
-            exportFcs(assay, scope, popIds);
-            setFcsExportOpen(false);
+            setFcsMinimumEvents(minimumEvents);
+            if (exportFcs(assay, scope, popIds, minimumEvents)) {
+              setFcsExportOpen(false);
+            }
           }}
         />
       )}

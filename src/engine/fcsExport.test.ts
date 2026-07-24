@@ -6,6 +6,7 @@ import {
   exportPopulationFcs,
   exportPopulationFcsCombined,
   inspectCombinedFcsCompatibility,
+  passesPopulationFcsExportThreshold,
   sanitizeFcsName,
   writeFcs,
 } from "./fcsExport";
@@ -19,6 +20,17 @@ function loadArrayBuffer(path: string): ArrayBuffer {
 }
 const toAB = (u8: Uint8Array): ArrayBuffer =>
   u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) as ArrayBuffer;
+
+describe("passesPopulationFcsExportThreshold", () => {
+  it("uses an exclusive, non-negative whole-event threshold", () => {
+    expect(passesPopulationFcsExportThreshold(0, 0)).toBe(false);
+    expect(passesPopulationFcsExportThreshold(1, 0)).toBe(true);
+    expect(passesPopulationFcsExportThreshold(100, 100)).toBe(false);
+    expect(passesPopulationFcsExportThreshold(101, 100)).toBe(true);
+    expect(passesPopulationFcsExportThreshold(1, -10)).toBe(true);
+    expect(passesPopulationFcsExportThreshold(null, 0)).toBe(false);
+  });
+});
 
 function syntheticSample(channels: { name: string; values: number[] }[]): Sample {
   const nEvents = channels[0]?.values.length ?? 0;

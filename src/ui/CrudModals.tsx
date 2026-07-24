@@ -5,7 +5,10 @@ import { useMemo, useRef, useState } from "react";
 import type { CoreState, Action } from "../store";
 import { wouldCreateCycle, type GateRef } from "../engine/models";
 import { populationTreeOrder } from "../engine/populations";
-import type { FcsExportAssay } from "../engine/fcsExport";
+import {
+  passesPopulationFcsExportThreshold,
+  type FcsExportAssay,
+} from "../engine/fcsExport";
 import { analyzeGatingMLQuadrantOmissions, type GatingMLFormat } from "../engine/gatingmlExport";
 import type { GatingImportMode } from "../engine/gatingMerge";
 import {
@@ -206,6 +209,7 @@ export interface FcsExportSampleOption {
   eventCount: number;
   active: boolean;
   checked: boolean;
+  populationEventCounts: Readonly<Record<string, number | null>> | null;
 }
 
 export function FcsExportModal({
@@ -215,6 +219,7 @@ export function FcsExportModal({
   initialPopIds,
   initialAssay,
   initialScope,
+  initialMinimumEvents,
   onCancel,
   onExport,
 }: {
@@ -224,8 +229,14 @@ export function FcsExportModal({
   initialPopIds: string[];
   initialAssay: FcsExportAssay;
   initialScope: "active" | "combined" | "split";
+  initialMinimumEvents: number;
   onCancel: () => void;
-  onExport: (popIds: string[], assay: FcsExportAssay, scope: "active" | "combined" | "split") => void;
+  onExport: (
+    popIds: string[],
+    assay: FcsExportAssay,
+    scope: "active" | "combined" | "split",
+    minimumEvents: number,
+  ) => void;
 }) {
   const { t } = useI18n();
   const order = populationTreeOrder(state.populations, state.root_population_id ?? null);
@@ -239,6 +250,10 @@ export function FcsExportModal({
     if (initialScope !== "active" && checkedSamples.length === 0) return "active";
     return initialScope;
   });
+  const [minimumEvents, setMinimumEvents] = useState(() =>
+    Math.max(0, Math.floor(initialMinimumEvents)),
+  );
+  const [confirmingSplitExport, setConfirmingSplitExport] = useState(false);
   const toggle = (id: string) =>
     setChecked((prev) => {
       const n = new Set(prev);
@@ -246,6 +261,81 @@ export function FcsExportModal({
       else n.add(id);
       return n;
     });
+  const splitCombinations = useMemo(() => {
+    const selectedPopulationIds = [...checked];
+    return checkedSamples.flatMap((sample) =>
+      selectedPopulationIds.map((popId) => {
+        const count = sample.populationEventCounts?.[popId];
+        const eventCount =
+          typeof count === "number" && Number.isFinite(count) ? count : null;
+        return {
+          key: `${sample.id}:${popId}`,
+          sampleName: sample.name,
+          populationName: state.populations[popId]?.name ?? popId,
+          eventCount,
+          writable: passesPopulationFcsExportThreshold(eventCount, minimumEvents),
+        };
+      }),
+    );
+  }, [checked, checkedSamples, minimumEvents, state.populations]);
+  const splitCombinationSummary = useMemo(() => {
+    const writable = splitCombinations.filter((combination) => combination.writable).length;
+    return {
+      ready: splitCombinations.every((combination) => combination.eventCount !== null),
+      writable,
+      skipped: splitCombinations.length - writable,
+    };
+  }, [splitCombinations]);
+  if (confirmingSplitExport) {
+    return (
+      <ModalShell title="Confirm separate FCS export">
+        <div className="gl-fcs-export-confirm-summary">
+          <strong>
+            {t("FCS outputs to write: {written}", {
+              written: splitCombinationSummary.writable,
+            })}
+          </strong>
+          <span>
+            {t("{skipped} population × file combinations will be skipped (≤ {threshold} events)", {
+              skipped: splitCombinationSummary.skipped,
+              threshold: minimumEvents,
+            })}
+          </span>
+        </div>
+        <div className="gl-fcs-export-combinations">
+          <div className="gl-fcs-export-combination header" aria-hidden="true">
+            <span>{t("FCS file")}</span>
+            <span>{t("Population")}</span>
+            <span>{t("Events")}</span>
+            <span>{t("Result")}</span>
+          </div>
+          {splitCombinations.map((combination) => (
+            <div
+              key={combination.key}
+              className={`gl-fcs-export-combination${combination.writable ? " included" : " skipped"}`}
+            >
+              <span title={combination.sampleName}>{combination.sampleName}</span>
+              <span title={combination.populationName}>{combination.populationName}</span>
+              <span>{combination.eventCount?.toLocaleString() ?? "…"}</span>
+              <strong>{combination.writable ? t("Write") : t("Skip")}</strong>
+            </div>
+          ))}
+        </div>
+        <div className="gl-modal-actions">
+          <button className="gl-btn-ghost" onClick={() => setConfirmingSplitExport(false)}>
+            {t("Back")}
+          </button>
+          <button
+            className="gl-btn"
+            disabled={splitCombinationSummary.writable === 0}
+            onClick={() => onExport([...checked], assay, scope, minimumEvents)}
+          >
+            {t("Export {count} FCS", { count: splitCombinationSummary.writable })}
+          </button>
+        </div>
+      </ModalShell>
+    );
+  }
   return (
     <ModalShell title="Export FCS">
       <div className="gl-modal-field">
@@ -337,6 +427,28 @@ export function FcsExportModal({
           </label>
         </div>
       </div>
+      {scope === "split" && (
+        <div className="gl-fcs-threshold">
+          <label>
+            <span>{t("Only write population × file combinations with more than")}</span>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={minimumEvents}
+              aria-label={t("Minimum events for each population and FCS combination")}
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                setMinimumEvents(Number.isFinite(next) ? Math.max(0, Math.floor(next)) : 0);
+              }}
+            />
+            <span>{t("events")}</span>
+          </label>
+          <small>
+            {t("A value of 0 skips empty outputs. This filter only affects separate-file export; pooled data are never filtered this way.")}
+          </small>
+        </div>
+      )}
       <div className="gl-fcs-export-summary" role="status">
         <strong>{t("Export summary")}</strong>
         <span>
@@ -355,6 +467,17 @@ export function FcsExportModal({
                   files: checkedSamples.length,
                 })}
         </span>
+        {scope === "split" && (
+          <span>
+            {splitCombinationSummary.ready
+              ? t("FCS outputs to write: {written} · skipped: {skipped} (≤ {threshold} events)", {
+                  written: splitCombinationSummary.writable,
+                  skipped: splitCombinationSummary.skipped,
+                  threshold: minimumEvents,
+                })
+              : t("Calculating population × file event counts…")}
+          </span>
+        )}
         {scope !== "active" && checkedSamples.length > 0 && (
           <span title={checkedSamples.map((sample) => sample.name).join("\n")}>
             {t("Sources: {names}", {
@@ -370,12 +493,20 @@ export function FcsExportModal({
           disabled={
             checked.size === 0 ||
             (scope === "active" && !activeSample) ||
-            (scope === "split" && checkedSamples.length === 0) ||
+            (scope === "split" && (
+              checkedSamples.length === 0 ||
+              !splitCombinationSummary.ready
+            )) ||
             (scope === "combined" && !combinedCompatibility.compatible)
           }
-          onClick={() => onExport([...checked], assay, scope)}
+          onClick={() => {
+            if (scope === "split") setConfirmingSplitExport(true);
+            else onExport([...checked], assay, scope, minimumEvents);
+          }}
         >
-          {t("Export")}{checked.size > 1 ? ` (${checked.size})` : ""}
+          {scope === "split"
+            ? t("Review export")
+            : `${t("Export")}${checked.size > 1 ? ` (${checked.size})` : ""}`}
         </button>
       </div>
     </ModalShell>

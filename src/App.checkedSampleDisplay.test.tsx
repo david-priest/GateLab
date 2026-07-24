@@ -150,6 +150,15 @@ describe("App checked-sample gating display", () => {
     expect(host.textContent).toContain("1 of 2 files contribute");
     expect(host.textContent).toContain("Pooled counts: 2 FCS · selected display: 1 contribute");
 
+    const openFcsExport = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Export FCS…")!;
+    act(() => openFcsExport.click());
+    await settle();
+    expect(host.textContent).toContain("FCS outputs to write: 1 · skipped: 1 (≤ 0 events)");
+    const cancelFcsExport = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Cancel")!;
+    act(() => cancelFcsExport.click());
+
     const allEvents = [...host.querySelectorAll<HTMLElement>(".pop-row")]
       .find((row) => row.textContent?.includes("All Events"))!;
     act(() => allEvents.click());

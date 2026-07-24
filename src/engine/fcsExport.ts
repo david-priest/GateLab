@@ -25,6 +25,16 @@ export interface FcsExportChannel {
   desc: string; // $PnS — display / marker name
 }
 
+/** Split export keeps a population × file output only when it exceeds this exclusive floor. */
+export function passesPopulationFcsExportThreshold(
+  eventCount: number | null | undefined,
+  minimumEvents: number,
+): boolean {
+  if (typeof eventCount !== "number" || !Number.isFinite(eventCount)) return false;
+  const threshold = Math.max(0, Math.floor(minimumEvents));
+  return eventCount > threshold;
+}
+
 const FCS_RANGE = 262144; // 2^18, matches .matrix_to_flowframe `range`
 const DELIM = "|"; // TEXT keyword delimiter (doubled to escape a literal)
 
