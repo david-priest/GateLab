@@ -127,6 +127,14 @@ export interface IllustrationOptions {
   scaleFontsWithPlot: boolean;
 }
 
+export interface IllustrationSampleSource {
+  id: string;
+  name: string;
+  sample: Sample;
+  masks: Record<string, Uint8Array>;
+  eventCount: Record<string, number | null>;
+}
+
 /** Assemble the object passed to CytofMiniPlot.renderIllustrationGrid. */
 export function buildIllustrationPayload(
   sample: Sample,
@@ -241,5 +249,173 @@ export function buildIllustrationPayload(
     font_sizes: opts.fontSizes,
     scale_fonts_with_plot: opts.scaleFontsWithPlot,
     gate_style: { pub_style: opts.pubStyle, line_width: opts.gateLineWidth },
+  };
+}
+
+interface IllustrationPlotPayload {
+  x: number[];
+  y: number[];
+  n_events: number;
+  [key: string]: unknown;
+}
+
+interface IllustrationGridPayload {
+  plots: Record<string, IllustrationPlotPayload>;
+  gate_overlays: Record<string, unknown>;
+  pop_ids: string[];
+  pop_names: Record<string, string>;
+  pop_counts: Record<string, number>;
+  population_colors: Record<string, string>;
+  [key: string]: unknown;
+}
+
+function asGridPayload(payload: Record<string, unknown>): IllustrationGridPayload {
+  return payload as IllustrationGridPayload;
+}
+
+/**
+ * Build an Illustration grid from the checked FCS set.
+ *
+ * Separate mode gives every file/population pair its own labelled row. Combined mode pools
+ * matching populations into one row while retaining one shared point budget. The caller chooses
+ * the blue/reference sample whose labels, axes, and gate overlays define a combined panel.
+ */
+export function buildMultiSampleIllustrationPayload(
+  sources: readonly IllustrationSampleSource[],
+  referenceSampleId: string | null,
+  gates: Record<string, Gate>,
+  gateOrder: string[],
+  populations: PopulationMap,
+  popIds: string[],
+  xChannels: string[],
+  yChannel: string | null,
+  globalScales: Record<string, [number, number]>,
+  opts: IllustrationOptions,
+  combineSamples: boolean,
+): Record<string, unknown> {
+  if (sources.length === 0) {
+    return {
+      containerId: "illustration-grid-container",
+      plots: {},
+      gate_overlays: {},
+      pop_ids: [],
+      pop_names: {},
+      pop_counts: {},
+      x_channels: xChannels,
+      y_channel: yChannel,
+    };
+  }
+
+  const panelCount = Math.max(1, sources.length) *
+    Math.max(1, popIds.length) *
+    Math.max(1, xChannels.length);
+  const sharedPreviewCap = Math.max(500, Math.floor(300_000 / panelCount));
+  const requestedCap = Number.isFinite(opts.maxEvents) && opts.maxEvents > 0
+    ? opts.maxEvents
+    : Infinity;
+  const sourceOptions = {
+    ...opts,
+    maxEvents: Math.min(requestedCap, sharedPreviewCap),
+  };
+  const built = sources.map((source) => ({
+    source,
+    payload: asGridPayload(buildIllustrationPayload(
+      source.sample,
+      gates,
+      gateOrder,
+      populations,
+      source.masks,
+      source.eventCount,
+      popIds,
+      xChannels,
+      yChannel,
+      globalScales,
+      sourceOptions,
+    )),
+  }));
+  const referenceIndex = Math.max(
+    0,
+    built.findIndex(({ source }) => source.id === referenceSampleId),
+  );
+  const base = built[referenceIndex].payload;
+
+  if (!combineSamples) {
+    const plots: Record<string, IllustrationPlotPayload> = {};
+    const gateOverlays: Record<string, unknown> = {};
+    const compositePopIds: string[] = [];
+    const popNames: Record<string, string> = {};
+    const popCounts: Record<string, number> = {};
+    const populationColors: Record<string, string> = {};
+
+    for (const { source, payload } of built) {
+      for (const popId of popIds) {
+        const compositeId = `${source.id}::${popId}`;
+        compositePopIds.push(compositeId);
+        popNames[compositeId] =
+          `${source.name} — ${payload.pop_names[popId] ?? populations[popId]?.name ?? popId}`;
+        popCounts[compositeId] = payload.pop_counts[popId] ?? 0;
+        populationColors[compositeId] =
+          opts.populationColors[popId] ?? "#3b82f6";
+        for (const xChannel of xChannels) {
+          const sourceKey = `${popId}|${xChannel}`;
+          const targetKey = `${compositeId}|${xChannel}`;
+          if (payload.plots[sourceKey]) plots[targetKey] = payload.plots[sourceKey];
+          if (payload.gate_overlays[sourceKey]) {
+            gateOverlays[targetKey] = payload.gate_overlays[sourceKey];
+          }
+        }
+      }
+    }
+
+    return {
+      ...base,
+      plots,
+      gate_overlays: gateOverlays,
+      pop_ids: compositePopIds,
+      pop_names: popNames,
+      pop_counts: popCounts,
+      population_colors: populationColors,
+    };
+  }
+
+  const plots: Record<string, IllustrationPlotPayload> = {};
+  const gateOverlays: Record<string, unknown> = {};
+  const popNames: Record<string, string> = {};
+  const popCounts: Record<string, number> = {};
+
+  for (const popId of popIds) {
+    popNames[popId] = populations[popId]?.name ?? popId;
+    popCounts[popId] = built.reduce(
+      (total, { payload }) => total + (payload.pop_counts[popId] ?? 0),
+      0,
+    );
+    for (const xChannel of xChannels) {
+      const key = `${popId}|${xChannel}`;
+      const available = built
+        .map(({ payload }) => payload.plots[key])
+        .filter((plot): plot is IllustrationPlotPayload => Boolean(plot));
+      if (available.length === 0) continue;
+      const referencePlot = base.plots[key] ?? available[0];
+      plots[key] = {
+        ...referencePlot,
+        x: available.flatMap((plot) => plot.x),
+        y: available.flatMap((plot) => plot.y),
+        n_events: popCounts[popId],
+      };
+      gateOverlays[key] =
+        base.gate_overlays[key] ??
+        built.map(({ payload }) => payload.gate_overlays[key]).find(Boolean) ??
+        [];
+    }
+  }
+
+  return {
+    ...base,
+    plots,
+    gate_overlays: gateOverlays,
+    pop_ids: popIds,
+    pop_names: popNames,
+    pop_counts: popCounts,
+    population_colors: opts.populationColors,
   };
 }

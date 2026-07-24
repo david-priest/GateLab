@@ -185,10 +185,9 @@ export function computeGateCounts(
 }
 
 /**
- * Populations in display order: root first, then each node's children sorted
- * case-insensitively by name (ties broken by id) — the exact order GateLabR's
- * population tree uses (app.R:5734-5737). Depth is 0 at the root. Used by the
- * tree view and the Statistics table so they stay in lockstep.
+ * Populations in display order: root first, then each node's children in their
+ * persisted order. Depth is 0 at the root. Used by the tree view and tables so
+ * every consumer stays in lockstep with user-controlled ordering.
  */
 export function populationTreeOrder(
   populations: PopulationMap,
@@ -205,14 +204,7 @@ export function populationTreeOrder(
     const pop = populations[popId];
     if (!pop) return;
     out.push({ popId, depth, isLastPath });
-    let childIds = [...new Set(pop.children)].filter((c) => c in populations);
-    if (childIds.length > 1) {
-      childIds = childIds.sort((a, b) => {
-        const na = (populations[a].name || a).toLowerCase();
-        const nb = (populations[b].name || b).toLowerCase();
-        return na < nb ? -1 : na > nb ? 1 : a < b ? -1 : a > b ? 1 : 0;
-      });
-    }
+    const childIds = [...new Set(pop.children)].filter((c) => c in populations);
     childIds.forEach((cid, i) => walk(cid, depth + 1, [...isLastPath, i === childIds.length - 1]));
   };
   walk(rootId, 0, []);

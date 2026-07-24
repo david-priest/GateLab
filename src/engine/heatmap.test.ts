@@ -3,6 +3,7 @@ import type { Sample } from "./sample";
 import type { PopulationMap } from "./models";
 import {
   buildHeatmapPayload,
+  buildMultiSampleHeatmapPayload,
   exactMedian,
   heatmapScaleNeedsPopulationComparison,
   scaleHeatmapValues,
@@ -94,5 +95,69 @@ describe("illustration heatmap", () => {
     expect(payload.rows.map((row) => row.raw_values)).toEqual([[2, 8], [8, 2], [null, null]]);
     expect(payload.rows.map((row) => row.values)).toEqual([[0, 1], [1, 0], [null, null]]);
     expect([payload.legend_min, payload.legend_max]).toEqual([0, 1]);
+  });
+
+  it("keeps checked FCS rows separate unless pooling is explicitly requested", () => {
+    const makeSample = (values: number[]) => ({
+      fcs: { nEvents: values.length },
+      index: (key: string) => key === "X" ? 0 : undefined,
+      labelForKey: (key: string) => key,
+      displayColumn: () => Float32Array.from(values),
+    }) as unknown as Sample;
+    const populations: PopulationMap = {
+      pop: { population_id: "pop", name: "Live cells" } as PopulationMap[string],
+    };
+    const sources = [
+      {
+        id: "a",
+        name: "donor-a.fcs",
+        sample: makeSample([1, 3]),
+        masks: { pop: Uint8Array.from([1, 1]) },
+        eventCount: { pop: 2 },
+      },
+      {
+        id: "b",
+        name: "donor-b.fcs",
+        sample: makeSample([5, 7]),
+        masks: { pop: Uint8Array.from([1, 1]) },
+        eventCount: { pop: 2 },
+      },
+    ];
+    const options = {
+      summaryStat: "median" as const,
+      scaleMode: "none" as const,
+      palette: "viridis" as const,
+      cellSize: 30,
+      showValues: true,
+    };
+
+    const separate = buildMultiSampleHeatmapPayload(
+      sources,
+      populations,
+      ["pop"],
+      ["X"],
+      false,
+      options,
+    );
+    expect(separate.rows.map(({ id, name, count, raw_values }) => ({
+      id, name, count, raw_values,
+    }))).toEqual([
+      { id: "a::pop", name: "donor-a.fcs — Live cells", count: 2, raw_values: [2] },
+      { id: "b::pop", name: "donor-b.fcs — Live cells", count: 2, raw_values: [6] },
+    ]);
+
+    const pooled = buildMultiSampleHeatmapPayload(
+      sources,
+      populations,
+      ["pop"],
+      ["X"],
+      true,
+      options,
+    );
+    expect(pooled.rows.map(({ id, name, count, raw_values }) => ({
+      id, name, count, raw_values,
+    }))).toEqual([
+      { id: "pop", name: "Live cells", count: 4, raw_values: [4] },
+    ]);
   });
 });

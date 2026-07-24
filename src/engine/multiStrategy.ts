@@ -4,8 +4,8 @@
 //
 // Several selected populations are laid out in a shared-hierarchy 2D grid:
 //   • col = total gates applied root→parent (get_gate_depth) — shared ancestry aligns.
-//   • row = DFS order of the selected populations (siblings sorted case-insensitively
-//     by name), compacted to remove gaps.
+//   • row = DFS order of the selected populations (using their persisted sibling
+//     order), compacted to remove gaps.
 // One node per distinct (parent_pop, x_channel, y_channel): it plots the PARENT events
 // (in DISPLAY space) with every gate that its relevant children draw on those channels
 // overlaid. Parent masks come from `masks` (derived.masks) — we do NOT re-run gating.
@@ -194,7 +194,7 @@ export function computeMultiPopStrategy(
     return depth;
   };
 
-  // ── row = DFS order of selected pops (siblings sorted case-insensitively by name) ──
+  // ── row = DFS order of selected pops (using the persisted population order) ──
   const orderedSelected: string[] = [];
   const selectedSet = new Set(selectedPopIds);
   const visited = new Set<string>();
@@ -202,14 +202,9 @@ export function computeMultiPopStrategy(
     if (visited.has(pid)) return;
     visited.add(pid);
     if (selectedSet.has(pid)) orderedSelected.push(pid);
-    let children = Object.keys(populations).filter((cid) => (populations[cid].parent_id ?? "") === pid);
-    if (children.length > 1) {
-      children = children.sort((a, b) => {
-        const na = (populations[a].name || a).toLowerCase();
-        const nb = (populations[b].name || b).toLowerCase();
-        return na < nb ? -1 : na > nb ? 1 : 0;
-      });
-    }
+    const children = [...new Set(populations[pid]?.children ?? [])].filter(
+      (cid) => populations[cid]?.parent_id === pid,
+    );
     for (const child of children) if (relevant.has(child)) visitPop(child);
   };
   visitPop(rootId);

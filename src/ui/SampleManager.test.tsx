@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 describe("SampleNavigator", () => {
-  it("keeps active-sample selection separate from analysis inclusion", () => {
+  it("keeps active-sample selection separate from display and analysis inclusion", () => {
     const onActivate = vi.fn();
     const onToggleIncluded = vi.fn();
     const onInvertIncluded = vi.fn();
@@ -52,12 +52,16 @@ describe("SampleNavigator", () => {
 
     const rows = host.querySelectorAll<HTMLElement>('[role="option"]');
     expect(rows[0].getAttribute("aria-selected")).toBe("true");
+    expect(rows[0].classList.contains("included")).toBe(true);
     expect(rows[1].getAttribute("aria-selected")).toBe("false");
     act(() => rows[1].click());
     expect(onActivate).toHaveBeenCalledWith("b");
 
-    const includeB = host.querySelector<HTMLInputElement>('input[aria-label="Include donor-b.fcs in analyses"]')!;
+    const includeB = host.querySelector<HTMLInputElement>(
+      'input[aria-label="Show donor-b.fcs in plots and analyses"]',
+    )!;
     expect(includeB.checked).toBe(false);
+    expect(includeB.closest(".gl-sample-row")?.classList.contains("included")).toBe(false);
     act(() => includeB.click());
     expect(onToggleIncluded).toHaveBeenCalledWith("b", true);
     expect(onActivate).toHaveBeenCalledTimes(1);

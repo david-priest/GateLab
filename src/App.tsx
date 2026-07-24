@@ -5,6 +5,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import pkg from "../package.json";
 import { clearPersistedTabState } from "./ui/tabState";
+import { historyShortcutAction } from "./ui/historyShortcuts";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type NewGate } from "./plots/GatingPlot";
 import { buildPlotGates, type PlotGate } from "./plots/gatePayload";
 import { includePlotGatesInAxisRange } from "./engine/axisRange";
@@ -15,6 +16,12 @@ import { resolvePartitionLevels, partitionAssign } from "./engine/factors";
 import { paletteColors, populationColor, UNGATED_COLOR, OVERLAY_PALETTES, type PaletteName } from "./engine/palettes";
 import { assignDivisionLevel, divisionPalette } from "./engine/division";
 import { encodeFloat32Base64, encodeUint8Base64 } from "./engine/encode";
+import {
+  aggregatePopulationTreeStats,
+  buildCombinedSamplePointCloud,
+  buildWorkspaceAxisRanges,
+  type CombinedSamplePlotInput,
+} from "./engine/multiSamplePlot";
 import {
   importGatingML,
   resolveGatingMLCompensation,
@@ -28,7 +35,15 @@ import {
   hasGatingStrategy,
   type GatingImportMode,
 } from "./engine/gatingMerge";
-import { exportPopulationFcs, exportPopulationFcsCombined, sanitizeFcsName, sanitizeFilePart, type FcsExportAssay } from "./engine/fcsExport";
+import {
+  exportPopulationFcs,
+  exportPopulationFcsCombined,
+  inspectCombinedFcsCompatibility,
+  passesPopulationFcsExportThreshold,
+  sanitizeFcsName,
+  sanitizeFilePart,
+  type FcsExportAssay,
+} from "./engine/fcsExport";
 import { zipSync } from "fflate";
 import {
   packWorkspace,
@@ -78,7 +93,6 @@ import { restorePortableAssayLayers } from "./engine/workspacePortableAssays";
 import {
   supportsFileSystemAccess,
   supportsDirectoryAccess,
-  pickFile,
   pickFileSource,
   pickFiles,
   pickDirectoryFiles,
@@ -86,10 +100,15 @@ import {
   writeHandleStream,
   saveAsHandle,
   saveAsHandleStream,
-  readFromHandle,
+  readFromHandleIfPermitted,
   rememberHandle,
   recallHandle,
+  type PickedFileSource,
 } from "./engine/fsAccess";
+import {
+  planWorkspaceFcsRelink,
+  type WorkspaceFcsRequirement,
+} from "./engine/workspaceRelink";
 import {
   AUTO_CHECKPOINT_INTERVAL_MS,
   requestPersistentWorkspaceHistory,
@@ -99,10 +118,14 @@ import {
 import {
   coreReducer,
   initialCoreState,
+  derivePopulationDisplaySelection,
   derivePopulationView,
   recompute,
   recomputeGating,
   type Action,
+  type Derived,
+  type GatingDerived,
+  type PopulationDisplaySelection,
 } from "./store";
 import { GateList } from "./ui/GateList";
 import { PopulationTree } from "./ui/PopulationTree";
@@ -132,6 +155,7 @@ import {
   type SampleImportProgress,
   type SampleListItem,
 } from "./ui/SampleManager";
+import { WorkspaceRelinkModal } from "./ui/WorkspaceRelinkModal";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
 import { NavigateIcon, RectIcon, PolyIcon, QuadIcon } from "./ui/icons";
 import { useSampleDataRevisionKey } from "./ui/useSampleDataRevisions";
@@ -177,6 +201,13 @@ interface PendingNewGate {
   sampleId: string;
   dataRevision: number;
   coordinateBindingKeys: readonly [string, string];
+}
+
+interface CachedSampleGating {
+  sample: Sample;
+  dataRevision: number;
+  gateVersion: number;
+  gating: GatingDerived;
 }
 
 /** Save data to a file the user downloads (local blob; user-initiated). */
@@ -260,6 +291,18 @@ interface SampleEntry {
   sourcePath?: string; // display-only path below a folder selected during this session
 }
 
+interface ResolvedReferenceFcs {
+  bytes: Uint8Array;
+  handle: FileSystemFileHandle | null;
+  sourcePath?: string;
+}
+
+interface IncludedDisplaySelection {
+  entry: SampleEntry;
+  gating: GatingDerived | null;
+  selection: PopulationDisplaySelection;
+}
+
 interface FcsImportCandidate {
   id: string;
   name: string;
@@ -271,6 +314,11 @@ interface FcsImportCandidate {
 interface PendingFolderImport {
   folderName: string;
   candidates: FcsImportCandidate[];
+}
+
+interface PendingWorkspaceRelink {
+  requirements: readonly WorkspaceFcsRequirement[];
+  workspaceHandle: FileSystemFileHandle | null;
 }
 
 function plotInteractionTokenFor(
@@ -307,6 +355,13 @@ export default function App() {
   const sampleDataRevisionKey = useSampleDataRevisionKey(samples);
   const [activeSampleId, setActiveSampleId] = useState<string | null>(null);
   const [pendingFolderImport, setPendingFolderImport] = useState<PendingFolderImport | null>(null);
+  const [pendingWorkspaceRelink, setPendingWorkspaceRelink] =
+    useState<PendingWorkspaceRelink | null>(null);
+  const [workspaceRelinkScanning, setWorkspaceRelinkScanning] = useState(false);
+  const [workspaceRelinkError, setWorkspaceRelinkError] = useState<string | null>(null);
+  const workspaceRelinkResolverRef = useRef<
+    ((resolved: ReadonlyMap<string, ResolvedReferenceFcs> | null) => void) | null
+  >(null);
   // Global sample filter (R's rv$sample_mask): samples excluded from the multi-sample analysis
   // tabs (Statistics / Proportions). New samples are included by default; default = all included.
   const [excludedSampleIds, setExcludedSampleIds] = useState<Set<string>>(new Set());
@@ -458,21 +513,22 @@ export default function App() {
   const [illustrationPresets, setIllustrationPresets] = useState<IllustrationPreset[]>([]);
   const [illustVersion, setIllustVersion] = useState(0); // bump to remount IllustrationTab on workspace load
   const [fcsAssay, setFcsAssay] = useState<FcsExportAssay>("original");
-  const [fcsScope, setFcsScope] = useState<"active" | "combined" | "split">("active");
+  const [fcsScope, setFcsScope] = useState<"active" | "combined" | "split">("split");
+  const [fcsMinimumEvents, setFcsMinimumEvents] = useState(0);
   const [fcsExportOpen, setFcsExportOpen] = useState(false);
   const [pendingGatingMlImport, setPendingGatingMlImport] = useState<PendingGatingMLImport | null>(null);
   const [gatingMlExportOpen, setGatingMlExportOpen] = useState(false);
   const [contourThreshold, setContourThreshold] = useState(5); // outer contour % of peak
   const [instrumentMode, setInstrumentMode] = useState<"auto" | "flow" | "cytof">("auto"); // active sample's instrument override
   // Colour-by-factor overlay on the main plot (population partition / division level).
-  const [overlayBy, setOverlayBy] = useState<"none" | "population" | "division">("none");
+  const [overlayBy, setOverlayBy] = useState<"none" | "population" | "division" | "sample">("none");
   const [overlayPalette, setOverlayPalette] = useState<PaletteName>("default");
-  const [overlaySamples, setOverlaySamples] = useState(false); // overlay all loaded samples on the plot
   const activeDisplayContextKey = sample?.displayTransformContextKey ?? null;
-  // Fixed ranges are retained per exact assay/transform context rather than destroyed or reused
-  // in incompatible coordinates when the active layer changes.
+  const activeWorkspaceScaleContextKey = sample?.workspaceScaleContextKey ?? null;
+  // Fixed ranges are workspace-wide within an assay family. Selecting another blue FCS row must
+  // not swap the scale map; Original and Compensated remain separate coordinate families.
   const { globalScales, setGlobalScales, preserveScalesForContext } =
-    useContextualGlobalScales(activeDisplayContextKey, scaleCacheEpoch);
+    useContextualGlobalScales(activeWorkspaceScaleContextKey, scaleCacheEpoch);
   // Per-sample metadata (Metadata tab): keyed by SampleEntry.id → { field: value }; ordered columns.
   const [metadata, setMetadata] = useState<Record<string, Record<string, string>>>({});
   const [metadataColumns, setMetadataColumns] = useState<MetadataColumn[]>([]);
@@ -516,9 +572,18 @@ export default function App() {
     effectiveYRange: null,
   };
 
-  // Reset the view range when the sample or displayed channel changes (→ auto range).
-  useEffect(() => setXRange(null), [sample, xIdx, activeDataRevision]);
-  useEffect(() => setYRange(null), [sample, yIdx, activeDataRevision]);
+  const activeXChannelKey = sample?.channels[xIdx]?.key ?? null;
+  const activeYChannelKey = sample?.channels[yIdx]?.key ?? null;
+  // Transient ranges are only meaningful within one channel/assay coordinate family. A blue-row
+  // sample change that retains those channels deliberately does not clear the shared view.
+  useEffect(
+    () => setXRange(null),
+    [activeWorkspaceScaleContextKey, activeXChannelKey, activeDataRevision],
+  );
+  useEffect(
+    () => setYRange(null),
+    [activeWorkspaceScaleContextKey, activeYChannelKey, activeDataRevision],
+  );
 
   // Drawn vertices are display-space coordinates. Never convert them after the assay layer
   // changes, because that would store a gate in a different coordinate system than the user drew.
@@ -689,6 +754,27 @@ export default function App() {
     window.addEventListener("mouseup", up);
   };
   const [state, dispatch] = useReducer(coreReducer, undefined, initialCoreState);
+  useEffect(() => {
+    const onHistoryShortcut = (event: KeyboardEvent) => {
+      const action = historyShortcutAction(event);
+      if (!action) return;
+      if (action === "undo" ? state.undo.length === 0 : state.redo.length === 0) return;
+      event.preventDefault();
+      dispatch({ type: action });
+    };
+    window.addEventListener("keydown", onHistoryShortcut);
+    return () => window.removeEventListener("keydown", onHistoryShortcut);
+  }, [state.undo.length, state.redo.length]);
+
+  // Presentation-only population edits (rename / sibling reorder) must not invalidate
+  // masks for every checked FCS file. Hold the last scientific gating graph until its
+  // explicit revision changes; cosmetic gate-label moves and active selections are also
+  // intentionally excluded.
+  const gatingState = useMemo(
+    () => state,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.gate_version, state.root_population_id],
+  );
 
   // Mark the workspace dirty on any edit (skipped once per load/save, which set skipDirtyRef).
   useEffect(() => {
@@ -698,7 +784,7 @@ export default function App() {
     }
     setDirty(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.gate_version, scalesVersion, sampleDataRevisionKey, instrumentMode, globalScales, mode, maxEvents, contourThreshold, densityColorPower, xIdx, yIdx, gatingFontSizes, workspaceCompensation]);
+  }, [state.gate_version, state.tree_version, scalesVersion, sampleDataRevisionKey, instrumentMode, globalScales, mode, maxEvents, contourThreshold, densityColorPower, xIdx, yIdx, gatingFontSizes, workspaceCompensation]);
 
   // Autosave lightweight reference workspaces only. Repacking every embedded FCS on each
   // edit would stall large bundled workspaces; bundles retain their format via manual Save.
@@ -770,7 +856,6 @@ export default function App() {
     setPanelVersion((version) => version + 1);
     setOverlayBy("none");
     setOverlayPalette("default");
-    setOverlaySamples(false);
 
     illustConfigRef.current = null;
     strategyConfigRef.current = null;
@@ -905,7 +990,7 @@ export default function App() {
     try {
       const res = pendingImport.result;
       const comp = pendingImport.compensation;
-      const displayContextBeforeImport = sample.displayTransformContextKey;
+      const displayContextBeforeImport = sample.workspaceScaleContextKey;
       const existingStrategy = state.root_population_id !== null && hasGatingStrategy({
         gates: state.gates,
         populations: state.populations,
@@ -939,7 +1024,7 @@ export default function App() {
       const restoredScales = restoreGatingMLScaleState(sample, res.scales, res.cytof_cofactor);
       const restoredRanges = Object.keys(restoredScales.ranges).length;
       if (restoredRanges) {
-        const targetContext = sample.displayTransformContextKey;
+        const targetContext = sample.workspaceScaleContextKey;
         const contextChanged = targetContext !== displayContextBeforeImport;
         if (contextChanged) preserveScalesForContext(targetContext);
         setGlobalScales((current) => contextChanged
@@ -998,40 +1083,66 @@ export default function App() {
     }
   }
 
-  function exportFcs(assay: FcsExportAssay, scope: "active" | "combined" | "split", popIds: string[]) {
-    if (!sample) return;
+  function exportFcs(
+    assay: FcsExportAssay,
+    scope: "active" | "combined" | "split",
+    popIds: string[],
+    minimumEvents: number,
+  ): boolean {
+    if (!sample || !activeEntry) return false;
     try {
       // popIds come from the export dialog. R exports N checkbox-selected populations; one → a
       // bare .fcs, many → a zip.
       if (popIds.length === 0) {
         setError("No population selected to export.");
-        return;
+        return false;
       }
-      const popMaskFor = (s: Sample, popId: string): Uint8Array | null =>
-        (s === sample ? derived : recompute(s, state)).masks[popId] ?? null;
+      const scopedEntries = scope === "active" ? [activeEntry] : includedSamples;
+      if (scopedEntries.length === 0) {
+        setError("No checked FCS files are available for this export scope.");
+        return false;
+      }
+      const splitThreshold = Math.max(0, Math.floor(minimumEvents));
+      const exportDerived = new Map<string, Derived>();
+      for (const entry of scopedEntries) {
+        exportDerived.set(
+          entry.id,
+          entry.id === activeSampleId ? derived : recompute(entry.sample, state),
+        );
+      }
+      const popMaskFor = (entry: SampleEntry, popId: string): Uint8Array => {
+        const mask = exportDerived.get(entry.id)?.masks[popId];
+        if (!mask) {
+          throw new Error(
+            `Cannot export ${state.populations[popId]?.name ?? popId}: no population mask is available for ${entry.name}.`,
+          );
+        }
+        return mask;
+      };
       const popNameOf = (popId: string) => sanitizeFilePart(state.populations[popId]?.name ?? "population");
-      const multiSample = samples.length > 1;
 
       // The file(s) produced for ONE population under the current sample scope.
       const filesForPop = (popId: string): Record<string, Uint8Array> => {
         const popName = popNameOf(popId);
         const out: Record<string, Uint8Array> = {};
-        if (scope === "combined" && multiSample) {
-          const items = samples.map((e) => ({
+        if (scope === "combined") {
+          const items = scopedEntries.map((e) => ({
             sample: e.sample,
             name: e.name,
-            mask: popMaskFor(e.sample, popId) ?? new Uint8Array(e.sample.fcs.nEvents),
+            mask: popMaskFor(e, popId),
           }));
           out[`combined_${popName}.fcs`] = exportPopulationFcsCombined(items, assay);
-        } else if (scope === "split" && multiSample) {
-          for (const e of samples) {
-            const mask = popMaskFor(e.sample, popId);
-            if (!mask) continue;
-            out[sanitizeFcsName(null, e.name, popName, null)] = exportPopulationFcs(e.sample, mask, assay);
+        } else if (scope === "split") {
+          for (const e of scopedEntries) {
+            const eventCount = exportDerived.get(e.id)?.stats.event_count[popId];
+            if (!passesPopulationFcsExportThreshold(eventCount, splitThreshold)) continue;
+            out[sanitizeFcsName(null, e.name, popName, null)] =
+              exportPopulationFcs(e.sample, popMaskFor(e, popId), assay);
           }
         } else {
-          const base = sanitizeFilePart((fileName || "sample").replace(/\.[^.]+$/, ""));
-          out[`${base}_${popName}.fcs`] = exportPopulationFcs(sample, popMaskFor(sample, popId), assay);
+          const base = sanitizeFilePart((activeEntry.name || "sample").replace(/\.[^.]+$/, ""));
+          out[`${base}_${popName}.fcs`] =
+            exportPopulationFcs(activeEntry.sample, popMaskFor(activeEntry, popId), assay);
         }
         return out;
       };
@@ -1039,8 +1150,14 @@ export default function App() {
       if (popIds.length === 1) {
         const files = filesForPop(popIds[0]);
         const names = Object.keys(files);
-        // One file (single sample, or combined) → bare .fcs; split-across-samples → zip.
-        if (names.length === 1 && !(scope === "split" && multiSample)) {
+        if (names.length === 0) {
+          setError(
+            `No population × FCS combination contained more than ${splitThreshold.toLocaleString()} events.`,
+          );
+          return false;
+        }
+        // One output → bare .fcs. Multiple checked files stay separate inside one zip.
+        if (names.length === 1) {
           downloadBlob(names[0], new Blob([files[names[0]] as BlobPart], { type: "application/octet-stream" }));
         } else {
           downloadBlob(`${popNameOf(popIds[0])}_by_sample.zip`, new Blob([zipSync(files) as BlobPart], { type: "application/zip" }));
@@ -1049,13 +1166,28 @@ export default function App() {
         // Several populations → one zip, each population's file(s) inside.
         const files: Record<string, Uint8Array> = {};
         for (const popId of popIds) Object.assign(files, filesForPop(popId));
+        if (Object.keys(files).length === 0) {
+          setError(
+            `No population × FCS combination contained more than ${splitThreshold.toLocaleString()} events.`,
+          );
+          return false;
+        }
         downloadBlob(`populations_${popIds.length}.zip`, new Blob([zipSync(files) as BlobPart], { type: "application/zip" }));
       }
       setError(null);
+      return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return false;
     }
   }
+
+  const combinedFcsCompatibility = useMemo(
+    () => inspectCombinedFcsCompatibility(
+      includedSamples.map((entry) => ({ sample: entry.sample, name: entry.name })),
+    ),
+    [includedSamples, sampleDataRevisionKey, panelVersion],
+  );
 
   function toggleCompensation(on: boolean): boolean {
     if (!sample) return false;
@@ -1621,20 +1753,6 @@ export default function App() {
     };
   }
 
-  function makeEntry(
-    bytes: Uint8Array,
-    name: string,
-    handle: FileSystemFileHandle | null,
-    sourcePath?: string,
-  ): SampleEntry | null {
-    try {
-      return createEntry(bytes, name, handle, sourcePath);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      return null;
-    }
-  }
-
   // Append a parsed batch atomically. This avoids treating every member of a multi-file
   // import as a separate first sample while React state updates are still queued.
   function addSampleEntries(entries: readonly SampleEntry[]): void {
@@ -1690,8 +1808,6 @@ export default function App() {
     setActiveSampleId(id);
     setXIdx(nx);
     setYIdx(ny);
-    setXRange(null);
-    setYRange(null);
     setInstrumentMode(entry.sample.instrumentMode);
   }
 
@@ -2151,20 +2267,163 @@ export default function App() {
     }
   }
 
-  // Resolve one reference-workspace sample's FCS bytes: an already-open sample of the same name →
-  // a remembered handle → a "locate the file" prompt. Returns null if it can't be found.
-  async function resolveReferenceFcs(fileName: string): Promise<{ bytes: Uint8Array; handle: FileSystemFileHandle | null } | null> {
+  // Resolve a reference-workspace sample without prompting: an already-open sample of the
+  // same name → a remembered handle. All unresolved names are handled together below.
+  async function resolveKnownReferenceFcs(fileName: string): Promise<ResolvedReferenceFcs | null> {
     const existing = samples.find((e) => e.name === fileName);
-    if (existing) return { bytes: existing.bytes, handle: existing.handle };
+    if (existing) {
+      return {
+        bytes: existing.bytes,
+        handle: existing.handle,
+        ...(existing.sourcePath ? { sourcePath: existing.sourcePath } : {}),
+      };
+    }
     const h = await recallHandle("fcs:" + fileName);
-    const read = h ? await readFromHandle(h) : null;
-    if (read) return { bytes: read.bytes, handle: h };
-    if (supportsFileSystemAccess()) {
-      setImportMsg(`Locate the data file: ${fileName}`);
-      const picked = await pickFile(FCS_FILE_ACCEPT, `Locate ${fileName}`, { id: "gatelab-relink-fcs" });
-      if (picked) return { bytes: picked.bytes, handle: picked.handle };
+    const read = h ? await readFromHandleIfPermitted(h) : null;
+    if (
+      read &&
+      read.name.normalize("NFC").toLocaleLowerCase() ===
+        fileName.normalize("NFC").toLocaleLowerCase()
+    ) {
+      return { bytes: read.bytes, handle: h };
     }
     return null;
+  }
+
+  async function resolveReferenceFcsFolder(
+    requirements: readonly WorkspaceFcsRequirement[],
+    workspaceHandle: FileSystemFileHandle | null,
+  ): Promise<ReadonlyMap<string, ResolvedReferenceFcs> | null> {
+    if (requirements.length === 0) return new Map();
+
+    setImportMsg(
+      `Linked FCS files unavailable · choose the folder containing all ${requirements.length} required file` +
+        `${requirements.length === 1 ? "" : "s"}`,
+    );
+
+    let sourceName: string;
+    let sources: PickedFileSource[];
+    if (supportsDirectoryAccess()) {
+      const picked = await pickDirectoryFiles([".fcs"], {
+        id: "gatelab-relink-fcs-folder",
+        ...(workspaceHandle ? { startIn: workspaceHandle } : {}),
+      });
+      if (!picked) return null;
+      sourceName = picked.name;
+      sources = picked.files;
+    } else if (supportsFileSystemAccess()) {
+      setImportMsg(
+        `Select all ${requirements.length} required FCS file${requirements.length === 1 ? "" : "s"} together`,
+      );
+      const picked = await pickFiles(
+        FCS_FILE_ACCEPT,
+        "FCS files required by this workspace",
+        { id: "gatelab-relink-fcs-batch" },
+      );
+      if (!picked) return null;
+      sourceName = "selected files";
+      sources = picked;
+    } else {
+      throw new Error(
+        "This browser cannot select a folder for linked FCS recovery. Open GateLab in a Chromium-based browser or use a portable workspace.",
+      );
+    }
+
+    const plan = planWorkspaceFcsRelink(requirements, sources);
+    if (plan.missing.length > 0 || plan.ambiguous.length > 0) {
+      const details: string[] = [];
+      if (plan.missing.length > 0) {
+        details.push(`Missing: ${plan.missing.map(({ fileName }) => fileName).join(", ")}`);
+      }
+      if (plan.ambiguous.length > 0) {
+        details.push(
+          "Ambiguous: " +
+            plan.ambiguous.map(({ requirement, candidates }) =>
+              `${requirement.fileName} (${candidates.length > 0
+                ? candidates.map(({ relativePath }) => relativePath).join(" | ")
+                : "duplicate workspace filename"})`
+            ).join("; "),
+        );
+      }
+      throw new Error(
+        `The selected folder "${sourceName}" could not uniquely match every FCS file required by this workspace. ` +
+          `${details.join(". ")}. No workspace data were changed.`,
+      );
+    }
+
+    const resolved = new Map<string, ResolvedReferenceFcs>();
+    for (let index = 0; index < requirements.length; index++) {
+      const requirement = requirements[index];
+      const source = plan.matches.get(requirement.dataPath)!;
+      setImportMsg(
+        `Relinking from ${sourceName} · ${index + 1} / ${requirements.length} · ${requirement.fileName}`,
+      );
+      const bytes = new Uint8Array(await source.file.arrayBuffer());
+      resolved.set(requirement.dataPath, {
+        bytes,
+        handle: source.handle,
+        sourcePath: sourceName === "selected files"
+          ? source.relativePath
+          : `${sourceName}/${source.relativePath}`,
+      });
+    }
+    return resolved;
+  }
+
+  function requestReferenceFcsFolder(
+    requirements: readonly WorkspaceFcsRequirement[],
+    workspaceHandle: FileSystemFileHandle | null,
+  ): Promise<ReadonlyMap<string, ResolvedReferenceFcs> | null> {
+    if (workspaceRelinkResolverRef.current) {
+      return Promise.reject(new Error("Another workspace relink request is already open."));
+    }
+    setImportMsg(
+      `Linked FCS files unavailable · choose one folder for all ${requirements.length} required file` +
+        `${requirements.length === 1 ? "" : "s"}`,
+    );
+    setWorkspaceRelinkError(null);
+    setWorkspaceRelinkScanning(false);
+    setPendingWorkspaceRelink({
+      requirements: [...requirements],
+      workspaceHandle,
+    });
+    return new Promise((resolve) => {
+      workspaceRelinkResolverRef.current = resolve;
+    });
+  }
+
+  function cancelPendingWorkspaceRelink(): void {
+    const resolve = workspaceRelinkResolverRef.current;
+    workspaceRelinkResolverRef.current = null;
+    setPendingWorkspaceRelink(null);
+    setWorkspaceRelinkError(null);
+    setWorkspaceRelinkScanning(false);
+    resolve?.(null);
+  }
+
+  async function choosePendingWorkspaceRelinkFolder(): Promise<void> {
+    const pendingRelink = pendingWorkspaceRelink;
+    if (!pendingRelink || workspaceRelinkScanning) return;
+    setWorkspaceRelinkScanning(true);
+    setWorkspaceRelinkError(null);
+    try {
+      // This call must begin directly inside the button gesture. Browsers reject a picker
+      // launched later from the asynchronous workspace parser.
+      const resolved = await resolveReferenceFcsFolder(
+        pendingRelink.requirements,
+        pendingRelink.workspaceHandle,
+      );
+      if (!resolved) return;
+      const resolve = workspaceRelinkResolverRef.current;
+      workspaceRelinkResolverRef.current = null;
+      setPendingWorkspaceRelink(null);
+      resolve?.(resolved);
+    } catch (cause) {
+      setWorkspaceRelinkError(cause instanceof Error ? cause.message : String(cause));
+      setImportMsg("Selected FCS location was incomplete · choose another folder");
+    } finally {
+      setWorkspaceRelinkScanning(false);
+    }
   }
 
   async function restoreSavedWorkspaceCompensation(
@@ -2352,28 +2611,85 @@ export default function App() {
       }
       const { fcsByPath, storage } = envelope;
 
-      // Build an entry for every sample (bundled bytes, else re-linked from disk).
-      const entries: SampleEntry[] = [];
-      const nextMetadata: Record<string, Record<string, string>> = {};
-      const nextDivision: Record<string, DivisionProfile> = {};
-      const missing: string[] = [];
+      // Resolve every external FCS before parsing or changing the current workspace. Missing
+      // handles are recovered from one user-selected folder, not one picker per sample.
+      const referenceRequirements: WorkspaceFcsRequirement[] = [];
       for (const wss of ws.samples) {
         if (typeof wss.fileName !== "string" || typeof wss.dataPath !== "string") {
           throw new Error("Invalid GateLab workspace: a sample declaration is malformed.");
         }
+        if (!fcsByPath?.[wss.dataPath]) {
+          referenceRequirements.push({
+            dataPath: wss.dataPath,
+            fileName: wss.fileName,
+          });
+        }
+      }
+
+      const duplicateReferenceNames = new Set<string>();
+      const seenReferenceNames = new Set<string>();
+      for (const { fileName } of referenceRequirements) {
+        const normalized = fileName.normalize("NFC").toLocaleLowerCase();
+        if (seenReferenceNames.has(normalized)) duplicateReferenceNames.add(fileName);
+        seenReferenceNames.add(normalized);
+      }
+      if (duplicateReferenceNames.size > 0) {
+        throw new Error(
+          "This linked workspace contains multiple FCS files with the same filename " +
+            `(${[...duplicateReferenceNames].join(", ")}), so GateLab cannot safely distinguish them by folder matching. ` +
+            "Open the original files and save a portable workspace instead.",
+        );
+      }
+
+      const resolvedReferenceFcs = new Map<string, ResolvedReferenceFcs>();
+      const unresolvedRequirements: WorkspaceFcsRequirement[] = [];
+      for (const requirement of referenceRequirements) {
+        const known = await resolveKnownReferenceFcs(requirement.fileName);
+        if (known) {
+          resolvedReferenceFcs.set(requirement.dataPath, known);
+        } else {
+          unresolvedRequirements.push(requirement);
+        }
+      }
+      if (unresolvedRequirements.length > 0) {
+        const recovered = await requestReferenceFcsFolder(unresolvedRequirements, wsH);
+        if (!recovered) {
+          setImportMsg("Workspace open cancelled · current workspace unchanged");
+          return;
+        }
+        for (const [dataPath, resolved] of recovered) {
+          resolvedReferenceFcs.set(dataPath, resolved);
+        }
+      }
+
+      // Build an entry for every sample only after all linked files have been resolved.
+      const entries: SampleEntry[] = [];
+      const nextMetadata: Record<string, Record<string, string>> = {};
+      const nextDivision: Record<string, DivisionProfile> = {};
+      for (const wss of ws.samples) {
         let fcsB = fcsByPath?.[wss.dataPath] ?? null;
         let fcsH: FileSystemFileHandle | null = null;
+        let sourcePath: string | undefined;
         if (!fcsB) {
-          const resolved = await resolveReferenceFcs(wss.fileName);
+          const resolved = resolvedReferenceFcs.get(wss.dataPath);
           if (!resolved) {
-            missing.push(wss.fileName);
-            continue;
+            throw new Error(
+              `GateLab could not resolve ${wss.fileName}. The current workspace was not changed.`,
+            );
           }
           fcsB = resolved.bytes;
           fcsH = resolved.handle;
+          sourcePath = resolved.sourcePath;
         }
-        const entry = makeEntry(fcsB, wss.fileName, fcsH);
-        if (!entry) continue;
+        let entry: SampleEntry;
+        try {
+          entry = createEntry(fcsB, wss.fileName, fcsH, sourcePath);
+        } catch (cause) {
+          throw new Error(
+            `Could not read ${wss.fileName}: ${cause instanceof Error ? cause.message : String(cause)}. ` +
+              "The current workspace was not changed.",
+          );
+        }
         if (wss.instrumentMode === "flow" || wss.instrumentMode === "cytof") {
           entry.sample.setInstrumentMode(wss.instrumentMode);
         }
@@ -2383,13 +2699,6 @@ export default function App() {
         entry.handle = fcsH;
         if (fcsH) void rememberHandle("fcs:" + wss.fileName, fcsH);
         entries.push(entry);
-      }
-
-      if (entries.length !== ws.samples.length) {
-        const failed = missing.length ? ` Missing: ${missing.join(", ")}.` : "";
-        setError(`Could not load every data file declared by this workspace.${failed} The workspace was not opened.`);
-        setBusy(false);
-        return;
       }
 
       if (rawVersion === WORKSPACE_VERSION_3) {
@@ -2506,7 +2815,7 @@ export default function App() {
       skipDirtyRef.current = true;
       const activeIdx = Math.min(Math.max(0, ws.activeSample), entries.length - 1);
       const active = entries[activeIdx].sample;
-      const targetDisplayContext = active.displayTransformContextKey;
+      const targetDisplayContext = active.workspaceScaleContextKey;
       preserveScalesForContext(targetDisplayContext);
       setSamples(entries);
       setWorkspaceCompensation(
@@ -2555,7 +2864,6 @@ export default function App() {
       setImportMsg(
         `Opened ${wsFileName || "workspace"} · ${nS} sample${nS > 1 ? "s" : ""}` +
           ` · ${storage === "bundle" ? "self-contained bundle" : "linked FCS"}` +
-          (missing.length ? ` · missing: ${missing.join(", ")}` : "") +
           ` · saved ${new Date(ws.savedAt).toLocaleString()}`,
       );
     } catch (e) {
@@ -2575,12 +2883,131 @@ export default function App() {
   // depends on which population is currently selected. Keep that stable work cached across
   // population clicks; only invalidate when the sample/gating inputs themselves change.
   const gatingDerived = useMemo(
-    () => recomputeGating(sample, state),
+    () => recomputeGating(sample, gatingState),
     // Sample is mutable by design, so its explicit revision must invalidate gate geometry.
     // instrumentMode remains separate because transform-only changes do not always revise data.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sample, state.gates, state.populations, state.root_population_id, state.gate_version, activeDataRevision, instrumentMode],
+    [sample, gatingState, activeDataRevision, instrumentMode],
   );
+
+  const checkedDisplayNeedsGating = useMemo(() => {
+    const rootId = state.root_population_id;
+    if (!rootId) return false;
+    if (overlayBy === "population") return true;
+    const activePopulationId = state.active_population_id ?? rootId;
+    if (activePopulationId !== rootId) return true;
+    return (state.selected_pop_ids ?? []).some((id) => id !== rootId);
+  }, [
+    overlayBy,
+    state.active_population_id,
+    state.root_population_id,
+    state.selected_pop_ids,
+  ]);
+
+  // Keep inactive checked files out of the synchronous render path. Their full gating
+  // masks are updated one file at a time between browser paints, and only while a view
+  // that needs cross-file population counts is visible. This preserves the active-file
+  // interaction latency when a workspace contains many large FCS files.
+  const inactiveGatingCacheRef = useRef<Map<string, CachedSampleGating>>(new Map());
+  const inactiveGatingGenerationRef = useRef(0);
+  const [inactiveGatingCacheVersion, setInactiveGatingCacheVersion] = useState(0);
+  const [pendingIncludedGatingIds, setPendingIncludedGatingIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  useEffect(() => {
+    if (!activeEntry || !sample) return;
+    inactiveGatingCacheRef.current.set(activeEntry.id, {
+      sample,
+      dataRevision: sample.dataRevision,
+      gateVersion: state.gate_version,
+      gating: gatingDerived,
+    });
+  }, [activeEntry, sample, activeDataRevision, state.gate_version, gatingDerived]);
+
+  useEffect(() => {
+    const generation = ++inactiveGatingGenerationRef.current;
+    let timer: number | null = null;
+    const loadedIds = new Set(samples.map((entry) => entry.id));
+    for (const id of inactiveGatingCacheRef.current.keys()) {
+      if (!loadedIds.has(id)) inactiveGatingCacheRef.current.delete(id);
+    }
+
+    // The Gating plot can draw All Events without these masks, but its Population tree still
+    // needs pooled counts for every checked FCS. Keep that secondary work scheduled rather than
+    // putting it back into the synchronous gate-editing path.
+    const inactiveGatingNeeded =
+      activeTab === "illustration" ||
+      activeTab === "gating" ||
+      fcsExportOpen;
+    if (!inactiveGatingNeeded || !sample) {
+      setPendingIncludedGatingIds(new Set());
+      return () => {
+        if (timer !== null) window.clearTimeout(timer);
+      };
+    }
+
+    const targets = includedSamples.filter((entry) => {
+      if (entry.id === activeSampleId) return false;
+      const cached = inactiveGatingCacheRef.current.get(entry.id);
+      return !cached ||
+        cached.sample !== entry.sample ||
+        cached.dataRevision !== entry.sample.dataRevision ||
+        cached.gateVersion !== state.gate_version;
+    });
+    setPendingIncludedGatingIds(new Set(targets.map((entry) => entry.id)));
+
+    let targetIndex = 0;
+    const processNext = () => {
+      if (generation !== inactiveGatingGenerationRef.current) return;
+      if (targetIndex >= targets.length) {
+        setPendingIncludedGatingIds(new Set());
+        return;
+      }
+      const entry = targets[targetIndex++];
+      timer = window.setTimeout(() => {
+        timer = null;
+        if (generation !== inactiveGatingGenerationRef.current) return;
+        try {
+          const gating = recomputeGating(entry.sample, gatingState);
+          if (generation !== inactiveGatingGenerationRef.current) return;
+          inactiveGatingCacheRef.current.set(entry.id, {
+            sample: entry.sample,
+            dataRevision: entry.sample.dataRevision,
+            gateVersion: state.gate_version,
+            gating,
+          });
+          setInactiveGatingCacheVersion((version) => version + 1);
+          setPendingIncludedGatingIds((previous) => {
+            const next = new Set(previous);
+            next.delete(entry.id);
+            return next;
+          });
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+        processNext();
+      }, 0);
+    };
+    processNext();
+
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+    };
+    // Gate/data identities are explicit; active/checked population selection is cheap
+    // and deliberately does not invalidate these full gating masks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeTab,
+    fcsExportOpen,
+    sample,
+    activeSampleId,
+    includedSamples,
+    samples,
+    sampleDataRevisionKey,
+    state.gate_version,
+    gatingState,
+  ]);
 
   const derived = useMemo(
     () => derivePopulationView(sample, state, gatingDerived),
@@ -2589,6 +3016,152 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [sample, gatingDerived, state.active_population_id, state.selected_pop_ids],
   );
+
+  const includedGatingResults = useMemo<readonly GatingDerived[] | null>(() => {
+    const results: GatingDerived[] = [];
+    for (const entry of includedSamples) {
+      if (entry.id === activeSampleId) {
+        results.push(gatingDerived);
+        continue;
+      }
+      const cached = inactiveGatingCacheRef.current.get(entry.id);
+      if (
+        !cached ||
+        cached.sample !== entry.sample ||
+        cached.dataRevision !== entry.sample.dataRevision ||
+        cached.gateVersion !== state.gate_version
+      ) return null;
+      results.push(cached.gating);
+    }
+    return results;
+  }, [
+    includedSamples,
+    activeSampleId,
+    gatingDerived,
+    inactiveGatingCacheVersion,
+    state.gate_version,
+  ]);
+
+  const exportPopulationCountsBySample = useMemo(() => {
+    const counts = new Map<string, Readonly<Record<string, number | null>>>();
+    for (const entry of samples) {
+      if (entry.id === activeSampleId) {
+        counts.set(entry.id, gatingDerived.stats.event_count);
+        continue;
+      }
+      const cached = inactiveGatingCacheRef.current.get(entry.id);
+      if (
+        cached &&
+        cached.sample === entry.sample &&
+        cached.dataRevision === entry.sample.dataRevision &&
+        cached.gateVersion === state.gate_version
+      ) {
+        counts.set(entry.id, cached.gating.stats.event_count);
+      }
+    }
+    return counts;
+  }, [
+    samples,
+    activeSampleId,
+    gatingDerived,
+    inactiveGatingCacheVersion,
+    state.gate_version,
+  ]);
+
+  const pooledPopulationStats = useMemo(
+    () => includedGatingResults === null
+      ? null
+      : aggregatePopulationTreeStats(
+          state.populations,
+          state.root_population_id,
+          includedGatingResults.map((result) => result.stats),
+        ),
+    [
+      includedGatingResults,
+      state.populations,
+      state.root_population_id,
+    ],
+  );
+  const populationTreeDerived = useMemo<Derived>(
+    () => pooledPopulationStats ? { ...derived, stats: pooledPopulationStats } : derived,
+    [derived, pooledPopulationStats],
+  );
+  const populationStatsPending =
+    includedSamples.length > 0 && includedGatingResults === null;
+
+  const includedDisplaySelections = useMemo<IncludedDisplaySelection[]>(
+    () => includedSamples.flatMap((entry): IncludedDisplaySelection[] => {
+    if (!checkedDisplayNeedsGating) {
+      return [{
+        entry,
+        gating: entry.id === activeSampleId ? gatingDerived : null,
+        selection: {
+          activeMask: null,
+          displayMask: null,
+          displayPopCount: 0,
+        },
+      }];
+    }
+    const gating = entry.id === activeSampleId
+      ? gatingDerived
+      : inactiveGatingCacheRef.current.get(entry.id)?.gating;
+    const cached = entry.id === activeSampleId
+      ? null
+      : inactiveGatingCacheRef.current.get(entry.id);
+    if (
+      !gating ||
+      (cached && (
+        cached.sample !== entry.sample ||
+        cached.dataRevision !== entry.sample.dataRevision ||
+        cached.gateVersion !== state.gate_version
+      ))
+    ) return [];
+    return [{
+      entry,
+      gating,
+      selection: derivePopulationDisplaySelection(entry.sample, state, gating),
+    }];
+    }),
+    [
+      includedSamples,
+      activeSampleId,
+      gatingDerived,
+      checkedDisplayNeedsGating,
+      inactiveGatingCacheVersion,
+      state.active_population_id,
+      state.selected_pop_ids,
+      state.root_population_id,
+      state.gate_version,
+    ],
+  );
+
+  const illustrationSampleViews = useMemo(() => includedSamples.flatMap((entry) => {
+    if (entry.id === activeSampleId) {
+      return [{ id: entry.id, name: entry.name, sample: entry.sample, derived }];
+    }
+    const cached = inactiveGatingCacheRef.current.get(entry.id);
+    if (
+      !cached ||
+      cached.sample !== entry.sample ||
+      cached.dataRevision !== entry.sample.dataRevision ||
+      cached.gateVersion !== state.gate_version
+    ) return [];
+    return [{
+      id: entry.id,
+      name: entry.name,
+      sample: entry.sample,
+      derived: derivePopulationView(entry.sample, state, cached.gating),
+    }];
+  }), [
+    includedSamples,
+    activeSampleId,
+    derived,
+    inactiveGatingCacheVersion,
+    state.active_population_id,
+    state.selected_pop_ids,
+    state.root_population_id,
+    state.gate_version,
+  ]);
 
   // Rows for the Population metadata table (Metadata tab): every gated population (root excluded),
   // with read-only derived Parent / Count / % Parent (from the active sample's stats).
@@ -2641,6 +3214,13 @@ export default function App() {
   const overlaySpec = useMemo<OverlaySpec | null>(() => {
     if (!sample || overlayBy === "none") return null;
     const n = sample.fcs.nEvents;
+    if (overlayBy === "sample") {
+      return {
+        colors: new Uint8Array(n),
+        palette: paletteColors(overlayPalette, 1),
+        labels: [fileName],
+      };
+    }
     if (overlayBy === "population") {
       const rootId = state.root_population_id ?? "";
       const allPops = populationTreeOrder(state.populations, rootId).map((o) => o.popId);
@@ -2665,9 +3245,7 @@ export default function App() {
     for (let e = 0; e < n; e++) colors[e] = assignDivisionLevel(dye[e], prof.boundaries);
     return { colors, palette: divisionPalette(nLevels), labels: Array.from({ length: nLevels }, (_, i) => `Div${i}`) };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, activeDataRevision, overlayBy, overlayPalette, state.populations, state.root_population_id, state.gate_version, derived, activeSampleId, compatibleDivisionProfiles]);
-
-  const overlaySampleRevisionKey = overlaySamples ? sampleDataRevisionKey : "";
+  }, [sample, activeDataRevision, overlayBy, overlayPalette, fileName, state.populations, state.root_population_id, state.gate_version, derived, activeSampleId, compatibleDivisionProfiles]);
 
   const mainPlotGates = useMemo(() => {
     if (!sample) return [];
@@ -2681,10 +3259,46 @@ export default function App() {
     );
   }, [sample, state.gates, state.gate_order, derived.gateCounts, xIdx, yIdx]);
 
+  const workspaceAutomaticRanges = useMemo(() => {
+    if (
+      !sample ||
+      !activeXChannelKey ||
+      !activeYChannelKey ||
+      !activeWorkspaceScaleContextKey
+    ) return null;
+    const inputs = samples.flatMap((entry): CombinedSamplePlotInput[] => {
+      if (entry.sample.workspaceScaleContextKey !== activeWorkspaceScaleContextKey) return [];
+      const xIndex = entry.sample.index(activeXChannelKey);
+      const yIndex = entry.sample.index(activeYChannelKey);
+      if (xIndex === undefined || yIndex === undefined) return [];
+      return [{
+        id: entry.id,
+        name: entry.name,
+        sample: entry.sample,
+        xIndex,
+        yIndex,
+        mask: null,
+      }];
+    });
+    return buildWorkspaceAxisRanges(inputs);
+  }, [
+    samples,
+    sampleDataRevisionKey,
+    activeXChannelKey,
+    activeYChannelKey,
+    activeWorkspaceScaleContextKey,
+    scalesVersion,
+    instrumentMode,
+  ]);
+
   const payload = useMemo(() => {
     if (!sample) return null;
     const xName = sample.channels[xIdx].key;
     const yName = sample.channels[yIdx].key;
+    const effectiveXRange =
+      xRange ?? globalScales[xName] ?? workspaceAutomaticRanges?.xRange ?? null;
+    const effectiveYRange =
+      yRange ?? globalScales[yName] ?? workspaceAutomaticRanges?.yRange ?? null;
     const base = sample.plotPayload(
       xIdx,
       yIdx,
@@ -2692,55 +3306,164 @@ export default function App() {
       mainPlotGates,
       derived.displayMask ?? derived.activeMask, // union of checked pops, else active
       state.selected_gate_id,
-      xRange ?? globalScales[xName] ?? null, // per-view → global channel scale → auto
-      yRange ?? globalScales[yName] ?? null,
+      effectiveXRange, // per-view → explicit workspace scale → automatic workspace scale
+      effectiveYRange,
       maxEvents <= 0 ? Infinity : maxEvents,
       contourThreshold,
       overlaySpec,
     );
 
-    // Multi-sample overlay: reuse the active sample's axes/ticks/gates, but replace the point cloud
-    // with every loaded sample's events on the current channels, coloured by sample.
-    if (overlaySamples && samples.length > 1) {
-      const capPer = Math.max(500, Math.floor((maxEvents > 0 ? maxEvents : 50000) / samples.length));
-      const xs: number[] = [];
-      const ys: number[] = [];
-      const cols: number[] = [];
-      const palette = paletteColors(overlayPalette, samples.length);
-      const labels: string[] = [];
-      let used = 0;
-      samples.forEach((e) => {
-        const xi = e.sample.index(xName);
-        const yi = e.sample.index(yName);
-        if (xi === undefined || yi === undefined) return;
-        const xc = e.sample.displayColumn(xi);
-        const yc = e.sample.displayColumn(yi);
-        const n = xc.length;
-        const cap = Math.min(capPer, n);
-        const denom = cap > 1 ? cap - 1 : 1;
-        for (let k = 0; k < cap; k++) {
-          const j = Math.round((k * (n - 1)) / denom);
-          xs.push(xc[j]); ys.push(yc[j]); cols.push(used);
-        }
-        labels.push(e.name);
-        used++;
-      });
+    const activeOnly =
+      includedDisplaySelections.length === 1 &&
+      includedDisplaySelections[0].entry.id === activeSampleId &&
+      pendingIncludedGatingIds.size === 0;
+    if (activeOnly) {
       return {
         ...base,
-        x_b64: encodeFloat32Base64(Float32Array.from(xs)),
-        y_b64: encodeFloat32Base64(Float32Array.from(ys)),
-        n_events: xs.length,
-        overlay_mode: true,
-        color_b64: encodeUint8Base64(Uint8Array.from(cols)),
-        color_palette: palette.slice(0, used),
-        color_labels: labels,
+        sample_scope_count: 1,
+        sample_contributor_count: base.n_events > 0 ? 1 : 0,
+        sample_contributor_names: base.n_events > 0 ? [fileName] : [],
       };
     }
-    return base;
-    // Active revision updates the current assay; the aggregate key is included only while
-    // plotting other samples so an inactive sample change does not rebuild the normal plot.
+
+    // Checked files are the authoritative plotted sample set. The active (blue) row still
+    // supplies channels, axes and editable gates; compatible checked files contribute their
+    // selected-population events under one shared point cap.
+    const compatible = includedDisplaySelections.flatMap(({ entry, gating, selection }) => {
+      const xIndex = entry.sample.index(xName);
+      const yIndex = entry.sample.index(yName);
+      return xIndex === undefined || yIndex === undefined
+        ? []
+        : [{ entry, gating, selection, xIndex, yIndex }];
+    });
+
+    let colorPalette: string[] | undefined;
+    let colorLabels: string[] | undefined;
+    const inputs: CombinedSamplePlotInput[] = compatible.map(
+      ({ entry, selection, xIndex, yIndex }) => ({
+        id: entry.id,
+        name: entry.name,
+        sample: entry.sample,
+        xIndex,
+        yIndex,
+        mask: selection.displayMask,
+      }),
+    );
+
+    if (overlayBy === "sample") {
+      colorPalette = paletteColors(overlayPalette, compatible.length);
+      colorLabels = compatible.map(({ entry }) => entry.name);
+      inputs.forEach((input, index) => {
+        input.colorIndex = index;
+      });
+    } else if (overlayBy === "population") {
+      const rootId = state.root_population_id ?? "";
+      const allPopulations = populationTreeOrder(state.populations, rootId).map(({ popId }) => popId);
+      const levels = resolvePartitionLevels(state.populations, rootId, allPopulations);
+      const ungated = levels.length;
+      colorPalette = [
+        ...levels.map((level) =>
+          populationColor(overlayPalette, state.populations[level.popId]?.colorSlot)),
+        UNGATED_COLOR,
+      ];
+      colorLabels = [...levels.map(({ name }) => name), "ungated"];
+      compatible.forEach(({ gating }, index) => {
+        if (!gating) {
+          inputs[index].colorIndex = ungated;
+          return;
+        }
+        const masks = levels.map(({ popId }) => gating.masks[popId] ?? null);
+        inputs[index].colorAt = (eventIndex) => {
+          let best = -1;
+          let bestDepth = -1;
+          for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
+            if (masks[levelIndex]?.[eventIndex] && levels[levelIndex].depth > bestDepth) {
+              best = levelIndex;
+              bestDepth = levels[levelIndex].depth;
+            }
+          }
+          return best < 0 ? ungated : best;
+        };
+      });
+    } else if (overlayBy === "division") {
+      const profiles = compatible.map(({ entry }) => {
+        const profile = compatibleDivisionProfiles[entry.id];
+        const channelIndex = profile ? entry.sample.index(profile.channelKey) : undefined;
+        return profile && channelIndex !== undefined
+          ? { profile, channelIndex }
+          : null;
+      });
+      const levelCount = Math.max(
+        1,
+        ...profiles.map((profile) => profile ? profile.profile.boundaries.length + 1 : 0),
+      );
+      const unassigned = levelCount;
+      colorPalette = [...divisionPalette(levelCount), UNGATED_COLOR];
+      colorLabels = [
+        ...Array.from({ length: levelCount }, (_, index) => `Div${index}`),
+        "unassigned",
+      ];
+      profiles.forEach((profile, index) => {
+        if (!profile) {
+          inputs[index].colorIndex = unassigned;
+          return;
+        }
+        const values = compatible[index].entry.sample.displayColumn(profile.channelIndex);
+        inputs[index].colorAt = (eventIndex) =>
+          assignDivisionLevel(values[eventIndex], profile.profile.boundaries);
+      });
+    }
+
+    const cloud = buildCombinedSamplePointCloud(
+      inputs,
+      maxEvents <= 0 ? Infinity : maxEvents,
+    );
+    const contributors = cloud.sampleEventCounts.filter(({ eventCount }) => eventCount > 0);
+    return {
+      ...base,
+      x_b64: encodeFloat32Base64(cloud.x),
+      y_b64: encodeFloat32Base64(cloud.y),
+      n_events: cloud.eventCount,
+      sample_scope_count: cloud.sampleEventCounts.length,
+      sample_contributor_count: contributors.length,
+      sample_contributor_names: contributors.map(({ name }) => name),
+      overlay_mode: cloud.colors !== null,
+      color_b64: cloud.colors ? encodeUint8Base64(cloud.colors) : undefined,
+      color_palette: cloud.colors ? colorPalette : undefined,
+      color_labels: cloud.colors ? colorLabels : undefined,
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, activeDataRevision, xIdx, yIdx, mode, mainPlotGates, state.selected_gate_id, derived, scalesVersion, xRange, yRange, maxEvents, contourThreshold, instrumentMode, globalScales, overlaySpec, overlaySamples, overlaySampleRevisionKey, samples, overlayPalette]);
+  }, [
+    sample,
+    activeDataRevision,
+    xIdx,
+    yIdx,
+    mode,
+    mainPlotGates,
+    state.selected_gate_id,
+    derived,
+    scalesVersion,
+    xRange,
+    yRange,
+    maxEvents,
+    contourThreshold,
+    instrumentMode,
+    globalScales,
+    workspaceAutomaticRanges,
+    overlaySpec,
+    overlayBy,
+    overlayPalette,
+    includedDisplaySelections,
+    pendingIncludedGatingIds,
+    activeSampleId,
+    state.root_population_id,
+    state.populations,
+    compatibleDivisionProfiles,
+    fileName,
+  ]);
+
+  const contributingSampleCount = payload?.sample_contributor_count ?? 0;
+  const contributingSampleNames = payload?.sample_contributor_names ?? [];
 
   // Pointer navigation reads this mutable ref after render. Use the exact fitted payload range so
   // the first drag cannot jump from a gate-aware auto range back to the data-only range.
@@ -3245,11 +3968,12 @@ export default function App() {
                   {t("Colour by")}
                   <select value={overlayBy} onChange={(e) => setOverlayBy(e.target.value as typeof overlayBy)}>
                     <option value="none">{t("None")}</option>
+                    {samples.length > 1 && <option value="sample">{t("Sample")}</option>}
                     <option value="population">{t("Population")}</option>
                     {activeSampleId && compatibleDivisionProfiles[activeSampleId] && <option value="division">{t("Division")}</option>}
                   </select>
                 </label>
-                {(overlayBy !== "none" || overlaySamples) && (
+                {overlayBy !== "none" && (
                   <label className="gl-field-inline">
                     {t("Palette")}
                     <select value={overlayPalette} onChange={(e) => setOverlayPalette(e.target.value as PaletteName)}>
@@ -3257,12 +3981,52 @@ export default function App() {
                     </select>
                   </label>
                 )}
-                {samples.length > 1 && (
-                  <label className="gl-check" title="Plot all loaded samples together, coloured by sample">
-                    <input type="checkbox" checked={overlaySamples} onChange={(e) => setOverlaySamples(e.target.checked)} />
-                    {t("Overlay samples")}
-                  </label>
-                )}
+                <span
+                  className={`gl-sample-scope-badge${pendingIncludedGatingIds.size > 0 ? " is-pending" : ""}`}
+                  title={[
+                    t("Checked files are plotted together; the blue row supplies channels, axes, and editable gates."),
+                    ...includedSamples.map((entry) => entry.name),
+                    ...(pendingIncludedGatingIds.size === 0
+                      ? [
+                          t("Selected display contributors: {files}", {
+                            files: contributingSampleNames.length
+                              ? contributingSampleNames.join(", ")
+                              : t("None"),
+                          }),
+                        ]
+                      : []),
+                  ].join("\n")}
+                >
+                  <strong>
+                    {includedSamples.length > 1
+                      ? t("Pooled display")
+                      : includedSamples.length === 1
+                        ? t("Single-file display")
+                        : t("No checked files")}
+                  </strong>
+                  {includedSamples.length > 0 &&
+                    ` · ${t("{count} checked FCS", { count: includedSamples.length })}`}
+                  {pendingIncludedGatingIds.size > 0
+                    ? ` · ${t("preparing {count} population masks…", {
+                        count: pendingIncludedGatingIds.size,
+                      })}`
+                    : payload
+                      ? ` · ${t("{count} events", {
+                          count: payload.n_events.toLocaleString(),
+                        })}${includedSamples.length > 0
+                          ? ` · ${t("{contributing} of {checked} files contribute", {
+                              contributing: contributingSampleCount,
+                              checked: includedSamples.length,
+                            })}`
+                          : ""}`
+                      : ""}
+                </span>
+                <span
+                  className="gl-active-sample-key"
+                  title={t("Clicking a row makes it active without changing which checked files are pooled.")}
+                >
+                  {t("Blue: {name} · axes and gate editing", { name: fileName })}
+                </span>
               </div>
             </div>
             <div className="gl-scales gl-ranges">
@@ -3271,8 +4035,10 @@ export default function App() {
                 const r3 = (n: number) => Math.round(n * 1000) / 1000;
                 const xName = sample.channels[xIdx].key;
                 const yName = sample.channels[yIdx].key;
-                const effX = xRange ?? globalScales[xName] ?? payload?.x_range ?? sample.displayRange(xIdx);
-                const effY = yRange ?? globalScales[yName] ?? payload?.y_range ?? sample.displayRange(yIdx);
+                const effX = xRange ?? globalScales[xName] ??
+                  workspaceAutomaticRanges?.xRange ?? payload?.x_range ?? sample.displayRange(xIdx);
+                const effY = yRange ?? globalScales[yName] ??
+                  workspaceAutomaticRanges?.yRange ?? payload?.y_range ?? sample.displayRange(yIdx);
                 return (
                   <>
                     {/* Editing a Range sets the SHARED per-channel scale (globalScales), which the
@@ -3302,8 +4068,20 @@ export default function App() {
                 className="gl-mini-btn"
                 title="Fit the current view to the robust event distribution and every gate on these axes"
                 onClick={() => {
-                  setXRange(includePlotGatesInAxisRange(sample.displayRange(xIdx), mainPlotGates, "x"));
-                  setYRange(includePlotGatesInAxisRange(sample.displayRange(yIdx), mainPlotGates, "y"));
+                  const fitX = includePlotGatesInAxisRange(
+                    workspaceAutomaticRanges?.xRange ?? sample.displayRange(xIdx),
+                    mainPlotGates,
+                    "x",
+                  );
+                  const fitY = includePlotGatesInAxisRange(
+                    workspaceAutomaticRanges?.yRange ?? sample.displayRange(yIdx),
+                    mainPlotGates,
+                    "y",
+                  );
+                  setGlobalScale(sample.channels[xIdx].key, fitX);
+                  setGlobalScale(sample.channels[yIdx].key, fitY);
+                  setXRange(null);
+                  setYRange(null);
                 }}
               >
                 {t("Fit data + gates")}
@@ -3316,6 +4094,12 @@ export default function App() {
                   setGlobalScale(sample.channels[xIdx].key, null);
                   setGlobalScale(sample.channels[yIdx].key, null);
                 }}>⟲</button>
+              <span
+                className="gl-workspace-scale-badge"
+                title={t("Automatic and edited ranges are shared across compatible FCS files in this workspace.")}
+              >
+                {t("Workspace scales")}
+              </span>
               {derived.displayPopCount > 1 && (
                 <span className="gl-display-pops-banner">
                   {t("Displaying {count} populations (union)", { count: derived.displayPopCount })}
@@ -3564,6 +4348,10 @@ export default function App() {
               <IllustrationTab
                 key={illustVersion}
                 sample={sample}
+                sampleViews={illustrationSampleViews}
+                activeSampleId={activeSampleId}
+                checkedSampleCount={includedSamples.length}
+                pendingSampleCount={pendingIncludedGatingIds.size}
                 state={state}
                 derived={derived}
                 globalScales={globalScales}
@@ -3677,11 +4465,34 @@ export default function App() {
                 }
               }}
             >
-              <PopulationTree state={state} derived={derived} dispatch={uiDispatch} />
+              <PopulationTree
+                state={state}
+                derived={populationTreeDerived}
+                dispatch={uiDispatch}
+                statsPending={populationStatsPending}
+                statsSampleCount={includedSamples.length}
+                displayContributorCount={
+                  pendingIncludedGatingIds.size === 0 ? contributingSampleCount : undefined
+                }
+                displayContributorNames={
+                  pendingIncludedGatingIds.size === 0 ? contributingSampleNames : undefined
+                }
+              />
             </div>
           </div>
         </aside>
       </div>
+
+      {pendingWorkspaceRelink && (
+        <WorkspaceRelinkModal
+          requirements={pendingWorkspaceRelink.requirements}
+          folderSelectionAvailable={supportsDirectoryAccess()}
+          scanning={workspaceRelinkScanning}
+          error={workspaceRelinkError}
+          onChoose={() => void choosePendingWorkspaceRelinkFolder()}
+          onCancel={cancelPendingWorkspaceRelink}
+        />
+      )}
 
       {sampleManagerOpen && (
         <SampleManagerModal
@@ -3823,8 +4634,8 @@ export default function App() {
         <BulkRenameModal
           state={state}
           onCancel={() => setCrud(null)}
-          onConfirm={(mapping) => {
-            dispatch({ type: "bulkRenamePopulations", mapping });
+          onConfirm={(updates) => {
+            dispatch({ type: "bulkEditPopulations", updates });
             setCrud(null);
           }}
         />
@@ -3865,7 +4676,15 @@ export default function App() {
       {fcsExportOpen && sample && (
         <FcsExportModal
           state={state}
-          samplesCount={samples.length}
+          samples={samples.map((entry) => ({
+            id: entry.id,
+            name: entry.name,
+            eventCount: entry.sample.fcs.nEvents,
+            active: entry.id === activeSampleId,
+            checked: !excludedSampleIds.has(entry.id),
+            populationEventCounts: exportPopulationCountsBySample.get(entry.id) ?? null,
+          }))}
+          combinedCompatibility={combinedFcsCompatibility}
           initialPopIds={
             state.selected_pop_ids.length > 0
               ? state.selected_pop_ids
@@ -3875,12 +4694,15 @@ export default function App() {
           }
           initialAssay={fcsAssay}
           initialScope={fcsScope}
+          initialMinimumEvents={fcsMinimumEvents}
           onCancel={() => setFcsExportOpen(false)}
-          onExport={(popIds, assay, scope) => {
+          onExport={(popIds, assay, scope, minimumEvents) => {
             setFcsAssay(assay);
             setFcsScope(scope);
-            exportFcs(assay, samples.length > 1 ? scope : "active", popIds);
-            setFcsExportOpen(false);
+            setFcsMinimumEvents(minimumEvents);
+            if (exportFcs(assay, scope, popIds, minimumEvents)) {
+              setFcsExportOpen(false);
+            }
           }}
         />
       )}

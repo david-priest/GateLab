@@ -12,6 +12,7 @@ import {
   newRootPopulation,
   linkChildToParent,
   sortPopulationTree,
+  sortPopulationTreeAlpha,
   nextGateColor,
   removePopulationReparentChildren,
   wouldCreateCycle,
@@ -43,6 +44,8 @@ export interface CoreState {
   selected_pop_ids: string[];
   selected_gate_ids: string[];
   gate_version: number;
+  /** Persisted population names/order changed without changing any event memberships. */
+  tree_version: number;
   undo: Snapshot[];
   redo: Snapshot[];
 }
@@ -53,6 +56,8 @@ interface Snapshot {
   populations: PopulationMap;
   root_population_id: string | null;
   active_population_id: string | null;
+  /** Whether moving between this snapshot and the adjacent history state changes memberships. */
+  affects_gating: boolean;
 }
 
 const MAX_UNDO = 20;
@@ -68,24 +73,26 @@ export function initialCoreState(): CoreState {
     selected_pop_ids: [],
     selected_gate_ids: [],
     gate_version: 0,
+    tree_version: 0,
     undo: [],
     redo: [],
   };
 }
 
-function snapshot(s: CoreState): Snapshot {
+function snapshot(s: CoreState, affectsGating = true): Snapshot {
   return {
     gates: s.gates,
     gate_order: s.gate_order,
     populations: s.populations,
     root_population_id: s.root_population_id,
     active_population_id: s.active_population_id,
+    affects_gating: affectsGating,
   };
 }
 
 /** Push an undo snapshot, clear redo (call before a structural change). */
-function pushUndo(s: CoreState): Pick<CoreState, "undo" | "redo"> {
-  return { undo: [snapshot(s), ...s.undo].slice(0, MAX_UNDO), redo: [] };
+function pushUndo(s: CoreState, affectsGating = true): Pick<CoreState, "undo" | "redo"> {
+  return { undo: [snapshot(s, affectsGating), ...s.undo].slice(0, MAX_UNDO), redo: [] };
 }
 
 export type Action =
@@ -121,6 +128,13 @@ export type Action =
   | { type: "editGate"; gateId: string; vertices: [number, number][] } // dragged poly/rect vertices (gating space)
   | { type: "moveQuadrantCenter"; gateId: string; center: [number, number] } // dragged crosshair (gating space)
   | { type: "renamePopulation"; popId: string; name: string }
+  | { type: "setPopulationGateRefs"; popId: string; gateRefs: GateRef[] }
+  | {
+      type: "movePopulation";
+      popId: string;
+      targetId: string;
+      placement: "before" | "inside" | "after";
+    }
   | {
       type: "editPopulation";
       popId: string;
@@ -130,12 +144,17 @@ export type Action =
     }
   | { type: "deletePopulations"; popIds: string[] }
   | { type: "bulkRenamePopulations"; mapping: Record<string, string> } // by current name → new name
+  | {
+      type: "bulkEditPopulations";
+      updates: { popId: string; name: string; gateRefs: GateRef[] }[];
+    }
   | { type: "moveSelectedPopulations"; popIds: string[]; parentId: string }
   | { type: "duplicateSelectedPopulations"; popIds: string[] }
   | { type: "deleteGates"; gateIds: string[] }
   | { type: "clearGateSelection" }
   | { type: "clearPopSelection" }
   | { type: "sortGatesAlpha" }
+  | { type: "sortPopulationsAlpha" }
   | {
       type: "importGating";
       gates: Record<string, Gate>;
@@ -175,6 +194,7 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
         populations: { [root.population_id]: root },
         root_population_id: root.population_id,
         active_population_id: root.population_id,
+        gate_version: state.gate_version + 1,
       };
     }
 
@@ -322,22 +342,120 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
     }
 
     case "renamePopulation": {
-      if (!state.populations[action.popId]) return state;
+      const name = action.name.trim();
+      if (!state.populations[action.popId] || !name || state.populations[action.popId].name === name) {
+        return state;
+      }
       const populations = clonePops(state.populations);
-      populations[action.popId].name = action.name;
-      sortPopulationTree(populations, state.root_population_id!);
-      return { ...state, ...pushUndo(state), populations, gate_version: state.gate_version + 1 };
+      populations[action.popId].name = name;
+      return { ...state, ...pushUndo(state, false), populations, tree_version: state.tree_version + 1 };
+    }
+
+    case "setPopulationGateRefs": {
+      const population = state.populations[action.popId];
+      if (
+        !population ||
+        action.popId === state.root_population_id ||
+        !validPopulationGateRefs(state.gates, action.gateRefs) ||
+        sameGateRefs(population.gate_refs, action.gateRefs)
+      ) {
+        return state;
+      }
+      const populations = clonePops(state.populations);
+      populations[action.popId].gate_refs = action.gateRefs.map((ref) => ({ ...ref }));
+      return {
+        ...state,
+        ...pushUndo(state),
+        populations,
+        gate_version: state.gate_version + 1,
+      };
+    }
+
+    case "movePopulation": {
+      const source = state.populations[action.popId];
+      const target = state.populations[action.targetId];
+      if (
+        !source ||
+        !target ||
+        action.popId === state.root_population_id ||
+        action.popId === action.targetId
+      ) {
+        return state;
+      }
+
+      const destinationParentId =
+        action.placement === "inside" ? action.targetId : target.parent_id;
+      if (
+        !destinationParentId ||
+        !state.populations[destinationParentId] ||
+        wouldCreateCycle(state.populations, action.popId, destinationParentId)
+      ) {
+        return state;
+      }
+      if (
+        action.placement !== "inside" &&
+        !state.populations[destinationParentId].children.includes(action.targetId)
+      ) {
+        return state;
+      }
+
+      const populations = clonePops(state.populations);
+      const oldParentId = source.parent_id;
+      if (oldParentId && populations[oldParentId]) {
+        populations[oldParentId].children = populations[oldParentId].children.filter(
+          (childId) => childId !== action.popId,
+        );
+      }
+
+      const destination = populations[destinationParentId];
+      const destinationChildren = destination.children.filter(
+        (childId) => childId !== action.popId,
+      );
+      let insertionIndex = destinationChildren.length;
+      if (action.placement !== "inside") {
+        const targetIndex = destinationChildren.indexOf(action.targetId);
+        if (targetIndex < 0) return state;
+        insertionIndex = targetIndex + (action.placement === "after" ? 1 : 0);
+      }
+      destinationChildren.splice(insertionIndex, 0, action.popId);
+      destination.children = destinationChildren;
+      populations[action.popId].parent_id = destinationParentId;
+      if (state.root_population_id) sortPopulationTree(populations, state.root_population_id);
+
+      const parentChanged = oldParentId !== destinationParentId;
+      if (
+        !parentChanged &&
+        oldParentId &&
+        sameStringArray(
+          state.populations[oldParentId].children,
+          populations[oldParentId].children,
+        )
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        ...pushUndo(state, parentChanged),
+        populations,
+        gate_version: parentChanged ? state.gate_version + 1 : state.gate_version,
+        tree_version: parentChanged ? state.tree_version : state.tree_version + 1,
+      };
     }
 
     case "editPopulation": {
       const { popId, name, parentId, gateRefs } = action;
       if (!state.populations[popId] || popId === state.root_population_id) return state;
+      if (!validPopulationGateRefs(state.gates, gateRefs)) return state;
       const populations = clonePops(state.populations);
       const pop = populations[popId];
-      if (name.trim()) pop.name = name.trim();
-      pop.gate_refs = gateRefs;
+      const nextName = name.trim() || pop.name;
+      const nameChanged = nextName !== pop.name;
+      const refsChanged = !sameGateRefs(pop.gate_refs, gateRefs);
+      pop.name = nextName;
+      pop.gate_refs = gateRefs.map((ref) => ({ ...ref }));
       // Re-parent (guarded against cycles; the UI already excludes invalid parents).
       const oldParent = pop.parent_id;
+      let parentChanged = false;
       if (
         parentId &&
         parentId !== oldParent &&
@@ -348,9 +466,18 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
           populations[oldParent].children = populations[oldParent].children.filter((c) => c !== popId);
         }
         linkChildToParent(populations, popId, parentId);
+        parentChanged = true;
       }
+      if (!nameChanged && !refsChanged && !parentChanged) return state;
       sortPopulationTree(populations, state.root_population_id!);
-      return { ...state, ...pushUndo(state), populations, gate_version: state.gate_version + 1 };
+      const affectsGating = refsChanged || parentChanged;
+      return {
+        ...state,
+        ...pushUndo(state, affectsGating),
+        populations,
+        gate_version: affectsGating ? state.gate_version + 1 : state.gate_version,
+        tree_version: affectsGating ? state.tree_version : state.tree_version + 1,
+      };
     }
 
     case "deletePopulations": {
@@ -389,8 +516,63 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
         if (nn && nn.trim() && nn.trim() !== pop.name) { pop.name = nn.trim(); changed = true; }
       }
       if (!changed) return state;
-      sortPopulationTree(populations, state.root_population_id!);
-      return { ...state, ...pushUndo(state), populations, gate_version: state.gate_version + 1 };
+      return { ...state, ...pushUndo(state, false), populations, tree_version: state.tree_version + 1 };
+    }
+
+    case "bulkEditPopulations": {
+      const seenPopulations = new Set<string>();
+      for (const update of action.updates) {
+        const population = state.populations[update.popId];
+        if (!population || seenPopulations.has(update.popId)) return state;
+        seenPopulations.add(update.popId);
+        if (update.popId === state.root_population_id && update.gateRefs.length > 0) return state;
+        const seenRefs = new Set<string>();
+        for (const ref of update.gateRefs) {
+          const gate = state.gates[ref.gate_id];
+          const refKey = `${ref.gate_id}:${ref.quadrant ?? ""}`;
+          if (!gate || seenRefs.has(refKey)) return state;
+          seenRefs.add(refKey);
+          if (
+            (gate.gate_type === "quadrant" &&
+              (!Number.isInteger(ref.quadrant) || ref.quadrant! < 1 || ref.quadrant! > 4)) ||
+            (gate.gate_type !== "quadrant" && ref.quadrant !== undefined)
+          ) return state;
+        }
+      }
+
+      const populations = clonePops(state.populations);
+      let changed = false;
+      let refsChangedAny = false;
+      for (const update of action.updates) {
+        const population = populations[update.popId];
+        const name = update.name.trim() || population.name;
+        const refsChanged =
+          population.gate_refs.length !== update.gateRefs.length ||
+          population.gate_refs.some((ref, index) => {
+            const next = update.gateRefs[index];
+            return !next ||
+              ref.gate_id !== next.gate_id ||
+              ref.include !== next.include ||
+              ref.quadrant !== next.quadrant;
+          });
+        if (name !== population.name) {
+          population.name = name;
+          changed = true;
+        }
+        if (refsChanged) {
+          population.gate_refs = update.gateRefs.map((ref) => ({ ...ref }));
+          changed = true;
+          refsChangedAny = true;
+        }
+      }
+      if (!changed) return state;
+      return {
+        ...state,
+        ...pushUndo(state, refsChangedAny),
+        populations,
+        gate_version: refsChangedAny ? state.gate_version + 1 : state.gate_version,
+        tree_version: refsChangedAny ? state.tree_version : state.tree_version + 1,
+      };
     }
 
     case "moveSelectedPopulations": {
@@ -563,27 +745,50 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
       return { ...state, gate_order: order };
     }
 
+    case "sortPopulationsAlpha": {
+      if (!state.root_population_id || !state.populations[state.root_population_id]) return state;
+      const populations = clonePops(state.populations);
+      sortPopulationTreeAlpha(populations, state.root_population_id);
+      const changed = Object.keys(state.populations).some((popId) =>
+        !sameStringArray(
+          state.populations[popId].children,
+          populations[popId]?.children ?? [],
+        ),
+      );
+      if (!changed) return state;
+      return {
+        ...state,
+        ...pushUndo(state, false),
+        populations,
+        tree_version: state.tree_version + 1,
+      };
+    }
+
     case "undo": {
       if (state.undo.length === 0) return state;
       const prev = state.undo[0];
+      const { affects_gating: affectsGating, ...previousGraph } = prev;
       return {
         ...state,
-        ...prev,
+        ...previousGraph,
         undo: state.undo.slice(1),
-        redo: [snapshot(state), ...state.redo].slice(0, MAX_UNDO),
-        gate_version: state.gate_version + 1,
+        redo: [snapshot(state, affectsGating), ...state.redo].slice(0, MAX_UNDO),
+        gate_version: affectsGating ? state.gate_version + 1 : state.gate_version,
+        tree_version: affectsGating ? state.tree_version : state.tree_version + 1,
       };
     }
 
     case "redo": {
       if (state.redo.length === 0) return state;
       const next = state.redo[0];
+      const { affects_gating: affectsGating, ...nextGraph } = next;
       return {
         ...state,
-        ...next,
+        ...nextGraph,
         redo: state.redo.slice(1),
-        undo: [snapshot(state), ...state.undo].slice(0, MAX_UNDO),
-        gate_version: state.gate_version + 1,
+        undo: [snapshot(state, affectsGating), ...state.undo].slice(0, MAX_UNDO),
+        gate_version: affectsGating ? state.gate_version + 1 : state.gate_version,
+        tree_version: affectsGating ? state.tree_version : state.tree_version + 1,
       };
     }
 
@@ -622,6 +827,41 @@ function clonePops(pops: PopulationMap): PopulationMap {
   return out;
 }
 
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameGateRefs(left: readonly GateRef[], right: readonly GateRef[]): boolean {
+  return left.length === right.length && left.every((ref, index) => {
+    const next = right[index];
+    return !!next &&
+      ref.gate_id === next.gate_id &&
+      ref.include === next.include &&
+      ref.quadrant === next.quadrant;
+  });
+}
+
+function validPopulationGateRefs(
+  gates: Readonly<Record<string, Gate>>,
+  refs: readonly GateRef[],
+): boolean {
+  const seen = new Set<string>();
+  for (const ref of refs) {
+    const gate = gates[ref.gate_id];
+    const key = `${ref.gate_id}:${ref.quadrant ?? ""}`;
+    if (!gate || seen.has(key)) return false;
+    seen.add(key);
+    if (
+      (gate.gate_type === "quadrant" &&
+        (!Number.isInteger(ref.quadrant) || ref.quadrant! < 1 || ref.quadrant! > 4)) ||
+      (gate.gate_type !== "quadrant" && ref.quadrant !== undefined)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Derived stats — apply the strategy and compute the tree's counts/percentages
 // ---------------------------------------------------------------------------
@@ -642,6 +882,13 @@ export interface Derived {
   /** Number of checked populations contributing to displayMask (0 → just the active pop). */
   displayPopCount: number;
   populations: PopulationMap; // with event_count / percent_of_parent filled in
+}
+
+export interface PopulationDisplaySelection {
+  activeMask: Uint8Array | null;
+  /** Events to draw: union of checked populations, otherwise the active population. */
+  displayMask: Uint8Array | null;
+  displayPopCount: number;
 }
 
 /** Expensive results that depend on data/gates, but not on the active population. */
@@ -724,22 +971,9 @@ export function derivePopulationView(
   const { masks, stats, populations, gateMasks } = gating;
   const data = sample.gatingData();
 
-  const activeId = state.active_population_id ?? state.root_population_id;
-  const activeMask = masks[activeId] ?? masks[state.root_population_id] ?? null;
+  const { activeMask, displayMask, displayPopCount } =
+    derivePopulationDisplaySelection(sample, state, gating);
   const gateCounts = computeGateCounts(state.gates, activeMask, data, gateMasks);
-
-  // Display mask = union of the checked populations (mirrors GateLabR get_display_pop_mask), else
-  // the active population. Gate counts stay on the active pop; only the plotted point cloud changes.
-  const selIds = (state.selected_pop_ids ?? []).filter((id) => masks[id] && id !== state.root_population_id);
-  let displayMask = activeMask;
-  if (selIds.length > 0) {
-    const union = new Uint8Array(sample.fcs.nEvents);
-    for (const id of selIds) {
-      const m = masks[id];
-      for (let i = 0; i < union.length; i++) if (m[i]) union[i] = 1;
-    }
-    displayMask = union;
-  }
 
   return {
     masks,
@@ -747,9 +981,41 @@ export function derivePopulationView(
     gateCounts,
     activeMask,
     displayMask,
-    displayPopCount: selIds.length,
+    displayPopCount,
     populations,
   };
+}
+
+/**
+ * Select the active/checked-population masks without recomputing gate counts.
+ * The combined-sample gating display uses this cheap path for inactive files so
+ * changing populations never scans every event once per gate and per file.
+ */
+export function derivePopulationDisplaySelection(
+  sample: Sample | null,
+  state: CoreState,
+  gating: GatingDerived,
+): PopulationDisplaySelection {
+  if (!sample || !state.root_population_id || Object.keys(gating.populations).length === 0) {
+    return { activeMask: null, displayMask: null, displayPopCount: 0 };
+  }
+
+  const activeId = state.active_population_id ?? state.root_population_id;
+  const activeMask = gating.masks[activeId] ?? gating.masks[state.root_population_id] ?? null;
+  const selectedIds = (state.selected_pop_ids ?? [])
+    .filter((id) => gating.masks[id] && id !== state.root_population_id);
+  if (selectedIds.length === 0) {
+    return { activeMask, displayMask: activeMask, displayPopCount: 0 };
+  }
+
+  const union = new Uint8Array(sample.fcs.nEvents);
+  for (const id of selectedIds) {
+    const mask = gating.masks[id];
+    for (let index = 0; index < union.length; index++) {
+      if (mask[index]) union[index] = 1;
+    }
+  }
+  return { activeMask, displayMask: union, displayPopCount: selectedIds.length };
 }
 
 /** One-shot compatibility helper for non-React callers and tests. */

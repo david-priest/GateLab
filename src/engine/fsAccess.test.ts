@@ -6,6 +6,7 @@ import {
   pickFile,
   pickFileSource,
   pickFiles,
+  readFromHandleIfPermitted,
   saveAsHandleStream,
   writeHandleStream,
 } from "./fsAccess";
@@ -176,4 +177,68 @@ describe("pickFile", () => {
     expect(picked?.name).toBe("cytometry");
     expect(picked?.files.map((file) => file.relativePath)).toEqual(["batch/nested.FCS", "root.fcs"]);
   });
+
+  it("can start workspace relinking beside the workspace file", async () => {
+    const workspaceHandle = { kind: "file", name: "analysis.gatelab" } as FileSystemFileHandle;
+    const rootDirectory = {
+      kind: "directory",
+      name: "analysis",
+      async *values() {},
+    };
+    const showDirectoryPicker = vi.fn().mockResolvedValue(rootDirectory);
+    Object.defineProperty(window, "showDirectoryPicker", {
+      configurable: true,
+      value: showDirectoryPicker,
+    });
+
+    await pickDirectoryFiles([".fcs"], {
+      id: "gatelab-relink-fcs-folder",
+      startIn: workspaceHandle,
+    });
+
+    expect(showDirectoryPicker).toHaveBeenCalledWith({
+      mode: "read",
+      id: "gatelab-relink-fcs-folder",
+      startIn: workspaceHandle,
+    });
+  });
+
+  it("does not request permission separately for every remembered FCS handle", async () => {
+    const requestPermission = vi.fn().mockResolvedValue("granted");
+    const getFile = vi.fn();
+    const handle = {
+      queryPermission: vi.fn().mockResolvedValue("prompt"),
+      requestPermission,
+      getFile,
+    } as unknown as FileSystemFileHandle;
+
+    await expect(readFromHandleIfPermitted(handle)).resolves.toBeNull();
+    expect(requestPermission).not.toHaveBeenCalled();
+    expect(getFile).not.toHaveBeenCalled();
+  });
+
+  it("silently reuses a remembered FCS handle when permission is already granted", async () => {
+    const bytes = Uint8Array.from([70, 67, 83]);
+    const file = testFileWithArrayBuffer("remembered.fcs", bytes);
+    const handle = {
+      queryPermission: vi.fn().mockResolvedValue("granted"),
+      requestPermission: vi.fn(),
+      getFile: vi.fn().mockResolvedValue(file),
+    } as unknown as FileSystemFileHandle;
+
+    await expect(readFromHandleIfPermitted(handle)).resolves.toEqual({
+      bytes,
+      name: "remembered.fcs",
+    });
+    expect(handle.requestPermission).not.toHaveBeenCalled();
+  });
 });
+
+function testFileWithArrayBuffer(name: string, bytes: Uint8Array): File {
+  const file = new File([bytes.slice().buffer as ArrayBuffer], name);
+  Object.defineProperty(file, "arrayBuffer", {
+    configurable: true,
+    value: async () => bytes.slice().buffer,
+  });
+  return file;
+}

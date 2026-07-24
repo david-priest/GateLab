@@ -169,7 +169,13 @@ export function linkChildToParent(
   return populations;
 }
 
-/** Sort all children recursively by lowercased name (ties broken by id). */
+/**
+ * Normalise every reachable children list without changing its stored order.
+ *
+ * The historical name is retained for compatibility with existing callers. Population
+ * order is now user-controlled, so this function only removes duplicates, missing ids,
+ * and self-links while walking the tree.
+ */
 export function sortPopulationTree(
   populations: PopulationMap,
   rootPopulationId: string,
@@ -179,22 +185,46 @@ export function sortPopulationTree(
   const recurse = (popId: string): void => {
     const pop = populations[popId];
     if (!pop) return;
-    let childIds = [...new Set(pop.children)].filter(
+    const childIds = [...new Set(pop.children)].filter(
       (cid) => cid in populations && cid !== popId,
     );
-    if (childIds.length > 1) {
-      childIds = childIds
-        .map((cid) => {
-          const nm = populations[cid].name;
-          return { cid, key: (nm && nm.length ? nm : cid).toLowerCase() };
-        })
-        .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : a.cid < b.cid ? -1 : a.cid > b.cid ? 1 : 0))
-        .map((o) => o.cid);
-    }
     pop.children = childIds;
     for (const cid of childIds) recurse(cid);
   };
 
+  recurse(rootPopulationId);
+  return populations;
+}
+
+/** Explicitly alphabetise every sibling group while preserving the hierarchy. */
+export function sortPopulationTreeAlpha(
+  populations: PopulationMap,
+  rootPopulationId: string,
+): PopulationMap {
+  sortPopulationTree(populations, rootPopulationId);
+  if (!rootPopulationId || !populations[rootPopulationId]) return populations;
+
+  const visited = new Set<string>();
+  const recurse = (popId: string): void => {
+    if (visited.has(popId)) return;
+    visited.add(popId);
+    const pop = populations[popId];
+    if (!pop) return;
+    pop.children.sort((leftId, rightId) => {
+      const left = (populations[leftId]?.name || leftId).toLocaleLowerCase();
+      const right = (populations[rightId]?.name || rightId).toLocaleLowerCase();
+      return left < right
+        ? -1
+        : left > right
+          ? 1
+          : leftId < rightId
+            ? -1
+            : leftId > rightId
+              ? 1
+              : 0;
+    });
+    for (const childId of pop.children) recurse(childId);
+  };
   recurse(rootPopulationId);
   return populations;
 }

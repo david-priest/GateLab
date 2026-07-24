@@ -5,9 +5,18 @@ import { useMemo, useRef, useState } from "react";
 import type { CoreState, Action } from "../store";
 import { wouldCreateCycle, type GateRef } from "../engine/models";
 import { populationTreeOrder } from "../engine/populations";
-import type { FcsExportAssay } from "../engine/fcsExport";
+import {
+  passesPopulationFcsExportThreshold,
+  type FcsExportAssay,
+} from "../engine/fcsExport";
 import { analyzeGatingMLQuadrantOmissions, type GatingMLFormat } from "../engine/gatingmlExport";
 import type { GatingImportMode } from "../engine/gatingMerge";
+import {
+  parsePopulationEditTable,
+  serializePopulationEditTemplate,
+  type PopulationBulkEditPreview,
+  type PopulationBulkEditUpdate,
+} from "../engine/populationTable";
 import { useI18n } from "./i18n";
 
 function ModalShell({ title, children }: { title: string; children: React.ReactNode }) {
@@ -194,29 +203,57 @@ export function MovePopsModal({
 }
 
 /** FCS export dialog: pick populations, an explicit value space, and sample scope. */
+export interface FcsExportSampleOption {
+  id: string;
+  name: string;
+  eventCount: number;
+  active: boolean;
+  checked: boolean;
+  populationEventCounts: Readonly<Record<string, number | null>> | null;
+}
+
 export function FcsExportModal({
   state,
-  samplesCount,
+  samples,
+  combinedCompatibility,
   initialPopIds,
   initialAssay,
   initialScope,
+  initialMinimumEvents,
   onCancel,
   onExport,
 }: {
   state: CoreState;
-  samplesCount: number;
+  samples: readonly FcsExportSampleOption[];
+  combinedCompatibility: { compatible: boolean; reason: string | null };
   initialPopIds: string[];
   initialAssay: FcsExportAssay;
   initialScope: "active" | "combined" | "split";
+  initialMinimumEvents: number;
   onCancel: () => void;
-  onExport: (popIds: string[], assay: FcsExportAssay, scope: "active" | "combined" | "split") => void;
+  onExport: (
+    popIds: string[],
+    assay: FcsExportAssay,
+    scope: "active" | "combined" | "split",
+    minimumEvents: number,
+  ) => void;
 }) {
   const { t } = useI18n();
   const order = populationTreeOrder(state.populations, state.root_population_id ?? null);
   const allIds = order.map((o) => o.popId);
   const [checked, setChecked] = useState<Set<string>>(() => new Set(initialPopIds));
   const [assay, setAssay] = useState(initialAssay);
-  const [scope, setScope] = useState(initialScope);
+  const activeSample = samples.find((sample) => sample.active) ?? samples[0] ?? null;
+  const checkedSamples = samples.filter((sample) => sample.checked);
+  const [scope, setScope] = useState<"active" | "combined" | "split">(() => {
+    if (initialScope === "combined" && !combinedCompatibility.compatible) return "split";
+    if (initialScope !== "active" && checkedSamples.length === 0) return "active";
+    return initialScope;
+  });
+  const [minimumEvents, setMinimumEvents] = useState(() =>
+    Math.max(0, Math.floor(initialMinimumEvents)),
+  );
+  const [confirmingSplitExport, setConfirmingSplitExport] = useState(false);
   const toggle = (id: string) =>
     setChecked((prev) => {
       const n = new Set(prev);
@@ -224,6 +261,81 @@ export function FcsExportModal({
       else n.add(id);
       return n;
     });
+  const splitCombinations = useMemo(() => {
+    const selectedPopulationIds = [...checked];
+    return checkedSamples.flatMap((sample) =>
+      selectedPopulationIds.map((popId) => {
+        const count = sample.populationEventCounts?.[popId];
+        const eventCount =
+          typeof count === "number" && Number.isFinite(count) ? count : null;
+        return {
+          key: `${sample.id}:${popId}`,
+          sampleName: sample.name,
+          populationName: state.populations[popId]?.name ?? popId,
+          eventCount,
+          writable: passesPopulationFcsExportThreshold(eventCount, minimumEvents),
+        };
+      }),
+    );
+  }, [checked, checkedSamples, minimumEvents, state.populations]);
+  const splitCombinationSummary = useMemo(() => {
+    const writable = splitCombinations.filter((combination) => combination.writable).length;
+    return {
+      ready: splitCombinations.every((combination) => combination.eventCount !== null),
+      writable,
+      skipped: splitCombinations.length - writable,
+    };
+  }, [splitCombinations]);
+  if (confirmingSplitExport) {
+    return (
+      <ModalShell title="Confirm separate FCS export">
+        <div className="gl-fcs-export-confirm-summary">
+          <strong>
+            {t("FCS outputs to write: {written}", {
+              written: splitCombinationSummary.writable,
+            })}
+          </strong>
+          <span>
+            {t("{skipped} population × file combinations will be skipped (≤ {threshold} events)", {
+              skipped: splitCombinationSummary.skipped,
+              threshold: minimumEvents,
+            })}
+          </span>
+        </div>
+        <div className="gl-fcs-export-combinations">
+          <div className="gl-fcs-export-combination header" aria-hidden="true">
+            <span>{t("FCS file")}</span>
+            <span>{t("Population")}</span>
+            <span>{t("Events")}</span>
+            <span>{t("Result")}</span>
+          </div>
+          {splitCombinations.map((combination) => (
+            <div
+              key={combination.key}
+              className={`gl-fcs-export-combination${combination.writable ? " included" : " skipped"}`}
+            >
+              <span title={combination.sampleName}>{combination.sampleName}</span>
+              <span title={combination.populationName}>{combination.populationName}</span>
+              <span>{combination.eventCount?.toLocaleString() ?? "…"}</span>
+              <strong>{combination.writable ? t("Write") : t("Skip")}</strong>
+            </div>
+          ))}
+        </div>
+        <div className="gl-modal-actions">
+          <button className="gl-btn-ghost" onClick={() => setConfirmingSplitExport(false)}>
+            {t("Back")}
+          </button>
+          <button
+            className="gl-btn"
+            disabled={splitCombinationSummary.writable === 0}
+            onClick={() => onExport([...checked], assay, scope, minimumEvents)}
+          >
+            {t("Export {count} FCS", { count: splitCombinationSummary.writable })}
+          </button>
+        </div>
+      </ModalShell>
+    );
+  }
   return (
     <ModalShell title="Export FCS">
       <div className="gl-modal-field">
@@ -257,34 +369,151 @@ export function FcsExportModal({
         {assay === "display" && "Exports the values currently used for display after compensation (when enabled) and logicle/arcsinh transformation."}
         {" "}The output file is FCS 3.0 with 32-bit floating-point values.
       </div>
-      {samplesCount > 1 && (
-        <label className="gl-modal-field">
-          <span>{t("Samples")}</span>
-          <select value={scope} onChange={(e) => setScope(e.target.value as typeof scope)}>
-            <option value="active">{t("this sample")}</option>
-            <option value="combined">{t("all (combined)")}</option>
-            <option value="split">{t("all (split zip)")}</option>
-          </select>
-        </label>
-      )}
-      {samplesCount > 1 && scope === "combined" && (
-        <div className="gl-modal-note">
-          Combined export requires every sample containing selected events to have the same channels
-          (channel order may differ). If panels differ, choose “all (split zip)”; GateLab will not omit
-          samples or channels from a combined file.
+      <div className="gl-modal-field">
+        <span>{t("FCS source and packaging")}</span>
+        <div className="gl-fcs-scope-options">
+          <label className={`gl-fcs-scope-option${scope === "active" ? " selected" : ""}`}>
+            <input
+              type="radio"
+              name="fcs-export-scope"
+              value="active"
+              checked={scope === "active"}
+              disabled={!activeSample}
+              onChange={() => setScope("active")}
+            />
+            <span>
+              <strong>
+                {t("Active file only — {name}", { name: activeSample?.name ?? t("none") })}
+              </strong>
+              <small>{t("The blue row is exported; other checked files are ignored.")}</small>
+            </span>
+          </label>
+          <label className={`gl-fcs-scope-option${scope === "split" ? " selected" : ""}`}>
+            <input
+              type="radio"
+              name="fcs-export-scope"
+              value="split"
+              checked={scope === "split"}
+              disabled={checkedSamples.length === 0}
+              onChange={() => setScope("split")}
+            />
+            <span>
+              <strong>
+                {t("Checked files, kept separate — {count} FCS", {
+                  count: checkedSamples.length,
+                })}
+                {checkedSamples.length > 1 && <em>{t("Recommended")}</em>}
+              </strong>
+              <small>{t("Preserves each source filename and sample identity; multiple outputs are placed in one ZIP.")}</small>
+            </span>
+          </label>
+          <label className={`gl-fcs-scope-option${scope === "combined" ? " selected" : ""}`}>
+            <input
+              type="radio"
+              name="fcs-export-scope"
+              value="combined"
+              checked={scope === "combined"}
+              disabled={!combinedCompatibility.compatible}
+              onChange={() => setScope("combined")}
+            />
+            <span>
+              <strong>{t("Pool checked files into one FCS — advanced")}</strong>
+              <small>
+                {combinedCompatibility.compatible
+                  ? t("Events are concatenated into one file. Source-file identity is not retained.")
+                  : combinedCompatibility.reason}
+              </small>
+            </span>
+          </label>
+        </div>
+      </div>
+      {scope === "split" && (
+        <div className="gl-fcs-threshold">
+          <label>
+            <span>{t("Only write population × file combinations with more than")}</span>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={minimumEvents}
+              aria-label={t("Minimum events for each population and FCS combination")}
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                setMinimumEvents(Number.isFinite(next) ? Math.max(0, Math.floor(next)) : 0);
+              }}
+            />
+            <span>{t("events")}</span>
+          </label>
+          <small>
+            {t("A value of 0 skips empty outputs. This filter only affects separate-file export; pooled data are never filtered this way.")}
+          </small>
         </div>
       )}
+      <div className="gl-fcs-export-summary" role="status">
+        <strong>{t("Export summary")}</strong>
+        <span>
+          {scope === "active"
+            ? t("{populations} populations from {name}", {
+                populations: checked.size,
+                name: activeSample?.name ?? t("none"),
+              })
+            : scope === "split"
+              ? t("{populations} populations × {files} checked files, kept separate", {
+                  populations: checked.size,
+                  files: checkedSamples.length,
+                })
+              : t("{populations} pooled population files from {files} checked files", {
+                  populations: checked.size,
+                  files: checkedSamples.length,
+                })}
+        </span>
+        {scope === "split" && (
+          <span>
+            {splitCombinationSummary.ready
+              ? t("FCS outputs to write: {written} · skipped: {skipped} (≤ {threshold} events)", {
+                  written: splitCombinationSummary.writable,
+                  skipped: splitCombinationSummary.skipped,
+                  threshold: minimumEvents,
+                })
+              : t("Calculating population × file event counts…")}
+          </span>
+        )}
+        {scope !== "active" && checkedSamples.length > 0 && (
+          <span title={checkedSamples.map((sample) => sample.name).join("\n")}>
+            {t("Sources: {names}", {
+              names: checkedSamples.map((sample) => sample.name).join(", "),
+            })}
+          </span>
+        )}
+      </div>
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
-        <button className="gl-btn" disabled={checked.size === 0} onClick={() => onExport([...checked], assay, scope)}>
-          {t("Export")}{checked.size > 1 ? ` (${checked.size})` : ""}
+        <button
+          className="gl-btn"
+          disabled={
+            checked.size === 0 ||
+            (scope === "active" && !activeSample) ||
+            (scope === "split" && (
+              checkedSamples.length === 0 ||
+              !splitCombinationSummary.ready
+            )) ||
+            (scope === "combined" && !combinedCompatibility.compatible)
+          }
+          onClick={() => {
+            if (scope === "split") setConfirmingSplitExport(true);
+            else onExport([...checked], assay, scope, minimumEvents);
+          }}
+        >
+          {scope === "split"
+            ? t("Review export")
+            : `${t("Export")}${checked.size > 1 ? ` (${checked.size})` : ""}`}
         </button>
       </div>
     </ModalShell>
   );
 }
 
-/** Bulk-rename populations from a CSV (old_population,new_population) with a template download. */
+/** Atomic, previewed bulk edits of population names and positive AND gate definitions. */
 export function BulkRenameModal({
   state,
   onCancel,
@@ -292,48 +521,82 @@ export function BulkRenameModal({
 }: {
   state: CoreState;
   onCancel: () => void;
-  onConfirm: (mapping: Record<string, string>) => void;
+  onConfirm: (updates: PopulationBulkEditUpdate[]) => void;
 }) {
   const { t } = useI18n();
   const fileRef = useRef<HTMLInputElement>(null);
   const [err, setErr] = useState<string | null>(null);
-  const names = populationTreeOrder(state.populations, state.root_population_id ?? null)
-    .map(({ popId }) => state.populations[popId]?.name ?? popId)
-    .filter((n, i, a) => a.indexOf(n) === i);
+  const [preview, setPreview] = useState<PopulationBulkEditPreview | null>(null);
+  const tableState = useMemo(() => ({
+    populations: state.populations,
+    gates: state.gates,
+    rootPopulationId: state.root_population_id,
+  }), [state.populations, state.gates, state.root_population_id]);
 
   const downloadTemplate = () => {
-    const csv = "old_population,new_population\n" + names.map((n) => `${JSON.stringify(n)},${JSON.stringify(n)}`).join("\n") + "\n";
+    setErr(null);
+    let csv: string;
+    try {
+      csv = serializePopulationEditTemplate(tableState);
+    } catch (cause) {
+      setErr(cause instanceof Error ? cause.message : String(cause));
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-    a.download = "population_rename_template.csv";
+    a.href = url;
+    a.download = "population_edit_template.csv";
     a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
   const onFile = async (f: File) => {
     try {
-      const lines = (await f.text()).split(/\r\n|\r|\n/).filter((l) => l.trim());
-      const mapping: Record<string, string> = {};
-      for (let i = 1; i < lines.length; i++) {
-        const cells = lines[i].match(/("([^"]|"")*"|[^,]*)(,|$)/g)?.map((c) => c.replace(/,$/, "").replace(/^"|"$/g, "").replace(/""/g, '"').trim()) ?? [];
-        if (cells[0] && cells[1] && cells[0] !== cells[1]) mapping[cells[0]] = cells[1];
-      }
-      if (Object.keys(mapping).length === 0) { setErr("No renames found (need old_population,new_population columns)."); return; }
-      onConfirm(mapping);
+      setPreview(parsePopulationEditTable(await f.text(), tableState));
+      setErr(null);
     } catch (e) {
+      setPreview(null);
       setErr(e instanceof Error ? e.message : String(e));
     }
   };
   return (
-    <ModalShell title="Bulk-rename populations">
+    <ModalShell title="Bulk-edit populations">
       <p style={{ fontSize: 12, color: "#555", margin: "2px 0 12px", lineHeight: 1.4 }}>
-        {t("Download the template, edit the new_population column, and upload it. Rows are matched by current name.")}
+        {t("Download the template, edit new_population and gate_names, then upload it. Gate names are a comma-separated positive AND list; quadrant references use Gate name [Q1]. Population IDs keep rows unambiguous.")}
       </p>
       {err && <p style={{ fontSize: 12, color: "#d64545" }}>{err}</p>}
+      {preview && (
+        <div className="gl-modal-note" role="status">
+          <strong>{t("Validated — no changes have been applied yet.")}</strong>
+          <br />
+          {t("{rows} rows · {renames} renames · {definitions} gate definitions changed · {unchanged} unchanged", {
+            rows: preview.rowCount,
+            renames: preview.renameCount,
+            definitions: preview.gateDefinitionCount,
+            unchanged: preview.unchangedCount,
+          })}
+          {preview.omittedCount > 0
+            ? ` · ${t("{count} omitted populations will be left unchanged", { count: preview.omittedCount })}`
+            : ""}
+          {preview.legacyRenameOnly ? ` · ${t("legacy rename-only file")}` : ""}
+        </div>
+      )}
       <input ref={fileRef} type="file" accept=".csv,.tsv,.txt" style={{ display: "none" }}
-        onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); }} />
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void onFile(f);
+          e.target.value = "";
+        }} />
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={downloadTemplate}>{t("Template ↧")}</button>
         <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
-        <button className="gl-btn" onClick={() => fileRef.current?.click()}>{t("Upload CSV…")}</button>
+        <button className="gl-btn-ghost" onClick={() => fileRef.current?.click()}>{t("Choose CSV/TSV…")}</button>
+        <button
+          className="gl-btn"
+          disabled={!preview || (preview.renameCount === 0 && preview.gateDefinitionCount === 0)}
+          onClick={() => preview && onConfirm(preview.updates)}
+        >
+          {t("Apply changes")}
+        </button>
       </div>
     </ModalShell>
   );

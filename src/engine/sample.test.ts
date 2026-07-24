@@ -4,6 +4,7 @@ import { parseFcs, type FcsFile } from "./fcs";
 import { Sample } from "./sample";
 import { transformChannel } from "./transforms";
 import { decodeFloat32Base64 } from "./encode";
+import { includePlotGatesInAxisRange } from "./axisRange";
 
 const ARIA_SMALL =
   "/Users/davidpriest/code/gatelabr-test-fcs/conventional_comp_AriaIII/sample_Bmem_purity_small.fcs";
@@ -214,20 +215,44 @@ describe("Sample — CyTOF, display gating space", () => {
     expect(Array.from(plottedX)).toEqual([fullX[0], fullX[3]]); // ranks 0 and 2 of mask
   });
 
-  it("fits automatic axes around visible gates but preserves an explicit user range", () => {
+  it("keeps automatic axes invariant across gate moves and honours explicit fitted ranges", () => {
     const baseX = s.displayRange(1);
     const baseY = s.displayRange(2);
     const gateX = baseX[1] + 3;
-    const gates = [{ vertices: [[gateX, baseY[0]], [gateX + 1, baseY[1]]] }];
+    const polygonBefore = { gate_type: "polygon", vertices: [[gateX, baseY[0]], [gateX + 1, baseY[1]]] };
+    const transitions = [
+      {
+        name: "polygon vertex edit",
+        before: polygonBefore,
+        after: { gate_type: "polygon", vertices: [[gateX + 4, baseY[0]], [gateX + 5, baseY[1]]] },
+      },
+      {
+        name: "rectangle move",
+        before: { gate_type: "rectangle", vertices: [[gateX, baseY[0]], [gateX + 1, baseY[1]]] },
+        after: { gate_type: "rectangle", vertices: [[gateX + 4, baseY[0]], [gateX + 5, baseY[1]]] },
+      },
+      {
+        name: "quadrant move",
+        before: { gate_type: "quadrant", center: [gateX, baseY[0]] },
+        after: { gate_type: "quadrant", center: [gateX + 4, baseY[1]] },
+      },
+    ];
 
-    const automatic = s.plotPayload(1, 2, "dots", gates);
-    expect(automatic.x_range[1]).toBeGreaterThan(gateX + 1);
+    for (const transition of transitions) {
+      const automaticBefore = s.plotPayload(1, 2, "dots", [transition.before]);
+      const automaticAfter = s.plotPayload(1, 2, "dots", [transition.after]);
+      expect(automaticBefore.x_range, `${transition.name}: initial X`).toBe(baseX);
+      expect(automaticBefore.y_range, `${transition.name}: initial Y`).toBe(baseY);
+      expect(automaticAfter.x_range, `${transition.name}: repainted X`).toBe(baseX);
+      expect(automaticAfter.y_range, `${transition.name}: repainted Y`).toBe(baseY);
+    }
 
-    const explicitX: [number, number] = [0, 1];
-    const explicitY: [number, number] = [2, 3];
-    const explicit = s.plotPayload(1, 2, "dots", gates, null, null, explicitX, explicitY);
-    expect(explicit.x_range).toBe(explicitX);
-    expect(explicit.y_range).toBe(explicitY);
+    const fittedX = includePlotGatesInAxisRange(baseX, [polygonBefore], "x");
+    const fittedY = includePlotGatesInAxisRange(baseY, [polygonBefore], "y");
+    const fitted = s.plotPayload(1, 2, "dots", [polygonBefore], null, null, fittedX, fittedY);
+    expect(fitted.x_range).toBe(fittedX);
+    expect(fitted.y_range).toBe(fittedY);
+    expect(fitted.x_range[1]).toBeGreaterThan(gateX + 1);
   });
 });
 

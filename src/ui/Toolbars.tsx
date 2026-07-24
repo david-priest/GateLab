@@ -89,11 +89,12 @@ export function PopToolbar({
   const nChecked = state.selected_pop_ids.length;
   return (
     <div className="gl-tools">
+      <Tool label="A↓" title={t("Sort populations alphabetically")} onClick={() => dispatch({ type: "sortPopulationsAlpha" })} disabled={Object.keys(state.populations).length < 3} />
       <Tool label="＋" title={t("Create population")} onClick={onAdd} disabled={Object.keys(state.gates).length === 0} />
       <Tool label="✎" title={t("Edit active population (name, parent, gates)")} onClick={onRename} disabled={!canRename} />
       <Tool label="⧉" title={t("Duplicate checked populations")} onClick={() => onDuplicate(state.selected_pop_ids)} disabled={nChecked === 0} />
       <Tool label="⇄" title={t("Move checked populations to a new parent")} onClick={() => onMove(state.selected_pop_ids)} disabled={nChecked === 0} />
-      <Tool label="⇞" title={t("Bulk-rename populations via CSV (upload / template)")} onClick={onBulkRename} disabled={Object.keys(state.populations).length < 2} />
+      <Tool label="⇞" title={t("Bulk-edit population names and gate definitions via CSV")} onClick={onBulkRename} disabled={Object.keys(state.populations).length < 2} />
       <Tool label="✕" title={t("Clear population selection")} onClick={() => dispatch({ type: "clearPopSelection" })} disabled={nChecked === 0} />
       <Tool
         label="🗑"

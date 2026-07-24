@@ -5,6 +5,8 @@ import { Sample } from "./sample";
 import {
   exportPopulationFcs,
   exportPopulationFcsCombined,
+  inspectCombinedFcsCompatibility,
+  passesPopulationFcsExportThreshold,
   sanitizeFcsName,
   writeFcs,
 } from "./fcsExport";
@@ -18,6 +20,17 @@ function loadArrayBuffer(path: string): ArrayBuffer {
 }
 const toAB = (u8: Uint8Array): ArrayBuffer =>
   u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) as ArrayBuffer;
+
+describe("passesPopulationFcsExportThreshold", () => {
+  it("uses an exclusive, non-negative whole-event threshold", () => {
+    expect(passesPopulationFcsExportThreshold(0, 0)).toBe(false);
+    expect(passesPopulationFcsExportThreshold(1, 0)).toBe(true);
+    expect(passesPopulationFcsExportThreshold(100, 100)).toBe(false);
+    expect(passesPopulationFcsExportThreshold(101, 100)).toBe(true);
+    expect(passesPopulationFcsExportThreshold(1, -10)).toBe(true);
+    expect(passesPopulationFcsExportThreshold(null, 0)).toBe(false);
+  });
+});
 
 function syntheticSample(channels: { name: string; values: number[] }[]): Sample {
   const nEvents = channels[0]?.values.length ?? 0;
@@ -240,6 +253,37 @@ describe("exportPopulationFcsCombined — concatenates masked events across samp
     expect(() => exportPopulationFcsCombined([
       { sample: one, name: "one.fcs", mask: new Uint8Array(2) },
     ])).toThrow(/contains no events/i);
+  });
+});
+
+describe("inspectCombinedFcsCompatibility", () => {
+  it("accepts the same channel set in a different order", () => {
+    const first = syntheticSample([
+      { name: "A", values: [1] },
+      { name: "B", values: [2] },
+    ]);
+    const second = syntheticSample([
+      { name: "B", values: [3] },
+      { name: "A", values: [4] },
+    ]);
+    expect(inspectCombinedFcsCompatibility([
+      { sample: first, name: "first.fcs" },
+      { sample: second, name: "second.fcs" },
+    ])).toEqual({ compatible: true, reason: null });
+  });
+
+  it("disables pooled export and names the mismatched FCS", () => {
+    const full = syntheticSample([
+      { name: "A", values: [1] },
+      { name: "B", values: [2] },
+    ]);
+    const missing = syntheticSample([{ name: "A", values: [3] }]);
+    const result = inspectCombinedFcsCompatibility([
+      { sample: full, name: "full.fcs" },
+      { sample: missing, name: "missing.fcs" },
+    ]);
+    expect(result.compatible).toBe(false);
+    expect(result.reason).toMatch(/missing\.fcs.*missing B/i);
   });
 });
 

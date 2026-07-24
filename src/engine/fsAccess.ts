@@ -7,7 +7,11 @@ export const supportsFileSystemAccess = (): boolean =>
   typeof window !== "undefined" && typeof window.showOpenFilePicker === "function" && typeof window.showSaveFilePicker === "function";
 
 interface DirectoryPickerWindow extends Window {
-  showDirectoryPicker?: (options?: { mode?: "read" | "readwrite"; id?: string }) => Promise<FileSystemDirectoryHandle>;
+  showDirectoryPicker?: (options?: {
+    mode?: "read" | "readwrite";
+    id?: string;
+    startIn?: FileSystemHandle;
+  }) => Promise<FileSystemDirectoryHandle>;
 }
 
 interface IterableDirectoryHandle extends FileSystemDirectoryHandle {
@@ -43,6 +47,8 @@ export interface PickedDirectory {
 export interface PickFileOptions {
   /** Stable purpose identifier so Chromium does not share picker state across workflows. */
   id?: string;
+  /** Existing handle whose directory should be shown first when the browser supports it. */
+  startIn?: FileSystemHandle;
 }
 
 async function readHandle(handle: FileSystemFileHandle): Promise<{ bytes: Uint8Array; name: string }> {
@@ -134,6 +140,7 @@ export async function pickDirectoryFiles(
     const handle = await directoryPickerWindow().showDirectoryPicker!({
       mode: "read",
       ...(options.id ? { id: options.id } : {}),
+      ...(options.startIn ? { startIn: options.startIn } : {}),
     });
     const allowed = new Set(extensions.map((extension) => extension.toLowerCase()));
     const files: PickedFileSource[] = [];
@@ -242,6 +249,22 @@ export async function saveAsHandleStream(
 export async function readFromHandle(handle: FileSystemFileHandle): Promise<{ bytes: Uint8Array; name: string } | null> {
   try {
     if (!(await ensurePermission(handle, "read"))) return null;
+    return await readHandle(handle);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-read a persisted handle only when the browser has already granted access.
+ * Workspace preflight uses this silent path so reopening a many-file workspace never
+ * produces one permission prompt per remembered FCS.
+ */
+export async function readFromHandleIfPermitted(
+  handle: FileSystemFileHandle,
+): Promise<{ bytes: Uint8Array; name: string } | null> {
+  try {
+    if ((await handle.queryPermission?.({ mode: "read" })) !== "granted") return null;
     return await readHandle(handle);
   } catch {
     return null;

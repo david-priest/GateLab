@@ -122,6 +122,27 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     expect(back.workspaceId).toBe("workspace-test-1");
   });
 
+  it("preserves a manually arranged, non-alphabetical population order", () => {
+    const arranged = cloneWs(ws);
+    arranged.gating.populations.p2 = {
+      population_id: "p2",
+      name: "Alpha population",
+      gate_refs: [],
+      gate_logic: "and",
+      parent_id: "root",
+      children: [],
+      event_count: null,
+      percent_of_parent: null,
+    };
+    arranged.gating.populations.root.children = ["p1", "p2"];
+
+    const { ws: back } = readWorkspaceBytes(packWorkspace(arranged, fcsByPath));
+
+    expect(back.gating.populations.root.children).toEqual(["p1", "p2"]);
+    expect(back.gating.populations.p1.name).toBe("Cells");
+    expect(back.gating.populations.p2.name).toBe("Alpha population");
+  });
+
   it("migrates a v1 (single-sample) workspace to v2 on read", () => {
     const v1 = {
       format: "gatelab-workspace",
