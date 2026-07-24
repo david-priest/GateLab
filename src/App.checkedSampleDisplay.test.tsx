@@ -147,11 +147,14 @@ describe("App checked-sample gating display", () => {
     act(() => create.click());
     await settle();
     expect(plottedCount()).toBe(3);
+    expect(host.textContent).toContain("1 of 2 files contribute");
+    expect(host.textContent).toContain("Pooled counts: 2 FCS · selected display: 1 contribute");
 
     const allEvents = [...host.querySelectorAll<HTMLElement>(".pop-row")]
       .find((row) => row.textContent?.includes("All Events"))!;
     act(() => allEvents.click());
     expect(plottedCount()).toBe(7);
+    expect(host.textContent).toContain("2 of 2 files contribute");
 
     const showA = host.querySelector<HTMLInputElement>(
       'input[aria-label="Show sample-a.fcs in plots and analyses"]',

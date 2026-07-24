@@ -17,6 +17,7 @@ import { paletteColors, populationColor, UNGATED_COLOR, OVERLAY_PALETTES, type P
 import { assignDivisionLevel, divisionPalette } from "./engine/division";
 import { encodeFloat32Base64, encodeUint8Base64 } from "./engine/encode";
 import {
+  aggregatePopulationTreeStats,
   buildCombinedSamplePointCloud,
   buildWorkspaceAxisRanges,
   type CombinedSamplePlotInput,
@@ -2880,9 +2881,9 @@ export default function App() {
   ]);
 
   // Keep inactive checked files out of the synchronous render path. Their full gating
-  // masks are updated one file at a time between browser paints, and only while the
-  // Gating tab is visible. This preserves the active-file interaction latency when a
-  // workspace contains many large FCS files.
+  // masks are updated one file at a time between browser paints, and only while a view
+  // that needs cross-file population counts is visible. This preserves the active-file
+  // interaction latency when a workspace contains many large FCS files.
   const inactiveGatingCacheRef = useRef<Map<string, CachedSampleGating>>(new Map());
   const inactiveGatingGenerationRef = useRef(0);
   const [inactiveGatingCacheVersion, setInactiveGatingCacheVersion] = useState(0);
@@ -2908,9 +2909,12 @@ export default function App() {
       if (!loadedIds.has(id)) inactiveGatingCacheRef.current.delete(id);
     }
 
+    // The Gating plot can draw All Events without these masks, but its Population tree still
+    // needs pooled counts for every checked FCS. Keep that secondary work scheduled rather than
+    // putting it back into the synchronous gate-editing path.
     const inactiveGatingNeeded =
       activeTab === "illustration" ||
-      (activeTab === "gating" && checkedDisplayNeedsGating);
+      activeTab === "gating";
     if (!inactiveGatingNeeded || !sample) {
       setPendingIncludedGatingIds(new Set());
       return () => {
@@ -2975,7 +2979,6 @@ export default function App() {
     includedSamples,
     samples,
     sampleDataRevisionKey,
-    checkedDisplayNeedsGating,
     state.gate_version,
     gatingState,
   ]);
@@ -2987,6 +2990,52 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [sample, gatingDerived, state.active_population_id, state.selected_pop_ids],
   );
+
+  const includedGatingResults = useMemo<readonly GatingDerived[] | null>(() => {
+    const results: GatingDerived[] = [];
+    for (const entry of includedSamples) {
+      if (entry.id === activeSampleId) {
+        results.push(gatingDerived);
+        continue;
+      }
+      const cached = inactiveGatingCacheRef.current.get(entry.id);
+      if (
+        !cached ||
+        cached.sample !== entry.sample ||
+        cached.dataRevision !== entry.sample.dataRevision ||
+        cached.gateVersion !== state.gate_version
+      ) return null;
+      results.push(cached.gating);
+    }
+    return results;
+  }, [
+    includedSamples,
+    activeSampleId,
+    gatingDerived,
+    inactiveGatingCacheVersion,
+    state.gate_version,
+  ]);
+
+  const pooledPopulationStats = useMemo(
+    () => includedGatingResults === null
+      ? null
+      : aggregatePopulationTreeStats(
+          state.populations,
+          state.root_population_id,
+          includedGatingResults.map((result) => result.stats),
+        ),
+    [
+      includedGatingResults,
+      state.populations,
+      state.root_population_id,
+    ],
+  );
+  const populationTreeDerived = useMemo<Derived>(
+    () => pooledPopulationStats ? { ...derived, stats: pooledPopulationStats } : derived,
+    [derived, pooledPopulationStats],
+  );
+  const populationStatsPending =
+    includedSamples.length > 0 && includedGatingResults === null;
 
   const includedDisplaySelections = useMemo<IncludedDisplaySelection[]>(
     () => includedSamples.flatMap((entry): IncludedDisplaySelection[] => {
@@ -3216,7 +3265,14 @@ export default function App() {
       includedDisplaySelections.length === 1 &&
       includedDisplaySelections[0].entry.id === activeSampleId &&
       pendingIncludedGatingIds.size === 0;
-    if (activeOnly) return base;
+    if (activeOnly) {
+      return {
+        ...base,
+        sample_scope_count: 1,
+        sample_contributor_count: base.n_events > 0 ? 1 : 0,
+        sample_contributor_names: base.n_events > 0 ? [fileName] : [],
+      };
+    }
 
     // Checked files are the authoritative plotted sample set. The active (blue) row still
     // supplies channels, axes and editable gates; compatible checked files contribute their
@@ -3310,11 +3366,15 @@ export default function App() {
       inputs,
       maxEvents <= 0 ? Infinity : maxEvents,
     );
+    const contributors = cloud.sampleEventCounts.filter(({ eventCount }) => eventCount > 0);
     return {
       ...base,
       x_b64: encodeFloat32Base64(cloud.x),
       y_b64: encodeFloat32Base64(cloud.y),
       n_events: cloud.eventCount,
+      sample_scope_count: cloud.sampleEventCounts.length,
+      sample_contributor_count: contributors.length,
+      sample_contributor_names: contributors.map(({ name }) => name),
       overlay_mode: cloud.colors !== null,
       color_b64: cloud.colors ? encodeUint8Base64(cloud.colors) : undefined,
       color_palette: cloud.colors ? colorPalette : undefined,
@@ -3347,7 +3407,11 @@ export default function App() {
     state.root_population_id,
     state.populations,
     compatibleDivisionProfiles,
+    fileName,
   ]);
+
+  const contributingSampleCount = payload?.sample_contributor_count ?? 0;
+  const contributingSampleNames = payload?.sample_contributor_names ?? [];
 
   // Pointer navigation reads this mutable ref after render. Use the exact fitted payload range so
   // the first drag cannot jump from a gate-aware auto range back to the data-only range.
@@ -3867,7 +3931,19 @@ export default function App() {
                 )}
                 <span
                   className={`gl-sample-scope-badge${pendingIncludedGatingIds.size > 0 ? " is-pending" : ""}`}
-                  title={`${t("Checked files are plotted together; the blue row supplies channels, editable gates, and sidebar counts.")}\n${includedSamples.map((entry) => entry.name).join("\n")}`}
+                  title={[
+                    t("Checked files are plotted together; the blue row supplies channels, axes, and editable gates."),
+                    ...includedSamples.map((entry) => entry.name),
+                    ...(pendingIncludedGatingIds.size === 0
+                      ? [
+                          t("Selected display contributors: {files}", {
+                            files: contributingSampleNames.length
+                              ? contributingSampleNames.join(", ")
+                              : t("None"),
+                          }),
+                        ]
+                      : []),
+                  ].join("\n")}
                 >
                   <strong>
                     {includedSamples.length > 1
@@ -3885,7 +3961,12 @@ export default function App() {
                     : payload
                       ? ` · ${t("{count} events", {
                           count: payload.n_events.toLocaleString(),
-                        })}`
+                        })}${includedSamples.length > 0
+                          ? ` · ${t("{contributing} of {checked} files contribute", {
+                              contributing: contributingSampleCount,
+                              checked: includedSamples.length,
+                            })}`
+                          : ""}`
                       : ""}
                 </span>
                 <span
@@ -4332,7 +4413,19 @@ export default function App() {
                 }
               }}
             >
-              <PopulationTree state={state} derived={derived} dispatch={uiDispatch} />
+              <PopulationTree
+                state={state}
+                derived={populationTreeDerived}
+                dispatch={uiDispatch}
+                statsPending={populationStatsPending}
+                statsSampleCount={includedSamples.length}
+                displayContributorCount={
+                  pendingIncludedGatingIds.size === 0 ? contributingSampleCount : undefined
+                }
+                displayContributorNames={
+                  pendingIncludedGatingIds.size === 0 ? contributingSampleNames : undefined
+                }
+              />
             </div>
           </div>
         </aside>

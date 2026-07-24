@@ -1738,8 +1738,15 @@ input[type="number"]::-webkit-outer-spin-button {
 .gate-list-panel { min-height: 120px; max-height: 220px; }
 .population-tree-panel { min-height: 200px; flex: 1; }
 .population-tree-hint {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
   color: #7b8491; font-size: 10px; font-style: italic; line-height: 1.25;
   padding: 1px 5px 4px;
+}
+.population-tree-hint > span {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.population-tree-hint > strong {
+  flex: 0 0 auto; color: #315b8d; font-style: normal; font-weight: 600; white-space: nowrap;
 }
 
 .gate-card {

@@ -14,6 +14,10 @@ interface Props {
   state: CoreState;
   derived: Derived;
   dispatch: (a: Action) => void;
+  statsPending?: boolean;
+  statsSampleCount?: number;
+  displayContributorCount?: number;
+  displayContributorNames?: readonly string[];
 }
 
 function focusTreeContainer() {
@@ -89,7 +93,15 @@ function gateChoices(state: CoreState): GateChoice[] {
   });
 }
 
-export function PopulationTree({ state, derived, dispatch }: Props) {
+export function PopulationTree({
+  state,
+  derived,
+  dispatch,
+  statsPending = false,
+  statsSampleCount = 1,
+  displayContributorCount,
+  displayContributorNames,
+}: Props) {
   const { t } = useI18n();
   const { populations, root_population_id, active_population_id, selected_gate_id, selected_pop_ids, gates } = state;
   const stats = derived.stats;
@@ -119,7 +131,16 @@ export function PopulationTree({ state, derived, dispatch }: Props) {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setGatePicker(null);
     };
-    const closeOnViewportChange = () => setGatePicker(null);
+    const closeOnViewportChange = (event: Event) => {
+      // The gate catalogue owns its scroll position. Only scrolling elsewhere in the app should
+      // dismiss the fixed-position picker.
+      if (
+        event.type === "scroll" &&
+        event.target instanceof Node &&
+        gatePickerRef.current?.contains(event.target)
+      ) return;
+      setGatePicker(null);
+    };
     window.addEventListener("pointerdown", closeIfOutside);
     window.addEventListener("keydown", closeOnEscape);
     window.addEventListener("resize", closeOnViewportChange);
@@ -270,9 +291,13 @@ export function PopulationTree({ state, derived, dispatch }: Props) {
     const countVal = stats.event_count[popId] ?? pop.event_count;
     const pctParent = stats.percent_of_parent[popId] ?? pop.percent_of_parent;
     const pctTotal = stats.percent_of_total[popId];
-    const countText = countVal != null ? countVal.toLocaleString() : "?";
+    const countText = statsPending
+      ? "…"
+      : countVal != null
+        ? countVal.toLocaleString()
+        : "?";
     let pctText = "";
-    if (!isRoot) {
+    if (!isRoot && !statsPending) {
       const parts: string[] = [];
       if (pctParent != null) parts.push(`${pctParent}% pnt`);
       if (pctTotal != null) parts.push(`${pctTotal}% tot`);
@@ -471,7 +496,31 @@ export function PopulationTree({ state, derived, dispatch }: Props) {
   return (
     <div className="population-tree-panel">
       <div className="population-tree-hint">
-        {t("Double-click a name to rename · Shift-drag to reorder or reparent · Shift-click a gate to change/remove · + adds a gate")}
+        <span>
+          {t("Double-click a name to rename · Shift-drag to reorder or reparent · Shift-click a gate to change/remove · + adds a gate")}
+        </span>
+        {statsSampleCount > 1 && (
+          <strong
+            title={
+              displayContributorNames
+                ? t("Selected display contributors: {files}", {
+                    files: displayContributorNames.length
+                      ? displayContributorNames.join(", ")
+                      : t("None"),
+                  })
+                : undefined
+            }
+          >
+            {statsPending
+              ? t("Pooling {count} checked FCS…", { count: statsSampleCount })
+              : displayContributorCount === undefined
+                ? t("Counts pooled across {count} checked FCS", { count: statsSampleCount })
+                : t("Pooled counts: {count} FCS · selected display: {contributing} contribute", {
+                    count: statsSampleCount,
+                    contributing: displayContributorCount,
+                  })}
+          </strong>
+        )}
       </div>
       {rows}
       {gatePicker && pickerPopulation && (

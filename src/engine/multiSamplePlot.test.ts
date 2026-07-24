@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { FcsFile } from "./fcs";
 import { Sample } from "./sample";
 import {
+  aggregatePopulationTreeStats,
   allocateCombinedSampleCaps,
   buildCombinedSamplePointCloud,
   buildWorkspaceAxisRanges,
   type CombinedSamplePlotInput,
 } from "./multiSamplePlot";
+import type { PopulationMap } from "./models";
 
 function sample(name: string, values: readonly number[]): Sample {
   const columns = [
@@ -97,5 +99,68 @@ describe("buildWorkspaceAxisRanges", () => {
     expect(ranges!.xRange[1]).toBeGreaterThan(secondX[secondX.length - 1]);
     expect(ranges!.yRange[0]).toBeLessThan(firstY[0]);
     expect(ranges!.yRange[1]).toBeGreaterThan(secondY[secondY.length - 1]);
+  });
+});
+
+describe("aggregatePopulationTreeStats", () => {
+  it("sums file-specific populations and derives percentages from pooled parents", () => {
+    const populations = {
+      root: {
+        population_id: "root",
+        name: "All Events",
+        gate_refs: [],
+        gate_logic: "and",
+        parent_id: null,
+        children: ["cells"],
+        event_count: null,
+        percent_of_parent: null,
+      },
+      cells: {
+        population_id: "cells",
+        name: "Cells",
+        gate_refs: [],
+        gate_logic: "and",
+        parent_id: "root",
+        children: ["f0", "f1"],
+        event_count: null,
+        percent_of_parent: null,
+      },
+      f0: {
+        population_id: "f0",
+        name: "F0",
+        gate_refs: [],
+        gate_logic: "and",
+        parent_id: "cells",
+        children: [],
+        event_count: null,
+        percent_of_parent: null,
+      },
+      f1: {
+        population_id: "f1",
+        name: "F1",
+        gate_refs: [],
+        gate_logic: "and",
+        parent_id: "cells",
+        children: [],
+        event_count: null,
+        percent_of_parent: null,
+      },
+    } satisfies PopulationMap;
+    const pooled = aggregatePopulationTreeStats(populations, "root", [
+      {
+        event_count: { root: 100, cells: 80, f0: 30, f1: 0 },
+        percent_of_parent: {},
+        percent_of_total: {},
+      },
+      {
+        event_count: { root: 200, cells: 120, f0: 0, f1: 60 },
+        percent_of_parent: {},
+        percent_of_total: {},
+      },
+    ]);
+
+    expect(pooled.event_count).toEqual({ root: 300, cells: 200, f0: 30, f1: 60 });
+    expect(pooled.percent_of_parent).toEqual({ root: 100, cells: 66.67, f0: 15, f1: 30 });
+    expect(pooled.percent_of_total).toEqual({ root: 100, cells: 66.67, f0: 10, f1: 20 });
   });
 });

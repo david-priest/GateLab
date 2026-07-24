@@ -267,6 +267,12 @@ describe("PopulationTree direct editing", () => {
     expect(getComputedStyle(list).overflowY).toBe("auto");
     expect(getComputedStyle(list).flexGrow).toBe("1");
     expect(getComputedStyle(host.querySelector(".pop-gate-picker")!).maxHeight).toBe("360px");
+
+    act(() => list.dispatchEvent(new Event("scroll")));
+    expect(host.querySelector(".pop-gate-picker")).not.toBeNull();
+
+    act(() => window.dispatchEvent(new Event("scroll")));
+    expect(host.querySelector(".pop-gate-picker")).toBeNull();
   });
 
   it("turns a Shift-drag drop gesture into a precise reorder action", () => {

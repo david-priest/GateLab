@@ -1,5 +1,7 @@
 import type { Sample } from "./sample";
 import { robustAxisRange } from "./axisRange";
+import type { PopulationMap } from "./models";
+import type { TreeStats } from "../store";
 
 export interface CombinedSamplePlotInput {
   id: string;
@@ -28,6 +30,46 @@ export interface CombinedSamplePointCloud {
 export interface WorkspaceAxisRanges {
   xRange: [number, number];
   yRange: [number, number];
+}
+
+/** Sum checked-file population counts, then recompute percentages from the pooled denominators. */
+export function aggregatePopulationTreeStats(
+  populations: PopulationMap,
+  rootPopulationId: string | null,
+  inputs: readonly TreeStats[],
+): TreeStats {
+  const event_count: Record<string, number | null> = {};
+  const percent_of_parent: Record<string, number | null> = {};
+  const percent_of_total: Record<string, number | null> = {};
+
+  for (const popId of Object.keys(populations)) {
+    event_count[popId] = inputs.reduce((total, stats) => {
+      const count = stats.event_count[popId];
+      return total + (typeof count === "number" && Number.isFinite(count) ? count : 0);
+    }, 0);
+  }
+
+  const rootCount = rootPopulationId ? event_count[rootPopulationId] ?? 0 : 0;
+  const round2 = (value: number) => Math.round(value * 100) / 100;
+  for (const [popId, population] of Object.entries(populations)) {
+    const count = event_count[popId] ?? 0;
+    if (popId === rootPopulationId) {
+      percent_of_parent[popId] = 100;
+      percent_of_total[popId] = 100;
+      continue;
+    }
+    const parentCount = population.parent_id
+      ? event_count[population.parent_id] ?? 0
+      : rootCount;
+    percent_of_parent[popId] = parentCount > 0
+      ? round2((count / parentCount) * 100)
+      : 0;
+    percent_of_total[popId] = rootCount > 0
+      ? round2((count / rootCount) * 100)
+      : 0;
+  }
+
+  return { event_count, percent_of_parent, percent_of_total };
 }
 
 function countSelected(mask: Uint8Array | null, eventCount: number): number {
