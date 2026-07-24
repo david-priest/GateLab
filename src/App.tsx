@@ -701,6 +701,15 @@ export default function App() {
     window.addEventListener("mouseup", up);
   };
   const [state, dispatch] = useReducer(coreReducer, undefined, initialCoreState);
+  // Presentation-only population edits (rename / sibling reorder) must not invalidate
+  // masks for every checked FCS file. Hold the last scientific gating graph until its
+  // explicit revision changes; cosmetic gate-label moves and active selections are also
+  // intentionally excluded.
+  const gatingState = useMemo(
+    () => state,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.gate_version, state.root_population_id],
+  );
 
   // Mark the workspace dirty on any edit (skipped once per load/save, which set skipDirtyRef).
   useEffect(() => {
@@ -710,7 +719,7 @@ export default function App() {
     }
     setDirty(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.gate_version, scalesVersion, sampleDataRevisionKey, instrumentMode, globalScales, mode, maxEvents, contourThreshold, densityColorPower, xIdx, yIdx, gatingFontSizes, workspaceCompensation]);
+  }, [state.gate_version, state.tree_version, scalesVersion, sampleDataRevisionKey, instrumentMode, globalScales, mode, maxEvents, contourThreshold, densityColorPower, xIdx, yIdx, gatingFontSizes, workspaceCompensation]);
 
   // Autosave lightweight reference workspaces only. Repacking every embedded FCS on each
   // edit would stall large bundled workspaces; bundles retain their format via manual Save.
@@ -2586,11 +2595,11 @@ export default function App() {
   // depends on which population is currently selected. Keep that stable work cached across
   // population clicks; only invalidate when the sample/gating inputs themselves change.
   const gatingDerived = useMemo(
-    () => recomputeGating(sample, state),
+    () => recomputeGating(sample, gatingState),
     // Sample is mutable by design, so its explicit revision must invalidate gate geometry.
     // instrumentMode remains separate because transform-only changes do not always revise data.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sample, state.gates, state.populations, state.root_population_id, state.gate_version, activeDataRevision, instrumentMode],
+    [sample, gatingState, activeDataRevision, instrumentMode],
   );
 
   // Keep inactive checked files out of the synchronous render path. Their full gating
@@ -2651,7 +2660,7 @@ export default function App() {
         timer = null;
         if (generation !== inactiveGatingGenerationRef.current) return;
         try {
-          const gating = recomputeGating(entry.sample, state);
+          const gating = recomputeGating(entry.sample, gatingState);
           if (generation !== inactiveGatingGenerationRef.current) return;
           inactiveGatingCacheRef.current.set(entry.id, {
             sample: entry.sample,
@@ -2687,9 +2696,7 @@ export default function App() {
     samples,
     sampleDataRevisionKey,
     state.gate_version,
-    state.gates,
-    state.populations,
-    state.root_population_id,
+    gatingState,
   ]);
 
   const derived = useMemo(

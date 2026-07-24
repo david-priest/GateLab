@@ -16,6 +16,7 @@ import {
   newRootPopulation,
   linkChildToParent,
   sortPopulationTree,
+  sortPopulationTreeAlpha,
   wouldCreateCycle,
   type Gate,
   type PopulationMap,
@@ -225,7 +226,7 @@ describe("computeGateCounts with a quadrant gate", () => {
 // ---------------------------------------------------------------------------
 
 describe("tree ops", () => {
-  it("sortPopulationTree orders children case-insensitively by name", () => {
+  it("sortPopulationTree normalises children without changing their stored order", () => {
     const root = newRootPopulation(0);
     const pops: PopulationMap = { [root.population_id]: root };
     const names = ["beta", "Alpha", "gamma", "Delta"];
@@ -236,8 +237,30 @@ describe("tree ops", () => {
       ids.push(p.population_id);
       linkChildToParent(pops, p.population_id, root.population_id);
     }
+    pops[root.population_id].children = [
+      ids[0],
+      ids[1],
+      ids[0],
+      "missing",
+      root.population_id,
+      ids[2],
+      ids[3],
+    ];
     sortPopulationTree(pops, root.population_id);
     const ordered = pops[root.population_id].children.map((c) => pops[c].name);
+    expect(ordered).toEqual(["beta", "Alpha", "gamma", "Delta"]);
+  });
+
+  it("sortPopulationTreeAlpha alphabetises siblings only when explicitly requested", () => {
+    const root = newRootPopulation(0);
+    const pops: PopulationMap = { [root.population_id]: root };
+    for (const name of ["beta", "Alpha", "gamma", "Delta"]) {
+      const child = newPopulation(name, [], root.population_id);
+      pops[child.population_id] = child;
+      linkChildToParent(pops, child.population_id, root.population_id);
+    }
+    sortPopulationTreeAlpha(pops, root.population_id);
+    const ordered = pops[root.population_id].children.map((childId) => pops[childId].name);
     expect(ordered).toEqual(["Alpha", "beta", "Delta", "gamma"]);
   });
 

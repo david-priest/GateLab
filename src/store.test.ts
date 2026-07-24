@@ -293,6 +293,92 @@ describe("store: gate + population flow", () => {
     const renamed = coreReducer(state, { type: "bulkRenamePopulations", mapping: { FSClo: "Small" } });
     expect(Object.values(renamed.populations).some((p) => p.name === "Small")).toBe(true);
     expect(Object.values(renamed.populations).some((p) => p.name === "FSClo")).toBe(false);
+    expect(renamed.gate_version).toBe(state.gate_version);
+    expect(renamed.tree_version).toBe(state.tree_version + 1);
+  });
+
+  it("renamePopulation is undoable without invalidating gating memberships", () => {
+    const { state } = withGate();
+    const population = Object.values(state.populations).find((p) => p.name === "FSClo")!;
+    const renamed = coreReducer(state, {
+      type: "renamePopulation",
+      popId: population.population_id,
+      name: "  Small cells  ",
+    });
+
+    expect(renamed.populations[population.population_id].name).toBe("Small cells");
+    expect(renamed.gate_version).toBe(state.gate_version);
+    expect(renamed.tree_version).toBe(state.tree_version + 1);
+    expect(renamed.undo).toHaveLength(state.undo.length + 1);
+    const undone = coreReducer(renamed, { type: "undo" });
+    expect(undone.populations[population.population_id].name).toBe("FSClo");
+    expect(undone.gate_version).toBe(state.gate_version);
+    expect(undone.tree_version).toBe(renamed.tree_version + 1);
+  });
+
+  it("preserves presentation-only undo markers across an intervening scientific undo/redo", () => {
+    const { state } = withGate();
+    const population = state.active_population_id!;
+    const gateId = state.gate_order[0];
+    const renamedOnce = coreReducer(state, {
+      type: "renamePopulation",
+      popId: population,
+      name: "First name",
+    });
+    const editedGate = coreReducer(renamedOnce, {
+      type: "editGate",
+      gateId,
+      vertices: [[-2000, -2000], [2000, 2000]],
+    });
+    const renamedTwice = coreReducer(editedGate, {
+      type: "renamePopulation",
+      popId: population,
+      name: "Second name",
+    });
+
+    const undoRename = coreReducer(renamedTwice, { type: "undo" });
+    expect(undoRename.gate_version).toBe(editedGate.gate_version);
+    const undoGate = coreReducer(undoRename, { type: "undo" });
+    expect(undoGate.gate_version).toBe(undoRename.gate_version + 1);
+    const redoGate = coreReducer(undoGate, { type: "redo" });
+    expect(redoGate.gate_version).toBe(undoGate.gate_version + 1);
+    const redoRename = coreReducer(redoGate, { type: "redo" });
+    expect(redoRename.populations[population].name).toBe("Second name");
+    expect(redoRename.gate_version).toBe(redoGate.gate_version);
+  });
+
+  it("setPopulationGateRefs replaces a definition atomically and rejects invalid refs", () => {
+    let { state } = withGate();
+    const population = Object.values(state.populations).find((p) => p.name === "FSClo")!;
+    state = coreReducer(state, {
+      type: "addGate",
+      gateType: "rectangle",
+      xChannel: "FSC-A",
+      yChannel: "SSC-A",
+      vertices: [[0, 0], [10, 10]],
+      name: "Second",
+    });
+    const secondGateId = state.gate_order[1];
+    const edited = coreReducer(state, {
+      type: "setPopulationGateRefs",
+      popId: population.population_id,
+      gateRefs: [{ gate_id: secondGateId, include: true }],
+    });
+
+    expect(edited.populations[population.population_id].gate_refs).toEqual([
+      { gate_id: secondGateId, include: true },
+    ]);
+    expect(edited.gate_version).toBe(state.gate_version + 1);
+    expect(edited.undo).toHaveLength(state.undo.length + 1);
+    expect(coreReducer(edited, { type: "undo" }).populations[population.population_id].gate_refs)
+      .toEqual(state.populations[population.population_id].gate_refs);
+
+    const invalid = coreReducer(state, {
+      type: "setPopulationGateRefs",
+      popId: population.population_id,
+      gateRefs: [{ gate_id: "missing", include: true }],
+    });
+    expect(invalid).toBe(state);
   });
 
   it("bulkEditPopulations applies names and gate definitions atomically with one undo step", () => {
@@ -346,6 +432,82 @@ describe("store: gate + population flow", () => {
     // B under A (now a descendant of B) would cycle → no-op
     const cyc = coreReducer(moved, { type: "moveSelectedPopulations", popIds: [B.population_id], parentId: A.population_id });
     expect(cyc.populations[B.population_id].parent_id).toBe(moved.populations[B.population_id].parent_id);
+  });
+
+  it("movePopulation persists sibling order without invalidating gating masks", () => {
+    let state = coreReducer(initialCoreState(), { type: "loadSample", nEvents: 10 });
+    const root = state.root_population_id!;
+    for (const name of ["Alpha", "Zulu", "Beta"]) {
+      state = coreReducer(state, { type: "addPopulation", name, parentId: root, gateRefs: [] });
+    }
+    const byName = Object.fromEntries(
+      Object.values(state.populations).map((population) => [population.name, population.population_id]),
+    );
+    const before = [...state.populations[root].children];
+    const moved = coreReducer(state, {
+      type: "movePopulation",
+      popId: byName.Beta,
+      targetId: byName.Alpha,
+      placement: "before",
+    });
+
+    expect(moved.populations[root].children).toEqual([
+      byName.Beta,
+      byName.Alpha,
+      byName.Zulu,
+    ]);
+    expect(moved.gate_version).toBe(state.gate_version);
+    expect(moved.tree_version).toBe(state.tree_version + 1);
+    const undone = coreReducer(moved, { type: "undo" });
+    expect(undone.populations[root].children).toEqual(before);
+    expect(undone.gate_version).toBe(state.gate_version);
+    expect(undone.tree_version).toBe(moved.tree_version + 1);
+  });
+
+  it("movePopulation reparents into a target and rejects descendant cycles", () => {
+    let state = coreReducer(initialCoreState(), { type: "loadSample", nEvents: 10 });
+    const root = state.root_population_id!;
+    state = coreReducer(state, { type: "addPopulation", name: "A", parentId: root, gateRefs: [] });
+    const a = state.active_population_id!;
+    state = coreReducer(state, { type: "addPopulation", name: "B", parentId: root, gateRefs: [] });
+    const b = state.active_population_id!;
+    state = coreReducer(state, { type: "addPopulation", name: "C", parentId: a, gateRefs: [] });
+    const c = state.active_population_id!;
+    const moved = coreReducer(state, {
+      type: "movePopulation",
+      popId: c,
+      targetId: b,
+      placement: "inside",
+    });
+
+    expect(moved.populations[c].parent_id).toBe(b);
+    expect(moved.populations[b].children).toContain(c);
+    expect(moved.populations[a].children).not.toContain(c);
+    expect(moved.gate_version).toBe(state.gate_version + 1);
+
+    const cyclic = coreReducer(moved, {
+      type: "movePopulation",
+      popId: b,
+      targetId: c,
+      placement: "inside",
+    });
+    expect(cyclic).toBe(moved);
+  });
+
+  it("sortPopulationsAlpha is explicit, undoable, and presentation-only", () => {
+    let state = coreReducer(initialCoreState(), { type: "loadSample", nEvents: 10 });
+    const root = state.root_population_id!;
+    for (const name of ["Zulu", "Alpha", "Beta"]) {
+      state = coreReducer(state, { type: "addPopulation", name, parentId: root, gateRefs: [] });
+    }
+    const creationOrder = [...state.populations[root].children];
+    const sorted = coreReducer(state, { type: "sortPopulationsAlpha" });
+
+    expect(sorted.populations[root].children.map((id) => sorted.populations[id].name))
+      .toEqual(["Alpha", "Beta", "Zulu"]);
+    expect(sorted.gate_version).toBe(state.gate_version);
+    expect(sorted.tree_version).toBe(state.tree_version + 1);
+    expect(coreReducer(sorted, { type: "undo" }).populations[root].children).toEqual(creationOrder);
   });
 
   it("moveQuadrantCenter updates the crosshair centre", () => {

@@ -1605,6 +1605,10 @@ input[type="number"]::-webkit-outer-spin-button {
 }
 .gate-list-panel { min-height: 120px; max-height: 220px; }
 .population-tree-panel { min-height: 200px; flex: 1; }
+.population-tree-hint {
+  color: #7b8491; font-size: 10px; font-style: italic; line-height: 1.25;
+  padding: 1px 5px 4px;
+}
 
 .gate-card {
   display: flex; align-items: center; padding: 1px 8px; margin: 0;
@@ -1629,6 +1633,15 @@ input[type="number"]::-webkit-outer-spin-button {
 .pop-row-select { margin: 0; width: 13px; height: 13px; cursor: pointer; }
 .pop-row:hover { background: #eef; }
 .pop-row.active { background: #d6edff; border-color: #88b8ff; }
+.pop-row.dragging { opacity: 0.45; }
+.pop-row.drop-before { box-shadow: inset 0 2px 0 #2f80ed; }
+.pop-row.drop-after { box-shadow: inset 0 -2px 0 #2f80ed; }
+.pop-row.drop-inside { outline: 2px solid #2f80ed; outline-offset: -2px; }
+.pop-row.drop-invalid {
+  box-shadow: inset 0 0 0 1px #c94a4a;
+  outline: none;
+  cursor: not-allowed;
+}
 .pop-row-indent { display: inline-block; flex: 0 0 auto; }
 /* Name column sizes to its content (tree + name) so the pills sit right after it,
    instead of a fixed 40% that left a big gap. */
@@ -1640,6 +1653,11 @@ input[type="number"]::-webkit-outer-spin-button {
 }
 .pop-row-name-col > svg { display: block; flex-shrink: 0; align-self: stretch; overflow: visible; }
 .pop-row-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pop-row-name-input {
+  min-width: 0; width: 100%; height: 20px; padding: 1px 4px;
+  border: 1px solid #2f80ed; border-radius: 3px; background: #fff; color: #222;
+  font: inherit; font-weight: 500;
+}
 /* Pills fill the middle and wrap as whole badges when the pane is narrow. */
 .pop-row-gates-col { display: flex; align-items: center; flex: 1 1 auto; min-width: 0; overflow: visible; }
 .pop-row-gates {
@@ -1666,6 +1684,53 @@ input[type="number"]::-webkit-outer-spin-button {
   box-shadow: inset 0 0 0 2px #2f80ed, inset 0 0 0 3px rgba(255,255,255,0.9);
   filter: brightness(1.1);
 }
+.pop-tree-gate-add {
+  border: 1px dashed #9da8b5; background: #eef2f6; color: #536170;
+  cursor: pointer; font-family: inherit; font-weight: 700; min-width: 20px;
+}
+.pop-tree-gate-add:hover { background: #dfe8f2; border-color: #6f8297; }
+
+.pop-gate-picker {
+  position: fixed; z-index: 180; width: 300px; max-height: 300px;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px; border: 1px solid #aeb9c6; border-radius: 6px;
+  background: #fff; color: #222; box-shadow: 0 8px 24px rgba(31,45,61,0.24);
+}
+.pop-gate-picker-title {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  min-width: 0; font-size: 12px; font-weight: 600;
+}
+.pop-gate-picker-title > span {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pop-gate-picker-title > button {
+  flex: 0 0 auto; width: 22px; height: 22px; padding: 0; border: 0;
+  border-radius: 3px; background: transparent; color: #596777; font-size: 17px; cursor: pointer;
+}
+.pop-gate-picker-title > button:hover { background: #edf2f7; }
+.pop-gate-picker-remove {
+  width: 100%; padding: 5px 7px; border: 1px solid #e1b8b8; border-radius: 4px;
+  background: #fff7f7; color: #9d2d2d; text-align: left; font-size: 11px; cursor: pointer;
+}
+.pop-gate-picker-remove:hover { background: #fdeaea; }
+.pop-gate-picker-search {
+  width: 100%; padding: 5px 7px; border: 1px solid #c8d1dc; border-radius: 4px;
+  background: #fff; color: #222; font-size: 12px;
+}
+.pop-gate-picker-list {
+  min-height: 0; overflow-y: auto; border: 1px solid #e0e5eb; border-radius: 4px;
+}
+.pop-gate-picker-choice {
+  display: flex; align-items: center; gap: 7px; width: 100%; padding: 5px 7px;
+  border: 0; border-bottom: 1px solid #edf0f3; background: #fff; color: #222;
+  text-align: left; font-size: 11px; line-height: 1.25; cursor: pointer;
+}
+.pop-gate-picker-choice:last-child { border-bottom: 0; }
+.pop-gate-picker-choice:hover, .pop-gate-picker-choice.current { background: #e9f2ff; }
+.pop-gate-picker-swatch {
+  flex: 0 0 11px; width: 11px; height: 11px; border-radius: 2px;
+}
+.pop-gate-picker-empty { padding: 12px 8px; color: #7b8491; font-size: 11px; text-align: center; }
 
 /* ── Modals ─────────────────────────────────────────────────────── */
 .gl-modal-backdrop {

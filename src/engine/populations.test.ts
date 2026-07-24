@@ -213,7 +213,7 @@ describe("applyGatingStrategy — percent_of_parent through 3+ nested levels", (
 });
 
 describe("populationTreeOrder — depth + isLastPath for tree connectors", () => {
-  // Root → Aaa → A1 (leaf); Root → Bbb (leaf). Children sort by name (Aaa before Bbb).
+  // Root → Aaa → A1 (leaf); Root → Bbb (leaf). The stored child order is authoritative.
   const pops: PopulationMap = {
     root: pop("root", "Root", null, ["a", "b"]),
     a: pop("a", "Aaa", "root", ["a1"]),
@@ -233,6 +233,19 @@ describe("populationTreeOrder — depth + isLastPath for tree connectors", () =>
   it("returns [] for a null/absent root", () => {
     expect(populationTreeOrder(pops, null)).toEqual([]);
     expect(populationTreeOrder(pops, "nope")).toEqual([]);
+  });
+
+  it("preserves a deliberately non-alphabetical sibling order", () => {
+    const custom: PopulationMap = {
+      root: pop("root", "Root", null, ["z", "a"]),
+      z: pop("z", "Zulu", "root", []),
+      a: pop("a", "Alpha", "root", []),
+    };
+    expect(populationTreeOrder(custom, "root").map(({ popId }) => popId)).toEqual([
+      "root",
+      "z",
+      "a",
+    ]);
   });
 });
 
