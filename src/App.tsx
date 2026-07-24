@@ -4061,8 +4061,8 @@ export default function App() {
         <BulkRenameModal
           state={state}
           onCancel={() => setCrud(null)}
-          onConfirm={(mapping) => {
-            dispatch({ type: "bulkRenamePopulations", mapping });
+          onConfirm={(updates) => {
+            dispatch({ type: "bulkEditPopulations", updates });
             setCrud(null);
           }}
         />

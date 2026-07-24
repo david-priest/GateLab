@@ -130,6 +130,10 @@ export type Action =
     }
   | { type: "deletePopulations"; popIds: string[] }
   | { type: "bulkRenamePopulations"; mapping: Record<string, string> } // by current name → new name
+  | {
+      type: "bulkEditPopulations";
+      updates: { popId: string; name: string; gateRefs: GateRef[] }[];
+    }
   | { type: "moveSelectedPopulations"; popIds: string[]; parentId: string }
   | { type: "duplicateSelectedPopulations"; popIds: string[] }
   | { type: "deleteGates"; gateIds: string[] }
@@ -387,6 +391,55 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
       for (const pop of Object.values(populations)) {
         const nn = action.mapping[pop.name];
         if (nn && nn.trim() && nn.trim() !== pop.name) { pop.name = nn.trim(); changed = true; }
+      }
+      if (!changed) return state;
+      sortPopulationTree(populations, state.root_population_id!);
+      return { ...state, ...pushUndo(state), populations, gate_version: state.gate_version + 1 };
+    }
+
+    case "bulkEditPopulations": {
+      const seenPopulations = new Set<string>();
+      for (const update of action.updates) {
+        const population = state.populations[update.popId];
+        if (!population || seenPopulations.has(update.popId)) return state;
+        seenPopulations.add(update.popId);
+        if (update.popId === state.root_population_id && update.gateRefs.length > 0) return state;
+        const seenRefs = new Set<string>();
+        for (const ref of update.gateRefs) {
+          const gate = state.gates[ref.gate_id];
+          const refKey = `${ref.gate_id}:${ref.quadrant ?? ""}`;
+          if (!gate || seenRefs.has(refKey)) return state;
+          seenRefs.add(refKey);
+          if (
+            (gate.gate_type === "quadrant" &&
+              (!Number.isInteger(ref.quadrant) || ref.quadrant! < 1 || ref.quadrant! > 4)) ||
+            (gate.gate_type !== "quadrant" && ref.quadrant !== undefined)
+          ) return state;
+        }
+      }
+
+      const populations = clonePops(state.populations);
+      let changed = false;
+      for (const update of action.updates) {
+        const population = populations[update.popId];
+        const name = update.name.trim() || population.name;
+        const refsChanged =
+          population.gate_refs.length !== update.gateRefs.length ||
+          population.gate_refs.some((ref, index) => {
+            const next = update.gateRefs[index];
+            return !next ||
+              ref.gate_id !== next.gate_id ||
+              ref.include !== next.include ||
+              ref.quadrant !== next.quadrant;
+          });
+        if (name !== population.name) {
+          population.name = name;
+          changed = true;
+        }
+        if (refsChanged) {
+          population.gate_refs = update.gateRefs.map((ref) => ({ ...ref }));
+          changed = true;
+        }
       }
       if (!changed) return state;
       sortPopulationTree(populations, state.root_population_id!);

@@ -8,6 +8,12 @@ import { populationTreeOrder } from "../engine/populations";
 import type { FcsExportAssay } from "../engine/fcsExport";
 import { analyzeGatingMLQuadrantOmissions, type GatingMLFormat } from "../engine/gatingmlExport";
 import type { GatingImportMode } from "../engine/gatingMerge";
+import {
+  parsePopulationEditTable,
+  serializePopulationEditTemplate,
+  type PopulationBulkEditPreview,
+  type PopulationBulkEditUpdate,
+} from "../engine/populationTable";
 import { useI18n } from "./i18n";
 
 function ModalShell({ title, children }: { title: string; children: React.ReactNode }) {
@@ -284,7 +290,7 @@ export function FcsExportModal({
   );
 }
 
-/** Bulk-rename populations from a CSV (old_population,new_population) with a template download. */
+/** Atomic, previewed bulk edits of population names and positive AND gate definitions. */
 export function BulkRenameModal({
   state,
   onCancel,
@@ -292,48 +298,82 @@ export function BulkRenameModal({
 }: {
   state: CoreState;
   onCancel: () => void;
-  onConfirm: (mapping: Record<string, string>) => void;
+  onConfirm: (updates: PopulationBulkEditUpdate[]) => void;
 }) {
   const { t } = useI18n();
   const fileRef = useRef<HTMLInputElement>(null);
   const [err, setErr] = useState<string | null>(null);
-  const names = populationTreeOrder(state.populations, state.root_population_id ?? null)
-    .map(({ popId }) => state.populations[popId]?.name ?? popId)
-    .filter((n, i, a) => a.indexOf(n) === i);
+  const [preview, setPreview] = useState<PopulationBulkEditPreview | null>(null);
+  const tableState = useMemo(() => ({
+    populations: state.populations,
+    gates: state.gates,
+    rootPopulationId: state.root_population_id,
+  }), [state.populations, state.gates, state.root_population_id]);
 
   const downloadTemplate = () => {
-    const csv = "old_population,new_population\n" + names.map((n) => `${JSON.stringify(n)},${JSON.stringify(n)}`).join("\n") + "\n";
+    setErr(null);
+    let csv: string;
+    try {
+      csv = serializePopulationEditTemplate(tableState);
+    } catch (cause) {
+      setErr(cause instanceof Error ? cause.message : String(cause));
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-    a.download = "population_rename_template.csv";
+    a.href = url;
+    a.download = "population_edit_template.csv";
     a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
   const onFile = async (f: File) => {
     try {
-      const lines = (await f.text()).split(/\r\n|\r|\n/).filter((l) => l.trim());
-      const mapping: Record<string, string> = {};
-      for (let i = 1; i < lines.length; i++) {
-        const cells = lines[i].match(/("([^"]|"")*"|[^,]*)(,|$)/g)?.map((c) => c.replace(/,$/, "").replace(/^"|"$/g, "").replace(/""/g, '"').trim()) ?? [];
-        if (cells[0] && cells[1] && cells[0] !== cells[1]) mapping[cells[0]] = cells[1];
-      }
-      if (Object.keys(mapping).length === 0) { setErr("No renames found (need old_population,new_population columns)."); return; }
-      onConfirm(mapping);
+      setPreview(parsePopulationEditTable(await f.text(), tableState));
+      setErr(null);
     } catch (e) {
+      setPreview(null);
       setErr(e instanceof Error ? e.message : String(e));
     }
   };
   return (
-    <ModalShell title="Bulk-rename populations">
+    <ModalShell title="Bulk-edit populations">
       <p style={{ fontSize: 12, color: "#555", margin: "2px 0 12px", lineHeight: 1.4 }}>
-        {t("Download the template, edit the new_population column, and upload it. Rows are matched by current name.")}
+        {t("Download the template, edit new_population and gate_names, then upload it. Gate names are a comma-separated positive AND list; quadrant references use Gate name [Q1]. Population IDs keep rows unambiguous.")}
       </p>
       {err && <p style={{ fontSize: 12, color: "#d64545" }}>{err}</p>}
+      {preview && (
+        <div className="gl-modal-note" role="status">
+          <strong>{t("Validated — no changes have been applied yet.")}</strong>
+          <br />
+          {t("{rows} rows · {renames} renames · {definitions} gate definitions changed · {unchanged} unchanged", {
+            rows: preview.rowCount,
+            renames: preview.renameCount,
+            definitions: preview.gateDefinitionCount,
+            unchanged: preview.unchangedCount,
+          })}
+          {preview.omittedCount > 0
+            ? ` · ${t("{count} omitted populations will be left unchanged", { count: preview.omittedCount })}`
+            : ""}
+          {preview.legacyRenameOnly ? ` · ${t("legacy rename-only file")}` : ""}
+        </div>
+      )}
       <input ref={fileRef} type="file" accept=".csv,.tsv,.txt" style={{ display: "none" }}
-        onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); }} />
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void onFile(f);
+          e.target.value = "";
+        }} />
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={downloadTemplate}>{t("Template ↧")}</button>
         <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
-        <button className="gl-btn" onClick={() => fileRef.current?.click()}>{t("Upload CSV…")}</button>
+        <button className="gl-btn-ghost" onClick={() => fileRef.current?.click()}>{t("Choose CSV/TSV…")}</button>
+        <button
+          className="gl-btn"
+          disabled={!preview || (preview.renameCount === 0 && preview.gateDefinitionCount === 0)}
+          onClick={() => preview && onConfirm(preview.updates)}
+        >
+          {t("Apply changes")}
+        </button>
       </div>
     </ModalShell>
   );

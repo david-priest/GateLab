@@ -295,6 +295,43 @@ describe("store: gate + population flow", () => {
     expect(Object.values(renamed.populations).some((p) => p.name === "FSClo")).toBe(false);
   });
 
+  it("bulkEditPopulations applies names and gate definitions atomically with one undo step", () => {
+    const { state } = withGate();
+    const population = Object.values(state.populations).find((p) => p.name === "FSClo")!;
+    const edited = coreReducer(state, {
+      type: "bulkEditPopulations",
+      updates: [{
+        popId: population.population_id,
+        name: "Small",
+        gateRefs: [],
+      }],
+    });
+
+    expect(edited.populations[population.population_id]).toMatchObject({
+      name: "Small",
+      gate_refs: [],
+    });
+    expect(edited.undo).toHaveLength(state.undo.length + 1);
+    expect(edited.gate_version).toBe(state.gate_version + 1);
+
+    const invalid = coreReducer(state, {
+      type: "bulkEditPopulations",
+      updates: [
+        {
+          popId: population.population_id,
+          name: "Would change",
+          gateRefs: [],
+        },
+        {
+          popId: "missing",
+          name: "Invalid",
+          gateRefs: [],
+        },
+      ],
+    });
+    expect(invalid).toBe(state);
+  });
+
   it("moveSelectedPopulations reparents and guards cycles", () => {
     const sample = makeSample();
     let state = coreReducer(initialCoreState(), { type: "loadSample", nEvents: sample.fcs.nEvents });
