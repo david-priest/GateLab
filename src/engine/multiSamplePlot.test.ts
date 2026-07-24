@@ -4,6 +4,7 @@ import { Sample } from "./sample";
 import {
   allocateCombinedSampleCaps,
   buildCombinedSamplePointCloud,
+  buildWorkspaceAxisRanges,
   type CombinedSamplePlotInput,
 } from "./multiSamplePlot";
 
@@ -79,5 +80,22 @@ describe("buildCombinedSamplePointCloud", () => {
     expect(cloud.x).toHaveLength(0);
     expect(cloud.y).toHaveLength(0);
     expect(cloud.colors).toBeNull();
+  });
+});
+
+describe("buildWorkspaceAxisRanges", () => {
+  it("uses every compatible file and ignores population masks", () => {
+    const first = input("a", [1, 2, 3], Uint8Array.from([1, 0, 0]));
+    const second = input("b", [100, 110, 120], Uint8Array.from([0, 0, 1]));
+    const ranges = buildWorkspaceAxisRanges([first, second], 100);
+    const firstX = first.sample.displayColumn(first.xIndex);
+    const firstY = first.sample.displayColumn(first.yIndex);
+    const secondX = second.sample.displayColumn(second.xIndex);
+    const secondY = second.sample.displayColumn(second.yIndex);
+    expect(ranges).not.toBeNull();
+    expect(ranges!.xRange[0]).toBeLessThan(firstX[0]);
+    expect(ranges!.xRange[1]).toBeGreaterThan(secondX[secondX.length - 1]);
+    expect(ranges!.yRange[0]).toBeLessThan(firstY[0]);
+    expect(ranges!.yRange[1]).toBeGreaterThan(secondY[secondY.length - 1]);
   });
 });

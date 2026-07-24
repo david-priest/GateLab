@@ -200,9 +200,18 @@ export function MovePopsModal({
 }
 
 /** FCS export dialog: pick populations, an explicit value space, and sample scope. */
+export interface FcsExportSampleOption {
+  id: string;
+  name: string;
+  eventCount: number;
+  active: boolean;
+  checked: boolean;
+}
+
 export function FcsExportModal({
   state,
-  samplesCount,
+  samples,
+  combinedCompatibility,
   initialPopIds,
   initialAssay,
   initialScope,
@@ -210,7 +219,8 @@ export function FcsExportModal({
   onExport,
 }: {
   state: CoreState;
-  samplesCount: number;
+  samples: readonly FcsExportSampleOption[];
+  combinedCompatibility: { compatible: boolean; reason: string | null };
   initialPopIds: string[];
   initialAssay: FcsExportAssay;
   initialScope: "active" | "combined" | "split";
@@ -222,7 +232,13 @@ export function FcsExportModal({
   const allIds = order.map((o) => o.popId);
   const [checked, setChecked] = useState<Set<string>>(() => new Set(initialPopIds));
   const [assay, setAssay] = useState(initialAssay);
-  const [scope, setScope] = useState(initialScope);
+  const activeSample = samples.find((sample) => sample.active) ?? samples[0] ?? null;
+  const checkedSamples = samples.filter((sample) => sample.checked);
+  const [scope, setScope] = useState<"active" | "combined" | "split">(() => {
+    if (initialScope === "combined" && !combinedCompatibility.compatible) return "split";
+    if (initialScope !== "active" && checkedSamples.length === 0) return "active";
+    return initialScope;
+  });
   const toggle = (id: string) =>
     setChecked((prev) => {
       const n = new Set(prev);
@@ -263,26 +279,102 @@ export function FcsExportModal({
         {assay === "display" && "Exports the values currently used for display after compensation (when enabled) and logicle/arcsinh transformation."}
         {" "}The output file is FCS 3.0 with 32-bit floating-point values.
       </div>
-      {samplesCount > 1 && (
-        <label className="gl-modal-field">
-          <span>{t("Samples")}</span>
-          <select value={scope} onChange={(e) => setScope(e.target.value as typeof scope)}>
-            <option value="active">{t("this sample")}</option>
-            <option value="combined">{t("all (combined)")}</option>
-            <option value="split">{t("all (split zip)")}</option>
-          </select>
-        </label>
-      )}
-      {samplesCount > 1 && scope === "combined" && (
-        <div className="gl-modal-note">
-          Combined export requires every sample containing selected events to have the same channels
-          (channel order may differ). If panels differ, choose “all (split zip)”; GateLab will not omit
-          samples or channels from a combined file.
+      <div className="gl-modal-field">
+        <span>{t("FCS source and packaging")}</span>
+        <div className="gl-fcs-scope-options">
+          <label className={`gl-fcs-scope-option${scope === "active" ? " selected" : ""}`}>
+            <input
+              type="radio"
+              name="fcs-export-scope"
+              value="active"
+              checked={scope === "active"}
+              disabled={!activeSample}
+              onChange={() => setScope("active")}
+            />
+            <span>
+              <strong>
+                {t("Active file only — {name}", { name: activeSample?.name ?? t("none") })}
+              </strong>
+              <small>{t("The blue row is exported; other checked files are ignored.")}</small>
+            </span>
+          </label>
+          <label className={`gl-fcs-scope-option${scope === "split" ? " selected" : ""}`}>
+            <input
+              type="radio"
+              name="fcs-export-scope"
+              value="split"
+              checked={scope === "split"}
+              disabled={checkedSamples.length === 0}
+              onChange={() => setScope("split")}
+            />
+            <span>
+              <strong>
+                {t("Checked files, kept separate — {count} FCS", {
+                  count: checkedSamples.length,
+                })}
+                {checkedSamples.length > 1 && <em>{t("Recommended")}</em>}
+              </strong>
+              <small>{t("Preserves each source filename and sample identity; multiple outputs are placed in one ZIP.")}</small>
+            </span>
+          </label>
+          <label className={`gl-fcs-scope-option${scope === "combined" ? " selected" : ""}`}>
+            <input
+              type="radio"
+              name="fcs-export-scope"
+              value="combined"
+              checked={scope === "combined"}
+              disabled={!combinedCompatibility.compatible}
+              onChange={() => setScope("combined")}
+            />
+            <span>
+              <strong>{t("Pool checked files into one FCS — advanced")}</strong>
+              <small>
+                {combinedCompatibility.compatible
+                  ? t("Events are concatenated into one file. Source-file identity is not retained.")
+                  : combinedCompatibility.reason}
+              </small>
+            </span>
+          </label>
         </div>
-      )}
+      </div>
+      <div className="gl-fcs-export-summary" role="status">
+        <strong>{t("Export summary")}</strong>
+        <span>
+          {scope === "active"
+            ? t("{populations} populations from {name}", {
+                populations: checked.size,
+                name: activeSample?.name ?? t("none"),
+              })
+            : scope === "split"
+              ? t("{populations} populations × {files} checked files, kept separate", {
+                  populations: checked.size,
+                  files: checkedSamples.length,
+                })
+              : t("{populations} pooled population files from {files} checked files", {
+                  populations: checked.size,
+                  files: checkedSamples.length,
+                })}
+        </span>
+        {scope !== "active" && checkedSamples.length > 0 && (
+          <span title={checkedSamples.map((sample) => sample.name).join("\n")}>
+            {t("Sources: {names}", {
+              names: checkedSamples.map((sample) => sample.name).join(", "),
+            })}
+          </span>
+        )}
+      </div>
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
-        <button className="gl-btn" disabled={checked.size === 0} onClick={() => onExport([...checked], assay, scope)}>
+        <button
+          className="gl-btn"
+          disabled={
+            checked.size === 0 ||
+            (scope === "active" && !activeSample) ||
+            (scope === "split" && checkedSamples.length === 0) ||
+            (scope === "combined" && !combinedCompatibility.compatible)
+          }
+          onClick={() => onExport([...checked], assay, scope)}
+        >
           {t("Export")}{checked.size > 1 ? ` (${checked.size})` : ""}
         </button>
       </div>

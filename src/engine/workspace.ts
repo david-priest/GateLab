@@ -89,6 +89,8 @@ export interface WorkspaceFile {
 export interface IllustrationConfig {
   /** Explicit plot family. Optional so workspaces saved before heatmaps remain valid. */
   plotType?: "biplot" | "histogram" | "heatmap";
+  /** Pool matching populations across checked FCS files; false keeps file-labelled rows. */
+  combineSamples?: boolean;
   popIds: string[];
   xChannels: string[];
   yChannel: string;

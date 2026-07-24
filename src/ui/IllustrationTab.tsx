@@ -13,11 +13,14 @@ import type { Sample } from "../engine/sample";
 import type { IllustrationConfig, IllustrationPreset } from "../engine/workspace";
 import { loadMiniPlots } from "../plots/loadPlots";
 import { exportGridPNG, exportGridSVG, exportGridPDF } from "../plots/gridExport";
-import { buildIllustrationPayload } from "../engine/illustration";
+import {
+  buildMultiSampleIllustrationPayload,
+  type IllustrationSampleSource,
+} from "../engine/illustration";
 import { populationTreeOrder } from "../engine/populations";
 import { populationColor } from "../engine/palettes";
 import {
-  buildHeatmapPayload,
+  buildMultiSampleHeatmapPayload,
   heatmapScaleNeedsPopulationComparison,
   type HeatmapPalette,
   type HeatmapScaleMode,
@@ -30,6 +33,15 @@ import { useI18n } from "./i18n";
 
 interface Props {
   sample: Sample;
+  sampleViews: readonly Readonly<{
+    id: string;
+    name: string;
+    sample: Sample;
+    derived: Derived;
+  }>[];
+  activeSampleId: string | null;
+  checkedSampleCount: number;
+  pendingSampleCount: number;
   state: CoreState;
   derived: Derived;
   globalScales: Record<string, [number, number]>;
@@ -61,6 +73,10 @@ function configsMatch(a: IllustrationConfig, b: IllustrationConfig): boolean {
 
 export function IllustrationTab({
   sample,
+  sampleViews,
+  activeSampleId,
+  checkedSampleCount,
+  pendingSampleCount,
   state,
   derived,
   globalScales,
@@ -83,6 +99,7 @@ export function IllustrationTab({
   const c0 = configRef.current;
   const initialPlotType = c0?.plotType ?? (c0?.yChannel === "" ? "histogram" : "biplot");
   const [plotType, setPlotType] = useState<"biplot" | "histogram" | "heatmap">(initialPlotType);
+  const [combineSamples, setCombineSamples] = useState(c0?.combineSamples ?? false);
   const [popIds, setPopIds] = useState<string[]>(() => (c0 ? c0.popIds : order.slice(0, 4).map((o) => o.popId)));
   const [xChannels, setXChannels] = useState<string[]>(() => (c0 ? c0.xChannels : [defaultX]));
   const [yChannel, setYChannel] = useState(c0?.yChannel || defaultY);
@@ -132,11 +149,18 @@ export function IllustrationTab({
   const isHistogram = plotType === "histogram";
   const isHeatmap = plotType === "heatmap";
   const isContour = plotType === "biplot" && displayMode === "contour";
+  const sampleScopeReady =
+    checkedSampleCount > 0 &&
+    sampleViews.length === checkedSampleCount &&
+    pendingSampleCount === 0;
   // Per-channel scaling (min-max or z-score) needs ≥2 populations to have a within-channel range;
   // with one population every cell collapses to a single flat value (minmax → 0.5, z-score → 0).
   const heatmapDegenerate =
     isHeatmap &&
-    heatmapScaleNeedsPopulationComparison(heatmapScale, popIds.length);
+    heatmapScaleNeedsPopulationComparison(
+      heatmapScale,
+      popIds.length * (combineSamples ? 1 : Math.max(1, sampleViews.length)),
+    );
   const isRidgeline = isHistogram && histLayout === "ridgeline";
 
   // Default colour = the population's STABLE slot (frozen: adding/removing a population never
@@ -148,7 +172,8 @@ export function IllustrationTab({
   // Assemble the live config and mirror it into the App-held ref after every render, so the
   // settings survive a tab unmount (persist across tab switches) and App can save them.
   const currentConfig: IllustrationConfig = {
-    plotType, popIds, xChannels, yChannel, displayMode, plotSize, nColumns, fitToColumns, maxEvents, allEvents,
+    plotType, combineSamples, popIds, xChannels, yChannel, displayMode, plotSize, nColumns,
+    fitToColumns, maxEvents, allEvents,
     colorByPop, overlayPops, popColors, pointSize, pointAlpha, contourThreshold, kdeBandwidth, pubStyle,
     densityColorPower,
     gateLineWidth, histLineWidth, histFill, histFillAlpha, histOverlayMode, histLayout, ridgeOverlap,
@@ -164,6 +189,7 @@ export function IllustrationTab({
   // Apply a full config bundle (preset load).
   const applyConfig = (c: IllustrationConfig) => {
     setPlotType(c.plotType ?? (c.yChannel === "" ? "histogram" : "biplot"));
+    setCombineSamples(c.combineSamples ?? false);
     setPopIds(c.popIds); setXChannels(c.xChannels); setYChannel(c.yChannel);
     setDisplayMode(c.displayMode); setPlotSize(c.plotSize); setNColumns(c.nColumns);
     setFitToColumns(c.fitToColumns); setMaxEvents(c.maxEvents); setAllEvents(c.allEvents);
@@ -184,6 +210,10 @@ export function IllustrationTab({
 
   useEffect(() => {
     if (!containerRef.current) return;
+    // Never render a misleading partial checked-file result. Inactive masks are prepared
+    // between paints; retaining the previous illustration also avoids rebuilding the grid once
+    // per arriving FCS in a large workspace.
+    if (!sampleScopeReady) return;
     const c = renderedConfig;
     const renderedPlotType = c.plotType ?? (c.yChannel === "" ? "histogram" : "biplot");
     const cap = c.allEvents ? Infinity : c.maxEvents;
@@ -194,14 +224,21 @@ export function IllustrationTab({
         state.populations[popId]?.colorSlot ?? Math.max(0, c.popIds.indexOf(popId)),
       );
 
+    const illustrationSources: IllustrationSampleSource[] = sampleViews.map((view) => ({
+      id: view.id,
+      name: view.name,
+      sample: view.sample,
+      masks: view.derived.masks,
+      eventCount: view.derived.stats.event_count,
+    }));
+
     if (renderedPlotType === "heatmap") {
-      const heatmap = buildHeatmapPayload(
-        sample,
+      const heatmap = buildMultiSampleHeatmapPayload(
+        illustrationSources,
         state.populations,
-        derived.masks,
-        derived.stats.event_count,
         c.popIds,
         c.xChannels,
+        c.combineSamples ?? false,
         {
           summaryStat: c.heatmapStat ?? "median",
           scaleMode: c.heatmapScale ?? "column_minmax",
@@ -223,13 +260,12 @@ export function IllustrationTab({
     const renderedYChannel = renderedPlotType === "biplot"
       ? (c.yChannel || defaultY || sample.channels[0]?.key || null)
       : null;
-    const payload = buildIllustrationPayload(
-      sample,
+    const payload = buildMultiSampleIllustrationPayload(
+      illustrationSources,
+      activeSampleId,
       state.gates,
       state.gate_order,
       state.populations,
-      derived.masks,
-      derived.stats.event_count,
       c.popIds,
       c.xChannels,
       renderedYChannel,
@@ -263,12 +299,13 @@ export function IllustrationTab({
         fontSizes: { tick: c.fontTick, axis_label: c.fontAxis, gate_label: c.fontGate, title: c.fontTitle },
         scaleFontsWithPlot: c.scaleFontsWithPlot ?? true,
       },
+      c.combineSamples ?? false,
     );
     loadMiniPlots().renderIllustrationGrid("illustration-grid-container", payload);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    sample, renderedConfig, state.gates, state.gate_order, state.populations,
-    state.gate_version, globalScales, derived, dataRevision,
+    sample, sampleViews, activeSampleId, renderedConfig, state.gates, state.gate_order,
+    state.populations, state.gate_version, globalScales, derived, dataRevision, sampleScopeReady,
   ]);
 
   const toggle = <T,>(arr: T[], v: T): T[] => (arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);
@@ -284,11 +321,21 @@ export function IllustrationTab({
           <button
             className={`gl-btn gl-illust-render${renderPending ? " pending" : ""}`}
             title="Apply the current controls and rebuild the illustration"
+            disabled={!sampleScopeReady}
             onClick={() => setRenderedConfig(snapshotConfig(currentConfig))}
           >
             {t("Render Illustration")}
           </button>
           {renderPending && <span className="gl-illust-pending">{t("Changes pending")}</span>}
+          <span className="gl-illust-sample-status">
+            {t("{ready} of {checked} checked FCS ready", {
+              ready: sampleViews.length,
+              checked: checkedSampleCount,
+            })}
+            {pendingSampleCount > 0
+              ? ` · ${t("preparing {count} population masks…", { count: pendingSampleCount })}`
+              : ""}
+          </span>
         </div>
         {/* Named presets — save / load / delete the whole illustration config */}
         <div className="gl-illust-row">
@@ -333,6 +380,22 @@ export function IllustrationTab({
           >
             {t("Delete")}
           </button>
+          <span className="gl-ctl-sep" />
+          <span className="gl-stats-opt-label">{t("FCS files")}</span>
+          <label className="gl-check" title={t("Unchecked files in the Samples panel are excluded.")}>
+            <input
+              type="checkbox"
+              checked={combineSamples}
+              disabled={checkedSampleCount < 2}
+              onChange={(event) => setCombineSamples(event.target.checked)}
+            />
+            {t("Combine checked FCS files")}
+          </label>
+          <span className="gl-hint">
+            {combineSamples
+              ? t("One pooled illustration")
+              : t("Separate file-labelled rows")}
+          </span>
         </div>
         {/* Plot type + display + contour smoothing */}
         <div className="gl-illust-row">

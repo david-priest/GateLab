@@ -418,6 +418,21 @@ export class Sample {
     ]);
   }
 
+  /**
+   * Workspace-wide axis ranges are shared across files in the same assay family.
+   *
+   * Individual FCS files can have different automatically estimated transform
+   * parameters, but selecting a different file must not swap the user's axis frame.
+   * Original and compensated measurements remain separate because their coordinates
+   * are not interchangeable.
+   */
+  get workspaceScaleContextKey(): string {
+    return JSON.stringify([
+      this.activeLayer,
+      this.instrument,
+    ]);
+  }
+
   /** Exact active assay + display-transform identity for one channel's annotations. */
   displayCoordinateBindingKey(channelKey: string): string {
     const idx = this.byName.get(channelKey);

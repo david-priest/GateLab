@@ -5,6 +5,7 @@ import { Sample } from "./sample";
 import {
   exportPopulationFcs,
   exportPopulationFcsCombined,
+  inspectCombinedFcsCompatibility,
   sanitizeFcsName,
   writeFcs,
 } from "./fcsExport";
@@ -240,6 +241,37 @@ describe("exportPopulationFcsCombined — concatenates masked events across samp
     expect(() => exportPopulationFcsCombined([
       { sample: one, name: "one.fcs", mask: new Uint8Array(2) },
     ])).toThrow(/contains no events/i);
+  });
+});
+
+describe("inspectCombinedFcsCompatibility", () => {
+  it("accepts the same channel set in a different order", () => {
+    const first = syntheticSample([
+      { name: "A", values: [1] },
+      { name: "B", values: [2] },
+    ]);
+    const second = syntheticSample([
+      { name: "B", values: [3] },
+      { name: "A", values: [4] },
+    ]);
+    expect(inspectCombinedFcsCompatibility([
+      { sample: first, name: "first.fcs" },
+      { sample: second, name: "second.fcs" },
+    ])).toEqual({ compatible: true, reason: null });
+  });
+
+  it("disables pooled export and names the mismatched FCS", () => {
+    const full = syntheticSample([
+      { name: "A", values: [1] },
+      { name: "B", values: [2] },
+    ]);
+    const missing = syntheticSample([{ name: "A", values: [3] }]);
+    const result = inspectCombinedFcsCompatibility([
+      { sample: full, name: "full.fcs" },
+      { sample: missing, name: "missing.fcs" },
+    ]);
+    expect(result.compatible).toBe(false);
+    expect(result.reason).toMatch(/missing\.fcs.*missing B/i);
   });
 });
 

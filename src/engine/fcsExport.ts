@@ -15,6 +15,11 @@ import type { Sample } from "./sample";
 
 export type FcsExportAssay = "original" | "compensated" | "display";
 
+export interface CombinedFcsCompatibility {
+  compatible: boolean;
+  reason: string | null;
+}
+
 export interface FcsExportChannel {
   name: string; // $PnN — original FCS parameter name
   desc: string; // $PnS — display / marker name
@@ -168,6 +173,47 @@ function maskCount(mask: Uint8Array): number {
   let c = 0;
   for (let i = 0; i < mask.length; i++) if (mask[i]) c++;
   return c;
+}
+
+/** Conservative preflight for the pooled-export option shown in the export dialog. */
+export function inspectCombinedFcsCompatibility(
+  samples: readonly { sample: Sample; name?: string }[],
+): CombinedFcsCompatibility {
+  if (samples.length < 2) {
+    return {
+      compatible: false,
+      reason: "Check at least two FCS files to create one pooled FCS.",
+    };
+  }
+  const reference = samples[0];
+  const referenceKeys = reference.sample.channels.map((channel) => channel.key);
+  if (new Set(referenceKeys).size !== referenceKeys.length) {
+    return {
+      compatible: false,
+      reason: `${reference.name || "The reference FCS"} contains duplicate channel identifiers.`,
+    };
+  }
+  const referenceSet = new Set(referenceKeys);
+  for (let index = 1; index < samples.length; index++) {
+    const candidate = samples[index];
+    const keys = candidate.sample.channels.map((channel) => channel.key);
+    const set = new Set(keys);
+    const duplicates = keys.filter((key, keyIndex) => keys.indexOf(key) !== keyIndex);
+    const missing = referenceKeys.filter((key) => !set.has(key));
+    const extra = keys.filter((key) => !referenceSet.has(key));
+    if (missing.length || extra.length || duplicates.length) {
+      const details = [
+        missing.length ? `missing ${missing.join(", ")}` : "",
+        extra.length ? `extra ${extra.join(", ")}` : "",
+        duplicates.length ? `duplicate ${[...new Set(duplicates)].join(", ")}` : "",
+      ].filter(Boolean).join("; ");
+      return {
+        compatible: false,
+        reason: `${candidate.name || `FCS ${index + 1}`} has a different channel panel (${details}).`,
+      };
+    }
+  }
+  return { compatible: true, reason: null };
 }
 
 /**

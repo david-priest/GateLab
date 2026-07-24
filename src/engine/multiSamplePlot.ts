@@ -1,4 +1,5 @@
 import type { Sample } from "./sample";
+import { robustAxisRange } from "./axisRange";
 
 export interface CombinedSamplePlotInput {
   id: string;
@@ -22,6 +23,11 @@ export interface CombinedSamplePointCloud {
   /** Full selected-event count before display downsampling. */
   eventCount: number;
   sampleEventCounts: ReadonlyArray<{ id: string; name: string; eventCount: number }>;
+}
+
+export interface WorkspaceAxisRanges {
+  xRange: [number, number];
+  yRange: [number, number];
 }
 
 function countSelected(mask: Uint8Array | null, eventCount: number): number {
@@ -152,5 +158,35 @@ export function buildCombinedSamplePointCloud(
       name: input.name,
       eventCount: counts[index],
     })),
+  };
+}
+
+/**
+ * Compute one stable automatic frame from every compatible file in the workspace.
+ *
+ * This deliberately ignores the checked-file display subset. Checking files changes
+ * which events are drawn, but must not make axes jump while a user compares samples.
+ * The deterministic shared cap also prevents range calculation from multiplying the
+ * point budget by the number of loaded FCS files.
+ */
+export function buildWorkspaceAxisRanges(
+  inputs: readonly CombinedSamplePlotInput[],
+  rangeSampleCap = 100_000,
+): WorkspaceAxisRanges | null {
+  if (inputs.length === 0) return null;
+  const cloud = buildCombinedSamplePointCloud(
+    inputs.map((input) => ({
+      ...input,
+      mask: null,
+      colors: null,
+      colorIndex: undefined,
+      colorAt: undefined,
+    })),
+    rangeSampleCap,
+  );
+  if (cloud.x.length === 0 || cloud.y.length === 0) return null;
+  return {
+    xRange: robustAxisRange(cloud.x),
+    yRange: robustAxisRange(cloud.y),
   };
 }

@@ -44,6 +44,14 @@ export interface HeatmapPayload {
   legend_max: number;
 }
 
+export interface HeatmapSampleSource {
+  id: string;
+  name: string;
+  sample: Sample;
+  masks: Record<string, Uint8Array>;
+  eventCount: Record<string, number | null>;
+}
+
 function swap(values: number[], a: number, b: number): void {
   const x = values[a];
   values[a] = values[b];
@@ -178,14 +186,14 @@ function summarizeColumn(column: ArrayLike<number>, indices: number[], stat: Hea
   return Number.isFinite(value) ? value : null;
 }
 
-/** Build the shared mini_plot.js heatmap payload. */
-export function buildHeatmapPayload(
-  sample: Sample,
-  populations: PopulationMap,
-  masks: Record<string, Uint8Array>,
-  eventCount: Record<string, number | null>,
-  popIds: string[],
-  channelKeys: string[],
+function finishHeatmapPayload(
+  rows: Array<{
+    id: string;
+    name: string;
+    count: number;
+    rawValues: Array<number | null>;
+  }>,
+  channels: HeatmapChannel[],
   options: {
     summaryStat: HeatmapSummaryStat;
     scaleMode: HeatmapScaleMode;
@@ -195,16 +203,7 @@ export function buildHeatmapPayload(
     zLimit?: number;
   },
 ): HeatmapPayload {
-  const channels = channelKeys.flatMap((key) => {
-    const index = sample.index(key);
-    return index === undefined ? [] : [{ id: key, label: sample.labelForKey(key), index }];
-  });
-  const columns = channels.map((channel) => sample.displayColumn(channel.index));
-  const validPopIds = popIds.filter((id) => populations[id]);
-  const raw = validPopIds.map((popId) => {
-    const indices = indicesFor(masks[popId], sample.fcs.nEvents);
-    return columns.map((column) => summarizeColumn(column, indices, options.summaryStat));
-  });
+  const raw = rows.map((row) => row.rawValues);
   const zLimit = Number.isFinite(options.zLimit) && (options.zLimit ?? 0) > 0 ? options.zLimit! : 2.5;
   const scaled = scaleHeatmapValues(raw, options.scaleMode, zLimit);
   const finite = scaled.flat().filter((v): v is number => typeof v === "number" && Number.isFinite(v));
@@ -229,14 +228,14 @@ export function buildHeatmapPayload(
   }
 
   return {
-    rows: validPopIds.map((id, row) => ({
-      id,
-      name: populations[id]?.name ?? id,
-      count: eventCount[id] ?? indicesFor(masks[id], sample.fcs.nEvents).length,
-      values: scaled[row],
-      raw_values: raw[row],
+    rows: rows.map((row, index) => ({
+      id: row.id,
+      name: row.name,
+      count: row.count,
+      values: scaled[index],
+      raw_values: row.rawValues,
     })),
-    channels: channels.map(({ id, label }) => ({ id, label })),
+    channels,
     summary_stat: options.summaryStat,
     scale_mode: options.scaleMode,
     palette: options.palette,
@@ -246,4 +245,139 @@ export function buildHeatmapPayload(
     legend_min: legendMin,
     legend_max: legendMax,
   };
+}
+
+function summarizeAcrossSources(
+  sources: readonly HeatmapSampleSource[],
+  columns: ReadonlyArray<ArrayLike<number> | null>,
+  indices: readonly number[][],
+  stat: HeatmapSummaryStat,
+): number | null {
+  if (stat === "mean") {
+    let sum = 0;
+    let count = 0;
+    for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+      const column = columns[sourceIndex];
+      if (!column) continue;
+      for (const eventIndex of indices[sourceIndex]) {
+        const value = column[eventIndex];
+        if (!Number.isFinite(value)) continue;
+        sum += value;
+        count++;
+      }
+    }
+    return count ? sum / count : null;
+  }
+
+  const values: number[] = [];
+  for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+    const column = columns[sourceIndex];
+    if (!column) continue;
+    for (const eventIndex of indices[sourceIndex]) {
+      const value = column[eventIndex];
+      if (Number.isFinite(value)) values.push(value);
+    }
+  }
+  const value = exactMedian(values);
+  return Number.isFinite(value) ? value : null;
+}
+
+/** Build a heatmap from the checked FCS set, either file-labelled or pooled by population. */
+export function buildMultiSampleHeatmapPayload(
+  sources: readonly HeatmapSampleSource[],
+  populations: PopulationMap,
+  popIds: string[],
+  channelKeys: string[],
+  combineSamples: boolean,
+  options: {
+    summaryStat: HeatmapSummaryStat;
+    scaleMode: HeatmapScaleMode;
+    palette: HeatmapPalette;
+    cellSize: number;
+    showValues: boolean;
+    zLimit?: number;
+  },
+): HeatmapPayload {
+  const channels = channelKeys.flatMap((key): HeatmapChannel[] => {
+    const source = sources.find(({ sample }) => sample.index(key) !== undefined);
+    return source ? [{ id: key, label: source.sample.labelForKey(key) }] : [];
+  });
+  const validPopIds = popIds.filter((id) => populations[id]);
+  const channelColumns = channels.map(({ id }) =>
+    sources.map(({ sample }) => {
+      const index = sample.index(id);
+      return index === undefined ? null : sample.displayColumn(index);
+    }));
+
+  const rows: Array<{
+    id: string;
+    name: string;
+    count: number;
+    rawValues: Array<number | null>;
+  }> = [];
+
+  if (combineSamples) {
+    for (const popId of validPopIds) {
+      const sourceIndices = sources.map(({ sample, masks }) =>
+        indicesFor(masks[popId], sample.fcs.nEvents));
+      rows.push({
+        id: popId,
+        name: populations[popId]?.name ?? popId,
+        count: sources.reduce(
+          (total, source, sourceIndex) =>
+            total + (source.eventCount[popId] ?? sourceIndices[sourceIndex].length),
+          0,
+        ),
+        rawValues: channelColumns.map((columns) =>
+          summarizeAcrossSources(sources, columns, sourceIndices, options.summaryStat)),
+      });
+    }
+  } else {
+    for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+      const source = sources[sourceIndex];
+      for (const popId of validPopIds) {
+        const indices = indicesFor(source.masks[popId], source.sample.fcs.nEvents);
+        rows.push({
+          id: `${source.id}::${popId}`,
+          name: `${source.name} — ${populations[popId]?.name ?? popId}`,
+          count: source.eventCount[popId] ?? indices.length,
+          rawValues: channelColumns.map((columns) => {
+            const column = columns[sourceIndex];
+            return column
+              ? summarizeColumn(column, indices, options.summaryStat)
+              : null;
+          }),
+        });
+      }
+    }
+  }
+
+  return finishHeatmapPayload(rows, channels, options);
+}
+
+/** Build the shared mini_plot.js heatmap payload. */
+export function buildHeatmapPayload(
+  sample: Sample,
+  populations: PopulationMap,
+  masks: Record<string, Uint8Array>,
+  eventCount: Record<string, number | null>,
+  popIds: string[],
+  channelKeys: string[],
+  options: {
+    summaryStat: HeatmapSummaryStat;
+    scaleMode: HeatmapScaleMode;
+    palette: HeatmapPalette;
+    cellSize: number;
+    showValues: boolean;
+    zLimit?: number;
+  },
+): HeatmapPayload {
+  return buildMultiSampleHeatmapPayload(
+    [{ id: "sample", name: "", sample, masks, eventCount }],
+    populations,
+    popIds,
+    channelKeys,
+    true,
+    options,
+  );
 }

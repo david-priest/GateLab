@@ -12,6 +12,8 @@ interface CapturedPlotProps {
     n_events: number;
     x_b64: string;
     y_b64: string;
+    x_range: [number, number];
+    y_range: [number, number];
   };
   onNewGate: (gate: NewGate) => void;
 }
@@ -104,6 +106,11 @@ function plottedCount(): number {
   return plotHarness.props.payload.n_events;
 }
 
+function plottedX(): number[] {
+  if (!plotHarness.props) throw new Error("Gating plot was not rendered");
+  return [...decodeFloat32Base64(plotHarness.props.payload.x_b64)];
+}
+
 describe("App checked-sample gating display", () => {
   it("uses checkboxes for plotted files while the blue row only controls the active file", async () => {
     act(() => root.render(<App />));
@@ -120,7 +127,11 @@ describe("App checked-sample gating display", () => {
     await settle();
 
     expect(plottedCount()).toBe(7);
-    expect(host.textContent).toContain("2 checked files");
+    expect(plottedX().slice(0, 3).every((value) => value < 0.7)).toBe(true);
+    expect(plottedX().slice(3).every((value) => value > 1)).toBe(true);
+    expect(host.textContent).toContain("2 checked FCS");
+    expect(host.textContent).toContain("Pooled display");
+    const sharedRange = [...plotHarness.props!.payload.x_range] as [number, number];
 
     act(() => plotHarness.props!.onNewGate({
       gate_type: "rectangle",
@@ -147,6 +158,7 @@ describe("App checked-sample gating display", () => {
     )!;
     act(() => showA.click());
     expect(plottedCount()).toBe(4);
+    expect(plottedX().every((value) => value > 1)).toBe(true);
 
     const rowA = [...host.querySelectorAll<HTMLElement>('[role="option"]')]
       .find((row) => row.textContent?.includes("sample-a.fcs"))!;
@@ -155,6 +167,8 @@ describe("App checked-sample gating display", () => {
     expect(rowA.getAttribute("aria-selected")).toBe("true");
     expect(showA.checked).toBe(false);
     expect(plottedCount()).toBe(4);
+    expect(plottedX().every((value) => value > 1)).toBe(true);
+    expect(plotHarness.props!.payload.x_range).toEqual(sharedRange);
 
     const showB = host.querySelector<HTMLInputElement>(
       'input[aria-label="Show sample-b.fcs in plots and analyses"]',

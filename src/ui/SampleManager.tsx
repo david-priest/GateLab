@@ -94,12 +94,18 @@ export function SampleNavigator({
       </div>
 
       {items.length > 0 && (
-        <div className="gl-sample-inclusion-actions" aria-label={t("Display and analysis inclusion")}>
-          <span>{t("Display / analyses")}</span>
-          <button type="button" onClick={onIncludeAll}>{t("All")}</button>
-          <button type="button" onClick={onIncludeNone}>{t("None")}</button>
-          <button type="button" onClick={onInvertIncluded}>{t("Invert")}</button>
-        </div>
+        <>
+          <div className="gl-sample-inclusion-actions" aria-label={t("Display and analysis inclusion")}>
+            <span>{t("Display / analyses")}</span>
+            <button type="button" onClick={onIncludeAll}>{t("All")}</button>
+            <button type="button" onClick={onIncludeNone}>{t("None")}</button>
+            <button type="button" onClick={onInvertIncluded}>{t("Invert")}</button>
+          </div>
+          <div className="gl-sample-scope-key">
+            <span><span className="gl-sample-scope-check">☑</span>{t("checked = pooled display")}</span>
+            <span><span className="gl-sample-scope-blue" />{t("blue = active axes and gate editing")}</span>
+          </div>
+        </>
       )}
 
       {items.length >= 5 && (
@@ -135,7 +141,7 @@ export function SampleNavigator({
           return (
             <div
               key={item.id}
-              className={`gl-sample-row${active ? " active" : ""}`}
+              className={`gl-sample-row${included ? " included" : ""}${active ? " active" : ""}`}
               role="option"
               aria-selected={active}
               tabIndex={0}
