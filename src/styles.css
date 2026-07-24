@@ -599,6 +599,9 @@ input[type="number"]::-webkit-outer-spin-button {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   min-height: 28px; color: var(--muted); font-size: 10px;
 }
+.gl-comp-apply-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.gl-comp-apply-copy strong { color: var(--text); font-size: 10px; font-weight: 600; }
+.gl-comp-apply-copy strong.is-empty { color: #a24435; }
 .gl-comp-workspace-tabs {
   display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 3px; min-height: 32px;
   border-bottom: 1px solid var(--line);
@@ -1381,6 +1384,7 @@ input[type="number"]::-webkit-outer-spin-button {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
   font-size: 12px;
   color: var(--muted);
@@ -1399,6 +1403,25 @@ input[type="number"]::-webkit-outer-spin-button {
 
 /* Panel tab — channel rename */
 .gl-panel-hint { max-width: 720px; margin: 0 0 12px; }
+.gl-panel-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.gl-panel-import {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  max-width: 900px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #f7faff;
+}
+.gl-panel-import-error { border-color: #efb0b0; background: #fff3f3; color: #8a1c1c; }
+.gl-panel-import-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.gl-panel-import-copy > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-panel-import-copy > span { color: var(--muted); font-size: 11px; }
+.gl-panel-import-counts { display: flex; gap: 5px 12px; flex-wrap: wrap; color: var(--muted); font-size: 10px; }
+.gl-panel-import-actions { display: flex; flex: none; align-items: center; gap: 7px; }
 .gl-panel-table td, .gl-panel-table th { vertical-align: middle; }
 .gl-panel-table code { font-size: 11px; color: var(--muted); }
 .gl-panel-table tr.renamed { background: var(--active); }

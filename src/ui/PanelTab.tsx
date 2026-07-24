@@ -4,7 +4,13 @@
 // stable channel identity, never the label — so a rename can never break a gate. The rename
 // applies to every loaded sample that has the channel, keeping the shared gate tree consistent.
 
-import { useState } from "react";
+import { useRef, useState } from "react";
+import {
+  parsePanelImport,
+  serializePanelTemplate,
+  type PanelImportPreview,
+  type PanelTableChannel,
+} from "../engine/panelTable";
 import type { Sample } from "../engine/sample";
 import { useI18n } from "./i18n";
 
@@ -12,14 +18,24 @@ interface Props {
   sample: Sample;
   /** rename the channel identity `key` to `label` ("" resets to default) across all samples */
   onRename: (key: string, label: string) => void;
+  /** Apply a validated bulk rename as one workspace change. */
+  onRenameMany: (changes: readonly { key: string; label: string }[]) => void;
   onResetAll: () => void;
 }
 
-export function PanelTab({ sample, onRename, onResetAll }: Props) {
+interface ImportDraft {
+  fileName: string;
+  preview: PanelImportPreview;
+}
+
+export function PanelTab({ sample, onRename, onRenameMany, onResetAll }: Props) {
   const { t } = useI18n();
+  const fileRef = useRef<HTMLInputElement>(null);
   // Local draft so typing is smooth; commit on blur / Enter.
   const [draft, setDraft] = useState<Record<string, string>>({});
-  const rows = sample.channels.map((c, i) => ({
+  const [importDraft, setImportDraft] = useState<ImportDraft | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const rows: (PanelTableChannel & { idx: number; renamed: boolean })[] = sample.channels.map((c, i) => ({
     idx: i,
     key: c.key,
     pnn: c.pnn,
@@ -42,17 +58,111 @@ export function PanelTab({ sample, onRename, onResetAll }: Props) {
     clearDraft(key);
   };
 
+  const downloadTemplate = () => {
+    const url = URL.createObjectURL(new Blob([serializePanelTemplate(rows)], {
+      type: "text/csv;charset=utf-8",
+    }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "gatelab_panel_template.csv";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const readImport = async (file: File) => {
+    setImportError(null);
+    setImportDraft(null);
+    try {
+      setImportDraft({ fileName: file.name, preview: parsePanelImport(await file.text(), rows) });
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "Could not read the panel import file.");
+    }
+  };
+
+  const applyImport = () => {
+    if (!importDraft || importDraft.preview.changes.length === 0) return;
+    onRenameMany(importDraft.preview.changes.map(({ key, label }) => ({ key, label })));
+    setImportDraft(null);
+    setImportError(null);
+  };
+
   return (
     <div className="gl-tab-panel">
       <div className="gl-tab-head">
         <h2 className="gl-tab-title">{t("Panel — channel names")}</h2>
-        <button className="gl-btn-ghost" onClick={onResetAll} disabled={!anyRenamed}>
-          {t("Reset all")}
-        </button>
+        <div className="gl-panel-actions">
+          <button type="button" className="gl-btn-ghost" onClick={downloadTemplate}>
+            {t("Download template")}
+          </button>
+          <button type="button" className="gl-btn-ghost" onClick={() => fileRef.current?.click()}>
+            {t("Upload CSV/TSV…")}
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values,text/plain"
+            style={{ display: "none" }}
+            onChange={(event) => {
+              const file = event.currentTarget.files?.[0];
+              event.currentTarget.value = "";
+              if (file) void readImport(file);
+            }}
+          />
+          <button type="button" className="gl-btn-ghost" onClick={onResetAll} disabled={!anyRenamed}>
+            {t("Reset all")}
+          </button>
+        </div>
       </div>
       <p className="gl-hint gl-panel-hint">
-        {t("Rename the display name (marker) for each channel. The FCS channel id ($PnN) is fixed. Scatter and Time/QC channels are locked. Renames apply to every loaded sample and are cosmetic — gates and statistics are unaffected.")}
+        {t("Rename the display name (marker) for each channel. The FCS channel id ($PnN) is fixed. Scatter and Time/QC channels are locked. Renames apply to every loaded sample and are cosmetic — gates and statistics are unaffected. Download the template to edit display names in Excel, then upload it here; omitted channels remain unchanged.")}
       </p>
+
+      {importError && (
+        <div className="gl-panel-import gl-panel-import-error" role="alert">
+          <span>{t(importError)}</span>
+          <button type="button" className="gl-mini-btn" onClick={() => setImportError(null)}>{t("Dismiss")}</button>
+        </div>
+      )}
+      {importDraft && (
+        <div className="gl-panel-import" role="status" aria-live="polite">
+          <div className="gl-panel-import-copy">
+            <strong>{importDraft.fileName}</strong>
+            <span>
+              {importDraft.preview.changes.length > 0
+                ? t("Ready to apply {count} display-name changes.", { count: importDraft.preview.changes.length })
+                : t("No display-name changes found.")}
+            </span>
+            <div className="gl-panel-import-counts">
+              <span>{t("{count} matched", { count: importDraft.preview.matchedCount })}</span>
+              {importDraft.preview.unchangedCount > 0 && (
+                <span>{t("{count} unchanged", { count: importDraft.preview.unchangedCount })}</span>
+              )}
+              {importDraft.preview.lockedIgnoredCount > 0 && (
+                <span>{t("{count} locked changes ignored", { count: importDraft.preview.lockedIgnoredCount })}</span>
+              )}
+              {importDraft.preview.unknownIdentifiers.length > 0 && (
+                <span>{t("{count} unknown rows ignored", { count: importDraft.preview.unknownIdentifiers.length })}</span>
+              )}
+              {importDraft.preview.omittedCount > 0 && (
+                <span>{t("{count} omitted channels unchanged", { count: importDraft.preview.omittedCount })}</span>
+              )}
+            </div>
+          </div>
+          <div className="gl-panel-import-actions">
+            <button type="button" className="gl-btn-ghost" onClick={() => setImportDraft(null)}>{t("Cancel")}</button>
+            <button
+              type="button"
+              className="gl-btn-primary"
+              disabled={importDraft.preview.changes.length === 0}
+              onClick={applyImport}
+            >
+              {t("Apply panel changes")}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="gl-stats-scroll">
         <table className="gl-stats-table gl-panel-table">

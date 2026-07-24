@@ -588,6 +588,46 @@ describe("CompensationManager Apply", () => {
     manager.dispose();
   });
 
+  it("applies one CyTOF NNLS profile across a multi-file aggregate transaction", async () => {
+    const first = new Sample(cytofFcs());
+    const second = new Sample(cytofFcs());
+    const profile = await cytofProfile();
+    const progress: Array<Readonly<{
+      sampleIndex: number;
+      sampleCount: number;
+      totalEvents: number;
+    }>> = [];
+    const manager = new CompensationManager({
+      workspaceKey: "workspace-cytof-multi-file",
+      workerFactory: () => new RuntimeWorker(),
+      byteBudget: 160,
+      fixedWorkspaceBytes: 0,
+      yieldToEventLoop: () => Promise.resolve(),
+    });
+
+    const result = await manager.apply({
+      profile,
+      targets: [
+        { sample: first, activeLayer: "compensated" },
+        { sample: second, activeLayer: "compensated" },
+      ],
+      onProgress: ({ sampleIndex, sampleCount, totalEvents }) => {
+        progress.push({ sampleIndex, sampleCount, totalEvents });
+      },
+    });
+
+    expect(result.targets).toHaveLength(2);
+    expect(first.compensatedLayerStatus().state).toBe("ready");
+    expect(second.compensatedLayerStatus().state).toBe("ready");
+    expect(first.activeLayer).toBe("compensated");
+    expect(second.activeLayer).toBe("compensated");
+    expect(progress.some(({ sampleIndex }) => sampleIndex === 0)).toBe(true);
+    expect(progress.some(({ sampleIndex }) => sampleIndex === 1)).toBe(true);
+    expect(progress.every(({ sampleCount, totalEvents }) => sampleCount === 2 && totalEvents === 10))
+      .toBe(true);
+    manager.dispose();
+  });
+
   it("discards every computed target when another target becomes stale before installation", async () => {
     const first = new Sample(flowFcs());
     const second = new Sample(flowFcs(4));

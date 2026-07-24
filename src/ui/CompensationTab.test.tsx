@@ -211,6 +211,8 @@ function renderTab(
     hasExistingGates?: boolean;
     applyStatus?: CompensationApplyUiStatus | null;
     installedProfile?: CompensationProfileRecord | null;
+    applyTargetCount?: number;
+    applyTargetEventCount?: number;
     applyWorkerCount?: number;
     applyWorkerLimit?: number;
     onApplyWorkerCountChange?: (count: number) => void;
@@ -240,6 +242,8 @@ function renderTab(
         hasExistingGates={options.hasExistingGates}
         applyStatus={options.applyStatus}
         installedProfile={options.installedProfile}
+        applyTargetCount={options.applyTargetCount}
+        applyTargetEventCount={options.applyTargetEventCount}
         applyWorkerCount={options.applyWorkerCount}
         applyWorkerLimit={options.applyWorkerLimit}
         onApplyWorkerCountChange={options.onApplyWorkerCountChange}
@@ -950,6 +954,36 @@ describe("CompensationTab CyTOF import path", () => {
     expect(host.textContent).toContain("Exact matches2");
     expect(host.querySelectorAll<HTMLInputElement>('.gl-comp-channel-grid input:checked')).toHaveLength(2);
     expect(host.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("shows the checked-file Apply scope and blocks an empty selection", async () => {
+    const sample = cytofSample();
+    const stateKey = "workspace-a:cytof-multi-file-scope";
+    renderTab(sample, {
+      stateKey,
+      applyTargetCount: 3,
+      applyTargetEventCount: 321_000,
+      onApplyProfile: async () => undefined,
+    });
+    await chooseMatrix();
+
+    expect(host.textContent).toContain(
+      "Applies atomically to 3 checked FCS files · 321,000 total events",
+    );
+    const apply = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Apply NNLS compensation")!;
+    expect(apply.disabled).toBe(false);
+
+    renderTab(sample, {
+      stateKey,
+      applyTargetCount: 0,
+      applyTargetEventCount: 0,
+      onApplyProfile: async () => undefined,
+    });
+    expect(host.textContent).toContain(
+      "No FCS files are checked. Select at least one file in Samples.",
+    );
+    expect(apply.disabled).toBe(true);
   });
 
   it("retains the imported matrix and selections while the persistent tab is hidden", async () => {
