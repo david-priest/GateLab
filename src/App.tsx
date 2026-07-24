@@ -16,6 +16,10 @@ import { paletteColors, populationColor, UNGATED_COLOR, OVERLAY_PALETTES, type P
 import { assignDivisionLevel, divisionPalette } from "./engine/division";
 import { encodeFloat32Base64, encodeUint8Base64 } from "./engine/encode";
 import {
+  buildCombinedSamplePointCloud,
+  type CombinedSamplePlotInput,
+} from "./engine/multiSamplePlot";
+import {
   importGatingML,
   resolveGatingMLCompensation,
   restoreGatingMLScaleState,
@@ -99,10 +103,12 @@ import {
 import {
   coreReducer,
   initialCoreState,
+  derivePopulationDisplaySelection,
   derivePopulationView,
   recompute,
   recomputeGating,
   type Action,
+  type GatingDerived,
 } from "./store";
 import { GateList } from "./ui/GateList";
 import { PopulationTree } from "./ui/PopulationTree";
@@ -177,6 +183,13 @@ interface PendingNewGate {
   sampleId: string;
   dataRevision: number;
   coordinateBindingKeys: readonly [string, string];
+}
+
+interface CachedSampleGating {
+  sample: Sample;
+  dataRevision: number;
+  gateVersion: number;
+  gating: GatingDerived;
 }
 
 /** Save data to a file the user downloads (local blob; user-initiated). */
@@ -465,9 +478,8 @@ export default function App() {
   const [contourThreshold, setContourThreshold] = useState(5); // outer contour % of peak
   const [instrumentMode, setInstrumentMode] = useState<"auto" | "flow" | "cytof">("auto"); // active sample's instrument override
   // Colour-by-factor overlay on the main plot (population partition / division level).
-  const [overlayBy, setOverlayBy] = useState<"none" | "population" | "division">("none");
+  const [overlayBy, setOverlayBy] = useState<"none" | "population" | "division" | "sample">("none");
   const [overlayPalette, setOverlayPalette] = useState<PaletteName>("default");
-  const [overlaySamples, setOverlaySamples] = useState(false); // overlay all loaded samples on the plot
   const activeDisplayContextKey = sample?.displayTransformContextKey ?? null;
   // Fixed ranges are retained per exact assay/transform context rather than destroyed or reused
   // in incompatible coordinates when the active layer changes.
@@ -770,7 +782,6 @@ export default function App() {
     setPanelVersion((version) => version + 1);
     setOverlayBy("none");
     setOverlayPalette("default");
-    setOverlaySamples(false);
 
     illustConfigRef.current = null;
     strategyConfigRef.current = null;
@@ -2582,6 +2593,105 @@ export default function App() {
     [sample, state.gates, state.populations, state.root_population_id, state.gate_version, activeDataRevision, instrumentMode],
   );
 
+  // Keep inactive checked files out of the synchronous render path. Their full gating
+  // masks are updated one file at a time between browser paints, and only while the
+  // Gating tab is visible. This preserves the active-file interaction latency when a
+  // workspace contains many large FCS files.
+  const inactiveGatingCacheRef = useRef<Map<string, CachedSampleGating>>(new Map());
+  const inactiveGatingGenerationRef = useRef(0);
+  const [inactiveGatingCacheVersion, setInactiveGatingCacheVersion] = useState(0);
+  const [pendingIncludedGatingIds, setPendingIncludedGatingIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  useEffect(() => {
+    if (!activeEntry || !sample) return;
+    inactiveGatingCacheRef.current.set(activeEntry.id, {
+      sample,
+      dataRevision: sample.dataRevision,
+      gateVersion: state.gate_version,
+      gating: gatingDerived,
+    });
+  }, [activeEntry, sample, activeDataRevision, state.gate_version, gatingDerived]);
+
+  useEffect(() => {
+    const generation = ++inactiveGatingGenerationRef.current;
+    let timer: number | null = null;
+    const loadedIds = new Set(samples.map((entry) => entry.id));
+    for (const id of inactiveGatingCacheRef.current.keys()) {
+      if (!loadedIds.has(id)) inactiveGatingCacheRef.current.delete(id);
+    }
+
+    if (activeTab !== "gating" || !sample) {
+      setPendingIncludedGatingIds(new Set());
+      return () => {
+        if (timer !== null) window.clearTimeout(timer);
+      };
+    }
+
+    const targets = includedSamples.filter((entry) => {
+      if (entry.id === activeSampleId) return false;
+      const cached = inactiveGatingCacheRef.current.get(entry.id);
+      return !cached ||
+        cached.sample !== entry.sample ||
+        cached.dataRevision !== entry.sample.dataRevision ||
+        cached.gateVersion !== state.gate_version;
+    });
+    setPendingIncludedGatingIds(new Set(targets.map((entry) => entry.id)));
+
+    let targetIndex = 0;
+    const processNext = () => {
+      if (generation !== inactiveGatingGenerationRef.current) return;
+      if (targetIndex >= targets.length) {
+        setPendingIncludedGatingIds(new Set());
+        return;
+      }
+      const entry = targets[targetIndex++];
+      timer = window.setTimeout(() => {
+        timer = null;
+        if (generation !== inactiveGatingGenerationRef.current) return;
+        try {
+          const gating = recomputeGating(entry.sample, state);
+          if (generation !== inactiveGatingGenerationRef.current) return;
+          inactiveGatingCacheRef.current.set(entry.id, {
+            sample: entry.sample,
+            dataRevision: entry.sample.dataRevision,
+            gateVersion: state.gate_version,
+            gating,
+          });
+          setInactiveGatingCacheVersion((version) => version + 1);
+          setPendingIncludedGatingIds((previous) => {
+            const next = new Set(previous);
+            next.delete(entry.id);
+            return next;
+          });
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+        processNext();
+      }, 0);
+    };
+    processNext();
+
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+    };
+    // Gate/data identities are explicit; active/checked population selection is cheap
+    // and deliberately does not invalidate these full gating masks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeTab,
+    sample,
+    activeSampleId,
+    includedSamples,
+    samples,
+    sampleDataRevisionKey,
+    state.gate_version,
+    state.gates,
+    state.populations,
+    state.root_population_id,
+  ]);
+
   const derived = useMemo(
     () => derivePopulationView(sample, state, gatingDerived),
     // `gatingDerived` changes whenever gates/populations change; active/checked ids only select
@@ -2589,6 +2699,37 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [sample, gatingDerived, state.active_population_id, state.selected_pop_ids],
   );
+
+  const includedDisplaySelections = useMemo(() => includedSamples.flatMap((entry) => {
+    const gating = entry.id === activeSampleId
+      ? gatingDerived
+      : inactiveGatingCacheRef.current.get(entry.id)?.gating;
+    const cached = entry.id === activeSampleId
+      ? null
+      : inactiveGatingCacheRef.current.get(entry.id);
+    if (
+      !gating ||
+      (cached && (
+        cached.sample !== entry.sample ||
+        cached.dataRevision !== entry.sample.dataRevision ||
+        cached.gateVersion !== state.gate_version
+      ))
+    ) return [];
+    return [{
+      entry,
+      gating,
+      selection: derivePopulationDisplaySelection(entry.sample, state, gating),
+    }];
+  }), [
+    includedSamples,
+    activeSampleId,
+    gatingDerived,
+    inactiveGatingCacheVersion,
+    state.active_population_id,
+    state.selected_pop_ids,
+    state.root_population_id,
+    state.gate_version,
+  ]);
 
   // Rows for the Population metadata table (Metadata tab): every gated population (root excluded),
   // with read-only derived Parent / Count / % Parent (from the active sample's stats).
@@ -2641,6 +2782,13 @@ export default function App() {
   const overlaySpec = useMemo<OverlaySpec | null>(() => {
     if (!sample || overlayBy === "none") return null;
     const n = sample.fcs.nEvents;
+    if (overlayBy === "sample") {
+      return {
+        colors: new Uint8Array(n),
+        palette: paletteColors(overlayPalette, 1),
+        labels: [fileName],
+      };
+    }
     if (overlayBy === "population") {
       const rootId = state.root_population_id ?? "";
       const allPops = populationTreeOrder(state.populations, rootId).map((o) => o.popId);
@@ -2665,9 +2813,7 @@ export default function App() {
     for (let e = 0; e < n; e++) colors[e] = assignDivisionLevel(dye[e], prof.boundaries);
     return { colors, palette: divisionPalette(nLevels), labels: Array.from({ length: nLevels }, (_, i) => `Div${i}`) };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, activeDataRevision, overlayBy, overlayPalette, state.populations, state.root_population_id, state.gate_version, derived, activeSampleId, compatibleDivisionProfiles]);
-
-  const overlaySampleRevisionKey = overlaySamples ? sampleDataRevisionKey : "";
+  }, [sample, activeDataRevision, overlayBy, overlayPalette, fileName, state.populations, state.root_population_id, state.gate_version, derived, activeSampleId, compatibleDivisionProfiles]);
 
   const mainPlotGates = useMemo(() => {
     if (!sample) return [];
@@ -2699,48 +2845,137 @@ export default function App() {
       overlaySpec,
     );
 
-    // Multi-sample overlay: reuse the active sample's axes/ticks/gates, but replace the point cloud
-    // with every loaded sample's events on the current channels, coloured by sample.
-    if (overlaySamples && samples.length > 1) {
-      const capPer = Math.max(500, Math.floor((maxEvents > 0 ? maxEvents : 50000) / samples.length));
-      const xs: number[] = [];
-      const ys: number[] = [];
-      const cols: number[] = [];
-      const palette = paletteColors(overlayPalette, samples.length);
-      const labels: string[] = [];
-      let used = 0;
-      samples.forEach((e) => {
-        const xi = e.sample.index(xName);
-        const yi = e.sample.index(yName);
-        if (xi === undefined || yi === undefined) return;
-        const xc = e.sample.displayColumn(xi);
-        const yc = e.sample.displayColumn(yi);
-        const n = xc.length;
-        const cap = Math.min(capPer, n);
-        const denom = cap > 1 ? cap - 1 : 1;
-        for (let k = 0; k < cap; k++) {
-          const j = Math.round((k * (n - 1)) / denom);
-          xs.push(xc[j]); ys.push(yc[j]); cols.push(used);
-        }
-        labels.push(e.name);
-        used++;
+    const activeOnly =
+      includedDisplaySelections.length === 1 &&
+      includedDisplaySelections[0].entry.id === activeSampleId &&
+      pendingIncludedGatingIds.size === 0;
+    if (activeOnly) return base;
+
+    // Checked files are the authoritative plotted sample set. The active (blue) row still
+    // supplies channels, axes and editable gates; compatible checked files contribute their
+    // selected-population events under one shared point cap.
+    const compatible = includedDisplaySelections.flatMap(({ entry, gating, selection }) => {
+      const xIndex = entry.sample.index(xName);
+      const yIndex = entry.sample.index(yName);
+      return xIndex === undefined || yIndex === undefined
+        ? []
+        : [{ entry, gating, selection, xIndex, yIndex }];
+    });
+
+    let colorPalette: string[] | undefined;
+    let colorLabels: string[] | undefined;
+    const inputs: CombinedSamplePlotInput[] = compatible.map(
+      ({ entry, selection, xIndex, yIndex }) => ({
+        id: entry.id,
+        name: entry.name,
+        sample: entry.sample,
+        xIndex,
+        yIndex,
+        mask: selection.displayMask,
+      }),
+    );
+
+    if (overlayBy === "sample") {
+      colorPalette = paletteColors(overlayPalette, compatible.length);
+      colorLabels = compatible.map(({ entry }) => entry.name);
+      inputs.forEach((input, index) => {
+        input.colorIndex = index;
       });
-      return {
-        ...base,
-        x_b64: encodeFloat32Base64(Float32Array.from(xs)),
-        y_b64: encodeFloat32Base64(Float32Array.from(ys)),
-        n_events: xs.length,
-        overlay_mode: true,
-        color_b64: encodeUint8Base64(Uint8Array.from(cols)),
-        color_palette: palette.slice(0, used),
-        color_labels: labels,
-      };
+    } else if (overlayBy === "population") {
+      const rootId = state.root_population_id ?? "";
+      const allPopulations = populationTreeOrder(state.populations, rootId).map(({ popId }) => popId);
+      const levels = resolvePartitionLevels(state.populations, rootId, allPopulations);
+      const ungated = levels.length;
+      colorPalette = [
+        ...levels.map((level) =>
+          populationColor(overlayPalette, state.populations[level.popId]?.colorSlot)),
+        UNGATED_COLOR,
+      ];
+      colorLabels = [...levels.map(({ name }) => name), "ungated"];
+      compatible.forEach(({ gating }, index) => {
+        const masks = levels.map(({ popId }) => gating.masks[popId] ?? null);
+        inputs[index].colorAt = (eventIndex) => {
+          let best = -1;
+          let bestDepth = -1;
+          for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
+            if (masks[levelIndex]?.[eventIndex] && levels[levelIndex].depth > bestDepth) {
+              best = levelIndex;
+              bestDepth = levels[levelIndex].depth;
+            }
+          }
+          return best < 0 ? ungated : best;
+        };
+      });
+    } else if (overlayBy === "division") {
+      const profiles = compatible.map(({ entry }) => {
+        const profile = compatibleDivisionProfiles[entry.id];
+        const channelIndex = profile ? entry.sample.index(profile.channelKey) : undefined;
+        return profile && channelIndex !== undefined
+          ? { profile, channelIndex }
+          : null;
+      });
+      const levelCount = Math.max(
+        1,
+        ...profiles.map((profile) => profile ? profile.profile.boundaries.length + 1 : 0),
+      );
+      const unassigned = levelCount;
+      colorPalette = [...divisionPalette(levelCount), UNGATED_COLOR];
+      colorLabels = [
+        ...Array.from({ length: levelCount }, (_, index) => `Div${index}`),
+        "unassigned",
+      ];
+      profiles.forEach((profile, index) => {
+        if (!profile) {
+          inputs[index].colorIndex = unassigned;
+          return;
+        }
+        const values = compatible[index].entry.sample.displayColumn(profile.channelIndex);
+        inputs[index].colorAt = (eventIndex) =>
+          assignDivisionLevel(values[eventIndex], profile.profile.boundaries);
+      });
     }
-    return base;
-    // Active revision updates the current assay; the aggregate key is included only while
-    // plotting other samples so an inactive sample change does not rebuild the normal plot.
+
+    const cloud = buildCombinedSamplePointCloud(
+      inputs,
+      maxEvents <= 0 ? Infinity : maxEvents,
+    );
+    return {
+      ...base,
+      x_b64: encodeFloat32Base64(cloud.x),
+      y_b64: encodeFloat32Base64(cloud.y),
+      n_events: cloud.eventCount,
+      overlay_mode: cloud.colors !== null,
+      color_b64: cloud.colors ? encodeUint8Base64(cloud.colors) : undefined,
+      color_palette: cloud.colors ? colorPalette : undefined,
+      color_labels: cloud.colors ? colorLabels : undefined,
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, activeDataRevision, xIdx, yIdx, mode, mainPlotGates, state.selected_gate_id, derived, scalesVersion, xRange, yRange, maxEvents, contourThreshold, instrumentMode, globalScales, overlaySpec, overlaySamples, overlaySampleRevisionKey, samples, overlayPalette]);
+  }, [
+    sample,
+    activeDataRevision,
+    xIdx,
+    yIdx,
+    mode,
+    mainPlotGates,
+    state.selected_gate_id,
+    derived,
+    scalesVersion,
+    xRange,
+    yRange,
+    maxEvents,
+    contourThreshold,
+    instrumentMode,
+    globalScales,
+    overlaySpec,
+    overlayBy,
+    overlayPalette,
+    includedDisplaySelections,
+    pendingIncludedGatingIds,
+    activeSampleId,
+    state.root_population_id,
+    state.populations,
+    compatibleDivisionProfiles,
+  ]);
 
   // Pointer navigation reads this mutable ref after render. Use the exact fitted payload range so
   // the first drag cannot jump from a gate-aware auto range back to the data-only range.
@@ -3245,11 +3480,12 @@ export default function App() {
                   {t("Colour by")}
                   <select value={overlayBy} onChange={(e) => setOverlayBy(e.target.value as typeof overlayBy)}>
                     <option value="none">{t("None")}</option>
+                    {samples.length > 1 && <option value="sample">{t("Sample")}</option>}
                     <option value="population">{t("Population")}</option>
                     {activeSampleId && compatibleDivisionProfiles[activeSampleId] && <option value="division">{t("Division")}</option>}
                   </select>
                 </label>
-                {(overlayBy !== "none" || overlaySamples) && (
+                {overlayBy !== "none" && (
                   <label className="gl-field-inline">
                     {t("Palette")}
                     <select value={overlayPalette} onChange={(e) => setOverlayPalette(e.target.value as PaletteName)}>
@@ -3257,12 +3493,14 @@ export default function App() {
                     </select>
                   </label>
                 )}
-                {samples.length > 1 && (
-                  <label className="gl-check" title="Plot all loaded samples together, coloured by sample">
-                    <input type="checkbox" checked={overlaySamples} onChange={(e) => setOverlaySamples(e.target.checked)} />
-                    {t("Overlay samples")}
-                  </label>
-                )}
+                <span className="gl-hint" title={t("Checked files are plotted together; the blue row supplies channels, editable gates, and sidebar counts.")}>
+                  {includedSamples.length === 0
+                    ? t("No checked files")
+                    : t("{count} checked files", { count: includedSamples.length })}
+                  {pendingIncludedGatingIds.size > 0
+                    ? ` · ${t("updating {count}…", { count: pendingIncludedGatingIds.size })}`
+                    : ""}
+                </span>
               </div>
             </div>
             <div className="gl-scales gl-ranges">

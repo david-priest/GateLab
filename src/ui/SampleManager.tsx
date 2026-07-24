@@ -94,8 +94,8 @@ export function SampleNavigator({
       </div>
 
       {items.length > 0 && (
-        <div className="gl-sample-inclusion-actions" aria-label={t("Analysis inclusion")}>
-          <span>{t("Analyses")}</span>
+        <div className="gl-sample-inclusion-actions" aria-label={t("Display and analysis inclusion")}>
+          <span>{t("Display / analyses")}</span>
           <button type="button" onClick={onIncludeAll}>{t("All")}</button>
           <button type="button" onClick={onIncludeNone}>{t("None")}</button>
           <button type="button" onClick={onInvertIncluded}>{t("Invert")}</button>
@@ -151,8 +151,8 @@ export function SampleNavigator({
               <input
                 type="checkbox"
                 className="gl-sample-include"
-                title={t("Include this sample in multi-sample analyses and CyTOF compensation Apply")}
-                aria-label={t("Include {name} in analyses", { name: item.name })}
+                title={t("Show this sample in combined plots and include it in analyses and CyTOF compensation Apply")}
+                aria-label={t("Show {name} in plots and analyses", { name: item.name })}
                 checked={included}
                 onClick={(event) => event.stopPropagation()}
                 onChange={(event) => onToggleIncluded(item.id, event.target.checked)}
@@ -255,7 +255,7 @@ export function SampleManagerModal({
         <button type="button" onClick={() => selectVisible(true)}>{t("All visible")}</button>
         <button type="button" onClick={() => selectVisible(false)}>{t("None visible")}</button>
         <span className="gl-sample-manager-separator" />
-        <span>{t("Analyses")}</span>
+        <span>{t("Display / analyses")}</span>
         <button type="button" onClick={onIncludeAll}>{t("All")}</button>
         <button type="button" onClick={onIncludeNone}>{t("None")}</button>
         <button type="button" onClick={onInvertIncluded}>{t("Invert")}</button>
@@ -266,7 +266,7 @@ export function SampleManagerModal({
             <tr>
               <th aria-label={t("Select for management")} />
               <th>{t("Active")}</th>
-              <th>{t("Analyses")}</th>
+              <th>{t("Display / analyses")}</th>
               <th>{t("File")}</th>
               <th>{t("Events")}</th>
               <th>{t("Channels")}</th>
@@ -303,7 +303,7 @@ export function SampleManagerModal({
                 <td>
                   <input
                     type="checkbox"
-                    aria-label={`Include ${item.name} in analyses`}
+                    aria-label={t("Show {name} in plots and analyses", { name: item.name })}
                     checked={!excludedIds.has(item.id)}
                     onChange={(event) => onToggleIncluded(item.id, event.target.checked)}
                   />

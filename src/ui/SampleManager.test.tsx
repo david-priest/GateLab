@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 describe("SampleNavigator", () => {
-  it("keeps active-sample selection separate from analysis inclusion", () => {
+  it("keeps active-sample selection separate from display and analysis inclusion", () => {
     const onActivate = vi.fn();
     const onToggleIncluded = vi.fn();
     const onInvertIncluded = vi.fn();
@@ -56,7 +56,9 @@ describe("SampleNavigator", () => {
     act(() => rows[1].click());
     expect(onActivate).toHaveBeenCalledWith("b");
 
-    const includeB = host.querySelector<HTMLInputElement>('input[aria-label="Include donor-b.fcs in analyses"]')!;
+    const includeB = host.querySelector<HTMLInputElement>(
+      'input[aria-label="Show donor-b.fcs in plots and analyses"]',
+    )!;
     expect(includeB.checked).toBe(false);
     act(() => includeB.click());
     expect(onToggleIncluded).toHaveBeenCalledWith("b", true);

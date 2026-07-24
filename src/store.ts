@@ -644,6 +644,13 @@ export interface Derived {
   populations: PopulationMap; // with event_count / percent_of_parent filled in
 }
 
+export interface PopulationDisplaySelection {
+  activeMask: Uint8Array | null;
+  /** Events to draw: union of checked populations, otherwise the active population. */
+  displayMask: Uint8Array | null;
+  displayPopCount: number;
+}
+
 /** Expensive results that depend on data/gates, but not on the active population. */
 export interface GatingDerived {
   masks: MaskMap;
@@ -724,22 +731,9 @@ export function derivePopulationView(
   const { masks, stats, populations, gateMasks } = gating;
   const data = sample.gatingData();
 
-  const activeId = state.active_population_id ?? state.root_population_id;
-  const activeMask = masks[activeId] ?? masks[state.root_population_id] ?? null;
+  const { activeMask, displayMask, displayPopCount } =
+    derivePopulationDisplaySelection(sample, state, gating);
   const gateCounts = computeGateCounts(state.gates, activeMask, data, gateMasks);
-
-  // Display mask = union of the checked populations (mirrors GateLabR get_display_pop_mask), else
-  // the active population. Gate counts stay on the active pop; only the plotted point cloud changes.
-  const selIds = (state.selected_pop_ids ?? []).filter((id) => masks[id] && id !== state.root_population_id);
-  let displayMask = activeMask;
-  if (selIds.length > 0) {
-    const union = new Uint8Array(sample.fcs.nEvents);
-    for (const id of selIds) {
-      const m = masks[id];
-      for (let i = 0; i < union.length; i++) if (m[i]) union[i] = 1;
-    }
-    displayMask = union;
-  }
 
   return {
     masks,
@@ -747,9 +741,41 @@ export function derivePopulationView(
     gateCounts,
     activeMask,
     displayMask,
-    displayPopCount: selIds.length,
+    displayPopCount,
     populations,
   };
+}
+
+/**
+ * Select the active/checked-population masks without recomputing gate counts.
+ * The combined-sample gating display uses this cheap path for inactive files so
+ * changing populations never scans every event once per gate and per file.
+ */
+export function derivePopulationDisplaySelection(
+  sample: Sample | null,
+  state: CoreState,
+  gating: GatingDerived,
+): PopulationDisplaySelection {
+  if (!sample || !state.root_population_id || Object.keys(gating.populations).length === 0) {
+    return { activeMask: null, displayMask: null, displayPopCount: 0 };
+  }
+
+  const activeId = state.active_population_id ?? state.root_population_id;
+  const activeMask = gating.masks[activeId] ?? gating.masks[state.root_population_id] ?? null;
+  const selectedIds = (state.selected_pop_ids ?? [])
+    .filter((id) => gating.masks[id] && id !== state.root_population_id);
+  if (selectedIds.length === 0) {
+    return { activeMask, displayMask: activeMask, displayPopCount: 0 };
+  }
+
+  const union = new Uint8Array(sample.fcs.nEvents);
+  for (const id of selectedIds) {
+    const mask = gating.masks[id];
+    for (let index = 0; index < union.length; index++) {
+      if (mask[index]) union[index] = 1;
+    }
+  }
+  return { activeMask, displayMask: union, displayPopCount: selectedIds.length };
 }
 
 /** One-shot compatibility helper for non-React callers and tests. */
