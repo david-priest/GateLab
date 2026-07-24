@@ -5,6 +5,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import pkg from "../package.json";
 import { clearPersistedTabState } from "./ui/tabState";
+import { historyShortcutAction } from "./ui/historyShortcuts";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type NewGate } from "./plots/GatingPlot";
 import { buildPlotGates, type PlotGate } from "./plots/gatePayload";
 import { includePlotGatesInAxisRange } from "./engine/axisRange";
@@ -701,6 +702,18 @@ export default function App() {
     window.addEventListener("mouseup", up);
   };
   const [state, dispatch] = useReducer(coreReducer, undefined, initialCoreState);
+  useEffect(() => {
+    const onHistoryShortcut = (event: KeyboardEvent) => {
+      const action = historyShortcutAction(event);
+      if (!action) return;
+      if (action === "undo" ? state.undo.length === 0 : state.redo.length === 0) return;
+      event.preventDefault();
+      dispatch({ type: action });
+    };
+    window.addEventListener("keydown", onHistoryShortcut);
+    return () => window.removeEventListener("keydown", onHistoryShortcut);
+  }, [state.undo.length, state.redo.length]);
+
   // Presentation-only population edits (rename / sibling reorder) must not invalidate
   // masks for every checked FCS file. Hold the last scientific gating graph until its
   // explicit revision changes; cosmetic gate-label moves and active selections are also

@@ -208,7 +208,13 @@ describe("PopulationTree direct editing", () => {
 
     dispatch.mockClear();
     act(() => gatePill.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
-    expect(host.querySelector(".pop-gate-picker")).not.toBeNull();
+    const picker = host.querySelector<HTMLElement>(".pop-gate-picker")!;
+    expect(picker).not.toBeNull();
+    expect(picker.textContent).toContain("Change gate: Gate one");
+    expect(picker.querySelector(".pop-gate-picker-current")?.textContent)
+      .toContain("Current gate: Gate one");
+    expect(picker.querySelector(".pop-gate-picker-choice.current")?.textContent)
+      .toContain("Current");
     expect(dispatch).not.toHaveBeenCalled();
     const remove = [...host.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent?.includes("Remove this gate"))!;
@@ -235,6 +241,34 @@ describe("PopulationTree direct editing", () => {
     });
   });
 
+  it("keeps a long gate catalogue in a bounded scrollable list", () => {
+    const { state, derived } = makeInteractionFixture();
+    for (let index = 3; index <= 36; index++) {
+      const gateId = `g${index}`;
+      state.gates[gateId] = {
+        gate_id: gateId,
+        name: `Gate ${index}`,
+        gate_type: "rectangle",
+        x_channel: "FSC-A",
+        y_channel: "SSC-A",
+        vertices: [[0, 0], [1, 1]],
+        color: "#377eb8",
+        label_offset: null,
+      };
+      state.gate_order.push(gateId);
+    }
+    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} />));
+
+    const gatePill = host.querySelector<HTMLElement>('.pop-row[data-pop-id="pop-b"] .pop-tree-gate-badge')!;
+    act(() => gatePill.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
+    const list = host.querySelector<HTMLElement>(".pop-gate-picker-list")!;
+
+    expect(list.querySelectorAll(".pop-gate-picker-choice")).toHaveLength(36);
+    expect(getComputedStyle(list).overflowY).toBe("auto");
+    expect(getComputedStyle(list).flexGrow).toBe("1");
+    expect(getComputedStyle(host.querySelector(".pop-gate-picker")!).maxHeight).toBe("360px");
+  });
+
   it("turns a Shift-drag drop gesture into a precise reorder action", () => {
     const { state, derived } = makeInteractionFixture();
     const dispatch = vi.fn();
@@ -253,28 +287,45 @@ describe("PopulationTree direct editing", () => {
       height: 30,
       toJSON: () => ({}),
     });
-    const dataTransfer = {
-      effectAllowed: "",
-      dropEffect: "",
-      setData: vi.fn(),
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn().mockReturnValue(target),
+    });
+    Object.defineProperties(source, {
+      setPointerCapture: { configurable: true, value: vi.fn() },
+      hasPointerCapture: { configurable: true, value: vi.fn().mockReturnValue(true) },
+      releasePointerCapture: { configurable: true, value: vi.fn() },
+    });
+    const pointerEvent = (
+      type: string,
+      options: { clientX: number; clientY: number; shiftKey?: boolean },
+    ) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperties(event, {
+        pointerId: { value: 7 },
+        button: { value: 0 },
+        clientX: { value: options.clientX },
+        clientY: { value: options.clientY },
+        shiftKey: { value: options.shiftKey ?? false },
+      });
+      return event;
     };
-    const dragStart = new Event("dragstart", { bubbles: true, cancelable: true });
-    Object.defineProperties(dragStart, {
-      shiftKey: { value: true },
-      dataTransfer: { value: dataTransfer },
-    });
-    act(() => source.dispatchEvent(dragStart));
 
-    const dragOver = new Event("dragover", { bubbles: true, cancelable: true });
-    Object.defineProperties(dragOver, {
-      clientY: { value: 2 },
-      dataTransfer: { value: dataTransfer },
-    });
-    act(() => target.dispatchEvent(dragOver));
+    act(() => source.dispatchEvent(pointerEvent("pointerdown", {
+      clientX: 100,
+      clientY: 28,
+      shiftKey: true,
+    })));
+    act(() => source.dispatchEvent(pointerEvent("pointermove", {
+      clientX: 100,
+      clientY: 2,
+    })));
+    expect(target.classList.contains("drop-before")).toBe(true);
+    act(() => source.dispatchEvent(pointerEvent("pointerup", {
+      clientX: 100,
+      clientY: 2,
+    })));
 
-    const drop = new Event("drop", { bubbles: true, cancelable: true });
-    Object.defineProperty(drop, "dataTransfer", { value: dataTransfer });
-    act(() => target.dispatchEvent(drop));
     expect(dispatch).toHaveBeenCalledWith({
       type: "movePopulation",
       popId: "pop-a",

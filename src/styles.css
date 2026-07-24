@@ -1633,7 +1633,7 @@ input[type="number"]::-webkit-outer-spin-button {
 .pop-row-select { margin: 0; width: 13px; height: 13px; cursor: pointer; }
 .pop-row:hover { background: #eef; }
 .pop-row.active { background: #d6edff; border-color: #88b8ff; }
-.pop-row.dragging { opacity: 0.45; }
+.pop-row.dragging { opacity: 0.45; cursor: grabbing; user-select: none; }
 .pop-row.drop-before { box-shadow: inset 0 2px 0 #2f80ed; }
 .pop-row.drop-after { box-shadow: inset 0 -2px 0 #2f80ed; }
 .pop-row.drop-inside { outline: 2px solid #2f80ed; outline-offset: -2px; }
@@ -1691,7 +1691,8 @@ input[type="number"]::-webkit-outer-spin-button {
 .pop-tree-gate-add:hover { background: #dfe8f2; border-color: #6f8297; }
 
 .pop-gate-picker {
-  position: fixed; z-index: 180; width: 300px; max-height: 300px;
+  position: fixed; z-index: 180; width: 300px; height: min(360px, calc(100vh - 16px));
+  max-height: 360px;
   display: flex; flex-direction: column; gap: 6px;
   padding: 8px; border: 1px solid #aeb9c6; border-radius: 6px;
   background: #fff; color: #222; box-shadow: 0 8px 24px rgba(31,45,61,0.24);
@@ -1708,6 +1709,11 @@ input[type="number"]::-webkit-outer-spin-button {
   border-radius: 3px; background: transparent; color: #596777; font-size: 17px; cursor: pointer;
 }
 .pop-gate-picker-title > button:hover { background: #edf2f7; }
+.pop-gate-picker-current {
+  display: flex; align-items: center; gap: 7px; padding: 6px 7px;
+  border: 1px solid #9dc1f5; border-radius: 4px;
+  background: #eaf3ff; color: #294c78; font-size: 11px;
+}
 .pop-gate-picker-remove {
   width: 100%; padding: 5px 7px; border: 1px solid #e1b8b8; border-radius: 4px;
   background: #fff7f7; color: #9d2d2d; text-align: left; font-size: 11px; cursor: pointer;
@@ -1718,7 +1724,8 @@ input[type="number"]::-webkit-outer-spin-button {
   background: #fff; color: #222; font-size: 12px;
 }
 .pop-gate-picker-list {
-  min-height: 0; overflow-y: auto; border: 1px solid #e0e5eb; border-radius: 4px;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  overscroll-behavior: contain; border: 1px solid #e0e5eb; border-radius: 4px;
 }
 .pop-gate-picker-choice {
   display: flex; align-items: center; gap: 7px; width: 100%; padding: 5px 7px;
@@ -1726,9 +1733,19 @@ input[type="number"]::-webkit-outer-spin-button {
   text-align: left; font-size: 11px; line-height: 1.25; cursor: pointer;
 }
 .pop-gate-picker-choice:last-child { border-bottom: 0; }
-.pop-gate-picker-choice:hover, .pop-gate-picker-choice.current { background: #e9f2ff; }
+.pop-gate-picker-choice:hover { background: #f1f6fc; }
+.pop-gate-picker-choice.current {
+  background: #dcecff; box-shadow: inset 3px 0 0 #2f80ed; font-weight: 600;
+}
 .pop-gate-picker-swatch {
   flex: 0 0 11px; width: 11px; height: 11px; border-radius: 2px;
+}
+.pop-gate-picker-choice-label {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pop-gate-picker-current-badge {
+  flex: 0 0 auto; padding: 1px 5px; border-radius: 999px;
+  background: #2f80ed; color: #fff; font-size: 9px; font-weight: 700;
 }
 .pop-gate-picker-empty { padding: 12px 8px; color: #7b8491; font-size: 11px; text-align: center; }
 

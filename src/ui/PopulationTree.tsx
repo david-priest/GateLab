@@ -29,10 +29,20 @@ interface DropTarget {
   valid: boolean;
 }
 
+interface PointerDrag {
+  popId: string;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  active: boolean;
+  dropTarget: DropTarget | null;
+}
+
 interface GateChoice {
   key: string;
   gateRef: GateRef;
   gate: Gate;
+  shortLabel: string;
   label: string;
 }
 
@@ -62,6 +72,7 @@ function gateChoices(state: CoreState): GateChoice[] {
         key: gateRefKey(gateRef),
         gateRef,
         gate,
+        shortLabel: gate.name,
         label: `${gate.name} — ${suffix}`,
       }];
     }
@@ -71,6 +82,7 @@ function gateChoices(state: CoreState): GateChoice[] {
         key: gateRefKey(gateRef),
         gateRef,
         gate,
+        shortLabel: `${gate.name} [Q${quadrant}]`,
         label: `${gate.name} [Q${quadrant}] — ${suffix}`,
       };
     });
@@ -90,6 +102,8 @@ export function PopulationTree({ state, derived, dispatch }: Props) {
   const [gateQuery, setGateQuery] = useState("");
   const gatePickerRef = useRef<HTMLDivElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const pointerDragRef = useRef<PointerDrag | null>(null);
+  const suppressRowClickRef = useRef(false);
 
   useEffect(() => {
     if (!editingName) return;
@@ -157,7 +171,7 @@ export function PopulationTree({ state, derived, dispatch }: Props) {
     event.stopPropagation();
     const rect = event.currentTarget.getBoundingClientRect();
     const width = 300;
-    const height = 300;
+    const height = 360;
     setGateQuery("");
     setGatePicker({
       popId,
@@ -213,6 +227,38 @@ export function PopulationTree({ state, derived, dispatch }: Props) {
       !wouldCreateCycle(populations, sourceId, destinationParentId);
   };
 
+  const resetPointerDrag = (row: HTMLDivElement, pointerId: number): void => {
+    if (row.hasPointerCapture?.(pointerId)) row.releasePointerCapture(pointerId);
+    pointerDragRef.current = null;
+    setDraggingPopId(null);
+    setDropTarget(null);
+  };
+
+  const updatePointerDropTarget = (
+    sourceId: string,
+    clientX: number,
+    clientY: number,
+  ): DropTarget | null => {
+    const pointed = document.elementFromPoint(clientX, clientY);
+    const row = pointed instanceof Element ? pointed.closest<HTMLElement>(".pop-row") : null;
+    const targetId = row?.dataset.popId;
+    if (!row || !targetId || !populations[targetId]) return null;
+    const rect = row.getBoundingClientRect();
+    const position = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
+    const placement: DropPlacement = targetId === root_population_id
+      ? "inside"
+      : position < 0.28
+        ? "before"
+        : position > 0.72
+          ? "after"
+          : "inside";
+    return {
+      popId: targetId,
+      placement,
+      valid: validDrop(sourceId, targetId, placement),
+    };
+  };
+
   const appendRows = (popId: string, depth: number, isLastPath: boolean[]) => {
     if (visited.has(popId)) return;
     visited.add(popId);
@@ -245,55 +291,68 @@ export function PopulationTree({ state, derived, dispatch }: Props) {
             : "")
         }
         data-pop-id={popId}
-        draggable={!isRoot}
-        onClick={() => {
+        onClick={(event) => {
+          if (suppressRowClickRef.current) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
           dispatch({ type: "setActivePopulation", popId });
           focusTreeContainer();
         }}
-        onDragStart={(event) => {
-          if (isRoot || !event.shiftKey) {
-            event.preventDefault();
-            return;
-          }
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", popId);
-          setDraggingPopId(popId);
-          setDropTarget(null);
-        }}
-        onDragOver={(event) => {
-          if (!draggingPopId) return;
-          const rect = event.currentTarget.getBoundingClientRect();
-          const position = rect.height > 0 ? (event.clientY - rect.top) / rect.height : 0.5;
-          const placement: DropPlacement = isRoot
-            ? "inside"
-            : position < 0.28
-              ? "before"
-              : position > 0.72
-                ? "after"
-                : "inside";
-          const valid = validDrop(draggingPopId, popId, placement);
-          if (valid) {
-            event.preventDefault();
-            event.dataTransfer.dropEffect = "move";
-          }
-          setDropTarget({ popId, placement, valid });
-        }}
-        onDrop={(event) => {
+        onPointerDown={(event) => {
+          if (isRoot || !event.shiftKey || event.button !== 0) return;
+          const target = event.target instanceof Element ? event.target : null;
+          if (target?.closest("button, input, .pop-tree-gate-badge")) return;
+          pointerDragRef.current = {
+            popId,
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            active: false,
+            dropTarget: null,
+          };
+          event.currentTarget.setPointerCapture?.(event.pointerId);
           event.preventDefault();
-          if (draggingPopId && dropTarget?.popId === popId && dropTarget.valid) {
+        }}
+        onPointerMove={(event) => {
+          const drag = pointerDragRef.current;
+          if (!drag || drag.pointerId !== event.pointerId) return;
+          if (!drag.active) {
+            const moved = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+            if (moved < 4) return;
+            drag.active = true;
+            setDraggingPopId(drag.popId);
+          }
+          event.preventDefault();
+          const nextTarget = updatePointerDropTarget(drag.popId, event.clientX, event.clientY);
+          drag.dropTarget = nextTarget;
+          setDropTarget(nextTarget);
+        }}
+        onPointerUp={(event) => {
+          const drag = pointerDragRef.current;
+          if (!drag || drag.pointerId !== event.pointerId) return;
+          if (drag.active) {
+            event.preventDefault();
+            suppressRowClickRef.current = true;
+            window.setTimeout(() => {
+              suppressRowClickRef.current = false;
+            }, 0);
+          }
+          if (drag.active && drag.dropTarget?.valid) {
             dispatch({
               type: "movePopulation",
-              popId: draggingPopId,
-              targetId: popId,
-              placement: dropTarget.placement,
+              popId: drag.popId,
+              targetId: drag.dropTarget.popId,
+              placement: drag.dropTarget.placement,
             });
           }
-          setDraggingPopId(null);
-          setDropTarget(null);
+          resetPointerDrag(event.currentTarget, event.pointerId);
         }}
-        onDragEnd={() => {
-          setDraggingPopId(null);
-          setDropTarget(null);
+        onPointerCancel={(event) => {
+          const drag = pointerDragRef.current;
+          if (!drag || drag.pointerId !== event.pointerId) return;
+          resetPointerDrag(event.currentTarget, event.pointerId);
         }}
       >
         <span className="pop-row-select-col">
@@ -396,6 +455,9 @@ export function PopulationTree({ state, derived, dispatch }: Props) {
     gatePicker?.refIndex !== null && gatePicker?.refIndex !== undefined && pickerPopulation
       ? pickerPopulation.gate_refs[gatePicker.refIndex]
       : null;
+  const pickerCurrentChoice = pickerCurrentRef
+    ? choices.find((choice) => choice.key === gateRefKey(pickerCurrentRef)) ?? null
+    : null;
   const usedKeys = new Set(
     (pickerPopulation?.gate_refs ?? [])
       .filter((_, index) => index !== gatePicker?.refIndex)
@@ -423,10 +485,23 @@ export function PopulationTree({ state, derived, dispatch }: Props) {
         >
           <div className="pop-gate-picker-title">
             <span>
-              {gatePicker.refIndex === null ? t("Add gate") : t("Change gate")} · {pickerPopulation.name}
+              {gatePicker.refIndex === null
+                ? t("Add gate")
+                : t("Change gate: {gate}", {
+                    gate: pickerCurrentChoice?.shortLabel ?? t("Unknown gate"),
+                  })} · {pickerPopulation.name}
             </span>
             <button type="button" onClick={() => setGatePicker(null)} aria-label={t("Close")}>×</button>
           </div>
+          {pickerCurrentChoice && (
+            <div className="pop-gate-picker-current">
+              <span
+                className="pop-gate-picker-swatch"
+                style={{ background: pickerCurrentChoice.gate.color }}
+              />
+              <span><strong>{t("Current gate")}:</strong> {pickerCurrentChoice.shortLabel}</span>
+            </div>
+          )}
           {gatePicker.refIndex !== null && (
             <button type="button" className="pop-gate-picker-remove" onClick={removePickedGate}>
               {t("Remove this gate from the population")}
@@ -452,7 +527,10 @@ export function PopulationTree({ state, derived, dispatch }: Props) {
                 onClick={() => chooseGate(choice)}
               >
                 <span className="pop-gate-picker-swatch" style={{ background: choice.gate.color }} />
-                <span>{choice.label}</span>
+                <span className="pop-gate-picker-choice-label">{choice.label}</span>
+                {pickerCurrentRef && gateRefKey(pickerCurrentRef) === choice.key && (
+                  <span className="pop-gate-picker-current-badge">{t("Current")}</span>
+                )}
               </button>
             ))}
             {availableChoices.length === 0 && (
