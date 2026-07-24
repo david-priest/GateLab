@@ -18,7 +18,7 @@ import type {
   PersistedTransformBinding,
 } from "./workspaceCompensation";
 import { encodeFloat32Base64, encodeUint8Base64 } from "./encode";
-import { includePlotGatesInAxisRange, robustAxisRange } from "./axisRange";
+import { robustAxisRange } from "./axisRange";
 import { DEFAULT_DENSITY_COLOR_POWER } from "./pseudocolor";
 import { logicleTicks, scatterTicks, type AxisTicks } from "./ticks";
 import {
@@ -1739,9 +1739,10 @@ export class Sample {
     const ydFull = this.displayColumn(yIdx);
 
     // Ticks depend on the visible range → compute from the effective (possibly panned) range.
-    const plotGates = Array.isArray(gates) ? gates : [];
-    const xr = xRange ?? includePlotGatesInAxisRange(this.displayRange(xIdx), plotGates, "x");
-    const yr = yRange ?? includePlotGatesInAxisRange(this.displayRange(yIdx), plotGates, "y");
+    // Automatic axes are data-only and must remain invariant while gates are moved or edited.
+    // Gate-aware fitting is an explicit App action that supplies fixed xRange/yRange overrides.
+    const xr = xRange ?? this.displayRange(xIdx);
+    const yr = yRange ?? this.displayRange(yIdx);
     const xTicks = this.channelTicks(xIdx, xr);
     const yTicks = this.channelTicks(yIdx, yr);
 
