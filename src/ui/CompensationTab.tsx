@@ -102,6 +102,8 @@ interface Props {
   hasExistingGates?: boolean;
   applyStatus?: CompensationApplyUiStatus | null;
   installedProfile?: CompensationProfileRecord | null;
+  applyTargetCount?: number;
+  applyTargetEventCount?: number;
   applyWorkerCount?: number;
   applyWorkerLimit?: number;
   onApplyWorkerCountChange?: (count: number) => void;
@@ -147,6 +149,9 @@ export interface CompensationApplyUiStatus {
   readonly fraction: number;
   readonly processedEvents: number;
   readonly totalEvents: number;
+  readonly targetFileIndex?: number;
+  readonly targetFileCount?: number;
+  readonly targetFileName?: string;
 }
 
 interface CytofMatrixDraft {
@@ -456,6 +461,8 @@ function CompensationTabImpl({
   hasExistingGates = false,
   applyStatus = null,
   installedProfile = null,
+  applyTargetCount = 1,
+  applyTargetEventCount,
   applyWorkerCount,
   applyWorkerLimit,
   onApplyWorkerCountChange,
@@ -581,6 +588,11 @@ function CompensationTabImpl({
   const matrixRef = useRef<HTMLDivElement>(null);
   const commonPathRef = useRef<HTMLDivElement>(null);
   const applyBusy = applyingProfile || applyStatus !== null;
+  const resolvedApplyTargetCount = Math.max(0, Math.floor(applyTargetCount));
+  const resolvedApplyTargetEventCount = Math.max(
+    0,
+    Math.floor(applyTargetEventCount ?? sample.fcs.nEvents),
+  );
   const visibleApplyProgress: CompensationApplyUiStatus | null = applyStatus ??
     (applyProgress
       ? {
@@ -1511,9 +1523,10 @@ function CompensationTabImpl({
         },
       );
       await onApplyProfile(profile, setApplyProgress);
-      setActionMessage(t("Applied {name} to {count} channels. Original measurements remain available.", {
+      setActionMessage(t("Applied {name} to {channels} channels across {files} checked FCS files. Original measurements remain available.", {
         name: displayName,
-        count: includedCytofChannels.size,
+        channels: includedCytofChannels.size,
+        files: resolvedApplyTargetCount,
       }));
       setCytofDraft(null);
       setIncludedCytofChannels(new Set());
@@ -2690,17 +2703,27 @@ function CompensationTabImpl({
               )}
 
               <div className="gl-comp-apply-row">
-                <div>
-                  {applyBusy
-                    ? visibleApplyProgress
-                      ? t("{phase}… {percent}% ({processed} / {total} events)", {
-                          phase: t(visibleApplyProgress.phase === "cancelling" ? "Cancelling" : visibleApplyProgress.phase === "preparing" ? "Preparing" : "Applying"),
-                          percent: Math.round(visibleApplyProgress.fraction * 100),
-                          processed: visibleApplyProgress.processedEvents.toLocaleString(),
-                          total: visibleApplyProgress.totalEvents.toLocaleString(),
-                        })
-                      : t("Preparing compensation…")
-                    : t("The Original assay is retained and can be restored at any time.")}
+                <div className="gl-comp-apply-copy">
+                  <span>
+                    {applyBusy
+                      ? visibleApplyProgress
+                        ? t("{phase}… {percent}% ({processed} / {total} events)", {
+                            phase: t(visibleApplyProgress.phase === "cancelling" ? "Cancelling" : visibleApplyProgress.phase === "preparing" ? "Preparing" : "Applying"),
+                            percent: Math.round(visibleApplyProgress.fraction * 100),
+                            processed: visibleApplyProgress.processedEvents.toLocaleString(),
+                            total: visibleApplyProgress.totalEvents.toLocaleString(),
+                          })
+                        : t("Preparing compensation…")
+                      : t("The Original assay is retained and can be restored at any time.")}
+                  </span>
+                  <strong className={resolvedApplyTargetCount === 0 ? "is-empty" : undefined}>
+                    {resolvedApplyTargetCount === 0
+                      ? t("No FCS files are checked. Select at least one file in Samples.")
+                      : t("Applies atomically to {files} checked FCS files · {events} total events", {
+                          files: resolvedApplyTargetCount,
+                          events: resolvedApplyTargetEventCount.toLocaleString(),
+                        })}
+                  </strong>
                 </div>
                 {applyBusy ? (
                   <button
@@ -2717,6 +2740,7 @@ function CompensationTabImpl({
                     className="gl-btn"
                     disabled={
                       !onApplyProfile ||
+                      resolvedApplyTargetCount === 0 ||
                       !cytofCompatibility.canApply ||
                       (hasExistingGates && !gateRecomputeAcknowledged)
                     }
@@ -2831,7 +2855,12 @@ function CompensationTabImpl({
           />
           {Object.keys(stagedCoefficients).length > 0 && (
             <div className="gl-comp-staged-actions">
-              <span>{t("{count} pending edits", { count: Object.keys(stagedCoefficients).length })}</span>
+              <span>
+                {t("{count} pending edits", { count: Object.keys(stagedCoefficients).length })}
+                {profileRecord?.scientific.kind === "cytof-spillover"
+                  ? ` · ${t("{files} checked FCS files", { files: resolvedApplyTargetCount })}`
+                  : ""}
+              </span>
               <button
                 type="button"
                 className="gl-mini-btn"
@@ -2847,7 +2876,13 @@ function CompensationTabImpl({
               <button
                 type="button"
                 className="gl-btn"
-                disabled={applyBusy || sweepProgress !== null || boundsPreviewPairKey !== null || !onApplyProfile}
+                disabled={
+                  applyBusy ||
+                  sweepProgress !== null ||
+                  boundsPreviewPairKey !== null ||
+                  !onApplyProfile ||
+                  (profileRecord?.scientific.kind === "cytof-spillover" && resolvedApplyTargetCount === 0)
+                }
                 onClick={() => void applyStagedMatrix()}
               >
                 {t("Apply revised matrix")}

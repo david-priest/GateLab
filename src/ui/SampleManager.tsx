@@ -151,7 +151,7 @@ export function SampleNavigator({
               <input
                 type="checkbox"
                 className="gl-sample-include"
-                title={t("Include this sample in multi-sample analyses")}
+                title={t("Include this sample in multi-sample analyses and CyTOF compensation Apply")}
                 aria-label={t("Include {name} in analyses", { name: item.name })}
                 checked={included}
                 onClick={(event) => event.stopPropagation()}

@@ -66,6 +66,7 @@ import {
   CompensationManager,
   type CompensationApplyProgress,
 } from "./engine/compensationManager";
+import { reportMatrixCompatibility } from "./engine/compensationCompatibility";
 import type { CompensationProfileRecord } from "./engine/compensationProfileRecord";
 import {
   digestFcsBytes,
@@ -1108,7 +1109,47 @@ export default function App() {
         throw new Error(t("The compensation revision cannot be applied because its parent profile is missing from this workspace."));
       }
     }
-    const targetSample = sample;
+    const targetEntries = profile.scientific.kind === "cytof-spillover"
+      ? includedSamples
+      : activeEntry
+        ? [activeEntry]
+        : [];
+    if (targetEntries.length === 0) {
+      const message = t("Check at least one FCS file in Samples before applying CyTOF compensation.");
+      setError(message);
+      throw new Error(message);
+    }
+    if (profile.scientific.kind === "cytof-spillover") {
+      const incompatible = targetEntries.flatMap((entry) => {
+        if (entry.sample.instrument !== "cytof") {
+          return [t("{name}: not a CyTOF file", { name: entry.name })];
+        }
+        const compatibility = reportMatrixCompatibility({
+          kind: "cytof-spillover",
+          matrix: profile.scientific.matrix,
+          includedChannels: profile.scientific.includedChannels,
+          sampleChannels: entry.sample.channels,
+        });
+        return compatibility.canApply
+          ? []
+          : [t("{name}: {reason}", {
+              name: entry.name,
+              reason: compatibility.blockers.map(({ message }) => message).join(" "),
+            })];
+      });
+      if (incompatible.length > 0) {
+        const message = t(
+          "Compensation was not applied. Every checked FCS file must be compatible with the CyTOF matrix: {files}",
+          { files: incompatible.join("; ") },
+        );
+        setError(message);
+        throw new Error(message);
+      }
+    }
+    const targetTotalEvents = targetEntries.reduce(
+      (total, entry) => total + entry.sample.fcs.nEvents,
+      0,
+    );
     compensationApplyGuardRef.current = true;
     setCompensationApplyStatus({
       phase: "preparing",
@@ -1116,14 +1157,19 @@ export default function App() {
       profileName: profile.name,
       fraction: 0,
       processedEvents: 0,
-      totalEvents: targetSample.fcs.nEvents,
+      totalEvents: targetTotalEvents,
+      targetFileCount: targetEntries.length,
     });
     try {
       await checkpointCurrentWorkspace("before-compensation-apply");
       const result = await manager.apply({
         profile,
-        targets: [{ sample: targetSample, activeLayer: "compensated" }],
+        targets: targetEntries.map(({ sample: targetSample }) => ({
+          sample: targetSample,
+          activeLayer: "compensated",
+        })),
         onProgress: (progress) => {
+          const progressEntry = targetEntries[progress.sampleIndex];
           setCompensationApplyStatus({
             phase: "applying",
             operation: "apply",
@@ -1131,24 +1177,43 @@ export default function App() {
             fraction: progress.fraction,
             processedEvents: progress.processedEvents,
             totalEvents: progress.totalEvents,
+            targetFileIndex: progress.sampleIndex + 1,
+            targetFileCount: progress.sampleCount,
+            ...(progressEntry ? { targetFileName: progressEntry.name } : {}),
           });
-          setImportMsg(t("Compensation · {percent}% · {processed} / {total} events", {
-            percent: Math.round(progress.fraction * 100),
-            processed: progress.processedEvents.toLocaleString(),
-            total: progress.totalEvents.toLocaleString(),
-          }));
+          setImportMsg(progress.sampleCount > 1 && progressEntry
+            ? t("Compensation · file {current} of {count}: {name} · {percent}% · {processed} / {total} events", {
+                current: progress.sampleIndex + 1,
+                count: progress.sampleCount,
+                name: progressEntry.name,
+                percent: Math.round(progress.fraction * 100),
+                processed: progress.processedEvents.toLocaleString(),
+                total: progress.totalEvents.toLocaleString(),
+              })
+            : t("Compensation · {percent}% · {processed} / {total} events", {
+                percent: Math.round(progress.fraction * 100),
+                processed: progress.processedEvents.toLocaleString(),
+                total: progress.totalEvents.toLocaleString(),
+              }));
           onProgress?.(progress);
         },
       });
-      const targetEntry = samples.find(({ sample: candidate }) => candidate === targetSample);
-      const appliedBinding = result.targets[0]?.binding;
-      if (targetEntry && appliedBinding) {
-        // Best-effort local acceleration. The saved profile remains the scientific source of
-        // truth when storage is unavailable or the derived assay exceeds the cache size cap.
-        void digestFcsBytes(targetEntry.bytes)
-          .then((fcsDigest) => writeCachedCompensatedAssay(fcsDigest, targetSample, appliedBinding))
-          .catch(() => undefined);
-      }
+      // Best-effort local acceleration for every committed target. Cache sequentially so a
+      // many-file Apply cannot create a burst of large digest/IndexedDB jobs after completion.
+      void (async () => {
+        for (const applied of result.targets) {
+          const targetEntry = targetEntries.find(({ sample: candidate }) => candidate === applied.sample);
+          if (!targetEntry) continue;
+          try {
+            const fcsDigest = await digestFcsBytes(targetEntry.bytes);
+            await writeCachedCompensatedAssay(fcsDigest, applied.sample, applied.binding);
+          } catch {
+            // The profile remains the scientific source of truth when the local cache is
+            // unavailable or the derived assay exceeds its size cap.
+          }
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        }
+      })();
       setWorkspaceCompensation((current) => {
         const exists = current.lineages.some(({ records }) =>
           records.some(({ profileId }) => profileId === profile.profileId)
@@ -1179,7 +1244,16 @@ export default function App() {
       const appliedChannelCount = profile.scientific.kind === "flow-spillover"
         ? profile.scientific.matrix.receiverChannels.length
         : profile.scientific.includedChannels.length;
-      setImportMsg(t("Compensated with {name} · {count} channels", { name: profile.name, count: appliedChannelCount }));
+      setImportMsg(profile.scientific.kind === "cytof-spillover"
+        ? t("Compensated {files} checked FCS files with {name} · {count} channels", {
+            files: targetEntries.length,
+            name: profile.name,
+            count: appliedChannelCount,
+          })
+        : t("Compensated with {name} · {count} channels", {
+            name: profile.name,
+            count: appliedChannelCount,
+          }));
       pendingCheckpointReasonRef.current = "after-compensation-apply";
     } catch (cause) {
       if (cause instanceof CompensationCancelledError) {
@@ -2821,7 +2895,12 @@ export default function App() {
                     ? "Preparing CyTOF compensation"
                     : "Applying CyTOF compensation")}
             </strong>
-            <span title={compensationApplyStatus.profileName}>{compensationApplyStatus.profileName}</span>
+            <span title={compensationApplyStatus.targetFileName ?? compensationApplyStatus.profileName}>
+              {compensationApplyStatus.profileName}
+              {compensationApplyStatus.targetFileName
+                ? ` · ${compensationApplyStatus.targetFileName}`
+                : ""}
+            </span>
           </div>
           <progress
             aria-label={t(compensationApplyStatus.operation === "restore"
@@ -2831,6 +2910,12 @@ export default function App() {
             value={compensationApplyStatus.fraction}
           />
           <span className="gl-comp-apply-status-count">
+            {compensationApplyStatus.targetFileCount && compensationApplyStatus.targetFileCount > 1
+              ? `${t("File {current} / {total}", {
+                  current: compensationApplyStatus.targetFileIndex ?? 1,
+                  total: compensationApplyStatus.targetFileCount,
+                })} · `
+              : ""}
             {t("{percent}% · {processed} / {total} events", {
               percent: Math.round(compensationApplyStatus.fraction * 100),
               processed: compensationApplyStatus.processedEvents.toLocaleString(),
@@ -3508,6 +3593,10 @@ export default function App() {
                   hasExistingGates={Object.keys(state.gates).length > 0}
                   applyStatus={compensationApplyStatus}
                   installedProfile={activeCompensationProfile}
+                  applyTargetCount={sample.instrument === "cytof" ? includedSamples.length : 1}
+                  applyTargetEventCount={sample.instrument === "cytof"
+                    ? includedSamples.reduce((total, entry) => total + entry.sample.fcs.nEvents, 0)
+                    : sample.fcs.nEvents}
                   applyWorkerCount={compensationWorkerCount}
                   applyWorkerLimit={compensationWorkerLimit}
                   onApplyWorkerCountChange={changeCompensationWorkerCount}

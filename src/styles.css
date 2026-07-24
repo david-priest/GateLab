@@ -599,6 +599,9 @@ input[type="number"]::-webkit-outer-spin-button {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   min-height: 28px; color: var(--muted); font-size: 10px;
 }
+.gl-comp-apply-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.gl-comp-apply-copy strong { color: var(--text); font-size: 10px; font-weight: 600; }
+.gl-comp-apply-copy strong.is-empty { color: #a24435; }
 .gl-comp-workspace-tabs {
   display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 3px; min-height: 32px;
   border-bottom: 1px solid var(--line);
