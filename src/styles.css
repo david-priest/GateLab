@@ -1768,6 +1768,37 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-modal-note { color: var(--muted); font-size: 11px; margin: 4px 0 12px; }
 .gl-modal-warning { color: #7a3e00; background: #fff4df; border: 1px solid #e9bd72; border-radius: 4px; font-size: 12px; line-height: 1.4; margin: 4px 0 12px; padding: 8px 10px; }
 .gl-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.gl-workspace-relink-modal { width: min(540px, calc(100vw - 40px)); }
+.gl-workspace-relink-intro {
+  margin: 0 0 10px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.gl-workspace-relink-summary {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.gl-workspace-relink-files {
+  max-height: min(240px, calc(100vh - 330px));
+  margin-bottom: 9px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--bg);
+}
+.gl-workspace-relink-files > div {
+  min-height: 27px;
+  padding: 5px 8px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gl-workspace-relink-files > div:last-child { border-bottom: 0; }
 .gl-comp-export-modal { width: min(580px, calc(100vw - 40px)); }
 .gl-comp-export-intro {
   margin: 0 0 12px; color: var(--muted); font-size: 12px; line-height: 1.45;

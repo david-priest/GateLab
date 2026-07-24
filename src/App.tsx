@@ -83,7 +83,6 @@ import { restorePortableAssayLayers } from "./engine/workspacePortableAssays";
 import {
   supportsFileSystemAccess,
   supportsDirectoryAccess,
-  pickFile,
   pickFileSource,
   pickFiles,
   pickDirectoryFiles,
@@ -94,7 +93,12 @@ import {
   readFromHandle,
   rememberHandle,
   recallHandle,
+  type PickedFileSource,
 } from "./engine/fsAccess";
+import {
+  planWorkspaceFcsRelink,
+  type WorkspaceFcsRequirement,
+} from "./engine/workspaceRelink";
 import {
   AUTO_CHECKPOINT_INTERVAL_MS,
   requestPersistentWorkspaceHistory,
@@ -139,6 +143,7 @@ import {
   type SampleImportProgress,
   type SampleListItem,
 } from "./ui/SampleManager";
+import { WorkspaceRelinkModal } from "./ui/WorkspaceRelinkModal";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
 import { NavigateIcon, RectIcon, PolyIcon, QuadIcon } from "./ui/icons";
 import { useSampleDataRevisionKey } from "./ui/useSampleDataRevisions";
@@ -274,6 +279,12 @@ interface SampleEntry {
   sourcePath?: string; // display-only path below a folder selected during this session
 }
 
+interface ResolvedReferenceFcs {
+  bytes: Uint8Array;
+  handle: FileSystemFileHandle | null;
+  sourcePath?: string;
+}
+
 interface FcsImportCandidate {
   id: string;
   name: string;
@@ -285,6 +296,11 @@ interface FcsImportCandidate {
 interface PendingFolderImport {
   folderName: string;
   candidates: FcsImportCandidate[];
+}
+
+interface PendingWorkspaceRelink {
+  requirements: readonly WorkspaceFcsRequirement[];
+  workspaceHandle: FileSystemFileHandle | null;
 }
 
 function plotInteractionTokenFor(
@@ -321,6 +337,13 @@ export default function App() {
   const sampleDataRevisionKey = useSampleDataRevisionKey(samples);
   const [activeSampleId, setActiveSampleId] = useState<string | null>(null);
   const [pendingFolderImport, setPendingFolderImport] = useState<PendingFolderImport | null>(null);
+  const [pendingWorkspaceRelink, setPendingWorkspaceRelink] =
+    useState<PendingWorkspaceRelink | null>(null);
+  const [workspaceRelinkScanning, setWorkspaceRelinkScanning] = useState(false);
+  const [workspaceRelinkError, setWorkspaceRelinkError] = useState<string | null>(null);
+  const workspaceRelinkResolverRef = useRef<
+    ((resolved: ReadonlyMap<string, ResolvedReferenceFcs> | null) => void) | null
+  >(null);
   // Global sample filter (R's rv$sample_mask): samples excluded from the multi-sample analysis
   // tabs (Statistics / Proportions). New samples are included by default; default = all included.
   const [excludedSampleIds, setExcludedSampleIds] = useState<Set<string>>(new Set());
@@ -1654,20 +1677,6 @@ export default function App() {
     };
   }
 
-  function makeEntry(
-    bytes: Uint8Array,
-    name: string,
-    handle: FileSystemFileHandle | null,
-    sourcePath?: string,
-  ): SampleEntry | null {
-    try {
-      return createEntry(bytes, name, handle, sourcePath);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      return null;
-    }
-  }
-
   // Append a parsed batch atomically. This avoids treating every member of a multi-file
   // import as a separate first sample while React state updates are still queued.
   function addSampleEntries(entries: readonly SampleEntry[]): void {
@@ -2184,20 +2193,163 @@ export default function App() {
     }
   }
 
-  // Resolve one reference-workspace sample's FCS bytes: an already-open sample of the same name →
-  // a remembered handle → a "locate the file" prompt. Returns null if it can't be found.
-  async function resolveReferenceFcs(fileName: string): Promise<{ bytes: Uint8Array; handle: FileSystemFileHandle | null } | null> {
+  // Resolve a reference-workspace sample without prompting: an already-open sample of the
+  // same name → a remembered handle. All unresolved names are handled together below.
+  async function resolveKnownReferenceFcs(fileName: string): Promise<ResolvedReferenceFcs | null> {
     const existing = samples.find((e) => e.name === fileName);
-    if (existing) return { bytes: existing.bytes, handle: existing.handle };
+    if (existing) {
+      return {
+        bytes: existing.bytes,
+        handle: existing.handle,
+        ...(existing.sourcePath ? { sourcePath: existing.sourcePath } : {}),
+      };
+    }
     const h = await recallHandle("fcs:" + fileName);
     const read = h ? await readFromHandle(h) : null;
-    if (read) return { bytes: read.bytes, handle: h };
-    if (supportsFileSystemAccess()) {
-      setImportMsg(`Locate the data file: ${fileName}`);
-      const picked = await pickFile(FCS_FILE_ACCEPT, `Locate ${fileName}`, { id: "gatelab-relink-fcs" });
-      if (picked) return { bytes: picked.bytes, handle: picked.handle };
+    if (
+      read &&
+      read.name.normalize("NFC").toLocaleLowerCase() ===
+        fileName.normalize("NFC").toLocaleLowerCase()
+    ) {
+      return { bytes: read.bytes, handle: h };
     }
     return null;
+  }
+
+  async function resolveReferenceFcsFolder(
+    requirements: readonly WorkspaceFcsRequirement[],
+    workspaceHandle: FileSystemFileHandle | null,
+  ): Promise<ReadonlyMap<string, ResolvedReferenceFcs> | null> {
+    if (requirements.length === 0) return new Map();
+
+    setImportMsg(
+      `Linked FCS files unavailable · choose the folder containing all ${requirements.length} required file` +
+        `${requirements.length === 1 ? "" : "s"}`,
+    );
+
+    let sourceName: string;
+    let sources: PickedFileSource[];
+    if (supportsDirectoryAccess()) {
+      const picked = await pickDirectoryFiles([".fcs"], {
+        id: "gatelab-relink-fcs-folder",
+        ...(workspaceHandle ? { startIn: workspaceHandle } : {}),
+      });
+      if (!picked) return null;
+      sourceName = picked.name;
+      sources = picked.files;
+    } else if (supportsFileSystemAccess()) {
+      setImportMsg(
+        `Select all ${requirements.length} required FCS file${requirements.length === 1 ? "" : "s"} together`,
+      );
+      const picked = await pickFiles(
+        FCS_FILE_ACCEPT,
+        "FCS files required by this workspace",
+        { id: "gatelab-relink-fcs-batch" },
+      );
+      if (!picked) return null;
+      sourceName = "selected files";
+      sources = picked;
+    } else {
+      throw new Error(
+        "This browser cannot select a folder for linked FCS recovery. Open GateLab in a Chromium-based browser or use a portable workspace.",
+      );
+    }
+
+    const plan = planWorkspaceFcsRelink(requirements, sources);
+    if (plan.missing.length > 0 || plan.ambiguous.length > 0) {
+      const details: string[] = [];
+      if (plan.missing.length > 0) {
+        details.push(`Missing: ${plan.missing.map(({ fileName }) => fileName).join(", ")}`);
+      }
+      if (plan.ambiguous.length > 0) {
+        details.push(
+          "Ambiguous: " +
+            plan.ambiguous.map(({ requirement, candidates }) =>
+              `${requirement.fileName} (${candidates.length > 0
+                ? candidates.map(({ relativePath }) => relativePath).join(" | ")
+                : "duplicate workspace filename"})`
+            ).join("; "),
+        );
+      }
+      throw new Error(
+        `The selected folder "${sourceName}" could not uniquely match every FCS file required by this workspace. ` +
+          `${details.join(". ")}. No workspace data were changed.`,
+      );
+    }
+
+    const resolved = new Map<string, ResolvedReferenceFcs>();
+    for (let index = 0; index < requirements.length; index++) {
+      const requirement = requirements[index];
+      const source = plan.matches.get(requirement.dataPath)!;
+      setImportMsg(
+        `Relinking from ${sourceName} · ${index + 1} / ${requirements.length} · ${requirement.fileName}`,
+      );
+      const bytes = new Uint8Array(await source.file.arrayBuffer());
+      resolved.set(requirement.dataPath, {
+        bytes,
+        handle: source.handle,
+        sourcePath: sourceName === "selected files"
+          ? source.relativePath
+          : `${sourceName}/${source.relativePath}`,
+      });
+    }
+    return resolved;
+  }
+
+  function requestReferenceFcsFolder(
+    requirements: readonly WorkspaceFcsRequirement[],
+    workspaceHandle: FileSystemFileHandle | null,
+  ): Promise<ReadonlyMap<string, ResolvedReferenceFcs> | null> {
+    if (workspaceRelinkResolverRef.current) {
+      return Promise.reject(new Error("Another workspace relink request is already open."));
+    }
+    setImportMsg(
+      `Linked FCS files unavailable · choose one folder for all ${requirements.length} required file` +
+        `${requirements.length === 1 ? "" : "s"}`,
+    );
+    setWorkspaceRelinkError(null);
+    setWorkspaceRelinkScanning(false);
+    setPendingWorkspaceRelink({
+      requirements: [...requirements],
+      workspaceHandle,
+    });
+    return new Promise((resolve) => {
+      workspaceRelinkResolverRef.current = resolve;
+    });
+  }
+
+  function cancelPendingWorkspaceRelink(): void {
+    const resolve = workspaceRelinkResolverRef.current;
+    workspaceRelinkResolverRef.current = null;
+    setPendingWorkspaceRelink(null);
+    setWorkspaceRelinkError(null);
+    setWorkspaceRelinkScanning(false);
+    resolve?.(null);
+  }
+
+  async function choosePendingWorkspaceRelinkFolder(): Promise<void> {
+    const pendingRelink = pendingWorkspaceRelink;
+    if (!pendingRelink || workspaceRelinkScanning) return;
+    setWorkspaceRelinkScanning(true);
+    setWorkspaceRelinkError(null);
+    try {
+      // This call must begin directly inside the button gesture. Browsers reject a picker
+      // launched later from the asynchronous workspace parser.
+      const resolved = await resolveReferenceFcsFolder(
+        pendingRelink.requirements,
+        pendingRelink.workspaceHandle,
+      );
+      if (!resolved) return;
+      const resolve = workspaceRelinkResolverRef.current;
+      workspaceRelinkResolverRef.current = null;
+      setPendingWorkspaceRelink(null);
+      resolve?.(resolved);
+    } catch (cause) {
+      setWorkspaceRelinkError(cause instanceof Error ? cause.message : String(cause));
+      setImportMsg("Selected FCS location was incomplete · choose another folder");
+    } finally {
+      setWorkspaceRelinkScanning(false);
+    }
   }
 
   async function restoreSavedWorkspaceCompensation(
@@ -2385,28 +2537,85 @@ export default function App() {
       }
       const { fcsByPath, storage } = envelope;
 
-      // Build an entry for every sample (bundled bytes, else re-linked from disk).
-      const entries: SampleEntry[] = [];
-      const nextMetadata: Record<string, Record<string, string>> = {};
-      const nextDivision: Record<string, DivisionProfile> = {};
-      const missing: string[] = [];
+      // Resolve every external FCS before parsing or changing the current workspace. Missing
+      // handles are recovered from one user-selected folder, not one picker per sample.
+      const referenceRequirements: WorkspaceFcsRequirement[] = [];
       for (const wss of ws.samples) {
         if (typeof wss.fileName !== "string" || typeof wss.dataPath !== "string") {
           throw new Error("Invalid GateLab workspace: a sample declaration is malformed.");
         }
+        if (!fcsByPath?.[wss.dataPath]) {
+          referenceRequirements.push({
+            dataPath: wss.dataPath,
+            fileName: wss.fileName,
+          });
+        }
+      }
+
+      const duplicateReferenceNames = new Set<string>();
+      const seenReferenceNames = new Set<string>();
+      for (const { fileName } of referenceRequirements) {
+        const normalized = fileName.normalize("NFC").toLocaleLowerCase();
+        if (seenReferenceNames.has(normalized)) duplicateReferenceNames.add(fileName);
+        seenReferenceNames.add(normalized);
+      }
+      if (duplicateReferenceNames.size > 0) {
+        throw new Error(
+          "This linked workspace contains multiple FCS files with the same filename " +
+            `(${[...duplicateReferenceNames].join(", ")}), so GateLab cannot safely distinguish them by folder matching. ` +
+            "Open the original files and save a portable workspace instead.",
+        );
+      }
+
+      const resolvedReferenceFcs = new Map<string, ResolvedReferenceFcs>();
+      const unresolvedRequirements: WorkspaceFcsRequirement[] = [];
+      for (const requirement of referenceRequirements) {
+        const known = await resolveKnownReferenceFcs(requirement.fileName);
+        if (known) {
+          resolvedReferenceFcs.set(requirement.dataPath, known);
+        } else {
+          unresolvedRequirements.push(requirement);
+        }
+      }
+      if (unresolvedRequirements.length > 0) {
+        const recovered = await requestReferenceFcsFolder(unresolvedRequirements, wsH);
+        if (!recovered) {
+          setImportMsg("Workspace open cancelled · current workspace unchanged");
+          return;
+        }
+        for (const [dataPath, resolved] of recovered) {
+          resolvedReferenceFcs.set(dataPath, resolved);
+        }
+      }
+
+      // Build an entry for every sample only after all linked files have been resolved.
+      const entries: SampleEntry[] = [];
+      const nextMetadata: Record<string, Record<string, string>> = {};
+      const nextDivision: Record<string, DivisionProfile> = {};
+      for (const wss of ws.samples) {
         let fcsB = fcsByPath?.[wss.dataPath] ?? null;
         let fcsH: FileSystemFileHandle | null = null;
+        let sourcePath: string | undefined;
         if (!fcsB) {
-          const resolved = await resolveReferenceFcs(wss.fileName);
+          const resolved = resolvedReferenceFcs.get(wss.dataPath);
           if (!resolved) {
-            missing.push(wss.fileName);
-            continue;
+            throw new Error(
+              `GateLab could not resolve ${wss.fileName}. The current workspace was not changed.`,
+            );
           }
           fcsB = resolved.bytes;
           fcsH = resolved.handle;
+          sourcePath = resolved.sourcePath;
         }
-        const entry = makeEntry(fcsB, wss.fileName, fcsH);
-        if (!entry) continue;
+        let entry: SampleEntry;
+        try {
+          entry = createEntry(fcsB, wss.fileName, fcsH, sourcePath);
+        } catch (cause) {
+          throw new Error(
+            `Could not read ${wss.fileName}: ${cause instanceof Error ? cause.message : String(cause)}. ` +
+              "The current workspace was not changed.",
+          );
+        }
         if (wss.instrumentMode === "flow" || wss.instrumentMode === "cytof") {
           entry.sample.setInstrumentMode(wss.instrumentMode);
         }
@@ -2416,13 +2625,6 @@ export default function App() {
         entry.handle = fcsH;
         if (fcsH) void rememberHandle("fcs:" + wss.fileName, fcsH);
         entries.push(entry);
-      }
-
-      if (entries.length !== ws.samples.length) {
-        const failed = missing.length ? ` Missing: ${missing.join(", ")}.` : "";
-        setError(`Could not load every data file declared by this workspace.${failed} The workspace was not opened.`);
-        setBusy(false);
-        return;
       }
 
       if (rawVersion === WORKSPACE_VERSION_3) {
@@ -2588,7 +2790,6 @@ export default function App() {
       setImportMsg(
         `Opened ${wsFileName || "workspace"} · ${nS} sample${nS > 1 ? "s" : ""}` +
           ` · ${storage === "bundle" ? "self-contained bundle" : "linked FCS"}` +
-          (missing.length ? ` · missing: ${missing.join(", ")}` : "") +
           ` · saved ${new Date(ws.savedAt).toLocaleString()}`,
       );
     } catch (e) {
@@ -3940,6 +4141,17 @@ export default function App() {
           </div>
         </aside>
       </div>
+
+      {pendingWorkspaceRelink && (
+        <WorkspaceRelinkModal
+          requirements={pendingWorkspaceRelink.requirements}
+          folderSelectionAvailable={supportsDirectoryAccess()}
+          scanning={workspaceRelinkScanning}
+          error={workspaceRelinkError}
+          onChoose={() => void choosePendingWorkspaceRelinkFolder()}
+          onCancel={cancelPendingWorkspaceRelink}
+        />
+      )}
 
       {sampleManagerOpen && (
         <SampleManagerModal

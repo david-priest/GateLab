@@ -176,4 +176,29 @@ describe("pickFile", () => {
     expect(picked?.name).toBe("cytometry");
     expect(picked?.files.map((file) => file.relativePath)).toEqual(["batch/nested.FCS", "root.fcs"]);
   });
+
+  it("can start workspace relinking beside the workspace file", async () => {
+    const workspaceHandle = { kind: "file", name: "analysis.gatelab" } as FileSystemFileHandle;
+    const rootDirectory = {
+      kind: "directory",
+      name: "analysis",
+      async *values() {},
+    };
+    const showDirectoryPicker = vi.fn().mockResolvedValue(rootDirectory);
+    Object.defineProperty(window, "showDirectoryPicker", {
+      configurable: true,
+      value: showDirectoryPicker,
+    });
+
+    await pickDirectoryFiles([".fcs"], {
+      id: "gatelab-relink-fcs-folder",
+      startIn: workspaceHandle,
+    });
+
+    expect(showDirectoryPicker).toHaveBeenCalledWith({
+      mode: "read",
+      id: "gatelab-relink-fcs-folder",
+      startIn: workspaceHandle,
+    });
+  });
 });
