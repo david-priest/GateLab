@@ -147,6 +147,7 @@ const WORKSPACE_V3_ALLOWED_KEYS = [
 const SAMPLE_V3_REQUIRED_KEYS = ["fileName", "dataPath", "logicleW", "assay"] as const;
 const SAMPLE_V3_ALLOWED_KEYS = [
   ...SAMPLE_V3_REQUIRED_KEYS,
+  "sampleId",
   "scatterCofactor",
   "cytofCofactor",
   "instrumentMode",

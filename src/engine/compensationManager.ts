@@ -116,6 +116,11 @@ export interface CompensationApplyResult {
   readonly targets: readonly CompensationApplyTargetResult[];
 }
 
+export interface ExternalCompensationBinding {
+  readonly profile: CompensationProfileRecord;
+  readonly binding: PersistedCompensatedLayerBinding;
+}
+
 export interface PrimeCompensationPreviewRequest {
   readonly profile: CompensationProfileRecord;
   readonly sample: Sample;
@@ -661,7 +666,7 @@ export class CompensationManager {
     this.previewPrimeReservation = reservation;
     let state: PreviewSessionState | null = null;
     try {
-      const profile = await this.validateProfile(request.profile);
+      const profile = await this.validateProfile(request.profile, "preview");
       this.assertPreviewPrimeCurrent(reservation);
       const snapshot = this.captureSampleSnapshot(sample, profile);
       const estimatedPreviewBytes = fixed.byteLength +
@@ -906,7 +911,7 @@ export class CompensationManager {
     let profile: CompensationProfileRecord;
     let snapshots: SampleSnapshot[];
     try {
-      profile = await this.validateProfile(stableRequest.profile);
+      profile = await this.validateProfile(stableRequest.profile, "apply");
       this.assertUsable();
       if (
         this.applyReservation !== reservation ||
@@ -1012,6 +1017,33 @@ export class CompensationManager {
       `apply:${active.aggregateId}:`,
       new CompensationCancelledError(reason),
     );
+  }
+
+  /**
+   * Validate and bind a complete assay solved by an authoritative external
+   * host. This performs the same exact channel/instrument checks as browser
+   * Apply, but deliberately does not claim that GateLab's worker performed the
+   * numerical solve.
+   */
+  async prepareExternalApplyBinding(
+    input: CompensationProfileRecord,
+    sample: Sample,
+  ): Promise<ExternalCompensationBinding> {
+    this.assertUsable();
+    const profile = await validateCompensationProfileRecord(input);
+    if (
+      (profile.scientific.kind === "flow-spillover" &&
+        profile.scientific.method !== "matrix-inverse") ||
+      (profile.scientific.kind === "cytof-spillover" &&
+        profile.scientific.method !== "nnls")
+    ) {
+      throw new CompensationManagerError(
+        "unsupported-compensation-method",
+        "The external assay profile has an incompatible compensation method.",
+      );
+    }
+    const snapshot = this.captureSampleSnapshot(sample, profile);
+    return Object.freeze({ profile, binding: snapshot.binding });
   }
 
   dispose(): void {
@@ -1348,7 +1380,10 @@ export class CompensationManager {
     }
   }
 
-  private async validateProfile(input: CompensationProfileRecord): Promise<CompensationProfileRecord> {
+  private async validateProfile(
+    input: CompensationProfileRecord,
+    purpose: "apply" | "preview",
+  ): Promise<CompensationProfileRecord> {
     const profile = await validateCompensationProfileRecord(input);
     if (profile.scientific.kind === "flow-spillover") {
       if (profile.scientific.method !== "matrix-inverse") {
@@ -1357,7 +1392,13 @@ export class CompensationManager {
           "Conventional-flow profiles require exact matrix inversion.",
         );
       }
-      if (profile.scientific.solverVersion !== FLOW_SOLVER_VERSION) {
+      const externalPreview =
+        purpose === "preview" &&
+        profile.scientific.solverVersion === "r-matrix-inverse-v1";
+      if (
+        profile.scientific.solverVersion !== FLOW_SOLVER_VERSION &&
+        !externalPreview
+      ) {
         throw new CompensationManagerError(
           "unsupported-solver-version",
           `Profile solver ${profile.scientific.solverVersion} cannot be labelled as ${FLOW_SOLVER_VERSION}.`,
@@ -1372,7 +1413,13 @@ export class CompensationManager {
         "CyTOF profiles require non-negative least squares.",
       );
     }
-    if (profile.scientific.solverVersion !== CYTOF_NNLS_SOLVER_VERSION) {
+    const externalPreview =
+      purpose === "preview" &&
+      profile.scientific.solverVersion === "r-nnls-v1";
+    if (
+      profile.scientific.solverVersion !== CYTOF_NNLS_SOLVER_VERSION &&
+      !externalPreview
+    ) {
       throw new CompensationManagerError(
         "unsupported-solver-version",
         `Profile solver ${profile.scientific.solverVersion} cannot be labelled as ${CYTOF_NNLS_SOLVER_VERSION}.`,

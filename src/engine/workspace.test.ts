@@ -18,8 +18,8 @@ function makeWs(): WorkspaceFile {
     savedAt: "2026-01-01T00:00:00.000Z",
     app: "GateLab",
     samples: [
-      { fileName: "run1.fcs", dataPath: "data/0_run1.fcs", logicleW: { "PE-A": 0.7 }, scatterCofactor: { "FSC-A": 300 }, cytofCofactor: 5, compensationOn: true, labels: { "PE-A": "CD3" }, metadata: { condition: "stim", donor: "d1" } },
-      { fileName: "run2.fcs", dataPath: "data/1_run2.fcs", logicleW: {}, cytofCofactor: 7.5, compensationOn: false, metadata: { condition: "unstim", donor: "d2" } },
+      { sampleId: "sample-run-1", fileName: "run1.fcs", dataPath: "data/0_run1.fcs", logicleW: { "PE-A": 0.7 }, scatterCofactor: { "FSC-A": 300 }, cytofCofactor: 5, compensationOn: true, labels: { "PE-A": "CD3" }, metadata: { condition: "stim", donor: "d1" } },
+      { sampleId: "sample-run-2", fileName: "run2.fcs", dataPath: "data/1_run2.fcs", logicleW: {}, cytofCofactor: 7.5, compensationOn: false, metadata: { condition: "unstim", donor: "d2" } },
     ],
     activeSample: 1,
     gating: {
@@ -171,6 +171,16 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     expect(validateWorkspace(older)).toBe(true);
     expect(readWorkspaceBytes(packWorkspaceReference(older)).ws.display.fontSizes).toBeUndefined();
     expect(readWorkspaceBytes(packWorkspaceReference(older)).ws.display.densityColorPower).toBeUndefined();
+  });
+
+  it("rejects duplicate or blank persisted sample identities", () => {
+    const duplicate = cloneWs(ws);
+    duplicate.samples[1].sampleId = duplicate.samples[0].sampleId;
+    expect(() => validateWorkspace(duplicate)).toThrow(/duplicate sampleId/i);
+
+    const blank = cloneWs(ws);
+    blank.samples[0].sampleId = " ";
+    expect(() => validateWorkspace(blank)).toThrow(/invalid sampleId/i);
   });
 
   it("round-trips coordinate-bound division profiles while accepting legacy profiles without a binding", () => {

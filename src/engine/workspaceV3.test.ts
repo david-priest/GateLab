@@ -125,6 +125,7 @@ function fullSample(
   overrides: Partial<WorkspaceSample> = {},
 ): WorkspaceSample {
   return {
+    sampleId: "sample-alpha",
     fileName: "sample α.fcs",
     dataPath: "data/0_sample-alpha.fcs",
     logicleW: { A: 0.72, B: 0.55 },
@@ -393,12 +394,14 @@ async function compensatedWorkspace(): Promise<{
   const cytof = await baseline("cytof-root", cytofScientific());
   const legacy = workspaceV2([
     fullSample({
+      sampleId: "sample-flow",
       fileName: "flow.fcs",
       dataPath: "data/flow.fcs",
       cytofCofactor: undefined,
       instrumentMode: "flow",
     }),
     fullSample({
+      sampleId: "sample-cytof",
       fileName: "cytof.fcs",
       dataPath: "data/cytof.fcs",
       logicleW: {},
@@ -449,6 +452,7 @@ describe("legacy workspace migration to v3", () => {
     const legacy = workspaceV2([
       fullSample(),
       fullSample({
+        sampleId: "sample-beta",
         fileName: "second.fcs",
         dataPath: "data/1_second.fcs",
         logicleW: {},
@@ -635,7 +639,11 @@ describe("uncompensated v3 validation", () => {
   it("reuses common workspace validation, including unique data paths and graph/display state", async () => {
     const duplicate = migrateWorkspaceV2ToV3(workspaceV2([
       fullSample(),
-      fullSample({ fileName: "duplicate.fcs", dataPath: "data/1_duplicate.fcs" }),
+      fullSample({
+        sampleId: "sample-beta",
+        fileName: "duplicate.fcs",
+        dataPath: "data/1_duplicate.fcs",
+      }),
     ]));
     duplicate.samples[1].dataPath = duplicate.samples[0].dataPath;
     const duplicateError = await expectV3Error(

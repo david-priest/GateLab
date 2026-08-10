@@ -5,6 +5,7 @@
 
 import type { Sample } from "./sample";
 import type { PopulationMap } from "./models";
+import type { IllustrationPopulationSelection } from "./illustration";
 
 export type HeatmapSummaryStat = "median" | "mean";
 export type HeatmapScaleMode = "none" | "column_minmax" | "row_minmax" | "column_zscore";
@@ -297,6 +298,7 @@ export function buildMultiSampleHeatmapPayload(
     showValues: boolean;
     zLimit?: number;
   },
+  selectedBySample?: IllustrationPopulationSelection,
 ): HeatmapPayload {
   const channels = channelKeys.flatMap((key): HeatmapChannel[] => {
     const source = sources.find(({ sample }) => sample.index(key) !== undefined);
@@ -318,14 +320,21 @@ export function buildMultiSampleHeatmapPayload(
 
   if (combineSamples) {
     for (const popId of validPopIds) {
-      const sourceIndices = sources.map(({ sample, masks }) =>
-        indicesFor(masks[popId], sample.fcs.nEvents));
+      const sourceSelected = sources.map(({ id }) =>
+        !selectedBySample || (selectedBySample[id] ?? []).includes(popId));
+      if (!sourceSelected.some(Boolean)) continue;
+      const sourceIndices = sources.map(({ sample, masks }, sourceIndex) => {
+        if (!sourceSelected[sourceIndex]) return [];
+        return indicesFor(masks[popId], sample.fcs.nEvents);
+      });
       rows.push({
         id: popId,
         name: populations[popId]?.name ?? popId,
         count: sources.reduce(
           (total, source, sourceIndex) =>
-            total + (source.eventCount[popId] ?? sourceIndices[sourceIndex].length),
+            total + (sourceSelected[sourceIndex]
+              ? (source.eventCount[popId] ?? sourceIndices[sourceIndex].length)
+              : 0),
           0,
         ),
         rawValues: channelColumns.map((columns) =>
@@ -336,6 +345,7 @@ export function buildMultiSampleHeatmapPayload(
     for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
       const source = sources[sourceIndex];
       for (const popId of validPopIds) {
+        if (selectedBySample && !(selectedBySample[source.id] ?? []).includes(popId)) continue;
         const indices = indicesFor(source.masks[popId], source.sample.fcs.nEvents);
         rows.push({
           id: `${source.id}::${popId}`,

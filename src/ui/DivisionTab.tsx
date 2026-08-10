@@ -27,6 +27,8 @@ interface Props {
   savedProfile: DivisionProfile | null;
   profileStale: boolean;
   onApply: (profile: DivisionProfile) => void;
+  onWriteToHost?: (profile: DivisionProfile) => void;
+  hostWriteBusy?: boolean;
   dataRevision: number;
 }
 
@@ -42,7 +44,17 @@ function strided(idx: number[], cap: number): number[] {
   return out;
 }
 
-export function DivisionTab({ sample, sampleName, derived, savedProfile, profileStale, onApply, dataRevision }: Props) {
+export function DivisionTab({
+  sample,
+  sampleName,
+  derived,
+  savedProfile,
+  profileStale,
+  onApply,
+  onWriteToHost,
+  hostWriteBusy = false,
+  dataRevision,
+}: Props) {
   const { t } = useI18n();
   const keys = sample.channels.map((c) => c.key);
   const [dyeIdx, setDyeIdx] = useState(() => guessChannel(keys, /CFSE|CTV|CellTrace|Violet|Tag/i, 0));
@@ -154,13 +166,14 @@ export function DivisionTab({ sample, sampleName, derived, savedProfile, profile
   // Apply writes the profile to the ACTIVE sample only (the button label says so). R's multi-sample
   // "Apply to selected" (app.R:4190-4218) is intentionally deferred until GateLab has a global
   // sample-inclusion set; it would then loop the selected samples here.
-  const apply = () => onApply({
+  const currentProfile = (): DivisionProfile => ({
     channelKey: keys[dyeIdx],
     boundaries: [...boundaries].sort((a, b) => a - b),
     n,
     colName: colName.trim() || "div",
     coordinateBindingKey: sample.displayCoordinateBindingKey(keys[dyeIdx]),
   });
+  const apply = () => onApply(currentProfile());
 
   return (
     <div className="gl-tab-panel">
@@ -207,6 +220,16 @@ export function DivisionTab({ sample, sampleName, derived, savedProfile, profile
         >
           {t("Apply to {sample}", { sample: sampleName })}
         </button>
+        {onWriteToHost && (
+          <button
+            className="gl-mini-btn gl-btn-apply"
+            onClick={() => onWriteToHost(currentProfile())}
+            disabled={!profileValid || hostWriteBusy}
+            title={t("Persist division calls for compatible samples in SingleCellExperiment colData")}
+          >
+            {hostWriteBusy ? t("Writing…") : t("Write divisions to SCE")}
+          </button>
+        )}
       </div>
 
       <div className="gl-hint gl-panel-hint">

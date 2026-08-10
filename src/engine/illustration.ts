@@ -135,6 +135,20 @@ export interface IllustrationSampleSource {
   eventCount: Record<string, number | null>;
 }
 
+export type IllustrationPopulationSelection = Readonly<
+  Record<string, readonly string[]>
+>;
+
+function selectedPopulationIds(
+  sourceId: string,
+  orderedPopIds: readonly string[],
+  selectedBySample: IllustrationPopulationSelection | undefined,
+): string[] {
+  if (!selectedBySample) return [...orderedPopIds];
+  const selected = new Set(selectedBySample[sourceId] ?? []);
+  return orderedPopIds.filter((popId) => selected.has(popId));
+}
+
 /** Assemble the object passed to CytofMiniPlot.renderIllustrationGrid. */
 export function buildIllustrationPayload(
   sample: Sample,
@@ -292,6 +306,7 @@ export function buildMultiSampleIllustrationPayload(
   globalScales: Record<string, [number, number]>,
   opts: IllustrationOptions,
   combineSamples: boolean,
+  selectedBySample?: IllustrationPopulationSelection,
 ): Record<string, unknown> {
   if (sources.length === 0) {
     return {
@@ -306,9 +321,17 @@ export function buildMultiSampleIllustrationPayload(
     };
   }
 
-  const panelCount = Math.max(1, sources.length) *
-    Math.max(1, popIds.length) *
-    Math.max(1, xChannels.length);
+  const selectedPopIdsBySource = new Map(
+    sources.map((source) => [
+      source.id,
+      selectedPopulationIds(source.id, popIds, selectedBySample),
+    ]),
+  );
+  const selectedPairCount = sources.reduce(
+    (total, source) => total + (selectedPopIdsBySource.get(source.id)?.length ?? 0),
+    0,
+  );
+  const panelCount = Math.max(1, selectedPairCount) * Math.max(1, xChannels.length);
   const sharedPreviewCap = Math.max(500, Math.floor(300_000 / panelCount));
   const requestedCap = Number.isFinite(opts.maxEvents) && opts.maxEvents > 0
     ? opts.maxEvents
@@ -326,7 +349,7 @@ export function buildMultiSampleIllustrationPayload(
       populations,
       source.masks,
       source.eventCount,
-      popIds,
+      selectedPopIdsBySource.get(source.id) ?? [],
       xChannels,
       yChannel,
       globalScales,
@@ -348,7 +371,7 @@ export function buildMultiSampleIllustrationPayload(
     const populationColors: Record<string, string> = {};
 
     for (const { source, payload } of built) {
-      for (const popId of popIds) {
+      for (const popId of selectedPopIdsBySource.get(source.id) ?? []) {
         const compositeId = `${source.id}::${popId}`;
         compositePopIds.push(compositeId);
         popNames[compositeId] =
@@ -384,14 +407,17 @@ export function buildMultiSampleIllustrationPayload(
   const popCounts: Record<string, number> = {};
 
   for (const popId of popIds) {
+    const selectedBuilt = built.filter(({ source }) =>
+      selectedPopIdsBySource.get(source.id)?.includes(popId));
+    if (selectedBuilt.length === 0) continue;
     popNames[popId] = populations[popId]?.name ?? popId;
-    popCounts[popId] = built.reduce(
+    popCounts[popId] = selectedBuilt.reduce(
       (total, { payload }) => total + (payload.pop_counts[popId] ?? 0),
       0,
     );
     for (const xChannel of xChannels) {
       const key = `${popId}|${xChannel}`;
-      const available = built
+      const available = selectedBuilt
         .map(({ payload }) => payload.plots[key])
         .filter((plot): plot is IllustrationPlotPayload => Boolean(plot));
       if (available.length === 0) continue;
@@ -404,7 +430,7 @@ export function buildMultiSampleIllustrationPayload(
       };
       gateOverlays[key] =
         base.gate_overlays[key] ??
-        built.map(({ payload }) => payload.gate_overlays[key]).find(Boolean) ??
+        selectedBuilt.map(({ payload }) => payload.gate_overlays[key]).find(Boolean) ??
         [];
     }
   }
@@ -413,7 +439,7 @@ export function buildMultiSampleIllustrationPayload(
     ...base,
     plots,
     gate_overlays: gateOverlays,
-    pop_ids: popIds,
+    pop_ids: popIds.filter((popId) => popCounts[popId] !== undefined),
     pop_names: popNames,
     pop_counts: popCounts,
     population_colors: opts.populationColors,

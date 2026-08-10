@@ -166,6 +166,38 @@ import {
 } from "./engine/pseudocolor";
 import { DensityColourControl } from "./ui/DensityColourControl";
 import { UI_LANGUAGE_OPTIONS, useI18n, type UiLanguage } from "./ui/i18n";
+import { useOptionalGateLabHost } from "./host/HostContext";
+import { createBrowserHost } from "./host/browserHost";
+import {
+  loadHostedDataset,
+  type GateLabHostedSample,
+} from "./host/hostedSample";
+import {
+  adoptedRProfile,
+  authoritativeRProfile,
+  GATELAB_HOST_COMPENSATION_CONTRACT_VERSION,
+} from "./host/compensationContract";
+import {
+  decodeChannelMajorFloat32,
+  type GateLabHostAssayDescriptor,
+  type GateLabHostDatasetDescriptor,
+} from "./host/datasetContract";
+import {
+  convertHostedGateSpace,
+  readHostedWorkspace,
+} from "./host/hostedWorkspace";
+import {
+  GATELAB_HOST_COLDATA_CONTRACT_VERSION,
+  packMembershipBits,
+  type GateLabHostCategoricalColumn,
+  type GateLabHostPopulationColumn,
+} from "./host/colDataContract";
+import { GATELAB_HOST_ROWDATA_CONTRACT_VERSION } from "./host/rowDataContract";
+import type { GateLabHostWorkspaceWriteResult } from "./host/workspaceContract";
+import {
+  SceColDataExportModal,
+  type ScePopulationColumnSpec,
+} from "./ui/SceColDataExportModal";
 
 const CompensationTab = lazy(async () => {
   const module = await import("./ui/CompensationTab");
@@ -183,7 +215,8 @@ type CrudModal =
   | { kind: "confirmNewWorkspace" }
   | { kind: "confirmDelete"; what: "gates" | "pops"; ids: string[] }
   | { kind: "movePops"; ids: string[] }
-  | { kind: "bulkRename" };
+  | { kind: "bulkRename" }
+  | { kind: "exportSceColData" };
 
 type DrawMode = "navigate" | "draw-rect" | "draw-poly" | "draw-quadrant";
 type LiveWorkspaceFile = WorkspaceFile | WorkspaceFileV3;
@@ -286,9 +319,18 @@ interface SampleEntry {
   id: string;
   name: string;
   sample: Sample;
-  bytes: Uint8Array; // original FCS bytes (workspace bundling / re-parse)
+  /** Original FCS bytes; null for an SCE sample owned by the R host. */
+  bytes: Uint8Array | null;
   handle: FileSystemFileHandle | null; // File System Access handle (reference workspaces)
   sourcePath?: string; // display-only path below a folder selected during this session
+  hostSource?: Readonly<{
+    datasetId: string;
+    sampleId: string;
+    assayId: string;
+    assayRevision: number;
+    /** Zero-based original SCE columns for exact host write-back. */
+    eventIndex: Uint32Array;
+  }>;
 }
 
 interface ResolvedReferenceFcs {
@@ -349,6 +391,10 @@ function plotInteractionTokenFor(
 }
 
 export default function App() {
+  const providedHost = useOptionalGateLabHost();
+  const fallbackBrowserHost = useMemo(() => createBrowserHost(), []);
+  const host = providedHost ?? fallbackBrowserHost;
+  const isSceHost = host.kind === "r-sce";
   const { language, setLanguage, t } = useI18n();
   // Multiple samples share ONE gating tree (FlowJo-style): add/remove freely, one is active.
   const [samples, setSamples] = useState<SampleEntry[]>([]);
@@ -462,11 +508,43 @@ export default function App() {
     cancelCompensationCandidatePreview("The Compensation tab was hidden.");
   }, [cancelCompensationCandidatePreview, cancelCompensationSweepManagers]);
   const compensationApplyGuardRef = useRef(false);
+  const hostCompensationAbortRef = useRef<AbortController | null>(null);
   const compensationRestoreCancelledRef = useRef(false);
   const [compensationApplyStatus, setCompensationApplyStatus] =
     useState<CompensationApplyUiStatus | null>(null);
   const [scaleCacheEpoch, setScaleCacheEpoch] = useState(0);
   const [dirty, setDirty] = useState(false);
+  const [workspaceEditRevision, setWorkspaceEditRevision] = useState(0);
+  const workspaceEditRevisionRef = useRef(0);
+  const markWorkspaceDirty = useCallback(() => {
+    setDirty(true);
+    setWorkspaceEditRevision((current) => {
+      const next = current + 1;
+      workspaceEditRevisionRef.current = next;
+      return next;
+    });
+  }, []);
+  const [hostWorkspaceRevision, setHostWorkspaceRevision] = useState(0);
+  const hostWorkspaceRevisionRef = useRef(0);
+  const [hostWorkspaceStatus, setHostWorkspaceStatus] = useState<
+    "loading" | "saved" | "saving" | "unsaved" | "error"
+  >("loading");
+  const [hostColDataBusy, setHostColDataBusy] = useState(false);
+  const [hostAdapterWriteBusy, setHostAdapterWriteBusy] = useState(false);
+  const [hostColDataColumns, setHostColDataColumns] = useState<readonly string[]>([]);
+  const [hostDatasetDescriptor, setHostDatasetDescriptor] =
+    useState<GateLabHostDatasetDescriptor | null>(null);
+  const hostExistingCompensatedAssays = useMemo(
+    () => (hostDatasetDescriptor?.assays ?? []).filter(
+      (assay): assay is GateLabHostAssayDescriptor =>
+        assay.coordinateSpace === "linear" &&
+        !samples.some(({ hostSource }) => hostSource?.assayId === assay.id),
+    ),
+    [hostDatasetDescriptor, samples],
+  );
+  const hostSaveChainRef = useRef<Promise<unknown>>(Promise.resolve());
+  const lastHostSavedEditRevisionRef = useRef(-1);
+  const lastHostSaveResultRef = useRef<GateLabHostWorkspaceWriteResult | null>(null);
   const [xIdx, setXIdx] = useState(0);
   const [yIdx, setYIdx] = useState(1);
   const [mode, setMode] = useState<DisplayMode>("pseudocolor");
@@ -782,7 +860,7 @@ export default function App() {
       skipDirtyRef.current = false;
       return;
     }
-    setDirty(true);
+    markWorkspaceDirty();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.gate_version, state.tree_version, scalesVersion, sampleDataRevisionKey, instrumentMode, globalScales, mode, maxEvents, contourThreshold, densityColorPower, xIdx, yIdx, gatingFontSizes, workspaceCompensation]);
 
@@ -1210,7 +1288,7 @@ export default function App() {
       if (sample.activeLayer !== previousLayer) {
         setXRange(null); // assay values changed → re-auto-range
         setYRange(null);
-        setDirty(true);
+        markWorkspaceDirty();
       }
       setError(null);
       return true;
@@ -1223,6 +1301,11 @@ export default function App() {
   async function applyCompensationProfile(
     profile: CompensationProfileRecord,
     onProgress?: (progress: CompensationApplyProgress) => void,
+    existingHostAssay?: Readonly<{
+      id: string;
+      label: string;
+      revision: number;
+    }>,
   ): Promise<void> {
     if (!sample) throw new Error(t("No active sample is available for compensation."));
     const manager = compensationManagerRef.current!;
@@ -1294,42 +1377,181 @@ export default function App() {
     });
     try {
       await checkpointCurrentWorkspace("before-compensation-apply");
-      const result = await manager.apply({
-        profile,
-        targets: targetEntries.map(({ sample: targetSample }) => ({
-          sample: targetSample,
-          activeLayer: "compensated",
-        })),
-        onProgress: (progress) => {
-          const progressEntry = targetEntries[progress.sampleIndex];
-          setCompensationApplyStatus({
-            phase: "applying",
-            operation: "apply",
-            profileName: profile.name,
-            fraction: progress.fraction,
-            processedEvents: progress.processedEvents,
-            totalEvents: progress.totalEvents,
-            targetFileIndex: progress.sampleIndex + 1,
-            targetFileCount: progress.sampleCount,
-            ...(progressEntry ? { targetFileName: progressEntry.name } : {}),
-          });
-          setImportMsg(progress.sampleCount > 1 && progressEntry
-            ? t("Compensation · file {current} of {count}: {name} · {percent}% · {processed} / {total} events", {
-                current: progress.sampleIndex + 1,
-                count: progress.sampleCount,
-                name: progressEntry.name,
-                percent: Math.round(progress.fraction * 100),
-                processed: progress.processedEvents.toLocaleString(),
-                total: progress.totalEvents.toLocaleString(),
+      const progressHandler = (progress: CompensationApplyProgress) => {
+        const progressEntry = targetEntries[progress.sampleIndex];
+        setCompensationApplyStatus({
+          phase: "applying",
+          operation: "apply",
+          profileName: profile.name,
+          fraction: progress.fraction,
+          processedEvents: progress.processedEvents,
+          totalEvents: progress.totalEvents,
+          targetFileIndex: progress.sampleIndex + 1,
+          targetFileCount: progress.sampleCount,
+          ...(progressEntry ? { targetFileName: progressEntry.name } : {}),
+        });
+        setImportMsg(progress.sampleCount > 1 && progressEntry
+          ? t("Compensation · file {current} of {count}: {name} · {percent}% · {processed} / {total} events", {
+              current: progress.sampleIndex + 1,
+              count: progress.sampleCount,
+              name: progressEntry.name,
+              percent: Math.round(progress.fraction * 100),
+              processed: progress.processedEvents.toLocaleString(),
+              total: progress.totalEvents.toLocaleString(),
+            })
+          : t("Compensation · {percent}% · {processed} / {total} events", {
+              percent: Math.round(progress.fraction * 100),
+              processed: progress.processedEvents.toLocaleString(),
+              total: progress.totalEvents.toLocaleString(),
+            }));
+        onProgress?.(progress);
+      };
+
+      let result: Awaited<ReturnType<CompensationManager["apply"]>>;
+      if (isSceHost && host.compensation) {
+        const authoritativeProfile = existingHostAssay
+          ? await adoptedRProfile(profile)
+          : await authoritativeRProfile(profile);
+        const targetBindings = await Promise.all(targetEntries.map(
+          ({ sample: targetSample }) =>
+            manager.prepareExternalApplyBinding(
+              authoritativeProfile,
+              targetSample,
+            ),
+        ));
+        const datasetId = targetEntries[0].hostSource?.datasetId;
+        if (
+          !datasetId ||
+          targetEntries.some(({ hostSource }) =>
+            !hostSource || hostSource.datasetId !== datasetId
+          )
+        ) {
+          throw new Error(
+            "The selected samples are not mapped to one SCE dataset.",
+          );
+        }
+        setCompensationApplyStatus({
+          phase: "applying",
+          operation: "apply",
+          profileName: authoritativeProfile.name,
+          fraction: 0,
+          processedEvents: 0,
+          totalEvents: targetTotalEvents,
+          targetFileCount: targetEntries.length,
+        });
+        setImportMsg(
+          existingHostAssay
+            ? t("Adopting existing SCE assay {assay} · no values will be recomputed", {
+                assay: existingHostAssay.label,
               })
-            : t("Compensation · {percent}% · {processed} / {total} events", {
-                percent: Math.round(progress.fraction * 100),
-                processed: progress.processedEvents.toLocaleString(),
-                total: progress.totalEvents.toLocaleString(),
-              }));
-          onProgress?.(progress);
-        },
-      });
+            : `Applying ${authoritativeProfile.name} in R · ` +
+              `${targetTotalEvents.toLocaleString()} full SCE events`,
+        );
+        const targets = targetEntries.map((entry) => ({
+          sampleId: entry.hostSource!.sampleId,
+          sourceAssayId: entry.hostSource!.assayId,
+          expectedAssayRevision: entry.hostSource!.assayRevision,
+          activeLayer: "compensated" as const,
+        }));
+        const hosted = existingHostAssay
+          ? await host.compensation.adoptExistingAssay({
+              contractVersion:
+                GATELAB_HOST_COMPENSATION_CONTRACT_VERSION,
+              datasetId,
+              profile: authoritativeProfile,
+              outputAssayId: existingHostAssay.id,
+              expectedOutputAssayRevision: existingHostAssay.revision,
+              targets,
+            })
+          : await (() => {
+              const controller = new AbortController();
+              hostCompensationAbortRef.current = controller;
+              return host.compensation!.applyProfile({
+                contractVersion:
+                  GATELAB_HOST_COMPENSATION_CONTRACT_VERSION,
+                datasetId,
+                profile: authoritativeProfile,
+                targets,
+                workerCount: compensationWorkerCount,
+              }, controller.signal, progressHandler);
+            })();
+        if (
+          hosted.application.profile.profileId !==
+            authoritativeProfile.profileId ||
+          hosted.application.profile.profileHash !==
+            authoritativeProfile.profileHash
+        ) {
+          throw new Error(
+            "The R host returned a different compensation profile identity.",
+          );
+        }
+        if (
+          existingHostAssay &&
+          (
+            hosted.application.execution !== "adopted-existing-assay" ||
+            hosted.application.outputAssay.id !== existingHostAssay.id
+          )
+        ) {
+          throw new Error(
+            "The R host did not adopt the selected existing assay.",
+          );
+        }
+        const payloadBySample = new Map(
+          hosted.targets.map((target) => [target.sampleId, target]),
+        );
+        const prepared = targetEntries.map((entry, index) => {
+          const target = payloadBySample.get(entry.hostSource!.sampleId);
+          if (!target || target.eventCount !== entry.sample.fcs.nEvents) {
+            throw new Error(
+              `The R host returned an incomplete assay for '${entry.name}'.`,
+            );
+          }
+          const columns = decodeChannelMajorFloat32(
+            target.assayPayload,
+            entry.sample.channels.length,
+            target.eventCount,
+          );
+          const binding = targetBindings[index].binding;
+          return entry.sample.prepareCompensatedLayer({
+            metadata: binding,
+            columns: binding.channelBindings
+              .filter(({ included }) => included)
+              .map(({ pnn, fcsColumnIndex }) => ({
+                pnn,
+                fcsColumnIndex,
+                values: columns[fcsColumnIndex],
+              })),
+          }, { activeLayer: "compensated" });
+        });
+        Sample.commitPreparedCompensatedLayers(prepared);
+        result = {
+          jobId: `r-host:${hosted.application.outputAssay.revision}`,
+          profile: hosted.application.profile,
+          targets: targetEntries.map((entry, index) => ({
+            sample: entry.sample,
+            binding: targetBindings[index].binding,
+          })),
+        };
+        progressHandler({
+          jobId: result.jobId,
+          sampleIndex: Math.max(0, targetEntries.length - 1),
+          sampleCount: targetEntries.length,
+          sampleProcessedEvents: targetEntries.at(-1)?.sample.fcs.nEvents ?? 0,
+          sampleTotalEvents: targetEntries.at(-1)?.sample.fcs.nEvents ?? 0,
+          processedEvents: targetTotalEvents,
+          totalEvents: targetTotalEvents,
+          fraction: 1,
+        });
+      } else {
+        result = await manager.apply({
+          profile,
+          targets: targetEntries.map(({ sample: targetSample }) => ({
+            sample: targetSample,
+            activeLayer: "compensated",
+          })),
+          onProgress: progressHandler,
+        });
+      }
       // Best-effort local acceleration for every committed target. Cache sequentially so a
       // many-file Apply cannot create a burst of large digest/IndexedDB jobs after completion.
       void (async () => {
@@ -1337,6 +1559,7 @@ export default function App() {
           const targetEntry = targetEntries.find(({ sample: candidate }) => candidate === applied.sample);
           if (!targetEntry) continue;
           try {
+            if (!targetEntry.bytes) continue;
             const fcsDigest = await digestFcsBytes(targetEntry.bytes);
             await writeCachedCompensatedAssay(fcsDigest, applied.sample, applied.binding);
           } catch {
@@ -1346,19 +1569,21 @@ export default function App() {
           await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
         }
       })();
+      const appliedProfile = result.profile;
       setWorkspaceCompensation((current) => {
         const exists = current.lineages.some(({ records }) =>
-          records.some(({ profileId }) => profileId === profile.profileId)
+          records.some(({ profileId }) => profileId === appliedProfile.profileId)
         );
         if (exists) return current;
         const lineageIndex = current.lineages.findIndex(
-          ({ baselineProfileId }) => baselineProfileId === profile.baselineProfileId,
+          ({ baselineProfileId }) =>
+            baselineProfileId === appliedProfile.baselineProfileId,
         );
         if (lineageIndex >= 0) {
           return {
             ...current,
             lineages: current.lineages.map((lineage, index) => index === lineageIndex
-              ? { ...lineage, records: [...lineage.records, profile] }
+              ? { ...lineage, records: [...lineage.records, appliedProfile] }
               : lineage),
           };
         }
@@ -1366,24 +1591,33 @@ export default function App() {
           ...current,
           lineages: [
             ...current.lineages,
-            { baselineProfileId: profile.baselineProfileId, records: [profile] },
+            {
+              baselineProfileId: appliedProfile.baselineProfileId,
+              records: [appliedProfile],
+            },
           ],
         };
       });
       setXRange(null);
       setYRange(null);
       setError(null);
-      const appliedChannelCount = profile.scientific.kind === "flow-spillover"
-        ? profile.scientific.matrix.receiverChannels.length
-        : profile.scientific.includedChannels.length;
-      setImportMsg(profile.scientific.kind === "cytof-spillover"
-        ? t("Compensated {files} checked FCS files with {name} · {count} channels", {
-            files: targetEntries.length,
-            name: profile.name,
-            count: appliedChannelCount,
-          })
+      const appliedChannelCount =
+        appliedProfile.scientific.kind === "flow-spillover"
+          ? appliedProfile.scientific.matrix.receiverChannels.length
+          : appliedProfile.scientific.includedChannels.length;
+      setImportMsg(appliedProfile.scientific.kind === "cytof-spillover"
+        ? existingHostAssay
+          ? t("Using existing SCE assay {assay} for {files} checked samples · no recomputation", {
+              assay: existingHostAssay.label,
+              files: targetEntries.length,
+            })
+          : t("Compensated {files} checked FCS files with {name} · {count} channels", {
+              files: targetEntries.length,
+              name: appliedProfile.name,
+              count: appliedChannelCount,
+            })
         : t("Compensated with {name} · {count} channels", {
-            name: profile.name,
+            name: appliedProfile.name,
             count: appliedChannelCount,
           }));
       pendingCheckpointReasonRef.current = "after-compensation-apply";
@@ -1397,9 +1631,27 @@ export default function App() {
       setError(message);
       throw cause;
     } finally {
+      hostCompensationAbortRef.current = null;
       compensationApplyGuardRef.current = false;
       setCompensationApplyStatus(null);
     }
+  }
+
+  async function adoptExistingCompensationAssay(
+    profile: CompensationProfileRecord,
+    assay: Readonly<{ id: string; label: string; revision: number }>,
+    onProgress?: (progress: CompensationApplyProgress) => void,
+  ): Promise<void> {
+    if (!isSceHost || !host.compensation) {
+      throw new Error(
+        t("Existing-assay adoption is available only for a hosted SingleCellExperiment."),
+      );
+    }
+    return applyCompensationProfile(
+      profile,
+      onProgress,
+      assay,
+    );
   }
 
   function cancelCompensationApply(): void {
@@ -1409,6 +1661,7 @@ export default function App() {
     setCompensationApplyStatus((current) => current
       ? { ...current, phase: "cancelling" }
       : current);
+    hostCompensationAbortRef.current?.abort();
     compensationManagerRef.current!.cancelApply("Cancelled by the user.");
   }
 
@@ -1555,9 +1808,11 @@ export default function App() {
     const config = illustConfigRef.current;
     if (!config) return;
     setIllustrationPresets((prev) => [...prev.filter((p) => p.name !== name), { name, config }]);
+    markWorkspaceDirty();
   };
   const deleteIllustrationPreset = (name: string) => {
     setIllustrationPresets((prev) => prev.filter((p) => p.name !== name));
+    markWorkspaceDirty();
   };
   const setGlobalScale = (key: string, range: [number, number] | null) => {
     setGlobalScales((prev) => {
@@ -1585,7 +1840,7 @@ export default function App() {
     }
     if (changed) {
       setPanelVersion((v) => v + 1);
-      setDirty(true);
+      markWorkspaceDirty();
     }
   };
   const renameChannel = (key: string, label: string) => renameChannels([{ key, label }]);
@@ -1601,14 +1856,57 @@ export default function App() {
     }
     if (changed) {
       setPanelVersion((v) => v + 1);
-      setDirty(true);
+      markWorkspaceDirty();
     }
   };
+
+  async function writeHostedPanel(): Promise<void> {
+    if (!isSceHost || !host.rowData || !hostDatasetDescriptor || !sample) {
+      setError("This host cannot write panel labels into SCE rowData.");
+      return;
+    }
+    setHostAdapterWriteBusy(true);
+    setError(null);
+    try {
+      const result = await host.rowData.writeChannelLabels({
+        contractVersion: GATELAB_HOST_ROWDATA_CONTRACT_VERSION,
+        datasetId: hostDatasetDescriptor.id,
+        expectedRevision: hostDatasetDescriptor.rowDataRevision ?? 0,
+        changes: sample.channels.map((channel, index) => {
+          const descriptor = hostDatasetDescriptor.channels.find(
+            ({ id }) => id === channel.key,
+          );
+          const current = sample.channelLabel(index);
+          const defaultLabel = descriptor?.pns?.trim() ||
+            descriptor?.label.trim() ||
+            channel.key;
+          return {
+            channelId: channel.key,
+            label: current === channel.key ||
+                (current === defaultLabel && !descriptor?.displayLabel)
+              ? ""
+              : current,
+          };
+        }),
+      });
+      setHostDatasetDescriptor((current) => current
+        ? { ...current, rowDataRevision: result.revision }
+        : current);
+      setImportMsg(
+        `Saved ${result.changedChannelIds.length} panel label` +
+          `${result.changedChannelIds.length === 1 ? "" : "s"} to SCE rowData.`,
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setHostAdapterWriteBusy(false);
+    }
+  }
 
   // ── Metadata (Metadata tab) ──────────────────────────────────────────────────
   const setMetadataCell = (sampleId: string, field: string, value: string) => {
     setMetadata((m) => ({ ...m, [sampleId]: { ...(m[sampleId] ?? {}), [field]: value } }));
-    setDirty(true);
+    markWorkspaceDirty();
   };
   const addMetadataColumn = (name: string) => {
     setMetadataColumns((cols) => {
@@ -1617,7 +1915,7 @@ export default function App() {
       if (taken.has(n)) { let i = 2; while (taken.has(`${n}${i}`)) i++; n = `${n}${i}`; }
       return [...cols, { name: n }];
     });
-    setDirty(true);
+    markWorkspaceDirty();
   };
   const renameMetadataColumn = (oldName: string, newName: string) => {
     const nn = newName.trim();
@@ -1631,7 +1929,7 @@ export default function App() {
       }
       return out;
     });
-    setDirty(true);
+    markWorkspaceDirty();
   };
   const deleteMetadataColumn = (name: string) => {
     setMetadataColumns((cols) => cols.filter((c) => c.name !== name));
@@ -1643,7 +1941,7 @@ export default function App() {
       }
       return out;
     });
-    setDirty(true);
+    markWorkspaceDirty();
   };
   const importMetadata = async (file: File) => {
     try {
@@ -1665,7 +1963,7 @@ export default function App() {
       });
       pendingCheckpointReasonRef.current = "after-metadata-import";
       setMetadata(nextMeta);
-      setDirty(true);
+      markWorkspaceDirty();
       setImportMsg(
         `Metadata: ${matched}/${samples.length} sample${samples.length === 1 ? "" : "s"} matched` +
           (unmatched.length ? ` · unmatched rows: ${unmatched.slice(0, 5).join(", ")}${unmatched.length > 5 ? "…" : ""}` : ""),
@@ -1678,7 +1976,7 @@ export default function App() {
   // Population metadata handlers (2nd Metadata table) — mirror the sample ones but keyed by population_id.
   const setPopMetaCell = (popId: string, field: string, value: string) => {
     setPopulationMetadata((m) => ({ ...m, [popId]: { ...(m[popId] ?? {}), [field]: value } }));
-    setDirty(true);
+    markWorkspaceDirty();
   };
   const addPopMetaColumn = (name: string) => {
     setPopulationMetaColumns((cols) => {
@@ -1687,7 +1985,7 @@ export default function App() {
       if (taken.has(n)) { let i = 2; while (taken.has(`${n}${i}`)) i++; n = `${n}${i}`; }
       return [...cols, { name: n }];
     });
-    setDirty(true);
+    markWorkspaceDirty();
   };
   const renamePopMetaColumn = (oldName: string, newName: string) => {
     const nn = newName.trim();
@@ -1701,7 +1999,7 @@ export default function App() {
       }
       return out;
     });
-    setDirty(true);
+    markWorkspaceDirty();
   };
   const deletePopMetaColumn = (name: string) => {
     setPopulationMetaColumns((cols) => cols.filter((c) => c.name !== name));
@@ -1713,15 +2011,172 @@ export default function App() {
       }
       return out;
     });
-    setDirty(true);
+    markWorkspaceDirty();
   };
 
   const applyDivision = (profile: DivisionProfile) => {
     if (!activeSampleId) return;
     setDivisionProfiles((m) => ({ ...m, [activeSampleId]: profile }));
-    setDirty(true);
+    markWorkspaceDirty();
     setImportMsg(`Division applied to ${fileName}: ${profile.n} boundaries on ${profile.channelKey} → ${profile.colName}`);
   };
+
+  async function writeHostedDivisions(profile: DivisionProfile): Promise<void> {
+    if (!isSceHost || !host.colData || !activeSampleId) {
+      setError("This host cannot write division calls into SCE colData.");
+      return;
+    }
+    const datasetId = samples[0]?.hostSource?.datasetId;
+    if (!datasetId) {
+      setError("The SCE dataset identity is unavailable.");
+      return;
+    }
+    const columnName = profile.colName.trim() || "div";
+    const collision = hostColDataColumns.includes(columnName);
+    if (collision && !window.confirm(
+      `SCE colData already contains '${columnName}'. Replace that column with the current division calls?`,
+    )) return;
+
+    const profiles = { ...divisionProfiles, [activeSampleId]: profile };
+    const eligibleProfiles = samples.map((entry) => {
+      const candidate = profiles[entry.id];
+      if (!candidate || candidate.colName !== columnName) return null;
+      try {
+        return candidate.coordinateBindingKey ===
+            entry.sample.displayCoordinateBindingKey(candidate.channelKey)
+          ? candidate
+          : null;
+      } catch {
+        return null;
+      }
+    });
+    const maximumDivision = Math.max(
+      profile.n,
+      ...eligibleProfiles.flatMap((candidate) => candidate ? [candidate.n] : []),
+    );
+    if (maximumDivision >= 255) {
+      setError("Division annotations cannot contain more than 254 levels.");
+      return;
+    }
+
+    setHostAdapterWriteBusy(true);
+    setError(null);
+    try {
+      applyDivision(profile);
+      const levels = Array.from(
+        { length: maximumDivision + 1 },
+        (_, index) => `Div${index}`,
+      );
+      const sampleValues = samples.map((entry, sampleIndex) => {
+        const source = entry.hostSource;
+        if (!source || source.datasetId !== datasetId) {
+          throw new Error(`Sample '${entry.name}' is not mapped to this SCE.`);
+        }
+        const candidate = eligibleProfiles[sampleIndex];
+        if (!candidate) {
+          return {
+            sampleId: source.sampleId,
+            eventCount: source.eventIndex.length,
+            constantCode: 255,
+          };
+        }
+        const channelIndex = entry.sample.index(candidate.channelKey);
+        if (channelIndex === undefined) {
+          throw new Error(
+            `Division channel '${candidate.channelKey}' is unavailable in '${entry.name}'.`,
+          );
+        }
+        const values = entry.sample.displayColumn(channelIndex);
+        const codes = new Uint8Array(values.length);
+        for (let index = 0; index < values.length; index += 1) {
+          codes[index] = assignDivisionLevel(values[index], candidate.boundaries);
+        }
+        return {
+          sampleId: source.sampleId,
+          eventCount: codes.length,
+          codesBase64: encodeUint8Base64(codes),
+        };
+      });
+      const result = await host.colData.writeCategoricalColumns({
+        contractVersion: GATELAB_HOST_COLDATA_CONTRACT_VERSION,
+        datasetId,
+        overwrite: collision,
+        columns: [{ columnName, levels, sampleValues }],
+      });
+      setHostColDataColumns((current) => [...new Set([...current, columnName])]);
+      const written = result.columns[0];
+      setImportMsg(
+        `Wrote division calls to SCE colData '${columnName}'` +
+          (written?.missingCount
+            ? ` · ${written.missingCount.toLocaleString()} events had no compatible profile`
+            : ""),
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setHostAdapterWriteBusy(false);
+    }
+  }
+
+  async function writeHostedSampleMetadata(): Promise<void> {
+    if (!isSceHost || !host.colData) {
+      setError("This host cannot write sample metadata into SCE colData.");
+      return;
+    }
+    const datasetId = samples[0]?.hostSource?.datasetId;
+    if (!datasetId || metadataColumns.length === 0) return;
+    const columnNames = metadataColumns.map(({ name }) => name);
+    const collisions = columnNames.filter((name) => hostColDataColumns.includes(name));
+    if (collisions.length > 0 && !window.confirm(
+      `Replace ${collisions.length} existing SCE colData column` +
+        `${collisions.length === 1 ? "" : "s"}: ${collisions.join(", ")}?`,
+    )) return;
+
+    setHostAdapterWriteBusy(true);
+    setError(null);
+    try {
+      const columns: GateLabHostCategoricalColumn[] = metadataColumns.map(({ name }) => {
+        const values = samples.map((entry) => metadata[entry.id]?.[name] ?? "");
+        const levels = [...new Set(values.filter((value) => value.length > 0))];
+        if (levels.length >= 255) {
+          throw new Error(`Metadata column '${name}' has more than 254 levels.`);
+        }
+        return {
+          columnName: name,
+          levels,
+          sampleValues: samples.map((entry, index) => {
+            const source = entry.hostSource;
+            if (!source || source.datasetId !== datasetId) {
+              throw new Error(`Sample '${entry.name}' is not mapped to this SCE.`);
+            }
+            const value = values[index];
+            return {
+              sampleId: source.sampleId,
+              eventCount: source.eventIndex.length,
+              constantCode: value.length > 0 ? levels.indexOf(value) : 255,
+            };
+          }),
+        };
+      });
+      const result = await host.colData.writeCategoricalColumns({
+        contractVersion: GATELAB_HOST_COLDATA_CONTRACT_VERSION,
+        datasetId,
+        overwrite: collisions.length > 0,
+        columns,
+      });
+      setHostColDataColumns((current) => [
+        ...new Set([...current, ...result.columns.map(({ columnName }) => columnName)]),
+      ]);
+      setImportMsg(
+        `Wrote ${result.columns.length} sample metadata column` +
+          `${result.columns.length === 1 ? "" : "s"} to SCE colData.`,
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setHostAdapterWriteBusy(false);
+    }
+  }
 
   // Preferred channel indices for a sample — keep the current channels (by key) if it has them.
   function channelsFor(s: Sample): [number, number] {
@@ -1736,6 +2191,7 @@ export default function App() {
     name: string,
     handle: FileSystemFileHandle | null,
     sourcePath?: string,
+    persistedId?: string,
   ): SampleEntry {
     // Workspace/FCS readers normally return an exact-owned ArrayBuffer. parseFcs is read-only, so
     // reuse it instead of briefly duplicating a potentially multi-GB source file during import.
@@ -1744,7 +2200,7 @@ export default function App() {
       ? bytes.buffer
       : bytes.slice().buffer;
     return {
-      id: crypto.randomUUID(),
+      id: persistedId ?? crypto.randomUUID(),
       name,
       sample: new Sample(parseFcs(ab)),
       bytes,
@@ -1799,6 +2255,177 @@ export default function App() {
       );
     }
   }
+
+  const hostedDatasetLoadStartedRef = useRef(false);
+  useEffect(() => {
+    if (
+      host.kind !== "r-sce" ||
+      !host.datasets ||
+      hostedDatasetLoadStartedRef.current
+    ) return;
+    hostedDatasetLoadStartedRef.current = true;
+    const controller = new AbortController();
+    setBusy(true);
+    setImportMsg("Connecting to the SingleCellExperiment host…");
+
+    void (async () => {
+      try {
+        const datasets = await host.datasets!.listDatasets();
+        if (datasets.length === 0) {
+          throw new Error("GateLabR did not provide a SingleCellExperiment dataset.");
+        }
+        const dataset = datasets[0];
+        setHostDatasetDescriptor(dataset);
+        const hostedSamples = await loadHostedDataset(
+          host.datasets!,
+          dataset,
+          controller.signal,
+        );
+        if (controller.signal.aborted) return;
+        if (hostedSamples.length === 0) {
+          throw new Error(`SingleCellExperiment '${dataset.label}' has no samples.`);
+        }
+        setHostColDataColumns(dataset.colDataColumns ?? []);
+        setWorkspaceEditRevision(0);
+        workspaceEditRevisionRef.current = 0;
+        lastHostSavedEditRevisionRef.current = -1;
+        const entries = hostedSamples.map((hosted): SampleEntry => ({
+          id: `${hosted.datasetId}:${hosted.sampleId}`,
+          name: hosted.name,
+          sample: hosted.sample,
+          bytes: null,
+          handle: null,
+          sourcePath: `SingleCellExperiment/${hosted.name}`,
+          hostSource: {
+            datasetId: hosted.datasetId,
+            sampleId: hosted.sampleId,
+            assayId: hosted.assayId,
+            assayRevision: hosted.assayRevision,
+            eventIndex: hosted.eventIndex,
+          },
+        }));
+        addSampleEntries(entries);
+
+        const hostedMetadata = Object.fromEntries(hostedSamples.map(
+          (hosted: GateLabHostedSample, index) => [
+            entries[index].id,
+            Object.fromEntries(
+              Object.entries(hosted.metadata)
+                .filter(([, value]) => value !== null)
+                .map(([field, value]) => [field, String(value)]),
+            ),
+          ],
+        ));
+        const metadataNames = [...new Set(
+          hostedSamples.flatMap((hosted) => Object.keys(hosted.metadata)),
+        )];
+        setMetadata(hostedMetadata);
+        setMetadataColumns(metadataNames.map((name) => ({ name })));
+        let hostedStatus =
+          `Loaded ${dataset.label} · ${hostedSamples.length} sample` +
+          `${hostedSamples.length === 1 ? "" : "s"} · ` +
+          `${dataset.eventCount.toLocaleString()} events from R`;
+
+        const workspaceEnvelope = await host.workspaces?.readWorkspace(dataset.id) ?? null;
+        const initialHostRevision = workspaceEnvelope?.revision ?? 0;
+        setHostWorkspaceRevision(initialHostRevision);
+        hostWorkspaceRevisionRef.current = initialHostRevision;
+        setHostWorkspaceStatus(workspaceEnvelope ? "saved" : "unsaved");
+        if (workspaceEnvelope) lastHostSavedEditRevisionRef.current = 0;
+        if (workspaceEnvelope && !controller.signal.aborted) {
+          try {
+            const restored = await readHostedWorkspace(
+              workspaceEnvelope,
+              dataset,
+              entries.map(({ sample: hostedSample }) => hostedSample),
+            );
+            const workspace = convertHostedGateSpace(
+              restored.workspace,
+              entries[0].sample,
+              restored.sourceGateSpace,
+            );
+            const activeIdx = Math.min(
+              Math.max(0, workspace.activeSample),
+              entries.length - 1,
+            );
+            const active = entries[activeIdx].sample;
+            const nextWorkspaceId = workspace.workspaceId ?? makeWorkspaceId();
+            compensationManagerRef.current!.resetWorkspace(nextWorkspaceId);
+            pendingCheckpointReasonRef.current = "after-workspace-open";
+            skipDirtyRef.current = true;
+            if (workspace.version === WORKSPACE_VERSION_3) {
+              await restoreSavedWorkspaceCompensation(workspace, entries);
+              setWorkspaceCompensation(workspace.compensation);
+            } else {
+              setWorkspaceCompensation(newEmptyWorkspaceCompensationState());
+            }
+            setActiveSampleId(entries[activeIdx].id);
+            setPopulationMetadata(workspace.populationMetadata ?? {});
+            setPopulationMetaColumns(workspace.populationMetaColumns ?? []);
+            illustConfigRef.current = workspace.illustration ?? null;
+            setIllustrationPresets(workspace.illustrationPresets ?? []);
+            setIllustVersion((version) => version + 1);
+            clearPersistedTabState();
+            setScaleCacheEpoch((epoch) => epoch + 1);
+            setGlobalScales(workspace.scales.globalScales ?? {});
+            setInstrumentMode(active.instrumentMode);
+            setMode(workspace.display.mode);
+            setMaxEvents(workspace.display.maxEvents);
+            setContourThreshold(workspace.display.contourThreshold);
+            setDensityColorPower(
+              normalizeDensityColorPower(workspace.display.densityColorPower),
+            );
+            setGatingFontSizes({
+              ...DEFAULT_GATING_FONT_SIZES,
+              ...workspace.display.fontSizes,
+            });
+            const [defaultX, defaultY] = active.defaultChannelIndices();
+            setXIdx(active.index(workspace.display.xChannel) ?? defaultX);
+            setYIdx(active.index(workspace.display.yChannel) ?? defaultY);
+            setXRange(null);
+            setYRange(null);
+            setWsHandle(null);
+            setWsName(dataset.label);
+            setWsStorage("reference");
+            setWorkspaceId(nextWorkspaceId);
+            setDirty(false);
+            dispatch({
+              type: "loadWorkspace",
+              gates: workspace.gating.gates,
+              gate_order: workspace.gating.gate_order,
+              populations: workspace.gating.populations,
+              root_population_id: workspace.gating.root_population_id,
+              active_population_id: workspace.gating.active_population_id,
+              selected_gate_id: workspace.gating.selected_gate_id,
+            });
+            hostedStatus =
+              `Restored ${workspace.gating.gate_order.length} gate` +
+              `${workspace.gating.gate_order.length === 1 ? "" : "s"} and ` +
+              `${Object.keys(workspace.gating.populations).length} population` +
+              `${Object.keys(workspace.gating.populations).length === 1 ? "" : "s"} ` +
+              `from ${restored.sourceFormat === "gatelabr-legacy" ? "GateLabR" : "GateLab"} SCE metadata`;
+          } catch (cause) {
+            setError(
+              "The SingleCellExperiment data loaded, but its saved GateLab workspace " +
+                `could not be restored: ${cause instanceof Error ? cause.message : String(cause)}`,
+            );
+          }
+        }
+        setImportMsg(hostedStatus);
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        setError(cause instanceof Error ? cause.message : String(cause));
+        setImportMsg(null);
+      } finally {
+        if (!controller.signal.aborted) setBusy(false);
+      }
+    })();
+
+    return () => controller.abort();
+    // The host adapter is immutable for one mount; addSampleEntries intentionally
+    // captures the empty initial workspace exactly once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [host]);
 
   function selectSample(id: string) {
     const entry = samples.find((s) => s.id === id);
@@ -1972,6 +2599,7 @@ export default function App() {
       savedAt: new Date().toISOString(),
       app: "GateLab",
       samples: samples.map((e, i) => ({
+        sampleId: e.id,
         fileName: e.name,
         dataPath: sampleDataPath(e.name, i),
         logicleW: e.sample.logicleWOverrides(),
@@ -2057,14 +2685,93 @@ export default function App() {
     };
   }
   buildWsRef.current = buildWorkspaceFile; // keep the autosave builder fresh each render
+
+  function saveHostedWorkspace(
+    reason: "autosave" | "explicit",
+    clientRevision = workspaceEditRevisionRef.current,
+  ): Promise<GateLabHostWorkspaceWriteResult> {
+    const run = hostSaveChainRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (!isSceHost || !host.workspaces) {
+          throw new Error("This GateLab host cannot save changes into an SCE.");
+        }
+        if (
+          reason === "autosave" &&
+          lastHostSavedEditRevisionRef.current >= clientRevision &&
+          lastHostSaveResultRef.current
+        ) {
+          return lastHostSaveResultRef.current;
+        }
+        const ws = buildWsRef.current();
+        const datasetId = samples[0]?.hostSource?.datasetId;
+        if (!ws || !datasetId) {
+          throw new Error("The hosted SCE workspace is not ready to save.");
+        }
+        setHostWorkspaceStatus("saving");
+        const result = await host.workspaces.writeWorkspace({
+          datasetId,
+          expectedRevision: hostWorkspaceRevisionRef.current,
+          clientRevision,
+          reason,
+          workspaceJson: JSON.stringify(ws),
+        });
+        hostWorkspaceRevisionRef.current = result.revision;
+        setHostWorkspaceRevision(result.revision);
+        lastHostSavedEditRevisionRef.current = Math.max(
+          lastHostSavedEditRevisionRef.current,
+          result.clientRevision,
+        );
+        lastHostSaveResultRef.current = result;
+        if (workspaceEditRevisionRef.current === clientRevision) {
+          setDirty(false);
+          setHostWorkspaceStatus("saved");
+        } else {
+          setHostWorkspaceStatus("unsaved");
+        }
+        return result;
+      })
+      .catch((cause) => {
+        setHostWorkspaceStatus("error");
+        throw cause;
+      });
+    hostSaveChainRef.current = run.catch(() => undefined);
+    return run;
+  }
+
+  useEffect(() => {
+    if (!isSceHost || !dirty || !sample || !host.workspaces) return;
+    setHostWorkspaceStatus("unsaved");
+    const clientRevision = workspaceEditRevision;
+    const timer = window.setTimeout(() => {
+      void saveHostedWorkspace("autosave", clientRevision).catch((cause) => {
+        setError(
+          `SCE autosave failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+      });
+    }, 1200);
+    return () => window.clearTimeout(timer);
+    // The queued writer reads the current workspace builder and serializes writes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty, host.workspaces, isSceHost, sample, workspaceEditRevision]);
+
   const rememberAllHandles = async () => {
     await Promise.all(samples.flatMap((e) => e.handle ? [rememberHandle("fcs:" + e.name, e.handle)] : []));
   };
+  function requireFcsBytes(entry: SampleEntry): Uint8Array {
+    if (!entry.bytes) {
+      throw new Error(
+        `'${entry.name}' is owned by the R SingleCellExperiment host and has no source FCS bytes. ` +
+        "Save changes back to the R object instead.",
+      );
+    }
+    return entry.bytes;
+  }
   function currentFcsByPath(ws: LiveWorkspaceFile): Record<string, Uint8Array> {
     return Object.fromEntries(ws.samples.map((wss, i) => {
       const entry = samples[i];
       if (!entry) throw new Error(`The loaded data for ${wss.fileName} is unavailable.`);
-      return [wss.dataPath, entry.bytes];
+      return [wss.dataPath, requireFcsBytes(entry)];
     }));
   }
   function currentPortableSources(ws: WorkspaceFileV3) {
@@ -2073,7 +2780,7 @@ export default function App() {
       if (!entry) throw new Error(`The loaded data for ${workspaceSample.fileName} is unavailable.`);
       return Object.freeze({
         dataPath: workspaceSample.dataPath,
-        fcsBytes: entry.bytes,
+        fcsBytes: requireFcsBytes(entry),
         sample: entry.sample,
       });
     });
@@ -2271,7 +2978,7 @@ export default function App() {
   // same name → a remembered handle. All unresolved names are handled together below.
   async function resolveKnownReferenceFcs(fileName: string): Promise<ResolvedReferenceFcs | null> {
     const existing = samples.find((e) => e.name === fileName);
-    if (existing) {
+    if (existing?.bytes) {
       return {
         bytes: existing.bytes,
         handle: existing.handle,
@@ -2478,6 +3185,90 @@ export default function App() {
       fcsDigest: Awaited<ReturnType<typeof digestFcsBytes>> | null;
     }> = [];
     try {
+      if (isSceHost) {
+        if (!host.compensation) {
+          throw new Error(
+            "This GateLabR host cannot restore persisted SCE compensation.",
+          );
+        }
+        const datasetId = tasks[0].entry.hostSource?.datasetId;
+        if (!datasetId) {
+          throw new Error(
+            "The hosted compensation state has no SCE dataset identity.",
+          );
+        }
+        const prepared = [];
+        const tasksByProfile = new Map<string, typeof tasks>();
+        for (const task of tasks) {
+          const group = tasksByProfile.get(task.profile.profileId) ?? [];
+          group.push(task);
+          tasksByProfile.set(task.profile.profileId, group);
+        }
+        for (const [profileId, profileTasks] of tasksByProfile) {
+          assertNotCancelled();
+          const stored = await host.compensation.readStoredApplication(
+            datasetId,
+            profileId,
+          );
+          if (!stored) {
+            throw new Error(
+              `The SCE no longer contains the compensated assay for '${profileTasks[0].profile.name}'.`,
+            );
+          }
+          const payloadBySample = new Map(
+            stored.targets.map((target) => [target.sampleId, target]),
+          );
+          for (const task of profileTasks) {
+            assertNotCancelled();
+            const source = task.entry.hostSource;
+            const target = source
+              ? payloadBySample.get(source.sampleId)
+              : undefined;
+            if (!source || !target) {
+              throw new Error(
+                `The SCE compensated assay is unavailable for '${task.entry.name}'.`,
+              );
+            }
+            const external = await manager.prepareExternalApplyBinding(
+              stored.application.profile,
+              task.entry.sample,
+            );
+            if (
+              external.profile.profileId !== task.binding.profileId ||
+              external.profile.profileHash !== task.binding.profileHash ||
+              JSON.stringify(external.binding) !== JSON.stringify(task.binding)
+            ) {
+              throw new Error(
+                `Saved compensation identity changed for '${task.entry.name}'.`,
+              );
+            }
+            const columns = decodeChannelMajorFloat32(
+              target.assayPayload,
+              task.entry.sample.channels.length,
+              target.eventCount,
+            );
+            prepared.push(task.entry.sample.prepareCompensatedLayer({
+              metadata: external.binding,
+              columns: external.binding.channelBindings
+                .filter(({ included }) => included)
+                .map(({ pnn, fcsColumnIndex }) => ({
+                  pnn,
+                  fcsColumnIndex,
+                  values: columns[fcsColumnIndex],
+                })),
+            }, { activeLayer: task.assay.activeLayer }));
+            completedEvents += task.entry.sample.fcs.nEvents;
+            setRestoreStatus("preparing", completedEvents);
+          }
+        }
+        Sample.commitPreparedCompensatedLayers(prepared);
+        setImportMsg(
+          `Restored ${tasks.length} compensated SCE assay` +
+            `${tasks.length === 1 ? "" : "s"} without recomputation`,
+        );
+        return;
+      }
+
       for (let index = 0; index < tasks.length; index++) {
         const task = tasks[index];
         assertNotCancelled();
@@ -2487,7 +3278,9 @@ export default function App() {
         }));
         let fcsDigest: Awaited<ReturnType<typeof digestFcsBytes>> | null = null;
         try {
-          fcsDigest = await digestFcsBytes(task.entry.bytes);
+          if (task.entry.bytes) {
+            fcsDigest = await digestFcsBytes(task.entry.bytes);
+          }
         } catch {
           // Web Crypto/local storage is an acceleration only. Fall through to exact recomputation.
         }
@@ -2683,7 +3476,7 @@ export default function App() {
         }
         let entry: SampleEntry;
         try {
-          entry = createEntry(fcsB, wss.fileName, fcsH, sourcePath);
+          entry = createEntry(fcsB, wss.fileName, fcsH, sourcePath, wss.sampleId);
         } catch (cause) {
           throw new Error(
             `Could not read ${wss.fileName}: ${cause instanceof Error ? cause.message : String(cause)}. ` +
@@ -2764,7 +3557,7 @@ export default function App() {
               ws,
               ws.samples.map((workspaceSample, index) => Object.freeze({
                 dataPath: workspaceSample.dataPath,
-                fcsBytes: entries[index].bytes,
+                fcsBytes: requireFcsBytes(entries[index]),
                 sample: entries[index].sample,
               })),
               {
@@ -3067,6 +3860,88 @@ export default function App() {
     inactiveGatingCacheVersion,
     state.gate_version,
   ]);
+
+  async function exportHostedPopulationColumns(
+    specs: readonly ScePopulationColumnSpec[],
+    overwrite: boolean,
+  ): Promise<void> {
+    if (!isSceHost || !host.colData) {
+      setError("This host cannot write population memberships into colData.");
+      return;
+    }
+    const datasetId = samples[0]?.hostSource?.datasetId;
+    if (!datasetId) {
+      setError("The SCE dataset identity is unavailable.");
+      return;
+    }
+    setHostColDataBusy(true);
+    setError(null);
+    try {
+      const saved = await saveHostedWorkspace(
+        "autosave",
+        workspaceEditRevisionRef.current,
+      );
+      const columns: GateLabHostPopulationColumn[] = specs.map((spec) => {
+        const sampleMasks = samples.map((entry) => {
+          const source = entry.hostSource;
+          if (!source || source.datasetId !== datasetId) {
+            throw new Error(`Sample '${entry.name}' is not mapped to this SCE.`);
+          }
+          let gating: GatingDerived;
+          if (entry.id === activeSampleId) {
+            gating = gatingDerived;
+          } else {
+            const cached = inactiveGatingCacheRef.current.get(entry.id);
+            gating = cached &&
+              cached.sample === entry.sample &&
+              cached.dataRevision === entry.sample.dataRevision &&
+              cached.gateVersion === state.gate_version
+              ? cached.gating
+              : recomputeGating(entry.sample, gatingState);
+          }
+          const mask = gating.masks[spec.populationId];
+          if (!mask || mask.length !== source.eventIndex.length) {
+            throw new Error(
+              `Population '${spec.populationName}' could not be evaluated for sample '${entry.name}'.`,
+            );
+          }
+          return {
+            sampleId: source.sampleId,
+            eventCount: mask.length,
+            membershipBitsBase64: encodeUint8Base64(packMembershipBits(mask)),
+          };
+        });
+        return {
+          ...spec,
+          sampleMasks,
+        };
+      });
+      const result = await host.colData.writeColumns({
+        contractVersion: GATELAB_HOST_COLDATA_CONTRACT_VERSION,
+        datasetId,
+        workspaceRevision: saved.revision,
+        overwrite,
+        columns,
+      });
+      setHostColDataColumns((current) => [
+        ...new Set([...current, ...result.columns.map(({ columnName }) => columnName)]),
+      ]);
+      setImportMsg(
+        `Wrote ${result.columns.length} population membership column` +
+          `${result.columns.length === 1 ? "" : "s"} to the SCE · ` +
+          result.columns
+            .map(({ columnName, memberCount }) =>
+              `${columnName}: ${memberCount.toLocaleString()}`,
+            )
+            .join(" · "),
+      );
+      setCrud(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setHostColDataBusy(false);
+    }
+  }
 
   const pooledPopulationStats = useMemo(
     () => includedGatingResults === null
@@ -3531,7 +4406,7 @@ export default function App() {
   return (
     <div className="gl-app">
       <header className="gl-header">
-        <strong>GateLab</strong>
+        <strong>{isSceHost ? "GateLabR" : "GateLab"}</strong>
         {sample && (
           <span className="gl-meta">
             {fileName} — {t("{count} events", { count: sample.fcs.nEvents.toLocaleString() })} ·{" "}
@@ -3576,16 +4451,25 @@ export default function App() {
         <span
           className="gl-header-meta"
           style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap" }}
-          title="GateLab — MIT-licensed, © 2026 David G. Priest. A TypeScript reimplementation reusing GateLabR's D3 engine."
+          title={
+            isSceHost
+              ? "GateLabR — SingleCellExperiment host using the shared GateLab React core."
+              : "GateLab — MIT-licensed, © 2026 David G. Priest."
+          }
         >
-          GateLab v{pkg.version} · MIT ·{" "}
+          {isSceHost ? `GateLab core v${pkg.version}` : `GateLab v${pkg.version} · MIT`} ·{" "}
+          {t("Questions or bugs?")}{" "}
+          {/* Link straight to the issue tracker rather than the repo root: the
+              point is to invite feedback, so land people where they can file it. */}
           <a
-            href="https://github.com/david-priest/GateLab"
+            href={isSceHost
+              ? "https://github.com/david-priest/GateLabR/issues"
+              : "https://github.com/david-priest/GateLab/issues"}
             target="_blank"
             rel="noopener noreferrer"
             style={{ color: "inherit", textDecoration: "underline" }}
           >
-            repo
+            {t("please leave an issue at the repo")}
           </a>
         </span>
         <label className="gl-header-language">
@@ -3650,14 +4534,16 @@ export default function App() {
               {t("View Compensation")}
             </button>
           )}
-          <button
-            type="button"
-            className="gl-mini-btn"
-            disabled={compensationApplyStatus.phase === "cancelling"}
-            onClick={cancelCompensationApply}
-          >
-            {compensationApplyStatus.phase === "cancelling" ? t("Cancelling…") : t("Cancel")}
-          </button>
+          {!isSceHost && (
+            <button
+              type="button"
+              className="gl-mini-btn"
+              disabled={compensationApplyStatus.phase === "cancelling"}
+              onClick={cancelCompensationApply}
+            >
+              {compensationApplyStatus.phase === "cancelling" ? t("Cancelling…") : t("Cancel")}
+            </button>
+          )}
         </div>
       )}
 
@@ -3670,6 +4556,9 @@ export default function App() {
             excludedIds={excludedSampleIds}
             busy={busy}
             importProgress={sampleImportProgress}
+            sourceLabel={isSceHost ? "SingleCellExperiment samples" : "FCS samples"}
+            showImportActions={!isSceHost}
+            showManageActions={!isSceHost}
             onOpenFiles={() => void openFcs()}
             onOpenFolder={() => void openFcsFolder()}
             onManage={() => {
@@ -3735,61 +4624,111 @@ export default function App() {
           />
 
           <div className="gl-side-title" style={{ marginTop: 10 }}>
-            {t("Workspace")}
+            {isSceHost ? "R host" : t("Workspace")}
           </div>
-          {wsName && (
-            <div className="gl-hint" title={wsName} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {dirty ? "● " : ""}
-              {wsName}
-              {dirty ? ` (${t("unsaved")})` : ""}
-            </div>
+          {isSceHost ? (
+            <>
+              <div className="gl-hint">
+                SingleCellExperiment · workspace revision {hostWorkspaceRevision}
+                {hostWorkspaceStatus === "saving"
+                  ? " · saving…"
+                  : hostWorkspaceStatus === "saved"
+                    ? " · saved"
+                    : hostWorkspaceStatus === "error"
+                      ? " · save failed"
+                      : " · unsaved"}
+              </div>
+              <button
+                className="gl-btn-ghost gl-btn-block"
+                disabled={!sample || !host.workspaces || hostWorkspaceStatus === "saving"}
+                title="Save gates, populations, scales, and display settings into the R SingleCellExperiment"
+                onClick={() => {
+                  void saveHostedWorkspace(
+                    "explicit",
+                    workspaceEditRevisionRef.current,
+                  )
+                    .then(({ revision }) => {
+                      setImportMsg(`Saved GateLab workspace to SCE · revision ${revision}`);
+                    })
+                    .catch((cause) => {
+                      setError(cause instanceof Error ? cause.message : String(cause));
+                    });
+                }}
+              >
+                Save to SCE{dirty ? " ●" : ""}
+              </button>
+              {host.capabilities.dataModel.writeBackColumns && host.colData && (
+                <button
+                  className="gl-btn-ghost gl-btn-block"
+                  disabled={
+                    !sample ||
+                    hostColDataBusy ||
+                    Object.keys(state.populations).length <= 1
+                  }
+                  title="Write exact full-data population memberships into SingleCellExperiment colData"
+                  onClick={() => setCrud({ kind: "exportSceColData" })}
+                >
+                  Export populations to colData…
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              {wsName && (
+                <div className="gl-hint" title={wsName} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {dirty ? "● " : ""}
+                  {wsName}
+                  {dirty ? ` (${t("unsaved")})` : ""}
+                </div>
+              )}
+              <button
+                className="gl-btn-ghost gl-btn-block"
+                disabled={busy || !sample || compensationApplyStatus !== null}
+                title="Close the current data, gates, and workspace settings and begin an empty workspace"
+                onClick={() => setCrud({ kind: "confirmNewWorkspace" })}
+              >
+                {t("New Workspace…")}
+              </button>
+              <button
+                className="gl-btn-ghost gl-btn-block"
+                disabled={busy || compensationApplyStatus !== null}
+                title="Open a saved .gatelab workspace (gates, populations, scales, compensation)"
+                onClick={openWorkspace}
+              >
+                {t("Open Workspace…")}
+              </button>
+              <button
+                className="gl-btn-ghost gl-btn-block"
+                disabled={!sample}
+                title={
+                  wsHandle
+                    ? wsStorage === "bundle"
+                      ? "Save changes in place while preserving the embedded FCS data"
+                      : "Save gates/populations/scales/compensation back to the linked workspace file (in place)"
+                    : "Choose a location and save the workspace"
+                }
+                onClick={saveWorkspace}
+              >
+                {wsHandle ? `${t("Save")}${dirty ? " ●" : ""}` : t("Save Workspace…")}
+              </button>
+              <button
+                className="gl-btn-ghost gl-btn-block"
+                disabled={!sample}
+                title="Save a lightweight reference workspace. Source FCS and compensated values are not embedded; use Save Portable Copy for a self-contained archive."
+                onClick={saveWorkspaceAs}
+              >
+                {t("Save As…")}
+              </button>
+              <button
+                className="gl-btn-ghost gl-btn-block"
+                disabled={!sample}
+                title="Save a self-contained .gatelab with the exact source FCS and any computed compensated assay, so it can reopen without rerunning compensation."
+                onClick={saveBundledCopy}
+              >
+                {t("Save Portable Copy…")}
+              </button>
+            </>
           )}
-          <button
-            className="gl-btn-ghost gl-btn-block"
-            disabled={busy || !sample || compensationApplyStatus !== null}
-            title="Close the current data, gates, and workspace settings and begin an empty workspace"
-            onClick={() => setCrud({ kind: "confirmNewWorkspace" })}
-          >
-            {t("New Workspace…")}
-          </button>
-          <button
-            className="gl-btn-ghost gl-btn-block"
-            disabled={busy || compensationApplyStatus !== null}
-            title="Open a saved .gatelab workspace (gates, populations, scales, compensation)"
-            onClick={openWorkspace}
-          >
-            {t("Open Workspace…")}
-          </button>
-          <button
-            className="gl-btn-ghost gl-btn-block"
-            disabled={!sample}
-            title={
-              wsHandle
-                ? wsStorage === "bundle"
-                  ? "Save changes in place while preserving the embedded FCS data"
-                  : "Save gates/populations/scales/compensation back to the linked workspace file (in place)"
-                : "Choose a location and save the workspace"
-            }
-            onClick={saveWorkspace}
-          >
-            {wsHandle ? `${t("Save")}${dirty ? " ●" : ""}` : t("Save Workspace…")}
-          </button>
-          <button
-            className="gl-btn-ghost gl-btn-block"
-            disabled={!sample}
-            title="Save a lightweight reference workspace. Source FCS and compensated values are not embedded; use Save Portable Copy for a self-contained archive."
-            onClick={saveWorkspaceAs}
-          >
-            {t("Save As…")}
-          </button>
-          <button
-            className="gl-btn-ghost gl-btn-block"
-            disabled={!sample}
-            title="Save a self-contained .gatelab with the exact source FCS and any computed compensated assay, so it can reopen without rerunning compensation."
-            onClick={saveBundledCopy}
-          >
-            {t("Save Portable Copy…")}
-          </button>
           <input
             ref={wsRef}
             type="file"
@@ -4294,6 +5233,8 @@ export default function App() {
                 savedProfile={activeSampleId ? compatibleDivisionProfiles[activeSampleId] ?? null : null}
                 profileStale={!!activeSampleId && !!divisionProfiles[activeSampleId] && !compatibleDivisionProfiles[activeSampleId]}
                 onApply={applyDivision}
+                onWriteToHost={isSceHost && host.colData ? writeHostedDivisions : undefined}
+                hostWriteBusy={hostAdapterWriteBusy}
                 dataRevision={activeDataRevision}
               />
             )}
@@ -4314,6 +5255,10 @@ export default function App() {
                 onAddPopColumn={addPopMetaColumn}
                 onRenamePopColumn={renamePopMetaColumn}
                 onDeletePopColumn={deletePopMetaColumn}
+                onWriteSampleMetadataToHost={
+                  isSceHost && host.colData ? writeHostedSampleMetadata : undefined
+                }
+                hostWriteBusy={hostAdapterWriteBusy}
               />
             )}
             {activeTab === "panel" && (
@@ -4323,6 +5268,10 @@ export default function App() {
                 onRename={renameChannel}
                 onRenameMany={renameChannels}
                 onResetAll={resetAllLabels}
+                onWriteToHost={
+                  isSceHost && host.rowData ? writeHostedPanel : undefined
+                }
+                hostWriteBusy={hostAdapterWriteBusy}
               />
             )}
             {activeTab === "scales" && (
@@ -4361,6 +5310,7 @@ export default function App() {
                 presets={illustrationPresets}
                 onSavePreset={saveIllustrationPreset}
                 onDeletePreset={deleteIllustrationPreset}
+                onConfigChange={markWorkspaceDirty}
                 dataRevision={activeDataRevision}
                 densityColorPower={densityColorPower}
                 onDensityColorPowerChange={changeDensityColorPower}
@@ -4375,8 +5325,15 @@ export default function App() {
                   key={compensationTabStateKey}
                   sample={sample}
                   sampleName={fileName}
+                  hostedCompensationMatrix={hostDatasetDescriptor?.compensationMatrix}
                   compensationOn={compensationOn}
                   onApplyProfile={applyCompensationProfile}
+                  existingHostAssays={hostExistingCompensatedAssays}
+                  onAdoptExistingAssay={
+                    isSceHost && host.compensation
+                      ? adoptExistingCompensationAssay
+                      : undefined
+                  }
                   onCancelApply={cancelCompensationApply}
                   hasExistingGates={Object.keys(state.gates).length > 0}
                   applyStatus={compensationApplyStatus}
@@ -4671,6 +5628,26 @@ export default function App() {
             setImportMsg("Gating-ML import cancelled; the current strategy was not changed.");
           }}
           onImport={applyGatingImport}
+        />
+      )}
+      {crud?.kind === "exportSceColData" && isSceHost && (
+        <SceColDataExportModal
+          state={state}
+          existingColumns={hostColDataColumns}
+          initialPopulationIds={
+            state.selected_pop_ids.length > 0
+              ? state.selected_pop_ids
+              : state.active_population_id
+                ? [state.active_population_id]
+                : []
+          }
+          busy={hostColDataBusy}
+          onCancel={() => {
+            if (!hostColDataBusy) setCrud(null);
+          }}
+          onExport={(columns, overwrite) => {
+            void exportHostedPopulationColumns(columns, overwrite);
+          }}
         />
       )}
       {fcsExportOpen && sample && (
