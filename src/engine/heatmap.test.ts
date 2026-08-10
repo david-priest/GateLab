@@ -159,5 +159,35 @@ describe("illustration heatmap", () => {
     }))).toEqual([
       { id: "pop", name: "Live cells", count: 4, raw_values: [4] },
     ]);
+
+    const sparseSeparate = buildMultiSampleHeatmapPayload(
+      sources,
+      populations,
+      ["pop"],
+      ["X"],
+      false,
+      options,
+      { a: ["pop"], b: [] },
+    );
+    expect(sparseSeparate.rows.map(({ id, count, raw_values }) => ({
+      id, count, raw_values,
+    }))).toEqual([
+      { id: "a::pop", count: 2, raw_values: [2] },
+    ]);
+
+    const sparsePooled = buildMultiSampleHeatmapPayload(
+      sources,
+      populations,
+      ["pop"],
+      ["X"],
+      true,
+      options,
+      { a: [], b: ["pop"] },
+    );
+    expect(sparsePooled.rows.map(({ id, count, raw_values }) => ({
+      id, count, raw_values,
+    }))).toEqual([
+      { id: "pop", count: 2, raw_values: [6] },
+    ]);
   });
 });

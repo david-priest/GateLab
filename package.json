@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b --noEmit && vite build",
+    "build:embed": "tsc -b --noEmit && vite build --config vite.embed.config.ts",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"

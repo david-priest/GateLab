@@ -41,6 +41,9 @@ export function SampleNavigator({
   excludedIds,
   busy,
   importProgress,
+  sourceLabel = "FCS samples",
+  showImportActions = true,
+  showManageActions = true,
   onOpenFiles,
   onOpenFolder,
   onManage,
@@ -56,6 +59,9 @@ export function SampleNavigator({
   excludedIds: ReadonlySet<string>;
   busy: boolean;
   importProgress: SampleImportProgress | null;
+  sourceLabel?: string;
+  showImportActions?: boolean;
+  showManageActions?: boolean;
   onOpenFiles: () => void;
   onOpenFolder: () => void;
   onManage: () => void;
@@ -76,22 +82,30 @@ export function SampleNavigator({
   }), [language]);
 
   return (
-    <section className="gl-sample-navigator" aria-label={t("FCS samples")}>
+    <section className="gl-sample-navigator" aria-label={t(sourceLabel)}>
       <div className="gl-sample-heading">
         <div className="gl-side-title">{t("Samples")}</div>
         <span>{t("{included} / {total} included", { included: includedCount, total: items.length })}</span>
       </div>
-      <div className="gl-sample-add-actions">
-        <button type="button" className="gl-btn gl-sample-add-primary" disabled={busy} onClick={onOpenFiles}>
-          {t("+ Files…")}
-        </button>
-        <button type="button" className="gl-mini-btn" disabled={busy} onClick={onOpenFolder}>
-          {t("+ Folder…")}
-        </button>
-        <button type="button" className="gl-mini-btn" disabled={busy || items.length === 0} onClick={onManage}>
-          {t("Manage…")}
-        </button>
-      </div>
+      {(showImportActions || showManageActions) && (
+        <div className="gl-sample-add-actions">
+          {showImportActions && (
+            <>
+              <button type="button" className="gl-btn gl-sample-add-primary" disabled={busy} onClick={onOpenFiles}>
+                {t("+ Files…")}
+              </button>
+              <button type="button" className="gl-mini-btn" disabled={busy} onClick={onOpenFolder}>
+                {t("+ Folder…")}
+              </button>
+            </>
+          )}
+          {showManageActions && (
+            <button type="button" className="gl-mini-btn" disabled={busy || items.length === 0} onClick={onManage}>
+              {t("Manage…")}
+            </button>
+          )}
+        </div>
+      )}
 
       {items.length > 0 && (
         <>
@@ -168,18 +182,20 @@ export function SampleNavigator({
               <span className="gl-sample-meta" title={exactSummary}>
                 {localizedCompactNumber.format(item.eventCount)} · {item.channelCount}ch
               </span>
-              <button
-                type="button"
-                className="gl-sample-row-menu"
-                aria-label={t("Manage {name}", { name: item.name })}
-                title={t("Manage this sample")}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onManageSample(item.id);
-                }}
-              >
-                ⋯
-              </button>
+              {showManageActions && (
+                <button
+                  type="button"
+                  className="gl-sample-row-menu"
+                  aria-label={t("Manage {name}", { name: item.name })}
+                  title={t("Manage this sample")}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onManageSample(item.id);
+                  }}
+                >
+                  ⋯
+                </button>
+              )}
             </div>
           );
         })}

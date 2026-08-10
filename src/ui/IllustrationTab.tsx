@@ -29,6 +29,7 @@ import {
 import { MultiColumnChecklist } from "./MultiColumnChecklist";
 import { CollapsiblePicker } from "./CollapsiblePicker";
 import { DensityColourControl } from "./DensityColourControl";
+import { IllustrationSelectionMatrix } from "./IllustrationSelectionMatrix";
 import { useI18n } from "./i18n";
 
 interface Props {
@@ -53,6 +54,7 @@ interface Props {
   presets: IllustrationPreset[];
   onSavePreset: (name: string) => void;
   onDeletePreset: (name: string) => void;
+  onConfigChange: () => void;
   dataRevision: number;
   densityColorPower: number;
   onDensityColorPowerChange: (value: number) => void;
@@ -64,6 +66,12 @@ function snapshotConfig(config: IllustrationConfig): IllustrationConfig {
     popIds: [...config.popIds],
     xChannels: [...config.xChannels],
     popColors: { ...config.popColors },
+    selectedPopulationsBySample: config.selectedPopulationsBySample
+      ? Object.fromEntries(
+          Object.entries(config.selectedPopulationsBySample)
+            .map(([sampleId, popIds]) => [sampleId, [...popIds]]),
+        )
+      : undefined,
   };
 }
 
@@ -86,6 +94,7 @@ export function IllustrationTab({
   presets,
   onSavePreset,
   onDeletePreset,
+  onConfigChange,
   dataRevision,
   densityColorPower,
   onDensityColorPowerChange,
@@ -100,6 +109,17 @@ export function IllustrationTab({
   const initialPlotType = c0?.plotType ?? (c0?.yChannel === "" ? "histogram" : "biplot");
   const [plotType, setPlotType] = useState<"biplot" | "histogram" | "heatmap">(initialPlotType);
   const [combineSamples, setCombineSamples] = useState(c0?.combineSamples ?? false);
+  const [selectionMode, setSelectionMode] = useState<"uniform" | "matrix">(
+    c0?.selectionMode ?? "uniform",
+  );
+  const [selectedPopulationsBySample, setSelectedPopulationsBySample] = useState<
+    Record<string, string[]>
+  >(() => c0?.selectedPopulationsBySample
+    ? Object.fromEntries(
+        Object.entries(c0.selectedPopulationsBySample)
+          .map(([sampleId, popIds]) => [sampleId, [...popIds]]),
+      )
+    : {});
   const [popIds, setPopIds] = useState<string[]>(() => (c0 ? c0.popIds : order.slice(0, 4).map((o) => o.popId)));
   const [xChannels, setXChannels] = useState<string[]>(() => (c0 ? c0.xChannels : [defaultX]));
   const [yChannel, setYChannel] = useState(c0?.yChannel || defaultY);
@@ -153,13 +173,29 @@ export function IllustrationTab({
     checkedSampleCount > 0 &&
     sampleViews.length === checkedSampleCount &&
     pendingSampleCount === 0;
+  const orderedPopulationIds = order.map(({ popId }) => popId);
+  const effectivePopulationIds = selectionMode === "matrix"
+    ? orderedPopulationIds.filter((popId) =>
+        sampleViews.some(({ id }) => (selectedPopulationsBySample[id] ?? []).includes(popId)))
+    : popIds;
+  const selectedCombinationCount = selectionMode === "matrix"
+    ? sampleViews.reduce(
+        (total, { id }) =>
+          total + effectivePopulationIds.reduce(
+            (sampleTotal, popId) =>
+              sampleTotal + Number((selectedPopulationsBySample[id] ?? []).includes(popId)),
+            0,
+          ),
+        0,
+      )
+    : popIds.length * Math.max(1, sampleViews.length);
   // Per-channel scaling (min-max or z-score) needs ≥2 populations to have a within-channel range;
   // with one population every cell collapses to a single flat value (minmax → 0.5, z-score → 0).
   const heatmapDegenerate =
     isHeatmap &&
     heatmapScaleNeedsPopulationComparison(
       heatmapScale,
-      popIds.length * (combineSamples ? 1 : Math.max(1, sampleViews.length)),
+      combineSamples ? effectivePopulationIds.length : selectedCombinationCount,
     );
   const isRidgeline = isHistogram && histLayout === "ridgeline";
 
@@ -172,7 +208,8 @@ export function IllustrationTab({
   // Assemble the live config and mirror it into the App-held ref after every render, so the
   // settings survive a tab unmount (persist across tab switches) and App can save them.
   const currentConfig: IllustrationConfig = {
-    plotType, combineSamples, popIds, xChannels, yChannel, displayMode, plotSize, nColumns,
+    plotType, combineSamples, selectionMode, selectedPopulationsBySample,
+    popIds, xChannels, yChannel, displayMode, plotSize, nColumns,
     fitToColumns, maxEvents, allEvents,
     colorByPop, overlayPops, popColors, pointSize, pointAlpha, contourThreshold, kdeBandwidth, pubStyle,
     densityColorPower,
@@ -182,14 +219,27 @@ export function IllustrationTab({
   };
   const [renderedConfig, setRenderedConfig] = useState<IllustrationConfig>(() => snapshotConfig(currentConfig));
   const renderPending = !configsMatch(currentConfig, renderedConfig);
+  const previousConfigJsonRef = useRef(JSON.stringify(snapshotConfig(currentConfig)));
   useEffect(() => {
     configRef.current = currentConfig;
+    const next = JSON.stringify(snapshotConfig(currentConfig));
+    if (next !== previousConfigJsonRef.current) {
+      previousConfigJsonRef.current = next;
+      onConfigChange();
+    }
   });
 
   // Apply a full config bundle (preset load).
   const applyConfig = (c: IllustrationConfig) => {
     setPlotType(c.plotType ?? (c.yChannel === "" ? "histogram" : "biplot"));
     setCombineSamples(c.combineSamples ?? false);
+    setSelectionMode(c.selectionMode ?? "uniform");
+    setSelectedPopulationsBySample(c.selectedPopulationsBySample
+      ? Object.fromEntries(
+          Object.entries(c.selectedPopulationsBySample)
+            .map(([sampleId, popIds]) => [sampleId, [...popIds]]),
+        )
+      : {});
     setPopIds(c.popIds); setXChannels(c.xChannels); setYChannel(c.yChannel);
     setDisplayMode(c.displayMode); setPlotSize(c.plotSize); setNColumns(c.nColumns);
     setFitToColumns(c.fitToColumns); setMaxEvents(c.maxEvents); setAllEvents(c.allEvents);
@@ -216,6 +266,14 @@ export function IllustrationTab({
     if (!sampleScopeReady) return;
     const c = renderedConfig;
     const renderedPlotType = c.plotType ?? (c.yChannel === "" ? "histogram" : "biplot");
+    const renderedSelectionMode = c.selectionMode ?? "uniform";
+    const renderedSelection = renderedSelectionMode === "matrix"
+      ? (c.selectedPopulationsBySample ?? {})
+      : undefined;
+    const renderedPopIds = renderedSelectionMode === "matrix"
+      ? orderedPopulationIds.filter((popId) =>
+          sampleViews.some(({ id }) => (renderedSelection?.[id] ?? []).includes(popId)))
+      : c.popIds;
     const cap = c.allEvents ? Infinity : c.maxEvents;
     const cols = c.nColumns || c.xChannels.length || 1;
     const renderedColorFor = (popId: string) =>
@@ -236,7 +294,7 @@ export function IllustrationTab({
       const heatmap = buildMultiSampleHeatmapPayload(
         illustrationSources,
         state.populations,
-        c.popIds,
+        renderedPopIds,
         c.xChannels,
         c.combineSamples ?? false,
         {
@@ -246,6 +304,7 @@ export function IllustrationTab({
           cellSize: c.heatmapCellSize ?? 30,
           showValues: c.heatmapShowValues ?? false,
         },
+        renderedSelection,
       );
       loadMiniPlots().renderIllustrationGrid("illustration-grid-container", {
         containerId: "illustration-grid-container",
@@ -266,7 +325,7 @@ export function IllustrationTab({
       state.gates,
       state.gate_order,
       state.populations,
-      c.popIds,
+      renderedPopIds,
       c.xChannels,
       renderedYChannel,
       globalScales,
@@ -285,7 +344,7 @@ export function IllustrationTab({
         overlayPops: c.overlayPops,
         // Pass an explicit colour for EVERY displayed pop (stable slot ?? manual override) so the
         // renderer never falls back to its own index-based palette (which would reshuffle on add).
-        populationColors: Object.fromEntries(c.popIds.map((id) => [id, renderedColorFor(id)])),
+        populationColors: Object.fromEntries(renderedPopIds.map((id) => [id, renderedColorFor(id)])),
         histLineWidth: c.histLineWidth,
         histFill: c.histFill,
         histFillAlpha: c.histFillAlpha,
@@ -300,6 +359,7 @@ export function IllustrationTab({
         scaleFontsWithPlot: c.scaleFontsWithPlot ?? true,
       },
       c.combineSamples ?? false,
+      renderedSelection,
     );
     loadMiniPlots().renderIllustrationGrid("illustration-grid-container", payload);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -380,8 +440,38 @@ export function IllustrationTab({
           >
             {t("Delete")}
           </button>
-          <span className="gl-ctl-sep" />
+        </div>
+        <div className="gl-illust-row gl-illust-sample-selection">
           <span className="gl-stats-opt-label">{t("FCS files")}</span>
+          <label className="gl-check">
+            <input
+              type="radio"
+              name="illust-fcs-population-selection"
+              checked={selectionMode === "uniform"}
+              onChange={() => setSelectionMode("uniform")}
+            />
+            {t("Same populations for every FCS")}
+          </label>
+          <label className="gl-check">
+            <input
+              type="radio"
+              name="illust-fcs-population-selection"
+              checked={selectionMode === "matrix"}
+              onChange={() => {
+                setSelectedPopulationsBySample((previous) => {
+                  const next = Object.fromEntries(
+                    Object.entries(previous).map(([sampleId, ids]) => [sampleId, [...ids]]),
+                  ) as Record<string, string[]>;
+                  for (const view of sampleViews) {
+                    if (next[view.id] === undefined) next[view.id] = [...popIds];
+                  }
+                  return next;
+                });
+                setSelectionMode("matrix");
+              }}
+            />
+            {t("Choose by FCS")}
+          </label>
           <label className="gl-check" title={t("Unchecked files in the Samples panel are excluded.")}>
             <input
               type="checkbox"
@@ -395,6 +485,9 @@ export function IllustrationTab({
             {combineSamples
               ? t("One pooled illustration")
               : t("Separate file-labelled rows")}
+            {selectionMode === "matrix"
+              ? ` · ${t("{count} selected combinations", { count: selectedCombinationCount })}`
+              : ""}
           </span>
         </div>
         {/* Plot type + display + contour smoothing */}
@@ -695,7 +788,7 @@ export function IllustrationTab({
       </div>
 
       {/* Responsive, equal-height multi-column channel + population checklists. */}
-      <div className="gl-illust-pickers">
+      <div className={`gl-illust-pickers${selectionMode === "matrix" ? " is-single" : ""}`}>
         <CollapsiblePicker
           className="gl-illust-picker"
           label={isHeatmap ? t("Channels") : t("X channels")}
@@ -719,42 +812,65 @@ export function IllustrationTab({
           />
         </CollapsiblePicker>
 
-        <CollapsiblePicker
-          className="gl-illust-picker"
-          label={t("Populations")}
-          summary={t("{selected} of {total} selected", { selected: popIds.length, total: order.length })}
-          actions={(
-            <>
-              <button className="gl-mini-btn" onClick={() => setPopIds(order.map((o) => o.popId))}>{t("All")}</button>
-              <button className="gl-mini-btn" onClick={() => setPopIds([])}>{t("None")}</button>
-            </>
-          )}
-        >
-          <MultiColumnChecklist
-            items={order}
-            ariaLabel="Illustration populations"
-            selected={({ popId }) => popIds.includes(popId)}
-            onToggle={({ popId }) => setPopIds((previous) => toggle(previous, popId))}
-            getKey={({ popId }) => popId}
-            getLabel={({ popId }) => state.populations[popId]?.name ?? popId}
-            getDepth={({ depth }) => depth}
-            distribution="fill-first"
-            visibleRows={15}
-            height={300}
-            renderTrailing={({ popId }) => (
-              popIds.includes(popId) && !isHeatmap && (colorByPop || overlayPops) ? (
-                <input
-                  type="color"
-                  className="gl-pop-color"
-                  title="Population colour"
-                  value={colorFor(popId)}
-                  onChange={(e) => setPopColors((colors) => ({ ...colors, [popId]: e.target.value }))}
-                />
-              ) : null
+        {selectionMode === "uniform" ? (
+          <CollapsiblePicker
+            className="gl-illust-picker"
+            label={t("Populations")}
+            summary={t("{selected} of {total} selected", { selected: popIds.length, total: order.length })}
+            actions={(
+              <>
+                <button className="gl-mini-btn" onClick={() => setPopIds(order.map((o) => o.popId))}>{t("All")}</button>
+                <button className="gl-mini-btn" onClick={() => setPopIds([])}>{t("None")}</button>
+              </>
             )}
-          />
-        </CollapsiblePicker>
+          >
+            <MultiColumnChecklist
+              items={order}
+              ariaLabel="Illustration populations"
+              selected={({ popId }) => popIds.includes(popId)}
+              onToggle={({ popId }) => setPopIds((previous) => toggle(previous, popId))}
+              getKey={({ popId }) => popId}
+              getLabel={({ popId }) => state.populations[popId]?.name ?? popId}
+              getDepth={({ depth }) => depth}
+              distribution="fill-first"
+              visibleRows={15}
+              height={300}
+              renderTrailing={({ popId }) => (
+                popIds.includes(popId) && !isHeatmap && (colorByPop || overlayPops) ? (
+                  <input
+                    type="color"
+                    className="gl-pop-color"
+                    title="Population colour"
+                    value={colorFor(popId)}
+                    onChange={(e) => setPopColors((colors) => ({ ...colors, [popId]: e.target.value }))}
+                  />
+                ) : null
+              )}
+            />
+          </CollapsiblePicker>
+        ) : null}
       </div>
+
+      {selectionMode === "matrix" ? (
+        <IllustrationSelectionMatrix
+          samples={sampleViews.map((view) => ({
+            id: view.id,
+            name: view.name,
+            eventCount: view.derived.stats.event_count,
+          }))}
+          populations={order.map(({ popId, depth }) => ({
+            id: popId,
+            name: state.populations[popId]?.name ?? popId,
+            depth,
+          }))}
+          value={selectedPopulationsBySample}
+          onChange={setSelectedPopulationsBySample}
+          populationColor={!isHeatmap && (colorByPop || overlayPops) ? colorFor : undefined}
+          onPopulationColorChange={!isHeatmap && (colorByPop || overlayPops)
+            ? (popId, color) => setPopColors((colors) => ({ ...colors, [popId]: color }))
+            : undefined}
+        />
+      ) : null}
 
       <div id="illustration-grid-container" ref={containerRef} className="gl-mini-grid-container" />
     </div>

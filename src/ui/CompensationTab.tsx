@@ -62,6 +62,7 @@ import {
 import type { CompensationApplyProgress } from "../engine/compensationManager";
 import type { PreviewSolvedResponse } from "../workers/compensationProtocol";
 import type { Sample } from "../engine/sample";
+import type { GateLabHostCompensationMatrixDescriptor } from "../host/datasetContract";
 import {
   exportCompensationComparison,
   type CompensationComparisonExportFormat,
@@ -93,9 +94,16 @@ import {
 interface Props {
   sample: Sample;
   sampleName?: string;
+  hostedCompensationMatrix?: GateLabHostCompensationMatrixDescriptor | null;
   compensationOn: boolean;
   onApplyProfile?: (
     profile: CompensationProfileRecord,
+    onProgress?: (progress: CompensationApplyProgress) => void,
+  ) => Promise<void>;
+  existingHostAssays?: readonly ExistingHostCompensatedAssay[];
+  onAdoptExistingAssay?: (
+    profile: CompensationProfileRecord,
+    assay: ExistingHostCompensatedAssay,
     onProgress?: (progress: CompensationApplyProgress) => void,
   ) => Promise<void>;
   onCancelApply?: () => void;
@@ -118,6 +126,12 @@ interface Props {
   stateKey: string;
   densityColorPower?: number;
   onDensityColorPowerChange?: (value: number) => void;
+}
+
+export interface ExistingHostCompensatedAssay {
+  readonly id: string;
+  readonly label: string;
+  readonly revision: number;
 }
 
 export interface CompensationReviewPopulation {
@@ -156,6 +170,7 @@ export interface CompensationApplyUiStatus {
 
 interface CytofMatrixDraft {
   readonly fileName: string;
+  readonly source: "file" | "host";
   readonly parsed: ParsedCompensationMatrixTable;
   readonly matrix: CanonicalCompensationMatrix;
   readonly validationWarnings: readonly MatrixValidationIssue[];
@@ -452,11 +467,58 @@ function profileOriginText(profile: CompensationProfileRecord, translate: (sourc
   return `${profile.origin.presetId} · ${translate("bundled preset")} ${profile.origin.presetVersion}`;
 }
 
+function hostedCytofDraft(
+  descriptor: GateLabHostCompensationMatrixDescriptor | null | undefined,
+): Readonly<{
+  draft: CytofMatrixDraft | null;
+  error: string | null;
+}> {
+  if (!descriptor || descriptor.kind !== "cytof-spillover") {
+    return { draft: null, error: null };
+  }
+  const parsed: ParsedCompensationMatrixTable = {
+    input: {
+      sourceChannels: descriptor.sourceChannels,
+      receiverChannels: descriptor.receiverChannels,
+      matrix: descriptor.matrix,
+    },
+    format: {
+      delimiter: "csv",
+      sourceColumnHeader: "source",
+    },
+  };
+  const validated = validateAndCanonicalizeCompensationMatrix(
+    parsed.input,
+    "cytof-spillover",
+  );
+  if (!validated.ok) {
+    return {
+      draft: null,
+      error: `The SCE spillover matrix is invalid. ${validated.errors
+        .map(({ message }) => message)
+        .join(" ")}`,
+    };
+  }
+  return {
+    draft: {
+      fileName: descriptor.name,
+      source: "host",
+      parsed,
+      matrix: validated.value,
+      validationWarnings: validated.warnings,
+    },
+    error: null,
+  };
+}
+
 function CompensationTabImpl({
   sample,
   sampleName = "sample.fcs",
+  hostedCompensationMatrix = null,
   compensationOn,
   onApplyProfile,
+  existingHostAssays = [],
+  onAdoptExistingAssay,
   onCancelApply,
   hasExistingGates = false,
   applyStatus = null,
@@ -488,6 +550,13 @@ function CompensationTabImpl({
   // A profile-derived result and the embedded FCS matrix are different scientific sources. Never
   // present the embedded matrix as the active profile's coefficients.
   const spill = !profileMetadata && sample.instrument === "flow" ? sample.spillover : null;
+  const hostedFlowMatrix = hostedCompensationMatrix?.kind === "flow-spillover"
+    ? hostedCompensationMatrix
+    : null;
+  const initialHostedCytofDraft = useMemo(
+    () => hostedCytofDraft(hostedCompensationMatrix),
+    [hostedCompensationMatrix],
+  );
   const [selectedPairKey, setSelectedPairKey] = usePersistedTabState<string | null>(
     `compensation.${stateKey}.selectedPair`,
     null,
@@ -574,12 +643,28 @@ function CompensationTabImpl({
   const candidatePreviewGenerationRef = useRef(0);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionIsError, setActionIsError] = useState(false);
-  const [cytofDraft, setCytofDraft] = useState<CytofMatrixDraft | null>(null);
-  const [includedCytofChannels, setIncludedCytofChannels] = useState<Set<string>>(
-    () => new Set(),
+  const [cytofDraft, setCytofDraft] = useState<CytofMatrixDraft | null>(
+    () => initialHostedCytofDraft.draft,
   );
-  const [cytofImportError, setCytofImportError] = useState<string | null>(null);
+  const [includedCytofChannels, setIncludedCytofChannels] = useState<Set<string>>(
+    () => {
+      const receiverChannels = initialHostedCytofDraft.draft?.matrix.receiverChannels ?? [];
+      const sampleCounts = new Map<string, number>();
+      for (const channel of sample.channels) {
+        const pnn = channel.pnn.trim().normalize("NFC");
+        sampleCounts.set(pnn, (sampleCounts.get(pnn) ?? 0) + 1);
+      }
+      return new Set(receiverChannels.filter((pnn) => sampleCounts.get(pnn) === 1));
+    },
+  );
+  const [cytofImportError, setCytofImportError] = useState<string | null>(
+    () => initialHostedCytofDraft.error,
+  );
   const [gateRecomputeAcknowledged, setGateRecomputeAcknowledged] = useState(false);
+  const [selectedExistingAssayId, setSelectedExistingAssayId] = useState(
+    () => existingHostAssays[0]?.id ?? "",
+  );
+  const [existingAssayConfirmed, setExistingAssayConfirmed] = useState(false);
   const [applyProgress, setApplyProgress] = useState<CompensationApplyProgress | null>(null);
   const [applyingProfile, setApplyingProfile] = useState(false);
   const [localApplyProfileName, setLocalApplyProfileName] = useState<string | null>(null);
@@ -593,6 +678,18 @@ function CompensationTabImpl({
     0,
     Math.floor(applyTargetEventCount ?? sample.fcs.nEvents),
   );
+  const selectedExistingAssay = existingHostAssays.find(
+    ({ id }) => id === selectedExistingAssayId,
+  ) ?? existingHostAssays[0] ?? null;
+
+  useEffect(() => {
+    if (
+      selectedExistingAssayId &&
+      existingHostAssays.some(({ id }) => id === selectedExistingAssayId)
+    ) return;
+    setSelectedExistingAssayId(existingHostAssays[0]?.id ?? "");
+    setExistingAssayConfirmed(false);
+  }, [existingHostAssays, selectedExistingAssayId]);
   const visibleApplyProgress: CompensationApplyUiStatus | null = applyStatus ??
     (applyProgress
       ? {
@@ -718,7 +815,7 @@ function CompensationTabImpl({
         receiverChannels: spill.channels.map((key) => channelDisplay(sample, key)),
         matrix: spill.matrix,
         kind: "flow",
-        title: "Embedded compensation matrix",
+        title: hostedFlowMatrix ? "SCE spillover matrix" : "Embedded compensation matrix",
         subtitle: "Source rows ↓ · Receiver columns → · values are spillover percentages",
         coefficientNote: "Applying the embedded matrix leaves its coefficients unchanged.",
       };
@@ -751,7 +848,7 @@ function CompensationTabImpl({
         ? "This is the exact uploaded matrix. The NNLS solve uses its selected, matched channels; original measurements remain stored separately."
         : "This is the exact installed matrix. Original measurements remain stored separately.",
     };
-  }, [profileMetadata, profileRecord, sample, spill, t]);
+  }, [hostedFlowMatrix, profileMetadata, profileRecord, sample, spill, t]);
   const sourceChannels = matrixView?.sourceChannels ?? [];
   const receiverChannels = matrixView?.receiverChannels ?? [];
   useEffect(() => {
@@ -1323,7 +1420,7 @@ function CompensationTabImpl({
   const source = profileMetadata
     ? profileRecord?.name ?? "Installed compensation profile"
     : spill
-      ? "Embedded FCS matrix"
+      ? hostedFlowMatrix ? "SCE spillover matrix" : "Embedded FCS matrix"
       : "No compatible matrix";
   const method = profileMetadata
     ? methodLabel(profileMetadata.kind, profileMetadata.method)
@@ -1451,6 +1548,7 @@ function CompensationTabImpl({
       );
       setCytofDraft({
         fileName: file.name,
+        source: "file",
         parsed,
         matrix: validated.value,
         validationWarnings: validated.warnings,
@@ -1470,6 +1568,43 @@ function CompensationTabImpl({
       else next.delete(pnn);
       return next;
     });
+  };
+
+  const createCytofDraftProfile = async (): Promise<CompensationProfileRecord> => {
+    if (!cytofDraft) {
+      throw new Error(t("Choose a CyTOF spillover matrix first."));
+    }
+    const suffix = globalThis.crypto?.randomUUID?.() ??
+      `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const displayName = cytofDraft.fileName.replace(/\.(?:csv|tsv|txt)$/i, "") ||
+      "CyTOF compensation";
+    return createCompensationBaselineProfile(
+      {
+        kind: "cytof-spillover",
+        method: "nnls",
+        solverVersion: CYTOF_NNLS_SOLVER_VERSION,
+        solverSettings: DEFAULT_CYTOF_NNLS_SETTINGS,
+        matrix: cytofDraft.matrix,
+        includedChannels: Array.from(includedCytofChannels),
+      },
+      {
+        profileId: `cytof-${suffix}`,
+        name: displayName,
+        createdAt: new Date(),
+        origin: {
+          type: "uploaded",
+          fileName: cytofDraft.fileName,
+          format: cytofDraft.parsed.format.delimiter,
+          sourceColumnHeader: cytofDraft.parsed.format.sourceColumnHeader,
+        },
+        provenance: {
+          sourceDescription: cytofDraft.source === "host"
+            ? "CyTOF spillover matrix from metadata(sce)$spillover_matrix"
+            : "User-uploaded CyTOF spillover matrix",
+          estimationMethod: "Imported; coefficients preserved exactly",
+        },
+      },
+    );
   };
 
   const applyCytofProfile = async () => {
@@ -1493,38 +1628,10 @@ function CompensationTabImpl({
     setApplyingProfile(true);
     setLocalApplyProfileName(cytofDraft.fileName);
     try {
-      const suffix = globalThis.crypto?.randomUUID?.() ??
-        `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const displayName = cytofDraft.fileName.replace(/\.(?:csv|tsv|txt)$/i, "") ||
-        "CyTOF compensation";
-      const profile = await createCompensationBaselineProfile(
-        {
-          kind: "cytof-spillover",
-          method: "nnls",
-          solverVersion: CYTOF_NNLS_SOLVER_VERSION,
-          solverSettings: DEFAULT_CYTOF_NNLS_SETTINGS,
-          matrix: cytofDraft.matrix,
-          includedChannels: Array.from(includedCytofChannels),
-        },
-        {
-          profileId: `cytof-${suffix}`,
-          name: displayName,
-          createdAt: new Date(),
-          origin: {
-            type: "uploaded",
-            fileName: cytofDraft.fileName,
-            format: cytofDraft.parsed.format.delimiter,
-            sourceColumnHeader: cytofDraft.parsed.format.sourceColumnHeader,
-          },
-          provenance: {
-            sourceDescription: "User-uploaded CyTOF spillover matrix",
-            estimationMethod: "Imported; coefficients preserved exactly",
-          },
-        },
-      );
+      const profile = await createCytofDraftProfile();
       await onApplyProfile(profile, setApplyProgress);
       setActionMessage(t("Applied {name} to {channels} channels across {files} checked FCS files. Original measurements remain available.", {
-        name: displayName,
+        name: profile.name,
         channels: includedCytofChannels.size,
         files: resolvedApplyTargetCount,
       }));
@@ -1536,6 +1643,53 @@ function CompensationTabImpl({
       const message = cause instanceof Error ? cause.message : String(cause);
       if (/cancel/i.test(message)) setActionMessage(t("CyTOF compensation was cancelled; the previous assay was left unchanged."));
       else setCytofImportError(message);
+    } finally {
+      applySubmissionRef.current = false;
+      setApplyingProfile(false);
+      setLocalApplyProfileName(null);
+    }
+  };
+
+  const adoptExistingCytofAssay = async () => {
+    if (
+      applySubmissionRef.current ||
+      applyBusy ||
+      !cytofDraft ||
+      !cytofCompatibility?.canApply ||
+      !selectedExistingAssay ||
+      !onAdoptExistingAssay ||
+      !existingAssayConfirmed
+    ) return;
+    if (hasExistingGates && !gateRecomputeAcknowledged) {
+      setCytofImportError(
+        t("Confirm that existing gate memberships will be recomputed in compensated coordinates before adopting the assay."),
+      );
+      return;
+    }
+    setCytofImportError(null);
+    setActionMessage(null);
+    setApplyProgress(null);
+    applySubmissionRef.current = true;
+    setApplyingProfile(true);
+    setLocalApplyProfileName(selectedExistingAssay.label);
+    try {
+      const profile = await createCytofDraftProfile();
+      await onAdoptExistingAssay(
+        profile,
+        selectedExistingAssay,
+        setApplyProgress,
+      );
+      setActionMessage(t("Using existing SCE assay {assay} with {matrix}. No assay values were recomputed.", {
+        assay: selectedExistingAssay.label,
+        matrix: profile.name,
+      }));
+      setCytofDraft(null);
+      setIncludedCytofChannels(new Set());
+      setGateRecomputeAcknowledged(false);
+      setExistingAssayConfirmed(false);
+      setApplyProgress(null);
+    } catch (cause) {
+      setCytofImportError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       applySubmissionRef.current = false;
       setApplyingProfile(false);
@@ -1558,7 +1712,8 @@ function CompensationTabImpl({
       );
       return;
     }
-    const displayName = `${sampleName.replace(/\.fcs$/i, "") || "Flow"} spillover`;
+    const displayName = hostedFlowMatrix?.name ||
+      `${sampleName.replace(/\.fcs$/i, "") || "Flow"} spillover`;
     setActionMessage(null);
     setActionIsError(false);
     setApplyProgress(null);
@@ -1581,21 +1736,36 @@ function CompensationTabImpl({
           name: displayName,
           createdAt: new Date(),
           origin: {
-            type: "embedded-fcs",
-            fileName: sampleName,
-            ...(embeddedFlowProfileMatrix.keyword
-              ? { keyword: embeddedFlowProfileMatrix.keyword }
-              : {}),
+            ...(hostedFlowMatrix
+              ? {
+                  type: "uploaded" as const,
+                  fileName: hostedFlowMatrix.name,
+                  format: "csv" as const,
+                  sourceColumnHeader: "source",
+                }
+              : {
+                  type: "embedded-fcs" as const,
+                  fileName: sampleName,
+                  ...(embeddedFlowProfileMatrix.keyword
+                    ? { keyword: embeddedFlowProfileMatrix.keyword }
+                    : {}),
+                }),
           },
           provenance: {
-            sourceDescription: "Spillover matrix embedded in the source FCS file",
-            estimationMethod: "Imported from FCS; coefficients preserved exactly",
+            sourceDescription: hostedFlowMatrix
+              ? "Flow spillover matrix from metadata(sce)$spillover_matrix"
+              : "Spillover matrix embedded in the source FCS file",
+            estimationMethod: hostedFlowMatrix
+              ? "Imported from SCE metadata; coefficients preserved exactly"
+              : "Imported from FCS; coefficients preserved exactly",
           },
         },
       );
       await onApplyProfile(profile, setApplyProgress);
       setGateRecomputeAcknowledged(false);
-      setActionMessage(t("Flow matrix editing is ready. The exact embedded matrix is retained as the baseline, and Original measurements remain available."));
+      setActionMessage(t(hostedFlowMatrix
+        ? "Flow matrix editing is ready. The exact hosted matrix is retained as the baseline, and Original measurements remain available."
+        : "Flow matrix editing is ready. The exact embedded matrix is retained as the baseline, and Original measurements remain available."));
     } catch (cause) {
       setActionIsError(true);
       setActionMessage(cause instanceof Error ? cause.message : String(cause));
@@ -2547,7 +2717,11 @@ function CompensationTabImpl({
       {sample.instrument === "flow" && spill && !profileMetadata && (
         <section className="gl-comp-flow-enable" aria-labelledby="comp-flow-enable-heading">
           <div>
-            <strong id="comp-flow-enable-heading">{t("Embedded FCS matrix")}</strong>
+            <strong id="comp-flow-enable-heading">
+              {t(hostedFlowMatrix
+                ? "SCE spillover matrix"
+                : "Embedded FCS matrix")}
+            </strong>
             <span>{t("Install this exact matrix as the immutable baseline to edit coefficients and preview their effect.")}</span>
           </div>
           {hasExistingGates && (
@@ -2750,6 +2924,67 @@ function CompensationTabImpl({
                   </button>
                 )}
               </div>
+              {existingHostAssays.length > 0 && onAdoptExistingAssay && (
+                <div
+                  className="gl-comp-adopt-existing"
+                  aria-labelledby="comp-adopt-existing-heading"
+                >
+                  <div className="gl-comp-adopt-copy">
+                    <strong id="comp-adopt-existing-heading">
+                      {t("Use an existing SCE assay")}
+                    </strong>
+                    <span>
+                      {t("Records this matrix against data already computed in R. GateLabR will not recompute or overwrite the selected assay.")}
+                    </span>
+                  </div>
+                  <label>
+                    <span>{t("Existing linear assay")}</span>
+                    <select
+                      value={selectedExistingAssay?.id ?? ""}
+                      disabled={applyBusy}
+                      onChange={(event) => {
+                        setSelectedExistingAssayId(event.currentTarget.value);
+                        setExistingAssayConfirmed(false);
+                      }}
+                    >
+                      {existingHostAssays.map((assay) => (
+                        <option key={assay.id} value={assay.id}>
+                          {assay.label === assay.id
+                            ? assay.id
+                            : `${assay.label} (${assay.id})`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="gl-comp-adopt-confirm">
+                    <input
+                      type="checkbox"
+                      checked={existingAssayConfirmed}
+                      disabled={applyBusy}
+                      onChange={(event) =>
+                        setExistingAssayConfirmed(event.currentTarget.checked)}
+                    />
+                    <span>
+                      {t("I confirm this assay was computed from the selected source assay using this exact matrix and channel set.")}
+                    </span>
+                  </label>
+                  <button
+                    type="button"
+                    className="gl-btn-ghost"
+                    disabled={
+                      applyBusy ||
+                      !selectedExistingAssay ||
+                      !existingAssayConfirmed ||
+                      resolvedApplyTargetCount === 0 ||
+                      !cytofCompatibility.canApply ||
+                      (hasExistingGates && !gateRecomputeAcknowledged)
+                    }
+                    onClick={() => void adoptExistingCytofAssay()}
+                  >
+                    {t("Use existing assay — no recomputation")}
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </section>
@@ -3763,8 +3998,14 @@ function CompensationTabImpl({
       )}
       {exportDialogOpen && matrixView && (
         <CompensationMatrixExportDialog
-          profileLabel={profileRecord?.name ?? "embedded_FCS"}
-          installedLabel={t(profileRecord ? "Installed matrix" : "Embedded FCS matrix")}
+          profileLabel={profileRecord?.name ?? (hostedFlowMatrix ? "SCE_spillover" : "embedded_FCS")}
+          installedLabel={t(
+            profileRecord
+              ? "Installed matrix"
+              : hostedFlowMatrix
+                ? "SCE spillover matrix"
+                : "Embedded FCS matrix",
+          )}
           installedMatrix={{
             sourceChannels: matrixView.sourceAxisKeys,
             receiverChannels: matrixView.receiverAxisKeys,

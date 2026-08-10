@@ -130,4 +130,56 @@ describe("multi-sample Illustration payload", () => {
     expect(payload.plots["pop|X"].x).toEqual([1, 2, 10, 20, 30]);
     expect(payload.plots["pop|X"].n_events).toBe(5);
   });
+
+  it("renders only explicitly selected FCS × population cells", () => {
+    const payload = buildMultiSampleIllustrationPayload(
+      sources,
+      "a",
+      {},
+      [],
+      populations,
+      ["pop"],
+      ["X"],
+      null,
+      {},
+      options,
+      false,
+      { a: ["pop"], b: [] },
+    ) as {
+      pop_ids: string[];
+      pop_counts: Record<string, number>;
+      plots: Record<string, { x: number[] }>;
+    };
+
+    expect(payload.pop_ids).toEqual(["a::pop"]);
+    expect(payload.pop_counts).toEqual({ "a::pop": 2 });
+    expect(payload.plots["a::pop|X"].x).toEqual([1, 2]);
+    expect(payload.plots["b::pop|X"]).toBeUndefined();
+  });
+
+  it("pools only samples selected for each population", () => {
+    const payload = buildMultiSampleIllustrationPayload(
+      sources,
+      "a",
+      {},
+      [],
+      populations,
+      ["pop"],
+      ["X"],
+      null,
+      {},
+      options,
+      true,
+      { a: [], b: ["pop"] },
+    ) as {
+      pop_ids: string[];
+      pop_counts: Record<string, number>;
+      plots: Record<string, { x: number[]; n_events: number }>;
+    };
+
+    expect(payload.pop_ids).toEqual(["pop"]);
+    expect(payload.pop_counts).toEqual({ pop: 3 });
+    expect(payload.plots["pop|X"].x).toEqual([10, 20, 30]);
+    expect(payload.plots["pop|X"].n_events).toBe(3);
+  });
 });

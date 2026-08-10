@@ -16,6 +16,10 @@ export interface FcsChannel {
   marker: string | null; // $PnS (antigen/marker label, may be absent)
   bits: number; // $PnB
   range: number; // $PnR
+  /** Stable app identity supplied by a non-FCS host (for example an SCE row name). */
+  appKey?: string;
+  /** Cosmetic label supplied by a non-FCS host; never used for gate identity. */
+  appLabel?: string;
 }
 
 export interface SpilloverMatrix {

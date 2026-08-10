@@ -34,6 +34,8 @@ export interface GatingFontSizes {
 }
 
 export interface WorkspaceSample {
+  /** Stable identity for saved Illustration/Layout bindings. Optional in older workspaces. */
+  sampleId?: string;
   fileName: string;
   dataPath: string; // unique in-zip path (e.g. "data/0_run.fcs"); also the bundle lookup key
   logicleW: Record<string, number>; // per-sample user W overrides
@@ -91,6 +93,10 @@ export interface IllustrationConfig {
   plotType?: "biplot" | "histogram" | "heatmap";
   /** Pool matching populations across checked FCS files; false keeps file-labelled rows. */
   combineSamples?: boolean;
+  /** Uniform preserves legacy Cartesian selection; matrix enables sparse FCS × population cells. */
+  selectionMode?: "uniform" | "matrix";
+  /** Population IDs selected for each persisted sample ID when selectionMode is matrix. */
+  selectedPopulationsBySample?: Record<string, string[]>;
   popIds: string[];
   xChannels: string[];
   yChannel: string;
@@ -221,6 +227,7 @@ export function validateWorkspace(ws: WorkspaceFile): true {
   }
 
   const dataPaths = new Set<string>();
+  const sampleIds = new Set<string>();
   ws.samples.forEach((sample, i) => {
     if (!isRecord(sample)) invalidWorkspace(`sample ${i + 1} is not an object.`);
     if (typeof sample.fileName !== "string" || sample.fileName.trim().length === 0) {
@@ -232,6 +239,15 @@ export function validateWorkspace(ws: WorkspaceFile): true {
     }
     if (dataPaths.has(sample.dataPath)) invalidWorkspace(`duplicate sample dataPath "${sample.dataPath}".`);
     dataPaths.add(sample.dataPath);
+    if (sample.sampleId !== undefined) {
+      if (typeof sample.sampleId !== "string" || sample.sampleId.trim().length === 0) {
+        invalidWorkspace(`sample ${i + 1} has an invalid sampleId.`);
+      }
+      if (sampleIds.has(sample.sampleId)) {
+        invalidWorkspace(`duplicate sampleId "${sample.sampleId}".`);
+      }
+      sampleIds.add(sample.sampleId);
+    }
     if (!isRecord(sample.logicleW) || typeof sample.compensationOn !== "boolean") {
       invalidWorkspace(`sample ${i + 1} has invalid transform or compensation settings.`);
     }

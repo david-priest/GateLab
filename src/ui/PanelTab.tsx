@@ -21,6 +21,8 @@ interface Props {
   /** Apply a validated bulk rename as one workspace change. */
   onRenameMany: (changes: readonly { key: string; label: string }[]) => void;
   onResetAll: () => void;
+  onWriteToHost?: () => void;
+  hostWriteBusy?: boolean;
 }
 
 interface ImportDraft {
@@ -28,7 +30,14 @@ interface ImportDraft {
   preview: PanelImportPreview;
 }
 
-export function PanelTab({ sample, onRename, onRenameMany, onResetAll }: Props) {
+export function PanelTab({
+  sample,
+  onRename,
+  onRenameMany,
+  onResetAll,
+  onWriteToHost,
+  hostWriteBusy = false,
+}: Props) {
   const { t } = useI18n();
   const fileRef = useRef<HTMLInputElement>(null);
   // Local draft so typing is smooth; commit on blur / Enter.
@@ -113,6 +122,17 @@ export function PanelTab({ sample, onRename, onRenameMany, onResetAll }: Props) 
           <button type="button" className="gl-btn-ghost" onClick={onResetAll} disabled={!anyRenamed}>
             {t("Reset all")}
           </button>
+          {onWriteToHost && (
+            <button
+              type="button"
+              className="gl-btn-primary"
+              onClick={onWriteToHost}
+              disabled={hostWriteBusy}
+              title={t("Persist the current display names in SingleCellExperiment rowData")}
+            >
+              {hostWriteBusy ? t("Writing…") : t("Write panel to SCE")}
+            </button>
+          )}
         </div>
       </div>
       <p className="gl-hint gl-panel-hint">

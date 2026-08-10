@@ -55,6 +55,19 @@ const endsWithA = (s: string): boolean => /-A$/i.test(s);
 const suffixAHW = (s: string): boolean => /-(A|H|W)$/i.test(s);
 
 export function resolveChannels(fcs: FcsFile): ResolvedChannel[] {
+  if (fcs.channels.some((channel) => channel.appKey !== undefined)) {
+    return uniqueChannelKeys(fcs.channels.map((channel) => ({
+      key: channel.appKey?.trim() || channel.name,
+      ...(channel.appLabel?.trim() &&
+          channel.appLabel.trim() !== (channel.appKey?.trim() || channel.name)
+        ? { label: channel.appLabel.trim() }
+        : {}),
+      pnn: channel.name,
+      marker: channel.marker,
+      columnIndex: channel.index,
+      range: channel.range,
+    })));
+  }
   if (fcs.instrument !== "flow") {
     // CyTOF / other: keep all channels; prefer the marker when it's distinct.
     return uniqueChannelKeys(fcs.channels.map((c) => ({

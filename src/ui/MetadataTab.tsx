@@ -33,11 +33,14 @@ interface Props {
   onAddPopColumn: (name: string) => void;
   onRenamePopColumn: (oldName: string, newName: string) => void;
   onDeletePopColumn: (name: string) => void;
+  onWriteSampleMetadataToHost?: () => void;
+  hostWriteBusy?: boolean;
 }
 
 export function MetadataTab({
   samples, metadata, columns, onSetCell, onAddColumn, onRenameColumn, onDeleteColumn, onImport,
   populationRows, populationMetadata, populationColumns, onSetPopCell, onAddPopColumn, onRenamePopColumn, onDeletePopColumn,
+  onWriteSampleMetadataToHost, hostWriteBusy = false,
 }: Props) {
   const { t } = useI18n();
   const sampleRows: MetaRow[] = samples.map((s) => ({
@@ -48,6 +51,24 @@ export function MetadataTab({
 
   return (
     <div className="gl-tab-panel">
+      {onWriteSampleMetadataToHost && (
+        <div className="gl-tab-head">
+          <div>
+            <h2 className="gl-tab-title">{t("SingleCellExperiment metadata")}</h2>
+            <p className="gl-hint gl-panel-hint">
+              {t("Write the sample-level fields below across the corresponding events in SCE colData. Existing columns require explicit overwrite confirmation.")}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="gl-btn-primary"
+            disabled={hostWriteBusy || columns.length === 0}
+            onClick={onWriteSampleMetadataToHost}
+          >
+            {hostWriteBusy ? t("Writing…") : t("Write sample metadata to SCE")}
+          </button>
+        </div>
+      )}
       <EditableMetaTable
         title={t("Sample metadata")}
         rowHeader={t("Sample")}

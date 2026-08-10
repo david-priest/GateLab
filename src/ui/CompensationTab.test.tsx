@@ -7,6 +7,7 @@ import type { Sha256Digest } from "../engine/compensationProfile";
 import type { CompensationApplyProgress } from "../engine/compensationManager";
 import type { CompensationProfileRecord } from "../engine/compensationProfileRecord";
 import type { FcsFile } from "../engine/fcs";
+import type { GateLabHostCompensationMatrixDescriptor } from "../host/datasetContract";
 import { Sample, type CompensatedLayerInput } from "../engine/sample";
 import type { PersistedCompensatedLayerBinding } from "../engine/workspaceCompensation";
 import type { PreviewSolvedResponse } from "../workers/compensationProtocol";
@@ -14,6 +15,7 @@ import {
   CompensationTab,
   type CompensationApplyUiStatus,
   type CompensationCandidatePreviewSolver,
+  type ExistingHostCompensatedAssay,
   type CompensationReviewPopulation,
   type CompensationSweepSolver,
 } from "./CompensationTab";
@@ -203,8 +205,15 @@ function renderTab(
   sample: Sample,
   options: Readonly<{
     compensationOn?: boolean;
+    hostedCompensationMatrix?: GateLabHostCompensationMatrixDescriptor | null;
     onApplyProfile?: (
       profile: CompensationProfileRecord,
+      onProgress?: (progress: CompensationApplyProgress) => void,
+    ) => Promise<void>;
+    existingHostAssays?: readonly ExistingHostCompensatedAssay[];
+    onAdoptExistingAssay?: (
+      profile: CompensationProfileRecord,
+      assay: ExistingHostCompensatedAssay,
       onProgress?: (progress: CompensationApplyProgress) => void,
     ) => Promise<void>;
     onCancelApply?: () => void;
@@ -237,7 +246,10 @@ function renderTab(
         key={stateKey}
         sample={sample}
         compensationOn={options.compensationOn ?? false}
+        hostedCompensationMatrix={options.hostedCompensationMatrix}
         onApplyProfile={options.onApplyProfile}
+        existingHostAssays={options.existingHostAssays}
+        onAdoptExistingAssay={options.onAdoptExistingAssay}
         onCancelApply={options.onCancelApply}
         hasExistingGates={options.hasExistingGates}
         applyStatus={options.applyStatus}
@@ -507,6 +519,42 @@ describe("CompensationTab common path", () => {
       keyword: "$SPILLOVER",
     });
     expect(host.textContent).toContain("exact embedded matrix is retained as the baseline");
+  });
+
+  it("labels an SCE-hosted Flow matrix truthfully while preserving its exact baseline", async () => {
+    stubDeterministicCrypto();
+    const sample = flowSample({ coefficient: 0.07125 });
+    const applied = vi.fn(async (_profile: CompensationProfileRecord) => undefined);
+    renderTab(sample, {
+      stateKey: "workspace-a:hosted-flow-enable",
+      hostedCompensationMatrix: {
+        kind: "flow-spillover",
+        name: "metadata(sce)$spillover_matrix",
+        sourceChannels: ["FL1-A", "FL2-A"],
+        receiverChannels: ["FL1-A", "FL2-A"],
+        matrix: [[1, 0.07125], [0.02, 1]],
+      },
+      onApplyProfile: applied,
+    });
+
+    expect(host.textContent).toContain("SCE spillover matrix");
+    expect(host.textContent).not.toContain("Embedded FCS matrix");
+    const enable = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Enable matrix editing")!;
+    await act(async () => {
+      enable.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const profile = applied.mock.calls[0][0];
+    expect(profile.origin).toMatchObject({
+      type: "uploaded",
+      fileName: "metadata(sce)$spillover_matrix",
+    });
+    expect(profile.provenance?.sourceDescription)
+      .toBe("Flow spillover matrix from metadata(sce)$spillover_matrix");
+    expect(profile.scientific.matrix.matrix).toEqual([[1, 0.07125], [0.02, 1]]);
+    expect(host.textContent).toContain("exact hosted matrix is retained as the baseline");
   });
 
   it("edits flow coefficients from the matrix or Global inspector with the same live Original/Candidate preview", async () => {
@@ -954,6 +1002,56 @@ describe("CompensationTab CyTOF import path", () => {
     expect(host.textContent).toContain("Exact matches2");
     expect(host.querySelectorAll<HTMLInputElement>('.gl-comp-channel-grid input:checked')).toHaveLength(2);
     expect(host.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("adopts a selected existing SCE assay without presenting it as Apply", async () => {
+    stubDeterministicCrypto();
+    const adopted = vi.fn(async (
+      _profile: CompensationProfileRecord,
+      _assay: ExistingHostCompensatedAssay,
+      _onProgress?: (progress: CompensationApplyProgress) => void,
+    ) => undefined);
+    renderTab(cytofSample(), {
+      stateKey: "workspace-a:cytof-adopt",
+      existingHostAssays: [{
+        id: "counts_comp",
+        label: "Compensated counts",
+        revision: 3,
+      }],
+      onAdoptExistingAssay: adopted,
+      applyTargetCount: 2,
+      applyTargetEventCount: 6,
+    });
+    await chooseMatrix();
+
+    expect(host.textContent).toContain("Use an existing SCE assay");
+    expect(host.textContent).toContain(
+      "GateLabR will not recompute or overwrite the selected assay.",
+    );
+    const button = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((candidate) =>
+        candidate.textContent === "Use existing assay — no recomputation"
+      )!;
+    expect(button.disabled).toBe(true);
+    const confirmation = host.querySelector<HTMLInputElement>(
+      ".gl-comp-adopt-confirm input",
+    )!;
+    act(() => confirmation.click());
+    expect(button.disabled).toBe(false);
+
+    await act(async () => {
+      button.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(adopted).toHaveBeenCalledTimes(1);
+    expect(adopted.mock.calls[0][1]).toEqual({
+      id: "counts_comp",
+      label: "Compensated counts",
+      revision: 3,
+    });
+    expect(adopted.mock.calls[0][0].scientific.kind)
+      .toBe("cytof-spillover");
+    expect(host.textContent).toContain("No assay values were recomputed.");
   });
 
   it("shows the checked-file Apply scope and blocks an empty selection", async () => {
@@ -1407,6 +1505,47 @@ describe("CompensationTab CyTOF import path", () => {
     expect(host.textContent).toContain("Retained 1 flagged pair for post-correction review");
     expect(host.querySelector<HTMLInputElement>(".gl-comp-followup-toggle input")?.checked).toBe(true);
     expect(attention.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("opens an SCE-hosted rectangular CyTOF matrix without requiring another upload", async () => {
+    stubDeterministicCrypto();
+    const applied = vi.fn(async (_profile: CompensationProfileRecord) => undefined);
+    const hostedCompensationMatrix: GateLabHostCompensationMatrixDescriptor = {
+      kind: "cytof-spillover",
+      name: "metadata(sce)$spillover_matrix",
+      sourceChannels: ["In113Di"],
+      receiverChannels: ["In113Di", "Y89Di"],
+      matrix: [[1, 0.025]],
+    };
+    renderTab(cytofSample(), {
+      stateKey: "workspace-a:hosted-cytof",
+      hostedCompensationMatrix,
+      onApplyProfile: applied,
+    });
+
+    expect(host.textContent).toContain("metadata(sce)$spillover_matrix");
+    expect(host.textContent).toContain("1 sources × 2 receivers");
+    expect(host.textContent).not.toContain("Choose a CyTOF spillover matrix first");
+
+    const apply = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Apply NNLS compensation")!;
+    expect(apply.disabled).toBe(false);
+    await act(async () => {
+      apply.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(applied).toHaveBeenCalledTimes(1);
+    const profile = applied.mock.calls[0][0];
+    expect(profile.scientific.matrix.sourceChannels).toEqual(["In113Di"]);
+    expect(profile.scientific.matrix.receiverChannels).toEqual(["In113Di", "Y89Di"]);
+    expect(profile.scientific.matrix.matrix).toEqual([[1, 0.025]]);
+    expect(profile.origin).toMatchObject({
+      type: "uploaded",
+      fileName: "metadata(sce)$spillover_matrix",
+    });
+    expect(profile.provenance?.sourceDescription)
+      .toBe("CyTOF spillover matrix from metadata(sce)$spillover_matrix");
   });
 });
 
