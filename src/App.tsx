@@ -13,6 +13,7 @@ import {
   isFlowJoWorkspace,
   listFlowJoWorkspaceSamples,
   flowJoWorkspaceToGatingML,
+  type FlowJoSampleSummary,
 } from "./engine/flowjoWorkspace";
 import { ChannelScales } from "./engine/channelScales";
 import { includePlotGatesInAxisRange } from "./engine/axisRange";
@@ -624,6 +625,10 @@ export default function App() {
   const [fcsMinimumEvents, setFcsMinimumEvents] = useState(0);
   const [fcsExportOpen, setFcsExportOpen] = useState(false);
   const [pendingGatingMlImport, setPendingGatingMlImport] = useState<PendingGatingMLImport | null>(null);
+  // A workspace whose sample could not be resolved unambiguously; the user picks one.
+  const [wspPicker, setWspPicker] = useState<
+    { text: string; samples: FlowJoSampleSummary[]; reason: string } | null
+  >(null);
   const [gatingMlExportOpen, setGatingMlExportOpen] = useState(false);
   const [contourThreshold, setContourThreshold] = useState(5); // outer contour % of peak
   const [instrumentMode, setInstrumentMode] = useState<"auto" | "flow" | "cytof">("auto"); // active sample's instrument override
@@ -1038,38 +1043,60 @@ export default function App() {
   async function prepareGatingImport(file: File) {
     if (!sample || !activeSampleId) return;
     try {
-      let text = await file.text();
-      let wspNote = "";
+      const text = await file.text();
 
       // A FlowJo workspace is rewritten into Gating-ML and then takes the ordinary path, so
       // channel resolution, validation, population building and merge/replace are unchanged.
       // FlowJo's own Gating-ML export omits gating:name, so importing a workspace is the only
       // way to get a NAMED hierarchy out of FlowJo without a separate recovery step.
-      if (isFlowJoWorkspace(text)) {
-        const samples = listFlowJoWorkspaceSamples(text);
-        const stem = (n: string) => n.replace(/\.fcs$/i, "").trim().toLowerCase();
-        const match = samples.find((s) => stem(s.name) === stem(fileName));
-        if (!match) {
-          const withGates = samples.filter((s) => s.gateCount > 0).map((s) => s.name);
-          throw new Error(
-            `This workspace has no sample matching the loaded file "${fileName}". ` +
-              `It contains: ${withGates.slice(0, 8).join(", ")}` +
-              `${withGates.length > 8 ? `, and ${withGates.length - 8} more` : ""}. ` +
-              `Load the matching FCS file first, or select it as the active file.`,
-          );
-        }
-        const converted = flowJoWorkspaceToGatingML(text, match.name);
-        text = converted.gatingMl;
-        wspNote =
-          ` from FlowJo workspace · ${match.name}` +
-          (converted.warnings.length ? ` · ${converted.warnings.length} skipped` : "");
-        if (converted.warnings.length) {
-          // Skipped gates are surfaced, never dropped quietly: a hierarchy that silently loses
-          // a branch looks like a successful import.
-          setError(converted.warnings.join("\n"));
-        }
+      if (!isFlowJoWorkspace(text)) {
+        await prepareGatingImportFromGatingML(text, "");
+        return;
       }
 
+      const samples = listFlowJoWorkspaceSamples(text);
+      const usable = samples.filter((s) => s.gateCount > 0);
+      if (!usable.length) throw new Error("This workspace contains no gates GateLab can read.");
+
+      const stem = (n: string) => n.replace(/\.fcs$/i, "").trim().toLowerCase();
+      const matches = usable.filter((s) => stem(s.name) === stem(fileName));
+
+      // Exactly one match keeps the ordinary flow a single click. Anything else is ambiguous
+      // and gets a picker rather than a guess: FlowJo allows the same file to be added twice,
+      // and quietly taking the first would import another sample's gates.
+      if (matches.length === 1) {
+        await importFlowJoSample(text, matches[0]);
+        return;
+      }
+      setWspPicker({
+        text,
+        samples: usable,
+        reason: matches.length > 1
+          ? `${matches.length} samples in this workspace are named "${matches[0].name}". Choose which one to import.`
+          : `No sample in this workspace matches the loaded file "${fileName}". Choose which sample's gates to import.`,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function importFlowJoSample(text: string, choice: FlowJoSampleSummary) {
+    const converted = flowJoWorkspaceToGatingML(text, choice.index);
+    if (converted.warnings.length) {
+      // Skipped gates are surfaced, never dropped quietly: a hierarchy that silently loses a
+      // branch looks like a successful import.
+      setError(converted.warnings.join("\n"));
+    }
+    await prepareGatingImportFromGatingML(
+      converted.gatingMl,
+      ` from FlowJo workspace · ${converted.sampleName}` +
+        (converted.warnings.length ? ` · ${converted.warnings.length} skipped` : ""),
+    );
+  }
+
+  async function prepareGatingImportFromGatingML(text: string, wspNote: string) {
+    if (!sample || !activeSampleId) return;
+    try {
       const pnnMap: Record<string, string> = {};
       for (const c of sample.channels) pnnMap[c.pnn] = c.key;
       const res = importGatingML(text, sample.channels.map((c) => c.key), pnnMap);
@@ -5921,6 +5948,53 @@ export default function App() {
             setCrud(null);
           }}
         />
+      )}
+      {wspPicker && (
+        <div className="gl-modal-backdrop" onClick={() => setWspPicker(null)}>
+          <div
+            className="gl-modal gl-wsp-picker"
+            role="dialog"
+            aria-label="Choose a FlowJo sample"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="gl-modal-title">{t("Choose a sample from the workspace")}</div>
+            <div className="gl-modal-note">{wspPicker.reason}</div>
+            <div className="gl-wsp-list">
+              {wspPicker.samples.map((s) => (
+                <button
+                  key={s.index}
+                  className="gl-wsp-row"
+                  onClick={() => {
+                    const chosen = s;
+                    setWspPicker(null);
+                    void importFlowJoSample(wspPicker.text, chosen);
+                  }}
+                >
+                  <span className="gl-wsp-name">
+                    {s.name || `(unnamed sample ${s.index + 1})`}
+                    {/* Position disambiguates two entries that share a name — the case that
+                        previously resolved to whichever came first. */}
+                    {s.duplicateName && (
+                      <span className="gl-wsp-dupe">{t("position")} {s.index + 1}</span>
+                    )}
+                  </span>
+                  <span className="gl-wsp-meta">
+                    {s.gateCount} {t("gates")}
+                    {s.eventCount !== null ? ` · ${s.eventCount.toLocaleString()} ${t("events")}` : ""}
+                    {s.owningGroup ? ` · ${s.owningGroup}` : ""}
+                    {s.rootCount > 1 ? ` · ${s.rootCount} ${t("trees")}` : ""}
+                    {s.unsupportedCount > 0
+                      ? ` · ${s.unsupportedCount} ${t("unreadable")}`
+                      : ""}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div className="gl-modal-actions">
+              <button className="gl-tool" onClick={() => setWspPicker(null)}>{t("Cancel")}</button>
+            </div>
+          </div>
+        </div>
       )}
       {pendingGatingMlImport && (
         <GatingMlImportModal

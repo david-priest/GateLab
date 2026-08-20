@@ -11,6 +11,8 @@ import { importGatingML } from "./gatingml";
 const WSP = "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/GateLab Paper/GateLab-2026-08-15-B flowjo-and-cytobank-concordance/data/flowjo-igcb-lp4/flowjo/17-Dec-2025 new.wsp";
 const has = existsSync(WSP);
 const wsp = () => readFileSync(WSP, "utf-8");
+const lp4Index = () =>
+  listFlowJoWorkspaceSamples(wsp()).find((s) => s.name === "LP4 rec.fcs")!.index;
 
 const G = "http://www.isac-net.org/std/Gating-ML/v2.0/gating";
 const D = "http://www.isac-net.org/std/Gating-ML/v2.0/datatypes";
@@ -43,7 +45,7 @@ describe("FlowJo workspace import", () => {
 
   it("carries names and nesting into the emitted Gating-ML", () => {
     const xml = synthetic(polygonPop("Parent", "g1", polygonPop("Child", "g2")));
-    const out = flowJoWorkspaceToGatingML(xml, "s.fcs");
+    const out = flowJoWorkspaceToGatingML(xml, 0);
     expect(out.gatingMl).toContain('gating:name="Parent"');
     expect(out.gatingMl).toContain('gating:name="Child"');
     expect(out.gatingMl).toContain('gating:parent_id="g1"');
@@ -59,16 +61,45 @@ describe("FlowJo workspace import", () => {
          <gating:EllipsoidGate xmlns:gating="${G}" gating:id="g1"/></Gate>
          <Subpopulations>${child}</Subpopulations></Population>` + polygonPop("Fine", "g3"),
     );
-    const out = flowJoWorkspaceToGatingML(xml, "s.fcs");
+    const out = flowJoWorkspaceToGatingML(xml, 0);
     expect(out.gatingMl).toContain('gating:name="Fine"');
     expect(out.gatingMl).not.toContain("UnderEllipse");
     expect(out.warnings.join(" ")).toMatch(/EllipsoidGate/);
     expect(out.warnings.join(" ")).toMatch(/skipped/);
   });
 
-  it("names the available samples when asked for one that is not there", () => {
-    expect(() => flowJoWorkspaceToGatingML(synthetic(polygonPop("A", "g1")), "other.fcs"))
-      .toThrow(/s\.fcs/);
+  it("reports how many samples there are when the index is out of range", () => {
+    expect(() => flowJoWorkspaceToGatingML(synthetic(polygonPop("A", "g1")), 3))
+      .toThrow(/holds 1/);
+  });
+
+  // FlowJo allows the same file to be added twice. Selecting by name would resolve to
+  // whichever came first and import the wrong sample's gates without saying anything.
+  it("distinguishes samples that share a name, and selects by position", () => {
+    const two = `<Workspace><SampleList>
+      <SampleNode name="dup.fcs" count="100"><Subpopulations>${polygonPop("First", "g1")}</Subpopulations></SampleNode>
+      <SampleNode name="dup.fcs" count="200"><Subpopulations>${polygonPop("Second", "g2")}</Subpopulations></SampleNode>
+    </SampleList></Workspace>`;
+    const listed = listFlowJoWorkspaceSamples(two);
+    expect(listed.map((s) => s.index)).toEqual([0, 1]);
+    expect(listed.every((s) => s.duplicateName)).toBe(true);
+    expect(flowJoWorkspaceToGatingML(two, 0).gatingMl).toContain('gating:name="First"');
+    expect(flowJoWorkspaceToGatingML(two, 1).gatingMl).toContain('gating:name="Second"');
+  });
+
+  // Two independent top-level trees mean the sample was gated under more than one strategy;
+  // importing them together is a merge the user did not ask for, so it must be stated.
+  it("reports parallel gating trees rather than merging them silently", () => {
+    const xml = synthetic(polygonPop("TreeA", "g1") + polygonPop("TreeB", "g2"));
+    expect(listFlowJoWorkspaceSamples(xml)[0].rootCount).toBe(2);
+    expect(flowJoWorkspaceToGatingML(xml, 0).warnings.join(" "))
+      .toMatch(/2 independent gating trees/);
+  });
+
+  it("carries the owning group through for telling similar names apart", () => {
+    const xml = `<Workspace><SampleList><SampleNode name="a.fcs" count="1" owningGroup="Panel A">
+      <Subpopulations>${polygonPop("P", "g1")}</Subpopulations></SampleNode></SampleList></Workspace>`;
+    expect(listFlowJoWorkspaceSamples(xml)[0].owningGroup).toBe("Panel A");
   });
 
   it.runIf(has)("lists the real workspace's samples", () => {
@@ -81,7 +112,7 @@ describe("FlowJo workspace import", () => {
   });
 
   it.runIf(has)("rebuilds the LP4 hierarchy end to end, through importGatingML", () => {
-    const out = flowJoWorkspaceToGatingML(wsp(), "LP4 rec.fcs");
+    const out = flowJoWorkspaceToGatingML(wsp(), lp4Index());
     expect(out.warnings).toEqual([]);
     // FlowJo's own counts come across for a concordance readout.
     expect(out.flowJoCounts["Scatter"]).toBe(35712);
@@ -107,7 +138,7 @@ describe("FlowJo workspace import", () => {
 
   // The geometry is what makes the Gating-ML export redundant: the workspace already holds it.
   it.runIf(has)("preserves the vertices exactly", () => {
-    const out = flowJoWorkspaceToGatingML(wsp(), "LP4 rec.fcs");
+    const out = flowJoWorkspaceToGatingML(wsp(), lp4Index());
     expect(out.gatingMl).toContain("30887444.5705699");
     expect(out.gatingMl).toContain("759668.2975150499");
   });
