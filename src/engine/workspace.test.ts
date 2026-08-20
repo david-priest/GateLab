@@ -298,3 +298,43 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     expect(() => readWorkspaceBytes(incomplete)).toThrow(/missing.*run2\.fcs/i);
   });
 });
+
+describe("excluded (NOT) gate references", () => {
+  it("survive a save/reload round trip and stay valid", () => {
+    const ws = makeWs();
+    ws.gating.populations.p1.gate_refs = [{ gate_id: "g1", include: false }];
+    expect(validateWorkspace(ws)).toBe(true);
+
+    const { ws: back } = readWorkspaceBytes(packWorkspaceReference(ws));
+    expect(back.gating.populations.p1.gate_refs).toEqual([{ gate_id: "g1", include: false }]);
+  });
+
+  it("are rejected when include is not a boolean", () => {
+    const ws = makeWs();
+    // A missing include would otherwise be read as "excluded" and silently invert a
+    // population, so it must fail loudly rather than default.
+    (ws.gating.populations.p1.gate_refs[0] as { include?: boolean }).include = undefined;
+    expect(() => validateWorkspace(ws)).toThrow(/boolean include/);
+  });
+});
+
+describe("point-mark display settings", () => {
+  it("round-trip through the workspace", () => {
+    const ws = makeWs();
+    ws.display.pointAlpha = 0.65;
+    ws.display.pointSize = 2.4;
+    expect(validateWorkspace(ws)).toBe(true);
+    const { ws: back } = readWorkspaceBytes(packWorkspaceReference(ws));
+    expect(back.display.pointAlpha).toBe(0.65);
+    expect(back.display.pointSize).toBe(2.4);
+  });
+
+  it("are optional, so a workspace saved before the controls existed still opens", () => {
+    const ws = makeWs();
+    delete ws.display.pointAlpha;
+    delete ws.display.pointSize;
+    expect(validateWorkspace(ws)).toBe(true);
+    const { ws: back } = readWorkspaceBytes(packWorkspaceReference(ws));
+    expect(back.display.pointSize).toBeUndefined();
+  });
+});

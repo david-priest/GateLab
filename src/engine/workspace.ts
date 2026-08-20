@@ -40,6 +40,8 @@ export interface WorkspaceSample {
   dataPath: string; // unique in-zip path (e.g. "data/0_run.fcs"); also the bundle lookup key
   logicleW: Record<string, number>; // per-sample user W overrides
   scatterCofactor?: Record<string, number>; // per-sample flow-scatter arcsinh cofactors
+  /** Flow-scatter channel keys shown on a linear axis instead of arcsinh. */
+  scatterLinear?: string[];
   cytofCofactor?: number; // per-sample global CyTOF arcsinh cofactor
   compensationOn: boolean; // per-sample
   instrumentMode?: "auto" | "flow" | "cytof"; // per-sample instrument override ('auto' = detected)
@@ -74,6 +76,10 @@ export interface WorkspaceFile {
     contourThreshold: number;
     /** Shared pseudocolour transfer exponent. Higher values reserve warm colours for denser cores. */
     densityColorPower?: number;
+    /** Main-plot mark opacity. Optional: workspaces saved before the control existed have none. */
+    pointAlpha?: number;
+    /** Main-plot mark radius in px. Display only — density colouring is computed on a fixed grid. */
+    pointSize?: number;
     /** Main Gating plot typography. Optional for workspaces saved before these controls existed. */
     fontSizes?: GatingFontSizes;
   };
@@ -253,6 +259,13 @@ export function validateWorkspace(ws: WorkspaceFile): true {
     }
     if (sample.scatterCofactor !== undefined && !positiveNumericRecord(sample.scatterCofactor)) {
       invalidWorkspace(`sample ${i + 1} has invalid scatter cofactors.`);
+    }
+    if (
+      sample.scatterLinear !== undefined &&
+      (!Array.isArray(sample.scatterLinear) ||
+        !sample.scatterLinear.every((key) => typeof key === "string"))
+    ) {
+      invalidWorkspace(`sample ${i + 1} has an invalid linear-scatter channel list.`);
     }
     if (sample.cytofCofactor !== undefined &&
         (typeof sample.cytofCofactor !== "number" || !Number.isFinite(sample.cytofCofactor) || sample.cytofCofactor <= 0)) {

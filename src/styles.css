@@ -1565,10 +1565,16 @@ input[type="number"]::-webkit-outer-spin-button {
   overflow: auto;
 }
 
+/* The gating control strip wraps onto a second row rather than crushing its
+   children on a narrow screen (a 13" laptop runs out of width here). The order of
+   who gives up space is deliberate: the axis pickers shrink first, down to a
+   readable floor, because a truncated channel name is still legible; buttons,
+   chips and icons never shrink, because a squashed icon is unusable. */
 .gl-controls {
   display: flex;
   align-items: center;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 8px 16px; /* row-gap column-gap — tighter between wrapped rows */
   padding: 6px 12px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
@@ -1589,19 +1595,47 @@ input[type="number"]::-webkit-outer-spin-button {
   font-size: 12px;
   max-width: 220px;
 }
-.gl-draw-tools { display: flex; gap: 4px; margin-left: 8px; padding-left: 8px; border-left: 1px solid var(--line); }
-.gl-modes { display: flex; gap: 4px; margin-left: auto; align-items: center; }
+/* The X/Y pair is the one group allowed to absorb the squeeze. min-width: 0 is
+   required for a flex child to shrink below its intrinsic content width at all. */
+.gl-axis-pickers {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+/* Shrink, never grow: `1 1 auto` here stretches the pair across a wide screen and
+   strands X and Y at opposite ends of the strip. */
+.gl-axis-pickers label { flex: 0 1 auto; min-width: 0; }
+.gl-axis-pickers select { flex: 0 1 auto; min-width: 7.5rem; }
+/* Everything else holds its natural width and wraps instead. */
+.gl-controls > label { flex: 0 0 auto; }
+.gl-draw-tools {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+  margin-left: 8px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+}
+.gl-modes {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  align-items: center;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
 .gl-sample-scope-badge,
 .gl-workspace-scale-badge {
+  /* A statement of fact about how ranges behave, not a control and not a state to act on.
+     A pill reads as either, so this is plain muted text alongside the range fields. */
   display: inline-flex;
   align-items: center;
-  min-height: 20px;
-  padding: 1px 7px;
-  border: 1px solid #b9d4fb;
-  border-radius: 999px;
-  background: #eef6ff;
-  color: #315b8d;
+  color: var(--muted);
   font-size: 10px;
+  font-style: italic;
   white-space: nowrap;
 }
 .gl-sample-scope-badge.is-pending {
@@ -1610,19 +1644,15 @@ input[type="number"]::-webkit-outer-spin-button {
   color: #8a5b08;
 }
 .gl-active-sample-key {
-  max-width: 220px;
+  /* Shrink only when the strip is actually short of room, and grow back when it is not.
+     A fixed max-width truncated even on a wide window and could never un-truncate. */
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   color: var(--muted);
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.gl-workspace-scale-badge {
-  min-height: 18px;
-  padding-block: 0;
-  border-color: var(--line);
-  background: var(--panel);
-  color: var(--muted);
 }
 .gl-contour-outer { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; margin-right: 4px; }
 .gl-contour-outer select {
@@ -1661,17 +1691,30 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-scales {
   display: flex;
   align-items: center;
-  gap: 18px;
+  /* Wraps for the same reason the gating control strip does: with an X and a Y row this
+     strip outgrows a 13" laptop, and a non-wrapping flex row crushes its children. */
+  flex-wrap: wrap;
+  gap: 6px 18px;
   padding: 5px 12px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   font-size: 11px;
 }
-.gl-scales-label { color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px; }
-.gl-scale-row { display: flex; align-items: center; gap: 6px; }
+.gl-scales-label {
+  color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em;
+  font-size: 10px; white-space: nowrap; flex: 0 0 auto;
+}
+.gl-scale-row { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 .gl-scale-axis { color: var(--muted); min-width: 90px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gl-scale-row input[type="range"] { width: 120px; accent-color: var(--accent); }
 .gl-scale-val { color: var(--text); font-variant-numeric: tabular-nums; min-width: 30px; }
+/* Linear toggle sits before the cofactor slider it disables, so the cause is left of
+   the effect. Matches the muted weight of the other scale-row labels. */
+.gl-scatter-linear {
+  display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;
+  color: var(--muted); font-size: 12px; cursor: pointer;
+}
+.gl-scale-row input[type="range"]:disabled { opacity: 0.35; cursor: not-allowed; }
 
 .gl-ranges { gap: 12px; flex-wrap: wrap; }
 .gl-range-row { display: flex; align-items: center; gap: 5px; }
@@ -1897,6 +1940,37 @@ input[type="number"]::-webkit-outer-spin-button {
   border: 1px solid var(--line); border-radius: 4px; padding: 6px;
 }
 .gl-gateref-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); }
+.gl-gateref-pick { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; }
+/* NOT only means anything for a gate this population actually uses, so it is
+   disabled until the gate is ticked rather than hidden — a control that appears
+   and disappears is harder to find than one that is visibly unavailable. */
+.gl-gateref-not {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.gl-gateref-not.is-disabled { opacity: 0.4; }
+/* Names both options rather than offering a lone "Linear" tick, which left the
+   alternative unstated and read as an on/off rather than a choice of scale. */
+/* Rides along on the Fonts strip rather than claiming a row of its own: two dropdowns
+   did not earn a whole strip, and margin-left:auto keeps them off the font steppers. */
+.gl-scatter-inline {
+  display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
+  margin-left: auto; padding-left: 12px; border-left: 1px solid var(--line);
+}
+.gl-scatter-inline .gl-scale-row { gap: 4px; }
+.gl-scatter-scale {
+  background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 2px 4px; font-size: 11px; flex: 0 0 auto;
+}
+.gl-gateref-not:not(.is-disabled):hover { background: var(--hover); color: var(--text); }
 .gl-inherited { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 0; }
 
 /* Focusable container for arrow-key navigation (matches GateLabR). */
@@ -1991,7 +2065,14 @@ input[type="number"]::-webkit-outer-spin-button {
   display: inline-block; padding: 0 5px; border-radius: 3px;
   font-size: 10px; color: white; line-height: 16px; white-space: nowrap;
 }
-.gate-ref-badge.exclude { text-decoration: line-through; opacity: 0.7; }
+/* An excluded (NOT) reference is ACTIVE, not disabled, so it keeps full opacity —
+   the old 0.7 dimming read as "switched off". The explicit "NOT " prefix from
+   gateRefLabel() carries the meaning; the dashed inner edge marks it at a glance
+   without changing the pill's size or the row's wrapping. */
+.gate-ref-badge.exclude {
+  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.9);
+  font-style: italic;
+}
 /* Selection ring is inset so it does not change pill dimensions or row wrapping.
    A white inner edge separates the ring from the pill colour; the blue reads as selected. */
 .gate-ref-badge.selected-gate {
@@ -2034,6 +2115,14 @@ input[type="number"]::-webkit-outer-spin-button {
   border: 1px solid #9dc1f5; border-radius: 4px;
   background: #eaf3ff; color: #294c78; font-size: 11px;
 }
+/* Sits directly under the current gate so it reads as a property of THIS reference,
+   not of the population. Toggling it on an existing reference applies immediately. */
+.pop-gate-picker-not {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; padding: 5px 7px; border: 1px solid #c8d1dc; border-radius: 4px;
+  background: #fff; color: #333; font-size: 11px; cursor: pointer;
+}
+.pop-gate-picker-not:hover { background: var(--hover); }
 .pop-gate-picker-remove {
   width: 100%; padding: 5px 7px; border: 1px solid #e1b8b8; border-radius: 4px;
   background: #fff7f7; color: #9d2d2d; text-align: left; font-size: 11px; cursor: pointer;

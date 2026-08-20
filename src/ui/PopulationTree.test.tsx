@@ -340,3 +340,50 @@ describe("PopulationTree direct editing", () => {
     });
   });
 });
+
+describe("authoring a NOT gate reference", () => {
+  it("renders an excluded reference as NOT <gate>, not -<gate>", () => {
+    // "-CD4" is ambiguous in cytometry, where "CD4-" already means CD4-negative.
+    const { state, derived } = makeInteractionFixture();
+    state.populations["pop-b"].gate_refs = [{ gate_id: "g1", include: false }];
+    derived.populations = state.populations;
+    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} />));
+
+    const pill = host.querySelector<HTMLElement>('.pop-row[data-pop-id="pop-b"] .pop-tree-gate-badge')!;
+    expect(pill.textContent).toBe("NOT Gate one");
+    expect(pill.classList.contains("exclude")).toBe(true);
+    // Excluded is an active state, not a disabled one: it must not be dimmed.
+    expect(getComputedStyle(pill).opacity).toBe("1");
+  });
+
+  it("excludes a reference from the shift-click picker, applying immediately", () => {
+    const { state, derived } = makeInteractionFixture();
+    const dispatch = vi.fn();
+    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={dispatch} />));
+
+    const gatePill = host.querySelector<HTMLElement>('.pop-row[data-pop-id="pop-b"] .pop-tree-gate-badge')!;
+    act(() => gatePill.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
+
+    const notBox = host.querySelector<HTMLInputElement>(".pop-gate-picker-not input")!;
+    expect(notBox.checked).toBe(false); // the reference is currently included
+    act(() => notBox.click());
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "setPopulationGateRefs",
+      popId: "pop-b",
+      gateRefs: [{ gate_id: "g1", include: false }],
+    });
+  });
+
+  it("seeds the picker checkbox from the reference it was opened on", () => {
+    const { state, derived } = makeInteractionFixture();
+    state.populations["pop-b"].gate_refs = [{ gate_id: "g1", include: false }];
+    derived.populations = state.populations;
+    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} />));
+
+    const gatePill = host.querySelector<HTMLElement>('.pop-row[data-pop-id="pop-b"] .pop-tree-gate-badge')!;
+    act(() => gatePill.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
+
+    expect(host.querySelector<HTMLInputElement>(".pop-gate-picker-not input")!.checked).toBe(true);
+  });
+});

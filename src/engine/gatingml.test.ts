@@ -2,9 +2,34 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { importGatingML, normalizeChannel } from "./gatingml";
+import { applyGatingStrategy } from "./populations";
 
 const GATELABR = "vendor/GateLabR/Gates from GateLabR.xml";
 const CYTOBANK = "vendor/GateLabR/Gates from Cytobank.xml";
+
+/**
+ * Per-event membership of one imported population over single-channel X data.
+ * Import alone cannot show that NOT means what it should — only evaluating the
+ * imported strategy against events can, so the NOT tests assert on this.
+ */
+function membership(
+  res: ReturnType<typeof importGatingML>,
+  popId: string,
+  xs: number[],
+): number[] {
+  const data = { n: xs.length, column: (ch: string) => (ch === "X" ? xs : undefined) };
+  const { masks } = applyGatingStrategy(res.gates, res.populations, res.root_population_id, data);
+  return Array.from(masks[popId]);
+}
+
+/** The single non-root population of a minimal import fixture. */
+function onlyPopulation(res: ReturnType<typeof importGatingML>) {
+  const pops = Object.values(res.populations).filter(
+    (p) => p.population_id !== res.root_population_id,
+  );
+  expect(pops).toHaveLength(1);
+  return pops[0];
+}
 
 /** All fcs-dimension channel names referenced in a Gating-ML file. */
 function channelsIn(xml: string): string[] {
@@ -142,7 +167,7 @@ describe("strict import safety", () => {
     expect(() => importGatingML(xml, ["X", "Y"])).toThrow(/transformation linear-1/);
   });
 
-  it("rejects flat NOT logic and names the affected population", () => {
+  it("imports flat NOT logic as an excluded gate reference", () => {
     const xml = `<?xml version="1.0"?>
       <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
         xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
@@ -154,15 +179,71 @@ describe("strict import safety", () => {
         </gating:BooleanGate>
       </gating:Gating-ML>`;
 
-    expect(() => importGatingML(xml, ["X"])).toThrow(
-      /Population "Outside" uses NOT logic; GateLab currently imports positive AND populations only/,
-    );
-    expect(() => importGatingML(xml, ["X"])).toThrow(
-      /No gates or populations were imported; the current workspace was not changed/,
-    );
+    const res = importGatingML(xml, ["X"]);
+    expect(res.n_gates_imported).toBe(1);
+    const pop = onlyPopulation(res);
+    expect(pop.name).toBe("Outside");
+    expect(pop.gate_refs).toHaveLength(1);
+    expect(pop.gate_refs[0].include).toBe(false);
+    // range-1 is X in [0, 1], so only the first event is inside it.
+    expect(membership(res, pop.population_id, [0.5, 1.5, 2.5])).toEqual([0, 1, 1]);
   });
 
-  it("rejects complemented references inside an AND population", () => {
+  // FlowJo's Gating-ML 2.0 export carries no BooleanGate and no
+  // <GatingHierarchy>; ancestry lives only in gating:parent_id. Ignoring it
+  // parents every gate to root, so each population is measured against All
+  // Events and child counts exceed their parents' — the import looks like it
+  // worked while being wrong.
+  it("nests populations declared with gating:parent_id", () => {
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
+        <gating:RectangleGate gating:id="g-scatter" gating:name="Scatter">
+          <gating:dimension gating:min="0" gating:max="10"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+        </gating:RectangleGate>
+        <gating:RectangleGate gating:id="g-singlets" gating:parent_id="g-scatter" gating:name="Singlets">
+          <gating:dimension gating:min="0" gating:max="5"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+        </gating:RectangleGate>
+        <gating:RectangleGate gating:id="g-b" gating:parent_id="g-singlets" gating:name="B cells">
+          <gating:dimension gating:min="0" gating:max="2"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+        </gating:RectangleGate>
+      </gating:Gating-ML>`;
+
+    const res = importGatingML(xml, ["X"]);
+    expect(res.n_gates_imported).toBe(3);
+
+    const byName: Record<string, string> = {};
+    for (const pop of Object.values(res.populations)) byName[pop.name] = pop.population_id;
+
+    expect(res.populations[byName["Scatter"]].parent_id).toBe(res.root_population_id);
+    expect(res.populations[byName["Singlets"]].parent_id).toBe(byName["Scatter"]);
+    expect(res.populations[byName["B cells"]].parent_id).toBe(byName["Singlets"]);
+
+    // Each population carries only its own gate; ancestry supplies the rest.
+    expect(res.populations[byName["B cells"]].gate_refs).toHaveLength(1);
+
+    // The defect this pins is quantitative: event 7 is inside Scatter only,
+    // event 3 inside Scatter+Singlets, event 1 inside all three. Flat parenting
+    // would put 7 in Scatter and 3 in Singlets independently of their parents.
+    const xs = [1, 3, 7, 20];
+    expect(membership(res, byName["Scatter"], xs)).toEqual([1, 1, 1, 0]);
+    expect(membership(res, byName["Singlets"], xs)).toEqual([1, 1, 0, 0]);
+    expect(membership(res, byName["B cells"], xs)).toEqual([1, 0, 0, 0]);
+  });
+
+  it("rejects a gating:parent_id that names no gate in the file", () => {
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
+        <gating:RectangleGate gating:id="g-child" gating:parent_id="g-absent" gating:name="Orphan">
+          <gating:dimension gating:min="0" gating:max="1"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+        </gating:RectangleGate>
+      </gating:Gating-ML>`;
+
+    expect(() => importGatingML(xml, ["X"])).toThrow(/missing parent gate g-absent/);
+  });
+
+  it("imports a complemented reference inside an AND population", () => {
     const xml = `<?xml version="1.0"?>
       <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
         xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
@@ -176,10 +257,14 @@ describe("strict import safety", () => {
         </gating:BooleanGate>
       </gating:Gating-ML>`;
 
-    expect(() => importGatingML(xml, ["X"])).toThrow(/Population "Outside" uses NOT logic/);
+    const res = importGatingML(xml, ["X"]);
+    const pop = onlyPopulation(res);
+    expect(pop.gate_logic).toBe("and");
+    expect(pop.gate_refs[0].include).toBe(false);
+    expect(membership(res, pop.population_id, [0.5, 1.5, 2.5])).toEqual([0, 1, 1]);
   });
 
-  it("rejects a complemented hierarchy population before import", () => {
+  it("imports a complemented hierarchy population", () => {
     const xml = `<?xml version="1.0"?>
       <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
         xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
@@ -193,7 +278,11 @@ describe("strict import safety", () => {
         </gating:GatingHierarchy>
       </gating:Gating-ML>`;
 
-    expect(() => importGatingML(xml, ["X"])).toThrow(/Population "Outside" uses NOT logic/);
+    const res = importGatingML(xml, ["X"]);
+    const pop = onlyPopulation(res);
+    expect(pop.name).toBe("Outside");
+    expect(pop.gate_refs[0].include).toBe(false);
+    expect(membership(res, pop.population_id, [0.5, 1.5, 2.5])).toEqual([0, 1, 1]);
   });
 
   it("rejects OR logic and names the affected population", () => {
@@ -215,6 +304,39 @@ describe("strict import safety", () => {
       </gating:Gating-ML>`;
 
     expect(() => importGatingML(xml, ["X"])).toThrow(/Population "Low or high" uses OR logic/);
+  });
+
+  it("applies De Morgan to a complemented AND population rather than rejecting it", () => {
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
+        <gating:RectangleGate gating:id="range-1" gating:name="Low">
+          <gating:dimension gating:min="0" gating:max="2"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+        </gating:RectangleGate>
+        <gating:RectangleGate gating:id="range-2" gating:name="High">
+          <gating:dimension gating:min="1" gating:max="3"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+        </gating:RectangleGate>
+        <gating:BooleanGate gating:id="and-1" gating:name="Both">
+          <gating:and>
+            <gating:gateReference gating:ref="range-1"/>
+            <gating:gateReference gating:ref="range-2"/>
+          </gating:and>
+        </gating:BooleanGate>
+        <gating:GatingHierarchy>
+          <gating:PopulationGatePair gating:gate-ref="and-1" gating:complement="true">
+            <gating:name>Not both</gating:name>
+          </gating:PopulationGatePair>
+        </gating:GatingHierarchy>
+      </gating:Gating-ML>`;
+
+    // NOT (A AND B) is OR of the negated refs, which is a single-logic population
+    // and therefore representable, unlike a genuinely mixed expression.
+    const res = importGatingML(xml, ["X"]);
+    const pop = onlyPopulation(res);
+    expect(pop.gate_logic).toBe("or");
+    expect(pop.gate_refs.map((r) => r.include)).toEqual([false, false]);
+    // A is X in [0, 2], B is X in [1, 3], so A AND B is X in [1, 2].
+    expect(membership(res, pop.population_id, [0.5, 1.5, 2.5, 3.5])).toEqual([1, 0, 1, 1]);
   });
 
   it("rejects a missing gate channel instead of weakening an AND population", () => {

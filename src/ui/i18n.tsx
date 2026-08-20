@@ -319,6 +319,7 @@ const JA: Readonly<Record<string, string>> = {
   "Pooled counts: {count} FCS · selected display: {contributing} contribute": "集計値：FCS {count}件 · 選択表示：{contributing}件にイベントあり",
   "{contributing} of {checked} files contribute": "{checked}件中{contributing}件にイベントあり",
   "Selected display contributors: {files}": "選択表示にイベントがあるファイル：{files}",
+  "Blue: {name}": "青: {name}",
   "Blue: {name} · axes and gate editing": "青：{name} · 軸とゲート編集",
   "Clicking a row makes it active without changing which checked files are pooled.": "行をクリックすると操作対象になりますが、まとめて表示するチェック済みファイルは変わりません。",
   "Workspace scales": "ワークスペース共通スケール",

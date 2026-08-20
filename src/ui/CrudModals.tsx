@@ -18,6 +18,7 @@ import {
   type PopulationBulkEditUpdate,
 } from "../engine/populationTable";
 import { useI18n } from "./i18n";
+import { gateRefLabel, EXCLUDE_HINT } from "./gateRefLabel";
 
 function ModalShell({ title, children }: { title: string; children: React.ReactNode }) {
   const { t } = useI18n();
@@ -692,6 +693,11 @@ export function EditPopModal({
   const [checked, setChecked] = useState<Set<string>>(
     new Set((pop?.gate_refs ?? []).filter((r) => state.gates[r.gate_id]?.gate_type !== "quadrant").map((r) => r.gate_id)),
   );
+  // NOT is per gate reference, not per population: gate_logic is one value for the
+  // whole population, so a reference is either intersected or complemented.
+  const [excluded, setExcluded] = useState<Set<string>>(
+    new Set((pop?.gate_refs ?? []).filter((r) => !r.include).map((r) => r.gate_id)),
+  );
 
   // Valid parents: any population that isn't this one or a descendant of it.
   const parentChoices = useMemo(
@@ -721,7 +727,7 @@ export function EditPopModal({
   const commit = () => {
     const gateRefs: GateRef[] = [
       ...lockedQuadrantRefs.map((ref) => ({ ...ref })),
-      ...[...checked].map((gid) => ({ gate_id: gid, include: true })),
+      ...[...checked].map((gid) => ({ gate_id: gid, include: !excluded.has(gid) })),
     ];
     onConfirm({ type: "editPopulation", popId, name, parentId, gateRefs });
   };
@@ -756,7 +762,7 @@ export function EditPopModal({
                   className={"gate-ref-badge" + (ir.include ? "" : " exclude")}
                   style={{ background: g.color, opacity: 0.75 }}
                 >
-                  {(ir.include ? g.name : `-${g.name}`) + " ← " + ir.from}
+                  {gateRefLabel(g.name, ir.include) + " ← " + ir.from}
                 </span>
               );
             })}
@@ -784,20 +790,46 @@ export function EditPopModal({
             const g = state.gates[gid];
             if (!g) return null;
             return (
-              <label key={gid} className="gl-gateref-row">
-                <input
-                  type="checkbox"
-                  checked={checked.has(gid)}
-                  onChange={(e) => {
-                    const next = new Set(checked);
-                    if (e.target.checked) next.add(gid);
-                    else next.delete(gid);
-                    setChecked(next);
-                  }}
-                />
-                <span className="gate-color-swatch" style={{ background: g.color, width: 10, height: 10 }} />
-                <span>{g.name}</span>
-              </label>
+              <div key={gid} className="gl-gateref-row">
+                <label className="gl-gateref-pick">
+                  <input
+                    type="checkbox"
+                    checked={checked.has(gid)}
+                    onChange={(e) => {
+                      const next = new Set(checked);
+                      if (e.target.checked) next.add(gid);
+                      else next.delete(gid);
+                      setChecked(next);
+                      // Dropping a gate drops its exclusion too, so an unrelated
+                      // NOT cannot reappear if the gate is ticked again later.
+                      if (!e.target.checked && excluded.has(gid)) {
+                        const stillExcluded = new Set(excluded);
+                        stillExcluded.delete(gid);
+                        setExcluded(stillExcluded);
+                      }
+                    }}
+                  />
+                  <span className="gate-color-swatch" style={{ background: g.color, width: 10, height: 10 }} />
+                  <span>{g.name}</span>
+                </label>
+                <label
+                  className={"gl-gateref-not" + (checked.has(gid) ? "" : " is-disabled")}
+                  title={t(EXCLUDE_HINT)}
+                >
+                  <input
+                    type="checkbox"
+                    checked={excluded.has(gid)}
+                    disabled={!checked.has(gid)}
+                    onChange={(e) => {
+                      const next = new Set(excluded);
+                      if (e.target.checked) next.add(gid);
+                      else next.delete(gid);
+                      setExcluded(next);
+                    }}
+                  />
+                  {t("NOT")}
+                </label>
+              </div>
             );
           })}
         </div>
@@ -836,12 +868,13 @@ export function CreatePopModal({
       : state.root_population_id ?? "",
   );
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [excluded, setExcluded] = useState<Set<string>>(new Set());
   const ids = (state.gate_order.length ? state.gate_order : Object.keys(state.gates))
     .filter((gid) => state.gates[gid]?.gate_type !== "quadrant");
 
   const commit = () => {
     const popName = name.trim() || `Pop_${Object.keys(state.populations).length}`;
-    const gateRefs: GateRef[] = [...checked].map((gid) => ({ gate_id: gid, include: true }));
+    const gateRefs: GateRef[] = [...checked].map((gid) => ({ gate_id: gid, include: !excluded.has(gid) }));
     onConfirm({ type: "addPopulation", name: popName, parentId, gateRefs });
   };
 
@@ -862,27 +895,53 @@ export function CreatePopModal({
         </select>
       </label>
       <div className="gl-modal-field" style={{ gap: 6 }}>
-        {t("Gate references (AND logic):")}
+        {t("Gate references (AND logic; tick NOT to exclude):")}
         <div className="gl-gateref-list">
           {ids.length === 0 && <em style={{ color: "var(--muted)" }}>{t("No gates yet.")}</em>}
           {ids.map((gid) => {
             const g = state.gates[gid];
             if (!g) return null;
             return (
-              <label key={gid} className="gl-gateref-row">
-                <input
-                  type="checkbox"
-                  checked={checked.has(gid)}
-                  onChange={(e) => {
-                    const next = new Set(checked);
-                    if (e.target.checked) next.add(gid);
-                    else next.delete(gid);
-                    setChecked(next);
-                  }}
-                />
-                <span className="gate-color-swatch" style={{ background: g.color, width: 10, height: 10 }} />
-                <span>{g.name}</span>
-              </label>
+              <div key={gid} className="gl-gateref-row">
+                <label className="gl-gateref-pick">
+                  <input
+                    type="checkbox"
+                    checked={checked.has(gid)}
+                    onChange={(e) => {
+                      const next = new Set(checked);
+                      if (e.target.checked) next.add(gid);
+                      else next.delete(gid);
+                      setChecked(next);
+                      // Dropping a gate drops its exclusion too, so an unrelated
+                      // NOT cannot reappear if the gate is ticked again later.
+                      if (!e.target.checked && excluded.has(gid)) {
+                        const stillExcluded = new Set(excluded);
+                        stillExcluded.delete(gid);
+                        setExcluded(stillExcluded);
+                      }
+                    }}
+                  />
+                  <span className="gate-color-swatch" style={{ background: g.color, width: 10, height: 10 }} />
+                  <span>{g.name}</span>
+                </label>
+                <label
+                  className={"gl-gateref-not" + (checked.has(gid) ? "" : " is-disabled")}
+                  title={t(EXCLUDE_HINT)}
+                >
+                  <input
+                    type="checkbox"
+                    checked={excluded.has(gid)}
+                    disabled={!checked.has(gid)}
+                    onChange={(e) => {
+                      const next = new Set(excluded);
+                      if (e.target.checked) next.add(gid);
+                      else next.delete(gid);
+                      setExcluded(next);
+                    }}
+                  />
+                  {t("NOT")}
+                </label>
+              </div>
             );
           })}
         </div>

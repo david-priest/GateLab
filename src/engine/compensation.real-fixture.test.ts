@@ -7,10 +7,9 @@ import {
 } from "./flowCompensationEngine";
 import { parseFcs, type NumericColumn } from "./fcs";
 import { Sample } from "./sample";
+import { ARIA_III_DIR } from "../testFixtures";
 
-const FIXTURE_ROOT =
-  process.env.GATELAB_COMP_FIXTURES ??
-  "/Users/davidpriest/code/gatelabr-test-fcs/conventional_comp_AriaIII";
+const FIXTURE_ROOT = process.env.GATELAB_COMP_FIXTURES ?? ARIA_III_DIR;
 
 const PAIRS = [
   ["sample_Bcell_check.fcs", "sample_Bcell_check_COMPENSATED.fcs"],

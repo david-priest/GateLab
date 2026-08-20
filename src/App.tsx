@@ -8,6 +8,8 @@ import { clearPersistedTabState } from "./ui/tabState";
 import { historyShortcutAction } from "./ui/historyShortcuts";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type NewGate } from "./plots/GatingPlot";
 import { buildPlotGates, type PlotGate } from "./plots/gatePayload";
+import { branchScopedGateOrder } from "./engine/branchGates";
+import { ChannelScales } from "./engine/channelScales";
 import { includePlotGatesInAxisRange } from "./engine/axisRange";
 import { parseFcs } from "./engine/fcs";
 import { Sample, type DisplayMode, type OverlaySpec } from "./engine/sample";
@@ -390,6 +392,16 @@ function plotInteractionTokenFor(
   ]);
 }
 
+/** Point-mark settings restored from a workspace, clamped to the ranges the UI offers. */
+function restoredPointAlpha(value: unknown): number {
+  const v = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(v) ? Math.max(0.05, Math.min(1, v)) : 0.4;
+}
+function restoredPointSize(value: unknown): number {
+  const v = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(v) ? Math.max(0.5, Math.min(2, v)) : 1.5;
+}
+
 export default function App() {
   const providedHost = useOptionalGateLabHost();
   const fallbackBrowserHost = useMemo(() => createBrowserHost(), []);
@@ -556,6 +568,14 @@ export default function App() {
   const [pending, setPending] = useState<PendingNewGate | null>(null);
   const [drawMode, setDrawMode] = useState<DrawMode>("navigate");
   const [scalesVersion, setScalesVersion] = useState(0);
+  // Set when a workspace finishes loading; consumed once the sample, gates and automatic
+  // ranges exist, which is later than the load handler itself.
+  const pendingFitOnLoad = useRef(false);
+  // Which global scales GateLab fitted itself, and under which display transform. A range the
+  // user pinned in the Scales tab is absent here, which is what keeps it from being discarded.
+  const autoFittedScales = useRef(new Map<string, string>());
+  // Axis pairs already fitted, so a fit happens once per plot rather than on every click.
+  const fittedAxisPairs = useRef(new Set<string>());
   const [panelVersion, setPanelVersion] = useState(0); // bumps when a channel display label changes
   const [crud, setCrud] = useState<CrudModal | null>(null);
   const [importMsg, setImportMsg] = useState<string | null>(null);
@@ -579,6 +599,7 @@ export default function App() {
   const compensationTabMounted = activeTab === "compensation" ||
     mountedCompensationStateKey === compensationTabStateKey;
   const [pointAlpha, setPointAlpha] = useState(0.4); // main-plot point opacity (cytof point_alpha)
+  const [pointSize, setPointSize] = useState(1.5); // main-plot mark radius in px (cytof point_size)
   const [densityColorPower, setDensityColorPower] = useState(DEFAULT_DENSITY_COLOR_POWER);
   const changeDensityColorPower = useCallback((value: number) => {
     setDensityColorPower(normalizeDensityColorPower(value));
@@ -930,6 +951,9 @@ export default function App() {
     setInstrumentMode("auto");
     setScaleCacheEpoch((epoch) => epoch + 1);
     setGlobalScales({});
+    channelScales.clear();
+    autoFittedScales.current.clear();
+    fittedAxisPairs.current.clear();
     setScalesVersion((version) => version + 1);
     setPanelVersion((version) => version + 1);
     setOverlayBy("none");
@@ -1814,6 +1838,72 @@ export default function App() {
     setIllustrationPresets((prev) => prev.filter((p) => p.name !== name));
     markWorkspaceDirty();
   };
+  // Display scales are owned by the workspace, never by one file. Sample reads its logicle W
+  // and scatter scale from here, so every file drawn together shares one transform per channel
+  // -- including files loaded after the setting was made, which no fan-out over the existing
+  // samples could reach. It also unifies the AUTO estimate: each file estimates W from its own
+  // data (0.500 vs 1.143 on one real channel), so a pooled workspace used to open already split
+  // before the user touched a control.
+  const channelScales = useRef(new ChannelScales()).current;
+  const attachedScales = useRef(new Map<Sample, () => void>());
+
+  useEffect(() => channelScales.onChange(() => setScalesVersion((version) => version + 1)),
+    [channelScales]);
+
+  // Attach only what is new and detach only what is gone: registering churns the roster
+  // generation, which every sample folds into its display-transform identity.
+  useEffect(() => {
+    const live = new Set(samples.map((entry) => entry.sample));
+    for (const [sample, detach] of attachedScales.current) {
+      if (!live.has(sample)) {
+        detach();
+        attachedScales.current.delete(sample);
+      }
+    }
+    for (const sample of live) {
+      if (!attachedScales.current.has(sample)) {
+        attachedScales.current.set(sample, sample.attachChannelScales(channelScales));
+      }
+    }
+  }, [samples, channelScales]);
+
+  // The W slider is continuous, and one commit re-transforms every event of every file drawn.
+  // Measured on a real four-file workspace (104,515 events) that costs ~14ms, inside a 60fps
+  // frame, so the drag can follow the pointer -- a fixed debounce made it lurch for no reason.
+  //
+  // Commits coalesce onto an animation frame, which self-throttles: the browser will not
+  // schedule the next frame until this one's work is done, so a workspace large enough to
+  // exceed the budget simply commits less often instead of queueing up behind the pointer.
+  // Only the latest value matters, so intermediate ticks are dropped rather than replayed.
+  const [pendingLogicleW, setPendingLogicleW] = useState<Record<string, number>>({});
+  const logicleWJob = useRef<{ idx: number; w: number; key: string } | null>(null);
+  const logicleWFrame = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (logicleWFrame.current !== null) cancelAnimationFrame(logicleWFrame.current);
+  }, []);
+
+  const commitLogicleW = (idx: number, w: number) => {
+    const key = sample?.channels[idx]?.key;
+    if (!key) return;
+    logicleWJob.current = { idx, w, key };
+    setPendingLogicleW((prev) => ({ ...prev, [key]: w })); // echo the drag immediately
+    if (logicleWFrame.current !== null) return;
+    logicleWFrame.current = requestAnimationFrame(() => {
+      logicleWFrame.current = null;
+      const job = logicleWJob.current;
+      logicleWJob.current = null;
+      if (!job || !sample) return;
+      sample.setLogicleW(job.idx, job.w);
+      bumpScales();
+      setPendingLogicleW((prev) => {
+        const next = { ...prev };
+        delete next[job.key];
+        return next;
+      });
+    });
+  };
+
   const setGlobalScale = (key: string, range: [number, number] | null) => {
     setGlobalScales((prev) => {
       const next = { ...prev };
@@ -2217,6 +2307,9 @@ export default function App() {
       setWorkspaceId(makeWorkspaceId());
       setScaleCacheEpoch((epoch) => epoch + 1);
       setGlobalScales({});
+      channelScales.clear();
+      autoFittedScales.current.clear();
+      fittedAxisPairs.current.clear();
       setWsHandle(null);
       setWsName("");
       setWsStorage("reference");
@@ -2375,11 +2468,14 @@ export default function App() {
             setDensityColorPower(
               normalizeDensityColorPower(workspace.display.densityColorPower),
             );
+            setPointAlpha(restoredPointAlpha(workspace.display.pointAlpha));
+            setPointSize(restoredPointSize(workspace.display.pointSize));
             setGatingFontSizes({
               ...DEFAULT_GATING_FONT_SIZES,
               ...workspace.display.fontSizes,
             });
             const [defaultX, defaultY] = active.defaultChannelIndices();
+            pendingFitOnLoad.current = true;
             setXIdx(active.index(workspace.display.xChannel) ?? defaultX);
             setYIdx(active.index(workspace.display.yChannel) ?? defaultY);
             setXRange(null);
@@ -2604,6 +2700,7 @@ export default function App() {
         dataPath: sampleDataPath(e.name, i),
         logicleW: e.sample.logicleWOverrides(),
         scatterCofactor: e.sample.scatterCofactorOverrides(),
+        scatterLinear: e.sample.scatterLinearKeys(),
         cytofCofactor: e.sample.arcsinhCofactor,
         compensationOn: e.sample.compensationEnabled,
         instrumentMode: e.sample.instrumentMode,
@@ -2622,6 +2719,8 @@ export default function App() {
       },
       scales: { globalScales },
       display: {
+        pointAlpha,
+        pointSize,
         xChannel: sample.channels[xIdx].key,
         yChannel: sample.channels[yIdx].key,
         mode,
@@ -3520,6 +3619,7 @@ export default function App() {
             entry.sample.setScatterCofactor(idx, cofactor);
           }
         }
+        entry.sample.applyScatterLinearKeys(wss.scatterLinear ?? []);
         entry.sample.applyLabelOverrides(wss.labels ?? {});
         if (wss.metadata && Object.keys(wss.metadata).length) nextMetadata[entry.id] = wss.metadata;
         if (wss.division) {
@@ -3633,8 +3733,11 @@ export default function App() {
       setMaxEvents(ws.display?.maxEvents ?? 50000);
       setContourThreshold(ws.display?.contourThreshold ?? 5);
       setDensityColorPower(normalizeDensityColorPower(ws.display?.densityColorPower));
+      setPointAlpha(restoredPointAlpha(ws.display?.pointAlpha));
+      setPointSize(restoredPointSize(ws.display?.pointSize));
       setGatingFontSizes({ ...DEFAULT_GATING_FONT_SIZES, ...ws.display?.fontSizes });
       const [dx, dy] = active.defaultChannelIndices();
+      pendingFitOnLoad.current = true;
       setXIdx(active.index(ws.display?.xChannel ?? "") ?? dx);
       setYIdx(active.index(ws.display?.yChannel ?? "") ?? dy);
       setXRange(null);
@@ -4122,17 +4225,39 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sample, activeDataRevision, overlayBy, overlayPalette, fileName, state.populations, state.root_population_id, state.gate_version, derived, activeSampleId, compatibleDivisionProfiles]);
 
+  // Hierarchy-scoped gate visibility; see branchScopedGateOrder for the rule.
+  const branchGateOrder = useMemo(
+    () => branchScopedGateOrder(
+      state.populations,
+      state.gates,
+      state.gate_order,
+      state.active_population_id,
+      state.root_population_id,
+      state.selected_gate_id,
+    ),
+    [
+      state.populations, state.gates, state.gate_order,
+      state.active_population_id, state.root_population_id, state.selected_gate_id,
+    ],
+  );
+
   const mainPlotGates = useMemo(() => {
     if (!sample) return [];
     return buildPlotGates(
       sample,
       state.gates,
-      state.gate_order,
+      branchGateOrder,
       derived.gateCounts,
       sample.channels[xIdx].key,
       sample.channels[yIdx].key,
     );
-  }, [sample, state.gates, state.gate_order, derived.gateCounts, xIdx, yIdx]);
+    // activeDisplayContextKey and scalesVersion are load-bearing: buildPlotGates converts
+    // each gate out of raw space with the CURRENT transform, so without them the gate keeps
+    // display coordinates computed under the previous scatter cofactor or scale while the
+    // event cloud and the axis both move to the new one. The gate then appears to slide off
+    // its own events even though membership, evaluated in raw space, never changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sample, state.gates, branchGateOrder, derived.gateCounts, xIdx, yIdx, activeDisplayContextKey, scalesVersion]);
 
   const workspaceAutomaticRanges = useMemo(() => {
     if (
@@ -4207,6 +4332,12 @@ export default function App() {
     const compatible = includedDisplaySelections.flatMap(({ entry, gating, selection }) => {
       const xIndex = entry.sample.index(xName);
       const yIndex = entry.sample.index(yName);
+      // Same scale context as the axis frame requires (see workspaceAutomaticRanges). A file on
+      // the other assay layer, or under a different instrument mode, has display coordinates
+      // that are not interchangeable with these -- pooling them draws one cloud from two
+      // coordinate spaces, and drew it inside a frame computed from only one of them. The
+      // contributor count in the header reports what this drops.
+      if (entry.sample.workspaceScaleContextKey !== activeWorkspaceScaleContextKey) return [];
       return xIndex === undefined || yIndex === undefined
         ? []
         : [{ entry, gating, selection, xIndex, yIndex }];
@@ -4351,12 +4482,82 @@ export default function App() {
   // Swap channel identity keys → Panel display labels for what cytof_plot.js SHOWS (axis labels,
   // the axis-label picker, and each gate's channel match). The store keeps identity keys; incoming
   // gate/axis events are translated back to keys (onNewGate / onAxisLabelClick).
+  // Fit data + gates the FIRST time each axis pair is shown. A gate drawn out near the edge
+  // otherwise lands outside the robust auto range and opens off-screen, and fitting only on
+  // workspace open left every later plot unfitted. Refitting on every visit would be worse
+  // than not fitting at all, so each pair is fitted once and then left alone.
+  //
+  // A range the user pinned in the Scales tab is never touched: only scales recorded in
+  // autoFittedScales are refitted or discarded. The Scales tab describes a pinned range as
+  // fixed whenever that channel is plotted, and that promise is kept.
+  //
+  // An auto-fit is also tied to the display transform it was computed under. Logicle W and the
+  // scatter cofactor change a channel's display coordinates, so a range fitted under the old
+  // transform no longer describes the data. Holding it would pin the axis to a stale frame
+  // while the events move underneath — which is exactly what made the W slider look dead.
+  useEffect(() => {
+    if (!sample || !workspaceAutomaticRanges) return;
+    const bindingKeyFor = (key: string): string | null => {
+      try {
+        return sample.displayCoordinateBindingKey(key);
+      } catch {
+        return null;
+      }
+    };
+
+    // Discard auto-fits whose channel has since been re-transformed, and allow their pairs to
+    // fit again at the new transform.
+    const stale: string[] = [];
+    for (const [key, fittedUnder] of autoFittedScales.current) {
+      const current = bindingKeyFor(key);
+      if (current !== null && current !== fittedUnder) stale.push(key);
+    }
+    if (stale.length) {
+      for (const key of stale) autoFittedScales.current.delete(key);
+      for (const pair of [...fittedAxisPairs.current]) {
+        if (stale.some((key) => pair.includes(key))) fittedAxisPairs.current.delete(pair);
+      }
+      setGlobalScales((prev) => {
+        const next = { ...prev };
+        for (const key of stale) delete next[key];
+        return next;
+      });
+      return; // refit on the next pass, once the cleared map has committed
+    }
+
+    const xKey = sample.channels[xIdx]?.key;
+    const yKey = sample.channels[yIdx]?.key;
+    if (!xKey || !yKey) return;
+    const pairKey = JSON.stringify([activeWorkspaceScaleContextKey, xKey, yKey]);
+    if (fittedAxisPairs.current.has(pairKey)) return;
+    // Marked fitted on first sight even when the plot has no gates yet, so that later drawing
+    // or editing a gate cannot trigger a fit: the viewport invariant is that gate edits never
+    // rescale. Fitting belongs to arriving at a plot, not to changing what is on one.
+    fittedAxisPairs.current.add(pairKey);
+    pendingFitOnLoad.current = false;
+
+    const axes = [
+      { key: xKey, idx: xIdx, auto: workspaceAutomaticRanges.xRange, axis: "x" as const },
+      { key: yKey, idx: yIdx, auto: workspaceAutomaticRanges.yRange, axis: "y" as const },
+    ];
+    for (const { key, idx, auto, axis } of axes) {
+      if (globalScales[key] && !autoFittedScales.current.has(key)) continue; // user-pinned
+      const binding = bindingKeyFor(key);
+      if (binding) autoFittedScales.current.set(key, binding);
+      setGlobalScale(key, includePlotGatesInAxisRange(auto ?? sample.displayRange(idx), mainPlotGates, axis));
+    }
+  }, [
+    sample, workspaceAutomaticRanges, mainPlotGates, xIdx, yIdx, globalScales,
+    activeWorkspaceScaleContextKey, scalesVersion,
+  ]);
+
   const displayed = useMemo(() => {
     if (!payload || !sample) return payload;
     const lbl = (k: string) => sample.labelForKey(k);
     return {
       ...payload,
       point_alpha: pointAlpha, // user-adjustable opacity (was frozen at the payload's 0.4)
+      point_size: pointSize, // mark radius only; density colouring is computed on a fixed grid
       density_color_power: densityColorPower,
       color_labels: undefined, // suppress cytof's in-canvas legend — we render it below the plot
       x_label: lbl(payload.x_label),
@@ -4369,7 +4570,7 @@ export default function App() {
       })),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [payload, sample, panelVersion, pointAlpha, densityColorPower]);
+  }, [payload, sample, panelVersion, pointAlpha, pointSize, densityColorPower]);
 
   // Colour-by overlay legend (population / division / sample) rendered OUTSIDE the plot.
   const overlayLegend = useMemo(() => {
@@ -4829,26 +5030,30 @@ export default function App() {
               style={{ display: activeTab === "gating" ? "flex" : "none" }}
             >
             <div className="gl-controls">
-              <label>
-                X
-                <select value={xIdx} onChange={(e) => setXIdx(+e.target.value)}>
-                  {sample.channels.map((_, i) => (
-                    <option key={i} value={i}>
-                      {sample.channelLabel(i)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Y
-                <select value={yIdx} onChange={(e) => setYIdx(+e.target.value)}>
-                  {sample.channels.map((_, i) => (
-                    <option key={i} value={i}>
-                      {sample.channelLabel(i)}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {/* X and Y travel together: on a narrow screen the strip wraps, and
+                  splitting the axis pair across two rows reads as unrelated controls. */}
+              <div className="gl-axis-pickers">
+                <label>
+                  X
+                  <select value={xIdx} onChange={(e) => setXIdx(+e.target.value)}>
+                    {sample.channels.map((_, i) => (
+                      <option key={i} value={i}>
+                        {sample.channelLabel(i)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Y
+                  <select value={yIdx} onChange={(e) => setYIdx(+e.target.value)}>
+                    {sample.channels.map((_, i) => (
+                      <option key={i} value={i}>
+                        {sample.channelLabel(i)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
               <label className="gl-alpha" title={t("Point opacity")} style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 α
                 <input
@@ -4858,6 +5063,19 @@ export default function App() {
                   step={0.05}
                   value={pointAlpha}
                   onChange={(e) => setPointAlpha(+e.target.value)}
+                  style={{ width: 72 }}
+                />
+              </label>
+              <label className="gl-alpha" title={t("Point size")} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                ◦
+                <input
+                  type="range"
+                  min={0.5}
+                  max={2}
+                  step={0.1}
+                  aria-label={t("Point size")}
+                  value={pointSize}
+                  onChange={(e) => setPointSize(+e.target.value)}
                   style={{ width: 72 }}
                 />
               </label>
@@ -4952,7 +5170,7 @@ export default function App() {
                     : payload
                       ? ` · ${t("{count} events", {
                           count: payload.n_events.toLocaleString(),
-                        })}${includedSamples.length > 0
+                        })}${includedSamples.length > 1
                           ? ` · ${t("{contributing} of {checked} files contribute", {
                               contributing: contributingSampleCount,
                               checked: includedSamples.length,
@@ -4964,7 +5182,7 @@ export default function App() {
                   className="gl-active-sample-key"
                   title={t("Clicking a row makes it active without changing which checked files are pooled.")}
                 >
-                  {t("Blue: {name} · axes and gate editing", { name: fileName })}
+                  {t("Blue: {name}", { name: fileName })}
                 </span>
               </div>
             </div>
@@ -5074,6 +5292,38 @@ export default function App() {
                   />
                 </label>
               ))}
+              {(sample.isScatterAxis(xIdx) || sample.isScatterAxis(yIdx)) && (
+                <div className="gl-scatter-inline">
+                  <span className="gl-scales-label">{t("Scatter")}</span>
+                  {([
+                  ["X", xIdx],
+                  ["Y", yIdx],
+                ] as const).map(([axis, idx]) => {
+                  if (!sample.isScatterAxis(idx)) return null;
+                  const isLinear = sample.scatterScale(idx) === "linear";
+                  return (
+                    <div className="gl-scale-row" key={axis}>
+                      <span className="gl-scale-axis">
+                        {axis} · {sample.channelLabel(idx)}
+                      </span>
+                      <select
+                        className="gl-scatter-scale"
+                        aria-label={`${axis} scatter scale`}
+                        title={t("Arcsinh (cofactor 150) renders near-zero and negative scatter that a linear axis cannot. Linear matches how FlowJo and Cytobank display scatter.")}
+                        value={isLinear ? "linear" : "arcsinh"}
+                        onChange={(e) => {
+                          sample.setScatterScale(idx, e.target.value === "linear" ? "linear" : "arcsinh");
+                          bumpScales();
+                        }}
+                      >
+                        <option value="arcsinh">{t("Arcsinh")}</option>
+                        <option value="linear">{t("Linear")}</option>
+                      </select>
+                    </div>
+                  );
+                })}
+                </div>
+              )}
             </div>
             {(sample.isLogicleChannel(xIdx) || sample.isLogicleChannel(yIdx)) && (
               <div className="gl-scales">
@@ -5092,13 +5342,12 @@ export default function App() {
                         min={0.1}
                         max={2.0}
                         step={0.05}
-                        value={sample.currentLogicleW(idx)}
-                        onChange={(e) => {
-                          sample.setLogicleW(idx, +e.target.value);
-                          bumpScales();
-                        }}
+                        value={pendingLogicleW[sample.channels[idx].key] ?? sample.currentLogicleW(idx)}
+                        onChange={(e) => commitLogicleW(idx, +e.target.value)}
                       />
-                      <span className="gl-scale-val">{sample.currentLogicleW(idx).toFixed(2)}</span>
+                      <span className="gl-scale-val">
+                        {(pendingLogicleW[sample.channels[idx].key] ?? sample.currentLogicleW(idx)).toFixed(2)}
+                      </span>
                       <button
                         className="gl-tool"
                         title={t("Reset to auto-estimated W")}
@@ -5115,6 +5364,10 @@ export default function App() {
                 )}
               </div>
             )}
+            {/* Scatter scale — same shape and placement as Logicle W, and shown only for
+                flow scatter axes. CyTOF is excluded deliberately: arcsinh cofactor 5 is the
+                field convention and is not offered as a choice. Gates live in raw space for
+                flow, so nothing here moves a gate; it only changes what the axis looks like. */}
             <div
               className="gl-plot-area"
               ref={plotAreaRef}

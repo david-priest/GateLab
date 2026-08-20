@@ -7,9 +7,8 @@ import {
   type CompensationWorkerResponse,
 } from "./compensationProtocol";
 import { createCompensationWorkerRuntime } from "./compensationWorkerRuntime";
+import { ARIA_III_DIR as FIXTURE_ROOT } from "../testFixtures";
 
-const FIXTURE_ROOT =
-  "/Users/davidpriest/code/gatelabr-test-fcs/conventional_comp_AriaIII";
 const PAIRS = [
   ["sample_Bcell_check.fcs", "sample_Bcell_check_COMPENSATED.fcs"],
   ["sample_Bmem_purity_large.fcs", "sample_Bmem_purity_large_COMPENSATED.fcs"],

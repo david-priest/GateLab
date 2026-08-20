@@ -279,9 +279,15 @@ export function hasFlowSuffix(name: string): boolean {
 
 export function isScatterChannel(name: string): boolean {
   if (isQcChannel(name)) return false;
-  return /^FSC|^SSC|^BSC|^FS[\s\-_]|^SS[\s\-_]|^BS[\s\-_]|^FS$|^SS$|^LightLoss|^Extinction/i.test(
-    name,
-  );
+  if (/^FSC|^SSC|^BSC|^FS[\s\-_]|^SS[\s\-_]|^BS[\s\-_]|^FS$|^SS$|^LightLoss|^Light\s*Loss|^Extinction/i.test(name)) {
+    return true;
+  }
+  // Some instruments spell the axis out ("Forward Scatter", "Side scatter"). The
+  // qualifier is required: a bare "scatter" anywhere, or a bare FSC/SSC token anywhere,
+  // would swallow the derived imaging morphometrics a BD FACSDiscover S8 emits —
+  // "Size (FSC)", "Eccentricity (SSC (Imaging))", "Delta CoM (FSC/eGFP)" — which are
+  // shape measurements, not scatter, and must keep their fluorescence-style transform.
+  return /^(forward|side|back|orthogonal)[\s_-]*(angle[\s_-]*)?scatter/i.test(name);
 }
 
 const NON_METAL_EXACT = [

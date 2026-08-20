@@ -5,9 +5,8 @@ import {
   compareFlowCompensation,
 } from "./flowCompensationEngine";
 import { parseFcs, type FcsFile, type NumericColumn } from "./fcs";
+import { ARIA_III_DIR as FIXTURE_ROOT } from "../testFixtures";
 
-const FIXTURE_ROOT =
-  "/Users/davidpriest/code/gatelabr-test-fcs/conventional_comp_AriaIII";
 const FIXTURES = [
   "sample_Bcell_check.fcs",
   "sample_Bmem_purity_large.fcs",

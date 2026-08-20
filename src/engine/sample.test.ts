@@ -5,9 +5,8 @@ import { Sample } from "./sample";
 import { transformChannel } from "./transforms";
 import { decodeFloat32Base64 } from "./encode";
 import { includePlotGatesInAxisRange } from "./axisRange";
+import { ARIA_SMALL } from "../testFixtures";
 
-const ARIA_SMALL =
-  "/Users/davidpriest/code/gatelabr-test-fcs/conventional_comp_AriaIII/sample_Bmem_purity_small.fcs";
 
 function loadArrayBuffer(path: string): ArrayBuffer {
   const b = readFileSync(path);
