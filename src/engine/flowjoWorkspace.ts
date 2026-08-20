@@ -29,8 +29,20 @@ const DATATYPE_NS = "http://www.isac-net.org/std/Gating-ML/v2.0/datatypes";
 const SUPPORTED_GATE_LOCAL_NAMES = new Set(["PolygonGate", "RectangleGate"]);
 
 export interface FlowJoSampleSummary {
+  /**
+   * Position in the workspace. Selection is by index, never by name: FlowJo allows the same
+   * file to be added twice, and resolving a duplicate name by taking the first match would
+   * import another sample's gates without saying so.
+   */
+  index: number;
   /** `SampleNode@name`, normally the FCS file name. */
   name: string;
+  /** FlowJo group this sample is analysed under, for telling near-identical names apart. */
+  owningGroup: string;
+  /** Another sample in this workspace carries the same name. */
+  duplicateName: boolean;
+  /** Independent top-level trees. More than one means parallel strategies in one sample. */
+  rootCount: number;
   /** `SampleNode@count` — the events FlowJo had for the sample, or null when absent. */
   eventCount: number | null;
   /** Populations carrying a gate this importer understands. */
@@ -104,7 +116,13 @@ function sampleNodes(doc: Document): Element[] {
 
 /** Summarise every sample in the workspace, so the caller can choose one. */
 export function listFlowJoWorkspaceSamples(xmlText: string): FlowJoSampleSummary[] {
-  return sampleNodes(parseWorkspace(xmlText)).map((node) => {
+  const nodes = sampleNodes(parseWorkspace(xmlText));
+  const nameCounts = new Map<string, number>();
+  for (const n of nodes) {
+    const nm = n.getAttribute("name") ?? "";
+    nameCounts.set(nm, (nameCounts.get(nm) ?? 0) + 1);
+  }
+  return nodes.map((node, index) => {
     let gateCount = 0;
     let unsupportedCount = 0;
     eachPopulation(node, (pop) => {
@@ -117,8 +135,14 @@ export function listFlowJoWorkspaceSamples(xmlText: string): FlowJoSampleSummary
       return false;
     });
     const rawCount = Number(node.getAttribute("count"));
+    const name = node.getAttribute("name") ?? "";
     return {
-      name: node.getAttribute("name") ?? "",
+      index,
+      name,
+      owningGroup: node.getAttribute("owningGroup") ?? "",
+      duplicateName: (nameCounts.get(name) ?? 0) > 1,
+      rootCount: childrenByLocalName(node, "Subpopulations")
+        .reduce((n, subs) => n + childrenByLocalName(subs, "Population").length, 0),
       eventCount: Number.isFinite(rawCount) ? rawCount : null,
       gateCount,
       unsupportedCount,
@@ -132,15 +156,16 @@ export function listFlowJoWorkspaceSamples(xmlText: string): FlowJoSampleSummary
  * Names come from `Population@name` and ancestry from the nesting, so neither FlowJo's gate ids
  * nor any `custom_info` convention is relied on for structure.
  */
-export function flowJoWorkspaceToGatingML(xmlText: string, sampleName: string): FlowJoConversion {
+export function flowJoWorkspaceToGatingML(xmlText: string, sampleIndex: number): FlowJoConversion {
   const doc = parseWorkspace(xmlText);
-  const node = sampleNodes(doc).find((n) => n.getAttribute("name") === sampleName);
+  const nodes = sampleNodes(doc);
+  const node = nodes[sampleIndex];
   if (!node) {
-    const available = sampleNodes(doc).map((n) => n.getAttribute("name") ?? "?");
     throw new Error(
-      `No sample named "${sampleName}" in this workspace. It contains: ${available.join(", ") || "no samples"}.`,
+      `This workspace has no sample at position ${sampleIndex + 1}; it holds ${nodes.length}.`,
     );
   }
+  const sampleName = node.getAttribute("name") ?? `sample ${sampleIndex + 1}`;
 
   const out = new DOMParser().parseFromString(
     `<gating:Gating-ML xmlns:gating="${GATING_NS}" xmlns:data-type="${DATATYPE_NS}"/>`,
@@ -192,6 +217,17 @@ export function flowJoWorkspaceToGatingML(xmlText: string, sampleName: string): 
     throw new Error(
       `"${sampleName}" has no gates this importer can read.` +
         (warnings.length ? ` ${warnings[0]}` : ""),
+    );
+  }
+
+  // Parallel top-level trees mean the sample was gated under more than one strategy. They are
+  // imported together, which is a merge the user did not ask for, so it is stated.
+  const rootTrees = Array.from(root.children).filter(
+    (el) => !el.getAttributeNS(GATING_NS, "parent_id"),
+  ).length;
+  if (rootTrees > 1) {
+    warnings.push(
+      `"${sampleName}" holds ${rootTrees} independent gating trees; all were imported together.`,
     );
   }
 
