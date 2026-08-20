@@ -323,6 +323,7 @@ const JA: Readonly<Record<string, string>> = {
   "Blue: {name} · axes and gate editing": "青：{name} · 軸とゲート編集",
   "Clicking a row makes it active without changing which checked files are pooled.": "行をクリックすると操作対象になりますが、まとめて表示するチェック済みファイルは変わりません。",
   "Workspace scales": "ワークスペース共通スケール",
+  "Branch gates": "枝のゲートのみ",
   "Automatic and edited ranges are shared across compatible FCS files in this workspace.": "自動および編集した軸範囲は、このワークスペース内の互換性のあるFCSファイルで共有されます。",
   "No checked files": "チェック済みファイルなし",
   "{count} checked files": "{count}件のチェック済みファイル",
