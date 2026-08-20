@@ -95,6 +95,75 @@ function buildWorkspace(sample: Sample) {
   return { gates, gate_order, populations: pops, root_population_id: root.population_id };
 }
 
+// Cytobank has exactly three scale types: Linear (flag 1), Log (2) and Arcsinh (4). Its own
+// exports confirm it — a CyTOF experiment writes transforms:fasinh with "flag":4, and a flow
+// experiment writes transforms:flog with "flag":2. Neither ever writes transforms:logicle, and
+// there is no flag 5.
+//
+// GateLab used to emit logicle with "flag":5 for flow fluorescence, producing a file Cytobank
+// rejects. It went unnoticed because every earlier test of this format used CyTOF data, where
+// everything is arcsinh already and the logicle branch is never reached. These tests use FLOW
+// data specifically, so that gap cannot reopen.
+describe("Cytobank format never emits a scale Cytobank cannot read (flow)", () => {
+  const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+  const ws = buildWorkspace(sample);
+  const xml = exportGatingML({ ...ws, sample, format: "cytobank", timestamp: "2026-01-01T00:00:00" });
+
+  it("declares no logicle transform", () => {
+    expect(sample.instrument).toBe("flow"); // the case the old tests never covered
+    expect(xml).not.toContain("transforms:logicle");
+    expect(xml).toContain("transforms:fasinh");
+  });
+
+  it("uses only Cytobank's own scale flags", () => {
+    const flags = [...xml.matchAll(/"flag":(\d+)/g)].map((m) => Number(m[1]));
+    expect(flags.length).toBeGreaterThan(0);
+    // 1 = Linear, 2 = Log, 4 = Arcsinh. Anything else is not a Cytobank scale type.
+    expect([...new Set(flags)].sort()).toEqual(
+      [...new Set(flags)].filter((f) => [1, 2, 4].includes(f)).sort(),
+    );
+    expect(flags).not.toContain(5);
+  });
+
+  it("quotes the cofactor the vertices were actually transformed with", () => {
+    // A definition JSON that names a cofactor the coordinates were not built from would place
+    // every gate wrongly while importing cleanly — the worst outcome available here.
+    const fluor = sample.channels.find((_c, i) => sample.transformKind(i) === "logicle");
+    expect(fluor, "fixture has a logicle fluorescence channel").toBeTruthy();
+    const m = xml.match(/<transforms:fasinh transforms:T="([0-9.]+)"/);
+    expect(m).toBeTruthy();
+    // fasinh(T = cf·sinh(1)) reduces to asinh(x / cf); recover cf and check it is the one the
+    // arcsinh scale entries advertise.
+    const cf = Number(m![1]) / Math.sinh(1);
+    expect(xml).toContain(`"flag":4,"argument":"${Math.round(cf)}"`);
+  });
+
+  it("never references a GateSet, and flattens ancestry like Cytobank does", () => {
+    // Cytobank has no construct for a population referencing another population: every GateSet
+    // is the AND of its whole ancestor chain of primitive gates, and its own exports reference
+    // a GateSet exactly zero times. GateLab used to emit a parent GateSet reference plus a
+    // "pop_N" token in the boolean expression — legal Gating-ML, round-trips with itself, and
+    // rejected by Cytobank with no explanation.
+    expect(xml).not.toMatch(/gating:ref="GateSet_/);
+    expect(xml).toMatch(/gating:ref="Gate_/);
+
+    const exprs = [...xml.matchAll(/"booleanExpression":"([^"]*)"/g)].map((m) => m[1]);
+    expect(exprs.length).toBeGreaterThan(0);
+    for (const e of exprs) expect(e).not.toMatch(/\bpop_\d+\b/);
+    expect(xml).not.toContain("gatelabParent");
+
+    // A child population must name its parent's gates too, not just its own.
+    const nested = exprs.filter((e) => e.split(" AND ").length > 1);
+    expect(nested.length, "fixture has a nested population").toBeGreaterThan(0);
+  });
+
+  it("still round-trips back into GateLab", () => {
+    const back = importGatingML(xml, sample.channels.map((c) => c.key),
+      Object.fromEntries(sample.channels.map((c) => [c.pnn, c.key])), sample.instrument);
+    expect(back.n_gates_imported).toBe(2);
+  });
+});
+
 describe("GatingML export → import round-trip (Aria III flow)", () => {
   const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
   const ws = buildWorkspace(sample);
@@ -105,7 +174,7 @@ describe("GatingML export → import round-trip (Aria III flow)", () => {
   for (const format of ["standard", "cytobank"] as const) {
     describe(`${format} format`, () => {
       const xml = exportGatingML({ ...ws, sample, format, timestamp: "2026-01-01T00:00:00" });
-      const back = importGatingML(xml, sessionChannels, pnnMap);
+      const back = importGatingML(xml, sessionChannels, pnnMap, sample.instrument);
 
       it("is valid XML with the right header + gate elements", () => {
         expect(xml).toContain("<gating:Gating-ML");
@@ -481,7 +550,7 @@ describe("GatingML NOT round-trip (Aria III flow, real events)", () => {
       const ws = buildExcludedWorkspace();
       const before = membershipByName(ws);
       const xml = exportGatingML({ ...ws, sample, format, timestamp: "2026-01-01T00:00:00" });
-      const back = importGatingML(xml, sessionChannels, pnnMap);
+      const back = importGatingML(xml, sessionChannels, pnnMap, sample.instrument);
 
       it("emits the exclusion rather than dropping it", () => {
         expect(xml).toMatch(/complement="true"|NOT gate_/);

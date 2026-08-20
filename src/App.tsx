@@ -1099,7 +1099,10 @@ export default function App() {
     try {
       const pnnMap: Record<string, string> = {};
       for (const c of sample.channels) pnnMap[c.pnn] = c.key;
-      const res = importGatingML(text, sample.channels.map((c) => c.key), pnnMap);
+      // The instrument decides whether an arcsinh vertex is inverted: flow stores gates in
+      // raw space, CyTOF in arcsinh space.
+      const res = importGatingML(
+        text, sample.channels.map((c) => c.key), pnnMap, sample.instrument);
       const comp = resolveGatingMLCompensation(
         res.compensation,
         res.compensation_refs,

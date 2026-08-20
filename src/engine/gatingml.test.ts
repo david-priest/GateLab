@@ -144,6 +144,9 @@ describe("channel resolution", () => {
   });
 });
 
+const G = "http://www.isac-net.org/std/Gating-ML/v2.0/gating";
+const D = "http://www.isac-net.org/std/Gating-ML/v2.0/datatypes";
+
 describe("strict import safety", () => {
   it("cancels instead of silently dropping unsupported gates or transforms", () => {
     const xml = `<?xml version="1.0"?>
@@ -229,6 +232,39 @@ describe("strict import safety", () => {
     expect(membership(res, byName["Scatter"], xs)).toEqual([1, 1, 1, 0]);
     expect(membership(res, byName["Singlets"], xs)).toEqual([1, 1, 0, 0]);
     expect(membership(res, byName["B cells"], xs)).toEqual([1, 0, 0, 0]);
+  });
+
+  // Which space an arcsinh vertex is in depends on how the app stores gates for that
+  // instrument, not on the transform. Flow stores raw, so a flow fluorescence arcsinh vertex
+  // must be inverted; CyTOF stores arcsinh, so it must not be. Treating flow as CyTOF left
+  // every fluorescence gate sitting at its transformed coordinate — a plausible number in the
+  // wrong space, which is how a Cytobank-exchanged flow strategy silently lands wrong.
+  it("inverts arcsinh for flow fluorescence but not for CyTOF", () => {
+    const cf = 150;
+    const T = cf * Math.sinh(1);
+    const raw = 1000;
+    const transformed = Math.asinh(raw / cf);
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="${G}" xmlns:data-type="${D}"
+        xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations">
+        <transforms:transformation transforms:id="Tr_Fasinh_150">
+          <transforms:fasinh transforms:T="${T}" transforms:M="0.4342944819032518" transforms:A="0"/>
+        </transforms:transformation>
+        <gating:RectangleGate gating:id="r1" gating:name="R">
+          <gating:dimension gating:min="${transformed}" gating:max="${transformed * 2}"
+            gating:transformation-ref="Tr_Fasinh_150">
+            <data-type:fcs-dimension data-type:name="PE-A"/>
+          </gating:dimension>
+        </gating:RectangleGate>
+      </gating:Gating-ML>`;
+
+    const flow = importGatingML(xml, ["PE-A"], {}, "flow");
+    const flowGate = Object.values(flow.gates)[0] as { vertices: [number, number][] };
+    expect(flowGate.vertices[0][0]).toBeCloseTo(raw, 3);
+
+    const cytof = importGatingML(xml, ["PE-A"], {}, "cytof");
+    const cytofGate = Object.values(cytof.gates)[0] as { vertices: [number, number][] };
+    expect(cytofGate.vertices[0][0]).toBeCloseTo(transformed, 6);
   });
 
   it("rejects a gating:parent_id that names no gate in the file", () => {
