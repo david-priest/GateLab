@@ -288,8 +288,10 @@ describe("inspectCombinedFcsCompatibility", () => {
 
 describe("sanitizeFcsName", () => {
   it("replaces unsafe chars with _ and joins parts", () => {
+    // "+" is kept. It used to become "_", which made CD45RB+IgD+ and CD45RB+IgD- collide on
+    // one file name and silently overwrite each other during a multi-population export.
     expect(sanitizeFcsName("exp1", "Sample A/1", "CD4+ T cells", "raw")).toBe(
-      "exp1_Sample_A_1_CD4__T_cells_raw.fcs",
+      "exp1_Sample_A_1_CD4+_T_cells_raw.fcs",
     );
   });
 

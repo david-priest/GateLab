@@ -40,6 +40,7 @@ import {
 import {
   exportPopulationFcs,
   exportPopulationFcsCombined,
+  mergeExportFiles,
   inspectCombinedFcsCompatibility,
   passesPopulationFcsExportThreshold,
   sanitizeFcsName,
@@ -1267,7 +1268,7 @@ export default function App() {
       } else {
         // Several populations → one zip, each population's file(s) inside.
         const files: Record<string, Uint8Array> = {};
-        for (const popId of popIds) Object.assign(files, filesForPop(popId));
+        for (const popId of popIds) mergeExportFiles(files, filesForPop(popId));
         if (Object.keys(files).length === 0) {
           setError(
             `No population × FCS combination contained more than ${splitThreshold.toLocaleString()} events.`,
