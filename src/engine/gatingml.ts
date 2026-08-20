@@ -121,7 +121,8 @@ function detectSource(root: Element): "gatelabr" | "cytobank" | "generic" {
 
 type TransformDef =
   | { type: "logicle"; T: number; W: number; M: number; A: number }
-  | { type: "fasinh"; T: number; M: number; A: number };
+  | { type: "fasinh"; T: number; M: number; A: number }
+  | { type: "flog"; T: number; M: number };
 
 function parseTransforms(root: Element): Record<string, TransformDef> {
   const out: Record<string, TransformDef> = {};
@@ -138,6 +139,19 @@ function parseTransforms(root: Element): Record<string, TransformDef> {
       const a = num(attrLocal(lg, "A"));
       if (hasNum(t) && hasNum(w)) {
         out[id] = { type: "logicle", T: t, W: w, M: hasNum(m) ? m : 4.5, A: hasNum(a) ? a : 0 };
+        continue;
+      }
+    }
+
+    // Cytobank writes flog for a Log scale, which is what a flow experiment gets by default.
+    // Without this the whole file is rejected as "unsupported transformation" — safe, but it
+    // makes a Cytobank flow strategy unreadable.
+    const lo = firstChildLocal(el, "flog") ?? firstChildLocal(el, "log");
+    if (lo) {
+      const t = num(attrLocal(lo, "T"));
+      const m = num(attrLocal(lo, "M"));
+      if (hasNum(t) && t > 0 && hasNum(m) && m > 0) {
+        out[id] = { type: "flog", T: t, M: m };
         continue;
       }
     }
@@ -251,6 +265,7 @@ function makeInverter(
   resolvedChannel: string,
   transRef: string | undefined,
   transforms: Record<string, TransformDef>,
+  instrument: "flow" | "cytof" = "cytof",
 ): (v: number) => number {
   const identity = (v: number) => v;
   if (!transRef || !resolvedChannel) return identity;
@@ -271,10 +286,31 @@ function makeInverter(
     return (v) => lg.inverse(v / span);
   }
 
+  if (tr.type === "flog") {
+    // Gating-ML flog: y = log10(x / T) / M + 1, so x = T · 10^((y − 1) · M).
+    // Confirmed against a real Cytobank flow export: with T = M = 1 a gating:min of 4.1688
+    // pairs with 3.1688 in the same gate's Cytobank definition JSON, which is log10(x).
+    // Flow stores gates raw so this must be inverted; CyTOF never uses a log scale.
+    if (instrument !== "flow" || isQcChannel(resolvedChannel)) return identity;
+    const { T, M } = tr;
+    if (!Number.isFinite(T) || T <= 0 || !Number.isFinite(M) || M <= 0) return identity;
+    return (v) => T * Math.pow(10, (v - 1) * M);
+  }
+
   if (tr.type === "fasinh") {
-    // CyTOF metal / Gaussian: gates stored in arcsinh(=display) space → identity.
-    // Flow scatter: gates stored in RAW space → invert the arcsinh forward transform.
-    if (!isScatterChannel(resolvedChannel)) return identity;
+    // Which space the vertices are in depends on how THIS app stores gates for the instrument,
+    // not on the transform:
+    //   • CyTOF — gates are stored in arcsinh (= display) space, so an arcsinh vertex is
+    //     already in storage space → identity.
+    //   • Flow — gates are stored in RAW space, so an arcsinh vertex must be inverted. That is
+    //     true of flow scatter, and equally of flow fluorescence when the file carries arcsinh
+    //     rather than logicle: Cytobank cannot express logicle, so a flow strategy exchanged
+    //     through Cytobank arrives arcsinh. Treating it as identity left every fluorescence
+    //     gate at its transformed coordinate — a plausible number, in the wrong space.
+    const invertible = instrument === "flow"
+      ? !isQcChannel(resolvedChannel)
+      : isScatterChannel(resolvedChannel);
+    if (!invertible) return identity;
     const T = tr.T;
     const M = Number.isFinite(tr.M) ? tr.M : Math.log10(Math.E);
     const A = Number.isFinite(tr.A) ? tr.A : 0;
@@ -783,6 +819,8 @@ export function importGatingML(
   xmlText: string,
   sessionChannels: string[],
   pnnToChannel: Record<string, string> = {},
+  /** How this app stores gates for the loaded sample; decides whether arcsinh is inverted. */
+  instrument: "flow" | "cytof" = "cytof",
 ): GatingMLResult {
   const doc = new DOMParser().parseFromString(xmlText, "application/xml");
   const parseErr = doc.getElementsByTagName("parsererror");
@@ -936,8 +974,8 @@ export function importGatingML(
 
     const xTr = g.dims?.[0]?.transformation_ref;
     const yTr = g.dims?.[1]?.transformation_ref;
-    const invX = makeInverter(xCh, xTr, transforms);
-    const invY = makeInverter(yCh, yTr, transforms);
+    const invX = makeInverter(xCh, xTr, transforms, instrument);
+    const invY = makeInverter(yCh, yTr, transforms, instrument);
     const verts: Vertex[] = (g.vertices ?? []).map((v) => [invX(v[0]), invY(v[1])]);
     if (verts.length < 3 && g.gate_type === "polygon") {
       nSkipped++;

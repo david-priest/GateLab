@@ -21,6 +21,22 @@ const SINH1 = Math.sinh(1); // sinh(log10(e)·ln10) = sinh(1)
 const LOG10E = Math.log10(Math.E); // GatingML fasinh M
 const LOGICLE_SPAN = 4.5; // M + A for exported logicle vertices (flowCore [0, M])
 
+/**
+ * Cofactor for flow fluorescence in the CYTOBANK format only.
+ *
+ * Cytobank has exactly three scale types — Linear (flag 1), Log (2) and Arcsinh (4) — and no
+ * concept of logicle. Its own exports of both CyTOF and flow data confirm it: they carry
+ * transforms:fasinh and transforms:flog, never transforms:logicle. Emitting logicle produced a
+ * file Cytobank rejects, which went unnoticed because every earlier test of this format used
+ * CyTOF data, where everything is arcsinh already and the logicle branch is never reached.
+ *
+ * 150 matches the cofactor GateLab already uses for flow scatter and is the usual flow default.
+ * Arcsinh is an approximation of logicle, so gate boundaries shift slightly near zero; that is
+ * the price of a representation Cytobank can read, and Cytobank's own documentation makes the
+ * same trade.
+ */
+const CYTOBANK_FLOW_COFACTOR = 150;
+
 export type GatingMLFormat = "cytobank" | "standard";
 
 export interface GatingMLExportOpts {
@@ -106,7 +122,7 @@ interface TransformRegistry {
   trDefs: Map<string, TrDef>; // ordered by first appearance
 }
 
-function buildTransforms(sample: Sample): TransformRegistry {
+function buildTransforms(sample: Sample, cytobankMode: boolean): TransformRegistry {
   const chToTr = new Map<string, string | null>();
   const trDefs = new Map<string, TrDef>();
   const isFlow = sample.instrument === "flow";
@@ -129,6 +145,12 @@ function buildTransforms(sample: Sample): TransformRegistry {
       chToTr.set(key, null);
     } else if (isScatterChannel(key)) {
       const cf = sample.currentScatterCofactor(idx);
+      const trId = `Tr_Fasinh_${Math.round(cf)}`;
+      if (!trDefs.has(trId)) trDefs.set(trId, { type: "fasinh", T: cf * SINH1, M: LOG10E, A: 0 });
+      chToTr.set(key, trId);
+    } else if (cytobankMode) {
+      // Cytobank cannot represent logicle, so fluorescence goes out as arcsinh.
+      const cf = CYTOBANK_FLOW_COFACTOR;
       const trId = `Tr_Fasinh_${Math.round(cf)}`;
       if (!trDefs.has(trId)) trDefs.set(trId, { type: "fasinh", T: cf * SINH1, M: LOG10E, A: 0 });
       chToTr.set(key, trId);
@@ -157,6 +179,8 @@ function scaleJson(trId: string | null | undefined, isFlow: boolean, cofactor: n
   } else if (!isFlow) {
     flag = 4; arg = String(cofactor); mn = -5.0; mx = 12000.0;
   } else if (trId.startsWith("Tr_Logicle_")) {
+    // Only reachable in the standard format, which Cytobank never reads. Cytobank knows
+    // Linear (1), Log (2) and Arcsinh (4) only; flag 5 is not one of its scale types.
     flag = 5; arg = "4.5"; mn = -0.5; mx = 4.5;
   } else {
     flag = 4; arg = String(cofactor); mn = -2.0; mx = 12.0;
@@ -365,7 +389,7 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     return pnn && pnn.length ? pnn : key;
   };
 
-  const { chToTr, trDefs } = buildTransforms(sample);
+  const { chToTr, trDefs } = buildTransforms(sample, cytobankMode);
   const scalesJson = buildScalesJson(sample, opts.globalScales);
   const compensationRefFor = (channelKey: string): "FCS" | "uncompensated" =>
     isFlow && sample.embeddedCompensationEnabled && sample.spillover?.channels.includes(channelKey)
@@ -373,14 +397,27 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
       : "uncompensated";
   const axisCofactor = (channelKey: string): number => {
     const idx = sample.index(channelKey);
-    return isFlow && idx !== undefined && isScatterChannel(channelKey)
-      ? sample.currentScatterCofactor(idx)
-      : cofactor;
+    if (isFlow && idx !== undefined && isScatterChannel(channelKey)) {
+      return sample.currentScatterCofactor(idx);
+    }
+    // Flow fluorescence in Cytobank format is arcsinh, so the definition JSON must quote the
+    // cofactor the vertices were actually transformed with.
+    if (cytobankMode && isFlow && idx !== undefined && !isQcChannel(channelKey)) {
+      return CYTOBANK_FLOW_COFACTOR;
+    }
+    return cofactor;
   };
 
   // Forward-transform a stored (gating-space) coordinate into export/display space.
   const toExport = (channelKey: string, v: number): number => {
     const idx = sample.index(channelKey);
+    // Cytobank format, flow fluorescence: the declared transform is fasinh, so the vertices must
+    // be arcsinh of the RAW value rather than the app's logicle display coordinate. Flow gates
+    // are stored in raw space, so this is a direct substitution with nothing to invert.
+    // fasinh(T = cf·sinh(1), M = log10 e, A = 0) reduces exactly to asinh(x / cf).
+    if (cytobankMode && idx !== undefined && sample.transformKind(idx) === "logicle") {
+      return Math.asinh(v / CYTOBANK_FLOW_COFACTOR);
+    }
     let dv = sample.gatingToDisplay(channelKey, v);
     if (idx !== undefined && sample.transformKind(idx) === "logicle") dv *= LOGICLE_SPAN;
     return dv;
@@ -464,13 +501,12 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     const boolNum = popBoolNum.get(pid)!;
     const boolGmlId = popBoolGmlId.get(pid)!;
 
-    // Nearest non-root ancestor that itself has a GateSet.
-    let parentBoolNum: number | null = null;
+    // Nearest non-root ancestor that itself has a GateSet. Used by the standard format's
+    // hierarchy; the Cytobank format flattens the ancestry instead (see below).
     let parentBoolGmlId: string | null = null;
     let walk: string | null = pop.parent_id;
     while (walk && walk !== root_population_id) {
       if (popBoolGmlId.has(walk)) {
-        parentBoolNum = popBoolNum.get(walk)!;
         parentBoolGmlId = popBoolGmlId.get(walk)!;
         break;
       }
@@ -485,36 +521,49 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
             `"${pop.name}". Export the standard GateLab/GateLabR format instead.`,
         );
       }
-      const ownRefLines = valid.map((gr) => {
+      // Cytobank has no concept of one population referencing another: every GateSet is the
+      // AND of its WHOLE ancestor chain of primitive gates. Referencing a GateSet is legal
+      // Gating-ML, and GateLab reads its own files back that way, but Cytobank's importer has
+      // no such construct and rejects the file with no explanation. Its own exports never
+      // reference a GateSet — not once — so the ancestry is flattened here instead.
+      const chain: typeof valid = [];
+      const seenGateIds = new Set<string>();
+      const pushRef = (gr: (typeof valid)[number]) => {
+        if (seenGateIds.has(gr.gate_id)) return;
+        seenGateIds.add(gr.gate_id);
+        chain.push(gr);
+      };
+      const ancestry: string[] = [];
+      for (let w: string | null = pop.parent_id; w && w !== root_population_id;
+           w = populations[w]?.parent_id ?? null) {
+        ancestry.unshift(w);
+      }
+      for (const aid of ancestry) {
+        for (const gr of (populations[aid]?.gate_refs ?? [])) {
+          if (gateToGmlId.has(gr.gate_id)) pushRef(gr);
+        }
+      }
+      for (const gr of valid) pushRef(gr);
+
+      let refLines = chain.map((gr) => {
         const comp = gr.include ? "" : ' gating:complement="true"';
         return `      <gating:gateReference gating:ref="${gateToGmlId.get(gr.gate_id)}"${comp} />`;
       });
-      let refLines = parentBoolGmlId
-        ? [...ownRefLines, `      <gating:gateReference gating:ref="${parentBoolGmlId}" />`]
-        : ownRefLines;
       // GatingML Boolean operations need ≥2 refs — pad single-ref lists.
       if (refLines.length === 1) {
         refLines = [
           refLines[0],
-          `      <!-- Single-gate root population: ref twice (GatingML requires ≥2 args for "${operation}") -->`,
+          `      <!-- Single-gate population: ref twice (GatingML requires ≥2 args for "${operation}") -->`,
           refLines[0],
         ];
       }
 
-      const allSeq = valid.map((gr) => gateSeq.get(gr.gate_id)!);
-      const negSeq = valid.filter((gr) => !gr.include).map((gr) => gateSeq.get(gr.gate_id)!);
-      const exprParts = valid.map((gr) => {
-        const sid = gateSeq.get(gr.gate_id)!;
-        return gr.include ? `gate_${sid}` : `NOT gate_${sid}`;
-      });
-      if (parentBoolNum != null) {
-        const parentGsId = parentBoolNum - 36000000 + 1;
-        exprParts.push(`pop_${parentGsId}`);
-      }
-      const ownExpr = exprParts.slice(0, valid.length).join(operation === "or" ? " OR " : " AND ");
-      const boolExpr = parentBoolNum != null ? `(${ownExpr}) AND ${exprParts[exprParts.length - 1]}` : ownExpr;
-      const parentMarker = parentBoolNum == null ? ',"gatelabParent":"root"' : "";
-      const boolDefJson = `{"gates":[${allSeq.join(",")}],"negGates":[${negSeq.join(",")}],"tailoredPerPopulation":{},"booleanExpression":"${boolExpr}"${parentMarker}}`;
+      const allSeq = chain.map((gr) => gateSeq.get(gr.gate_id)!);
+      const negSeq = chain.filter((gr) => !gr.include).map((gr) => gateSeq.get(gr.gate_id)!);
+      const boolExpr = chain
+        .map((gr) => (gr.include ? `gate_${gateSeq.get(gr.gate_id)!}` : `NOT gate_${gateSeq.get(gr.gate_id)!}`))
+        .join(operation === "or" ? " OR " : " AND ");
+      const boolDefJson = `{"gates":[${allSeq.join(",")}],"negGates":[${negSeq.join(",")}],"tailoredPerPopulation":{},"booleanExpression":"${boolExpr}"}`;
 
       boolLines.push(
         `  <gating:BooleanGate gating:id="${boolGmlId}">`,
