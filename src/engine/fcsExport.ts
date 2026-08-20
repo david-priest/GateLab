@@ -344,7 +344,41 @@ export function exportPopulationFcsCombined(
  * char outside [A-Za-z0-9._-] with "_". Windows-safe (kills / \ : * ? " < > |). Shared by all
  * download filename construction so a population like "CD4+/CD8-" never yields an invalid name. */
 export function sanitizeFilePart(s: string | null | undefined): string {
-  return String(s ?? "").trim().replace(/[^A-Za-z0-9._-]/g, "_");
+  // Immunology population names are built from + and -, and the minus is usually the Unicode
+  // U+2212 that the app renders. Mapping both to "_" made sibling gates collide on one name:
+  // CD45RB+IgD+, CD45RB+IgD- and CD45RB-IgD+ all became "CD45RB_IgD_", and the later export
+  // silently overwrote the earlier one -- twelve populations produced eight files.
+  // + and - are legal on every filesystem, so they are kept and the signs survive.
+  return String(s ?? "")
+    .trim()
+    .replace(/[\u2212\u2012\u2013\u2014\u2010\u2011]/g, "-") // minus / dashes → ASCII
+    .replace(/[^A-Za-z0-9._+-]/g, "_");
+}
+
+/**
+ * Merge exported files without ever losing one to a name clash.
+ *
+ * Sanitising can still map two distinct population names onto the same string, and writing
+ * into a plain object would drop the earlier file with no error. Distinct content therefore
+ * gets a numbered suffix instead.
+ */
+export function mergeExportFiles(
+  into: Record<string, Uint8Array>,
+  from: Record<string, Uint8Array>,
+): Record<string, Uint8Array> {
+  for (const [name, bytes] of Object.entries(from)) {
+    if (!(name in into)) {
+      into[name] = bytes;
+      continue;
+    }
+    const dot = name.lastIndexOf(".");
+    const stem = dot > 0 ? name.slice(0, dot) : name;
+    const ext = dot > 0 ? name.slice(dot) : "";
+    let n = 2;
+    while (`${stem}_${n}${ext}` in into) n++;
+    into[`${stem}_${n}${ext}`] = bytes;
+  }
+  return into;
 }
 
 export function sanitizeFcsName(
