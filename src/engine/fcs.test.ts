@@ -1,12 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { parseFcs } from "./fcs";
+import { ARIA_SMALL } from "../testFixtures";
 
 // Ground truth extracted independently (fcsparser for metadata; a raw big-endian
 // struct read for the data values) from the real Aria III test file. This is a
 // "don't guess" cross-check: the parser must reproduce these exactly.
-const ARIA_SMALL =
-  "/Users/davidpriest/code/gatelabr-test-fcs/conventional_comp_AriaIII/sample_Bmem_purity_small.fcs";
 
 function loadArrayBuffer(path: string): ArrayBuffer {
   const b = readFileSync(path);

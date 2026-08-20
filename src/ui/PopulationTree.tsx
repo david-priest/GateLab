@@ -9,6 +9,7 @@ import type { CoreState, Derived, Action } from "../store";
 import { wouldCreateCycle, type Gate, type GateRef } from "../engine/models";
 import { TreeConnectors } from "./TreeConnectors";
 import { useI18n } from "./i18n";
+import { gateRefLabel, EXCLUDE_HINT } from "./gateRefLabel";
 
 interface Props {
   state: CoreState;
@@ -53,6 +54,8 @@ interface GateChoice {
 interface GatePickerState {
   popId: string;
   refIndex: number | null;
+  /** Pending NOT state for the reference being added or changed. */
+  exclude: boolean;
   left: number;
   top: number;
 }
@@ -194,9 +197,12 @@ export function PopulationTree({
     const width = 300;
     const height = 360;
     setGateQuery("");
+    const existing =
+      refIndex === null ? null : populations[popId]?.gate_refs[refIndex] ?? null;
     setGatePicker({
       popId,
       refIndex,
+      exclude: existing ? !existing.include : false,
       left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
       top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - height - 8)),
     });
@@ -207,14 +213,28 @@ export function PopulationTree({
     const population = populations[gatePicker.popId];
     if (!population) return;
     const gateRefs = population.gate_refs.map((ref) => ({ ...ref }));
-    if (gatePicker.refIndex === null) gateRefs.push({ ...choice.gateRef });
+    const picked = { ...choice.gateRef, include: !gatePicker.exclude };
+    if (gatePicker.refIndex === null) gateRefs.push(picked);
     else if (gatePicker.refIndex >= 0 && gatePicker.refIndex < gateRefs.length) {
-      gateRefs[gatePicker.refIndex] = { ...choice.gateRef };
+      gateRefs[gatePicker.refIndex] = picked;
     } else {
       return;
     }
     dispatch({ type: "setPopulationGateRefs", popId: gatePicker.popId, gateRefs });
     setGatePicker(null);
+  };
+
+  const setPickerExclude = (exclude: boolean) => {
+    if (!gatePicker) return;
+    setGatePicker({ ...gatePicker, exclude });
+    if (gatePicker.refIndex === null) return; // adding: applied when a gate is chosen
+    const population = populations[gatePicker.popId];
+    const current = population?.gate_refs[gatePicker.refIndex];
+    if (!population || !current) return;
+    const gateRefs = population.gate_refs.map((ref, index) =>
+      index === gatePicker.refIndex ? { ...ref, include: !exclude } : { ...ref },
+    );
+    dispatch({ type: "setPopulationGateRefs", popId: gatePicker.popId, gateRefs });
   };
 
   const removePickedGate = () => {
@@ -444,10 +464,9 @@ export function PopulationTree({
                     if (e.shiftKey && !isRoot) openGatePicker(e, popId, i);
                     else dispatch({ type: "selectGate", gateId: ref.gate_id });
                   }}
-                  title={t("Click to select; Shift-click to change or remove")}
+                  title={t("Click to select; Shift-click to change, exclude (NOT), or remove")}
                 >
-                  {ref.include ? gate.name : `-${gate.name}`}
-                  {ref.quadrant !== undefined ? ` [Q${ref.quadrant}]` : ""}
+                  {gateRefLabel(gate.name, ref.include, ref.quadrant)}
                 </span>
               );
             })}
@@ -551,6 +570,16 @@ export function PopulationTree({
               <span><strong>{t("Current gate")}:</strong> {pickerCurrentChoice.shortLabel}</span>
             </div>
           )}
+          <label className="pop-gate-picker-not" title={t(EXCLUDE_HINT)}>
+            <input
+              type="checkbox"
+              checked={gatePicker.exclude}
+              onChange={(event) => setPickerExclude(event.target.checked)}
+            />
+            <span>
+              <strong>{t("NOT")}</strong> — {t("keep events outside this gate")}
+            </span>
+          </label>
           {gatePicker.refIndex !== null && (
             <button type="button" className="pop-gate-picker-remove" onClick={removePickedGate}>
               {t("Remove this gate from the population")}

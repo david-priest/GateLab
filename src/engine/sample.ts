@@ -20,7 +20,8 @@ import type {
 import { encodeFloat32Base64, encodeUint8Base64 } from "./encode";
 import { robustAxisRange } from "./axisRange";
 import { DEFAULT_DENSITY_COLOR_POWER } from "./pseudocolor";
-import { logicleTicks, scatterTicks, type AxisTicks } from "./ticks";
+import type { ChannelScales } from "./channelScales";
+import { logicleTicks, scatterTicks, linearScatterTicks, type AxisTicks } from "./ticks";
 import {
   extractDisplaySpillover,
   type DisplaySpillover,
@@ -114,6 +115,13 @@ export interface OverlaySpec {
 export interface SampleOpts {
   /** CyTOF arcsinh cofactor (default 5). */
   cytofCofactor?: number;
+  /**
+   * Workspace-wide owner of display scales. When supplied, logicle W and the scatter scale are
+   * read from and written to it, so every file drawn together shares one transform per channel
+   * — including files loaded after the setting was made. Omitted in unit tests and any
+   * single-sample use, where the per-sample fallbacks below behave exactly as before.
+   */
+  channelScales?: ChannelScales;
 }
 
 export type AssayLayer = "original" | "compensated";
@@ -415,6 +423,25 @@ export class Sample {
       this.instrument === "cytof" ? this.cytofCofactor : null,
       this.instrument === "flow" ? orderedOverrides(this.wOverride) : [],
       this.instrument === "flow" ? orderedOverrides(this.scatterCofactorOverride) : [],
+      // Shared settings, and the generation of the participant roster. An explicit change
+      // re-keys only the channels it touched; the roster moves only when a file is added or
+      // removed, which is the only time the shared auto estimate can change. Keeping this
+      // precise matters because compensation staging keys off this same identity.
+      this.channelScales
+        ? [
+            this.channelScales.identityFor(
+              this.workspaceScaleContextKey,
+              this.channels.map((channel) => channel.key),
+            ),
+            this.channelScales.rosterVersion,
+          ]
+        : [],
+      // Linear scatter changes a channel's transform to identity, so it belongs here for
+      // the same reason the cofactor does. Omitting it let the plot reuse display
+      // coordinates computed under arcsinh while the gate outline, which is transformed
+      // live from raw space, moved to the new scale — the gate appeared to jump off its
+      // own events while the event count stayed correct.
+      this.instrument === "flow" ? [...this.scatterLinear].map((i) => this.channels[i]?.key ?? `#${i}`).sort() : [],
     ]);
   }
 
@@ -1450,6 +1477,21 @@ export class Sample {
   private readonly logicleParamsCache = new Map<number, { t: number; w: number }>();
   /** User-set logicle W per channel (overrides the auto estimate). */
   private readonly wOverride = new Map<number, number>();
+  /** Workspace-wide owner of display scales; absent in single-sample and unit-test use. */
+  private channelScales?: ChannelScales;
+
+  /**
+   * Join a workspace's shared display scales. Registering also contributes this file's own auto
+   * estimate to the shared one, so the roster generation moves and dependent caches re-key.
+   */
+  attachChannelScales(scales: ChannelScales): () => void {
+    this.channelScales = scales;
+    scales.register(this);
+    return () => {
+      scales.unregister(this);
+      if (this.channelScales === scales) this.channelScales = undefined;
+    };
+  }
 
   private logicleParams(idx: number): { t: number; w: number } {
     let p = this.logicleParamsCache.get(idx);
@@ -1464,17 +1506,23 @@ export class Sample {
   private transform(idx: number): ChannelTransform {
     const hit = this.transformCache.get(idx);
     if (hit) return hit;
-    const name = this.channels[idx].key;
+    const { key: name, pnn } = this.channels[idx];
     let t: ChannelTransform;
     if (this.instrument === "cytof") {
       t = isCytofRawChannel(name) ? IDENTITY : asinhTransform(this.cytofCofactor);
-    } else if (isQcChannel(name)) {
+    } else if (isQcChannel(name) || isQcChannel(pnn)) {
       t = IDENTITY;
-    } else if (isScatterChannel(name)) {
-      t = asinhTransform(this.currentScatterCofactor(idx));
+      // Classify on $PnN as well as the display key, as the spillover resolution above
+      // already does. On instruments whose $PnS is prose ("Forward Scatter (FSC-HLin)"
+      // on a Guava Muse) the key is the prose and only $PnN ("FSC-HLin") is recognisable
+      // as scatter, so keying on the label alone silently gave scatter a logicle.
+    } else if (isScatterChannel(name) || isScatterChannel(pnn)) {
+      // Linear scatter reuses the identity transform rather than introducing a new kind:
+      // raw == display for that channel, which axis ticks and gate rendering already handle.
+      t = this.scatterIsLinear(idx) ? IDENTITY : asinhTransform(this.currentScatterCofactor(idx));
     } else {
       const { t: tv } = this.logicleParams(idx);
-      const w = this.wOverride.get(idx) ?? this.logicleParams(idx).w;
+      const w = this.currentLogicleW(idx);
       const lg = new Logicle(tv, w, 4.5, 0);
       // GateLabR (fcs_import.R:862) falls back to asinh(x/150) when the logicle can't be built /
       // doesn't converge (Logicle.scale returns -1). Health-check at representative values; an
@@ -1532,13 +1580,95 @@ export class Sample {
     if (activeDataChanged) this.invalidateAll();
     this.publishRevisions(activeDataChanged, layerStateChanged);
   }
+  /** Flow-scatter channels the user has switched to a linear display, by column index. */
+  private readonly scatterLinear = new Set<number>();
+
+  /**
+   * True for a flow scatter axis — the only channels the scatter scale control applies to.
+   * CyTOF is excluded deliberately: arcsinh cofactor 5 is the field convention there and
+   * is not offered as a choice.
+   */
+  isScatterAxis(idx: number): boolean {
+    if (this.instrument !== "flow") return false;
+    const channel = this.channels[idx];
+    if (!channel) return false;
+    return isScatterChannel(channel.key) || isScatterChannel(channel.pnn);
+  }
+
+  /** Display scale for a flow scatter channel. */
+  scatterScale(idx: number): "arcsinh" | "linear" {
+    return this.scatterIsLinear(idx) ? "linear" : "arcsinh";
+  }
+
+  /**
+   * Switch a flow scatter channel between arcsinh and linear display. Gates are stored in
+   * raw space for flow, so this never moves a gate — only what the axis looks like.
+   */
+  setScatterScale(idx: number, scale: "arcsinh" | "linear"): void {
+    if (!this.isScatterAxis(idx)) return;
+    const key = this.channels[idx]?.key;
+    if (this.channelScales && key) {
+      this.channelScales.setScatterLinear(this.workspaceScaleContextKey, key, scale === "linear");
+      return;
+    }
+    if (scale === "linear") this.scatterLinear.add(idx);
+    else this.scatterLinear.delete(idx);
+    this.invalidateChannel(idx);
+  }
+
+  /** Channel keys displayed linearly, for workspace save. */
+  scatterLinearKeys(): string[] {
+    const keys = new Set(
+      [...this.scatterLinear].map((idx) => this.channels[idx]?.key).filter((k): k is string => !!k),
+    );
+    if (this.channelScales) {
+      const context = this.workspaceScaleContextKey;
+      for (const channel of this.channels) {
+        if (this.channelScales.isScatterLinear(context, channel.key)) keys.add(channel.key);
+      }
+    }
+    return [...keys];
+  }
+
+  /** Restore linear scatter channels from a saved workspace. */
+  applyScatterLinearKeys(keys: readonly string[]): void {
+    this.scatterLinear.clear();
+    for (const key of keys) {
+      const idx = this.byName.get(key);
+      if (idx !== undefined && this.isScatterAxis(idx)) {
+        if (this.channelScales) {
+          this.channelScales.setScatterLinear(this.workspaceScaleContextKey, key, true);
+          continue;
+        }
+        this.scatterLinear.add(idx);
+        this.invalidateChannel(idx);
+      }
+    }
+  }
+
+  /** Clear a scatter cofactor override, reverting to the 150 default. */
+  resetScatterCofactor(idx: number): void {
+    this.scatterCofactorOverride.delete(idx);
+    this.invalidateChannel(idx);
+  }
+
   /** Current flow-scatter arcsinh cofactor (default 150). */
   currentScatterCofactor(idx: number): number {
+    const key = this.channels[idx]?.key;
+    if (this.channelScales && key) {
+      const shared = this.channelScales.scatterCofactor(this.workspaceScaleContextKey, key);
+      if (shared !== undefined) return shared;
+    }
     return this.scatterCofactorOverride.get(idx) ?? 150;
   }
   /** Override one flow-scatter cofactor; invalidates its display/gating caches. */
   setScatterCofactor(idx: number, cofactor: number): void {
     if (!Number.isFinite(cofactor) || cofactor <= 0) return;
+    const key = this.channels[idx]?.key;
+    if (this.channelScales && key) {
+      this.channelScales.setScatterCofactor(this.workspaceScaleContextKey, key, cofactor);
+      return;
+    }
     this.scatterCofactorOverride.set(idx, cofactor);
     this.invalidateChannel(idx);
   }
@@ -1548,14 +1678,61 @@ export class Sample {
     for (const [idx, cofactor] of this.scatterCofactorOverride) {
       out[this.channels[idx].key] = cofactor;
     }
+    if (this.channelScales) {
+      // Shared settings are saved into every sample's record, so the on-disk format is
+      // unchanged and a workspace written now still opens in an older build.
+      const context = this.workspaceScaleContextKey;
+      for (const channel of this.channels) {
+        const shared = this.channelScales.scatterCofactor(context, channel.key);
+        if (shared !== undefined) out[channel.key] = shared;
+      }
+    }
     return out;
   }
   /** Current logicle W (user override or auto). */
   currentLogicleW(idx: number): number {
+    const shared = this.channelScales;
+    const key = this.channels[idx]?.key;
+    if (shared && key) {
+      const context = this.workspaceScaleContextKey;
+      const explicit = shared.logicleW(context, key);
+      if (explicit !== undefined) return explicit;
+      // The shared auto estimate, not this file's own: per-file estimates differ (0.500 vs
+      // 1.143 on one real channel), which is what made a pooled cloud open already split.
+      const auto = shared.autoLogicleW(context, key);
+      if (auto !== undefined) return auto;
+    }
     return this.wOverride.get(idx) ?? this.logicleParams(idx).w;
+  }
+
+  /** This file's own estimate, ignoring the shared owner. Used by it to derive the shared W. */
+  ownAutoLogicleW(idx: number): number {
+    return this.logicleParams(idx).w;
+  }
+
+  /** Invalidate one channel's display cache after a shared-scale change. */
+  invalidateChannelForScales(idx: number): void {
+    this.invalidateChannel(idx);
+  }
+
+  /** True when this channel is drawn on a linear scatter axis. */
+  private scatterIsLinear(idx: number): boolean {
+    const shared = this.channelScales;
+    const key = this.channels[idx]?.key;
+    if (shared && key) return shared.isScatterLinear(this.workspaceScaleContextKey, key);
+    return this.scatterLinear.has(idx);
   }
   /** Override the logicle W for a channel; invalidates its cached display column. */
   setLogicleW(idx: number, w: number): void {
+    // Guarded like setScatterScale. Without it a workspace-wide write lands on files where the
+    // same channel key resolves to scatter or QC, persisting an override that does nothing but
+    // churn this sample's display-transform identity.
+    if (!this.isLogicleChannel(idx)) return;
+    const key = this.channels[idx]?.key;
+    if (this.channelScales && key) {
+      this.channelScales.setLogicleW(this.workspaceScaleContextKey, key, w);
+      return;
+    }
     this.wOverride.set(idx, Math.max(0.1, Math.min(w, 2.0)));
     this.invalidateChannel(idx);
   }
@@ -1563,10 +1740,24 @@ export class Sample {
   logicleWOverrides(): Record<string, number> {
     const out: Record<string, number> = {};
     for (const [idx, w] of this.wOverride) out[this.channels[idx].key] = w;
+    if (this.channelScales) {
+      for (const [key, w] of Object.entries(
+        this.channelScales.logicleWEntries(this.workspaceScaleContextKey),
+      )) {
+        if (this.byName.has(key)) out[key] = w;
+      }
+    }
     return out;
   }
   /** Clear a W override, reverting to the auto estimate. */
   resetLogicleW(idx: number): void {
+    const key = this.channels[idx]?.key;
+    if (this.channelScales && key) {
+      // Reverts to the SHARED estimate. Reverting to each file's own estimate is what made the
+      // reset button deterministically re-split a pooled cloud.
+      this.channelScales.resetLogicleW(this.workspaceScaleContextKey, key);
+      return;
+    }
     this.wOverride.delete(idx);
     this.invalidateChannel(idx);
   }
@@ -1721,8 +1912,17 @@ export class Sample {
     const fwd = (v: number) => t.forward(v);
     const inv = (v: number) => t.inverse(v);
     // Flow scatter (FSC/SSC): asinh display, raw-unit decade labels (1K/10K/100K).
+    // On a LINEAR scatter axis the transform is the identity, and those decade labels
+    // pile up against the low end of the axis and overlap illegibly — 10K, 100K and 1M
+    // land within a few pixels of each other. Evenly spaced linear ticks are correct
+    // there, so fall through to the D3 default.
     if (this.instrument === "flow" && isScatterChannel(name)) {
-      return scatterTicks(fwd, inv, axisRange, this.currentScatterCofactor(idx));
+      // A linear scatter axis is the identity transform. Raw-unit DECADE labels pile up
+      // against its low end and overlap illegibly, so it gets evenly spaced ticks — but
+      // still with the K/M labels the rest of the app uses, not D3's "10,000,000".
+      return t.kind === "identity"
+        ? linearScatterTicks(axisRange)
+        : scatterTicks(fwd, inv, axisRange, this.currentScatterCofactor(idx));
     }
     // Flow signal (fluorophore): logicle display, biexponential decade labels.
     if (t.kind === "logicle") {

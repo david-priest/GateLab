@@ -197,3 +197,37 @@ export function scatterTicks(
     return null;
   }
 }
+
+/**
+ * Evenly spaced ticks for a LINEAR scatter axis, labelled with the same K/M
+ * abbreviation the transformed axes use. D3's default formatter would print
+ * "10,000,000" where every other axis in the app reads "10M".
+ */
+export function linearScatterTicks(axisRange: [number, number]): AxisTicks | null {
+  const [lo, hi] = axisRange;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return null;
+  const span = hi - lo;
+  // A 1/2/5 x 10^n step, the same family D3 picks, so the count stays near six.
+  const rough = span / 6;
+  const mag = Math.pow(10, Math.floor(Math.log10(rough)));
+  const norm = rough / mag;
+  const step = (norm >= 5 ? 5 : norm >= 2 ? 2 : 1) * mag;
+  const first = Math.ceil(lo / step) * step;
+  const major: number[] = [];
+  // Every tick inside the range is kept. Overhang at the frame edge is handled where it
+  // belongs, by the renderer's axis clip bands — an earlier guess that trimmed the outer
+  // 3% here was treating a symptom that turned out to have a different cause, and it threw
+  // away legitimate end ticks to do it.
+  for (let v = first; v <= hi + step * 1e-9 && major.length < 24; v += step) {
+    major.push(Math.abs(v) < step * 1e-9 ? 0 : v);
+  }
+  if (major.length < 2) return null;
+  return {
+    major_pos: major,
+    major_labels: major.map(fmtScatterLabel),
+    minor_pos: [],
+    // Linear ticks are evenly spaced and cannot crowd, so the renderer must not
+    // run its compressed-label hiding pass over them.
+    tick_mode: "scatter_log10",
+  };
+}

@@ -4,9 +4,8 @@ import { parseFcs } from "./fcs";
 import { Sample } from "./sample";
 import { extractDisplaySpillover, invertMatrix, compensate } from "./compensation";
 import { isScatterChannel, isQcChannel } from "./transforms";
+import { ARIA_SMALL } from "../testFixtures";
 
-const ARIA_SMALL =
-  "/Users/davidpriest/code/gatelabr-test-fcs/conventional_comp_AriaIII/sample_Bmem_purity_small.fcs";
 function loadArrayBuffer(path: string): ArrayBuffer {
   const b = readFileSync(path);
   return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);

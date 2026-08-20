@@ -62,15 +62,33 @@ describe("GateLab cytof interaction patches", () => {
     warning.mockRestore();
   });
 
-  it("reserves warm pseudocolours for denser event cores without changing density", () => {
+  it("biases the quantile pseudocolour ramp without changing density", () => {
+    // The renderer maps density by quantile rank (equal-probability, as FlowJo does); the
+    // exponent composes with that ramp. Event positions, density bins and event inclusion
+    // are untouched either way.
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const patched = patchCytofForGateLab(cytofSrc);
 
     expect(warning).not.toHaveBeenCalled();
     expect(patched).toContain("var colourPower = Number(_plotData.density_color_power);");
     expect(patched).toContain("colourPower = 1.6;");
-    expect(patched).toContain("Math.pow(Math.min(1, cache.densities[i] / cache.maxDens), colourPower)");
+    expect(patched).toContain("Math.pow(Math.min(1, cache.rank[i]), colourPower)");
+    // The peak-relative mapping must be gone, or the ramp is no longer self-normalising.
+    expect(patched).not.toContain("cache.densities[i] / cache.maxDens");
     expect(() => new Function(patched)).not.toThrow();
+
+    warning.mockRestore();
+  });
+
+  it("still patches an older pinned renderer that divides by the peak", () => {
+    // The submodule can legitimately sit behind GateLabR main, so the pre-quantile form
+    // must keep working rather than silently losing the exponent.
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const legacy = cytofSrc.replace("var t = cache.rank[i];", "var t = cache.densities[i] / cache.maxDens;");
+    const patched = patchCytofForGateLab(legacy);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(patched).toContain("Math.pow(Math.min(1, cache.densities[i] / cache.maxDens), colourPower)");
 
     warning.mockRestore();
   });

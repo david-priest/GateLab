@@ -171,3 +171,41 @@ describe("transformChannel vs real-FCS GateLabR oracle", () => {
     expect(w).toBeCloseTo(pe.meta.W!, 9);
   });
 });
+
+describe("isScatterChannel — worded names and the imaging-morphometrics guard", () => {
+  it("accepts spelled-out scatter axes", () => {
+    expect(isScatterChannel("Forward Scatter (FSC-HLin)")).toBe(true);
+    expect(isScatterChannel("Forward Scatter Width")).toBe(true);
+    expect(isScatterChannel("Side scatter")).toBe(true);
+    expect(isScatterChannel("Side Angle Scatter")).toBe(true);
+    expect(isScatterChannel("Back-scatter")).toBe(true);
+  });
+
+  it("still accepts the abbreviated and light-loss forms", () => {
+    expect(isScatterChannel("FSC-A")).toBe(true);
+    expect(isScatterChannel("SSC (Violet)-A")).toBe(true);
+    expect(isScatterChannel("LightLoss (Imaging)-A")).toBe(true);
+    expect(isScatterChannel("Light Loss-A")).toBe(true);
+  });
+
+  it("does NOT swallow derived imaging morphometrics that merely mention FSC/SSC", () => {
+    // A BD FACSDiscover S8 emits these. They are shape measurements computed FROM the
+    // scatter image, not scatter, and must keep a fluorescence-style transform. This is
+    // why the qualifier is required and why FSC/SSC are matched only at the start.
+    for (const name of [
+      "Size (FSC)",
+      "Eccentricity (SSC (Imaging))",
+      "Max Intensity (LightLoss (Imaging))",
+      "Delta CoM (FSC/eGFP)",
+      "Long Axis Moment (SSC (Imaging))",
+      "Diffusivity (FSC)",
+    ]) {
+      expect(isScatterChannel(name), `${name} must not be treated as scatter`).toBe(false);
+    }
+  });
+
+  it("does not treat a bare mention of scatter as an axis", () => {
+    expect(isScatterChannel("Scatter Ratio")).toBe(false);
+    expect(isScatterChannel("CD45 backscatter-corrected")).toBe(false);
+  });
+});

@@ -6,6 +6,7 @@ import { Sample } from "./sample";
 import { analyzeGatingMLQuadrantOmissions, exportGatingML } from "./gatingmlExport";
 import { importGatingML, resolveGatingMLCompensation, restoreGatingMLScaleState } from "./gatingml";
 import { getGateMask } from "./gates";
+import { applyGatingStrategy } from "./populations";
 import {
   newRootPopulation,
   newPopulation,
@@ -15,9 +16,8 @@ import {
   type PopulationMap,
   type Vertex,
 } from "./models";
+import { ARIA_SMALL } from "../testFixtures";
 
-const ARIA_SMALL =
-  "/Users/davidpriest/code/gatelabr-test-fcs/conventional_comp_AriaIII/sample_Bmem_purity_small.fcs";
 
 function loadArrayBuffer(path: string): ArrayBuffer {
   const b = readFileSync(path);
@@ -437,4 +437,83 @@ describe("GatingML positive-AND import policy", () => {
     const back = importGatingML(xml, sessionChannels, pnnMap);
     expect(Object.values(back.populations).some((pop) => pop.name.startsWith("Quadrant"))).toBe(false);
   });
+});
+
+describe("GatingML NOT round-trip (Aria III flow, real events)", () => {
+  const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+  const sessionChannels = sample.channels.map((c) => c.key);
+  const pnnMap: Record<string, string> = {};
+  for (const c of sample.channels) pnnMap[c.pnn] = c.key;
+
+  /**
+   * The positive-AND workspace plus a sibling population that EXCLUDES the scatter
+   * rectangle. Negating the fluorophore polygon instead would be vacuous: it contains
+   * every event of its parent, so its complement is empty and the test could not fail.
+   */
+  function buildExcludedWorkspace() {
+    const ws = buildWorkspace(sample);
+    const rectGateId = ws.gate_order[0];
+    const notCells = newPopulation(
+      "Not cells", [newGateRef(rectGateId, false)], ws.root_population_id,
+    );
+    ws.populations[notCells.population_id] = notCells;
+    ws.populations = linkChildToParent(
+      ws.populations, notCells.population_id, ws.root_population_id,
+    );
+    return ws;
+  }
+
+  /** Per-event membership of every named population, keyed by name. */
+  function membershipByName(ws: ReturnType<typeof buildWorkspace>): Record<string, Uint8Array> {
+    const { masks } = applyGatingStrategy(
+      ws.gates, ws.populations, ws.root_population_id, sample.gatingData(),
+    );
+    const out: Record<string, Uint8Array> = {};
+    for (const pop of Object.values(ws.populations)) {
+      if (pop.population_id === ws.root_population_id) continue;
+      out[pop.name] = masks[pop.population_id];
+    }
+    return out;
+  }
+
+  for (const format of ["standard", "cytobank"] as const) {
+    describe(`${format} format`, () => {
+      const ws = buildExcludedWorkspace();
+      const before = membershipByName(ws);
+      const xml = exportGatingML({ ...ws, sample, format, timestamp: "2026-01-01T00:00:00" });
+      const back = importGatingML(xml, sessionChannels, pnnMap);
+
+      it("emits the exclusion rather than dropping it", () => {
+        expect(xml).toMatch(/complement="true"|NOT gate_/);
+      });
+
+      it("re-imports the excluded reference as include = false", () => {
+        const notCells = Object.values(back.populations).find((p) => p.name === "Not cells");
+        expect(notCells).toBeDefined();
+        expect(notCells!.gate_refs).toHaveLength(1);
+        expect(notCells!.gate_refs[0].include).toBe(false);
+      });
+
+      it("preserves membership event for event, and the NOT population is not empty", () => {
+        const after = membershipByName({
+          gates: back.gates,
+          gate_order: back.gate_order,
+          populations: back.populations,
+          root_population_id: back.root_population_id,
+        });
+        for (const name of Object.keys(before)) {
+          expect(after[name], `population ${name} missing after round-trip`).toBeDefined();
+          expect(Array.from(after[name])).toEqual(Array.from(before[name]));
+        }
+        // Guard against a vacuous pass: NOT and its positive counterpart must partition
+        // the root, so neither is empty and equality above is a real constraint.
+        const count = (m: Uint8Array) => m.reduce((s, v) => s + v, 0);
+        const nCells = count(before["Cells"]);
+        const nNotCells = count(before["Not cells"]);
+        expect(nCells).toBeGreaterThan(0);
+        expect(nNotCells).toBeGreaterThan(0);
+        expect(nCells + nNotCells).toBe(sample.gatingData().n);
+      });
+    });
+  }
 });

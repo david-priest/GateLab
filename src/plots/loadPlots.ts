@@ -173,11 +173,22 @@ export function patchCytofForGateLab(src: string): string {
         if (!isFinite(colourPower) || colourPower <= 0) colourPower = 1.6;
 
         for (var j = 0; j < n; j++) {`;
-  const densityPowerNeedle = "var t = cache.densities[i] / cache.maxDens;";
-  const densityPowerPatch = "var t = Math.pow(Math.min(1, cache.densities[i] / cache.maxDens), colourPower);";
+  // The renderer now maps density by quantile rank (equal-probability, as FlowJo does).
+  // The exponent composes with it as a bias on that ramp, which keeps its documented meaning
+  // — above one still reserves yellow/red for the genuinely densest cores — while the ramp
+  // itself stays self-normalising across samples.
+  const densityPowerNeedle = "var t = cache.rank[i];";
+  const densityPowerPatch = "var t = Math.pow(Math.min(1, cache.rank[i]), colourPower);";
+  // Kept so an older pinned submodule, which still divides by the peak, is patched too.
+  const legacyPeakNeedle = "var t = cache.densities[i] / cache.maxDens;";
+  const legacyPeakPatch = "var t = Math.pow(Math.min(1, cache.densities[i] / cache.maxDens), colourPower);";
+  if (out.includes(legacyPeakNeedle)) out = out.replace(legacyPeakNeedle, legacyPeakPatch);
   if (out.includes(densityPowerSetupNeedle)) out = out.replace(densityPowerSetupNeedle, densityPowerSetupPatch);
   if (out.includes(densityPowerNeedle)) out = out.replace(densityPowerNeedle, densityPowerPatch);
-  if (!out.includes("_plotData.density_color_power") || !out.includes(densityPowerPatch)) {
+  if (
+    !out.includes("_plotData.density_color_power") ||
+    !(out.includes(densityPowerPatch) || out.includes(legacyPeakPatch))
+  ) {
     console.warn("[GateLab] cytof pseudocolour-transfer patch did not match.");
   }
 

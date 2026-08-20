@@ -4,7 +4,7 @@
 // (float32/float64/int, honouring $BYTEORD), returning per-channel columns.
 //
 // Verified against the ground truth of
-// gatelabr-test-fcs/conventional_comp_AriaIII/sample_Bmem_purity_small.fcs:
+// the Aria III fixture sample_Bmem_purity_small.fcs (see src/testFixtures.ts):
 //   FCS3.1, $DATATYPE=F, $BYTEORD='4,3,2,1' (big-endian), 1080 events, 13 channels,
 //   6-channel $SPILLOVER. (Endianness is real, not guessed — see fcs.test.ts.)
 

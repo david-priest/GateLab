@@ -17,7 +17,6 @@ import {
   buildMultiSampleIllustrationPayload,
   type IllustrationSampleSource,
 } from "../engine/illustration";
-import { populationTreeOrder } from "../engine/populations";
 import { populationColor } from "../engine/palettes";
 import {
   buildMultiSampleHeatmapPayload,
@@ -31,6 +30,7 @@ import { CollapsiblePicker } from "./CollapsiblePicker";
 import { DensityColourControl } from "./DensityColourControl";
 import { IllustrationSelectionMatrix } from "./IllustrationSelectionMatrix";
 import { useI18n } from "./i18n";
+import { illustrationPickerPopulations } from "./illustrationPopulations";
 
 interface Props {
   sample: Sample;
@@ -101,7 +101,7 @@ export function IllustrationTab({
 }: Props) {
   const { t } = useI18n();
   const rootId = state.root_population_id ?? "";
-  const order = populationTreeOrder(state.populations, rootId).filter(({ popId }) => popId !== rootId);
+  const { order, defaultSelection } = illustrationPickerPopulations(state.populations, rootId);
   const allChannels = sample.channels.map((c) => c.key);
 
   // Restore from the App-held config on (re)mount; null = first-ever mount → prop-derived defaults.
@@ -120,7 +120,7 @@ export function IllustrationTab({
           .map(([sampleId, popIds]) => [sampleId, [...popIds]]),
       )
     : {});
-  const [popIds, setPopIds] = useState<string[]>(() => (c0 ? c0.popIds : order.slice(0, 4).map((o) => o.popId)));
+  const [popIds, setPopIds] = useState<string[]>(() => (c0 ? c0.popIds : defaultSelection));
   const [xChannels, setXChannels] = useState<string[]>(() => (c0 ? c0.xChannels : [defaultX]));
   const [yChannel, setYChannel] = useState(c0?.yChannel || defaultY);
   const [displayMode, setDisplayMode] = useState(c0?.displayMode ?? "pseudocolor");

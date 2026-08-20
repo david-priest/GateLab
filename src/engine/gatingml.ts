@@ -3,9 +3,11 @@
 //
 // GateLabR exports encode the population hierarchy as a <GatingHierarchy> of nested
 // <PopulationGatePair>s; Cytobank exports use flat <BooleanGate>s + custom_info
-// (gate_set_id, booleanExpression "pop_X"). Both structures are handled, but the
-// current product policy imports positive AND populations only: files containing
-// NOT/complement or OR logic are rejected before any workspace state is replaced.
+// (gate_set_id, booleanExpression "pop_X"). Both structures are handled. NOT is
+// supported: a complemented reference becomes a GateRef with include = false. OR
+// populations are still rejected before any workspace state is replaced, because a
+// population carries one gate_logic for all its refs (see
+// unsupportedBooleanLogicProblems).
 // Gate vertices live in TRANSFORMED (display) space with a transformation-ref; we
 // invert them back to the gating space GateLab masks in (raw for flow, arcsinh for
 // CyTOF).
@@ -306,6 +308,7 @@ interface RawGate {
   pop_parent_indices?: number[];
   gate_set_id?: number;
   explicit_root?: boolean;
+  parent_id?: string;
 }
 
 function parseGateNode(node: Element): RawGate | null {
@@ -426,12 +429,21 @@ function pairPopulationName(pair: Element, rawGates: Record<string, RawGate>): s
 }
 
 /**
- * GateLab deliberately authors and imports positive intersections only. Detect
- * unsupported Boolean semantics while the XML is still detached from app state,
- * and report the affected population names rather than silently dropping an
- * operator and changing membership.
+ * NOT is representable: a complemented reference maps 1:1 onto a GateRef with
+ * include = false, which the gating engine already evaluates per event. OR is not
+ * yet accepted on import, because a population carries a single gate_logic for all
+ * of its refs, so a mixed expression such as `A AND (B OR C)` has no faithful
+ * representation and would silently change membership.
+ *
+ * Detect the remaining unsupported semantics while the XML is still detached from
+ * app state, and report the affected population names rather than dropping an
+ * operator quietly.
+ *
+ * Note that a pair-level complement over an AND boolean is still accepted: De
+ * Morgan turns it into an OR of negated refs, which is a faithful single-logic
+ * population rather than a mixed expression.
  */
-function positiveAndLogicProblems(
+function unsupportedBooleanLogicProblems(
   rawGates: Record<string, RawGate>,
   hierarchyNode: Element | null,
 ): string[] {
@@ -451,27 +463,15 @@ function positiveAndLogicProblems(
     namesByGate.set(gateRef, [...new Set(names)]);
   }
 
-  const addProblem = (name: string, operation: "NOT" | "OR") => {
-    problems.push(
-      `Population ${JSON.stringify(name)} uses ${operation} logic; ` +
-        "GateLab currently imports positive AND populations only.",
-    );
-  };
-
   for (const gate of Object.values(rawGates)) {
     if (gate.gate_type !== "boolean") continue;
+    if (gate.operation !== "or") continue;
     const names = namesByGate.get(gate.gml_id) ?? [gate.name];
-    if (gate.operation === "or") {
-      for (const name of names) addProblem(name, "OR");
-    }
-    if (gate.operation === "not" || (gate.refs ?? []).some((ref) => ref.complement)) {
-      for (const name of names) addProblem(name, "NOT");
-    }
-  }
-
-  for (const pair of pairs) {
-    if ((attrLocal(pair, "complement") ?? "false").toLowerCase() === "true") {
-      addProblem(pairPopulationName(pair, rawGates), "NOT");
+    for (const name of names) {
+      problems.push(
+        `Population ${JSON.stringify(name)} uses OR logic; ` +
+          "GateLab imports AND populations, with NOT on individual gate references.",
+      );
     }
   }
 
@@ -852,10 +852,12 @@ export function importGatingML(
       importProblems.push(`${gateLabel(el)} could not be parsed.`);
       continue;
     }
+    const parentRef = attrLocal(el, "parent_id");
+    if (parentRef) g.parent_id = parentRef;
     rawGates[g.gml_id] = g;
     if (g.gate_type === "boolean") boolOrder.push(g.gml_id);
   }
-  importProblems.push(...positiveAndLogicProblems(rawGates, hierarchyNode));
+  importProblems.push(...unsupportedBooleanLogicProblems(rawGates, hierarchyNode));
   importProblems.push(...missingChannelProblems(rawGates, sessionChannels, pnnToChannel));
   const gatelabrState = parseGatelabrState(root);
   const compensationRefs = parseCompensationRefs(rawGates);
@@ -866,6 +868,9 @@ export function importGatingML(
       if (ref && !transforms[ref]) {
         importProblems.push(`${gate.gml_id} references unsupported or missing transformation ${ref}.`);
       }
+    }
+    if (gate.parent_id && !rawGates[gate.parent_id]) {
+      importProblems.push(`${gate.gml_id} references missing parent gate ${gate.parent_id}.`);
     }
     if (gate.gate_type === "boolean") {
       for (const ref of gate.refs ?? []) {
@@ -1084,12 +1089,50 @@ function buildPopulationsFromBooleans(
   }
 
   if (Object.keys(boolNames).length === 0) {
-    // No booleans → one population per primitive gate under root.
-    for (const gid of gateOrder) {
-      const g = appGates[gid];
-      const pop = newPopulation(g.name, [newGateRef(gid, true)], rootPopId);
-      populations[pop.population_id] = pop;
-      linkChildToParent(populations, pop.population_id, rootPopId);
+    // No booleans. Standard Gating-ML 2.0 — and therefore FlowJo's export —
+    // expresses ancestry as a parent_id attribute on each gate rather than as
+    // Boolean gates, so honour that before falling back to a flat tree.
+    // Without this every gate parents to root and each population is measured
+    // against All Events, which silently inflates every child count.
+    const appToGml: Record<string, string> = {};
+    for (const [gmlId, appId] of Object.entries(gmlToApp)) appToGml[appId] = gmlId;
+
+    const parentAppOf = (gid: string): string | null => {
+      const gmlId = appToGml[gid];
+      const parentGml = gmlId ? rawGates[gmlId]?.parent_id : undefined;
+      if (!parentGml) return null;
+      const parentApp = gmlToApp[parentGml];
+      return parentApp && parentApp !== gid ? parentApp : null;
+    };
+
+    // Depth orders parents before children; the seen set makes a malformed
+    // cycle terminate instead of hanging the import.
+    const depthOf = (gid: string): number => {
+      let d = 0;
+      let cur: string | null = gid;
+      const seen = new Set<string>();
+      while (cur && !seen.has(cur)) {
+        seen.add(cur);
+        const parent: string | null = parentAppOf(cur);
+        if (!parent) break;
+        cur = parent;
+        d++;
+      }
+      return d;
+    };
+
+    const ordered = [...gateOrder].sort((a, b) => depthOf(a) - depthOf(b));
+    const gidToPid: Record<string, string> = {};
+    for (const gid of ordered) gidToPid[gid] = uuid();
+
+    for (const gid of ordered) {
+      const pid = gidToPid[gid];
+      const parentApp = parentAppOf(gid);
+      const parentPid = parentApp ? gidToPid[parentApp] ?? rootPopId : rootPopId;
+      const pop = newPopulation(appGates[gid].name, [newGateRef(gid, true)], parentPid);
+      pop.population_id = pid; // preserve the id used for parent links
+      populations[pid] = pop;
+      linkChildToParent(populations, pid, parentPid);
     }
     return;
   }

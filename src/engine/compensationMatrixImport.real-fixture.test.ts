@@ -13,13 +13,12 @@ import {
 } from "./cytofCompensationEngine";
 import { parseFcs } from "./fcs";
 import { Sample } from "./sample";
+import { ARIA_SPILLOVER_CSV } from "../testFixtures";
 
 const cytofMatrixPath =
   process.env.GATELAB_CYTOF_SPILL_MATRIX ??
   "/Users/davidpriest/code/archive/snakemake-experiments/SLE_AIM_test_260325_snakemake/results/compensation/spillover_matrix_beads.csv";
-const flowUnnamedRowsPath =
-  process.env.GATELAB_FLOW_SPILL_MATRIX ??
-  "/Users/davidpriest/code/gatelabr-test-fcs/conventional_comp_AriaIII/spillover_matrix_embedded.csv";
+const flowUnnamedRowsPath = process.env.GATELAB_FLOW_SPILL_MATRIX ?? ARIA_SPILLOVER_CSV;
 const wingLabMatrixPath =
   process.env.GATELAB_WINGLAB_CYTOF_SPILL_MATRIX ??
   "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/HyperIgM/260519 Second round of mass phenotyping/data/Compensation/WingLab_QQ_beads_sm_full.csv";
