@@ -80,6 +80,12 @@ export interface WorkspaceFile {
     pointAlpha?: number;
     /** Main-plot mark radius in px. Display only — density colouring is computed on a fixed grid. */
     pointSize?: number;
+    /**
+     * Draw only the gates of the displayed branch. Optional: workspaces saved before the
+     * control existed have none, and absent reads as true, which is the default behaviour
+     * they were saved under.
+     */
+    branchGatesOnly?: boolean;
     /** Main Gating plot typography. Optional for workspaces saved before these controls existed. */
     fontSizes?: GatingFontSizes;
   };

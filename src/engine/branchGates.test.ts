@@ -79,4 +79,15 @@ describe("hierarchy-scoped gate visibility", () => {
     expect(branchScopedGateOrder({} as PopulationMap, GATES, ORDER, "IgD+", "root", null))
       .toEqual(ORDER);
   });
+
+  // The toggle's OFF state is not a variant of the scoping rule -- it bypasses it entirely,
+  // drawing every gate that shares the plot's channels so thresholds set on different branches
+  // can be compared against each other. Pinned here because the App-level memo short-circuits
+  // before calling this function, and a future refactor could quietly route through it.
+  it("is bypassed, not reconfigured, when branch scoping is off", () => {
+    const unscoped = ORDER.length ? ORDER : Object.keys(GATES);
+    expect(unscoped).toEqual(ORDER);
+    // Scoped and unscoped genuinely differ for the case the toggle exists to serve.
+    expect(visible("IgD+", null)).not.toEqual(unscoped);
+  });
 });

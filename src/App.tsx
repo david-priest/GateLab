@@ -9,6 +9,11 @@ import { historyShortcutAction } from "./ui/historyShortcuts";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type NewGate } from "./plots/GatingPlot";
 import { buildPlotGates, type PlotGate } from "./plots/gatePayload";
 import { branchScopedGateOrder } from "./engine/branchGates";
+import {
+  isFlowJoWorkspace,
+  listFlowJoWorkspaceSamples,
+  flowJoWorkspaceToGatingML,
+} from "./engine/flowjoWorkspace";
 import { ChannelScales } from "./engine/channelScales";
 import { includePlotGatesInAxisRange } from "./engine/axisRange";
 import { parseFcs } from "./engine/fcs";
@@ -230,6 +235,8 @@ interface PendingGatingMLImport {
   sampleId: string;
   mergeBlockedReason: string | null;
   compensationNote: string | null;
+  /** Set when the gates came from a FlowJo workspace, so the result line can say which sample. */
+  sourceNote: string;
 }
 
 interface PendingNewGate {
@@ -622,6 +629,10 @@ export default function App() {
   const [instrumentMode, setInstrumentMode] = useState<"auto" | "flow" | "cytof">("auto"); // active sample's instrument override
   // Colour-by-factor overlay on the main plot (population partition / division level).
   const [overlayBy, setOverlayBy] = useState<"none" | "population" | "division" | "sample">("none");
+  // Scope the gates drawn on the plot to the displayed branch (default), or draw every gate
+  // that shares the channel pair. The wide view is for comparing thresholds set on different
+  // branches against each other, which the scoped view deliberately hides.
+  const [branchGatesOnly, setBranchGatesOnly] = useState(true);
   const [overlayPalette, setOverlayPalette] = useState<PaletteName>("default");
   const activeDisplayContextKey = sample?.displayTransformContextKey ?? null;
   const activeWorkspaceScaleContextKey = sample?.workspaceScaleContextKey ?? null;
@@ -1027,7 +1038,38 @@ export default function App() {
   async function prepareGatingImport(file: File) {
     if (!sample || !activeSampleId) return;
     try {
-      const text = await file.text();
+      let text = await file.text();
+      let wspNote = "";
+
+      // A FlowJo workspace is rewritten into Gating-ML and then takes the ordinary path, so
+      // channel resolution, validation, population building and merge/replace are unchanged.
+      // FlowJo's own Gating-ML export omits gating:name, so importing a workspace is the only
+      // way to get a NAMED hierarchy out of FlowJo without a separate recovery step.
+      if (isFlowJoWorkspace(text)) {
+        const samples = listFlowJoWorkspaceSamples(text);
+        const stem = (n: string) => n.replace(/\.fcs$/i, "").trim().toLowerCase();
+        const match = samples.find((s) => stem(s.name) === stem(fileName));
+        if (!match) {
+          const withGates = samples.filter((s) => s.gateCount > 0).map((s) => s.name);
+          throw new Error(
+            `This workspace has no sample matching the loaded file "${fileName}". ` +
+              `It contains: ${withGates.slice(0, 8).join(", ")}` +
+              `${withGates.length > 8 ? `, and ${withGates.length - 8} more` : ""}. ` +
+              `Load the matching FCS file first, or select it as the active file.`,
+          );
+        }
+        const converted = flowJoWorkspaceToGatingML(text, match.name);
+        text = converted.gatingMl;
+        wspNote =
+          ` from FlowJo workspace · ${match.name}` +
+          (converted.warnings.length ? ` · ${converted.warnings.length} skipped` : "");
+        if (converted.warnings.length) {
+          // Skipped gates are surfaced, never dropped quietly: a hierarchy that silently loses
+          // a branch looks like a successful import.
+          setError(converted.warnings.join("\n"));
+        }
+      }
+
       const pnnMap: Record<string, string> = {};
       for (const c of sample.channels) pnnMap[c.pnn] = c.key;
       const res = importGatingML(text, sample.channels.map((c) => c.key), pnnMap);
@@ -1076,6 +1118,7 @@ export default function App() {
         sampleId: activeSampleId,
         mergeBlockedReason,
         compensationNote,
+        sourceNote: wspNote,
       });
       setError(null);
     } catch (e) {
@@ -1158,7 +1201,8 @@ export default function App() {
           (comp.target === false ? " · compensation disabled" : "") +
           (res.skipped_channels.length
             ? ` · skipped channels: ${res.skipped_channels.join(", ")}`
-            : ""),
+            : "") +
+          pendingImport.sourceNote,
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -2469,6 +2513,8 @@ export default function App() {
             setDensityColorPower(
               normalizeDensityColorPower(workspace.display.densityColorPower),
             );
+            setBranchGatesOnly(
+              (workspace.display as { branchGatesOnly?: boolean }).branchGatesOnly !== false);
             setPointAlpha(restoredPointAlpha(workspace.display.pointAlpha));
             setPointSize(restoredPointSize(workspace.display.pointSize));
             setGatingFontSizes({
@@ -2729,6 +2775,7 @@ export default function App() {
         contourThreshold,
         densityColorPower,
         fontSizes: gatingFontSizes,
+        branchGatesOnly,
       },
       illustration: illustConfigRef.current ?? undefined,
       illustrationPresets,
@@ -3469,6 +3516,14 @@ export default function App() {
     setError(null);
     setImportMsg(`Opening ${wsFileName} · reading workspace`);
     try {
+      // "Workspace" means two different things now: a .gatelab bundle, and a FlowJo .wsp that
+      // carries gates only. Point at the right control rather than failing on the zip header.
+      if (/\.wsp$/i.test(wsFileName)) {
+        throw new Error(
+          `"${wsFileName}" is a FlowJo workspace, which holds gates rather than a GateLab ` +
+            `workspace. Load its FCS file first, then use "Import gating (GatingML / FlowJo)…".`,
+        );
+      }
       const envelope = await readWorkspaceEnvelopeFromFile(file);
       await openWorkspaceFromEnvelope(envelope, wsH, wsFileName);
     } catch (e) {
@@ -3734,6 +3789,8 @@ export default function App() {
       setMaxEvents(ws.display?.maxEvents ?? 50000);
       setContourThreshold(ws.display?.contourThreshold ?? 5);
       setDensityColorPower(normalizeDensityColorPower(ws.display?.densityColorPower));
+      setBranchGatesOnly(
+        (ws.display as { branchGatesOnly?: boolean } | undefined)?.branchGatesOnly !== false);
       setPointAlpha(restoredPointAlpha(ws.display?.pointAlpha));
       setPointSize(restoredPointSize(ws.display?.pointSize));
       setGatingFontSizes({ ...DEFAULT_GATING_FONT_SIZES, ...ws.display?.fontSizes });
@@ -4228,17 +4285,20 @@ export default function App() {
 
   // Hierarchy-scoped gate visibility; see branchScopedGateOrder for the rule.
   const branchGateOrder = useMemo(
-    () => branchScopedGateOrder(
+    () => (!branchGatesOnly
+      ? (state.gate_order.length ? state.gate_order : Object.keys(state.gates))
+      : branchScopedGateOrder(
       state.populations,
       state.gates,
       state.gate_order,
       state.active_population_id,
       state.root_population_id,
       state.selected_gate_id,
-    ),
+    )),
     [
       state.populations, state.gates, state.gate_order,
       state.active_population_id, state.root_population_id, state.selected_gate_id,
+      branchGatesOnly,
     ],
   );
 
@@ -4951,15 +5011,15 @@ export default function App() {
               </div>
               <button
                 className="gl-btn-ghost gl-btn-block"
-                title="Import Gating-ML 2.0 gates and positive AND populations, then choose whether to merge them into the current hierarchy or replace the current strategy"
+                title="Import Gating-ML 2.0 (.xml) or a FlowJo workspace (.wsp), then choose whether to merge into the current hierarchy or replace the current strategy. A workspace also carries population names, which FlowJo's own Gating-ML export omits."
                 onClick={() => xmlRef.current?.click()}
               >
-                {t("Import GatingML…")}
+                {t("Import gating (GatingML / FlowJo)…")}
               </button>
               <input
                 ref={xmlRef}
                 type="file"
-                accept=".xml"
+                accept=".xml,.wsp"
                 style={{ display: "none" }}
                 onChange={(e) => {
                   const f = e.target.files?.[0];
@@ -5644,6 +5704,17 @@ export default function App() {
           <div className="gl-side-section gl-side-grow">
             <div className="gl-side-head">
               <div className="gl-side-title">{t("Populations")}</div>
+              <label
+                className="gl-branch-gates-toggle"
+                title={t("Draw only the gates belonging to the displayed branch — the gates on the current population and its descendants, or, once a gate is selected, that gate's own sub-branch. Unchecked draws every gate sharing the plot's channels, which is how thresholds set on different branches are compared.")}
+              >
+                <input
+                  type="checkbox"
+                  checked={branchGatesOnly}
+                  onChange={(e) => setBranchGatesOnly(e.target.checked)}
+                />
+                {t("Branch gates")}
+              </label>
               <PopToolbar
                 state={state}
                 dispatch={dispatch}
