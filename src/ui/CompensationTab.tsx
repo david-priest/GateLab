@@ -808,6 +808,11 @@ function CompensationTabImpl({
 
   const matrixView = useMemo<CompensationMatrixView | null>(() => {
     if (spill) {
+      // An FCS-embedded matrix and one supplied from outside the file compensate identically but
+      // are not the same claim: only the embedded one can be re-derived from the file. Calling a
+      // workspace matrix "embedded" would misstate where these coefficients came from.
+      const origin = sample.spilloverOrigin;
+      const external = origin.kind === "external" ? origin : null;
       return {
         sourceAxisKeys: spill.channels,
         receiverAxisKeys: spill.channels,
@@ -815,9 +820,21 @@ function CompensationTabImpl({
         receiverChannels: spill.channels.map((key) => channelDisplay(sample, key)),
         matrix: spill.matrix,
         kind: "flow",
-        title: hostedFlowMatrix ? "SCE spillover matrix" : "Embedded compensation matrix",
+        title: hostedFlowMatrix
+          ? "SCE spillover matrix"
+          : external
+            ? `Compensation matrix from ${external.label}`
+            : "Embedded compensation matrix",
         subtitle: "Source rows ↓ · Receiver columns → · values are spillover percentages",
-        coefficientNote: "Applying the embedded matrix leaves its coefficients unchanged.",
+        coefficientNote: external
+          ? "This FCS carries no spillover matrix of its own; these coefficients came from the " +
+            "imported FlowJo workspace and are applied unchanged." +
+            (external.droppedChannels.length
+              ? ` ${external.droppedChannels.length} of its parameter(s) are not in this file ` +
+                `(${external.droppedChannels.join(", ")}) and were left out, which changes the ` +
+                "result for the channels they spill into."
+              : "")
+          : "Applying the embedded matrix leaves its coefficients unchanged.",
       };
     }
     if (!profileRecord || !profileMetadata) return null;

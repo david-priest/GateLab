@@ -32,6 +32,8 @@ function renderModal(mergeBlockedReason: string | null, onImport = vi.fn()) {
       mergeBlockedReason={mergeBlockedReason}
       compensationNote={null}
       compensationNeedsConfirmation={false}
+      matrixChoice={null}
+      onMatrixChoice={vi.fn()}
       onCancel={vi.fn()}
       onImport={onImport}
     />,

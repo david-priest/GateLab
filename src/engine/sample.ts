@@ -81,6 +81,9 @@ export interface ScatterPayload {
   x_label: string;
   y_label: string;
   x_range: [number, number];
+  /** Display-transform identity per axis; see scatterPayload. Absent on older payloads. */
+  x_binding?: string;
+  y_binding?: string;
   y_range: [number, number];
   display_mode: DisplayMode;
   point_alpha: number;
@@ -110,6 +113,46 @@ export interface OverlaySpec {
   colors: Uint8Array;
   palette: string[];
   labels: string[];
+}
+
+/**
+ * Where the active spillover matrix came from.
+ *
+ * An FCS-embedded matrix and one supplied from outside the file compensate identically, but they
+ * are not interchangeable as provenance: only the embedded one can be re-derived from the file,
+ * so an external matrix has to be recorded wherever the compensation state is written down.
+ */
+export type SpilloverOrigin =
+  | { kind: "fcs" }
+  | {
+      kind: "external";
+      label: string;
+      droppedChannels: readonly string[];
+      /** True when this replaced a matrix the file itself carried. */
+      replacedEmbedded: boolean;
+      /** Largest absolute coefficient difference from the replaced matrix, if there was one. */
+      maxDeviationFromEmbedded: number | null;
+    };
+
+/**
+ * Largest absolute difference between two matrices over the channels they share.
+ *
+ * Used to say how far apart an external matrix and the file's own one are. Channels present in
+ * only one of them are ignored: the question is whether the shared coefficients agree.
+ */
+export function maxCoefficientDelta(a: DisplaySpillover, b: DisplaySpillover): number {
+  const ai = new Map(a.channels.map((c, i) => [c, i]));
+  const bi = new Map(b.channels.map((c, i) => [c, i]));
+  let worst = 0;
+  for (const r of a.channels) {
+    for (const c of a.channels) {
+      if (!bi.has(r) || !bi.has(c)) continue;
+      const x = a.matrix[ai.get(r)!][ai.get(c)!];
+      const y = b.matrix[bi.get(r)!][bi.get(c)!];
+      if (Number.isFinite(x) && Number.isFinite(y)) worst = Math.max(worst, Math.abs(x - y));
+    }
+  }
+  return worst;
 }
 
 export interface SampleOpts {
@@ -362,8 +405,18 @@ export class Sample {
   private readonly gatingCache = new Map<number, Float32Array>();
   /** Kept/renamed channels (spectral raw detectors filtered out for flow). */
   readonly channels: ResolvedChannel[];
-  /** Embedded $SPILLOVER mapped to display-named fluorochrome channels (null if none). */
-  readonly spillover: DisplaySpillover | null;
+  private _spillover: DisplaySpillover | null;
+  private _spilloverOrigin: SpilloverOrigin = { kind: "fcs" };
+
+  /** Spillover mapped to display-named fluorochrome channels (null when none is available). */
+  get spillover(): DisplaySpillover | null {
+    return this._spillover;
+  }
+
+  /** Where the active matrix came from. Exports and the UI must be able to tell them apart. */
+  get spilloverOrigin(): SpilloverOrigin {
+    return this._spilloverOrigin;
+  }
 
   constructor(fcs: FcsFile, opts: SampleOpts = {}) {
     this.fcs = fcs;
@@ -373,7 +426,7 @@ export class Sample {
     this.channels.forEach((c, i) => this.byName.set(c.key, i));
     const pnnToKey = new Map<string, string>();
     for (const c of this.channels) pnnToKey.set(c.pnn, c.key);
-    this.spillover = extractDisplaySpillover(
+    this._spillover = extractDisplaySpillover(
       fcs.spillover,
       (pnn) => pnnToKey.get(pnn) ?? null,
       isScatterChannel,
@@ -509,7 +562,7 @@ export class Sample {
     return () => this.layerRevisionListeners.delete(listener);
   }
 
-  /** True when the file carries a (non-identity) spillover that can be applied. */
+  /** True when a (non-identity) spillover is available to apply, from the file or otherwise. */
   get hasCompensation(): boolean {
     return this.spillover !== null;
   }
@@ -926,6 +979,85 @@ export class Sample {
     }
     if (layer === this._activeLayer) return;
     this.commitAssayLayerChange(this.compensatedLayer, layer);
+  }
+
+  /**
+   * What an external matrix would compensate here, without installing anything.
+   *
+   * Lets a caller show the consequences — including which parameters this file does not have —
+   * and get confirmation before the sample is changed.
+   */
+  externalSpilloverPreview(matrix: { channels: string[]; matrix: number[][] }): {
+    display: DisplaySpillover | null;
+    dropped: string[];
+  } {
+    const pnnToKey = new Map<string, string>();
+    for (const c of this.channels) pnnToKey.set(c.pnn, c.key);
+    const display = extractDisplaySpillover(
+      matrix,
+      (pnn) => pnnToKey.get(pnn) ?? null,
+      isScatterChannel,
+      isQcChannel,
+    );
+    // extractDisplaySpillover keeps only the channels this file has and takes that sub-matrix.
+    // Dropping a channel that spills into the others changes the result, so it is reported
+    // rather than absorbed silently.
+    const kept = new Set(display?.channels ?? []);
+    const dropped = matrix.channels.filter((pnn) => {
+      const key = pnnToKey.get(pnn);
+      return key === undefined || !kept.has(key);
+    });
+    return { display, dropped };
+  }
+
+  /**
+   * Supply a spillover matrix the FCS itself does not carry.
+   *
+   * BD FACSDiva exports routinely have no `$SPILLOVER`: the matrix lives in the FlowJo workspace
+   * instead, and gates drawn on `Comp-`-prefixed parameters cannot be evaluated without it. Once
+   * installed, the matrix behaves exactly like an embedded one — `setCompensation()`, gating,
+   * statistics and export all read it through `spillover` — so nothing downstream needs to know.
+   *
+   * Replacing a matrix the file already carries requires `replaceEmbedded`, because doing it
+   * silently would change every gated population with nothing on screen to explain why. It is a
+   * real case rather than a hypothetical: a BD FACSDiva export writes the ACQUISITION matrix into
+   * the file (under `SPILL`), while the operator's later adjustment lives only in the FlowJo
+   * workspace -- and it is the adjusted one the gates were drawn under. Preferring the file's
+   * would place every fluorescence gate slightly wrong and look entirely healthy.
+   */
+  installExternalSpillover(
+    matrix: { channels: string[]; matrix: number[][] },
+    label: string,
+    opts: { replaceEmbedded?: boolean } = {},
+  ): void {
+    if (this.instrument !== "flow") {
+      throw new Error("An external spillover matrix applies to flow data only.");
+    }
+    const embedded = this._spillover;
+    if (embedded !== null && !opts.replaceEmbedded) {
+      throw new Error(
+        "This file already carries a spillover matrix, so an external one was not applied.",
+      );
+    }
+    const { display, dropped } = this.externalSpilloverPreview(matrix);
+    if (!display) {
+      throw new Error(
+        `"${label}" has no usable compensation for this file: fewer than two of its ` +
+          `${matrix.channels.length} parameters are fluorescence channels present here, or the ` +
+          "matrix is an identity.",
+      );
+    }
+    // Compensation must be off before the layer beneath it changes, or the installed compensated
+    // layer would keep values derived from the matrix being replaced.
+    if (embedded !== null && this.compensationEnabled) this.setCompensation(false);
+    this._spillover = display;
+    this._spilloverOrigin = Object.freeze({
+      kind: "external" as const,
+      label,
+      droppedChannels: Object.freeze(dropped),
+      replacedEmbedded: embedded !== null,
+      maxDeviationFromEmbedded: embedded === null ? null : maxCoefficientDelta(embedded, display),
+    });
   }
 
   /** Toggle spillover compensation (applied to raw fluor values before transforms). */
@@ -2061,6 +2193,13 @@ export class Sample {
       gates,
       selected_gate_id: selectedGateId ?? null,
       channels: this.channels.map((c) => c.key),
+      // The display binding for each axis: every setting that can change that channel's
+      // transform. The contour cache is built in display space, so without this a W change
+      // rescales the axes and moves the gates while the cached density stays where it was.
+      // Both channels' transforms have just been materialised by displayColumn(), so this
+      // costs a string, not a re-derivation.
+      x_binding: this.displayCoordinateBindingKey(this.channels[xIdx].key),
+      y_binding: this.displayCoordinateBindingKey(this.channels[yIdx].key),
       x_is_logicle: xTicks !== null,
       y_is_logicle: yTicks !== null,
       x_logicle_ticks: xTicks,

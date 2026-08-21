@@ -8,7 +8,7 @@ import {
 } from "./flowjoWorkspace";
 import { importGatingML } from "./gatingml";
 
-const WSP = "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/GateLab Paper/GateLab-2026-08-15-B flowjo-and-cytobank-concordance/data/flowjo-igcb-lp4/flowjo/17-Dec-2025 new.wsp";
+const WSP = "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/GateLab Paper/GateLab-2026-08-15-B flowjo-and-cytobank-concordance/data/lp4-igcb-s8/source/flowjo-workspace/17-Dec-2025 new.wsp";
 const has = existsSync(WSP);
 const wsp = () => readFileSync(WSP, "utf-8");
 const lp4Index = () =>

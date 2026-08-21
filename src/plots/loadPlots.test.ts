@@ -138,6 +138,18 @@ describe("GateLab mini-plot density patches", () => {
     warning.mockRestore();
   });
 
+  it("applies the contour patches once, however many times it runs", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const once = patchCytofForGateLab(cytofSrc);
+    const twice = patchCytofForGateLab(once);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(twice).toBe(once);
+    expect(once.match(/__glContourDebug/g) ?? []).toHaveLength(1);
+
+    warning.mockRestore();
+  });
+
   it("drops the contour cache wherever pan or stretch changes the base domain", () => {
     // Pan and shift-drag-stretch set the base scale domain and call _redraw(), which never
     // touches the contour cache; the fingerprint is only consulted in render(), which these
@@ -155,6 +167,26 @@ describe("GateLab mini-plot density patches", () => {
       "_yBase.domain(_plotData.y_range); _contourCache = null; // GateLab: base domain changed");
     expect(patched).toContain(
       "_xBase.domain(pend.x); _yBase.domain(pend.y); _contourCache = null; // GateLab: base domain changed");
+
+    warning.mockRestore();
+  });
+
+  it("draws gate outlines from the densified path while handles stay on the vertices", () => {
+    // A polygon's edges are straight in gating space; under a non-linear axis their image is a
+    // curve. Joining transformed vertices with straight lines draws something that is not the
+    // gate. The path follows `outline`; the drag handles must keep binding to `vertices`.
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(cytofSrc).not.toContain("_gateOutlinePts");
+    expect(patched).toContain("function _gateOutlinePts(g)");
+    // Both path-building sites: initial draw and the in-place update during a drag.
+    expect(patched.match(/_toPx\(_gateOutlinePts\(gate\), zx, zy\)/g) ?? []).toHaveLength(2);
+    expect(patched.match(/_gateOutlinePts\(gate\)\.map\(function \(v\)/g) ?? []).toHaveLength(2);
+    // Handles are untouched.
+    expect(patched).toContain(".data(gate.vertices)");
+    expect(patched).not.toContain("_toPx(gate.vertices, zx, zy)");
 
     warning.mockRestore();
   });

@@ -75,7 +75,11 @@ describe("App sample management", () => {
   it("imports a batch atomically and removes selected files through the manager", async () => {
     const invalidateSample = vi.spyOn(CompensationManager.prototype, "invalidateSample");
     act(() => root.render(<App />));
-    const fileInputs = host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]');
+    // The two inputs that add samples to the workspace: files and folder. The FlowJo workspace
+    // importer has its own, marked with data-role, because it gathers files without adding them.
+    const fileInputs = host.querySelectorAll<HTMLInputElement>(
+      'input[type="file"][accept=".fcs"]:not([data-role])',
+    );
     expect(fileInputs).toHaveLength(2);
     const directFileInput = [...fileInputs].find((input) => !input.hasAttribute("webkitdirectory"))!;
     Object.defineProperty(directFileInput, "files", {

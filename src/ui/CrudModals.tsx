@@ -42,6 +42,8 @@ export function GatingMlImportModal({
   mergeBlockedReason,
   compensationNote,
   compensationNeedsConfirmation,
+  matrixChoice,
+  onMatrixChoice,
   onCancel,
   onImport,
 }: {
@@ -53,6 +55,13 @@ export function GatingMlImportModal({
   mergeBlockedReason: string | null;
   compensationNote: string | null;
   compensationNeedsConfirmation: boolean;
+  /**
+   * Offered when the loaded FCS and the workspace each carry a spillover matrix and they are not
+   * the same. Both are legitimate — the file's is what the instrument recorded, the workspace's
+   * is what the analysis used — so this is a choice, not a correction.
+   */
+  matrixChoice: { workspaceLabel: string; maxDelta: number; value: "workspace" | "file" } | null;
+  onMatrixChoice: (value: "workspace" | "file") => void;
   onCancel: () => void;
   onImport: (mode: GatingImportMode) => void;
 }) {
@@ -67,6 +76,33 @@ export function GatingMlImportModal({
       {compensationNote && (
         <div className={compensationNeedsConfirmation ? "gl-modal-warning" : "gl-modal-note"} role={compensationNeedsConfirmation ? "alert" : undefined}>
           {compensationNote}
+        </div>
+      )}
+      {matrixChoice && (
+        <div className="gl-modal-field">
+          <span>
+            {t("This FCS and the workspace each carry a spillover matrix, and they differ by up to {delta}. Which should the gates be evaluated with?", { delta: matrixChoice.maxDelta.toFixed(4) })}
+          </span>
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 7, color: "var(--text)" }}>
+            <input
+              type="radio"
+              name="gatingml-import-matrix"
+              value="workspace"
+              checked={matrixChoice.value === "workspace"}
+              onChange={() => onMatrixChoice("workspace")}
+            />
+            <span>{t("The workspace's — {name}. This is the compensation in force when the gates were drawn.", { name: matrixChoice.workspaceLabel })}</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 7, color: "var(--text)" }}>
+            <input
+              type="radio"
+              name="gatingml-import-matrix"
+              value="file"
+              checked={matrixChoice.value === "file"}
+              onChange={() => onMatrixChoice("file")}
+            />
+            <span>{t("The file's — the matrix stored in the FCS, typically the one recorded at acquisition.")}</span>
+          </label>
         </div>
       )}
       <div className="gl-modal-field">

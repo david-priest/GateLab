@@ -23,7 +23,7 @@ function flowFile(negativeTail: number): FcsFile {
   };
 }
 
-const LP4_DIR = "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/GateLab Paper/GateLab-2026-08-15-B flowjo-and-cytobank-concordance/data/flowjo-igcb-lp4/fcs";
+const LP4_DIR = "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/GateLab Paper/GateLab-2026-08-15-B flowjo-and-cytobank-concordance/data/lp4-igcb-s8/source/fcs";
 const loadReal = (name: string) => {
   const b = readFileSync(`${LP4_DIR}/${name}`);
   return new Sample(parseFcs(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)));
