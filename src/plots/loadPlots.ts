@@ -62,6 +62,71 @@ export function patchCytofForGateLab(src: string): string {
     console.warn("[GateLab] cytof delayed-boot patch did not match — the first plot may be cleared.");
   }
 
+  // The gates-only fast path copies just gates and selection, so the edge mode would go stale
+  // there and switching it would do nothing until something else forced a full render. Carrying
+  // it means changing the mode redraws the overlays and leaves the cells alone, like any other
+  // gate-only change.
+  const fastPathNeedle = "_plotData.selected_gate_id = plotData.selected_gate_id;";
+  if (out.includes(fastPathNeedle) && !out.includes("_plotData.gate_edge_mode =")) {
+    out = out.replace(
+      fastPathNeedle,
+      fastPathNeedle + "\n              _plotData.gate_edge_mode = plotData.gate_edge_mode;",
+    );
+  } else if (!out.includes("_plotData.gate_edge_mode =")) {
+    console.warn("[GateLab] cytof gate-edge-mode fast-path patch did not match — the edge toggle may need a full redraw.");
+  }
+
+  // The grey companion path: drawn under the straight edges so the user can see how far the real
+  // boundary departs from what they drew, without having to switch modes to find out.
+  const bowCreateNeedle = "// ── Gate label — data-space centroid + draggable offset ──────";
+  if (out.includes(bowCreateNeedle) && !out.includes("'gate-bow'")) {
+    out = out.replace(
+      bowCreateNeedle,
+      "var _bowPts = _bowPx(gate, zx, zy, isFlipped);\n" +
+        "              if (_bowPts) {\n" +
+        "                  gg.append('path').attr('class', 'gate-bow')\n" +
+        "                      .datum(_bowPts).attr('d', line)\n" +
+        "                      .attr('fill', 'none')\n" +
+        "                      .attr('stroke', '#8a8a8a')\n" +
+        "                      .attr('stroke-width', 1)\n" +
+        "                      .attr('stroke-opacity', 0.9)\n" +
+        "                      .style('pointer-events', 'none');\n" +
+        "              }\n\n              " +
+        bowCreateNeedle,
+    );
+  }
+
+  // ...and kept in step during a drag, alongside the three paths already updated in place.
+  const bowUpdateNeedle = "gg.select('.gate-outline').datum(pts).attr('d', pathD);";
+  if (out.includes(bowUpdateNeedle) && !out.includes("gg.select('.gate-bow')")) {
+    out = out.replace(
+      bowUpdateNeedle,
+      bowUpdateNeedle +
+        "\n          var _bowUpd = _bowPx(gate, zx, zy, flipped);\n" +
+        "          gg.select('.gate-bow').attr('d', _bowUpd ? line(_bowUpd) : null);",
+    );
+  }
+
+  // A live drag rewrites gate.vertices in place, but `outline` is computed by React from the
+  // gating-space vertices and cannot be recomputed here -- the renderer has no access to the
+  // channel transforms. Left alone, the path keeps drawing the pre-drag curve while the handles
+  // move, so the edges detach from their own vertices. Dropping the stale outline as the
+  // vertices change makes _gateOutlinePts fall back to them, so edges track the drag as straight
+  // segments and settle onto the true boundary when React sends the next payload on release.
+  const dragVertexNeedle = "gate.vertices = origVerts.map(";
+  if (!out.includes("gate.outline = null; // stale mid-drag")) {
+    const hits = out.split(dragVertexNeedle).length - 1;
+    if (hits === 4) {
+      out = out.split(dragVertexNeedle)
+        .join("gate.outline = null; // stale mid-drag\n                    gate.vertices = origVerts.map(");
+    } else {
+      console.warn(
+        `[GateLab] cytof drag-outline patch matched ${hits}/4 vertex mutations — gate edges may ` +
+          "lag their handles while dragging.",
+      );
+    }
+  }
+
   // A polygon's edges are straight in GATING space, where membership is decided. Under a
   // non-linear axis their image is a curve, so joining the transformed vertices with straight
   // lines draws something that is not the gate -- on an arcsinh axis crossing zero the drawn edge
@@ -81,8 +146,24 @@ export function patchCytofForGateLab(src: string): string {
       out = out.split(outlineDirect).join("_toPx(_gateOutlinePts(gate), zx, zy)");
       out = out.replace(
         defAnchor,
-        "    function _gateOutlinePts(g) {\n" +
-          "        return (g.outline && g.outline.length > 2) ? g.outline : g.vertices;\n" +
+        "    function _gateEdgeMode() {\n" +
+          "        return (_plotData && _plotData.gate_edge_mode) || 'straight-bow';\n" +
+          "    }\n" +
+          "    function _hasBow(g) { return !!(g.outline && g.outline.length > 2); }\n" +
+          "    // The path the gate is drawn with: the true curve only when asked for it.\n" +
+          "    function _gateOutlinePts(g) {\n" +
+          "        return (_gateEdgeMode() === 'bowed' && _hasBow(g)) ? g.outline : g.vertices;\n" +
+          "    }\n" +
+          "    // The thin grey companion showing the real boundary behind straight edges.\n" +
+          "    function _gateBowPts(g) {\n" +
+          "        return (_gateEdgeMode() === 'straight-bow' && _hasBow(g)) ? g.outline : null;\n" +
+          "    }\n" +
+          "    function _bowPx(g, zx, zy, flipped) {\n" +
+          "        var b = _gateBowPts(g);\n" +
+          "        if (!b) return null;\n" +
+          "        return flipped\n" +
+          "            ? b.map(function (v) { return [zx(v[1]), zy(v[0])]; })\n" +
+          "            : _toPx(b, zx, zy);\n" +
           "    }\n\n" +
           defAnchor,
       );

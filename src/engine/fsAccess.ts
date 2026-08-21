@@ -77,6 +77,10 @@ export async function pickFile(
       ...(accept ? { types: [{ description, accept }] } : {}),
       multiple: false,
       ...(options.id ? { id: options.id } : {}),
+      // Open where the caller last was. Declared on PickFileOptions from the start but only
+      // honoured by the directory picker, so every file picker opened wherever the browser
+      // last happened to be rather than beside the file being worked on.
+      ...(options.startIn ? { startIn: options.startIn } : {}),
     });
     const { bytes, name } = await readHandle(handle);
     return { handle, bytes, name };
@@ -97,6 +101,10 @@ export async function pickFileSource(
       ...(accept ? { types: [{ description, accept }] } : {}),
       multiple: false,
       ...(options.id ? { id: options.id } : {}),
+      // Open where the caller last was. Declared on PickFileOptions from the start but only
+      // honoured by the directory picker, so every file picker opened wherever the browser
+      // last happened to be rather than beside the file being worked on.
+      ...(options.startIn ? { startIn: options.startIn } : {}),
     });
     const file = await handle.getFile();
     return { handle, file, name: file.name, relativePath: file.name };
@@ -117,6 +125,10 @@ export async function pickFiles(
       types: [{ description, accept }],
       multiple: true,
       ...(options.id ? { id: options.id } : {}),
+      // Open where the caller last was. Declared on PickFileOptions from the start but only
+      // honoured by the directory picker, so every file picker opened wherever the browser
+      // last happened to be rather than beside the file being worked on.
+      ...(options.startIn ? { startIn: options.startIn } : {}),
     });
     return await Promise.all(handles.map(async (handle) => {
       const file = await handle.getFile();
