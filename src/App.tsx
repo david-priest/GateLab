@@ -324,6 +324,32 @@ const DRAW_TOOLS: { id: DrawMode; Icon: () => React.ReactElement; title: string 
   { id: "draw-quadrant", Icon: QuadIcon, title: "Quadrant gate — click the crosshair centre" },
 ];
 
+/**
+ * How a gate's edges are drawn.
+ *
+ * A polygon's edges are straight in gating space, so on a non-linear axis their true image is a
+ * curve. Straight edges are what most people expect and what other tools draw, but they are not
+ * the gate. The default shows both: straight edges to work with, and a thin grey line where the
+ * boundary actually falls, so the difference is visible without having to go looking for it.
+ */
+type GateEdgeMode = "straight" | "straight-bow" | "bowed";
+const GATE_EDGE_MODES: { id: GateEdgeMode; label: string; hint: string }[] = [
+  { id: "straight", label: "Straight",
+    hint: "Straight lines between vertices. Familiar, and what FlowJo draws — but on a non-linear axis it is not where the gate actually falls." },
+  { id: "straight-bow", label: "Straight + true edge",
+    hint: "Straight edges to work with, plus a thin grey line showing the real boundary." },
+  { id: "bowed", label: "True edge",
+    hint: "The boundary the gate actually has on these axes." },
+];
+
+/**
+ * Elements whose gestures belong to cytof_plot.js, so GateLab's pan must not also start on them.
+ *
+ * Kept identical to the renderer's own list; a cross-check test compares the two, because the
+ * copies drifting apart is exactly how gate labels came to start a pan.
+ */
+export const CYTOF_OWNED_TARGETS = ".saved-gate, .gate-label, .cytof-xlabel, .cytof-ylabel";
+
 const MODES: { id: DisplayMode; label: string }[] = [
   { id: "pseudocolor", label: "Pseudocolor" },
   { id: "dots", label: "Dots" },
@@ -663,6 +689,8 @@ export default function App() {
     {
       fileName: string;
       text: string;
+      /** The .wsp's own handle, so the FCS picker opens in the folder it came from. */
+      handle: FileSystemFileHandle | null;
       samples: FlowJoSampleSummary[];
       pending: { name: string; file: File }[];
       strategySample: number | null;
@@ -674,6 +702,17 @@ export default function App() {
     { text: string; choice: FlowJoSampleSummary; treeIndex: number | null; targetNames: string[] } | null
   >(null);
   const wspFcsRef = useRef<HTMLInputElement>(null);
+  const [gateEdgeMode, setGateEdgeMode] = useState<GateEdgeMode>(() => {
+    const stored = typeof localStorage !== "undefined" ? localStorage.getItem("gatelab.gateEdgeMode") : null;
+    return stored === "straight" || stored === "bowed" || stored === "straight-bow" ? stored : "straight-bow";
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("gatelab.gateEdgeMode", gateEdgeMode);
+    } catch {
+      // A blocked localStorage is not a reason to fail; the choice just does not persist.
+    }
+  }, [gateEdgeMode]);
   const [gatingMlExportOpen, setGatingMlExportOpen] = useState(false);
   const [contourThreshold, setContourThreshold] = useState(5); // outer contour % of peak
   const [instrumentMode, setInstrumentMode] = useState<"auto" | "flow" | "cytof">("auto"); // active sample's instrument override
@@ -722,6 +761,7 @@ export default function App() {
   }, [cancelCompensationCandidatePreview, cancelCompensationSweepManagers]);
   const bumpScales = () => setScalesVersion((v) => v + 1);
   const plotAreaRef = useRef<HTMLDivElement>(null);
+
   const pzRef = useRef({
     sample, xIdx, yIdx, xRange, yRange, drawMode, mode, globalScales,
     effectiveXRange: null as [number, number] | null,
@@ -848,7 +888,12 @@ export default function App() {
       const t = e.target as Element;
       // Gate gestures and clickable axis labels belong to cytof_plot.js. Starting our
       // plot-wide pan listener on either can prevent or disturb the intended interaction.
-      if (t.closest?.(".saved-gate, .cytof-xlabel, .cytof-ylabel")) return;
+      // Must match the renderer's own exclusion list. Gate labels are re-parented into a
+      // top-level `gate-labels-layer` for z-order, so they are NOT inside `.saved-gate` and a
+      // guard naming only that lets a label drag start this plot-wide pan as well. Both then run:
+      // the label moves, and on mouseup the pan commits a range through setGlobalScale, which is
+      // the scale snapping back after nothing more than moving a label.
+      if (t.closest?.(CYTOF_OWNED_TARGETS)) return;
       const rr = ranges();
       if (!rr) return;
       const r = rect();
@@ -1147,6 +1192,43 @@ export default function App() {
     // importFlowJoSample is recreated every render; depending on it would re-run this endlessly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingFlowJoStrategy, sample, activeSampleId, fileName]);
+
+  /**
+   * Gather FCS for an open workspace, starting in the folder the .wsp came from.
+   *
+   * A plain <input type="file"> cannot be told where to open -- the browser decides, and it
+   * remembers wherever it was last, which for a workspace import is almost never the right place.
+   * The File System Access picker takes `startIn`, and the workspace's own handle is exactly the
+   * hint needed, since its FCS normally sit beside it. Falls back to the input where that API is
+   * unavailable, which loses only the starting folder.
+   */
+  async function chooseFlowJoFcs(state: NonNullable<typeof flowJoOpen>) {
+    if (!supportsFileSystemAccess()) {
+      wspFcsRef.current?.click();
+      return;
+    }
+    try {
+      const picked = await pickFiles(
+        FCS_FILE_ACCEPT,
+        "FCS files",
+        // Keyed separately from the sample importer so the two do not fight over a remembered
+        // folder, and started at the workspace so the first open lands in the right place.
+        { id: "gatelab-flowjo-workspace-fcs", ...(state.handle ? { startIn: state.handle } : {}) },
+      );
+      if (!picked?.length) return;
+      setFlowJoOpen((cur) => cur && {
+        ...cur,
+        pending: [
+          ...cur.pending,
+          ...picked
+            .filter((f) => !cur.pending.some((q) => q.name === f.name))
+            .map((f) => ({ name: f.name, file: f.file })),
+        ],
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
 
   /** Load the files gathered for a .wsp, then hand its strategy to the ordinary import path. */
   async function completeFlowJoOpen(state: NonNullable<typeof flowJoOpen>) {
@@ -3754,6 +3836,7 @@ export default function App() {
         setFlowJoOpen({
           fileName: wsFileName,
           text,
+          handle: wsH,
           samples: wsSamples,
           pending: [],
           // Pre-select the sample carrying the most gates: with one sample it is the only
@@ -4524,21 +4607,36 @@ export default function App() {
   }, [sample, activeDataRevision, overlayBy, overlayPalette, fileName, state.populations, state.root_population_id, state.gate_version, derived, activeSampleId, compatibleDivisionProfiles]);
 
   // Hierarchy-scoped gate visibility; see branchScopedGateOrder for the rule.
+  //
+  // Ticking a gate in the Gates list also forces it onto the plot whenever it is drawn on the
+  // current axes, whether or not it defines anything in the displayed branch. Without that a gate
+  // belonging to no population -- a trial gate, or one being compared against another -- cannot be
+  // shown at all, because branch scoping has nothing to place it under. The axes still decide:
+  // a ticked gate on other channels stays hidden, since drawing it here would put it in a space
+  // it was never defined in.
   const branchGateOrder = useMemo(
-    () => (!branchGatesOnly
-      ? (state.gate_order.length ? state.gate_order : Object.keys(state.gates))
-      : branchScopedGateOrder(
-      state.populations,
-      state.gates,
-      state.gate_order,
-      state.active_population_id,
-      state.root_population_id,
-      state.selected_gate_id,
-    )),
+    () => {
+      const scoped = !branchGatesOnly
+        ? (state.gate_order.length ? state.gate_order : Object.keys(state.gates))
+        : branchScopedGateOrder(
+          state.populations,
+          state.gates,
+          state.gate_order,
+          state.active_population_id,
+          state.root_population_id,
+          state.selected_gate_id,
+        );
+      if (!state.selected_gate_ids?.length) return scoped;
+      const shown = new Set(scoped);
+      const order = state.gate_order.length ? state.gate_order : Object.keys(state.gates);
+      // Keep the canonical order rather than appending, so ticking a gate does not reorder the
+      // ones already drawn.
+      return order.filter((id) => shown.has(id) || state.selected_gate_ids.includes(id));
+    },
     [
       state.populations, state.gates, state.gate_order,
       state.active_population_id, state.root_population_id, state.selected_gate_id,
-      branchGatesOnly,
+      state.selected_gate_ids, branchGatesOnly,
     ],
   );
 
@@ -4852,10 +4950,35 @@ export default function App() {
     activeWorkspaceScaleContextKey, scalesVersion,
   ]);
 
+  /**
+   * The last payload sent, so a gates-only change can be recognised.
+   *
+   * cytof has a fast path that updates gate overlays without touching the canvas, and GateLab
+   * never used it: every gate edit, label move and selection sent a full payload, which re-decodes
+   * the event arrays and repaints every cell. That repaint is the flicker seen when dragging a
+   * gate. The events are provably unchanged when their encoded bytes are, so that is what decides
+   * it rather than a guess at which inputs matter.
+   */
+  const lastSentPayload = useRef<{ x: string; y: string; sig: string } | null>(null);
+
   const displayed = useMemo(() => {
     if (!payload || !sample) return payload;
     const lbl = (k: string) => sample.labelForKey(k);
+    // Everything that changes what is drawn on the canvas, as opposed to over it.
+    const sig = JSON.stringify([
+      payload.x_label, payload.y_label, payload.x_range, payload.y_range,
+      payload.display_mode, payload.n_events, payload.contour_threshold,
+      payload.x_binding ?? null, payload.y_binding ?? null,
+      pointAlpha, pointSize, densityColorPower,
+    ]);
+    const prev = lastSentPayload.current;
+    const gatesOnly =
+      prev !== null && prev.sig === sig &&
+      prev.x === payload.x_b64 && prev.y === payload.y_b64;
+    lastSentPayload.current = { x: payload.x_b64, y: payload.y_b64, sig };
     return {
+      ...(gatesOnly ? { gates_only: true } : {}),
+      gate_edge_mode: gateEdgeMode,
       ...payload,
       point_alpha: pointAlpha, // user-adjustable opacity (was frozen at the payload's 0.4)
       point_size: pointSize, // mark radius only; density colouring is computed on a fixed grid
@@ -4871,7 +4994,7 @@ export default function App() {
       })),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [payload, sample, panelVersion, pointAlpha, pointSize, densityColorPower]);
+  }, [payload, sample, panelVersion, pointAlpha, pointSize, densityColorPower, gateEdgeMode]);
 
   // Colour-by overlay legend (population / division / sample) rendered OUTSIDE the plot.
   const overlayLegend = useMemo(() => {
@@ -5446,6 +5569,18 @@ export default function App() {
                   </button>
                 ))}
                 <span className="gl-ctl-sep" />
+                <label className="gl-field-inline" title={GATE_EDGE_MODES.find((m) => m.id === gateEdgeMode)?.hint}>
+                  {t("Gate edges")}
+                  <select
+                    value={gateEdgeMode}
+                    onChange={(e) => setGateEdgeMode(e.target.value as GateEdgeMode)}
+                  >
+                    {GATE_EDGE_MODES.map((m) => (
+                      <option key={m.id} value={m.id}>{t(m.label)}</option>
+                    ))}
+                  </select>
+                </label>
+                <span className="gl-ctl-sep" />
                 <label className="gl-field-inline">
                   {t("Colour by")}
                   <select value={overlayBy} onChange={(e) => setOverlayBy(e.target.value as typeof overlayBy)}>
@@ -5591,6 +5726,14 @@ export default function App() {
                 {t("drag to pan · shift-drag to stretch")}
               </span>
             </div>
+            {/* Shown only when a gate on this plot actually curves, and only in the modes where that
+                is visible. A standing note nobody has a question about is noise; this answers the
+                question at the moment it occurs to someone. */}
+            {gateEdgeMode !== "straight" && mainPlotGates.some((g) => g.outline) && (
+              <div className="gl-hint" style={{ padding: "2px 6px", lineHeight: 1.45 }}>
+                {t("Drew a straight edge and it looks curved? Gates are stored in raw values, not in the scale you are viewing \u2014 so on a log, logicle or arcsinh axis a straight edge maps to a curve. The curve is where the gate really falls, and the counts follow it. Rectangles and quadrants never curve. Choose \u201cStraight\u201d to draw chords between the vertices instead; that changes the picture only, never the gating.")}
+              </div>
+            )}
             <div className="gl-scales gl-gating-fonts" aria-label="Gating plot font sizes">
               <span className="gl-scales-label">{t("Fonts")}</span>
               {([
@@ -5755,6 +5898,19 @@ export default function App() {
                   if (idx === undefined) return;
                   if (e.axis === "x") setXIdx(idx);
                   else setYIdx(idx);
+                }}
+                onRangeChange={(e) => {
+                  // The renderer panned or stretched itself and is telling us where it ended up. Commit
+                  // it exactly as GateLab's own pan does, or the next payload -- a gate edit, a label
+                  // move, even switching how edges are drawn -- carries the old range and snaps the view
+                  // back to it, with the contours left at a geometry nothing else agrees with.
+                  if (!plotInteractionIsCurrent() || !sample) return;
+                  const ok = (r: [number, number]) => r?.length === 2 && r.every(Number.isFinite) && r[0] !== r[1];
+                  if (!ok(e.x_range) || !ok(e.y_range)) return;
+                  setGlobalScale(sample.channels[xIdx].key, e.x_range);
+                  setGlobalScale(sample.channels[yIdx].key, e.y_range);
+                  setXRange(null);
+                  setYRange(null);
                 }}
                 onGateLabelMove={(e) => {
                   if (!plotInteractionIsCurrent()) return;
@@ -6301,7 +6457,7 @@ export default function App() {
               )}
 
               <div className="gl-modal-actions">
-                <button onClick={() => wspFcsRef.current?.click()}>{t("Choose FCS files…")}</button>
+                <button onClick={() => void chooseFlowJoFcs(flowJoOpen)}>{t("Choose FCS files…")}</button>
                 <button onClick={() => setFlowJoOpen(null)}>{t("Cancel")}</button>
                 <button
                   disabled={!chosenResolved || (!!chosen && chosen.trees.length > 1 && flowJoOpen.strategyTree === null)}

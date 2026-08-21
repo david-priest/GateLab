@@ -11,6 +11,10 @@ interface CapturedPlotProps {
     x_range: [number, number];
     y_range: [number, number];
     gates: Array<{ gate_id: string; gate_type: string }>;
+    gates_only?: boolean;
+    gate_edge_mode?: string;
+    x_b64: string;
+    y_b64: string;
   };
   onNewGate: (gate: NewGate) => void;
   onGateEdit: (edit: { gate_id: string; vertices: [number, number][] }) => void;
@@ -169,5 +173,74 @@ describe("App gating viewport invariant", () => {
     }));
     act(() => plotHarness.props!.onGateSelect(quadrantId));
     expect(ranges()).toEqual(initial);
+  });
+
+  it("updates gates without repainting the cells", async () => {
+    // cytof has a fast path that redraws gate overlays and leaves the canvas alone. GateLab never
+    // set it, so every gate edit, label move and selection sent a full payload, re-decoded the
+    // event arrays and repainted every cell — which is the flicker seen while dragging a gate.
+    act(() => root.render(<App />));
+    const fcsInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(fcsInput, "files", { configurable: true, value: [testFile()] });
+    await act(async () => {
+      fcsInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const events = plotHarness.props!.payload.x_b64;
+
+    const gateId = await createGate({
+      gate_type: "rectangle",
+      vertices: [[10, 10], [20, 20]],
+      x_channel: "FSC-A",
+      y_channel: "SSC-A",
+    }, "Create");
+
+    // Creating, moving a label, editing vertices and selecting all leave the events untouched.
+    for (const change of [
+      () => plotHarness.props!.onGateLabelMove({ gate_id: gateId, label_offset: [5, 5] }),
+      () => plotHarness.props!.onGateEdit({ gate_id: gateId, vertices: [[12, 12], [22, 22]] }),
+      () => plotHarness.props!.onGateSelect(gateId),
+    ]) {
+      act(change);
+      expect(plotHarness.props!.payload.x_b64).toBe(events);
+      expect(plotHarness.props!.payload.gates_only).toBe(true);
+    }
+
+    // The other direction needs no test: the flag is decided by comparing the encoded event
+    // bytes, so a payload whose events differ cannot be marked gates-only. That is a property of
+    // the comparison rather than of the inputs, which is why it is done on the bytes and not on a
+    // guess at which state changes matter.
+  });
+
+  it("sends the gate edge mode when it changes", async () => {
+    // A field added to the payload but not to the memo's dependencies is a control that appears
+    // to work and does nothing until something else forces a re-render. Assert the payload, not
+    // the state, so the bug cannot hide between them.
+    act(() => root.render(<App />));
+    const fcsInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(fcsInput, "files", { configurable: true, value: [testFile()] });
+    await act(async () => {
+      fcsInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const select = [...host.querySelectorAll<HTMLSelectElement>("select")]
+      .find((el) => [...el.options].some((o) => o.value === "straight-bow"));
+    expect(select, "the gate edge control should be rendered").toBeTruthy();
+    expect(plotHarness.props!.payload.gate_edge_mode).toBe("straight-bow");
+
+    // React tracks the value on the node, so a plain assignment is swallowed; go through the
+    // prototype setter the way a real change does.
+    const setValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!;
+    for (const next of ["bowed", "straight", "straight-bow"]) {
+      act(() => {
+        setValue.call(select!, next);
+        select!.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      expect(plotHarness.props!.payload.gate_edge_mode).toBe(next);
+    }
   });
 });

@@ -41,6 +41,12 @@ interface Props {
   onGateSelect?: (gateId: string) => void;
   onAxisLabelClick?: (e: { axis: "x" | "y"; selected: string }) => void;
   onGateLabelMove?: (e: { gate_id: string; label_offset: [number, number] }) => void;
+  /**
+   * The renderer changed the view itself -- its own pan and stretch mutate the plot's ranges
+   * locally and report them here. Without this React never learns, so the next payload it
+   * sends carries the range from before and the view snaps back to it.
+   */
+  onRangeChange?: (e: { x_range: [number, number]; y_range: [number, number] }) => void;
 }
 
 interface GateEditEvent {
@@ -94,6 +100,7 @@ export function GatingPlot({
   onGateSelect,
   onAxisLabelClick,
   onGateLabelMove,
+  onRangeChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<CytofD3Api | null>(null);
@@ -113,6 +120,7 @@ export function GatingPlot({
     onGateSelect,
     onAxisLabelClick,
     onGateLabelMove,
+    onRangeChange,
   });
   payloadRef.current = payload;
   modeRef.current = mode;
@@ -125,6 +133,7 @@ export function GatingPlot({
     onGateSelect,
     onAxisLabelClick,
     onGateLabelMove,
+    onRangeChange,
   };
 
   const cancelScheduledPaint = () => {
@@ -265,6 +274,10 @@ export function GatingPlot({
       bus.on("gate_label_move", (v: unknown) => {
         if (!interactionIsCurrent()) return;
         callbacksRef.current.onGateLabelMove?.(v as { gate_id: string; label_offset: [number, number] });
+      }),
+      bus.on("plot_range", (v: unknown) => {
+        if (!interactionIsCurrent()) return;
+        callbacksRef.current.onRangeChange?.(v as { x_range: [number, number]; y_range: [number, number] });
       }),
     ];
 

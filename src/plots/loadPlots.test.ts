@@ -190,4 +190,40 @@ describe("GateLab mini-plot density patches", () => {
 
     warning.mockRestore();
   });
+
+  it("drops the stale outline wherever a drag rewrites the vertices", () => {
+    // The outline is computed by React from gating-space vertices; the renderer cannot recompute
+    // it, having no access to the channel transforms. A drag rewrites gate.vertices in place, so
+    // without this the path keeps drawing the pre-drag curve while the handles move and the edges
+    // visibly detach from their own vertices.
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(cytofSrc).not.toContain("gate.outline = null");
+    // All four: whole-gate move and vertex drag, each in normal and flipped orientation.
+    expect(patched.match(/gate\.outline = null; \/\/ stale mid-drag/g) ?? []).toHaveLength(4);
+
+    warning.mockRestore();
+  });
+
+  it("renders gate edges in three modes without repainting the cells to switch", () => {
+    // Straight edges are what other tools draw but are not the gate on a non-linear axis; the
+    // default shows both, so the difference is visible without going looking for it.
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(patched).toContain("function _gateEdgeMode()");
+    // The main path takes the curve only when asked; the grey companion only in the middle mode.
+    expect(patched).toContain("_gateEdgeMode() === 'bowed'");
+    expect(patched).toContain("_gateEdgeMode() === 'straight-bow'");
+    // Created and kept in step during a drag.
+    expect(patched).toContain("'gate-bow'");
+    expect(patched).toContain("gg.select('.gate-bow')");
+    // Carried on the gates-only path, so switching mode does not repaint the canvas.
+    expect(patched).toContain("_plotData.gate_edge_mode = plotData.gate_edge_mode;");
+
+    warning.mockRestore();
+  });
 });
