@@ -75,6 +75,38 @@ export function patchCytofForGateLab(src: string): string {
     console.warn("[GateLab] cytof contour-key patch did not match — contour may lag on pan.");
   }
 
+  // Pan and shift-drag-stretch set the base scale domain directly and then call _redraw(),
+  // which never touches the contour cache. The fingerprint is only consulted inside render(),
+  // which neither path calls -- so the cached polygons, which are in BASE-SCALE PIXEL space, got
+  // drawn against the new domain: the density sat still while the axes and gates moved.
+  // Pseudocolour was never affected because _redraw() recomputes it from the scales each time.
+  //
+  // The comment on the _finishPan call asserts "contour rebuilds at the final range". Nothing
+  // rebuilt it, which is why putting the range in the fingerprint looked sufficient -- it is,
+  // for range changes arriving through render() (the Min/Max controls), but not for dragging.
+  //
+  // Clearing the cache at the two places the domain is set is the whole fix. During a drag
+  // _panActive is true and _drawScatter runs instead of _drawContour, so the KDE is recomputed
+  // exactly once, on release.
+  const panFlushNeedle = "_yBase.domain(_plotData.y_range);";
+  const panFinishNeedle = "_xBase.domain(pend.x); _yBase.domain(pend.y);";
+  const panPatched = "_contourCache = null; // GateLab: base domain changed";
+  if (!out.includes(panPatched)) {
+    let applied = 0;
+    if (out.includes(panFlushNeedle)) {
+      out = out.replace(panFlushNeedle, `${panFlushNeedle} ${panPatched}`);
+      applied++;
+    }
+    if (out.includes(panFinishNeedle)) {
+      out = out.replace(panFinishNeedle, `${panFinishNeedle} ${panPatched}`);
+      applied++;
+    }
+    if (applied < 2) {
+      console.warn("[GateLab] cytof pan contour-invalidation patch matched " + applied +
+        "/2 sites — contour may freeze when panning or stretching.");
+    }
+  }
+
   // A polygon closed on mousedown sets this guard to swallow that physical click. React can
   // switch back to navigate before the click arrives, leaving the guard set; the first click of
   // the next polygon was then lost. A mode change always starts a fresh drawing transaction.

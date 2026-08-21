@@ -137,4 +137,25 @@ describe("GateLab mini-plot density patches", () => {
 
     warning.mockRestore();
   });
+
+  it("drops the contour cache wherever pan or stretch changes the base domain", () => {
+    // Pan and shift-drag-stretch set the base scale domain and call _redraw(), which never
+    // touches the contour cache; the fingerprint is only consulted in render(), which these
+    // paths never reach. The cached polygons are in base-scale PIXEL space, so they were drawn
+    // against the new domain and the density stayed put while the axes and gates moved.
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(cytofSrc).not.toContain("_contourCache = null; // GateLab: base domain changed");
+    // Both sites: the rAF flush during a drag, and the commit on release.
+    expect(patched.match(/_contourCache = null; \/\/ GateLab: base domain changed/g) ?? [])
+      .toHaveLength(2);
+    expect(patched).toContain(
+      "_yBase.domain(_plotData.y_range); _contourCache = null; // GateLab: base domain changed");
+    expect(patched).toContain(
+      "_xBase.domain(pend.x); _yBase.domain(pend.y); _contourCache = null; // GateLab: base domain changed");
+
+    warning.mockRestore();
+  });
 });
