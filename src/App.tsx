@@ -713,6 +713,18 @@ export default function App() {
       // A blocked localStorage is not a reason to fail; the choice just does not persist.
     }
   }, [gateEdgeMode]);
+  // Dismissed for good once read: it answers a question, and a standing answer is clutter.
+  const [gateEdgeNoteHidden, setGateEdgeNoteHiddenState] = useState<boolean>(
+    () => (typeof localStorage !== "undefined" ? localStorage.getItem("gatelab.gateEdgeNoteHidden") === "1" : false),
+  );
+  const setGateEdgeNoteHidden = (hidden: boolean) => {
+    setGateEdgeNoteHiddenState(hidden);
+    try {
+      localStorage.setItem("gatelab.gateEdgeNoteHidden", hidden ? "1" : "0");
+    } catch {
+      // A blocked localStorage only costs persistence; the note still hides for this session.
+    }
+  };
   const [gatingMlExportOpen, setGatingMlExportOpen] = useState(false);
   const [contourThreshold, setContourThreshold] = useState(5); // outer contour % of peak
   const [instrumentMode, setInstrumentMode] = useState<"auto" | "flow" | "cytof">("auto"); // active sample's instrument override
@@ -5727,11 +5739,22 @@ export default function App() {
               </span>
             </div>
             {/* Shown only when a gate on this plot actually curves, and only in the modes where that
-                is visible. A standing note nobody has a question about is noise; this answers the
-                question at the moment it occurs to someone. */}
-            {gateEdgeMode !== "straight" && mainPlotGates.some((g) => g.outline) && (
-              <div className="gl-hint" style={{ padding: "2px 6px", lineHeight: 1.45 }}>
-                {t("Drew a straight edge and it looks curved? Gates are stored in raw values, not in the scale you are viewing \u2014 so on a log, logicle or arcsinh axis a straight edge maps to a curve. The curve is where the gate really falls, and the counts follow it. Rectangles and quadrants never curve. Choose \u201cStraight\u201d to draw chords between the vertices instead; that changes the picture only, never the gating.")}
+                is visible — and dismissible, because it answers a question once. The full explanation
+                stays on the control's tooltip, available on demand rather than occupying the plot for
+                everyone who already knows. */}
+            {!gateEdgeNoteHidden && gateEdgeMode !== "straight"
+              && mainPlotGates.some((g) => g.outline) && (
+              <div className="gl-hint" style={{ display: "flex", alignItems: "center", gap: 6, padding: "1px 6px" }}>
+                <span>{t("Straight edges can look curved here \u2014 gates are stored in raw values, so the curve is where the gate really falls. Gating is unchanged.")}</span>
+                <button
+                  className="gl-chip"
+                  style={{ padding: "0 5px", lineHeight: 1.3 }}
+                  title={t("Hide this note")}
+                  aria-label={t("Hide this note")}
+                  onClick={() => setGateEdgeNoteHidden(true)}
+                >
+                  ×
+                </button>
               </div>
             )}
             <div className="gl-scales gl-gating-fonts" aria-label="Gating plot font sizes">
