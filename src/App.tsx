@@ -13,12 +13,16 @@ import {
   isFlowJoWorkspace,
   listFlowJoWorkspaceSamples,
   flowJoWorkspaceToGatingML,
+  matchFlowJoSamples,
+  resolveFlowJoWorkspaceFiles,
   type FlowJoSampleSummary,
+  type FlowJoSampleMatchKey,
+  type FlowJoSpillover,
 } from "./engine/flowjoWorkspace";
 import { ChannelScales } from "./engine/channelScales";
 import { includePlotGatesInAxisRange } from "./engine/axisRange";
-import { parseFcs } from "./engine/fcs";
-import { Sample, type DisplayMode, type OverlaySpec } from "./engine/sample";
+import { parseFcs, type SpilloverMatrix } from "./engine/fcs";
+import { Sample, maxCoefficientDelta, type DisplayMode, type OverlaySpec } from "./engine/sample";
 import { populationTreeOrder } from "./engine/populations";
 import { resolvePartitionLevels, partitionAssign } from "./engine/factors";
 import { paletteColors, populationColor, UNGATED_COLOR, OVERLAY_PALETTES, type PaletteName } from "./engine/palettes";
@@ -238,6 +242,23 @@ interface PendingGatingMLImport {
   compensationNote: string | null;
   /** Set when the gates came from a FlowJo workspace, so the result line can say which sample. */
   sourceNote: string;
+  /**
+   * A matrix the FlowJo workspace carries that the FCS does not, held until the user confirms:
+   * installing it on the sample changes every fluorescence value, so it must not happen while
+   * the import is still cancellable.
+   */
+  externalSpillover: {
+    matrix: SpilloverMatrix;
+    label: string;
+    dropped: string[];
+    /** The loaded FCS already had a matrix, which this one replaces. */
+    replacesEmbedded: boolean;
+    /** ...and the two are not the same compensation. */
+    differsFromEmbedded: boolean;
+    maxDelta: number | null;
+  } | null;
+  /** Which matrix to evaluate the gates with, when the two disagree. */
+  matrixChoice: "workspace" | "file";
 }
 
 interface PendingNewGate {
@@ -629,6 +650,30 @@ export default function App() {
   const [wspPicker, setWspPicker] = useState<
     { text: string; samples: FlowJoSampleSummary[]; reason: string } | null
   >(null);
+  /** A sample holding more than one independent tree; GateLab can hold only one. */
+  const [treePicker, setTreePicker] = useState<
+    { text: string; sample: FlowJoSampleSummary; matchedOn: FlowJoSampleMatchKey | null } | null
+  >(null);
+  /**
+   * Opening a .wsp directly. The workspace names the files it expects, so the FCS can be
+   * gathered from what is already loaded plus whatever the user points at; samples whose file
+   * never turns up are reported and skipped rather than blocking the rest.
+   */
+  const [flowJoOpen, setFlowJoOpen] = useState<
+    {
+      fileName: string;
+      text: string;
+      samples: FlowJoSampleSummary[];
+      pending: { name: string; file: File }[];
+      strategySample: number | null;
+      strategyTree: number | null;
+    } | null
+  >(null);
+  /** Held until the sample the strategy belongs to is the active one. */
+  const [pendingFlowJoStrategy, setPendingFlowJoStrategy] = useState<
+    { text: string; choice: FlowJoSampleSummary; treeIndex: number | null; targetNames: string[] } | null
+  >(null);
+  const wspFcsRef = useRef<HTMLInputElement>(null);
   const [gatingMlExportOpen, setGatingMlExportOpen] = useState(false);
   const [contourThreshold, setContourThreshold] = useState(5); // outer contour % of peak
   const [instrumentMode, setInstrumentMode] = useState<"auto" | "flow" | "cytof">("auto"); // active sample's instrument override
@@ -1058,14 +1103,22 @@ export default function App() {
       const usable = samples.filter((s) => s.gateCount > 0);
       if (!usable.length) throw new Error("This workspace contains no gates GateLab can read.");
 
-      const stem = (n: string) => n.replace(/\.fcs$/i, "").trim().toLowerCase();
-      const matches = usable.filter((s) => stem(s.name) === stem(fileName));
+      // A FACSDiva export names its samples by the acquisition's $FIL keyword rather than by the
+      // file on disk, so the loaded file's own $FIL is offered as a second key.
+      const fil = sample.fcs.keywords["$FIL"] ?? null;
+      const { matches, matchedOn } = matchFlowJoSamples(usable, { fileName, fil });
 
       // Exactly one match keeps the ordinary flow a single click. Anything else is ambiguous
       // and gets a picker rather than a guess: FlowJo allows the same file to be added twice,
       // and quietly taking the first would import another sample's gates.
-      if (matches.length === 1) {
-        await importFlowJoSample(text, matches[0]);
+      if (matches.length === 1 && matchedOn !== null) {
+        const only = matches[0];
+        if (only.trees.length > 1) {
+          // GateLab holds one strategy. Merging several would combine trees FlowJo kept apart.
+          setTreePicker({ text, sample: only, matchedOn });
+          return;
+        }
+        await importFlowJoSample(text, only, matchedOn, only.trees.length === 1 ? 0 : null);
         return;
       }
       setWspPicker({
@@ -1073,15 +1126,75 @@ export default function App() {
         samples: usable,
         reason: matches.length > 1
           ? `${matches.length} samples in this workspace are named "${matches[0].name}". Choose which one to import.`
-          : `No sample in this workspace matches the loaded file "${fileName}". Choose which sample's gates to import.`,
+          : `No sample in this workspace matches the loaded file "${fileName}"` +
+            `${fil ? ` or its $FIL keyword "${fil}"` : ""}. Choose which sample's gates to import.`,
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   }
 
-  async function importFlowJoSample(text: string, choice: FlowJoSampleSummary) {
-    const converted = flowJoWorkspaceToGatingML(text, choice.index);
+  // A workspace's strategy can only be imported onto its own sample, and loading that sample is
+  // asynchronous, so the strategy waits here until it is the active one. Matching on any of the
+  // names the workspace records, because the file on disk may carry none of them but its own.
+  useEffect(() => {
+    const p = pendingFlowJoStrategy;
+    if (!p || !sample || !activeSampleId) return;
+    const stem = (n: string) => n.replace(/\.fcs$/i, "").trim().toLowerCase();
+    if (!p.targetNames.some((n) => stem(n) === stem(fileName))) return;
+    setPendingFlowJoStrategy(null);
+    void importFlowJoSample(p.text, p.choice, null, p.treeIndex);
+    // importFlowJoSample is recreated every render; depending on it would re-run this endlessly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingFlowJoStrategy, sample, activeSampleId, fileName]);
+
+  /** Load the files gathered for a .wsp, then hand its strategy to the ordinary import path. */
+  async function completeFlowJoOpen(state: NonNullable<typeof flowJoOpen>) {
+    const chosen = state.samples.find((x) => x.index === state.strategySample);
+    if (!chosen) return;
+    setFlowJoOpen(null);
+    const loadedNames = samples.map((s0) => s0.name);
+    const resolutions = resolveFlowJoWorkspaceFiles(
+      state.samples,
+      [...loadedNames, ...state.pending.map((f) => f.name)],
+    );
+    const target = resolutions.find((r) => r.sampleIndex === chosen.index);
+    if (!target?.fileName) {
+      setError(
+        `The strategy belongs to "${chosen.name}", whose FCS was not among the files chosen. ` +
+          `Expected one of: ${chosen.candidateFileNames.join(", ")}.`,
+      );
+      return;
+    }
+    const skipped = resolutions.filter((r) => r.fileName === null);
+    if (skipped.length) {
+      setImportMsg(
+        `${skipped.length} of ${state.samples.length} sample(s) in ${state.fileName} had no matching FCS and were skipped.`,
+      );
+    }
+    // A tree is only chosen when there is a choice; one tree needs no question.
+    const treeIndex = state.strategyTree ?? (chosen.trees.length === 1 ? 0 : null);
+    setPendingFlowJoStrategy({
+      text: state.text,
+      choice: chosen,
+      treeIndex,
+      targetNames: [target.fileName, ...chosen.candidateFileNames],
+    });
+    if (state.pending.length) {
+      await importFcsCandidates(state.pending.map((f) => ({
+        id: crypto.randomUUID(), name: f.name, file: f.file, handle: null,
+      })));
+    }
+  }
+
+  async function importFlowJoSample(
+    text: string,
+    choice: FlowJoSampleSummary,
+    matchedOn: FlowJoSampleMatchKey | null = null,
+    /** Which of the sample's independent trees; null merges them all, and says so. */
+    treeIndex: number | null = null,
+  ) {
+    const converted = flowJoWorkspaceToGatingML(text, choice.index, treeIndex);
     if (converted.warnings.length) {
       // Skipped gates are surfaced, never dropped quietly: a hierarchy that silently loses a
       // branch looks like a successful import.
@@ -1090,15 +1203,52 @@ export default function App() {
     await prepareGatingImportFromGatingML(
       converted.gatingMl,
       ` from FlowJo workspace · ${converted.sampleName}` +
+        (treeIndex !== null && choice.trees.length > 1
+          ? ` · ${choice.trees[treeIndex]?.name ?? `tree ${treeIndex + 1}`}`
+          : "") +
+        // The sample name will not look like the loaded file when $FIL was the matching key, so
+        // say why this sample was chosen rather than leaving it looking like the wrong one.
+        (matchedOn === "fil" ? ` (matched on $FIL)` : "") +
         (converted.warnings.length ? ` · ${converted.warnings.length} skipped` : ""),
+      converted.spillover,
     );
   }
 
-  async function prepareGatingImportFromGatingML(text: string, wspNote: string) {
+  async function prepareGatingImportFromGatingML(
+    text: string,
+    wspNote: string,
+    workspaceSpillover: FlowJoSpillover | null = null,
+  ) {
     if (!sample || !activeSampleId) return;
     try {
       const pnnMap: Record<string, string> = {};
       for (const c of sample.channels) pnnMap[c.pnn] = c.key;
+
+      // The workspace's matrix takes precedence over one embedded in the file, because it is the
+      // record of what the gates were actually drawn under. A FACSDiva export writes the
+      // ACQUISITION matrix into the FCS while the operator's later adjustment lives only in the
+      // workspace, and the two are not the same. The preview does not touch the sample.
+      const external =
+        workspaceSpillover && sample.instrument === "flow"
+          ? sample.externalSpilloverPreview(workspaceSpillover.matrix)
+          : null;
+      const embeddedDelta =
+        external?.display != null && sample.spillover !== null
+          ? maxCoefficientDelta(sample.spillover, external.display)
+          : null;
+      const externalSpillover =
+        external?.display != null
+          ? {
+              matrix: workspaceSpillover!.matrix,
+              label: workspaceSpillover!.name || "the FlowJo workspace",
+              dropped: external.dropped,
+              replacesEmbedded: sample.spillover !== null,
+              // Coefficients agreeing to this much are the same matrix round-tripped through a
+              // text keyword; beyond it the two are genuinely different compensations.
+              differsFromEmbedded: embeddedDelta !== null && embeddedDelta > 1e-6,
+              maxDelta: embeddedDelta,
+            }
+          : null;
       // The instrument decides whether an arcsinh vertex is inverted: flow stores gates in
       // raw space, CyTOF in arcsinh space.
       const res = importGatingML(
@@ -1107,7 +1257,7 @@ export default function App() {
         res.compensation,
         res.compensation_refs,
         sample.instrument === "flow",
-        sample.spillover,
+        external?.display ?? sample.spillover ?? null,
       );
       const existingStrategy = state.root_population_id !== null && hasGatingStrategy({
         gates: state.gates,
@@ -1134,6 +1284,30 @@ export default function App() {
               ? "This strategy was gated without compensation, so importing will disable the current compensation setting."
               : "This strategy was gated without compensation; the current data are already uncompensated.";
           }
+        } else if (comp.target && externalSpillover?.differsFromEmbedded) {
+          // The most dangerous case, and the reason any of this exists: both matrices are real
+          // and they disagree, so compensating with the file's would move every fluorescence
+          // gate while looking completely healthy.
+          compensationNote =
+            `This FCS and the FlowJo workspace each carry a spillover matrix, and they are not ` +
+            `the same: coefficients differ by up to ${externalSpillover.maxDelta!.toFixed(4)}. ` +
+            `The file's is typically the matrix recorded at acquisition; the workspace's is the ` +
+            `compensation in force when these gates were drawn. Compensation will be enabled ` +
+            `either way, and which matrix is used changes where every fluorescence gate falls.`;
+        } else if (comp.target && externalSpillover) {
+          // The loaded FCS has no matrix of its own, so this is the only thing that can place the
+          // gates. It changes every fluorescence value, so it is stated plainly rather than
+          // applied as a detail of the gate import.
+          compensationNote =
+            `These gates were drawn on compensated data, and this FCS carries no spillover ` +
+            `matrix. Importing will apply the matrix "${externalSpillover.label}" from the ` +
+            `FlowJo workspace to ${externalSpillover.matrix.channels.length - externalSpillover.dropped.length} ` +
+            `channel(s) and enable compensation.` +
+            (externalSpillover.dropped.length
+              ? ` ${externalSpillover.dropped.length} of its parameter(s) are not in this file ` +
+                `(${externalSpillover.dropped.join(", ")}) and were left out, which changes the ` +
+                `result for the channels they spill into.`
+              : "");
         } else if (comp.target) {
           compensationNote =
             "This file declares FCS compensation but does not contain GateLab's exact matrix record. " +
@@ -1149,6 +1323,10 @@ export default function App() {
         mergeBlockedReason,
         compensationNote,
         sourceNote: wspNote,
+        externalSpillover,
+        // Defaulting to the workspace's, because that is the compensation the gates were drawn
+        // under -- but it is offered as a choice, not asserted as the correct answer.
+        matrixChoice: "workspace",
       });
       setError(null);
     } catch (e) {
@@ -1185,6 +1363,21 @@ export default function App() {
         // Replacing the hierarchy is destructive; merge mode retains the current strategy.
         await checkpointCurrentWorkspace("before-gatingml-replace");
       }
+      // Installed only now that the import is going ahead. It rewrites every fluorescence value,
+      // so it must not happen while the confirmation dialog can still be dismissed.
+      if (
+        comp.target === true &&
+        pendingImport.externalSpillover &&
+        // Declining the workspace's matrix leaves the file's in place, which needs no install.
+        !(pendingImport.externalSpillover.differsFromEmbedded && pendingImport.matrixChoice === "file")
+      ) {
+        sample.installExternalSpillover(
+          pendingImport.externalSpillover.matrix,
+          pendingImport.externalSpillover.label,
+          { replaceEmbedded: pendingImport.externalSpillover.replacesEmbedded },
+        );
+      }
+
       const compensationChanged = comp.target !== null && sample.compensationEnabled !== comp.target;
       if (comp.target !== null) {
         sample.setCompensation(comp.target);
@@ -3548,11 +3741,28 @@ export default function App() {
     try {
       // "Workspace" means two different things now: a .gatelab bundle, and a FlowJo .wsp that
       // carries gates only. Point at the right control rather than failing on the zip header.
+      // A .wsp holds gates and the names of the files they were drawn on, but no data. Opening
+      // one therefore means gathering its FCS first -- from what is already loaded, plus
+      // whatever the user can point at -- rather than refusing until a file happens to be open.
       if (/\.wsp$/i.test(wsFileName)) {
-        throw new Error(
-          `"${wsFileName}" is a FlowJo workspace, which holds gates rather than a GateLab ` +
-            `workspace. Load its FCS file first, then use "Import gating (GatingML / FlowJo)…".`,
-        );
+        const text = await file.text();
+        if (!isFlowJoWorkspace(text)) {
+          throw new Error(`"${wsFileName}" is not a FlowJo workspace GateLab can read.`);
+        }
+        const wsSamples = listFlowJoWorkspaceSamples(text).filter((x) => x.gateCount > 0);
+        if (!wsSamples.length) throw new Error("This workspace contains no gates GateLab can read.");
+        setFlowJoOpen({
+          fileName: wsFileName,
+          text,
+          samples: wsSamples,
+          pending: [],
+          // Pre-select the sample carrying the most gates: with one sample it is the only
+          // answer, and with several it is the likeliest strategy of record.
+          strategySample: wsSamples.reduce((best, x) => (x.gateCount > best.gateCount ? x : best)).index,
+          strategyTree: null,
+        });
+        setImportMsg(null);
+        return;
       }
       const envelope = await readWorkspaceEnvelopeFromFile(file);
       await openWorkspaceFromEnvelope(envelope, wsH, wsFileName);
@@ -4914,6 +5124,30 @@ export default function App() {
               event.target.value = "";
             }}
           />
+          <input
+            ref={wspFcsRef}
+            type="file"
+            accept=".fcs"
+            data-role="flowjo-workspace-fcs"
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const picked = Array.from(e.target.files ?? []);
+              e.target.value = "";
+              if (!picked.length) return;
+              // Held rather than loaded: the dialog resolves them by name first, so the user can
+              // see what matched before anything is added to the workspace.
+              setFlowJoOpen((cur) => cur && {
+                ...cur,
+                pending: [
+                  ...cur.pending,
+                  ...picked
+                    .filter((f) => !cur.pending.some((q) => q.name === f.name))
+                    .map((f) => ({ name: f.name, file: f })),
+                ],
+              });
+            }}
+          />
 
           <div className="gl-side-title" style={{ marginTop: 10 }}>
             {isSceHost ? "R host" : t("Workspace")}
@@ -4984,7 +5218,7 @@ export default function App() {
               <button
                 className="gl-btn-ghost gl-btn-block"
                 disabled={busy || compensationApplyStatus !== null}
-                title="Open a saved .gatelab workspace (gates, populations, scales, compensation)"
+                title="Open a saved .gatelab workspace, or a FlowJo .wsp — a workspace holds gates rather than data, so GateLab will ask for the FCS files it refers to"
                 onClick={openWorkspace}
               >
                 {t("Open Workspace…")}
@@ -5024,7 +5258,7 @@ export default function App() {
           <input
             ref={wsRef}
             type="file"
-            accept={`.${WORKSPACE_EXT}`}
+            accept={`.${WORKSPACE_EXT},.wsp`}
             style={{ display: "none" }}
             onChange={async (e) => {
               const f = e.target.files?.[0];
@@ -5952,6 +6186,136 @@ export default function App() {
           }}
         />
       )}
+      {treePicker && (
+        <div className="gl-modal-backdrop" onClick={() => setTreePicker(null)}>
+          <div
+            className="gl-modal gl-wsp-picker"
+            role="dialog"
+            aria-label="Choose a gating tree"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="gl-modal-title">{t("Choose a gating strategy")}</div>
+            <div className="gl-modal-note">
+              {t("This sample holds several independent strategies. GateLab holds one at a time, so importing them together would merge trees FlowJo kept apart.")}
+            </div>
+            <div className="gl-wsp-list">
+              {treePicker.sample.trees.map((tree) => (
+                <button
+                  key={tree.index}
+                  className="gl-wsp-row"
+                  onClick={() => {
+                    const picked = treePicker;
+                    setTreePicker(null);
+                    void importFlowJoSample(picked.text, picked.sample, picked.matchedOn, tree.index);
+                  }}
+                >
+                  <span className="gl-wsp-name">{tree.name || `(unnamed tree ${tree.index + 1})`}</span>
+                  <span className="gl-wsp-meta">
+                    {tree.gateCount} {t("gates")}
+                    {tree.rootCount !== null ? ` · ${tree.rootCount.toLocaleString()} ${t("events")}` : ""}
+                    {tree.unsupportedCount > 0 ? ` · ${tree.unsupportedCount} ${t("skipped")}` : ""}
+                    {tree.populations.length ? ` · ${tree.populations.slice(0, 4).join(", ")}${tree.populations.length > 4 ? "…" : ""}` : ""}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div className="gl-modal-actions">
+              <button onClick={() => setTreePicker(null)}>{t("Cancel")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {flowJoOpen && (() => {
+        // Resolve against everything available right now: the samples already open plus the
+        // files chosen in this dialog. Recomputed on render so adding files updates the list.
+        const resolutions = resolveFlowJoWorkspaceFiles(
+          flowJoOpen.samples,
+          [...samples.map((s0) => s0.name), ...flowJoOpen.pending.map((f) => f.name)],
+        );
+        const found = resolutions.filter((r) => r.fileName !== null).length;
+        const chosen = flowJoOpen.samples.find((x) => x.index === flowJoOpen.strategySample);
+        const chosenResolved = resolutions.find((r) => r.sampleIndex === flowJoOpen.strategySample)?.fileName;
+        return (
+          <div className="gl-modal-backdrop" onClick={() => setFlowJoOpen(null)}>
+            <div
+              className="gl-modal gl-wsp-picker"
+              role="dialog"
+              aria-label="Open a FlowJo workspace"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="gl-modal-title">{t("Open FlowJo workspace")} · {flowJoOpen.fileName}</div>
+              <div className="gl-modal-note">
+                {t("A workspace holds gates, not data. Choose the FCS files it refers to; any it cannot find are skipped.")}
+                {" "}
+                <strong>{found}/{flowJoOpen.samples.length}</strong> {t("found")}
+              </div>
+
+              <div className="gl-wsp-list">
+                {flowJoOpen.samples.map((x) => {
+                  const r = resolutions.find((q) => q.sampleIndex === x.index);
+                  const isStrategy = x.index === flowJoOpen.strategySample;
+                  return (
+                    <button
+                      key={x.index}
+                      className="gl-wsp-row"
+                      aria-pressed={isStrategy}
+                      style={isStrategy ? { outline: "2px solid var(--gl-accent, #2563eb)" } : undefined}
+                      onClick={() => setFlowJoOpen({ ...flowJoOpen, strategySample: x.index, strategyTree: null })}
+                    >
+                      <span className="gl-wsp-name">
+                        {x.name || `(unnamed sample ${x.index + 1})`}
+                        {x.duplicateName && <span className="gl-wsp-dupe">{t("position")} {x.index + 1}</span>}
+                      </span>
+                      <span className="gl-wsp-meta">
+                        {r?.fileName
+                          ? `${t("found")}: ${r.fileName}`
+                          : `${t("not found")} — ${x.candidateFileNames.join(" / ")}`}
+                        {` · ${x.gateCount} ${t("gates")}`}
+                        {x.rootCount > 1 ? ` · ${x.rootCount} ${t("trees")}` : ""}
+                        {isStrategy ? ` · ${t("strategy to import")}` : ""}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {chosen && chosen.trees.length > 1 && (
+                <div className="gl-modal-note">
+                  {t("This sample holds several strategies; choose one")}:{" "}
+                  <select
+                    value={flowJoOpen.strategyTree ?? ""}
+                    onChange={(e) => setFlowJoOpen({
+                      ...flowJoOpen,
+                      strategyTree: e.target.value === "" ? null : Number(e.target.value),
+                    })}
+                  >
+                    <option value="">{t("Choose…")}</option>
+                    {chosen.trees.map((tree) => (
+                      <option key={tree.index} value={tree.index}>
+                        {tree.name} — {tree.gateCount} {t("gates")}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="gl-modal-actions">
+                <button onClick={() => wspFcsRef.current?.click()}>{t("Choose FCS files…")}</button>
+                <button onClick={() => setFlowJoOpen(null)}>{t("Cancel")}</button>
+                <button
+                  disabled={!chosenResolved || (!!chosen && chosen.trees.length > 1 && flowJoOpen.strategyTree === null)}
+                  title={chosenResolved ? undefined : t("The FCS for the selected strategy has not been found yet")}
+                  onClick={() => void completeFlowJoOpen(flowJoOpen)}
+                >
+                  {t("Import")}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {wspPicker && (
         <div className="gl-modal-backdrop" onClick={() => setWspPicker(null)}>
           <div
@@ -6024,6 +6388,18 @@ export default function App() {
           }
           mergeBlockedReason={pendingGatingMlImport.mergeBlockedReason}
           compensationNote={pendingGatingMlImport.compensationNote}
+          matrixChoice={
+            pendingGatingMlImport.externalSpillover?.differsFromEmbedded
+              ? {
+                  workspaceLabel: pendingGatingMlImport.externalSpillover.label,
+                  maxDelta: pendingGatingMlImport.externalSpillover.maxDelta ?? 0,
+                  value: pendingGatingMlImport.matrixChoice,
+                }
+              : null
+          }
+          onMatrixChoice={(value) =>
+            setPendingGatingMlImport((cur) => cur && { ...cur, matrixChoice: value })
+          }
           compensationNeedsConfirmation={pendingGatingMlImport.compensation.requiresConfirmation}
           onCancel={() => {
             setPendingGatingMlImport(null);

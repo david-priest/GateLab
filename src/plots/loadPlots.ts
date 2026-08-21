@@ -62,6 +62,38 @@ export function patchCytofForGateLab(src: string): string {
     console.warn("[GateLab] cytof delayed-boot patch did not match — the first plot may be cleared.");
   }
 
+  // A polygon's edges are straight in GATING space, where membership is decided. Under a
+  // non-linear axis their image is a curve, so joining the transformed vertices with straight
+  // lines draws something that is not the gate -- on an arcsinh axis crossing zero the drawn edge
+  // misses the real boundary by hundreds of pixels, and events sit on the visibly wrong side of
+  // it. GateLab now sends a densified `outline` alongside `vertices`; the path follows it while
+  // the drag handles stay bound to `vertices`, so the editable set is unchanged.
+  const outlineFlipped = "gate.vertices.map(function (v) { return [zx(v[1]), zy(v[0])]; })";
+  const outlineDirect = "_toPx(gate.vertices, zx, zy)";
+  if (!out.includes("_gateOutlinePts")) {
+    const flippedHits = out.split(outlineFlipped).length - 1;
+    const directHits = out.split(outlineDirect).length - 1;
+    const defAnchor = "    function _closedLine()";
+    if (flippedHits === 2 && directHits === 2 && out.includes(defAnchor)) {
+      out = out.split(outlineFlipped).join(
+        "_gateOutlinePts(gate).map(function (v) { return [zx(v[1]), zy(v[0])]; })",
+      );
+      out = out.split(outlineDirect).join("_toPx(_gateOutlinePts(gate), zx, zy)");
+      out = out.replace(
+        defAnchor,
+        "    function _gateOutlinePts(g) {\n" +
+          "        return (g.outline && g.outline.length > 2) ? g.outline : g.vertices;\n" +
+          "    }\n\n" +
+          defAnchor,
+      );
+    } else {
+      console.warn(
+        `[GateLab] cytof gate-outline patch matched ${flippedHits}/2 flipped and ` +
+          `${directHits}/2 direct sites — curved gate outlines are not applied.`,
+      );
+    }
+  }
+
   // cytof caches contours by point data. Include the view range so pan/stretch cannot leave
   // the density frozen while axes and gates move.
   const contourNeedle = "pd.contour_threshold || 5];";
@@ -75,19 +107,37 @@ export function patchCytofForGateLab(src: string): string {
     console.warn("[GateLab] cytof contour-key patch did not match — contour may lag on pan.");
   }
 
-  // Pan and shift-drag-stretch set the base scale domain directly and then call _redraw(),
+  // ...and the display binding, which is what actually changes when a logicle W is moved. The
+  // range and the sampled point values are not reliable proxies for it: a W change can leave the
+  // stated range untouched while remapping every point, and the contour is cached in display
+  // pixel space. Pseudocolour never showed this because its cache is cleared on every render;
+  // contour only clears when this fingerprint changes, so the density sat still while the axes
+  // and gates moved under it.
+  const bindingNeedle = "(pd.x_range || []).join(','), (pd.y_range || []).join(',')];";
+  const bindingAlt = "(pd.x_range||[]).join(','), (pd.y_range||[]).join(',')];";
+  const bindingPatched = "pd.x_binding || ''";
+  if (!out.includes(bindingPatched)) {
+    const needle = out.includes(bindingNeedle) ? bindingNeedle
+      : out.includes(bindingAlt) ? bindingAlt : null;
+    if (needle) {
+      out = out.replace(
+        needle,
+        needle.slice(0, -2) + ", pd.x_binding || '', pd.y_binding || ''];",
+      );
+    } else {
+      console.warn("[GateLab] cytof contour binding-key patch did not match — contour may freeze on a scale change.");
+    }
+  }
+
+  // Pan and shift-drag-stretch change the base scale domain directly and then call _redraw(),
   // which never touches the contour cache. The fingerprint is only consulted inside render(),
-  // which neither path calls -- so the cached polygons, which are in BASE-SCALE PIXEL space, got
-  // drawn against the new domain: the density sat still while the axes and gates moved.
-  // Pseudocolour was never affected because _redraw() recomputes it from the scales each time.
+  // which these paths never call -- so the cached polygons, which are in BASE-SCALE PIXEL space,
+  // get drawn against the new domain and the density sits still while the axes and gates move.
+  // The comment on the _finishPan call claims "contour rebuilds at the final range"; nothing
+  // rebuilds it. Pseudocolour is unaffected because _redraw() recomputes it from the scales.
   //
-  // The comment on the _finishPan call asserts "contour rebuilds at the final range". Nothing
-  // rebuilt it, which is why putting the range in the fingerprint looked sufficient -- it is,
-  // for range changes arriving through render() (the Min/Max controls), but not for dragging.
-  //
-  // Clearing the cache at the two places the domain is set is the whole fix. During a drag
-  // _panActive is true and _drawScatter runs instead of _drawContour, so the KDE is recomputed
-  // exactly once, on release.
+  // Clearing the cache where the domain is set is enough: during a drag _panActive is true and
+  // _drawScatter runs instead of _drawContour, so the KDE is recomputed exactly once, on release.
   const panFlushNeedle = "_yBase.domain(_plotData.y_range);";
   const panFinishNeedle = "_xBase.domain(pend.x); _yBase.domain(pend.y);";
   const panPatched = "_contourCache = null; // GateLab: base domain changed";
@@ -105,6 +155,28 @@ export function patchCytofForGateLab(src: string): string {
       console.warn("[GateLab] cytof pan contour-invalidation patch matched " + applied +
         "/2 sites — contour may freeze when panning or stretching.");
     }
+  }
+
+  // Opt-in diagnostic for the contour cache. It lives in a closure, so there is no way to see
+  // from the console whether a redraw reused or rebuilt it -- which is exactly what you need to
+  // know when the density sits still while the axes move. Set window.__glContourDebug = true and
+  // reproduce; every render logs which part of the fingerprint moved, if any.
+  const debugNeedle = "var newContourKey = _makeContourKey(plotData);";
+  if (out.includes(debugNeedle) && !out.includes("__glContourDebug")) {
+    out = out.replace(
+      debugNeedle,
+      debugNeedle +
+        "\n          if (typeof window !== 'undefined' && window.__glContourDebug) {" +
+        "\n              var _kOld = (_contourKey || '').split('|'), _kNew = (newContourKey || '').split('|');" +
+        "\n              var _names = ['n','x_label','y_label','bandwidth','threshold','x_range','y_range','x_binding','y_binding'];" +
+        "\n              var _changed = [];" +
+        "\n              _names.forEach(function (nm, i) { if (_kOld[i] !== _kNew[i]) _changed.push(nm); });" +
+        "\n              console.log('[GateLab contour]', newContourKey === _contourKey ? 'REUSED cache' : 'REBUILD'," +
+        "\n                  '| changed:', _changed.length ? _changed.join(',') : 'none'," +
+        "\n                  '| PLOT_W:', PLOT_W, '| canvas:', (document.querySelector('.gl-plot canvas')||{}).width," +
+        "\n                  '| mode:', plotData.display_mode);" +
+        "\n          }",
+    );
   }
 
   // A polygon closed on mousedown sets this guard to swallow that physical click. React can
@@ -125,7 +197,9 @@ export function patchCytofForGateLab(src: string): string {
   // plot overlay. The preview itself is visual-only; close detection is coordinate based.
   const modeNeedle = `_g.select('.cytof-overlay').style('cursor',
             newMode === 'navigate' ? 'default' : 'crosshair');`;
-  if (out.includes(modeNeedle)) {
+  // Guarded like the others: patching an already-patched source would otherwise append the two
+  // pointer-events statements a second time.
+  if (out.includes(modeNeedle) && !out.includes("_g.select('.gate-layer').style('pointer-events'")) {
     out = out.replace(
       modeNeedle,
       `${modeNeedle}
