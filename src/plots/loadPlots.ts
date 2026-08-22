@@ -722,6 +722,24 @@ ${applyModeNeedle}`,
 // columns) crams 18 lines into a tiny plot and looks too busy. Scale the level count and line
 // width with the panel's inner dimension (baseline ~270px = the original 18 levels / 1.0px).
 export function patchMiniPlot(src: string): string {
+  // Default the grid canvases to the DISPLAY's resolution, as the gating plot now does.
+  //
+  // mini_plot already supersamples, but at a hardcoded 2x. That happens to be right on a 2x
+  // screen, which is why the Strategy and Illustration grids looked sharper than the main plot
+  // while it was still drawing at CSS resolution. It is wrong in both directions elsewhere: on a
+  // 3x display the grids are now the soft ones, and on a 1x display every grid cell carries four
+  // times the pixels for no visible gain, which matters when dozens are rendered at once.
+  //
+  // Only the DEFAULT changes. Callers that pass canvas_scale explicitly still win, so the
+  // compensation inspector keeps its 3x and every export keeps its dpi/96.
+  const gridDprNeedle = "if (!isFinite(CANVAS_SCALE) || CANVAS_SCALE <= 0) CANVAS_SCALE = 2;";
+  const gridDprPatch =
+    "if (!isFinite(CANVAS_SCALE) || CANVAS_SCALE <= 0) {\n" +
+    "            // GateLab: match the display, capped like the gating plot. See loadPlots.ts.\n" +
+    "            CANVAS_SCALE = Math.min(3, Math.max(1, window.devicePixelRatio || 1));\n" +
+    "        }";
+  const gridDprSites = src.split(gridDprNeedle).length - 1;
+
   let out = src;
   const marginNeedle = "var M = { top: 22, right: 8, bottom: 38, left: 42 };";
   const marginPatch = `var requestedMargins = cfg.plot_margins || {};
@@ -896,15 +914,80 @@ export function patchMiniPlot(src: string): string {
         if (!isFinite(colourPower) || colourPower <= 0) colourPower = 1;
 
         // Sort by density`;
+  // Carry the gate's true boundary into the strategy grid.
+  //
+  // The grid builder rebuilds each gate as a fresh object from the step, and its field list left
+  // out `outline` — the densified true edge. Everything downstream was already correct: the
+  // payload computes the outline, the gate-edge mode reaches the renderer, and the draw code
+  // reads gate.outline. It was simply never on the object, so _bowPts was always null and the
+  // Strategy grid drew straight chords no matter which mode was selected.
+  const strategyOutlineNeedle = "                    label_offset: step.label_offset";
+  const strategyOutlinePatch =
+    "                    label_offset: step.label_offset,\n" +
+    "                    outline: step.outline";
+  if (out.includes(strategyOutlineNeedle) && !out.includes("outline: step.outline")) {
+    out = out.replace(strategyOutlineNeedle, strategyOutlinePatch);
+  } else if (!out.includes("outline: step.outline")) {
+    console.warn("[GateLab] mini_plot strategy-outline patch did not match — the grid cannot draw true gate edges.");
+  }
+
+  // Contours are drawn dark in the grids, as they are on the gating plot.
+  //
+  // The strategy-grid builder hardcodes pop_color '#3182ce', which is right for a histogram fill
+  // and wrong for a contour: the contour path took it for both its lines and its outlier dots, so
+  // every Strategy panel in contour mode came out blue while the same population on the gating
+  // plot was black. Reading a dedicated contour_color instead leaves histograms their fill and
+  // leaves the back-gated overlay its orange, which is doing real work distinguishing the two.
+  const contourColourNeedle =
+    "                    line_color: cfg.pop_color || '#111111',\n" +
+    "                    outlier_color: cfg.pop_color || '#111111',";
+  const contourColourPatch =
+    "                    line_color: cfg.contour_color || '#111111',\n" +
+    "                    outlier_color: cfg.contour_color || '#111111',";
+  if (out.includes(contourColourNeedle)) {
+    out = out.replace(contourColourNeedle, contourColourPatch);
+  } else if (!out.includes("cfg.contour_color")) {
+    console.warn("[GateLab] mini_plot contour-colour patch did not match — grid contours stay population-coloured.");
+  }
+
+  // Colour by QUANTILE RANK, the same mapping the gating plot uses, so a population does not
+  // change colour when you look at it in a grid instead of on the main plot.
+  //
+  // The two renderers had drifted apart: cytof_plot maps by equal-probability rank (as FlowJo
+  // does), while this one mapped density as a fraction of a ceiling. Rank is self-normalising,
+  // which is what the ceiling was working around -- an exact-zero pile occupies the bottom of
+  // the ramp by construction rather than dragging the top of it upward. Ties share a mid-rank,
+  // so two events in the same density bin cannot take different colours from their sort order.
+  //
+  // The ceiling machinery above still runs; it now only bounds the smoothing/clip path, and an
+  // explicit density_color_ceiling is still honoured by callers that set one.
   const densityRatioNeedle = "var t = densities[idx] / maxDens;";
-  const densityRatioPatch = "var t = Math.pow(Math.min(1, densities[idx] / colourCeiling), colourPower);";
+  const densityRatioPatch =
+    "var t = Math.pow(Math.min(1, _rank[idx]), colourPower);";
+  // The rank array, built from the sort this renderer already performs.
+  const rankSetupNeedle = "        ctx.globalAlpha = pointAlpha;";
+  const rankSetupPatch = `        var _rank = new Float32Array(n);
+        var _denom = n > 1 ? n - 1 : 1;
+        for (var _r = 0; _r < n; ) {
+            var _runStart = _r;
+            while (_r + 1 < n && densities[indices[_r + 1]] === densities[indices[_runStart]]) _r++;
+            var _mid = ((_runStart + _r) / 2) / _denom;
+            for (var _k = _runStart; _k <= _r; _k++) _rank[indices[_k]] = _mid;
+            _r++;
+        }
+
+        ctx.globalAlpha = pointAlpha;`;
   if (out.includes(pseudocolorCall)) out = out.replace(pseudocolorCall, robustPseudocolorCall);
   if (out.includes(pseudocolorSignature)) out = out.replace(pseudocolorSignature, robustPseudocolorSignature);
   if (out.includes(densityGridSizeNeedle)) out = out.replace(densityGridSizeNeedle, densityGridSizePatch);
   if (out.includes(densityBlurNeedle)) out = out.replace(densityBlurNeedle, densityBlurPatch);
   if (out.includes(densityLookupNeedle)) out = out.replace(densityLookupNeedle, densityLookupPatch);
   if (out.includes(densityCeilingNeedle)) out = out.replace(densityCeilingNeedle, densityCeilingPatch);
+  if (out.includes(rankSetupNeedle)) out = out.replace(rankSetupNeedle, rankSetupPatch);
   if (out.includes(densityRatioNeedle)) out = out.replace(densityRatioNeedle, densityRatioPatch);
+  if (!out.includes("var _rank = new Float32Array(n);") || !out.includes("_rank[idx]")) {
+    console.warn("[GateLab] mini_plot quantile-rank pseudocolour patch did not match — grids will not match the gating plot.");
+  }
 
   // The grid renderers unpack a top-level style payload into each mini-plot configuration. Keep
   // the shared density transfer setting intact through that boundary for Strategy/Illustration.
@@ -980,6 +1063,14 @@ export function patchMiniPlot(src: string): string {
   ) {
     console.warn("[GateLab] mini_plot robust-density patch did not match.");
   }
+  if (gridDprSites > 0 && !out.includes("GateLab: match the display, capped like the gating plot")) {
+    const before = out;
+    out = out.split(gridDprNeedle).join(gridDprPatch);
+    if (out === before) {
+      console.warn("[GateLab] mini_plot canvas-resolution patch did not match — grids stay at a fixed 2x.");
+    }
+  }
+
   return out;
 }
 

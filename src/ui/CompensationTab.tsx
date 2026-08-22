@@ -125,6 +125,15 @@ interface Props {
   visible?: boolean;
   stateKey: string;
   densityColorPower?: number;
+  /**
+   * The app-wide channel naming choice.
+   *
+   * Not read directly — `sample.labelForKey` already applies it. It is a prop so the memos that
+   * build channel lists have something that CHANGES when it does: `sample` is a stable mutable
+   * object whose identity never moves, so every derived label stayed at whatever it was when
+   * this tab first mounted.
+   */
+  channelLabelMode?: string;
   onDensityColorPowerChange?: (value: number) => void;
 }
 
@@ -281,14 +290,19 @@ function channelDisplay(sample: Sample, key: string): Readonly<{
   combined: string;
 }> {
   const index = sample.index(key);
-  const pnn = index === undefined ? key : sample.channels[index].pnn;
+  const channel = index === undefined ? undefined : sample.channels[index];
+  const pnn = channel?.pnn ?? key;
+  // `label` follows the app-wide naming choice, because it titles plot axes.
   const label = sample.labelForKey(key);
-  return {
-    key,
-    pnn,
-    label,
-    combined: label === pnn ? pnn : `${label} (${pnn})`,
-  };
+  // `combined` does NOT: it always names the marker and its detector, because it identifies a
+  // channel in the matrix and in tooltips, where "which detector" is the whole question. Built
+  // from $PnS rather than from `label`, which would read "CD19 (BV421-A) (BV421-A)" once the
+  // naming choice already includes the detector.
+  // An explicit Panel-tab rename outranks $PnS, exactly as it does on an axis. Falling straight
+  // to the marker here dropped the user's own name from the matrix.
+  const named = (channel?.label ?? "").trim() || (channel?.marker ?? "").trim();
+  const combined = named && named !== pnn ? `${named} (${pnn})` : pnn;
+  return { key, pnn, label, combined };
 }
 
 function channelDisplayForPnn(sample: Sample, pnn: string): ReturnType<typeof channelDisplay> {
@@ -538,6 +552,7 @@ function CompensationTabImpl({
   visible = true,
   stateKey,
   densityColorPower = DEFAULT_DENSITY_COLOR_POWER,
+  channelLabelMode = "marker",
   onDensityColorPowerChange = () => undefined,
 }: Props) {
   const { t } = useI18n();
@@ -804,7 +819,7 @@ function CompensationTabImpl({
       sampleChannels: samplePnnChannels,
       includedChannels: Array.from(includedCytofChannels),
     });
-  }, [cytofDraft, includedCytofChannels, samplePnnChannels]);
+  }, [cytofDraft, includedCytofChannels, samplePnnChannels, channelLabelMode]);
 
   const matrixView = useMemo<CompensationMatrixView | null>(() => {
     if (spill) {
@@ -865,7 +880,7 @@ function CompensationTabImpl({
         ? "This is the exact uploaded matrix. The NNLS solve uses its selected, matched channels; original measurements remain stored separately."
         : "This is the exact installed matrix. Original measurements remain stored separately.",
     };
-  }, [hostedFlowMatrix, profileMetadata, profileRecord, sample, spill, t]);
+  }, [hostedFlowMatrix, profileMetadata, profileRecord, sample, spill, t, channelLabelMode]);
   const sourceChannels = matrixView?.sourceChannels ?? [];
   const receiverChannels = matrixView?.receiverChannels ?? [];
   useEffect(() => {
@@ -3199,7 +3214,7 @@ function CompensationTabImpl({
                           className={selectedPair?.receiverIndex === receiverIndex ? "is-selected" : undefined}
                           title={channel.combined}
                         >
-                          <span>{channel.pnn}</span>
+                          <span>{channel.combined}</span>
                         </div>
                       ))}
                     </div>
@@ -3216,7 +3231,7 @@ function CompensationTabImpl({
                           className={selectedPair?.sourceIndex === sourceIndex ? "is-selected" : undefined}
                           title={channel.combined}
                         >
-                          {channel.pnn}
+                          {channel.combined}
                         </div>
                       ))}
                     </div>
