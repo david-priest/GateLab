@@ -6506,6 +6506,7 @@ export default function App() {
                   stateKey={compensationTabStateKey}
                   densityColorPower={densityColorPower}
                   onDensityColorPowerChange={changeDensityColorPower}
+                  channelLabelMode={channelLabelMode}
                 />
               </Suspense>
             </ErrorBoundary>}

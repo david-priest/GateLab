@@ -16,6 +16,81 @@ describe("GateLab cytof interaction patches", () => {
     warning.mockRestore();
   });
 
+  it("carries the gate's true boundary into the strategy grid", () => {
+    // The grid builder rebuilt each gate from the step and left `outline` off the field list, so
+    // _bowPts was always null and the Strategy tab drew straight chords whatever edge mode was
+    // chosen. Everything either side of it was already right.
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchMiniPlot(miniSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(miniSrc).not.toContain("outline: step.outline");
+    expect(patched).toContain("outline: step.outline");
+    // The draw code that consumes it must still be present.
+    expect(patched).toContain("gate.outline && gate.outline.length > 2");
+
+    warning.mockRestore();
+  });
+
+  it("applies the edge mode under publication style too", () => {
+    // Publication style only swaps colours (black stroke, black label fill). It must keep using
+    // the same path the edge-mode patch produces, or figures would silently revert to straight
+    // chords exactly where it matters most.
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchMiniPlot(miniSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    const pathAssign = patched.indexOf("var pathStr = _toPath(");
+    const pubStroke = patched.indexOf("pubStyle ? '#000000' : gate.color");
+    expect(pathAssign).toBeGreaterThan(-1);
+    expect(pubStroke).toBeGreaterThan(pathAssign);   // the stroke uses the patched path
+    expect(patched).not.toContain("var pathStr = 'M' + points.map(");
+
+    warning.mockRestore();
+  });
+
+  it("draws grid contours dark rather than in the population colour", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchMiniPlot(miniSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(miniSrc).toContain("line_color: cfg.pop_color || '#111111'");
+    expect(patched).not.toContain("line_color: cfg.pop_color || '#111111'");
+    expect(patched).toContain("line_color: cfg.contour_color || '#111111'");
+    // Histograms keep the population colour, and back-gating keeps its orange.
+    expect(patched).toContain("cfg.pop_color || '#444444'");
+    expect(patched).toContain("back_color");
+
+    warning.mockRestore();
+  });
+
+  it("defaults the grid canvases to the display too, without overriding explicit callers", () => {
+    // mini_plot supersampled at a hardcoded 2x. Right on a 2x screen, wrong on a 3x one (the
+    // grids become the soft ones) and wasteful on a 1x one, where every cell carries four times
+    // the pixels for nothing.
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchMiniPlot(miniSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(miniSrc).toContain("CANVAS_SCALE = 2;");
+    expect(patched).not.toContain("CANVAS_SCALE = 2;");
+    expect(patched).toContain("window.devicePixelRatio");
+    expect(patched).toContain("Math.min(3, Math.max(1,");
+
+    // Both render paths in mini_plot, not just the first.
+    const sites = patched.split("GateLab: match the display").length - 1;
+    expect(sites).toBe(miniSrc.split("CANVAS_SCALE = 2;").length - 1);
+
+    // An explicit canvas_scale must still win — the compensation inspector passes 3 and every
+    // export passes dpi/96, and neither may be silently reduced to the screen's ratio.
+    expect(patched).toContain("var CANVAS_SCALE = Number(cfg.canvas_scale);");
+    const guard = patched.indexOf("var CANVAS_SCALE = Number(cfg.canvas_scale);");
+    const fallback = patched.indexOf("window.devicePixelRatio", guard);
+    expect(fallback).toBeGreaterThan(guard);
+
+    warning.mockRestore();
+  });
+
   it("sizes the plot canvas to the display, not to CSS pixels", () => {
     // The backing store was PLOT_W x PLOT_H CSS pixels, so on a 2x screen every event was drawn
     // at half the resolution the display can show. mini_plot already renders at 2x.
@@ -276,7 +351,11 @@ describe("GateLab mini-plot density patches", () => {
     expect(patched).toContain("? requestedCeiling : maxDens;");
     expect(patched).toContain("if (qd > 0) occupied.push(qd);");
     expect(patched).toContain("Math.floor(clipQ * (occupied.length - 1))");
-    expect(patched).toContain("Math.pow(Math.min(1, densities[idx] / colourCeiling), colourPower)");
+    // The colour mapping is now quantile RANK, matching the gating plot; the ceiling still
+    // bounds the clip/smoothing path but no longer sets the ramp.
+    expect(patched).toContain("Math.pow(Math.min(1, _rank[idx]), colourPower)");
+    expect(patched).toContain("var _rank = new Float32Array(n);");
+    expect(patched).not.toContain("var t = densities[idx] / maxDens;");
     expect(patched).toContain("density_color_power: data.density_color_power");
     expect(patched).toContain("ctx.arc(px, py, dotR, 0, 6.2832)");
     expect(patched).toContain("H + xAxisLabelOffset");
