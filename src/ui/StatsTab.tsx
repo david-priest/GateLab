@@ -7,6 +7,7 @@ import { usePersistedTabState } from "./tabState";
 import { recompute, type CoreState, type Derived } from "../store";
 import type { Sample } from "../engine/sample";
 import { computePopulationStats, MFI_STATS, type StatType, type ValueSpace } from "../engine/stats";
+import { significantNumber } from "./compensationUiFormat";
 import { populationTreeOrder } from "../engine/populations";
 import { TreeConnectors } from "./TreeConnectors";
 import { MultiColumnChecklist } from "./MultiColumnChecklist";
@@ -121,6 +122,15 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
     setChannels((prev) => (prev.includes(ch) ? prev.filter((c) => c !== ch) : [...prev, ch]));
 
   const fmtCount = (v: number | null) => (v == null ? "—" : v.toLocaleString());
+  /**
+   * MFI columns carry a measured value, not a count, and their magnitude depends entirely on
+   * the value space: raw runs to tens of thousands, a logicle display coordinate lives in
+   * [0, 1]. Significant figures suit both, where a fixed number of decimal places suits
+   * neither. Four is enough to separate channels without implying precision the statistic
+   * does not have.
+   */
+  const isMfiColumn = (key: string) => key.includes("::");
+  const fmtMfi = (v: number | null) => (v == null ? "—" : significantNumber(v, 4));
   const fmtCell = (metric: string, v: number | null) =>
     v == null ? "—" : metric === "count" ? v.toLocaleString() : `${v}%`;
 
@@ -131,7 +141,16 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
     }
     if (table) {
       return ["Population", ...table.columns.map((c) => c.label)].join(",") + "\n" +
-        table.rows.map((r) => [JSON.stringify(r.name), ...table.columns.map((c) => r.cells[c.key] ?? "")].join(",")).join("\n");
+        table.rows.map((r) => [
+          JSON.stringify(r.name),
+          ...table.columns.map((c) => {
+            const v = r.cells[c.key];
+            if (v == null) return "";
+            // Six significant figures rather than the four on screen: an exported file is read
+            // by something else, and full float noise (0.48391827364) helps nobody either.
+            return isMfiColumn(c.key) ? significantNumber(v, 6) : v;
+          }),
+        ].join(",")).join("\n");
     }
     return "";
   };
@@ -289,7 +308,9 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
                     <td key={c.key} className="gl-stats-num">
                       {c.key === "pct_parent" || c.key === "pct_total"
                         ? r.cells[c.key] == null ? "—" : `${r.cells[c.key]}%`
-                        : fmtCount(r.cells[c.key])}
+                        : isMfiColumn(c.key)
+                          ? fmtMfi(r.cells[c.key])
+                          : fmtCount(r.cells[c.key])}
                     </td>
                   ))}
                 </tr>

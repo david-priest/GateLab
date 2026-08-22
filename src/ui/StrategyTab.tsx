@@ -27,6 +27,8 @@ interface Props {
   configRef: MutableRefObject<StrategyConfig | null>;
   densityColorPower: number;
   onDensityColorPowerChange: (value: number) => void;
+  /** Fit these channels to their data plus the gates drawn on them. */
+  onFitChannels: (keys: readonly string[]) => void;
 }
 
 type GateView = "forward" | "back";
@@ -58,6 +60,7 @@ export interface StrategyConfig {
 }
 
 export function StrategyTab({
+  onFitChannels,
   sample,
   state,
   derived,
@@ -67,6 +70,8 @@ export function StrategyTab({
   densityColorPower,
   onDensityColorPowerChange,
 }: Props) {
+  /** Channels of the plots most recently rendered, for Fit. */
+  const shownChannels = useRef<readonly string[]>([]);
   const { t } = useI18n();
   const rootId = state.root_population_id ?? "";
   const c0 = configRef.current; // restore on (re)mount; null = first-ever
@@ -155,6 +160,9 @@ export function StrategyTab({
       let effMode = displayMode;
       if (gateView.includes("forward") && gateView.includes("back") && effMode === "pseudocolor") effMode = "scatter";
       const steps = computeGatingStrategy(sample, state.gates, state.populations, rootId, popId, { fullPath, maxEvents: cap });
+      // Remembered so Fit can act on exactly the plots on screen, rather than every channel a
+      // gate happens to use.
+      shownChannels.current = steps.flatMap((s) => [s.x_channel, s.y_channel]);
       const finalMask = gateView.includes("back") ? derived.masks[popId] ?? null : null;
       const payload = buildStrategyPayload(sample, steps, finalMask, globalScales, {
         gateView,
@@ -282,6 +290,11 @@ export function StrategyTab({
           DPI
           <input type="number" min={72} max={1200} step={1} value={exportDpi} onChange={(e) => setExportDpi(Math.max(72, Math.min(1200, Math.round(+e.target.value) || 300)))} />
         </label>
+        <button
+          className="gl-mini-btn"
+          title={t("Fit every plot shown here to its data and the gates on it")}
+          onClick={() => onFitChannels(shownChannels.current)}
+        >{t("Fit data + gates")}</button>
         <button className="gl-mini-btn" onClick={() => exportGridPNG("strategy-grid-container-grid", popName + "_strategy")}>PNG</button>
         <button className="gl-mini-btn" onClick={() => exportGridSVG("strategy-grid-container-grid", popName + "_strategy", exportDpi)}>SVG</button>
         <button className="gl-mini-btn" onClick={() => void exportGridPDF("strategy-grid-container-grid", popName + "_strategy", exportDpi)}>PDF</button>

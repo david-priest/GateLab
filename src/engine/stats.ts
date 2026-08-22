@@ -136,7 +136,11 @@ export function computePopulationStats(
             const sd = stddev(vals);
             val = Number.isFinite(m) && m !== 0 ? (sd / Math.abs(m)) * 100 : NaN;
           }
-          cells[key] = Number.isFinite(val) ? round(val, 1) : null;
+          // Stored at full precision and formatted for display by the caller. Rounding to one
+          // decimal here was fine for raw values in the tens of thousands and destroyed the
+          // TRANSFORMED ones: a logicle display coordinate lives in [0, 1], so every median
+          // collapsed onto 0.1 to 0.6 and a whole column of channels read as identical.
+          cells[key] = Number.isFinite(val) ? val : null;
         }
       });
     }

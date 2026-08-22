@@ -45,8 +45,10 @@ describe("MultiColumnChecklist", () => {
     ));
 
     const columns = [...host.querySelectorAll<HTMLElement>(".gl-multi-picker-column")];
-    expect(columns).toHaveLength(4);
-    expect(columns.map((column) => column.querySelectorAll("label").length)).toEqual([5, 5, 0, 0]);
+    // Ten items at five rows need exactly two columns. It used to render four, the last two
+    // empty, because the column count came from the width rather than from the overflow.
+    expect(columns).toHaveLength(2);
+    expect(columns.map((column) => column.querySelectorAll("label").length)).toEqual([5, 5]);
     expect(columns[0].textContent).toContain("Population 1");
     expect(columns[0].textContent).toContain("Population 5");
     expect(columns[1].textContent).toContain("Population 6");

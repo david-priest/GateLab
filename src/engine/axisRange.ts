@@ -89,6 +89,33 @@ function finitePair(value: unknown): [number, number] | null {
  */
 const LABEL_MAX_EXTENSION = 0.25;
 
+/**
+ * Fit ONE channel's axis to its data plus every gate drawn on it, on either axis.
+ *
+ * The Gating tab fits the two axes it is showing. The Strategy and Illustration grids show many
+ * plots at once, so a fit there has to work per channel rather than per plot: a channel can be
+ * the x of one panel and the y of another, and both sets of gates belong in the range.
+ *
+ * Gate coordinates are converted with the gate's OWN transform, so a raw-space gate and a
+ * display-space gate on the same channel both land where they are actually drawn.
+ */
+export function fitChannelAxisRange(
+  dataRange: [number, number],
+  gateCoordinates: readonly number[],
+): [number, number] {
+  let [lo, hi] = dataRange;
+  let expandedLow = false;
+  let expandedHigh = false;
+  for (const value of gateCoordinates) {
+    if (!Number.isFinite(value)) continue;
+    if (value < lo) { lo = value; expandedLow = true; }
+    if (value > hi) { hi = value; expandedHigh = true; }
+  }
+  if (!expandedLow && !expandedHigh) return dataRange;
+  const buffer = Math.max(1e-10, hi - lo) * PADDING_FRACTION;
+  return [expandedLow ? lo - buffer : lo, expandedHigh ? hi + buffer : hi];
+}
+
 export function includePlotGatesInAxisRange(
   baseRange: [number, number],
   gates: readonly unknown[],

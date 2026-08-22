@@ -625,9 +625,28 @@ input[type="number"]::-webkit-outer-spin-button {
 
 /* Illustration tab — multi-row control panel */
 .gl-illust-controls { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+/* The Illustration control strip follows the Gating strip's rule: wrap onto another row rather
+   than push the panel sideways. Measured at 900px before this, eight of these rows were
+   overflowing horizontally rather than wrapping, because nothing was allowed to shrink.
+   Channel selects give up space first (a truncated channel name is still legible); buttons,
+   steppers and radios hold their size, because a squashed control is unusable. */
 .gl-illust-row {
   display: flex; align-items: center; gap: 10px 12px; flex-wrap: wrap;
   font-size: 12px; color: var(--text);
+  min-width: 0;
+}
+.gl-illust-row > * { min-width: 0; }
+.gl-illust-row select { flex: 0 1 auto; min-width: 5.5rem; max-width: 100%; }
+.gl-illust-row input[type="number"], .gl-illust-row button { flex: none; }
+/* A range input's intrinsic width is ~130px and min-width defaults to auto, so it cannot shrink
+   and pushes the row sideways instead. Sliders are still usable narrow; a stepper or a button
+   is not, which is why only these are allowed to give. */
+.gl-illust-row input[type="range"] { flex: 0 1 auto; min-width: 60px; }
+/* A section eyebrow and the controls it names wrap as one unit. Loose in the row, "Display"
+   could end up a line above its own radio buttons. */
+.gl-illust-group {
+  display: flex; align-items: center; gap: 10px 12px; flex-wrap: wrap;
+  flex: 0 1 auto; min-width: 0;
 }
 .gl-illust-top-actions { margin-bottom: 2px; }
 .gl-illust-render.pending { background: #e6920a; }
@@ -2538,4 +2557,34 @@ input[type="number"]::-webkit-outer-spin-button {
 .gate-layer.gl-gates-inert,
 .gate-layer.gl-gates-inert * {
   pointer-events: none !important;
+}
+
+/* Panel tab: the app-wide channel naming choice sits with the renames it interacts with. */
+.gl-panel-labelmode {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap;
+}
+.gl-panel-labelmode input { margin: 0; }
+
+/* ── Narrow windows: the right pane stops competing for width ─────────────────────
+   The body is a flex ROW of three fixed-ish panes, so on a narrow window the centre is what
+   gives: measured at 1100px it was 120 pixels wide, too narrow for a 131px slider, and the
+   Illustration and Strategy control strips pushed sideways instead of wrapping. Below 1200px
+   the Gates/Populations pane wraps onto its own full-width row beneath, which hands the centre
+   back its width without putting anything out of reach.
+
+   The width is set inline by the drag-to-resize handle, so overriding it needs !important;
+   `display` is also inline-set (the Compensation tab hides this pane), so it is left alone. */
+@media (max-width: 1200px) {
+  .gl-body { flex-wrap: wrap; align-content: flex-start; }
+  .gl-left, .gl-center { min-height: 60vh; }
+  .gl-side {
+    width: 100% !important;
+    flex: 1 1 100%;
+    min-height: 34vh;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+  /* Dragging a horizontal edge means nothing once the pane is stacked below. */
+  .gl-side-resize { display: none; }
 }

@@ -217,6 +217,9 @@ export interface SampleOpts {
   channelScales?: ChannelScales;
 }
 
+/** Axis and picker naming: the marker alone, or the marker with its detector. */
+export type ChannelLabelMode = "marker" | "channel-marker";
+
 export type AssayLayer = "original" | "compensated";
 
 /** One derived output column, identified only by exact FCS identity. */
@@ -2094,7 +2097,37 @@ export class Sample {
 
   /** Display label for a resolved-channel index — the Panel-tab override, else the key. */
   channelLabel(idx: number): string {
-    return this.channels[idx].label ?? this.channels[idx].key;
+    const channel = this.channels[idx];
+    // A Panel-tab rename is an explicit instruction and always wins.
+    if (channel.label) return channel.label;
+    if (this.channelLabelMode === "channel-marker") {
+      // $PnS is the marker, $PnN the detector it was measured on. Which of them the identity
+      // key ended up as depends on the file, so the label is built from the PARTS rather than
+      // decorating the key -- decorating would double up on a file whose key already carries
+      // both, which is exactly what a spectral export produces.
+      const marker = channel.marker?.trim();
+      if (marker && marker !== channel.pnn) return `${marker} (${channel.pnn})`;
+      return channel.pnn || channel.key;
+    }
+    return channel.key;
+  }
+
+  /**
+   * How channels are named on axes, pickers and tables.
+   *
+   * A workspace can lose the fluorophore: a file whose $PnS is "CD19" resolves to the key
+   * "CD19" and the detector never appears, even though $PnN still holds it and the Panel tab
+   * shows it. This is a display choice, not an identity one -- gates, masks, compensation and
+   * the workspace all key off `key`, so switching modes cannot move anything.
+   */
+  private channelLabelMode: ChannelLabelMode = "marker";
+
+  setChannelLabelMode(mode: ChannelLabelMode): void {
+    this.channelLabelMode = mode;
+  }
+
+  get labelMode(): ChannelLabelMode {
+    return this.channelLabelMode;
   }
 
   /** Display label for a channel identity key (key unchanged if not found). */
