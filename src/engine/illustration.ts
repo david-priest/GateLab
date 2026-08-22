@@ -5,10 +5,11 @@
 // Rendered through the reused mini_plot.js CytofMiniPlot.renderIllustrationGrid so output matches.
 
 import type { Sample } from "./sample";
+import type { GateEdgeMode } from "../ui/gateEdgeModes";
 import type { Gate, PopulationMap } from "./models";
 import { computeGateCounts, type GateCount } from "./populations";
 import type { AxisTicks } from "./ticks";
-import { displayLabelOffset } from "../plots/gatePayload";
+import { displayLabelOffset, polygonOutline } from "../plots/gatePayload";
 import { computeRangeFromValues } from "./strategy";
 
 /** Even-spaced downsample of masked event indices (round(seq(1,N,len=cap))). */
@@ -29,6 +30,8 @@ interface GateOverlay {
   percent_of_parent: number | null;
   gate_type: string;
   vertices: [number, number][];
+  /** True display-space boundary, present only when the transform actually bends the edges. */
+  outline?: [number, number][];
   color: string;
   label_offset: [number, number] | null;
 }
@@ -63,8 +66,16 @@ function buildGatesForChannels(
       // (vx,vy) are in (gate.x_channel, gate.y_channel) space.
       const cellX = flipped ? vy : vx; // value on xCh
       const cellY = flipped ? vx : vy; // value on yCh
-      return [sample.gatingToDisplay(xCh, cellX), sample.gatingToDisplay(yCh, cellY)];
+      return [sample.gateToDisplay(gate, xCh, cellX), sample.gateToDisplay(gate, yCh, cellY)];
     });
+
+    // A gate is straight in the space it was drawn in, so it bows when an axis is shown on a
+    // different scale. Rectangles are axis-aligned boxes in display space and provably cannot.
+    const outline = gate.gate_type === "rectangle" ? undefined : polygonOutline(
+      raw.map(([vx, vy]) => (flipped ? [vy, vx] : [vx, vy]) as [number, number]),
+      (pt) => [sample.gateToDisplay(gate, xCh, pt[0]), sample.gateToDisplay(gate, yCh, pt[1])],
+      verts,
+    );
 
     const c = gateCounts[gid];
     out.push({
@@ -73,6 +84,7 @@ function buildGatesForChannels(
       percent_of_parent: c?.percent_of_parent ?? null,
       gate_type: gate.gate_type,
       vertices: verts,
+      outline,
       color: gate.color,
       label_offset: gate.label_offset ?? displayLabelOffset(verts),
     });
@@ -123,6 +135,7 @@ export interface IllustrationOptions {
   ridgeGradient: boolean; // heat gradient (black→yellow) fill
   pubStyle: boolean; // black gates, no label background
   gateLineWidth: number;
+  gateEdgeMode?: GateEdgeMode;
   fontSizes: IllustrationFontSizes;
   scaleFontsWithPlot: boolean;
 }
@@ -163,7 +176,7 @@ export function buildIllustrationPayload(
   globalScales: Record<string, [number, number]>,
   opts: IllustrationOptions,
 ): Record<string, unknown> {
-  const data = sample.gatingData();
+  const data = sample.gateAssayData();
   // Preview point budget: cap per-panel events so a large max-events × many pop×channel panels
   // can't lock the browser up (app.R:7751-7761). Full max-events is reserved for export.
   const nPanels = Math.max(1, popIds.length) * Math.max(1, xChannels.length);
@@ -262,7 +275,11 @@ export function buildIllustrationPayload(
     ridge_gradient: opts.ridgeGradient,
     font_sizes: opts.fontSizes,
     scale_fonts_with_plot: opts.scaleFontsWithPlot,
-    gate_style: { pub_style: opts.pubStyle, line_width: opts.gateLineWidth },
+    gate_style: {
+      pub_style: opts.pubStyle,
+      line_width: opts.gateLineWidth,
+      gate_edge_mode: opts.gateEdgeMode ?? "straight-bow",
+    },
   };
 }
 

@@ -20,6 +20,8 @@ import {
   type GateRef,
   type PopulationMap,
   type Vertex,
+  type GateSpace,
+  type GateTransforms,
 } from "./engine/models";
 import {
   applyGatingStrategy,
@@ -103,20 +105,26 @@ export type Action =
       gateType: "polygon" | "rectangle";
       xChannel: string;
       yChannel: string;
-      /** vertices already in gating space */
+      /** vertices already in the gate's own space (see `space`) */
       vertices: Vertex[];
       labelOffset?: [number, number];
       name: string;
       createPop?: { name: string; parentId: string };
+      /** Coordinate space the vertices are straight in; omitted = the sample's legacy default. */
+      space?: GateSpace;
+      /** Transform each axis was drawn under. Required when `space` is "display". */
+      transforms?: GateTransforms;
     }
   | {
       type: "addQuadrant";
       xChannel: string;
       yChannel: string;
-      /** center already in gating space */
+      /** center already in the gate's own space (see `space`) */
       center: [number, number];
       prefix: string;
       parentId: string;
+      space?: GateSpace;
+      transforms?: GateTransforms;
     }
   | { type: "addPopulation"; name: string; parentId: string; gateRefs: GateRef[] }
   | { type: "setActivePopulation"; popId: string }
@@ -211,6 +219,9 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
         color,
         null,
       );
+      // Recorded at creation and never rewritten: the gate's space is part of its identity.
+      if (action.space) gate.space = action.space;
+      if (action.transforms) gate.transforms = action.transforms;
       const gates = { ...state.gates, [gate.gate_id]: gate };
       const gate_order = [...state.gate_order, gate.gate_id];
       const base = { ...pushUndo(state), gates, gate_order, selected_gate_id: gate.gate_id };
@@ -245,6 +256,8 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
         action.center,
         color,
       );
+      if (action.space) qgate.space = action.space;
+      if (action.transforms) qgate.transforms = action.transforms;
       const gates = { ...state.gates, [qgate.gate_id]: qgate };
       const gate_order = [...state.gate_order, qgate.gate_id];
       const populations: PopulationMap = clonePops(state.populations);
@@ -925,7 +938,7 @@ export function recomputeGating(sample: Sample | null, state: CoreState): Gating
   if (!sample || !state.root_population_id || Object.keys(state.populations).length === 0) {
     return EMPTY_GATING_DERIVED;
   }
-  const data = sample.gatingData();
+  const data = sample.gateAssayData();
   const gateMasks = computeGateMasks(state.gates, data);
   const pops = clonePops(state.populations);
   const { masks, populations } = applyGatingStrategy(
@@ -969,7 +982,7 @@ export function derivePopulationView(
     return EMPTY_DERIVED;
   }
   const { masks, stats, populations, gateMasks } = gating;
-  const data = sample.gatingData();
+  const data = sample.gateAssayData();
 
   const { activeMask, displayMask, displayPopCount } =
     derivePopulationDisplaySelection(sample, state, gating);

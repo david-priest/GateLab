@@ -11,12 +11,13 @@
 // overlaid. Parent masks come from `masks` (derived.masks) — we do NOT re-run gating.
 //
 // Coordinate handling mirrors buildStrategyPayload / gatePayload exactly: masks/percentages
-// run in GATING space (sample.gatingData()); plotted values + gate vertices + axis ranges
+// run in each GATE's own space (sample.gateAssayData()); plotted values + gate vertices + axis ranges
 // are DISPLAY space; axis labels are the Panel display labels (sample.labelForKey).
 
 import type { Sample } from "./sample";
+import type { GateEdgeMode } from "../ui/gateEdgeModes";
 import type { Gate, GateRef, Population, PopulationMap } from "./models";
-import { getGateMask } from "./gates";
+import { columnsForGate, getGateMask } from "./gates";
 import type { AxisTicks } from "./ticks";
 import { computeRangeFromValues, type StrategyFontSizes } from "./strategy";
 import { displayLabelOffset } from "../plots/gatePayload";
@@ -87,8 +88,8 @@ function gatingVertices(gate: Gate): [number, number][] {
 function displayVerticesOf(sample: Sample, xCh: string, yCh: string, gate: Gate): [number, number][] {
   if (gate.gate_type === "quadrant") return [];
   const toD = (vx: number, vy: number): [number, number] => [
-    sample.gatingToDisplay(xCh, vx),
-    sample.gatingToDisplay(yCh, vy),
+    sample.gateToDisplay(gate, xCh, vx),
+    sample.gateToDisplay(gate, yCh, vy),
   ];
   if (gate.gate_type === "rectangle") {
     let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
@@ -234,7 +235,7 @@ export function computeMultiPopStrategy(
   const rowMap = new Map<number, number>();
   uniqueRows.forEach((r, i) => rowMap.set(r, i));
 
-  const data = sample.gatingData();
+  const data = sample.gateAssayData();
 
   // ── Build result nodes with event data + ranges + ticks ──
   const result: MultiStrategyNode[] = [];
@@ -291,7 +292,7 @@ export function computeMultiPopStrategy(
       // percent_of_parent: gate mask ∩ parent mask (include vs exclude), like the R.
       let pct: number | null = null;
       if (gateDef && nTotal > 0) {
-        const gm = getGateMask(gateDef, data);
+        const gm = getGateMask(gateDef, columnsForGate(data, gateDef));
         let nChild = 0;
         if (parentId === rootId) {
           for (let i = 0; i < gm.length; i++) {
@@ -408,6 +409,7 @@ export interface MultiStrategyPayloadOptions {
   kdeBandwidth: number;
   pubStyle: boolean; // black gates, no label background
   gateLineWidth: number;
+  gateEdgeMode?: GateEdgeMode;
   fontSizes: StrategyFontSizes;
   contextTitle?: string;
 }
@@ -431,6 +433,10 @@ export function buildMultiStrategyPayload(
     point_size: opts.pointSize,
     kde_bandwidth: opts.kdeBandwidth,
     font_sizes: opts.fontSizes,
-    gate_style: { pub_style: opts.pubStyle, line_width: opts.gateLineWidth },
+    gate_style: {
+      pub_style: opts.pubStyle,
+      line_width: opts.gateLineWidth,
+      gate_edge_mode: opts.gateEdgeMode ?? "straight-bow",
+    },
   };
 }

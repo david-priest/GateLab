@@ -80,6 +80,53 @@ input[type="number"]::-webkit-outer-spin-button {
   gap: 12px;
 }
 .gl-header .gl-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
+
+/* Hovering the app name explains what GateLab is and why its gate numbers differ from FlowJo's.
+   CSS-only: no state, and it cannot get stuck open. `position: relative` on the wrapper anchors
+   the card; the header itself must not clip it, so the card is fixed-width and left-aligned to
+   the wrapper rather than centred (the name sits hard against the left edge of the window). */
+.gl-brand { position: relative; display: inline-block; cursor: help; }
+.gl-brand:focus-visible { outline: 2px solid var(--accent, #3b82f6); outline-offset: 2px; border-radius: 3px; }
+.gl-brand-card {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 1200;
+  display: none;
+  width: 460px;
+  max-width: calc(100vw - 24px);
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  white-space: normal;
+  /* The card is only ever read, never pointed at; letting it take the pointer would make it
+     flicker as the cursor crosses the gap between the name and the card. */
+  pointer-events: none;
+}
+.gl-brand:hover .gl-brand-card,
+.gl-brand:focus-visible .gl-brand-card,
+.gl-brand:focus-within .gl-brand-card { display: block; }
+.gl-brand-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+.gl-brand-card-by { font-weight: 400; font-size: 11px; color: var(--muted); }
+.gl-brand-card p { margin: 0 0 8px; }
+.gl-brand-card p:last-child { margin-bottom: 0; }
+.gl-brand-card b { font-weight: 600; }
 .gl-header .gl-error { color: #e0736b; font-size: 12px; }
 .gl-header-language {
   display: inline-flex;
@@ -1558,7 +1605,10 @@ input[type="number"]::-webkit-outer-spin-button {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 28px;
+  /* Less headroom than sides: the control strip already separates the plot from the chrome
+     above it, while the 28px flanks keep the axis labels off the pane edges. The reclaimed
+     space matters at the BOTTOM, where the X-axis label and its channel picker live. */
+  padding: 10px 28px 28px;
   min-height: 0;
   min-width: 0;
   background: var(--workspace);
@@ -2477,3 +2527,15 @@ input[type="number"]::-webkit-outer-spin-button {
   background: #fff4df; border: 1px solid #e9bd72; border-radius: 3px; padding: 0 4px;
 }
 .gl-wsp-meta { color: var(--muted); font-size: 11px; }
+
+/* While a gate tool is active, saved gates must not swallow clicks — otherwise a new gate cannot
+   be started inside an existing one, and the move cursor appears mid-draw.
+   cytof_plot.js sets pointer-events INLINE on the gate children ('all' on each fill area, 'stroke'
+   on each hit path, 'all' on labels). In SVG an explicit value on a descendant overrides the one
+   inherited from its group, so setting pointer-events:none on .gate-layer does nothing to them.
+   Only !important in a stylesheet outranks an inline declaration, which is why this lives here
+   rather than in the renderer patch. Toggled by _syncGatePointerEvents(). */
+.gate-layer.gl-gates-inert,
+.gate-layer.gl-gates-inert * {
+  pointer-events: none !important;
+}

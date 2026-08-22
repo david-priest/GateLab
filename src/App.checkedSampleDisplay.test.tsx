@@ -32,6 +32,9 @@ vi.mock("./plots/GatingPlot", () => ({
 
 function syntheticFcs(seed: number): FcsFile {
   const count = seed === 1 ? 3 : 4;
+  // Seed 3 stands for a DIFFERENT panel: same detectors, a different stain on the second one.
+  // That is the case that must not pool — a shared channel name is not a shared measurement.
+  const secondMarker = seed === 3 ? "CD4" : null;
   return {
     version: "FCS3.1",
     nEvents: count,
@@ -39,7 +42,7 @@ function syntheticFcs(seed: number): FcsFile {
     keywords: {},
     channels: [
       { index: 0, name: "FSC-A", marker: null, bits: 32, range: 262144 },
-      { index: 1, name: "SSC-A", marker: null, bits: 32, range: 262144 },
+      { index: 1, name: "SSC-A", marker: secondMarker, bits: 32, range: 262144 },
     ],
     columns: [
       Float32Array.from({ length: count }, (_, index) => seed * 100 + index),
@@ -112,7 +115,43 @@ function plottedX(): number[] {
 }
 
 describe("App checked-sample gating display", () => {
-  it("uses checkboxes for plotted files while the blue row only controls the active file", async () => {
+  // Refusing to pool across panels, rather than narrowing to the channels they share. Two panels
+  // can put a different marker on the same detector, so pooling on a shared NAME draws one cloud
+  // from two different stains and any gate on it means nothing in either.
+  it("refuses to pool a checked file whose panel differs, and says so", async () => {
+    act(() => root.render(<App />));
+    const directInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(directInput, "files", {
+      configurable: true,
+      value: [testFile("panel-1.fcs", 1), testFile("panel-2.fcs", 3)],
+    });
+    await act(async () => {
+      directInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await settle();
+
+    // Both checked, but only the primary contributes: the other panel is refused, not narrowed
+    // to the channels the two happen to share. The primary is the most recently added file, so
+    // panel-2's 4 events are drawn and panel-1's 3 are not — never the pooled 7.
+    expect(host.textContent).toContain("2 checked FCS");
+    expect(plottedCount()).toBe(4);
+    expect(host.textContent).toContain("different panel");
+
+    // Unchecking the primary leaves the mismatched file alone, which is fine — it simply becomes
+    // the primary itself, and there is nothing left to refuse.
+    const show2 = host.querySelector<HTMLInputElement>(
+      'input[aria-label="Show panel-2.fcs in plots and analyses"]',
+    )!;
+    act(() => show2.click());
+    await settle();
+    expect(plottedCount()).toBe(3);
+    expect(host.textContent).not.toContain("different panel");
+  });
+
+
+  it("makes the checkboxes the whole selection, with no separate active row", async () => {
     act(() => root.render(<App />));
     const directInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
       .find((input) => !input.hasAttribute("webkitdirectory"))!;
@@ -172,20 +211,25 @@ describe("App checked-sample gating display", () => {
     expect(plottedCount()).toBe(4);
     expect(plottedX().every((value) => value > 1)).toBe(true);
 
+    // Clicking a row now CHECKS that file and unchecks the rest, rather than setting a separate
+    // active row alongside the checkboxes. Two selections to keep in step is what let the header,
+    // the plot and the population counts each describe a different file at the same time.
     const rowA = [...host.querySelectorAll<HTMLElement>('[role="option"]')]
       .find((row) => row.textContent?.includes("sample-a.fcs"))!;
     act(() => rowA.click());
     await settle();
     expect(rowA.getAttribute("aria-selected")).toBe("true");
-    expect(showA.checked).toBe(false);
-    expect(plottedCount()).toBe(4);
-    expect(plottedX().every((value) => value > 1)).toBe(true);
+    expect(showA.checked).toBe(true);
+    expect(host.querySelector<HTMLInputElement>(
+      'input[aria-label="Show sample-b.fcs in plots and analyses"]',
+    )!.checked).toBe(false);
+    expect(plottedCount()).toBe(3);
+    expect(plottedX().every((value) => value < 0.7)).toBe(true);
     expect(plotHarness.props!.payload.x_range).toEqual(sharedRange);
 
-    const showB = host.querySelector<HTMLInputElement>(
-      'input[aria-label="Show sample-b.fcs in plots and analyses"]',
-    )!;
-    act(() => showB.click());
+    // Unchecking the last file keeps the plot on screen at zero events rather than removing the
+    // gating view, so the state is legible and recoverable.
+    act(() => showA.click());
     expect(plottedCount()).toBe(0);
     expect(host.textContent).toContain("No checked files");
 

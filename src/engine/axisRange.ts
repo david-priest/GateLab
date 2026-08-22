@@ -78,13 +78,26 @@ function finitePair(value: unknown): [number, number] | null {
  * small buffer so the gate line/handles do not sit on the plot border. Explicit user/global
  * ranges bypass this helper in Sample.plotPayload and therefore remain authoritative.
  */
+/**
+ * How far a LABEL alone may push an axis past what the data and gate geometry need.
+ *
+ * A label is an annotation of a gate, not a thing the view exists to contain: if it falls
+ * outside, the answer is to move the label, not to rescale the plot. Letting one drive the fit
+ * without limit is how a single quadrant label in a far corner shrank a whole dataset into the
+ * opposite corner. A quarter of the fitted span is enough that a label sitting just off the edge
+ * is still brought into view, and little enough that no label can dominate the plot.
+ */
+const LABEL_MAX_EXTENSION = 0.25;
+
 export function includePlotGatesInAxisRange(
   baseRange: [number, number],
   gates: readonly unknown[],
   axis: "x" | "y",
 ): [number, number] {
   const axisIndex = axis === "x" ? 0 : 1;
-  const coordinates: number[] = [];
+  // Geometry and labels are fitted separately: geometry sets the range, labels may only nudge it.
+  const geometry: number[] = [];
+  const labels: number[] = [];
 
   for (const value of gates) {
     if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
@@ -93,10 +106,10 @@ export function includePlotGatesInAxisRange(
     const finiteVertices = vertices
       .map(finitePair)
       .filter((point): point is [number, number] => point !== null);
-    for (const point of finiteVertices) coordinates.push(point[axisIndex]);
+    for (const point of finiteVertices) geometry.push(point[axisIndex]);
 
     const center = finitePair(gate.center);
-    if (center) coordinates.push(center[axisIndex]);
+    if (center) geometry.push(center[axisIndex]);
 
     // A user-positioned label is part of the visible annotation. Auto-generated labels are
     // also included, but only when a finite gate centroid exists.
@@ -109,25 +122,39 @@ export function includePlotGatesInAxisRange(
     if (labelOffset && anchorPoints.length > 0) {
       const anchor = anchorPoints.reduce((sum, point) => sum + point[axisIndex], 0) /
         anchorPoints.length;
-      coordinates.push(anchor + labelOffset[axisIndex]);
+      labels.push(anchor + labelOffset[axisIndex]);
     }
   }
 
-  if (coordinates.length === 0) return baseRange;
+  if (geometry.length === 0 && labels.length === 0) return baseRange;
+
   let lo = baseRange[0];
   let hi = baseRange[1];
   let expandedLow = false;
   let expandedHigh = false;
-  for (const coordinate of coordinates) {
+  for (const coordinate of geometry) {
+    if (coordinate <= lo) { lo = coordinate; expandedLow = true; }
+    if (coordinate >= hi) { hi = coordinate; expandedHigh = true; }
+  }
+
+  // Labels get whatever room is left, and no more. Measured against the range the data and the
+  // geometry already agreed on, so one distant label cannot enlarge its own allowance.
+  const allowance = Math.max(1e-10, hi - lo) * LABEL_MAX_EXTENSION;
+  const labelFloor = lo - allowance;
+  const labelCeiling = hi + allowance;
+  for (const coordinate of labels) {
+    // <= / >= , not < / > : a label sitting exactly on the edge still earns the padding that
+    // keeps it off the plot border, which is the behaviour this has always had.
     if (coordinate <= lo) {
-      lo = coordinate;
+      lo = Math.max(labelFloor, coordinate);
       expandedLow = true;
     }
     if (coordinate >= hi) {
-      hi = coordinate;
+      hi = Math.min(labelCeiling, coordinate);
       expandedHigh = true;
     }
   }
+
   if (!expandedLow && !expandedHigh) return baseRange;
 
   const span = Math.max(1e-10, hi - lo);

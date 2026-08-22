@@ -101,9 +101,10 @@ describe("channel resolution", () => {
     expect(normalizeChannel("CD3 (Y89Di)")).toBe("y89");
   });
 
-  it("inverts logicle vertices from flowCore [0,M] scale, not flowutils [0,1]", () => {
-    // GateLabR exports logicle vertices in [0, M] (T→M=4.5). A vertex at 4.5 must
-    // invert to ~T (846653), not blow up to ~1e23 (which happens if treated as [0,1]).
+  it("reads logicle vertices on the flowCore [0,M] scale, not flowutils [0,1]", () => {
+    // Gating-ML/flowCore logicle spans [0, M+A]; GateLab's spans [0, 1]. A vertex at M must land
+    // at exactly 1.0 in GateLab units. Reading it as [0,1] would leave it at 4.5 — off the top of
+    // the scale — and inverting THAT blows up to ~1e23, which is what this originally caught.
     const T = 846653.2;
     const xml = `<?xml version="1.0"?>
       <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
@@ -120,10 +121,12 @@ describe("channel resolution", () => {
     const res = importGatingML(xml, ["CD19", "CD14"]);
     const g = Object.values(res.gates)[0];
     const verts = "vertices" in g ? g.vertices : [];
-    const maxX = Math.max(...verts.map((v) => v[0]));
-    // vertex at display 4.5 → raw ≈ T, comfortably within a real channel range
-    expect(maxX).toBeGreaterThan(T * 0.5);
-    expect(maxX).toBeLessThan(T * 3);
+    expect(Math.max(...verts.map((v) => v[0]))).toBeCloseTo(1, 9);
+    expect(Math.min(...verts.map((v) => v[0]))).toBeCloseTo(0, 9);
+    // And the gate keeps the space the file declared, with the transform recorded on it, rather
+    // than being inverted into raw — which per Gating-ML §2.3.2 would be a different gate.
+    expect(g.space).toBe("display");
+    expect(g.transforms?.CD19).toEqual({ kind: "logicle", T, W: 1.5, M: 4.5, A: 0 });
   });
 
   it("resolves metal $PnN via the pnn→channel bridge", () => {
@@ -239,7 +242,7 @@ describe("strict import safety", () => {
   // must be inverted; CyTOF stores arcsinh, so it must not be. Treating flow as CyTOF left
   // every fluorescence gate sitting at its transformed coordinate — a plausible number in the
   // wrong space, which is how a Cytobank-exchanged flow strategy silently lands wrong.
-  it("inverts arcsinh for flow fluorescence but not for CyTOF", () => {
+  it("keeps arcsinh vertices in the declared space for BOTH instruments", () => {
     const cf = 150;
     const T = cf * Math.sinh(1);
     const raw = 1000;
@@ -258,13 +261,58 @@ describe("strict import safety", () => {
         </gating:RectangleGate>
       </gating:Gating-ML>`;
 
-    const flow = importGatingML(xml, ["PE-A"], {}, "flow");
-    const flowGate = Object.values(flow.gates)[0] as { vertices: [number, number][] };
-    expect(flowGate.vertices[0][0]).toBeCloseTo(raw, 3);
+    // The instrument no longer decides the coordinate space — the FILE does. A dimension that
+    // declares fasinh means "straight in fasinh", for flow exactly as for CyTOF, so both keep the
+    // transformed coordinate and record the transform. Previously flow inverted to raw, which
+    // silently produced a different gate from the one the file describes.
+    for (const instrument of ["flow", "cytof"] as const) {
+      const res = importGatingML(xml, ["PE-A"], {}, instrument);
+      const g = Object.values(res.gates)[0] as { vertices: [number, number][]; space?: string;
+        transforms?: Record<string, { kind: string; cofactor?: number }> };
+      expect(g.vertices[0][0], instrument).toBeCloseTo(transformed, 6);
+      expect(g.space, instrument).toBe("display");
+      expect(g.transforms?.["PE-A"]?.kind).toBe("asinh");
+      expect(g.transforms?.["PE-A"]?.cofactor).toBeCloseTo(cf, 6);
+      // Not the raw value: keeping it raw is the bug this replaced.
+      expect(g.vertices[0][0]).not.toBeCloseTo(raw, 3);
+    }
+  });
 
-    const cytof = importGatingML(xml, ["PE-A"], {}, "cytof");
-    const cytofGate = Object.values(cytof.gates)[0] as { vertices: [number, number][] };
-    expect(cytofGate.vertices[0][0]).toBeCloseTo(transformed, 6);
+  it("imports a dimension with no transformation-ref as a raw-space gate", () => {
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="${G}" xmlns:data-type="${D}">
+        <gating:RectangleGate gating:id="r1" gating:name="R">
+          <gating:dimension gating:min="200" gating:max="8000">
+            <data-type:fcs-dimension data-type:name="PE-A"/>
+          </gating:dimension>
+        </gating:RectangleGate>
+      </gating:Gating-ML>`;
+    const res = importGatingML(xml, ["PE-A"], {}, "flow");
+    const g = Object.values(res.gates)[0] as { vertices: [number, number][]; space?: string };
+    expect(g.space).toBe("raw");
+    expect(g.vertices.map((v) => v[0])).toContain(200); // verbatim, nothing applied
+    expect(res.untranslatable_transform_gates).toEqual([]);
+  });
+
+  it("falls back to raw for a transform GateLab cannot hold, and says which gates", () => {
+    // A log scale has no GateLab display transform. Inverting into raw is a well-defined gate but
+    // not the one the file describes, so it is reported rather than imported silently.
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="${G}" xmlns:data-type="${D}"
+        xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations">
+        <transforms:transformation transforms:id="Tr_Log">
+          <transforms:flog transforms:T="10000" transforms:M="4"/>
+        </transforms:transformation>
+        <gating:RectangleGate gating:id="r1" gating:name="Logged">
+          <gating:dimension gating:min="1" gating:max="2" gating:transformation-ref="Tr_Log">
+            <data-type:fcs-dimension data-type:name="PE-A"/>
+          </gating:dimension>
+        </gating:RectangleGate>
+      </gating:Gating-ML>`;
+    const res = importGatingML(xml, ["PE-A"], {}, "flow");
+    const g = Object.values(res.gates)[0] as { space?: string };
+    expect(g.space).toBe("raw");
+    expect(res.untranslatable_transform_gates).toEqual(["Logged"]);
   });
 
   it("rejects a gating:parent_id that names no gate in the file", () => {

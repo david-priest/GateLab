@@ -23,6 +23,11 @@
  */
 
 import type { SpilloverMatrix } from "./fcs";
+import type { TransformSpec } from "./models";
+import { transformFromSpec } from "./sample";
+
+/** Marker the converter writes and importGatingML reads back. Internal to that handoff. */
+export const WSP_GATE_SPACE_TAG = "gatelab_gate_space";
 
 const GATING_NS = "http://www.isac-net.org/std/Gating-ML/v2.0/gating";
 const DATATYPE_NS = "http://www.isac-net.org/std/Gating-ML/v2.0/datatypes";
@@ -137,6 +142,160 @@ function childrenByLocalName(node: Element, localName: string): Element[] {
   }
   return out;
 }
+
+
+/**
+ * Which display transform the workspace declares for each parameter.
+ *
+ * FlowJo evaluates a gate as straight lines in the space the axis is CURRENTLY displayed in, and
+ * the `<Transformations>` block is that display declaration — keyed by parameter name, never
+ * referenced by the gates themselves. So the space a FlowJo gate is straight in is whatever this
+ * block says for its two axes.
+ */
+function workspaceTransformKinds(node: Element): Map<string, string> {
+  const out = new Map<string, string>();
+  const block = transformsBlockFor(node);
+  if (!block) return out;
+  for (let el = block.firstElementChild; el; el = el.nextElementSibling) {
+    for (const p of childrenByLocalName(el, "parameter")) {
+      const name = p.getAttributeNS(DATATYPE_NS, "name") ?? p.getAttribute("data-type:name");
+      if (name) out.set(name, el.localName);
+    }
+  }
+  return out;
+}
+
+
+/** The two axis parameter names of a gate element, in dimension order (x, y). */
+function gateAxisNames(el: Element): [string, string] | null {
+  const names: string[] = [];
+  for (const d of el.getElementsByTagName("*")) {
+    if (d.localName !== "fcs-dimension") continue;
+    const n = d.getAttributeNS(DATATYPE_NS, "name") ?? d.getAttribute("data-type:name");
+    if (n) names.push(n);
+  }
+  return names.length >= 2 ? [names[0], names[1]] : null;
+}
+
+/**
+ * Rewrite a gate's coordinates from FlowJo's raw storage into the space FlowJo evaluates it in.
+ *
+ * FlowJo stores vertices raw but applies the gate as straight lines in the axis's DISPLAY space,
+ * so reproducing it means forward-transforming the vertices and marking the gate as living there.
+ * Both gate kinds are covered: a polygon's vertex coordinates, and a rectangle's min/max, which
+ * stay a valid axis-aligned box because the transforms are monotonic.
+ */
+function applyForwardTransform(el: Element, fx: (v: number) => number, fy: (v: number) => number): void {
+  const dims: Element[] = [];
+  for (const d of el.getElementsByTagName("*")) if (d.localName === "dimension") dims.push(d);
+  dims.forEach((d, i) => {
+    const f = i === 0 ? fx : fy;
+    for (const attr of ["min", "max"] as const) {
+      const raw = d.getAttributeNS(GATING_NS, attr) ?? d.getAttribute(`gating:${attr}`);
+      if (raw === null || raw === "") continue;
+      const v = Number(raw);
+      if (Number.isFinite(v)) d.setAttributeNS(GATING_NS, `gating:${attr}`, String(f(v)));
+    }
+  });
+  for (const v of el.getElementsByTagName("*")) {
+    if (v.localName !== "vertex") continue;
+    const coords: Element[] = [];
+    for (let c = v.firstElementChild; c; c = c.nextElementSibling) {
+      if (c.localName === "coordinate") coords.push(c);
+    }
+    coords.forEach((c, i) => {
+      const raw = c.getAttributeNS(DATATYPE_NS, "value") ?? c.getAttribute("data-type:value");
+      const n = Number(raw);
+      if (Number.isFinite(n)) c.setAttributeNS(DATATYPE_NS, "data-type:value", String((i === 0 ? fx : fy)(n)));
+    });
+  }
+}
+
+/**
+ * Record the gate's space on the element for importGatingML to read back.
+ *
+ * Keyed by AXIS POSITION rather than channel name: the importer resolves dimension names to
+ * session channels, so a name written here would have to survive a mapping this module cannot
+ * see. x/y always survive it, because dimension order is what defines them.
+ */
+function writeGateSpace(doc: Document, el: Element, x: TransformSpec, y: TransformSpec): void {
+  const info = doc.createElementNS(DATATYPE_NS, "data-type:custom_info");
+  const tag = doc.createElementNS(DATATYPE_NS, WSP_GATE_SPACE_TAG);
+  tag.textContent = JSON.stringify({ space: "display", x, y });
+  info.appendChild(tag);
+  el.insertBefore(info, el.firstChild);
+}
+
+/**
+ * The <Transformations> block that governs a sample's axes.
+ *
+ * It is a SIBLING of <SampleNode>, not a descendant: FlowJo nests
+ * <Sample><DataSet/><Transformations/><SampleNode/></Sample>. Searching the SampleNode's own
+ * subtree therefore finds nothing, which silently left every imported gate in raw space — the
+ * gates looked right and their counts were quietly FlowJo's straight-in-raw approximation.
+ */
+function transformsBlockFor(node: Element): Element | null {
+  for (let el: Element | null = node; el; el = el.parentElement) {
+    for (let c = el.firstElementChild; c; c = c.nextElementSibling) {
+      if (c.localName === "Transformations") return c;
+    }
+    if (el.localName === "Sample") break;
+  }
+  return null;
+}
+
+/** FlowJo's declared display transform for one parameter, as a GateLab TransformSpec. */
+function specForTransformElement(el: Element): TransformSpec | null {
+  const n = (name: string): number => Number(el.getAttributeNS(TRANSFORMS_NS, name)
+    ?? el.getAttribute(`transforms:${name}`));
+  switch (el.localName) {
+    case "linear":
+      // A linear display axis IS raw, so there is nothing to hold and nothing to convert.
+      return { kind: "identity" };
+    case "biex": {
+      const spec = {
+        kind: "biex" as const,
+        maxValue: n("maxRange"), pos: n("pos"), neg: n("neg"),
+        widthBasis: n("width"), channelRange: Math.trunc(n("length")),
+      };
+      const ok = Number.isFinite(spec.maxValue) && Number.isFinite(spec.pos)
+        && Number.isFinite(spec.neg) && spec.widthBasis < 0 && spec.channelRange > 1;
+      return ok ? spec : null;
+    }
+    case "log": {
+      const spec = { kind: "wsplog" as const, offset: n("offset"), decades: n("decades") };
+      return spec.offset > 0 && spec.decades > 0 ? spec : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** Every parameter's declared display transform, keyed by parameter name. */
+export function workspaceTransformSpecs(node: Element): Map<string, TransformSpec> {
+  const out = new Map<string, TransformSpec>();
+  const block = transformsBlockFor(node);
+  if (!block) return out;
+  for (let el = block.firstElementChild; el; el = el.nextElementSibling) {
+    const spec = specForTransformElement(el);
+    if (!spec) continue;
+    for (const p of childrenByLocalName(el, "parameter")) {
+      const name = p.getAttributeNS(DATATYPE_NS, "name") ?? p.getAttribute("data-type:name");
+      if (name) out.set(name, spec);
+    }
+  }
+  return out;
+}
+
+/**
+ * Transforms GateLab has a display for, and can therefore hold a gate in.
+ *
+ * `linear` is included because a linear display axis IS raw — a gate straight in linear is
+ * straight in raw, so GateLab reproduces it exactly. FlowJo's `biex` and `log` have no GateLab
+ * equivalent (biex is FlowJo's own numerically-defined transform, not a logicle), so gates on
+ * those axes are imported straight-in-RAW, which is not the gate FlowJo evaluates.
+ */
+const REPRESENTABLE_FLOWJO_TRANSFORMS = new Set(["linear"]);
 
 function parseWorkspace(xmlText: string): Document {
   const doc = new DOMParser().parseFromString(xmlText, "application/xml");
@@ -310,7 +469,9 @@ export interface FlowJoSampleMatch {
 
 /** Compare two FCS-ish names the way FlowJo and the file system disagree about them. */
 function sameFile(a: string, b: string): boolean {
-  const stem = (n: string) => n.replace(/\.fcs$/i, "").trim().toLowerCase();
+  // Trim BEFORE stripping the extension: /\.fcs$/ does not match when the name carries trailing
+  // whitespace, so the other order silently failed to match a padded workspace name.
+  const stem = (n: string) => n.trim().replace(/\.fcs$/i, "").trim().toLowerCase();
   return stem(a).length > 0 && stem(a) === stem(b);
 }
 
@@ -557,6 +718,11 @@ export function flowJoWorkspaceToGatingML(
   const idOf = new Map<Element, string>();
   const spill = sampleSpillover(node);
   const unresolvedCompensated = new Set<string>();
+  const transformKinds = workspaceTransformKinds(node);
+  const transformSpecs = workspaceTransformSpecs(node);
+  /** gate name → the non-representable transforms its axes are displayed with. */
+  const approximated = new Map<string, Set<string>>();
+  let carried = 0;
   let serial = 0;
 
   const roots = rootPopulations(node);
@@ -585,6 +751,37 @@ export function flowJoWorkspaceToGatingML(
 
     const copy = out.importNode(el, true) as Element;
     nameDimensionsAndRefs(copy, spill, unresolvedCompensated);
+
+    // FlowJo stores vertices raw but evaluates the gate as straight lines in the axis's DISPLAY
+    // space. Where GateLab can hold that space, the vertices are moved into it and the gate is
+    // marked as living there, so it reproduces FlowJo's boundary rather than a straight-in-raw
+    // lookalike. Where it cannot, the gate still imports — straight in raw — and is named.
+    const axes = gateAxisNames(el);
+    const specFor = (ch: string): TransformSpec | undefined =>
+      transformSpecs.get(ch) ?? transformSpecs.get(ch.replace(/^Comp-/, ""));
+    const sx = axes ? specFor(axes[0]) : undefined;
+    const sy = axes ? specFor(axes[1]) : undefined;
+
+    if (axes && sx && sy) {
+      // Both axes linear means the gate is already straight in raw; nothing to move or record.
+      if (sx.kind !== "identity" || sy.kind !== "identity") {
+        applyForwardTransform(
+          copy,
+          transformFromSpec(sx).forward,
+          transformFromSpec(sy).forward,
+        );
+        writeGateSpace(out, copy, sx, sy);
+        carried++;
+      }
+    } else if (axes) {
+      for (const [i, ch] of axes.entries()) {
+        if ((i === 0 ? sx : sy) !== undefined) continue;
+        const kind = transformKinds.get(ch) ?? transformKinds.get(ch.replace(/^Comp-/, ""));
+        if (!kind || REPRESENTABLE_FLOWJO_TRANSFORMS.has(kind)) continue;
+        if (!approximated.has(name)) approximated.set(name, new Set());
+        approximated.get(name)!.add(kind);
+      }
+    }
     // FlowJo ids are unique within one file, which is all that is needed here; a generated id
     // keeps the document valid when one is missing.
     const gateId = el.getAttributeNS(GATING_NS, "id") ?? `wsp_gate_${++serial}`;
@@ -609,6 +806,23 @@ export function flowJoWorkspaceToGatingML(
     throw new Error(
       `"${sampleName}" has no gates this importer can read.` +
         (warnings.length ? ` ${warnings[0]}` : ""),
+    );
+  }
+
+  // FlowJo evaluates a gate as straight lines in the space its axes are DISPLAYED in. Where that
+  // space is one GateLab has no transform for, the gate is imported straight-in-raw instead —
+  // a different gate, by however much the transform bends over its edges. Stated per gate, with
+  // the transforms named, so it is clear which results are exact and which are approximations.
+  if (approximated.size) {
+    const kinds = [...new Set([...approximated.values()].flatMap((v) => [...v]))].sort();
+    const names = [...approximated.keys()];
+    const shown = names.slice(0, 6).map((n) => `"${n}"`).join(", ");
+    warnings.push(
+      `${names.length} of ${Object.keys(flowJoCounts).length} gate(s) are drawn on axes FlowJo ` +
+        `displays with ${kinds.join(" / ")}, which GateLab has no equivalent transform for. They ` +
+        "were imported as straight in RAW space, which is not the boundary FlowJo evaluates, so " +
+        "their event counts will differ from FlowJo's by more than binning alone: " +
+        shown + (names.length > 6 ? `, and ${names.length - 6} more.` : "."),
     );
   }
 
@@ -642,4 +856,39 @@ export function flowJoWorkspaceToGatingML(
     warnings,
     spillover: spill,
   };
+}
+
+// ── Which loaded sample a workspace's strategy belongs to ────────────────────
+
+/** What to do with a pending workspace strategy, given the files currently loaded. */
+export type FlowJoTargetResolution =
+  | { kind: "apply" }                       // the active sample is the one the workspace gates
+  | { kind: "switch"; id: string }          // it is loaded, but is not active
+  | { kind: "absent"; wanted: string[] };   // no loaded file carries a name this workspace knows
+
+/**
+ * Decide where a FlowJo workspace's gating strategy should land.
+ *
+ * A workspace can only be imported onto its own sample, and the .wsp records that sample under
+ * one or more names. The import used to check ONLY the active sample and wait silently otherwise
+ * — so choosing several FCS at the prompt, where the target was not the file that happened to end
+ * up active, loaded the data with no gating hierarchy and said nothing. Intermittent by nature:
+ * it depended on which file was active when the strategy became ready.
+ *
+ * Names are compared on their stem, because the file on disk routinely differs from the name the
+ * workspace recorded (a `$FIL` keyword, or a renamed copy).
+ */
+export function resolveFlowJoTarget(
+  targetNames: readonly string[],
+  activeName: string,
+  loaded: readonly { id: string; name: string }[],
+): FlowJoTargetResolution {
+  // Trim BEFORE stripping the extension: /\.fcs$/ does not match when the name carries trailing
+  // whitespace, so the other order silently failed to match a padded workspace name.
+  const stem = (n: string) => n.trim().replace(/\.fcs$/i, "").trim().toLowerCase();
+  const wanted = new Set(targetNames.map(stem).filter((n) => n.length > 0));
+  if (wanted.size === 0) return { kind: "absent", wanted: [...targetNames] };
+  if (wanted.has(stem(activeName))) return { kind: "apply" };
+  const hit = loaded.find((e) => wanted.has(stem(e.name)));
+  return hit ? { kind: "switch", id: hit.id } : { kind: "absent", wanted: [...targetNames] };
 }

@@ -210,6 +210,87 @@ export function patchCytofForGateLab(src: string): string {
     }
   }
 
+  // Draw the events at the display's real resolution.
+  //
+  // The canvas backing store was sized in CSS pixels, so on a 2x screen a 460x460 bitmap was
+  // stretched over 920x920 physical pixels and every event was drawn at half the resolution the
+  // display can show. mini_plot already renders at 2x "for crisp on-screen display" (mini_plot.js
+  // :103), which is why the Strategy and Illustration grids look sharper than the main plot.
+  //
+  // The backing store grows; the CSS size does not, and the context is pre-scaled so every
+  // drawing call keeps using the same logical 0..PLOT_W coordinates. Nothing downstream changes:
+  // there is no setTransform anywhere in the renderer, and every save() is paired with a
+  // restore(), so the base scale survives the zoom transform in _drawContour.
+  //
+  // Clamped to 3: beyond that the buffer grows quadratically for no visible gain (a 630px plot
+  // at 4x is a 2520-square buffer, 25MB) and the density passes get slower with it.
+  const dprNeedle = `        _canvas = document.createElement('canvas');
+        _canvas.width  = PLOT_W;
+        _canvas.height = PLOT_H;
+        _canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
+        ctnr.appendChild(_canvas);
+        _ctx = _canvas.getContext('2d');`;
+  const dprPatched = "// GateLab: canvas at device resolution; see loadPlots.ts.";
+  if (!out.includes(dprPatched)) {
+    if (out.includes(dprNeedle)) {
+      out = out.replace(
+        dprNeedle,
+        [
+          `        ${dprPatched}`,
+          "        var _dpr = Math.min(3, Math.max(1, window.devicePixelRatio || 1));",
+          "        _canvas = document.createElement('canvas');",
+          "        _canvas.width  = Math.round(PLOT_W * _dpr);",
+          "        _canvas.height = Math.round(PLOT_H * _dpr);",
+          "        _canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;' +",
+          "            'width:' + PLOT_W + 'px;height:' + PLOT_H + 'px;';",
+          "        ctnr.appendChild(_canvas);",
+          "        _ctx = _canvas.getContext('2d');",
+          "        _ctx.scale(_dpr, _dpr);",
+        ].join("\n"),
+      );
+      // clear() wipes using the backing-store size, which is now _dpr times the logical extent.
+      // Harmless (it over-clears past the edge) but wrong on its face, so it says what it means.
+      out = out.replace(
+        "_ctx.clearRect(0, 0, _canvas.width, _canvas.height);",
+        "_ctx.clearRect(0, 0, PLOT_W, PLOT_H); // logical units: the context is pre-scaled",
+      );
+    } else {
+      console.warn("[GateLab] cytof canvas-resolution patch did not match — the plot renders at CSS resolution.");
+    }
+  }
+
+  // ONE owner for the view: GateLab's pan, not the renderer's.
+  //
+  // cytof binds `pointerdown.navigate` and runs a complete second pan/stretch implementation on
+  // the same background drag that App's `mousedown` handler takes -- both fire, neither knows
+  // about the other. They compute from different bases and write to different places: cytof
+  // mutates _plotData.x_range/_y_range and _redraw()s immediately, while App writes React state
+  // that paints a frame later. Whichever landed last in a given frame is what you saw, so the
+  // gesture was nondeterministic -- most visibly with Shift, where the plot would keep panning
+  // while the range fields showed a stretch.
+  //
+  // App's is the one to keep: it commits to globalScales so the Strategy and Illustration tabs
+  // inherit the view, it keeps the Min/Max fields in lockstep, and it defers range writes in
+  // contour mode. The renderer's is left over from the Shiny app and owns nothing GateLab needs.
+  // Only the pan binding goes -- every gate gesture (mousedown.draw, mousemove.draw, click.draw)
+  // and the axis-label pickers are untouched.
+  //
+  // _panActive therefore stays false throughout a drag. That is fine: the only thing it gated was
+  // degrading contour to scatter for speed mid-pan, and App already holds the range back to
+  // drag-end in contour mode, so the KDE still rebuilds exactly once.
+  const navPanNeedle = "_svg.on('pointerdown.navigate', _onNavigatePointerDown)";
+  const navPanPatched = "// GateLab: the renderer's pan is disabled; App owns the view. See loadPlots.ts.";
+  if (!out.includes(navPanPatched)) {
+    if (out.includes(navPanNeedle)) {
+      out = out.replace(
+        navPanNeedle,
+        `${navPanPatched}\n        _svg.on('pointerdown.navigate', null)`,
+      );
+    } else {
+      console.warn("[GateLab] cytof navigate-pan removal did not match — two pan handlers may race.");
+    }
+  }
+
   // Pan and shift-drag-stretch change the base scale domain directly and then call _redraw(),
   // which never touches the contour cache. The fingerprint is only consulted inside render(),
   // which these paths never call -- so the cached polygons, which are in BASE-SCALE PIXEL space,
@@ -273,23 +354,165 @@ export function patchCytofForGateLab(src: string): string {
     console.warn("[GateLab] cytof polygon-close guard patch did not match.");
   }
 
-  // Saved gate fills have D3 drag handlers and cover large parts of the plot. While drawing,
-  // make the entire saved-gate layer transparent to pointer input so every click reaches the
-  // plot overlay. The preview itself is visual-only; close detection is coordinate based.
+  // A workspace can hold raw-space and display-space gates side by side and they look identical
+  // on screen, so the space rides on the label as two letters (x then y): R raw, A arcsinh,
+  // L logicle, N linear. Without it the two kinds are indistinguishable, which is the silent
+  // footgun the whole gating-space design exists to prevent. Suppressed on CyTOF upstream.
+  const badgeNeedle = `            var bb = txt.node().getBBox();`;
+  const badgePatch = `            if (gate.space_badge) {
+                txt.append('tspan')
+                    .attr('x', 0).attr('dy', pctLine ? '1.25em' : '1.3em')
+                    .style('font-size', '9px')
+                    .style('letter-spacing', '0.09em')
+                    .attr('fill-opacity', 0.8)
+                    .text(gate.space_badge);
+            }
+            if (gate.space_hint) labelG.append('title').text(gate.space_hint);
+${badgeNeedle}`;
+  if (out.includes(badgeNeedle) && !out.includes("gate.space_badge")) {
+    out = out.replace(badgeNeedle, badgePatch);
+  } else if (!out.includes("gate.space_badge")) {
+    console.warn("[GateLab] cytof gate space-badge patch did not match.");
+  }
+
+  // Two fixes to axis-label crowding, both around zero.
+  //
+  // 1. The label thinning ran only for tick_mode 'asinh' and 'logicle'. Scatter axes were excluded
+  //    on the stated grounds that "decade-spaced labels never overlap" — true of a pure log10
+  //    axis, false of an ARCSINH scatter axis, which packs -100, -10, 0, 10, 100 into a few pixels
+  //    either side of zero. Now run for every tick mode; it is a no-op when nothing is crowded.
+  //
+  // 2. The thinning kept labels left-to-right, so the crowd around zero was resolved by keeping
+  //    whichever label happened to be leftmost and dropping the rest — including 0 itself. On a
+  //    transformed axis 0 is the anchor that shows where the linear region sits, so it is now
+  //    considered first and the rest fan outward from it.
+  const thinNeedle = `    function _hideCompressedLabels(sel, scale, minSpacingPx) {`;
+  const thinBody = /_hideCompressedLabels\(sel, scale, minSpacingPx\) \{[\s\S]*?\n    \}\n/;
+  if (out.includes(thinNeedle) && !out.includes("labeled.sort(function (a, b) { return a.mag - b.mag; })")) {
+    out = out.replace(
+      thinBody,
+      `_hideCompressedLabels(sel, scale, minSpacingPx) {
+        var labeled = [];
+        sel.selectAll('.tick text').each(function(d) {
+            var el = d3.select(this);
+            if (el.style('display') !== 'none' && el.text() !== '') {
+                labeled.push({ el: el, px: scale(d), mag: Math.abs(Number(d)) });
+            }
+        });
+        labeled.sort(function (a, b) { return a.mag - b.mag; });
+        var kept = [];
+        for (var i = 0; i < labeled.length; i++) {
+            var clash = false;
+            for (var j = 0; j < kept.length; j++) {
+                if (Math.abs(labeled[i].px - kept[j]) < minSpacingPx) { clash = true; break; }
+            }
+            if (clash) labeled[i].el.style('display', 'none');
+            else kept.push(labeled[i].px);
+        }
+    }\n`,
+    );
+  }
+  const scatterThinX = `            if (xTicks.tick_mode === 'asinh' || xTicks.tick_mode === 'logicle') {
+                _hideCompressedLabels(_g.select('.x-axis'), zx, 28);
+            }`;
+  const scatterThinY = `            if (yTicks.tick_mode === 'asinh' || yTicks.tick_mode === 'logicle') {
+                _hideCompressedLabels(_g.select('.y-axis'), zy, 18);
+            }`;
+  let thinHits = 0;
+  if (out.includes(scatterThinX)) {
+    thinHits++;
+    out = out.replace(scatterThinX, `            _hideCompressedLabels(_g.select('.x-axis'), zx, 28);`);
+  }
+  if (out.includes(scatterThinY)) {
+    thinHits++;
+    out = out.replace(scatterThinY, `            _hideCompressedLabels(_g.select('.y-axis'), zy, 18);`);
+  }
+  if (thinHits !== 2 && !out.includes("labeled.sort(function (a, b) { return a.mag - b.mag; })")) {
+    console.warn(`[GateLab] cytof axis-label thinning patch matched ${thinHits}/2 axes.`);
+  }
+
+  // Saved gate fills have D3 drag handlers and cover large parts of the plot. While drawing, the
+  // whole saved-gate layer must be transparent to pointer input so every click reaches the plot
+  // overlay — otherwise a new gate cannot be started inside an existing one, and the move cursor
+  // appears over gates mid-draw. The preview is visual-only; close detection is coordinate based.
+  //
+  // Derived from the CURRENT mode and re-asserted wherever the layer is rebuilt, rather than set
+  // once when the mode changes. _init() recreates .gate-layer (first paint, a missing canvas, or a
+  // >30px column resize) and _applyMode only runs on a CHANGE of mode, so the one-shot version was
+  // silently dropped by the next re-init and gates started intercepting clicks again.
+  const syncMarker = "function _syncGatePointerEvents()";
+  const applyModeNeedle = "    function _applyMode(newMode) {";
   const modeNeedle = `_g.select('.cytof-overlay').style('cursor',
             newMode === 'navigate' ? 'default' : 'crosshair');`;
-  // Guarded like the others: patching an already-patched source would otherwise append the two
-  // pointer-events statements a second time.
-  if (out.includes(modeNeedle) && !out.includes("_g.select('.gate-layer').style('pointer-events'")) {
+  const readyNeedle = "        _ready = true;";
+  if (!out.includes(syncMarker)) {
+    let hits = 0;
+    if (out.includes(applyModeNeedle)) {
+      hits++;
+      out = out.replace(
+        applyModeNeedle,
+        `    // GateLab: gate pointer-events follow the current mode; see loadPlots.ts.
+    function _syncGatePointerEvents() {
+        if (!_g) return;
+        var drawing = _mode !== 'navigate';
+        // The class is what actually works: the gate children declare pointer-events inline, and
+        // an inline value beats one inherited from this group. See .gl-gates-inert in styles.css.
+        _g.select('.gate-layer').classed('gl-gates-inert', drawing)
+            .style('pointer-events', drawing ? 'none' : null);
+        _g.select('.draw-layer').style('pointer-events', 'none');
+        _g.select('.cytof-overlay').style('cursor', drawing ? 'crosshair' : 'default');
+    }
+
+${applyModeNeedle}`,
+      );
+    }
+    if (out.includes(modeNeedle)) {
+      hits++;
+      out = out.replace(modeNeedle, "_syncGatePointerEvents();");
+    }
+    if (out.includes(readyNeedle)) {
+      hits++;
+      out = out.replace(readyNeedle, `${readyNeedle}\n        _syncGatePointerEvents();`);
+    }
+    if (hits !== 3) {
+      console.warn(
+        `[GateLab] cytof draw-mode pointer patch matched ${hits}/3 sites — saved gates will ` +
+          "intercept clicks while a gate tool is active.",
+      );
+    }
+  }
+
+  // The channel picker opens UPWARD when there is no room below it.
+  //
+  // The panel is anchored at labelRect.bottom + 4, which is right for the Y-axis label (up the
+  // left edge) and wrong for the X-axis label, which sits at the BOTTOM of the plot: the list
+  // then extends past the viewport and the channels at its end cannot be reached at all. The
+  // panel is measured after mounting, because its height depends on how many channels the file
+  // has -- `sel.size` is min(channels, 12), so a 13-channel file and a 40-channel file differ.
+  const pickerFitMarker = "// GateLab: flip the channel picker above the label when it will not fit below.";
+  const pickerAppendNeedle = "        document.body.appendChild(panel);";
+  if (!out.includes(pickerFitMarker) && out.includes(pickerAppendNeedle)) {
     out = out.replace(
-      modeNeedle,
-      `${modeNeedle}
-        _g.select('.gate-layer').style('pointer-events',
-            newMode === 'navigate' ? null : 'none');
-        _g.select('.draw-layer').style('pointer-events', 'none');`,
+      pickerAppendNeedle,
+      `${pickerAppendNeedle}
+        ${pickerFitMarker}
+        (function () {
+            var margin = 4;
+            var h = panel.getBoundingClientRect().height;
+            var below = window.innerHeight - (labelRect.bottom + margin);
+            var above = labelRect.top - margin;
+            if (h <= below) return;                       // fits where it is
+            if (above > below) {
+                // Flip above, clamped so the top of the list stays reachable on a short window.
+                panel.style.top = Math.max(margin, labelRect.top - margin - h) + 'px';
+            } else {
+                // More room below than above, but still not enough: sit against the bottom edge.
+                panel.style.top = Math.max(margin, window.innerHeight - h - margin) + 'px';
+            }
+        })();`,
     );
-  } else if (!out.includes("_g.select('.gate-layer').style('pointer-events'")) {
-    console.warn("[GateLab] cytof draw-mode pointer patch did not match.");
+  } else if (!out.includes(pickerFitMarker)) {
+    console.warn("[GateLab] cytof channel-picker fit patch did not match — the X picker may open off-screen.");
   }
 
   // React must not accept plot interactions for a new sample/assay identity until that identity
@@ -534,6 +757,41 @@ export function patchMiniPlot(src: string): string {
   } else if (!out.includes("var requestedMargins = cfg.plot_margins || {};")) {
     console.warn("[GateLab] mini_plot configurable-margin patch did not match.");
   }
+  // A gate is straight only in the space it was drawn in, so it bows once an axis is shown on a
+  // different scale. The main gating plot has offered straight / straight+grey bow / bowed since
+  // v0.6.0, but the Strategy and Illustration grids always drew straight chords — and those are
+  // the views that become figures, so a published gate could differ from the one actually applied.
+  // gate_style already reaches both grids, so the mode rides along with no other plumbing.
+  const edgeNeedle =
+    "        var pathStr = 'M' + points.map(function (p) {\n" +
+    "            return p[0] + ',' + p[1];\n" +
+    "        }).join('L') + 'Z';";
+  const edgePatch =
+    "        var _edgeMode = gateStyle.gate_edge_mode || 'straight-bow';\n" +
+    "        function _toPath(pts) {\n" +
+    "            return 'M' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join('L') + 'Z';\n" +
+    "        }\n" +
+    "        // Same test the gating plot uses: rectangles and quadrants carry no outline and\n" +
+    "        // provably never bow, so they are unaffected by the mode.\n" +
+    "        var _bowPts = (gate.outline && gate.outline.length > 2)\n" +
+    "            ? gate.outline.map(function (v) { return [xScale(v[0]), yScale(v[1])]; })\n" +
+    "            : null;\n" +
+    "        if (_edgeMode === 'straight-bow' && _bowPts) {\n" +
+    "            g.append('path')\n" +
+    "                .attr('d', _toPath(_bowPts))\n" +
+    "                .attr('fill', 'none')\n" +
+    "                .attr('stroke', '#8a8a8a')\n" +
+    "                .attr('stroke-width', Math.max(0.5, lineWidth * 0.67))\n" +
+    "                .attr('stroke-opacity', 0.9);\n" +
+    "        }\n" +
+    "        // The label stays on the straight centroid so it does not shift with the mode.\n" +
+    "        var pathStr = _toPath((_edgeMode === 'bowed' && _bowPts) ? _bowPts : points);";
+  if (out.includes(edgeNeedle)) {
+    out = out.replace(edgeNeedle, edgePatch);
+  } else if (!out.includes("var _edgeMode = gateStyle.gate_edge_mode")) {
+    console.warn("[GateLab] mini_plot gate-edge-mode patch did not match.");
+  }
+
   const levelNeedle = "var nLevels = 18;";
   const levelPatchedNeedle = "var nLevels = Math.max(6, Math.min(18, Math.round(18 * Math.min(W, H) / 270)));";
   const lineNeedle = "ctx.lineWidth = 1.0;";

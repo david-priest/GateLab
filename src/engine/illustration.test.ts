@@ -12,11 +12,16 @@ function source(id: string, name: string, x: readonly number[]): IllustrationSam
   const sample = {
     fcs: { nEvents: column.length },
     gatingData: () => [column],
+    // Gates are now evaluated in their own coordinate space, so the payload asks for columns
+    // per gate rather than once per sample. This stub has one space, so both resolve the same.
+    gateAssayData: () => ({ n: column.length, forGate: () => [column] }),
     index: (key: string) => key === "X" ? 0 : undefined,
     displayColumn: () => column,
     channelTicks: () => null,
     labelForKey: (key: string) => key,
     gatingToDisplay: (_key: string, value: number) => value,
+    gateToDisplay: (_gate: unknown, _key: string, value: number) => value,
+    gateSpace: () => "raw",
   } as unknown as Sample;
   return {
     id,

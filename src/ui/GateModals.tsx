@@ -1,13 +1,15 @@
 // GateModals.tsx — the "Name this gate" / "Create quadrant gate" dialogs shown when a
 // gate is drawn (input$new_gate). Ported from app.R observeEvent(input$new_gate) +
-// confirm_gate_btn / confirm_quadrant_btn. On confirm, drawn DISPLAY-space vertices are
-// converted to gating space (sample.displayToGating) before the gate is stored.
+// confirm_gate_btn / confirm_quadrant_btn. On confirm, the drawn DISPLAY-space vertices are
+// converted into the space the new gate will live in, and — for a display-space gate — the
+// transform each axis was drawn under is snapshotted onto it. That snapshot is what keeps the
+// gate's membership fixed afterwards; without it the gate would follow the view, as FlowJo's do.
 
 import { useMemo, useState } from "react";
 import type { NewGate } from "../plots/GatingPlot";
 import type { Sample } from "../engine/sample";
 import type { Action } from "../store";
-import type { PopulationMap, Vertex } from "../engine/models";
+import type { GateSpace, PopulationMap, Vertex } from "../engine/models";
 import { useI18n } from "./i18n";
 
 interface Props {
@@ -17,6 +19,12 @@ interface Props {
   activePopId: string | null;
   rootPopId: string;
   nGates: number;
+  /**
+   * Space new gates are created in; the gate records it permanently. `null` records nothing and
+   * leaves the gate on this sample's legacy default — which is what CyTOF still does, since
+   * migrating its gates to an explicit snapshot touches saved workspaces and is its own change.
+   */
+  gateSpace: GateSpace | null;
   onCancel: () => void;
   onConfirm: (a: Action) => void;
 }
@@ -35,6 +43,7 @@ export function GateModals({
   activePopId,
   rootPopId,
   nGates,
+  gateSpace,
   onCancel,
   onConfirm,
 }: Props) {
@@ -44,9 +53,14 @@ export function GateModals({
   );
   const defaultParent = activePopId && populations[activePopId] ? activePopId : rootPopId;
 
+  // The space fields the new gate will carry, and the conversion that matches them. Computed
+  // once here so the vertices and the snapshot can never disagree about which space they mean.
+  const spaceFields = gateSpace
+    ? sample.newGateSpaceFields(gateSpace, pending.x_channel, pending.y_channel)
+    : {};
   const toGating = (v: Vertex): Vertex => [
-    sample.displayToGating(pending.x_channel, v[0]),
-    sample.displayToGating(pending.y_channel, v[1]),
+    sample.displayToGate(spaceFields, pending.x_channel, v[0]),
+    sample.displayToGate(spaceFields, pending.y_channel, v[1]),
   ];
 
   if (pending.gate_type === "quadrant") {
@@ -65,6 +79,7 @@ export function GateModals({
             center: c,
             prefix,
             parentId,
+            ...spaceFields,
           });
         }}
       />
@@ -89,6 +104,7 @@ export function GateModals({
           vertices,
           labelOffset: pending.label_offset,
           name: gateName,
+          ...spaceFields,
           createPop: createPop
             ? { name: popNameInput.trim() || gateName, parentId }
             : undefined,

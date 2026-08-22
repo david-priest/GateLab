@@ -10,8 +10,10 @@
 // keeps them separate and exposes gating↔display vertex conversion.
 
 import type { FcsFile, NumericColumn } from "./fcs";
-import type { AssayData } from "./gates";
+import type { AssayData, GateAssayData } from "./gates";
+import type { Gate, GateSpace, GateTransforms, TransformSpec } from "./models";
 import { resolveChannels, type ResolvedChannel } from "./channels";
+import { biexTransform, wspLogTransform } from "./biex";
 import type { MatrixChannelBinding } from "./compensationCompatibility";
 import type {
   PersistedCompensatedLayerBinding,
@@ -39,15 +41,63 @@ import {
   estimateLogicleParams,
 } from "./transforms";
 
+/** Anything carrying a gate's coordinate-space identity — a Gate satisfies this structurally. */
+export interface GateSpaceRef {
+  space?: GateSpace;
+  transforms?: GateTransforms;
+}
+
 export interface ChannelTransform {
   kind: "logicle" | "asinh" | "identity";
   forward(v: number): number; // raw → display
   inverse(v: number): number; // display → raw
 }
 
+/**
+ * DEFAULT cofactor for arcsinh-displayed FLOW FLUORESCENCE channels.
+ *
+ * 150 is GateLabR's own value (fcs_import.R:862). It is only a starting point: the cofactor is
+ * the sole thing that distinguishes arcsinh from a log axis, because it sets where the linear
+ * region around zero gives way to log behaviour. At 150 on data reaching 10M nearly the whole
+ * axis is already log, which is why such a plot looks much like the logicle it replaced.
+ * Raising the cofactor widens the linear region and packs the near-zero noise into a tighter
+ * band; lowering it blows that noise out across the plot. Hence the per-channel control.
+ */
+export const FLUOR_ARCSINH_COFACTOR = 150;
+
 const IDENTITY: ChannelTransform = { kind: "identity", forward: (v) => v, inverse: (v) => v };
 function asinhTransform(cf: number): ChannelTransform {
   return { kind: "asinh", forward: (v) => Math.asinh(v / cf), inverse: (v) => cf * Math.sinh(v) };
+}
+
+/**
+ * Rebuild a display transform from a serialised spec.
+ *
+ * A display-space gate carries the transform it was drawn under, so its membership must be
+ * computable from the gate alone — never from whatever the sample is currently showing. That is
+ * the whole difference between a stable Gating-ML gate and a FlowJo one.
+ */
+export function transformFromSpec(spec: TransformSpec): ChannelTransform {
+  if (spec.kind === "identity") return IDENTITY;
+  if (spec.kind === "asinh") return asinhTransform(spec.cofactor);
+  if (spec.kind === "biex") {
+    const t = biexTransform(spec);
+    return { kind: "asinh", forward: t.forward, inverse: t.inverse };
+  }
+  if (spec.kind === "wsplog") {
+    const t = wspLogTransform(spec);
+    return { kind: "asinh", forward: t.forward, inverse: t.inverse };
+  }
+  const lg = new Logicle(spec.T, spec.W, spec.M, spec.A);
+  const fallback = asinhTransform(150);
+  return {
+    kind: "logicle",
+    forward: (v) => {
+      const x = lg.scale(v);
+      return x === -1 || !Number.isFinite(x) ? fallback.forward(v) : x;
+    },
+    inverse: (v) => lg.inverse(v),
+  };
 }
 
 type ScatterRole = "forward" | "side" | "other";
@@ -400,6 +450,7 @@ export class Sample {
   /** User-set flow-scatter cofactors, keyed by resolved channel index. */
   private readonly scatterCofactorOverride = new Map<number, number>();
   private readonly transformCache = new Map<number, ChannelTransform>();
+  private readonly pinnedCache = new Map<string, NumericColumn>();
   private readonly byName = new Map<string, number>();
   private readonly displayCache = new Map<number, Float32Array>();
   private readonly gatingCache = new Map<number, Float32Array>();
@@ -495,6 +546,9 @@ export class Sample {
       // live from raw space, moved to the new scale — the gate appeared to jump off its
       // own events while the event count stayed correct.
       this.instrument === "flow" ? [...this.scatterLinear].map((i) => this.channels[i]?.key ?? `#${i}`).sort() : [],
+      // Same reasoning for the fluorescence arcsinh choice: it swaps logicle for asinh, so
+      // display coordinates computed under the old transform must not be reused.
+      this.instrument === "flow" ? [...this.fluorArcsinh].map((i) => this.channels[i]?.key ?? `#${i}`).sort() : [],
     ]);
   }
 
@@ -529,7 +583,7 @@ export class Sample {
     } else if (transform.kind === "logicle") {
       transformBinding = ["logicle", this.logicleT(idx), this.currentLogicleW(idx)];
     } else {
-      transformBinding = ["asinh-fallback", 150];
+      transformBinding = ["asinh-fallback", this.currentFluorCofactor(idx)];
     }
     return JSON.stringify([
       this.activeAssayBindingKey,
@@ -1652,6 +1706,12 @@ export class Sample {
       // Linear scatter reuses the identity transform rather than introducing a new kind:
       // raw == display for that channel, which axis ticks and gate rendering already handle.
       t = this.scatterIsLinear(idx) ? IDENTITY : asinhTransform(this.currentScatterCofactor(idx));
+    } else if (this.fluorIsArcsinh(idx)) {
+      // Arcsinh cofactor 150 for a fluorescence channel, chosen per channel. It is the same
+      // transform the unhealthy-logicle path below falls back to, and the same one GateLabR uses
+      // (fcs_import.R:862) -- offered here as a deliberate choice rather than only as a rescue.
+      // Flow gates live in raw space, so this moves no event in or out of a gate.
+      t = asinhTransform(this.currentFluorCofactor(idx));
     } else {
       const { t: tv } = this.logicleParams(idx);
       const w = this.currentLogicleW(idx);
@@ -1660,7 +1720,7 @@ export class Sample {
       // doesn't converge (Logicle.scale returns -1). Health-check at representative values; an
       // unhealthy channel uses asinh outright, a healthy one still guards rare per-value failures
       // so no -1/NaN display coord ever reaches the plot / ticks / stats.
-      const asinhFallback = asinhTransform(150);
+      const asinhFallback = asinhTransform(this.currentFluorCofactor(idx));
       const healthy = [0, tv * 0.5, tv].every((v) => {
         const s = lg.scale(v);
         return Number.isFinite(s) && s !== -1;
@@ -1714,6 +1774,8 @@ export class Sample {
   }
   /** Flow-scatter channels the user has switched to a linear display, by column index. */
   private readonly scatterLinear = new Set<number>();
+  /** Fallback for a Sample with no ChannelScales owner; mirrors scatterLinear. */
+  private readonly fluorArcsinh = new Set<number>();
 
   /**
    * True for a flow scatter axis — the only channels the scatter scale control applies to.
@@ -1725,6 +1787,123 @@ export class Sample {
     const channel = this.channels[idx];
     if (!channel) return false;
     return isScatterChannel(channel.key) || isScatterChannel(channel.pnn);
+  }
+
+  /**
+   * True for a flow FLUORESCENCE channel -- not scatter, not QC/Time, not CyTOF.
+   *
+   * Classification, not current appearance: it stays true whether the channel is showing its
+   * logicle or an arcsinh, which is what lets the scale control and the W override survive a
+   * switch. Classified on $PnN as well as the display key, as transform() does, because on some
+   * instruments the key is prose and only $PnN is recognisable.
+   */
+  isFluorChannel(idx: number): boolean {
+    if (this.instrument !== "flow") return false;
+    const channel = this.channels[idx];
+    if (!channel) return false;
+    if (isQcChannel(channel.key) || isQcChannel(channel.pnn)) return false;
+    return !isScatterChannel(channel.key) && !isScatterChannel(channel.pnn);
+  }
+
+  /** Display scale for a flow fluorescence channel. */
+  fluorScale(idx: number): "logicle" | "arcsinh" {
+    return this.fluorIsArcsinh(idx) ? "arcsinh" : "logicle";
+  }
+
+  /**
+   * Switch a flow fluorescence channel between its logicle and arcsinh (cofactor 150).
+   *
+   * Gates are stored in raw space for flow, so this never moves a gate -- only what the axis
+   * looks like. Any logicle W the user set is kept, so switching back restores their axis.
+   */
+  setFluorScale(idx: number, scale: "logicle" | "arcsinh"): void {
+    if (!this.isFluorChannel(idx)) return;
+    const key = this.channels[idx]?.key;
+    if (this.channelScales && key) {
+      this.channelScales.setFluorArcsinh(this.workspaceScaleContextKey, key, scale === "arcsinh");
+      return;
+    }
+    if (scale === "arcsinh") this.fluorArcsinh.add(idx);
+    else this.fluorArcsinh.delete(idx);
+    this.invalidateChannel(idx);
+  }
+
+  /** Channel keys displayed with arcsinh instead of logicle, for workspace save. */
+  fluorArcsinhKeys(): string[] {
+    const keys = new Set(
+      [...this.fluorArcsinh].map((idx) => this.channels[idx]?.key).filter((k): k is string => !!k),
+    );
+    if (this.channelScales) {
+      const context = this.workspaceScaleContextKey;
+      for (const channel of this.channels) {
+        if (this.channelScales.isFluorArcsinh(context, channel.key)) keys.add(channel.key);
+      }
+    }
+    return [...keys];
+  }
+
+  /** Restore arcsinh fluorescence channels from a saved workspace. */
+  applyFluorArcsinhKeys(keys: readonly string[]): void {
+    this.fluorArcsinh.clear();
+    for (const key of keys) {
+      const idx = this.byName.get(key);
+      if (idx !== undefined && this.isFluorChannel(idx)) {
+        if (this.channelScales) {
+          this.channelScales.setFluorArcsinh(this.workspaceScaleContextKey, key, true);
+          continue;
+        }
+        this.fluorArcsinh.add(idx);
+        this.invalidateChannel(idx);
+      }
+    }
+  }
+
+  /**
+   * Arcsinh cofactor in force for a fluorescence channel (default 150).
+   *
+   * Shares the per-channel cofactor store with scatter: a channel is one or the other, never
+   * both, so one map serves and a workspace written now still opens in an older build.
+   */
+  currentFluorCofactor(idx: number): number {
+    const key = this.channels[idx]?.key;
+    if (this.channelScales && key) {
+      const shared = this.channelScales.scatterCofactor(this.workspaceScaleContextKey, key);
+      if (shared !== undefined) return shared;
+    }
+    return this.scatterCofactorOverride.get(idx) ?? FLUOR_ARCSINH_COFACTOR;
+  }
+
+  /** Override one fluorescence arcsinh cofactor; invalidates its display caches. */
+  setFluorCofactor(idx: number, cofactor: number): void {
+    if (!this.isFluorChannel(idx) || !Number.isFinite(cofactor) || cofactor <= 0) return;
+    const key = this.channels[idx]?.key;
+    if (this.channelScales && key) {
+      this.channelScales.setScatterCofactor(this.workspaceScaleContextKey, key, cofactor);
+      return;
+    }
+    this.scatterCofactorOverride.set(idx, cofactor);
+    this.invalidateChannel(idx);
+  }
+
+  /** Clear a fluorescence cofactor override, reverting to the 150 default. */
+  resetFluorCofactor(idx: number): void {
+    if (!this.isFluorChannel(idx)) return;
+    const key = this.channels[idx]?.key;
+    if (this.channelScales && key) {
+      this.channelScales.resetScatterCofactor(this.workspaceScaleContextKey, key);
+      return;
+    }
+    this.scatterCofactorOverride.delete(idx);
+    this.invalidateChannel(idx);
+  }
+
+  /** True when this fluorescence channel is drawn on an arcsinh axis. */
+  private fluorIsArcsinh(idx: number): boolean {
+    if (this.instrument !== "flow") return false;
+    const shared = this.channelScales;
+    const key = this.channels[idx]?.key;
+    if (shared && key) return shared.isFluorArcsinh(this.workspaceScaleContextKey, key);
+    return this.fluorArcsinh.has(idx);
   }
 
   /** Display scale for a flow scatter channel. */
@@ -1859,7 +2038,12 @@ export class Sample {
     // Guarded like setScatterScale. Without it a workspace-wide write lands on files where the
     // same channel key resolves to scatter or QC, persisting an override that does nothing but
     // churn this sample's display-transform identity.
-    if (!this.isLogicleChannel(idx)) return;
+    // Guarded on the channel's CLASS, not on what it currently displays: a channel switched to
+    // arcsinh is still a fluorescence channel with a logicle W, and it must keep the W the user
+    // set so switching back restores the axis they left. Guarding on isLogicleChannel() would
+    // also make restore order load-bearing -- a workspace that applied its arcsinh keys before
+    // its W overrides would silently drop every W.
+    if (!this.isFluorChannel(idx)) return;
     const key = this.channels[idx]?.key;
     if (this.channelScales && key) {
       this.channelScales.setLogicleW(this.workspaceScaleContextKey, key, w);
@@ -2021,6 +2205,141 @@ export class Sample {
     };
   }
 
+  /**
+   * Columns resolved per gate, for the whole gating strategy.
+   *
+   * This is what evaluation must use: a workspace can hold gates in different spaces, and each
+   * has to be tested against its own columns. Handing one AssayData to every gate is what made a
+   * display-space gate count zero events — its arcsinh vertices were compared with raw values.
+   */
+  gateAssayData(): GateAssayData {
+    return { n: this.fcs.nEvents, forGate: (gate) => this.gatingDataFor(gate) };
+  }
+
+  /**
+   * The current display transform for one channel, in serialisable form.
+   *
+   * Mirrors transform() branch for branch. They must not drift, so
+   * sample.transformSpec.test.ts asserts transformFromSpec(transformSpec(k)) reproduces
+   * transform(idx) numerically for every channel of every fixture.
+   */
+  transformSpec(channelKey: string): TransformSpec {
+    const idx = this.byName.get(channelKey);
+    if (idx === undefined) return { kind: "identity" };
+    const t = this.transform(idx);
+    if (t.kind === "identity") return { kind: "identity" };
+    if (t.kind === "logicle") {
+      return { kind: "logicle", T: this.logicleT(idx), W: this.currentLogicleW(idx), M: 4.5, A: 0 };
+    }
+    if (this.instrument === "cytof") return { kind: "asinh", cofactor: this.cytofCofactor };
+    const { key, pnn } = this.channels[idx];
+    if (isScatterChannel(key) || isScatterChannel(pnn)) {
+      return { kind: "asinh", cofactor: this.currentScatterCofactor(idx) };
+    }
+    // A fluorescence channel on arcsinh, or the unhealthy-logicle fallback -- both asinh/150.
+    return { kind: "asinh", cofactor: this.currentFluorCofactor(idx) };
+  }
+
+  /** Snapshot every axis of a gate at the current display transforms. */
+  gateTransformSnapshot(xChannel: string, yChannel: string): Record<string, TransformSpec> {
+    return { [xChannel]: this.transformSpec(xChannel), [yChannel]: this.transformSpec(yChannel) };
+  }
+
+  /** The space a gate's vertices live in; absent means this sample's pre-field default. */
+  gateSpace(gate: GateSpaceRef): GateSpace {
+    return gate.space ?? this.gatingSpace;
+  }
+
+  /**
+   * One of a gate's stored coordinates → raw.
+   *
+   * A display-space gate's vertices are in ITS OWN recorded transform, which need not be the one
+   * currently on screen, so this inverts the gate's transform and never the sample's.
+   */
+  gateToRaw(gate: GateSpaceRef, channel: string, v: number): number {
+    if (this.gateSpace(gate) === "raw") return v;
+    const spec = gate.transforms?.[channel];
+    if (!spec) return this.displayToRaw(channel, v); // legacy CyTOF: read in the current display
+    return transformFromSpec(spec).inverse(v);
+  }
+
+  /** Raw → the space this gate stores its vertices in. */
+  rawToGate(gate: GateSpaceRef, channel: string, v: number): number {
+    if (this.gateSpace(gate) === "raw") return v;
+    const spec = gate.transforms?.[channel];
+    if (!spec) return this.rawToDisplay(channel, v);
+    return transformFromSpec(spec).forward(v);
+  }
+
+  /**
+   * A gate's stored coordinate → the current display space, for drawing.
+   *
+   * Via raw, so that a gate drawn under one transform and viewed under another lands where it
+   * actually falls. When the two transforms agree the round trip is exact and the gate draws
+   * straight; when they differ, the difference IS the bow, which is the signal we want shown.
+   */
+  gateToDisplay(gate: GateSpaceRef, channel: string, v: number): number {
+    return this.rawToDisplay(channel, this.gateToRaw(gate, channel, v));
+  }
+
+  /** A coordinate read off the current plot → the space this gate stores its vertices in. */
+  displayToGate(gate: GateSpaceRef, channel: string, v: number): number {
+    return this.rawToGate(gate, channel, this.displayToRaw(channel, v));
+  }
+
+  /** Snapshot to attach to a NEW gate being created in `space` on these axes. */
+  newGateSpaceFields(space: GateSpace, xChannel: string, yChannel: string): GateSpaceRef {
+    return space === "raw"
+      ? { space }
+      : { space, transforms: this.gateTransformSnapshot(xChannel, yChannel) };
+  }
+
+  /**
+   * AssayData in the space THIS gate's vertices live in.
+   *
+   * A workspace can legitimately hold both kinds at once — importing a FlowJo .wsp brings in
+   * display-space gates alongside gates drawn here in raw space — so the columns a mask runs on
+   * are a property of the gate, never of the sample's current view.
+   */
+  gatingDataFor(gate: Gate): AssayData {
+    const space = this.gateSpace(gate);
+    if (space === "raw") {
+      return {
+        n: this.fcs.nEvents,
+        column: (ch) => {
+          const i = this.byName.get(ch);
+          return i === undefined ? undefined : this.activeLinearColumn(i);
+        },
+      };
+    }
+    const specs = gate.transforms;
+    // No snapshot: a legacy CyTOF gate, which has always been read in the current display space.
+    if (!specs) return this.gatingData();
+    return {
+      n: this.fcs.nEvents,
+      column: (ch) => {
+        const i = this.byName.get(ch);
+        if (i === undefined) return undefined;
+        const spec = specs[ch];
+        return spec ? this.pinnedColumn(i, spec) : this.gatingColumn(i);
+      },
+    };
+  }
+
+  /** Raw column pushed through a gate's own recorded transform. Cached per (channel, spec). */
+  private pinnedColumn(idx: number, spec: TransformSpec): NumericColumn {
+    const key = `${this.activeAssayBindingKey}|${idx}|${JSON.stringify(spec)}`;
+    const hit = this.pinnedCache.get(key);
+    if (hit) return hit;
+    const raw = this.activeLinearColumn(idx);
+    const t = transformFromSpec(spec);
+    const out = new Float32Array(raw.length);
+    if (t.kind === "identity") out.set(raw);
+    else for (let i = 0; i < raw.length; i++) out[i] = t.forward(raw[i]);
+    this.pinnedCache.set(key, out);
+    return out;
+  }
+
   /** Robust auto display range for an axis (0.1st–99.9th percentiles), cached. */
   displayRange(idx: number): [number, number] {
     const hit = this.rangeCache.get(idx);
@@ -2059,6 +2378,13 @@ export class Sample {
     // Flow signal (fluorophore): logicle display, biexponential decade labels.
     if (t.kind === "logicle") {
       return logicleTicks(fwd, inv, axisRange, this.logicleParams(idx).t);
+    }
+    // Flow signal on arcsinh -- either chosen, or the unhealthy-logicle fallback. scatterTicks
+    // is not scatter-specific: it lays out raw-unit decades over the visible range and is what
+    // any asinh axis needs. Without it the axis fell through to D3's linear ticks and was
+    // labelled in DISPLAY units (-2, 0, 2, 4 …), which name nothing a cytometrist can read.
+    if (this.instrument === "flow" && t.kind === "asinh") {
+      return scatterTicks(fwd, inv, axisRange, this.currentFluorCofactor(idx));
     }
     return null; // CyTOF metal / identity → D3 default linear ticks
   }

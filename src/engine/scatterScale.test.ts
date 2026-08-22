@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { parseFcs } from "./fcs";
 import { Sample } from "./sample";
 import { getGateMask } from "./gates";
+import { ChannelScales } from "./channelScales";
 import { ARIA_SMALL, FIXTURES_ROOT } from "../testFixtures";
 import type { Gate } from "./models";
 
@@ -217,5 +218,46 @@ describe("scatter axis ticks follow the scale", () => {
     s.setScatterScale(idx, "linear");
     s.setScatterScale(idx, "arcsinh");
     expect(s.channelTicks(idx, s.displayRange(idx))).not.toBeNull();
+  });
+});
+
+// The app always attaches a shared ChannelScales; the tests above do not. That difference hid a
+// real bug: with scales attached, setScatterScale / setLogicleW write to the shared store and
+// return EARLY, without invalidating the channel's cached transform, display column and range.
+// The plot then kept drawing the old coordinates while the axis was refitted to the new ones —
+// which collapsed the view to a single tick at 0, and Fit data + gates could not recover it
+// because the stale range came back every time.
+describe("a shared ChannelScales still invalidates the channel's caches", () => {
+  it("changes the display coordinate and the auto range when scatter goes linear", () => {
+    const s = load(ARIA_SMALL);
+    const scales = new ChannelScales();
+    s.attachChannelScales(scales);
+    const idx = s.index("FSC-A")!;
+
+    // Warm every cache the way the app does before the user touches the control.
+    const beforeDisplay = s.rawToDisplay("FSC-A", 12345);
+    const beforeRange = s.displayRange(idx);
+    expect(s.transformKind(idx)).toBe("asinh");
+
+    s.setScatterScale(idx, "linear");
+
+    expect(s.scatterScale(idx)).toBe("linear");
+    expect(s.transformKind(idx)).toBe("identity");
+    expect(s.rawToDisplay("FSC-A", 12345)).toBeCloseTo(12345, 6);
+    expect(s.rawToDisplay("FSC-A", 12345)).not.toBeCloseTo(beforeDisplay, 6);
+    // The auto range must move with it, or the axis is fitted to coordinates nothing is drawn at.
+    expect(s.displayRange(idx)[1]).not.toBeCloseTo(beforeRange[1], 6);
+    expect(s.displayRange(idx)[1]).toBeGreaterThan(1000);
+  });
+
+  it("changes the display coordinate when the logicle W moves", () => {
+    const s = load(ARIA_SMALL);
+    s.attachChannelScales(new ChannelScales());
+    const idx = s.channels.findIndex((_c, i) => s.isLogicleChannel(i));
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const key = s.channels[idx].key;
+    const before = s.rawToDisplay(key, 5000);
+    s.setLogicleW(idx, 1.75);
+    expect(s.rawToDisplay(key, 5000)).not.toBeCloseTo(before, 6);
   });
 });

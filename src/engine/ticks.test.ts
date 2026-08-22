@@ -75,3 +75,36 @@ describe("scatterTicks", () => {
     expect(scatterTicks(fwd, inv, [1, 1], cf)).toBeNull();
   });
 });
+
+describe("arcsinh decade ticks at a large cofactor", () => {
+  // A fluorescence channel displayed with arcsinh can carry a cofactor in the thousands, which
+  // is the whole point of the control. The decade floor was pinned at cofactor/10 -- fine at
+  // 150, where it sits far below any real axis, but at 10,000 it rose ABOVE the visible data,
+  // every decade was filtered out, and the axis rendered with a lone "0" and nothing else.
+  const asinhAt = (cf: number) => ({
+    forward: (v: number) => Math.asinh(v / cf),
+    inverse: (v: number) => Math.sinh(v) * cf,
+  });
+
+  it("still labels the decades when the cofactor exceeds the data", () => {
+    const cf = 10000;
+    const { forward, inverse } = asinhAt(cf);
+    const ticks = scatterTicks(forward, inverse, [forward(-50), forward(400)], cf);
+    expect(ticks).not.toBeNull();
+    expect(ticks!.major_labels).toContain("0");
+    // The point of the fix: real decades, not just zero.
+    expect(ticks!.major_labels.filter((l) => l !== "0").length).toBeGreaterThan(0);
+    expect(ticks!.major_labels).toContain("100");
+  });
+
+  it("leaves a normal scatter axis alone", () => {
+    // cofactor 150 against a full scatter range: the data bound is far above cf/10, so the
+    // floor is unchanged and this axis renders exactly as it did before.
+    const cf = 150;
+    const { forward, inverse } = asinhAt(cf);
+    const ticks = scatterTicks(forward, inverse, [forward(-1000), forward(262144)], cf);
+    expect(ticks!.major_labels).toEqual(
+      expect.arrayContaining(["0", "1K", "10K", "100K"]),
+    );
+  });
+});

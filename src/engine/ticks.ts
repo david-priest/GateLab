@@ -157,6 +157,12 @@ export function scatterTicks(
     if (rawMax > 0) {
       // If the range includes zero, start around the linear-to-log transition scale.
       let posFloor = rawMin > 0 ? rawMin : cf / 10;
+      // ...but never above the data. The cofactor floor exists to keep decades out of the
+      // linear region, where they would pile up against zero; it assumed a cofactor near 150,
+      // which sits far below any scatter axis. On a fluorescence channel set to arcsinh 10,000
+      // the floor landed ABOVE the visible maximum, every positive decade was filtered out, and
+      // the axis was labelled with a lone "0". Keeping at least the top decade in view bounds it.
+      posFloor = Math.min(posFloor, rawMax / 10);
       posFloor = Math.max(posFloor, 1e-9);
       const exps = decadesInRange(posFloor, rawMax);
       if (exps.length) {
@@ -168,6 +174,7 @@ export function scatterTicks(
     if (rawMin < 0) {
       const negAbsMax = Math.abs(rawMin);
       let negAbsFloor = rawMax < 0 ? Math.abs(rawMax) : cf / 10;
+      negAbsFloor = Math.min(negAbsFloor, negAbsMax / 10); // same bound, mirrored
       negAbsFloor = Math.max(negAbsFloor, 1e-9);
       const exps = decadesInRange(negAbsFloor, negAbsMax);
       if (exps.length) {

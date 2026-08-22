@@ -13,9 +13,10 @@
 // normalization), matching GateLabR and round-tripping through importGatingML (which
 // divides by (M+A) before inverting). Scatter/CyTOF use the natural arcsinh value.
 
-import type { Sample } from "./sample";
-import type { Gate, PolyRectGate, PopulationMap } from "./models";
-import { isScatterChannel, isQcChannel } from "./transforms";
+import { transformFromSpec, type Sample } from "./sample";
+import type { Gate, PolyRectGate, PopulationMap, TransformSpec } from "./models";
+import { isScatterChannel } from "./transforms";
+import { polygonOutline } from "../plots/gatePayload";
 
 const SINH1 = Math.sinh(1); // sinh(log10(e)·ln10) = sinh(1)
 const LOG10E = Math.log10(Math.E); // GatingML fasinh M
@@ -117,52 +118,115 @@ type TrDef =
   | { type: "fasinh"; T: number; M: number; A: number }
   | { type: "logicle"; T: number; W: number; M: number; A: number };
 
-interface TransformRegistry {
-  chToTr: Map<string, string | null>; // channel key → transform id (null = no transform)
+interface GateAxisExport {
+  /** Transform id to declare on the dimension; null = no transformation-ref (raw values). */
+  trId: string | null;
+  /** Cofactor the vertices were actually built with, for the Cytobank definition JSON. */
+  cofactor: number;
+  /** Stored coordinate → the coordinate written to the file. */
+  convert(v: number): number;
+  /** True when `convert` bends straight edges, so a polygon must be subdivided to stay faithful. */
+  needsDensify?: boolean;
+}
+
+interface GateExportPlan {
+  axis(gateId: string, channelKey: string): GateAxisExport;
   trDefs: Map<string, TrDef>; // ordered by first appearance
 }
 
-function buildTransforms(sample: Sample, cytobankMode: boolean): TransformRegistry {
-  const chToTr = new Map<string, string | null>();
-  const trDefs = new Map<string, TrDef>();
-  const isFlow = sample.instrument === "flow";
+/** Stable id fragment for a number: 150 → "150", 150.25 → "150_25". */
+function idNum(x: number): string {
+  return String(round(x, 4)).replace(/[.-]/g, (c) => (c === "." ? "_" : "m"));
+}
 
-  if (!isFlow) {
-    // CyTOF: one shared fasinh transform for all arcsinh channels.
-    const cofactor = sample.arcsinhCofactor;
-    const trId = `Tr_Arcsinh_${round(cofactor, 4)}`;
-    trDefs.set(trId, { type: "fasinh", T: cofactor * SINH1, M: LOG10E, A: 0 });
-    sample.channels.forEach((c, idx) => {
-      chToTr.set(c.key, sample.transformKind(idx) === "identity" ? null : trId);
-    });
-    return { chToTr, trDefs };
+/**
+ * What to declare, and what to write, for every (gate, axis) pair.
+ *
+ * Per gate rather than per channel because a gate's coordinate space is a property of the gate:
+ * two gates on the same channel can legitimately be in different spaces, and only the gate knows
+ * which. Getting this from the channel is what made the exporter describe a gate GateLab does not
+ * apply — measured at Jaccard 0.984–0.997 against a compliant reader on the S6 scatter gates.
+ *
+ * The rule is simply: declare the transform the gate's own vertices are straight in.
+ *   • raw gate      → no transformation-ref, raw vertices. Exact.
+ *   • display gate  → its recorded transform, vertices verbatim. Exact.
+ * The only inexact case is Cytobank + logicle, which Cytobank cannot represent at all.
+ */
+function buildGateExportPlan(
+  sample: Sample,
+  gates: Record<string, Gate>,
+  gateOrder: string[],
+  cytobankMode: boolean,
+): GateExportPlan {
+  const trDefs = new Map<string, TrDef>();
+  const byKey = new Map<string, GateAxisExport>();
+  const isCytof = sample.instrument === "cytof";
+
+  const fasinh = (cf: number): string => {
+    const trId = isCytof ? `Tr_Arcsinh_${idNum(cf)}` : `Tr_Fasinh_${idNum(cf)}`;
+    if (!trDefs.has(trId)) trDefs.set(trId, { type: "fasinh", T: cf * SINH1, M: LOG10E, A: 0 });
+    return trId;
+  };
+
+  const plan = (gate: Gate, channelKey: string): GateAxisExport => {
+    const space = sample.gateSpace(gate);
+    const own: TransformSpec = space === "raw"
+      ? { kind: "identity" }
+      : (gate.transforms?.[channelKey] ?? sample.transformSpec(channelKey));
+
+    if (own.kind === "identity") {
+      // No transform to declare, and the values are already what a reader should use.
+      return { trId: null, cofactor: sample.arcsinhCofactor, convert: (v) => v };
+    }
+    if (own.kind === "asinh") {
+      // GateLab's arcsinh display coordinate IS fasinh(T = cf·sinh(1), M = log10 e, A = 0).
+      return { trId: fasinh(own.cofactor), cofactor: own.cofactor, convert: (v) => v };
+    }
+    // FlowJo's own transforms, which arrive on gates imported from a .wsp. Gating-ML has no way
+    // to express either, so the gate is written in RAW space with no transformation-ref. That is
+    // exact for a rectangle (a monotonic transform maps an axis-aligned box to an axis-aligned
+    // box) and for a quadrant's single point; a polygon's edges are densified instead — see
+    // densifyAxes below — so the boundary survives to well under a pixel.
+    if (own.kind === "biex" || own.kind === "wsplog") {
+      const inv = transformFromSpec(own).inverse;
+      return { trId: null, cofactor: sample.arcsinhCofactor, convert: inv, needsDensify: true };
+    }
+
+    // Logicle.
+    if (cytobankMode) {
+      // Cytobank knows Linear (1), Log (2) and Arcsinh (4) only — there is no logicle to declare,
+      // so the gate is re-expressed as arcsinh of the RAW value. This is the one lossy path in
+      // the exporter: the re-expressed gate is not the gate GateLab applies.
+      const inv = transformFromSpec(own).inverse;
+      const cf = CYTOBANK_FLOW_COFACTOR;
+      return {
+        trId: fasinh(cf),
+        cofactor: cf,
+        convert: (v) => Math.asinh(inv(v * LOGICLE_SPAN) / cf),
+      };
+    }
+    const W = clampW(own.W);
+    const trId = `Tr_Logicle_${channelKey.replace(/[^A-Za-z0-9]/g, "_")}_W${idNum(W)}`;
+    if (!trDefs.has(trId)) trDefs.set(trId, { type: "logicle", T: own.T, W, M: own.M, A: own.A });
+    // GateLab's logicle display spans [0, 1]; flowCore/Gating-ML logicle spans [0, M + A].
+    const span = own.M + own.A;
+    return { trId, cofactor: sample.arcsinhCofactor, convert: (v) => v * span };
+  };
+
+  for (const gid of gateOrder.length ? gateOrder : Object.keys(gates)) {
+    const gate = gates[gid];
+    if (!gate) continue;
+    for (const ch of [gate.x_channel, gate.y_channel]) {
+      const k = `${gid}|${ch}`;
+      if (!byKey.has(k)) byKey.set(k, plan(gate, ch));
+    }
   }
 
-  // Flow: logicle for fluorescence, fasinh for scatter, none for QC.
-  sample.channels.forEach((c, idx) => {
-    const key = c.key;
-    if (isQcChannel(key)) {
-      chToTr.set(key, null);
-    } else if (isScatterChannel(key)) {
-      const cf = sample.currentScatterCofactor(idx);
-      const trId = `Tr_Fasinh_${Math.round(cf)}`;
-      if (!trDefs.has(trId)) trDefs.set(trId, { type: "fasinh", T: cf * SINH1, M: LOG10E, A: 0 });
-      chToTr.set(key, trId);
-    } else if (cytobankMode) {
-      // Cytobank cannot represent logicle, so fluorescence goes out as arcsinh.
-      const cf = CYTOBANK_FLOW_COFACTOR;
-      const trId = `Tr_Fasinh_${Math.round(cf)}`;
-      if (!trDefs.has(trId)) trDefs.set(trId, { type: "fasinh", T: cf * SINH1, M: LOG10E, A: 0 });
-      chToTr.set(key, trId);
-    } else {
-      const T = sample.logicleT(idx);
-      const W = clampW(sample.currentLogicleW(idx));
-      const trId = `Tr_Logicle_${key.replace(/[^A-Za-z0-9]/g, "_")}`;
-      trDefs.set(trId, { type: "logicle", T, W, M: 4.5, A: 0 });
-      chToTr.set(key, trId);
-    }
-  });
-  return { chToTr, trDefs };
+  return {
+    trDefs,
+    axis: (gateId, channelKey) =>
+      byKey.get(`${gateId}|${channelKey}`) ?? { trId: null, cofactor: sample.arcsinhCofactor, convert: (v) => v },
+  };
 }
 
 const round = (x: number, d: number): number => {
@@ -325,8 +389,14 @@ function buildScalesJson(sample: Sample, globalScales: Record<string, [number, n
     const entry: ScaleEntry = {};
     if (kind === "logicle") {
       entry.w = round(clampW(sample.currentLogicleW(idx)), 6);
-    } else if (kind === "asinh" && sample.instrument === "flow" && isScatterChannel(c.key)) {
-      entry.cofactor = round(sample.currentScatterCofactor(idx), 6);
+    } else if (kind === "asinh" && sample.instrument === "flow") {
+      // Any arcsinh flow axis, scatter or fluorescence. Keying this on isScatterChannel() left a
+      // fluorescence channel shown with arcsinh carrying neither a W nor a cofactor, so a reader
+      // could not reproduce the axis it was drawn on.
+      entry.cofactor = round(
+        isScatterChannel(c.key) ? sample.currentScatterCofactor(idx) : sample.currentFluorCofactor(idx),
+        6,
+      );
     }
     const gs = globalScales[c.key];
     if (gs && Number.isFinite(gs[0]) && Number.isFinite(gs[1]) && gs[1] > gs[0]) {
@@ -379,7 +449,6 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
   }
 
   const isFlow = sample.instrument === "flow";
-  const cofactor = sample.arcsinhCofactor;
 
   // display channel name → dimension name (Cytobank uses $PnN, standard uses the display key).
   const pnnFor = (key: string): string => {
@@ -389,43 +458,30 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     return pnn && pnn.length ? pnn : key;
   };
 
-  const { chToTr, trDefs } = buildTransforms(sample, cytobankMode);
+  const exportPlan = buildGateExportPlan(sample, gates, gate_order, cytobankMode);
+  const trDefs = exportPlan.trDefs;
   const scalesJson = buildScalesJson(sample, opts.globalScales);
   const compensationRefFor = (channelKey: string): "FCS" | "uncompensated" =>
     isFlow && sample.embeddedCompensationEnabled && sample.spillover?.channels.includes(channelKey)
       ? "FCS"
       : "uncompensated";
-  const axisCofactor = (channelKey: string): number => {
-    const idx = sample.index(channelKey);
-    if (isFlow && idx !== undefined && isScatterChannel(channelKey)) {
-      return sample.currentScatterCofactor(idx);
-    }
-    // Flow fluorescence in Cytobank format is arcsinh, so the definition JSON must quote the
-    // cofactor the vertices were actually transformed with.
-    if (cytobankMode && isFlow && idx !== undefined && !isQcChannel(channelKey)) {
-      return CYTOBANK_FLOW_COFACTOR;
-    }
-    return cofactor;
-  };
+  // Each gate's vertices are written in the space that gate declares, so the file describes the
+  // gate GateLab actually applies rather than a transformed lookalike.
+  const displayGate = (g: PolyRectGate): PolyRectGate => {
+    const ax = exportPlan.axis(g.gate_id, g.x_channel);
+    const ay = exportPlan.axis(g.gate_id, g.y_channel);
+    const toOut = (vv: [number, number]): [number, number] => [ax.convert(vv[0]), ay.convert(vv[1])];
+    const vertices = g.vertices.map(toOut);
 
-  // Forward-transform a stored (gating-space) coordinate into export/display space.
-  const toExport = (channelKey: string, v: number): number => {
-    const idx = sample.index(channelKey);
-    // Cytobank format, flow fluorescence: the declared transform is fasinh, so the vertices must
-    // be arcsinh of the RAW value rather than the app's logicle display coordinate. Flow gates
-    // are stored in raw space, so this is a direct substitution with nothing to invert.
-    // fasinh(T = cf·sinh(1), M = log10 e, A = 0) reduces exactly to asinh(x / cf).
-    if (cytobankMode && idx !== undefined && sample.transformKind(idx) === "logicle") {
-      return Math.asinh(v / CYTOBANK_FLOW_COFACTOR);
+    // Writing a gate into a space its edges are not straight in turns each edge into a curve, and
+    // a straight segment between the transformed endpoints is no longer the same boundary. Only
+    // polygons are affected: a rectangle stays an axis-aligned box under any monotonic transform.
+    if ((ax.needsDensify || ay.needsDensify) && g.gate_type === "polygon") {
+      const dense = polygonOutline(g.vertices, toOut, vertices);
+      if (dense) return { ...g, vertices: dense };
     }
-    let dv = sample.gatingToDisplay(channelKey, v);
-    if (idx !== undefined && sample.transformKind(idx) === "logicle") dv *= LOGICLE_SPAN;
-    return dv;
+    return { ...g, vertices };
   };
-  const displayGate = (g: PolyRectGate): PolyRectGate => ({
-    ...g,
-    vertices: g.vertices.map((vv) => [toExport(g.x_channel, vv[0]), toExport(g.y_channel, vv[1])] as [number, number]),
-  });
 
   // Assign numeric ids / seq to non-quadrant gates (quadrant gates have no GatingML rep).
   const gateToGmlId = new Map<string, string>();
@@ -451,14 +507,16 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     const dg = displayGate(g as PolyRectGate);
     const gmlId = gateToGmlId.get(gid)!;
     const numId = gateNumericId.get(gid)!;
-    const xTr = chToTr.get(g.x_channel) ?? null;
-    const yTr = chToTr.get(g.y_channel) ?? null;
+    const xAxis = exportPlan.axis(gid, g.x_channel);
+    const yAxis = exportPlan.axis(gid, g.y_channel);
+    const xTr = xAxis.trId;
+    const yTr = yAxis.trId;
     const xName = pnnFor(g.x_channel);
     const yName = pnnFor(g.y_channel);
     const xCompRef = compensationRefFor(g.x_channel);
     const yCompRef = compensationRefFor(g.y_channel);
-    const xCofactor = axisCofactor(g.x_channel);
-    const yCofactor = axisCofactor(g.y_channel);
+    const xCofactor = xAxis.cofactor;
+    const yCofactor = yAxis.cofactor;
     if (g.gate_type === "rectangle") {
       gateLines.push(...rectangleXml(
         dg, gmlId, numId, i + 1, xTr, yTr, isFlow, xCofactor, yCofactor,
