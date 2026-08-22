@@ -24,7 +24,12 @@ export function layoutIllustrationPicker<T>(
   const visibleRows = options.visibleRows ?? ILLUSTRATION_PICKER_VISIBLE_ROWS;
   const safeRows = Math.max(1, Math.floor(visibleRows));
   const safeAvailable = Math.max(1, Math.floor(availableColumns));
-  const columnCount = Math.min(safeAvailable, Math.max(1, items.length));
+  // Columns appear on OVERFLOW, not because the width allows them. Taking every column the
+  // width offered spread fourteen channels across four columns of four, leaving each one
+  // three-quarters empty and the list harder to scan than a single column would have been.
+  // Width still caps the count; it just no longer drives it.
+  const columnsNeeded = Math.max(1, Math.ceil(items.length / safeRows));
+  const columnCount = Math.min(safeAvailable, columnsNeeded);
   const lastColumnScrollable = items.length > columnCount * safeRows;
   const columns: T[][] = [];
 

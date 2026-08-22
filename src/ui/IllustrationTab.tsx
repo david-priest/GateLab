@@ -56,6 +56,8 @@ interface Props {
   onSavePreset: (name: string) => void;
   onDeletePreset: (name: string) => void;
   onConfigChange: () => void;
+  /** Fit these channels to their data plus the gates drawn on them. */
+  onFitChannels: (keys: readonly string[]) => void;
   dataRevision: number;
   densityColorPower: number;
   onDensityColorPowerChange: (value: number) => void;
@@ -81,6 +83,7 @@ function configsMatch(a: IllustrationConfig, b: IllustrationConfig): boolean {
 }
 
 export function IllustrationTab({
+  onFitChannels,
   sample,
   sampleViews,
   activeSampleId,
@@ -390,6 +393,13 @@ export function IllustrationTab({
           >
             {t("Render Illustration")}
           </button>
+          <button
+            type="button"
+            className="gl-mini-btn"
+            title={t("Fit every plot shown here to its data and the gates on it")}
+            disabled={!sampleScopeReady}
+            onClick={() => onFitChannels([...xChannels, ...(yChannel ? [yChannel] : [])])}
+          >{t("Fit data + gates")}</button>
           {renderPending && <span className="gl-illust-pending">{t("Changes pending")}</span>}
           <span className="gl-illust-sample-status">
             {t("{ready} of {checked} checked FCS ready", {
@@ -498,6 +508,7 @@ export function IllustrationTab({
         <div className="gl-illust-row">
           {/* Explicit plot-type toggle — histograms used to be reachable only by picking a "no Y"
               option buried in the Y-channel dropdown, which was undiscoverable. */}
+          <div className="gl-illust-group">
           <span className="gl-stats-opt-label">{t("Plot")}</span>
           {[
             { v: "biplot", l: "Biplot" },
@@ -518,6 +529,7 @@ export function IllustrationTab({
               {t(pt.l)}
             </label>
           ))}
+          </div>
           {plotType === "biplot" && (
             <>
               <span className="gl-ctl-sep" />
@@ -534,13 +546,15 @@ export function IllustrationTab({
           {plotType === "biplot" && (
             <>
               <span className="gl-ctl-sep" />
-              <span className="gl-stats-opt-label">{t("Display")}</span>
-              {[{ v: "scatter", l: "Scatter" }, { v: "pseudocolor", l: "Pseudo" }, { v: "contour", l: "Contour" }].map((m) => (
-                <label key={m.v} className="gl-check">
-                  <input type="radio" name="illust-mode" checked={displayMode === m.v} onChange={() => setDisplayMode(m.v)} />
-                  {t(m.l)}
-                </label>
-              ))}
+              <div className="gl-illust-group">
+                <span className="gl-stats-opt-label">{t("Display")}</span>
+                {[{ v: "scatter", l: "Scatter" }, { v: "pseudocolor", l: "Pseudo" }, { v: "contour", l: "Contour" }].map((m) => (
+                  <label key={m.v} className="gl-check">
+                    <input type="radio" name="illust-mode" checked={displayMode === m.v} onChange={() => setDisplayMode(m.v)} />
+                    {t(m.l)}
+                  </label>
+                ))}
+              </div>
             </>
           )}
           {isContour && (
@@ -779,15 +793,19 @@ export function IllustrationTab({
 
         {/* Fonts + export */}
         <div className="gl-illust-row">
-          <span className="gl-stats-opt-label">{t("Fonts")}</span>
-          <label className="gl-field-inline">{t("Tick")}<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 9)} /></label>
-          <label className="gl-field-inline">{t("Axis")}<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 12)} /></label>
-          <label className="gl-field-inline">{t("Title")}<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 12)} /></label>
-          <label className="gl-field-inline">{t("Gate")}<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 10)} /></label>
-          <label className="gl-check" title="Scale these base font sizes with the rendered plot or heatmap cell size">
-            <input type="checkbox" checked={scaleFontsWithPlot} onChange={(e) => setScaleFontsWithPlot(e.target.checked)} />
-            Scale with plot
-          </label>
+          {/* The eyebrow and the sizes it names wrap as one unit; loose in the row, "Fonts" ended
+              up a line above its own inputs. */}
+          <div className="gl-illust-group">
+            <span className="gl-stats-opt-label">{t("Fonts")}</span>
+            <label className="gl-field-inline">{t("Tick")}<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 9)} /></label>
+            <label className="gl-field-inline">{t("Axis")}<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 12)} /></label>
+            <label className="gl-field-inline">{t("Title")}<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 12)} /></label>
+            <label className="gl-field-inline">{t("Gate")}<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 10)} /></label>
+            <label className="gl-check" title="Scale these base font sizes with the rendered plot or heatmap cell size">
+              <input type="checkbox" checked={scaleFontsWithPlot} onChange={(e) => setScaleFontsWithPlot(e.target.checked)} />
+              Scale with plot
+            </label>
+          </div>
           <span className="gl-ctl-sep" />
           <label className="gl-field-inline" title="Export resolution for SVG/PDF (72–1200 DPI)">
             DPI

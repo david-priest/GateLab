@@ -21,7 +21,7 @@ import {
   type FlowJoSpillover,
 } from "./engine/flowjoWorkspace";
 import { ChannelScales } from "./engine/channelScales";
-import { includePlotGatesInAxisRange } from "./engine/axisRange";
+import { fitChannelAxisRange, includePlotGatesInAxisRange } from "./engine/axisRange";
 import { parseFcs, type SpilloverMatrix } from "./engine/fcs";
 import { Sample, maxCoefficientDelta, type DisplayMode, type OverlaySpec } from "./engine/sample";
 import { populationTreeOrder } from "./engine/populations";
@@ -146,6 +146,7 @@ import { GateList } from "./ui/GateList";
 import { GATE_EDGE_MODES, type GateEdgeMode } from "./ui/gateEdgeModes";
 import { resolveFlowJoTarget } from "./engine/flowjoWorkspace";
 import type { GateSpace } from "./engine/models";
+import type { ChannelLabelMode } from "./engine/sample";
 import { gateSpaceBadge } from "./engine/gateSpaceBadge";
 import { PopulationTree } from "./ui/PopulationTree";
 import { GateModals } from "./ui/GateModals";
@@ -213,15 +214,16 @@ import {
 } from "./host/colDataContract";
 import { GATELAB_HOST_ROWDATA_CONTRACT_VERSION } from "./host/rowDataContract";
 import type { GateLabHostWorkspaceWriteResult } from "./host/workspaceContract";
+import { lazyChunk } from "./ui/lazyChunk";
 import {
   SceColDataExportModal,
   type ScePopulationColumnSpec,
 } from "./ui/SceColDataExportModal";
 
-const CompensationTab = lazy(async () => {
+const CompensationTab = lazy(lazyChunk("CompensationTab", async () => {
   const module = await import("./ui/CompensationTab");
   return { default: module.CompensationTab };
-});
+}));
 
 const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
 
@@ -2307,6 +2309,27 @@ export default function App() {
   // schedule the next frame until this one's work is done, so a workspace large enough to
   // exceed the budget simply commits less often instead of queueing up behind the pointer.
   // Only the latest value matters, so intermediate ticks are dropped rather than replayed.
+  /**
+   * How channels are named on axes and pickers, app-wide.
+   *
+   * A file whose $PnS is "CD19" resolves to the identity key "CD19", so the detector never
+   * appears even though $PnN still holds it. Purely cosmetic: identity, gates and compensation
+   * all key off the channel key, so switching this cannot move an event.
+   */
+  const [channelLabelMode, setChannelLabelMode] = useState<ChannelLabelMode>(() => {
+    try {
+      return localStorage.getItem("gatelab.channelLabelMode") === "channel-marker"
+        ? "channel-marker" : "marker";
+    } catch { return "marker"; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("gatelab.channelLabelMode", channelLabelMode); } catch { /* private mode */ }
+    // Every loaded sample, not just the active one: the setting is app-wide and a file loaded
+    // later must adopt it too (see the effect below).
+    for (const entry of samples) entry.sample.setChannelLabelMode(channelLabelMode);
+    setPanelVersion((v) => v + 1);
+  }, [channelLabelMode, samples]);
+
   const [pendingLogicleW, setPendingLogicleW] = useState<Record<string, number>>({});
   const logicleWJob = useRef<{ idx: number; w: number; key: string } | null>(null);
   const logicleWFrame = useRef<number | null>(null);
@@ -5148,6 +5171,41 @@ export default function App() {
     setYRange(null);
   }, [sample, xIdx, yIdx, workspaceAutomaticRanges, mainPlotGates, setGlobalScale]);
 
+  /**
+   * Fit a set of CHANNELS to their data plus the gates drawn on them.
+   *
+   * The Gating tab's Fit fits the two axes on screen. The Strategy and Illustration grids show
+   * many plots at once, and a channel can be the x of one panel and the y of another, so the fit
+   * there is per channel and takes gates from both orientations.
+   */
+  const fitChannels = useCallback((keys: readonly string[]) => {
+    if (!sample) return;
+    const seen = new Set<string>();
+    for (const key of keys) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const idx = sample.index(key);
+      if (idx === undefined) continue;
+      const coords: number[] = [];
+      for (const gate of Object.values(state.gates)) {
+        for (const axis of ["x", "y"] as const) {
+          const channel = axis === "x" ? gate.x_channel : gate.y_channel;
+          if (channel !== key) continue;
+          const points = gate.gate_type === "quadrant"
+            ? [gate.center]
+            : (gate.vertices as [number, number][]);
+          for (const point of points) {
+            if (!point) continue;
+            // The gate's own transform, so raw-space and display-space gates on the same
+            // channel both land where they are actually drawn.
+            coords.push(sample.gateToDisplay(gate, key, axis === "x" ? point[0] : point[1]));
+          }
+        }
+      }
+      setGlobalScale(key, fitChannelAxisRange(sample.displayRange(idx), coords));
+    }
+  }, [sample, state.gates, setGlobalScale]);
+
   // Switching a scatter axis between arcsinh and linear rewrites that channel's display
   // coordinates wholesale -- events that sat at 8.6 now sit at 250000 -- so a range fitted under
   // the old transform describes nothing. The auto-fit effect above is supposed to notice via the
@@ -6351,6 +6409,8 @@ export default function App() {
             )}
             {activeTab === "panel" && (
               <PanelTab
+                labelMode={channelLabelMode}
+                onLabelModeChange={setChannelLabelMode}
                 key={panelVersion}
                 sample={sample}
                 onRename={renameChannel}
@@ -6371,6 +6431,7 @@ export default function App() {
             )}
             {activeTab === "strategy" && (
               <StrategyTab
+                onFitChannels={fitChannels}
                 sample={sample}
                 state={state}
                 derived={derived}
@@ -6383,6 +6444,7 @@ export default function App() {
             )}
             {activeTab === "illustration" && (
               <IllustrationTab
+                onFitChannels={fitChannels}
                 key={illustVersion}
                 sample={sample}
                 sampleViews={illustrationSampleViews}

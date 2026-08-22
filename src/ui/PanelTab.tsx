@@ -11,7 +11,7 @@ import {
   type PanelImportPreview,
   type PanelTableChannel,
 } from "../engine/panelTable";
-import type { Sample } from "../engine/sample";
+import type { ChannelLabelMode, Sample } from "../engine/sample";
 import { useI18n } from "./i18n";
 
 interface Props {
@@ -23,6 +23,9 @@ interface Props {
   onResetAll: () => void;
   onWriteToHost?: () => void;
   hostWriteBusy?: boolean;
+  /** How channels are named on axes and pickers, app-wide. */
+  labelMode: ChannelLabelMode;
+  onLabelModeChange: (mode: ChannelLabelMode) => void;
 }
 
 interface ImportDraft {
@@ -32,6 +35,8 @@ interface ImportDraft {
 
 export function PanelTab({
   sample,
+  labelMode,
+  onLabelModeChange,
   onRename,
   onRenameMany,
   onResetAll,
@@ -101,6 +106,17 @@ export function PanelTab({
     <div className="gl-tab-panel">
       <div className="gl-tab-head">
         <h2 className="gl-tab-title">{t("Panel — channel names")}</h2>
+        {/* The fluorophore is often present in $PnN while the identity key is only the marker,
+            so a workspace can look as though it lost it. This is a display choice; it renames
+            nothing and cannot move a gate. */}
+        <label className="gl-panel-labelmode" title={t("Axis and picker names throughout the app. The detector comes from $PnN, which is kept even when the channel's identity is just the marker. Renaming a channel here always overrides this.")}>
+          <input
+            type="checkbox"
+            checked={labelMode === "channel-marker"}
+            onChange={(e) => onLabelModeChange(e.target.checked ? "channel-marker" : "marker")}
+          />
+          <span>{t("Show the detector with the marker")}</span>
+        </label>
         <div className="gl-panel-actions">
           <button type="button" className="gl-btn-ghost" onClick={downloadTemplate}>
             {t("Download template")}

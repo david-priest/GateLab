@@ -43,6 +43,8 @@ describe("PanelTab bulk editing", () => {
           onRename={vi.fn()}
           onRenameMany={onRenameMany}
           onResetAll={vi.fn()}
+          labelMode="marker"
+          onLabelModeChange={vi.fn()}
         />
       </I18nProvider>,
     ));
@@ -75,6 +77,8 @@ describe("PanelTab bulk editing", () => {
           onRename={vi.fn()}
           onRenameMany={vi.fn()}
           onResetAll={vi.fn()}
+          labelMode="marker"
+          onLabelModeChange={vi.fn()}
         />
       </I18nProvider>,
     ));
