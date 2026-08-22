@@ -5278,22 +5278,26 @@ export default function App() {
               <span className="gl-brand-card-by">{t("Developed by David Priest")}</span>
             </span>
             <p>
-              {t("A browser-based gating tool for flow and mass cytometry. Files never leave the machine — every FCS is parsed, transformed and gated locally.")}
+              {t("A browser-based gating tool for flow and mass cytometry. Files never leave the machine. Every FCS is parsed, transformed and gated locally.")}
             </p>
             <p>
               <b>{t("Mass cytometry (CyTOF).")}</b>{" "}
-              {t("Channels are displayed with arcsinh at cofactor 5, the field convention, and gates are stored in that same arcsinh space. The scale is not offered as a per-channel choice because there is no competing convention to choose between.")}
+              {t("Channels are shown with arcsinh at cofactor 5, which is the field convention, and gates are stored in that same space. There is no per-channel choice here because there is no competing convention to choose between.")}
             </p>
             <p>
               <b>{t("Flow cytometry.")}</b>{" "}
-              {t("Scatter and fluorescence each carry a display scale you pick per channel — scatter arcsinh or linear, fluorescence logicle or arcsinh — but gates are stored and evaluated in RAW space, not in whatever the axis happens to show.")}
+              {t("You pick a display scale per channel: arcsinh or linear for scatter, logicle or arcsinh for fluorescence. Gates are stored and evaluated in raw channel values regardless, so nothing you do to an axis can move an event in or out of a gate.")}
             </p>
             <p>
-              {t("That is a deliberate divergence. FlowJo and Gating-ML 2.0 evaluate a polygon as straight lines in the DISPLAY space, so changing an axis scale changes which events fall inside a gate: on one of our own workspaces, switching FSC-W from linear to log moved a gate from 43.5% to 80.5% of its parent without anyone touching the gate. In GateLab a display control cannot move a single event in or out of a gate. The cost is that a raw-straight edge bows when drawn on a transformed axis, which the gate-edge control shows explicitly rather than hiding.")}
+              {t("This differs from FlowJo and from Gating-ML 2.0, which both treat a polygon as straight lines in the space the axis is showing. Under that model the gate changes when the view changes. The cost of doing it the other way is that a gate drawn straight in raw values looks bowed on a transformed axis, which the gate-edge control shows you rather than hides.")}
             </p>
             <p>
-              <b>{t("Gating-ML interchange is a work in progress.")}</b>{" "}
-              {t("Import and export of Gating-ML 2.0 and FlowJo workspaces are actively developed and measured against FlowJo, Cytobank and CytoML on real files. Cytobank compatibility is the least settled of them — Cytobank supports only linear, log and arcsinh scales, so a logicle gate has to be re-expressed on the way out, and that path is not yet exact. Treat an exported file as something to check rather than something to trust, and please report anything that does not round-trip.")}
+              <b>{t("One hierarchy for the whole workspace.")}</b>{" "}
+              {t("GateLab applies a single population hierarchy to every file you have checked. FlowJo can keep a separate population tree per FCS file, and Cytobank can tailor a gate's coordinates per file; GateLab does neither, so what you see is what every file gets. If per-file gate or population tailoring turns out to be wanted, it can be added.")}
+            </p>
+            <p>
+              <b>{t("Gating-ML interchange is still being worked on.")}</b>{" "}
+              {t("Import and export of Gating-ML 2.0 and FlowJo workspaces are measured against FlowJo, Cytobank and CytoML on real files. Cytobank is the least settled of the three, because it supports only linear, log and arcsinh scales, so a logicle gate has to be re-expressed on the way out and that path is not yet exact. Check an exported file rather than trusting it, and please report anything that does not survive a round trip.")}
             </p>
           </span>
         </span>
