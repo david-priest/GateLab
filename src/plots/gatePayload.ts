@@ -5,6 +5,7 @@
 
 import type { Sample } from "../engine/sample";
 import type { Gate } from "../engine/models";
+import { gateSpaceBadge } from "../engine/gateSpaceBadge";
 import type { GateCount } from "../engine/populations";
 
 export interface PlotGate {
@@ -101,7 +102,7 @@ function subdivideEdge(
  * holds at any plot size without this module needing to know one: 0.2% of the bounding-box
  * diagonal is well under a pixel for a gate covering most of a plot.
  */
-function polygonOutline(
+export function polygonOutline(
   gatingVerts: [number, number][],
   toDisplay: (p: [number, number]) => [number, number],
   displayVerts: [number, number][],
@@ -130,6 +131,69 @@ function polygonOutline(
   return out.length > gatingVerts.length + 1 ? out : undefined;
 }
 
+
+/** The display extent of the data on each axis, or null where a channel has no spread. */
+type AxisFrames = [[number, number] | null, [number, number] | null];
+
+/**
+ * How far outside the data's own extent a label may still sit before it counts as lost.
+ *
+ * Not zero: a label placed just beyond the cloud is a normal, deliberate thing to do, and the
+ * axis fit leaves room for exactly that.
+ */
+const OFF_PLOT_MARGIN = 0.35;
+
+/**
+ * A user-dragged label offset, but only while it still means something on these axes.
+ *
+ * `label_offset` is a delta in DISPLAY units, so it silently changes meaning whenever the axis
+ * transform does. A label dragged on an arcsinh axis spanning about -4 to 9 carries an offset of
+ * several units; read on a logicle axis, which spans 0 to 1, that same offset throws the label
+ * several axis-widths away.
+ *
+ * The rule: a label that would land off the plot goes back to the position it would have had
+ * when its gate was made. Nothing is lost in the nether, and nothing has to be hunted for.
+ *
+ * The reference frame is the AXIS, not the gate. Judging against the gate's own extent looks
+ * equivalent and is not: a QUADRANT is a single point, so its extent is zero, the limit collapsed
+ * to a constant and every stale quadrant offset survived. That is what flung a quadrant label
+ * into the far corner after switching a fluorescence channel from arcsinh to logicle — and,
+ * because includePlotGatesInAxisRange() also considered label positions, dragged the axis out to
+ * reach it and shrank the data into a corner.
+ *
+ * Self-correcting: an unusable offset is dropped, the label auto-places beside its gate, and
+ * dragging it again records an offset in the units now in force.
+ */
+function usableLabelOffset(
+  stored: [number, number] | null | undefined,
+  displayVerts: [number, number][],
+  axisFrames: AxisFrames,
+): [number, number] | null {
+  if (!stored || !stored.every(Number.isFinite)) return null;
+  const finite = displayVerts.filter((v) => v.every(Number.isFinite));
+  if (finite.length === 0) return null;
+
+  for (const axis of [0, 1] as const) {
+    const frame = axisFrames[axis];
+    const vs = finite.map((v) => v[axis]);
+    if (frame) {
+      // Where the label would actually END UP, judged against the data's own display extent
+      // with a margin. Deliberately NOT the current zoom: zooming in would otherwise throw away
+      // every label placement on the plot, which is destructive and fights the user.
+      const anchor = vs.reduce((sum, v) => sum + v, 0) / vs.length;
+      const position = anchor + stored[axis];
+      const margin = (frame[1] - frame[0]) * OFF_PLOT_MARGIN;
+      if (position < frame[0] - margin || position > frame[1] + margin) return null;
+      continue;
+    }
+    // No usable axis frame (a channel with no spread). Fall back to the gate's own extent.
+    const span = Math.max(...vs) - Math.min(...vs);
+    const room = span > 0 ? span * 20 : Math.abs(vs[0]) * 20 + 1;
+    if (Math.abs(stored[axis]) > room) return null;
+  }
+  return stored;
+}
+
 /** Gates drawn on (xChannel, yChannel) in normal orientation, in display space. */
 export function buildPlotGates(
   sample: Sample,
@@ -140,6 +204,15 @@ export function buildPlotGates(
   yChannel: string,
 ): PlotGate[] {
   const out: PlotGate[] = [];
+  // The display extent of the DATA on each axis — the frame a label has to land inside.
+  // Cached on Sample, so this costs nothing per gate.
+  const frameOf = (channel: string): [number, number] | null => {
+    const idx = sample.index(channel);
+    if (idx === undefined) return null;
+    const [lo, hi] = sample.displayRange(idx);
+    return Number.isFinite(lo) && Number.isFinite(hi) && hi > lo ? [lo, hi] : null;
+  };
+  const axisFrames: AxisFrames = [frameOf(xChannel), frameOf(yChannel)];
   const ids = gateOrder.length ? gateOrder : Object.keys(gates);
   for (const gid of ids) {
     const gate = gates[gid];
@@ -148,22 +221,27 @@ export function buildPlotGates(
 
     const counts = gateCounts[gid];
     const toDisplay = ([vx, vy]: [number, number]): [number, number] => [
-      sample.gatingToDisplay(xChannel, vx),
-      sample.gatingToDisplay(yChannel, vy),
+      sample.gateToDisplay(gate, xChannel, vx),
+      sample.gateToDisplay(gate, yChannel, vy),
     ];
+    // Two-letter space badge, drawn under the label. Null on CyTOF, where it would read the
+    // same on every gate forever.
+    const badge = gateSpaceBadge(sample, gate);
     const common = {
       gate_id: gid,
       x_channel: xChannel,
       y_channel: yChannel,
       color: gate.color,
       name: gate.name,
+      space_badge: badge?.text,
+      space_hint: badge?.hint,
     };
 
     if (gate.gate_type === "quadrant") {
       out.push({
         ...common,
         gate_type: "quadrant",
-        label_offset: gate.label_offset,
+        label_offset: usableLabelOffset(gate.label_offset, [toDisplay(gate.center)], axisFrames),
         center: toDisplay(gate.center),
         quadrant_counts: counts?.quadrants?.map((q) => q.event_count),
         quadrant_pcts: counts?.quadrants?.map((q) => q.percent_of_parent),
@@ -189,7 +267,8 @@ export function buildPlotGates(
         gate_type: "rectangle",
         vertices: displayVerts,
         // Label offset must be in DISPLAY space (cytof applies it to display coords).
-        label_offset: gate.label_offset ?? displayLabelOffset(displayVerts),
+        label_offset: usableLabelOffset(gate.label_offset, displayVerts, axisFrames)
+          ?? displayLabelOffset(displayVerts),
         percent_of_parent: counts?.percent_of_parent ?? null,
       });
     } else {
@@ -199,7 +278,8 @@ export function buildPlotGates(
         gate_type: gate.gate_type,
         vertices: displayVerts,
         outline: polygonOutline(gate.vertices, toDisplay, displayVerts),
-        label_offset: gate.label_offset ?? displayLabelOffset(displayVerts),
+        label_offset: usableLabelOffset(gate.label_offset, displayVerts, axisFrames)
+          ?? displayLabelOffset(displayVerts),
         percent_of_parent: counts?.percent_of_parent ?? null,
       });
     }

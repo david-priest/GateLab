@@ -5,6 +5,7 @@
 // SCE-with-metadata. Reopening re-parses the FCS (bit-identical) and reapplies the JSON state.
 
 import { zipSync, unzipSync, strToU8, strFromU8 } from "fflate";
+import type { GateEdgeMode } from "../ui/gateEdgeModes";
 import type { Gate, PopulationMap } from "./models";
 import type { DisplayMode } from "./sample";
 import { readZipFileEntries } from "./workspaceArchiveStream";
@@ -42,6 +43,8 @@ export interface WorkspaceSample {
   scatterCofactor?: Record<string, number>; // per-sample flow-scatter arcsinh cofactors
   /** Flow-scatter channel keys shown on a linear axis instead of arcsinh. */
   scatterLinear?: string[];
+  /** Flow fluorescence channel keys shown with arcsinh instead of their logicle. */
+  fluorArcsinh?: string[];
   cytofCofactor?: number; // per-sample global CyTOF arcsinh cofactor
   compensationOn: boolean; // per-sample
   instrumentMode?: "auto" | "flow" | "cytof"; // per-sample instrument override ('auto' = detected)
@@ -129,6 +132,9 @@ export interface IllustrationConfig {
   kdeBandwidth: number;
   pubStyle: boolean;
   gateLineWidth: number;
+  /** Gate-edge display, saved with the preset so a figure's look does not depend on
+   *  whatever the gating plot happened to be set to. Optional: presets predate it. */
+  gateEdgeMode?: GateEdgeMode;
   histLineWidth: number;
   histFill: boolean;
   histFillAlpha: number;
@@ -272,6 +278,13 @@ export function validateWorkspace(ws: WorkspaceFile): true {
         !sample.scatterLinear.every((key) => typeof key === "string"))
     ) {
       invalidWorkspace(`sample ${i + 1} has an invalid linear-scatter channel list.`);
+    }
+    if (
+      sample.fluorArcsinh !== undefined &&
+      (!Array.isArray(sample.fluorArcsinh) ||
+        !sample.fluorArcsinh.every((key) => typeof key === "string"))
+    ) {
+      invalidWorkspace(`sample ${i + 1} has an invalid arcsinh-fluorescence channel list.`);
     }
     if (sample.cytofCofactor !== undefined &&
         (typeof sample.cytofCofactor !== "number" || !Number.isFinite(sample.cytofCofactor) || sample.cytofCofactor <= 0)) {

@@ -2,8 +2,8 @@
 // compute per-gate counts within a population. Ported from GateLabR gate_engine.R
 // (apply_gating_strategy + compute_gate_counts). Masks are Uint8Array (1 = member).
 
-import type { AssayData } from "./gates";
-import { getGateMask } from "./gates";
+import type { AssayData, GateAssayData } from "./gates";
+import { columnsForGate, getGateMask } from "./gates";
 import type { Gate, PopulationMap } from "./models";
 
 export type MaskMap = Record<string, Uint8Array>;
@@ -20,14 +20,15 @@ function gateMaskKey(gateId: string, quadrant?: number): string {
  */
 export function computeGateMasks(
   gates: Record<string, Gate>,
-  data: AssayData,
+  data: AssayData | GateAssayData,
 ): GateMaskCache {
   const masks: GateMaskCache = {};
   for (const [gateId, gate] of Object.entries(gates)) {
     if (gate.gate_type === "quadrant") {
-      for (let q = 1; q <= 4; q++) masks[gateMaskKey(gateId, q)] = getGateMask(gate, data, q);
+      const d = columnsForGate(data, gate);
+      for (let q = 1; q <= 4; q++) masks[gateMaskKey(gateId, q)] = getGateMask(gate, d, q);
     } else {
-      masks[gateMaskKey(gateId)] = getGateMask(gate, data);
+      masks[gateMaskKey(gateId)] = getGateMask(gate, columnsForGate(data, gate));
     }
   }
   return masks;
@@ -59,7 +60,7 @@ export function applyGatingStrategy(
   gates: Record<string, Gate>,
   populations: PopulationMap,
   rootPopulationId: string,
-  data: AssayData,
+  data: AssayData | GateAssayData,
   gateMasks?: GateMaskCache,
 ): GatingResult {
   const n = data.n;
@@ -70,7 +71,7 @@ export function applyGatingStrategy(
       const m = gateMasks[gateMaskKey(gateId, quadrant)];
       if (m && m.length === n) return m;
     }
-    return getGateMask(gateDef, data, quadrant);
+    return getGateMask(gateDef, columnsForGate(data, gateDef), quadrant);
   };
 
   // Root gets all events
@@ -151,7 +152,7 @@ export interface GateCount {
 export function computeGateCounts(
   gates: Record<string, Gate>,
   popMask: Uint8Array | null,
-  data: AssayData,
+  data: AssayData | GateAssayData,
   gateMasks?: GateMaskCache,
 ): Record<string, GateCount> {
   const mask = popMask ?? new Uint8Array(data.n).fill(1);
@@ -162,7 +163,7 @@ export function computeGateCounts(
     const gate = gates[gid];
     if (gate.gate_type === "quadrant") {
       const quads = [1, 2, 3, 4].map((q) => {
-        const gm = gateMasks?.[gateMaskKey(gid, q)] ?? getGateMask(gate, data, q);
+        const gm = gateMasks?.[gateMaskKey(gid, q)] ?? getGateMask(gate, columnsForGate(data, gate), q);
         let nIn = 0;
         for (let i = 0; i < mask.length; i++) if (mask[i] && gm[i]) nIn++;
         return {
@@ -172,7 +173,7 @@ export function computeGateCounts(
       });
       counts[gid] = { event_count: null, percent_of_parent: null, quadrants: quads };
     } else {
-      const gm = gateMasks?.[gateMaskKey(gid)] ?? getGateMask(gate, data);
+      const gm = gateMasks?.[gateMaskKey(gid)] ?? getGateMask(gate, columnsForGate(data, gate));
       let nIn = 0;
       for (let i = 0; i < mask.length; i++) if (mask[i] && gm[i]) nIn++;
       counts[gid] = {

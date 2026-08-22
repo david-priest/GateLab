@@ -8,10 +8,11 @@
 // When both forward+back are shown, the final population's events overlay in orange.
 
 import type { Sample } from "./sample";
+import type { GateEdgeMode } from "../ui/gateEdgeModes";
 import type { Gate, GateRef, PopulationMap } from "./models";
-import { getGateMask, type AssayData } from "./gates";
+import { columnsForGate, getGateMask, type GateAssayData } from "./gates";
 import type { AxisTicks } from "./ticks";
-import { displayLabelOffset } from "../plots/gatePayload";
+import { displayLabelOffset, polygonOutline } from "../plots/gatePayload";
 
 const round1 = (x: number): number => Math.round(x * 10) / 10;
 
@@ -49,6 +50,7 @@ export interface StrategyStep {
   x: number[]; // parent events, display space, gate's x channel
   y: number[];
   displayVertices: [number, number][]; // gate overlay, display space
+  outline?: [number, number][]; // true boundary, only when the transform bends the edges
   n_before: number;
   n_after: number;
   n_total: number;
@@ -57,12 +59,30 @@ export interface StrategyStep {
   pop_name: string;
 }
 
+/**
+ * True display-space boundary for a gate, present only when the transform actually bends it.
+ *
+ * A gate is straight in the space it was drawn in and bows once an axis is shown on a different
+ * scale. Rectangles are axis-aligned boxes in display space and provably cannot bow.
+ */
+function outlineOf(sample: Sample, gate: Gate, displayVerts: [number, number][]) {
+  if (gate.gate_type === "quadrant" || gate.gate_type === "rectangle") return undefined;
+  return polygonOutline(
+    gate.vertices,
+    (pt) => [
+      sample.gateToDisplay(gate, gate.x_channel, pt[0]),
+      sample.gateToDisplay(gate, gate.y_channel, pt[1]),
+    ],
+    displayVerts,
+  );
+}
+
 /** Display-space overlay vertices for a gate (rectangles → AABB corners). */
 function displayVerticesOf(sample: Sample, gate: Gate): [number, number][] {
   if (gate.gate_type === "quadrant") return [];
   const toD = (vx: number, vy: number): [number, number] => [
-    sample.gatingToDisplay(gate.x_channel, vx),
-    sample.gatingToDisplay(gate.y_channel, vy),
+    sample.gateToDisplay(gate, gate.x_channel, vx),
+    sample.gateToDisplay(gate, gate.y_channel, vy),
   ];
   if (gate.gate_type === "rectangle") {
     let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
@@ -113,7 +133,7 @@ export function computeGatingStrategy(
   }
   if (allRefs.length === 0) return [];
 
-  const data: AssayData = sample.gatingData();
+  const data: GateAssayData = sample.gateAssayData();
   const n = sample.fcs.nEvents;
   let running = new Uint8Array(n).fill(1);
   const steps: StrategyStep[] = [];
@@ -126,7 +146,7 @@ export function computeGatingStrategy(
     for (let i = 0; i < n; i++) if (running[i]) nBefore++;
     if (nBefore === 0) break;
 
-    const gm = getGateMask(gate, data, ref.quadrant);
+    const gm = getGateMask(gate, columnsForGate(data, gate), ref.quadrant);
     const newMask = new Uint8Array(n);
     let nAfter = 0;
     for (let i = 0; i < n; i++) {
@@ -154,6 +174,8 @@ export function computeGatingStrategy(
     const x = sampleIdx.map((i) => (xCol ? xCol[i] : NaN));
     const y = sampleIdx.map((i) => (yCol ? yCol[i] : NaN));
 
+    const displayVerts = displayVerticesOf(sample, gate);
+
     steps.push({
       gate_id: gate.gate_id,
       gate_name: gate.name,
@@ -165,7 +187,8 @@ export function computeGatingStrategy(
       include: ref.include,
       x,
       y,
-      displayVertices: displayVerticesOf(sample, gate),
+      displayVertices: displayVerts,
+      outline: outlineOf(sample, gate, displayVerts),
       n_before: nBefore,
       n_after: nAfter,
       n_total: n,
@@ -201,6 +224,7 @@ export interface StrategyPayloadOptions {
   kdeBandwidth: number; // contour smoothing (0 = auto)
   pubStyle: boolean; // black gates, no label background
   gateLineWidth: number;
+  gateEdgeMode?: GateEdgeMode;
   fontSizes: StrategyFontSizes;
   contextTitle?: string;
 }
@@ -272,6 +296,7 @@ export function buildStrategyPayload(
       x_channel: sample.labelForKey(s.x_channel),
       y_channel: sample.labelForKey(s.y_channel),
       vertices: s.displayVertices,
+      outline: s.outline,
       gate_type: s.gate_type,
       color: s.color,
       // Same label position as the main plot: user-set offset, else the auto "above the gate".
@@ -309,6 +334,10 @@ export function buildStrategyPayload(
     point_size: opts.pointSize,
     kde_bandwidth: opts.kdeBandwidth,
     font_sizes: opts.fontSizes,
-    gate_style: { pub_style: opts.pubStyle, line_width: opts.gateLineWidth },
+    gate_style: {
+      pub_style: opts.pubStyle,
+      line_width: opts.gateLineWidth,
+      gate_edge_mode: opts.gateEdgeMode ?? "straight-bow",
+    },
   };
 }

@@ -7,6 +7,7 @@ import pkg from "../package.json";
 import { clearPersistedTabState } from "./ui/tabState";
 import { historyShortcutAction } from "./ui/historyShortcuts";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type NewGate } from "./plots/GatingPlot";
+import { startPanSession } from "./plots/panGesture";
 import { buildPlotGates, type PlotGate } from "./plots/gatePayload";
 import { branchScopedGateOrder } from "./engine/branchGates";
 import {
@@ -131,6 +132,7 @@ import {
 import {
   coreReducer,
   initialCoreState,
+  type CoreState,
   derivePopulationDisplaySelection,
   derivePopulationView,
   recompute,
@@ -141,6 +143,10 @@ import {
   type PopulationDisplaySelection,
 } from "./store";
 import { GateList } from "./ui/GateList";
+import { GATE_EDGE_MODES, type GateEdgeMode } from "./ui/gateEdgeModes";
+import { resolveFlowJoTarget } from "./engine/flowjoWorkspace";
+import type { GateSpace } from "./engine/models";
+import { gateSpaceBadge } from "./engine/gateSpaceBadge";
 import { PopulationTree } from "./ui/PopulationTree";
 import { GateModals } from "./ui/GateModals";
 import { GateToolbar, PopToolbar } from "./ui/Toolbars";
@@ -218,6 +224,26 @@ const CompensationTab = lazy(async () => {
 });
 
 const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
+
+/**
+ * Arcsinh-cofactor slider bounds, as log10 of the cofactor.
+ *
+ * 1 to 100,000: the low end covers 10-bit data on the original 0-1023 scale, the high end
+ * covers spectral data reaching 10M, where a cofactor in the thousands is what makes the axis
+ * differ from a log scale at all. Rounded to three significant figures so the readout under
+ * the slider is exactly the value in force.
+ */
+const COFACTOR_LOG_MIN = 0;
+const COFACTOR_LOG_MAX = 5;
+const cofactorFromSlider = (log10Value: number): number => {
+  const raw = Math.pow(10, log10Value);
+  const magnitude = Math.pow(10, Math.floor(Math.log10(raw)) - 2);
+  return Math.max(1, Math.round(raw / magnitude) * magnitude);
+};
+const fmtCofactor = (cofactor: number): string =>
+  cofactor >= 10000 ? `${(cofactor / 1000).toFixed(0)}K`
+  : cofactor >= 1000 ? `${(cofactor / 1000).toFixed(1)}K`
+  : `${Math.round(cofactor)}`;
 const INITIAL_LEFT_PANE_WIDTH = 264;
 const INITIAL_RIGHT_PANE_WIDTH = 672;
 
@@ -233,6 +259,28 @@ type CrudModal =
 
 type DrawMode = "navigate" | "draw-rect" | "draw-poly" | "draw-quadrant";
 type LiveWorkspaceFile = WorkspaceFile | WorkspaceFileV3;
+
+/**
+ * Does this import need the user to decide anything?
+ *
+ * Three things can need a choice, and none of them is guaranteed:
+ *   • an existing strategy, so merge-vs-replace is a real fork;
+ *   • a compensation change the user must confirm before it rewrites every value;
+ *   • two different spillover matrices, where both are legitimate answers.
+ *
+ * With none of them present -- a Gating-ML file or FlowJo workspace opened into a fresh
+ * workspace -- the dialog offered a choice between two identical outcomes, so it is skipped and
+ * the strategy simply loads.
+ */
+export function gatingImportNeedsDecision(
+  pending: PendingGatingMLImport,
+  state: Pick<CoreState, "gates" | "populations" | "root_population_id">,
+): boolean {
+  if (pending.compensation.requiresConfirmation) return true;
+  if (pending.externalSpillover?.differsFromEmbedded) return true;
+  if (state.root_population_id === null) return false;
+  return hasGatingStrategy({ ...state, root_population_id: state.root_population_id });
+}
 
 interface PendingGatingMLImport {
   result: GatingMLResult;
@@ -332,15 +380,6 @@ const DRAW_TOOLS: { id: DrawMode; Icon: () => React.ReactElement; title: string 
  * the gate. The default shows both: straight edges to work with, and a thin grey line where the
  * boundary actually falls, so the difference is visible without having to go looking for it.
  */
-type GateEdgeMode = "straight" | "straight-bow" | "bowed";
-const GATE_EDGE_MODES: { id: GateEdgeMode; label: string; hint: string }[] = [
-  { id: "straight", label: "Straight",
-    hint: "Straight lines between vertices. Familiar, and what FlowJo draws — but on a non-linear axis it is not where the gate actually falls." },
-  { id: "straight-bow", label: "Straight + true edge",
-    hint: "Straight edges to work with, plus a thin grey line showing the real boundary." },
-  { id: "bowed", label: "True edge",
-    hint: "The boundary the gate actually has on these axes." },
-];
 
 /**
  * Elements whose gestures belong to cytof_plot.js, so GateLab's pan must not also start on them.
@@ -702,6 +741,21 @@ export default function App() {
     { text: string; choice: FlowJoSampleSummary; treeIndex: number | null; targetNames: string[] } | null
   >(null);
   const wspFcsRef = useRef<HTMLInputElement>(null);
+  // Space NEW gates are drawn in. A preference about how you work, not a property of the data —
+  // the gates themselves carry the truth — so it lives beside gateEdgeMode rather than in the
+  // workspace. It never touches a gate that already exists: see the design doc, §2.3.
+  const [newGateSpace, setNewGateSpace] = useState<GateSpace>(() => {
+    const stored = typeof localStorage !== "undefined" ? localStorage.getItem("gatelab.newGateSpace") : null;
+    return stored === "display" ? "display" : "raw";
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("gatelab.newGateSpace", newGateSpace);
+    } catch {
+      /* private mode */
+    }
+  }, [newGateSpace]);
+
   const [gateEdgeMode, setGateEdgeMode] = useState<GateEdgeMode>(() => {
     const stored = typeof localStorage !== "undefined" ? localStorage.getItem("gatelab.gateEdgeMode") : null;
     return stored === "straight" || stored === "bowed" || stored === "straight-bow" ? stored : "straight-bow";
@@ -849,7 +903,6 @@ export default function App() {
         yr: p.yRange ?? p.globalScales[yKey] ?? p.effectiveYRange ?? p.sample.displayRange(p.yIdx),
       };
     };
-    const clampF = (f: number) => Math.min(0.98, Math.max(0.02, f));
     const valid = (r: [number, number]): boolean =>
       Number.isFinite(r[0]) && Number.isFinite(r[1]) && r[1] - r[0] > 1e-6;
 
@@ -873,26 +926,21 @@ export default function App() {
       if (pzRef.current.mode === "contour") return;
       if (!raf) raf = requestAnimationFrame(flush);
     };
-    const listen = (onMove: (ev: MouseEvent) => void) => {
-      const onUp = () => {
-        window.removeEventListener("mousemove", onMove);
-        window.removeEventListener("mouseup", onUp);
-        const fx = pX ?? pzRef.current.xRange; // pending (contour mode) else the last live-panned range
-        const fy = pY ?? pzRef.current.yRange;
-        flush(); // apply any deferred range (contour mode) once at drag-end
-        // Commit the final panned/stretched view to the SHARED per-channel scale so the Gating plot
-        // AND the Strategy / Illustration tabs inherit it (persisting per-channel, GateLabR-style);
-        // then clear the transient per-view range so globalScales is the single source of truth.
-        const p = pzRef.current;
-        if (p.sample && fx && fy && valid(fx) && valid(fy)) {
-          setGlobalScale(p.sample.channels[p.xIdx].key, fx);
-          setGlobalScale(p.sample.channels[p.yIdx].key, fy);
-          setXRange(null);
-          setYRange(null);
-        }
-      };
-      window.addEventListener("mousemove", onMove);
-      window.addEventListener("mouseup", onUp);
+    /** Commit the drag's final view to the shared per-channel scale. */
+    const commitDrag = () => {
+      const fx = pX ?? pzRef.current.xRange; // pending (contour mode) else the last live-panned range
+      const fy = pY ?? pzRef.current.yRange;
+      flush(); // apply any deferred range (contour mode) once at drag-end
+      // Commit to the SHARED per-channel scale so the Gating plot AND the Strategy / Illustration
+      // tabs inherit it (persisting per-channel, GateLabR-style); then clear the transient
+      // per-view range so globalScales is the single source of truth.
+      const p = pzRef.current;
+      if (p.sample && fx && fy && valid(fx) && valid(fy)) {
+        setGlobalScale(p.sample.channels[p.xIdx].key, fx);
+        setGlobalScale(p.sample.channels[p.yIdx].key, fy);
+        setXRange(null);
+        setYRange(null);
+      }
     };
 
     const onMouseDown = (e: MouseEvent) => {
@@ -912,30 +960,22 @@ export default function App() {
       const { xr, yr } = rr;
       e.preventDefault();
 
-      if (e.altKey || e.shiftKey) {
-        // Anchored stretch: min fixed; the data point grabbed at mousedown follows the
-        // cursor, so the max end moves and the data stretches/compresses.
-        const gx = xr[0] + clampF((e.clientX - r.left) / r.width) * (xr[1] - xr[0]);
-        const gy = yr[1] - clampF((e.clientY - r.top) / r.height) * (yr[1] - yr[0]);
-        listen((ev) => {
-          const fx = clampF((ev.clientX - r.left) / r.width);
-          const fy = clampF((ev.clientY - r.top) / r.height);
-          const xMax = xr[0] + (gx - xr[0]) / fx; // x_min anchored
-          const yMax = (gy - yr[0] * fy) / (1 - fy); // y_min anchored
-          queue([xr[0], xMax], [yr[0], yMax]);
-        });
-      } else {
-        // Pan: grab the data and move it with the cursor.
-        const startX = e.clientX;
-        const startY = e.clientY;
-        const xSpan = xr[1] - xr[0];
-        const ySpan = yr[1] - yr[0];
-        listen((ev) => {
-          const ddx = ((ev.clientX - startX) / r.width) * xSpan;
-          const ddy = ((ev.clientY - startY) / r.height) * ySpan;
-          queue([xr[0] - ddx, xr[1] - ddx], [yr[0] + ddy, yr[1] + ddy]);
-        });
-      }
+      // Shift/Option is read LIVE, from mouse moves AND key presses -- see panGesture.ts.
+      startPanSession(
+        { clientX: e.clientX, clientY: e.clientY, shiftKey: e.shiftKey, altKey: e.altKey },
+        r, xr, yr,
+        {
+          // The range this drag has already produced, preferred over ranges(): the writes are
+          // coalesced to a frame, so ranges() lags and rebasing off it is a visible jump.
+          liveRanges: () => {
+            const live = ranges();
+            return { xr: pX ?? live?.xr ?? xr, yr: pY ?? live?.yr ?? yr };
+          },
+          onRanges: queue,
+          onEnd: commitDrag,
+        },
+        window,
+      );
     };
 
     el.addEventListener("mousedown", onMouseDown);
@@ -1197,13 +1237,30 @@ export default function App() {
   useEffect(() => {
     const p = pendingFlowJoStrategy;
     if (!p || !sample || !activeSampleId) return;
-    const stem = (n: string) => n.replace(/\.fcs$/i, "").trim().toLowerCase();
-    if (!p.targetNames.some((n) => stem(n) === stem(fileName))) return;
-    setPendingFlowJoStrategy(null);
-    void importFlowJoSample(p.text, p.choice, null, p.treeIndex);
+    const where = resolveFlowJoTarget(p.targetNames, fileName, samples);
+
+    if (where.kind === "apply") {
+      setPendingFlowJoStrategy(null);
+      void importFlowJoSample(p.text, p.choice, null, p.treeIndex);
+      return;
+    }
+    if (where.kind === "switch") {
+      // Loaded, but not the ACTIVE sample. Activate it and let this effect run again.
+      setSampleIncluded(where.id, true);
+      selectSample(where.id);
+      return;
+    }
+    // Nothing loaded carries a name this workspace knows. The strategy is still held — the user
+    // may yet load the right file — but the wait is now visible instead of looking like the gates
+    // were simply forgotten.
+    setImportMsg(
+      `Waiting for the FCS this workspace gates: ${where.wanted.slice(0, 3).join(", ")}` +
+        (where.wanted.length > 3 ? `, and ${where.wanted.length - 3} more` : "") +
+        ". The loaded file(s) carry none of those names.",
+    );
     // importFlowJoSample is recreated every render; depending on it would re-run this endlessly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingFlowJoStrategy, sample, activeSampleId, fileName]);
+  }, [pendingFlowJoStrategy, sample, activeSampleId, fileName, samples]);
 
   /**
    * Gather FCS for an open workspace, starting in the folder the .wsp came from.
@@ -1427,6 +1484,19 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e));
     }
   }
+
+  // Importing into an EMPTY workspace has nothing to ask about: with no strategy to replace,
+  // "merge" and "replace" produce the same result, so the dialog was asking the user to choose
+  // between two identical outcomes. It still appears whenever a real decision exists -- an
+  // existing strategy, a compensation warning, or two different spillover matrices.
+  useEffect(() => {
+    if (!pendingGatingMlImport) return;
+    if (gatingImportNeedsDecision(pendingGatingMlImport, state)) return;
+    void applyGatingImport("replace");
+    // applyGatingImport is recreated every render and re-running on `state` would re-apply the
+    // import; the pending record is what identifies one import, so it alone drives this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingGatingMlImport]);
 
   async function applyGatingImport(mode: GatingImportMode) {
     const pendingImport = pendingGatingMlImport;
@@ -2266,6 +2336,45 @@ export default function App() {
     });
   };
 
+  // Arcsinh cofactor, committed the same way and for the same reason as the logicle W above.
+  //
+  // The slider runs over LOG10 of the cofactor: it is useful from single digits (old 10-bit
+  // data) to tens of thousands (spectral data reaching 10M), and a linear slider over that
+  // span would put every value a cytometrist actually wants inside its first pixel. Values are
+  // rounded to three significant figures so the number under the slider is exactly the number
+  // in force, not a rounded view of a longer one.
+  const [pendingFluorCofactor, setPendingFluorCofactor] = useState<Record<string, number>>({});
+  const fluorCofactorJob = useRef<{ idx: number; cofactor: number; key: string } | null>(null);
+  const fluorCofactorFrame = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (fluorCofactorFrame.current !== null) cancelAnimationFrame(fluorCofactorFrame.current);
+  }, []);
+
+  const commitFluorCofactor = (idx: number, cofactor: number) => {
+    const key = sample?.channels[idx]?.key;
+    if (!key) return;
+    fluorCofactorJob.current = { idx, cofactor, key };
+    setPendingFluorCofactor((prev) => ({ ...prev, [key]: cofactor })); // echo the drag immediately
+    if (fluorCofactorFrame.current !== null) return;
+    fluorCofactorFrame.current = requestAnimationFrame(() => {
+      fluorCofactorFrame.current = null;
+      const job = fluorCofactorJob.current;
+      fluorCofactorJob.current = null;
+      if (!job || !sample) return;
+      sample.setFluorCofactor(job.idx, job.cofactor);
+      // The visible range is in asinh display units, which move with the cofactor: without a
+      // refit the data walks off the axis as the slider is dragged.
+      pendingScaleRefit.current = true;
+      bumpScales();
+      setPendingFluorCofactor((prev) => {
+        const next = { ...prev };
+        delete next[job.key];
+        return next;
+      });
+    });
+  };
+
   const setGlobalScale = (key: string, range: [number, number] | null) => {
     setGlobalScales((prev) => {
       const next = { ...prev };
@@ -2887,6 +2996,21 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host]);
 
+  /**
+   * Make one file the ONLY checked file, and the primary.
+   *
+   * The checked set is the selection: there is no separate row for the user to keep in step with
+   * it. One checked file still has to supply channels, axes, transforms and the editable gates —
+   * nothing else can — so the first checked file plays that part rather than being chosen
+   * independently. Two selections to manage is what let the header, the plot and the population
+   * counts each describe a different file at the same time.
+   */
+  function selectOnlySample(id: string): void {
+    if (!samples.some((s) => s.id === id)) return;
+    setExcludedSampleIds(new Set(samples.filter((e) => e.id !== id).map((e) => e.id)));
+    selectSample(id);
+  }
+
   function selectSample(id: string) {
     const entry = samples.find((s) => s.id === id);
     if (!entry || id === activeSampleId) return;
@@ -2897,6 +3021,21 @@ export default function App() {
     setYIdx(ny);
     setInstrumentMode(entry.sample.instrumentMode);
   }
+
+  // Whenever the checked set changes, the primary must still be one of its members: it is what
+  // supplies the axes and the editable gates, and a primary nobody checked is exactly the state
+  // that showed an unstained control's empty plot beside another file's population counts.
+  useEffect(() => {
+    if (activeSampleId !== null && includedSamples.some((e) => e.id === activeSampleId)) return;
+    const first = includedSamples[0]?.id ?? null;
+    // With nothing checked, the last primary is KEPT rather than cleared. It still supplies the
+    // channels and axes, so the plot stays on screen and reports zero events; clearing it would
+    // take the whole gating view away and give no clue that the fix is to check a file.
+    if (first === null) return;
+    selectSample(first);
+    // selectSample is recreated every render; the guard above is what stops this re-running.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [includedSamples, activeSampleId]);
 
   function setSampleIncluded(id: string, included: boolean): void {
     setExcludedSampleIds((previous) => {
@@ -3065,6 +3204,7 @@ export default function App() {
         logicleW: e.sample.logicleWOverrides(),
         scatterCofactor: e.sample.scatterCofactorOverrides(),
         scatterLinear: e.sample.scatterLinearKeys(),
+        fluorArcsinh: e.sample.fluorArcsinhKeys(),
         cytofCofactor: e.sample.arcsinhCofactor,
         compensationOn: e.sample.compensationEnabled,
         instrumentMode: e.sample.instrumentMode,
@@ -4011,6 +4151,9 @@ export default function App() {
           }
         }
         entry.sample.applyScatterLinearKeys(wss.scatterLinear ?? []);
+        // After the W overrides above, so a channel restored to arcsinh still carries the W the
+        // user set for its logicle and switching back gives them the axis they saved.
+        entry.sample.applyFluorArcsinhKeys(wss.fluorArcsinh ?? []);
         entry.sample.applyLabelOverrides(wss.labels ?? {});
         if (wss.metadata && Object.keys(wss.metadata).length) nextMetadata[entry.id] = wss.metadata;
         if (wss.division) {
@@ -4702,6 +4845,29 @@ export default function App() {
     instrumentMode,
   ]);
 
+  /**
+   * Panel identity: the ordered channel keys with their markers.
+   *
+   * Ordered, because two panels that use the same channels in a different order are different
+   * acquisitions; and keyed on the marker as well as the detector, because the same detector
+   * carries a different stain between panels — which is exactly the case that must not pool.
+   */
+  const panelKeyOf = useCallback((s: Sample): string =>
+    JSON.stringify(s.channels.map((c) => [c.key, c.pnn])), []);
+
+  const primaryPanelKey = useMemo(
+    () => (sample ? panelKeyOf(sample) : null),
+    [sample, panelKeyOf],
+  );
+
+  /** Checked files that cannot be pooled with the primary because their panel differs. */
+  const panelMismatchNames = useMemo(
+    () => (primaryPanelKey === null ? [] : includedSamples
+      .filter((e) => panelKeyOf(e.sample) !== primaryPanelKey)
+      .map((e) => e.name)),
+    [includedSamples, primaryPanelKey, panelKeyOf],
+  );
+
   const payload = useMemo(() => {
     if (!sample) return null;
     const xName = sample.channels[xIdx].key;
@@ -4749,6 +4915,12 @@ export default function App() {
       // coordinate spaces, and drew it inside a frame computed from only one of them. The
       // contributor count in the header reports what this drops.
       if (entry.sample.workspaceScaleContextKey !== activeWorkspaceScaleContextKey) return [];
+      // Pooling files whose PANELS differ is refused outright, not silently narrowed to the
+      // channels they happen to share. Two panels can carry the same channel name for different
+      // markers, so a shared name is not evidence of a shared measurement — pooling on it draws
+      // one cloud from two different stains, and gates drawn on it mean nothing in either. The
+      // header's contributor count reports what this dropped.
+      if (panelKeyOf(entry.sample) !== primaryPanelKey) return [];
       return xIndex === undefined || yIndex === undefined
         ? []
         : [{ entry, gating, selection, xIndex, yIndex }];
@@ -4962,6 +5134,42 @@ export default function App() {
     activeWorkspaceScaleContextKey, scalesVersion,
   ]);
 
+  /** Fit both axes to the robust event distribution plus every gate drawn on them. */
+  const fitDataAndGates = useCallback(() => {
+    if (!sample) return;
+    const xKey = sample.channels[xIdx]?.key;
+    const yKey = sample.channels[yIdx]?.key;
+    if (!xKey || !yKey) return;
+    setGlobalScale(xKey, includePlotGatesInAxisRange(
+      workspaceAutomaticRanges?.xRange ?? sample.displayRange(xIdx), mainPlotGates, "x"));
+    setGlobalScale(yKey, includePlotGatesInAxisRange(
+      workspaceAutomaticRanges?.yRange ?? sample.displayRange(yIdx), mainPlotGates, "y"));
+    setXRange(null);
+    setYRange(null);
+  }, [sample, xIdx, yIdx, workspaceAutomaticRanges, mainPlotGates, setGlobalScale]);
+
+  // Switching a scatter axis between arcsinh and linear rewrites that channel's display
+  // coordinates wholesale -- events that sat at 8.6 now sit at 250000 -- so a range fitted under
+  // the old transform describes nothing. The auto-fit effect above is supposed to notice via the
+  // binding key, but it defers to any range already in globalScales, and a pan or stretch commits
+  // one there; after the user has touched the view even once, the switch left the axis pinned to
+  // the old frame with the data collapsed against one edge. Refit explicitly instead of relying
+  // on that, and do it in an effect so the automatic ranges have recomputed at the new transform
+  // first -- computing them in the change handler would fit to the scale being replaced.
+  const pendingScaleRefit = useRef(false);
+  useEffect(() => {
+    if (!pendingScaleRefit.current) return;
+    // Nothing to fit against -- no sample, or the channels are not both present. Clear the
+    // intent rather than holding it: the flag also suppresses painting (see `displayed`), so a
+    // request that can never be satisfied would freeze the plot instead of merely deferring it.
+    if (!workspaceAutomaticRanges) {
+      pendingScaleRefit.current = false;
+      return;
+    }
+    pendingScaleRefit.current = false;
+    fitDataAndGates();
+  }, [scalesVersion, workspaceAutomaticRanges, fitDataAndGates]);
+
   /**
    * The last payload sent, so a gates-only change can be recognised.
    *
@@ -4973,8 +5181,21 @@ export default function App() {
    */
   const lastSentPayload = useRef<{ x: string; y: string; sig: string } | null>(null);
 
+  /**
+   * The last frame actually handed to the renderer, so a known-bad one can be skipped.
+   *
+   * Changing an axis transform rewrites that channel's display coordinates immediately, but the
+   * axis range is refitted in an effect -- deliberately, because the automatic ranges have to
+   * recompute at the new transform first. That leaves exactly one render in between whose data
+   * and gates are in the NEW coordinates while its range is still the OLD frame, and it paints:
+   * that is the flash of a wildly misshapen gate before the plot settles. The frame is known to
+   * be wrong before it is drawn, so it is simply not drawn -- the previous frame stays up for
+   * one tick and the refitted one replaces it.
+   */
+  const lastDisplayed = useRef<Record<string, unknown> | null>(null);
   const displayed = useMemo(() => {
     if (!payload || !sample) return payload;
+    if (pendingScaleRefit.current && lastDisplayed.current) return lastDisplayed.current;
     const lbl = (k: string) => sample.labelForKey(k);
     // Everything that changes what is drawn on the canvas, as opposed to over it.
     const sig = JSON.stringify([
@@ -4988,7 +5209,7 @@ export default function App() {
       prev !== null && prev.sig === sig &&
       prev.x === payload.x_b64 && prev.y === payload.y_b64;
     lastSentPayload.current = { x: payload.x_b64, y: payload.y_b64, sig };
-    return {
+    const out = {
       ...(gatesOnly ? { gates_only: true } : {}),
       gate_edge_mode: gateEdgeMode,
       ...payload,
@@ -5005,6 +5226,8 @@ export default function App() {
         y_channel: lbl(g.y_channel),
       })),
     };
+    lastDisplayed.current = out;
+    return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload, sample, panelVersion, pointAlpha, pointSize, densityColorPower, gateEdgeMode]);
 
@@ -5043,7 +5266,37 @@ export default function App() {
   return (
     <div className="gl-app">
       <header className="gl-header">
-        <strong>{isSceHost ? "GateLabR" : "GateLab"}</strong>
+        {/* Hovering the name explains what the app is and, more usefully, the one design choice
+            that makes its numbers differ from FlowJo's. That divergence is deliberate and worth
+            stating where someone comparing two tools will actually find it. Focusable so it is
+            reachable from the keyboard, not only on hover. */}
+        <span className="gl-brand" tabIndex={0}>
+          <strong>{isSceHost ? "GateLabR" : "GateLab"}</strong>
+          <span className="gl-brand-card" role="tooltip">
+            <span className="gl-brand-card-head">
+              {isSceHost ? "GateLabR" : "GateLab"} v{pkg.version}
+              <span className="gl-brand-card-by">{t("Developed by David Priest")}</span>
+            </span>
+            <p>
+              {t("A browser-based gating tool for flow and mass cytometry. Files never leave the machine — every FCS is parsed, transformed and gated locally.")}
+            </p>
+            <p>
+              <b>{t("Mass cytometry (CyTOF).")}</b>{" "}
+              {t("Channels are displayed with arcsinh at cofactor 5, the field convention, and gates are stored in that same arcsinh space. The scale is not offered as a per-channel choice because there is no competing convention to choose between.")}
+            </p>
+            <p>
+              <b>{t("Flow cytometry.")}</b>{" "}
+              {t("Scatter and fluorescence each carry a display scale you pick per channel — scatter arcsinh or linear, fluorescence logicle or arcsinh — but gates are stored and evaluated in RAW space, not in whatever the axis happens to show.")}
+            </p>
+            <p>
+              {t("That is a deliberate divergence. FlowJo and Gating-ML 2.0 evaluate a polygon as straight lines in the DISPLAY space, so changing an axis scale changes which events fall inside a gate: on one of our own workspaces, switching FSC-W from linear to log moved a gate from 43.5% to 80.5% of its parent without anyone touching the gate. In GateLab a display control cannot move a single event in or out of a gate. The cost is that a raw-straight edge bows when drawn on a transformed axis, which the gate-edge control shows explicitly rather than hiding.")}
+            </p>
+            <p>
+              <b>{t("Gating-ML interchange is a work in progress.")}</b>{" "}
+              {t("Import and export of Gating-ML 2.0 and FlowJo workspaces are actively developed and measured against FlowJo, Cytobank and CytoML on real files. Cytobank compatibility is the least settled of them — Cytobank supports only linear, log and arcsinh scales, so a logicle gate has to be re-expressed on the way out, and that path is not yet exact. Treat an exported file as something to check rather than something to trust, and please report anything that does not round-trip.")}
+            </p>
+          </span>
+        </span>
         {sample && (
           <span className="gl-meta">
             {fileName} — {t("{count} events", { count: sample.fcs.nEvents.toLocaleString() })} ·{" "}
@@ -5206,7 +5459,7 @@ export default function App() {
               setSampleManagerSelection([id]);
               setSampleManagerOpen(true);
             }}
-            onActivate={selectSample}
+            onActivate={selectOnlySample}
             onToggleIncluded={setSampleIncluded}
             onIncludeAll={includeAllSamples}
             onIncludeNone={includeNoSamples}
@@ -5581,6 +5834,25 @@ export default function App() {
                   </button>
                 ))}
                 <span className="gl-ctl-sep" />
+                {sample.instrument !== "cytof" && (
+                  <label
+                    className="gl-field-inline"
+                    title={
+                      newGateSpace === "raw"
+                        ? "New gates are straight in RAW values. Their membership can never change when you move a display control, and their edges bow on a transformed axis."
+                        : "New gates are straight in the CURRENT display space, and record the transform they were drawn under. Their edges stay straight as drawn, and their membership still cannot change later — unlike FlowJo, which re-reads whatever scale is on screen."
+                    }
+                  >
+                    {t("New gates in")}
+                    <select
+                      value={newGateSpace}
+                      onChange={(e) => setNewGateSpace(e.target.value as GateSpace)}
+                    >
+                      <option value="raw">{t("Raw space")}</option>
+                      <option value="display">{t("Display space")}</option>
+                    </select>
+                  </label>
+                )}
                 <label className="gl-field-inline" title={GATE_EDGE_MODES.find((m) => m.id === gateEdgeMode)?.hint}>
                   {t("Gate edges")}
                   <select
@@ -5652,9 +5924,15 @@ export default function App() {
                 </span>
                 <span
                   className="gl-active-sample-key"
-                  title={t("Clicking a row makes it active without changing which checked files are pooled.")}
+                  title={panelMismatchNames.length > 0
+                    ? t("Files whose panel differs from {name} are not pooled with it: the same channel name can carry a different marker between panels, so a shared name is not a shared measurement. Uncheck them, or check them alone.", { name: fileName })
+                    : t("The first checked file supplies the channels, axes and editable gates. Clicking a row checks that file alone.")}
                 >
-                  {t("Blue: {name}", { name: fileName })}
+                  {panelMismatchNames.length > 0
+                    ? `⚠ ${t("{count} checked file(s) not pooled — different panel", {
+                        count: panelMismatchNames.length,
+                      })}`
+                    : t("Axes from: {name}", { name: fileName })}
                 </span>
               </div>
             </div>
@@ -5696,22 +5974,7 @@ export default function App() {
                 type="button"
                 className="gl-mini-btn"
                 title="Fit the current view to the robust event distribution and every gate on these axes"
-                onClick={() => {
-                  const fitX = includePlotGatesInAxisRange(
-                    workspaceAutomaticRanges?.xRange ?? sample.displayRange(xIdx),
-                    mainPlotGates,
-                    "x",
-                  );
-                  const fitY = includePlotGatesInAxisRange(
-                    workspaceAutomaticRanges?.yRange ?? sample.displayRange(yIdx),
-                    mainPlotGates,
-                    "y",
-                  );
-                  setGlobalScale(sample.channels[xIdx].key, fitX);
-                  setGlobalScale(sample.channels[yIdx].key, fitY);
-                  setXRange(null);
-                  setYRange(null);
-                }}
+                onClick={fitDataAndGates}
               >
                 {t("Fit data + gates")}
               </button>
@@ -5804,6 +6067,7 @@ export default function App() {
                         value={isLinear ? "linear" : "arcsinh"}
                         onChange={(e) => {
                           sample.setScatterScale(idx, e.target.value === "linear" ? "linear" : "arcsinh");
+                          pendingScaleRefit.current = true;
                           bumpScales();
                         }}
                       >
@@ -5816,49 +6080,112 @@ export default function App() {
                 </div>
               )}
             </div>
-            {(sample.isLogicleChannel(xIdx) || sample.isLogicleChannel(yIdx)) && (
+            {/* Fluorescence scale — logicle (default) or arcsinh 150. Keyed on the channel's
+                CLASS, not on what it currently shows, so the control stays put after switching
+                to arcsinh; the Logicle W row below is what comes and goes. CyTOF is excluded:
+                it is arcsinh throughout and the choice would be meaningless. */}
+            {(sample.isFluorChannel(xIdx) || sample.isFluorChannel(yIdx)) && (
               <div className="gl-scales">
-                <span className="gl-scales-label">{t("Logicle W")}</span>
+                <span className="gl-scales-label">{t("Signal")}</span>
                 {([
                   ["X", xIdx],
                   ["Y", yIdx],
                 ] as const).map(([axis, idx]) =>
-                  sample.isLogicleChannel(idx) ? (
+                  sample.isFluorChannel(idx) ? (
                     <div className="gl-scale-row" key={axis}>
                       <span className="gl-scale-axis">
                         {axis} · {sample.channelLabel(idx)}
                       </span>
-                      <input
-                        type="range"
-                        min={0.1}
-                        max={2.0}
-                        step={0.05}
-                        value={pendingLogicleW[sample.channels[idx].key] ?? sample.currentLogicleW(idx)}
-                        onChange={(e) => commitLogicleW(idx, +e.target.value)}
-                      />
-                      <span className="gl-scale-val">
-                        {(pendingLogicleW[sample.channels[idx].key] ?? sample.currentLogicleW(idx)).toFixed(2)}
-                      </span>
-                      <button
-                        className="gl-tool"
-                        title={t("Reset to auto-estimated W")}
-                        aria-label={`Reset ${axis} logicle W to auto`}
-                        onClick={() => {
-                          sample.resetLogicleW(idx);
+                      <select
+                        className="gl-scatter-scale"
+                        aria-label={`${axis} signal scale`}
+                        title={t("Logicle is estimated per channel and shaped by W. Arcsinh is shaped by its cofactor, which sets where the linear region around zero gives way to log. Gates live in raw space, so neither moves an event in or out of a gate.")}
+                        value={sample.fluorScale(idx)}
+                        onChange={(e) => {
+                          sample.setFluorScale(idx, e.target.value === "arcsinh" ? "arcsinh" : "logicle");
+                          pendingScaleRefit.current = true;
                           bumpScales();
                         }}
                       >
-                        A
-                      </button>
+                        <option value="logicle">{t("Logicle")}</option>
+                        <option value="arcsinh">{t("Arcsinh")}</option>
+                      </select>
+                      {sample.fluorScale(idx) === "logicle" ? (
+                        <>
+                          <input
+                            type="range"
+                            aria-label={`${axis} logicle W`}
+                            title={t("Logicle W — how many decades of negative values the axis shows.")}
+                            min={0.1}
+                            max={2.0}
+                            step={0.05}
+                            value={pendingLogicleW[sample.channels[idx].key] ?? sample.currentLogicleW(idx)}
+                            onChange={(e) => commitLogicleW(idx, +e.target.value)}
+                          />
+                          <span className="gl-scale-val">
+                            {(pendingLogicleW[sample.channels[idx].key] ?? sample.currentLogicleW(idx)).toFixed(2)}
+                          </span>
+                          <button
+                            className="gl-tool"
+                            title={t("Reset to auto-estimated W")}
+                            aria-label={`Reset ${axis} logicle W to auto`}
+                            onClick={() => {
+                              sample.resetLogicleW(idx);
+                              bumpScales();
+                            }}
+                          >
+                            A
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <input
+                            type="range"
+                            aria-label={`${axis} arcsinh cofactor`}
+                            title={t("Arcsinh cofactor — where the linear region around zero gives way to log. Raise it to pack the near-zero and negative noise into a tighter band; lower it to spread that noise out and make the axis behave like a log scale.")}
+                            min={COFACTOR_LOG_MIN}
+                            max={COFACTOR_LOG_MAX}
+                            step={0.02}
+                            value={Math.log10(
+                              pendingFluorCofactor[sample.channels[idx].key] ??
+                                sample.currentFluorCofactor(idx),
+                            )}
+                            onChange={(e) => commitFluorCofactor(idx, cofactorFromSlider(+e.target.value))}
+                          />
+                          <span className="gl-scale-val">
+                            {fmtCofactor(
+                              pendingFluorCofactor[sample.channels[idx].key] ??
+                                sample.currentFluorCofactor(idx),
+                            )}
+                          </span>
+                          <button
+                            className="gl-tool"
+                            title={t("Reset to the default cofactor (150)")}
+                            aria-label={`Reset ${axis} arcsinh cofactor to default`}
+                            onClick={() => {
+                              sample.resetFluorCofactor(idx);
+                              setPendingFluorCofactor((c) => {
+                                const next = { ...c };
+                                delete next[sample.channels[idx].key];
+                                return next;
+                              });
+                              pendingScaleRefit.current = true;
+                              bumpScales();
+                            }}
+                          >
+                            A
+                          </button>
+                        </>
+                      )}
                     </div>
                   ) : null,
                 )}
               </div>
             )}
-            {/* Scatter scale — same shape and placement as Logicle W, and shown only for
+            {/* The scatter scale control sits above, in the chrome block; it is shown only for
                 flow scatter axes. CyTOF is excluded deliberately: arcsinh cofactor 5 is the
                 field convention and is not offered as a choice. Gates live in raw space for
-                flow, so nothing here moves a gate; it only changes what the axis looks like. */}
+                flow, so nothing there moves a gate; it only changes what the axis looks like. */}
             <div
               className="gl-plot-area"
               ref={plotAreaRef}
@@ -5897,7 +6224,7 @@ export default function App() {
                   if (!g || g.gate_type === "quadrant") return;
                   const verts = e.vertices.map(
                     ([vx, vy]) =>
-                      [sample.displayToGating(g.x_channel, vx), sample.displayToGating(g.y_channel, vy)] as [number, number],
+                      [sample.displayToGate(g, g.x_channel, vx), sample.displayToGate(g, g.y_channel, vy)] as [number, number],
                   );
                   dispatch({ type: "editGate", gateId: e.gate_id, vertices: verts });
                 }}
@@ -5908,7 +6235,7 @@ export default function App() {
                   dispatch({
                     type: "moveQuadrantCenter",
                     gateId: e.gate_id,
-                    center: [sample.displayToGating(g.x_channel, e.center[0]), sample.displayToGating(g.y_channel, e.center[1])],
+                    center: [sample.displayToGate(g, g.x_channel, e.center[0]), sample.displayToGate(g, g.y_channel, e.center[1])],
                   });
                 }}
                 onGateSelect={(id) => {
@@ -6142,7 +6469,9 @@ export default function App() {
                 onDelete={(ids) => ids.length && setCrud({ kind: "confirmDelete", what: "gates", ids })}
               />
             </div>
-            <GateList state={state} derived={derived} dispatch={uiDispatch} labelForKey={(k) => sample?.labelForKey(k) ?? k} />
+            <GateList state={state} derived={derived} dispatch={uiDispatch}
+              labelForKey={(k) => sample?.labelForKey(k) ?? k}
+              badgeFor={(g) => (sample ? gateSpaceBadge(sample, g) : null)} />
           </div>
           <div className="gl-side-section gl-side-grow">
             <div className="gl-side-head">
@@ -6229,7 +6558,7 @@ export default function App() {
             setSampleManagerOpen(false);
             setSampleManagerSelection([]);
           }}
-          onActivate={selectSample}
+          onActivate={selectOnlySample}
           onToggleIncluded={setSampleIncluded}
           onIncludeAll={includeAllSamples}
           onIncludeNone={includeNoSamples}
@@ -6257,6 +6586,9 @@ export default function App() {
 
       {pending && sample && state.root_population_id && (
         <GateModals
+          // CyTOF keeps its legacy space for now; the distinction is a flow problem (every CyTOF
+          // channel is arcsinh at cofactor 5, so both spaces would read the same badge forever).
+          gateSpace={sample?.instrument === "cytof" ? null : newGateSpace}
           pending={pending.gate}
           sample={sample}
           populations={state.populations}
@@ -6542,7 +6874,7 @@ export default function App() {
           </div>
         </div>
       )}
-      {pendingGatingMlImport && (
+      {pendingGatingMlImport && gatingImportNeedsDecision(pendingGatingMlImport, state) && (
         <GatingMlImportModal
           nGates={pendingGatingMlImport.result.n_gates_imported}
           nPopulations={pendingGatingMlImport.result.n_pops_imported}

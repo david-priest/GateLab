@@ -20,9 +20,12 @@ import {
   nextGateColor,
   type Gate,
   type GateRef,
+  type GateTransforms,
   type PopulationMap,
+  type TransformSpec,
   type Vertex,
 } from "./models";
+import { WSP_GATE_SPACE_TAG } from "./flowjoWorkspace";
 import type { DisplaySpillover } from "./compensation";
 import type { Sample } from "./sample";
 import { Logicle, isQcChannel, isScatterChannel } from "./transforms";
@@ -261,6 +264,51 @@ function resolveChannel(
 // Inverter — transformed (display) vertex → gating space
 // ---------------------------------------------------------------------------
 
+/**
+ * A declared Gating-ML transform expressed as a GateLab TransformSpec, or null when GateLab
+ * cannot represent it exactly.
+ *
+ * Gating-ML §4.2.3 makes the transform part of the GATE: a polygon is straight in the space its
+ * dimension's transformation-ref declares. So the faithful import is to keep the vertices in that
+ * space and record the transform on the gate — not to invert them into raw, which yields a
+ * different gate (§2.3.2 works the example and calls that substitution naive).
+ *
+ * Returns null for anything GateLab has no display transform for (log scales, and non-canonical
+ * fasinh whose M/A are not the plain asinh(x/cofactor) form). Those fall back to inverting into
+ * raw space, which is a well-defined gate — just not the same one — and is reported to the user.
+ */
+function specFromGmlTransform(
+  tr: TransformDef | undefined,
+): { spec: TransformSpec; toGateUnits: (v: number) => number } | null {
+  if (!tr) return { spec: { kind: "identity" }, toGateUnits: (v) => v };
+
+  if (tr.type === "logicle") {
+    const { T, W } = tr;
+    const M = Number.isFinite(tr.M) ? tr.M : 4.5;
+    const A = Number.isFinite(tr.A) ? tr.A : 0;
+    if (!Number.isFinite(T) || T <= 0 || !(W >= 0)) return null;
+    const span = M + A;
+    if (!(span > 0)) return null;
+    // Gating-ML/flowCore logicle spans [0, M + A]; GateLab's spans [0, 1].
+    return { spec: { kind: "logicle", T, W, M, A }, toGateUnits: (v) => v / span };
+  }
+
+  if (tr.type === "fasinh") {
+    const { T } = tr;
+    const M = Number.isFinite(tr.M) ? tr.M : Math.log10(Math.E);
+    const A = Number.isFinite(tr.A) ? tr.A : 0;
+    if (!Number.isFinite(T) || T <= 0) return null;
+    // GateLab's arcsinh display is exactly asinh(x / cofactor), which is fasinh only when
+    // M = log10 e and A = 0. Any other scaling is a transform GateLab cannot hold.
+    if (Math.abs(M - Math.log10(Math.E)) > 1e-9 || Math.abs(A) > 1e-12) return null;
+    const cofactor = T / Math.sinh(M * LN10);
+    if (!Number.isFinite(cofactor) || cofactor <= 0) return null;
+    return { spec: { kind: "asinh", cofactor }, toGateUnits: (v) => v };
+  }
+
+  return null; // flog — GateLab has no log display transform
+}
+
 function makeInverter(
   resolvedChannel: string,
   transRef: string | undefined,
@@ -330,6 +378,32 @@ function makeInverter(
 // Gate node parsing
 // ---------------------------------------------------------------------------
 
+/** The space a FlowJo workspace gate was converted into; see flowjoWorkspace.WSP_GATE_SPACE_TAG. */
+interface WspGateSpace {
+  space: "display";
+  x: TransformSpec;
+  y: TransformSpec;
+}
+
+/**
+ * Read the space the .wsp converter recorded on this gate, if any.
+ *
+ * Keyed by axis position rather than channel name, because the names in the document still have
+ * to be resolved to session channels and x/y are what survive that resolution unchanged.
+ */
+function parseWspGateSpace(node: Element): WspGateSpace | null {
+  for (const info of Array.from(node.getElementsByTagName("*"))) {
+    if (info.localName !== WSP_GATE_SPACE_TAG) continue;
+    try {
+      const v = JSON.parse(info.textContent ?? "") as WspGateSpace;
+      if (v && v.space === "display" && v.x?.kind && v.y?.kind) return v;
+    } catch {
+      return null; // a malformed marker is ignored; the gate imports raw, as it would have before
+    }
+  }
+  return null;
+}
+
 interface RawGate {
   gml_id: string;
   name: string;
@@ -345,6 +419,7 @@ interface RawGate {
   gate_set_id?: number;
   explicit_root?: boolean;
   parent_id?: string;
+  wsp_space?: WspGateSpace | null;
 }
 
 function parseGateNode(node: Element): RawGate | null {
@@ -380,6 +455,7 @@ function parseGateNode(node: Element): RawGate | null {
       ],
       channels: [x.channel, y.channel],
       dims: [x, y],
+      wsp_space: parseWspGateSpace(node),
     };
   }
 
@@ -404,6 +480,7 @@ function parseGateNode(node: Element): RawGate | null {
       vertices: verts,
       channels: [dims[0].channel, dims[1].channel],
       dims,
+      wsp_space: parseWspGateSpace(node),
     };
   }
 
@@ -553,6 +630,8 @@ export interface GatingMLResult {
   n_gates_imported: number;
   n_gates_skipped: number;
   skipped_channels: string[];
+  /** Gates imported into raw space because their declared transform is not representable. */
+  untranslatable_transform_gates: string[];
   source: "gatelabr" | "cytobank" | "generic";
   n_pops_imported: number;
   scales: Record<string, GatingMLScaleEntry> | null;
@@ -714,6 +793,20 @@ export function restoreGatingMLScaleState(
         state.w !== undefined && sample.currentLogicleW(idx) !== state.w) {
       sample.setLogicleW(idx, state.w);
       transformsChanged = true;
+    }
+    // A fluorescence entry carrying a cofactor and no W was written for an ARCSINH axis --
+    // buildScalesJson writes w for logicle and cofactor for asinh, never both -- so this is
+    // how the channel's scale choice comes back. Older files wrote neither and are unaffected.
+    if (sample.instrument === "flow" && sample.isFluorChannel(idx) &&
+        state.cofactor !== undefined && state.w === undefined) {
+      if (sample.fluorScale(idx) !== "arcsinh") {
+        sample.setFluorScale(idx, "arcsinh");
+        transformsChanged = true;
+      }
+      if (sample.currentFluorCofactor(idx) !== state.cofactor) {
+        sample.setFluorCofactor(idx, state.cofactor);
+        transformsChanged = true;
+      }
     }
     if (sample.instrument === "flow" && isScatterChannel(key) && state.cofactor !== undefined &&
         sample.currentScatterCofactor(idx) !== state.cofactor) {
@@ -950,6 +1043,9 @@ export function importGatingML(
   const gateOrder: string[] = [];
   let nSkipped = 0;
   const unresolved: string[] = [];
+  // Gates whose declared transform GateLab has no display for, so they were inverted into raw
+  // space instead of kept in the space the file declares. Reported, never silent.
+  const untranslatable: string[] = [];
 
   // Primitive gates → app gates (resolve channels, invert vertices).
   for (const gmlId of Object.keys(rawGates)) {
@@ -974,9 +1070,44 @@ export function importGatingML(
 
     const xTr = g.dims?.[0]?.transformation_ref;
     const yTr = g.dims?.[1]?.transformation_ref;
-    const invX = makeInverter(xCh, xTr, transforms, instrument);
-    const invY = makeInverter(yCh, yTr, transforms, instrument);
-    const verts: Vertex[] = (g.vertices ?? []).map((v) => [invX(v[0]), invY(v[1])]);
+
+    // Gating-ML puts the transform on the GATE, so the faithful import keeps each vertex in the
+    // space its dimension declares and records that transform. Only when GateLab cannot hold the
+    // declared transform do we fall back to inverting into raw, which is a different gate.
+    const axisSpec = (ch: string, ref: string | undefined) => {
+      // QC channels are never transformed, whatever a file claims (matching makeInverter).
+      if (!ref || isQcChannel(ch)) return { spec: { kind: "identity" } as TransformSpec, toGateUnits: (v: number) => v };
+      return specFromGmlTransform(transforms[ref]);
+    };
+    const sx = axisSpec(xCh, xTr);
+    const sy = axisSpec(yCh, yTr);
+
+    let verts: Vertex[];
+    let spaceFields: { space?: "raw" | "display"; transforms?: GateTransforms };
+    if (g.wsp_space) {
+      // A FlowJo workspace gate arrives already moved into the space FlowJo evaluates it in, with
+      // that space recorded on the element. Gating-ML cannot express biex or FlowJo's log, so the
+      // converter carries them here rather than through a transformation-ref.
+      verts = (g.vertices ?? []).map((v) => [v[0], v[1]] as Vertex);
+      spaceFields = {
+        space: "display",
+        transforms: { [xCh]: g.wsp_space.x, [yCh]: g.wsp_space.y },
+      };
+    } else if (sx && sy) {
+      verts = (g.vertices ?? []).map((v) => [sx.toGateUnits(v[0]), sy.toGateUnits(v[1])]);
+      const bothIdentity = sx.spec.kind === "identity" && sy.spec.kind === "identity";
+      spaceFields = bothIdentity
+        ? { space: "raw" }
+        : { space: "display", transforms: { [xCh]: sx.spec, [yCh]: sy.spec } };
+    } else {
+      // A transform GateLab has no display for (a log scale, or a non-canonical fasinh). Invert
+      // into raw as before, and say so rather than silently importing a different gate.
+      untranslatable.push(g.name);
+      const invX = makeInverter(xCh, xTr, transforms, instrument);
+      const invY = makeInverter(yCh, yTr, transforms, instrument);
+      verts = (g.vertices ?? []).map((v) => [invX(v[0]), invY(v[1])]);
+      spaceFields = { space: "raw" };
+    }
     if (verts.length < 3 && g.gate_type === "polygon") {
       nSkipped++;
       continue;
@@ -992,6 +1123,7 @@ export function importGatingML(
       vertices: verts,
       color: nextGateColor(Object.keys(appGates).length),
       label_offset: null, // auto-position (buildPlotGates computes it in display space)
+      ...spaceFields,
     };
     gateOrder.push(appId);
     gmlToApp[gmlId] = appId;
@@ -1073,6 +1205,7 @@ export function importGatingML(
     n_gates_imported: Object.keys(appGates).length,
     n_gates_skipped: nSkipped,
     skipped_channels: [...new Set(unresolved)].sort(),
+    untranslatable_transform_gates: [...new Set(untranslatable)].sort(),
     source: detectSource(root),
     n_pops_imported: Math.max(0, Object.keys(populations).length - 1),
     scales: gatelabrState.scales,

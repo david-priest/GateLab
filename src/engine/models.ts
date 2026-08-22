@@ -4,6 +4,41 @@
 
 export type Vertex = [number, number];
 
+/**
+ * The coordinate space a gate's vertices live in, and in which its edges are straight.
+ *
+ * `raw`     — straight in raw channel values. Membership cannot change when a display control
+ *             moves, and the boundary bows when drawn on a transformed axis.
+ * `display` — straight in the transformed space recorded in `transforms`, which is Gating-ML's
+ *             model (the transform belongs to the gate, via `transformation-ref`). Membership is
+ *             still fixed, because the gate carries its own transform rather than reading the
+ *             current one — that is the difference from FlowJo, whose gates move with the view.
+ *
+ * Absent means "whatever this sample did before the field existed": raw for flow, display for
+ * CyTOF. Never default it to a literal, or every saved CyTOF workspace changes meaning.
+ * See `LabNotes/Coding/GateLab/GateLab — gating space (raw vs display) design.md`.
+ */
+export type GateSpace = "raw" | "display";
+
+/**
+ * A display transform, in a form that can be serialised and rebuilt exactly.
+ *
+ * `biex` and `wsplog` are FlowJo's own display transforms. GateLab never *displays* on them —
+ * they arrive only on gates imported from a .wsp, where they record the space FlowJo evaluates
+ * the gate in. That separation is why they cost nothing in the UI: a gate can live in biex space,
+ * evaluate exactly, and still be drawn on GateLab's own axis, where it bows to show honestly that
+ * it was drawn under a different transform.
+ */
+export type TransformSpec =
+  | { kind: "identity" }
+  | { kind: "asinh"; cofactor: number }
+  | { kind: "logicle"; T: number; W: number; M: number; A: number }
+  | { kind: "biex"; maxValue: number; pos: number; neg: number; widthBasis: number; channelRange: number }
+  | { kind: "wsplog"; offset: number; decades: number };
+
+/** The transform each axis was drawn under. Only meaningful when `space` is `display`. */
+export type GateTransforms = Record<string, TransformSpec>;
+
 export interface PolyRectGate {
   gate_id: string;
   name: string;
@@ -11,6 +46,10 @@ export interface PolyRectGate {
   x_channel: string;
   y_channel: string;
   vertices: Vertex[];
+  /** Space the vertices are straight in; absent = this sample's pre-field default. */
+  space?: GateSpace;
+  /** Per-axis transform the gate was drawn under. Present only when space is display. */
+  transforms?: GateTransforms;
   color: string;
   label_offset: [number, number] | null;
 }
@@ -22,6 +61,10 @@ export interface QuadrantGate {
   x_channel: string;
   y_channel: string;
   center: [number, number];
+  /** Space the vertices are straight in; absent = this sample's pre-field default. */
+  space?: GateSpace;
+  /** Per-axis transform the gate was drawn under. Present only when space is display. */
+  transforms?: GateTransforms;
   color: string;
   label_offset: [number, number] | null;
 }

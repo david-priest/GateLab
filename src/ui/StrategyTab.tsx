@@ -6,6 +6,7 @@ import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import type { CoreState, Derived } from "../store";
 import type { Sample } from "../engine/sample";
 import { loadMiniPlots } from "../plots/loadPlots";
+import { GATE_EDGE_MODES, type GateEdgeMode } from "./gateEdgeModes";
 import { exportGridPNG, exportGridSVG, exportGridPDF } from "../plots/gridExport";
 import { computeGatingStrategy, buildStrategyPayload } from "../engine/strategy";
 import { computeMultiPopStrategy, buildMultiStrategyPayload } from "../engine/multiStrategy";
@@ -49,6 +50,7 @@ export interface StrategyConfig {
   kdeBandwidth: number;
   pubStyle: boolean;
   gateLineWidth: number;
+  gateEdgeMode?: GateEdgeMode;
   fontTick: number;
   fontAxis: number;
   fontTitle: number;
@@ -88,6 +90,7 @@ export function StrategyTab({
   const manualKdeBandwidth = useRef(c0?.kdeBandwidth && c0.kdeBandwidth > 0 ? c0.kdeBandwidth : 4);
   const [pubStyle, setPubStyle] = useState(c0?.pubStyle ?? false);
   const [gateLineWidth, setGateLineWidth] = useState(c0?.gateLineWidth ?? 1.5);
+  const [gateEdgeMode, setGateEdgeMode] = useState<GateEdgeMode>(c0?.gateEdgeMode ?? "straight-bow");
   const [fontTick, setFontTick] = useState(c0?.fontTick ?? 8);
   const [fontAxis, setFontAxis] = useState(c0?.fontAxis ?? 10);
   const [fontTitle, setFontTitle] = useState(c0?.fontTitle ?? 10);
@@ -103,7 +106,7 @@ export function StrategyTab({
   const currentConfig: StrategyConfig = {
     mode, exportDpi, multiPops, popId, fullPath, gateView, displayMode, maxEvents, allEvents,
     plotSize, nColumns, fitToColumns, pointSize, pointAlpha, contourThreshold, kdeBandwidth,
-    pubStyle, gateLineWidth, fontTick, fontAxis, fontTitle, fontGate,
+    pubStyle, gateLineWidth, gateEdgeMode, fontTick, fontAxis, fontTitle, fontGate,
   };
   useEffect(() => {
     configRef.current = currentConfig;
@@ -141,6 +144,7 @@ export function StrategyTab({
           kdeBandwidth,
           pubStyle,
           gateLineWidth,
+          gateEdgeMode,
           fontSizes,
           contextTitle: `${multiPops.length} population${multiPops.length === 1 ? "" : "s"}`,
         });
@@ -166,6 +170,7 @@ export function StrategyTab({
         kdeBandwidth,
         pubStyle,
         gateLineWidth,
+        gateEdgeMode,
         fontSizes,
         contextTitle: state.populations[popId]?.name,
       });
@@ -174,7 +179,7 @@ export function StrategyTab({
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, multiPops, sample, popId, fullPath, gateView, displayMode, maxEvents, allEvents, plotSize, nColumns, fitToColumns,
-      pointSize, pointAlpha, densityColorPower, contourThreshold, kdeBandwidth, pubStyle, gateLineWidth, fontTick, fontAxis, fontTitle, fontGate,
+      pointSize, pointAlpha, densityColorPower, contourThreshold, kdeBandwidth, pubStyle, gateLineWidth, gateEdgeMode, fontTick, fontAxis, fontTitle, fontGate,
       state.gates, state.gate_version, globalScales, derived, dataRevision]);
 
   const toggleGateView = (v: GateView) =>
@@ -344,6 +349,14 @@ export function StrategyTab({
         <label className="gl-field-inline">
           {t("Gate line")}
           <input type="number" min={0.5} max={5} step={0.25} value={gateLineWidth} onChange={num(setGateLineWidth, 1.5)} />
+        </label>
+        <label className="gl-field-inline" title={GATE_EDGE_MODES.find((m) => m.id === gateEdgeMode)?.hint}>
+          {t("Gate edges")}
+          <select value={gateEdgeMode} onChange={(e) => setGateEdgeMode(e.target.value as GateEdgeMode)}>
+            {GATE_EDGE_MODES.map((m) => (
+              <option key={m.id} value={m.id}>{t(m.label)}</option>
+            ))}
+          </select>
         </label>
         <span className="gl-ctl-sep" />
         <span className="gl-stats-opt-label">{t("Fonts")}</span>

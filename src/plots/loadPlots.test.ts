@@ -16,15 +16,143 @@ describe("GateLab cytof interaction patches", () => {
     warning.mockRestore();
   });
 
+  it("sizes the plot canvas to the display, not to CSS pixels", () => {
+    // The backing store was PLOT_W x PLOT_H CSS pixels, so on a 2x screen every event was drawn
+    // at half the resolution the display can show. mini_plot already renders at 2x.
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(cytofSrc).toContain("_canvas.width  = PLOT_W;");
+    expect(patched).not.toContain("_canvas.width  = PLOT_W;");
+    expect(patched).toContain("Math.round(PLOT_W * _dpr)");
+    expect(patched).toContain("window.devicePixelRatio");
+    expect(patched).toContain("_ctx.scale(_dpr, _dpr);");
+    // The element must stay its original size on screen; only the buffer grows.
+    expect(patched).toContain("'width:' + PLOT_W + 'px;height:' + PLOT_H + 'px;'");
+    // The scale must be applied AFTER the context exists, or it is a no-op on undefined.
+    expect(patched.indexOf("_ctx.scale(_dpr, _dpr);"))
+      .toBeGreaterThan(patched.indexOf("_ctx = _canvas.getContext('2d');"));
+    // clear() must not wipe in backing-store units once the context is pre-scaled.
+    expect(patched).not.toContain("_ctx.clearRect(0, 0, _canvas.width, _canvas.height);");
+
+    warning.mockRestore();
+  });
+
+  it("leaves exactly one pan implementation bound to the plot", () => {
+    // Two pans ran on the same background drag -- the renderer's and App's -- writing to
+    // different places from different bases. Whichever painted last in a frame won, so Shift
+    // sometimes appeared not to switch to stretch at all.
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(cytofSrc).toContain("_svg.on('pointerdown.navigate', _onNavigatePointerDown)");
+    expect(patched).not.toContain("_svg.on('pointerdown.navigate', _onNavigatePointerDown)");
+    // Must be LIVE code, not a line the inserted comment swallowed: the whole d3 chain hangs off
+    // it, so a comment marker anywhere before it on the same line would silently unbind every
+    // gate gesture as well. Assert the statement starts its own line.
+    const navLine = patched
+      .split("\n")
+      .find((line) => line.includes("_svg.on('pointerdown.navigate', null)"));
+    expect(navLine, "the disabled-pan binding should be on its own line").toBeDefined();
+    expect(navLine!.trimStart().startsWith("_svg.on('pointerdown.navigate', null)")).toBe(true);
+
+    // The gate gestures and the axis-label pickers must survive untouched.
+    for (const kept of [
+      "on('mousedown.draw', _onMousedown)",
+      "on('mousemove.draw', _onMousemove)",
+      "on('click.draw',    _onClick)",
+    ]) {
+      expect(patched).toContain(kept);
+    }
+
+    warning.mockRestore();
+  });
+
+  it("opens the channel picker upward when it would not fit below the label", () => {
+    // The X-axis label sits at the bottom of the plot, so a picker anchored under it ran past
+    // the viewport and its last channels could not be reached.
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    // The unpatched source positions the panel below the label and never reconsiders.
+    expect(cytofSrc).toContain("panel.style.top  = (labelRect.bottom + 4) + 'px';");
+    expect(cytofSrc).not.toContain("labelRect.top - margin - h");
+    expect(patched).toContain("flip the channel picker above the label");
+    expect(patched).toContain("labelRect.top - margin - h");
+    // Measured after mounting -- the height depends on the channel count.
+    const appendAt = patched.indexOf("document.body.appendChild(panel);");
+    const measureAt = patched.indexOf("panel.getBoundingClientRect().height");
+    expect(appendAt).toBeGreaterThan(-1);
+    expect(measureAt).toBeGreaterThan(appendAt);
+
+    warning.mockRestore();
+  });
+
   it("keeps polygon vertex clicks out of saved-gate drag handlers", () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const patched = patchCytofForGateLab(cytofSrc);
 
     expect(warning).not.toHaveBeenCalled();
     expect(patched).toContain("_mouseData = null; _polyJustClosed = false;");
-    expect(patched).toContain("newMode === 'navigate' ? null : 'none'");
     expect(patched).toContain("_g.select('.draw-layer').style('pointer-events', 'none');");
     expect(patched).toMatch(/\(pd\.x_range\s*\|\|\s*\[\]\)\.join\(','\)/);
+
+    // Derived from the CURRENT mode, not from the mode-change argument: _applyMode only runs on
+    // a CHANGE, so a one-shot set was dropped the next time _init() rebuilt .gate-layer and
+    // saved gates silently began intercepting clicks again mid-draw.
+    expect(patched).toContain("var drawing = _mode !== 'navigate';");
+    // The layer-level style alone is inert: cytof_plot.js sets pointer-events INLINE on each
+    // gate's fill ('all') and hit path ('stroke'), and an inline value beats an inherited one.
+    // Only the class, backed by !important in styles.css, actually stops them.
+    expect(patched).toContain("classed('gl-gates-inert', drawing)");
+    expect(cytofSrc).toContain(".style('pointer-events', 'all')"); // the reason the class is needed
+    expect(patched).not.toContain("newMode === 'navigate' ? null : 'none'");
+    // Re-asserted at both places the layer can come back: mode change and re-init.
+    expect(patched).toContain("_ready = true;\n        _syncGatePointerEvents();");
+    expect((patched.match(/_syncGatePointerEvents\(\);/g) ?? []).length).toBe(2);
+
+    warning.mockRestore();
+  });
+
+  // The badge is what makes a raw gate and a display gate distinguishable on screen. If this
+  // patch silently stops matching, the two become identical again and nothing else would say so.
+  it("draws the gating-space badge and its tooltip on the gate label", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(cytofSrc).not.toContain("space_badge");
+    expect(patched).toContain("if (gate.space_badge) {");
+    expect(patched).toContain("labelG.append('title').text(gate.space_hint)");
+    // Below the percentage when there is one, so it never displaces the name.
+    expect(patched).toContain("pctLine ? '1.25em' : '1.3em'");
+    // Applied once, not once per re-patch.
+    expect((patched.match(/if \(gate\.space_badge\) \{/g) ?? []).length).toBe(1);
+
+    warning.mockRestore();
+  });
+
+  // An arcsinh scatter axis packs -100, -10, 0, 10, 100 into a few pixels around zero. The
+  // thinning that handles this was gated to tick_mode 'asinh'/'logicle', so scatter axes — the
+  // ones that actually crowd — never got it, and the labels collided.
+  it("thins crowded axis labels on every tick mode, keeping zero", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    // The vendored source only thins two of the three branches per axis.
+    expect(cytofSrc).toContain("xTicks.tick_mode === 'asinh' || xTicks.tick_mode === 'logicle'");
+    expect(patched).not.toContain("xTicks.tick_mode === 'asinh' || xTicks.tick_mode === 'logicle'");
+    expect(patched).not.toContain("yTicks.tick_mode === 'asinh' || yTicks.tick_mode === 'logicle'");
+    // Thinning now runs for both axes in every branch: 3 call sites each.
+    expect((patched.match(/_hideCompressedLabels\(_g\.select\('\.x-axis'\)/g) ?? []).length).toBe(3);
+    expect((patched.match(/_hideCompressedLabels\(_g\.select\('\.y-axis'\)/g) ?? []).length).toBe(3);
+    // Zero first, then outward — dropping the anchor is what made the axis unreadable.
+    expect(patched).toContain("labeled.sort(function (a, b) { return a.mag - b.mag; })");
+    expect(patched).not.toContain("labeled.sort(function(a, b) { return a.px - b.px; })");
 
     warning.mockRestore();
   });
@@ -100,6 +228,30 @@ describe("GateLab cytof interaction patches", () => {
 
     expect(repatched.match(/function _offscalePts\(\)/g)).toHaveLength(1);
     expect(repatched.match(/outlierPts = outlierPts\.concat\(_offscalePts\(\)\);/g)).toHaveLength(1);
+
+    warning.mockRestore();
+  });
+});
+
+describe("GateLab mini-plot gate-edge patches", () => {
+  // The Strategy and Illustration grids drew straight chords regardless of the edge mode, and
+  // those are the views that become figures — so a published gate could differ from the one
+  // actually applied. The patch degrades to a console.warn if the vendored source moves, which
+  // is invisible in a browser, so the match is asserted here.
+  it("honours gate_edge_mode in the Strategy / Illustration grid overlays", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchMiniPlot(miniSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(miniSrc).not.toContain("gate_edge_mode");
+    expect(patched).toContain("var _edgeMode = gateStyle.gate_edge_mode || 'straight-bow';");
+    // Straight chords stay the default path; the true boundary is opt-in.
+    expect(patched).toContain("_toPath((_edgeMode === 'bowed' && _bowPts) ? _bowPts : points)");
+    // The grey companion only in straight-bow, and only when an outline exists.
+    expect(patched).toContain("if (_edgeMode === 'straight-bow' && _bowPts) {");
+    expect(patched).toContain("var _bowPts = (gate.outline && gate.outline.length > 2)");
+    // The label centroid still comes from the straight vertices, so it cannot shift with the mode.
+    expect(patched).toContain("d3.mean(points, function (p) { return p[0]; })");
 
     warning.mockRestore();
   });

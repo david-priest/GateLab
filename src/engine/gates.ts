@@ -10,6 +10,21 @@ export interface AssayData {
   column(channel: string): ArrayLike<number> | undefined;
 }
 
+/**
+ * Columns resolved PER GATE, because a workspace can hold gates in different coordinate spaces
+ * and each must be evaluated in its own. Passing one AssayData for every gate is what made a
+ * display-space gate report zero events: its arcsinh vertices were tested against raw values.
+ */
+export interface GateAssayData {
+  n: number;
+  forGate(gate: Gate): AssayData;
+}
+
+/** Accepts either form: a plain AssayData means "the same columns for every gate". */
+export function columnsForGate(data: AssayData | GateAssayData, gate: Gate): AssayData {
+  return "forGate" in data ? data.forGate(gate) : data;
+}
+
 // ---------------------------------------------------------------------------
 // Point-in-polygon (inside OR on boundary, matching sp::point.in.polygon >= 1)
 // ---------------------------------------------------------------------------

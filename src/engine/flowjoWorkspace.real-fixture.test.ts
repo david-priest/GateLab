@@ -90,6 +90,47 @@ describe("Priest et al. 2024 published sort workspace", () => {
     expect(gatingMl).not.toMatch(/Comp-/);
   });
 
+  // FlowJo evaluates a gate as straight lines in the space its axes are DISPLAYED in, which for
+  // this workspace is biex on all six fluorescence parameters and linear on the four scatter ones.
+  // Reproducing FlowJo means the fluorescence gates must import into biex space.
+  //
+  // The <Transformations> block is a SIBLING of <SampleNode>, not a descendant, so the first
+  // version of this lookup searched a subtree that never contains it and quietly left every gate
+  // in raw space. Nothing about the imported gates looked wrong — they simply carried FlowJo's
+  // straight-in-raw approximation instead of its actual boundary.
+  maybe("imports fluorescence gates in FlowJo's biex space and scatter gates raw", () => {
+    const { gatingMl } = flowJoWorkspaceToGatingML(readFileSync(wspPath, "utf8"), 0);
+    const res = importGatingML(gatingMl, [
+      "FSC-A", "FSC-H", "FSC-W", "SSC-A", "SSC-H", "SSC-W",
+      "PE-Cy7-A", "APC-A", "APC-Cy7-A", "BV421-A", "BV711-A", "BV786-A", "BUV805-A",
+    ], {}, "flow");
+
+    const gates = Object.values(res.gates);
+    expect(gates.length).toBe(18);
+
+    const spaces = gates.map((g) => ({
+      name: g.name,
+      space: g.space ?? "raw",
+      kinds: [g.transforms?.[g.x_channel]?.kind, g.transforms?.[g.y_channel]?.kind],
+    }));
+    const scatter = spaces.filter((g) => g.kinds.every((k) => k === undefined));
+    const biex = spaces.filter((g) => g.kinds.some((k) => k === "biex"));
+
+    // The three scatter gates are straight in linear, which IS raw — nothing to record.
+    expect(scatter.map((g) => g.name).sort()).toEqual(["FSC A vs H", "FSC SSC", "SSc a VS h"]);
+    for (const g of scatter) expect(g.space).toBe("raw");
+
+    // Every other gate is on biex axes and must carry that space.
+    expect(biex.length).toBe(15);
+    for (const g of biex) {
+      expect(g.space, g.name).toBe("display");
+      expect(g.kinds.every((k) => k === "biex"), g.name).toBe(true);
+    }
+
+    // Nothing was reported as unrepresentable: biex is now held, not approximated.
+    expect(res.untranslatable_transform_gates).toEqual([]);
+  });
+
   // The whole chain the app runs on import, against the real file: does every gate resolve to a
   // real channel, does the workspace matrix cover them, and does the strategy end up compensated?
   (existsSync(wspPath) && existsSync(fcsPath) ? maybe : it.skip)(

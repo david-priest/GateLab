@@ -5,7 +5,10 @@ import {
   isFlowJoWorkspace,
   listFlowJoWorkspaceSamples,
   flowJoWorkspaceToGatingML,
+  WSP_GATE_SPACE_TAG,
 } from "./flowjoWorkspace";
+import { transformFromSpec } from "./sample";
+import type { TransformSpec } from "./models";
 import { importGatingML } from "./gatingml";
 
 const WSP = "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/GateLab Paper/GateLab-2026-08-15-B flowjo-and-cytobank-concordance/data/lp4-igcb-s8/source/flowjo-workspace/17-Dec-2025 new.wsp";
@@ -137,9 +140,42 @@ describe("FlowJo workspace import", () => {
   });
 
   // The geometry is what makes the Gating-ML export redundant: the workspace already holds it.
-  it.runIf(has)("preserves the vertices exactly", () => {
+  //
+  // The vertices no longer pass through untouched. FlowJo stores them raw but evaluates the gate
+  // as straight lines in the axis's DISPLAY space, so the converter moves them there and records
+  // the transform on the gate. What must hold is that the move is exact and reversible: inverting
+  // the transform the file declares recovers FlowJo's original raw coordinate.
+  it.runIf(has)("moves the vertices into the declared space, reversibly", () => {
     const out = flowJoWorkspaceToGatingML(wsp(), lp4Index());
-    expect(out.gatingMl).toContain("30887444.5705699");
-    expect(out.gatingMl).toContain("759668.2975150499");
+    const doc = new DOMParser().parseFromString(out.gatingMl, "application/xml");
+
+    const gate = Array.from(doc.getElementsByTagName("*"))
+      .find((el) => el.localName === "PolygonGate");
+    expect(gate, "the LP4 tree has a polygon gate").toBeTruthy();
+
+    const marker = Array.from(gate!.getElementsByTagName("*"))
+      .find((el) => el.localName === WSP_GATE_SPACE_TAG);
+    expect(marker, "its space is recorded on the gate").toBeTruthy();
+    const space = JSON.parse(marker!.textContent!) as {
+      space: string; x: TransformSpec; y: TransformSpec;
+    };
+    // LP4 displays this pair on log axes, which is exactly where the coordinate space matters.
+    expect(space.space).toBe("display");
+    expect(space.x.kind).toBe("wsplog");
+
+    const inv = { x: transformFromSpec(space.x).inverse, y: transformFromSpec(space.y).inverse };
+    const written: number[][] = [];
+    for (const v of Array.from(gate!.getElementsByTagName("*"))) {
+      if (v.localName !== "vertex") continue;
+      const cs = Array.from(v.getElementsByTagName("*")).filter((c) => c.localName === "coordinate");
+      written.push(cs.map((c) => Number(c.getAttribute("data-type:value"))));
+    }
+    expect(written.length).toBeGreaterThan(2);
+
+    // FlowJo's own raw coordinates, recovered from what the file now holds.
+    const rawX = written.map((v) => inv.x(v[0]));
+    const rawY = written.map((v) => inv.y(v[1]));
+    expect(rawX.some((v) => Math.abs(v - 30887444.5705699) < 1e-3)).toBe(true);
+    expect(rawY.some((v) => Math.abs(v - 759668.2975150499) < 1e-3)).toBe(true);
   });
 });

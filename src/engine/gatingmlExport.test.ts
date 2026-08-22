@@ -94,6 +94,28 @@ function buildWorkspace(sample: Sample) {
 
   return { gates, gate_order, populations: pops, root_population_id: root.population_id };
 }
+/**
+ * The same workspace with every gate in DISPLAY space, snapshotting the sample's transforms.
+ *
+ * A raw gate now exports with no transformation-ref at all — that is the whole point of Phase 4 —
+ * so the cases that assert what GateLab *declares* have to use gates that declare something.
+ */
+function asDisplayWorkspace(sample: Sample, ws: ReturnType<typeof buildWorkspace>) {
+  const gates: Record<string, Gate> = {};
+  for (const [gid, g] of Object.entries(ws.gates)) {
+    const toDisp = (v: Vertex): Vertex => [
+      sample.rawToDisplay(g.x_channel, v[0]),
+      sample.rawToDisplay(g.y_channel, v[1]),
+    ];
+    gates[gid] = {
+      ...g,
+      vertices: (g as { vertices: Vertex[] }).vertices.map(toDisp),
+      ...sample.newGateSpaceFields("display", g.x_channel, g.y_channel),
+    } as Gate;
+  }
+  return { ...ws, gates };
+}
+
 
 // Cytobank has exactly three scale types: Linear (flag 1), Log (2) and Arcsinh (4). Its own
 // exports confirm it — a CyTOF experiment writes transforms:fasinh with "flag":4, and a flow
@@ -107,12 +129,28 @@ function buildWorkspace(sample: Sample) {
 describe("Cytobank format never emits a scale Cytobank cannot read (flow)", () => {
   const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
   const ws = buildWorkspace(sample);
-  const xml = exportGatingML({ ...ws, sample, format: "cytobank", timestamp: "2026-01-01T00:00:00" });
+  // Display-space gates, because only a gate that declares a transform can declare a WRONG one.
+  const dispWs = asDisplayWorkspace(sample, ws);
+  const xml = exportGatingML({ ...dispWs, sample, format: "cytobank", timestamp: "2026-01-01T00:00:00" });
+  const rawXml = exportGatingML({ ...ws, sample, format: "cytobank", timestamp: "2026-01-01T00:00:00" });
 
   it("declares no logicle transform", () => {
     expect(sample.instrument).toBe("flow"); // the case the old tests never covered
     expect(xml).not.toContain("transforms:logicle");
     expect(xml).toContain("transforms:fasinh");
+  });
+
+  // Phase 4: the export declares the space the gate is actually in. A raw gate is straight in raw,
+  // so it declares nothing at all and writes raw values — which is what makes a compliant reader
+  // reproduce GateLab's own populations instead of a transformed lookalike.
+  it("declares nothing for raw-space gates, and writes their raw vertices", () => {
+    expect(rawXml).not.toContain("transformation-ref");
+    expect(rawXml).not.toContain("<transforms:");
+    // The rectangle's raw bounds, verbatim.
+    expect(rawXml).toContain('gating:min="20000"');
+    expect(rawXml).toContain('gating:max="90000"');
+    // And Cytobank is told the axis is Linear, which is exactly true of a raw-space gate.
+    expect(rawXml).toContain('"flag":1');
   });
 
   it("uses only Cytobank's own scale flags", () => {
@@ -138,6 +176,36 @@ describe("Cytobank format never emits a scale Cytobank cannot read (flow)", () =
     expect(xml).toContain(`"flag":4,"argument":"${Math.round(cf)}"`);
   });
 
+  // A channel the user set to linear has no transform, so toExport() leaves its gate vertices in
+  // raw space. The exporter declared fasinh for every scatter channel regardless, so a linear
+  // SSC-A gate went out carrying a vertex of ~2.4e5 on an axis declared fasinh over [-2, 12].
+  // Cytobank's Gating-ML upload hangs on that file and GateLab reported nothing wrong.
+  it("declares no transform for a channel the user set to linear", () => {
+    const s2 = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+    const ws2 = buildWorkspace(s2); // gates first: flow gates are stored raw, so rescaling is safe
+    const linIdx = s2.channels.findIndex((_c, i) => s2.transformKind(i) === "asinh");
+    expect(linIdx, "fixture has an arcsinh scatter channel").toBeGreaterThanOrEqual(0);
+    s2.setScatterScale(linIdx, "linear");
+    expect(s2.transformKind(linIdx)).toBe("identity");
+
+    const out = exportGatingML({
+      ...ws2, sample: s2, format: "cytobank", timestamp: "2026-01-01T00:00:00",
+    });
+    const dims = [
+      ...out.matchAll(/<gating:dimension([^>]*)>\s*<data-type:fcs-dimension data-type:name="([^"]+)"/g),
+    ];
+    expect(dims.length).toBeGreaterThan(0);
+    expect(dims.some((m) => m[2] === s2.channels[linIdx].key), "the linear channel is gated on").toBe(true);
+    for (const [, attrs, name] of dims) {
+      const idx = s2.index(name);
+      if (idx !== undefined && s2.transformKind(idx) === "identity") {
+        expect(attrs, `${name} is linear, so it must declare no transform`).not.toContain(
+          "transformation-ref",
+        );
+      }
+    }
+  });
+
   it("never references a GateSet, and flattens ancestry like Cytobank does", () => {
     // Cytobank has no construct for a population referencing another population: every GateSet
     // is the AND of its whole ancestor chain of primitive gates, and its own exports reference
@@ -161,6 +229,140 @@ describe("Cytobank format never emits a scale Cytobank cannot read (flow)", () =
     const back = importGatingML(xml, sample.channels.map((c) => c.key),
       Object.fromEntries(sample.channels.map((c) => [c.pnn, c.key])), sample.instrument);
     expect(back.n_gates_imported).toBe(2);
+  });
+});
+
+// The point of Phase 4: the file must describe the gate GateLab APPLIES, not a transformed
+// lookalike. Previously the exporter forward-transformed raw vertices and declared the channel's
+// transform, which per Gating-ML §2.3.2 means "straight in that space" — a different gate, and the
+// spec calls that substitution naïve by name. Measured at Jaccard 0.984–0.997 on the S6 scatter
+// gates against a compliant reader.
+describe("the exported file declares the space each gate is actually in", () => {
+  const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+  const ws = buildWorkspace(sample);
+
+  /** The whole <gating:PolygonGate>/<gating:RectangleGate> element carrying this name. */
+  function gateXml(xml: string, gateName: string): string {
+    const all = xml.match(/<gating:(PolygonGate|RectangleGate)\b[\s\S]*?<\/gating:\1>/g) ?? [];
+    const hit = all.find((g) => g.includes(`<name>${gateName}</name>`));
+    expect(hit, `gate ${gateName} present`).toBeTruthy();
+    return hit!;
+  }
+  /** Dimensions as the file states them: [channel, transformation-ref | null]. */
+  function dimsOf(xml: string, gateName: string): [string, string | null][] {
+    return [...gateXml(xml, gateName).matchAll(
+      /<gating:dimension([^>]*)>\s*<data-type:fcs-dimension data-type:name="([^"]+)"/g,
+    )].map((m) => [m[2], (/transformation-ref="([^"]+)"/.exec(m[1]) ?? [null, null])[1]]);
+  }
+  function vertsOf(xml: string, gateName: string): number[] {
+    // Polygons carry data-type:value on each vertex; rectangles carry gating:min / gating:max
+    // as attributes of the dimension itself.
+    return [...gateXml(xml, gateName).matchAll(
+      /(?:data-type:value|gating:min|gating:max)="([-0-9.eE]+)"/g,
+    )].map((m) => Number(m[1]));
+  }
+
+  it("writes a raw gate as raw values with no transformation-ref", () => {
+    const xml = exportGatingML({ ...ws, sample, format: "standard", timestamp: "2026-01-01T00:00:00" });
+    for (const [, tr] of dimsOf(xml, "PE+APC gate")) expect(tr).toBeNull();
+    // Verbatim: a reader joining these with straight segments in raw space reproduces GateLab's
+    // own gate exactly, which is the property the old export did not have.
+    const poly = Object.values(ws.gates).find((g) => g.name === "PE+APC gate")!;
+    const expected = (poly as { vertices: [number, number][] }).vertices.flat();
+    expect(vertsOf(xml, "PE+APC gate")).toEqual(expected);
+  });
+
+  it("writes a display gate in its own transform, and declares that transform", () => {
+    const dispWs = asDisplayWorkspace(sample, ws);
+    const xml = exportGatingML({ ...dispWs, sample, format: "standard", timestamp: "2026-01-01T00:00:00" });
+    const rect = Object.values(dispWs.gates).find((g) => g.name === "Cells")!;
+    const cf = (rect.transforms?.[rect.x_channel] as { cofactor: number }).cofactor;
+
+    for (const [, tr] of dimsOf(xml, "Cells")) expect(tr).toBe(`Tr_Fasinh_${cf}`);
+    expect(xml).toContain(`transforms:id="Tr_Fasinh_${cf}"`);
+    // Vertices verbatim again — arcsinh display coordinates ARE fasinh(T = cf·sinh(1)) coordinates.
+    // Compared with tolerance only because the writer formats to finite precision.
+    const xs = (rect as { vertices: [number, number][] }).vertices.map((v) => v[0]);
+    const written = vertsOf(xml, "Cells");
+    expect(written.some((w) => Math.abs(w - Math.min(...xs)) < 1e-9)).toBe(true);
+    expect(written.some((w) => Math.abs(w - Math.max(...xs)) < 1e-9)).toBe(true);
+  });
+
+  it("keeps two gates on the same channel in their own spaces", () => {
+    // The reason the plan is per gate and not per channel: one channel, two answers.
+    const dispWs = asDisplayWorkspace(sample, ws);
+    const mixed = {
+      ...ws,
+      gates: {
+        ...ws.gates,
+        ...Object.fromEntries(
+          Object.entries(dispWs.gates)
+            .filter(([, g]) => g.name === "Cells")
+            .map(([gid, g]) => [`${gid}-d`, { ...g, gate_id: `${gid}-d`, name: "Cells display" }]),
+        ),
+      },
+      gate_order: [...ws.gate_order, `${Object.entries(ws.gates).find(([, g]) => g.name === "Cells")![0]}-d`],
+    };
+    const xml = exportGatingML({ ...mixed, sample, format: "standard", timestamp: "2026-01-01T00:00:00" });
+    expect(dimsOf(xml, "Cells").every(([, tr]) => tr === null)).toBe(true);
+    expect(dimsOf(xml, "Cells display").every(([, tr]) => tr !== null)).toBe(true);
+  });
+});
+
+// Export and import must agree about what the file means, or GateLab quietly disagrees with
+// itself: the round trip is the only place both halves of Phase 4 are exercised together.
+describe("a gate survives export → import in the same space", () => {
+  const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+  const ws = buildWorkspace(sample);
+
+  function roundTrip(w: ReturnType<typeof buildWorkspace>) {
+    const xml = exportGatingML({ ...w, sample, format: "standard", timestamp: "2026-01-01T00:00:00" });
+    return importGatingML(xml, sample.channels.map((c) => c.key), {}, sample.instrument);
+  }
+
+  it("keeps a raw gate raw, selecting exactly the same events", () => {
+    const res = roundTrip(ws);
+    const before = Object.values(ws.gates).find((g) => g.name === "PE+APC gate")!;
+    const after = Object.values(res.gates).find((g) => g.name === "PE+APC gate")!;
+    expect(sample.gateSpace(after)).toBe("raw");
+    expect(Array.from(getGateMask(after, sample.gatingDataFor(after))))
+      .toEqual(Array.from(getGateMask(before, sample.gatingDataFor(before))));
+  });
+
+  it("keeps a display gate in display space, selecting exactly the same events", () => {
+    const dispWs = asDisplayWorkspace(sample, ws);
+    const res = roundTrip(dispWs);
+    const before = Object.values(dispWs.gates).find((g) => g.name === "PE+APC gate")!;
+    const after = Object.values(res.gates).find((g) => g.name === "PE+APC gate")!;
+    expect(sample.gateSpace(after)).toBe("display");
+    expect(after.transforms?.[after.x_channel]?.kind).toBe("logicle");
+    expect(Array.from(getGateMask(after, sample.gatingDataFor(after))))
+      .toEqual(Array.from(getGateMask(before, sample.gatingDataFor(before))));
+  });
+
+  it("does not collapse the two spaces into one representation", () => {
+    // Guards the tests above from passing vacuously. Note these two gates select the SAME events
+    // on this fixture: the polygon is compact, so the lens between its straight-in-raw edges and
+    // its straight-in-logicle edges contains no events. That is expected — the divergence scales
+    // with how far an edge spans the transform, which is why it showed up on real spanning gates
+    // (Jaccard 0.984–0.997 on the S6 scatter gates) and not here.
+    const rawG = Object.values(roundTrip(ws).gates).find((g) => g.name === "PE+APC gate")!;
+    const dispG = Object.values(roundTrip(asDisplayWorkspace(sample, ws)).gates)
+      .find((g) => g.name === "PE+APC gate")!;
+
+    expect(sample.gateSpace(rawG)).toBe("raw");
+    expect(sample.gateSpace(dispG)).toBe("display");
+    expect(rawG.transforms).toBeUndefined();
+    expect(dispG.transforms).toBeTruthy();
+    // Same gate, two spaces: the stored numbers must not be the same numbers.
+    const xs = (g: typeof rawG) => (g as { vertices: [number, number][] }).vertices.map((v) => v[0]);
+    expect(xs(rawG)).not.toEqual(xs(dispG));
+    // Each still selects a real, non-trivial population.
+    for (const g of [rawG, dispG]) {
+      const n = Array.from(getGateMask(g, sample.gatingDataFor(g))).reduce((a, v) => a + v, 0);
+      expect(n).toBeGreaterThan(0);
+      expect(n).toBeLessThan(sample.fcs.nEvents);
+    }
   });
 });
 

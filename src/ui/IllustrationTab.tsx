@@ -12,6 +12,7 @@ import type { CoreState, Derived } from "../store";
 import type { Sample } from "../engine/sample";
 import type { IllustrationConfig, IllustrationPreset } from "../engine/workspace";
 import { loadMiniPlots } from "../plots/loadPlots";
+import { GATE_EDGE_MODES, type GateEdgeMode } from "./gateEdgeModes";
 import { exportGridPNG, exportGridSVG, exportGridPDF } from "../plots/gridExport";
 import {
   buildMultiSampleIllustrationPayload,
@@ -141,6 +142,7 @@ export function IllustrationTab({
   const manualKdeBandwidth = useRef(c0?.kdeBandwidth && c0.kdeBandwidth > 0 ? c0.kdeBandwidth : 4);
   const [pubStyle, setPubStyle] = useState(c0?.pubStyle ?? false);
   const [gateLineWidth, setGateLineWidth] = useState(c0?.gateLineWidth ?? 1.5);
+  const [gateEdgeMode, setGateEdgeMode] = useState<GateEdgeMode>(c0?.gateEdgeMode ?? "straight-bow");
   // Histogram / ridgeline
   const [histLineWidth, setHistLineWidth] = useState(c0?.histLineWidth ?? 1.8);
   const [histFill, setHistFill] = useState(c0?.histFill ?? false);
@@ -213,7 +215,7 @@ export function IllustrationTab({
     fitToColumns, maxEvents, allEvents,
     colorByPop, overlayPops, popColors, pointSize, pointAlpha, contourThreshold, kdeBandwidth, pubStyle,
     densityColorPower,
-    gateLineWidth, histLineWidth, histFill, histFillAlpha, histOverlayMode, histLayout, ridgeOverlap,
+    gateLineWidth, gateEdgeMode, histLineWidth, histFill, histFillAlpha, histOverlayMode, histLayout, ridgeOverlap,
     ridgeColGap, ridgeGradient, heatmapStat, heatmapScale, heatmapPalette, heatmapCellSize,
     heatmapShowValues, fontTick, fontAxis, fontTitle, fontGate, scaleFontsWithPlot,
   };
@@ -248,6 +250,7 @@ export function IllustrationTab({
     if (c.densityColorPower !== undefined) onDensityColorPowerChange(c.densityColorPower);
     if (c.kdeBandwidth > 0) manualKdeBandwidth.current = c.kdeBandwidth;
     setKdeBandwidth(c.kdeBandwidth); setPubStyle(c.pubStyle); setGateLineWidth(c.gateLineWidth);
+    setGateEdgeMode(c.gateEdgeMode ?? "straight-bow");
     setHistLineWidth(c.histLineWidth); setHistFill(c.histFill); setHistFillAlpha(c.histFillAlpha);
     setHistOverlayMode(c.histOverlayMode); setHistLayout(c.histLayout); setRidgeOverlap(c.ridgeOverlap);
     setRidgeColGap(c.ridgeColGap); setRidgeGradient(c.ridgeGradient);
@@ -355,6 +358,7 @@ export function IllustrationTab({
         ridgeGradient: c.ridgeGradient,
         pubStyle: c.pubStyle,
         gateLineWidth: c.gateLineWidth,
+        gateEdgeMode: c.gateEdgeMode ?? "straight-bow",
         fontSizes: { tick: c.fontTick, axis_label: c.fontAxis, gate_label: c.fontGate, title: c.fontTitle },
         scaleFontsWithPlot: c.scaleFontsWithPlot ?? true,
       },
@@ -647,6 +651,14 @@ export function IllustrationTab({
             <label className="gl-field-inline">
               {t("Gate line")}
               <input type="number" min={0.5} max={5} step={0.25} value={gateLineWidth} onChange={num(setGateLineWidth, 1.5)} />
+            </label>
+            <label className="gl-field-inline" title={GATE_EDGE_MODES.find((m) => m.id === gateEdgeMode)?.hint}>
+              {t("Gate edges")}
+              <select value={gateEdgeMode} onChange={(e) => setGateEdgeMode(e.target.value as GateEdgeMode)}>
+                {GATE_EDGE_MODES.map((m) => (
+                  <option key={m.id} value={m.id}>{t(m.label)}</option>
+                ))}
+              </select>
             </label>
           </div>
         ) : plotType === "histogram" ? (

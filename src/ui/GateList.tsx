@@ -4,6 +4,8 @@
 // Card click → selectGate (gate_list_click). Checkbox → toggleGateSelect.
 
 import type { CoreState, Derived, Action } from "../store";
+import type { Gate } from "../engine/models";
+import type { GateSpaceBadge } from "../engine/gateSpaceBadge";
 import { useI18n } from "./i18n";
 
 interface Props {
@@ -12,9 +14,11 @@ interface Props {
   dispatch: (a: Action) => void;
   /** Map a channel identity key → its Panel display label (identity if omitted). */
   labelForKey?: (key: string) => string;
+  /** Two-letter gating-space badge for a gate; null or omitted shows nothing (CyTOF). */
+  badgeFor?: (gate: Gate) => GateSpaceBadge | null;
 }
 
-export function GateList({ state, derived, dispatch, labelForKey = (k) => k }: Props) {
+export function GateList({ state, derived, dispatch, labelForKey = (k) => k, badgeFor }: Props) {
   const { t } = useI18n();
   const { gates, gate_order, selected_gate_id, selected_gate_ids } = state;
   const checked = new Set(selected_gate_ids);
@@ -60,7 +64,26 @@ export function GateList({ state, derived, dispatch, labelForKey = (k) => k }: P
               />
             </span>
             <div className="gate-color-swatch" style={{ background: gate.color }} />
-            <div className="gate-card-name">{gate.name}</div>
+            <div className="gate-card-name">
+              {gate.name}
+              {(() => {
+                // Which space this gate lives in, beside its name — a raw and a display gate are
+                // otherwise indistinguishable in this list.
+                const badge = badgeFor?.(gate);
+                return badge ? (
+                  <span
+                    title={badge.hint}
+                    style={{
+                      marginLeft: 6, fontSize: 9, letterSpacing: "0.09em", opacity: 0.65,
+                      border: "1px solid currentColor", borderRadius: 3, padding: "0 3px",
+                      verticalAlign: "middle", whiteSpace: "nowrap",
+                    }}
+                  >
+                    {badge.text}
+                  </span>
+                ) : null;
+              })()}
+            </div>
             <div className="gate-card-channels">{chText}</div>
             <div className="gate-card-info">{countText}</div>
           </div>
