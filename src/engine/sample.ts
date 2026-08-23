@@ -1723,7 +1723,15 @@ export class Sample {
       // doesn't converge (Logicle.scale returns -1). Health-check at representative values; an
       // unhealthy channel uses asinh outright, a healthy one still guards rare per-value failures
       // so no -1/NaN display coord ever reaches the plot / ticks / stats.
-      const asinhFallback = asinhTransform(this.currentFluorCofactor(idx));
+      //
+      // The PER-VALUE rescue inside a healthy logicle is pinned at 150, because
+      // transformFromSpec() rebuilds this transform from a {kind:"logicle"} spec that carries no
+      // cofactor and rescues at 150. Using the adjustable fluor cofactor here made the live
+      // transform and its own serialised spec disagree on exactly the values where the logicle
+      // fails — the one drift the mirror rule exists to prevent. The UNHEALTHY branch tracks the
+      // cofactor deliberately: that channel reports {kind:"asinh", cofactor} as its spec, so the
+      // pair stays consistent there too.
+      const perValueRescue = asinhTransform(150);
       const healthy = [0, tv * 0.5, tv].every((v) => {
         const s = lg.scale(v);
         return Number.isFinite(s) && s !== -1;
@@ -1731,10 +1739,10 @@ export class Sample {
       t = healthy
         ? {
             kind: "logicle",
-            forward: (v) => { const s = lg.scale(v); return s === -1 || !Number.isFinite(s) ? asinhFallback.forward(v) : s; },
+            forward: (v) => { const s = lg.scale(v); return s === -1 || !Number.isFinite(s) ? perValueRescue.forward(v) : s; },
             inverse: (v) => lg.inverse(v),
           }
-        : asinhFallback;
+        : asinhTransform(this.currentFluorCofactor(idx));
     }
     this.transformCache.set(idx, t);
     return t;
@@ -2269,7 +2277,8 @@ export class Sample {
     if (isScatterChannel(key) || isScatterChannel(pnn)) {
       return { kind: "asinh", cofactor: this.currentScatterCofactor(idx) };
     }
-    // A fluorescence channel on arcsinh, or the unhealthy-logicle fallback -- both asinh/150.
+    // A fluorescence channel on arcsinh (chosen), or the unhealthy-logicle fallback: both
+    // display asinh at the channel's current fluor cofactor, and the spec says so.
     return { kind: "asinh", cofactor: this.currentFluorCofactor(idx) };
   }
 
@@ -2361,9 +2370,18 @@ export class Sample {
 
   /** Raw column pushed through a gate's own recorded transform. Cached per (channel, spec). */
   private pinnedColumn(idx: number, spec: TransformSpec): NumericColumn {
-    const key = `${this.activeAssayBindingKey}|${idx}|${JSON.stringify(spec)}`;
+    const prefix = `${this.activeAssayBindingKey}|`;
+    const key = `${prefix}${idx}|${JSON.stringify(spec)}`;
     const hit = this.pinnedCache.get(key);
     if (hit) return hit;
+    // Evict columns pinned under OTHER assay bindings before adding one. Each entry is
+    // nEvents x 4 bytes, and nothing else ever clears this cache -- a session that toggled
+    // compensation while holding several imported .wsp gates accumulated a full set of pinned
+    // columns per layer, forever. Correctness never depended on this (the binding key already
+    // prevents stale hits); it is purely the memory bound.
+    for (const k of this.pinnedCache.keys()) {
+      if (!k.startsWith(prefix)) this.pinnedCache.delete(k);
+    }
     const raw = this.activeLinearColumn(idx);
     const t = transformFromSpec(spec);
     const out = new Float32Array(raw.length);

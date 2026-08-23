@@ -25,6 +25,7 @@
 import type { SpilloverMatrix } from "./fcs";
 import type { TransformSpec } from "./models";
 import { transformFromSpec } from "./sample";
+import { biexTransform } from "./biex";
 
 /** Marker the converter writes and importGatingML reads back. Internal to that handoff. */
 export const WSP_GATE_SPACE_TAG = "gatelab_gate_space";
@@ -258,13 +259,33 @@ function specForTransformElement(el: Element): TransformSpec | null {
         maxValue: n("maxRange"), pos: n("pos"), neg: n("neg"),
         widthBasis: n("width"), channelRange: Math.trunc(n("length")),
       };
-      const ok = Number.isFinite(spec.maxValue) && Number.isFinite(spec.pos)
+      const ok = Number.isFinite(spec.maxValue) && Number.isFinite(spec.pos) && spec.pos > 0
         && Number.isFinite(spec.neg) && spec.widthBasis < 0 && spec.channelRange > 1;
-      return ok ? spec : null;
+      if (!ok) return null;
+      // Attribute checks cannot prove the parameters produce a usable calibration table -- the
+      // table IS the transform, so build it here, where a failure degrades this one parameter to
+      // the warned straight-in-raw path instead of throwing later, mid-evaluation.
+      try {
+        biexTransform(spec);
+      } catch {
+        return null;
+      }
+      return spec;
     }
     case "log": {
       const spec = { kind: "wsplog" as const, offset: n("offset"), decades: n("decades") };
       return spec.offset > 0 && spec.decades > 0 ? spec : null;
+    }
+    case "logicle": {
+      // FlowJo can display an axis with logicle instead of biex. None of the workspaces this
+      // importer was built against use it (seven files, 2016-2025, carry only linear/biex/log),
+      // but the mapping is direct and GateLab's own logicle differs from Gating-ML's only by a
+      // per-axis constant scale -- an affine change that maps straight lines to straight lines,
+      // so gate membership is identical under either.
+      const spec = { kind: "logicle" as const, T: n("T"), W: n("W"), M: n("M"), A: n("A") };
+      const ok = Number.isFinite(spec.T) && spec.T > 0 && Number.isFinite(spec.W) && spec.W >= 0
+        && Number.isFinite(spec.M) && spec.M > 0 && Number.isFinite(spec.A);
+      return ok ? spec : null;
     }
     default:
       return null;
@@ -288,12 +309,13 @@ export function workspaceTransformSpecs(node: Element): Map<string, TransformSpe
 }
 
 /**
- * Transforms GateLab has a display for, and can therefore hold a gate in.
+ * Transform kinds that bend nothing, so a gate on such an axis needs no carrying: a linear
+ * display axis IS raw, and a gate straight in it is straight in raw.
  *
- * `linear` is included because a linear display axis IS raw — a gate straight in linear is
- * straight in raw, so GateLab reproduces it exactly. FlowJo's `biex` and `log` have no GateLab
- * equivalent (biex is FlowJo's own numerically-defined transform, not a logicle), so gates on
- * those axes are imported straight-in-RAW, which is not the gate FlowJo evaluates.
+ * Everything else — biex, log, logicle — is handled by specForTransformElement returning a
+ * TransformSpec, and gates on those axes are CARRIED into FlowJo's own space (Phase 4b(ii)).
+ * This set only matters on the warning path, for a transform kind that produced no spec: such a
+ * gate imports straight-in-raw, which is not the gate FlowJo evaluates, and is named as such.
  */
 const REPRESENTABLE_FLOWJO_TRANSFORMS = new Set(["linear"]);
 
@@ -774,9 +796,23 @@ export function flowJoWorkspaceToGatingML(
         carried++;
       }
     } else if (axes) {
+      // The pair could not be carried. That happens two ways, and both leave a real bend behind:
+      // an axis whose transform produced no spec (unknown kind, or parameters that failed to
+      // build), and — the previously SILENT case — an axis that has a perfectly carriable
+      // transform whose partner is not declared in the Transformations block at all. Carrying
+      // half a pair would mean guessing the undeclared axis's display (FlowJo probably means
+      // linear, but that is not documented), so the gate imports straight-in-raw and every
+      // bending axis is named rather than the known bend being quietly dropped.
       for (const [i, ch] of axes.entries()) {
-        if ((i === 0 ? sx : sy) !== undefined) continue;
+        const spec = i === 0 ? sx : sy;
+        if (spec !== undefined && spec.kind === "identity") continue; // linear: nothing bends
         const kind = transformKinds.get(ch) ?? transformKinds.get(ch.replace(/^Comp-/, ""));
+        if (spec !== undefined) {
+          // Carriable on its own; lost to an undeclared partner.
+          if (!approximated.has(name)) approximated.set(name, new Set());
+          approximated.get(name)!.add(kind ?? spec.kind);
+          continue;
+        }
         if (!kind || REPRESENTABLE_FLOWJO_TRANSFORMS.has(kind)) continue;
         if (!approximated.has(name)) approximated.set(name, new Set());
         approximated.get(name)!.add(kind);
@@ -810,18 +846,20 @@ export function flowJoWorkspaceToGatingML(
   }
 
   // FlowJo evaluates a gate as straight lines in the space its axes are DISPLAYED in. Where that
-  // space is one GateLab has no transform for, the gate is imported straight-in-raw instead —
-  // a different gate, by however much the transform bends over its edges. Stated per gate, with
-  // the transforms named, so it is clear which results are exact and which are approximations.
+  // space could not be carried — a transform GateLab has no spec for, or a pair broken by an
+  // undeclared partner axis — the gate is imported straight-in-raw instead: a different gate, by
+  // however much the transform bends over its edges. Stated per gate, with the transforms named,
+  // so it is clear which results are exact and which are approximations.
   if (approximated.size) {
     const kinds = [...new Set([...approximated.values()].flatMap((v) => [...v]))].sort();
     const names = [...approximated.keys()];
     const shown = names.slice(0, 6).map((n) => `"${n}"`).join(", ");
     warnings.push(
       `${names.length} of ${Object.keys(flowJoCounts).length} gate(s) are drawn on axes FlowJo ` +
-        `displays with ${kinds.join(" / ")}, which GateLab has no equivalent transform for. They ` +
-        "were imported as straight in RAW space, which is not the boundary FlowJo evaluates, so " +
-        "their event counts will differ from FlowJo's by more than binning alone: " +
+        `displays with ${kinds.join(" / ")}, which could not be carried onto the imported gate ` +
+        "(the transform is one GateLab cannot hold, or its partner axis is not declared in the " +
+        "workspace). They were imported as straight in RAW space, which is not the boundary " +
+        "FlowJo evaluates, so their event counts will differ from FlowJo's by more than binning alone: " +
         shown + (names.length > 6 ? `, and ${names.length - 6} more.` : "."),
     );
   }

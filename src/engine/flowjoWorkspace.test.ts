@@ -179,3 +179,74 @@ describe("FlowJo workspace import", () => {
     expect(rawY.some((v) => Math.abs(v - 759668.2975150499) < 1e-3)).toBe(true);
   });
 });
+
+// ── Transform carriage edge cases (synthetic, because no real workspace exhibits them) ──────────
+
+const T = "http://www.isac-net.org/std/Gating-ML/v2.0/transformations";
+
+/** A workspace in FlowJo's real shape: Transformations is a SIBLING of SampleNode. */
+function syntheticWithTransforms(transforms: string, populations: string): string {
+  return `<Workspace xmlns:transforms="${T}" xmlns:data-type="${D}">
+    <SampleList><Sample>
+      <Transformations>${transforms}</Transformations>
+      <SampleNode name="s.fcs" count="100"><Subpopulations>${populations}</Subpopulations></SampleNode>
+    </Sample></SampleList></Workspace>`;
+}
+const biexFor = (param: string, pos = 4.418539922): string =>
+  `<transforms:biex transforms:maxRange="262144" transforms:pos="${pos}" transforms:neg="0"
+     transforms:width="-10" transforms:length="256">
+     <data-type:parameter data-type:name="${param}"/></transforms:biex>`;
+const logicleFor = (param: string): string =>
+  `<transforms:logicle transforms:T="262144" transforms:W="0.5" transforms:M="4.5" transforms:A="0">
+     <data-type:parameter data-type:name="${param}"/></transforms:logicle>`;
+const linearFor = (param: string): string =>
+  `<transforms:linear transforms:minRange="0" transforms:maxRange="262144">
+     <data-type:parameter data-type:name="${param}"/></transforms:linear>`;
+
+describe("FlowJo transform carriage", () => {
+  it("carries a biex pair and marks the gate's space", () => {
+    const xml = syntheticWithTransforms(biexFor("X") + biexFor("Y"), polygonPop("A", "g1"));
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.gatingMl).toContain(WSP_GATE_SPACE_TAG);
+    expect(out.gatingMl).toMatch(/"kind":"biex"/);
+  });
+
+  it("carries a logicle pair — FlowJo can display logicle, and GateLab holds that space", () => {
+    const xml = syntheticWithTransforms(logicleFor("X") + logicleFor("Y"), polygonPop("A", "g1"));
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.gatingMl).toContain(WSP_GATE_SPACE_TAG);
+    expect(out.gatingMl).toMatch(/"kind":"logicle"/);
+    expect(out.warnings.join(" ")).not.toMatch(/RAW space/);
+  });
+
+  it("warns — not silently drops — a biex axis whose partner is undeclared", () => {
+    // Only X is in the Transformations block. The pair cannot be carried without guessing what
+    // FlowJo means by an undeclared axis, so the gate imports straight-in-raw; the previously
+    // SILENT part was that X's biex bend vanished without a word.
+    const xml = syntheticWithTransforms(biexFor("X"), polygonPop("A", "g1"));
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.gatingMl).not.toContain(WSP_GATE_SPACE_TAG);
+    expect(out.warnings.join(" ")).toMatch(/biex/);
+    expect(out.warnings.join(" ")).toMatch(/RAW space/);
+    expect(out.warnings.join(" ")).toMatch(/"A"/);
+  });
+
+  it("stays silent when the pair is linear + undeclared, where nothing bends", () => {
+    const xml = syntheticWithTransforms(linearFor("X"), polygonPop("A", "g1"));
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.gatingMl).not.toContain(WSP_GATE_SPACE_TAG);
+    expect(out.warnings.join(" ")).not.toMatch(/RAW space/);
+  });
+
+  it("degrades a biex whose parameters cannot build a table to warned straight-in-raw", () => {
+    // pos=400 sends exp() past overflow while the minimum underflows to zero: the calibration
+    // table comes out NaN. Before the table guard this produced a silently all-false gate; now
+    // the spec is rejected at parse time and the gate takes the named straight-in-raw path.
+    const xml = syntheticWithTransforms(
+      biexFor("X", 400) + biexFor("Y", 400), polygonPop("A", "g1"));
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.gatingMl).not.toContain(WSP_GATE_SPACE_TAG);
+    expect(out.warnings.join(" ")).toMatch(/biex/);
+    expect(out.warnings.join(" ")).toMatch(/RAW space/);
+  });
+});
