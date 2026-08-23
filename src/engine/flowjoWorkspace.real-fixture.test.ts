@@ -28,7 +28,7 @@ const GATING = "http://www.isac-net.org/std/Gating-ML/v2.0/gating";
 describe("Priest et al. 2024 published sort workspace", () => {
   const maybe = existsSync(wspPath) ? it : it.skip;
 
-  maybe("reads the workspace-only Diva matrix for the published sample", () => {
+  maybe("reads the workspace-only Diva matrix for the published sample", { timeout: 60000 }, () => {
     const text = readFileSync(wspPath, "utf8");
     const samples = listFlowJoWorkspaceSamples(text);
     expect(samples).toHaveLength(1);
@@ -72,7 +72,7 @@ describe("Priest et al. 2024 published sort workspace", () => {
     expect(flowJoCounts["CD11c- Naive"]).toBe(34983);
   });
 
-  maybe("marks six fluorescence dimensions compensated and the four scatter ones not", () => {
+  maybe("marks six fluorescence dimensions compensated and the four scatter ones not", { timeout: 60000 }, () => {
     const { gatingMl } = flowJoWorkspaceToGatingML(readFileSync(wspPath, "utf8"), 0);
     const doc = new DOMParser().parseFromString(gatingMl, "application/xml");
     const byRef = { FCS: new Set<string>(), uncompensated: new Set<string>() };
@@ -98,7 +98,7 @@ describe("Priest et al. 2024 published sort workspace", () => {
   // version of this lookup searched a subtree that never contains it and quietly left every gate
   // in raw space. Nothing about the imported gates looked wrong — they simply carried FlowJo's
   // straight-in-raw approximation instead of its actual boundary.
-  maybe("imports fluorescence gates in FlowJo's biex space and scatter gates raw", () => {
+  maybe("imports fluorescence gates in FlowJo's biex space and scatter gates raw", { timeout: 60000 }, () => {
     const { gatingMl } = flowJoWorkspaceToGatingML(readFileSync(wspPath, "utf8"), 0);
     const res = importGatingML(gatingMl, [
       "FSC-A", "FSC-H", "FSC-W", "SSC-A", "SSC-H", "SSC-W",

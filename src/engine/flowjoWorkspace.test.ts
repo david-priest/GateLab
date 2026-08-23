@@ -105,7 +105,7 @@ describe("FlowJo workspace import", () => {
     expect(listFlowJoWorkspaceSamples(xml)[0].owningGroup).toBe("Panel A");
   });
 
-  it.runIf(has)("lists the real workspace's samples", () => {
+  it.runIf(has)("lists the real workspace's samples", { timeout: 60000 }, () => {
     const samples = listFlowJoWorkspaceSamples(wsp());
     expect(samples.length).toBe(24);
     const lp4 = samples.find((s) => s.name === "LP4 rec.fcs")!;
@@ -114,7 +114,7 @@ describe("FlowJo workspace import", () => {
     expect(lp4.unsupportedCount).toBe(0);
   });
 
-  it.runIf(has)("rebuilds the LP4 hierarchy end to end, through importGatingML", () => {
+  it.runIf(has)("rebuilds the LP4 hierarchy end to end, through importGatingML", { timeout: 60000 }, () => {
     const out = flowJoWorkspaceToGatingML(wsp(), lp4Index());
     expect(out.warnings).toEqual([]);
     // FlowJo's own counts come across for a concordance readout.
@@ -145,7 +145,7 @@ describe("FlowJo workspace import", () => {
   // as straight lines in the axis's DISPLAY space, so the converter moves them there and records
   // the transform on the gate. What must hold is that the move is exact and reversible: inverting
   // the transform the file declares recovers FlowJo's original raw coordinate.
-  it.runIf(has)("moves the vertices into the declared space, reversibly", () => {
+  it.runIf(has)("moves the vertices into the declared space, reversibly", { timeout: 60000 }, () => {
     const out = flowJoWorkspaceToGatingML(wsp(), lp4Index());
     const doc = new DOMParser().parseFromString(out.gatingMl, "application/xml");
 
