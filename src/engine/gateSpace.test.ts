@@ -51,6 +51,29 @@ describe("transformSpec round-trips the live transform", () => {
       }
     });
   }
+
+  it("agrees even where the logicle solver fails and the rescue fires", () => {
+    // Logicle.scale gives up at extreme inputs (±MAX_VALUE reproduces it on this fixture) and
+    // both paths fall back to asinh. The live rescue once used the ADJUSTABLE fluor cofactor
+    // while the spec-rebuilt transform rescued at a fixed 150, so a lingering cofactor override
+    // — set in arcsinh mode, then switched back to logicle — made the live display and the
+    // gate's own serialised transform disagree on exactly the values where the solver fails.
+    // Real events never reach these values; pinned because the mirror rule allows NO drift.
+    const s = load(ARIA_SMALL);
+    const idx = s.channels.findIndex((_, i) => s.isLogicleChannel(i));
+    const key = s.channels[idx].key;
+    s.setFluorScale(idx, "arcsinh");
+    s.setFluorCofactor(idx, 10000);      // the override that used to leak into the rescue
+    s.setFluorScale(idx, "logicle");
+    expect(s.isLogicleChannel(idx)).toBe(true);
+
+    const f = transformFromSpec(s.transformSpec(key)).forward;
+    for (const v of [Number.MAX_VALUE, -Number.MAX_VALUE]) {
+      const live = s.rawToDisplay(key, v);
+      expect(Number.isFinite(live), `rescue produced a finite coordinate @ ${v}`).toBe(true);
+      expect(f(v), `${key} @ ${v}`).toBeCloseTo(live, 6);
+    }
+  });
 });
 
 describe("a display-space gate is pinned to its own transform", () => {

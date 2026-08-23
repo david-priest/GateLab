@@ -135,6 +135,22 @@ export function generateBiexLut(p: BiexParams, strictStep = false): BiexLut {
     positive[j] = -positive[2 * zeroChan - j];
   }
 
+  // The table IS the transform, so a bad table is a bad transform and must say so. Without this,
+  // parameters that send logRoot a non-positive bound (pos <= width/2 with a zero channel of 0)
+  // flowed NaN through the whole table, every membership comparison against NaN was false, and
+  // the gate quietly reported zero events -- the silent failure shape this codebase defends
+  // against everywhere else. The parser catches a thrown table and degrades the gate to
+  // warned-straight-in-raw, which is the documented behaviour for a transform GateLab cannot hold.
+  for (let j = 0; j < nPoints; j++) {
+    if (!Number.isFinite(positive[j]) || (j > 0 && !(positive[j] > positive[j - 1]))) {
+      throw new Error(
+        `Biex parameters produce an unusable calibration table (maxValue ${p.maxValue}, ` +
+        `pos ${p.pos}, neg ${p.neg}, width ${p.widthBasis}, length ${p.channelRange}: ` +
+        `table ${Number.isFinite(positive[j]) ? "not increasing" : "not finite"} at entry ${j}).`,
+      );
+    }
+  }
+
   return { x: positive, y: vals };
 }
 
