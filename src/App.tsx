@@ -20,6 +20,7 @@ import {
   type FlowJoSampleMatchKey,
   type FlowJoSpillover,
 } from "./engine/flowjoWorkspace";
+import { isDivaWorkspace, listDivaGateTrees, divaToGatingML } from "./engine/divaWorkspace";
 import { ChannelScales } from "./engine/channelScales";
 import { fitChannelAxisRange, includePlotGatesInAxisRange } from "./engine/axisRange";
 import { parseFcs, type SpilloverMatrix } from "./engine/fcs";
@@ -1188,6 +1189,39 @@ export default function App() {
     if (!sample || !activeSampleId) return;
     try {
       const text = await file.text();
+
+      // A BD FACSDiva experiment export is rewritten into Gating-ML the same way a FlowJo
+      // workspace is, so the ordinary import path handles both. Diva is the record BEFORE
+      // FlowJo: raw-linear scatter vertices, explicit hierarchy, per-gate event counts, and the
+      // compensation actually applied (including hand adjustments that exist nowhere else).
+      if (isDivaWorkspace(text)) {
+        const trees = listDivaGateTrees(text).filter((t) => t.gateCount > 0);
+        if (!trees.length) throw new Error("This Diva experiment contains no gates GateLab can read.");
+        // Prefer the tree for the loaded file's tube; else a single tree is the only answer;
+        // else take the largest and SAY SO — quietly taking the first is how the FlowJo path
+        // imported another sample's gates before it grew a picker.
+        const byFile = trees.find(
+          (t) => (t.dataFilename ?? "").toLowerCase() === fileName.toLowerCase());
+        const pick = byFile ?? (trees.length === 1
+          ? trees[0]
+          : trees.reduce((best, t) => (t.gateCount > best.gateCount ? t : best)));
+        const conv = divaToGatingML(text, pick.index, fileName);
+        const notes = [...conv.warnings];
+        if (!byFile && trees.length > 1) {
+          notes.unshift(
+            `This experiment holds ${trees.length} gate trees and none names the loaded file; ` +
+              `"${pick.label}" (${pick.gateCount} gates) was imported. The others: ` +
+              trees.filter((t) => t !== pick).map((t) => `${t.label} (${t.gateCount})`).join(", ") + ".");
+        }
+        if (notes.length) setError(notes.join("\n"));
+        await prepareGatingImportFromGatingML(
+          conv.gatingMl,
+          ` from FACSDiva experiment · ${conv.label}` +
+            (conv.warnings.length ? ` · ${conv.warnings.length} note(s)` : ""),
+          conv.spillover,
+        );
+        return;
+      }
 
       // A FlowJo workspace is rewritten into Gating-ML and then takes the ordinary path, so
       // channel resolution, validation, population building and merge/replace are unchanged.
