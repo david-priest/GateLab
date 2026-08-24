@@ -194,15 +194,35 @@ function buildGateExportPlan(
       };
     }
     // FlowJo's own transforms, which arrive on gates imported from a .wsp. Gating-ML has no way
-    // to express either, so the gate is written in RAW space with no transformation-ref. That is
-    // exact for a rectangle (a monotonic transform maps an axis-aligned box to an axis-aligned
-    // box) and for a quadrant's single point; a polygon's edges are densified instead — see
-    // densifyAxes below — so the boundary survives to well under a pixel.
+    // to express either, so the gate is re-expressed in a space that IS expressible, with its
+    // edges densified — see polygonOutline — so the boundary survives to well under a pixel. A
+    // rectangle needs no densification: a monotonic transform maps an axis-aligned box to an
+    // axis-aligned box.
     if (own.kind === "biex" || own.kind === "wsplog") {
       const inv = transformFromSpec(own).inverse;
+      if (!cytobankMode) {
+        // Standard format: RAW, with no transformation-ref. Raw is the honest description of the
+        // coordinates, and the round-trip notebook's reader REFUSES a standard file containing a
+        // transforms: block -- that refusal is what proves its vertices are raw.
+        return {
+          trId: null, cofactor: sample.arcsinhCofactor, convert: inv, needsDensify: true,
+          rawToExport: (v) => v,
+        };
+      }
+      // Cytobank: arcsinh rather than raw. Both are faithful -- the gate is densified either way,
+      // and membership is unchanged -- but the SPACE decides what Cytobank draws. Written raw, a
+      // biex or log axis is declared linear (flag 1), so Cytobank spreads a log-distributed
+      // channel evenly across a linear axis and the whole population collapses into the bottom-
+      // left corner, gate included. Declaring arcsinh (flag 4) with a transformation-ref puts the
+      // data where a cytometrist expects it, which is what Cytobank does in its own exports
+      // (Tr_Arcsinh_150). Only the rendering changes; the boundary does not.
+      const cf = isCytof ? sample.arcsinhCofactor : CYTOBANK_FLOW_COFACTOR;
       return {
-        trId: null, cofactor: sample.arcsinhCofactor, convert: inv, needsDensify: true,
-        rawToExport: (v) => v,   // written in RAW space, so raw values need no mapping
+        trId: fasinh(cf),
+        cofactor: cf,
+        convert: (v) => Math.asinh(inv(v) / cf),
+        needsDensify: true,
+        rawToExport: (v) => Math.asinh(v / cf),
       };
     }
 
