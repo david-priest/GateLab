@@ -17,6 +17,7 @@ import { transformFromSpec, type Sample } from "./sample";
 import type { Gate, PolyRectGate, PopulationMap, TransformSpec } from "./models";
 import { isScatterChannel } from "./transforms";
 import { polygonOutline } from "../plots/gatePayload";
+import { robustAxisRange } from "./axisRange";
 
 const SINH1 = Math.sinh(1); // sinh(log10(e)·ln10) = sinh(1)
 const LOG10E = Math.log10(Math.E); // GatingML fasinh M
@@ -127,6 +128,12 @@ interface GateAxisExport {
   convert(v: number): number;
   /** True when `convert` bends straight edges, so a polygon must be subdivided to stay faithful. */
   needsDensify?: boolean;
+  /**
+   * RAW value → the coordinate written to the file. Distinct from `convert`, which starts from
+   * the gate's own stored space. Needed to state the axis range Cytobank should draw, which is a
+   * property of the DATA and cannot be recovered from the gate's vertices alone.
+   */
+  rawToExport(v: number): number;
 }
 
 interface GateExportPlan {
@@ -176,11 +183,15 @@ function buildGateExportPlan(
 
     if (own.kind === "identity") {
       // No transform to declare, and the values are already what a reader should use.
-      return { trId: null, cofactor: sample.arcsinhCofactor, convert: (v) => v };
+      return { trId: null, cofactor: sample.arcsinhCofactor, convert: (v) => v, rawToExport: (v) => v };
     }
     if (own.kind === "asinh") {
       // GateLab's arcsinh display coordinate IS fasinh(T = cf·sinh(1), M = log10 e, A = 0).
-      return { trId: fasinh(own.cofactor), cofactor: own.cofactor, convert: (v) => v };
+      const cf0 = own.cofactor;
+      return {
+        trId: fasinh(cf0), cofactor: cf0, convert: (v) => v,
+        rawToExport: (v) => Math.asinh(v / cf0),
+      };
     }
     // FlowJo's own transforms, which arrive on gates imported from a .wsp. Gating-ML has no way
     // to express either, so the gate is written in RAW space with no transformation-ref. That is
@@ -189,7 +200,10 @@ function buildGateExportPlan(
     // densifyAxes below — so the boundary survives to well under a pixel.
     if (own.kind === "biex" || own.kind === "wsplog") {
       const inv = transformFromSpec(own).inverse;
-      return { trId: null, cofactor: sample.arcsinhCofactor, convert: inv, needsDensify: true };
+      return {
+        trId: null, cofactor: sample.arcsinhCofactor, convert: inv, needsDensify: true,
+        rawToExport: (v) => v,   // written in RAW space, so raw values need no mapping
+      };
     }
 
     // Logicle.
@@ -203,6 +217,7 @@ function buildGateExportPlan(
         trId: fasinh(cf),
         cofactor: cf,
         convert: (v) => Math.asinh(inv(v * LOGICLE_SPAN) / cf),
+        rawToExport: (v) => Math.asinh(v / cf),
       };
     }
     const W = clampW(own.W);
@@ -210,7 +225,11 @@ function buildGateExportPlan(
     if (!trDefs.has(trId)) trDefs.set(trId, { type: "logicle", T: own.T, W, M: own.M, A: own.A });
     // GateLab's logicle display spans [0, 1]; flowCore/Gating-ML logicle spans [0, M + A].
     const span = own.M + own.A;
-    return { trId, cofactor: sample.arcsinhCofactor, convert: (v) => v * span };
+    const fwd = transformFromSpec(own).forward;
+    return {
+      trId, cofactor: sample.arcsinhCofactor, convert: (v) => v * span,
+      rawToExport: (v) => fwd(v) * span,
+    };
   };
 
   for (const gid of gateOrder.length ? gateOrder : Object.keys(gates)) {
@@ -225,7 +244,8 @@ function buildGateExportPlan(
   return {
     trDefs,
     axis: (gateId, channelKey) =>
-      byKey.get(`${gateId}|${channelKey}`) ?? { trId: null, cofactor: sample.arcsinhCofactor, convert: (v) => v },
+      byKey.get(`${gateId}|${channelKey}`)
+        ?? { trId: null, cofactor: sample.arcsinhCofactor, convert: (v) => v, rawToExport: (v) => v },
   };
 }
 
@@ -236,20 +256,55 @@ const round = (x: number, d: number): number => {
 const clampW = (w: number): number => Math.max(0.1, Math.min(Number.isFinite(w) ? w : 0.5, 2.0));
 
 // ── Scale JSON (per gate dimension) ──────────────────────────────────────────
-function scaleJson(trId: string | null | undefined, isFlow: boolean, cofactor: number): string {
-  let flag: number, arg: string, mn: number, mx: number;
+/**
+ * The axis range Cytobank should draw, in the space the vertices are written in.
+ *
+ * This used to be four hardcoded constants -- linear got `1 … 1570900`, flow arcsinh got
+ * `-2 … 12` -- chosen to look plausible and derived from nothing. They routinely excluded the
+ * gate's OWN vertices: 17 of LP4's axis/gate combinations had vertices outside the range the same
+ * file declared, the worst by a factor of 100 (a raw vertex at 1.5e8 against a declared max of
+ * 1.57e6). Cytobank draws the axis from this block and recomputes membership from the vertices,
+ * so a gate outside its own axis imports invisible, which is exactly the failure that stalled the
+ * Cytobank arm.
+ *
+ * Derived instead: the channel's own robust data range mapped into the export space, unioned with
+ * the gate's exported vertices so the gate is always inside, then padded. Cytobank's own exports
+ * use the full instrument range (`1 … 262144` on a 2^18 instrument) for every gate on a channel;
+ * the union keeps that per-channel consistency wherever two gates share a space, while still
+ * guaranteeing containment for a gate drawn outside the bulk of the data.
+ */
+function scaleJson(
+  trId: string | null | undefined, isFlow: boolean, cofactor: number,
+  range: [number, number],
+): string {
+  let flag: number, arg: string;
   if (trId == null) {
-    flag = 1; arg = "1"; mn = 1.0; mx = 1570900.0;
-  } else if (!isFlow) {
-    flag = 4; arg = String(cofactor); mn = -5.0; mx = 12000.0;
+    flag = 1; arg = "1";
   } else if (trId.startsWith("Tr_Logicle_")) {
     // Only reachable in the standard format, which Cytobank never reads. Cytobank knows
     // Linear (1), Log (2) and Arcsinh (4) only; flag 5 is not one of its scale types.
-    flag = 5; arg = "4.5"; mn = -0.5; mx = 4.5;
+    flag = 5; arg = "4.5";
   } else {
-    flag = 4; arg = String(cofactor); mn = -2.0; mx = 12.0;
+    flag = 4; arg = String(cofactor);
   }
+  void isFlow;   // the range no longer depends on instrument class; it comes from the data
+  const [mn, mx] = range;
   return `{"flag":${flag},"argument":"${arg}","min":${fmtNum(mn)},"max":${fmtNum(mx)},"bins":256,"size":256}`;
+}
+
+/** Union of a data range and the gate's own extent, padded so the gate is strictly inside. */
+function axisScaleRange(
+  dataRange: [number, number] | null, vertLo: number, vertHi: number,
+): [number, number] {
+  let lo = vertLo, hi = vertHi;
+  if (dataRange && Number.isFinite(dataRange[0]) && Number.isFinite(dataRange[1])) {
+    lo = Math.min(lo, dataRange[0]);
+    hi = Math.max(hi, dataRange[1]);
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
+  const span = hi - lo;
+  const pad = (span > 0 ? span : Math.abs(hi) || 1) * 0.02;
+  return [lo - pad, hi + pad];
 }
 
 /** Cytobank definition JSON — vertices already in export (display) space. */
@@ -260,14 +315,16 @@ function definitionJson(
   isFlow: boolean,
   xCofactor: number,
   yCofactor: number,
+  xRange: [number, number],
+  yRange: [number, number],
 ): string {
   const xs = gate.vertices.map((v) => v[0]);
   const ys = gate.vertices.map((v) => v[1]);
   const mean = (a: number[]) => a.reduce((s, v) => s + v, 0) / a.length;
   const cx = mean(xs);
   const cy = mean(ys);
-  const sx = scaleJson(xTr, isFlow, xCofactor);
-  const sy = scaleJson(yTr, isFlow, yCofactor);
+  const sx = scaleJson(xTr, isFlow, xCofactor, xRange);
+  const sy = scaleJson(yTr, isFlow, yCofactor, yRange);
   const header = `"scale":{"x":${sx},"y":${sy}},"positive":false,"negative":false,"locked":false,"label":[${fmtNum(cx)},${fmtNum(cy)}]`;
   let geom: string;
   if (gate.gate_type === "rectangle") {
@@ -327,10 +384,11 @@ function rectangleXml(
   xTr: string | null | undefined, yTr: string | null | undefined,
   isFlow: boolean, xCofactor: number, yCofactor: number, xName: string, yName: string,
   xCompRef: "FCS" | "uncompensated", yCompRef: "FCS" | "uncompensated",
+  xRange: [number, number], yRange: [number, number],
 ): string[] {
   const xs = gate.vertices.map((v) => v[0]);
   const ys = gate.vertices.map((v) => v[1]);
-  const def = definitionJson(gate, xTr, yTr, isFlow, xCofactor, yCofactor);
+  const def = definitionJson(gate, xTr, yTr, isFlow, xCofactor, yCofactor, xRange, yRange);
   return [
     `  <gating:RectangleGate gating:id="${gmlId}">`,
     ...customInfo(gate.name, numId, seq, "RectangleGate", def),
@@ -345,8 +403,9 @@ function polygonXml(
   xTr: string | null | undefined, yTr: string | null | undefined,
   isFlow: boolean, xCofactor: number, yCofactor: number, xName: string, yName: string,
   xCompRef: "FCS" | "uncompensated", yCompRef: "FCS" | "uncompensated",
+  xRange: [number, number], yRange: [number, number],
 ): string[] {
-  const def = definitionJson(gate, xTr, yTr, isFlow, xCofactor, yCofactor);
+  const def = definitionJson(gate, xTr, yTr, isFlow, xCofactor, yCofactor, xRange, yRange);
   const vertLines = gate.vertices.flatMap((v) => [
     "    <gating:vertex>",
     `      <gating:coordinate data-type:value="${fmtNum(v[0])}" />`,
@@ -499,6 +558,33 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     gateSeq.set(gid, i + 1);
   });
 
+  // The data range each channel occupies in the space its gates are written in, memoised by
+  // (channel, transform) because a workspace can hold gates on one channel in different spaces.
+  // Cheap: robustAxisRange samples rather than sorting the whole column.
+  const dataRangeCache = new Map<string, [number, number] | null>();
+  const dataRangeFor = (channelKey: string, ax: GateAxisExport): [number, number] | null => {
+    const key = `${channelKey}|${ax.trId ?? "raw"}`;
+    const hit = dataRangeCache.get(key);
+    if (hit !== undefined) return hit;
+    let out: [number, number] | null = null;
+    const idx = sample.channels.findIndex((c) => c.key === channelKey);
+    if (idx >= 0) {
+      const raw = sample.rawColumnData(idx);
+      const n = raw.length;
+      if (n > 0) {
+        // Sample rather than map the whole column: a range only needs a representative subset,
+        // and an export must not walk millions of events per channel.
+        const step = Math.max(1, Math.floor(n / 20000));
+        const buf = new Float64Array(Math.ceil(n / step));
+        let k = 0;
+        for (let j = 0; j < n; j += step) buf[k++] = ax.rawToExport(raw[j]);
+        out = robustAxisRange(buf.subarray(0, k));
+      }
+    }
+    dataRangeCache.set(key, out);
+    return out;
+  };
+
   // Gate elements.
   const gateLines: string[] = [];
   gate_order.forEach((gid, i) => {
@@ -517,15 +603,20 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     const yCompRef = compensationRefFor(g.y_channel);
     const xCofactor = xAxis.cofactor;
     const yCofactor = yAxis.cofactor;
+    // Derived from the exported geometry, so it holds for a densified polygon too.
+    const exs = dg.vertices.map((v) => v[0]);
+    const eys = dg.vertices.map((v) => v[1]);
+    const xRange = axisScaleRange(dataRangeFor(g.x_channel, xAxis), Math.min(...exs), Math.max(...exs));
+    const yRange = axisScaleRange(dataRangeFor(g.y_channel, yAxis), Math.min(...eys), Math.max(...eys));
     if (g.gate_type === "rectangle") {
       gateLines.push(...rectangleXml(
         dg, gmlId, numId, i + 1, xTr, yTr, isFlow, xCofactor, yCofactor,
-        xName, yName, xCompRef, yCompRef,
+        xName, yName, xCompRef, yCompRef, xRange, yRange,
       ));
     } else {
       gateLines.push(...polygonXml(
         dg, gmlId, numId, i + 1, xTr, yTr, isFlow, xCofactor, yCofactor,
-        xName, yName, xCompRef, yCompRef,
+        xName, yName, xCompRef, yCompRef, xRange, yRange,
       ));
     }
   });
@@ -718,6 +809,11 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     "  <data-type:custom_info>",
     "    <cytobank>",
     `      <about>${escAttr(aboutStr)}</about>`,
+    // Cytobank states the gating version in its own exports and we did not. The remaining fields
+    // it writes -- experiment_number, experiment_title, experiment_url -- identify a specific
+    // Cytobank experiment and are deliberately NOT invented here: the file is imported into an
+    // experiment the user already has open, and a fabricated number could name someone else's.
+    ...(cytobankMode ? ["      <cytobank_gating_version>2.0</cytobank_gating_version>"] : []),
     `      <export_timestamp>${timestamp}</export_timestamp>`,
     "    </cytobank>",
     "    <gatelabr_scales>",
