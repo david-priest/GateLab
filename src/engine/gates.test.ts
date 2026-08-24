@@ -278,3 +278,42 @@ describe("tree ops", () => {
     expect(wouldCreateCycle(pops, b.population_id, root.population_id)).toBe(false);
   });
 });
+
+// ── Repeated vertices ────────────────────────────────────────────────────────────────────────
+//
+// A repeated vertex makes a zero-length edge, and a zero-length edge has dx = dy = 0, so its
+// cross product and dot product are identically zero for every point. The on-boundary test
+// therefore fired for EVERY event inside the bounding box and the gate selected the whole box:
+// a real biex polygon went from 790 events to 899, its exact bounding-box count.
+//
+// This is routine input, not a pathological case. polygonOutline closes its ring by repeating the
+// first vertex, so every densified polygon GateLab exports carries one, and Gating-ML written by
+// other tools often closes rings explicitly. Caught 2026-08-24 by the Gating-ML round-trip test
+// once its fixture gates were made discriminating enough to have events near their boundaries.
+describe("polygon masks tolerate repeated vertices", () => {
+  // A unit triangle, and points chosen so that "inside the triangle" and "inside the bounding
+  // box" differ: (0.9, 0.9) is in the box but outside the hypotenuse.
+  const tri: [number, number][] = [[0, 0], [1, 0], [0, 1]];
+  const xs = [0.1, 0.9, 0.25];
+  const ys = [0.1, 0.9, 0.25];
+  const expected = [1, 0, 1];
+
+  it("gives the same mask with the ring closed explicitly", () => {
+    expect(Array.from(gateMaskPolygon(xs, ys, tri))).toEqual(expected);
+    expect(Array.from(gateMaskPolygon(xs, ys, [...tri, [0, 0]]))).toEqual(expected);
+  });
+
+  it("gives the same mask with a vertex repeated mid-ring", () => {
+    expect(Array.from(gateMaskPolygon(xs, ys, [[0, 0], [1, 0], [1, 0], [0, 1]]))).toEqual(expected);
+  });
+
+  it("does not select the bounding box when every vertex is repeated", () => {
+    const doubled = tri.flatMap((v) => [v, v]) as [number, number][];
+    expect(Array.from(gateMaskPolygon(xs, ys, doubled))).toEqual(expected);
+  });
+
+  it("still counts a point genuinely on an edge as inside", () => {
+    // The guard must not disable the on-boundary test for real edges.
+    expect(Array.from(gateMaskPolygon([0.5], [0], [...tri, [0, 0]]))).toEqual([1]);
+  });
+});
