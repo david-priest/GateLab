@@ -106,6 +106,16 @@ export function polygonOutline(
   gatingVerts: [number, number][],
   toDisplay: (p: [number, number]) => [number, number],
   displayVerts: [number, number][],
+  opts?: {
+    /** Override the 0.2% default. The EXPORTER passes half of it and spends the other half on
+     *  Douglas-Peucker collapse, so its two-stage boundary keeps the same total bound. */
+    tol?: number;
+    /** Out-param: filled with { span, edgeBreaks } so a caller can post-process per edge.
+     *  edgeBreaks[i] is the index in the returned ring where edge i's appended points begin;
+     *  edge i's endpoint (an ORIGINAL vertex, which must survive any simplification) is the
+     *  last appended point, at edgeBreaks[i+1] - 1 (ring length for the final edge). */
+    detail?: { span?: [number, number]; edgeBreaks?: number[] };
+  },
 ): [number, number][] | undefined {
   if (gatingVerts.length < 3) return undefined;
   const xs = displayVerts.map((v) => v[0]).filter(Number.isFinite);
@@ -118,13 +128,19 @@ export function polygonOutline(
   if (!(spanX > 0) && !(spanY > 0)) return undefined;
   const span: [number, number] = [spanX > 0 ? spanX : Infinity, spanY > 0 ? spanY : Infinity];
   // 0.2% of the gate's own extent on the axis that bends, which is sub-pixel at any plot size.
-  const tol = 0.002;
+  const tol = opts?.tol ?? 0.002;
 
   const out: [number, number][] = [toDisplay(gatingVerts[0])];
+  const breaks: number[] = [];
   for (let i = 0; i < gatingVerts.length; i++) {
+    breaks.push(out.length);
     subdivideEdge(
       gatingVerts[i], gatingVerts[(i + 1) % gatingVerts.length], toDisplay, tol, span, out,
     );
+  }
+  if (opts?.detail) {
+    opts.detail.span = span;
+    opts.detail.edgeBreaks = breaks;
   }
   // A straight-in-display gate needs no outline; leaving it off keeps the payload small and the
   // renderer on its existing path.

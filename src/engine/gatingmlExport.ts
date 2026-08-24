@@ -264,6 +264,58 @@ function buildGateExportPlan(
   };
 }
 
+/**
+ * Douglas-Peucker over a densified ring, per edge, keeping every ORIGINAL vertex.
+ *
+ * subdivideEdge bisects, so it lays points down uniformly along an edge even when the curvature
+ * is concentrated in one stretch of it -- a real LP4 export carried 25 to 67 vertices per gate,
+ * which is unusable to hand-edit in the receiving tool. Collapse drops the interior points a
+ * straight chord already represents within `tol` (span-normalised, the same metric subdivision
+ * uses). The exporter subdivides at HALF the documented tolerance and collapses at the other
+ * half, so the two stages together keep the same 0.2% total bound rather than doubling it.
+ * Original vertices are forced anchors: a true corner can never be simplified away.
+ */
+function collapseDensifiedRing(
+  ring: [number, number][],
+  edgeBreaks: number[],
+  span: [number, number],
+  tol: number,
+): [number, number][] {
+  const keep = new Array<boolean>(ring.length).fill(false);
+  keep[0] = true;
+  const dp = (i0: number, i1: number): void => {
+    if (i1 - i0 < 2) return;
+    const [ax, ay] = ring[i0];
+    const [bx, by] = ring[i1];
+    const dx = (bx - ax) / span[0];
+    const dy = (by - ay) / span[1];
+    const len = Math.hypot(dx, dy);
+    let worst = -1;
+    let worstD = tol;
+    for (let i = i0 + 1; i < i1; i++) {
+      const px = (ring[i][0] - ax) / span[0];
+      const py = (ring[i][1] - ay) / span[1];
+      // Perpendicular distance to the chord; degenerate chord falls back to point distance.
+      const d = len > 0 ? Math.abs(dx * py - dy * px) / len : Math.hypot(px, py);
+      if (d > worstD) { worstD = d; worst = i; }
+    }
+    if (worst >= 0) {
+      keep[worst] = true;
+      dp(i0, worst);
+      dp(worst, i1);
+    }
+  };
+  for (let e = 0; e < edgeBreaks.length; e++) {
+    // Edge e's appended points end at the next edge's break (ring end for the last edge); the
+    // final appended point is the edge's endpoint, an original vertex.
+    const end = (e + 1 < edgeBreaks.length ? edgeBreaks[e + 1] : ring.length) - 1;
+    keep[end] = true;
+    const start = edgeBreaks[e] - 1; // the previous edge's endpoint anchors this one
+    dp(Math.max(0, start), end);
+  }
+  return ring.filter((_, i) => keep[i]);
+}
+
 const round = (x: number, d: number): number => {
   const f = Math.pow(10, d);
   return Math.round(x * f) / f;
@@ -352,7 +404,10 @@ function definitionJson(
 }
 
 // ── XML fragments ────────────────────────────────────────────────────────────
-function customInfo(name: string, numericId: number, gateSeq: number, typeStr: string, defJson: string): string[] {
+function customInfo(
+  name: string, numericId: number, gateSeq: number, typeStr: string, defJson: string,
+  compensationId: number,
+): string[] {
   return [
     "    <data-type:custom_info>",
     "      <cytobank>",
@@ -361,7 +416,10 @@ function customInfo(name: string, numericId: number, gateSeq: number, typeStr: s
     `        <gate_id>${gateSeq}</gate_id>`,
     `        <type>${typeStr}</type>`,
     "        <version>-1</version>",
-    "        <compensation_id>-2</compensation_id>",
+    // Cytobank's semantics, read off its own exports: -2 = uncompensated, 0 = the file's
+    // internal matrix, a positive id = a named Cytobank compensation. Every gate used to say -2
+    // even when its dimensions declared compensation-ref="FCS".
+    `        <compensation_id>${compensationId}</compensation_id>`,
     "        <fcs_file_id />",
     "        <tailored>false</tailored>",
     "        <tailored_per_population>false</tailored_per_population>",
@@ -400,13 +458,14 @@ function rectangleXml(
   isFlow: boolean, xCofactor: number, yCofactor: number, xName: string, yName: string,
   xCompRef: "FCS" | "uncompensated", yCompRef: "FCS" | "uncompensated",
   xRange: [number, number], yRange: [number, number],
+  compensationId: number,
 ): string[] {
   const xs = gate.vertices.map((v) => v[0]);
   const ys = gate.vertices.map((v) => v[1]);
   const def = definitionJson(gate, xTr, yTr, isFlow, xCofactor, yCofactor, xRange, yRange);
   return [
     `  <gating:RectangleGate gating:id="${gmlId}">`,
-    ...customInfo(gate.name, numId, seq, "RectangleGate", def),
+    ...customInfo(gate.name, numId, seq, "RectangleGate", def, compensationId),
     ...dimXml(xName, xTr, xCompRef, Math.min(...xs), Math.max(...xs)),
     ...dimXml(yName, yTr, yCompRef, Math.min(...ys), Math.max(...ys)),
     "  </gating:RectangleGate>",
@@ -419,6 +478,7 @@ function polygonXml(
   isFlow: boolean, xCofactor: number, yCofactor: number, xName: string, yName: string,
   xCompRef: "FCS" | "uncompensated", yCompRef: "FCS" | "uncompensated",
   xRange: [number, number], yRange: [number, number],
+  compensationId: number,
 ): string[] {
   const def = definitionJson(gate, xTr, yTr, isFlow, xCofactor, yCofactor, xRange, yRange);
   const vertLines = gate.vertices.flatMap((v) => [
@@ -429,7 +489,7 @@ function polygonXml(
   ]);
   return [
     `  <gating:PolygonGate gating:id="${gmlId}">`,
-    ...customInfo(gate.name, numId, seq, "PolygonGate", def),
+    ...customInfo(gate.name, numId, seq, "PolygonGate", def, compensationId),
     ...dimXml(xName, xTr, xCompRef),
     ...dimXml(yName, yTr, yCompRef),
     ...vertLines,
@@ -551,7 +611,13 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     // a straight segment between the transformed endpoints is no longer the same boundary. Only
     // polygons are affected: a rectangle stays an axis-aligned box under any monotonic transform.
     if ((ax.needsDensify || ay.needsDensify) && g.gate_type === "polygon") {
-      const dense = polygonOutline(g.vertices, toOut, vertices);
+      const detail: { span?: [number, number]; edgeBreaks?: number[] } = {};
+      // Half the 0.2% documented tolerance on subdivision, half on collapse: same total bound,
+      // far fewer vertices. See collapseDensifiedRing.
+      const dense = polygonOutline(g.vertices, toOut, vertices, { tol: 0.001, detail });
+      if (dense && detail.span && detail.edgeBreaks) {
+        return { ...g, vertices: collapseDensifiedRing(dense, detail.edgeBreaks, detail.span, 0.001) };
+      }
       if (dense) return { ...g, vertices: dense };
     }
     return { ...g, vertices };
@@ -600,6 +666,49 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     return out;
   };
 
+  // ── The compensation matrix, as Cytobank's own exports carry it ─────────────────────────
+  //
+  // The export used to write compensation-ref="FCS" and no matrix, leaving the receiving tool
+  // to find one itself. When the gates were computed under a matrix that is NOT in the FCS —
+  // S6: FlowJo gated with the workspace's hand-adjusted DivaCompMtx while the FCS carries the
+  // acquisition matrix, 48 of 49 coefficients different — the receiver silently compensates
+  // with the wrong one. Measured on Cytobank: the 3 uncompensated scatter gates matched GateLab
+  // exactly while all 15 compensated gates drifted, 1,437 events in total. Emitting the ACTIVE
+  // matrix makes the file self-contained; Cytobank parses these blocks from its own exports
+  // ("We have parsed out a spectrum matrix"). Cytobank flavour only: the standard flavour must
+  // stay free of transforms: elements, which is what proves its vertices are raw.
+  const EXPORTED_MATRIX_ID = 1;
+  const exportCompensationOn = sample.instrument === "flow" && sample.embeddedCompensationEnabled;
+  const exportSpillover = exportCompensationOn ? sample.spillover : null;
+  const spectrumLines: string[] = [];
+  if (cytobankMode && exportSpillover) {
+    const detectors = exportSpillover.channels.map((c: string) => pnnFor(c));
+    const matrixName = sample.spilloverOrigin.kind === "external"
+      ? sample.spilloverOrigin.label
+      : "FCS $SPILLOVER";
+    spectrumLines.push(
+      `  <transforms:spectrumMatrix transforms:id="Spill_${EXPORTED_MATRIX_ID}">`,
+      "    <data-type:custom_info>",
+      "      <cytobank>",
+      `        <cytobank_compensation_id>${EXPORTED_MATRIX_ID}</cytobank_compensation_id>`,
+      `        <cytobank_compensation_name>${escAttr(matrixName)}</cytobank_compensation_name>`,
+      "      </cytobank>",
+      "    </data-type:custom_info>",
+      "    <transforms:fluorochromes>",
+      ...detectors.map((d: string) => `      <data-type:fcs-dimension data-type:name="Comp_${escAttr(d)}" />`),
+      "    </transforms:fluorochromes>",
+      "    <transforms:detectors>",
+      ...detectors.map((d: string) => `      <data-type:fcs-dimension data-type:name="${escAttr(d)}" />`),
+      "    </transforms:detectors>",
+      ...exportSpillover.matrix.flatMap((row: number[]) => [
+        "    <transforms:spectrum>",
+        ...row.map((v: number) => `      <transforms:coefficient transforms:value="${fmtNum(v)}" />`),
+        "    </transforms:spectrum>",
+      ]),
+      "  </transforms:spectrumMatrix>",
+    );
+  }
+
   // Gate elements.
   const gateLines: string[] = [];
   gate_order.forEach((gid, i) => {
@@ -623,15 +732,26 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     const eys = dg.vertices.map((v) => v[1]);
     const xRange = axisScaleRange(dataRangeFor(g.x_channel, xAxis), Math.min(...exs), Math.max(...exs));
     const yRange = axisScaleRange(dataRangeFor(g.y_channel, yAxis), Math.min(...eys), Math.max(...eys));
+    // Cytobank's ids, read off its own exports: -2 = uncompensated, 0 = the file's internal
+    // matrix, positive = a named compensation. A compensated gate points at the matrix this file
+    // DECLARES below when the active matrix is not the FCS's own (the S6 case: gates drawn under
+    // the workspace's hand-adjusted matrix, which the FCS does not carry); at the file-internal
+    // one (0) when it is. compensation-ref stays "FCS"/"uncompensated" — Cytobank's own exports
+    // never reference a matrix from a dimension, and GateLab's importer refuses anything else.
+    const compensated = xCompRef === "FCS" || yCompRef === "FCS";
+    const compId = !compensated ? -2
+      : !cytobankMode ? -2
+      : sample.spilloverOrigin.kind === "fcs" ? 0
+      : EXPORTED_MATRIX_ID;
     if (g.gate_type === "rectangle") {
       gateLines.push(...rectangleXml(
         dg, gmlId, numId, i + 1, xTr, yTr, isFlow, xCofactor, yCofactor,
-        xName, yName, xCompRef, yCompRef, xRange, yRange,
+        xName, yName, xCompRef, yCompRef, xRange, yRange, compId,
       ));
     } else {
       gateLines.push(...polygonXml(
         dg, gmlId, numId, i + 1, xTr, yTr, isFlow, xCofactor, yCofactor,
-        xName, yName, xCompRef, yCompRef, xRange, yRange,
+        xName, yName, xCompRef, yCompRef, xRange, yRange, compId,
       ));
     }
   });
@@ -836,6 +956,7 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     "    </gatelabr_scales>",
     "  </data-type:custom_info>",
     ...[...trDefs.entries()].flatMap(([id, tr]) => transformXml(id, tr)),
+    ...spectrumLines,
     ...gateLines,
     ...boolLines,
     ...(hierLines.length ? ["  <gating:GatingHierarchy>", ...hierLines, "  </gating:GatingHierarchy>"] : []),
