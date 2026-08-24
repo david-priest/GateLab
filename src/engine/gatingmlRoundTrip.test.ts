@@ -10,9 +10,11 @@
 // invariant a refactor of transform(), transformSpec() or the exporter could silently break.
 //
 // FlowJo's biex and wsplog (Class 2) have no Gating-ML representation, so those gates export as
-// raw with densified polygon edges. Rectangles must survive that EXACTLY (a monotonic transform
-// maps an axis-aligned box to an axis-aligned box); polygons are bounded by the densification
-// tolerance, and the bound is measured here rather than assumed.
+// raw with densified polygon edges. Both forms are BOUNDED rather than exact, and the bounds have
+// different causes: a polygon by the densification tolerance, a rectangle by float precision at
+// the boundary (a monotonic transform preserves an axis-aligned box's geometry exactly, but the
+// two membership predicates can differ by an ulp -- see the rectangle case). Class 1 is the only
+// thing asserted exact here.
 
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -106,10 +108,18 @@ describe("Gating-ML self round-trip", () => {
   const sample = load();
   const fluor = sample.channels.filter((_, i) => sample.isLogicleChannel(i)).map((c) => c.key);
   const [fx, fy] = fluor;
-  // Real, partial populations: bounds from the fixture's quantiles so no mask is all-in/all-out.
-  const rectRaw: Vertex[] = [[20000, 10000], [80000, 10000], [80000, 90000], [20000, 90000]];
+  // Real, PARTIAL populations, with the boundary running through dense data — which is the only
+  // place a round trip can go wrong. The previous shapes spanned this fixture's whole fluorescence
+  // range and held 1079 of its 1080 events, so "membership survived" was nearly unfalsifiable:
+  // shifting an edge by 1% of the gate's extent moved zero events, because the edges sat in empty
+  // space. These bounds come from the fixture's own quantiles (PE-A q25/q75 = -2/11,
+  // PE-Cy7-A q25/q75 = 10/32), and a 1% edge shift now moves 1.3-2.3% of the gate, two orders
+  // above the Class 2 tolerance below. assertPartial keeps it that way.
+  const rectRaw: Vertex[] = [[-2, 10], [11, 10], [11, 32], [-2, 32]];
   // Spans negative on both axes — the region where transforms bend hardest.
-  const polyRaw: Vertex[] = [[-150, -80], [2500, -80], [3500, 4000], [400, 7000], [-150, 1500]];
+  const polyRaw: Vertex[] = [[-11, 0], [11, 0], [25, 32], [4, 61], [-11, 21]];
+  // wsplog clamps at its offset, so its gate must sit strictly positive to stay meaningful.
+  const wsplogRect: Vertex[] = [[2, 2], [25, 2], [25, 61], [2, 61]];
 
   const asinhSpec = (cf: number): TransformSpec => ({ kind: "asinh", cofactor: cf });
   const logicleSpecFor = (key: string): TransformSpec =>
@@ -120,20 +130,46 @@ describe("Gating-ML self round-trip", () => {
   };
   const wsplogSpec: TransformSpec = { kind: "wsplog", offset: 1, decades: 4.5 };
 
+  /**
+   * A gate that holds almost every event cannot test membership: there is nothing outside it to
+   * move in, so the assertion passes however the round trip behaves. `events > 0 && < n` was meant
+   * to catch that and did not -- it passed on a gate holding 1079 of 1080. A real band is the fix.
+   */
+  const assertPartial = (name: string, events: number, n: number) => {
+    const frac = events / n;
+    expect(frac, `"${name}" holds ${events}/${n} — too small to test membership`).toBeGreaterThan(0.05);
+    expect(frac, `"${name}" holds ${events}/${n} — an almost-everything gate cannot fail`).toBeLessThan(0.95);
+  };
+
   const assertExact = (gates: Gate[]) => {
     const back = roundTrip(sample, gates);
     for (const g of gates) {
       const before = maskOf(sample, g);
       const events = before.reduce((s, v) => s + v, 0);
-      expect(events, `"${g.name}" holds a real population`).toBeGreaterThan(0);
-      expect(events, `"${g.name}" is not all-in`).toBeLessThan(before.length);
+      assertPartial(g.name, events, before.length);
       expect(moved(before, maskOf(sample, back.get(g.name)!)), `"${g.name}" events moved`).toBe(0);
+    }
+  };
+
+  /**
+   * Class 2's bounded counterpart. `frac` is the share of a gate's own events allowed to move,
+   * floored at one event so a small population is not held to a stricter standard than a large
+   * one. Kept separate from assertExact so that "exact" keeps meaning exact.
+   */
+  const assertWithin = (gates: Gate[], frac: number) => {
+    const back = roundTrip(sample, gates);
+    for (const g of gates) {
+      const before = maskOf(sample, g);
+      const events = before.reduce((s, v) => s + v, 0);
+      assertPartial(g.name, events, before.length);
+      expect(moved(before, maskOf(sample, back.get(g.name)!)), `"${g.name}" events moved`)
+        .toBeLessThanOrEqual(Math.max(1, Math.ceil(events * frac)));
     }
   };
 
   it("Class 1: raw gates return with identical membership", () => {
     assertExact([
-      gateIn(sample, "raw rect", "rectangle", "FSC-A", "SSC-A", rectRaw, null),
+      gateIn(sample, "raw rect", "rectangle", fx, fy, rectRaw, null),
       gateIn(sample, "raw poly", "polygon", fx, fy, polyRaw, null),
     ]);
   });
@@ -141,7 +177,7 @@ describe("Gating-ML self round-trip", () => {
   it("Class 1: arcsinh display gates return with identical membership", () => {
     const spec = { x: asinhSpec(150), y: asinhSpec(150) };
     assertExact([
-      gateIn(sample, "asinh rect", "rectangle", fx, fy, polyRawBox(polyRaw), spec),
+      gateIn(sample, "asinh rect", "rectangle", fx, fy, rectRaw, spec),
       gateIn(sample, "asinh poly", "polygon", fx, fy, polyRaw, spec),
     ]);
   });
@@ -149,21 +185,34 @@ describe("Gating-ML self round-trip", () => {
   it("Class 1: logicle display gates return with identical membership", () => {
     const spec = { x: logicleSpecFor(fx), y: logicleSpecFor(fy) };
     assertExact([
-      gateIn(sample, "logicle rect", "rectangle", fx, fy, polyRawBox(polyRaw), spec),
+      gateIn(sample, "logicle rect", "rectangle", fx, fy, rectRaw, spec),
       gateIn(sample, "logicle poly", "polygon", fx, fy, polyRaw, spec),
     ]);
   });
 
-  it("Class 2: a rectangle under biex or wsplog survives exactly through raw", () => {
-    // No Gating-ML representation exists, so these export as raw — which is EXACT for an
-    // axis-aligned box under any monotonic transform. wsplog clamps below its offset, so its
-    // rectangle sits fully above it to stay meaningful.
-    assertExact([
-      gateIn(sample, "biex rect", "rectangle", fx, fy, polyRawBox(polyRaw),
+  it("Class 2: a rectangle under biex or wsplog is bounded by float precision at the boundary", () => {
+    // A monotonic transform maps an axis-aligned box to an axis-aligned box, so exporting these
+    // raw preserves the GEOMETRY exactly. The arithmetic is what is not exact: GateLab evaluates
+    // the original by forward-transforming each event and comparing against display-space corners,
+    // while the re-imported gate compares raw values against LUT-inverted corners. The two
+    // predicates agree in exact arithmetic and can differ by one float ulp, so an event sitting on
+    // the boundary value can fall the other way.
+    //
+    // This case asserted exactness until 2026-08-24, and passed -- but only because no event in
+    // this fixture sits that close to an edge. On the S6 FACSDiva data, whose values are quantised
+    // so that several events share one boundary value, a biex rectangle moves 1 event of 1,518
+    // (experiment GateLab-2026-08-15-B). Zero was therefore an accident of the fixture, not a
+    // property of the round trip, and a test that encodes an accident fails for the wrong reason
+    // the day the fixture changes. The bound below is two orders of magnitude tighter than any
+    // real geometric regression, which moves a percent-level share of the gate.
+    //
+    // wsplog clamps below its offset, so its rectangle sits fully above it to stay meaningful.
+    assertWithin([
+      gateIn(sample, "biex rect", "rectangle", fx, fy, rectRaw,
         { x: biexSpec, y: biexSpec }),
-      gateIn(sample, "wsplog rect", "rectangle", fx, fy, [[50, 40], [6000, 40], [6000, 9000], [50, 9000]],
+      gateIn(sample, "wsplog rect", "rectangle", fx, fy, wsplogRect,
         { x: wsplogSpec, y: wsplogSpec }),
-    ]);
+    ], 0.0005);
   });
 
   it("Class 2: a polygon under biex is bounded by densification, and the bound is small", () => {
@@ -191,12 +240,3 @@ describe("Gating-ML self round-trip", () => {
       .toThrow(/quadrant/i);
   });
 });
-
-/** The bounding box of a polygon, as 4 rectangle corners in the same raw units. */
-function polyRawBox(poly: Vertex[]): Vertex[] {
-  const xs = poly.map((v) => v[0]);
-  const ys = poly.map((v) => v[1]);
-  const x0 = Math.min(...xs), x1 = Math.max(...xs);
-  const y0 = Math.min(...ys), y1 = Math.max(...ys);
-  return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
-}

@@ -99,12 +99,25 @@ export function gateMaskPolygon(
 
     let inside = false;
     for (const edge of edges) {
-      const cross = edge.dx * (py - edge.ay) - edge.dy * (px - edge.ax);
-      if (Math.abs(cross) <= edge.boundaryTolerance) {
-        const dot = (px - edge.ax) * edge.dx + (py - edge.ay) * edge.dy;
-        if (dot >= -1e-12 && dot <= edge.len2 + 1e-12) {
-          inside = true;
-          break;
+      // A zero-length edge — a repeated vertex — has no direction, so nothing can lie *along* it
+      // and it cannot be crossed. It must be skipped, not evaluated: with dx = dy = 0 both the
+      // cross product and the dot product are identically zero for EVERY point, so
+      // |cross| <= tolerance and dot <= len2 + 1e-12 both held for every event and the
+      // on-boundary branch marked the whole BOUNDING BOX inside. One biex polygon went from 790
+      // events to 899, which is precisely its bounding-box count.
+      //
+      // Repeated vertices are routine, not exotic: polygonOutline closes its ring by repeating
+      // the first vertex, so every densified polygon GateLab exports carries one, and Gating-ML
+      // written elsewhere often closes rings explicitly too. The crossing test below is already
+      // inert for such an edge (ay === by), so only the boundary test needed the guard.
+      if (edge.len2 > 0) {
+        const cross = edge.dx * (py - edge.ay) - edge.dy * (px - edge.ax);
+        if (Math.abs(cross) <= edge.boundaryTolerance) {
+          const dot = (px - edge.ax) * edge.dx + (py - edge.ay) * edge.dy;
+          if (dot >= -1e-12 && dot <= edge.len2 + 1e-12) {
+            inside = true;
+            break;
+          }
         }
       }
 
