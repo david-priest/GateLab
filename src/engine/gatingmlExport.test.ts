@@ -858,3 +858,165 @@ describe("Cytobank scale ranges contain their own gates", () => {
     });
   }
 });
+
+// ── The compensation matrix travels in the Cytobank flavour ──────────────────────────────────
+//
+// The export used to write compensation-ref="FCS" and no matrix, so a receiving tool had to
+// find one itself — and when the gates were computed under a matrix that is not in the FCS (S6:
+// FlowJo's hand-adjusted DivaCompMtx vs the acquisition matrix in the file, 48 of 49
+// coefficients different), Cytobank silently compensated with the wrong one: its 3 uncompensated
+// scatter gates matched GateLab exactly while all 15 compensated gates drifted, 1,437 events.
+describe("Cytobank export carries the active spillover matrix", () => {
+  function compFixture() {
+    const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+    expect(sample.hasCompensation).toBe(true);
+    sample.setCompensation(true);
+    return { sample, ws: buildWorkspace(sample) };
+  }
+
+  it("emits a spectrumMatrix block with the matrix values, detectors and Comp_ fluorochromes", () => {
+    const { sample, ws } = compFixture();
+    const xml = exportGatingML({ ...ws, sample, format: "cytobank", timestamp: "t" });
+    expect(xml).toContain('<transforms:spectrumMatrix transforms:id="Spill_1">');
+    const sp = sample.spillover!;
+    for (const ch of sp.channels) {
+      const pnn = sample.channels.find((c) => c.key === ch)!.pnn;
+      expect(xml).toContain(`<data-type:fcs-dimension data-type:name="Comp_${pnn}" />`);
+      expect(xml).toContain(`<data-type:fcs-dimension data-type:name="${pnn}" />`);
+    }
+    // One spectrum row per channel, and a representative off-diagonal coefficient survives.
+    expect(xml.match(/<transforms:spectrum>/g)!.length).toBe(sp.channels.length);
+    const offDiag = sp.matrix.flatMap((row, i) => row.filter((_, j) => j !== i)).find((v) => v > 0)!;
+    expect(xml).toContain(`transforms:value="${offDiag}"`);
+  });
+
+  it("points compensated gates at the file-internal matrix and leaves uncompensated ones alone", () => {
+    const { sample, ws } = compFixture();
+    const xml = exportGatingML({ ...ws, sample, format: "cytobank", timestamp: "t" });
+    // ARIA's spillover comes from the FCS itself, so compensated gates say 0 (Cytobank's
+    // "file internal"), not a declared-matrix id; uncompensated gates keep -2.
+    expect(sample.spilloverOrigin.kind).toBe("fcs");
+    // Scoped to GEOMETRIC gates: boolean gate-set blocks hardcode 0 in every export (mirroring
+    // Cytobank's own), so a whole-file toContain(0) is satisfied vacuously — mutation-tested.
+    const ids = [...xml.matchAll(
+      /<gating:(?:Polygon|Rectangle)Gate[\s\S]*?<compensation_id>(-?\d+)</g)].map((m) => m[1]);
+    expect(ids).toContain("0");
+    expect(ids).toContain("-2");
+  });
+
+  it("keeps the standard flavour free of transforms elements — the raw-vertex proof", () => {
+    const { sample, ws } = compFixture();
+    const xml = exportGatingML({ ...ws, sample, format: "standard", timestamp: "t" });
+    expect(xml).not.toContain("spectrumMatrix");
+    // The round-trip notebook REFUSES a standard file containing any transforms: element, and
+    // that refusal is what proves the standard flavour's vertices are raw. asDisplayWorkspace
+    // gates would legitimately add transformation blocks, so this fixture keeps raw gates.
+    expect(xml).not.toContain("<transforms:transformation");
+    // And the compensated round trip through the importer still resolves.
+    const back = importGatingML(xml, sample.channels.map((c) => c.key),
+      Object.fromEntries(sample.channels.map((c) => [c.pnn, c.key])));
+    expect(resolveGatingMLCompensation(back.compensation, back.compensation_refs, true,
+      sample.spillover)).toEqual({ target: true, source: "embedded", requiresConfirmation: false });
+  });
+
+  it("names an externally installed matrix and points compensated gates at it", () => {
+    // The S6 shape: the matrix the gates were computed under came from the FlowJo workspace,
+    // not the FCS, so "file internal" (0) would hand the receiver the WRONG matrix. The gate
+    // must point at the declared block instead.
+    const { sample, ws } = compFixture();
+    const doctored = {
+      channels: sample.spillover!.channels,
+      matrix: sample.spillover!.matrix.map((row, i) =>
+        row.map((v, j) => (i === j ? 1 : Math.min(0.9, v + 0.05)))),
+    };
+    sample.setCompensation(false);
+    sample.installExternalSpillover(doctored, "DivaCompMtx_test.fcs", { replaceEmbedded: true });
+    sample.setCompensation(true);
+    expect(sample.spilloverOrigin.kind).toBe("external");
+
+    const xml = exportGatingML({ ...ws, sample, format: "cytobank", timestamp: "t" });
+    expect(xml).toContain("<cytobank_compensation_name>DivaCompMtx_test.fcs</cytobank_compensation_name>");
+    expect(xml).toContain("<compensation_id>1</compensation_id>");
+    // And the values in the block are the ACTIVE (external) matrix's as the sample now holds
+    // it — installExternalSpillover re-extracts to display space, so compare post-install.
+    const active = sample.spillover!;
+    const offDiag = active.matrix.flatMap((row, i) => row.filter((_, j) => j !== i)).find((v) => v > 0.01)!;
+    const m = xml.match(/<transforms:spectrumMatrix[\s\S]*?<\/transforms:spectrumMatrix>/)![0];
+    const emitted = [...m.matchAll(/transforms:value="([^"]+)"/g)].map((x) => Number(x[1]));
+    expect(emitted.some((v) => Math.abs(v - offDiag) < 1e-6)).toBe(true);
+  });
+
+  it("emits no matrix when compensation is off", () => {
+    const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+    const ws = buildWorkspace(sample);
+    const xml = exportGatingML({ ...ws, sample, format: "cytobank", timestamp: "t" });
+    expect(xml).not.toContain("spectrumMatrix");
+    // Boolean gate sets always say 0, mirroring Cytobank's own exports; the check is that no
+    // GEOMETRIC gate claims a compensation while compensation is off.
+    for (const m of xml.matchAll(/<gating:(?:Polygon|Rectangle)Gate[\s\S]*?<compensation_id>(-?\d+)</g)) {
+      expect(m[1]).toBe("-2");
+    }
+  });
+});
+
+// ── Densified polygons are collapsed to editable vertex counts ──────────────────────────────
+//
+// subdivideEdge bisects, so it distributes points uniformly along an edge even where the curve
+// is locally straight: a real LP4 export carried 25-67 vertices per gate, unusable to hand-edit
+// in Cytobank. The exporter now subdivides at half the 0.2% tolerance and Douglas-Peuckers the
+// interior points at the other half — the same total bound (the round-trip suite measures moved
+// events and still passes), roughly half the vertices on the shapes that were worst.
+describe("densified polygon vertex collapse", () => {
+  it("halves the pathological case and never simplifies away an original vertex", () => {
+    const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+    const fluor = sample.channels.filter((_, i) => sample.transformKind(i) === "logicle")
+      .map((c) => c.key);
+    const [fx, fy] = fluor;
+    const biex = { kind: "biex", maxValue: 262144, pos: 4.418539922, neg: 0,
+                   widthBasis: -10, channelRange: 256 } as const;
+    // Spans most of the biex range, the shape that exported 67 vertices before the collapse.
+    const raw: Vertex[] = [[-150, -80], [2500, -80], [3500, 4000], [400, 7000], [-150, 1500]];
+    const g = {
+      gate_id: uuid(), name: "wide", gate_type: "polygon", x_channel: fx, y_channel: fy,
+      color: "#000", label_offset: null, vertices: raw, space: "display",
+      transforms: { [fx]: biex, [fy]: biex },
+    } as Gate & { vertices: Vertex[] };
+    g.vertices = raw.map(([vx, vy]) => [
+      sample.rawToGate(g as Gate, fx, vx), sample.rawToGate(g as Gate, fy, vy)]);
+
+    const root = newRootPopulation();
+    let pops: PopulationMap = { [root.population_id]: root };
+    const pp = newPopulation("wide", [newGateRef(g.gate_id, true)], root.population_id);
+    pops[pp.population_id] = pp;
+    pops = linkChildToParent(pops, pp.population_id, root.population_id);
+    const ws = { gates: { [g.gate_id]: g as Gate }, gate_order: [g.gate_id],
+                 populations: pops, root_population_id: root.population_id };
+    const xml = exportGatingML({ ...ws, sample, format: "standard", timestamp: "t" });
+
+    const n = (xml.match(/<gating:vertex>/g) ?? []).length;
+    // Measured 36 with the collapse (67 without it; ~130 if only the finer subdivision ran).
+    expect(n).toBeLessThanOrEqual(45);
+    expect(n).toBeGreaterThanOrEqual(raw.length);
+
+    // Every ORIGINAL vertex survives as the gate actually holds it: corners are forced anchors
+    // in the collapse. "As the gate holds it" matters — a raw coordinate outside the biex
+    // table's domain (x = -150 here; this table bottoms out near -93.5) was clamped when the
+    // display-space gate was CREATED, so the export legitimately returns the clamp, not the
+    // out-of-domain number. Membership is unaffected: every raw value beyond the domain edge
+    // shares that display coordinate. So the invariant is round-tripped-vertex survival, and
+    // exactness is additionally asserted for the in-domain corners.
+    const vals = [...xml.matchAll(/data-type:value="([^"]+)"/g)].map((m) => Number(m[1]));
+    const pts: [number, number][] = [];
+    for (let i = 0; i + 1 < vals.length; i += 2) pts.push([vals[i], vals[i + 1]]);
+    raw.forEach(([rx, ry], i) => {
+      const ex = sample.gateToRaw(g as Gate, fx, (g.vertices as Vertex[])[i][0]);
+      const ey = sample.gateToRaw(g as Gate, fy, (g.vertices as Vertex[])[i][1]);
+      expect(pts.some(([x, y]) => Math.abs(x - ex) < 1e-6 && Math.abs(y - ey) < 1e-6),
+        `vertex ${i} (${rx}, ${ry}) survived as (${ex}, ${ey})`).toBe(true);
+      if (rx > -90 && ry > -90) {
+        expect(Math.abs(ex - rx)).toBeLessThan(1e-6);
+        expect(Math.abs(ey - ry)).toBeLessThan(1e-6);
+      }
+    });
+  });
+});
