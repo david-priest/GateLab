@@ -788,3 +788,73 @@ describe("GatingML NOT round-trip (Aria III flow, real events)", () => {
     });
   }
 });
+
+// ── The declared scale must contain the gate it describes ────────────────────────────────────
+//
+// Cytobank draws the axis from the <definition> scale block and recomputes membership from the
+// vertices, so a gate whose vertices fall outside its own declared min/max imports invisible.
+// The ranges used to be hardcoded constants (linear got 1 … 1570900, flow arcsinh -2 … 12), and
+// on real data 17 of LP4's axis/gate combinations fell outside them -- one by a factor of 100.
+// That is what stalled the Cytobank arm of GateLab-2026-08-15-B.
+describe("Cytobank scale ranges contain their own gates", () => {
+  const scalesOf = (xml: string) => {
+    const out: { name: string; scale: Record<string, { min: number; max: number }>;
+                 xs: number[]; ys: number[] }[] = [];
+    for (const m of xml.matchAll(/<name>([^<]*)<\/name>[\s\S]*?<definition>([\s\S]*?)<\/definition>/g)) {
+      const json = m[2].replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+      let j: Record<string, unknown>;
+      try { j = JSON.parse(json); } catch { continue; }
+      const scale = j.scale as Record<string, { min: number; max: number }> | undefined;
+      if (!scale) continue;
+      const poly = (j.polygon as { vertices?: [number, number][] } | undefined)?.vertices;
+      const rect = j.rectangle as { x1: number; y1: number; x2: number; y2: number } | undefined;
+      const verts = poly ?? (rect ? [[rect.x1, rect.y1], [rect.x2, rect.y2]] as [number, number][] : null);
+      if (!verts) continue;
+      out.push({ name: m[1], scale, xs: verts.map((v) => v[0]), ys: verts.map((v) => v[1]) });
+    }
+    return out;
+  };
+
+  for (const format of ["cytobank", "standard"] as const) {
+    it(`holds for every gate in the ${format} format`, () => {
+      const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+      // Display-space gates, which is where the hardcoded ranges failed worst: a biex or logicle
+      // gate re-expressed for export lands far outside a constant guessed in advance.
+      const base = asDisplayWorkspace(sample, buildWorkspace(sample));
+
+      // Plus a raw gate deliberately BEYOND this fixture's own data, because the fixture alone
+      // cannot expose the bug: every ARIA value happens to sit inside the old hardcoded
+      // 1 … 1570900, so restoring that constant still passed. LP4's FACSDiscover S8 reaches
+      // 1.5e8 -- two orders past it -- which is the real case this guards.
+      const far = sample.channels[0].key;
+      const far2 = sample.channels[1].key;
+      const farGate = {
+        gate_id: uuid(), name: "far out", gate_type: "rectangle",
+        x_channel: far, y_channel: far2, color: "#000", label_offset: null, space: "raw",
+        vertices: [[2e6, 2e6], [5e7, 5e7]] as Vertex[],
+      } as Gate;
+      const farPop = newPopulation("far out", [newGateRef(farGate.gate_id, true)],
+                                   base.root_population_id);
+      const ws = {
+        ...base,
+        gates: { ...base.gates, [farGate.gate_id]: farGate },
+        gate_order: [...base.gate_order, farGate.gate_id],
+        populations: linkChildToParent(
+          { ...base.populations, [farPop.population_id]: farPop },
+          farPop.population_id, base.root_population_id),
+      };
+      const xml = exportGatingML({ ...ws, sample, format, timestamp: "t" });
+      const gates = scalesOf(xml);
+      expect(gates.length).toBeGreaterThan(0);
+      for (const g of gates) {
+        for (const [axis, vals] of [["x", g.xs], ["y", g.ys]] as const) {
+          const a = g.scale[axis];
+          expect(Math.min(...vals), `${g.name} ${axis} min inside declared scale`)
+            .toBeGreaterThanOrEqual(a.min);
+          expect(Math.max(...vals), `${g.name} ${axis} max inside declared scale`)
+            .toBeLessThanOrEqual(a.max);
+        }
+      }
+    });
+  }
+});
