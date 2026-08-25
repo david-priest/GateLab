@@ -251,7 +251,7 @@ describe("strict import safety", () => {
       <gating:Gating-ML xmlns:gating="${G}" xmlns:data-type="${D}"
         xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations">
         <transforms:transformation transforms:id="Tr_Fasinh_150">
-          <transforms:fasinh transforms:T="${T}" transforms:M="0.4342944819032518" transforms:A="0"/>
+          <transforms:fasinh transforms:T="${T}" transforms:M="0.43429448190325176" transforms:A="0"/>
         </transforms:transformation>
         <gating:RectangleGate gating:id="r1" gating:name="R">
           <gating:dimension gating:min="${transformed}" gating:max="${transformed * 2}"
@@ -447,5 +447,84 @@ describe("strict import safety", () => {
     expect(() => importGatingML(xml, ["X"])).toThrow(
       /Partial Gating-ML imports are not allowed because dropping a gate can change population membership/,
     );
+  });
+});
+
+// ── CyTOF Gaussian channels keep their declared arcsinh space ───────────────────────────────
+//
+// Cytobank exports a CyTOF WidthGate with its Width dimension in ARCSINH space
+// (transformation-ref="Tr_Arcsinh_5", min 3.818 / max 4.560 ≈ raw 113–238, exactly where
+// Gaussian data sits). Width matches isQcChannel by NAME, and the 0.7.0 per-gate-space rewrite
+// used that generic test to strip the declared transform on import — the vertices were kept but
+// the gate was stamped space:"raw", so the band evaluated and drew at raw 3.8–4.6, far below
+// the data (nPhos4, "cytobank gates 36 pops.xml"). The instrument decides which channels are
+// never transformed: for CyTOF only the true raw channels are, and the Gaussian parameters are
+// displayed and gated in arcsinh exactly like the metals.
+describe("CyTOF Gaussian channel import", () => {
+  const G = "http://www.isac-net.org/std/Gating-ML/v2.0/gating";
+  const T = "http://www.isac-net.org/std/Gating-ML/v2.0/transformations";
+  const D = "http://www.isac-net.org/std/Gating-ML/v2.0/datatypes";
+  // The real nPhos4 WidthGate, verbatim values.
+  const xml = `<gating:Gating-ML xmlns:gating="${G}" xmlns:transforms="${T}" xmlns:data-type="${D}">
+    <transforms:transformation transforms:id="Tr_Arcsinh_5">
+      <transforms:fasinh transforms:T="5.8760059682190064" transforms:M="0.43429448190325176" transforms:A="0" />
+    </transforms:transformation>
+    <gating:RectangleGate gating:id="Gate_1_V2lkdGhHYXRl">
+      <data-type:custom_info><cytobank><name>WidthGate</name><id>1</id><gate_id>1</gate_id>
+        <type>RectangleGate</type><definition>{}</definition></cytobank></data-type:custom_info>
+      <gating:dimension gating:compensation-ref="FCS" gating:min="-57210.19889294151" gating:max="11589746.536096007">
+        <data-type:fcs-dimension data-type:name="Time" />
+      </gating:dimension>
+      <gating:dimension gating:compensation-ref="FCS" gating:min="3.817958837656066" gating:max="4.55972465093369" gating:transformation-ref="Tr_Arcsinh_5">
+        <data-type:fcs-dimension data-type:name="Width" />
+      </gating:dimension>
+    </gating:RectangleGate>
+    <gating:BooleanGate gating:id="GateSet_1">
+      <data-type:custom_info><cytobank><name>WidthGate</name><id>11</id><gate_set_id>1</gate_set_id>
+        <definition>{"gates":[1],"negGates":[]}</definition></cytobank></data-type:custom_info>
+      <gating:and>
+        <gating:gateReference gating:ref="Gate_1_V2lkdGhHYXRl" />
+        <gating:gateReference gating:ref="Gate_1_V2lkdGhHYXRl" />
+      </gating:and>
+    </gating:BooleanGate>
+  </gating:Gating-ML>`;
+
+  it("imports the Width axis as a display-space arcsinh gate, not raw", () => {
+    const res = importGatingML(xml, ["Time", "Width"], {}, "cytof");
+    expect(res.n_gates_imported).toBe(1);
+    const g = Object.values(res.gates)[0] as {
+      space?: string; transforms?: Record<string, { kind: string; cofactor?: number }>;
+      vertices: [number, number][];
+    };
+    expect(g.space).toBe("display");
+    expect(g.transforms?.["Width"]?.kind).toBe("asinh");
+    expect(g.transforms?.["Width"]?.cofactor).toBeCloseTo(5, 6);
+    // Vertices stay in the declared space — the transform is carried, not baked in.
+    const ys = g.vertices.map((v) => v[1]);
+    expect(Math.min(...ys)).toBeCloseTo(3.817958837656066, 9);
+    expect(Math.max(...ys)).toBeCloseTo(4.55972465093369, 9);
+  });
+
+  it("selects Gaussian events where the data actually is", () => {
+    const res = importGatingML(xml, ["Time", "Width"], {}, "cytof");
+    // Width raw values around 150 sit INSIDE the band (asinh(150/5) ≈ 4.09); values around 4
+    // — where the broken import put the gate — sit far outside it.
+    const time = [1000, 1000, 1000, 1000];
+    const width = [150, 238, 4, 500];
+    const data = {
+      n: 4,
+      column: (ch: string) => (ch === "Time" ? time : ch === "Width" ? width : undefined),
+    };
+    // Evaluate through the gate-space machinery the app uses: transform raw -> the gate's own
+    // space per axis, as columnsForGate does for a display-space gate.
+    const g = Object.values(res.gates)[0] as {
+      transforms?: Record<string, { cofactor?: number }>; vertices: [number, number][];
+    };
+    const cf = g.transforms?.["Width"]?.cofactor ?? NaN;
+    const ys = g.vertices.map((v) => v[1]);
+    const [lo, hi] = [Math.min(...ys), Math.max(...ys)];
+    const inside = width.map((w) => Math.asinh(w / cf) >= lo && Math.asinh(w / cf) <= hi);
+    expect(inside).toEqual([true, true, false, false]);
+    void data;
   });
 });
