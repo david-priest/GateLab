@@ -20,6 +20,7 @@ import {
   type FlowJoSampleMatchKey,
   type FlowJoSpillover,
 } from "./engine/flowjoWorkspace";
+import { isDivaWorkspace, listDivaGateTrees, divaToGatingML } from "./engine/divaWorkspace";
 import { ChannelScales } from "./engine/channelScales";
 import { fitChannelAxisRange, includePlotGatesInAxisRange } from "./engine/axisRange";
 import { parseFcs, type SpilloverMatrix } from "./engine/fcs";
@@ -1188,6 +1189,39 @@ export default function App() {
     if (!sample || !activeSampleId) return;
     try {
       const text = await file.text();
+
+      // A BD FACSDiva experiment export is rewritten into Gating-ML the same way a FlowJo
+      // workspace is, so the ordinary import path handles both. Diva is the record BEFORE
+      // FlowJo: raw-linear scatter vertices, explicit hierarchy, per-gate event counts, and the
+      // compensation actually applied (including hand adjustments that exist nowhere else).
+      if (isDivaWorkspace(text)) {
+        const trees = listDivaGateTrees(text).filter((t) => t.gateCount > 0);
+        if (!trees.length) throw new Error("This Diva experiment contains no gates GateLab can read.");
+        // Prefer the tree for the loaded file's tube; else a single tree is the only answer;
+        // else take the largest and SAY SO — quietly taking the first is how the FlowJo path
+        // imported another sample's gates before it grew a picker.
+        const byFile = trees.find(
+          (t) => (t.dataFilename ?? "").toLowerCase() === fileName.toLowerCase());
+        const pick = byFile ?? (trees.length === 1
+          ? trees[0]
+          : trees.reduce((best, t) => (t.gateCount > best.gateCount ? t : best)));
+        const conv = divaToGatingML(text, pick.index, fileName);
+        const notes = [...conv.warnings];
+        if (!byFile && trees.length > 1) {
+          notes.unshift(
+            `This experiment holds ${trees.length} gate trees and none names the loaded file; ` +
+              `"${pick.label}" (${pick.gateCount} gates) was imported. The others: ` +
+              trees.filter((t) => t !== pick).map((t) => `${t.label} (${t.gateCount})`).join(", ") + ".");
+        }
+        if (notes.length) setError(notes.join("\n"));
+        await prepareGatingImportFromGatingML(
+          conv.gatingMl,
+          ` from FACSDiva experiment · ${conv.label}` +
+            (conv.warnings.length ? ` · ${conv.warnings.length} note(s)` : ""),
+          conv.spillover,
+        );
+        return;
+      }
 
       // A FlowJo workspace is rewritten into Gating-ML and then takes the ordinary path, so
       // channel resolution, validation, population building and merge/replace are unchanged.
@@ -6302,7 +6336,16 @@ export default function App() {
                 }}
                 onGateSelect={(id) => {
                   if (!plotInteractionIsCurrent()) return;
-                  uiDispatch({ type: "selectGate", gateId: id });
+                  // Plain dispatch, NOT uiDispatch: the axis auto-switch belongs to the gate
+                  // LIST click (app.R:5030), where the gate may be off-screen. A gate selected
+                  // ON the plot is already visible on the current axes — and for a gate drawn
+                  // flipped, uiDispatch would swap xIdx/yIdx, which are part of the plot
+                  // interaction token. The engine defers repaints during a drag, so the token
+                  // could not reconcile before mouseup, and the drag's own gate_edit was then
+                  // discarded as stale — the gate visibly snapped back, and only a second
+                  // attempt (tokens now settled) moved it. Selection must never change the
+                  // interaction context of the drag that performs it.
+                  dispatch({ type: "selectGate", gateId: id });
                 }}
                 onAxisLabelClick={(e) => {
                   if (!plotInteractionIsCurrent()) return;

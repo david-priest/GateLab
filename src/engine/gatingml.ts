@@ -28,7 +28,7 @@ import {
 import { WSP_GATE_SPACE_TAG } from "./flowjoWorkspace";
 import type { DisplaySpillover } from "./compensation";
 import type { Sample } from "./sample";
-import { Logicle, isQcChannel, isScatterChannel } from "./transforms";
+import { Logicle, isCytofRawChannel, isQcChannel, isScatterChannel } from "./transforms";
 
 const LN10 = Math.log(10);
 const uuid = () => crypto.randomUUID();
@@ -1075,8 +1075,17 @@ export function importGatingML(
     // space its dimension declares and records that transform. Only when GateLab cannot hold the
     // declared transform do we fall back to inverting into raw, which is a different gate.
     const axisSpec = (ch: string, ref: string | undefined) => {
-      // QC channels are never transformed, whatever a file claims (matching makeInverter).
-      if (!ref || isQcChannel(ch)) return { spec: { kind: "identity" } as TransformSpec, toGateUnits: (v: number) => v };
+      // Channels this instrument never transforms keep raw vertices whatever a file claims —
+      // but WHICH channels those are is per instrument, and it must match the display pipeline
+      // (sample.transform), not a generic notion of QC. Flow: the QC channels (Time etc.),
+      // matching makeInverter. CyTOF: only the true raw channels (Time, Event_length, ...);
+      // the Gaussian parameters — Width, Residual, Center, Offset — match isQcChannel by NAME
+      // yet are displayed and gated in arcsinh exactly like the metals. Treating them as QC
+      // here discarded their declared Tr_Arcsinh ref and left every Gaussian gate at its
+      // transformed coordinate in raw space, far below the data — a 0.7.0 regression (the
+      // per-gate space rewrite), found on nPhos4's WidthGate.
+      const neverTransformed = instrument === "flow" ? isQcChannel(ch) : isCytofRawChannel(ch);
+      if (!ref || neverTransformed) return { spec: { kind: "identity" } as TransformSpec, toGateUnits: (v: number) => v };
       return specFromGmlTransform(transforms[ref]);
     };
     const sx = axisSpec(xCh, xTr);
