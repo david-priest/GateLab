@@ -509,3 +509,62 @@ describe("GatingPlot render lifecycle", () => {
     });
   });
 });
+
+describe("drag-select interaction", () => {
+  // The snap-back mechanism, pinned from both sides. Dragging a NOT-currently-selected gate
+  // makes the engine emit gate_select at mousedown and gate_edit at mouseup, with repaints
+  // deferred in between. If the app responds to that selection by changing anything in the
+  // interaction token (it used to switch the plot axes to the gate's channels, flipping
+  // xIdx/yIdx for a flipped-orientation gate), the mouseup's edit is discarded as stale and
+  // the gate snaps back — needing a second drag once the tokens settle. So: the wrapper drops
+  // cross-context edits (that part protects sample switches), and the APP must keep selection
+  // out of the interaction token, which App.tsx does by not retargeting axes on plot selection.
+  it("delivers the drag-end edit when selection leaves the interaction token unchanged", () => {
+    const item = mountPlot();
+    const onGateEdit = vi.fn();
+    const onGateSelect = vi.fn();
+    const renderPlot = (interactionToken: string) => (
+      <GatingPlot
+        payload={{ points: [1] }}
+        interactionToken={interactionToken}
+        onGateEdit={onGateEdit}
+        onGateSelect={onGateSelect}
+      />
+    );
+    act(() => item.root.render(renderPlot("sample-a:revision-1")));
+    flush();
+
+    // mousedown on a non-selected gate: the engine selects…
+    act(() => plotBus.emit("gate_select", "gate-2"));
+    expect(onGateSelect).toHaveBeenCalledWith("gate-2");
+    // …the app re-renders (selection state changed) with the SAME token…
+    act(() => item.root.render(renderPlot("sample-a:revision-1")));
+    // …and the mouseup edit must be delivered, not dropped.
+    act(() => plotBus.emit("gate_edit", { gate_id: "gate-2", vertices: [[5, 4], [7, 6]], seq: 7 }));
+    expect(onGateEdit).toHaveBeenCalledTimes(1);
+    // The engine's protective latch survives until a payload containing the edit is painted.
+    expect(plot.clearPendingEdit).not.toHaveBeenCalledWith("gate-2", 7);
+  });
+
+  it("drops the drag-end edit when the app churns the token mid-drag — the snap-back", () => {
+    const item = mountPlot();
+    const onGateEdit = vi.fn();
+    const renderPlot = (interactionToken: string) => (
+      <GatingPlot
+        payload={{ points: [1] }}
+        interactionToken={interactionToken}
+        onGateEdit={onGateEdit}
+      />
+    );
+    act(() => item.root.render(renderPlot("axes-x-y")));
+    flush();
+    act(() => plotBus.emit("gate_select", "gate-2"));
+    // An app that retargets the axes on selection changes the token while the repaint is
+    // still deferred behind the drag…
+    act(() => item.root.render(renderPlot("axes-y-x")));
+    act(() => plotBus.emit("gate_edit", { gate_id: "gate-2", vertices: [[5, 4], [7, 6]], seq: 8 }));
+    // …and the edit is gone: this is the wrapper behaviour the app must not trigger.
+    expect(onGateEdit).not.toHaveBeenCalled();
+    expect(plot.clearPendingEdit).toHaveBeenCalledWith("gate-2", 8);
+  });
+});

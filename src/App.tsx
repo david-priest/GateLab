@@ -6336,7 +6336,16 @@ export default function App() {
                 }}
                 onGateSelect={(id) => {
                   if (!plotInteractionIsCurrent()) return;
-                  uiDispatch({ type: "selectGate", gateId: id });
+                  // Plain dispatch, NOT uiDispatch: the axis auto-switch belongs to the gate
+                  // LIST click (app.R:5030), where the gate may be off-screen. A gate selected
+                  // ON the plot is already visible on the current axes — and for a gate drawn
+                  // flipped, uiDispatch would swap xIdx/yIdx, which are part of the plot
+                  // interaction token. The engine defers repaints during a drag, so the token
+                  // could not reconcile before mouseup, and the drag's own gate_edit was then
+                  // discarded as stale — the gate visibly snapped back, and only a second
+                  // attempt (tokens now settled) moved it. Selection must never change the
+                  // interaction context of the drag that performs it.
+                  dispatch({ type: "selectGate", gateId: id });
                 }}
                 onAxisLabelClick={(e) => {
                   if (!plotInteractionIsCurrent()) return;
