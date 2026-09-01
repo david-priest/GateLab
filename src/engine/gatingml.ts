@@ -407,10 +407,12 @@ function parseWspGateSpace(node: Element): WspGateSpace | null {
 interface RawGate {
   gml_id: string;
   name: string;
-  gate_type: "rectangle" | "polygon" | "boolean";
+  gate_type: "rectangle" | "polygon" | "ellipse" | "boolean";
   x_channel?: string;
   y_channel?: string;
   vertices?: Vertex[];
+  /** EllipsoidGate payload, in the space its dimensions declare. */
+  ellipse?: { mean: [number, number]; covariance: [[number, number], [number, number]]; distance_square: number };
   channels: string[];
   dims?: GmlDim[];
   operation?: "and" | "or" | "not";
@@ -478,6 +480,46 @@ function parseGateNode(node: Element): RawGate | null {
       x_channel: dims[0].channel,
       y_channel: dims[1].channel,
       vertices: verts,
+      channels: [dims[0].channel, dims[1].channel],
+      dims,
+      wsp_space: parseWspGateSpace(node),
+    };
+  }
+
+  if (loc === "EllipsoidGate") {
+    // Gating-ML 2.0 §5.5: mean, symmetric covarianceMatrix (rows of entries), distanceSquare.
+    // Cytobank writes these natively; the parameters live in whatever space the dimensions'
+    // transformation-refs declare, exactly like polygon vertices.
+    const dims = parseDimensions(node);
+    if (dims.length !== 2) return null;
+    const meanEl = firstChildLocal(node, "mean");
+    const covEl = firstChildLocal(node, "covarianceMatrix");
+    // distanceSquare is an ELEMENT carrying data-type:value (Cytobank writes exactly that);
+    // the attribute form is accepted too.
+    const d2El = firstChildLocal(node, "distanceSquare");
+    const d2 = num(attrLocal(node, "distanceSquare") ?? (d2El ? attrLocal(d2El, "value") : null));
+    if (!meanEl || !covEl) return null;
+    const meanCoords = childrenLocal(meanEl, "coordinate");
+    if (meanCoords.length < 2) return null;
+    const mx = num(attrLocal(meanCoords[0], "value"));
+    const my = num(attrLocal(meanCoords[1], "value"));
+    const rows = childrenLocal(covEl, "row").map((r) =>
+      childrenLocal(r, "entry").map((e) => num(attrLocal(e, "value"))));
+    if (!hasNum(mx) || !hasNum(my) || rows.length !== 2 || rows.some((r) => r.length !== 2 || r.some((v) => !hasNum(v)))) {
+      return null;
+    }
+    const dsq = hasNum(d2) ? d2 : 1; // Gating-ML default when distanceSquare is omitted
+    return {
+      gml_id: gmlId ?? uuid(),
+      name: nm,
+      gate_type: "ellipse",
+      x_channel: dims[0].channel,
+      y_channel: dims[1].channel,
+      ellipse: {
+        mean: [mx, my],
+        covariance: [[rows[0][0] as number, rows[0][1] as number], [rows[1][0] as number, rows[1][1] as number]],
+        distance_square: dsq,
+      },
       channels: [dims[0].channel, dims[1].channel],
       dims,
       wsp_space: parseWspGateSpace(node),
@@ -926,7 +968,7 @@ export function importGatingML(
   const boolOrder: string[] = [];
   let hierarchyNode: Element | null = null;
   const importProblems: string[] = [];
-  const supportedGateTypes = new Set(["RectangleGate", "PolygonGate", "BooleanGate"]);
+  const supportedGateTypes = new Set(["RectangleGate", "PolygonGate", "EllipsoidGate", "BooleanGate"]);
 
   for (const el of Array.from(root.children)) {
     if (el.localName === "GatingHierarchy" && !hierarchyNode) {
@@ -1123,17 +1165,49 @@ export function importGatingML(
     }
 
     const appId = uuid();
-    appGates[appId] = {
-      gate_id: appId,
-      name: g.name,
-      gate_type: g.gate_type,
-      x_channel: xCh,
-      y_channel: yCh,
-      vertices: verts,
-      color: nextGateColor(Object.keys(appGates).length),
-      label_offset: null, // auto-position (buildPlotGates computes it in display space)
-      ...spaceFields,
-    };
+    if (g.gate_type === "ellipse" && g.ellipse) {
+      // An ellipse's parameters live in the space its dimensions declare, exactly like polygon
+      // vertices. The per-axis unit change (toGateUnits) is linear for every transform GateLab
+      // holds — identity, or logicle's v/span — so it acts on the mean directly and on the
+      // covariance as C'ij = Cij·ki·kj. A transform with NO GateLab spec cannot be inverted for
+      // an ellipse at all (a covariance through a nonlinear map is not a covariance), so that
+      // gate is skipped by name rather than imported as something else.
+      if (!(sx && sy)) {
+        nSkipped++;
+        continue; // already recorded in untranslatable above
+      }
+      const kx = sx.toGateUnits(1) - sx.toGateUnits(0);
+      const ky = sy.toGateUnits(1) - sy.toGateUnits(0);
+      const e = g.ellipse;
+      appGates[appId] = {
+        gate_id: appId,
+        name: g.name,
+        gate_type: "ellipse",
+        x_channel: xCh,
+        y_channel: yCh,
+        mean: [sx.toGateUnits(e.mean[0]), sy.toGateUnits(e.mean[1])],
+        covariance: [
+          [e.covariance[0][0] * kx * kx, e.covariance[0][1] * kx * ky],
+          [e.covariance[1][0] * ky * kx, e.covariance[1][1] * ky * ky],
+        ],
+        distance_square: e.distance_square,
+        color: nextGateColor(Object.keys(appGates).length),
+        label_offset: null,
+        ...spaceFields,
+      };
+    } else {
+      appGates[appId] = {
+        gate_id: appId,
+        name: g.name,
+        gate_type: g.gate_type as "polygon" | "rectangle",
+        x_channel: xCh,
+        y_channel: yCh,
+        vertices: verts,
+        color: nextGateColor(Object.keys(appGates).length),
+        label_offset: null, // auto-position (buildPlotGates computes it in display space)
+        ...spaceFields,
+      };
+    }
     gateOrder.push(appId);
     gmlToApp[gmlId] = appId;
   }

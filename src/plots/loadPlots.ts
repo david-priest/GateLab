@@ -113,6 +113,191 @@ export function patchCytofForGateLab(src: string): string {
   // move, so the edges detach from their own vertices. Dropping the stale outline as the
   // vertices change makes _gateOutlinePts fall back to them, so edges track the drag as straight
   // segments and settle onto the true boundary when React sends the next payload on release.
+  // ── Ellipse gates: the payload marks them editable:false ──────────────────────────────────
+  // An ellipse is presented to the renderer as its sampled boundary polygon. Body select/move
+  // must keep working, but vertex handles would offer 64 draggable sample points whose edits
+  // cannot be mapped back to a covariance — so the payload's editable flag now gates the
+  // handles, where before the engine hardcoded every gate editable.
+  const editableNeedle = "var isEditable = true;";
+  if (out.includes(editableNeedle)) {
+    out = out.replace(editableNeedle, "var isEditable = gate.editable !== false;");
+  } else if (!out.includes("gate.editable !== false")) {
+    console.warn("[GateLab] cytof editable patch: needle not found — ellipse gates may grow vertex handles.");
+  }
+
+  // ── Ellipse draw mode ─────────────────────────────────────────────────────────────────────
+  // Reuses the rectangle rubber-band machinery wholesale: the same mousedown handler and the
+  // same _rectStart/_rectCurrent state, so _applyMode's cancel path needs no change. The drag
+  // reads centre-out — press at the centre, pull to set the radii — with a live <ellipse>
+  // preview, and emits new_gate("ellipse", [[cx,cy],[cx+rx,cy+ry]]) in display coordinates.
+  const ellipseModeNeedle = "if (_mode !== 'draw-rect') return;";
+  if (out.includes(ellipseModeNeedle)) {
+    out = out.replace(ellipseModeNeedle,
+      "if (_mode !== 'draw-rect' && _mode !== 'draw-ellipse') return;");
+  } else if (!out.includes("_mode !== 'draw-ellipse'")) {
+    console.warn("[GateLab] cytof ellipse mode patch: mousedown needle not found — ellipse drawing disabled.");
+  }
+
+  const ellipsePreviewNeedle =
+    "        dl.append('rect').attr('class', 'rubber-band')\n" +
+    "            .attr('x', sx).attr('y', sy)\n" +
+    "            .attr('width',  Math.max(0, ex - sx))\n" +
+    "            .attr('height', Math.max(0, ey - sy));";
+  const ellipsePreviewPatch =
+    "        if (_mode === 'draw-ellipse') {\n" +
+    "            dl.append('ellipse').attr('class', 'rubber-band')\n" +
+    "                .attr('cx', zx(_rectStart.dx)).attr('cy', zy(_rectStart.dy))\n" +
+    "                .attr('rx', Math.abs(zx(_rectCurrent.dx) - zx(_rectStart.dx)))\n" +
+    "                .attr('ry', Math.abs(zy(_rectCurrent.dy) - zy(_rectStart.dy)));\n" +
+    "        } else {\n" +
+    ellipsePreviewNeedle + "\n" +
+    "        }";
+  // The needle survives inside the patch's own else-branch, so idempotency needs the
+  // already-patched check on the PRIMARY condition, not only on the warning.
+  if (out.includes(ellipsePreviewNeedle) && !out.includes("dl.append('ellipse')")) {
+    out = out.replace(ellipsePreviewNeedle, ellipsePreviewPatch);
+  } else if (!out.includes("dl.append('ellipse')")) {
+    console.warn("[GateLab] cytof ellipse preview patch: needle not found — no live preview while drawing.");
+  }
+
+  // The finish branch runs BEFORE the rectangle's min/max, which would average the press point
+  // away: for a centre-out ellipse the press point (_rectStart) IS the centre.
+  const ellipseFinishNeedle =
+    "        _rectCurrent = { dx: zx.invert(px), dy: zy.invert(py) };\n\n" +
+    "        var x0 = Math.min(";
+  const ellipseFinishPatch =
+    "        _rectCurrent = { dx: zx.invert(px), dy: zy.invert(py) };\n\n" +
+    "        if (_mode === 'draw-ellipse') {\n" +
+    "            var ecx = _rectStart.dx, ecy = _rectStart.dy;\n" +
+    "            var erx = Math.abs(_rectCurrent.dx - ecx), ery = Math.abs(_rectCurrent.dy - ecy);\n" +
+    "            _rectStart = null; _rectCurrent = null;\n" +
+    "            _g.select('.draw-layer').selectAll('*').remove();\n" +
+    "            if (Math.abs(zx(ecx + erx) - zx(ecx)) < 5 || Math.abs(zy(ecy + ery) - zy(ecy)) < 5) return;\n" +
+    "            _notifyNewGate('ellipse', [[ecx - erx, ecy - ery], [ecx + erx, ecy + ery]]);\n" +
+    "            return;\n" +
+    "        }\n\n" +
+    "        var x0 = Math.min(";
+  if (out.includes(ellipseFinishNeedle)) {
+    out = out.replace(ellipseFinishNeedle, ellipseFinishPatch);
+  } else if (!out.includes("_notifyNewGate('ellipse'")) {
+    console.warn("[GateLab] cytof ellipse finish patch: needle not found — ellipse drawing disabled.");
+  }
+
+  // ── Ellipse axis handles: resize + rotate ──────────────────────────────────────────────────
+  // Injected after the vertex-handle block. A selected gate carrying payload `ellipse` geometry
+  // gets four handles at its axis endpoints. Dragging a MAJOR handle sets that axis length and
+  // rotates the ellipse to point at the cursor; a MINOR handle does the same with the
+  // perpendicular constraint — so rotation needs no separate grip. The live drag rewrites
+  // gate.vertices (the sampled ring) and lets _updateGateElements redraw exactly as vertex
+  // drags do; drag end emits ellipse_edit with the display-space parameters, and the app maps
+  // them back into the gate's covariance.
+  const ellipseHandleAnchor =
+    "                vertCircles.each(function (d, i) {\n" +
+    "                    d3.select(this).call(\n" +
+    "                        _makeVertexDrag(gate, i, gg, fillEl, outlineEl,\n" +
+    "                                        vertCircles, labelG, zx, zy, isFlipped)\n" +
+    "                    );\n" +
+    "                });\n" +
+    "            }";
+  const ellipseHandleBlock = ellipseHandleAnchor + "\n" +
+    "            if (isSel && gate.ellipse) {\n" +
+    "                var E = { m: [gate.ellipse.mean[0], gate.ellipse.mean[1]],\n" +
+    "                          a: gate.ellipse.major, b: gate.ellipse.minor, th: gate.ellipse.angle };\n" +
+    "                var _ehPts = function () {\n" +
+    "                    var ca = Math.cos(E.th), sa = Math.sin(E.th);\n" +
+    "                    return [[E.m[0] + E.a * ca, E.m[1] + E.a * sa, 0],\n" +
+    "                            [E.m[0] - E.a * ca, E.m[1] - E.a * sa, 0],\n" +
+    "                            [E.m[0] - E.b * sa, E.m[1] + E.b * ca, 1],\n" +
+    "                            [E.m[0] + E.b * sa, E.m[1] - E.b * ca, 1]];\n" +
+    "                };\n" +
+    "                var _ehRing = function () {\n" +
+    "                    var out = [], ca = Math.cos(E.th), sa = Math.sin(E.th);\n" +
+    "                    for (var i = 0; i < 64; i++) {\n" +
+    "                        var t = 2 * Math.PI * i / 64;\n" +
+    "                        var px = E.a * Math.cos(t), py = E.b * Math.sin(t);\n" +
+    "                        out.push([E.m[0] + px * ca - py * sa, E.m[1] + px * sa + py * ca]);\n" +
+    "                    }\n" +
+    "                    return out;\n" +
+    "                };\n" +
+    "                var ehCircles = gg.selectAll('circle.eh')\n" +
+    "                    .data(_ehPts())\n" +
+    "                    .enter().append('circle').attr('class', 'eh')\n" +
+    "                    .attr('cx', function (d) { return isFlipped ? zx(d[1]) : zx(d[0]); })\n" +
+    "                    .attr('cy', function (d) { return isFlipped ? zy(d[0]) : zy(d[1]); })\n" +
+    "                    .attr('r', VRAD)\n" +
+    "                    .attr('fill', color).attr('fill-opacity', 0.9)\n" +
+    "                    .attr('stroke', 'white').attr('stroke-width', 2)\n" +
+    "                    .style('cursor', 'grab').style('pointer-events', 'all');\n" +
+    "                ehCircles.each(function (d0) {\n" +
+    "                    var minorHandle = d0[2] === 1;\n" +
+    "                    d3.select(this).call(d3.drag()\n" +
+    "                        .on('start', function (event) { _dragging = true; event.sourceEvent.stopPropagation(); })\n" +
+    "                        .on('drag', function (event) {\n" +
+    "                            var p = _ptr(event), zx2 = _zx(), zy2 = _zy();\n" +
+    "                            var sx0 = zx2.invert(p[0]), sy0 = zy2.invert(p[1]);\n" +
+    "                            var dx = (isFlipped ? sy0 : sx0) - E.m[0];\n" +
+    "                            var dy = (isFlipped ? sx0 : sy0) - E.m[1];\n" +
+    "                            var r = Math.hypot(dx, dy);\n" +
+    "                            if (!(r > 1e-9)) return;\n" +
+    "                            if (minorHandle) { E.b = r; E.th = Math.atan2(dy, dx) + Math.PI / 2; }\n" +
+    "                            else { E.a = r; E.th = Math.atan2(dy, dx); }\n" +
+    "                            gate.outline = null; // ring is stale during a handle drag\n" +
+    "                            gate.vertices = _ehRing();\n" +
+    "                            _updateGateElements(gate, gg, zx2, zy2, isFlipped);\n" +
+    "                            gg.selectAll('circle.eh').data(_ehPts())\n" +
+    "                                .attr('cx', function (d) { return isFlipped ? zx2(d[1]) : zx2(d[0]); })\n" +
+    "                                .attr('cy', function (d) { return isFlipped ? zy2(d[0]) : zy2(d[1]); });\n" +
+    "                        })\n" +
+    "                        .on('end', function () {\n" +
+    "                            _dragging = false;\n" +
+    "                            _shinyInput('ellipse_edit', { gate_id: gate.gate_id,\n" +
+    "                                mean: [E.m[0], E.m[1]], major: E.a, minor: E.b, angle: E.th,\n" +
+    "                                _ts: Date.now() });\n" +
+    "                        }));\n" +
+    "                });\n" +
+    "            }";
+  if (out.includes(ellipseHandleAnchor) && !out.includes("gg.selectAll('circle.eh')")) {
+    out = out.replace(ellipseHandleAnchor, ellipseHandleBlock);
+  } else if (!out.includes("gg.selectAll('circle.eh')")) {
+    console.warn("[GateLab] cytof ellipse handle patch: anchor not found — ellipse resize/rotate disabled.");
+  }
+
+  // Body-moving a gate goes through _updateGateElements, which repositions the fill, outline,
+  // label and `circle.vh` vertex handles — but the ellipse's `circle.eh` axis handles were
+  // injected later, so they froze in place until the drag-end payload rebuild. Reposition them
+  // from the live ring: a body move only translates the ellipse, so the centre is the ring's
+  // centroid and the axis offsets come unchanged from the payload's ellipse geometry. During a
+  // HANDLE drag this runs with stale major/minor/angle, but that drag rewrites the same circles
+  // from its own live parameters immediately after, in the same call.
+  const ehFollowNeedle =
+    "        // Update label position — data-space centroid + label_offset (preserves user-moved position)";
+  const ehFollowBlock =
+    "        // GateLab: ellipse axis handles follow the ring during a body move.\n" +
+    "        if (gate.ellipse) {\n" +
+    "            var ecx2 = d3.mean(gate.vertices, function (v) { return v[0]; });\n" +
+    "            var ecy2 = d3.mean(gate.vertices, function (v) { return v[1]; });\n" +
+    "            var eca2 = Math.cos(gate.ellipse.angle), esa2 = Math.sin(gate.ellipse.angle);\n" +
+    "            var ea2 = gate.ellipse.major, eb2 = gate.ellipse.minor;\n" +
+    "            var ehp2 = [[ecx2 + ea2 * eca2, ecy2 + ea2 * esa2],\n" +
+    "                        [ecx2 - ea2 * eca2, ecy2 - ea2 * esa2],\n" +
+    "                        [ecx2 - eb2 * esa2, ecy2 + eb2 * eca2],\n" +
+    "                        [ecx2 + eb2 * esa2, ecy2 - eb2 * eca2]];\n" +
+    "            gg.selectAll('circle.eh').each(function (d, i) {\n" +
+    "                var v = ehp2[i];\n" +
+    "                d3.select(this)\n" +
+    "                    .attr('cx', flipped ? zx(v[1]) : zx(v[0]))\n" +
+    "                    .attr('cy', flipped ? zy(v[0]) : zy(v[1]));\n" +
+    "            });\n" +
+    "        }\n\n" +
+    ehFollowNeedle;
+  if (out.includes(ehFollowNeedle) && !out.includes("ellipse axis handles follow the ring")) {
+    out = out.replace(ehFollowNeedle, ehFollowBlock);
+  } else if (!out.includes("ellipse axis handles follow the ring")) {
+    console.warn(
+      "[GateLab] cytof ellipse handle-follow patch: needle not found — handles will lag a body move.",
+    );
+  }
+
   const dragVertexNeedle = "gate.vertices = origVerts.map(";
   if (!out.includes("gate.outline = null; // stale mid-drag")) {
     const hits = out.split(dragVertexNeedle).length - 1;

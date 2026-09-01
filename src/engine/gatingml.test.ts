@@ -169,7 +169,9 @@ describe("strict import safety", () => {
         <gating:EllipsoidGate gating:id="ellipse-1"/>
       </gating:Gating-ML>`;
 
-    expect(() => importGatingML(xml, ["X", "Y"])).toThrow(/EllipsoidGate ellipse-1 is not supported/);
+    // EllipsoidGate is a supported type now, so a MALFORMED one (no mean, no covariance) must
+    // cancel as unparseable rather than pass unnoticed — the safety property is unchanged.
+    expect(() => importGatingML(xml, ["X", "Y"])).toThrow(/EllipsoidGate .*could not be parsed/);
     expect(() => importGatingML(xml, ["X", "Y"])).toThrow(/transformation linear-1/);
   });
 

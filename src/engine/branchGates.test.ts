@@ -69,6 +69,18 @@ describe("hierarchy-scoped gate visibility", () => {
     expect(out).toContain("g-orphan");
   });
 
+  it("keeps unowned gates visible when showUnowned is on, and only then", () => {
+    // A freshly drawn gate that skipped population creation: deselected, another branch shown.
+    const withOrphan = [...ORDER, "g-orphan"];
+    const gates = { ...GATES, "g-orphan": { gate_id: "g-orphan" } as Gate };
+    const scoped = (showUnowned: boolean) =>
+      branchScopedGateOrder(POPS, gates, withOrphan, "IgD+", "root", "g-early-pos", showUnowned);
+    // Off is the raw branch filter: the orphan vanishes the moment it is not selected.
+    expect(scoped(false)).toEqual(["g-early-pos", "g-early-neg"]);
+    // On keeps it, without admitting any OWNED gate from outside the branch.
+    expect(scoped(true)).toEqual(["g-early-pos", "g-early-neg", "g-orphan"]);
+  });
+
   it("preserves gate_order rather than imposing its own order", () => {
     const reversed = [...ORDER].reverse();
     expect(branchScopedGateOrder(POPS, GATES, reversed, "CD19", "root", null))

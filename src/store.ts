@@ -27,8 +27,10 @@ import {
   applyGatingStrategy,
   computeGateCounts,
   computeGateMasks,
+  createGateMaskMemo,
   pickPopColorSlot,
   ensurePopColorSlots,
+  type GateMaskMemo,
   type MaskMap,
   type GateCount,
   type GateMaskCache,
@@ -116,6 +118,19 @@ export type Action =
       transforms?: GateTransforms;
     }
   | {
+      type: "addEllipse";
+      xChannel: string;
+      yChannel: string;
+      /** Centre and per-axis radii, already in the gate's own space (see `space`). */
+      mean: [number, number];
+      radii: [number, number];
+      labelOffset?: [number, number];
+      name: string;
+      createPop?: { name: string; parentId: string };
+      space?: GateSpace;
+      transforms?: GateTransforms;
+    }
+  | {
       type: "addQuadrant";
       xChannel: string;
       yChannel: string;
@@ -134,6 +149,8 @@ export type Action =
   | { type: "renameGate"; gateId: string; name: string }
   | { type: "moveGateLabel"; gateId: string; labelOffset: [number, number] }
   | { type: "editGate"; gateId: string; vertices: [number, number][] } // dragged poly/rect vertices (gating space)
+  | { type: "moveEllipse"; gateId: string; mean: [number, number] } // ellipse translation (gate space)
+  | { type: "reshapeEllipse"; gateId: string; mean: [number, number]; covariance: [[number, number], [number, number]] } // handle drag (gate space)
   | { type: "moveQuadrantCenter"; gateId: string; center: [number, number] } // dragged crosshair (gating space)
   | { type: "renamePopulation"; popId: string; name: string }
   | { type: "setPopulationGateRefs"; popId: string; gateRefs: GateRef[] }
@@ -246,6 +263,43 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
       return { ...state, ...base, gate_version: state.gate_version + 1 };
     }
 
+    case "addEllipse": {
+      const gateId = crypto.randomUUID();
+      // A drawn ellipse starts axis-aligned: covariance diag(rx², ry²) at distanceSquare 1, so
+      // the drag radii ARE the half-axes. Rotation enters only through imports until the editor
+      // grows a rotation handle.
+      const gate: Gate = {
+        gate_id: gateId,
+        name: action.name,
+        gate_type: "ellipse",
+        x_channel: action.xChannel,
+        y_channel: action.yChannel,
+        mean: action.mean,
+        covariance: [[action.radii[0] * action.radii[0], 0], [0, action.radii[1] * action.radii[1]]],
+        distance_square: 1,
+        color: nextGateColor(Object.keys(state.gates).length),
+        label_offset: action.labelOffset ?? null,
+        ...(action.space ? { space: action.space } : {}),
+        ...(action.transforms ? { transforms: action.transforms } : {}),
+      };
+      const gates = { ...state.gates, [gateId]: gate };
+      const gate_order = [...state.gate_order, gateId];
+      let populations = state.populations;
+      let selected_pop: string | null = null;
+      if (action.createPop) {
+        const pop = newPopulation(action.createPop.name, [newGateRef(gateId, true)], action.createPop.parentId);
+        populations = linkChildToParent(
+          { ...populations, [pop.population_id]: pop }, pop.population_id, action.createPop.parentId);
+        selected_pop = pop.population_id;
+      }
+      return {
+        ...state, ...pushUndo(state), gates, gate_order, populations,
+        selected_gate_id: gateId,
+        ...(selected_pop ? { active_population_id: selected_pop } : {}),
+        gate_version: state.gate_version + 1,
+      };
+    }
+
     case "addQuadrant": {
       const color = nextGateColor(Object.keys(state.gates).length);
       const base = action.prefix ? action.prefix : `${action.xChannel}/${action.yChannel}`;
@@ -342,8 +396,28 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
 
     case "editGate": {
       const g = state.gates[action.gateId];
-      if (!g || g.gate_type === "quadrant") return state; // only poly/rect have vertices
+      // Only poly/rect hold editable vertices. An ellipse renders AS a sampled polygon, so a
+      // stray vertex edit reaching here must be refused, not written: accepting it would
+      // silently convert the covariance form into 64 fixed points.
+      if (!g || g.gate_type === "quadrant" || g.gate_type === "ellipse") return state;
       const gates = { ...state.gates, [action.gateId]: { ...g, vertices: action.vertices } };
+      return { ...state, ...pushUndo(state), gates, gate_version: state.gate_version + 1 };
+    }
+
+    case "moveEllipse": {
+      const g = state.gates[action.gateId];
+      if (!g || g.gate_type !== "ellipse") return state;
+      const gates = { ...state.gates, [action.gateId]: { ...g, mean: action.mean } };
+      return { ...state, ...pushUndo(state), gates, gate_version: state.gate_version + 1 };
+    }
+
+    case "reshapeEllipse": {
+      const g = state.gates[action.gateId];
+      if (!g || g.gate_type !== "ellipse") return state;
+      const gates = {
+        ...state.gates,
+        [action.gateId]: { ...g, mean: action.mean, covariance: action.covariance },
+      };
       return { ...state, ...pushUndo(state), gates, gate_version: state.gate_version + 1 };
     }
 
@@ -933,13 +1007,26 @@ function round2(x: number): number {
   return Math.round(x * 100) / 100;
 }
 
+/**
+ * One gate-mask memo per sample, so a regate only recomputes the gates that actually changed.
+ *
+ * Weakly held: a sample that leaves the workspace takes its memo with it. Each pooled sample
+ * keeps its own, since a mask belongs to the columns it was measured on.
+ */
+const gateMaskMemos = new WeakMap<Sample, GateMaskMemo>();
+
 /** Recompute full-data gate masks, population masks, and tree stats. */
 export function recomputeGating(sample: Sample | null, state: CoreState): GatingDerived {
   if (!sample || !state.root_population_id || Object.keys(state.populations).length === 0) {
     return EMPTY_GATING_DERIVED;
   }
   const data = sample.gateAssayData();
-  const gateMasks = computeGateMasks(state.gates, data);
+  let memo = gateMaskMemos.get(sample);
+  if (!memo) {
+    memo = createGateMaskMemo();
+    gateMaskMemos.set(sample, memo);
+  }
+  const gateMasks = computeGateMasks(state.gates, data, memo);
   const pops = clonePops(state.populations);
   const { masks, populations } = applyGatingStrategy(
     state.gates,

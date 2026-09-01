@@ -338,3 +338,37 @@ describe("point-mark display settings", () => {
     expect(back.display.pointSize).toBeUndefined();
   });
 });
+
+describe("ellipse gates survive workspace validation", () => {
+  // An ellipse stores the Gating-ML form -- mean, covariance, distanceSquare -- and has no
+  // vertices at all. The validator's gate_type switch predates ellipses, so it fell through to
+  // the unsupported-type branch and every save carrying one threw, which is what surfaced as a
+  // failed SCE autosave in GateLabR rather than as anything visible in the browser.
+  function withEllipse(): WorkspaceFile {
+    const ws = makeWs();
+    ws.gating.gates.e1 = {
+      gate_id: "e1", name: "Blasts", gate_type: "ellipse",
+      x_channel: "FSC-A", y_channel: "SSC-A",
+      mean: [3, 4], covariance: [[4, 0], [0, 1]], distance_square: 1,
+      color: "#377eb8", label_offset: null,
+    } as unknown as WorkspaceFile["gating"]["gates"][string];
+    ws.gating.gate_order = ["g1", "e1"];
+    return ws;
+  }
+
+  it("accepts an ellipse gate", () => {
+    expect(validateWorkspace(withEllipse())).toBe(true);
+  });
+
+  it("round-trips the covariance form byte-for-byte", () => {
+    const ws = withEllipse();
+    const { ws: back } = readWorkspaceBytes(packWorkspaceReference(ws));
+    expect(back.gating.gates.e1).toEqual(ws.gating.gates.e1);
+  });
+
+  it("still rejects an ellipse whose geometry is unusable", () => {
+    const bad = withEllipse();
+    (bad.gating.gates.e1 as unknown as { covariance: unknown }).covariance = [[1, 0], [0, "x"]];
+    expect(() => validateWorkspace(bad)).toThrow(/ellipse/i);
+  });
+});

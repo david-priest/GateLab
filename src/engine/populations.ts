@@ -13,6 +13,36 @@ function gateMaskKey(gateId: string, quadrant?: number): string {
   return quadrant === undefined ? gateId : `${gateId}::quadrant:${quadrant}`;
 }
 
+interface GateMaskMemoEntry {
+  gate: Gate;
+  x: ArrayLike<number> | undefined;
+  y: ArrayLike<number> | undefined;
+  /** One mask for a simple gate; four, in quadrant order, for a quadrant gate. */
+  masks: readonly Uint8Array[];
+}
+
+/**
+ * Per-gate memo for {@link computeGateMasks}, held across recomputes by the caller.
+ *
+ * Editing one gate used to recompute every gate's mask: one point-in-polygon test per event per
+ * gate, over the whole file. In an eight-gate workspace that is eight times the necessary work on
+ * every commit, and it is the hitch felt when a drag is released on a multi-million-event sample.
+ *
+ * Reuse is keyed on precisely the inputs the mask is computed from -- the gate object and the two
+ * resolved columns, all compared by reference -- so it cannot serve a stale mask. The store
+ * replaces a gate object on every geometry edit, and Sample replaces a column object whenever
+ * compensation, the active assay, or a transform invalidates its caches. Anything that would
+ * change the answer therefore changes a key, and anything that changes no key computes the same
+ * answer, because a mask is a pure function of those inputs.
+ */
+export interface GateMaskMemo {
+  entries: Map<string, GateMaskMemoEntry>;
+}
+
+export function createGateMaskMemo(): GateMaskMemo {
+  return { entries: new Map() };
+}
+
 /**
  * Compute each gate's full-data mask once for a gating-strategy version. Population
  * selection only changes which population mask these are intersected with, so these
@@ -21,14 +51,37 @@ function gateMaskKey(gateId: string, quadrant?: number): string {
 export function computeGateMasks(
   gates: Record<string, Gate>,
   data: AssayData | GateAssayData,
+  memo?: GateMaskMemo,
 ): GateMaskCache {
   const masks: GateMaskCache = {};
   for (const [gateId, gate] of Object.entries(gates)) {
+    const d = columnsForGate(data, gate);
+    // Resolving the columns is what the mask is keyed on, and Sample caches them, so this is a
+    // lookup rather than a second transform pass.
+    const x = d.column(gate.x_channel);
+    const y = d.column(gate.y_channel);
+    const cached = memo?.entries.get(gateId);
+    const reusable = cached && cached.gate === gate && cached.x === x && cached.y === y
+      ? cached.masks
+      : null;
+
+    const computed = reusable ?? (gate.gate_type === "quadrant"
+      ? [1, 2, 3, 4].map((quadrant) => getGateMask(gate, d, quadrant))
+      : [getGateMask(gate, d)]);
+
     if (gate.gate_type === "quadrant") {
-      const d = columnsForGate(data, gate);
-      for (let q = 1; q <= 4; q++) masks[gateMaskKey(gateId, q)] = getGateMask(gate, d, q);
+      for (let q = 1; q <= 4; q++) masks[gateMaskKey(gateId, q)] = computed[q - 1];
     } else {
-      masks[gateMaskKey(gateId)] = getGateMask(gate, columnsForGate(data, gate));
+      masks[gateMaskKey(gateId)] = computed[0];
+    }
+    memo?.entries.set(gateId, { gate, x, y, masks: computed });
+  }
+  // Forget gates that no longer exist, so a long editing session does not retain one mask per
+  // deleted gate. Masks for surviving gates are the same objects this call just returned, so the
+  // memo adds no retention of its own.
+  if (memo) {
+    for (const gateId of [...memo.entries.keys()]) {
+      if (!(gateId in gates)) memo.entries.delete(gateId);
     }
   }
   return masks;
@@ -81,53 +134,69 @@ export function applyGatingStrategy(
   populations[rootPopulationId].percent_of_parent = 100.0;
   const populationCounts: Record<string, number> = { [rootPopulationId]: n };
 
+  // Which events each population actually holds, carried down the tree.
+  //
+  // A population is always a subset of its parent, so a child only has to look at the events the
+  // parent kept. Walking all n events per population instead made a deep tree cost far more than
+  // it holds: under a QC branch that keeps 7% of a 1.2M-event file, each leaf was testing 1.2M
+  // events to decide 80k of them, once per gate reference. Indices also make the count exact
+  // without a second full pass to add up a mask.
+  const memberIndices: Record<string, Uint32Array> = {};
+  const rootIndices = new Uint32Array(n);
+  for (let i = 0; i < n; i++) rootIndices[i] = i;
+  memberIndices[rootPopulationId] = rootIndices;
+
   const queue: string[] = [rootPopulationId];
   while (queue.length > 0) {
     const popId = queue.shift()!;
     const pop = populations[popId];
-    const parentMask = result[popId];
+    const parentIndices = memberIndices[popId];
 
     for (const childId of pop.children) {
       const child = populations[childId];
       if (!child) continue;
 
-      let childMask: Uint8Array;
-      if (child.gate_refs.length > 0) {
-        if (child.gate_logic === "or") {
-          const orMask = new Uint8Array(n);
-          for (const ref of child.gate_refs) {
-            const gateDef = gates[ref.gate_id];
-            if (!gateDef) continue;
-            const gm = resolveGateMask(ref.gate_id, gateDef, ref.quadrant);
-            for (let i = 0; i < n; i++) {
-              const bit = ref.include ? gm[i] : gm[i] ? 0 : 1;
-              orMask[i] = orMask[i] | bit;
-            }
-          }
-          childMask = new Uint8Array(n);
-          for (let i = 0; i < n; i++) childMask[i] = parentMask[i] & orMask[i];
-        } else {
-          // AND (default)
-          childMask = new Uint8Array(parentMask); // copy
-          for (const ref of child.gate_refs) {
-            const gateDef = gates[ref.gate_id];
-            if (!gateDef) continue;
-            const gm = resolveGateMask(ref.gate_id, gateDef, ref.quadrant);
-            for (let i = 0; i < n; i++) {
-              const bit = ref.include ? gm[i] : gm[i] ? 0 : 1;
-              childMask[i] = childMask[i] & bit;
-            }
-          }
+      // Resolve each reference's mask once, dropping references to gates that no longer exist.
+      // An "and" over no surviving reference is still the parent, and an "or" over none is still
+      // empty, which is what the mask-at-a-time form did.
+      const refs: { mask: Uint8Array; include: boolean }[] = [];
+      for (const ref of child.gate_refs) {
+        const gateDef = gates[ref.gate_id];
+        if (!gateDef) continue;
+        refs.push({
+          mask: resolveGateMask(ref.gate_id, gateDef, ref.quadrant),
+          include: ref.include,
+        });
+      }
+
+      const childMask = new Uint8Array(n);
+      const kept = new Uint32Array(parentIndices.length);
+      let keptCount = 0;
+      const requireAll = child.gate_refs.length === 0 || child.gate_logic !== "or";
+
+      for (let k = 0; k < parentIndices.length; k++) {
+        const i = parentIndices[k];
+        // "and" starts inside and falls out on the first failing reference; "or" starts outside
+        // and stops at the first satisfied one. Either way the remaining references are skipped.
+        let inside = requireAll;
+        for (let r = 0; r < refs.length; r++) {
+          const gm = refs[r].mask;
+          const bit = refs[r].include ? gm[i] : gm[i] ? 0 : 1;
+          if (requireAll) {
+            if (!bit) { inside = false; break; }
+          } else if (bit) { inside = true; break; }
         }
-      } else {
-        // No gate refs: inherit parent events
-        childMask = new Uint8Array(parentMask);
+        if (inside) {
+          childMask[i] = 1;
+          kept[keptCount++] = i;
+        }
       }
 
       result[childId] = childMask;
+      memberIndices[childId] = kept.subarray(0, keptCount);
 
-      const childCount = countMask(childMask);
-      const parentCount = populationCounts[popId] ?? countMask(parentMask);
+      const childCount = keptCount;
+      const parentCount = populationCounts[popId] ?? parentIndices.length;
       populationCounts[childId] = childCount;
       child.event_count = childCount;
       child.percent_of_parent = parentCount > 0 ? round2((childCount / parentCount) * 100) : 0;

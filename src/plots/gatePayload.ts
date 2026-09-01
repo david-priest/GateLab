@@ -4,6 +4,7 @@
 // display space, and per-gate counts (within the active population) become labels.
 
 import type { Sample } from "../engine/sample";
+import { axesFromCovariance, ellipseBoundary } from "../engine/ellipse";
 import type { Gate } from "../engine/models";
 import { gateSpaceBadge } from "../engine/gateSpaceBadge";
 import type { GateCount } from "../engine/populations";
@@ -28,6 +29,16 @@ export interface PlotGate {
    * are unchanged and nothing about the stored gate or its export moves.
    */
   outline?: [number, number][];
+  /** Rendered as a polygon but backed by an EllipseGate; vertex edits must never come back. */
+  ellipse_source?: boolean;
+  /**
+   * Display-space handle geometry for a selected ellipse, present only when the gate-space →
+   * display map is affine on both axes (checked numerically, not assumed) — under a nonlinear
+   * axis the on-screen shape is not an ellipse and axis-end handles would lie.
+   */
+  ellipse?: { mean: [number, number]; major: number; minor: number; angle: number };
+  /** false suppresses vertex handles: body select/move stays, per-vertex reshaping is denied. */
+  editable?: boolean;
   percent_of_parent?: number | null;
   center?: [number, number];
   quadrant_counts?: number[];
@@ -283,6 +294,57 @@ export function buildPlotGates(
         gate_type: "rectangle",
         vertices: displayVerts,
         // Label offset must be in DISPLAY space (cytof applies it to display coords).
+        label_offset: usableLabelOffset(gate.label_offset, displayVerts, axisFrames)
+          ?? displayLabelOffset(displayVerts),
+        percent_of_parent: counts?.percent_of_parent ?? null,
+      });
+    } else if (gate.gate_type === "ellipse") {
+      // The renderer receives the sampled boundary as a POLYGON: the fill/stroke/label/move
+      // machinery all work unchanged, and the outline bends the curve through the display
+      // transforms exactly as it does for any polygon. editable:false suppresses vertex
+      // handles — dragging 64 sampled points would corrupt the covariance form, and reshaping
+      // an ellipse is a dedicated editor, not a vertex tweak. Body move still works: a
+      // translation applies uniformly to every boundary point, and the app maps it back to
+      // the mean.
+      const boundary = ellipseBoundary(gate);
+      const displayVerts = boundary.map(toDisplay);
+      // Handle geometry, iff the gate→display map is affine on both axes across the ellipse's
+      // own extent. Checked numerically with a midpoint test rather than inferred from the
+      // gate's space field: a display-space gate stops being affine the moment the axis scale
+      // is changed after drawing, and a raw-space gate on linear axes is perfectly editable.
+      const xs = boundary.map((v) => v[0]);
+      const ys = boundary.map((v) => v[1]);
+      const affine = (ch: string, lo: number, hi: number): number | null => {
+        const dLo = sample.gateToDisplay(gate, ch, lo);
+        const dHi = sample.gateToDisplay(gate, ch, hi);
+        const dMid = sample.gateToDisplay(gate, ch, (lo + hi) / 2);
+        const span = Math.abs(dHi - dLo);
+        if (!(span > 0)) return null;
+        if (Math.abs(dMid - (dLo + dHi) / 2) > 1e-6 * span) return null;
+        return (dHi - dLo) / (hi - lo || 1);
+      };
+      const kx = affine(gate.x_channel, Math.min(...xs), Math.max(...xs));
+      const ky = affine(gate.y_channel, Math.min(...ys), Math.max(...ys));
+      let handleGeom: PlotGate["ellipse"];
+      if (kx !== null && ky !== null) {
+        // Σ_display = K·Σ·K with K = diag(kx, ky); axes re-derived from it, because per-axis
+        // scaling does not act componentwise on (major, minor, angle).
+        const c = gate.covariance;
+        const covD: [[number, number], [number, number]] = [
+          [c[0][0] * kx * kx, c[0][1] * kx * ky],
+          [c[1][0] * ky * kx, c[1][1] * ky * ky],
+        ];
+        const ax = axesFromCovariance(covD, gate.distance_square);
+        handleGeom = { mean: toDisplay(gate.mean), major: ax.major, minor: ax.minor, angle: ax.angle };
+      }
+      out.push({
+        ...common,
+        gate_type: "polygon",
+        ellipse_source: true,
+        editable: false,
+        ...(handleGeom ? { ellipse: handleGeom } : {}),
+        vertices: displayVerts,
+        outline: polygonOutline(boundary, toDisplay, displayVerts),
         label_offset: usableLabelOffset(gate.label_offset, displayVerts, axisFrames)
           ?? displayLabelOffset(displayVerts),
         percent_of_parent: counts?.percent_of_parent ?? null,

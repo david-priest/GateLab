@@ -3,6 +3,7 @@ import {
   applyGatingStrategy,
   computeGateCounts,
   computeGateMasks,
+  createGateMaskMemo,
   populationTreeOrder,
   pickPopColorSlot,
   ensurePopColorSlots,
@@ -280,5 +281,188 @@ describe("colour slots — pickPopColorSlot / ensurePopColorSlots (freeze popula
     pops.c.colorSlot = pickPopColorSlot(pops);
     expect(pops.a.colorSlot).toBe(slotA); // A's colour is frozen
     expect(pops.c.colorSlot).not.toBe(slotA);
+  });
+});
+
+// A mask is a pure function of a gate's geometry and the two columns it reads, so the memo keys
+// on exactly those, by reference. These cover both halves of that claim: unchanged inputs must
+// reuse (or the fix does nothing), and any changed input must recompute (or it serves a stale
+// mask, which would silently move population counts).
+describe("computeGateMasks per-gate memo", () => {
+  // Columns must be reference-stable for the memo to hit, exactly as Sample's caches make them.
+  // The shared `assay` helper rebuilds a Float32Array per call, which would defeat it.
+  const stableAssay = (cols: Record<string, number[]>, n: number): AssayData => {
+    const built: Record<string, Float32Array> = {};
+    for (const [ch, values] of Object.entries(cols)) built[ch] = Float32Array.from(values);
+    return { n, column: (ch: string) => built[ch] };
+  };
+
+  const data = () => stableAssay({ x: [5, 25, 50, 5], y: [1, 1, 1, 1] }, 4);
+
+  it("returns the very same mask object for a gate that did not change", () => {
+    const memo = createGateMaskMemo();
+    const gates = { g1: rect("g1", 0, 10, 0, 100), g2: rect("g2", 20, 30, 0, 100) };
+    const d = data();
+
+    const first = computeGateMasks(gates, d, memo);
+    const second = computeGateMasks(gates, d, memo);
+
+    // Reference identity: getGateMask allocates a fresh Uint8Array, so the same object back
+    // proves it was not recomputed.
+    expect(second.g1).toBe(first.g1);
+    expect(second.g2).toBe(first.g2);
+  });
+
+  it("recomputes only the gate that moved", () => {
+    const memo = createGateMaskMemo();
+    const d = data();
+    const gates = { g1: rect("g1", 0, 10, 0, 100), g2: rect("g2", 20, 30, 0, 100) };
+    const first = computeGateMasks(gates, d, memo);
+
+    // The store replaces the edited gate's object and keeps the others, as its reducer does.
+    const moved = { ...gates, g1: rect("g1", 40, 60, 0, 100) };
+    const second = computeGateMasks(moved, d, memo);
+
+    expect(second.g2).toBe(first.g2);
+    expect(second.g1).not.toBe(first.g1);
+    // x = 5,25,50,5 — the moved gate now keeps only the third event.
+    expect(Array.from(second.g1)).toEqual([0, 0, 1, 0]);
+  });
+
+  it("recomputes when the underlying column is replaced", () => {
+    const memo = createGateMaskMemo();
+    const gates = { g1: rect("g1", 0, 10, 0, 100) };
+    const first = computeGateMasks(gates, data(), memo);
+
+    // A fresh assay stands for compensation, an assay swap, or a transform change: Sample hands
+    // back a different column object, and the gate object alone would not reveal that.
+    const second = computeGateMasks(gates, data(), memo);
+
+    expect(second.g1).not.toBe(first.g1);
+    expect(Array.from(second.g1)).toEqual(Array.from(first.g1));
+  });
+
+  it("reuses every quadrant mask of an unchanged quadrant gate", () => {
+    const memo = createGateMaskMemo();
+    const gates = { q: quad("q", 20, 1) };
+    const d = data();
+
+    const first = computeGateMasks(gates, d, memo);
+    const second = computeGateMasks(gates, d, memo);
+
+    for (let q = 1; q <= 4; q++) {
+      expect(second[`q::quadrant:${q}`]).toBe(first[`q::quadrant:${q}`]);
+    }
+  });
+
+  it("forgets a deleted gate rather than retaining its mask", () => {
+    const memo = createGateMaskMemo();
+    const d = data();
+    computeGateMasks({ g1: rect("g1", 0, 10, 0, 100), g2: rect("g2", 20, 30, 0, 100) }, d, memo);
+    expect(memo.entries.size).toBe(2);
+
+    computeGateMasks({ g1: rect("g1", 0, 10, 0, 100) }, d, memo);
+
+    expect([...memo.entries.keys()]).toEqual(["g1"]);
+  });
+
+  it("matches an unmemoized recompute through a sequence of edits", () => {
+    const memo = createGateMaskMemo();
+    const d = data();
+    const steps: Record<string, Gate>[] = [
+      { g1: rect("g1", 0, 10, 0, 100), q: quad("q", 20, 1) },
+      { g1: rect("g1", 0, 30, 0, 100), q: quad("q", 20, 1) },
+      { g1: rect("g1", 0, 30, 0, 100), q: quad("q", 40, 1) },
+      { g1: rect("g1", 0, 30, 0, 100) },
+    ];
+
+    for (const gates of steps) {
+      const memoized = computeGateMasks(gates, d, memo);
+      const plain = computeGateMasks(gates, d);
+      expect(Object.keys(memoized).sort()).toEqual(Object.keys(plain).sort());
+      for (const key of Object.keys(plain)) {
+        expect(Array.from(memoized[key])).toEqual(Array.from(plain[key]));
+      }
+    }
+  });
+});
+
+// Children are walked over their parent's member indices rather than the whole file, which is
+// only sound while a population stays a strict subset of its parent. These pin that invariant and
+// the edge cases the earlier mask-at-a-time form defined: a reference to a missing gate is
+// skipped, so "and" over none is the parent and "or" over none is empty.
+describe("applyGatingStrategy — parent-scoped membership", () => {
+  const countOnes = (mask: Uint8Array) => mask.reduce((total, bit) => total + bit, 0);
+
+  it("keeps a grandchild inside its parent, and its parent inside the root", () => {
+    const data = assay({ x: [5, 25, 50, 5, 60], y: [1, 1, 1, 1, 1] }, 5);
+    const gates: Record<string, Gate> = {
+      outer: rect("outer", 0, 55, 0, 100), // drops x = 60
+      inner: rect("inner", 0, 10, 0, 100), // of those, keeps x = 5
+    };
+    const pops: PopulationMap = {
+      root: pop("root", "All", null, ["mid"]),
+      mid: pop("mid", "Outer", "root", ["leaf"], [{ gate_id: "outer", include: true }]),
+      leaf: pop("leaf", "Inner", "mid", [], [{ gate_id: "inner", include: true }]),
+    };
+
+    const { masks, populations } = applyGatingStrategy(gates, pops, "root", data);
+
+    expect(Array.from(masks.mid)).toEqual([1, 1, 1, 1, 0]);
+    expect(Array.from(masks.leaf)).toEqual([1, 0, 0, 1, 0]);
+    // No event may appear in a child without appearing in its parent.
+    for (let i = 0; i < 5; i++) {
+      if (masks.leaf[i]) expect(masks.mid[i]).toBe(1);
+      if (masks.mid[i]) expect(masks.root[i]).toBe(1);
+    }
+    expect(populations.leaf.event_count).toBe(2);
+    expect(populations.leaf.percent_of_parent).toBe(50);
+  });
+
+  it("reports a count that matches its own mask at every depth", () => {
+    const data = assay({ x: [5, 25, 50, 5, 60], y: [1, 1, 1, 1, 1] }, 5);
+    const gates: Record<string, Gate> = { outer: rect("outer", 0, 55, 0, 100) };
+    const pops: PopulationMap = {
+      root: pop("root", "All", null, ["mid"]),
+      mid: pop("mid", "Outer", "root", [], [{ gate_id: "outer", include: true }]),
+    };
+
+    const { masks, populations } = applyGatingStrategy(gates, pops, "root", data);
+
+    for (const id of Object.keys(populations)) {
+      expect(populations[id].event_count).toBe(countOnes(masks[id]));
+    }
+  });
+
+  it("excludes with include:false, within the parent only", () => {
+    const data = assay({ x: [5, 25, 50, 5], y: [1, 1, 1, 1] }, 4);
+    const gates: Record<string, Gate> = {
+      outer: rect("outer", 0, 30, 0, 100), // keeps 5, 25, 5
+      drop: rect("drop", 0, 10, 0, 100),   // of those, removes the two x = 5
+    };
+    const pops: PopulationMap = {
+      root: pop("root", "All", null, ["mid"]),
+      mid: pop("mid", "Outer", "root", ["leaf"], [{ gate_id: "outer", include: true }]),
+      leaf: pop("leaf", "Not small", "mid", [], [{ gate_id: "drop", include: false }]),
+    };
+
+    const { masks } = applyGatingStrategy(gates, pops, "root", data);
+
+    // x = 50 is outside the parent, so excluding "drop" must not readmit it.
+    expect(Array.from(masks.leaf)).toEqual([0, 1, 0, 0]);
+  });
+
+  it("treats an 'and' over a missing gate as the parent, and an 'or' as empty", () => {
+    const data = assay({ x: [5, 25], y: [1, 1] }, 2);
+    const pops: PopulationMap = {
+      root: pop("root", "All", null, ["andPop", "orPop"]),
+      andPop: pop("andPop", "And", "root", [], [{ gate_id: "gone", include: true }], "and"),
+      orPop: pop("orPop", "Or", "root", [], [{ gate_id: "gone", include: true }], "or"),
+    };
+
+    const { masks } = applyGatingStrategy({}, pops, "root", data);
+
+    expect(Array.from(masks.andPop)).toEqual([1, 1]);
+    expect(Array.from(masks.orPop)).toEqual([0, 0]);
   });
 });

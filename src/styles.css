@@ -221,6 +221,30 @@ input[type="number"]::-webkit-outer-spin-button {
   min-height: 110px;
   flex-direction: column;
   gap: 6px;
+  position: relative;
+}
+.gl-sample-navigator.is-drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+/* Sits over the list while a drag is held, so the target is unmistakable. Pointer events stay
+   off it: the drop must reach the panel's own handler, not this layer. */
+.gl-sample-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  text-align: center;
+  pointer-events: none;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--panel) 88%, var(--accent));
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
 }
 .gl-sample-heading {
   display: flex;

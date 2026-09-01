@@ -69,7 +69,38 @@ export interface QuadrantGate {
   label_offset: [number, number] | null;
 }
 
-export type Gate = PolyRectGate | QuadrantGate;
+/**
+ * An ellipse held in its Gating-ML form: centre, covariance and a squared Mahalanobis radius.
+ *
+ * The covariance form is the interchange representation (Gating-ML EllipsoidGate; Cytobank and
+ * FlowJo both write it) and doubles as the evaluation form — membership is one quadratic-form
+ * test, with no axis/angle decomposition anywhere it could drift. Like every other gate, the
+ * parameters live in the gate's own space: raw, or display with the transforms recorded, and
+ * evaluation transforms events into that space first. That matches how FlowJo evaluates an
+ * ellipse drawn on biex axes — as a true ellipse in DISPLAY coordinates, which is not an
+ * ellipse in raw space at all.
+ */
+export interface EllipseGate {
+  gate_id: string;
+  name: string;
+  gate_type: "ellipse";
+  x_channel: string;
+  y_channel: string;
+  /** Centre (the Gating-ML mean), in the gate's space. */
+  mean: [number, number];
+  /** Symmetric 2×2 covariance, row-major, in the gate's space. */
+  covariance: [[number, number], [number, number]];
+  /** Squared Mahalanobis distance of the boundary (Gating-ML distanceSquare). */
+  distance_square: number;
+  /** Space the parameters live in; absent = this sample's pre-field default. */
+  space?: GateSpace;
+  /** Per-axis transform the gate was drawn under. Present only when space is display. */
+  transforms?: GateTransforms;
+  color: string;
+  label_offset: [number, number] | null;
+}
+
+export type Gate = PolyRectGate | QuadrantGate | EllipseGate;
 
 export interface GateRef {
   gate_id: string;
@@ -185,8 +216,8 @@ export function newRootPopulation(eventCount: number | null = null): Population 
 export function validateGate(gate: Gate): true {
   if (!gate.gate_id) throw new Error("Gate must have a gate_id");
   if (!gate.name) throw new Error("Gate must have a name");
-  if (!["polygon", "rectangle", "quadrant"].includes(gate.gate_type)) {
-    throw new Error(`Gate type must be 'polygon', 'rectangle' or 'quadrant', got: ${gate.gate_type}`);
+  if (!["polygon", "rectangle", "quadrant", "ellipse"].includes(gate.gate_type)) {
+    throw new Error(`Gate type must be 'polygon', 'rectangle', 'quadrant' or 'ellipse', got: ${gate.gate_type}`);
   }
   if (gate.gate_type === "polygon" && (gate as PolyRectGate).vertices.length < 3) {
     throw new Error("Polygon gate must have at least 3 vertices");

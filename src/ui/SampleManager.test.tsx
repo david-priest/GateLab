@@ -143,3 +143,146 @@ describe("FolderImportModal", () => {
     expect(onImport.mock.calls[0][0]).not.toContain("duplicate");
   });
 });
+
+// Dragging FCS files onto the samples panel is just another way to reach the same import as
+// "+ Files…", so the panel has to arm for file drags only, stay inert while an import is running
+// or when samples come from a host, and report folders rather than silently dropping them.
+describe("SampleNavigator drag and drop", () => {
+  function renderNavigator(props: {
+    onDropFiles?: (files: readonly File[], directoryCount: number) => void;
+    busy?: boolean;
+    showImportActions?: boolean;
+  }) {
+    act(() => root.render(
+      <SampleNavigator
+        items={items}
+        activeId="a"
+        excludedIds={new Set()}
+        busy={props.busy ?? false}
+        importProgress={null}
+        showImportActions={props.showImportActions ?? true}
+        onOpenFiles={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onManage={vi.fn()}
+        onManageSample={vi.fn()}
+        onActivate={vi.fn()}
+        onToggleIncluded={vi.fn()}
+        onIncludeAll={vi.fn()}
+        onIncludeNone={vi.fn()}
+        onInvertIncluded={vi.fn()}
+        onDropFiles={props.onDropFiles}
+      />,
+    ));
+    return host.querySelector(".gl-sample-navigator") as HTMLElement;
+  }
+
+  function dispatch(
+    target: HTMLElement,
+    type: string,
+    transfer: { types: string[]; files?: File[]; items?: unknown[] },
+  ) {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", {
+      value: {
+        types: transfer.types,
+        files: transfer.files ?? [],
+        items: transfer.items ?? [],
+        dropEffect: "none",
+      },
+    });
+    act(() => { target.dispatchEvent(event); });
+    return event;
+  }
+
+  const fcs = () => new File(["FCS3.1"], "donor-c.fcs");
+  const directoryItem = { webkitGetAsEntry: () => ({ isDirectory: true }) };
+
+  it("hands dropped files to the importer", () => {
+    const onDropFiles = vi.fn();
+    const panel = renderNavigator({ onDropFiles });
+    const file = fcs();
+
+    dispatch(panel, "drop", { types: ["Files"], files: [file] });
+
+    expect(onDropFiles).toHaveBeenCalledTimes(1);
+    expect(onDropFiles.mock.calls[0][0]).toEqual([file]);
+    expect(onDropFiles.mock.calls[0][1]).toBe(0);
+  });
+
+  it("shows the drop target only while a file drag is over the panel", () => {
+    const panel = renderNavigator({ onDropFiles: vi.fn() });
+
+    dispatch(panel, "dragenter", { types: ["Files"] });
+    expect(host.querySelector(".gl-sample-drop-overlay")).not.toBeNull();
+    expect(panel.className).toContain("is-drop-target");
+
+    dispatch(panel, "dragleave", { types: ["Files"] });
+    expect(host.querySelector(".gl-sample-drop-overlay")).toBeNull();
+  });
+
+  it("stays armed while the drag crosses child elements", () => {
+    const panel = renderNavigator({ onDropFiles: vi.fn() });
+    const child = panel.querySelector("button") as HTMLElement;
+
+    dispatch(panel, "dragenter", { types: ["Files"] });
+    // Entering a child fires enter before the matching leave on the parent; a plain boolean
+    // would flicker the target off here.
+    dispatch(child, "dragenter", { types: ["Files"] });
+    dispatch(panel, "dragleave", { types: ["Files"] });
+
+    expect(host.querySelector(".gl-sample-drop-overlay")).not.toBeNull();
+  });
+
+  it("ignores a drag that carries no files", () => {
+    const onDropFiles = vi.fn();
+    const panel = renderNavigator({ onDropFiles });
+
+    dispatch(panel, "dragenter", { types: ["text/plain"] });
+    expect(host.querySelector(".gl-sample-drop-overlay")).toBeNull();
+
+    dispatch(panel, "drop", { types: ["text/plain"] });
+    expect(onDropFiles).not.toHaveBeenCalled();
+  });
+
+  it("counts dropped folders so the caller can point at the folder importer", () => {
+    const onDropFiles = vi.fn();
+    const panel = renderNavigator({ onDropFiles });
+
+    dispatch(panel, "drop", {
+      types: ["Files"],
+      files: [new File([""], "PBMC")],
+      items: [directoryItem],
+    });
+
+    expect(onDropFiles.mock.calls[0][1]).toBe(1);
+  });
+
+  it("refuses a drop while an import is already running", () => {
+    const onDropFiles = vi.fn();
+    const panel = renderNavigator({ onDropFiles, busy: true });
+
+    dispatch(panel, "dragenter", { types: ["Files"] });
+    dispatch(panel, "drop", { types: ["Files"], files: [fcs()] });
+
+    expect(host.querySelector(".gl-sample-drop-overlay")).toBeNull();
+    expect(onDropFiles).not.toHaveBeenCalled();
+  });
+
+  it("refuses a drop when samples do not come from files", () => {
+    const onDropFiles = vi.fn();
+    const panel = renderNavigator({ onDropFiles, showImportActions: false });
+
+    dispatch(panel, "drop", { types: ["Files"], files: [fcs()] });
+
+    expect(onDropFiles).not.toHaveBeenCalled();
+  });
+
+  it("leaves the drop inert when no handler is supplied", () => {
+    const panel = renderNavigator({});
+
+    const event = dispatch(panel, "drop", { types: ["Files"], files: [fcs()] });
+
+    expect(host.querySelector(".gl-sample-drop-overlay")).toBeNull();
+    expect(event.defaultPrevented).toBe(false);
+  });
+});

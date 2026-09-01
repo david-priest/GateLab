@@ -31,6 +31,8 @@ import {
 } from "./rowDataContract";
 import {
   GATELAB_HOST_WORKSPACE_CONTRACT_VERSION,
+  GateLabWorkspaceConflictError,
+  workspaceConflictFrom,
   type GateLabHostWorkspaceEnvelope,
   type GateLabHostWorkspacePort,
   type GateLabHostWorkspaceWriteResult,
@@ -114,6 +116,8 @@ interface GateLabShinyHostResponse {
   ok: boolean;
   result?: unknown;
   error?: string;
+  errorCode?: string;
+  errorData?: unknown;
 }
 
 interface PendingHostRequest {
@@ -276,11 +280,18 @@ export function createShinySceHost(
     if (response.ok) {
       pending.resolve(response.result);
     } else {
-      pending.reject(new Error(
+      const message =
         typeof response.error === "string" && response.error.length > 0
           ? response.error
-          : "GateLabR could not complete the requested SCE update.",
-      ));
+          : "GateLabR could not complete the requested SCE update.";
+      // A revision conflict keeps its numbers so the caller can resync; everything else is a
+      // plain failure.
+      const conflict = workspaceConflictFrom(response.errorCode, response.errorData);
+      pending.reject(
+        conflict
+          ? new GateLabWorkspaceConflictError(message, conflict)
+          : new Error(message),
+      );
     }
   });
   shiny.addCustomMessageHandler(compensationProgressMessage, (message) => {

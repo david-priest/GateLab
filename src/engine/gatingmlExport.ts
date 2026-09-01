@@ -14,6 +14,7 @@
 // divides by (M+A) before inverting). Scatter/CyTOF use the natural arcsinh value.
 
 import { transformFromSpec, type Sample } from "./sample";
+import { axesFromCovariance, ellipseBoundary } from "./ellipse";
 import type { Gate, PolyRectGate, PopulationMap, TransformSpec } from "./models";
 import { isScatterChannel } from "./transforms";
 import { polygonOutline } from "../plots/gatePayload";
@@ -403,6 +404,50 @@ function definitionJson(
   return `{${header},${geom}}`;
 }
 
+// ── Ellipse emission ─────────────────────────────────────────────────────────
+/**
+ * EllipsoidGate in the export space: mean/covariance/distanceSquare, in exactly the shape
+ * Cytobank's own exports use (distanceSquare as an element with data-type:value). Only called
+ * when both axes convert LINEARLY into the export space — identity, the same transformed space
+ * (fasinh), or logicle's span scaling — because a covariance through a nonlinear map is not a
+ * covariance. Nonlinear cases (biex/wsplog) are densified to a polygon by the caller instead.
+ */
+function ellipseXml(
+  gate: import("./models").EllipseGate, gmlId: string, numId: number, seq: number,
+  xTr: string | null | undefined, yTr: string | null | undefined,
+  isFlow: boolean, xCofactor: number, yCofactor: number, xName: string, yName: string,
+  xCompRef: "FCS" | "uncompensated", yCompRef: "FCS" | "uncompensated",
+  xRange: [number, number], yRange: [number, number],
+  compensationId: number,
+  mean: [number, number], cov: [[number, number], [number, number]],
+): string[] {
+  const { major, minor, angle } = axesFromCovariance(cov, gate.distance_square);
+  const sx = scaleJson(xTr, isFlow, xCofactor, xRange);
+  const sy = scaleJson(yTr, isFlow, yCofactor, yRange);
+  const def = `{"scale":{"x":${sx},"y":${sy}},"positive":false,"negative":false,"locked":false,` +
+    `"label":[${fmtNum(mean[0])},${fmtNum(mean[1])}],` +
+    `"ellipse":{"center":[${fmtNum(mean[0])},${fmtNum(mean[1])}],"major":${fmtNum(major)},"minor":${fmtNum(minor)},"angle":${fmtNum(angle)}}}`;
+  return [
+    `  <gating:EllipsoidGate gating:id="${gmlId}">`,
+    ...customInfo(gate.name, numId, seq, "EllipseGate", def, compensationId),
+    ...dimXml(xName, xTr, xCompRef),
+    ...dimXml(yName, yTr, yCompRef),
+    "    <gating:mean>",
+    `      <gating:coordinate data-type:value="${fmtNum(mean[0])}" />`,
+    `      <gating:coordinate data-type:value="${fmtNum(mean[1])}" />`,
+    "    </gating:mean>",
+    "    <gating:covarianceMatrix>",
+    ...cov.flatMap((row) => [
+      "      <gating:row>",
+      ...row.map((v) => `        <gating:entry data-type:value="${fmtNum(v)}" />`),
+      "      </gating:row>",
+    ]),
+    "    </gating:covarianceMatrix>",
+    `    <gating:distanceSquare data-type:value="${fmtNum(gate.distance_square)}" />`,
+    "  </gating:EllipsoidGate>",
+  ];
+}
+
 // ── XML fragments ────────────────────────────────────────────────────────────
 function customInfo(
   name: string, numericId: number, gateSeq: number, typeStr: string, defJson: string,
@@ -712,8 +757,47 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
   // Gate elements.
   const gateLines: string[] = [];
   gate_order.forEach((gid, i) => {
-    const g = gates[gid];
-    if (!g || g.gate_type === "quadrant") return;
+    const gOrig = gates[gid];
+    if (!gOrig || gOrig.gate_type === "quadrant") return;
+    // An ellipse on axes that convert nonlinearly into the export space (biex/wsplog) has no
+    // EllipsoidGate representation — a covariance through a nonlinear map is not a covariance —
+    // so it exports as its sampled boundary, and displayGate then densifies that polygon like
+    // any other. Linear-converting ellipses take the exact EllipsoidGate path further down.
+    const gAxes = { x: exportPlan.axis(gid, gOrig.x_channel), y: exportPlan.axis(gid, gOrig.y_channel) };
+    const g: Gate = gOrig.gate_type === "ellipse" && (gAxes.x.needsDensify || gAxes.y.needsDensify)
+      ? { ...gOrig, gate_type: "polygon", vertices: ellipseBoundary(gOrig) } as unknown as Gate
+      : gOrig;
+    if (g.gate_type === "ellipse") {
+      const gmlId = gateToGmlId.get(gid)!;
+      const numId = gateNumericId.get(gid)!;
+      const xTr = gAxes.x.trId;
+      const yTr = gAxes.y.trId;
+      const kx = gAxes.x.convert(1) - gAxes.x.convert(0);
+      const ky = gAxes.y.convert(1) - gAxes.y.convert(0);
+      const mean: [number, number] = [gAxes.x.convert(g.mean[0]), gAxes.y.convert(g.mean[1])];
+      const cov: [[number, number], [number, number]] = [
+        [g.covariance[0][0] * kx * kx, g.covariance[0][1] * kx * ky],
+        [g.covariance[1][0] * ky * kx, g.covariance[1][1] * ky * ky],
+      ];
+      const bnd = ellipseBoundary(g).map(([bx, by]) => [gAxes.x.convert(bx), gAxes.y.convert(by)]);
+      const exs = bnd.map((v) => v[0]);
+      const eys = bnd.map((v) => v[1]);
+      const xRange = axisScaleRange(dataRangeFor(g.x_channel, gAxes.x), Math.min(...exs), Math.max(...exs));
+      const yRange = axisScaleRange(dataRangeFor(g.y_channel, gAxes.y), Math.min(...eys), Math.max(...eys));
+      const xCompRef = compensationRefFor(g.x_channel);
+      const yCompRef = compensationRefFor(g.y_channel);
+      const compensated = xCompRef === "FCS" || yCompRef === "FCS";
+      const compId = !compensated ? -2
+        : !cytobankMode ? -2
+        : sample.spilloverOrigin.kind === "fcs" ? 0
+        : EXPORTED_MATRIX_ID;
+      gateLines.push(...ellipseXml(
+        g, gmlId, numId, i + 1, xTr, yTr, isFlow, gAxes.x.cofactor, gAxes.y.cofactor,
+        pnnFor(g.x_channel), pnnFor(g.y_channel), xCompRef, yCompRef, xRange, yRange, compId,
+        mean, cov,
+      ));
+      return;
+    }
     const dg = displayGate(g as PolyRectGate);
     const gmlId = gateToGmlId.get(gid)!;
     const numId = gateNumericId.get(gid)!;

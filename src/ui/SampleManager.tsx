@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { useI18n } from "./i18n";
 
 export interface SampleListItem {
@@ -28,6 +28,27 @@ const compactNumber = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 1,
 });
 
+/**
+ * A drag only concerns this panel when it actually carries files. Without this check the panel
+ * would arm itself for a dragged gate, a text selection, or a tab, and then swallow the drop.
+ */
+function carriesFiles(event: DragEvent<HTMLElement>): boolean {
+  return Array.from(event.dataTransfer?.types ?? []).includes("Files");
+}
+
+/**
+ * Directories dropped alongside files, counted from the drag entries.
+ *
+ * A dropped folder still appears in `dataTransfer.files`, as a name-only entry that no reader
+ * can open, so counting the real directories here is what lets the caller say "use + Folder…"
+ * instead of failing to parse something the user can plainly see they dropped.
+ */
+function droppedDirectoryCount(event: DragEvent<HTMLElement>): number {
+  return Array.from(event.dataTransfer?.items ?? [])
+    .filter((item) => item.webkitGetAsEntry?.()?.isDirectory)
+    .length;
+}
+
 function matchesQuery(item: SampleListItem, query: string): boolean {
   const needle = query.trim().toLocaleLowerCase();
   if (!needle) return true;
@@ -53,6 +74,7 @@ export function SampleNavigator({
   onIncludeAll,
   onIncludeNone,
   onInvertIncluded,
+  onDropFiles,
 }: {
   items: readonly SampleListItem[];
   activeId: string | null;
@@ -71,9 +93,19 @@ export function SampleNavigator({
   onIncludeAll: () => void;
   onIncludeNone: () => void;
   onInvertIncluded: () => void;
+  /**
+   * Files dropped onto the panel, with the number of folders that came with them. Omitted where
+   * samples do not come from files at all -- a hosted SCE owns its own sample list.
+   */
+  onDropFiles?: (files: readonly File[], directoryCount: number) => void;
 }) {
   const { language, t } = useI18n();
   const [query, setQuery] = useState("");
+  const [dropActive, setDropActive] = useState(false);
+  // dragenter/dragleave fire for every child element the pointer crosses, so a boolean alone
+  // flickers off as soon as the drag reaches a button. Depth counting tracks the panel as a whole.
+  const dragDepth = useRef(0);
+  const dropEnabled = Boolean(onDropFiles) && showImportActions && !busy;
   const visible = useMemo(() => items.filter((item) => matchesQuery(item, query)), [items, query]);
   const includedCount = items.reduce((count, item) => count + Number(!excludedIds.has(item.id)), 0);
   const localizedCompactNumber = useMemo(() => new Intl.NumberFormat(language === "ja" ? "ja-JP" : undefined, {
@@ -81,8 +113,52 @@ export function SampleNavigator({
     maximumFractionDigits: 1,
   }), [language]);
 
+  function endDrag() {
+    dragDepth.current = 0;
+    setDropActive(false);
+  }
+
+  function handleDragEnter(event: DragEvent<HTMLElement>) {
+    if (!dropEnabled || !carriesFiles(event)) return;
+    event.preventDefault();
+    dragDepth.current += 1;
+    setDropActive(true);
+  }
+
+  function handleDragOver(event: DragEvent<HTMLElement>) {
+    if (!dropEnabled || !carriesFiles(event)) return;
+    // Without this the browser treats the drop as navigation and opens the FCS file instead.
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleDragLeave(event: DragEvent<HTMLElement>) {
+    if (!dropEnabled || !carriesFiles(event)) return;
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDropActive(false);
+  }
+
+  function handleDrop(event: DragEvent<HTMLElement>) {
+    if (!dropEnabled || !carriesFiles(event)) return;
+    event.preventDefault();
+    const directoryCount = droppedDirectoryCount(event);
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    endDrag();
+    onDropFiles?.(files, directoryCount);
+  }
+
   return (
-    <section className="gl-sample-navigator" aria-label={t(sourceLabel)}>
+    <section
+      className={`gl-sample-navigator${dropEnabled && dropActive ? " is-drop-target" : ""}`}
+      aria-label={t(sourceLabel)}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {dropEnabled && dropActive && (
+        <div className="gl-sample-drop-overlay">{t("Drop .fcs files to add them")}</div>
+      )}
       <div className="gl-sample-heading">
         <div className="gl-side-title">{t("Samples")}</div>
         <span>{t("{included} / {total} included", { included: includedCount, total: items.length })}</span>

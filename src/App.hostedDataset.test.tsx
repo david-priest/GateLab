@@ -13,6 +13,7 @@ import {
   GATELAB_HOST_CONTRACT_VERSION,
   type GateLabHostAdapter,
 } from "./host/contracts";
+import { GateLabWorkspaceConflictError } from "./host/workspaceContract";
 
 const plotHarness = vi.hoisted(() => ({
   eventCount: null as number | null,
@@ -354,5 +355,154 @@ describe("App SCE host loading", () => {
       [2.4, 3.1],
     ]);
     expect(container.textContent).toContain("workspace revision 1 · saved");
+  });
+});
+
+// The SCE advances on every accepted write, but the browser only learns the new revision from
+// that write's reply. A reply lost to a closing session, a reconnect or a replaced tab therefore
+// left the browser a revision behind for good: every later save failed the check and the only
+// cure was reloading. Reported from a live session as
+// "the browser expected revision 14 but the SCE is at revision 15".
+describe("workspace revision conflicts", () => {
+  const WRITER_ID = "00000000-0000-4000-8000-000000000001"; // the stubbed crypto.randomUUID
+
+  function hostWith(
+    writeWorkspace: GateLabHostAdapter["workspaces"] extends infer T
+      ? T extends { writeWorkspace: infer W } ? W : never
+      : never,
+  ): GateLabHostAdapter {
+    return {
+      contractVersion: GATELAB_HOST_CONTRACT_VERSION,
+      id: "test-r-host",
+      kind: "r-sce",
+      label: "Test R host",
+      capabilities: {
+        dataSources: { fcsFiles: false, singleCellExperiment: true },
+        dataModel: { multipleAssays: true, sampleMetadata: true, writeBackColumns: true },
+        persistence: {
+          workspaceFiles: false,
+          hostObject: true,
+          fileSystemAccess: false,
+          directoryAccess: false,
+        },
+        compute: { location: "host" },
+      },
+      datasets: {
+        async listDatasets() { return [dataset]; },
+        async readAssay(_datasetId, sampleId) {
+          return sampleId === "sample-0"
+            ? bufferOf(new Float32Array([5, 10, 20, 25]))
+            : bufferOf(new Float32Array([15, 30]));
+        },
+        async readEventIndex(_datasetId, sampleId) {
+          return sampleId === "sample-0"
+            ? bufferOf(new Uint32Array([0, 2]))
+            : bufferOf(new Uint32Array([1]));
+        },
+      },
+      workspaces: {
+        // The browser is told 14; the SCE has really reached 15 through a write it never heard
+        // the reply to.
+        async readWorkspace() {
+          return {
+            contractVersion: 1,
+            datasetId: "sce",
+            sourceFormat: "gatelabr-legacy" as const,
+            revision: 14,
+            workspaceJson: JSON.stringify({
+              gates: {},
+              gate_order: [],
+              populations: {
+                root: {
+                  population_id: "root",
+                  name: "All Events",
+                  gate_refs: [],
+                  gate_logic: "and",
+                  parent_id: null,
+                  children: [],
+                },
+              },
+              root_population_id: "root",
+              gate_value_space: "display",
+              global_scale_ranges: { CD3: [0, 8], CD19: [0, 7] },
+            }),
+          };
+        },
+        writeWorkspace,
+      },
+    };
+  }
+
+  async function renderAndSave(host: GateLabHostAdapter) {
+    await act(async () => {
+      root.render(
+        <GateLabHostProvider host={host}>
+          <App />
+        </GateLabHostProvider>,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.startsWith("Save to SCE"))!;
+    await act(async () => {
+      save.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+  }
+
+  it("resyncs and retries when the conflicting write was this browser's own", async () => {
+    let stored = 15; // the revision our own unheard write actually reached
+    const writeWorkspace = vi.fn(async (request: {
+      expectedRevision: number;
+      clientRevision: number;
+    }) => {
+      if (request.expectedRevision !== stored) {
+        throw new GateLabWorkspaceConflictError(
+          `expected ${request.expectedRevision}, SCE at ${stored}`,
+          { expectedRevision: request.expectedRevision, currentRevision: stored, writerId: WRITER_ID },
+        );
+      }
+      stored += 1;
+      return { revision: stored, clientRevision: request.clientRevision, savedAt: "2026-08-27T00:00:00Z" };
+    });
+
+    await renderAndSave(hostWith(writeWorkspace));
+
+    // Once to discover the conflict, once more at the revision the conflict reported.
+    expect(writeWorkspace).toHaveBeenCalledTimes(2);
+    expect(writeWorkspace.mock.calls[0][0].expectedRevision).toBe(14);
+    expect(writeWorkspace.mock.calls[1][0].expectedRevision).toBe(15);
+    // Recovered without the user reloading, and without the conflict surfacing as an error.
+    expect(container.textContent).toContain("Saved GateLab workspace to SCE · revision 16");
+    expect(container.textContent).not.toContain("revision conflict");
+  });
+
+  it("stamps the write with this browser's writer id", async () => {
+    const writeWorkspace = vi.fn(async (request: { expectedRevision: number; clientRevision: number }) => ({
+      revision: request.expectedRevision + 1,
+      clientRevision: request.clientRevision,
+      savedAt: "2026-08-27T00:00:00Z",
+    }));
+    await renderAndSave(hostWith(writeWorkspace));
+    expect(writeWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ writerId: WRITER_ID }),
+    );
+  });
+
+  it("refuses to overwrite a genuine second session, and reports it", async () => {
+    const writeWorkspace = vi.fn(async (request: { expectedRevision: number }) => {
+      throw new GateLabWorkspaceConflictError(
+        `Workspace revision conflict: the browser expected revision ${request.expectedRevision} ` +
+          "but the SCE is at revision 15. Another session wrote to this SCE; reload GateLabR " +
+          "before saving again.",
+        { expectedRevision: request.expectedRevision, currentRevision: 15, writerId: "another-session" },
+      );
+    });
+
+    await renderAndSave(hostWith(writeWorkspace));
+
+    // No retry: someone else's work is not silently replaced, and the user is told.
+    expect(writeWorkspace).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("Another session wrote to this SCE");
   });
 });

@@ -35,6 +35,15 @@ function cloneGate(gate: Gate, gateId: string): Gate {
   if (gate.gate_type === "quadrant") {
     return { ...gate, gate_id: gateId, center: [...gate.center], label_offset: labelOffset };
   }
+  if (gate.gate_type === "ellipse") {
+    return {
+      ...gate,
+      gate_id: gateId,
+      mean: [...gate.mean],
+      covariance: [[...gate.covariance[0]], [...gate.covariance[1]]] as [[number, number], [number, number]],
+      label_offset: labelOffset,
+    };
+  }
   return {
     ...gate,
     gate_id: gateId,
