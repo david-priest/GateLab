@@ -398,7 +398,7 @@ describe("GatingML export → import round-trip (Aria III flow)", () => {
         // rectangle: AABB corners recovered (order-independent → compare min/max)
         const origRect = ws.gates[ws.gate_order[0]];
         const rx = byName["Cells"].gate_type !== "quadrant" ? (byName["Cells"] as { vertices: Vertex[] }).vertices : [];
-        const oxs = origRect.gate_type !== "quadrant" ? origRect.vertices.map((v) => v[0]) : [];
+        const oxs = origRect.gate_type === "polygon" || origRect.gate_type === "rectangle" ? origRect.vertices.map((v) => v[0]) : [];
         const rxs = rx.map((v) => v[0]);
         expect(Math.min(...rxs)).toBeCloseTo(Math.min(...oxs), 0);
         expect(Math.max(...rxs)).toBeCloseTo(Math.max(...oxs), 0);
@@ -406,7 +406,7 @@ describe("GatingML export → import round-trip (Aria III flow)", () => {
         // polygon (logicle): every vertex recovered to within 1% (relative)
         const origPoly = ws.gates[ws.gate_order[1]];
         const rp = (byName["PE+APC gate"] as { vertices: Vertex[] }).vertices;
-        const op = origPoly.gate_type !== "quadrant" ? origPoly.vertices : [];
+        const op = origPoly.gate_type === "polygon" || origPoly.gate_type === "rectangle" ? origPoly.vertices : [];
         expect(rp.length).toBe(op.length);
         for (let i = 0; i < op.length; i++) {
           for (let k = 0; k < 2; k++) {

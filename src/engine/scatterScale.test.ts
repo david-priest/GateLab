@@ -168,7 +168,7 @@ describe("gate display coordinates follow the transform", () => {
     };
   }
   const displayX = (s: Sample, g: Gate) =>
-    (g.gate_type === "quadrant" ? [] : g.vertices).map(([vx]) => s.gatingToDisplay("FSC-A", vx));
+    (g.gate_type === "polygon" || g.gate_type === "rectangle" ? g.vertices : []).map(([vx]) => s.gatingToDisplay("FSC-A", vx));
 
   it("moves the gate outline when the scatter cofactor changes", () => {
     const s = load(ARIA_SMALL);

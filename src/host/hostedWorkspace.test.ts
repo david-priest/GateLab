@@ -130,3 +130,141 @@ describe("readHostedWorkspace", () => {
     )).toBe(restored.workspace);
   });
 });
+
+describe("ellipse gates through the legacy GateLabR path", () => {
+  function ellipseEnvelope(): GateLabHostWorkspaceEnvelope {
+    const envelope = legacyEnvelope();
+    const parsed = JSON.parse(envelope.workspaceJson) as {
+      gates: Record<string, Record<string, unknown>>;
+    };
+    parsed.gates["gate-1"] = {
+      gate_id: "gate-1",
+      name: "Blasts",
+      gate_type: "ellipse",
+      x_channel: "142Nd_CD3",
+      y_channel: "151Eu_CD19",
+      mean: [3, 4],
+      covariance: [[4, 0], [0, 1]],
+      distance_square: 1,
+      // The R mirror also writes a sampled boundary. Reading it back must NOT rebuild the gate
+      // from those points, or the covariance form silently becomes a fixed 64-gon.
+      vertices: [[5, 4], [3, 5], [1, 4], [3, 3]],
+      color: "#377eb8",
+      label_offset: null,
+    };
+    return { ...envelope, workspaceJson: JSON.stringify(parsed) };
+  }
+
+  it("restores the covariance form rather than the sampled boundary", async () => {
+    const restored = await readHostedWorkspace(ellipseEnvelope(), dataset);
+    const gate = restored.workspace.gating.gates["gate-1"] as unknown as {
+      gate_type: string;
+      mean: [number, number];
+      covariance: [[number, number], [number, number]];
+      distance_square: number;
+      vertices?: unknown;
+    };
+
+    expect(gate.gate_type).toBe("ellipse");
+    expect(gate.mean).toEqual([3, 4]);
+    expect(gate.covariance).toEqual([[4, 0], [0, 1]]);
+    expect(gate.distance_square).toBe(1);
+    expect(gate.vertices).toBeUndefined();
+  });
+
+  it("rejects an ellipse whose covariance is unusable rather than guessing one", async () => {
+    const envelope = ellipseEnvelope();
+    const parsed = JSON.parse(envelope.workspaceJson) as {
+      gates: Record<string, Record<string, unknown>>;
+    };
+    parsed.gates["gate-1"].covariance = [[4, 0]];
+    await expect(readHostedWorkspace(
+      { ...envelope, workspaceJson: JSON.stringify(parsed) },
+      dataset,
+    )).rejects.toThrow(/covariance/i);
+  });
+});
+
+// GateLabR stores the canonical workspace JSON verbatim, so a gate's space and the transforms it
+// was drawn under survive the SCE untouched. Dropping them while reading the JSON back re-reads
+// the gate in the sample's default space: the same coordinates then select a different event set,
+// with nothing on screen to say so. An ellipse is always created in display space with its axis
+// transforms captured, so it is hit systematically, but the fields belong to every gate type.
+describe("gate space and transforms through the legacy GateLabR path", () => {
+  const BIEX = {
+    kind: "biex",
+    maxValue: 262144,
+    pos: 4.5,
+    neg: 0,
+    widthBasis: -10,
+    channelRange: 4096,
+  };
+
+  function envelopeWithGate(gate: Record<string, unknown>): GateLabHostWorkspaceEnvelope {
+    const envelope = legacyEnvelope();
+    const parsed = JSON.parse(envelope.workspaceJson) as {
+      gates: Record<string, Record<string, unknown>>;
+    };
+    parsed.gates["gate-1"] = { ...parsed.gates["gate-1"], ...gate };
+    return { ...envelope, workspaceJson: JSON.stringify(parsed) };
+  }
+
+  function restoredGate(workspace: { gating: { gates: Record<string, unknown> } }) {
+    return workspace.gating.gates["gate-1"] as {
+      space?: string;
+      transforms?: Record<string, { kind: string; widthBasis?: number }>;
+    };
+  }
+
+  it("keeps a display-space ellipse's space and axis transforms", async () => {
+    const restored = await readHostedWorkspace(envelopeWithGate({
+      gate_type: "ellipse",
+      mean: [3, 4],
+      covariance: [[4, 0], [0, 1]],
+      distance_square: 1,
+      vertices: undefined,
+      space: "display",
+      transforms: { "142Nd_CD3": BIEX, "151Eu_CD19": { kind: "asinh", cofactor: 5 } },
+    }), dataset);
+    const gate = restoredGate(restored.workspace);
+
+    expect(gate.space).toBe("display");
+    expect(gate.transforms?.["142Nd_CD3"]).toEqual(BIEX);
+    expect(gate.transforms?.["151Eu_CD19"]).toEqual({ kind: "asinh", cofactor: 5 });
+  });
+
+  it("keeps the space on a rectangle too, not only on an ellipse", async () => {
+    const restored = await readHostedWorkspace(
+      envelopeWithGate({ space: "display", transforms: { "142Nd_CD3": BIEX } }),
+      dataset,
+    );
+    const gate = restoredGate(restored.workspace);
+
+    expect(gate.space).toBe("display");
+    expect(gate.transforms?.["142Nd_CD3"]).toEqual(BIEX);
+  });
+
+  it("leaves both fields absent when the stored gate predates them", async () => {
+    const restored = await readHostedWorkspace(legacyEnvelope(), dataset);
+    const gate = restoredGate(restored.workspace);
+
+    expect(gate.space).toBeUndefined();
+    expect(gate.transforms).toBeUndefined();
+  });
+
+  it("refuses a malformed transform rather than restoring the gate without one", async () => {
+    await expect(readHostedWorkspace(envelopeWithGate({
+      space: "display",
+      // widthBasis missing: honouring this as though the axis were untransformed is exactly the
+      // silent space mismatch this guards against.
+      transforms: { "142Nd_CD3": { ...BIEX, widthBasis: undefined } },
+    }), dataset)).rejects.toThrow(/transform/i);
+  });
+
+  it("refuses a gate space it does not understand", async () => {
+    await expect(readHostedWorkspace(
+      envelopeWithGate({ space: "screen" }),
+      dataset,
+    )).rejects.toThrow(/gate space/i);
+  });
+});

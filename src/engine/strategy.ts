@@ -8,6 +8,7 @@
 // When both forward+back are shown, the final population's events overlay in orange.
 
 import type { Sample } from "./sample";
+import { ellipseBoundary } from "./ellipse";
 import type { GateEdgeMode } from "../ui/gateEdgeModes";
 import type { Gate, GateRef, PopulationMap } from "./models";
 import { columnsForGate, getGateMask, type GateAssayData } from "./gates";
@@ -68,7 +69,7 @@ export interface StrategyStep {
 function outlineOf(sample: Sample, gate: Gate, displayVerts: [number, number][]) {
   if (gate.gate_type === "quadrant" || gate.gate_type === "rectangle") return undefined;
   return polygonOutline(
-    gate.vertices,
+    gate.gate_type === "ellipse" ? ellipseBoundary(gate) : gate.vertices,
     (pt) => [
       sample.gateToDisplay(gate, gate.x_channel, pt[0]),
       sample.gateToDisplay(gate, gate.y_channel, pt[1]),
@@ -84,6 +85,7 @@ function displayVerticesOf(sample: Sample, gate: Gate): [number, number][] {
     sample.gateToDisplay(gate, gate.x_channel, vx),
     sample.gateToDisplay(gate, gate.y_channel, vy),
   ];
+  if (gate.gate_type === "ellipse") return ellipseBoundary(gate).map(([vx, vy]) => toD(vx, vy));
   if (gate.gate_type === "rectangle") {
     let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
     for (const [vx, vy] of gate.vertices) {

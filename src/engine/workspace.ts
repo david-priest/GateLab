@@ -89,6 +89,11 @@ export interface WorkspaceFile {
      * they were saved under.
      */
     branchGatesOnly?: boolean;
+    /**
+     * Keep gates owned by no population visible under branch scoping. Absent reads as true —
+     * an unowned gate belongs to no branch, so no branch should hide it.
+     */
+    showUnownedGates?: boolean;
     /** Main Gating plot typography. Optional for workspaces saved before these controls existed. */
     fontSizes?: GatingFontSizes;
   };
@@ -350,6 +355,21 @@ export function validateWorkspace(ws: WorkspaceFile): true {
       }
     } else if (gate.gate_type === "quadrant") {
       if (!finitePair(gate.center)) invalidWorkspace(`quadrant gate "${gateId}" has an invalid center.`);
+    } else if (gate.gate_type === "ellipse") {
+      // An ellipse carries the Gating-ML form and no vertices at all: mean, a symmetric 2x2
+      // covariance, and the distanceSquare the boundary sits at. Everything drawn or evaluated
+      // is derived from those, so they are what has to survive the round trip.
+      if (!finitePair(gate.mean)) invalidWorkspace(`ellipse gate "${gateId}" has an invalid mean.`);
+      const cov = gate.covariance as unknown;
+      if (!Array.isArray(cov) || cov.length !== 2 || !cov.every(finitePair)) {
+        invalidWorkspace(`ellipse gate "${gateId}" has an invalid covariance matrix.`);
+      }
+      const [[, b], [c]] = cov as [[number, number], [number, number]];
+      if (b !== c) invalidWorkspace(`ellipse gate "${gateId}" has a non-symmetric covariance matrix.`);
+      if (typeof gate.distance_square !== "number" || !Number.isFinite(gate.distance_square)
+        || gate.distance_square <= 0) {
+        invalidWorkspace(`ellipse gate "${gateId}" has an invalid distance_square.`);
+      }
     } else {
       invalidWorkspace(`gate "${gateId}" has unsupported gate_type "${String((gate as { gate_type?: unknown }).gate_type)}".`);
     }

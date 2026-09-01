@@ -21,6 +21,7 @@ import {
   type FlowJoSpillover,
 } from "./engine/flowjoWorkspace";
 import { isDivaWorkspace, listDivaGateTrees, divaToGatingML } from "./engine/divaWorkspace";
+import { covarianceFromAxes, ellipseBoundary } from "./engine/ellipse";
 import { ChannelScales } from "./engine/channelScales";
 import { fitChannelAxisRange, includePlotGatesInAxisRange } from "./engine/axisRange";
 import { parseFcs, type SpilloverMatrix } from "./engine/fcs";
@@ -178,7 +179,7 @@ import {
 } from "./ui/SampleManager";
 import { WorkspaceRelinkModal } from "./ui/WorkspaceRelinkModal";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
-import { NavigateIcon, RectIcon, PolyIcon, QuadIcon } from "./ui/icons";
+import { NavigateIcon, RectIcon, PolyIcon, EllipseIcon, QuadIcon } from "./ui/icons";
 import { useSampleDataRevisionKey } from "./ui/useSampleDataRevisions";
 import { useContextualGlobalScales } from "./ui/useContextualGlobalScales";
 import {
@@ -214,7 +215,10 @@ import {
   type GateLabHostPopulationColumn,
 } from "./host/colDataContract";
 import { GATELAB_HOST_ROWDATA_CONTRACT_VERSION } from "./host/rowDataContract";
-import type { GateLabHostWorkspaceWriteResult } from "./host/workspaceContract";
+import {
+  GateLabWorkspaceConflictError,
+  type GateLabHostWorkspaceWriteResult,
+} from "./host/workspaceContract";
 import { lazyChunk } from "./ui/lazyChunk";
 import {
   SceColDataExportModal,
@@ -260,7 +264,7 @@ type CrudModal =
   | { kind: "bulkRename" }
   | { kind: "exportSceColData" };
 
-type DrawMode = "navigate" | "draw-rect" | "draw-poly" | "draw-quadrant";
+type DrawMode = "navigate" | "draw-rect" | "draw-poly" | "draw-ellipse" | "draw-quadrant";
 type LiveWorkspaceFile = WorkspaceFile | WorkspaceFileV3;
 
 /**
@@ -372,6 +376,7 @@ const DRAW_TOOLS: { id: DrawMode; Icon: () => React.ReactElement; title: string 
   { id: "navigate", Icon: NavigateIcon, title: "Navigate (pan / zoom)" },
   { id: "draw-rect", Icon: RectIcon, title: "Rectangle gate — drag a box" },
   { id: "draw-poly", Icon: PolyIcon, title: "Polygon gate — click vertices, double-click to close" },
+  { id: "draw-ellipse", Icon: EllipseIcon, title: "Ellipse gate — drag from the centre outward" },
   { id: "draw-quadrant", Icon: QuadIcon, title: "Quadrant gate — click the crosshair centre" },
 ];
 
@@ -655,6 +660,10 @@ export default function App() {
   const hostSaveChainRef = useRef<Promise<unknown>>(Promise.resolve());
   const lastHostSavedEditRevisionRef = useRef(-1);
   const lastHostSaveResultRef = useRef<GateLabHostWorkspaceWriteResult | null>(null);
+  // Identifies this browser session in the SCE's workspace record, so a write whose reply was
+  // lost can be recognised as ours and resynced from rather than dead-ending every later save.
+  const hostWriterIdRef = useRef<string | null>(null);
+  if (hostWriterIdRef.current === null) hostWriterIdRef.current = crypto.randomUUID();
   const [xIdx, setXIdx] = useState(0);
   const [yIdx, setYIdx] = useState(1);
   const [mode, setMode] = useState<DisplayMode>("pseudocolor");
@@ -791,6 +800,9 @@ export default function App() {
   // that shares the channel pair. The wide view is for comparing thresholds set on different
   // branches against each other, which the scoped view deliberately hides.
   const [branchGatesOnly, setBranchGatesOnly] = useState(true);
+  // Gates owned by no population belong to no branch, so branch scoping can only hide them by
+  // accident. On (the default) they stay visible regardless of the displayed branch.
+  const [showUnownedGates, setShowUnownedGates] = useState(true);
   const [overlayPalette, setOverlayPalette] = useState<PaletteName>("default");
   const activeDisplayContextKey = sample?.displayTransformContextKey ?? null;
   const activeWorkspaceScaleContextKey = sample?.workspaceScaleContextKey ?? null;
@@ -2998,6 +3010,8 @@ export default function App() {
             );
             setBranchGatesOnly(
               (workspace.display as { branchGatesOnly?: boolean }).branchGatesOnly !== false);
+            setShowUnownedGates(
+              (workspace.display as { showUnownedGates?: boolean }).showUnownedGates !== false);
             setPointAlpha(restoredPointAlpha(workspace.display.pointAlpha));
             setPointSize(restoredPointSize(workspace.display.pointSize));
             setGatingFontSizes({
@@ -3290,6 +3304,7 @@ export default function App() {
         densityColorPower,
         fontSizes: gatingFontSizes,
         branchGatesOnly,
+        showUnownedGates,
       },
       illustration: illustConfigRef.current ?? undefined,
       illustrationPresets,
@@ -3370,13 +3385,34 @@ export default function App() {
           throw new Error("The hosted SCE workspace is not ready to save.");
         }
         setHostWorkspaceStatus("saving");
-        const result = await host.workspaces.writeWorkspace({
-          datasetId,
-          expectedRevision: hostWorkspaceRevisionRef.current,
-          clientRevision,
-          reason,
-          workspaceJson: JSON.stringify(ws),
-        });
+        const workspaceJson = JSON.stringify(ws);
+        const writeAt = (expectedRevision: number) =>
+          host.workspaces!.writeWorkspace({
+            datasetId,
+            expectedRevision,
+            clientRevision,
+            reason,
+            workspaceJson,
+            writerId: hostWriterIdRef.current!,
+          });
+        let result: GateLabHostWorkspaceWriteResult;
+        try {
+          result = await writeAt(hostWorkspaceRevisionRef.current);
+        } catch (cause) {
+          // A write can land in the SCE while its reply never arrives -- a closing session, a
+          // reconnect, a replaced tab -- leaving this browser a revision behind and every later
+          // save failing the check. When the winning write carries our own writer id it is that
+          // lost reply, so resync to it and retry once: the result is exactly the state we would
+          // have reached had the reply arrived. A conflict from any other writer is a real second
+          // session and must not be silently overwritten.
+          if (
+            !(cause instanceof GateLabWorkspaceConflictError) ||
+            cause.conflict.writerId !== hostWriterIdRef.current
+          ) throw cause;
+          hostWorkspaceRevisionRef.current = cause.conflict.currentRevision;
+          setHostWorkspaceRevision(cause.conflict.currentRevision);
+          result = await writeAt(cause.conflict.currentRevision);
+        }
         hostWorkspaceRevisionRef.current = result.revision;
         setHostWorkspaceRevision(result.revision);
         lastHostSavedEditRevisionRef.current = Math.max(
@@ -4326,6 +4362,8 @@ export default function App() {
       setDensityColorPower(normalizeDensityColorPower(ws.display?.densityColorPower));
       setBranchGatesOnly(
         (ws.display as { branchGatesOnly?: boolean } | undefined)?.branchGatesOnly !== false);
+      setShowUnownedGates(
+        (ws.display as { showUnownedGates?: boolean } | undefined)?.showUnownedGates !== false);
       setPointAlpha(restoredPointAlpha(ws.display?.pointAlpha));
       setPointSize(restoredPointSize(ws.display?.pointSize));
       setGatingFontSizes({ ...DEFAULT_GATING_FONT_SIZES, ...ws.display?.fontSizes });
@@ -4706,7 +4744,12 @@ export default function App() {
     ],
   );
 
-  const illustrationSampleViews = useMemo(() => includedSamples.flatMap((entry) => {
+  // Only the Illustration tab reads these, and each entry costs a full derivePopulationView --
+  // gate counts over every event of that sample, for every gate. Building them while another tab
+  // is showing rebuilds an analysis dataset for a hidden tree on every gate edit, which is the
+  // one thing the performance invariant forbids: on a four-file, 6M-event workspace it was about
+  // 465ms of each ~790ms gate commit, spent on counts nobody was looking at.
+  const illustrationSampleViews = useMemo(() => (activeTab !== "illustration" ? [] : includedSamples.flatMap((entry) => {
     if (entry.id === activeSampleId) {
       return [{ id: entry.id, name: entry.name, sample: entry.sample, derived }];
     }
@@ -4723,7 +4766,8 @@ export default function App() {
       sample: entry.sample,
       derived: derivePopulationView(entry.sample, state, cached.gating),
     }];
-  }), [
+  })), [
+    activeTab,
     includedSamples,
     activeSampleId,
     derived,
@@ -4837,6 +4881,7 @@ export default function App() {
           state.active_population_id,
           state.root_population_id,
           state.selected_gate_id,
+          showUnownedGates,
         );
       if (!state.selected_gate_ids?.length) return scoped;
       const shown = new Set(scoped);
@@ -4848,7 +4893,7 @@ export default function App() {
     [
       state.populations, state.gates, state.gate_order,
       state.active_population_id, state.root_population_id, state.selected_gate_id,
-      state.selected_gate_ids, branchGatesOnly,
+      state.selected_gate_ids, branchGatesOnly, showUnownedGates,
     ],
   );
 
@@ -5227,7 +5272,9 @@ export default function App() {
           if (channel !== key) continue;
           const points = gate.gate_type === "quadrant"
             ? [gate.center]
-            : (gate.vertices as [number, number][]);
+            : gate.gate_type === "ellipse"
+              ? ellipseBoundary(gate, 16)
+              : (gate.vertices as [number, number][]);
           for (const point of points) {
             if (!point) continue;
             // The gate's own transform, so raw-space and display-space gates on the same
@@ -5560,6 +5607,22 @@ export default function App() {
             onIncludeAll={includeAllSamples}
             onIncludeNone={includeNoSamples}
             onInvertIncluded={invertIncludedSamples}
+            onDropFiles={isSceHost ? undefined : (dropped, directoryCount) => {
+              // Same ingestion as "+ Files…": the drop is only another way to pick the files.
+              const files = dropped.filter((file) => file.name.toLowerCase().endsWith(".fcs"));
+              if (files.length === 0) {
+                setError(directoryCount > 0
+                  ? "Folders are not read here — use “+ Folder…” to add a folder of FCS files."
+                  : "Only .fcs files can be dropped here.");
+                return;
+              }
+              void importFcsCandidates(files.map((file) => ({
+                id: crypto.randomUUID(),
+                name: file.name,
+                file,
+                handle: null,
+              })));
+            }}
           />
           <input
             ref={fileRef}
@@ -6318,11 +6381,56 @@ export default function App() {
                   // convert to gating space via the gate's stored channel keys, then persist.
                   const g = state.gates[e.gate_id];
                   if (!g || g.gate_type === "quadrant") return;
+                  if (g.gate_type === "ellipse") {
+                    // The plot presents an ellipse as its sampled boundary; a body drag is a
+                    // uniform display-space translation of those points. Only the mean moves —
+                    // the covariance is the gate's shape and never derives from dragged
+                    // samples. The new mean is the translated display centroid mapped back
+                    // into the gate's own space.
+                    const cx = e.vertices.reduce((a, v) => a + v[0], 0) / e.vertices.length;
+                    const cy = e.vertices.reduce((a, v) => a + v[1], 0) / e.vertices.length;
+                    dispatch({
+                      type: "moveEllipse",
+                      gateId: e.gate_id,
+                      mean: [sample.displayToGate(g, g.x_channel, cx), sample.displayToGate(g, g.y_channel, cy)],
+                    });
+                    return;
+                  }
                   const verts = e.vertices.map(
                     ([vx, vy]) =>
                       [sample.displayToGate(g, g.x_channel, vx), sample.displayToGate(g, g.y_channel, vy)] as [number, number],
                   );
                   dispatch({ type: "editGate", gateId: e.gate_id, vertices: verts });
+                }}
+                onEllipseEdit={(e) => {
+                  if (!plotInteractionIsCurrent()) return;
+                  const g = state.gates[e.gate_id];
+                  if (!g || g.gate_type !== "ellipse") return;
+                  // The handles worked in DISPLAY coordinates; the gate stores its covariance in
+                  // its own space. Handles are only offered when the gate→display map is affine
+                  // (the payload checks numerically), so the mean maps pointwise and the
+                  // covariance maps as K·Σ·K with the per-axis slopes — computed here from the
+                  // same displayToGate the mean uses, so the two can never disagree.
+                  const mean: [number, number] = [
+                    sample.displayToGate(g, g.x_channel, e.mean[0]),
+                    sample.displayToGate(g, g.y_channel, e.mean[1]),
+                  ];
+                  const slope = (ch: string, at: number, span: number): number => {
+                    const h = Math.max(Math.abs(span), 1e-6) * 0.01;
+                    return (sample.displayToGate(g, ch, at + h) - sample.displayToGate(g, ch, at - h)) / (2 * h);
+                  };
+                  const kx = slope(g.x_channel, e.mean[0], e.major);
+                  const ky = slope(g.y_channel, e.mean[1], e.major);
+                  const covD = covarianceFromAxes(e.major, e.minor, e.angle, g.distance_square);
+                  dispatch({
+                    type: "reshapeEllipse",
+                    gateId: e.gate_id,
+                    mean,
+                    covariance: [
+                      [covD[0][0] * kx * kx, covD[0][1] * kx * ky],
+                      [covD[1][0] * ky * kx, covD[1][1] * ky * ky],
+                    ],
+                  });
                 }}
                 onQuadrantMove={(e) => {
                   if (!plotInteractionIsCurrent()) return;
@@ -6597,6 +6705,19 @@ export default function App() {
                 />
                 {t("Branch gates")}
               </label>
+              {branchGatesOnly && (
+                <label
+                  className="gl-branch-gates-toggle"
+                  title={t("Always draw gates that belong to no population. Such a gate is in no branch, so branch scoping would otherwise hide it whenever it is not selected or ticked.")}
+                >
+                  <input
+                    type="checkbox"
+                    checked={showUnownedGates}
+                    onChange={(e) => setShowUnownedGates(e.target.checked)}
+                  />
+                  {t("Unowned gates")}
+                </label>
+              )}
               <PopToolbar
                 state={state}
                 dispatch={dispatch}

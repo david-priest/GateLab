@@ -17,7 +17,8 @@ export const DEFAULT_GATING_FONT_SIZES: GatingFontSizes = {
 };
 
 export interface NewGate {
-  gate_type: "rectangle" | "polygon" | "quadrant";
+  gate_type: "rectangle" | "polygon" | "ellipse" | "quadrant";
+  /** For an ellipse: [centre, centre+radii] in display coords; otherwise the drawn vertices. */
   vertices: [number, number][];
   x_channel: string;
   y_channel: string;
@@ -37,6 +38,8 @@ interface Props {
   fontSizes?: GatingFontSizes;
   onNewGate?: (g: NewGate) => void;
   onGateEdit?: (g: { gate_id: string; vertices: [number, number][] }) => void;
+  /** Ellipse handle drag: display-space centre and principal axes at the gate's distanceSquare. */
+  onEllipseEdit?: (v: { gate_id: string; mean: [number, number]; major: number; minor: number; angle: number }) => void;
   onQuadrantMove?: (e: { gate_id: string; center: [number, number] }) => void;
   onGateSelect?: (gateId: string) => void;
   onAxisLabelClick?: (e: { axis: "x" | "y"; selected: string }) => void;
@@ -96,6 +99,7 @@ export function GatingPlot({
   fontSizes = DEFAULT_GATING_FONT_SIZES,
   onNewGate,
   onGateEdit,
+  onEllipseEdit,
   onQuadrantMove,
   onGateSelect,
   onAxisLabelClick,
@@ -116,6 +120,7 @@ export function GatingPlot({
   const callbacksRef = useRef({
     onNewGate,
     onGateEdit,
+    onEllipseEdit,
     onQuadrantMove,
     onGateSelect,
     onAxisLabelClick,
@@ -129,6 +134,7 @@ export function GatingPlot({
   callbacksRef.current = {
     onNewGate,
     onGateEdit,
+    onEllipseEdit,
     onQuadrantMove,
     onGateSelect,
     onAxisLabelClick,
@@ -258,6 +264,11 @@ export function GatingPlot({
           interactionToken: paintedInteractionTokenRef.current,
         });
         handler(e);
+      }),
+      bus.on("ellipse_edit", (v: unknown) => {
+        if (!interactionIsCurrent()) return;
+        callbacksRef.current.onEllipseEdit?.(
+          v as { gate_id: string; mean: [number, number]; major: number; minor: number; angle: number });
       }),
       bus.on("gate_quadrant_move", (v: unknown) => {
         if (!interactionIsCurrent()) return;

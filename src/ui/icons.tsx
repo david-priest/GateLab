@@ -29,6 +29,15 @@ export function RectIcon() {
   );
 }
 
+/** Ellipse gate. */
+export function EllipseIcon() {
+  return (
+    <svg {...base}>
+      <ellipse cx="8" cy="8" rx="5.5" ry="3.5" />
+    </svg>
+  );
+}
+
 /** Polygon gate. */
 export function PolyIcon() {
   return (

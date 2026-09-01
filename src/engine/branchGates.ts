@@ -18,6 +18,11 @@ import type { Gate, PopulationMap } from "./models";
  * The selected gate is always kept, so selecting a gate from the Gates list can never hide the
  * very gate being selected. If filtering yields nothing — a gate owned by no population, or a
  * tree that produced no match — the unfiltered order is returned rather than a blank plot.
+ *
+ * A gate owned by no population belongs to no branch, so branch structure says nothing about
+ * whether it should be drawn — hiding it is a side effect of the filter, not a judgement.
+ * `showUnowned` keeps such gates visible regardless of the branch: without it a freshly drawn
+ * gate that skipped population creation vanishes the moment anything else is selected.
  */
 export function branchScopedGateOrder(
   populations: PopulationMap,
@@ -26,6 +31,7 @@ export function branchScopedGateOrder(
   activePopulationId: string | null,
   rootPopulationId: string | null,
   selectedGateId: string | null,
+  showUnowned = false,
 ): string[] {
   const gateOwner = new Map<string, string>(); // gate id → population that defines it
   for (const pop of Object.values(populations)) {
@@ -56,6 +62,9 @@ export function branchScopedGateOrder(
     }
   }
   if (selectedGateId) visible.add(selectedGateId);
+  if (showUnowned) {
+    for (const id of Object.keys(gates)) if (!gateOwner.has(id)) visible.add(id);
+  }
 
   const ids = gateOrder.length ? gateOrder : Object.keys(gates);
   const filtered = ids.filter((id) => visible.has(id));

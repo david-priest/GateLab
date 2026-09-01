@@ -458,3 +458,22 @@ describe("GateLab mini-plot density patches", () => {
     warning.mockRestore();
   });
 });
+
+describe("ellipse draw patches", () => {
+  it("lands all three surgical patches in the vendored source", () => {
+    const out = patchCytofForGateLab(cytofSrc);
+    // Mode admission, live preview, and the centre-out finish that emits the new gate.
+    expect(out).toContain("_mode !== 'draw-ellipse'");
+    expect(out).toContain("dl.append('ellipse')");
+    expect(out).toContain("_notifyNewGate('ellipse'");
+    // The axis handles: four circles, resize+rotate, emitting ellipse_edit.
+    expect(out).toContain("gg.selectAll('circle.eh')");
+    expect(out).toContain("_shinyInput('ellipse_edit'");
+    // Handles track a body move: _updateGateElements repositions circle.eh with everything else.
+    expect(out).toContain("ellipse axis handles follow the ring");
+    // And the payload-controlled editable flag that keeps vertex handles off ellipses.
+    expect(out).toContain("gate.editable !== false");
+    // Idempotent, like every other patch in this file.
+    expect(patchCytofForGateLab(out)).toBe(out);
+  });
+});

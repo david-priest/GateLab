@@ -15,6 +15,7 @@
 // are DISPLAY space; axis labels are the Panel display labels (sample.labelForKey).
 
 import type { Sample } from "./sample";
+import { ellipseBoundary } from "./ellipse";
 import type { GateEdgeMode } from "../ui/gateEdgeModes";
 import type { Gate, GateRef, Population, PopulationMap } from "./models";
 import { columnsForGate, getGateMask } from "./gates";
@@ -81,6 +82,7 @@ export interface MultiStrategyComputeOptions {
 /** Gating-space vertices for a gate (quadrant → none). Rectangles keep their stored corners. */
 function gatingVertices(gate: Gate): [number, number][] {
   if (gate.gate_type === "quadrant") return [];
+  if (gate.gate_type === "ellipse") return ellipseBoundary(gate);
   return gate.vertices;
 }
 
@@ -101,6 +103,7 @@ function displayVerticesOf(sample: Sample, xCh: string, yCh: string, gate: Gate)
     }
     return [toD(xmin, ymin), toD(xmax, ymin), toD(xmax, ymax), toD(xmin, ymax)];
   }
+  if (gate.gate_type === "ellipse") return ellipseBoundary(gate).map(([vx, vy]) => toD(vx, vy));
   return gate.vertices.map(([vx, vy]) => toD(vx, vy));
 }
 

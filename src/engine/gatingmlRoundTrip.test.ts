@@ -229,6 +229,26 @@ describe("Gating-ML self round-trip", () => {
     expect(movedEvents).toBeLessThanOrEqual(Math.max(1, Math.ceil(events * 0.005)));
   });
 
+  it("Class 1: ellipse gates return with identical membership, raw and arcsinh", () => {
+    // An ellipse is expressible exactly (EllipsoidGate carries mean/covariance/distanceSquare in
+    // the dimensions' declared space), so the round trip must move zero events — the same claim
+    // as rectangles and polygons, extended to the covariance form. A rotated covariance is used
+    // so an axis-order or transpose slip cannot cancel out.
+    const rawEllipse: Gate = {
+      gate_id: uuid(), name: "raw ellipse", gate_type: "ellipse", x_channel: fx, y_channel: fy,
+      mean: [8, 25], covariance: [[40, 15], [15, 30]], distance_square: 2,
+      color: "#000", label_offset: null, space: "raw",
+    } as Gate;
+    const dispEllipse: Gate = {
+      gate_id: uuid(), name: "asinh ellipse", gate_type: "ellipse", x_channel: fx, y_channel: fy,
+      mean: [Math.asinh(8 / 150), Math.asinh(25 / 150)],
+      covariance: [[0.02, 0.008], [0.008, 0.015]], distance_square: 1,
+      color: "#000", label_offset: null, space: "display",
+      transforms: { [fx]: asinhSpec(150), [fy]: asinhSpec(150) },
+    } as Gate;
+    assertExact([rawEllipse, dispEllipse]);
+  });
+
   it("quadrant gates are refused, not silently dropped", () => {
     const q: Gate = {
       gate_id: uuid(), name: "Q", gate_type: "quadrant", x_channel: fx, y_channel: fy,

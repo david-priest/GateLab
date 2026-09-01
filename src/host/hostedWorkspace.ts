@@ -1,4 +1,13 @@
-import type { Gate, GateRef, Population, PopulationMap, Vertex } from "../engine/models";
+import type {
+  Gate,
+  GateRef,
+  GateSpace,
+  GateTransforms,
+  Population,
+  PopulationMap,
+  TransformSpec,
+  Vertex,
+} from "../engine/models";
 import {
   migrateWorkspaceToV2,
   validateWorkspace,
@@ -72,6 +81,65 @@ function pair(value: unknown, label: string): [number, number] {
   return [value[0], value[1]];
 }
 
+/**
+ * The numeric parameters each transform kind carries. Keying this by `TransformSpec["kind"]`
+ * makes a new kind in models.ts a type error here rather than a field silently dropped.
+ */
+const TRANSFORM_PARAMETERS: Record<TransformSpec["kind"], readonly string[]> = {
+  identity: [],
+  asinh: ["cofactor"],
+  logicle: ["T", "W", "M", "A"],
+  biex: ["maxValue", "pos", "neg", "widthBasis", "channelRange"],
+  wsplog: ["offset", "decades"],
+};
+
+function transformSpec(value: unknown, label: string): TransformSpec {
+  const source = record(value, label);
+  const kind = stringValue(source.kind);
+  if (!(kind in TRANSFORM_PARAMETERS)) {
+    throw new Error(`Saved GateLabR workspace has an unsupported ${label}.`);
+  }
+  const spec: Record<string, unknown> = { kind };
+  for (const parameter of TRANSFORM_PARAMETERS[kind as TransformSpec["kind"]]) {
+    const number = finiteNumber(source[parameter]);
+    if (number === null) {
+      throw new Error(`Saved GateLabR workspace has an invalid ${label}.`);
+    }
+    spec[parameter] = number;
+  }
+  return spec as TransformSpec;
+}
+
+/**
+ * The space a gate's parameters are straight in, and the transforms it was drawn under.
+ *
+ * Both are optional on every gate type, and absent means the sample's pre-field default -- but
+ * dropping them when they ARE present re-reads the gate in a different space, so the same
+ * coordinates select a different event set with nothing on screen to say so. An ellipse is
+ * always created in display space with its axis transforms captured (a screen ellipse is not an
+ * ellipse in raw space), so it is the type that loses meaning most readily; the fields belong to
+ * every gate, which is why this sits in the shared part of normalizeGate rather than one branch.
+ *
+ * Malformed transforms throw rather than being skipped: restoring the gate as though it had none
+ * is the very silent-mismatch this exists to prevent.
+ */
+function gateSpaceFields(
+  source: Record<string, unknown>,
+  gateName: string,
+): { space?: GateSpace; transforms?: GateTransforms } {
+  const space = source.space;
+  if (space === undefined || space === null) return {};
+  if (space !== "raw" && space !== "display") {
+    throw new Error(`Saved GateLabR gate '${gateName}' has an unsupported gate space.`);
+  }
+  const entries = recordOrEmpty(source.transforms, `transforms for gate '${gateName}'`);
+  const transforms: GateTransforms = {};
+  for (const [channel, spec] of Object.entries(entries)) {
+    transforms[channel] = transformSpec(spec, `transform for gate '${gateName}'`);
+  }
+  return Object.keys(transforms).length > 0 ? { space, transforms } : { space };
+}
+
 function vertices(value: unknown, gateName: string): Vertex[] {
   if (!Array.isArray(value)) {
     throw new Error(`Saved GateLabR gate '${gateName}' has invalid vertices.`);
@@ -94,12 +162,33 @@ function normalizeGate(value: unknown, gateId: string, index: number): Gate {
     label_offset: source.label_offset === null || source.label_offset === undefined
       ? null
       : pair(source.label_offset, `label offset for gate '${name}'`),
+    ...gateSpaceFields(source, name),
   };
   if (source.gate_type === "quadrant") {
     return {
       ...common,
       gate_type: "quadrant",
       center: pair(source.center, `centre for gate '${name}'`),
+    };
+  }
+  if (source.gate_type === "ellipse") {
+    // The R mirror writes the covariance form plus a sampled boundary. The parameters are the
+    // record -- rebuilding from the boundary would quietly turn the ellipse into a 64-gon.
+    const cov = source.covariance;
+    if (!Array.isArray(cov) || cov.length !== 2) {
+      throw new Error(`Saved GateLabR gate '${name}' has an invalid covariance matrix.`);
+    }
+    const rows = cov.map((row) => pair(row, `covariance for gate '${name}'`));
+    const distanceSquare = finiteNumber(source.distance_square);
+    if (distanceSquare === null || distanceSquare <= 0) {
+      throw new Error(`Saved GateLabR gate '${name}' has an invalid distance_square.`);
+    }
+    return {
+      ...common,
+      gate_type: "ellipse",
+      mean: pair(source.mean, `mean for gate '${name}'`),
+      covariance: [rows[0], rows[1]],
+      distance_square: distanceSquare,
     };
   }
   if (source.gate_type !== "rectangle" && source.gate_type !== "polygon") {
@@ -383,6 +472,11 @@ export function convertHostedGateSpace<
           ] as Vertex,
         }];
       }
+      // An ellipse under a nonlinear space change is not an ellipse, so this legacy converter
+      // cannot move one — and never needs to: ellipses postdate the per-gate space field, so a
+      // pre-space-field workspace (the only thing this converter exists for) cannot hold one.
+      // Passing it through unchanged is exact.
+      if (gate.gate_type === "ellipse") return [gateId, gate];
       return [gateId, {
         ...gate,
         vertices: gate.vertices.map(([x, y]) => [

@@ -2,7 +2,8 @@
 // Ported from GateLabR inst/app/R/gate_engine.R (gate_mask_* + get_gate_mask).
 // Masks are Uint8Array (1 = in-gate, 0 = out) over display-space channel columns.
 
-import type { Gate, Vertex } from "./models";
+import type { EllipseGate, Gate, Vertex } from "./models";
+import { ellipseQuadraticForm } from "./ellipse";
 
 /** Column accessor for the currently-displayed (transformed) assay data. */
 export interface AssayData {
@@ -131,6 +132,32 @@ export function gateMaskPolygon(
   return out;
 }
 
+/**
+ * Ellipse membership: (p−μ)ᵀ Σ⁻¹ (p−μ) ≤ D², boundary-inclusive like every other gate — the
+ * quadratic form at the boundary equals D² exactly, and ≤ keeps it inside, matching Gating-ML.
+ * A degenerate covariance admits no interior (ellipseQuadraticForm returns valid: false), so a
+ * malformed file selects nothing rather than everything.
+ */
+export function gateMaskEllipse(
+  xVals: ArrayLike<number>,
+  yVals: ArrayLike<number>,
+  gate: EllipseGate,
+): Uint8Array {
+  const n = xVals.length;
+  const out = new Uint8Array(n);
+  const { ia, ib, ic, valid } = ellipseQuadraticForm(gate);
+  if (!valid) return out;
+  const [mx, my] = gate.mean;
+  const d2 = gate.distance_square;
+  if (!(d2 > 0)) return out;
+  for (let i = 0; i < n; i++) {
+    const dx = xVals[i] - mx;
+    const dy = yVals[i] - my;
+    if (ia * dx * dx + 2 * ib * dx * dy + ic * dy * dy <= d2) out[i] = 1;
+  }
+  return out;
+}
+
 export function gateMaskRectangle(
   xVals: ArrayLike<number>,
   yVals: ArrayLike<number>,
@@ -195,5 +222,6 @@ export function getGateMask(gate: Gate, data: AssayData, quadrant?: number): Uin
   if (gate.gate_type === "polygon") return gateMaskPolygon(x, y, gate.vertices);
   if (gate.gate_type === "rectangle") return gateMaskRectangle(x, y, gate.vertices);
   if (gate.gate_type === "quadrant") return gateMaskQuadrant(x, y, gate.center, quadrant ?? 1);
+  if (gate.gate_type === "ellipse") return gateMaskEllipse(x, y, gate);
   return new Uint8Array(data.n);
 }

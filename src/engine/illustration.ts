@@ -5,6 +5,7 @@
 // Rendered through the reused mini_plot.js CytofMiniPlot.renderIllustrationGrid so output matches.
 
 import type { Sample } from "./sample";
+import { ellipseBoundary } from "./ellipse";
 import type { GateEdgeMode } from "../ui/gateEdgeModes";
 import type { Gate, PopulationMap } from "./models";
 import { computeGateCounts, type GateCount } from "./populations";
@@ -61,7 +62,9 @@ function buildGatesForChannels(
     else continue;
 
     // Gate vertices (gating space) → display space on the cell's (xCh, yCh) axes.
-    const raw = gate.gate_type === "rectangle" ? aabbCorners(gate.vertices) : gate.vertices;
+    const raw = gate.gate_type === "rectangle" ? aabbCorners(gate.vertices)
+      : gate.gate_type === "ellipse" ? ellipseBoundary(gate)
+      : gate.vertices;
     const verts: [number, number][] = raw.map(([vx, vy]) => {
       // (vx,vy) are in (gate.x_channel, gate.y_channel) space.
       const cellX = flipped ? vy : vx; // value on xCh

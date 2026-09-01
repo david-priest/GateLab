@@ -86,6 +86,45 @@ export function GateModals({
     );
   }
 
+  if (pending.gate_type === "ellipse") {
+    // A drawn ellipse is an ellipse ON SCREEN, so it is created in DISPLAY space with the
+    // current axes' transforms captured — regardless of the new-gate space selector. Converting
+    // the drag to raw through a nonlinear axis would warp it into something that is not an
+    // ellipse, silently. On linear axes display and raw coincide, so nothing is lost there
+    // either. (CyTOF keeps its legacy space: gateSpace is null and the fields stay absent.)
+    const ellipseSpaceFields = gateSpace
+      ? sample.newGateSpaceFields("display", pending.x_channel, pending.y_channel)
+      : {};
+    return (
+      <GateModal
+        pending={pending}
+        parentChoices={parentChoices}
+        defaultParent={defaultParent}
+        onCancel={onCancel}
+        onConfirm={(nameInput, createPop, popNameInput, parentId) => {
+          let gateName = nameInput.trim() || `Gate_${nGates + 1}`;
+          if (createPop) gateName = appendSuffix(gateName, "gate");
+          // The plot emits the ellipse as its bounding-box corners (which also places the
+          // label correctly); centre and radii are recovered from them.
+          const [p0, p1] = pending.vertices;
+          onConfirm({
+            type: "addEllipse",
+            xChannel: pending.x_channel,
+            yChannel: pending.y_channel,
+            mean: [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2],
+            radii: [Math.abs(p1[0] - p0[0]) / 2, Math.abs(p1[1] - p0[1]) / 2],
+            labelOffset: pending.label_offset,
+            name: gateName,
+            ...ellipseSpaceFields,
+            createPop: createPop
+              ? { name: popNameInput.trim() || gateName, parentId }
+              : undefined,
+          });
+        }}
+      />
+    );
+  }
+
   return (
     <GateModal
       pending={pending}
