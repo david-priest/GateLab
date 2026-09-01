@@ -170,6 +170,7 @@ import type {
 import { StrategyTab, type StrategyConfig } from "./ui/StrategyTab";
 import { IllustrationTab } from "./ui/IllustrationTab";
 import {
+  compareSampleNames,
   FolderImportModal,
   SampleManagerModal,
   SampleNavigator,
@@ -231,6 +232,7 @@ const CompensationTab = lazy(lazyChunk("CompensationTab", async () => {
 }));
 
 const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
+
 
 /**
  * Arcsinh-cofactor slider bounds, as log10 of the cofactor.
@@ -3130,6 +3132,25 @@ export default function App() {
       samples.filter((entry) => !previous.has(entry.id)).map((entry) => entry.id),
     ));
   }
+
+  /**
+   * Reorder every loaded file by name.
+   *
+   * Files arrive in whichever order the picker produced, which after a batch import is rarely the
+   * order anyone wants to read them in. This is the workspace's own sample order, so it drives the
+   * samples panel, the manage table and anything that walks the list, and it is saved with the
+   * workspace. Membership, the active file and the checked set are all keyed by id, so nothing but
+   * the order moves.
+   */
+  const sortSamplesByName = useCallback((direction: "asc" | "desc") => {
+    setSamples((previous) => {
+      if (previous.length < 2) return previous;
+      const sorted = [...previous].sort((a, b) => compareSampleNames(a.name, b.name));
+      if (direction === "desc") sorted.reverse();
+      return sorted;
+    });
+    markWorkspaceDirty();
+  }, [markWorkspaceDirty]);
 
   async function removeSamples(ids: readonly string[]) {
     if (ids.length === 0) return;
@@ -6798,6 +6819,7 @@ export default function App() {
             await removeSamples(ids);
             setSampleManagerSelection([]);
           }}
+          onSort={isSceHost ? undefined : sortSamplesByName}
         />
       )}
 

@@ -49,6 +49,16 @@ function droppedDirectoryCount(event: DragEvent<HTMLElement>): number {
     .length;
 }
 
+// Numeric-aware so exp10 follows exp9 rather than exp1, and case-insensitive so a stray capital
+// does not sort a file away from its neighbours. Built once: constructing a collator per compare
+// is what makes a naive sort slow.
+const SAMPLE_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+/** Order two sample filenames the way someone reading the list would expect. */
+export function compareSampleNames(a: string, b: string): number {
+  return SAMPLE_NAME_COLLATOR.compare(a, b);
+}
+
 function matchesQuery(item: SampleListItem, query: string): boolean {
   const needle = query.trim().toLocaleLowerCase();
   if (!needle) return true;
@@ -303,6 +313,7 @@ export function SampleManagerModal({
   onIncludeNone,
   onInvertIncluded,
   onRemove,
+  onSort,
 }: {
   items: readonly SampleListItem[];
   activeId: string | null;
@@ -315,6 +326,8 @@ export function SampleManagerModal({
   onIncludeNone: () => void;
   onInvertIncluded: () => void;
   onRemove: (ids: readonly string[]) => Promise<void>;
+  /** Reorder the workspace's samples by filename. Omitted where the order is not the user's. */
+  onSort?: (direction: "asc" | "desc") => void;
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
@@ -357,6 +370,26 @@ export function SampleManagerModal({
         <button type="button" onClick={onIncludeAll}>{t("All")}</button>
         <button type="button" onClick={onIncludeNone}>{t("None")}</button>
         <button type="button" onClick={onInvertIncluded}>{t("Invert")}</button>
+        {onSort && (
+          <>
+            <span className="gl-sample-manager-separator" />
+            <span>{t("Order")}</span>
+            <button
+              type="button"
+              title={t("Sort every loaded file by name. This is the order they appear in throughout the app.")}
+              onClick={() => onSort("asc")}
+            >
+              {t("Name A–Z")}
+            </button>
+            <button
+              type="button"
+              title={t("Sort every loaded file by name, reversed.")}
+              onClick={() => onSort("desc")}
+            >
+              {t("Name Z–A")}
+            </button>
+          </>
+        )}
       </div>
       <div className="gl-sample-manager-table-wrap">
         <table className="gl-sample-manager-table">

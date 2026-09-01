@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FolderImportModal, SampleManagerModal, SampleNavigator, type SampleListItem } from "./SampleManager";
+import { compareSampleNames, FolderImportModal, SampleManagerModal, SampleNavigator, type SampleListItem } from "./SampleManager";
 
 const items: SampleListItem[] = [
   { id: "a", name: "donor-a.fcs", eventCount: 3420, channelCount: 8 },
@@ -284,5 +284,66 @@ describe("SampleNavigator drag and drop", () => {
 
     expect(host.querySelector(".gl-sample-drop-overlay")).toBeNull();
     expect(event.defaultPrevented).toBe(false);
+  });
+});
+
+// Files arrive in whichever order the picker produced, so the manage dialog offers to reorder the
+// workspace by name. The ordering has to read the way a person reads a filename, not the way a
+// byte comparison does.
+describe("sorting samples by name", () => {
+  it("puts exp10 after exp9 rather than after exp1", () => {
+    const names = ["exp10_T2.fcs", "exp2_T2.fcs", "exp1_T2.fcs", "exp9_T2.fcs"];
+    expect([...names].sort(compareSampleNames)).toEqual([
+      "exp1_T2.fcs", "exp2_T2.fcs", "exp9_T2.fcs", "exp10_T2.fcs",
+    ]);
+    // Plain lexicographic ordering is the trap this exists to avoid.
+    expect([...names].sort()).not.toEqual([...names].sort(compareSampleNames));
+  });
+
+  it("does not sort a file away from its neighbours over a stray capital", () => {
+    expect(compareSampleNames("Donor_b.fcs", "donor_a.fcs")).toBeGreaterThan(0);
+    expect(compareSampleNames("donor_A.fcs", "donor_a.fcs")).toBe(0);
+  });
+
+  function renderManager(onSort?: (direction: "asc" | "desc") => void) {
+    act(() => root.render(
+      <SampleManagerModal
+        items={items}
+        activeId="a"
+        excludedIds={new Set()}
+        onClose={vi.fn()}
+        onActivate={vi.fn()}
+        onToggleIncluded={vi.fn()}
+        onIncludeAll={vi.fn()}
+        onIncludeNone={vi.fn()}
+        onInvertIncluded={vi.fn()}
+        onRemove={vi.fn(async () => {})}
+        onSort={onSort}
+      />,
+    ));
+  }
+
+  function sortButton(label: string): HTMLButtonElement | undefined {
+    return [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === label);
+  }
+
+  it("asks for each direction from the manage dialog", () => {
+    const onSort = vi.fn();
+    renderManager(onSort);
+
+    act(() => sortButton("Name A–Z")!.click());
+    expect(onSort).toHaveBeenLastCalledWith("asc");
+
+    act(() => sortButton("Name Z–A")!.click());
+    expect(onSort).toHaveBeenLastCalledWith("desc");
+  });
+
+  it("offers no reordering when the sample order is not the user's to change", () => {
+    // A hosted SCE owns its sample list, so App passes no handler and the controls stay away
+    // rather than appearing and doing nothing.
+    renderManager(undefined);
+    expect(sortButton("Name A–Z")).toBeUndefined();
+    expect(sortButton("Name Z–A")).toBeUndefined();
   });
 });

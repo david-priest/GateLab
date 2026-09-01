@@ -574,24 +574,35 @@ export function IllustrationTab({
                 />
                 {t("Auto smoothing")}
               </label>
-              {kdeBandwidth > 0 && (
-                <label className="gl-field-inline" title="Higher bandwidth gives stronger contour smoothing">
-                  {t("Bandwidth")}
-                  <input
-                    type="range"
-                    min={0.2}
-                    max={14}
-                    step={0.2}
-                    value={kdeBandwidth}
-                    onChange={(e) => {
-                      const next = Math.max(0.2, Number(e.target.value) || 4);
-                      manualKdeBandwidth.current = next;
-                      setKdeBandwidth(next);
-                    }}
-                  />
-                  <span className="gl-num-badge">{kdeBandwidth.toFixed(1)}</span>
-                </label>
-              )}
+              {/* Always shown, disabled while automatic. Hiding it left the one control that
+                  explains a contour's smoothness invisible until you found the checkbox, and the
+                  automatic value is chosen from the plotted event count and the panel size -- so
+                  the same population can look quite different here and in the gating plot, which
+                  caps events differently and offers no bandwidth control of its own. */}
+              <label
+                className="gl-field-inline"
+                title={kdeBandwidth > 0
+                  ? t("Higher bandwidth gives stronger contour smoothing")
+                  : t("Automatic: chosen from the plotted event count and panel size. Turn off Auto smoothing to set it, and to match another plot's smoothing exactly.")}
+              >
+                {t("Bandwidth")}
+                <input
+                  type="range"
+                  min={0.2}
+                  max={14}
+                  step={0.2}
+                  disabled={kdeBandwidth === 0}
+                  value={kdeBandwidth > 0 ? kdeBandwidth : manualKdeBandwidth.current}
+                  onChange={(e) => {
+                    const next = Math.max(0.2, Number(e.target.value) || 4);
+                    manualKdeBandwidth.current = next;
+                    setKdeBandwidth(next);
+                  }}
+                />
+                <span className="gl-num-badge">
+                  {kdeBandwidth > 0 ? kdeBandwidth.toFixed(1) : t("auto")}
+                </span>
+              </label>
             </>
           )}
         </div>
