@@ -605,6 +605,22 @@ describe("uncompensated v3 validation", () => {
     },
   );
 
+  // Regression for a workspace saved by 0.7.0 or later: the saver writes per-sample display
+  // scale lists that this validator did not list, so every such file refused to reopen.
+  it("accepts and preserves the per-sample scale lists the app saves", async () => {
+    const candidate = clone(migrateWorkspaceV2ToV3(workspaceV2()));
+    const sample = candidate.samples[0] as unknown as Record<string, unknown>;
+    sample.scatterLinear = [];
+    sample.fluorArcsinh = ["CD3"];
+    const validated = await validateWorkspaceV3(JSON.parse(JSON.stringify(candidate)));
+    expect(validated.samples[0].scatterLinear).toEqual([]);
+    expect(validated.samples[0].fluorArcsinh).toEqual(["CD3"]);
+    // A malformed list is still refused, by the common workspace validation.
+    sample.fluorArcsinh = [3];
+    const error = await expectV3Error(validateWorkspaceV3(candidate), "invalid-workspace-v3");
+    expect(error.message).toContain("arcsinh-fluorescence");
+  });
+
   it("rejects unknown top-level fields", async () => {
     const candidate = clone(migrateWorkspaceV2ToV3(workspaceV2())) as unknown as Record<string, unknown>;
     candidate.futureCompensationCache = [];
