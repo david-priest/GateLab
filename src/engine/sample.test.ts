@@ -361,3 +361,27 @@ describe("Sample — Panel display labels (identity `key` is preserved)", () => 
     expect(s2.channelLabel(s2.index("CD19")!)).toBe("B");
   });
 });
+
+describe("Sample — a workspace matrix whose channel names FlowJo rewrote", () => {
+  // FlowJo writes "LIVE/DEAD Aqua-A" as "LIVE_DEAD Aqua-A" inside its workspace (keyword table,
+  // matrix and gate dimensions alike). Looked up by exact name the channel was dropped from the
+  // matrix and the others compensated without the row that spills into them.
+  it("maps the underscore spelling onto the file's slashed parameter instead of dropping it", () => {
+    const s = new Sample(syntheticFlow(["FSC-A", "LIVE/DEAD Aqua-A", "FITC-A"]));
+    const matrix = { channels: ["LIVE_DEAD Aqua-A", "FITC-A"], matrix: [[1, 0.1], [0.05, 1]] };
+    const { display, dropped } = s.externalSpilloverPreview(matrix);
+    expect(dropped).toEqual([]);
+    expect(display?.channels).toEqual(["LIVE/DEAD Aqua-A", "FITC-A"]);
+  });
+
+  it("prefers an exact name, and still drops a name that matches nothing", () => {
+    const s = new Sample(syntheticFlow(["FSC-A", "A_B-A", "A/B-A", "FITC-A"]));
+    const matrix = {
+      channels: ["A_B-A", "FITC-A", "NOPE-A"],
+      matrix: [[1, 0.1, 0], [0.05, 1, 0], [0, 0, 1]],
+    };
+    const { display, dropped } = s.externalSpilloverPreview(matrix);
+    expect(display?.channels).toEqual(["A_B-A", "FITC-A"]);
+    expect(dropped).toEqual(["NOPE-A"]);
+  });
+});

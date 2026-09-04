@@ -36,6 +36,7 @@ import {
   type GateMaskCache,
 } from "./engine/populations";
 import { mergeGatingStrategies, type GatingImportMode } from "./engine/gatingMerge";
+import { populationTreeOrder } from "./engine/populations";
 import type { Sample } from "./engine/sample";
 
 export interface CoreState {
@@ -161,6 +162,13 @@ export type Action =
       placement: "before" | "inside" | "after";
     }
   | {
+      /** Move several populations together, keeping their relative tree order. */
+      type: "movePopulations";
+      popIds: string[];
+      targetId: string;
+      placement: "before" | "inside" | "after";
+    }
+  | {
       type: "editPopulation";
       popId: string;
       name: string;
@@ -174,6 +182,7 @@ export type Action =
       updates: { popId: string; name: string; gateRefs: GateRef[] }[];
     }
   | { type: "moveSelectedPopulations"; popIds: string[]; parentId: string }
+  | { type: "setPopSelection"; popIds: string[] }
   | { type: "duplicateSelectedPopulations"; popIds: string[] }
   | { type: "deleteGates"; gateIds: string[] }
   | { type: "clearGateSelection" }
@@ -187,6 +196,8 @@ export type Action =
       populations: PopulationMap;
       root_population_id: string;
       mode?: GatingImportMode;
+      /** In merge mode, the current population the imported root's children attach under. */
+      attachTo?: string;
       /** Compensation lives outside CoreState; discard unsafe gate-only undo when its space changed. */
       clearHistory?: boolean;
     }
@@ -378,6 +389,12 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
       return { ...state, selected_pop_ids: [...set] };
     }
 
+    case "setPopSelection": {
+      const next = [...new Set(action.popIds)].filter((id) => state.populations[id] && id !== state.root_population_id);
+      if (sameStringArray(next, state.selected_pop_ids)) return state;
+      return { ...state, selected_pop_ids: next };
+    }
+
     case "renameGate": {
       if (!state.gates[action.gateId]) return state;
       const gates = { ...state.gates, [action.gateId]: { ...state.gates[action.gateId], name: action.name } };
@@ -458,24 +475,39 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
       };
     }
 
-    case "movePopulation": {
-      const source = state.populations[action.popId];
+    case "movePopulation":
+      return coreReducer(state, {
+        type: "movePopulations",
+        popIds: [action.popId],
+        targetId: action.targetId,
+        placement: action.placement,
+      });
+
+    case "movePopulations": {
+      // The moved set is pruned to its top-most members (a population travels with its
+      // subtree) and ordered as the tree shows it, so a dragged selection keeps its order.
+      const requested = new Set(action.popIds.filter((id) => state.populations[id] && id !== state.root_population_id));
+      const hasMovedAncestor = (id: string): boolean => {
+        let cur = state.populations[id]?.parent_id ?? null;
+        while (cur) {
+          if (requested.has(cur)) return true;
+          cur = state.populations[cur]?.parent_id ?? null;
+        }
+        return false;
+      };
+      const order = state.root_population_id
+        ? populationTreeOrder(state.populations, state.root_population_id).map((row) => row.popId)
+        : [];
+      const moving = order.filter((id) => requested.has(id) && !hasMovedAncestor(id));
       const target = state.populations[action.targetId];
-      if (
-        !source ||
-        !target ||
-        action.popId === state.root_population_id ||
-        action.popId === action.targetId
-      ) {
-        return state;
-      }
+      if (!moving.length || !target || moving.includes(action.targetId)) return state;
 
       const destinationParentId =
         action.placement === "inside" ? action.targetId : target.parent_id;
       if (
         !destinationParentId ||
         !state.populations[destinationParentId] ||
-        wouldCreateCycle(state.populations, action.popId, destinationParentId)
+        moving.some((id) => wouldCreateCycle(state.populations, id, destinationParentId))
       ) {
         return state;
       }
@@ -487,35 +519,36 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
       }
 
       const populations = clonePops(state.populations);
-      const oldParentId = source.parent_id;
-      if (oldParentId && populations[oldParentId]) {
-        populations[oldParentId].children = populations[oldParentId].children.filter(
-          (childId) => childId !== action.popId,
-        );
+      const movingSet = new Set(moving);
+      const touchedParents = new Set<string>();
+      for (const id of moving) {
+        const oldParentId = populations[id].parent_id;
+        if (oldParentId && populations[oldParentId]) {
+          touchedParents.add(oldParentId);
+          populations[oldParentId].children = populations[oldParentId].children.filter(
+            (childId) => childId !== id,
+          );
+        }
       }
 
       const destination = populations[destinationParentId];
-      const destinationChildren = destination.children.filter(
-        (childId) => childId !== action.popId,
-      );
+      const destinationChildren = destination.children.filter((childId) => !movingSet.has(childId));
       let insertionIndex = destinationChildren.length;
       if (action.placement !== "inside") {
         const targetIndex = destinationChildren.indexOf(action.targetId);
         if (targetIndex < 0) return state;
         insertionIndex = targetIndex + (action.placement === "after" ? 1 : 0);
       }
-      destinationChildren.splice(insertionIndex, 0, action.popId);
+      destinationChildren.splice(insertionIndex, 0, ...moving);
       destination.children = destinationChildren;
-      populations[action.popId].parent_id = destinationParentId;
+      for (const id of moving) populations[id].parent_id = destinationParentId;
       if (state.root_population_id) sortPopulationTree(populations, state.root_population_id);
 
-      const parentChanged = oldParentId !== destinationParentId;
+      const parentChanged = moving.some((id) => state.populations[id].parent_id !== destinationParentId);
       if (
         !parentChanged &&
-        oldParentId &&
-        sameStringArray(
-          state.populations[oldParentId].children,
-          populations[oldParentId].children,
+        [...touchedParents].every((pid) =>
+          sameStringArray(state.populations[pid].children, populations[pid].children),
         )
       ) {
         return state;
@@ -767,6 +800,7 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
               populations: action.populations,
               root_population_id: action.root_population_id,
             },
+            action.attachTo && state.populations[action.attachTo] ? action.attachTo : state.root_population_id!,
           )
         : action;
       // GatingML populations carry no colorSlot — backfill so imported pops get stable, frozen colours.

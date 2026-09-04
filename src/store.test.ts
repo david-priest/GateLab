@@ -587,3 +587,72 @@ describe("store: gate + population flow", () => {
     expect(undone.populations[importedPopId]).toBeUndefined();
   });
 });
+
+describe("moving several populations at once", () => {
+  function treeFixture() {
+    let state = coreReducer(initialCoreState(), { type: "loadSample", nEvents: 10 });
+    const root = state.root_population_id!;
+    for (const name of ["Alpha", "Zulu", "Beta", "Parent"]) {
+      state = coreReducer(state, { type: "addPopulation", name, parentId: root, gateRefs: [] });
+    }
+    const byName = Object.fromEntries(
+      Object.values(state.populations).map((population) => [population.name, population.population_id]),
+    );
+    state = coreReducer(state, { type: "addPopulation", name: "Child", parentId: byName.Parent, gateRefs: [] });
+    byName.Child = Object.values(state.populations).find((p) => p.name === "Child")!.population_id;
+    return { state, root, byName };
+  }
+
+  it("moves a checked set into a parent in tree order, keeping each subtree", () => {
+    const { state, root, byName } = treeFixture();
+    const moved = coreReducer(state, {
+      type: "movePopulations",
+      popIds: [byName.Beta, byName.Alpha],
+      targetId: byName.Parent,
+      placement: "inside",
+    });
+    expect(moved.populations[root].children).toEqual([byName.Zulu, byName.Parent]);
+    expect(moved.populations[byName.Parent].children).toEqual([byName.Child, byName.Alpha, byName.Beta]);
+    expect(moved.populations[byName.Alpha].parent_id).toBe(byName.Parent);
+    expect(moved.gate_version).toBe(state.gate_version + 1);
+    const undone = coreReducer(moved, { type: "undo" });
+    expect(undone.populations[root].children).toEqual(state.populations[root].children);
+  });
+
+  it("places a block before or after a sibling without changing masks", () => {
+    const { state, root, byName } = treeFixture();
+    const moved = coreReducer(state, {
+      type: "movePopulations",
+      popIds: [byName.Parent, byName.Beta],
+      targetId: byName.Alpha,
+      placement: "before",
+    });
+    expect(moved.populations[root].children).toEqual([byName.Beta, byName.Parent, byName.Alpha, byName.Zulu]);
+    expect(moved.gate_version).toBe(state.gate_version);
+    expect(moved.tree_version).toBe(state.tree_version + 1);
+  });
+
+  it("prunes a population whose ancestor is also moving, and refuses a target inside the set", () => {
+    const { state, byName } = treeFixture();
+    const moved = coreReducer(state, {
+      type: "movePopulations",
+      popIds: [byName.Child, byName.Parent],
+      targetId: byName.Zulu,
+      placement: "inside",
+    });
+    expect(moved.populations[byName.Zulu].children).toEqual([byName.Parent]);
+    expect(moved.populations[byName.Parent].children).toEqual([byName.Child]);
+    expect(moved.populations[byName.Child].parent_id).toBe(byName.Parent);
+    // Dropping the set onto one of its own members, or into a moving subtree, is a no-op.
+    expect(coreReducer(state, { type: "movePopulations", popIds: [byName.Alpha, byName.Beta], targetId: byName.Beta, placement: "inside" })).toBe(state);
+    expect(coreReducer(state, { type: "movePopulations", popIds: [byName.Parent], targetId: byName.Child, placement: "inside" })).toBe(state);
+    expect(coreReducer(state, { type: "movePopulations", popIds: [state.root_population_id!], targetId: byName.Zulu, placement: "inside" })).toBe(state);
+  });
+
+  it("setPopSelection replaces the checked set, dropping the root and unknown ids", () => {
+    const { state, byName } = treeFixture();
+    const next = coreReducer(state, { type: "setPopSelection", popIds: [byName.Zulu, state.root_population_id!, "missing", byName.Zulu, byName.Alpha] });
+    expect(next.selected_pop_ids).toEqual([byName.Zulu, byName.Alpha]);
+    expect(coreReducer(next, { type: "setPopSelection", popIds: [byName.Zulu, byName.Alpha] })).toBe(next);
+  });
+});

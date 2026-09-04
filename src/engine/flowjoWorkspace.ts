@@ -406,6 +406,68 @@ function summariseTree(root: Element, index: number): FlowJoTreeSummary {
 }
 
 /**
+ * The FCS `$TIMESTEP` the workspace recorded for a sample, or null when it records none.
+ *
+ * FlowJo displays and stores the Time axis in SECONDS, raw Time multiplied by `$TIMESTEP`, so a
+ * gate drawn on Time arrives here in seconds while the file holds ticks. Michaelis et al. 2025
+ * (LSRFortessa X-20): `$TIMESTEP` 0.01, Time column 20.8 to 2310.4, and the root rectangle's Time
+ * range 0.48 to 23.05, which selects nothing in ticks and empties every population beneath it.
+ */
+function sampleTimestep(sampleNode: Element): number | null {
+  const owner = sampleNode.parentElement;
+  for (const keywords of owner ? childrenByLocalName(owner, "Keywords") : []) {
+    for (const kw of childrenByLocalName(keywords, "Keyword")) {
+      if (kw.getAttribute("name") !== "$TIMESTEP") continue;
+      const v = Number(kw.getAttribute("value"));
+      return Number.isFinite(v) && v > 0 ? v : null;
+    }
+  }
+  return null;
+}
+
+/** FlowJo names the time parameter as the FCS does, and never compensates it. */
+const isTimeAxis = (name: string): boolean => /^time$/i.test(name.trim());
+
+/**
+ * Population names, qualified with as many parents as it takes to be unique within the import.
+ *
+ * An intracellular-cytokine strategy gates "IFNy+" under "IL-4+" and "IL-4+" under "IFNy+", so
+ * leaf names recur and everything keyed by name — FlowJo's counts, exported file names, the
+ * notebooks that compare tools — collides. "IFNy+/IL-4+" is the shortest name that tells two such
+ * populations apart, and a name that is unique already is left exactly as FlowJo wrote it.
+ */
+function qualifiedPopulationNames(roots: Element[]): Map<Element, string> {
+  const items: { pop: Element; path: string[] }[] = [];
+  for (const root of roots) {
+    walkTree(root, (pop) => {
+      const path: string[] = [];
+      for (let el: Element | null = pop; el && el.localName === "Population";
+           el = el.parentElement?.parentElement ?? null) {
+        path.unshift(el.getAttribute("name") ?? "");
+      }
+      items.push({ pop, path });
+      return true;
+    });
+  }
+  const depth = items.map(() => 1);
+  let names = items.map((it) => it.path[it.path.length - 1]);
+  for (;;) {
+    const counts = new Map<string, number>();
+    for (const n of names) counts.set(n, (counts.get(n) ?? 0) + 1);
+    let progressed = false;
+    items.forEach((it, i) => {
+      if ((counts.get(names[i]) ?? 0) > 1 && depth[i] < it.path.length) {
+        depth[i]++;
+        progressed = true;
+      }
+    });
+    if (!progressed) break;
+    names = items.map((it, i) => it.path.slice(-depth[i]).join("/"));
+  }
+  return new Map(items.map((it, i) => [it.pop, names[i]]));
+}
+
+/**
  * The names this sample's FCS may be stored under, best first.
  *
  * Order matters. The `DataSet` URI is the path FlowJo actually read, so its basename is the
@@ -754,9 +816,11 @@ export function flowJoWorkspaceToGatingML(
     );
   }
   const selectedRoots = treeIndex === null ? roots : [roots[treeIndex]];
+  const qualifiedNames = qualifiedPopulationNames(selectedRoots);
+  const timestep = sampleTimestep(node);
 
   const visitPopulation = (pop: Element, depth: number): boolean => {
-    const name = pop.getAttribute("name") ?? `population_${serial + 1}`;
+    const name = qualifiedNames.get(pop) ?? pop.getAttribute("name") ?? `population_${serial + 1}`;
     const { el, unsupported } = gateElementOf(pop);
 
     if (!el) {
@@ -783,19 +847,25 @@ export function flowJoWorkspaceToGatingML(
       transformSpecs.get(ch) ?? transformSpecs.get(ch.replace(/^Comp-/, ""));
     const sx = axes ? specFor(axes[0]) : undefined;
     const sy = axes ? specFor(axes[1]) : undefined;
+    // A Time axis comes back from FlowJo's seconds to the file's ticks first (see sampleTimestep);
+    // any display transform is applied on top of that, exactly as FlowJo built it.
+    const stepX = axes && timestep !== null && isTimeAxis(axes[0]) ? timestep : 1;
+    const stepY = axes && timestep !== null && isTimeAxis(axes[1]) ? timestep : 1;
+    const timeScaled = stepX !== 1 || stepY !== 1;
 
     if (axes && sx && sy) {
       // Both axes linear means the gate is already straight in raw; nothing to move or record.
       if (sx.kind !== "identity" || sy.kind !== "identity") {
-        applyForwardTransform(
-          copy,
-          transformFromSpec(sx).forward,
-          transformFromSpec(sy).forward,
-        );
+        const fx = transformFromSpec(sx).forward;
+        const fy = transformFromSpec(sy).forward;
+        applyForwardTransform(copy, (v) => fx(v / stepX), (v) => fy(v / stepY));
         writeGateSpace(out, copy, sx, sy);
         carried++;
+      } else if (timeScaled) {
+        applyForwardTransform(copy, (v) => v / stepX, (v) => v / stepY);
       }
     } else if (axes) {
+      if (timeScaled) applyForwardTransform(copy, (v) => v / stepX, (v) => v / stepY);
       // The pair could not be carried. That happens two ways, and both leave a real bend behind:
       // an axis whose transform produced no spec (unknown kind, or parameters that failed to
       // build), and — the previously SILENT case — an axis that has a perfectly carriable
@@ -837,6 +907,18 @@ export function flowJoWorkspaceToGatingML(
   };
 
   for (const selected of selectedRoots) walkTree(selected, visitPopulation);
+
+  const qualified = [...qualifiedNames.entries()]
+    .filter(([pop, name]) => name !== (pop.getAttribute("name") ?? ""))
+    .map(([, name]) => name);
+  if (qualified.length) {
+    warnings.push(
+      `${qualified.length} population name(s) recur under different parents and were qualified ` +
+        `with their parent so they stay distinct: ` +
+        qualified.slice(0, 6).map((n) => `"${n}"`).join(", ") +
+        (qualified.length > 6 ? ", …" : "") + ".",
+    );
+  }
 
   if (!root.children.length) {
     throw new Error(

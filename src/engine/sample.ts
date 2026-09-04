@@ -1050,19 +1050,27 @@ export class Sample {
   } {
     const pnnToKey = new Map<string, string>();
     for (const c of this.channels) pnnToKey.set(c.pnn, c.key);
-    const display = extractDisplaySpillover(
-      matrix,
-      (pnn) => pnnToKey.get(pnn) ?? null,
-      isScatterChannel,
-      isQcChannel,
-    );
+    // FlowJo rewrites a parameter name containing "/" with "_" inside its workspace, in the
+    // keyword table, the spillover matrix and the gate dimensions alike: "LIVE/DEAD Aqua-A" in
+    // the file is "LIVE_DEAD Aqua-A" in the matrix (Michaelis et al. 2025, LSRFortessa X-20).
+    // Looked up by exact name that channel was dropped, and the other seven were compensated
+    // without the row that spills into them. A matrix channel with no exact match is therefore
+    // tried with that one substitution, and accepted only when it names exactly one parameter
+    // that way. Nothing else is fuzzed.
+    const lookup = (pnn: string): string | null => {
+      const exact = pnnToKey.get(pnn);
+      if (exact !== undefined) return exact;
+      const hits = this.channels.filter((c) => c.pnn.replace(/\//g, "_") === pnn);
+      return hits.length === 1 ? hits[0].key : null;
+    };
+    const display = extractDisplaySpillover(matrix, lookup, isScatterChannel, isQcChannel);
     // extractDisplaySpillover keeps only the channels this file has and takes that sub-matrix.
     // Dropping a channel that spills into the others changes the result, so it is reported
     // rather than absorbed silently.
     const kept = new Set(display?.channels ?? []);
     const dropped = matrix.channels.filter((pnn) => {
-      const key = pnnToKey.get(pnn);
-      return key === undefined || !kept.has(key);
+      const key = lookup(pnn);
+      return key === null || !kept.has(key);
     });
     return { display, dropped };
   }

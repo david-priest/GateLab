@@ -27,6 +27,7 @@ export type WorkspaceCheckpointReason =
   | "after-workspace-open"
   | "before-gatingml-replace"
   | "after-gatingml-import"
+  | "after-barcode-import"
   | "before-gate-delete"
   | "before-population-delete"
   | "before-sample-remove"

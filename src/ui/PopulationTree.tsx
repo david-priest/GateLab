@@ -3,6 +3,10 @@
 // checkbox (selected_pop_ids), gate-ref badges (coloured by gate, "-name" when excluded,
 // .selected-gate ring when that gate is selected), count and "% pnt, % tot".
 // Row click → setActivePopulation (pop_tree_click) + focus the container for arrow nav.
+// The blue highlight is the move selection: a click highlights one row (the active population),
+// Shift-click highlights the range from the active row to the clicked one, Cmd/Ctrl-click adds or
+// removes a row, and Shift-drag moves every highlighted row together. The checkboxes are separate:
+// they pool the display and feed the toolbar's duplicate / move / delete actions.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { CoreState, Derived, Action } from "../store";
@@ -35,7 +39,8 @@ interface DropTarget {
 }
 
 interface PointerDrag {
-  popId: string;
+  /** The rows being moved: the dragged row, or every checked row when it is checked. */
+  popIds: string[];
   pointerId: number;
   startX: number;
   startY: number;
@@ -111,7 +116,15 @@ export function PopulationTree({
   const checkedPops = new Set(selected_pop_ids);
   const choices = useMemo(() => gateChoices(state), [state.gate_order, state.gates]);
   const [editingName, setEditingName] = useState<{ popId: string; value: string } | null>(null);
-  const [draggingPopId, setDraggingPopId] = useState<string | null>(null);
+  const [draggingPopIds, setDraggingPopIds] = useState<readonly string[]>([]);
+  /** Rows highlighted besides the active population; cleared whenever the active row changes. */
+  const [extraHighlight, setExtraHighlight] = useState<readonly string[]>([]);
+  useEffect(() => {
+    setExtraHighlight((ids) => (ids.length ? [] : ids));
+  }, [active_population_id]);
+  const highlighted = new Set<string>(
+    [active_population_id, ...extraHighlight].filter((id): id is string => !!id && !!populations[id]),
+  );
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const [gatePicker, setGatePicker] = useState<GatePickerState | null>(null);
   const [gateQuery, setGateQuery] = useState("");
@@ -171,6 +184,8 @@ export function PopulationTree({
 
   const rows: React.ReactNode[] = [];
   const visited = new Set<string>();
+  /** Every rendered row in display order; filled by the walk below, read by the handlers. */
+  const orderedPopIds: string[] = [];
 
   const startRename = (event: React.MouseEvent, popId: string) => {
     if (popId === root_population_id) return;
@@ -249,34 +264,60 @@ export function PopulationTree({
   };
 
   const validDrop = (
-    sourceId: string,
+    sourceIds: readonly string[],
     targetId: string,
     placement: DropPlacement,
   ): boolean => {
-    if (
-      sourceId === root_population_id ||
-      sourceId === targetId ||
-      !populations[sourceId] ||
-      !populations[targetId]
-    ) {
-      return false;
-    }
+    if (!sourceIds.length || !populations[targetId]) return false;
     const destinationParentId =
       placement === "inside" ? targetId : populations[targetId].parent_id;
-    return !!destinationParentId &&
-      !!populations[destinationParentId] &&
-      !wouldCreateCycle(populations, sourceId, destinationParentId);
+    if (!destinationParentId || !populations[destinationParentId]) return false;
+    return sourceIds.every(
+      (sourceId) =>
+        sourceId !== root_population_id &&
+        sourceId !== targetId &&
+        !!populations[sourceId] &&
+        !wouldCreateCycle(populations, sourceId, destinationParentId),
+    );
+  };
+
+  /** The rows a drag starting on `popId` carries: the highlighted rows when it is one of them. */
+  const dragSetFor = (popId: string): string[] => {
+    if (!highlighted.has(popId)) return [popId];
+    const ids = orderedPopIds.filter((id) => highlighted.has(id) && id !== root_population_id);
+    return ids.length ? ids : [popId];
   };
 
   const resetPointerDrag = (row: HTMLDivElement, pointerId: number): void => {
     if (row.hasPointerCapture?.(pointerId)) row.releasePointerCapture(pointerId);
     pointerDragRef.current = null;
-    setDraggingPopId(null);
+    setDraggingPopIds([]);
     setDropTarget(null);
   };
 
+  /**
+   * Highlight the rows from the active population to `popId`, in the order the tree shows,
+   * replacing the previous range so a shorter one un-highlights.
+   */
+  const highlightRangeTo = (popId: string): void => {
+    const anchor = active_population_id && orderedPopIds.includes(active_population_id) ? active_population_id : popId;
+    const a = orderedPopIds.indexOf(anchor);
+    const b = orderedPopIds.indexOf(popId);
+    if (a < 0 || b < 0) return;
+    if (!active_population_id || anchor !== active_population_id) dispatch({ type: "setActivePopulation", popId: anchor });
+    setExtraHighlight(
+      orderedPopIds.slice(Math.min(a, b), Math.max(a, b) + 1).filter((id) => id !== root_population_id && id !== anchor),
+    );
+  };
+
+  /** Add or remove one row from the highlight; the active row itself stays highlighted. */
+  const toggleHighlight = (popId: string): void => {
+    if (popId === active_population_id) return;
+    setExtraHighlight((ids) => (ids.includes(popId) ? ids.filter((id) => id !== popId) : [...ids, popId]));
+  };
+
   const updatePointerDropTarget = (
-    sourceId: string,
+    sourceIds: readonly string[],
     clientX: number,
     clientY: number,
   ): DropTarget | null => {
@@ -296,7 +337,7 @@ export function PopulationTree({
     return {
       popId: targetId,
       placement,
-      valid: validDrop(sourceId, targetId, placement),
+      valid: validDrop(sourceIds, targetId, placement),
     };
   };
 
@@ -305,6 +346,7 @@ export function PopulationTree({
     visited.add(popId);
     const pop = populations[popId];
     if (!pop) return;
+    orderedPopIds.push(popId);
 
     const isActive = popId === active_population_id;
     const isRoot = popId === root_population_id;
@@ -329,8 +371,8 @@ export function PopulationTree({
         key={popId}
         className={
           "pop-row" +
-          (isActive ? " active" : "") +
-          (draggingPopId === popId ? " dragging" : "") +
+          (isActive ? " active" : highlighted.has(popId) ? " highlighted" : "") +
+          (draggingPopIds.includes(popId) ? " dragging" : "") +
           (dropTarget?.popId === popId
             ? ` drop-${dropTarget.placement}${dropTarget.valid ? "" : " drop-invalid"}`
             : "")
@@ -342,6 +384,18 @@ export function PopulationTree({
             event.stopPropagation();
             return;
           }
+          const target = event.target instanceof Element ? event.target : null;
+          const onControl = !!target?.closest("button, input, .pop-tree-gate-badge");
+          if (!isRoot && !onControl && event.shiftKey) {
+            highlightRangeTo(popId);
+            focusTreeContainer();
+            return;
+          }
+          if (!isRoot && !onControl && (event.metaKey || event.ctrlKey)) {
+            toggleHighlight(popId);
+            focusTreeContainer();
+            return;
+          }
           dispatch({ type: "setActivePopulation", popId });
           focusTreeContainer();
         }}
@@ -350,7 +404,7 @@ export function PopulationTree({
           const target = event.target instanceof Element ? event.target : null;
           if (target?.closest("button, input, .pop-tree-gate-badge")) return;
           pointerDragRef.current = {
-            popId,
+            popIds: dragSetFor(popId),
             pointerId: event.pointerId,
             startX: event.clientX,
             startY: event.clientY,
@@ -367,10 +421,10 @@ export function PopulationTree({
             const moved = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
             if (moved < 4) return;
             drag.active = true;
-            setDraggingPopId(drag.popId);
+            setDraggingPopIds(drag.popIds);
           }
           event.preventDefault();
-          const nextTarget = updatePointerDropTarget(drag.popId, event.clientX, event.clientY);
+          const nextTarget = updatePointerDropTarget(drag.popIds, event.clientX, event.clientY);
           drag.dropTarget = nextTarget;
           setDropTarget(nextTarget);
         }}
@@ -385,12 +439,11 @@ export function PopulationTree({
             }, 0);
           }
           if (drag.active && drag.dropTarget?.valid) {
-            dispatch({
-              type: "movePopulation",
-              popId: drag.popId,
-              targetId: drag.dropTarget.popId,
-              placement: drag.dropTarget.placement,
-            });
+            dispatch(
+              drag.popIds.length === 1
+                ? { type: "movePopulation", popId: drag.popIds[0], targetId: drag.dropTarget.popId, placement: drag.dropTarget.placement }
+                : { type: "movePopulations", popIds: drag.popIds, targetId: drag.dropTarget.popId, placement: drag.dropTarget.placement },
+            );
           }
           resetPointerDrag(event.currentTarget, event.pointerId);
         }}
@@ -511,13 +564,34 @@ export function PopulationTree({
   const availableChoices = choices.filter(
     (choice) => !usedKeys.has(choice.key) && (!query || choice.label.toLocaleLowerCase().includes(query)),
   );
+  const checkable = Object.keys(populations).filter((id) => id !== root_population_id);
 
   return (
     <div className="population-tree-panel">
       <div className="population-tree-hint">
         <span>
-          {t("Double-click a name to rename · Shift-drag to reorder or reparent · Shift-click a gate to change/remove · + adds a gate")}
+          {t("Double-click a name to rename · Shift-click to highlight a range, Cmd/Ctrl-click to add or remove a row · Shift-drag to move the highlighted rows · Shift-click a gate to change/remove · + adds a gate")}
         </span>
+        {checkable.length > 0 && (
+          <span className="gl-sample-inclusion-actions population-tree-check-actions" aria-label={t("Checked populations")}>
+            <button
+              type="button"
+              title={t("Check every population")}
+              disabled={selected_pop_ids.length === checkable.length}
+              onClick={() => dispatch({ type: "setPopSelection", popIds: checkable })}
+            >
+              {t("All")}
+            </button>
+            <button
+              type="button"
+              title={t("Uncheck every population")}
+              disabled={selected_pop_ids.length === 0}
+              onClick={() => dispatch({ type: "clearPopSelection" })}
+            >
+              {t("None")}
+            </button>
+          </span>
+        )}
         {statsSampleCount > 1 && (
           <strong
             title={

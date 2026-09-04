@@ -87,6 +87,24 @@ import {
   type WorkspaceV3SampleRestoreContexts,
 } from "./engine/workspaceV3";
 import {
+  barcodeSchemeTemplateCsv,
+  buildBarcodeGating,
+  exportBarcodeScheme,
+  parseBarcodeTable,
+  previewQcChain,
+  resolveBarcodeScheme,
+  resolveQcChannel,
+} from "./engine/barcodeScheme";
+import {
+  DEFAULT_BARCODE_TEMPLATE,
+  isBarcodeTemplate,
+  learnBarcodeTemplate,
+  normalizeBarcodeTemplate,
+  type LearnedBarcodeTemplate,
+} from "./engine/barcodeTemplate";
+import { BarcodeSchemeImportModal, type BarcodeImportDraft } from "./ui/BarcodeSchemeImportModal";
+import { BarcodeSaveModal, type BarcodeSaveChoice } from "./ui/BarcodeSaveModal";
+import {
   SAMPLE_ASSAY_BINDING_SCHEMA,
   type SampleAssayBinding,
   type WorkspaceCompensationState,
@@ -725,6 +743,9 @@ export default function App() {
   const [fcsMinimumEvents, setFcsMinimumEvents] = useState(0);
   const [fcsExportOpen, setFcsExportOpen] = useState(false);
   const [pendingGatingMlImport, setPendingGatingMlImport] = useState<PendingGatingMLImport | null>(null);
+  const [barcodeImport, setBarcodeImport] = useState<BarcodeImportDraft | null>(null);
+  const [barcodeSave, setBarcodeSave] = useState<{ learned: LearnedBarcodeTemplate; exported: ReturnType<typeof exportBarcodeScheme> } | null>(null);
+  const barcodeRef = useRef<HTMLInputElement>(null);
   // A workspace whose sample could not be resolved unambiguously; the user picks one.
   const [wspPicker, setWspPicker] = useState<
     { text: string; samples: FlowJoSampleSummary[]; reason: string } | null
@@ -1198,6 +1219,160 @@ export default function App() {
   const folderRef = useRef<HTMLInputElement | null>(null);
   const xmlRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<HTMLInputElement>(null);
+
+  // ---- Barcode scheme: a sample table becomes debarcoding gates and populations ----------------
+  // The table carries one 0/1 per barcode channel per sample; the plane layout (which channels
+  // are drawn together) is proposed from column order, declared in the file, or edited in the
+  // dialog; the gate shapes come from a template. See src/engine/barcodeScheme.ts.
+
+  async function prepareBarcodeImport(file: File) {
+    if (!sample || !activeSampleId) return;
+    const text = await file.text();
+    const table = parseBarcodeTable(text);
+    const parentId =
+      state.active_population_id && state.populations[state.active_population_id]
+        ? state.active_population_id
+        : state.root_population_id ?? "";
+    setBarcodeImport({
+      fileName: file.name,
+      table,
+      planes: null,
+      template: DEFAULT_BARCODE_TEMPLATE,
+      templateLabel: "GateLab default",
+      parentId,
+      sampleId: activeSampleId,
+      // The QC chain belongs directly under the root; attaching under an existing population
+      // means the workspace already has one.
+      qc: parentId === (state.root_population_id ?? ""),
+    });
+    setError(null);
+  }
+
+  const barcodeQcPreview = useMemo(() => {
+    if (!barcodeImport || !sample) return null;
+    return barcodeImport.template.qc.length ? previewQcChain(barcodeImport.template.qc, sample.channels) : null;
+  }, [barcodeImport, sample]);
+
+  const barcodeScheme = useMemo(() => {
+    if (!barcodeImport || !sample) return null;
+    return resolveBarcodeScheme(barcodeImport.table, sample.channels, barcodeImport.planes ?? undefined);
+  }, [barcodeImport, sample]);
+
+  const learnedBarcodeTemplate = useMemo(() => {
+    if (!barcodeImport || !sample) return null;
+    return learnBarcodeTemplate(Object.values(state.gates), sample.arcsinhCofactor, "learned from the current workspace", state.populations, state.root_population_id);
+  }, [barcodeImport, sample, state.gates, state.populations, state.root_population_id]);
+
+  async function loadBarcodeTemplateFile(file: File) {
+    try {
+      const parsed: unknown = JSON.parse(await file.text());
+      if (!isBarcodeTemplate(parsed)) throw new Error("not a GateLab barcode template");
+      const template = normalizeBarcodeTemplate(parsed);
+      setBarcodeImport((d) => (d ? { ...d, template, templateLabel: file.name } : d));
+    } catch (cause) {
+      setError(`Could not read ${file.name} as a barcode template: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+
+  /** Learn the strategy and open the dialog offering the scheme table and the gate template. */
+  function openBarcodeSave() {
+    if (!sample) return;
+    const sourceName = samples.find((e) => e.id === activeSampleId)?.name ?? "this workspace";
+    const learned = learnBarcodeTemplate(
+      Object.values(state.gates),
+      sample.arcsinhCofactor,
+      `learned from ${sourceName}`,
+      state.populations,
+      state.root_population_id,
+    );
+    if (!learned) {
+      setError("No barcode plane with four gates was found in this workspace, so there is no debarcoding strategy to save.");
+      return;
+    }
+    const exported = exportBarcodeScheme(Object.values(state.gates), state.populations, state.root_population_id, learned, populationMetadata, sourceName);
+    setBarcodeSave({ learned, exported });
+    setError(null);
+  }
+
+  function applyBarcodeSave(choice: BarcodeSaveChoice) {
+    const saved = barcodeSave;
+    setBarcodeSave(null);
+    if (!saved) return;
+    const written: string[] = [];
+    if (choice.scheme) {
+      downloadBlob("barcode-scheme.csv", new Blob([saved.exported.csv], { type: "text/csv;charset=utf-8" }));
+      written.push(`barcode-scheme.csv (${saved.exported.nSamples} sample(s), ${saved.exported.planeLabels.length} plane(s))`);
+    }
+    if (choice.template) {
+      downloadBlob("barcode-template.json", new Blob([JSON.stringify(saved.learned.template, null, 2)], { type: "application/json" }));
+      written.push(
+        `barcode-template.json (${saved.learned.planes.length} plane(s)` +
+          (saved.learned.qcNames.length ? `, QC chain ${saved.learned.qcNames.join(" → ")})` : ", no QC chain)"),
+      );
+    }
+    const notes = [...saved.exported.notes, ...saved.learned.notes];
+    setImportMsg(`Saved ${written.join(" and ")}.${notes.length ? ` ${notes.join(" ")}` : ""}`);
+  }
+
+  function applyBarcodeImport() {
+    const draft = barcodeImport;
+    const scheme = barcodeScheme;
+    if (!draft || !scheme || !sample || draft.sampleId !== activeSampleId) {
+      setBarcodeImport(null);
+      setError("The active sample changed before the barcode scheme could be imported. Please import the file again.");
+      return;
+    }
+    try {
+      // Gates drawn against Time span the sample's own Time range.
+      const ranges: Record<string, [number, number]> = {};
+      if (draft.qc) {
+        for (const g of draft.template.qc.flatMap((p) => p.gates)) {
+          if (!g.xFull) continue;
+          const key = resolveQcChannel(g.x, sample.channels);
+          const ch = key ? sample.channels.find((c) => c.key === key) : undefined;
+          if (!ch || ranges[ch.key]) continue;
+          const col = sample.fcs.columns[ch.columnIndex];
+          let lo = Infinity;
+          let hi = -Infinity;
+          for (let i = 0; i < col.length; i++) {
+            const v = col[i];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+          }
+          if (Number.isFinite(lo) && Number.isFinite(hi)) ranges[ch.key] = [lo, hi];
+        }
+      }
+      const result = buildBarcodeGating(scheme, draft.template, sample.arcsinhCofactor, { qc: draft.qc, channels: sample.channels, ranges });
+      const hasStrategy = state.root_population_id !== null && state.populations[state.root_population_id] !== undefined;
+      pendingCheckpointReasonRef.current = "after-barcode-import";
+      dispatch({
+        type: "importGating",
+        gates: result.gates,
+        gate_order: result.gate_order,
+        populations: result.populations,
+        root_population_id: result.root_population_id,
+        mode: hasStrategy ? "merge" : "replace",
+        attachTo: hasStrategy ? draft.parentId : undefined,
+      });
+      // Imported ids are fresh UUIDs, which the merge keeps, so the metadata keys are final.
+      setPopulationMetadata((m) => ({ ...m, ...result.populationMetadata }));
+      setPopulationMetaColumns((cols) => [
+        ...cols,
+        ...result.metadataColumns.filter((name) => !cols.some((c) => c.name === name)).map((name) => ({ name })),
+      ]);
+      setBarcodeImport(null);
+      setError(null);
+      setImportMsg(
+        `Barcode scheme: ${result.nGates} gates on ${scheme.planes.length} plane(s), ${result.nPopulations} sample population(s)` +
+          (result.qc.populations.length ? ` under ${result.qc.populations.map((p) => p.name).join(" → ")}` : "") +
+          (hasStrategy ? ` in ${state.populations[draft.parentId]?.name ?? "the current root"}` : "") +
+          ". Tweak the gates; the populations follow." +
+          (result.qc.skipped.length ? ` Left out: ${result.qc.skipped.join(" ")}` : ""),
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
 
   async function prepareGatingImport(file: File) {
     if (!sample || !activeSampleId) return;
@@ -1709,13 +1884,17 @@ export default function App() {
       const filesForPop = (popId: string): Record<string, Uint8Array> => {
         const popName = popNameOf(popId);
         const out: Record<string, Uint8Array> = {};
+        // A population created from a barcode scheme carries the output file name the sheet
+        // asked for; it names the export of the single-sample and combined scopes.
+        const schemeFile = populationMetadata[popId]?.file_name?.trim();
+        const schemeStem = schemeFile ? sanitizeFilePart(schemeFile.replace(/\.fcs$/i, "")) : null;
         if (scope === "combined") {
           const items = scopedEntries.map((e) => ({
             sample: e.sample,
             name: e.name,
             mask: popMaskFor(e, popId),
           }));
-          out[`combined_${popName}.fcs`] = exportPopulationFcsCombined(items, assay);
+          out[schemeStem ? `${schemeStem}.fcs` : `combined_${popName}.fcs`] = exportPopulationFcsCombined(items, assay);
         } else if (scope === "split") {
           for (const e of scopedEntries) {
             const eventCount = exportDerived.get(e.id)?.stats.event_count[popId];
@@ -1725,7 +1904,7 @@ export default function App() {
           }
         } else {
           const base = sanitizeFilePart((activeEntry.name || "sample").replace(/\.[^.]+$/, ""));
-          out[`${base}_${popName}.fcs`] =
+          out[schemeStem ? `${schemeStem}.fcs` : `${base}_${popName}.fcs`] =
             exportPopulationFcs(activeEntry.sample, popMaskFor(activeEntry, popId), assay);
         }
         return out;
@@ -5862,6 +6041,32 @@ export default function App() {
               {importMsg && <div className="gl-hint">{t(importMsg)}</div>}
               <button
                 className="gl-btn-ghost gl-btn-block"
+                title="Import a barcode scheme: a CSV/TSV with one row per sample and one 0/1 column per barcode channel. Creates the debarcoding gates from a template and one population per sample, named from the table, so you tweak gates rather than draw them."
+                onClick={() => barcodeRef.current?.click()}
+              >
+                {t("Import barcode scheme…")}
+              </button>
+              <input
+                ref={barcodeRef}
+                type="file"
+                accept=".csv,.tsv,.txt"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void prepareBarcodeImport(f);
+                  e.target.value = "";
+                }}
+              />
+              <button
+                className="gl-btn-ghost gl-btn-block"
+                disabled={Object.keys(state.gates).length === 0}
+                title="Write this workspace's debarcoding strategy back out: the scheme table (CSV, one row per sample population with its 0/1 states, name, file name and metadata) and the gate template (JSON: the QC chain and the plane shapes) that an import can reuse on another run."
+                onClick={openBarcodeSave}
+              >
+                {t("Save barcode scheme…")}
+              </button>
+              <button
+                className="gl-btn-ghost gl-btn-block"
                 disabled={Object.keys(state.gates).length === 0}
                 title="Open the GatingML export dialog: choose standard GateLab/GateLabR or Cytobank-compatible format and review fidelity warnings."
                 onClick={() => setGatingMlExportOpen(true)}
@@ -7126,6 +7331,44 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+      {barcodeImport && barcodeScheme && sample && (
+        <BarcodeSchemeImportModal
+          draft={barcodeImport}
+          scheme={barcodeScheme}
+          channels={sample.channels}
+          state={state}
+          canLearn={learnedBarcodeTemplate !== null}
+          qcPreview={barcodeQcPreview}
+          onPlanesChange={(planes) => setBarcodeImport((d) => (d ? { ...d, planes } : d))}
+          onParentChange={(parentId) => setBarcodeImport((d) => (d ? { ...d, parentId } : d))}
+          onQcChange={(qc) => setBarcodeImport((d) => (d ? { ...d, qc } : d))}
+          onTemplateDefault={() => setBarcodeImport((d) => (d ? { ...d, template: DEFAULT_BARCODE_TEMPLATE, templateLabel: "GateLab default" } : d))}
+          onTemplateLearn={() => {
+            if (!learnedBarcodeTemplate) return;
+            setBarcodeImport((d) => (d ? {
+              ...d,
+              template: learnedBarcodeTemplate.template,
+              templateLabel: `learned from this workspace (${learnedBarcodeTemplate.planes.length} plane(s)${learnedBarcodeTemplate.qcNames.length ? `, QC chain ${learnedBarcodeTemplate.qcNames.join(" → ")}` : ", no QC chain"})`,
+            } : d));
+          }}
+          onTemplateFile={(f) => void loadBarcodeTemplateFile(f)}
+          onDownloadTemplateCsv={() => downloadBlob("barcode-scheme-template.csv", new Blob([barcodeSchemeTemplateCsv()], { type: "text/csv;charset=utf-8" }))}
+          onCancel={() => setBarcodeImport(null)}
+          onImport={applyBarcodeImport}
+        />
+      )}
+      {barcodeSave && (
+        <BarcodeSaveModal
+          summary={{
+            planeLabels: barcodeSave.exported.planeLabels,
+            qcNames: barcodeSave.learned.qcNames,
+            nSamples: barcodeSave.exported.nSamples,
+            notes: [...barcodeSave.exported.notes, ...barcodeSave.learned.notes],
+          }}
+          onSave={applyBarcodeSave}
+          onCancel={() => setBarcodeSave(null)}
+        />
       )}
       {pendingGatingMlImport && gatingImportNeedsDecision(pendingGatingMlImport, state) && (
         <GatingMlImportModal

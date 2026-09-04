@@ -250,3 +250,77 @@ describe("FlowJo transform carriage", () => {
     expect(out.warnings.join(" ")).toMatch(/RAW space/);
   });
 });
+
+// Three FlowJo conventions found on 2026-09-03 in a public workspace (Michaelis et al. 2025,
+// Zenodo 16749334, LSRFortessa X-20, FlowJo 10.10.0), each of which made the import wrong
+// without any error: a leaf name repeated under different parents, a Time gate stored in
+// seconds, and (in sample.test.ts) a slashed parameter name rewritten with an underscore.
+describe("FlowJo workspace import — names and units from a public ICS workspace", () => {
+  function sampleWith(keywords: string, populations: string): string {
+    return `<Workspace><SampleList><Sample><Keywords>${keywords}</Keywords>
+      <SampleNode name="s.fcs" count="100"><Subpopulations>${populations}</Subpopulations></SampleNode>
+    </Sample></SampleList></Workspace>`;
+  }
+  function rectPop(name: string, id: string, x: string, y: string,
+                   xr: [number, number], yr: [number, number], inner = ""): string {
+    return `<Population name="${name}" count="10"><Gate>
+      <gating:RectangleGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="${id}">
+        <gating:dimension gating:min="${xr[0]}" gating:max="${xr[1]}"><data-type:fcs-dimension data-type:name="${x}"/></gating:dimension>
+        <gating:dimension gating:min="${yr[0]}" gating:max="${yr[1]}"><data-type:fcs-dimension data-type:name="${y}"/></gating:dimension>
+      </gating:RectangleGate></Gate>
+      ${inner ? `<Subpopulations>${inner}</Subpopulations>` : ""}
+    </Population>`;
+  }
+  function rectangleRanges(gatingMl: string, gateId: string): [number, number][] {
+    const doc = new DOMParser().parseFromString(gatingMl, "application/xml");
+    const gate = Array.from(doc.getElementsByTagNameNS(G, "RectangleGate"))
+      .find((g) => g.getAttributeNS(G, "id") === gateId)!;
+    return Array.from(gate.getElementsByTagNameNS(G, "dimension")).map((d) => [
+      Number(d.getAttributeNS(G, "min")), Number(d.getAttributeNS(G, "max")),
+    ]);
+  }
+
+  it("qualifies a leaf name that recurs under different parents, and only that one", () => {
+    const xml = synthetic(
+      polygonPop("A", "g1", polygonPop("X", "g2")) + polygonPop("B", "g3", polygonPop("X", "g4")),
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.gatingMl).toContain('gating:name="A/X"');
+    expect(out.gatingMl).toContain('gating:name="B/X"');
+    expect(out.gatingMl).toContain('gating:name="A"');
+    expect(out.gatingMl).not.toContain('gating:name="X"');
+    expect(Object.keys(out.flowJoCounts).sort()).toEqual(["A", "A/X", "B", "B/X"]);
+    expect(out.warnings.some((w) => w.includes("qualified with their parent"))).toBe(true);
+  });
+
+  it("climbs as many parents as it takes, and no further", () => {
+    // X under A/P and under B/P: "P/X" is still ambiguous, so both climb to "A/P/X" and "B/P/X".
+    const xml = synthetic(
+      polygonPop("A", "g1", polygonPop("P", "g2", polygonPop("X", "g3"))) +
+      polygonPop("B", "g4", polygonPop("P", "g5", polygonPop("X", "g6"))),
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(Object.keys(out.flowJoCounts).sort()).toEqual(["A", "A/P", "A/P/X", "B", "B/P", "B/P/X"]);
+  });
+
+  it("returns a Time gate from FlowJo's seconds to the file's ticks with the sample's $TIMESTEP", () => {
+    const xml = sampleWith(
+      `<Keyword name="$FIL" value="s.fcs"/><Keyword name="$TIMESTEP" value="0.01"/>`,
+      rectPop("Time subset", "g1", "FSC-A", "Time", [6000, 160000], [0.5, 23]),
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    const [fsc, time] = rectangleRanges(out.gatingMl, "g1");
+    expect(fsc).toEqual([6000, 160000]);
+    expect(time[0]).toBeCloseTo(50, 9);
+    expect(time[1]).toBeCloseTo(2300, 9);
+  });
+
+  it("leaves Time alone when the workspace records no $TIMESTEP, and never touches another axis", () => {
+    const xml = sampleWith(
+      `<Keyword name="$FIL" value="s.fcs"/>`,
+      rectPop("Time subset", "g1", "Time", "SSC-A", [0.5, 23], [100, 900]),
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(rectangleRanges(out.gatingMl, "g1")).toEqual([[0.5, 23], [100, 900]]);
+  });
+});

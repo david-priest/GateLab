@@ -95,7 +95,6 @@ export function PopToolbar({
       <Tool label="⧉" title={t("Duplicate checked populations")} onClick={() => onDuplicate(state.selected_pop_ids)} disabled={nChecked === 0} />
       <Tool label="⇄" title={t("Move checked populations to a new parent")} onClick={() => onMove(state.selected_pop_ids)} disabled={nChecked === 0} />
       <Tool label="⇞" title={t("Bulk-edit population names and gate definitions via CSV")} onClick={onBulkRename} disabled={Object.keys(state.populations).length < 2} />
-      <Tool label="✕" title={t("Clear population selection")} onClick={() => dispatch({ type: "clearPopSelection" })} disabled={nChecked === 0} />
       <Tool
         label="🗑"
         title={t("Delete checked populations")}
