@@ -156,3 +156,26 @@ describe("gatingMergeSpaceConflict", () => {
     })).toBeNull();
   });
 });
+
+describe("mergeGatingStrategies attach point", () => {
+  it("attaches the imported root's children under the named population instead of the root", () => {
+    const current: GatingStrategyGraph = {
+      gates: { g1: rectangle("g1", "Cells") },
+      gate_order: ["g1"],
+      populations: populations("root", "cells", "Cells", "g1"),
+      root_population_id: "root",
+    };
+    const imported: GatingStrategyGraph = {
+      gates: { b1: rectangle("b1", "89+") },
+      gate_order: ["b1"],
+      populations: populations("iroot", "s1", "01", "b1"),
+      root_population_id: "iroot",
+    };
+    const merged = mergeGatingStrategies(current, imported, "cells");
+    const s1 = Object.values(merged.populations).find((p) => p.name === "01")!;
+    expect(s1.parent_id).toBe("cells");
+    expect(merged.populations.cells.children).toContain(s1.population_id);
+    expect(merged.populations.root.children).toEqual(["cells"]);
+    expect(() => mergeGatingStrategies(current, imported, "gone")).toThrow("no longer exists");
+  });
+});

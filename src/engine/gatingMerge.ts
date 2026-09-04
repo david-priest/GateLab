@@ -80,12 +80,21 @@ function orderedIds(order: string[], available: Record<string, unknown>): string
 export function mergeGatingStrategies(
   current: GatingStrategyGraph,
   imported: GatingStrategyGraph,
+  /**
+   * Population of the CURRENT strategy that the imported root's children attach to. Defaults to
+   * the current root. A barcode scheme, for example, belongs under the cleaned-up cells
+   * population rather than under All Events.
+   */
+  attachTo: string = current.root_population_id,
 ): GatingMergeResult {
   if (!current.populations[current.root_population_id]) {
     throw new Error("The current population hierarchy has no valid root.");
   }
   if (!imported.populations[imported.root_population_id]) {
     throw new Error("The imported population hierarchy has no valid root.");
+  }
+  if (!current.populations[attachTo]) {
+    throw new Error("The population to attach the imported strategy to no longer exists.");
   }
 
   const gates: Record<string, Gate> = { ...current.gates };
@@ -115,7 +124,7 @@ export function mergeGatingStrategies(
     if (sourceId === imported.root_population_id) continue;
     const targetId = populationIdMap[sourceId];
     const parentId = sourcePopulation.parent_id === imported.root_population_id
-      ? current.root_population_id
+      ? attachTo
       : sourcePopulation.parent_id
         ? populationIdMap[sourcePopulation.parent_id]
         : undefined;

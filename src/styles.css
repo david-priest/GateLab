@@ -2096,6 +2096,9 @@ input[type="number"]::-webkit-outer-spin-button {
 .population-tree-hint > strong {
   flex: 0 0 auto; color: #315b8d; font-style: normal; font-weight: 600; white-space: nowrap;
 }
+.population-tree-hint > .population-tree-check-actions {
+  flex: 0 0 auto; overflow: visible; font-style: normal; white-space: nowrap;
+}
 
 .gate-card {
   display: flex; align-items: center; padding: 1px 8px; margin: 0;
@@ -2120,6 +2123,7 @@ input[type="number"]::-webkit-outer-spin-button {
 .pop-row-select { margin: 0; width: 13px; height: 13px; cursor: pointer; }
 .pop-row:hover { background: #eef; }
 .pop-row.active { background: #d6edff; border-color: #88b8ff; }
+.pop-row.highlighted { background: #e6f2ff; border-color: #a8c8f0; }
 .pop-row.dragging { opacity: 0.45; cursor: grabbing; user-select: none; }
 .pop-row.drop-before { box-shadow: inset 0 2px 0 #2f80ed; }
 .pop-row.drop-after { box-shadow: inset 0 -2px 0 #2f80ed; }
