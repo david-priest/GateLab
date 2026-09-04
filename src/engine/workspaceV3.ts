@@ -145,10 +145,17 @@ const WORKSPACE_V3_ALLOWED_KEYS = [
 ] as const;
 
 const SAMPLE_V3_REQUIRED_KEYS = ["fileName", "dataPath", "logicleW", "assay"] as const;
+// Every key the saver writes per sample (App.tsx buildWorkspaceFile) must be listed here, or a
+// workspace saved by the app refuses to reopen: `scatterLinear` and `fluorArcsinh` were added to
+// the saver and to validateWorkspace() in 0.7.0 but not to this list, so a workspace saved from
+// 0.7.0 onwards failed with "sample 1 has an invalid field set. Unexpected: scatterLinear,
+// fluorArcsinh" (nPhos4, 2026-09-03). Their shape is checked by validateWorkspace() below.
 const SAMPLE_V3_ALLOWED_KEYS = [
   ...SAMPLE_V3_REQUIRED_KEYS,
   "sampleId",
   "scatterCofactor",
+  "scatterLinear",
+  "fluorArcsinh",
   "cytofCofactor",
   "instrumentMode",
   "labels",
