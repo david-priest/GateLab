@@ -1,5 +1,7 @@
+import { newGateRef, newPopulation, newRootPopulation } from "./models";
 import { describe, expect, it } from "vitest";
 import type { Gate, PopulationMap } from "./models";
+import {  } from "./models";
 import {
   gatingMergeSpaceConflict,
   mergeGatingStrategies,
@@ -177,5 +179,37 @@ describe("mergeGatingStrategies attach point", () => {
     expect(merged.populations.cells.children).toContain(s1.population_id);
     expect(merged.populations.root.children).toEqual(["cells"]);
     expect(() => mergeGatingStrategies(current, imported, "gone")).toThrow("no longer exists");
+  });
+});
+
+describe("mergeGatingStrategies with references to gates the workspace already holds", () => {
+  it("keeps a reference to an existing gate rather than treating it as dangling", () => {
+    const gate = (id: string, name: string) => ({
+      gate_id: id, name, gate_type: "rectangle" as const, x_channel: "FSC-A", y_channel: "SSC-A",
+      vertices: [[0, 0], [1, 1]] as [number, number][], color: "#000", label_offset: null,
+    });
+    const currentRoot = newRootPopulation();
+    const current = {
+      gates: { shared: gate("shared", "Shared") },
+      gate_order: ["shared"],
+      populations: { [currentRoot.population_id]: currentRoot },
+      root_population_id: currentRoot.population_id,
+    };
+    const importedRoot = newRootPopulation();
+    const pop = newPopulation("Uses shared and new", [newGateRef("shared", true), newGateRef("fresh", true)], importedRoot.population_id);
+    importedRoot.children.push(pop.population_id);
+    const imported = {
+      gates: { fresh: gate("fresh", "Fresh") },
+      gate_order: ["fresh"],
+      populations: { [importedRoot.population_id]: importedRoot, [pop.population_id]: pop },
+      root_population_id: importedRoot.population_id,
+    };
+    const merged = mergeGatingStrategies(current, imported);
+    expect(Object.keys(merged.gates).sort()).toEqual(["fresh", "shared"]);
+    const target = Object.values(merged.populations).find((p) => p.name === "Uses shared and new")!;
+    expect(target.gate_refs.map((r) => r.gate_id).sort()).toEqual(["fresh", "shared"]);
+    // A reference to a gate in neither graph is still refused.
+    const dangling = { ...imported, populations: { ...imported.populations, [pop.population_id]: { ...pop, gate_refs: [newGateRef("nowhere", true)] } } };
+    expect(() => mergeGatingStrategies(current, dangling)).toThrow(/dangling/);
   });
 });

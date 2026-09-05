@@ -37,6 +37,15 @@ import {
 } from "./engine/populations";
 import { mergeGatingStrategies, type GatingImportMode } from "./engine/gatingMerge";
 import { populationTreeOrder } from "./engine/populations";
+import {
+  DEFAULT_HIERARCHY_ID,
+  DEFAULT_HIERARCHY_NAME,
+  pruneDeletedGates,
+  referencedGateIds,
+  storeHierarchy,
+  type HierarchyRef,
+  type StoredHierarchy,
+} from "./engine/hierarchies";
 import type { Sample } from "./engine/sample";
 
 export interface CoreState {
@@ -51,6 +60,14 @@ export interface CoreState {
   gate_version: number;
   /** Persisted population names/order changed without changing any event memberships. */
   tree_version: number;
+  /**
+   * Every population hierarchy in menu order. The active one's tree is the live
+   * `populations` / `root_population_id` / `active_population_id` / `selected_pop_ids`; the
+   * others are parked in `stored_hierarchies`. All hierarchies share the one gate table.
+   */
+  hierarchies: HierarchyRef[];
+  active_hierarchy_id: string;
+  stored_hierarchies: Record<string, StoredHierarchy>;
   undo: Snapshot[];
   redo: Snapshot[];
 }
@@ -61,6 +78,9 @@ interface Snapshot {
   populations: PopulationMap;
   root_population_id: string | null;
   active_population_id: string | null;
+  hierarchies: HierarchyRef[];
+  active_hierarchy_id: string;
+  stored_hierarchies: Record<string, StoredHierarchy>;
   /** Whether moving between this snapshot and the adjacent history state changes memberships. */
   affects_gating: boolean;
 }
@@ -79,6 +99,9 @@ export function initialCoreState(): CoreState {
     selected_gate_ids: [],
     gate_version: 0,
     tree_version: 0,
+    hierarchies: [{ id: DEFAULT_HIERARCHY_ID, name: DEFAULT_HIERARCHY_NAME }],
+    active_hierarchy_id: DEFAULT_HIERARCHY_ID,
+    stored_hierarchies: {},
     undo: [],
     redo: [],
   };
@@ -91,8 +114,17 @@ function snapshot(s: CoreState, affectsGating = true): Snapshot {
     populations: s.populations,
     root_population_id: s.root_population_id,
     active_population_id: s.active_population_id,
+    hierarchies: s.hierarchies,
+    active_hierarchy_id: s.active_hierarchy_id,
+    stored_hierarchies: s.stored_hierarchies,
     affects_gating: affectsGating,
   };
+}
+
+/** The active hierarchy as a stored record, for parking it before another becomes live. */
+function parkActiveHierarchy(s: CoreState): StoredHierarchy {
+  const ref = s.hierarchies.find((h) => h.id === s.active_hierarchy_id) ?? { id: s.active_hierarchy_id, name: DEFAULT_HIERARCHY_NAME };
+  return storeHierarchy(ref, s);
 }
 
 /** Push an undo snapshot, clear redo (call before a structural change). */
@@ -183,6 +215,17 @@ export type Action =
     }
   | { type: "moveSelectedPopulations"; popIds: string[]; parentId: string }
   | { type: "setPopSelection"; popIds: string[] }
+  | {
+      /** Add a hierarchy holding this tree and make it the active one. */
+      type: "addHierarchy";
+      id: string;
+      name: string;
+      populations: PopulationMap;
+      root_population_id: string;
+    }
+  | { type: "switchHierarchy"; id: string }
+  | { type: "renameHierarchy"; id: string; name: string }
+  | { type: "deleteHierarchy"; id: string }
   | { type: "duplicateSelectedPopulations"; popIds: string[] }
   | { type: "deleteGates"; gateIds: string[] }
   | { type: "clearGateSelection" }
@@ -209,6 +252,10 @@ export type Action =
       root_population_id: string | null;
       active_population_id: string | null;
       selected_gate_id: string | null;
+      /** Absent in a workspace saved before hierarchies existed: it holds the one default. */
+      hierarchies?: HierarchyRef[];
+      active_hierarchy_id?: string;
+      stored_hierarchies?: StoredHierarchy[];
     }
   | { type: "undo" }
   | { type: "redo" };
@@ -740,6 +787,91 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
       return { ...state, ...pushUndo(state), populations, gate_version: state.gate_version + 1 };
     }
 
+    case "addHierarchy": {
+      if (!action.id || state.hierarchies.some((h) => h.id === action.id) || !action.populations[action.root_population_id]) return state;
+      const populations = clonePops(action.populations);
+      ensurePopColorSlots(populations, action.root_population_id);
+      const parked = parkActiveHierarchy(state);
+      return {
+        ...state,
+        ...pushUndo(state),
+        hierarchies: [...state.hierarchies, { id: action.id, name: action.name.trim() || DEFAULT_HIERARCHY_NAME }],
+        active_hierarchy_id: action.id,
+        stored_hierarchies: { ...state.stored_hierarchies, [parked.id]: parked },
+        populations,
+        root_population_id: action.root_population_id,
+        active_population_id: action.root_population_id,
+        selected_pop_ids: [],
+        gate_version: state.gate_version + 1,
+      };
+    }
+
+    case "switchHierarchy": {
+      const target = state.stored_hierarchies[action.id];
+      if (!target || action.id === state.active_hierarchy_id) return state;
+      const parked = parkActiveHierarchy(state);
+      const stored_hierarchies = { ...state.stored_hierarchies, [parked.id]: parked };
+      delete stored_hierarchies[action.id];
+      return {
+        ...state,
+        ...pushUndo(state),
+        active_hierarchy_id: action.id,
+        stored_hierarchies,
+        populations: target.populations,
+        root_population_id: target.root_population_id,
+        active_population_id: target.active_population_id && target.populations[target.active_population_id]
+          ? target.active_population_id
+          : target.root_population_id,
+        selected_pop_ids: target.selected_pop_ids.filter((id) => target.populations[id]),
+        gate_version: state.gate_version + 1,
+      };
+    }
+
+    case "renameHierarchy": {
+      const name = action.name.trim();
+      const ref = state.hierarchies.find((h) => h.id === action.id);
+      if (!ref || !name || ref.name === name) return state;
+      const hierarchies = state.hierarchies.map((h) => (h.id === action.id ? { ...h, name } : h));
+      const stored = state.stored_hierarchies[action.id];
+      return {
+        ...state,
+        ...pushUndo(state, false),
+        hierarchies,
+        stored_hierarchies: stored ? { ...state.stored_hierarchies, [action.id]: { ...stored, name } } : state.stored_hierarchies,
+        tree_version: state.tree_version + 1,
+      };
+    }
+
+    case "deleteHierarchy": {
+      if (state.hierarchies.length < 2 || !state.hierarchies.some((h) => h.id === action.id)) return state;
+      const hierarchies = state.hierarchies.filter((h) => h.id !== action.id);
+      if (action.id !== state.active_hierarchy_id) {
+        const stored_hierarchies = { ...state.stored_hierarchies };
+        delete stored_hierarchies[action.id];
+        return { ...state, ...pushUndo(state, false), hierarchies, stored_hierarchies, tree_version: state.tree_version + 1 };
+      }
+      // Deleting the active hierarchy: the next one in the menu becomes live.
+      const next = hierarchies[0];
+      const target = state.stored_hierarchies[next.id];
+      if (!target) return state;
+      const stored_hierarchies = { ...state.stored_hierarchies };
+      delete stored_hierarchies[next.id];
+      return {
+        ...state,
+        ...pushUndo(state),
+        hierarchies,
+        active_hierarchy_id: next.id,
+        stored_hierarchies,
+        populations: target.populations,
+        root_population_id: target.root_population_id,
+        active_population_id: target.active_population_id && target.populations[target.active_population_id]
+          ? target.active_population_id
+          : target.root_population_id,
+        selected_pop_ids: target.selected_pop_ids.filter((id) => target.populations[id]),
+        gate_version: state.gate_version + 1,
+      };
+    }
+
     case "deleteGates": {
       const ids = [...new Set(action.gateIds)].filter((id) => id in state.gates);
       if (ids.length === 0) return state;
@@ -765,12 +897,24 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
         }
       }
       if (state.root_population_id) sortPopulationTree(populations, state.root_population_id);
+      // The gates are shared, so every parked hierarchy loses the same references.
+      const stored_hierarchies: Record<string, StoredHierarchy> = {};
+      for (const [hid, h] of Object.entries(state.stored_hierarchies)) {
+        const pruned = pruneDeletedGates(h.populations, h.root_population_id, state.gates, idSet);
+        stored_hierarchies[hid] = {
+          ...h,
+          populations: pruned,
+          active_population_id: h.active_population_id && pruned[h.active_population_id] ? h.active_population_id : h.root_population_id,
+          selected_pop_ids: h.selected_pop_ids.filter((id) => pruned[id]),
+        };
+      }
       const active =
         state.active_population_id && populations[state.active_population_id]
           ? state.active_population_id
           : state.root_population_id;
       return {
         ...state,
+        stored_hierarchies,
         ...pushUndo(state),
         gates,
         gate_order: state.gate_order.filter((g) => g in gates),
@@ -806,14 +950,24 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
       // GatingML populations carry no colorSlot — backfill so imported pops get stable, frozen colours.
       const importedPops = clonePops(graph.populations);
       ensurePopColorSlots(importedPops, graph.root_population_id);
+      // Replacing the active hierarchy must not take gates away from the parked ones.
+      let gates = graph.gates;
+      let gate_order = graph.gate_order;
+      if (!shouldMerge && Object.keys(state.stored_hierarchies).length) {
+        const keep = new Set<string>();
+        for (const h of Object.values(state.stored_hierarchies)) for (const id of referencedGateIds(h.populations)) keep.add(id);
+        const retained = Object.fromEntries(Object.entries(state.gates).filter(([id]) => keep.has(id) && !graph.gates[id]));
+        gates = { ...retained, ...graph.gates };
+        gate_order = [...state.gate_order.filter((id) => retained[id]), ...graph.gate_order.filter((id) => !retained[id])];
+      }
       const activePopulationId = shouldMerge && state.active_population_id && importedPops[state.active_population_id]
         ? state.active_population_id
         : graph.root_population_id;
       return {
         ...state,
         ...(action.clearHistory ? { undo: [], redo: [] } : pushUndo(state)),
-        gates: graph.gates,
-        gate_order: graph.gate_order,
+        gates,
+        gate_order,
         populations: importedPops,
         root_population_id: graph.root_population_id,
         active_population_id: activePopulationId,
@@ -835,6 +989,19 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
       // a pre-colorSlot workspace or a GatingML import (which has none), so colours are stable + frozen.
       const loadedPops = clonePops(action.populations);
       ensurePopColorSlots(loadedPops, action.root_population_id);
+      const hierarchies = action.hierarchies?.length
+        ? action.hierarchies.map((h) => ({ id: h.id, name: h.name }))
+        : [{ id: DEFAULT_HIERARCHY_ID, name: DEFAULT_HIERARCHY_NAME }];
+      const active_hierarchy_id = action.active_hierarchy_id && hierarchies.some((h) => h.id === action.active_hierarchy_id)
+        ? action.active_hierarchy_id
+        : hierarchies[0].id;
+      const stored_hierarchies: Record<string, StoredHierarchy> = {};
+      for (const h of action.stored_hierarchies ?? []) {
+        if (h.id === active_hierarchy_id || !hierarchies.some((ref) => ref.id === h.id)) continue;
+        const pops = clonePops(h.populations);
+        ensurePopColorSlots(pops, h.root_population_id);
+        stored_hierarchies[h.id] = { ...h, populations: pops, selected_pop_ids: [] };
+      }
       return {
         ...state,
         gates: action.gates,
@@ -845,6 +1012,9 @@ export function coreReducer(state: CoreState, action: Action): CoreState {
         selected_gate_id: action.selected_gate_id,
         selected_pop_ids: [],
         selected_gate_ids: [],
+        hierarchies,
+        active_hierarchy_id,
+        stored_hierarchies,
         gate_version: state.gate_version + 1,
         undo: [],
         redo: [],

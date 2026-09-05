@@ -535,3 +535,40 @@ describe("authoring a NOT gate reference", () => {
     expect(host.querySelector<HTMLInputElement>(".pop-gate-picker-not input")!.checked).toBe(true);
   });
 });
+
+describe("the hierarchy menu", () => {
+  it("lists the hierarchies, switches on selection, and hands actions to the app", () => {
+    const { state, derived } = makeInteractionFixture();
+    state.hierarchies = [{ id: "main", name: "Scheme A" }, { id: "h2", name: "Scheme B" }];
+    state.active_hierarchy_id = "main";
+    const dispatch = vi.fn();
+    const onHierarchyAction = vi.fn();
+    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={dispatch} onHierarchyAction={onHierarchyAction} />));
+    const select = host.querySelector<HTMLSelectElement>(".population-tree-hierarchy select")!;
+    expect(select.value).toBe("main");
+    expect(Array.from(select.options).map((o) => o.textContent)).toEqual([
+      "Scheme A", "Scheme B", "New empty hierarchy…", "Duplicate this hierarchy…", "Rename this hierarchy…", "Delete this hierarchy…",
+    ]);
+    expect(host.querySelector(".population-tree-hierarchy-count")!.textContent).toBe("1 of 2");
+    act(() => {
+      select.value = "h2";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(dispatch).toHaveBeenCalledWith({ type: "switchHierarchy", id: "h2" });
+    act(() => {
+      select.value = "__duplicate";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onHierarchyAction).toHaveBeenCalledWith("duplicate");
+    // The select stays on the active hierarchy; actions never become its value.
+    expect(select.value).toBe("main");
+  });
+
+  it("disables deletion while only one hierarchy exists", () => {
+    const { state, derived } = makeInteractionFixture();
+    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} />));
+    const del = host.querySelector<HTMLOptionElement>('.population-tree-hierarchy option[value="__delete"]')!;
+    expect(del.disabled).toBe(true);
+    expect(host.querySelector(".population-tree-hierarchy-count")).toBeNull();
+  });
+});

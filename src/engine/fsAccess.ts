@@ -45,10 +45,44 @@ export interface PickedDirectory {
 }
 
 export interface PickFileOptions {
-  /** Stable purpose identifier so Chromium does not share picker state across workflows. */
+  /**
+   * Accepted for compatibility and ignored: every GateLab picker shares one id, so the
+   * browser remembers a single last-used folder for the whole app (see PICKER_ID).
+   */
   id?: string;
-  /** Existing handle whose directory should be shown first when the browser supports it. */
+  /** A handle to open beside, overriding the remembered last location for this one picker. */
   startIn?: FileSystemHandle;
+}
+
+/**
+ * The one picker id for the whole app. Chromium remembers the last-used directory per id and
+ * origin, so with a shared id every open and save dialog starts where the previous one ended,
+ * across buttons and across page loads. Separate ids per workflow (the earlier arrangement)
+ * made each button remember its own folder, which is not what anyone wants when the FCS
+ * files, the workspace and the barcode sheet all sit in one experiment folder.
+ */
+export const PICKER_ID = "gatelab";
+
+let lastLocation: FileSystemHandle | null = null;
+
+/** Remember where the user last opened or saved, so the next picker starts there. */
+export function rememberPickerLocation(handle: FileSystemHandle | null | undefined): void {
+  if (handle) lastLocation = handle;
+}
+
+export function lastPickerLocation(): FileSystemHandle | null {
+  return lastLocation;
+}
+
+/** For tests. */
+export function resetPickerLocation(): void {
+  lastLocation = null;
+}
+
+/** The id and start location every picker passes: a caller's startIn, else the last location. */
+function pickerPlacement(options: PickFileOptions = {}): { id: string; startIn?: FileSystemHandle } {
+  const startIn = options.startIn ?? lastLocation ?? undefined;
+  return { id: PICKER_ID, ...(startIn ? { startIn } : {}) };
 }
 
 async function readHandle(handle: FileSystemFileHandle): Promise<{ bytes: Uint8Array; name: string }> {
@@ -76,12 +110,9 @@ export async function pickFile(
     const [handle] = await window.showOpenFilePicker!({
       ...(accept ? { types: [{ description, accept }] } : {}),
       multiple: false,
-      ...(options.id ? { id: options.id } : {}),
-      // Open where the caller last was. Declared on PickFileOptions from the start but only
-      // honoured by the directory picker, so every file picker opened wherever the browser
-      // last happened to be rather than beside the file being worked on.
-      ...(options.startIn ? { startIn: options.startIn } : {}),
+      ...pickerPlacement(options),
     });
+    rememberPickerLocation(handle);
     const { bytes, name } = await readHandle(handle);
     return { handle, bytes, name };
   } catch (e) {
@@ -100,12 +131,9 @@ export async function pickFileSource(
     const [handle] = await window.showOpenFilePicker!({
       ...(accept ? { types: [{ description, accept }] } : {}),
       multiple: false,
-      ...(options.id ? { id: options.id } : {}),
-      // Open where the caller last was. Declared on PickFileOptions from the start but only
-      // honoured by the directory picker, so every file picker opened wherever the browser
-      // last happened to be rather than beside the file being worked on.
-      ...(options.startIn ? { startIn: options.startIn } : {}),
+      ...pickerPlacement(options),
     });
+    rememberPickerLocation(handle);
     const file = await handle.getFile();
     return { handle, file, name: file.name, relativePath: file.name };
   } catch (e) {
@@ -124,12 +152,9 @@ export async function pickFiles(
     const handles = await window.showOpenFilePicker!({
       types: [{ description, accept }],
       multiple: true,
-      ...(options.id ? { id: options.id } : {}),
-      // Open where the caller last was. Declared on PickFileOptions from the start but only
-      // honoured by the directory picker, so every file picker opened wherever the browser
-      // last happened to be rather than beside the file being worked on.
-      ...(options.startIn ? { startIn: options.startIn } : {}),
+      ...pickerPlacement(options),
     });
+    rememberPickerLocation(handles[0]);
     return await Promise.all(handles.map(async (handle) => {
       const file = await handle.getFile();
       return { handle, file, name: file.name, relativePath: file.name };
@@ -151,9 +176,9 @@ export async function pickDirectoryFiles(
   try {
     const handle = await directoryPickerWindow().showDirectoryPicker!({
       mode: "read",
-      ...(options.id ? { id: options.id } : {}),
-      ...(options.startIn ? { startIn: options.startIn } : {}),
+      ...pickerPlacement(options),
     });
+    rememberPickerLocation(handle);
     const allowed = new Set(extensions.map((extension) => extension.toLowerCase()));
     const files: PickedFileSource[] = [];
 
@@ -188,6 +213,7 @@ export async function writeHandle(handle: FileSystemFileHandle, data: BlobPart):
   const w = await handle.createWritable();
   await w.write(data);
   await w.close();
+  rememberPickerLocation(handle);
 }
 
 export type FileChunkProducer = (
@@ -228,11 +254,12 @@ export async function saveAsHandle(
 ): Promise<FileSystemFileHandle | null> {
   let handle: FileSystemFileHandle;
   try {
-    handle = await window.showSaveFilePicker!({ suggestedName, types: [{ description, accept }] });
+    handle = await window.showSaveFilePicker!({ suggestedName, types: [{ description, accept }], ...pickerPlacement() });
   } catch (e) {
     if ((e as DOMException)?.name === "AbortError") return null;
     throw e;
   }
+  rememberPickerLocation(handle);
   const w = await handle.createWritable();
   await w.write(data);
   await w.close();
@@ -248,11 +275,12 @@ export async function saveAsHandleStream(
 ): Promise<FileSystemFileHandle | null> {
   let handle: FileSystemFileHandle;
   try {
-    handle = await window.showSaveFilePicker!({ suggestedName, types: [{ description, accept }] });
+    handle = await window.showSaveFilePicker!({ suggestedName, types: [{ description, accept }], ...pickerPlacement() });
   } catch (e) {
     if ((e as DOMException)?.name === "AbortError") return null;
     throw e;
   }
+  rememberPickerLocation(handle);
   await streamToHandle(handle, produce);
   return handle;
 }
@@ -324,4 +352,26 @@ export async function recallHandle(key: string): Promise<FileSystemFileHandle | 
   } catch {
     return null;
   }
+}
+
+/**
+ * Open through the File System Access picker when the browser has it, so the dialog starts in
+ * the last-used folder like every other GateLab picker; otherwise click the hidden
+ * `<input type="file">` and let its change handler take over. Resolves to the picked files,
+ * or null when the input took over or the user cancelled.
+ */
+export async function pickFilesOrInput(
+  input: HTMLInputElement | null,
+  accept: Record<string, string[]>,
+  description: string,
+  multiple = false,
+): Promise<File[] | null> {
+  if (!supportsFileSystemAccess()) {
+    input?.click();
+    return null;
+  }
+  const picked = multiple
+    ? await pickFiles(accept, description)
+    : await pickFileSource(accept, description).then((one) => (one ? [one] : null));
+  return picked ? picked.map((p) => p.file) : null;
 }

@@ -15,11 +15,14 @@ interface OpenFilePickerOptions {
   multiple?: boolean;
   excludeAcceptAllOption?: boolean;
   id?: string;
+  startIn?: FileSystemHandle;
 }
 interface SaveFilePickerOptions {
   types?: FilePickerAcceptType[];
   suggestedName?: string;
   excludeAcceptAllOption?: boolean;
+  id?: string;
+  startIn?: FileSystemHandle;
 }
 
 interface Window {

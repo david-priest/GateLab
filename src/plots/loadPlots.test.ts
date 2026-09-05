@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import cytofSrc from "../../vendor/GateLabR/inst/app/www/cytof_plot.js?raw";
 import miniSrc from "../../vendor/GateLabR/inst/app/www/mini_plot.js?raw";
-import { patchCytofForGateLab, patchMiniPlot } from "./loadPlots";
+import { ELLIPSE_PIXEL_GEOMETRY_SRC, patchCytofForGateLab, patchMiniPlot } from "./loadPlots";
 
 describe("GateLab cytof interaction patches", () => {
   it("removes the delayed Shiny boot that clears GateLab's first painted FCS canvas", () => {
@@ -475,5 +475,72 @@ describe("ellipse draw patches", () => {
     expect(out).toContain("gate.editable !== false");
     // Idempotent, like every other patch in this file.
     expect(patchCytofForGateLab(out)).toBe(out);
+  });
+});
+
+describe("ellipse handle geometry in pixel space", () => {
+  // Evaluate the injected helper exactly as the browser would.
+  const glEll = new Function(`${ELLIPSE_PIXEL_GEOMETRY_SRC}; return _glEll;`)() as {
+    toPx: (m: [number, number], zx: (v: number) => number, zy: (v: number) => number, flipped: boolean) => [number, number];
+    toPixelAxes: (a: number, b: number, th: number, zx: (v: number) => number, zy: (v: number) => number, flipped: boolean) => { a: number; b: number; th: number };
+    toDisplayAxes: (a: number, b: number, th: number, zx: (v: number) => number, zy: (v: number) => number, flipped: boolean) => { a: number; b: number; th: number };
+    handlePx: (c: [number, number], P: { a: number; b: number; th: number }) => [number, number, number][];
+  };
+  // Display units → pixels with very different scales per axis, y pointing down.
+  const zx = (u: number) => 40 + 30 * u;
+  const zy = (v: number) => 300 - 90 * v;
+  const ring = (m: [number, number], a: number, b: number, th: number): [number, number][] => {
+    const out: [number, number][] = [];
+    for (let i = 0; i < 720; i++) {
+      const t = (2 * Math.PI * i) / 720;
+      const px = a * Math.cos(t);
+      const py = b * Math.sin(t);
+      out.push([m[0] + px * Math.cos(th) - py * Math.sin(th), m[1] + px * Math.sin(th) + py * Math.cos(th)]);
+    }
+    return out;
+  };
+
+  it("puts the handles at the drawn ellipse's farthest and nearest boundary points", () => {
+    for (const flipped of [false, true]) {
+      const m: [number, number] = [2, 1.5];
+      const [a, b, th] = [3, 1, Math.PI / 4];
+      const c = glEll.toPx(m, zx, zy, flipped);
+      const P = glEll.toPixelAxes(a, b, th, zx, zy, flipped);
+      const handles = glEll.handlePx(c, P);
+      // The pixel image of the boundary: its max and min distances from the centre are the
+      // pixel-space half-axes, and the handles sit on the boundary at those distances.
+      const px = ring(m, a, b, th).map((v) => glEll.toPx(v, zx, zy, flipped));
+      const dist = (p: [number, number]) => Math.hypot(p[0] - c[0], p[1] - c[1]);
+      const ds = px.map(dist);
+      expect(P.a).toBeCloseTo(Math.max(...ds), 1);
+      expect(P.b).toBeCloseTo(Math.min(...ds), 1);
+      const onBoundary = (h: [number, number, number]) => Math.min(...px.map((p) => Math.hypot(p[0] - h[0], p[1] - h[1])));
+      for (const h of handles) expect(onBoundary(h)).toBeLessThan(1.5);
+      expect(dist([handles[0][0], handles[0][1]])).toBeCloseTo(P.a, 6);
+      expect(dist([handles[2][0], handles[2][1]])).toBeCloseTo(P.b, 6);
+      // The display-space axis ends are NOT where the handles go under these scales.
+      const displayEnd = glEll.toPx([m[0] + b * -Math.sin(th), m[1] + b * Math.cos(th)], zx, zy, flipped);
+      expect(Math.abs(dist(displayEnd) - P.b)).toBeGreaterThan(5);
+    }
+  });
+
+  it("maps pixel-space axes back to display space losslessly", () => {
+    for (const flipped of [false, true]) {
+      const [a, b, th] = [2.5, 0.8, 0.6];
+      const P = glEll.toPixelAxes(a, b, th, zx, zy, flipped);
+      const D = glEll.toDisplayAxes(P.a, P.b, P.th, zx, zy, flipped);
+      expect(D.a).toBeCloseTo(a, 9);
+      expect(D.b).toBeCloseTo(b, 9);
+      // The angle comes back modulo π (an ellipse is symmetric under a half turn).
+      const dth = ((D.th - th) % Math.PI + Math.PI) % Math.PI;
+      expect(Math.min(dth, Math.PI - dth)).toBeLessThan(1e-9);
+    }
+  });
+
+  it("is prepended to the plot script once", () => {
+    const out = patchCytofForGateLab(cytofSrc);
+    expect(out.startsWith("var _glEll = ")).toBe(true);
+    expect(patchCytofForGateLab(out).split("var _glEll = ").length).toBe(2);
+    expect(out).toContain("_glEll.handlePx(_ehC(zx2, zy2)");
   });
 });

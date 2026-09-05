@@ -8,6 +8,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { pickFilesOrInput } from "../engine/fsAccess";
 import { DEFAULT_DENSITY_COLOR_POWER } from "../engine/pseudocolor";
 import {
   reportMatrixCompatibility,
@@ -1556,6 +1557,14 @@ function CompensationTabImpl({
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
     if (!file) return;
+    await importCytofMatrixFile(file);
+  };
+  /** Opens through the shared picker (last-used folder) where the browser has it. */
+  const chooseCytofMatrix = () =>
+    void pickFilesOrInput(cytofFileRef.current, { "text/csv": [".csv", ".tsv", ".txt"] }, "CyTOF spillover matrix").then((files) => {
+      if (files?.[0]) void importCytofMatrixFile(files[0]);
+    });
+  const importCytofMatrixFile = async (file: File) => {
     setCytofImportError(null);
     setActionMessage(null);
     setActionIsError(false);
@@ -2657,7 +2666,7 @@ function CompensationTabImpl({
             type="button"
             className="gl-mini-btn gl-comp-header-replace"
             disabled={applyBusy}
-            onClick={() => cytofFileRef.current?.click()}
+            onClick={chooseCytofMatrix}
           >
             {t("Replace matrix…")}
           </button>
@@ -2808,7 +2817,7 @@ function CompensationTabImpl({
                 type="button"
                 className={cytofDraft ? "gl-btn-ghost" : "gl-btn"}
                 disabled={applyBusy}
-                onClick={() => cytofFileRef.current?.click()}
+                onClick={chooseCytofMatrix}
               >
                 {cytofDraft ? t("Choose another matrix…") : t("Import matrix…")}
               </button>

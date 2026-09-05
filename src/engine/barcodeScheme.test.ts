@@ -260,6 +260,32 @@ describe("building the strategy", () => {
     expect(gate("Live").y_channel).toBe("198Pt_Live");
   });
 
+  it("reuses the workspace's gates of the same name and channels instead of creating them again", () => {
+    const channels = [...QC_CHANNELS, ...CHANNELS.filter((c) => c.key !== "Time" && c.key !== "103Rh_DNA" && c.key !== "CD45")];
+    const s = resolveBarcodeScheme(parseBarcodeTable(TABLE), channels);
+    const first = buildBarcodeGating(s, DEFAULT_BARCODE_TEMPLATE, 5, { qc: true, channels, ranges: { Time: [0, 1000] } });
+    // A second layout over the same gates: the 194/195 plane is dropped, so its four gates
+    // are not needed, and a new 196Pt channel joins 89Y.
+    const other = "# plane: 196Pt x 89Y\n# plane: 115In x 113In\nname,89Y,196Pt,113In,115In\n01,1,0,1,0\n02,0,1,0,1\n";
+    const s2 = resolveBarcodeScheme(parseBarcodeTable(other), channels);
+    const second = buildBarcodeGating(s2, DEFAULT_BARCODE_TEMPLATE, 5, {
+      qc: true, channels, ranges: { Time: [0, 1000] }, existingGates: Object.values(first.gates),
+    });
+    // All eight QC gates and the four 115In x 113In gates are reused; the 196Pt x 89Y plane is new.
+    expect(second.reusedGateIds).toHaveLength(8 + 4);
+    expect(second.nGates).toBe(4);
+    const firstByName = Object.fromEntries(Object.values(first.gates).map((g) => [g.name, g.gate_id]));
+    const cells = Object.values(second.populations).find((p) => p.name === "Cells")!;
+    expect(cells.gate_refs.map((r) => r.gate_id)).toContain(firstByName.CenterGate);
+    const s01 = Object.values(second.populations).find((p) => p.name === "01")!;
+    expect(s01.gate_refs.map((r) => r.gate_id)).toContain(firstByName["113+115-"]);
+    expect(Object.keys(second.gates).every((id) => !first.gates[id])).toBe(true);
+    // Reuse off: everything is created afresh.
+    const fresh = buildBarcodeGating(s2, DEFAULT_BARCODE_TEMPLATE, 5, { qc: true, channels, existingGates: Object.values(first.gates), reuse: false });
+    expect(fresh.reusedGateIds).toEqual([]);
+    expect(fresh.nGates).toBe(8 + 4 + 4);
+  });
+
   it("skips a QC gate whose channel is absent and says so, and leaves out a population with no gate left", () => {
     const channels = QC_CHANNELS.filter((c) => c.key !== "140Ce_H3K27me3" && c.key !== "198Pt_Live");
     const preview = previewQcChain(DEFAULT_BARCODE_TEMPLATE.qc, channels);

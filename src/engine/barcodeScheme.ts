@@ -447,8 +447,11 @@ export interface BarcodeGatingResult {
   metadataColumns: string[];
   /** Per plane, the gate id for each state key present. */
   gatesByPlane: { plane: BarcodePlane; gates: Partial<Record<BarcodeStateKey | "-" | "+", string>> }[];
+  /** Gates created by this build; reused ones are not counted. */
   nGates: number;
   nPopulations: number;
+  /** Existing gates referenced instead of created (see BarcodeBuildOptions.existingGates). */
+  reusedGateIds: string[];
   /** QC populations created above the samples, outermost first, and anything left out. */
   qc: QcChainPreview;
 }
@@ -466,6 +469,13 @@ export interface BarcodeBuildOptions {
   channels?: BarcodeChannelLike[];
   /** Raw min/max per channel key, for gates whose x spans the sample (Time). */
   ranges?: Record<string, [number, number]>;
+  /**
+   * Gates the workspace already holds. A gate with the same name on the same two channels is
+   * referenced instead of created, so a scheme imported into a second hierarchy runs on the
+   * first one's gates. Off when `reuse` is false.
+   */
+  existingGates?: readonly Gate[];
+  reuse?: boolean;
 }
 
 /**
@@ -564,6 +574,11 @@ export function buildBarcodeGating(
   const QC_COLORS = ["#984ea3", "#a65628", "#999999", "#e6ab02", "#66c2a5", "#f781bf", "#377eb8", "#4daf4a"];
   let qcColor = 0;
   const qcPreview: QcChainPreview = { populations: [], skipped: [] };
+  const reusable = options.reuse === false ? [] : options.existingGates ?? [];
+  const reusedGateIds: string[] = [];
+  /** An existing polygon or rectangle with this name on these channels, if any. */
+  const priorGate = (name: string, x: string, y: string): Gate | undefined =>
+    reusable.find((g) => (g.gate_type === "polygon" || g.gate_type === "rectangle") && g.name === name && g.x_channel === x && g.y_channel === y);
   /** Gate ids for the QC chain, per template population, in chain order. */
   const qcGateIds: string[][] = [];
   if (options.qc && template.qc.length) {
@@ -576,6 +591,13 @@ export function buildBarcodeGating(
         const y = resolveQcChannel(g.y, channels);
         if (!x || !y) {
           qcPreview.skipped.push(`${pop.name} / ${g.name}: no channel matches ${!x ? g.x : g.y}.`);
+          continue;
+        }
+        const prior = priorGate(g.name, x, y);
+        if (prior) {
+          reusedGateIds.push(prior.gate_id);
+          ids.push(prior.gate_id);
+          placed.push({ name: prior.name, x, y });
           continue;
         }
         const gate = qcGateFor(g, x, y, cofactor, options.ranges?.[x]);
@@ -612,10 +634,17 @@ export function buildBarcodeGating(
       const shapes = templateShapesFor(template, xLabel, yLabel);
       for (const key of ["--", "+-", "-+", "++"] as const) {
         const [xs, ys] = key.split("") as ["-" | "+", "-" | "+"];
+        // nPhos4 reads y then x: "194+195-" on a 195Pt (x) × 194Pt (y) plane.
+        const name = `${yName}${ys}${xName}${xs}`;
+        const prior = priorGate(name, plane.x, plane.y);
+        if (prior) {
+          reusedGateIds.push(prior.gate_id);
+          byState[key] = prior.gate_id;
+          continue;
+        }
         const g: PolyRectGate = {
           gate_id: crypto.randomUUID(),
-          // nPhos4 reads y then x: "194+195-" on a 195Pt (x) × 194Pt (y) plane.
-          name: `${yName}${ys}${xName}${xs}`,
+          name,
           gate_type: "polygon",
           x_channel: plane.x,
           y_channel: plane.y,
@@ -643,6 +672,12 @@ export function buildBarcodeGating(
         // An eight-vertex polygon around the band, so its edges can be bent like any other
         // barcode gate; the display axis is spanned in full.
         const vertices: Vertex[] = barcodeIsX ? octagonBox(lo, hi, dLo, dHi) : octagonBox(dLo, dHi, lo, hi);
+        const prior = priorGate(`${label}${key}`, plane.x, plane.y);
+        if (prior) {
+          reusedGateIds.push(prior.gate_id);
+          byState[key] = prior.gate_id;
+          continue;
+        }
         const g: PolyRectGate = {
           gate_id: crypto.randomUUID(),
           name: `${label}${key}`,
@@ -697,6 +732,7 @@ export function buildBarcodeGating(
     gatesByPlane,
     nGates: gate_order.length,
     nPopulations: scheme.samples.length,
+    reusedGateIds,
     qc: qcPreview,
   };
 }

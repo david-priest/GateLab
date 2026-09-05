@@ -132,7 +132,9 @@ export function mergeGatingStrategies(
       throw new Error(`Imported population "${sourcePopulation.name}" has a missing parent.`);
     }
     const gate_refs = sourcePopulation.gate_refs.map((ref) => {
-      const gateId = gateIdMap[ref.gate_id];
+      // An imported population may reference a gate the workspace already holds (a barcode
+      // scheme imported into a second hierarchy reuses the first one's gates): keep the id.
+      const gateId = gateIdMap[ref.gate_id] ?? (current.gates[ref.gate_id] ? ref.gate_id : undefined);
       if (!gateId) {
         throw new Error(`Imported population "${sourcePopulation.name}" has a dangling gate reference.`);
       }

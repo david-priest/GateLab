@@ -37,8 +37,48 @@ let loaded = false;
 let cached: { CytofD3: CytofD3Api; bus: PlotBus } | null = null;
 
 // GateLab adaptations kept OUT of the pristine vendored submodule.
+/**
+ * Ellipse handle geometry in PIXEL space, prepended to the plot script.
+ *
+ * The four handles must sit at the ellipse's on-screen vertices: the two points farthest from
+ * the centre and the two nearest. Those are the axis ends of the ellipse as drawn in pixels,
+ * which are not the axis ends in display units whenever the two axes have different pixel
+ * scales, because per-axis scaling rotates an ellipse's principal axes. So the display-space
+ * covariance is mapped through the linear part of the display→pixel map (M·Σ·Mᵀ), the axes are
+ * re-derived from the result, and a handle drag goes back the same way (M⁻¹·Σ·M⁻ᵀ). Exported
+ * so the mathematics can be tested outside the browser.
+ */
+export const ELLIPSE_PIXEL_GEOMETRY_SRC =
+  "var _glEll = (function () {\n" +
+  "    function mul(A, B) { return [[A[0][0] * B[0][0] + A[0][1] * B[1][0], A[0][0] * B[0][1] + A[0][1] * B[1][1]],\n" +
+  "                                 [A[1][0] * B[0][0] + A[1][1] * B[1][0], A[1][0] * B[0][1] + A[1][1] * B[1][1]]]; }\n" +
+  "    function tr(A) { return [[A[0][0], A[1][0]], [A[0][1], A[1][1]]]; }\n" +
+  "    function inv(A) { var d = A[0][0] * A[1][1] - A[0][1] * A[1][0];\n" +
+  "                      return [[A[1][1] / d, -A[0][1] / d], [-A[1][0] / d, A[0][0] / d]]; }\n" +
+  "    function covFromAxes(a, b, th) { var ca = Math.cos(th), sa = Math.sin(th), l1 = a * a, l2 = b * b;\n" +
+  "        return [[l1 * ca * ca + l2 * sa * sa, (l1 - l2) * ca * sa], [(l1 - l2) * ca * sa, l1 * sa * sa + l2 * ca * ca]]; }\n" +
+  "    function axesFromCov(C) { var a = C[0][0], b = C[0][1], c = C[1][1]; var t = a + c, det = a * c - b * b;\n" +
+  "        var disc = Math.sqrt(Math.max(0, t * t / 4 - det)); var l1 = t / 2 + disc, l2 = t / 2 - disc;\n" +
+  "        var th = Math.abs(b) < 1e-300 ? (a >= c ? 0 : Math.PI / 2) : Math.atan2(l1 - a, b);\n" +
+  "        return { a: Math.sqrt(Math.max(0, l1)), b: Math.sqrt(Math.max(0, l2)), th: th }; }\n" +
+  "    // Linear part of the display→pixel map for the current scales; flipped swaps the axes.\n" +
+  "    function M(zx, zy, flipped) { var sx = zx(1) - zx(0), sy = zy(1) - zy(0);\n" +
+  "        return flipped ? [[0, sx], [sy, 0]] : [[sx, 0], [0, sy]]; }\n" +
+  "    function toPx(m, zx, zy, flipped) { return flipped ? [zx(m[1]), zy(m[0])] : [zx(m[0]), zy(m[1])]; }\n" +
+  "    function toPixelAxes(a, b, th, zx, zy, flipped) { var m = M(zx, zy, flipped);\n" +
+  "        return axesFromCov(mul(mul(m, covFromAxes(a, b, th)), tr(m))); }\n" +
+  "    function toDisplayAxes(a, b, th, zx, zy, flipped) { var mi = inv(M(zx, zy, flipped));\n" +
+  "        return axesFromCov(mul(mul(mi, covFromAxes(a, b, th)), tr(mi))); }\n" +
+  "    // The four handles in pixels: major ends (0, 1) then minor ends (2, 3); the third field is the index.\n" +
+  "    function handlePx(c, P) { var ca = Math.cos(P.th), sa = Math.sin(P.th);\n" +
+  "        return [[c[0] + P.a * ca, c[1] + P.a * sa, 0], [c[0] - P.a * ca, c[1] - P.a * sa, 1],\n" +
+  "                [c[0] - P.b * sa, c[1] + P.b * ca, 2], [c[0] + P.b * sa, c[1] - P.b * ca, 3]]; }\n" +
+  "    return { toPx: toPx, toPixelAxes: toPixelAxes, toDisplayAxes: toDisplayAxes, handlePx: handlePx, axesFromCov: axesFromCov, covFromAxes: covFromAxes };\n" +
+  "})();\n";
+
 export function patchCytofForGateLab(src: string): string {
   let out = src;
+  if (!out.includes("var _glEll = ")) out = ELLIPSE_PIXEL_GEOMETRY_SRC + out;
 
   // In Shiny the plot bundle boots itself after a short delay, because the container may
   // appear after the script. GateLab's React wrapper instead calls render() as soon as the
@@ -185,12 +225,14 @@ export function patchCytofForGateLab(src: string): string {
 
   // ── Ellipse axis handles: resize + rotate ──────────────────────────────────────────────────
   // Injected after the vertex-handle block. A selected gate carrying payload `ellipse` geometry
-  // gets four handles at its axis endpoints. Dragging a MAJOR handle sets that axis length and
-  // rotates the ellipse to point at the cursor; a MINOR handle does the same with the
-  // perpendicular constraint — so rotation needs no separate grip. The live drag rewrites
-  // gate.vertices (the sampled ring) and lets _updateGateElements redraw exactly as vertex
-  // drags do; drag end emits ellipse_edit with the display-space parameters, and the app maps
-  // them back into the gate's covariance.
+  // gets four handles at its on-screen vertices: the geometry is display-space (mean, major,
+  // minor, angle), and _glEll maps it into pixels so the handles sit at the drawn ellipse's
+  // axis ends however the two axes are scaled. Dragging a MAJOR handle sets that axis length
+  // and rotates the ellipse to point at the cursor; a MINOR handle does the same with the
+  // perpendicular constraint — so rotation needs no separate grip. The drag keeps its own
+  // pixel-space axes so the handle under the cursor never swaps with its partner, converts
+  // them back to display space for the live ring, and drag end emits ellipse_edit with the
+  // display-space parameters, which the app maps back into the gate's covariance.
   const ellipseHandleAnchor =
     "                vertCircles.each(function (d, i) {\n" +
     "                    d3.select(this).call(\n" +
@@ -203,12 +245,9 @@ export function patchCytofForGateLab(src: string): string {
     "            if (isSel && gate.ellipse) {\n" +
     "                var E = { m: [gate.ellipse.mean[0], gate.ellipse.mean[1]],\n" +
     "                          a: gate.ellipse.major, b: gate.ellipse.minor, th: gate.ellipse.angle };\n" +
-    "                var _ehPts = function () {\n" +
-    "                    var ca = Math.cos(E.th), sa = Math.sin(E.th);\n" +
-    "                    return [[E.m[0] + E.a * ca, E.m[1] + E.a * sa, 0],\n" +
-    "                            [E.m[0] - E.a * ca, E.m[1] - E.a * sa, 0],\n" +
-    "                            [E.m[0] - E.b * sa, E.m[1] + E.b * ca, 1],\n" +
-    "                            [E.m[0] + E.b * sa, E.m[1] - E.b * ca, 1]];\n" +
+    "                var _ehC = function (zx2, zy2) { return _glEll.toPx(E.m, zx2, zy2, isFlipped); };\n" +
+    "                var _ehPts = function (zx2, zy2) {\n" +
+    "                    return _glEll.handlePx(_ehC(zx2, zy2), _glEll.toPixelAxes(E.a, E.b, E.th, zx2, zy2, isFlipped));\n" +
     "                };\n" +
     "                var _ehRing = function () {\n" +
     "                    var out = [], ca = Math.cos(E.th), sa = Math.sin(E.th);\n" +
@@ -220,33 +259,41 @@ export function patchCytofForGateLab(src: string): string {
     "                    return out;\n" +
     "                };\n" +
     "                var ehCircles = gg.selectAll('circle.eh')\n" +
-    "                    .data(_ehPts())\n" +
+    "                    .data(_ehPts(zx, zy))\n" +
     "                    .enter().append('circle').attr('class', 'eh')\n" +
-    "                    .attr('cx', function (d) { return isFlipped ? zx(d[1]) : zx(d[0]); })\n" +
-    "                    .attr('cy', function (d) { return isFlipped ? zy(d[0]) : zy(d[1]); })\n" +
+    "                    .attr('cx', function (d) { return d[0]; })\n" +
+    "                    .attr('cy', function (d) { return d[1]; })\n" +
     "                    .attr('r', VRAD)\n" +
     "                    .attr('fill', color).attr('fill-opacity', 0.9)\n" +
     "                    .attr('stroke', 'white').attr('stroke-width', 2)\n" +
     "                    .style('cursor', 'grab').style('pointer-events', 'all');\n" +
     "                ehCircles.each(function (d0) {\n" +
-    "                    var minorHandle = d0[2] === 1;\n" +
+    "                    var idx = d0[2], P = null;\n" +
     "                    d3.select(this).call(d3.drag()\n" +
-    "                        .on('start', function (event) { _dragging = true; event.sourceEvent.stopPropagation(); })\n" +
+    "                        .on('start', function (event) {\n" +
+    "                            _dragging = true; event.sourceEvent.stopPropagation();\n" +
+    "                            P = _glEll.toPixelAxes(E.a, E.b, E.th, _zx(), _zy(), isFlipped);\n" +
+    "                        })\n" +
     "                        .on('drag', function (event) {\n" +
     "                            var p = _ptr(event), zx2 = _zx(), zy2 = _zy();\n" +
-    "                            var sx0 = zx2.invert(p[0]), sy0 = zy2.invert(p[1]);\n" +
-    "                            var dx = (isFlipped ? sy0 : sx0) - E.m[0];\n" +
-    "                            var dy = (isFlipped ? sx0 : sy0) - E.m[1];\n" +
-    "                            var r = Math.hypot(dx, dy);\n" +
-    "                            if (!(r > 1e-9)) return;\n" +
-    "                            if (minorHandle) { E.b = r; E.th = Math.atan2(dy, dx) + Math.PI / 2; }\n" +
-    "                            else { E.a = r; E.th = Math.atan2(dy, dx); }\n" +
+    "                            var c = _ehC(zx2, zy2);\n" +
+    "                            var dx = p[0] - c[0], dy = p[1] - c[1];\n" +
+    "                            var r = Math.hypot(dx, dy), phi = Math.atan2(dy, dx);\n" +
+    "                            if (!(r > 1e-9) || !P) return;\n" +
+    "                            // Keep the dragged handle under the cursor: each index has its own\n" +
+    "                            // direction relative to the major axis.\n" +
+    "                            if (idx === 0) { P.a = r; P.th = phi; }\n" +
+    "                            else if (idx === 1) { P.a = r; P.th = phi + Math.PI; }\n" +
+    "                            else if (idx === 2) { P.b = r; P.th = phi - Math.PI / 2; }\n" +
+    "                            else { P.b = r; P.th = phi + Math.PI / 2; }\n" +
+    "                            var D = _glEll.toDisplayAxes(P.a, P.b, P.th, zx2, zy2, isFlipped);\n" +
+    "                            E.a = D.a; E.b = D.b; E.th = D.th;\n" +
     "                            gate.outline = null; // ring is stale during a handle drag\n" +
     "                            gate.vertices = _ehRing();\n" +
     "                            _updateGateElements(gate, gg, zx2, zy2, isFlipped);\n" +
-    "                            gg.selectAll('circle.eh').data(_ehPts())\n" +
-    "                                .attr('cx', function (d) { return isFlipped ? zx2(d[1]) : zx2(d[0]); })\n" +
-    "                                .attr('cy', function (d) { return isFlipped ? zy2(d[0]) : zy2(d[1]); });\n" +
+    "                            gg.selectAll('circle.eh').data(_glEll.handlePx(c, P))\n" +
+    "                                .attr('cx', function (d) { return d[0]; })\n" +
+    "                                .attr('cy', function (d) { return d[1]; });\n" +
     "                        })\n" +
     "                        .on('end', function () {\n" +
     "                            _dragging = false;\n" +
@@ -276,17 +323,11 @@ export function patchCytofForGateLab(src: string): string {
     "        if (gate.ellipse) {\n" +
     "            var ecx2 = d3.mean(gate.vertices, function (v) { return v[0]; });\n" +
     "            var ecy2 = d3.mean(gate.vertices, function (v) { return v[1]; });\n" +
-    "            var eca2 = Math.cos(gate.ellipse.angle), esa2 = Math.sin(gate.ellipse.angle);\n" +
-    "            var ea2 = gate.ellipse.major, eb2 = gate.ellipse.minor;\n" +
-    "            var ehp2 = [[ecx2 + ea2 * eca2, ecy2 + ea2 * esa2],\n" +
-    "                        [ecx2 - ea2 * eca2, ecy2 - ea2 * esa2],\n" +
-    "                        [ecx2 - eb2 * esa2, ecy2 + eb2 * eca2],\n" +
-    "                        [ecx2 + eb2 * esa2, ecy2 - eb2 * eca2]];\n" +
+    "            var ehc2 = _glEll.toPx([ecx2, ecy2], zx, zy, flipped);\n" +
+    "            var ehP2 = _glEll.toPixelAxes(gate.ellipse.major, gate.ellipse.minor, gate.ellipse.angle, zx, zy, flipped);\n" +
+    "            var ehp2 = _glEll.handlePx(ehc2, ehP2);\n" +
     "            gg.selectAll('circle.eh').each(function (d, i) {\n" +
-    "                var v = ehp2[i];\n" +
-    "                d3.select(this)\n" +
-    "                    .attr('cx', flipped ? zx(v[1]) : zx(v[0]))\n" +
-    "                    .attr('cy', flipped ? zy(v[0]) : zy(v[1]));\n" +
+    "                d3.select(this).attr('cx', ehp2[i][0]).attr('cy', ehp2[i][1]);\n" +
     "            });\n" +
     "        }\n\n" +
     ehFollowNeedle;

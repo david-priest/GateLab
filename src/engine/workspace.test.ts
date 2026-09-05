@@ -372,3 +372,42 @@ describe("ellipse gates survive workspace validation", () => {
     expect(() => validateWorkspace(bad)).toThrow(/ellipse/i);
   });
 });
+
+describe("population hierarchies in the workspace file", () => {
+  function withHierarchies(): WorkspaceFile {
+    const ws = cloneWs(makeWs());
+    ws.gating.hierarchies = [{ id: "main", name: "Scheme A" }, { id: "h2", name: "Scheme B" }];
+    ws.gating.active_hierarchy_id = "main";
+    ws.gating.stored_hierarchies = [{
+      id: "h2",
+      name: "Scheme B",
+      populations: {
+        r2: { population_id: "r2", name: "All Events", gate_refs: [], gate_logic: "and", parent_id: null, children: ["q1"], event_count: null, percent_of_parent: 100 },
+        q1: { population_id: "q1", name: "Cells again", gate_refs: [{ gate_id: "g1", include: false }], gate_logic: "and", parent_id: "r2", children: [], event_count: null, percent_of_parent: null },
+      },
+      root_population_id: "r2",
+      active_population_id: "q1",
+    }];
+    return ws;
+  }
+
+  it("accepts parked hierarchies whose trees reference the shared gates", () => {
+    expect(validateWorkspace(withHierarchies())).toBe(true);
+    expect(validateWorkspace(makeWs())).toBe(true);
+  });
+
+  it("checks a parked tree as strictly as the active one, and names it", () => {
+    const dangling = withHierarchies();
+    dangling.gating.stored_hierarchies![0].populations.q1.gate_refs = [{ gate_id: "missing", include: true }];
+    expect(() => validateWorkspace(dangling)).toThrow(/hierarchy "Scheme B": .*dangling gate reference/);
+    const noTree = withHierarchies();
+    noTree.gating.stored_hierarchies = [];
+    expect(() => validateWorkspace(noTree)).toThrow(/listed but its tree is missing/);
+    const badActive = withHierarchies();
+    badActive.gating.active_hierarchy_id = "nope";
+    expect(() => validateWorkspace(badActive)).toThrow(/active_hierarchy_id/);
+    const storedActive = withHierarchies();
+    storedActive.gating.stored_hierarchies![0].id = "main";
+    expect(() => validateWorkspace(storedActive)).toThrow(/listed, non-active hierarchy/);
+  });
+});

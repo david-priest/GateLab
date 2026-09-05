@@ -65,10 +65,19 @@ export interface WorkspaceFile {
   gating: {
     gates: Record<string, Gate>;
     gate_order: string[];
+    /** The ACTIVE hierarchy's tree, as every reader before hierarchies existed expects. */
     populations: PopulationMap;
     root_population_id: string | null;
     active_population_id: string | null;
     selected_gate_id: string | null;
+    /**
+     * Every hierarchy in menu order, the active one included. Absent in a workspace saved
+     * before 0.7.4: the tree above is then the one and only hierarchy.
+     */
+    hierarchies?: { id: string; name: string }[];
+    active_hierarchy_id?: string;
+    /** The parked hierarchies' trees (every id in `hierarchies` except the active one). */
+    stored_hierarchies?: WorkspaceStoredHierarchy[];
   };
   scales: { globalScales: Record<string, [number, number]> }; // shared per-channel axis ranges
   display: {
@@ -105,6 +114,15 @@ export interface WorkspaceFile {
   /** Population annotation (Metadata tab, 2nd table): keyed by population_id → { field: value }. */
   populationMetadata?: Record<string, Record<string, string>>;
   populationMetaColumns?: { name: string; levels?: string[] }[];
+}
+
+/** A hierarchy that was not active when the workspace was saved. Gates are the shared table. */
+export interface WorkspaceStoredHierarchy {
+  id: string;
+  name: string;
+  populations: PopulationMap;
+  root_population_id: string | null;
+  active_population_id: string | null;
 }
 
 /** Illustration-tab configuration (capture_illust_settings) — persisted per-workspace + as presets. */
@@ -227,6 +245,100 @@ function validateDivisionProfile(value: unknown, sampleIndex: number): void {
   if (value.coordinateBindingKey !== undefined &&
       (typeof value.coordinateBindingKey !== "string" || value.coordinateBindingKey.trim().length === 0)) {
     invalidWorkspace(`${label} has an invalid coordinateBindingKey.`);
+  }
+}
+
+/**
+ * Validate one population tree against the shared gate table. `label` prefixes messages for a
+ * parked hierarchy ("hierarchy \"B\": ") and is empty for the active one.
+ */
+function validatePopulationTree(
+  gates: Record<string, Gate>,
+  populations: PopulationMap,
+  rootId: unknown,
+  activePop: unknown,
+  label = "",
+): void {
+  try {
+    if (typeof rootId !== "string" || rootId.length === 0 || !populations[rootId]) {
+      invalidWorkspace("root_population_id is missing or does not identify a population.");
+    }
+
+    const popIds = Object.keys(populations);
+    for (const [popId, value] of Object.entries(populations)) {
+      if (!isRecord(value)) invalidWorkspace(`population "${popId}" is not an object.`);
+      const pop = value as unknown as PopulationMap[string];
+      if (pop.population_id !== popId) invalidWorkspace(`population map key "${popId}" does not match its population_id.`);
+      if (typeof pop.name !== "string" || pop.name.trim().length === 0) invalidWorkspace(`population "${popId}" has no name.`);
+      if (pop.gate_logic !== "and" && pop.gate_logic !== "or") invalidWorkspace(`population "${popId}" has invalid gate_logic.`);
+      if (!Array.isArray(pop.children) || !pop.children.every((id) => typeof id === "string")) {
+        invalidWorkspace(`population "${popId}" has invalid children.`);
+      }
+      if (new Set(pop.children).size !== pop.children.length) invalidWorkspace(`population "${popId}" lists a child more than once.`);
+      if (!Array.isArray(pop.gate_refs)) invalidWorkspace(`population "${popId}" has invalid gate_refs.`);
+
+      if (popId === rootId) {
+        if (pop.parent_id !== null) invalidWorkspace("the root population must have parent_id = null.");
+        if (pop.gate_refs.length) invalidWorkspace("the root population cannot contain gate references.");
+      } else if (typeof pop.parent_id !== "string" || !populations[pop.parent_id]) {
+        invalidWorkspace(`population "${popId}" has a missing parent.`);
+      } else if (pop.parent_id === popId) {
+        invalidWorkspace(`population "${popId}" cannot be its own parent.`);
+      }
+
+      for (const childId of pop.children) {
+        const child = populations[childId];
+        if (!child) invalidWorkspace(`population "${popId}" refers to missing child "${childId}".`);
+        if (child.parent_id !== popId) invalidWorkspace(`parent/child links disagree for population "${childId}".`);
+      }
+
+      for (const ref of pop.gate_refs) {
+        if (!isRecord(ref) || typeof ref.gate_id !== "string" || !gates[ref.gate_id]) {
+          invalidWorkspace(`population "${popId}" has a dangling gate reference.`);
+        }
+        if (typeof ref.include !== "boolean") invalidWorkspace(`population "${popId}" has a gate reference without a boolean include value.`);
+        const gate = gates[ref.gate_id];
+        if (gate.gate_type === "quadrant") {
+          if (!Number.isInteger(ref.quadrant) || ref.quadrant! < 1 || ref.quadrant! > 4) {
+            invalidWorkspace(`population "${popId}" has an invalid quadrant reference.`);
+          }
+        } else if (ref.quadrant !== undefined && ref.quadrant !== null) {
+          invalidWorkspace(`population "${popId}" assigns a quadrant to a non-quadrant gate.`);
+        }
+      }
+    }
+
+    for (const popId of popIds) {
+      if (popId === rootId) continue;
+      const parentId = populations[popId].parent_id!;
+      if (!populations[parentId].children.includes(popId)) {
+        invalidWorkspace(`population "${popId}" is absent from its parent's children list.`);
+      }
+    }
+
+    const reached = new Set<string>();
+    const visiting = new Set<string>();
+    const walk = (popId: string): void => {
+      if (visiting.has(popId)) invalidWorkspace(`population hierarchy contains a cycle at "${popId}".`);
+      if (reached.has(popId)) return;
+      visiting.add(popId);
+      for (const childId of populations[popId].children) walk(childId);
+      visiting.delete(popId);
+      reached.add(popId);
+    };
+    walk(rootId);
+    const unreachable = popIds.filter((id) => !reached.has(id));
+    if (unreachable.length) invalidWorkspace(`population hierarchy contains unreachable nodes: ${unreachable.join(", ")}.`);
+
+    if (activePop !== null && (typeof activePop !== "string" || !populations[activePop])) {
+      invalidWorkspace("active_population_id does not identify a population.");
+    }
+  } catch (cause) {
+    // A parked hierarchy's problems are reported under its name.
+    if (label && cause instanceof Error) {
+      invalidWorkspace(`${label}${cause.message.replace(/^Invalid GateLab workspace: /, "")}`);
+    }
+    throw cause;
   }
 }
 
@@ -392,80 +504,35 @@ export function validateWorkspace(ws: WorkspaceFile): true {
     );
   }
 
-  const rootId = ws.gating.root_population_id;
-  if (typeof rootId !== "string" || rootId.length === 0 || !populations[rootId]) {
-    invalidWorkspace("root_population_id is missing or does not identify a population.");
-  }
-
-  const popIds = Object.keys(populations);
-  for (const [popId, value] of Object.entries(populations)) {
-    if (!isRecord(value)) invalidWorkspace(`population "${popId}" is not an object.`);
-    const pop = value as unknown as PopulationMap[string];
-    if (pop.population_id !== popId) invalidWorkspace(`population map key "${popId}" does not match its population_id.`);
-    if (typeof pop.name !== "string" || pop.name.trim().length === 0) invalidWorkspace(`population "${popId}" has no name.`);
-    if (pop.gate_logic !== "and" && pop.gate_logic !== "or") invalidWorkspace(`population "${popId}" has invalid gate_logic.`);
-    if (!Array.isArray(pop.children) || !pop.children.every((id) => typeof id === "string")) {
-      invalidWorkspace(`population "${popId}" has invalid children.`);
-    }
-    if (new Set(pop.children).size !== pop.children.length) invalidWorkspace(`population "${popId}" lists a child more than once.`);
-    if (!Array.isArray(pop.gate_refs)) invalidWorkspace(`population "${popId}" has invalid gate_refs.`);
-
-    if (popId === rootId) {
-      if (pop.parent_id !== null) invalidWorkspace("the root population must have parent_id = null.");
-      if (pop.gate_refs.length) invalidWorkspace("the root population cannot contain gate references.");
-    } else if (typeof pop.parent_id !== "string" || !populations[pop.parent_id]) {
-      invalidWorkspace(`population "${popId}" has a missing parent.`);
-    } else if (pop.parent_id === popId) {
-      invalidWorkspace(`population "${popId}" cannot be its own parent.`);
-    }
-
-    for (const childId of pop.children) {
-      const child = populations[childId];
-      if (!child) invalidWorkspace(`population "${popId}" refers to missing child "${childId}".`);
-      if (child.parent_id !== popId) invalidWorkspace(`parent/child links disagree for population "${childId}".`);
-    }
-
-    for (const ref of pop.gate_refs) {
-      if (!isRecord(ref) || typeof ref.gate_id !== "string" || !gates[ref.gate_id]) {
-        invalidWorkspace(`population "${popId}" has a dangling gate reference.`);
+  validatePopulationTree(gates, populations, ws.gating.root_population_id, ws.gating.active_population_id);
+  const hierarchyRefs = ws.gating.hierarchies;
+  if (hierarchyRefs !== undefined) {
+    if (!Array.isArray(hierarchyRefs) || hierarchyRefs.length === 0) invalidWorkspace("hierarchies must be a non-empty list.");
+    const ids = new Set<string>();
+    for (const ref of hierarchyRefs) {
+      if (!isRecord(ref) || typeof ref.id !== "string" || !ref.id || typeof ref.name !== "string" || !ref.name.trim()) {
+        invalidWorkspace("every hierarchy needs an id and a name.");
       }
-      if (typeof ref.include !== "boolean") invalidWorkspace(`population "${popId}" has a gate reference without a boolean include value.`);
-      const gate = gates[ref.gate_id];
-      if (gate.gate_type === "quadrant") {
-        if (!Number.isInteger(ref.quadrant) || ref.quadrant! < 1 || ref.quadrant! > 4) {
-          invalidWorkspace(`population "${popId}" has an invalid quadrant reference.`);
-        }
-      } else if (ref.quadrant !== undefined && ref.quadrant !== null) {
-        invalidWorkspace(`population "${popId}" assigns a quadrant to a non-quadrant gate.`);
+      if (ids.has(ref.id)) invalidWorkspace(`hierarchy id "${ref.id}" is listed twice.`);
+      ids.add(ref.id);
+    }
+    const activeId = ws.gating.active_hierarchy_id;
+    if (typeof activeId !== "string" || !ids.has(activeId)) invalidWorkspace("active_hierarchy_id does not name a listed hierarchy.");
+    const stored = ws.gating.stored_hierarchies ?? [];
+    if (!Array.isArray(stored)) invalidWorkspace("stored_hierarchies must be a list.");
+    const storedIds = new Set<string>();
+    for (const h of stored) {
+      if (!isRecord(h) || typeof h.id !== "string" || !ids.has(h.id) || h.id === activeId) {
+        invalidWorkspace("a stored hierarchy must be a listed, non-active hierarchy.");
       }
+      if (storedIds.has(h.id)) invalidWorkspace(`hierarchy "${h.id}" is stored twice.`);
+      storedIds.add(h.id);
+      if (!isRecord(h.populations)) invalidWorkspace(`hierarchy "${h.name}" has no population map.`);
+      validatePopulationTree(gates, h.populations as PopulationMap, h.root_population_id, h.active_population_id, `hierarchy "${h.name}": `);
     }
-  }
-
-  for (const popId of popIds) {
-    if (popId === rootId) continue;
-    const parentId = populations[popId].parent_id!;
-    if (!populations[parentId].children.includes(popId)) {
-      invalidWorkspace(`population "${popId}" is absent from its parent's children list.`);
+    for (const id of ids) {
+      if (id !== activeId && !storedIds.has(id)) invalidWorkspace(`hierarchy "${id}" is listed but its tree is missing.`);
     }
-  }
-
-  const reached = new Set<string>();
-  const visiting = new Set<string>();
-  const walk = (popId: string): void => {
-    if (visiting.has(popId)) invalidWorkspace(`population hierarchy contains a cycle at "${popId}".`);
-    if (reached.has(popId)) return;
-    visiting.add(popId);
-    for (const childId of populations[popId].children) walk(childId);
-    visiting.delete(popId);
-    reached.add(popId);
-  };
-  walk(rootId);
-  const unreachable = popIds.filter((id) => !reached.has(id));
-  if (unreachable.length) invalidWorkspace(`population hierarchy contains unreachable nodes: ${unreachable.join(", ")}.`);
-
-  const activePop = ws.gating.active_population_id;
-  if (activePop !== null && (typeof activePop !== "string" || !populations[activePop])) {
-    invalidWorkspace("active_population_id does not identify a population.");
   }
   const selectedGate = ws.gating.selected_gate_id;
   if (selectedGate !== null && (typeof selectedGate !== "string" || !gates[selectedGate])) {
