@@ -56,6 +56,8 @@ function draftFor(text: string, planes: BarcodePlane[] | null = null): BarcodeIm
     parentId: "cells",
     sampleId: "s1",
     qc: true,
+    reuse: true,
+    newHierarchyName: null,
   };
 }
 
@@ -68,9 +70,13 @@ function mount(draft: BarcodeImportDraft, handlers: Partial<Parameters<typeof Ba
     state: stateWith(),
     canLearn: false,
     qcPreview: previewQcChain(draft.template.qc, CHANNELS),
+    reusePreview: { reused: 4, created: 6 },
+    suggestedHierarchyName: "Hierarchy 2",
     onPlanesChange: vi.fn(),
     onParentChange: vi.fn(),
+    onNewHierarchyChange: vi.fn(),
     onQcChange: vi.fn(),
+    onReuseChange: vi.fn(),
     onTemplateDefault: vi.fn(),
     onTemplateLearn: vi.fn(),
     onTemplateFile: vi.fn(),
@@ -116,6 +122,34 @@ describe("BarcodeSchemeImportModal", () => {
     expect(box).toBeTruthy();
     act(() => box.click());
     expect(props.onQcChange).toHaveBeenCalledWith(false);
+  });
+
+  it("offers to reuse existing gates and shows the count", () => {
+    const props = mount(draftFor("name,89Y,194Pt,195Pt\n01,1,0,0\n02,0,1,0\n"));
+    expect(host.textContent).toContain("Reuse gates this workspace already has, matched by name and channels: 4 reused, 6 to create");
+    const box = Array.from(host.querySelectorAll<HTMLInputElement>("input[type=checkbox]")).find((b) =>
+      b.parentElement?.textContent?.includes("Reuse gates"),
+    )!;
+    expect(box.checked).toBe(true);
+    act(() => box.click());
+    expect(props.onReuseChange).toHaveBeenCalledWith(false);
+  });
+
+  it("can send the strategy into a new hierarchy, named in the dialog", () => {
+    const props = mount(draftFor("name,89Y,194Pt,195Pt\n01,1,0,0\n02,0,1,0\n"));
+    const select = host.querySelector("select") as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).toContain("__new-hierarchy");
+    act(() => {
+      select.value = "__new-hierarchy";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(props.onNewHierarchyChange).toHaveBeenCalledWith("Hierarchy 2");
+    // With the name set, the dialog shows the field and Import stays enabled; blank disables it.
+    mount({ ...draftFor("name,89Y,194Pt,195Pt\n01,1,0,0\n02,0,1,0\n"), newHierarchyName: "Scheme B" });
+    expect((host.querySelector('input[aria-label="New hierarchy name"]') as HTMLInputElement).value).toBe("Scheme B");
+    expect(importButton().disabled).toBe(false);
+    mount({ ...draftFor("name,89Y,194Pt,195Pt\n01,1,0,0\n02,0,1,0\n"), newHierarchyName: "  " });
+    expect(importButton().disabled).toBe(true);
   });
 
   it("edits the plane layout through the callbacks", () => {

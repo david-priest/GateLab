@@ -104,6 +104,8 @@ import {
 } from "./engine/barcodeTemplate";
 import { BarcodeSchemeImportModal, type BarcodeImportDraft } from "./ui/BarcodeSchemeImportModal";
 import { BarcodeSaveModal, type BarcodeSaveChoice } from "./ui/BarcodeSaveModal";
+import { HierarchyModal, type HierarchyModalMode } from "./ui/HierarchyModal";
+import { cloneHierarchyTree, emptyHierarchyTree, newHierarchyId, uniqueHierarchyName } from "./engine/hierarchies";
 import {
   SAMPLE_ASSAY_BINDING_SCHEMA,
   type SampleAssayBinding,
@@ -130,6 +132,7 @@ import {
   pickFileSource,
   pickFiles,
   pickDirectoryFiles,
+  pickFilesOrInput,
   writeHandle,
   writeHandleStream,
   saveAsHandle,
@@ -171,7 +174,7 @@ import { gateSpaceBadge } from "./engine/gateSpaceBadge";
 import { PopulationTree } from "./ui/PopulationTree";
 import { GateModals } from "./ui/GateModals";
 import { GateToolbar, PopToolbar } from "./ui/Toolbars";
-import { RenameModal, CreatePopModal, EditPopModal, ConfirmModal, MovePopsModal, BulkRenameModal, FcsExportModal, GatingMlImportModal, GatingMlExportModal } from "./ui/CrudModals";
+import { RenameModal, CreatePopModal, EditPopModal, ConfirmModal, BulkRenameModal, FcsExportModal, GatingMlImportModal, GatingMlExportModal } from "./ui/CrudModals";
 import { StatsTab } from "./ui/StatsTab";
 import { PanelTab } from "./ui/PanelTab";
 import { MetadataTab } from "./ui/MetadataTab";
@@ -250,6 +253,9 @@ const CompensationTab = lazy(lazyChunk("CompensationTab", async () => {
 }));
 
 const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
+/** Picker types for the tables and workspaces the sidebar imports through pickFilesOrInput. */
+const GATING_IMPORT_ACCEPT = { "application/xml": [".xml", ".wsp"] };
+const TABLE_FILE_ACCEPT = { "text/csv": [".csv", ".tsv", ".txt"] };
 
 
 /**
@@ -280,7 +286,6 @@ type CrudModal =
   | { kind: "editPop"; id: string }
   | { kind: "confirmNewWorkspace" }
   | { kind: "confirmDelete"; what: "gates" | "pops"; ids: string[] }
-  | { kind: "movePops"; ids: string[] }
   | { kind: "bulkRename" }
   | { kind: "exportSceColData" };
 
@@ -742,6 +747,7 @@ export default function App() {
   const [fcsScope, setFcsScope] = useState<"active" | "combined" | "split">("split");
   const [fcsMinimumEvents, setFcsMinimumEvents] = useState(0);
   const [fcsExportOpen, setFcsExportOpen] = useState(false);
+  const [hierarchyModal, setHierarchyModal] = useState<HierarchyModalMode | null>(null);
   const [pendingGatingMlImport, setPendingGatingMlImport] = useState<PendingGatingMLImport | null>(null);
   const [barcodeImport, setBarcodeImport] = useState<BarcodeImportDraft | null>(null);
   const [barcodeSave, setBarcodeSave] = useState<{ learned: LearnedBarcodeTemplate; exported: ReturnType<typeof exportBarcodeScheme> } | null>(null);
@@ -1220,6 +1226,35 @@ export default function App() {
   const xmlRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<HTMLInputElement>(null);
 
+  // ---- Population hierarchies: several trees over the one shared gate table -------------------
+  const activeHierarchy = state.hierarchies.find((h) => h.id === state.active_hierarchy_id) ?? state.hierarchies[0];
+  const activeHierarchyIndex = Math.max(0, state.hierarchies.findIndex((h) => h.id === state.active_hierarchy_id)) + 1;
+
+  function applyHierarchyAction(mode: HierarchyModalMode, name: string) {
+    setHierarchyModal(null);
+    if (mode === "new") {
+      const tree = emptyHierarchyTree(sample?.fcs.nEvents ?? null);
+      dispatch({ type: "addHierarchy", id: newHierarchyId(), name, ...tree });
+      setImportMsg(`New hierarchy "${name}": All Events only, over the same gates.`);
+    } else if (mode === "duplicate") {
+      if (!state.root_population_id) return;
+      const copy = cloneHierarchyTree(state.populations, state.root_population_id);
+      dispatch({ type: "addHierarchy", id: newHierarchyId(), name, populations: copy.populations, root_population_id: copy.root_population_id });
+      // The populations have fresh ids; their metadata rows follow them.
+      setPopulationMetadata((m) => {
+        const next = { ...m };
+        for (const [oldId, newId] of Object.entries(copy.idMap)) if (m[oldId]) next[newId] = { ...m[oldId] };
+        return next;
+      });
+      setImportMsg(`Duplicated "${activeHierarchy?.name ?? "the hierarchy"}" as "${name}".`);
+    } else if (mode === "rename") {
+      dispatch({ type: "renameHierarchy", id: state.active_hierarchy_id, name });
+    } else if (mode === "delete") {
+      dispatch({ type: "deleteHierarchy", id: state.active_hierarchy_id });
+      setImportMsg(`Deleted the hierarchy "${activeHierarchy?.name ?? ""}"; its gates remain.`);
+    }
+  }
+
   // ---- Barcode scheme: a sample table becomes debarcoding gates and populations ----------------
   // The table carries one 0/1 per barcode channel per sample; the plane layout (which channels
   // are drawn together) is proposed from column order, declared in the file, or edited in the
@@ -1244,9 +1279,12 @@ export default function App() {
       // The QC chain belongs directly under the root; attaching under an existing population
       // means the workspace already has one.
       qc: parentId === (state.root_population_id ?? ""),
+      reuse: true,
+      newHierarchyName: null,
     });
     setError(null);
   }
+
 
   const barcodeQcPreview = useMemo(() => {
     if (!barcodeImport || !sample) return null;
@@ -1262,6 +1300,22 @@ export default function App() {
     if (!barcodeImport || !sample) return null;
     return learnBarcodeTemplate(Object.values(state.gates), sample.arcsinhCofactor, "learned from the current workspace", state.populations, state.root_population_id);
   }, [barcodeImport, sample, state.gates, state.populations, state.root_population_id]);
+
+  /** A dry build, to tell the dialog how many gates would be reused and created. */
+  const barcodeReusePreview = useMemo(() => {
+    if (!barcodeImport || !barcodeScheme || !sample || barcodeScheme.problems.length) return null;
+    try {
+      const r = buildBarcodeGating(barcodeScheme, barcodeImport.template, sample.arcsinhCofactor, {
+        qc: barcodeImport.qc,
+        channels: sample.channels,
+        existingGates: Object.values(state.gates),
+        reuse: barcodeImport.reuse,
+      });
+      return { reused: r.reusedGateIds.length, created: r.nGates };
+    } catch {
+      return null;
+    }
+  }, [barcodeImport, barcodeScheme, sample, state.gates]);
 
   async function loadBarcodeTemplateFile(file: File) {
     try {
@@ -1342,17 +1396,32 @@ export default function App() {
           if (Number.isFinite(lo) && Number.isFinite(hi)) ranges[ch.key] = [lo, hi];
         }
       }
-      const result = buildBarcodeGating(scheme, draft.template, sample.arcsinhCofactor, { qc: draft.qc, channels: sample.channels, ranges });
+      const result = buildBarcodeGating(scheme, draft.template, sample.arcsinhCofactor, {
+        qc: draft.qc,
+        channels: sample.channels,
+        ranges,
+        existingGates: Object.values(state.gates),
+        reuse: draft.reuse,
+      });
       const hasStrategy = state.root_population_id !== null && state.populations[state.root_population_id] !== undefined;
       pendingCheckpointReasonRef.current = "after-barcode-import";
+      // Into a new hierarchy: it is added first (fresh root, becomes active) and the strategy
+      // then merges under that root. The hierarchy the user was on is left as it was.
+      const newHierarchyName = draft.newHierarchyName?.trim() || null;
+      let attachTo: string | undefined = hasStrategy ? draft.parentId : undefined;
+      if (newHierarchyName) {
+        const tree = emptyHierarchyTree(sample.fcs.nEvents);
+        dispatch({ type: "addHierarchy", id: newHierarchyId(), name: newHierarchyName, ...tree });
+        attachTo = tree.root_population_id;
+      }
       dispatch({
         type: "importGating",
         gates: result.gates,
         gate_order: result.gate_order,
         populations: result.populations,
         root_population_id: result.root_population_id,
-        mode: hasStrategy ? "merge" : "replace",
-        attachTo: hasStrategy ? draft.parentId : undefined,
+        mode: hasStrategy || newHierarchyName ? "merge" : "replace",
+        attachTo,
       });
       // Imported ids are fresh UUIDs, which the merge keeps, so the metadata keys are final.
       setPopulationMetadata((m) => ({ ...m, ...result.populationMetadata }));
@@ -1363,9 +1432,13 @@ export default function App() {
       setBarcodeImport(null);
       setError(null);
       setImportMsg(
-        `Barcode scheme: ${result.nGates} gates on ${scheme.planes.length} plane(s), ${result.nPopulations} sample population(s)` +
+        `Barcode scheme: ${result.nGates} new gate${result.nGates === 1 ? "" : "s"}` +
+          (result.reusedGateIds.length ? ` and ${result.reusedGateIds.length} reused` : "") +
+          ` on ${scheme.planes.length} plane(s), ${result.nPopulations} sample population(s)` +
           (result.qc.populations.length ? ` under ${result.qc.populations.map((p) => p.name).join(" → ")}` : "") +
-          (hasStrategy ? ` in ${state.populations[draft.parentId]?.name ?? "the current root"}` : "") +
+          (newHierarchyName
+            ? ` in the new hierarchy "${newHierarchyName}"`
+            : hasStrategy ? ` in ${state.populations[draft.parentId]?.name ?? "the current root"}` : "") +
           ". Tweak the gates; the populations follow." +
           (result.qc.skipped.length ? ` Left out: ${result.qc.skipped.join(" ")}` : ""),
       );
@@ -1507,7 +1580,7 @@ export default function App() {
         "FCS files",
         // Keyed separately from the sample importer so the two do not fight over a remembered
         // folder, and started at the workspace so the first open lands in the right place.
-        { id: "gatelab-flowjo-workspace-fcs", ...(state.handle ? { startIn: state.handle } : {}) },
+        state.handle ? { startIn: state.handle } : {},
       );
       if (!picked?.length) return;
       setFlowJoOpen((cur) => cur && {
@@ -3414,7 +3487,7 @@ export default function App() {
       return;
     }
     try {
-      const picked = await pickFiles(FCS_FILE_ACCEPT, "FCS files", { id: "gatelab-open-fcs" });
+      const picked = await pickFiles(FCS_FILE_ACCEPT, "FCS files");
       if (!picked || picked.length === 0) return;
       await importFcsCandidates(picked.map((source) => ({
         id: crypto.randomUUID(),
@@ -3443,7 +3516,7 @@ export default function App() {
     }
     setError(null);
     try {
-      const picked = await pickDirectoryFiles([".fcs"], { id: "gatelab-open-fcs-folder" });
+      const picked = await pickDirectoryFiles([".fcs"]);
       if (!picked) return;
       stageFolderImport(picked.name, picked.files.map((source) => ({
         id: crypto.randomUUID(),
@@ -3491,6 +3564,15 @@ export default function App() {
         root_population_id: state.root_population_id,
         active_population_id: state.active_population_id,
         selected_gate_id: state.selected_gate_id,
+        hierarchies: state.hierarchies.map((h) => ({ id: h.id, name: h.name })),
+        active_hierarchy_id: state.active_hierarchy_id,
+        stored_hierarchies: Object.values(state.stored_hierarchies).map((h) => ({
+          id: h.id,
+          name: h.name,
+          populations: h.populations,
+          root_population_id: h.root_population_id,
+          active_population_id: h.active_population_id,
+        })),
       },
       scales: { globalScales },
       display: {
@@ -3864,7 +3946,7 @@ export default function App() {
       // content type for the custom extension, and assigning it both MIME types makes
       // Chromium's native filter intermittently disable valid files on first open.
       // Leave this picker unfiltered and let the streaming workspace parser validate it.
-      const picked = await pickFileSource(null, "GateLab workspace", { id: "gatelab-open-workspace" });
+      const picked = await pickFileSource(null, "GateLab workspace");
       if (picked) await openWorkspaceFromFile(picked.file, picked.handle, picked.name);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -3909,7 +3991,6 @@ export default function App() {
     let sources: PickedFileSource[];
     if (supportsDirectoryAccess()) {
       const picked = await pickDirectoryFiles([".fcs"], {
-        id: "gatelab-relink-fcs-folder",
         ...(workspaceHandle ? { startIn: workspaceHandle } : {}),
       });
       if (!picked) return null;
@@ -3922,7 +4003,7 @@ export default function App() {
       const picked = await pickFiles(
         FCS_FILE_ACCEPT,
         "FCS files required by this workspace",
-        { id: "gatelab-relink-fcs-batch" },
+        {},
       );
       if (!picked) return null;
       sourceName = "selected files";
@@ -4586,6 +4667,9 @@ export default function App() {
         root_population_id: ws.gating.root_population_id,
         active_population_id: ws.gating.active_population_id,
         selected_gate_id: ws.gating.selected_gate_id,
+        hierarchies: ws.gating.hierarchies,
+        active_hierarchy_id: ws.gating.active_hierarchy_id,
+        stored_hierarchies: ws.gating.stored_hierarchies?.map((h) => ({ ...h, selected_pop_ids: [] })),
       });
       const nS = entries.length;
       setImportMsg(
@@ -6023,7 +6107,7 @@ export default function App() {
               <button
                 className="gl-btn-ghost gl-btn-block"
                 title="Import Gating-ML 2.0 (.xml) or a FlowJo workspace (.wsp), then choose whether to merge into the current hierarchy or replace the current strategy. A workspace also carries population names, which FlowJo's own Gating-ML export omits."
-                onClick={() => xmlRef.current?.click()}
+                onClick={() => void pickFilesOrInput(xmlRef.current, GATING_IMPORT_ACCEPT, "Gating-ML or FlowJo workspace").then((files) => { if (files?.[0]) prepareGatingImport(files[0]); })}
               >
                 {t("Import gating (GatingML / FlowJo)…")}
               </button>
@@ -6042,7 +6126,7 @@ export default function App() {
               <button
                 className="gl-btn-ghost gl-btn-block"
                 title="Import a barcode scheme: a CSV/TSV with one row per sample and one 0/1 column per barcode channel. Creates the debarcoding gates from a template and one population per sample, named from the table, so you tweak gates rather than draw them."
-                onClick={() => barcodeRef.current?.click()}
+                onClick={() => void pickFilesOrInput(barcodeRef.current, TABLE_FILE_ACCEPT, "Barcode scheme table").then((files) => { if (files?.[0]) void prepareBarcodeImport(files[0]); })}
               >
                 {t("Import barcode scheme…")}
               </button>
@@ -6954,7 +7038,6 @@ export default function App() {
                 }}
                 onDelete={(ids) => ids.length && setCrud({ kind: "confirmDelete", what: "pops", ids })}
                 onDuplicate={(ids) => ids.length && dispatch({ type: "duplicateSelectedPopulations", popIds: ids })}
-                onMove={(ids) => ids.length && setCrud({ kind: "movePops", ids })}
                 onBulkRename={() => setCrud({ kind: "bulkRename" })}
               />
             </div>
@@ -6980,6 +7063,7 @@ export default function App() {
                 state={state}
                 derived={populationTreeDerived}
                 dispatch={uiDispatch}
+                onHierarchyAction={setHierarchyModal}
                 statsPending={populationStatsPending}
                 statsSampleCount={includedSamples.length}
                 displayContributorCount={
@@ -7130,17 +7214,6 @@ export default function App() {
               crud.what === "gates" ? "before-gate-delete" : "before-population-delete",
             );
             dispatch(crud.what === "gates" ? { type: "deleteGates", gateIds: crud.ids } : { type: "deletePopulations", popIds: crud.ids });
-            setCrud(null);
-          }}
-        />
-      )}
-      {crud?.kind === "movePops" && (
-        <MovePopsModal
-          state={state}
-          ids={crud.ids}
-          onCancel={() => setCrud(null)}
-          onConfirm={(parentId) => {
-            dispatch({ type: "moveSelectedPopulations", popIds: crud.ids, parentId });
             setCrud(null);
           }}
         />
@@ -7340,9 +7413,13 @@ export default function App() {
           state={state}
           canLearn={learnedBarcodeTemplate !== null}
           qcPreview={barcodeQcPreview}
+          reusePreview={barcodeReusePreview}
+          suggestedHierarchyName={uniqueHierarchyName(`Hierarchy ${state.hierarchies.length + 1}`, state.hierarchies)}
           onPlanesChange={(planes) => setBarcodeImport((d) => (d ? { ...d, planes } : d))}
           onParentChange={(parentId) => setBarcodeImport((d) => (d ? { ...d, parentId } : d))}
+          onNewHierarchyChange={(name) => setBarcodeImport((d) => (d ? { ...d, newHierarchyName: name, ...(name !== null ? { qc: true } : {}) } : d))}
           onQcChange={(qc) => setBarcodeImport((d) => (d ? { ...d, qc } : d))}
+          onReuseChange={(reuse) => setBarcodeImport((d) => (d ? { ...d, reuse } : d))}
           onTemplateDefault={() => setBarcodeImport((d) => (d ? { ...d, template: DEFAULT_BARCODE_TEMPLATE, templateLabel: "GateLab default" } : d))}
           onTemplateLearn={() => {
             if (!learnedBarcodeTemplate) return;
@@ -7356,6 +7433,24 @@ export default function App() {
           onDownloadTemplateCsv={() => downloadBlob("barcode-scheme-template.csv", new Blob([barcodeSchemeTemplateCsv()], { type: "text/csv;charset=utf-8" }))}
           onCancel={() => setBarcodeImport(null)}
           onImport={applyBarcodeImport}
+        />
+      )}
+      {hierarchyModal && (
+        <HierarchyModal
+          mode={hierarchyModal}
+          currentName={activeHierarchy?.name ?? ""}
+          initialName={
+            hierarchyModal === "rename"
+              ? activeHierarchy?.name ?? ""
+              : hierarchyModal === "duplicate"
+                ? uniqueHierarchyName(`${activeHierarchy?.name ?? "Hierarchy"} copy`, state.hierarchies)
+                : hierarchyModal === "new"
+                  ? uniqueHierarchyName(`Hierarchy ${state.hierarchies.length + 1}`, state.hierarchies)
+                  : ""
+          }
+          takenNames={state.hierarchies.map((h) => h.name)}
+          onCancel={() => setHierarchyModal(null)}
+          onConfirm={(name) => applyHierarchyAction(hierarchyModal, name)}
         />
       )}
       {barcodeSave && (
@@ -7447,6 +7542,7 @@ export default function App() {
             populationEventCounts: exportPopulationCountsBySample.get(entry.id) ?? null,
           }))}
           combinedCompatibility={combinedFcsCompatibility}
+          hierarchy={{ name: activeHierarchy?.name ?? "", index: activeHierarchyIndex, count: state.hierarchies.length }}
           initialPopIds={
             state.selected_pop_ids.length > 0
               ? state.selected_pop_ids

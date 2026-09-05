@@ -5,6 +5,10 @@ import { useMemo, useRef, useState } from "react";
 import type { CoreState, Action } from "../store";
 import { wouldCreateCycle, type GateRef } from "../engine/models";
 import { populationTreeOrder } from "../engine/populations";
+import { pickFilesOrInput } from "../engine/fsAccess";
+
+/** Picker types for the CSV/TSV tables the dialogs import. */
+const TABLE_ACCEPT = { "text/csv": [".csv", ".tsv", ".txt"] };
 import {
   passesPopulationFcsExportThreshold,
   type FcsExportAssay,
@@ -204,41 +208,6 @@ export function GatingMlExportModal({
   );
 }
 
-/** Move the checked populations to a new parent (cycle-guarded). */
-export function MovePopsModal({
-  state,
-  ids,
-  onCancel,
-  onConfirm,
-}: {
-  state: CoreState;
-  ids: string[];
-  onCancel: () => void;
-  onConfirm: (parentId: string) => void;
-}) {
-  const { t } = useI18n();
-  const order = populationTreeOrder(state.populations, state.root_population_id ?? null);
-  const moving = new Set(ids);
-  const candidates = order.filter(({ popId }) => !moving.has(popId) && ids.every((id) => !wouldCreateCycle(state.populations, id, popId)));
-  const [parentId, setParentId] = useState(candidates[0]?.popId ?? "");
-  return (
-    <ModalShell title={t("Move {count} populations", { count: ids.length })}>
-      <label className="gl-modal-field">
-        <span>{t("New parent")}</span>
-        <select value={parentId} onChange={(e) => setParentId(e.target.value)}>
-          {candidates.map(({ popId, depth }) => (
-            <option key={popId} value={popId}>{" ".repeat(depth * 2)}{state.populations[popId]?.name ?? popId}</option>
-          ))}
-        </select>
-      </label>
-      <div className="gl-modal-actions">
-        <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
-        <button className="gl-btn" disabled={!parentId} onClick={() => parentId && onConfirm(parentId)}>{t("Move")}</button>
-      </div>
-    </ModalShell>
-  );
-}
-
 /** FCS export dialog: pick populations, an explicit value space, and sample scope. */
 export interface FcsExportSampleOption {
   id: string;
@@ -257,11 +226,14 @@ export function FcsExportModal({
   initialAssay,
   initialScope,
   initialMinimumEvents,
+  hierarchy,
   onCancel,
   onExport,
 }: {
   state: CoreState;
   samples: readonly FcsExportSampleOption[];
+  /** The active hierarchy (1-based position and total); exports read the active one. */
+  hierarchy?: { name: string; index: number; count: number };
   combinedCompatibility: { compatible: boolean; reason: string | null };
   initialPopIds: string[];
   initialAssay: FcsExportAssay;
@@ -375,6 +347,15 @@ export function FcsExportModal({
   }
   return (
     <ModalShell title="Export FCS">
+      {hierarchy && hierarchy.count > 1 && (
+        <div className="gl-modal-note">
+          {t("Hierarchy: {name} ({n} of {count}). Populations are exported from the active hierarchy; switch hierarchies to export the others.", {
+            name: hierarchy.name,
+            n: hierarchy.index,
+            count: hierarchy.count,
+          })}
+        </div>
+      )}
       <div className="gl-modal-field">
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
           <span>{t("Populations")}</span>
@@ -626,7 +607,7 @@ export function BulkRenameModal({
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={downloadTemplate}>{t("Template ↧")}</button>
         <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
-        <button className="gl-btn-ghost" onClick={() => fileRef.current?.click()}>{t("Choose CSV/TSV…")}</button>
+        <button className="gl-btn-ghost" onClick={() => void pickFilesOrInput(fileRef.current, TABLE_ACCEPT, "Population edit table").then((files) => { if (files?.[0]) void onFile(files[0]); })}>{t("Choose CSV/TSV…")}</button>
         <button
           className="gl-btn"
           disabled={!preview || (preview.renameCount === 0 && preview.gateDefinitionCount === 0)}

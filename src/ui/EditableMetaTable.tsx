@@ -4,6 +4,7 @@
 // tables in the Metadata tab. Values are keyed by row id (sample id / population id).
 
 import { useRef, useState } from "react";
+import { pickFilesOrInput } from "../engine/fsAccess";
 import type { MetadataColumn } from "../engine/metadata";
 import { useI18n } from "./i18n";
 
@@ -68,7 +69,7 @@ export function EditableMetaTable({
           <button className="gl-btn-ghost" onClick={downloadTemplate}>{t("Export template")}</button>
           {onImport && (
             <>
-              <button className="gl-btn-ghost" onClick={() => fileRef.current?.click()}>{t("Import CSV/TSV…")}</button>
+              <button className="gl-btn-ghost" onClick={() => void pickFilesOrInput(fileRef.current, { "text/csv": [".csv", ".tsv", ".txt"] }, "Metadata table").then((files) => { if (files?.[0] && onImport) onImport(files[0]); })}>{t("Import CSV/TSV…")}</button>
               <input
                 ref={fileRef}
                 type="file"

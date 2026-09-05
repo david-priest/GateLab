@@ -5,6 +5,7 @@
 // applies to every loaded sample that has the channel, keeping the shared gate tree consistent.
 
 import { useRef, useState } from "react";
+import { pickFilesOrInput } from "../engine/fsAccess";
 import {
   parsePanelImport,
   serializePanelTemplate,
@@ -121,7 +122,7 @@ export function PanelTab({
           <button type="button" className="gl-btn-ghost" onClick={downloadTemplate}>
             {t("Download template")}
           </button>
-          <button type="button" className="gl-btn-ghost" onClick={() => fileRef.current?.click()}>
+          <button type="button" className="gl-btn-ghost" onClick={() => void pickFilesOrInput(fileRef.current, { "text/csv": [".csv", ".tsv", ".txt"] }, "Panel table").then((files) => { if (files?.[0]) void readImport(files[0]); })}>
             {t("Upload CSV/TSV…")}
           </button>
           <input

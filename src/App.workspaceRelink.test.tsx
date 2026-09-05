@@ -213,7 +213,7 @@ describe("App reference workspace relinking", () => {
     expect(showDirectoryPicker).toHaveBeenCalledTimes(1);
     expect(showDirectoryPicker).toHaveBeenCalledWith({
       mode: "read",
-      id: "gatelab-relink-fcs-folder",
+      id: "gatelab",
       startIn: workspaceHandle,
     });
     const sampleRows = host.querySelectorAll<HTMLElement>('[role="option"]');

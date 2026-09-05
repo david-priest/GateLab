@@ -8,6 +8,8 @@ import {
   type CoreState,
 } from "./store";
 import { Sample } from "./engine/sample";
+import { emptyHierarchyTree } from "./engine/hierarchies";
+import { newRootPopulation as rootPopulation, type Gate as GateRecord } from "./engine/models";
 import type { FcsFile } from "./engine/fcs";
 
 // Synthetic flow file: FSC-A/SSC-A scatter split cleanly by a rectangle.
@@ -654,5 +656,127 @@ describe("moving several populations at once", () => {
     const next = coreReducer(state, { type: "setPopSelection", popIds: [byName.Zulu, state.root_population_id!, "missing", byName.Zulu, byName.Alpha] });
     expect(next.selected_pop_ids).toEqual([byName.Zulu, byName.Alpha]);
     expect(coreReducer(next, { type: "setPopSelection", popIds: [byName.Zulu, byName.Alpha] })).toBe(next);
+  });
+});
+
+describe("several population hierarchies over shared gates", () => {
+  function withGates() {
+    let state = coreReducer(initialCoreState(), { type: "loadSample", nEvents: 10 });
+    const root = state.root_population_id!;
+    const box: [number, number][] = [[-1, -1], [100000, 100000]];
+    for (const name of ["A", "B"]) {
+      state = coreReducer(state, { type: "addGate", gateType: "rectangle", xChannel: "FSC-A", yChannel: "SSC-A", vertices: box, name, createPop: { name, parentId: root } });
+    }
+    const gateId = (name: string) => Object.values(state.gates).find((g) => g.name === name)!.gate_id;
+    const popId = (name: string) => Object.values(state.populations).find((p) => p.name === name)!.population_id;
+    return { state, root, gateId, popId };
+  }
+
+  it("starts with one default hierarchy and adds an empty one that becomes active", () => {
+    const { state } = withGates();
+    expect(state.hierarchies).toEqual([{ id: "main", name: "Main" }]);
+    const tree = emptyHierarchyTree(10);
+    const next = coreReducer(state, { type: "addHierarchy", id: "h2", name: "Scheme B", ...tree });
+    expect(next.hierarchies.map((h) => h.name)).toEqual(["Main", "Scheme B"]);
+    expect(next.active_hierarchy_id).toBe("h2");
+    expect(Object.keys(next.populations)).toEqual([tree.root_population_id]);
+    expect(next.root_population_id).toBe(tree.root_population_id);
+    // The gates are untouched and the parked tree is intact.
+    expect(next.gates).toBe(state.gates);
+    expect(Object.keys(next.stored_hierarchies.main.populations)).toHaveLength(3);
+    expect(next.stored_hierarchies.main.root_population_id).toBe(state.root_population_id);
+    // Undo brings the first hierarchy back as active, with the second gone again.
+    const undone = coreReducer(next, { type: "undo" });
+    expect(undone.active_hierarchy_id).toBe("main");
+    expect(undone.hierarchies).toHaveLength(1);
+    expect(undone.populations).toEqual(state.populations);
+  });
+
+  it("switches between hierarchies, parking the live tree and its selection", () => {
+    const { state, popId } = withGates();
+    let s = coreReducer(state, { type: "togglePopSelect", popId: popId("A"), checked: true });
+    s = coreReducer(s, { type: "setActivePopulation", popId: popId("B") });
+    s = coreReducer(s, { type: "addHierarchy", id: "h2", name: "B", ...emptyHierarchyTree(10) });
+    expect(s.selected_pop_ids).toEqual([]);
+    s = coreReducer(s, { type: "switchHierarchy", id: "main" });
+    expect(s.active_hierarchy_id).toBe("main");
+    expect(s.active_population_id).toBe(popId("B"));
+    expect(s.selected_pop_ids).toEqual([popId("A")]);
+    expect(Object.keys(s.stored_hierarchies)).toEqual(["h2"]);
+    expect(coreReducer(s, { type: "switchHierarchy", id: "main" })).toBe(s);
+    expect(coreReducer(s, { type: "switchHierarchy", id: "nope" })).toBe(s);
+  });
+
+  it("renames and deletes hierarchies, never the last one", () => {
+    const { state } = withGates();
+    let s = coreReducer(state, { type: "addHierarchy", id: "h2", name: "B", ...emptyHierarchyTree(10) });
+    s = coreReducer(s, { type: "renameHierarchy", id: "main", name: "Scheme A" });
+    expect(s.hierarchies.map((h) => h.name)).toEqual(["Scheme A", "B"]);
+    expect(s.stored_hierarchies.main.name).toBe("Scheme A");
+    // Deleting the active one makes the next listed hierarchy live.
+    s = coreReducer(s, { type: "deleteHierarchy", id: "h2" });
+    expect(s.hierarchies.map((h) => h.id)).toEqual(["main"]);
+    expect(s.active_hierarchy_id).toBe("main");
+    expect(Object.keys(s.populations)).toHaveLength(3);
+    expect(s.stored_hierarchies).toEqual({});
+    expect(coreReducer(s, { type: "deleteHierarchy", id: "main" })).toBe(s);
+  });
+
+  it("deleting a gate removes its references from every hierarchy", () => {
+    const { state, gateId, popId } = withGates();
+    const a = popId("A");
+    let s = coreReducer(state, { type: "addHierarchy", id: "h2", name: "B", ...emptyHierarchyTree(10) });
+    s = coreReducer(s, { type: "deleteGates", gateIds: [gateId("A")] });
+    expect(s.gates[gateId("A")]).toBeUndefined();
+    expect(s.stored_hierarchies.main.populations[a].gate_refs).toEqual([]);
+    expect(s.stored_hierarchies.main.populations[popId("B")].gate_refs).toHaveLength(1);
+  });
+
+  it("replacing the active hierarchy's strategy keeps gates the parked ones still use", () => {
+    const { state, gateId } = withGates();
+    let s = coreReducer(state, { type: "addHierarchy", id: "h2", name: "B", ...emptyHierarchyTree(10) });
+    const root = rootPopulation(10);
+    const g: GateRecord = { gate_id: "new-g", name: "New", gate_type: "rectangle", x_channel: "FSC-A", y_channel: "SSC-A", vertices: [[0, 0], [1, 1]], color: "#000", label_offset: null };
+    s = coreReducer(s, {
+      type: "importGating",
+      mode: "replace",
+      gates: { "new-g": g },
+      gate_order: ["new-g"],
+      populations: { [root.population_id]: root },
+      root_population_id: root.population_id,
+    });
+    expect(Object.keys(s.gates).sort()).toEqual([gateId("A"), gateId("B"), "new-g"].sort());
+    expect(s.gate_order).toEqual([gateId("A"), gateId("B"), "new-g"]);
+    expect(s.root_population_id).toBe(root.population_id);
+  });
+
+  it("loads a workspace with parked hierarchies and defaults to one without", () => {
+    const { state } = withGates();
+    const parked = emptyHierarchyTree(10);
+    const loaded = coreReducer(initialCoreState(), {
+      type: "loadWorkspace",
+      gates: state.gates,
+      gate_order: state.gate_order,
+      populations: state.populations,
+      root_population_id: state.root_population_id,
+      active_population_id: state.active_population_id,
+      selected_gate_id: null,
+      hierarchies: [{ id: "main", name: "Scheme A" }, { id: "h2", name: "Scheme B" }],
+      active_hierarchy_id: "main",
+      stored_hierarchies: [{ id: "h2", name: "Scheme B", populations: parked.populations, root_population_id: parked.root_population_id, active_population_id: null, selected_pop_ids: [] }],
+    });
+    expect(loaded.hierarchies.map((h) => h.name)).toEqual(["Scheme A", "Scheme B"]);
+    expect(Object.keys(loaded.stored_hierarchies)).toEqual(["h2"]);
+    const plain = coreReducer(initialCoreState(), {
+      type: "loadWorkspace",
+      gates: state.gates,
+      gate_order: state.gate_order,
+      populations: state.populations,
+      root_population_id: state.root_population_id,
+      active_population_id: state.active_population_id,
+      selected_gate_id: null,
+    });
+    expect(plain.hierarchies).toEqual([{ id: "main", name: "Main" }]);
+    expect(plain.stored_hierarchies).toEqual({});
   });
 });

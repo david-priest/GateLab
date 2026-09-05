@@ -15,10 +15,14 @@ import { TreeConnectors } from "./TreeConnectors";
 import { useI18n } from "./i18n";
 import { gateRefLabel, EXCLUDE_HINT } from "./gateRefLabel";
 
+export type HierarchyMenuAction = "new" | "duplicate" | "rename" | "delete";
+
 interface Props {
   state: CoreState;
   derived: Derived;
   dispatch: (a: Action) => void;
+  /** The hierarchy menu's actions that need a dialog; switching is dispatched directly. */
+  onHierarchyAction?: (action: HierarchyMenuAction) => void;
   statsPending?: boolean;
   statsSampleCount?: number;
   displayContributorCount?: number;
@@ -109,6 +113,7 @@ export function PopulationTree({
   statsSampleCount = 1,
   displayContributorCount,
   displayContributorNames,
+  onHierarchyAction,
 }: Props) {
   const { t } = useI18n();
   const { populations, root_population_id, active_population_id, selected_gate_id, selected_pop_ids, gates } = state;
@@ -566,8 +571,36 @@ export function PopulationTree({
   );
   const checkable = Object.keys(populations).filter((id) => id !== root_population_id);
 
+  const hierarchies = state.hierarchies ?? [];
+  const activeHierarchyId = state.active_hierarchy_id ?? hierarchies[0]?.id ?? "";
+
   return (
     <div className="population-tree-panel">
+      <div className="population-tree-hierarchy">
+        <span title={t("Every hierarchy shares the same gates; only the populations differ. Switch here, or create another for a second layout over the same gates.")}>
+          {t("Hierarchy")}
+        </span>
+        <select
+          aria-label={t("Hierarchy")}
+          value={activeHierarchyId}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v.startsWith("__")) onHierarchyAction?.(v.slice(2) as HierarchyMenuAction);
+            else if (v !== activeHierarchyId) dispatch({ type: "switchHierarchy", id: v });
+          }}
+        >
+          {hierarchies.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+          <optgroup label={t("Actions")}>
+            <option value="__new">{t("New empty hierarchy…")}</option>
+            <option value="__duplicate">{t("Duplicate this hierarchy…")}</option>
+            <option value="__rename">{t("Rename this hierarchy…")}</option>
+            <option value="__delete" disabled={hierarchies.length < 2}>{t("Delete this hierarchy…")}</option>
+          </optgroup>
+        </select>
+        {hierarchies.length > 1 && (
+          <span className="population-tree-hierarchy-count">{t("{n} of {total}", { n: hierarchies.findIndex((h) => h.id === activeHierarchyId) + 1, total: hierarchies.length })}</span>
+        )}
+      </div>
       <div className="population-tree-hint">
         <span>
           {t("Double-click a name to rename · Shift-click to highlight a range, Cmd/Ctrl-click to add or remove a row · Shift-drag to move the highlighted rows · Shift-click a gate to change/remove · + adds a gate")}
