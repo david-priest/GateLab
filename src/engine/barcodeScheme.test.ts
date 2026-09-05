@@ -9,7 +9,9 @@ import {
 import {
   barcodeSchemeTemplateCsv,
   buildBarcodeGating,
+  effectiveQcChain,
   exportBarcodeScheme,
+  exportHierarchyCsv,
   parseBarcodeString,
   parseBarcodeTable,
   previewQcChain,
@@ -399,9 +401,10 @@ describe("templates", () => {
     expect(out.channels).toEqual(["89Y_CD45", "113In_CD45", "115In_CD45", "194Pt_CD45", "195Pt_CD45"]);
     const lines = out.csv.trim().split("\n");
     expect(lines[0]).toMatch(/^# GateLab barcode scheme, saved \d{4}-\d{2}-\d{2} from test\.$/);
-    expect(lines.slice(1, 4)).toEqual(["# plane: 103Rh(display) x 89Y", "# plane: 115In x 113In", "# plane: 195Pt x 194Pt"]);
-    expect(lines[4]).toBe("name,file_name,condition,89Y,113In,115In,194Pt,195Pt");
-    expect(lines[5]).toBe("01,ex1_01.fcs,DMSO,1,1,0,0,0");
+    expect(lines.filter((l) => l.startsWith("# plane:"))).toEqual(["# plane: 103Rh(display) x 89Y", "# plane: 115In x 113In", "# plane: 195Pt x 194Pt"]);
+    const headerIdx = lines.findIndex((l) => l.startsWith("name,"));
+    expect(lines[headerIdx]).toBe("name,file_name,condition,89Y,113In,115In,194Pt,195Pt");
+    expect(lines[headerIdx + 1]).toBe("01,ex1_01.fcs,DMSO,1,1,0,0,0");
     // Round trip: the written table resolves to the same samples and states.
     const again = resolveBarcodeScheme(parseBarcodeTable(out.csv), channels);
     expect(again.problems).toEqual([]);
@@ -470,5 +473,213 @@ describe("templates", () => {
     expect(q1.gates[1].xFull).toBeUndefined();
     expect(q2.gates[0]).toMatchObject({ name: "CD19+198-", gate_type: "polygon", x: "116Cd_CD19", y: "198Pt_Live", transforms: { x: "asinh", y: "asinh" } });
     expect(q2.gates[0].vertices).toHaveLength(8);
+  });
+});
+
+describe("gates and QC populations declared in the file", () => {
+  const QC_CSV = [
+    "# plane: 195Pt x 194Pt",
+    "# plane: 115In x 113In",
+    "# plane: 103Rh(display) x 89Y",
+    "# gate: CenterGate | rectangle | Time x Center | raw | x full | y 300..600",
+    '"# gate: Singlets | rect | Event_length x DNA | linear, asinh | x -3..55 | y 1..8.5"',
+    "# gate: Beads | polygon | 140Ce x DNA | asinh | (-0.5,4.3) (2,4.5) (4.2,5.4) (5,8) (-0.4,7.7)",
+    "# gate: 194+195- | polygon | 194Pt x 195Pt | asinh | (2,-0.4) (6,-0.4) (6,2) (3.5,1.5) (2.5,1) (2.1,0.5) (2,0)",
+    "# population: Cells = CenterGate, Singlets, Beads, AmplitudeGate",
+    "# population: Live = Live, Nowhere",
+    "name,89Y,113In,115In,194Pt,195Pt",
+    "01,1,1,0,0,0",
+    "02,0,0,1,1,0",
+    "",
+  ].join("\n");
+
+  it("parses gate and population lines, Excel quoting included, and reports bad ones", () => {
+    const t = parseBarcodeTable(QC_CSV);
+    expect(t.problems).toEqual([]);
+    expect(t.gateDeclarations.map((g) => g.name)).toEqual(["CenterGate", "Singlets", "Beads", "194+195-"]);
+    const center = t.gateDeclarations[0];
+    expect(center).toMatchObject({ gate_type: "rectangle", x: "Time", y: "Center", space: "raw", xFull: true, yFull: false });
+    expect(center.vertices).toEqual([[0, 300], [1, 300], [1, 600], [0, 600]]);
+    const singlets = t.gateDeclarations[1];
+    expect(singlets).toMatchObject({ gate_type: "rectangle", space: "display", transforms: { x: "identity", y: "asinh" }, xFull: false });
+    expect(singlets.vertices).toEqual([[-3, 1], [55, 1], [55, 8.5], [-3, 8.5]]);
+    expect(t.gateDeclarations[2].vertices).toHaveLength(5);
+    expect(t.populationDeclarations).toEqual([
+      { name: "Cells", parent: null, gates: ["CenterGate", "Singlets", "Beads", "AmplitudeGate"], excluded: [], line: 8 },
+      { name: "Live", parent: null, gates: ["Live", "Nowhere"], excluded: [], line: 9 },
+    ]);
+    const bad = parseBarcodeTable([
+      "# gate: Oops | circle | Time x Center | raw | x full | y 1..2",
+      "# gate: NoShape | rectangle | Time x Center | raw | y 1..2",
+      "# gate: Few | polygon | A x B | asinh | (1,2) (3,4)",
+      "# gate: Scale | rectangle | Time x Center | cubic | x full | y 1..2",
+      "# population: Empty =",
+      "# population: Cells = A",
+      "# population: Cells = B",
+      "name,89Y,194Pt",
+      "01,1,0",
+      "",
+    ].join("\n"));
+    expect(bad.problems).toEqual([
+      'Line 1: gate "Oops" must be a rectangle or a polygon (got "circle").',
+      'Line 2: rectangle "NoShape" needs "x lo..hi" or "x full" (got "y 1..2").',
+      'Line 3: polygon "Few" needs at least three "(x,y)" points (got "(1,2) (3,4)").',
+      'Line 4: the scale must be "raw", "asinh", "linear" or one per axis such as "linear, asinh" (got "cubic").',
+      'Line 5: population "Empty" lists no gates.',
+      'Line 7: population "Cells" is declared twice.',
+    ]);
+  });
+
+  it("builds the chain from the file, filling undefined gates from the template by name and naming the rest", () => {
+    const channels = [...QC_CHANNELS, ...CHANNELS.filter((c) => c.key !== "Time" && c.key !== "103Rh_DNA" && c.key !== "CD45")];
+    const s = resolveBarcodeScheme(parseBarcodeTable(QC_CSV), channels);
+    expect(s.problems).toEqual([]);
+    const eff = effectiveQcChain(s, DEFAULT_BARCODE_TEMPLATE);
+    expect(eff.source).toBe("file");
+    expect(eff.chain.map((p) => `${p.name}:${p.gates.map((g) => g.name).join("+")}`)).toEqual(["Cells:CenterGate+Singlets+Beads+AmplitudeGate", "Live:Live"]);
+    expect(eff.missing).toEqual(["Live / Nowhere"]);
+    const r = buildBarcodeGating(s, DEFAULT_BARCODE_TEMPLATE, 5, { qc: true, channels, ranges: { Time: [0, 1000] } });
+    expect(r.qc.populations.map((p) => `${p.name}:${p.gates.length}`)).toEqual(["Cells:4", "Live:1"]);
+    expect(r.qc.skipped).toEqual(['Live / Nowhere: no "# gate:" line in the file and no gate of that name in the template.']);
+    const gate = (name: string) => Object.values(r.gates).find((g) => g.name === name) as PolyRectGate;
+    // The file's coordinates, with Time stretched to the sample.
+    expect(Math.min(...gate("CenterGate").vertices.map((v) => v[1]))).toBe(300);
+    expect(Math.max(...gate("CenterGate").vertices.map((v) => v[0]))).toBeCloseTo(1020);
+    expect(gate("Singlets").transforms).toEqual({ Event_length: { kind: "identity" }, "103Rh_DNA": { kind: "asinh", cofactor: 5 } });
+    expect(gate("Beads").vertices).toHaveLength(5);
+    // AmplitudeGate came from the template by name; the declared barcode polygon replaced the
+    // template shape on the 195Pt x 194Pt plane, swapped into the plane's orientation.
+    expect(gate("AmplitudeGate")).toBeDefined();
+    expect(gate("194+195-").vertices[0]).toEqual([-0.4, 2]);
+    expect(gate("194+195-").vertices).toHaveLength(7);
+    expect(gate("194-195-").vertices).toEqual(DEFAULT_BARCODE_TEMPLATE.states["--"]);
+  });
+
+  it("writes every gate and the chain, and the written file rebuilds the same gates with no template at all", () => {
+    const channels = [...QC_CHANNELS, ...CHANNELS.filter((c) => c.key !== "Time" && c.key !== "103Rh_DNA" && c.key !== "CD45")];
+    const built = buildBarcodeGating(resolveBarcodeScheme(parseBarcodeTable(TABLE), channels), DEFAULT_BARCODE_TEMPLATE, 5, { qc: true, channels, ranges: { Time: [0, 1000] } });
+    const gates = Object.values(built.gates);
+    const learned = learnBarcodeTemplate(gates, 5, "test", built.populations, built.root_population_id)!;
+    const out = exportBarcodeScheme(gates, built.populations, built.root_population_id, learned, built.populationMetadata, "test");
+    const lines = out.csv.split("\n");
+    expect(lines.filter((l) => l.startsWith("# gate:"))).toHaveLength(8 + 10);
+    expect(lines.filter((l) => l.startsWith("# population:"))).toEqual([
+      "# population: Cells = AmplitudeGate, CenterGate, OffsetGate, ResidualGate, WidthGate, SingletsGate, DNA+Bead-Gate",
+      "# population: Live = Live",
+    ]);
+    expect(lines.find((l) => l.startsWith("# gate: CenterGate"))).toBe("# gate: CenterGate | rectangle | Time x Center | raw | x full | y 321.283..615.828");
+    expect(lines.find((l) => l.startsWith("# gate: SingletsGate"))).toBe("# gate: SingletsGate | rectangle | Event_length x 103Rh | linear, asinh | x -3.458..55.468 | y 1.043..8.508");
+    // An empty template: everything must come from the file.
+    const bare = { ...DEFAULT_BARCODE_TEMPLATE, qc: [], states: { "--": [[0, 0], [1, 0], [1, 1]], "+-": [[0, 0], [1, 0], [1, 1]], "-+": [[0, 0], [1, 0], [1, 1]], "++": [[0, 0], [1, 0], [1, 1]] } } as typeof DEFAULT_BARCODE_TEMPLATE;
+    const again = resolveBarcodeScheme(parseBarcodeTable(out.csv), channels);
+    expect(again.problems).toEqual([]);
+    const rebuilt = buildBarcodeGating(again, bare, 5, { qc: true, channels, ranges: { Time: [0, 1000] } });
+    expect(rebuilt.qc.skipped).toEqual([]);
+    const byName = (r: typeof built) => Object.fromEntries(Object.values(r.gates).map((g) => [g.name, g as PolyRectGate]));
+    const a = byName(built);
+    const b = byName(rebuilt);
+    expect(Object.keys(b).sort()).toEqual(Object.keys(a).sort());
+    for (const name of Object.keys(a)) {
+      expect(b[name].gate_type).toBe(a[name].gate_type);
+      expect(b[name].x_channel).toBe(a[name].x_channel);
+      expect(b[name].y_channel).toBe(a[name].y_channel);
+      const av = a[name].vertices.map((v) => v.map((n) => Number(n.toFixed(3))));
+      const bv = b[name].vertices.map((v) => v.map((n) => Number(n.toFixed(3))));
+      expect(bv).toEqual(av);
+    }
+    expect(Object.values(rebuilt.populations).map((p) => p.name).sort()).toEqual(Object.values(built.populations).map((p) => p.name).sort());
+  });
+
+  it("the template CSV declares the standard chain by name and still parses clean", () => {
+    const t = parseBarcodeTable(barcodeSchemeTemplateCsv());
+    expect(t.problems).toEqual([]);
+    expect(t.populationDeclarations.map((p) => p.name)).toEqual(["Cells", "Live"]);
+    expect(t.gateDeclarations.map((g) => g.name)).toEqual(["CenterGate"]);
+    const s = resolveBarcodeScheme(t, CHANNELS);
+    expect(effectiveQcChain(s, DEFAULT_BARCODE_TEMPLATE).missing).toEqual([]);
+  });
+});
+
+describe("a hierarchy CSV with no sample table", () => {
+  const FLOW_CHANNELS: BarcodeChannelLike[] = [
+    { key: "FSC-A", pnn: "FSC-A", marker: null },
+    { key: "SSC-A", pnn: "SSC-A", marker: null },
+    { key: "CD3", pnn: "FL1-A", marker: "CD3" },
+    { key: "CD19", pnn: "FL2-A", marker: "CD19" },
+  ];
+  const HIER = [
+    "# gate: Cells | polygon | FSC-A x SSC-A | raw | (10000,5000) (200000,5000) (200000,150000) (10000,150000)",
+    "# gate: CD3+ | rectangle | CD3 x SSC-A | asinh, linear | x 2..8 | y 0..200000",
+    "# gate: CD19+ | rectangle | CD19 x SSC-A | asinh, linear | x 2..8 | y 0..200000",
+    "# population: Cells = Cells",
+    "# population: T cells < Cells = CD3+",
+    "# population: B cells < Cells = CD19+, not CD3+",
+    "# population: Other < Nowhere = CD19+",
+    "",
+  ].join("\n");
+
+  it("parses parents and NOT references, and imports as a tree with no problems", () => {
+    const t = parseBarcodeTable(HIER);
+    expect(t.problems).toEqual([]);
+    expect(t.hierarchyOnly).toBe(true);
+    expect(t.populationDeclarations.map((p) => [p.name, p.parent, p.gates, p.excluded])).toEqual([
+      ["Cells", null, ["Cells"], []],
+      ["T cells", "Cells", ["CD3+"], []],
+      ["B cells", "Cells", ["CD19+", "CD3+"], ["CD3+"]],
+      ["Other", "Nowhere", ["CD19+"], []],
+    ]);
+    const s = resolveBarcodeScheme(t, FLOW_CHANNELS);
+    expect(s.problems).toEqual([]);
+    expect(s.planes).toEqual([]);
+    expect(s.hierarchyOnly).toBe(true);
+    const r = buildBarcodeGating(s, { ...DEFAULT_BARCODE_TEMPLATE, qc: [] }, 5, { qc: true, channels: FLOW_CHANNELS });
+    expect(r.nGates).toBe(3);
+    expect(r.nPopulations).toBe(0);
+    expect(r.qc.populations.map((p) => `${p.name}${p.parent ? `<${p.parent}` : ""}`)).toEqual(["Cells", "T cells<Cells", "B cells<Cells", "Other<Nowhere"]);
+    expect(r.qc.skipped).toEqual(['Other: its parent "Nowhere" is not declared above it, so it goes under B cells.']);
+    const pops = Object.values(r.populations);
+    const byName = Object.fromEntries(pops.map((p) => [p.name, p]));
+    expect(byName["T cells"].parent_id).toBe(byName.Cells.population_id);
+    expect(byName["B cells"].parent_id).toBe(byName.Cells.population_id);
+    expect(byName.Other.parent_id).toBe(byName["B cells"].population_id);
+    const gateName = (id: string) => r.gates[id].name;
+    expect(byName["B cells"].gate_refs.map((ref) => `${ref.include ? "" : "not "}${gateName(ref.gate_id)}`)).toEqual(["CD19+", "not CD3+"]);
+    const cd3 = Object.values(r.gates).find((g) => g.name === "CD3+") as PolyRectGate;
+    expect(cd3.gate_type).toBe("rectangle");
+    expect(cd3.transforms).toEqual({ CD3: { kind: "asinh", cofactor: 5 }, "SSC-A": { kind: "identity" } });
+  });
+
+  it("writes any workspace as gate and population lines that rebuild the same tree", () => {
+    const s = resolveBarcodeScheme(parseBarcodeTable(HIER.split("\n").filter((l) => !l.includes("Nowhere")).join("\n")), FLOW_CHANNELS);
+    const built = buildBarcodeGating(s, { ...DEFAULT_BARCODE_TEMPLATE, qc: [] }, 5, { qc: true, channels: FLOW_CHANNELS });
+    const gates = Object.values(built.gates);
+    // An ellipse cannot be written; it is named in the notes and its population keeps the rest.
+    const ellipse = { gate_id: "e1", name: "Blob", gate_type: "ellipse", x_channel: "FSC-A", y_channel: "SSC-A", mean: [1, 1], covariance: [[1, 0], [0, 1]], distance_square: 1, color: "#000", label_offset: null } as unknown as (typeof gates)[number];
+    const out = exportHierarchyCsv([...gates, ellipse], built.populations, built.root_population_id, "test");
+    expect(out.nGates).toBe(3);
+    expect(out.nPopulations).toBe(3);
+    expect(out.notes).toEqual(['Blob: a ellipse gate cannot be written as a "# gate:" line.']);
+    const lines = out.csv.split("\n");
+    expect(lines.filter((l) => l.startsWith("# population:"))).toEqual([
+      "# population: Cells < All Events = Cells",
+      "# population: T cells < Cells = CD3+",
+      "# population: B cells < Cells = CD19+, not CD3+",
+    ]);
+    expect(lines.find((l) => l.startsWith("# gate: CD3+"))).toBe("# gate: CD3+ | rectangle | CD3 x SSC-A | asinh, linear | x 2..8 | y 0..200000");
+    const again = resolveBarcodeScheme(parseBarcodeTable(out.csv), FLOW_CHANNELS);
+    expect(again.problems).toEqual([]);
+    const rebuilt = buildBarcodeGating(again, { ...DEFAULT_BARCODE_TEMPLATE, qc: [] }, 5, { qc: true, channels: FLOW_CHANNELS });
+    expect(rebuilt.qc.skipped).toEqual([]);
+    const names = (r: typeof built) => Object.values(r.populations).map((p) => `${p.name}<${p.parent_id ? r.populations[p.parent_id].name : ""}`).sort();
+    expect(names(rebuilt)).toEqual(names(built));
+    const cells = Object.values(rebuilt.gates).find((g) => g.name === "Cells") as PolyRectGate;
+    expect(cells.space ?? "raw").toBe("raw");
+    expect(cells.vertices).toEqual([[10000, 5000], [200000, 5000], [200000, 150000], [10000, 150000]]);
+  });
+
+  it("a file with neither table nor population lines is still a problem", () => {
+    const t = parseBarcodeTable("# just a comment\n");
+    expect(t.hierarchyOnly).toBe(false);
+    expect(t.problems).toEqual(['The file has no header row, and no "# population:" lines either.']);
   });
 });

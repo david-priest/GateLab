@@ -90,8 +90,9 @@ import {
   barcodeSchemeTemplateCsv,
   buildBarcodeGating,
   exportBarcodeScheme,
+  exportHierarchyCsv,
   parseBarcodeTable,
-  previewQcChain,
+  previewQcChainFor,
   resolveBarcodeScheme,
   resolveQcChannel,
 } from "./engine/barcodeScheme";
@@ -103,7 +104,7 @@ import {
   type LearnedBarcodeTemplate,
 } from "./engine/barcodeTemplate";
 import { BarcodeSchemeImportModal, type BarcodeImportDraft } from "./ui/BarcodeSchemeImportModal";
-import { BarcodeSaveModal, type BarcodeSaveChoice } from "./ui/BarcodeSaveModal";
+import { BarcodeSaveModal, type BarcodeSaveChoice, type BarcodeSaveSummary } from "./ui/BarcodeSaveModal";
 import { HierarchyModal, type HierarchyModalMode } from "./ui/HierarchyModal";
 import { cloneHierarchyTree, emptyHierarchyTree, newHierarchyId, uniqueHierarchyName } from "./engine/hierarchies";
 import {
@@ -750,7 +751,11 @@ export default function App() {
   const [hierarchyModal, setHierarchyModal] = useState<HierarchyModalMode | null>(null);
   const [pendingGatingMlImport, setPendingGatingMlImport] = useState<PendingGatingMLImport | null>(null);
   const [barcodeImport, setBarcodeImport] = useState<BarcodeImportDraft | null>(null);
-  const [barcodeSave, setBarcodeSave] = useState<{ learned: LearnedBarcodeTemplate; exported: ReturnType<typeof exportBarcodeScheme> } | null>(null);
+  const [barcodeSave, setBarcodeSave] = useState<{
+    learned: LearnedBarcodeTemplate | null;
+    csv: string;
+    summary: BarcodeSaveSummary;
+  } | null>(null);
   const barcodeRef = useRef<HTMLInputElement>(null);
   // A workspace whose sample could not be resolved unambiguously; the user picks one.
   const [wspPicker, setWspPicker] = useState<
@@ -1286,15 +1291,17 @@ export default function App() {
   }
 
 
-  const barcodeQcPreview = useMemo(() => {
-    if (!barcodeImport || !sample) return null;
-    return barcodeImport.template.qc.length ? previewQcChain(barcodeImport.template.qc, sample.channels) : null;
-  }, [barcodeImport, sample]);
 
   const barcodeScheme = useMemo(() => {
     if (!barcodeImport || !sample) return null;
     return resolveBarcodeScheme(barcodeImport.table, sample.channels, barcodeImport.planes ?? undefined);
   }, [barcodeImport, sample]);
+
+  const barcodeQcPreview = useMemo(() => {
+    if (!barcodeImport || !barcodeScheme || !sample) return null;
+    const preview = previewQcChainFor(barcodeScheme, barcodeImport.template, sample.channels);
+    return preview.source === "none" ? null : preview;
+  }, [barcodeImport, barcodeScheme, sample]);
 
   const learnedBarcodeTemplate = useMemo(() => {
     if (!barcodeImport || !sample) return null;
@@ -1340,11 +1347,31 @@ export default function App() {
       state.root_population_id,
     );
     if (!learned) {
-      setError("No barcode plane with four gates was found in this workspace, so there is no debarcoding strategy to save.");
+      // No barcode plane: the file holds the plain hierarchy, every gate and population.
+      const out = exportHierarchyCsv(Object.values(state.gates), state.populations, state.root_population_id, sourceName);
+      setBarcodeSave({
+        learned: null,
+        csv: out.csv,
+        summary: { mode: "hierarchy", planeLabels: [], qcNames: [], nSamples: 0, nGates: out.nGates, nPopulations: out.nPopulations, hasTemplate: false, notes: out.notes },
+      });
+      setError(null);
       return;
     }
     const exported = exportBarcodeScheme(Object.values(state.gates), state.populations, state.root_population_id, learned, populationMetadata, sourceName);
-    setBarcodeSave({ learned, exported });
+    setBarcodeSave({
+      learned,
+      csv: exported.csv,
+      summary: {
+        mode: "scheme",
+        planeLabels: exported.planeLabels,
+        qcNames: learned.qcNames,
+        nSamples: exported.nSamples,
+        nGates: 0,
+        nPopulations: 0,
+        hasTemplate: true,
+        notes: [...exported.notes, ...learned.notes],
+      },
+    });
     setError(null);
   }
 
@@ -1354,17 +1381,22 @@ export default function App() {
     if (!saved) return;
     const written: string[] = [];
     if (choice.scheme) {
-      downloadBlob("barcode-scheme.csv", new Blob([saved.exported.csv], { type: "text/csv;charset=utf-8" }));
-      written.push(`barcode-scheme.csv (${saved.exported.nSamples} sample(s), ${saved.exported.planeLabels.length} plane(s))`);
+      const name = saved.summary.mode === "hierarchy" ? "hierarchy.csv" : "barcode-scheme.csv";
+      downloadBlob(name, new Blob([saved.csv], { type: "text/csv;charset=utf-8" }));
+      written.push(
+        saved.summary.mode === "hierarchy"
+          ? `hierarchy.csv (${saved.summary.nGates} gate(s), ${saved.summary.nPopulations} population(s))`
+          : `barcode-scheme.csv (${saved.summary.nSamples} sample(s), ${saved.summary.planeLabels.length} plane(s))`,
+      );
     }
-    if (choice.template) {
+    if (choice.template && saved.learned) {
       downloadBlob("barcode-template.json", new Blob([JSON.stringify(saved.learned.template, null, 2)], { type: "application/json" }));
       written.push(
         `barcode-template.json (${saved.learned.planes.length} plane(s)` +
           (saved.learned.qcNames.length ? `, QC chain ${saved.learned.qcNames.join(" → ")})` : ", no QC chain)"),
       );
     }
-    const notes = [...saved.exported.notes, ...saved.learned.notes];
+    const notes = saved.summary.notes;
     setImportMsg(`Saved ${written.join(" and ")}.${notes.length ? ` ${notes.join(" ")}` : ""}`);
   }
 
@@ -1432,10 +1464,15 @@ export default function App() {
       setBarcodeImport(null);
       setError(null);
       setImportMsg(
-        `Barcode scheme: ${result.nGates} new gate${result.nGates === 1 ? "" : "s"}` +
+        (scheme.hierarchyOnly ? "Hierarchy: " : "Barcode scheme: ") +
+          `${result.nGates} new gate${result.nGates === 1 ? "" : "s"}` +
           (result.reusedGateIds.length ? ` and ${result.reusedGateIds.length} reused` : "") +
-          ` on ${scheme.planes.length} plane(s), ${result.nPopulations} sample population(s)` +
-          (result.qc.populations.length ? ` under ${result.qc.populations.map((p) => p.name).join(" → ")}` : "") +
+          (scheme.hierarchyOnly ? `, ${result.qc.populations.length} population(s)` : ` on ${scheme.planes.length} plane(s), ${result.nPopulations} sample population(s)`) +
+          (result.qc.populations.length
+            ? ` under ${result.qc.populations.some((p) => p.parent)
+              ? result.qc.populations.map((p) => `${p.name}${p.parent ? ` (under ${p.parent})` : ""}`).join(", ")
+              : result.qc.populations.map((p) => p.name).join(" → ")}`
+            : "") +
           (newHierarchyName
             ? ` in the new hierarchy "${newHierarchyName}"`
             : hasStrategy ? ` in ${state.populations[draft.parentId]?.name ?? "the current root"}` : "") +
@@ -6125,10 +6162,10 @@ export default function App() {
               {importMsg && <div className="gl-hint">{t(importMsg)}</div>}
               <button
                 className="gl-btn-ghost gl-btn-block"
-                title="Import a barcode scheme: a CSV/TSV with one row per sample and one 0/1 column per barcode channel. Creates the debarcoding gates from a template and one population per sample, named from the table, so you tweak gates rather than draw them."
+                title="Import a hierarchy from a CSV: gate lines, population lines naming their parents, and, for a CyTOF debarcoding scheme, a table with one row per sample and one 0/1 column per barcode channel. Gates come from the file or from a template, so you tweak them rather than draw them."
                 onClick={() => void pickFilesOrInput(barcodeRef.current, TABLE_FILE_ACCEPT, "Barcode scheme table").then((files) => { if (files?.[0]) void prepareBarcodeImport(files[0]); })}
               >
-                {t("Import barcode scheme…")}
+                {t("Import hierarchy CSV…")}
               </button>
               <input
                 ref={barcodeRef}
@@ -6144,10 +6181,10 @@ export default function App() {
               <button
                 className="gl-btn-ghost gl-btn-block"
                 disabled={Object.keys(state.gates).length === 0}
-                title="Write this workspace's debarcoding strategy back out: the scheme table (CSV, one row per sample population with its 0/1 states, name, file name and metadata) and the gate template (JSON: the QC chain and the plane shapes) that an import can reuse on another run."
+                title="Write this workspace's gates and populations as a CSV the import reads back: for a debarcoding strategy, the sample table plus every gate and the QC populations, and a gate template (JSON); for any other workspace, every polygon and rectangle gate and every population."
                 onClick={openBarcodeSave}
               >
-                {t("Save barcode scheme…")}
+                {t("Save hierarchy CSV…")}
               </button>
               <button
                 className="gl-btn-ghost gl-btn-block"
@@ -7455,12 +7492,7 @@ export default function App() {
       )}
       {barcodeSave && (
         <BarcodeSaveModal
-          summary={{
-            planeLabels: barcodeSave.exported.planeLabels,
-            qcNames: barcodeSave.learned.qcNames,
-            nSamples: barcodeSave.exported.nSamples,
-            notes: [...barcodeSave.exported.notes, ...barcodeSave.learned.notes],
-          }}
+          summary={barcodeSave.summary}
           onSave={applyBarcodeSave}
           onCancel={() => setBarcodeSave(null)}
         />

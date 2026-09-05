@@ -97,7 +97,7 @@ describe("BarcodeSchemeImportModal", () => {
   it("summarises a clean scheme, lists the populations, and enables Import", () => {
     const props = mount(draftFor("name,89Y,194Pt,195Pt\n01,1,0,0\n02,0,1,0\n"));
     expect(host.textContent).toContain("2 sample(s), 3 barcode channel(s), 2 plane(s)");
-    expect(host.textContent).toContain("Populations to create: 01, 02");
+    expect(host.textContent).toContain("Sample populations to create: 01, 02");
     expect(host.textContent).toContain("drawn against 103Rh_DNA");
     expect(importButton().disabled).toBe(false);
     act(() => importButton().click());
@@ -122,6 +122,11 @@ describe("BarcodeSchemeImportModal", () => {
     expect(box).toBeTruthy();
     act(() => box.click());
     expect(props.onQcChange).toHaveBeenCalledWith(false);
+    // With populations declared in the file, the label says so.
+    mount(draftFor("# population: Cells = SingletsGate\nname,89Y,194Pt,195Pt\n01,1,0,0\n02,0,1,0\n"), {
+      qcPreview: { populations: [{ name: "Cells", gates: [{ name: "SingletsGate", x: "Event_length", y: "103Rh_DNA" }] }], skipped: [], source: "file" },
+    });
+    expect(host.textContent).toContain("Create the QC populations the file declares: Cells (1)");
   });
 
   it("offers to reuse existing gates and shows the count", () => {
@@ -149,6 +154,23 @@ describe("BarcodeSchemeImportModal", () => {
     expect((host.querySelector('input[aria-label="New hierarchy name"]') as HTMLInputElement).value).toBe("Scheme B");
     expect(importButton().disabled).toBe(false);
     mount({ ...draftFor("name,89Y,194Pt,195Pt\n01,1,0,0\n02,0,1,0\n"), newHierarchyName: "  " });
+    expect(importButton().disabled).toBe(true);
+  });
+
+  it("imports a hierarchy-only file without planes, and needs the populations to be on", () => {
+    const text = "# gate: Cells | rectangle | 89Y x 194Pt | asinh | x 0..1 | y 0..1\n# population: Cells = Cells\n";
+    const props = mount(draftFor(text), {
+      qcPreview: { populations: [{ name: "Cells", gates: [{ name: "Cells", x: "89Y_CD45", y: "194Pt_CD45" }] }], skipped: [], source: "file" },
+    });
+    expect(host.textContent).toContain("scheme.csv: a hierarchy of 1 population(s) and no sample table.");
+    expect(host.textContent).toContain("Create the populations the file declares: Cells (1)");
+    expect(host.querySelector(".gl-barcode-planes")).toBeNull();
+    expect(importButton().disabled).toBe(false);
+    act(() => importButton().click());
+    expect(props.onImport).toHaveBeenCalledTimes(1);
+    mount({ ...draftFor(text), qc: false }, {
+      qcPreview: { populations: [{ name: "Cells", gates: [{ name: "Cells", x: "89Y_CD45", y: "194Pt_CD45" }] }], skipped: [], source: "file" },
+    });
     expect(importButton().disabled).toBe(true);
   });
 
