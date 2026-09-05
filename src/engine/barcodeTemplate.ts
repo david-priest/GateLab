@@ -53,8 +53,14 @@ export interface QcGateTemplate {
 
 export interface QcPopulationTemplate {
   name: string;
-  /** All gates are intersected (AND, include). */
+  /** All gates are intersected (AND); those named in `excluded` are NOT-references. */
   gates: QcGateTemplate[];
+  excluded?: string[];
+  /**
+   * Parent population by name. Absent: the previous population in the list, or the attach
+   * point for the first, which is how a plain chain reads.
+   */
+  parent?: string;
 }
 
 export interface BarcodeTemplate {
@@ -365,10 +371,7 @@ export function learnBarcodeTemplate(
             notes.push(`${pop.name}: a ${g?.gate_type ?? "missing"} gate was not captured.`);
             continue;
           }
-          if (!ref.include) {
-            notes.push(`${pop.name}: the negated reference to ${g.name} was not captured.`);
-            continue;
-          }
+          if (!ref.include) entry.excluded = [...(entry.excluded ?? []), g.name];
           entry.gates.push(qcGateFromGate(g));
         }
         if (entry.gates.length) qc.push(entry);

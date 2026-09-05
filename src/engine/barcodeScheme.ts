@@ -21,6 +21,7 @@ import {
   type PolyRectGate,
   type PopulationMap,
   type Vertex,
+  type Population,
 } from "./models";
 import { isDnaChannel, massLabel, massToken, tokenMatchesChannel, type MassToken } from "./barcodeMass";
 import {
@@ -52,11 +53,58 @@ export interface PlaneDeclaration {
   line: number;
 }
 
+/**
+ * A "# gate:" header line: a gate defined in the file rather than taken from a template.
+ *
+ *   # gate: CenterGate | rectangle | Time x Center | raw | x full | y 321.283..615.828
+ *   # gate: DNA+Bead-Gate | polygon | 140Ce x DNA | asinh | (-0.475,4.3) (2.078,4.509) (4.227,5.428)
+ *
+ * Fields are separated by "|": name, type, the two channels joined by "x", the scale, then the
+ * shape. The scale is "raw" (raw values), "asinh" (both axes in arcsinh display units), "linear"
+ * (both axes untransformed display units) or one per axis as "linear, asinh". A rectangle is
+ * written as ranges, "x lo..hi" and "y lo..hi"; "x full" spans the loaded file's whole range
+ * (the Time axis). A polygon is a list of "(x,y)" points.
+ */
+export interface GateDeclaration {
+  name: string;
+  gate_type: "rectangle" | "polygon";
+  x: string;
+  y: string;
+  space: "raw" | "display";
+  transforms: { x: "identity" | "asinh"; y: "identity" | "asinh" };
+  vertices: Vertex[];
+  xFull: boolean;
+  yFull: boolean;
+  line: number;
+}
+
+/**
+ * A "# population: Cells = AmplitudeGate, CenterGate, …" line. Populations nest in file order
+ * unless a parent is named: "# population: B cells < Live = CD19+". A gate written as
+ * "not CD3+" is a NOT-reference.
+ */
+export interface PopulationDeclaration {
+  name: string;
+  /** Parent by name; null means the previous population, or the attach point for the first. */
+  parent: string | null;
+  gates: string[];
+  excluded: string[];
+  line: number;
+}
+
 export interface BarcodeTable {
   headers: string[];
   rows: string[][];
   /** "# plane:" header lines, in order. */
   planeDeclarations: PlaneDeclaration[];
+  /** "# gate:" header lines, in order. */
+  gateDeclarations: GateDeclaration[];
+  /** "# population:" header lines, in order: the hierarchy above the samples. */
+  populationDeclarations: PopulationDeclaration[];
+  /** "# samples under: Name": where the sample populations go; null means the last population. */
+  samplesUnder: string | null;
+  /** True when the file declares a hierarchy and carries no sample table at all. */
+  hierarchyOnly: boolean;
   problems: string[];
   delimiter: "," | "\t" | ";";
 }
@@ -114,27 +162,146 @@ function parsePlaneDeclaration(text: string, line: number): PlaneDeclaration | s
   return { x: x.name, y: y.name, xDisplay: x.display, yDisplay: y.display, line };
 }
 
+const NUMBER = String.raw`[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?`;
+
+function parseScale(text: string, line: number): { space: "raw" | "display"; transforms: { x: "identity" | "asinh"; y: "identity" | "asinh" } } | string {
+  const words = text.split(/\s*[,;/]\s*|\s+/).map((w) => w.trim().toLowerCase()).filter(Boolean);
+  const one = (w: string): "identity" | "asinh" | null =>
+    w === "asinh" || w === "arcsinh" || w === "display" ? "asinh" : w === "linear" || w === "identity" || w === "lin" ? "identity" : null;
+  if (words.length === 1 && words[0] === "raw") return { space: "raw", transforms: { x: "identity", y: "identity" } };
+  if (words.length === 1) {
+    const k = one(words[0]);
+    if (k) return { space: "display", transforms: { x: k, y: k } };
+  }
+  if (words.length === 2) {
+    const kx = one(words[0]);
+    const ky = one(words[1]);
+    if (kx && ky) return { space: "display", transforms: { x: kx, y: ky } };
+  }
+  return `Line ${line}: the scale must be "raw", "asinh", "linear" or one per axis such as "linear, asinh" (got "${text}").`;
+}
+
+/** Parse one "# gate:" line; see GateDeclaration for the form. */
+function parseGateDeclaration(text: string, line: number): GateDeclaration | string {
+  const body = text.replace(/^#\s*gate\s*:\s*/i, "").trim();
+  const fields = body.split("|").map((f) => f.trim());
+  if (fields.length < 5) {
+    return `Line ${line}: a gate line has five fields separated by "|": name | rectangle or polygon | X x Y | scale | shape (got "${body}").`;
+  }
+  const [name, typeText, channelsText, scaleText, ...shapeFields] = fields;
+  if (!name) return `Line ${line}: the gate has no name.`;
+  const typeWord = typeText.toLowerCase();
+  const gate_type = typeWord === "rectangle" || typeWord === "rect" ? "rectangle" : typeWord === "polygon" || typeWord === "poly" ? "polygon" : null;
+  if (!gate_type) return `Line ${line}: gate "${name}" must be a rectangle or a polygon (got "${typeText}").`;
+  const channels = channelsText.split(/\s+(?:x|×)\s+/i).map((c) => c.trim()).filter(Boolean);
+  if (channels.length !== 2) return `Line ${line}: gate "${name}" names two channels joined by "x", as in "Time x Center" (got "${channelsText}").`;
+  const scale = parseScale(scaleText, line);
+  if (typeof scale === "string") return scale;
+  const shape = shapeFields.join(" ").trim();
+  if (gate_type === "polygon") {
+    const pts = [...shape.matchAll(new RegExp(String.raw`\(\s*(${NUMBER})\s*[,;]\s*(${NUMBER})\s*\)`, "g"))];
+    if (pts.length < 3) return `Line ${line}: polygon "${name}" needs at least three "(x,y)" points (got "${shape}").`;
+    const vertices: Vertex[] = pts.map((m) => [Number(m[1]), Number(m[2])]);
+    return { name, gate_type, x: channels[0], y: channels[1], ...scale, vertices, xFull: false, yFull: false, line };
+  }
+  const axis = (which: "x" | "y"): { lo: number; hi: number } | "full" | string => {
+    const full = new RegExp(String.raw`(?:^|\s)${which}\s+full(?:\s|$)`, "i").test(shape);
+    const m = new RegExp(String.raw`(?:^|\s)${which}\s+(${NUMBER})\s*(?:\.\.|…|to|-)\s*(${NUMBER})(?:\s|$)`, "i").exec(shape);
+    if (full) return "full";
+    if (!m) return `Line ${line}: rectangle "${name}" needs "${which} lo..hi" or "${which} full" (got "${shape}").`;
+    const lo = Number(m[1]);
+    const hi = Number(m[2]);
+    return lo <= hi ? { lo, hi } : { lo: hi, hi: lo };
+  };
+  const ax = axis("x");
+  const ay = axis("y");
+  if (typeof ax === "string" && ax !== "full") return ax;
+  if (typeof ay === "string" && ay !== "full") return ay;
+  const xr = ax === "full" ? { lo: 0, hi: 1 } : (ax as { lo: number; hi: number });
+  const yr = ay === "full" ? { lo: 0, hi: 1 } : (ay as { lo: number; hi: number });
+  const vertices: Vertex[] = [[xr.lo, yr.lo], [xr.hi, yr.lo], [xr.hi, yr.hi], [xr.lo, yr.hi]];
+  return { name, gate_type, x: channels[0], y: channels[1], ...scale, vertices, xFull: ax === "full", yFull: ay === "full", line };
+}
+
+/** Parse one "# population: Cells = A, B, C" or "# population: B cells < Live = CD19+, not CD3+" line. */
+function parsePopulationDeclaration(text: string, line: number): PopulationDeclaration | string {
+  const body = text.replace(/^#\s*(?:population|qc|parent)\s*:\s*/i, "").trim();
+  const m = /^([^=]+?)\s*=\s*(.*)$/.exec(body);
+  if (!m) return `Line ${line}: a population line reads "# population: Name = gate, gate, …" or "# population: Name < Parent = gate, …" (got "${body}").`;
+  const head = m[1].trim();
+  const pm = /^(.+?)\s*(?:<|\bunder\b)\s*(.+)$/i.exec(head);
+  const name = (pm ? pm[1] : head).trim();
+  const parent = pm ? pm[2].trim() : null;
+  if (!name) return `Line ${line}: the population has no name.`;
+  if (pm && !parent) return `Line ${line}: population "${name}" names no parent after "<".`;
+  const gates: string[] = [];
+  const excluded: string[] = [];
+  for (const token of m[2].split(/\s*[,;&]\s*|\s+and\s+/i).map((g) => g.trim()).filter(Boolean)) {
+    const neg = /^(?:not\s+|!\s*)(.+)$/i.exec(token);
+    const gate = (neg ? neg[1] : token).trim();
+    if (!gate) continue;
+    gates.push(gate);
+    if (neg) excluded.push(gate);
+  }
+  if (!gates.length) return `Line ${line}: population "${name}" lists no gates.`;
+  return { name, parent, gates, excluded, line };
+}
+
+/** A comment line as Excel may have written it: wrapped in quotes with inner quotes doubled. */
+function unquoteComment(raw: string): string {
+  const t = raw.trim();
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) return t.slice(1, -1).replace(/""/g, '"').trim();
+  return t;
+}
+
 export function parseBarcodeTable(text: string): BarcodeTable {
   const lines = text.replace(/^﻿/, "").split(/\r?\n/);
   const problems: string[] = [];
   const planeDeclarations: PlaneDeclaration[] = [];
+  const gateDeclarations: GateDeclaration[] = [];
+  const populationDeclarations: PopulationDeclaration[] = [];
+  let samplesUnder: string | null = null;
+  const readComment = (raw: string, line: number): void => {
+    const t = unquoteComment(raw);
+    if (/^#\s*samples?\s+under\s*:/i.test(t)) {
+      const name = t.replace(/^#\s*samples?\s+under\s*:\s*/i, "").trim();
+      if (!name) problems.push(`Line ${line}: "# samples under:" names no population.`);
+      else samplesUnder = name;
+    } else if (/^#\s*planes?\s*:/i.test(t)) {
+      const d = parsePlaneDeclaration(t, line);
+      if (typeof d === "string") problems.push(d);
+      else planeDeclarations.push(d);
+    } else if (/^#\s*gate\s*:/i.test(t)) {
+      const d = parseGateDeclaration(t, line);
+      if (typeof d === "string") problems.push(d);
+      else if (gateDeclarations.some((g) => g.name === d.name)) problems.push(`Line ${line}: gate "${d.name}" is defined twice.`);
+      else gateDeclarations.push(d);
+    } else if (/^#\s*(?:population|qc|parent)\s*:/i.test(t)) {
+      const d = parsePopulationDeclaration(t, line);
+      if (typeof d === "string") problems.push(d);
+      else if (populationDeclarations.some((q) => q.name === d.name)) problems.push(`Line ${line}: population "${d.name}" is declared twice.`);
+      else populationDeclarations.push(d);
+    }
+  };
   let headerIndex = -1;
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
     if (!raw.trim()) continue;
-    if (raw.trim().startsWith("#")) {
-      if (/^#\s*planes?\s*:/i.test(raw.trim())) {
-        const d = parsePlaneDeclaration(raw.trim(), i + 1);
-        if (typeof d === "string") problems.push(d);
-        else planeDeclarations.push(d);
-      }
+    if (unquoteComment(raw).startsWith("#")) {
+      readComment(raw, i + 1);
       continue;
     }
     headerIndex = i;
     break;
   }
   if (headerIndex < 0) {
-    return { headers: [], rows: [], planeDeclarations, problems: [...problems, "The file has no header row."], delimiter: "," };
+    // A file of "# gate:" and "# population:" lines alone is a hierarchy without samples.
+    const hierarchyOnly = populationDeclarations.length > 0;
+    return {
+      headers: [], rows: [], planeDeclarations, gateDeclarations, populationDeclarations, samplesUnder, hierarchyOnly,
+      problems: hierarchyOnly ? problems : [...problems, "The file has no header row, and no \"# population:\" lines either."],
+      delimiter: ",",
+    };
   }
   const delimiter = detectDelimiter(lines[headerIndex]);
   const headers = splitDelimited(lines[headerIndex], delimiter);
@@ -144,7 +311,11 @@ export function parseBarcodeTable(text: string): BarcodeTable {
   const rows: string[][] = [];
   for (let i = headerIndex + 1; i < lines.length; i++) {
     const raw = lines[i];
-    if (!raw.trim() || raw.trim().startsWith("#")) continue;
+    if (!raw.trim()) continue;
+    if (unquoteComment(raw).startsWith("#")) {
+      readComment(raw, i + 1);
+      continue;
+    }
     const fields = splitDelimited(raw, delimiter);
     if (fields.length !== headers.length) {
       problems.push(`Line ${i + 1} has ${fields.length} field(s); the header has ${headers.length}.`);
@@ -152,8 +323,9 @@ export function parseBarcodeTable(text: string): BarcodeTable {
     }
     rows.push(fields);
   }
-  if (!rows.length) problems.push("The table has no sample rows.");
-  return { headers, rows, planeDeclarations, problems, delimiter };
+  const hierarchyOnly = !rows.length && populationDeclarations.length > 0;
+  if (!rows.length && !hierarchyOnly) problems.push("The table has no sample rows.");
+  return { headers, rows, planeDeclarations, gateDeclarations, populationDeclarations, samplesUnder, hierarchyOnly, problems, delimiter };
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +363,12 @@ export interface BarcodeScheme {
   planes: BarcodePlane[];
   samples: BarcodeSample[];
   metadataColumns: string[];
+  /** Gates and QC populations the file defines itself (see GateDeclaration). */
+  gateDeclarations: GateDeclaration[];
+  populationDeclarations: PopulationDeclaration[];
+  samplesUnder: string | null;
+  /** A hierarchy with no sample table: planes and samples are empty and that is not a problem. */
+  hierarchyOnly: boolean;
   problems: string[];
   notes: string[];
 }
@@ -381,7 +559,7 @@ export function resolveBarcodeScheme(
   });
 
   const barcodeChannels = [...channelCols.map((c) => c.key), ...stringChannels.filter((k) => !channelCols.some((c) => c.key === k))];
-  if (!barcodeChannels.length) problems.push("No barcode channel column was recognised: name each column by its isotope (89Y, 194Pt) or supply a barcode column.");
+  if (!barcodeChannels.length && !table.hierarchyOnly) problems.push("No barcode channel column was recognised: name each column by its isotope (89Y, 194Pt) or supply a barcode column.");
 
   for (const s of samples) {
     const missing = barcodeChannels.filter((k) => !(k in s.states));
@@ -396,9 +574,11 @@ export function resolveBarcodeScheme(
   const dupNames = [...new Set(names.filter((n, i) => names.indexOf(n) !== i))];
   if (dupNames.length) problems.push(`Duplicate population name(s): ${dupNames.join(", ")}.`);
 
-  const layout = planesOverride
-    ? { planes: planesOverride, problems: [] as string[], notes: [] as string[] }
-    : proposePlanes(barcodeChannels, channels, table.planeDeclarations);
+  const layout = table.hierarchyOnly
+    ? { planes: [] as BarcodePlane[], problems: [] as string[], notes: [] as string[] }
+    : planesOverride
+      ? { planes: planesOverride, problems: [] as string[], notes: [] as string[] }
+      : proposePlanes(barcodeChannels, channels, table.planeDeclarations);
   if (planesOverride) {
     const covered = new Set(planesOverride.flatMap((p) => [p.xIsBarcode ? p.x : "", p.yIsBarcode ? p.y : ""]));
     const missing = barcodeChannels.filter((k) => !covered.has(k));
@@ -428,6 +608,10 @@ export function resolveBarcodeScheme(
       ...(sampleIdCol >= 0 ? [h[sampleIdCol]] : []),
       ...(barcodeCol >= 0 ? [h[barcodeCol]] : []),
     ],
+    gateDeclarations: table.gateDeclarations,
+    populationDeclarations: table.populationDeclarations,
+    samplesUnder: table.samplesUnder,
+    hierarchyOnly: table.hierarchyOnly,
     problems: [...problems, ...layout.problems],
     notes: [...notes, ...layout.notes],
   };
@@ -457,7 +641,7 @@ export interface BarcodeGatingResult {
 }
 
 export interface QcChainPreview {
-  populations: { name: string; gates: { name: string; x: string; y: string }[] }[];
+  populations: { name: string; parent?: string; gates: { name: string; x: string; y: string }[] }[];
   /** Gates or populations left out because a channel could not be matched. */
   skipped: string[];
 }
@@ -510,6 +694,73 @@ export function resolveQcChannel(pattern: string, channels: BarcodeChannelLike[]
   return loose.length === 1 ? loose[0].key : null;
 }
 
+/** A declared gate as a template gate: the same record, minus the line number. */
+function qcGateFromDeclaration(g: GateDeclaration): QcGateTemplate {
+  return {
+    name: g.name,
+    x: g.x,
+    y: g.y,
+    gate_type: g.gate_type,
+    space: g.space,
+    ...(g.space === "display" ? { transforms: g.transforms } : {}),
+    vertices: g.vertices.map(([x, y]) => [x, y] as Vertex),
+    ...(g.xFull ? { xFull: true } : {}),
+  };
+}
+
+export interface EffectiveQcChain {
+  chain: QcPopulationTemplate[];
+  /** Where the populations came from. */
+  source: "file" | "template" | "none";
+  /** Gates a declared population names that neither the file nor the template defines. */
+  missing: string[];
+}
+
+/**
+ * The QC chain an import creates: the file's "# population:" lines when it has any, each gate
+ * taken from the file's "# gate:" line of that name or, failing that, from the template's
+ * chain by name (so a hand-written file can list the standard gates without coordinates);
+ * otherwise the template's own chain.
+ */
+export function effectiveQcChain(scheme: Pick<BarcodeScheme, "gateDeclarations" | "populationDeclarations">, template: BarcodeTemplate): EffectiveQcChain {
+  if (!scheme.populationDeclarations.length) {
+    return { chain: template.qc, source: template.qc.length ? "template" : "none", missing: [] };
+  }
+  const templateGates = new Map<string, QcGateTemplate>();
+  for (const pop of template.qc) for (const g of pop.gates) if (!templateGates.has(g.name)) templateGates.set(g.name, g);
+  const declared = new Map(scheme.gateDeclarations.map((g) => [g.name, g]));
+  const missing: string[] = [];
+  const chain: QcPopulationTemplate[] = scheme.populationDeclarations.map((pop) => ({
+    name: pop.name,
+    ...(pop.parent ? { parent: pop.parent } : {}),
+    ...(pop.excluded.length ? { excluded: pop.excluded } : {}),
+    gates: pop.gates.flatMap((name) => {
+      const d = declared.get(name);
+      if (d) return [qcGateFromDeclaration(d)];
+      const t = templateGates.get(name);
+      if (t) return [t];
+      missing.push(`${pop.name} / ${name}`);
+      return [];
+    }),
+  }));
+  return { chain, source: "file", missing };
+}
+
+/** The QC preview for a scheme and template together: what the import would create and skip. */
+export function previewQcChainFor(
+  scheme: Pick<BarcodeScheme, "gateDeclarations" | "populationDeclarations">,
+  template: BarcodeTemplate,
+  channels: BarcodeChannelLike[],
+): QcChainPreview & { source: EffectiveQcChain["source"] } {
+  const eff = effectiveQcChain(scheme, template);
+  const preview = previewQcChain(eff.chain, channels);
+  return {
+    ...preview,
+    skipped: [...eff.missing.map((m) => `${m}: no "# gate:" line in the file and no gate of that name in the template.`), ...preview.skipped],
+    source: eff.source,
+  };
+}
+
 /** What the QC chain would create on this sample, and what it would skip. */
 export function previewQcChain(qc: QcPopulationTemplate[], channels: BarcodeChannelLike[]): QcChainPreview {
   const populations: QcChainPreview["populations"] = [];
@@ -525,7 +776,7 @@ export function previewQcChain(qc: QcPopulationTemplate[], channels: BarcodeChan
       }
       gates.push({ name: g.name, x, y });
     }
-    if (gates.length) populations.push({ name: pop.name, gates });
+    if (gates.length) populations.push({ name: pop.name, ...(pop.parent ? { parent: pop.parent } : {}), gates });
     else skipped.push(`${pop.name}: none of its gates could be placed, so the population is left out.`);
   }
   return { populations, skipped };
@@ -581,9 +832,14 @@ export function buildBarcodeGating(
     reusable.find((g) => (g.gate_type === "polygon" || g.gate_type === "rectangle") && g.name === name && g.x_channel === x && g.y_channel === y);
   /** Gate ids for the QC chain, per template population, in chain order. */
   const qcGateIds: string[][] = [];
-  if (options.qc && template.qc.length) {
+  const qcEntries: QcPopulationTemplate[] = [];
+  /** A gate created by this build, by name and channels: a second population referencing it shares it. */
+  const createdQc = new Map<string, string>();
+  const effective = effectiveQcChain(scheme, template);
+  for (const m of effective.missing) qcPreview.skipped.push(`${m}: no "# gate:" line in the file and no gate of that name in the template.`);
+  if (options.qc && effective.chain.length) {
     const channels = options.channels ?? [];
-    for (const pop of template.qc) {
+    for (const pop of effective.chain) {
       const ids: string[] = [];
       const placed: { name: string; x: string; y: string }[] = [];
       for (const g of pop.gates) {
@@ -600,16 +856,25 @@ export function buildBarcodeGating(
           placed.push({ name: prior.name, x, y });
           continue;
         }
+        const createdKey = `${g.name}\u0000${x}\u0000${y}`;
+        const already = createdQc.get(createdKey);
+        if (already) {
+          ids.push(already);
+          placed.push({ name: g.name, x, y });
+          continue;
+        }
         const gate = qcGateFor(g, x, y, cofactor, options.ranges?.[x]);
         gate.color = QC_COLORS[qcColor++ % QC_COLORS.length];
         gates[gate.gate_id] = gate;
         gate_order.push(gate.gate_id);
+        createdQc.set(createdKey, gate.gate_id);
         ids.push(gate.gate_id);
         placed.push({ name: gate.name, x, y });
       }
       if (ids.length) {
         qcGateIds.push(ids);
-        qcPreview.populations.push({ name: pop.name, gates: placed });
+        qcEntries.push(pop);
+        qcPreview.populations.push({ name: pop.name, ...(pop.parent ? { parent: pop.parent } : {}), gates: placed });
       } else {
         qcPreview.skipped.push(`${pop.name}: none of its gates could be placed, so the population is left out.`);
       }
@@ -622,6 +887,25 @@ export function buildBarcodeGating(
   const addGate = (g: PolyRectGate) => {
     gates[g.gate_id] = g;
     gate_order.push(g.gate_id);
+  };
+  /**
+   * A barcode gate's shape from the file's own "# gate:" line of that name, when it has one:
+   * its vertices in the plane's orientation (a line written with the channels the other way
+   * round is swapped). Otherwise null and the template's shape is used.
+   */
+  const declaredShape = (name: string, plane: BarcodePlane): Vertex[] | null => {
+    const d = scheme.gateDeclarations.find((g) => g.name === name && g.gate_type === "polygon");
+    if (!d) return null;
+    const channels = options.channels ?? [];
+    const key = (c: string): string | null => {
+      const r = resolveMassToken(c, channels);
+      return "key" in r ? r.key : channels.find((ch) => ch.key === c || ch.pnn === c || ch.marker === c)?.key ?? null;
+    };
+    const dx = key(d.x);
+    const dy = key(d.y);
+    if (dx === plane.x && dy === plane.y) return d.vertices.map(([x, y]) => [x, y] as Vertex);
+    if (dx === plane.y && dy === plane.x) return d.vertices.map(([x, y]) => [y, x] as Vertex);
+    return null;
   };
 
   for (const plane of scheme.planes) {
@@ -648,7 +932,7 @@ export function buildBarcodeGating(
           gate_type: "polygon",
           x_channel: plane.x,
           y_channel: plane.y,
-          vertices: shapes[key].map(([x, y]) => [x, y] as Vertex),
+          vertices: declaredShape(name, plane) ?? shapes[key].map(([x, y]) => [x, y] as Vertex),
           color: STATE_COLORS[key],
           label_offset: null,
           ...asinhSpace(plane.x, plane.y),
@@ -684,7 +968,7 @@ export function buildBarcodeGating(
           gate_type: "polygon",
           x_channel: plane.x,
           y_channel: plane.y,
-          vertices,
+          vertices: declaredShape(`${label}${key}`, plane) ?? vertices,
           color,
           label_offset: null,
           ...asinhSpace(plane.x, plane.y),
@@ -699,13 +983,30 @@ export function buildBarcodeGating(
   const root = newRootPopulation();
   const populations: PopulationMap = { [root.population_id]: root };
   const populationMetadata: Record<string, Record<string, string>> = {};
+  // The QC populations as a tree: a named parent, else the previous population (a chain).
+  const byName = new Map<string, Population>();
+  const isRootName = (n: string) => /^(all events|root)$/i.test(n.trim());
   let parent = root;
   qcGateIds.forEach((ids, i) => {
-    const pop = newPopulation(qcPreview.populations[i].name, ids.map((id) => newGateRef(id, true)), parent.population_id, "and");
+    const entry = qcEntries[i];
+    let attach = parent;
+    if (entry.parent) {
+      const named = isRootName(entry.parent) ? root : byName.get(entry.parent);
+      if (named) attach = named;
+      else qcPreview.skipped.push(`${entry.name}: its parent "${entry.parent}" is not declared above it, so it goes under ${parent.name}.`);
+    }
+    const excluded = new Set(entry.excluded ?? []);
+    const pop = newPopulation(entry.name, ids.map((id) => newGateRef(id, !excluded.has(gates[id]?.name ?? "") && !excluded.has(options.existingGates?.find((g) => g.gate_id === id)?.name ?? ""))), attach.population_id, "and");
     populations[pop.population_id] = pop;
-    parent.children.push(pop.population_id);
+    attach.children.push(pop.population_id);
+    byName.set(entry.name, pop);
     parent = pop;
   });
+  if (scheme.samplesUnder) {
+    const named = isRootName(scheme.samplesUnder) ? root : byName.get(scheme.samplesUnder);
+    if (named) parent = named;
+    else qcPreview.skipped.push(`"# samples under: ${scheme.samplesUnder}" names no declared population, so the samples go under ${parent.name}.`);
+  }
   for (const sample of scheme.samples) {
     const refs = gatesByPlane.map(({ plane, gates: byState }) => {
       const id = byState[stateOf(sample, plane)];
@@ -862,9 +1163,43 @@ export function exportBarcodeScheme(
     (c) => !RESERVED_EXPORT_COLUMNS.has(c.toLowerCase()) && !channels.some((ch) => label(ch) === c),
   );
   const header = ["name", "file_name", ...metaColumns, ...channels.map(label)];
+  // The whole strategy in the file: every QC gate and barcode gate as a "# gate:" line and the
+  // QC chain as "# population:" lines, so the table alone reproduces the hierarchy.
+  const fmt = (v: number): string => String(Number(v.toFixed(3)));
+  const gateLine = (g: QcGateTemplate): string => {
+    const scale = g.space === "raw"
+      ? "raw"
+      : g.transforms && g.transforms.x !== g.transforms.y
+        ? `${g.transforms.x === "asinh" ? "asinh" : "linear"}, ${g.transforms.y === "asinh" ? "asinh" : "linear"}`
+        : g.transforms?.x === "identity" ? "linear" : "asinh";
+    const chans = `${label(g.x)} x ${label(g.y)}`;
+    if (g.gate_type === "rectangle") {
+      const xs = g.vertices.map((v) => v[0]);
+      const ys = g.vertices.map((v) => v[1]);
+      const xPart = g.xFull ? "x full" : `x ${fmt(Math.min(...xs))}..${fmt(Math.max(...xs))}`;
+      return `# gate: ${g.name} | rectangle | ${chans} | ${scale} | ${xPart} | y ${fmt(Math.min(...ys))}..${fmt(Math.max(...ys))}`;
+    }
+    return `# gate: ${g.name} | polygon | ${chans} | ${scale} | ${g.vertices.map(([x, y]) => `(${fmt(x)},${fmt(y)})`).join(" ")}`;
+  };
+  const qcLines = learned.template.qc.flatMap((pop) => pop.gates.map(gateLine));
+  const populationLines = learned.template.qc.map((pop) => populationLine(pop));
+  const samplesUnderLine = learned.template.qc.length ? [`# samples under: ${learned.template.qc[learned.template.qc.length - 1].name}`] : [];
+  const gateById = new Map(gates.map((g) => [g.gate_id, g]));
+  const barcodeLines = planes.flatMap((p) => p.gateIds.flatMap((id) => {
+    const g = gateById.get(id);
+    if (!g || (g.gate_type !== "polygon" && g.gate_type !== "rectangle")) return [];
+    const display = g.space === "display";
+    const vertices = g.vertices.map(([x, y]) => [display ? x : Math.asinh(x / cofactor), display ? y : Math.asinh(y / cofactor)] as Vertex);
+    return [gateLine({ name: g.name, x: g.x_channel, y: g.y_channel, gate_type: "polygon", space: "display", transforms: { x: "asinh", y: "asinh" }, vertices })];
+  }));
   const lines = [
     `# GateLab barcode scheme, saved ${new Date().toISOString().slice(0, 10)} from ${source}.`,
+    "# Gates are listed so this file reproduces the whole hierarchy; QC populations nest in the order given.",
     ...planeLabels.map((p) => `# plane: ${p}`),
+    ...qcLines,
+    ...barcodeLines,
+    ...populationLines,
+    ...samplesUnderLine,
     header.map(csvCell).join(","),
     ...rows.map((r) => [r.name, r.file, ...metaColumns.map((c) => r.meta[c] ?? ""), ...channels.map((ch) => r.states[ch] ?? "")].map(csvCell).join(",")),
     "",
@@ -875,6 +1210,106 @@ export function exportBarcodeScheme(
 const BARCODE_STATE_KEYS_LOCAL: readonly BarcodeStateKey[] = ["--", "+-", "-+", "++"];
 const RESERVED_EXPORT_COLUMNS = new Set(["name", "file_name", "sample_id", "barcode"]);
 
+/** "# population: Name < Parent = A, not B": the parent is written whenever the entry names one. */
+function populationLine(pop: QcPopulationTemplate): string {
+  const excluded = new Set(pop.excluded ?? []);
+  const gates = pop.gates.map((g) => (excluded.has(g.name) ? `not ${g.name}` : g.name)).join(", ");
+  return `# population: ${pop.name}${pop.parent ? ` < ${pop.parent}` : ""} = ${gates}`;
+}
+
+export interface HierarchyCsvExport {
+  csv: string;
+  nGates: number;
+  nPopulations: number;
+  /** Gates and references the grammar cannot carry (quadrants, ellipses, non-arcsinh display spaces). */
+  notes: string[];
+}
+
+/**
+ * Any workspace's gates and populations as the same CSV grammar, with no sample table: every
+ * polygon and rectangle as a "# gate:" line (raw gates in raw units; display gates in their
+ * arcsinh or linear units) and every population as a "# population:" line naming its parent.
+ * What the grammar cannot carry, a quadrant or ellipse gate or a display space that is not
+ * arcsinh or linear, is left out and listed in the notes and in the file's header.
+ */
+export function exportHierarchyCsv(
+  gates: Gate[],
+  populations: PopulationMap,
+  rootPopulationId: string | null,
+  source = "the current workspace",
+): HierarchyCsvExport {
+  const notes: string[] = [];
+  const fmt = (v: number): string => String(Number(v.toFixed(3)));
+  const label = (ch: string): string => massLabel(ch) ?? ch;
+  const written = new Map<string, string>();
+  for (const g of gates) {
+    if (g.gate_type !== "polygon" && g.gate_type !== "rectangle") {
+      notes.push(`${g.name}: a ${g.gate_type} gate cannot be written as a "# gate:" line.`);
+      continue;
+    }
+    let scale: string;
+    if (g.space !== "display") scale = "raw";
+    else {
+      const kind = (ch: string): "asinh" | "linear" | null => {
+        const k = g.transforms?.[ch]?.kind;
+        return k === "asinh" ? "asinh" : k === "identity" || k === undefined ? "linear" : null;
+      };
+      const kx = kind(g.x_channel);
+      const ky = kind(g.y_channel);
+      if (!kx || !ky) {
+        notes.push(`${g.name}: drawn in a ${g.transforms?.[g.x_channel]?.kind ?? "?"} display space, which the file cannot carry.`);
+        continue;
+      }
+      scale = kx === ky ? kx : `${kx}, ${ky}`;
+    }
+    const chans = `${label(g.x_channel)} x ${label(g.y_channel)}`;
+    if (g.gate_type === "rectangle") {
+      const xs = g.vertices.map((v) => v[0]);
+      const ys = g.vertices.map((v) => v[1]);
+      written.set(g.gate_id, `# gate: ${g.name} | rectangle | ${chans} | ${scale} | x ${fmt(Math.min(...xs))}..${fmt(Math.max(...xs))} | y ${fmt(Math.min(...ys))}..${fmt(Math.max(...ys))}`);
+    } else {
+      written.set(g.gate_id, `# gate: ${g.name} | polygon | ${chans} | ${scale} | ${g.vertices.map(([x, y]) => `(${fmt(x)},${fmt(y)})`).join(" ")}`);
+    }
+  }
+  const gateById = new Map(gates.map((g) => [g.gate_id, g]));
+  const order = rootPopulationId ? populationTreeOrder(populations, rootPopulationId).map((r) => r.popId) : Object.keys(populations);
+  const populationLines: string[] = [];
+  let nPopulations = 0;
+  for (const id of order) {
+    const pop = populations[id];
+    if (!pop || id === rootPopulationId) continue;
+    const parentName = pop.parent_id ? populations[pop.parent_id]?.name ?? "All Events" : "All Events";
+    const refs: string[] = [];
+    for (const r of pop.gate_refs) {
+      const g = gateById.get(r.gate_id);
+      if (!g || !written.has(r.gate_id) || r.quadrant != null) {
+        notes.push(`${pop.name}: its reference to ${g?.name ?? r.gate_id} is left out.`);
+        continue;
+      }
+      refs.push(r.include ? g.name : `not ${g.name}`);
+    }
+    if (!refs.length && pop.gate_refs.length) {
+      notes.push(`${pop.name}: none of its gates could be written, so the population is left out.`);
+      continue;
+    }
+    if (!refs.length) {
+      notes.push(`${pop.name}: has no gates, so the population is left out.`);
+      continue;
+    }
+    populationLines.push(`# population: ${pop.name} < ${parentName} = ${refs.join(", ")}`);
+    nPopulations += 1;
+  }
+  const lines = [
+    `# GateLab hierarchy, saved ${new Date().toISOString().slice(0, 10)} from ${source}.`,
+    "# Gates first, then populations naming their parent; import this file to rebuild the hierarchy.",
+    ...notes.map((n) => `# not written: ${n}`),
+    ...written.values(),
+    ...populationLines,
+    "",
+  ];
+  return { csv: lines.join("\n"), nGates: written.size, nPopulations, notes };
+}
+
 export function barcodeSchemeTemplateCsv(): string {
   return [
     "# GateLab barcode scheme. One row per sample; one column per barcode channel with 1 or 0.",
@@ -883,6 +1318,14 @@ export function barcodeSchemeTemplateCsv(): string {
     "# plane: 195Pt x 194Pt",
     "# plane: 115In x 113In",
     "# plane: 103Rh(display) x 89Y",
+    "# Optional: the QC populations above the samples, nested in this order, each listing its gates.",
+    "# A population may name its parent (\"# population: B cells < Live = CD19+, not CD3+\"), and a file",
+    "# of gate and population lines alone, with no sample table, imports as a plain hierarchy.",
+    "# A gate named here takes its shape from the template unless the file defines it with a",
+    "# \"# gate:\" line, as \"Save hierarchy CSV\" writes them, for example:",
+    "# gate: CenterGate | rectangle | Time x Center | raw | x full | y 321.283..615.828",
+    "# population: Cells = AmplitudeGate, CenterGate, OffsetGate, ResidualGate, WidthGate, SingletsGate, DNA+Bead-Gate",
+    "# population: Live = Live",
     "name,file_name,condition,89Y,113In,115In,194Pt,195Pt",
     "01,sample_01.fcs,DMSO,1,1,0,0,0",
     "02,sample_02.fcs,DMSO,1,0,1,0,0",

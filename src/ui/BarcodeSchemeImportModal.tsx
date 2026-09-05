@@ -6,6 +6,8 @@ import { useRef } from "react";
 import type { CoreState } from "../store";
 import { populationTreeOrder } from "../engine/populations";
 import type { BarcodeChannelLike, BarcodePlane, BarcodeScheme, BarcodeTable, QcChainPreview } from "../engine/barcodeScheme";
+
+type QcPreviewWithSource = QcChainPreview & { source?: "file" | "template" | "none" };
 import type { BarcodeTemplate } from "../engine/barcodeTemplate";
 import { useI18n } from "./i18n";
 import { pickFilesOrInput } from "../engine/fsAccess";
@@ -58,7 +60,7 @@ export function BarcodeSchemeImportModal({
   state: CoreState;
   canLearn: boolean;
   /** What the template's QC chain would create on this sample; null when the template has none. */
-  qcPreview: QcChainPreview | null;
+  qcPreview: QcPreviewWithSource | null;
   /** What a build would reuse and create, when the scheme has no problems. */
   reusePreview: { reused: number; created: number } | null;
   /** The name a new hierarchy is offered with. */
@@ -83,8 +85,10 @@ export function BarcodeSchemeImportModal({
   const channelKeys = channels.map((c) => c.key);
   const problems = scheme.problems;
   const toNewHierarchy = draft.newHierarchyName !== null;
+  const hierarchyOnly = scheme.hierarchyOnly;
   const canImport =
-    problems.length === 0 && scheme.samples.length > 0 && planes.length > 0 &&
+    problems.length === 0 &&
+    (hierarchyOnly ? !!qcPreview && qcPreview.populations.length > 0 && draft.qc : scheme.samples.length > 0 && planes.length > 0) &&
     (!toNewHierarchy || (draft.newHierarchyName ?? "").trim().length > 0);
 
   const setPlane = (i: number, patch: Partial<BarcodePlane>) => {
@@ -103,14 +107,16 @@ export function BarcodeSchemeImportModal({
   return (
     <div className="gl-modal-backdrop">
       <div className="gl-modal" style={{ maxWidth: 720 }}>
-        <div className="gl-modal-title">{t("Import barcode scheme")}</div>
+        <div className="gl-modal-title">{t("Import hierarchy")}</div>
         <div className="gl-modal-note">
-          {t("{file}: {samples} sample(s), {channels} barcode channel(s), {planes} plane(s).", {
-            file: draft.fileName,
-            samples: scheme.samples.length,
-            channels: scheme.channels.length,
-            planes: planes.length,
-          })}
+          {hierarchyOnly
+            ? t("{file}: a hierarchy of {populations} population(s) and no sample table.", { file: draft.fileName, populations: scheme.populationDeclarations.length })
+            : t("{file}: {samples} sample(s), {channels} barcode channel(s), {planes} plane(s).", {
+              file: draft.fileName,
+              samples: scheme.samples.length,
+              channels: scheme.channels.length,
+              planes: planes.length,
+            })}
           {scheme.metadataColumns.length > 0 && (
             <> {t("Metadata columns: {columns}.", { columns: scheme.metadataColumns.join(", ") })}</>
           )}
@@ -177,9 +183,13 @@ export function BarcodeSchemeImportModal({
               onChange={(e) => onQcChange(e.target.checked)}
             />
             <span>
-              {t("Create the QC populations above the samples")}
+              {hierarchyOnly
+                ? t("Create the populations the file declares")
+                : qcPreview?.source === "file"
+                  ? t("Create the QC populations the file declares")
+                  : t("Create the QC populations above the samples")}
               {qcPreview && qcPreview.populations.length > 0 && (
-                <>: {qcPreview.populations.map((p) => `${p.name} (${p.gates.length})`).join(" → ")}</>
+                <>: {qcPreview.populations.map((p) => `${p.name} (${p.gates.length})${p.parent ? ` under ${p.parent}` : ""}`).join(qcPreview.populations.some((p) => p.parent) ? ", " : " → ")}</>
               )}
               {qcPreview && qcPreview.populations.length === 0 && <> ({t("none in this template")})</>}
             </span>
@@ -203,6 +213,7 @@ export function BarcodeSchemeImportModal({
           </label>
         </div>
 
+        {!hierarchyOnly && (
         <div className="gl-modal-field">
           <span>{t("Planes: which channels are drawn together. An axis that is not a barcode axis contributes no state.")}</span>
           <div style={{ overflowX: "auto" }}>
@@ -248,6 +259,7 @@ export function BarcodeSchemeImportModal({
             <button className="gl-btn-ghost" disabled={draft.planes === null} onClick={() => onPlanesChange(null)}>{t("Reset to proposed")}</button>
           </div>
         </div>
+        )}
 
         {problems.length > 0 && (
           <div className="gl-modal-warning" role="alert">
@@ -261,7 +273,7 @@ export function BarcodeSchemeImportModal({
 
         {scheme.samples.length > 0 && (
           <div className="gl-modal-note">
-            {t("Populations to create:")}{" "}
+            {t("Sample populations to create:")}{" "}
             {scheme.samples.slice(0, 10).map((s) => s.name).join(", ")}
             {scheme.samples.length > 10 && t(" … and {n} more", { n: scheme.samples.length - 10 })}
           </div>

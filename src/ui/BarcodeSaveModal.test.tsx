@@ -31,7 +31,7 @@ describe("BarcodeSaveModal", () => {
       root.render(
         <I18nProvider>
           <BarcodeSaveModal
-            summary={{ planeLabels: ["195Pt x 194Pt", "103Rh(display) x 89Y"], qcNames: ["CellsB 1nolive", "CellsB"], nSamples: 33, notes: [] }}
+            summary={{ mode: "scheme", planeLabels: ["195Pt x 194Pt", "103Rh(display) x 89Y"], qcNames: ["CellsB 1nolive", "CellsB"], nSamples: 33, nGates: 0, nPopulations: 0, hasTemplate: true, notes: [] }}
             onSave={onSave}
             onCancel={vi.fn()}
           />
@@ -53,7 +53,7 @@ describe("BarcodeSaveModal", () => {
       root.render(
         <I18nProvider>
           <BarcodeSaveModal
-            summary={{ planeLabels: ["195Pt x 194Pt"], qcNames: [], nSamples: 0, notes: ["Left out 2 population(s) that use some but not all planes: a, b."] }}
+            summary={{ mode: "scheme", planeLabels: ["195Pt x 194Pt"], qcNames: [], nSamples: 0, nGates: 0, nPopulations: 0, hasTemplate: true, notes: ["Left out 2 population(s) that use some but not all planes: a, b."] }}
             onSave={vi.fn()}
             onCancel={vi.fn()}
           />
@@ -67,5 +67,29 @@ describe("BarcodeSaveModal", () => {
     expect(boxes[0].checked).toBe(false);
     act(() => boxes[1].click());
     expect(button("Save").disabled).toBe(true);
+  });
+});
+
+describe("BarcodeSaveModal for a plain hierarchy", () => {
+  it("offers the hierarchy file and no template when the workspace has no barcode plane", () => {
+    const onSave = vi.fn();
+    act(() => {
+      root.render(
+        <I18nProvider>
+          <BarcodeSaveModal
+            summary={{ mode: "hierarchy", planeLabels: [], qcNames: [], nSamples: 0, nGates: 5, nPopulations: 4, hasTemplate: false, notes: ["Blob: a ellipse gate cannot be written as a \"# gate:\" line."] }}
+            onSave={onSave}
+            onCancel={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    expect(host.textContent).toContain("No barcode plane in this workspace, so the file holds the plain hierarchy: 5 gate(s) and 4 population(s).");
+    expect(host.textContent).toContain("Hierarchy (CSV)");
+    expect(host.textContent).toContain("Blob: a ellipse gate");
+    const boxes = Array.from(host.querySelectorAll<HTMLInputElement>("input[type=checkbox]"));
+    expect(boxes.map((b) => [b.checked, b.disabled])).toEqual([[true, false], [false, true]]);
+    act(() => button("Save").click());
+    expect(onSave).toHaveBeenCalledWith({ scheme: true, template: false });
   });
 });
