@@ -219,6 +219,108 @@ describe("App SCE host loading", () => {
     expect(plotHarness.payload?.gates?.[0]?.vertices).toEqual(movedVertices);
   });
 
+  // A cluster label lives in colData, and the question "which clusters fall inside this gate"
+  // needs it on the plot while the gate is being drawn. Only names travel with the dataset; the
+  // values are fetched when the column is chosen, once, as one code per event.
+  it("colours the plot by a categorical colData column fetched on demand", async () => {
+    const readCategoricalColumn = vi.fn(async (request: { columnName: string }) => ({
+      columnName: request.columnName,
+      levels: ["B", "T"],
+      colors: ["#112233", "#445566"],
+      sampleValues: [
+        { sampleId: "sample-0", eventCount: 2, codesBase64: btoa(String.fromCharCode(0, 1)) },
+        { sampleId: "sample-1", eventCount: 1, constantCode: 1 },
+      ],
+    }));
+    const host: GateLabHostAdapter = {
+      contractVersion: GATELAB_HOST_CONTRACT_VERSION,
+      id: "test-r-host",
+      kind: "r-sce",
+      label: "Test R host",
+      capabilities: {
+        dataSources: { fcsFiles: false, singleCellExperiment: true },
+        dataModel: { multipleAssays: true, sampleMetadata: true, writeBackColumns: true },
+        persistence: {
+          workspaceFiles: false,
+          hostObject: true,
+          fileSystemAccess: false,
+          directoryAccess: false,
+        },
+        compute: { location: "host" },
+      },
+      datasets: {
+        async listDatasets() {
+          return [{
+            ...dataset,
+            colDataColumns: ["sample_id", "cluster", "score"],
+            colDataCategorical: [{ name: "sample_id", levelCount: 2 }, { name: "cluster", levelCount: 2 }],
+          }];
+        },
+        async readAssay(_datasetId, sampleId) {
+          return sampleId === "sample-0"
+            ? bufferOf(new Float32Array([5, 10, 20, 25]))
+            : bufferOf(new Float32Array([15, 30]));
+        },
+        async readEventIndex(_datasetId, sampleId) {
+          return sampleId === "sample-0"
+            ? bufferOf(new Uint32Array([0, 2]))
+            : bufferOf(new Uint32Array([1]));
+        },
+      },
+      colData: {
+        readCategoricalColumn,
+        async writeColumns() { throw new Error("not under test"); },
+        async writeCategoricalColumns() { throw new Error("not under test"); },
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        <GateLabHostProvider host={host}>
+          <App />
+        </GateLabHostProvider>,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(plotHarness.eventCount).toBe(3);
+
+    const option = container.querySelector<HTMLOptionElement>('option[value="coldata:cluster"]');
+    expect(option?.textContent).toBe("cluster (2)");
+    // The numeric column is not offered: there is nothing categorical to colour by.
+    expect(container.querySelector('option[value="coldata:score"]')).toBeNull();
+    const select = option!.closest("select")!;
+    await act(async () => {
+      select.value = "coldata:cluster";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+
+    expect(readCategoricalColumn).toHaveBeenCalledTimes(1);
+    expect(readCategoricalColumn.mock.calls[0][0]).toMatchObject({ datasetId: "sce", columnName: "cluster" });
+    const payload = plotHarness.payload as unknown as {
+      color_palette?: string[];
+      color_b64?: string;
+    };
+    // The legend is drawn beside the plot rather than inside the canvas.
+    const legend = [...container.querySelectorAll(".gl-overlay-legend span")]
+      .map((span) => span.textContent?.trim())
+      .filter((text) => text);
+    expect(legend).toEqual(["B", "T", "missing"]);
+    // The host's fixed colours win over the palette choice, so the plot matches the R figures.
+    expect(payload.color_palette?.slice(0, 2)).toEqual(["#112233", "#445566"]);
+    expect([...Uint8Array.from(atob(payload.color_b64!), (c) => c.charCodeAt(0))]).toEqual([0, 1, 1]);
+
+    // Choosing it again does not fetch again.
+    await act(async () => {
+      select.value = "none";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      select.value = "coldata:cluster";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(readCategoricalColumn).toHaveBeenCalledTimes(1);
+  });
+
   it("restores legacy GateLabR gates and populations from SCE metadata", async () => {
     const writeWorkspace = vi.fn(async (request: {
       datasetId: string;

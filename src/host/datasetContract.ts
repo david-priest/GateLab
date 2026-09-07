@@ -78,6 +78,12 @@ export interface GateLabHostDatasetDescriptor {
   compensationMatrix?: GateLabHostCompensationMatrixDescriptor;
   /** Existing SCE colData names, used to surface overwrite collisions. */
   colDataColumns?: readonly string[];
+  /**
+   * colData columns a plot can be coloured by: factor, character or logical with at most 254
+   * levels, so one code per event fits a byte with 255 left for a missing value. Only the names
+   * and level counts travel here; the values are fetched through the colData port on request.
+   */
+  colDataCategorical?: readonly Readonly<{ name: string; levelCount: number }>[];
   /** Monotonic revision guarding explicit SCE rowData panel writes. */
   rowDataRevision?: number;
 }

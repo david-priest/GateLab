@@ -30,12 +30,14 @@ import { populationTreeOrder } from "./engine/populations";
 import { resolvePartitionLevels, partitionAssign } from "./engine/factors";
 import { paletteColors, populationColor, UNGATED_COLOR, OVERLAY_PALETTES, type PaletteName } from "./engine/palettes";
 import { assignDivisionLevel, divisionPalette } from "./engine/division";
-import { encodeFloat32Base64, encodeUint8Base64 } from "./engine/encode";
+import { decodeUint8Base64, encodeFloat32Base64, encodeUint8Base64 } from "./engine/encode";
 import {
+  aggregateGateCounts,
   aggregatePopulationTreeStats,
   buildCombinedSamplePointCloud,
   buildWorkspaceAxisRanges,
   type CombinedSamplePlotInput,
+  type PooledGateCountInput,
 } from "./engine/multiSamplePlot";
 import {
   importGatingML,
@@ -231,6 +233,11 @@ import {
   convertHostedGateSpace,
   readHostedWorkspace,
 } from "./host/hostedWorkspace";
+import {
+  buildHostedMemberships,
+  type HierarchyTree,
+  type HostedMembershipSample,
+} from "./host/hostedMemberships";
 import {
   GATELAB_HOST_COLDATA_CONTRACT_VERSION,
   packMembershipBits,
@@ -531,6 +538,19 @@ function restoredPointSize(value: unknown): number {
   return Number.isFinite(v) ? Math.max(0.5, Math.min(2, v)) : 1.5;
 }
 
+/** A categorical colData column as fetched from the host: level names and per-sample codes. */
+interface HostCategoricalValues {
+  levels: string[];
+  /** Fixed by the host (metadata(sce)$gatelab_palettes); overrides the palette choice. */
+  colors?: string[];
+  /** Per SCE sample id: one code per event, or one code for the whole sample. 255 is missing. */
+  bySample: Record<string, Uint8Array | number>;
+}
+
+function categoricalPalette(column: HostCategoricalValues, palette: PaletteName): string[] {
+  return column.colors ?? paletteColors(palette, column.levels.length);
+}
+
 export default function App() {
   const providedHost = useOptionalGateLabHost();
   const fallbackBrowserHost = useMemo(() => createBrowserHost(), []);
@@ -673,6 +693,16 @@ export default function App() {
   const [hostColDataBusy, setHostColDataBusy] = useState(false);
   const [hostAdapterWriteBusy, setHostAdapterWriteBusy] = useState(false);
   const [hostColDataColumns, setHostColDataColumns] = useState<readonly string[]>([]);
+  // Categorical colData columns the host offers for "Colour by", and the ones fetched so far.
+  // Values arrive per sample as one code per event, exactly the form the categorical export sends
+  // the other way, and are fetched only when a column is chosen: a large SCE can carry many
+  // annotation columns, and none of them belongs in the dataset payload.
+  const [hostCategoricalColumns, setHostCategoricalColumns] =
+    useState<readonly Readonly<{ name: string; levelCount: number }>[]>([]);
+  const [hostCategoricalValues, setHostCategoricalValues] =
+    useState<Record<string, HostCategoricalValues>>({});
+  const hostCategoricalLoadingRef = useRef<Set<string>>(new Set());
+  const [overlayColDataColumn, setOverlayColDataColumn] = useState<string | null>(null);
   const [hostDatasetDescriptor, setHostDatasetDescriptor] =
     useState<GateLabHostDatasetDescriptor | null>(null);
   const hostExistingCompensatedAssays = useMemo(
@@ -829,7 +859,7 @@ export default function App() {
   const [contourThreshold, setContourThreshold] = useState(5); // outer contour % of peak
   const [instrumentMode, setInstrumentMode] = useState<"auto" | "flow" | "cytof">("auto"); // active sample's instrument override
   // Colour-by-factor overlay on the main plot (population partition / division level).
-  const [overlayBy, setOverlayBy] = useState<"none" | "population" | "division" | "sample">("none");
+  const [overlayBy, setOverlayBy] = useState<"none" | "population" | "division" | "sample" | "coldata">("none");
   // Scope the gates drawn on the plot to the displayed branch (default), or draw every gate
   // that shares the channel pair. The wide view is for comparing thresholds set on different
   // branches against each other, which the scoped view deliberately hides.
@@ -3025,6 +3055,7 @@ export default function App() {
         columns: [{ columnName, levels, sampleValues }],
       });
       setHostColDataColumns((current) => [...new Set([...current, columnName])]);
+      noteHostCategoricalColumn(columnName, levels.length);
       const written = result.columns[0];
       setImportMsg(
         `Wrote division calls to SCE colData '${columnName}'` +
@@ -3088,6 +3119,12 @@ export default function App() {
       setHostColDataColumns((current) => [
         ...new Set([...current, ...result.columns.map(({ columnName }) => columnName)]),
       ]);
+      for (const { columnName } of result.columns) {
+        noteHostCategoricalColumn(
+          columnName,
+          columns.find((column) => column.columnName === columnName)?.levels.length ?? 0,
+        );
+      }
       setImportMsg(
         `Wrote ${result.columns.length} sample metadata column` +
           `${result.columns.length === 1 ? "" : "s"} to SCE colData.`,
@@ -3210,6 +3247,9 @@ export default function App() {
           throw new Error(`SingleCellExperiment '${dataset.label}' has no samples.`);
         }
         setHostColDataColumns(dataset.colDataColumns ?? []);
+        setHostCategoricalColumns(dataset.colDataCategorical ?? []);
+        setHostCategoricalValues({});
+        hostCategoricalLoadingRef.current.clear();
         setWorkspaceEditRevision(0);
         workspaceEditRevisionRef.current = 0;
         lastHostSavedEditRevisionRef.current = -1;
@@ -3328,6 +3368,11 @@ export default function App() {
               root_population_id: workspace.gating.root_population_id,
               active_population_id: workspace.gating.active_population_id,
               selected_gate_id: workspace.gating.selected_gate_id,
+              // The SCE holds the whole workspace file, parked hierarchies included; restoring
+              // only the active tree would drop them on every reload in GateLabR.
+              hierarchies: workspace.gating.hierarchies,
+              active_hierarchy_id: workspace.gating.active_hierarchy_id,
+              stored_hierarchies: workspace.gating.stored_hierarchies?.map((h) => ({ ...h, selected_pop_ids: [] })),
             });
             hostedStatus =
               `Restored ${workspace.gating.gate_order.length} gate` +
@@ -3681,6 +3726,41 @@ export default function App() {
   }
   buildWsRef.current = buildWorkspaceFile; // keep the autosave builder fresh each render
 
+  /**
+   * Every SCE sample, gated under any hierarchy on demand. The active hierarchy reuses the gating
+   * already computed for the plot and the background cache; a parked hierarchy is evaluated here
+   * with its own tree over the shared gates.
+   */
+  function hostedMembershipSamples(datasetId: string): HostedMembershipSample[] {
+    return samples.map((entry): HostedMembershipSample => {
+      const source = entry.hostSource;
+      if (!source || source.datasetId !== datasetId) {
+        throw new Error(`Sample '${entry.name}' is not mapped to this SCE.`);
+      }
+      return {
+        sampleId: source.sampleId,
+        eventCount: source.eventIndex.length,
+        gatingFor: (tree: HierarchyTree) => {
+          if (!tree.active) {
+            return recomputeGating(entry.sample, {
+              ...gatingState,
+              populations: tree.populations,
+              root_population_id: tree.root_population_id,
+            });
+          }
+          if (entry.id === activeSampleId) return gatingDerived;
+          const cached = inactiveGatingCacheRef.current.get(entry.id);
+          return cached &&
+            cached.sample === entry.sample &&
+            cached.dataRevision === entry.sample.dataRevision &&
+            cached.gateVersion === state.gate_version
+            ? cached.gating
+            : recomputeGating(entry.sample, gatingState);
+        },
+      };
+    });
+  }
+
   function saveHostedWorkspace(
     reason: "autosave" | "explicit",
     clientRevision = workspaceEditRevisionRef.current,
@@ -3705,6 +3785,11 @@ export default function App() {
         }
         setHostWorkspaceStatus("saving");
         const workspaceJson = JSON.stringify(ws);
+        // An explicit save also hands R every population's membership, for every hierarchy and
+        // sample, so the whole tree can be read back there. Autosaves carry geometry only.
+        const memberships = reason === "explicit"
+          ? buildHostedMemberships(state, hostedMembershipSamples(datasetId))
+          : undefined;
         const writeAt = (expectedRevision: number) =>
           host.workspaces!.writeWorkspace({
             datasetId,
@@ -3713,6 +3798,7 @@ export default function App() {
             reason,
             workspaceJson,
             writerId: hostWriterIdRef.current!,
+            ...(memberships ? { memberships } : {}),
           });
         let result: GateLabHostWorkspaceWriteResult;
         try {
@@ -4916,6 +5002,20 @@ export default function App() {
     state.gate_version,
   ]);
 
+  /** A column the app just wrote is offered for colouring, and any values fetched before are dropped. */
+  function noteHostCategoricalColumn(columnName: string, levelCount: number): void {
+    setHostCategoricalColumns((current) => [
+      ...current.filter((column) => column.name !== columnName),
+      { name: columnName, levelCount },
+    ]);
+    setHostCategoricalValues((current) => {
+      if (!(columnName in current)) return current;
+      const next = { ...current };
+      delete next[columnName];
+      return next;
+    });
+  }
+
   async function exportHostedPopulationColumns(
     specs: readonly ScePopulationColumnSpec[],
     overwrite: boolean,
@@ -4981,6 +5081,7 @@ export default function App() {
       setHostColDataColumns((current) => [
         ...new Set([...current, ...result.columns.map(({ columnName }) => columnName)]),
       ]);
+      for (const { columnName } of result.columns) noteHostCategoricalColumn(columnName, 2);
       setImportMsg(
         `Wrote ${result.columns.length} population membership column` +
           `${result.columns.length === 1 ? "" : "s"} to the SCE · ` +
@@ -5146,6 +5247,54 @@ export default function App() {
     dispatch(a);
   };
 
+  // Fetch a categorical column the first time it is chosen; the values then stay for the session
+  // unless the app itself rewrites that column.
+  useEffect(() => {
+    if (overlayBy !== "coldata" || !overlayColDataColumn) return;
+    const columnName = overlayColDataColumn;
+    if (hostCategoricalValues[columnName] || hostCategoricalLoadingRef.current.has(columnName)) return;
+    const datasetId = samples[0]?.hostSource?.datasetId;
+    const read = host.colData?.readCategoricalColumn;
+    if (!isSceHost || !datasetId || !read) {
+      setError("This host cannot supply colData values to colour by.");
+      setOverlayBy("none");
+      return;
+    }
+    hostCategoricalLoadingRef.current.add(columnName);
+    void read.call(host.colData, {
+      contractVersion: GATELAB_HOST_COLDATA_CONTRACT_VERSION,
+      datasetId,
+      columnName,
+    }).then((result) => {
+      const bySample: Record<string, Uint8Array | number> = {};
+      for (const values of result.sampleValues) {
+        bySample[values.sampleId] = typeof values.constantCode === "number"
+          ? values.constantCode
+          : decodeUint8Base64(values.codesBase64 ?? "");
+      }
+      setHostCategoricalValues((current) => ({
+        ...current,
+        [columnName]: {
+          levels: [...result.levels],
+          ...(result.colors && result.colors.length === result.levels.length
+            ? { colors: [...result.colors] }
+            : {}),
+          bySample,
+        },
+      }));
+    }).catch((cause) => {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setOverlayBy("none");
+    }).finally(() => {
+      hostCategoricalLoadingRef.current.delete(columnName);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overlayBy, overlayColDataColumn, hostCategoricalValues, isSceHost, samples]);
+  const overlayColDataValues =
+    overlayBy === "coldata" && overlayColDataColumn
+      ? hostCategoricalValues[overlayColDataColumn] ?? null
+      : null;
+
   // Per-event colour index for the "Colour by" overlay (population Partition or division level).
   const overlaySpec = useMemo<OverlaySpec | null>(() => {
     if (!sample || overlayBy === "none") return null;
@@ -5171,6 +5320,22 @@ export default function App() {
       const palette = [...levels.map((l) => populationColor(overlayPalette, state.populations[l.popId]?.colorSlot)), UNGATED_COLOR];
       return { colors, palette, labels: [...levels.map((l) => l.name), "ungated"] };
     }
+    if (overlayBy === "coldata") {
+      const sampleId = activeEntry?.hostSource?.sampleId;
+      const codes = sampleId !== undefined ? overlayColDataValues?.bySample[sampleId] : undefined;
+      if (!overlayColDataValues || codes === undefined) return null;
+      const missing = overlayColDataValues.levels.length;
+      const colors = new Uint8Array(n);
+      for (let e = 0; e < n; e++) {
+        const code = typeof codes === "number" ? codes : codes[e];
+        colors[e] = code === 255 || code === undefined ? missing : code;
+      }
+      return {
+        colors,
+        palette: [...categoricalPalette(overlayColDataValues, overlayPalette), UNGATED_COLOR],
+        labels: [...overlayColDataValues.levels, "missing"],
+      };
+    }
     // division level (needs a profile on the active sample)
     const prof = activeSampleId ? compatibleDivisionProfiles[activeSampleId] : undefined;
     const idx = prof ? sample.index(prof.channelKey) : undefined;
@@ -5181,7 +5346,7 @@ export default function App() {
     for (let e = 0; e < n; e++) colors[e] = assignDivisionLevel(dye[e], prof.boundaries);
     return { colors, palette: divisionPalette(nLevels), labels: Array.from({ length: nLevels }, (_, i) => `Div${i}`) };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, activeDataRevision, overlayBy, overlayPalette, fileName, state.populations, state.root_population_id, state.gate_version, derived, activeSampleId, compatibleDivisionProfiles]);
+  }, [sample, activeDataRevision, overlayBy, overlayPalette, fileName, state.populations, state.root_population_id, state.gate_version, derived, activeSampleId, compatibleDivisionProfiles, activeEntry, overlayColDataValues]);
 
   // Hierarchy-scoped gate visibility; see branchScopedGateOrder for the rule.
   //
@@ -5218,23 +5383,6 @@ export default function App() {
     ],
   );
 
-  const mainPlotGates = useMemo(() => {
-    if (!sample) return [];
-    return buildPlotGates(
-      sample,
-      state.gates,
-      branchGateOrder,
-      derived.gateCounts,
-      sample.channels[xIdx].key,
-      sample.channels[yIdx].key,
-    );
-    // activeDisplayContextKey and scalesVersion are load-bearing: buildPlotGates converts
-    // each gate out of raw space with the CURRENT transform, so without them the gate keeps
-    // display coordinates computed under the previous scatter cofactor or scale while the
-    // event cloud and the axis both move to the new one. The gate then appears to slide off
-    // its own events even though membership, evaluated in raw space, never changed.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, state.gates, branchGateOrder, derived.gateCounts, xIdx, yIdx, activeDisplayContextKey, scalesVersion]);
 
   const workspaceAutomaticRanges = useMemo(() => {
     if (
@@ -5290,6 +5438,93 @@ export default function App() {
       .map((e) => e.name)),
     [includedSamples, primaryPanelKey, panelKeyOf],
   );
+
+  // The plot pools every compatible checked file, so the counts on its gate labels pool the
+  // same files. A per-file count under the pooled cloud misleads: a blue file with no events in
+  // a region reads 0% beneath a cloud drawn from the others. The contributor filter mirrors the
+  // cloud's (scale context, panel, both axes present). Null keeps the blue file's own counts,
+  // which are exact whenever that file is the only one drawn.
+  const pooledGateCounts = useMemo(() => {
+    if (!sample || includedSamples.length < 2) return null;
+    const xName = sample.channels[xIdx].key;
+    const yName = sample.channels[yIdx].key;
+    const contributors = includedSamples.filter((entry) =>
+      entry.sample.workspaceScaleContextKey === activeWorkspaceScaleContextKey &&
+      panelKeyOf(entry.sample) === primaryPanelKey &&
+      entry.sample.index(xName) !== undefined &&
+      entry.sample.index(yName) !== undefined);
+    if (contributors.length === 0) return null;
+    if (contributors.length === 1 && contributors[0].id === activeSampleId) return null;
+    const inputs: PooledGateCountInput[] = [];
+    for (const entry of contributors) {
+      let gating: GatingDerived | undefined;
+      if (entry.id === activeSampleId) {
+        gating = gatingDerived;
+      } else {
+        const cached = inactiveGatingCacheRef.current.get(entry.id);
+        if (
+          cached &&
+          cached.sample === entry.sample &&
+          cached.dataRevision === entry.sample.dataRevision &&
+          cached.gateVersion === state.gate_version
+        ) gating = cached.gating;
+      }
+      // Still being gated in the background: report the scope as the blue file until it lands.
+      if (!gating) return { counts: null, fileCount: contributors.length };
+      inputs.push({
+        gateMasks: gating.gateMasks,
+        activeMask: derivePopulationDisplaySelection(entry.sample, state, gating).activeMask,
+        eventCount: entry.sample.fcs.nEvents,
+      });
+    }
+    return { counts: aggregateGateCounts(state.gates, inputs), fileCount: contributors.length };
+    // The inactive-file masks live in a ref; inactiveGatingCacheVersion is their change signal.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    sample, includedSamples, xIdx, yIdx, activeWorkspaceScaleContextKey, panelKeyOf,
+    primaryPanelKey, activeSampleId, gatingDerived, inactiveGatingCacheVersion,
+    state.gate_version, state.gates, state.active_population_id, state.selected_pop_ids,
+    state.root_population_id,
+  ]);
+  const gateCountScope = useMemo(() => {
+    if (!pooledGateCounts) return null;
+    const count = pooledGateCounts.fileCount;
+    return pooledGateCounts.counts
+      ? {
+          text: t("pooled"),
+          hint: t("Pooled over {count} checked files: events inside the gate as a share of the active population, both summed across those files.", { count }),
+          listText: t("pooled · {count} FCS", { count }),
+        }
+      : {
+          text: t("blue file only"),
+          hint: t("Counts from the blue file alone while the other checked files are gated in the background; the plot pools {count} files.", { count }),
+          listText: t("blue file only · pooling…"),
+        };
+  }, [pooledGateCounts, t]);
+  const labelGateCounts = pooledGateCounts?.counts ?? derived.gateCounts;
+  const gateListDerived = useMemo<Derived>(
+    () => pooledGateCounts?.counts ? { ...derived, gateCounts: pooledGateCounts.counts } : derived,
+    [derived, pooledGateCounts],
+  );
+
+  const mainPlotGates = useMemo(() => {
+    if (!sample) return [];
+    return buildPlotGates(
+      sample,
+      state.gates,
+      branchGateOrder,
+      labelGateCounts,
+      sample.channels[xIdx].key,
+      sample.channels[yIdx].key,
+      gateCountScope && { text: gateCountScope.text, hint: gateCountScope.hint },
+    );
+    // activeDisplayContextKey and scalesVersion are load-bearing: buildPlotGates converts
+    // each gate out of raw space with the CURRENT transform, so without them the gate keeps
+    // display coordinates computed under the previous scatter cofactor or scale while the
+    // event cloud and the axis both move to the new one. The gate then appears to slide off
+    // its own events even though membership, evaluated in raw space, never changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sample, state.gates, branchGateOrder, labelGateCounts, gateCountScope, xIdx, yIdx, activeDisplayContextKey, scalesVersion]);
 
   const payload = useMemo(() => {
     if (!sample) return null;
@@ -5397,6 +5632,25 @@ export default function App() {
           return best < 0 ? ungated : best;
         };
       });
+    } else if (overlayBy === "coldata" && overlayColDataValues) {
+      const column = overlayColDataValues;
+      const missing = column.levels.length;
+      colorPalette = [...categoricalPalette(column, overlayPalette), UNGATED_COLOR];
+      colorLabels = [...column.levels, "missing"];
+      compatible.forEach(({ entry }, index) => {
+        const sampleId = entry.hostSource?.sampleId;
+        const codes = sampleId !== undefined ? column.bySample[sampleId] : undefined;
+        if (codes === undefined) {
+          inputs[index].colorIndex = missing;
+        } else if (typeof codes === "number") {
+          inputs[index].colorIndex = codes === 255 ? missing : codes;
+        } else {
+          inputs[index].colorAt = (eventIndex) => {
+            const code = codes[eventIndex];
+            return code === 255 || code === undefined ? missing : code;
+          };
+        }
+      });
     } else if (overlayBy === "division") {
       const profiles = compatible.map(({ entry }) => {
         const profile = compatibleDivisionProfiles[entry.id];
@@ -5471,6 +5725,7 @@ export default function App() {
     state.root_population_id,
     state.populations,
     compatibleDivisionProfiles,
+    overlayColDataValues,
     fileName,
   ]);
 
@@ -6041,8 +6296,18 @@ export default function App() {
                     "explicit",
                     workspaceEditRevisionRef.current,
                   )
-                    .then(({ revision }) => {
-                      setImportMsg(`Saved GateLab workspace to SCE · revision ${revision}`);
+                    .then(({ revision, memberships }) => {
+                      setImportMsg(
+                        `Saved GateLab workspace to SCE · revision ${revision}` +
+                          (memberships
+                            ? ` · memberships for ${memberships.populations} population` +
+                              `${memberships.populations === 1 ? "" : "s"} in ` +
+                              `${memberships.hierarchies} hierarch` +
+                              `${memberships.hierarchies === 1 ? "y" : "ies"}`
+                            // The core sent them; an R side that predates them stores nothing and
+                            // says nothing, so say it here rather than let the user find out later.
+                            : " · no memberships stored: this GateLabR predates them, reload it"),
+                      );
                     })
                     .catch((cause) => {
                       setError(cause instanceof Error ? cause.message : String(cause));
@@ -6373,17 +6638,45 @@ export default function App() {
                 <span className="gl-ctl-sep" />
                 <label className="gl-field-inline">
                   {t("Colour by")}
-                  <select value={overlayBy} onChange={(e) => setOverlayBy(e.target.value as typeof overlayBy)}>
+                  <select
+                    value={overlayBy === "coldata" ? `coldata:${overlayColDataColumn ?? ""}` : overlayBy}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      if (value.startsWith("coldata:")) {
+                        setOverlayColDataColumn(value.slice("coldata:".length));
+                        setOverlayBy("coldata");
+                      } else {
+                        setOverlayBy(value as Exclude<typeof overlayBy, "coldata">);
+                      }
+                    }}
+                  >
                     <option value="none">{t("None")}</option>
                     {samples.length > 1 && <option value="sample">{t("Sample")}</option>}
                     <option value="population">{t("Population")}</option>
                     {activeSampleId && compatibleDivisionProfiles[activeSampleId] && <option value="division">{t("Division")}</option>}
+                    {isSceHost && hostCategoricalColumns.length > 0 && (
+                      <optgroup label={t("colData")}>
+                        {hostCategoricalColumns.map((column) => (
+                          <option key={column.name} value={`coldata:${column.name}`}>
+                            {`${column.name} (${column.levelCount})`}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
                   </select>
                 </label>
+                {overlayBy === "coldata" && overlayColDataColumn && !overlayColDataValues && (
+                  <span className="gl-muted">{t("loading {column}…", { column: overlayColDataColumn })}</span>
+                )}
                 {overlayBy !== "none" && (
-                  <label className="gl-field-inline">
+                  <label
+                    className="gl-field-inline"
+                    title={overlayColDataValues?.colors
+                      ? t("Colours for this column are fixed in metadata(sce)$gatelab_palettes, so the palette does not apply.")
+                      : undefined}
+                  >
                     {t("Palette")}
-                    <select value={overlayPalette} onChange={(e) => setOverlayPalette(e.target.value as PaletteName)}>
+                    <select value={overlayPalette} disabled={!!overlayColDataValues?.colors} onChange={(e) => setOverlayPalette(e.target.value as PaletteName)}>
                       {OVERLAY_PALETTES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
                     </select>
                   </label>
@@ -7034,9 +7327,10 @@ export default function App() {
                 onDelete={(ids) => ids.length && setCrud({ kind: "confirmDelete", what: "gates", ids })}
               />
             </div>
-            <GateList state={state} derived={derived} dispatch={uiDispatch}
+            <GateList state={state} derived={gateListDerived} dispatch={uiDispatch}
               labelForKey={(k) => sample?.labelForKey(k) ?? k}
-              badgeFor={(g) => (sample ? gateSpaceBadge(sample, g) : null)} />
+              badgeFor={(g) => (sample ? gateSpaceBadge(sample, g) : null)}
+              countScope={gateCountScope?.listText ?? null} />
           </div>
           <div className="gl-side-section gl-side-grow">
             <div className="gl-side-head">

@@ -949,6 +949,15 @@ const JA: Readonly<Record<string, string>> = {
   "Saved compensation restore progress": "保存済み補正の復元進捗",
   "CyTOF compensation progress": "CyTOF補正の進捗",
   "{percent}% · {processed} / {total} events": "{percent}% · {processed} / {total}イベント",
+  "colData": "colData",
+  "loading {column}…": "{column} を読み込み中…",
+  "Colours for this column are fixed in metadata(sce)$gatelab_palettes, so the palette does not apply.": "この列の色は metadata(sce)$gatelab_palettes で固定されているため、パレットは適用されません。",
+  "pooled": "プール",
+  "blue file only": "青い行のみ",
+  "pooled · {count} FCS": "プール · {count} FCS",
+  "blue file only · pooling…": "青い行のみ · プール中…",
+  "Pooled over {count} checked files: events inside the gate as a share of the active population, both summed across those files.": "チェック済み{count}ファイルのプール値: ゲート内イベント数を、同じファイル群で合算したアクティブ集団に対する割合として示します。",
+  "Counts from the blue file alone while the other checked files are gated in the background; the plot pools {count} files.": "他のチェック済みファイルをバックグラウンドでゲーティング中のため、青い行のファイルのみの値です。プロットは{count}ファイルをプールしています。",
 };
 
 export type TranslationValues = Readonly<Record<string, string | number>>;

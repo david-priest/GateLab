@@ -16,9 +16,11 @@ interface Props {
   labelForKey?: (key: string) => string;
   /** Two-letter gating-space badge for a gate; null or omitted shows nothing (CyTOF). */
   badgeFor?: (gate: Gate) => GateSpaceBadge | null;
+  /** What the counts were taken over when not the blue file alone, e.g. "pooled · 3 FCS". */
+  countScope?: string | null;
 }
 
-export function GateList({ state, derived, dispatch, labelForKey = (k) => k, badgeFor }: Props) {
+export function GateList({ state, derived, dispatch, labelForKey = (k) => k, badgeFor, countScope }: Props) {
   const { t } = useI18n();
   const { gates, gate_order, selected_gate_id, selected_gate_ids } = state;
   const checked = new Set(selected_gate_ids);
@@ -43,7 +45,8 @@ export function GateList({ state, derived, dispatch, labelForKey = (k) => k, bad
         const countText = isQuad
           ? t("4 populations")
           : counts && counts.event_count != null
-            ? `${counts.event_count.toLocaleString()} (${counts.percent_of_parent}%)`
+            ? `${counts.event_count.toLocaleString()} (${counts.percent_of_parent}%)` +
+              (countScope ? ` · ${countScope}` : "")
             : "";
         const chText = `${labelForKey(gate.x_channel)} / ${labelForKey(gate.y_channel)}${isQuad ? `  · ${t("quadrant")}` : ""}`;
         return (

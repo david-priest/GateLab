@@ -210,6 +210,23 @@ describe("GateLab cytof interaction patches", () => {
     warning.mockRestore();
   });
 
+  it("names the scope of a pooled count beside the percentage, on plain and quadrant labels", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(cytofSrc).not.toContain("percent_scope");
+    expect(patched).toContain("(gate.percent_scope ? ' ' + gate.percent_scope : '')");
+    // Both label kinds carry it: the gate label's percentage line and the four quadrant labels.
+    expect((patched.match(/gate\.percent_scope \? ' ' \+ gate\.percent_scope/g) ?? []).length).toBe(2);
+    // The hint takes the tooltip and carries the space hint with it (only the first title shows).
+    expect(patched).toContain("labelG.append('title').text(gate.percent_scope_hint +");
+    // Applied once, not once per re-patch.
+    expect(patchCytofForGateLab(patched)).toBe(patched);
+
+    warning.mockRestore();
+  });
+
   // An arcsinh scatter axis packs -100, -10, 0, 10, 100 into a few pixels around zero. The
   // thinning that handles this was gated to tick_mode 'asinh'/'logicle', so scatter axes — the
   // ones that actually crowd — never got it, and the labels collided.
