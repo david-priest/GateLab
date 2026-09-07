@@ -25,6 +25,14 @@ export function encodeUint8Base64(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
+// Inverse of encodeUint8Base64: one byte per event, as the R host sends categorical codes.
+export function decodeUint8Base64(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
 // Inverse — decode a base64 float32 payload back to a Float32Array (for tests /
 // round-trip checks against the D3 decoder).
 export function decodeFloat32Base64(b64: string): Float32Array {

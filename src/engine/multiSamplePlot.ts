@@ -1,7 +1,8 @@
 import type { Sample } from "./sample";
 import { robustAxisRange } from "./axisRange";
-import type { PopulationMap } from "./models";
+import type { Gate, PopulationMap } from "./models";
 import type { TreeStats } from "../store";
+import { gateMaskKey, type GateCount, type GateMaskCache } from "./populations";
 
 export interface CombinedSamplePlotInput {
   id: string;
@@ -70,6 +71,61 @@ export function aggregatePopulationTreeStats(
   }
 
   return { event_count, percent_of_parent, percent_of_total };
+}
+
+export interface PooledGateCountInput {
+  /** Full-file masks for every gate (and quadrant) of this file, as recomputeGating leaves them. */
+  gateMasks: GateMaskCache;
+  /** This file's events in the active population; null means every event. */
+  activeMask: Uint8Array | null;
+  eventCount: number;
+}
+
+/**
+ * Gate counts over several checked files at once: the events inside each gate summed across the
+ * files, as a share of the active population summed the same way.
+ *
+ * A single file's counts are exact for that file and only that file. When the plot pools the
+ * checked files, a per-file count under the pooled cloud misleads: a blue file with no events in
+ * a region reads 0% beneath a dense cloud drawn from the others. The label that sits on a pooled
+ * cloud has to be pooled over the same files.
+ */
+export function aggregateGateCounts(
+  gates: Record<string, Gate>,
+  inputs: readonly PooledGateCountInput[],
+): Record<string, GateCount> {
+  const parentCount = inputs.reduce(
+    (total, input) => total + countSelected(input.activeMask, input.eventCount),
+    0,
+  );
+  const round2 = (value: number) => Math.round(value * 100) / 100;
+  const percent = (count: number) => (parentCount > 0 ? round2((count / parentCount) * 100) : 0);
+  const inside = (key: string): number => inputs.reduce((total, input) => {
+    const gateMask = input.gateMasks[key];
+    if (!gateMask) return total;
+    const active = input.activeMask;
+    const limit = Math.min(gateMask.length, input.eventCount);
+    let count = 0;
+    for (let index = 0; index < limit; index++) {
+      if (gateMask[index] && (!active || active[index])) count++;
+    }
+    return total + count;
+  }, 0);
+
+  const counts: Record<string, GateCount> = {};
+  for (const [gateId, gate] of Object.entries(gates)) {
+    if (gate.gate_type === "quadrant") {
+      const quadrants = [1, 2, 3, 4].map((quadrant) => {
+        const count = inside(gateMaskKey(gateId, quadrant));
+        return { event_count: count, percent_of_parent: percent(count) };
+      });
+      counts[gateId] = { event_count: null, percent_of_parent: null, quadrants };
+    } else {
+      const count = inside(gateMaskKey(gateId));
+      counts[gateId] = { event_count: count, percent_of_parent: percent(count) };
+    }
+  }
+  return counts;
 }
 
 function countSelected(mask: Uint8Array | null, eventCount: number): number {

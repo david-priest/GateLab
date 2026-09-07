@@ -2,13 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { FcsFile } from "./fcs";
 import { Sample } from "./sample";
 import {
+  aggregateGateCounts,
   aggregatePopulationTreeStats,
   allocateCombinedSampleCaps,
   buildCombinedSamplePointCloud,
   buildWorkspaceAxisRanges,
   type CombinedSamplePlotInput,
 } from "./multiSamplePlot";
-import type { PopulationMap } from "./models";
+import type { Gate, PopulationMap } from "./models";
+import { gateMaskKey } from "./populations";
 
 function sample(name: string, values: readonly number[]): Sample {
   const columns = [
@@ -162,5 +164,49 @@ describe("aggregatePopulationTreeStats", () => {
     expect(pooled.event_count).toEqual({ root: 300, cells: 200, f0: 30, f1: 60 });
     expect(pooled.percent_of_parent).toEqual({ root: 100, cells: 66.67, f0: 15, f1: 30 });
     expect(pooled.percent_of_total).toEqual({ root: 100, cells: 66.67, f0: 10, f1: 20 });
+  });
+});
+
+describe("aggregateGateCounts", () => {
+  const gates = {
+    g1: { gate_id: "g1", name: "G1", gate_type: "polygon", x_channel: "a", y_channel: "b", vertices: [] },
+    q1: { gate_id: "q1", name: "Q1", gate_type: "quadrant", x_channel: "a", y_channel: "b", center: [0, 0] },
+  } as unknown as Record<string, Gate>;
+
+  // The case the pooled label exists for: the blue file has no events in the gate, the other
+  // checked file has three of its four there. Per file that is 0%; pooled it is 3 of 7.
+  it("sums gate members and the active population across files", () => {
+    const counts = aggregateGateCounts(gates, [
+      {
+        gateMasks: { g1: Uint8Array.from([0, 0, 0]), [gateMaskKey("q1", 1)]: Uint8Array.from([1, 0, 0]),
+          [gateMaskKey("q1", 2)]: Uint8Array.from([0, 1, 0]), [gateMaskKey("q1", 3)]: Uint8Array.from([0, 0, 1]), [gateMaskKey("q1", 4)]: Uint8Array.from([0, 0, 0]) },
+        activeMask: null,
+        eventCount: 3,
+      },
+      {
+        gateMasks: { g1: Uint8Array.from([1, 1, 1, 0]), [gateMaskKey("q1", 1)]: Uint8Array.from([0, 0, 0, 0]),
+          [gateMaskKey("q1", 2)]: Uint8Array.from([1, 1, 0, 0]), [gateMaskKey("q1", 3)]: Uint8Array.from([0, 0, 1, 1]), [gateMaskKey("q1", 4)]: Uint8Array.from([0, 0, 0, 0]) },
+        activeMask: null,
+        eventCount: 4,
+      },
+    ]);
+    expect(counts.g1).toEqual({ event_count: 3, percent_of_parent: 42.86 });
+    expect(counts.q1.quadrants!.map((q) => q.event_count)).toEqual([1, 3, 3, 0]);
+    expect(counts.q1.quadrants![1].percent_of_parent).toBe(42.86);
+  });
+
+  it("counts only events in each file's active population, with the denominator pooled the same way", () => {
+    const counts = aggregateGateCounts({ g1: gates.g1 }, [
+      { gateMasks: { g1: Uint8Array.from([1, 1, 1]) }, activeMask: Uint8Array.from([1, 0, 0]), eventCount: 3 },
+      { gateMasks: { g1: Uint8Array.from([1, 0, 0, 0]) }, activeMask: Uint8Array.from([1, 1, 1, 0]), eventCount: 4 },
+    ]);
+    expect(counts.g1).toEqual({ event_count: 2, percent_of_parent: 50 });
+  });
+
+  it("reports 0% rather than NaN when no file has events in the active population", () => {
+    const counts = aggregateGateCounts({ g1: gates.g1 }, [
+      { gateMasks: { g1: Uint8Array.from([1]) }, activeMask: Uint8Array.from([0]), eventCount: 1 },
+    ]);
+    expect(counts.g1).toEqual({ event_count: 0, percent_of_parent: 0 });
   });
 });

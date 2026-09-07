@@ -601,6 +601,33 @@ ${badgeNeedle}`;
     console.warn("[GateLab] cytof gate space-badge patch did not match.");
   }
 
+  // A gate count is exact for the file it was taken from. When the plot pools several checked
+  // files the app supplies counts pooled over the same files and names that scope, and the label
+  // says so beside the percentage: a bare "0.0%" under a dense pooled cloud is the misreading
+  // this prevents. The scope's hint takes the label tooltip, carrying the space hint with it,
+  // since a browser shows only the first <title>.
+  const scopeNeedle =
+    "                ? Number(gate.percent_of_parent).toFixed(1) + '%'\n" +
+    "                : null;";
+  const scopePatch =
+    "                ? Number(gate.percent_of_parent).toFixed(1) + '%' +\n" +
+    "                  (gate.percent_scope ? ' ' + gate.percent_scope : '')\n" +
+    "                : null;\n" +
+    "            if (gate.percent_scope_hint) {\n" +
+    "                labelG.append('title').text(gate.percent_scope_hint +\n" +
+    "                    (gate.space_hint ? '\\n' + gate.space_hint : ''));\n" +
+    "            }";
+  const quadrantScopeNeedle =
+    "                      (p != null ? '  ' + Number(p).toFixed(1) + '%' : '');";
+  const quadrantScopePatch =
+    "                      (p != null ? '  ' + Number(p).toFixed(1) + '%' +\n" +
+    "                        (gate.percent_scope ? ' ' + gate.percent_scope : '') : '');";
+  if (out.includes(scopeNeedle) && out.includes(quadrantScopeNeedle) && !out.includes("gate.percent_scope")) {
+    out = out.replace(scopeNeedle, scopePatch).replace(quadrantScopeNeedle, quadrantScopePatch);
+  } else if (!out.includes("gate.percent_scope")) {
+    console.warn("[GateLab] cytof gate count-scope patch did not match.");
+  }
+
   // Two fixes to axis-label crowding, both around zero.
   //
   // 1. The label thinning ran only for tick_mode 'asinh' and 'logicle'. Scatter axes were excluded

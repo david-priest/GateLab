@@ -1,3 +1,5 @@
+import type { GateLabHostPopulationSampleMask } from "./colDataContract";
+
 export const GATELAB_HOST_WORKSPACE_CONTRACT_VERSION = 1 as const;
 
 export type GateLabHostWorkspaceSource =
@@ -23,6 +25,43 @@ export interface GateLabHostWorkspaceEnvelope {
 
 export type GateLabHostWorkspaceWriteReason = "autosave" | "explicit";
 
+/** One population of one hierarchy, with its membership over every SCE sample. */
+export interface GateLabHostMembershipPopulation {
+  hierarchyId: string;
+  populationId: string;
+  populationName: string;
+  /** Null for the hierarchy's root. */
+  parentId: string | null;
+  gateLogic: "and" | "or";
+  gates: readonly Readonly<{
+    gateId: string;
+    gateName: string;
+    include: boolean;
+    quadrant?: number;
+  }>[];
+  /** One mask per SCE sample, in the packed form the colData export uses. */
+  sampleMasks: readonly GateLabHostPopulationSampleMask[];
+}
+
+/**
+ * Every population of every hierarchy, evaluated over every event of the SCE.
+ *
+ * The workspace JSON carries gate geometry, and membership is computed only in the browser, so
+ * without this the R side could never say which events a population holds without reimplementing
+ * the gating engine. Sent with an explicit save, not an autosave: it costs one bit per event per
+ * population and a full evaluation of every sample.
+ */
+export interface GateLabHostWorkspaceMemberships {
+  hierarchies: readonly Readonly<{
+    id: string;
+    name: string;
+    active: boolean;
+    rootPopulationId: string;
+  }>[];
+  /** In hierarchy order, then tree order within a hierarchy (parents before children). */
+  populations: readonly GateLabHostMembershipPopulation[];
+}
+
 export interface GateLabHostWorkspaceWriteRequest {
   datasetId: string;
   expectedRevision: number;
@@ -39,6 +78,12 @@ export interface GateLabHostWorkspaceWriteRequest {
    * Optional: hosts that predate it simply record nothing.
    */
   writerId?: string;
+  /**
+   * Population memberships to store beside the workspace. Optional: an autosave omits them, and a
+   * host that predates them ignores the field. The host keeps the last set it was given until the
+   * next set arrives, recording the workspace revision they were computed at.
+   */
+  memberships?: GateLabHostWorkspaceMemberships;
 }
 
 /** A revision conflict, carrying what the browser needs to tell its own lost write apart. */
@@ -53,6 +98,8 @@ export interface GateLabHostWorkspaceWriteResult {
   revision: number;
   clientRevision: number;
   savedAt: string;
+  /** Present when the write carried memberships and the host stored them. */
+  memberships?: Readonly<{ hierarchies: number; populations: number }>;
 }
 
 export interface GateLabHostWorkspacePort {

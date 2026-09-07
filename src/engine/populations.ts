@@ -9,7 +9,7 @@ import type { Gate, PopulationMap } from "./models";
 export type MaskMap = Record<string, Uint8Array>;
 export type GateMaskCache = Record<string, Uint8Array>;
 
-function gateMaskKey(gateId: string, quadrant?: number): string {
+export function gateMaskKey(gateId: string, quadrant?: number): string {
   return quadrant === undefined ? gateId : `${gateId}::quadrant:${quadrant}`;
 }
 

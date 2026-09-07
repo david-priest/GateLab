@@ -66,7 +66,26 @@ export interface GateLabHostCategoricalWriteResult {
   }>[];
 }
 
+export interface GateLabHostCategoricalReadRequest {
+  contractVersion: typeof GATELAB_HOST_COLDATA_CONTRACT_VERSION;
+  datasetId: string;
+  columnName: string;
+}
+
+/** A categorical colData column in the same per-sample form the write sends the other way. */
+export interface GateLabHostCategoricalReadResult {
+  columnName: string;
+  levels: readonly string[];
+  /** One colour per level when the host has one fixed, so the plot matches the analysis's figures. */
+  colors?: readonly string[];
+  sampleValues: readonly GateLabHostCategoricalSampleValues[];
+}
+
 export interface GateLabHostColDataPort {
+  /** Optional: a host that predates it advertises no categorical columns. */
+  readCategoricalColumn?(
+    request: GateLabHostCategoricalReadRequest,
+  ): Promise<GateLabHostCategoricalReadResult>;
   writeColumns(
     request: GateLabHostColDataWriteRequest,
   ): Promise<GateLabHostColDataWriteResult>;

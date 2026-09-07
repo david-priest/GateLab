@@ -5,6 +5,7 @@ import {
 } from "./datasetContract";
 import {
   GATELAB_HOST_COLDATA_CONTRACT_VERSION,
+  type GateLabHostCategoricalReadResult,
   type GateLabHostCategoricalWriteResult,
   type GateLabHostColDataPort,
   type GateLabHostColDataWriteResult,
@@ -420,6 +421,15 @@ export function createShinySceHost(
     },
   };
   const colData: GateLabHostColDataPort = {
+    async readCategoricalColumn(request) {
+      if (request.contractVersion !== GATELAB_HOST_COLDATA_CONTRACT_VERSION) {
+        throw new Error("GateLab supplied an incompatible colData read request.");
+      }
+      return sendRequest<GateLabHostCategoricalReadResult>(
+        "read-categorical-coldata",
+        request,
+      );
+    },
     async writeColumns(request) {
       if (request.contractVersion !== GATELAB_HOST_COLDATA_CONTRACT_VERSION) {
         throw new Error("GateLab supplied an incompatible colData write request.");

@@ -208,6 +208,31 @@ describe("createShinySceHost", () => {
       columns: [{ columnName: "condition", missingCount: 0 }],
     });
 
+    const readPromise = host.colData!.readCategoricalColumn!({
+      contractVersion: 1,
+      datasetId: "sce",
+      columnName: "cluster",
+    });
+    const readRequest = [...setInputValue.mock.calls].reverse().find(
+      ([name]) => name === "gatelabr_host_request",
+    )?.[1] as { requestId: string; operation: string; payload: { columnName: string } };
+    expect(readRequest.operation).toBe("read-categorical-coldata");
+    expect(readRequest.payload.columnName).toBe("cluster");
+    handlers.get("gatelabr-host-response")!({
+      requestId: readRequest.requestId,
+      ok: true,
+      result: {
+        columnName: "cluster",
+        levels: ["B", "T"],
+        sampleValues: [{ sampleId: "sample-0", eventCount: 2, codesBase64: "AAE=" }],
+      },
+    });
+    await expect(readPromise).resolves.toEqual({
+      columnName: "cluster",
+      levels: ["B", "T"],
+      sampleValues: [{ sampleId: "sample-0", eventCount: 2, codesBase64: "AAE=" }],
+    });
+
     const rowDataPromise = host.rowData!.writeChannelLabels({
       contractVersion: 1,
       datasetId: "sce",

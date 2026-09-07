@@ -14,6 +14,7 @@ interface CapturedPlotProps {
     y_b64: string;
     x_range: [number, number];
     y_range: [number, number];
+    gates: { name: string; percent_of_parent?: number | null; percent_scope?: string }[];
   };
   onNewGate: (gate: NewGate) => void;
 }
@@ -150,6 +151,53 @@ describe("App checked-sample gating display", () => {
     expect(host.textContent).not.toContain("different panel");
   });
 
+
+  // The label on a gate sits on the pooled cloud, so its count pools the same files. Here the
+  // blue file (sample-b, added last) has nothing inside the gate and sample-a has all three of
+  // its events there: per file that is 0.0% under a cloud that is plainly not empty.
+  it("pools the gate label and gate list counts across the checked files, and says so", async () => {
+    act(() => root.render(<App />));
+    const directInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(directInput, "files", {
+      configurable: true,
+      value: [testFile("sample-a.fcs", 1), testFile("sample-b.fcs", 2)],
+    });
+    await act(async () => {
+      directInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await settle();
+    expect(plottedCount()).toBe(7);
+
+    act(() => plotHarness.props!.onNewGate({
+      gate_type: "rectangle",
+      vertices: [[0, 0], [1.05, 1.05]],
+      x_channel: "FSC-A",
+      y_channel: "SSC-A",
+    }));
+    const create = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Create")!;
+    act(() => create.click());
+    await settle();
+
+    const plotGate = plotHarness.props!.payload.gates[0];
+    expect(plotGate.percent_scope).toBe("pooled");
+    expect(plotGate.percent_of_parent).toBe(42.86);
+    expect(host.textContent).toContain("3 (42.86%) · pooled · 2 FCS");
+
+    // Alone, the blue file's own count is exact and needs no qualifier.
+    const showA = host.querySelector<HTMLInputElement>(
+      'input[aria-label="Show sample-a.fcs in plots and analyses"]',
+    )!;
+    act(() => showA.click());
+    await settle();
+    expect(plottedCount()).toBe(4);
+    expect(plotHarness.props!.payload.gates[0].percent_scope).toBeUndefined();
+    expect(plotHarness.props!.payload.gates[0].percent_of_parent).toBe(0);
+    expect(host.textContent).toContain("0 (0%)");
+    expect(host.textContent).not.toContain("· pooled");
+  });
 
   it("makes the checkboxes the whole selection, with no separate active row", async () => {
     act(() => root.render(<App />));

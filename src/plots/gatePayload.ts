@@ -40,9 +40,21 @@ export interface PlotGate {
   /** false suppresses vertex handles: body select/move stays, per-vertex reshaping is denied. */
   editable?: boolean;
   percent_of_parent?: number | null;
+  /**
+   * Word drawn after the percentage naming what it was counted over ("pooled"), with a hint for
+   * the tooltip. Absent when the count is the plotted file's own, which needs no qualifier.
+   */
+  percent_scope?: string;
+  percent_scope_hint?: string;
   center?: [number, number];
   quadrant_counts?: number[];
   quadrant_pcts?: number[];
+}
+
+/** The scope a gate count was taken over, when it is not simply the plotted file's own. */
+export interface GateCountScope {
+  text: string;
+  hint: string;
 }
 
 /** A small label offset above the gate, in DISPLAY space (mirrors defaultLabelOffset
@@ -229,6 +241,7 @@ export function buildPlotGates(
   gateCounts: Record<string, GateCount>,
   xChannel: string,
   yChannel: string,
+  countScope: GateCountScope | null = null,
 ): PlotGate[] {
   const out: PlotGate[] = [];
   // The display extent of the DATA on each axis — the frame a label has to land inside.
@@ -262,6 +275,9 @@ export function buildPlotGates(
       name: gate.name,
       space_badge: badge?.text,
       space_hint: badge?.hint,
+      ...(countScope
+        ? { percent_scope: countScope.text, percent_scope_hint: countScope.hint }
+        : {}),
     };
 
     if (gate.gate_type === "quadrant") {
