@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { useI18n } from "./i18n";
+import { HierarchyChip, type HierarchyChipInfo } from "./HierarchyChip";
+import { groupCheckedCount, type FacetColumn } from "../engine/sampleFacets";
 
 export interface SampleListItem {
   id: string;
@@ -7,6 +9,10 @@ export interface SampleListItem {
   eventCount: number;
   channelCount: number;
   sourcePath?: string;
+  /** The hierarchy this file is gated under, when the workspace assigns them per file. */
+  hierarchy?: HierarchyChipInfo;
+  /** This sample's metadata values, keyed by column. Absent where the workspace has none. */
+  metadata?: Record<string, string>;
 }
 
 export interface FolderImportItem {
@@ -84,6 +90,15 @@ export function SampleNavigator({
   onIncludeAll,
   onIncludeNone,
   onInvertIncluded,
+  facets = [],
+  facetColumnNames = [],
+  facetPartialColumns = [],
+  facetColumnChoice,
+  facetLocks = {},
+  facetLockOutside = 0,
+  onToggleFacet,
+  onToggleFacetLock,
+  onSetFacetColumns,
   onDropFiles,
 }: {
   items: readonly SampleListItem[];
@@ -103,6 +118,23 @@ export function SampleNavigator({
   onIncludeAll: () => void;
   onIncludeNone: () => void;
   onInvertIncluded: () => void;
+  /** Metadata columns offered as chip rows, each with its values. Empty hides the board. */
+  facets?: readonly FacetColumn[];
+  /** Every metadata column in the workspace, so the columns control can offer the hidden ones. */
+  facetColumnNames?: readonly string[];
+  /** Columns without a value for every sample -- per-event data such as a gate saved into colData. */
+  facetPartialColumns?: readonly string[];
+  /** Columns the user pinned, or undefined while the automatic choice stands. */
+  facetColumnChoice?: readonly string[];
+  /** Rows held fixed, by column, with the values each is frozen on. */
+  facetLocks?: Readonly<Record<string, readonly string[]>>;
+  /** Checked samples that no chip can count because a held row rules them out. */
+  facetLockOutside?: number;
+  /** Check every sample carrying this value, or uncheck them if they are all checked already. */
+  onToggleFacet?: (column: string, value: string) => void;
+  /** Freeze this row on what is checked in it, or release it. */
+  onToggleFacetLock?: (column: string) => void;
+  onSetFacetColumns?: (columns: readonly string[] | undefined) => void;
   /**
    * Files dropped onto the panel, with the number of folders that came with them. Omitted where
    * samples do not come from files at all -- a hosted SCE owns its own sample list.
@@ -111,6 +143,14 @@ export function SampleNavigator({
 }) {
   const { language, t } = useI18n();
   const [query, setQuery] = useState("");
+  const [columnsOpen, setColumnsOpen] = useState(false);
+  // The samples panel is narrow and short. Collapsing the board hands the room back to the list
+  // without losing the selection, which is what someone reading a long filtered list wants.
+  const [boardOpen, setBoardOpen] = useState(true);
+  // The panel is short and how much of it the chips deserve depends on the workspace, so the
+  // board is draggable rather than a fixed guess.
+  const [boardHeight, setBoardHeight] = useState(76);
+  const boardDrag = useRef<{ y: number; h: number } | null>(null);
   const [dropActive, setDropActive] = useState(false);
   // dragenter/dragleave fire for every child element the pointer crosses, so a boolean alone
   // flickers off as soon as the drag reaches a button. Depth counting tracks the panel as a whole.
@@ -159,7 +199,7 @@ export function SampleNavigator({
 
   return (
     <section
-      className={`gl-sample-navigator${dropEnabled && dropActive ? " is-drop-target" : ""}`}
+      className={`gl-sample-navigator${facets.length > 0 ? " has-facets" : ""}${dropEnabled && dropActive ? " is-drop-target" : ""}`}
       aria-label={t(sourceLabel)}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
@@ -196,7 +236,6 @@ export function SampleNavigator({
       {items.length > 0 && (
         <>
           <div className="gl-sample-inclusion-actions" aria-label={t("Display and analysis inclusion")}>
-            <span>{t("Display / analyses")}</span>
             <button type="button" onClick={onIncludeAll}>{t("All")}</button>
             <button type="button" onClick={onIncludeNone}>{t("None")}</button>
             <button type="button" onClick={onInvertIncluded}>{t("Invert")}</button>
@@ -204,8 +243,193 @@ export function SampleNavigator({
           <div className="gl-sample-scope-key">
             <span><span className="gl-sample-scope-check">☑</span>{t("checked = pooled display")}</span>
             <span><span className="gl-sample-scope-blue" />{t("blue = active axes and gate editing")}</span>
+            {items.some((item) => item.hierarchy) && (
+              <span><span className="gl-hierarchy-chip compact"><span className="gl-hierarchy-chip-index" style={{ background: "#7b8491", boxShadow: "inset 0 0 0 1.5px #7b8491, inset 0 0 0 2.5px #fff" }}>n</span></span>{t("badge = hierarchy")}</span>
+            )}
           </div>
         </>
+      )}
+
+      {facets.length > 0 && (
+        <div className="gl-sample-facet-board" aria-label={t("Select samples by metadata")}>
+          <div className="gl-sample-facet-head">
+            <button
+              type="button"
+              className="gl-sample-facet-toggle"
+              aria-expanded={boardOpen}
+              title={boardOpen ? t("Hide the metadata chips") : t("Show the metadata chips")}
+              onClick={() => setBoardOpen((open) => !open)}
+            >
+              {boardOpen ? "\u25be" : "\u25b8"}
+            </button>
+            {onSetFacetColumns && (
+              <button type="button" onClick={() => setColumnsOpen((open) => !open)}>
+                {t("Columns…")}
+              </button>
+            )}
+            <span
+              className="gl-sample-facet-tally"
+              title={t("{included} / {total} included", { included: includedCount, total: items.length })}
+            >
+              {includedCount}/{items.length}
+            </span>
+            {facetLockOutside > 0 && (
+              <span
+                className="gl-sample-facet-outside"
+                title={t("{count} checked outside the rows being held fixed, so no chip counts them. All / None / Invert stay global.", { count: facetLockOutside })}
+              >
+                +{facetLockOutside}
+              </span>
+            )}
+          </div>
+          {boardOpen && (
+          <div className="gl-sample-facets" style={{ height: boardHeight }}>
+          {facets.map((column) => {
+            const locked = facetLocks[column.name];
+            // Freezing an empty row would block every later click, so the control only arms once
+            // there is something in the row to hold on to.
+            const lockable = column.values.some(
+              (entry) => entry.sampleIds.some((id) => !excludedIds.has(id)));
+            return (
+            <div key={column.name} className={`gl-sample-facet-row${locked ? " is-locked" : ""}`}>
+              {onToggleFacetLock ? (
+                <button
+                  type="button"
+                  className={`gl-sample-facet-lock${locked ? " is-locked" : ""}`}
+                  aria-pressed={Boolean(locked)}
+                  aria-label={t("Hold {column} fixed", { column: column.name })}
+                  disabled={!locked && !lockable}
+                  title={locked
+                    ? t("{column} is held at {values}. Chips in the other rows reach only these samples. Click to release it.",
+                        { column: column.name, values: locked.join(", ") })
+                    : lockable
+                      ? t("Hold {column} at what is checked in it, so chips in the other rows reach only those samples.",
+                          { column: column.name })
+                      : t("Check something in {column} first, then hold it fixed.", { column: column.name })}
+                  onClick={() => onToggleFacetLock(column.name)}
+                >
+                  <svg viewBox="0 0 10 12" width="9" height="11" aria-hidden="true">
+                    <path
+                      d={locked ? "M2.5 5V3.5a2.5 2.5 0 0 1 5 0V5" : "M2.5 5V3.5a2.5 2.5 0 0 1 5 0"}
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.2"
+                    />
+                    <rect x="1" y="5" width="8" height="6" rx="1.2" fill="currentColor" />
+                  </svg>
+                </button>
+              ) : <span className="gl-sample-facet-lock" aria-hidden="true" />}
+              <span
+                className={`gl-sample-facet-name${column.covered < column.sampleCount ? " is-partial" : ""}`}
+                title={column.covered < column.sampleCount
+                  ? t("{column}: only {covered} of {total} samples have a value. This is per-event data, such as a gate saved into colData, so it does not describe whole samples.",
+                      { column: column.name, covered: column.covered, total: column.sampleCount })
+                  : column.name}
+              >
+                {column.name}
+                {column.covered < column.sampleCount && (
+                  <span className="gl-sample-facet-partial">{column.covered}/{column.sampleCount}</span>
+                )}
+                {locked && (
+                  <span className="gl-sample-facet-held" title={locked.join(", ")}>{locked.join(", ")}</span>
+                )}
+              </span>
+              <div className="gl-sample-facet-values">
+              {column.values.map((entry) => {
+                const on = groupCheckedCount(entry.sampleIds, excludedIds);
+                const total = entry.sampleIds.length;
+                // A lock can leave a value with no reachable sample. That is empty, not full:
+                // without the guard `0 === 0` would paint it as a completely checked group.
+                const empty = total === 0;
+                const state = empty ? "none" : on === total ? "all" : on === 0 ? "none" : "some";
+                // A partly-checked group is filled to its fraction, so the chip reads as a
+                // progress bar rather than as a second colour that has to be learnt. Nobody
+                // chooses the partial state -- it falls out of other clicks -- so it has to
+                // explain itself.
+                const fill = total > 0 ? Math.round((on / total) * 100) : 0;
+                return (
+                  <button
+                    key={entry.value}
+                    type="button"
+                    className={`gl-sample-facet-chip is-${state}${empty ? " is-empty" : ""}`}
+                    disabled={empty}
+                    style={state === "some" ? { "--gl-facet-fill": `${fill}%` } as React.CSSProperties : undefined}
+                    aria-pressed={!empty && on === total}
+                    // Say what the click will do. A partly-checked group completes before it
+                    // clears, so without this the second click is only discoverable by trying it.
+                    title={empty
+                      ? t("{value}: no sample here under the rows being held fixed", { value: entry.value })
+                      : `${t("{value}: {on} of {total} checked", { value: entry.value, on, total })} \u2014 ${
+                          on === total
+                            ? t("click to uncheck all {total}", { total })
+                            : t("click to check all {total}", { total })
+                        }`}
+                    onClick={() => onToggleFacet?.(column.name, entry.value)}
+                  >
+                    <span className="gl-sample-facet-label">{entry.value}</span>
+                    <span
+                      className="gl-sample-facet-count"
+                      style={{ minWidth: `${String(total).length * 2 + 1}ch` }}
+                    >
+                      {on}/{total}
+                    </span>
+                  </button>
+                );
+              })}
+              </div>
+            </div>
+            );
+          })}
+          </div>
+          )}
+          {boardOpen && (
+            <div
+              className="gl-sample-facet-grip"
+              title={t("Drag to resize")}
+              onPointerDown={(event) => {
+                event.currentTarget.setPointerCapture(event.pointerId);
+                boardDrag.current = { y: event.clientY, h: boardHeight };
+              }}
+              onPointerMove={(event) => {
+                const drag = boardDrag.current;
+                if (!drag) return;
+                setBoardHeight(Math.max(28, Math.min(320, drag.h + event.clientY - drag.y)));
+              }}
+              onPointerUp={() => { boardDrag.current = null; }}
+            />
+          )}
+
+          {columnsOpen && onSetFacetColumns && (
+            <div className="gl-sample-facet-columns">
+              {facetColumnNames.map((name) => {
+                const shown = facets.some((column) => column.name === name);
+                const partial = facetPartialColumns.includes(name);
+                return (
+                  <label
+                    key={name}
+                    className={partial ? "is-partial" : undefined}
+                    title={partial ? t("Only some samples have a value here.") : undefined}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={shown}
+                      onChange={() => onSetFacetColumns(
+                        shown
+                          ? facetColumnNames.filter((entry) => entry !== name && facets.some((column) => column.name === entry))
+                          : [...facetColumnNames.filter((entry) => facets.some((column) => column.name === entry)), name],
+                      )}
+                    />
+                    {name}
+                    {partial && <span className="gl-sample-facet-partial-mark">*</span>}
+                  </label>
+                );
+              })}
+              {facetColumnChoice && (
+                <button type="button" onClick={() => onSetFacetColumns(undefined)}>{t("Reset")}</button>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       {items.length >= 5 && (
@@ -264,7 +488,10 @@ export function SampleNavigator({
                 onChange={(event) => onToggleIncluded(item.id, event.target.checked)}
               />
               <span className="gl-sample-active-dot" aria-hidden="true" />
-              <span className="gl-sample-name">{item.name}</span>
+              <span className="gl-sample-name">
+                {item.hierarchy && <HierarchyChip info={item.hierarchy} compact title={t("Hierarchy: {name}", { name: item.hierarchy.name })} />}
+                {item.name}
+              </span>
               <span className="gl-sample-meta" title={exactSummary}>
                 {localizedCompactNumber.format(item.eventCount)} · {item.channelCount}ch
               </span>

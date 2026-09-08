@@ -130,6 +130,32 @@ export function storeHierarchy(
   };
 }
 
+/**
+ * The hierarchy a file is gated under when the workspace assigns hierarchies per file: its
+ * own assignment when that names a listed hierarchy, else the first hierarchy. A file that was
+ * never assigned, or whose hierarchy has since been deleted, therefore falls back to the first
+ * one rather than to nothing, so every file always has a tree.
+ */
+export function fileHierarchyId(assigned: string | undefined, hierarchies: readonly HierarchyRef[]): string {
+  if (assigned && hierarchies.some((h) => h.id === assigned)) return assigned;
+  return hierarchies[0]?.id ?? DEFAULT_HIERARCHY_ID;
+}
+
+/**
+ * The colour a hierarchy is shown in, by its position in the menu, so the files assigned to
+ * it and the menu entry read as the same thing. Ten colours, ColorBrewer Set1/Dark2 picks
+ * that stay apart from the green "checked" and blue "active" file marks; an eleventh
+ * hierarchy wraps round.
+ */
+export const HIERARCHY_COLOURS = [
+  "#7b3fa0", "#e6820e", "#1f9e89", "#c2185b", "#5b6abf",
+  "#8d6e2f", "#00838f", "#a61b1b", "#6d8b1e", "#5c5c5c",
+] as const;
+
+export function hierarchyColour(index: number): string {
+  return HIERARCHY_COLOURS[((index % HIERARCHY_COLOURS.length) + HIERARCHY_COLOURS.length) % HIERARCHY_COLOURS.length];
+}
+
 /** A name no other hierarchy uses: "Main copy", "Main copy 2", … */
 export function uniqueHierarchyName(base: string, taken: readonly HierarchyRef[]): string {
   const names = new Set(taken.map((h) => h.name));

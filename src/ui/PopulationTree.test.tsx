@@ -564,6 +564,48 @@ describe("the hierarchy menu", () => {
     expect(select.value).toBe("main");
   });
 
+  it("shows the per-file controls, routes the switch through the app, and assigns the checked files", () => {
+    const { state, derived } = makeInteractionFixture();
+    state.hierarchies = [{ id: "main", name: "Main" }, { id: "h2", name: "Day 7" }];
+    state.active_hierarchy_id = "h2";
+    const dispatch = vi.fn();
+    const onSwitchHierarchy = vi.fn();
+    const perFile = { enabled: true, chip: { index: 2, name: "Day 7", colour: "#e6820e" }, onToggle: vi.fn(), onAssignChecked: vi.fn(), checkedCount: 3 };
+    act(() => root.render(
+      <PopulationTree state={state} derived={derived} dispatch={dispatch} onSwitchHierarchy={onSwitchHierarchy} perFile={perFile} />,
+    ));
+    // The chip beside the menu is the one the files carry: number and name on the colour.
+    const chip = host.querySelector<HTMLElement>(".population-tree-hierarchy .gl-hierarchy-chip")!;
+    expect(chip.querySelector(".gl-hierarchy-chip-index")!.textContent).toBe("2");
+    expect(chip.querySelector(".gl-hierarchy-chip-name")!.textContent).toBe("Day 7");
+    expect(chip.querySelector<HTMLElement>(".gl-hierarchy-chip-index")!.style.background).toContain("230, 130, 14");
+    const toggle = host.querySelector<HTMLInputElement>(".population-tree-per-file input")!;
+    expect(toggle.checked).toBe(true);
+    act(() => { toggle.click(); });
+    expect(perFile.onToggle).toHaveBeenCalledWith(false);
+    const assign = host.querySelector<HTMLButtonElement>(".population-tree-assign-checked")!;
+    expect(assign.textContent).toBe("Assign 3 checked");
+    act(() => { assign.click(); });
+    expect(perFile.onAssignChecked).toHaveBeenCalledTimes(1);
+    // Switching goes to the app, which also records the active file's hierarchy.
+    const select = host.querySelector<HTMLSelectElement>(".population-tree-hierarchy select")!;
+    act(() => {
+      select.value = "main";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onSwitchHierarchy).toHaveBeenCalledWith("main");
+    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "switchHierarchy" }));
+  });
+
+  it("hides the chip and the assign action while per-file hierarchies are off", () => {
+    const { state, derived } = makeInteractionFixture();
+    const perFile = { enabled: false, chip: { index: 1, name: "Main", colour: "#7b3fa0" }, onToggle: vi.fn(), onAssignChecked: vi.fn(), checkedCount: 1 };
+    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} perFile={perFile} />));
+    expect(host.querySelector(".population-tree-per-file input")).not.toBeNull();
+    expect(host.querySelector(".population-tree-hierarchy .gl-hierarchy-chip")).toBeNull();
+    expect(host.querySelector(".population-tree-assign-checked")).toBeNull();
+  });
+
   it("disables deletion while only one hierarchy exists", () => {
     const { state, derived } = makeInteractionFixture();
     act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} />));

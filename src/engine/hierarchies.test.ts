@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { newGateRef, newPopulation, newRootPopulation, type Gate, type PopulationMap } from "./models";
-import { cloneHierarchyTree, emptyHierarchyTree, pruneDeletedGates, referencedGateIds, uniqueHierarchyName } from "./hierarchies";
+import {
+  cloneHierarchyTree,
+  emptyHierarchyTree,
+  fileHierarchyId,
+  HIERARCHY_COLOURS,
+  hierarchyColour,
+  pruneDeletedGates,
+  referencedGateIds,
+  uniqueHierarchyName,
+} from "./hierarchies";
 
 function tree(): { populations: PopulationMap; rootId: string; ids: Record<string, string> } {
   const root = newRootPopulation(100);
@@ -62,5 +71,23 @@ describe("hierarchies", () => {
     expect(uniqueHierarchyName("Main copy", taken)).toBe("Main copy 2");
     expect(uniqueHierarchyName("Other", taken)).toBe("Other");
     expect(uniqueHierarchyName("   ", taken)).toBe("Main 2");
+  });
+});
+
+describe("per-file hierarchy assignment", () => {
+  const hs = [{ id: "main", name: "Main" }, { id: "h2", name: "Day 7" }];
+
+  it("resolves an assigned hierarchy, and falls back to the first for none or a deleted one", () => {
+    expect(fileHierarchyId("h2", hs)).toBe("h2");
+    expect(fileHierarchyId(undefined, hs)).toBe("main");
+    expect(fileHierarchyId("gone", hs)).toBe("main");
+    expect(fileHierarchyId("h2", [])).toBe("main");
+  });
+
+  it("colours hierarchies by menu position and wraps round", () => {
+    expect(hierarchyColour(0)).toBe(HIERARCHY_COLOURS[0]);
+    expect(hierarchyColour(1)).toBe(HIERARCHY_COLOURS[1]);
+    expect(hierarchyColour(HIERARCHY_COLOURS.length)).toBe(HIERARCHY_COLOURS[0]);
+    expect(new Set(HIERARCHY_COLOURS).size).toBe(HIERARCHY_COLOURS.length);
   });
 });

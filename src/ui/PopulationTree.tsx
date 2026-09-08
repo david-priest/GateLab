@@ -14,8 +14,20 @@ import { wouldCreateCycle, type Gate, type GateRef } from "../engine/models";
 import { TreeConnectors } from "./TreeConnectors";
 import { useI18n } from "./i18n";
 import { gateRefLabel, EXCLUDE_HINT } from "./gateRefLabel";
+import { HierarchyChip, type HierarchyChipInfo } from "./HierarchyChip";
 
 export type HierarchyMenuAction = "new" | "duplicate" | "rename" | "delete";
+
+/** The per-file hierarchy controls: a switch, the active hierarchy's colour, and bulk assignment. */
+export interface PerFileHierarchyProps {
+  enabled: boolean;
+  /** The active hierarchy's chip, the same one its files carry in the sample list. */
+  chip: HierarchyChipInfo;
+  onToggle: (enabled: boolean) => void;
+  /** Assign every checked file to the active hierarchy. */
+  onAssignChecked: () => void;
+  checkedCount: number;
+}
 
 interface Props {
   state: CoreState;
@@ -23,6 +35,12 @@ interface Props {
   dispatch: (a: Action) => void;
   /** The hierarchy menu's actions that need a dialog; switching is dispatched directly. */
   onHierarchyAction?: (action: HierarchyMenuAction) => void;
+  /**
+   * Switching hierarchies goes through the app when it also assigns the active file; without
+   * this the switch is dispatched directly.
+   */
+  onSwitchHierarchy?: (id: string) => void;
+  perFile?: PerFileHierarchyProps;
   statsPending?: boolean;
   statsSampleCount?: number;
   displayContributorCount?: number;
@@ -114,6 +132,8 @@ export function PopulationTree({
   displayContributorCount,
   displayContributorNames,
   onHierarchyAction,
+  onSwitchHierarchy,
+  perFile,
 }: Props) {
   const { t } = useI18n();
   const { populations, root_population_id, active_population_id, selected_gate_id, selected_pop_ids, gates } = state;
@@ -580,13 +600,17 @@ export function PopulationTree({
         <span title={t("Every hierarchy shares the same gates; only the populations differ. Switch here, or create another for a second layout over the same gates.")}>
           {t("Hierarchy")}
         </span>
+        {perFile?.enabled && <HierarchyChip info={perFile.chip} title={t("Files assigned to this hierarchy carry this badge")} />}
         <select
           aria-label={t("Hierarchy")}
           value={activeHierarchyId}
           onChange={(e) => {
             const v = e.target.value;
             if (v.startsWith("__")) onHierarchyAction?.(v.slice(2) as HierarchyMenuAction);
-            else if (v !== activeHierarchyId) dispatch({ type: "switchHierarchy", id: v });
+            else if (v !== activeHierarchyId) {
+              if (onSwitchHierarchy) onSwitchHierarchy(v);
+              else dispatch({ type: "switchHierarchy", id: v });
+            }
           }}
         >
           {hierarchies.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
@@ -599,6 +623,26 @@ export function PopulationTree({
         </select>
         {hierarchies.length > 1 && (
           <span className="population-tree-hierarchy-count">{t("{n} of {total}", { n: hierarchies.findIndex((h) => h.id === activeHierarchyId) + 1, total: hierarchies.length })}</span>
+        )}
+        {perFile && (
+          <label
+            className="population-tree-per-file"
+            title={t("Gate each file under the hierarchy it is assigned to. Choosing a hierarchy here assigns the active file to it, files carry their hierarchy's badge in the sample list, and the pooled display holds the checked files of the active hierarchy.")}
+          >
+            <input type="checkbox" checked={perFile.enabled} onChange={(e) => perFile.onToggle(e.target.checked)} />
+            {t("Per-file hierarchies")}
+          </label>
+        )}
+        {perFile?.enabled && (
+          <button
+            type="button"
+            className="gl-mini-btn population-tree-assign-checked"
+            disabled={perFile.checkedCount === 0}
+            title={t("Assign every checked file to this hierarchy")}
+            onClick={perFile.onAssignChecked}
+          >
+            {t("Assign {count} checked", { count: perFile.checkedCount })}
+          </button>
         )}
       </div>
       <div className="population-tree-hint">

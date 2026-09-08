@@ -51,6 +51,11 @@ export interface WorkspaceSample {
   labels?: Record<string, string>; // Panel-tab channel display names, keyed by identity key
   metadata?: Record<string, string>; // per-sample metadata fields (Metadata tab)
   division?: { channelKey: string; boundaries: number[]; n: number; colName: string; coordinateBindingKey?: string }; // Division profile
+  /**
+   * The hierarchy this file is gated under when `gating.perFileHierarchies` is on. Absent, or
+   * naming a hierarchy that no longer exists, reads as the first hierarchy.
+   */
+  hierarchyId?: string;
 }
 
 export interface WorkspaceFile {
@@ -78,6 +83,11 @@ export interface WorkspaceFile {
     active_hierarchy_id?: string;
     /** The parked hierarchies' trees (every id in `hierarchies` except the active one). */
     stored_hierarchies?: WorkspaceStoredHierarchy[];
+    /**
+     * Each file is gated under the hierarchy its sample record names (`hierarchyId`) rather
+     * than under the active one. Absent reads as false: one hierarchy for every file.
+     */
+    perFileHierarchies?: boolean;
   };
   scales: { globalScales: Record<string, [number, number]> }; // shared per-channel axis ranges
   display: {
@@ -532,6 +542,14 @@ export function validateWorkspace(ws: WorkspaceFile): true {
     }
     for (const id of ids) {
       if (id !== activeId && !storedIds.has(id)) invalidWorkspace(`hierarchy "${id}" is listed but its tree is missing.`);
+    }
+  }
+  const perFile = ws.gating.perFileHierarchies;
+  if (perFile !== undefined && typeof perFile !== "boolean") invalidWorkspace("perFileHierarchies must be true or false.");
+  for (const wss of ws.samples) {
+    // An unknown id is tolerated (the file falls back to the first hierarchy), a non-string is not.
+    if (wss.hierarchyId !== undefined && (typeof wss.hierarchyId !== "string" || !wss.hierarchyId)) {
+      invalidWorkspace(`sample "${wss.fileName}" has a malformed hierarchyId.`);
     }
   }
   const selectedGate = ws.gating.selected_gate_id;

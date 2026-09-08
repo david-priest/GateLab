@@ -27,6 +27,64 @@ afterEach(() => {
 });
 
 describe("SampleNavigator", () => {
+  it("marks each file with its hierarchy chip when the workspace assigns hierarchies per file", () => {
+    const tagged: SampleListItem[] = [
+      { ...items[0], hierarchy: { index: 1, name: "Main", colour: "#7b3fa0" } },
+      { ...items[1], hierarchy: { index: 2, name: "Day 7 scheme", colour: "#e6820e" } },
+    ];
+    act(() => root.render(
+      <SampleNavigator
+        items={tagged}
+        activeId="a"
+        excludedIds={new Set()}
+        busy={false}
+        importProgress={null}
+        onOpenFiles={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onManage={vi.fn()}
+        onManageSample={vi.fn()}
+        onActivate={vi.fn()}
+        onToggleIncluded={vi.fn()}
+        onIncludeAll={vi.fn()}
+        onIncludeNone={vi.fn()}
+        onInvertIncluded={vi.fn()}
+      />,
+    ));
+    // The list is narrow, so a row carries only the numbered badge; the name is on hover.
+    const chips = Array.from(host.querySelectorAll<HTMLElement>(".gl-sample-row .gl-hierarchy-chip"));
+    expect(chips.map((c) => c.querySelector(".gl-hierarchy-chip-index")!.textContent)).toEqual(["1", "2"]);
+    expect(chips.every((c) => c.classList.contains("compact") && c.querySelector(".gl-hierarchy-chip-name") === null)).toBe(true);
+    expect(chips[1].title).toBe("Hierarchy: Day 7 scheme");
+    // The badge: the hierarchy's colour, and the white ring inset from its edge.
+    const badge = chips[1].querySelector<HTMLElement>(".gl-hierarchy-chip-index")!;
+    expect(badge.style.background).toContain("230, 130, 14");
+    expect(badge.style.boxShadow).toContain("inset 0 0 0 2.5px #fff");
+    expect(host.querySelector(".gl-sample-scope-key")!.textContent).toContain("badge = hierarchy");
+  });
+
+  it("shows no chip and no chip key while hierarchies are not assigned per file", () => {
+    act(() => root.render(
+      <SampleNavigator
+        items={items}
+        activeId="a"
+        excludedIds={new Set()}
+        busy={false}
+        importProgress={null}
+        onOpenFiles={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onManage={vi.fn()}
+        onManageSample={vi.fn()}
+        onActivate={vi.fn()}
+        onToggleIncluded={vi.fn()}
+        onIncludeAll={vi.fn()}
+        onIncludeNone={vi.fn()}
+        onInvertIncluded={vi.fn()}
+      />,
+    ));
+    expect(host.querySelector(".gl-hierarchy-chip")).toBeNull();
+    expect(host.querySelector(".gl-sample-scope-key")!.textContent).not.toContain("hierarchy");
+  });
+
   it("keeps active-sample selection separate from display and analysis inclusion", () => {
     const onActivate = vi.fn();
     const onToggleIncluded = vi.fn();
@@ -345,5 +403,314 @@ describe("sorting samples by name", () => {
     renderManager(undefined);
     expect(sortButton("Name A–Z")).toBeUndefined();
     expect(sortButton("Name Z–A")).toBeUndefined();
+  });
+});
+
+// A chip is a bulk checkbox for its group: the fill says how much of the group is checked, and a
+// click flips exactly that. There is no second state to read.
+describe("SampleNavigator metadata chips", () => {
+  const faceted: SampleListItem[] = [
+    { id: "s1", name: "D1_treated.fcs", eventCount: 100, channelCount: 4, metadata: { donor: "D1", stim: "treated" } },
+    { id: "s2", name: "D1_control.fcs", eventCount: 100, channelCount: 4, metadata: { donor: "D1", stim: "control" } },
+    { id: "s3", name: "D2_treated.fcs", eventCount: 100, channelCount: 4, metadata: { donor: "D2", stim: "treated" } },
+  ];
+  const donorFacet = {
+    name: "donor",
+    values: [
+      { value: "D1", sampleIds: ["s1", "s2"] },
+      { value: "D2", sampleIds: ["s3"] },
+    ],
+    covered: 3,
+    sampleCount: 3,
+  };
+
+  function render(props: { excluded?: string[]; onToggleFacet?: (column: string, value: string) => void }) {
+    act(() => root.render(
+      <SampleNavigator
+        items={faceted}
+        activeId="s1"
+        excludedIds={new Set(props.excluded ?? [])}
+        busy={false}
+        importProgress={null}
+        facets={[donorFacet]}
+        facetColumnNames={["donor", "stim"]}
+        onToggleFacet={props.onToggleFacet ?? vi.fn()}
+        onOpenFiles={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onManage={vi.fn()}
+        onManageSample={vi.fn()}
+        onActivate={vi.fn()}
+        onToggleIncluded={vi.fn()}
+        onIncludeAll={vi.fn()}
+        onIncludeNone={vi.fn()}
+        onInvertIncluded={vi.fn()}
+      />,
+    ));
+  }
+
+  const chip = (value: string) => [...host.querySelectorAll<HTMLButtonElement>(".gl-sample-facet-chip")]
+    .find((button) => button.textContent?.startsWith(value));
+
+  it("fills a chip whose group is entirely checked", () => {
+    render({});
+    expect(chip("D1")?.textContent).toContain("2/2");
+    expect(chip("D1")?.className).toContain("is-all");
+    expect(chip("D1")?.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("tints a chip whose group is only partly checked", () => {
+    render({ excluded: ["s2"] });
+    expect(chip("D1")?.textContent).toContain("1/2");
+    expect(chip("D1")?.className).toContain("is-some");
+    expect(chip("D1")?.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("empties a chip whose group is unchecked", () => {
+    render({ excluded: ["s1", "s2"] });
+    expect(chip("D1")?.className).toContain("is-none");
+  });
+
+  it("carries no second state beyond how much is checked", () => {
+    // The halo that used to mark a chip as "picked" was a second thing to read for no gain.
+    render({ excluded: ["s2"] });
+    expect(chip("D1")?.className).not.toContain("is-picked");
+  });
+
+  it("asks the caller to toggle the value it was given", () => {
+    const onToggleFacet = vi.fn();
+    render({ onToggleFacet });
+    act(() => chip("D2")!.click());
+    expect(onToggleFacet).toHaveBeenCalledWith("donor", "D2");
+  });
+
+  it("leaves the sample list alone: chips select, they do not filter", () => {
+    render({ excluded: ["s1", "s2"] });
+    expect([...host.querySelectorAll(".gl-sample-name")]).toHaveLength(3);
+  });
+
+  it("stays out of the way when the workspace has no metadata", () => {
+    act(() => root.render(
+      <SampleNavigator
+        items={items}
+        activeId="a"
+        excludedIds={new Set()}
+        busy={false}
+        importProgress={null}
+        onOpenFiles={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onManage={vi.fn()}
+        onManageSample={vi.fn()}
+        onActivate={vi.fn()}
+        onToggleIncluded={vi.fn()}
+        onIncludeAll={vi.fn()}
+        onIncludeNone={vi.fn()}
+        onInvertIncluded={vi.fn()}
+      />,
+    ));
+    expect(host.querySelector(".gl-sample-facet-board")).toBeNull();
+  });
+});
+
+// The partial state is the one nobody chooses -- it falls out of other clicks -- so it has to
+// explain itself rather than be a second colour to learn.
+describe("SampleNavigator chip fill", () => {
+  const items3: SampleListItem[] = [
+    { id: "s1", name: "a.fcs", eventCount: 1, channelCount: 1, metadata: { donor: "D1" } },
+    { id: "s2", name: "b.fcs", eventCount: 1, channelCount: 1, metadata: { donor: "D1" } },
+    { id: "s3", name: "c.fcs", eventCount: 1, channelCount: 1, metadata: { donor: "D1" } },
+    { id: "s4", name: "d.fcs", eventCount: 1, channelCount: 1, metadata: { donor: "D1" } },
+  ];
+  const facet = {
+    name: "donor",
+    values: [{ value: "D1", sampleIds: ["s1", "s2", "s3", "s4"] }],
+    covered: 4,
+    sampleCount: 4,
+  };
+
+  function chipWith(excluded: string[]) {
+    act(() => root.render(
+      <SampleNavigator
+        items={items3}
+        activeId="s1"
+        excludedIds={new Set(excluded)}
+        busy={false}
+        importProgress={null}
+        facets={[facet]}
+        onToggleFacet={vi.fn()}
+        onOpenFiles={vi.fn()} onOpenFolder={vi.fn()} onManage={vi.fn()} onManageSample={vi.fn()}
+        onActivate={vi.fn()} onToggleIncluded={vi.fn()} onIncludeAll={vi.fn()}
+        onIncludeNone={vi.fn()} onInvertIncluded={vi.fn()}
+      />,
+    ));
+    return host.querySelector<HTMLButtonElement>(".gl-sample-facet-chip")!;
+  }
+
+  it("fills to the fraction that is checked", () => {
+    expect(chipWith(["s3", "s4"]).style.getPropertyValue("--gl-facet-fill")).toBe("50%");
+    expect(chipWith(["s4"]).style.getPropertyValue("--gl-facet-fill")).toBe("75%");
+  });
+
+  it("carries no fraction when the group is all in or all out", () => {
+    // Those two are solid and empty; a gradient would only muddy an unambiguous state.
+    expect(chipWith([]).style.getPropertyValue("--gl-facet-fill")).toBe("");
+    expect(chipWith(["s1", "s2", "s3", "s4"]).style.getPropertyValue("--gl-facet-fill")).toBe("");
+  });
+});
+
+describe("SampleNavigator columns that do not line up with samples", () => {
+  const items: SampleListItem[] = [
+    { id: "s1", name: "a.fcs", eventCount: 100, channelCount: 4, metadata: { donor: "D1", gate: "TRUE" } },
+    { id: "s2", name: "b.fcs", eventCount: 100, channelCount: 4, metadata: { donor: "D1" } },
+    { id: "s3", name: "c.fcs", eventCount: 100, channelCount: 4, metadata: { donor: "D2" } },
+  ];
+  const gateFacet = { name: "gate", values: [{ value: "TRUE", sampleIds: ["s1"] }], covered: 1, sampleCount: 3 };
+  const donorFacet = {
+    name: "donor",
+    values: [{ value: "D1", sampleIds: ["s1", "s2"] }, { value: "D2", sampleIds: ["s3"] }],
+    covered: 3,
+    sampleCount: 3,
+  };
+
+  function render(facets: typeof gateFacet[]) {
+    act(() => root.render(
+      <SampleNavigator
+        items={items}
+        activeId="s1"
+        excludedIds={new Set<string>()}
+        busy={false}
+        importProgress={null}
+        facets={facets}
+        facetColumnNames={["donor", "gate"]}
+        facetPartialColumns={["gate"]}
+        onToggleFacet={vi.fn()}
+        onSetFacetColumns={vi.fn()}
+        onOpenFiles={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onManage={vi.fn()}
+        onManageSample={vi.fn()}
+        onActivate={vi.fn()}
+        onToggleIncluded={vi.fn()}
+        onIncludeAll={vi.fn()}
+        onIncludeNone={vi.fn()}
+        onInvertIncluded={vi.fn()}
+      />,
+    ));
+  }
+
+  it("marks the row with how many samples the column reaches", () => {
+    render([gateFacet]);
+    const label = host.querySelector(".gl-sample-facet-name.is-partial");
+    expect(label).not.toBeNull();
+    expect(label?.textContent).toContain("1/3");
+    expect(label?.getAttribute("title") ?? "").toContain("per-event data");
+  });
+
+  it("marks the column in the columns control before it is pinned", () => {
+    render([donorFacet]);
+    const button = Array.from(host.querySelectorAll("button"))
+      .find((element) => (element.textContent ?? "").includes("Columns"));
+    act(() => { button?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const labels = Array.from(host.querySelectorAll(".gl-sample-facet-columns label"));
+    const gate = labels.find((element) => (element.textContent ?? "").includes("gate"));
+    const donor = labels.find((element) => (element.textContent ?? "").includes("donor"));
+    expect(gate?.className).toContain("is-partial");
+    expect(donor?.className ?? "").not.toContain("is-partial");
+  });
+});
+
+describe("SampleNavigator row locks", () => {
+  const items: SampleListItem[] = [
+    { id: "a", name: "a.fcs", eventCount: 10, channelCount: 2, metadata: { cell: "CTL", stim: "control" } },
+    { id: "b", name: "b.fcs", eventCount: 10, channelCount: 2, metadata: { cell: "CTL", stim: "treated" } },
+    { id: "c", name: "c.fcs", eventCount: 10, channelCount: 2, metadata: { cell: "Naive", stim: "control" } },
+  ];
+  const cellFacet = {
+    name: "cell",
+    values: [{ value: "CTL", sampleIds: ["a", "b"] }, { value: "Naive", sampleIds: ["c"] }],
+    covered: 3,
+    sampleCount: 3,
+  };
+
+  function render(props: {
+    excluded?: string[];
+    locks?: Record<string, readonly string[]>;
+    facets?: typeof cellFacet[];
+    outside?: number;
+    onToggleFacetLock?: (column: string) => void;
+  }) {
+    act(() => root.render(
+      <SampleNavigator
+        items={items}
+        activeId="a"
+        excludedIds={new Set(props.excluded ?? [])}
+        busy={false}
+        importProgress={null}
+        facets={props.facets ?? [cellFacet]}
+        facetColumnNames={["cell", "stim"]}
+        facetLocks={props.locks ?? {}}
+        facetLockOutside={props.outside ?? 0}
+        onToggleFacet={vi.fn()}
+        onToggleFacetLock={props.onToggleFacetLock ?? vi.fn()}
+        onOpenFiles={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onManage={vi.fn()}
+        onManageSample={vi.fn()}
+        onActivate={vi.fn()}
+        onToggleIncluded={vi.fn()}
+        onIncludeAll={vi.fn()}
+        onIncludeNone={vi.fn()}
+        onInvertIncluded={vi.fn()}
+      />,
+    ));
+  }
+
+  const lock = () => host.querySelector<HTMLButtonElement>(".gl-sample-facet-lock");
+
+  it("cannot lock a row with nothing checked in it", () => {
+    render({ excluded: ["a", "b", "c"] });
+    expect(lock()?.disabled).toBe(true);
+  });
+
+  it("locks the row on the user's click", () => {
+    const onToggleFacetLock = vi.fn();
+    render({ excluded: ["c"], onToggleFacetLock });
+    expect(lock()?.disabled).toBe(false);
+    act(() => { lock()?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(onToggleFacetLock).toHaveBeenCalledWith("cell");
+  });
+
+  it("writes the frozen value on the row, not only in a tooltip", () => {
+    render({ excluded: ["c"], locks: { cell: ["CTL"] } });
+    expect(lock()?.className).toContain("is-locked");
+    expect(host.querySelector(".gl-sample-facet-held")?.textContent).toBe("CTL");
+  });
+
+  it("shows a value the lock rules out as empty rather than as fully checked", () => {
+    // What App hands down under a lock on CTL: the Naive group has no reachable sample.
+    const held = {
+      ...cellFacet,
+      values: [{ value: "CTL", sampleIds: ["a", "b"] }, { value: "Naive", sampleIds: [] }],
+    };
+    render({ excluded: ["c"], locks: { cell: ["CTL"] }, facets: [held] });
+    const chips = Array.from(host.querySelectorAll<HTMLButtonElement>(".gl-sample-facet-chip"));
+    const naive = chips.find((chip) => (chip.textContent ?? "").startsWith("Naive"));
+    expect(naive?.className).toContain("is-none");
+    expect(naive?.className).not.toContain("is-all");
+    expect(naive?.disabled).toBe(true);
+    expect(naive?.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("says how many checked samples no chip can count", () => {
+    // All / None / Invert stay global, so they can check a sample the lock rules out. Without this
+    // the board's chips would quietly account for fewer files than the tally.
+    render({ locks: { cell: ["CTL"] }, outside: 1 });
+    const outside = host.querySelector(".gl-sample-facet-outside");
+    expect(outside?.textContent).toBe("+1");
+    expect(outside?.getAttribute("title") ?? "").toContain("outside the rows being held fixed");
+  });
+
+  it("says nothing when every checked sample is inside the held rows", () => {
+    render({ locks: { cell: ["CTL"] }, outside: 0 });
+    expect(host.querySelector(".gl-sample-facet-outside")).toBeNull();
   });
 });
