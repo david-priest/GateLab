@@ -636,6 +636,17 @@ export interface BarcodeGatingResult {
   nPopulations: number;
   /** Existing gates referenced instead of created (see BarcodeBuildOptions.existingGates). */
   reusedGateIds: string[];
+  /**
+   * "# gate:" lines in the file that nothing used.
+   *
+   * A barcode gate takes its shape from a declaration only when the declaration's NAME equals the
+   * name the plane's states generate ("113+115-" on a 115In x 113In plane); anything else falls
+   * back to the template's generic shape. That fallback is silent and produces a strategy that
+   * looks complete while holding gates nobody drew -- the nBass19 scheme declared its gates as
+   * "113+115-Gate", Cytobank's own names, so eight of twelve barcode gates were quietly replaced
+   * by template boxes. Reporting the lines that had no effect is what makes that visible.
+   */
+  unusedDeclarations: string[];
   /** QC populations created above the samples, outermost first, and anything left out. */
   qc: QcChainPreview;
 }
@@ -893,6 +904,7 @@ export function buildBarcodeGating(
    * its vertices in the plane's orientation (a line written with the channels the other way
    * round is swapped). Otherwise null and the template's shape is used.
    */
+  const usedDeclarations = new Set<string>();
   const declaredShape = (name: string, plane: BarcodePlane): Vertex[] | null => {
     const d = scheme.gateDeclarations.find((g) => g.name === name && g.gate_type === "polygon");
     if (!d) return null;
@@ -903,8 +915,14 @@ export function buildBarcodeGating(
     };
     const dx = key(d.x);
     const dy = key(d.y);
-    if (dx === plane.x && dy === plane.y) return d.vertices.map(([x, y]) => [x, y] as Vertex);
-    if (dx === plane.y && dy === plane.x) return d.vertices.map(([x, y]) => [y, x] as Vertex);
+    if (dx === plane.x && dy === plane.y) {
+      usedDeclarations.add(d.name);
+      return d.vertices.map(([x, y]) => [x, y] as Vertex);
+    }
+    if (dx === plane.y && dy === plane.x) {
+      usedDeclarations.add(d.name);
+      return d.vertices.map(([x, y]) => [y, x] as Vertex);
+    }
     return null;
   };
 
@@ -1023,6 +1041,23 @@ export function buildBarcodeGating(
   const metadataColumns = [...scheme.metadataColumns];
   if (scheme.samples.some((s) => s.fileName) && !metadataColumns.includes("file_name")) metadataColumns.push("file_name");
 
+  // A declaration counts as used when a barcode gate took its shape, when the QC chain names it,
+  // or when a gate of that name exists in the built strategy (a reused workspace gate).
+  for (const pop of effective.chain) for (const g of pop.gates) usedDeclarations.add(g.name);
+  for (const id of gate_order) usedDeclarations.add(gates[id].name);
+  // A gate the workspace already had is reused by name and channels instead of being created,
+  // so its declaration was never read for a shape -- and is not unused: the second scheme of a
+  // run reuses all twelve barcode gates, and reporting their lines as ignored told the user to
+  // rename twelve lines that were doing exactly what they should.
+  const existing = new Map((options.existingGates ?? []).map((g) => [g.gate_id, g.name]));
+  for (const id of reusedGateIds) {
+    const name = existing.get(id);
+    if (name) usedDeclarations.add(name);
+  }
+  const unusedDeclarations = scheme.gateDeclarations
+    .filter((d) => !usedDeclarations.has(d.name))
+    .map((d) => d.name);
+
   return {
     gates,
     gate_order,
@@ -1034,6 +1069,7 @@ export function buildBarcodeGating(
     nGates: gate_order.length,
     nPopulations: scheme.samples.length,
     reusedGateIds,
+    unusedDeclarations,
     qc: qcPreview,
   };
 }

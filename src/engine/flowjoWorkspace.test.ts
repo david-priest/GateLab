@@ -99,6 +99,22 @@ describe("FlowJo workspace import", () => {
       .toMatch(/2 independent gating trees/);
   });
 
+  // Each tree can also be converted on its own, which is what importing them into separate
+  // hierarchies needs: one document per strategy, none of them carrying another's gates.
+  it("converts one parallel tree at a time, without the others' gates", () => {
+    const xml = synthetic(polygonPop("TreeA", "g1", polygonPop("Leaf", "g3")) + polygonPop("TreeB", "g2"));
+    const first = flowJoWorkspaceToGatingML(xml, 0, 0);
+    const second = flowJoWorkspaceToGatingML(xml, 0, 1);
+    expect(first.gatingMl).toContain('gating:name="TreeA"');
+    expect(first.gatingMl).toContain('gating:name="Leaf"');
+    expect(first.gatingMl).not.toContain('gating:name="TreeB"');
+    expect(second.gatingMl).toContain('gating:name="TreeB"');
+    expect(second.gatingMl).not.toContain('gating:name="TreeA"');
+    // Converted one at a time, neither run reports the merge that importing them together is.
+    expect(first.warnings.join(" ")).not.toMatch(/independent gating trees/);
+    expect(listFlowJoWorkspaceSamples(xml)[0].trees.map((t) => t.name)).toEqual(["TreeA", "TreeB"]);
+  });
+
   it("carries the owning group through for telling similar names apart", () => {
     const xml = `<Workspace><SampleList><SampleNode name="a.fcs" count="1" owningGroup="Panel A">
       <Subpopulations>${polygonPop("P", "g1")}</Subpopulations></SampleNode></SampleList></Workspace>`;

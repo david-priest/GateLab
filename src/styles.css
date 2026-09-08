@@ -202,9 +202,13 @@ input[type="number"]::-webkit-outer-spin-button {
   padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 5px;
   min-height: 0;
 }
+/* The sidebar is a stack of full-width actions above a list that has to earn its own room, so
+   these are tightened here rather than everywhere the ghost button is used. */
+.gl-left .gl-btn-ghost.gl-btn-block { padding: 3px 10px; font-size: 11px; }
+.gl-left .gl-side-title { margin-top: 4px !important; }
 .gl-left-resize {
   position: absolute;
   right: -4px;
@@ -302,6 +306,167 @@ input[type="number"]::-webkit-outer-spin-button {
   border-radius: 2px;
   background: var(--accent);
 }
+/* Bounded and scrollable: a workspace with several metadata columns would otherwise make the
+   board taller than the panel it sits in and paint over the Workspace section below it. */
+.gl-sample-facets {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+.gl-sample-facet-head { display: flex; align-items: center; gap: 6px; }
+.gl-sample-facet-head button {
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 16px;
+  border: 1px solid var(--border, #d8dee6);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+}
+/* The board's own bottom edge, made draggable, rather than a separate bar inside it: how much of
+   a short panel the chips deserve depends on how many columns the object carries. Deep enough to
+   grab (a hairline is a fight), and silent until pointed at. */
+.gl-sample-facet-grip {
+  height: 8px;
+  margin: 2px -5px -4px;
+  border-radius: 0 0 4px 4px;
+  cursor: ns-resize;
+}
+.gl-sample-facet-grip:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+/* The controls sit outside the scrolling rows: a board tall enough to scroll must not carry
+   "Show all" out of reach with it. */
+.gl-sample-facet-board {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 5px;
+  border: 0.5px solid var(--border, #d8dee6);
+  border-radius: 4px;
+}
+/* Only a panel that actually has a board asks for the extra room, so a workspace with no
+   metadata keeps exactly the layout it had before the board existed. The panel also clips its
+   own content: the list's 80px floor plus a board is taller than the panel's share of the
+   column, and without this the list paints straight over the Workspace section below. */
+.gl-sample-navigator.has-facets {
+  min-height: 300px;
+  overflow: hidden;
+}
+.gl-sample-navigator.has-facets .gl-sample-facet-actions { padding-top: 0; }
+.gl-sample-navigator.has-facets .gl-sample-list { min-height: 0; }
+.gl-sample-facet-row {
+  display: grid;
+  grid-template-columns: 13px 52px minmax(0, 1fr);
+  align-items: start;
+  gap: 2px;
+}
+.gl-sample-facet-values { display: flex; flex-wrap: wrap; gap: 2px; }
+.gl-sample-facet-name {
+  padding-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--muted);
+}
+.gl-sample-facet-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid var(--border, #d8dee6);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 15px;
+  cursor: pointer;
+}
+.gl-sample-facet-chip:hover { border-color: var(--accent); }
+/* Fill tracks how much of the group is checked, so a half-selected donor reads at a glance. */
+.gl-sample-facet-chip.is-all { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* Filled to the fraction checked, so "15/21" and the bar say the same thing and neither has to
+   be learnt. The pale fill keeps the label legible across the boundary. */
+.gl-sample-facet-chip.is-some {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent) 30%, transparent) 0 var(--gl-facet-fill, 50%),
+    transparent var(--gl-facet-fill, 50%)
+  );
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* The ring says which chips are doing the focusing, which is not the same as being checked. */
+.gl-sample-facet-chip.is-picked { box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent); }
+/* A column with holes is not a property of the samples; it is marked rather than hidden, so a
+   pinned one cannot be mistaken for metadata. */
+.gl-sample-facet-name.is-partial { color: var(--accent); font-style: italic; }
+.gl-sample-facet-partial { display: block; font-size: 9px; font-style: normal; opacity: 0.8; }
+.gl-sample-facet-columns label.is-partial { color: var(--accent); font-style: italic; }
+.gl-sample-facet-partial-mark { margin-left: 2px; font-style: normal; }
+/* A held row is the one piece of memory the board has, so it says so on the row itself rather
+   than only in a tooltip -- the checked set feeds Statistics and Proportions. */
+.gl-sample-facet-lock {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  padding: 0;
+  margin-top: 1px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  opacity: 0.45;
+  cursor: pointer;
+}
+.gl-sample-facet-lock:hover:not(:disabled) { opacity: 1; color: var(--accent); }
+.gl-sample-facet-lock.is-locked { opacity: 1; color: var(--accent); }
+.gl-sample-facet-lock:disabled { opacity: 0.15; cursor: default; }
+.gl-sample-facet-row.is-locked .gl-sample-facet-name { color: var(--accent); }
+.gl-sample-facet-held {
+  display: block;
+  font-size: 9px;
+  font-style: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gl-sample-facet-chip.is-empty { opacity: 0.3; cursor: default; }
+.gl-sample-facet-chip.is-empty:hover { border-color: var(--border); }
+.gl-sample-facet-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Tabular figures in a width reserved for this group's widest count, so a chip keeps its shape
+   as its numbers change. The group's total never changes, so "21/21" is the widest it can get. */
+.gl-sample-facet-count {
+  flex: none;
+  text-align: right;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+.gl-sample-facet-actions { display: flex; align-items: center; gap: 6px; padding-top: 2px; }
+.gl-sample-facet-actions button {
+  padding: 1px 6px;
+  font-size: 10px;
+  border: 1px solid var(--border, #d8dee6);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+}
+.gl-sample-facet-toggle { min-width: 18px; }
+.gl-sample-facet-tally { margin-left: auto; font-size: 10px; color: var(--muted); }
+.gl-sample-facet-outside { font-size: 10px; color: var(--accent); cursor: help; }
+.gl-sample-facet-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 4px 2px 2px;
+  border-top: 0.5px solid var(--border, #d8dee6);
+  font-size: 10px;
+  color: var(--muted);
+}
+.gl-sample-facet-columns label { display: inline-flex; align-items: center; gap: 3px; }
 .gl-sample-search {
   width: 100%;
   min-width: 0;
@@ -2093,6 +2258,25 @@ input[type="number"]::-webkit-outer-spin-button {
   flex: 1 1 auto; min-width: 0; max-width: 260px; font-size: 11px; padding: 1px 2px;
 }
 .population-tree-hierarchy-count { color: #7b8491; font-size: 10px; white-space: nowrap; }
+/* The hierarchy badge: a coloured disc with a thin white ring inset from its edge and the menu
+   number at its centre; beside the menu the name follows in the same colour. */
+.gl-hierarchy-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 150px; flex: 0 0 auto; vertical-align: -2px; }
+.gl-hierarchy-chip.compact { margin-right: 4px; }
+.gl-hierarchy-chip-index {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  width: 14px; height: 14px; border-radius: 50%;
+  color: #fff; font-size: 8px; font-weight: 700; line-height: 1; letter-spacing: -0.2px;
+}
+.gl-hierarchy-chip-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 10px; font-weight: 600;
+}
+.population-tree-per-file {
+  display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;
+  font-size: 10px; color: #4a5361; cursor: pointer;
+}
+.population-tree-per-file > input { margin: 0; width: 12px; height: 12px; }
+.population-tree-assign-checked { white-space: nowrap; }
 
 .population-tree-hint {
   display: flex; align-items: baseline; justify-content: space-between; gap: 8px;

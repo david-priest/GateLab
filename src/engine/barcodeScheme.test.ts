@@ -683,3 +683,53 @@ describe("a hierarchy CSV with no sample table", () => {
     expect(t.problems).toEqual(['The file has no header row, and no "# population:" lines either.']);
   });
 });
+
+// The nBass19 failure: Cytobank names its barcode gates "113+115-Gate", so every "# gate:" line
+// for the two indium and platinum planes named a gate the builder never asks for. The builder
+// silently used the template's generic box instead, and eight of twelve barcode gates in a
+// published debarcoding strategy were replaced by shapes nobody drew.
+describe("gate lines the build never used", () => {
+  const table = [
+    "# plane: 115In x 113In",
+    "# gate: 113+115-Gate | polygon | 115In x 113In | asinh | (-0.47,2.016) (1.021,2.088) (1.818,2.58) (0.1,3.0)",
+    "# gate: 113-115+ | polygon | 115In x 113In | asinh | (1.887,0.811) (2.539,1.52) (3.667,2.132) (2.0,0.5)",
+    "name,file_name,113In,115In",
+    "01,a.fcs,1,0",
+    "02,a.fcs,0,1",
+  ].join("\n");
+  const channels = [
+    { key: "In113Di", pnn: "In113Di", marker: "113In" },
+    { key: "In115Di", pnn: "In115Di", marker: "115In" },
+  ];
+
+  it("names the declaration that had no effect, and keeps the one that did", () => {
+    const scheme = resolveBarcodeScheme(parseBarcodeTable(table), channels);
+    expect(scheme.problems).toEqual([]);
+    const built = buildBarcodeGating(scheme, DEFAULT_BARCODE_TEMPLATE, 5, { channels });
+    // "113+115-Gate" is not a name any plane generates, so nothing consumed it.
+    expect(built.unusedDeclarations).toEqual(["113+115-Gate"]);
+    const shapeOf = (name: string) =>
+      (Object.values(built.gates).find((g) => g.name === name) as PolyRectGate | undefined)?.vertices;
+    // The matching declaration is honoured...
+    expect(shapeOf("113-115+")).toEqual([[1.887, 0.811], [2.539, 1.52], [3.667, 2.132], [2, 0.5]]);
+    // ...and the mismatched one leaves its gate on the template's shape, which is what the
+    // report exists to reveal.
+    expect(shapeOf("113+115-")).not.toEqual([[-0.47, 2.016], [1.021, 2.088], [1.818, 2.58], [0.1, 3]]);
+  });
+
+  // A second scheme imported into the same workspace reuses the barcode gates already there,
+  // matched by name and channels, so no declaration is read for a shape. Those lines are not
+  // unused: the gates they describe are in the strategy. The first version reported all twelve
+  // of nBass19's barcode gates as ignored on the second import, while reusing every one.
+  it("does not report a line whose gate was reused from the workspace", () => {
+    const scheme = resolveBarcodeScheme(parseBarcodeTable(table.replace("113+115-Gate", "113+115-")), channels);
+    const first = buildBarcodeGating(scheme, DEFAULT_BARCODE_TEMPLATE, 5, { channels });
+    expect(first.unusedDeclarations).toEqual([]);
+    const second = buildBarcodeGating(scheme, DEFAULT_BARCODE_TEMPLATE, 5, {
+      channels, existingGates: Object.values(first.gates) as PolyRectGate[], reuse: true,
+    });
+    expect(second.reusedGateIds.length).toBeGreaterThan(0);
+    expect(second.nGates).toBe(0);
+    expect(second.unusedDeclarations).toEqual([]);
+  });
+});

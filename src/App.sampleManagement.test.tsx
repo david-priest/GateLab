@@ -63,11 +63,11 @@ function testFile(name: string): File {
 }
 
 describe("App sample management", () => {
-  it("starts with the main left and right panes twenty percent wider", () => {
+  it("starts wide enough for a sample name and its metadata chips", () => {
     act(() => root.render(<App />));
 
     expect(host.querySelector<HTMLElement>('[aria-label="Samples and workspace"]')?.style.width)
-      .toBe("264px");
+      .toBe("330px");
     expect(host.querySelector<HTMLElement>('[aria-label="Gates and populations"]')?.style.width)
       .toBe("672px");
   });

@@ -411,3 +411,36 @@ describe("population hierarchies in the workspace file", () => {
     expect(() => validateWorkspace(storedActive)).toThrow(/listed, non-active hierarchy/);
   });
 });
+
+describe("per-file hierarchies in the workspace file", () => {
+  const fcsByPath = {
+    "data/0_run1.fcs": new Uint8Array([70, 67, 83, 51, 46, 48, 1]),
+    "data/1_run2.fcs": new Uint8Array([70, 67, 83, 51, 46, 48, 2]),
+  };
+
+  it("round-trips the mode flag and each sample's hierarchy, tolerating an id that no longer exists", () => {
+    const ws = makeWs();
+    ws.gating.perFileHierarchies = true;
+    ws.samples[0].hierarchyId = "main";
+    // A hierarchy deleted after the file was assigned: the reader keeps the id and the app falls
+    // back to the first hierarchy, so an old assignment never makes a workspace unreadable.
+    ws.samples[1].hierarchyId = "deleted-later";
+    expect(validateWorkspace(ws)).toBe(true);
+    const { ws: back } = readWorkspaceBytes(packWorkspace(ws, fcsByPath));
+    expect(back.gating.perFileHierarchies).toBe(true);
+    expect(back.samples.map((s) => s.hierarchyId)).toEqual(["main", "deleted-later"]);
+    // Absent stays absent, which reads as off / first hierarchy.
+    const plain = readWorkspaceBytes(packWorkspace(makeWs(), fcsByPath)).ws;
+    expect(plain.gating.perFileHierarchies).toBeUndefined();
+    expect(plain.samples[0].hierarchyId).toBeUndefined();
+  });
+
+  it("rejects a malformed flag or hierarchy id", () => {
+    const flag = makeWs();
+    (flag.gating as { perFileHierarchies?: unknown }).perFileHierarchies = "yes";
+    expect(() => validateWorkspace(flag)).toThrow(/perFileHierarchies/);
+    const id = makeWs();
+    (id.samples[0] as { hierarchyId?: unknown }).hierarchyId = 7;
+    expect(() => validateWorkspace(id)).toThrow(/hierarchyId/);
+  });
+});
