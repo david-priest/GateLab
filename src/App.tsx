@@ -132,7 +132,7 @@ import { BarcodeSchemeImportModal, type BarcodeImportDraft } from "./ui/BarcodeS
 import { BarcodeSaveModal, type BarcodeSaveChoice, type BarcodeSaveSummary } from "./ui/BarcodeSaveModal";
 import { HierarchyModal, type HierarchyModalMode } from "./ui/HierarchyModal";
 import type { GroupAction } from "./ui/SampleManager";
-import { cloneHierarchyTree, fileHierarchyId, newHierarchyId, referencedGateIds, uniqueHierarchyName, hierarchyColour } from "./engine/hierarchies";
+import { cloneHierarchyTree, correspondingHierarchyId, fileHierarchyId, newHierarchyId, referencedGateIds, storeHierarchy, uniqueHierarchyName, hierarchyColour } from "./engine/hierarchies";
 import { filesToHold, perFilePrimary } from "./engine/flowjoOpen";
 import { templateNameFromOrigin, type TailoredFile } from "./engine/tailoredImport";
 import { describeDiffering, planOneTreeImport, sameStructure, tailorFilesToTree } from "./engine/oneTreeImport";
@@ -2835,20 +2835,45 @@ export default function App() {
     }
   }
 
+  /**
+   * The gating state of the tree a file follows: the live tree when the file is on it, else the
+   * stored copy (a group's, or the file's own tailoring). Null when that copy is missing.
+   */
+  function treeStateForFile(fileId: string): { treeState: CoreState; live: boolean } | null {
+    const hid = hierarchyOfFile(fileId);
+    const live = hid === state.active_hierarchy_id;
+    const stored = live ? null : state.stored_hierarchies[hid];
+    if (!live && !stored) return null;
+    const treeState: CoreState = live ? state : {
+      ...state,
+      gates: stored!.gates, gate_order: stored!.gate_order, populations: stored!.populations,
+      root_population_id: stored!.root_population_id, active_population_id: stored!.active_population_id,
+      selected_pop_ids: stored!.selected_pop_ids,
+    };
+    return { treeState, live };
+  }
+
+  /**
+   * The id a live-tree population has in the tree a file follows: itself on the live tree; on a
+   * stored copy, the population its provenance links to, or null when the copy has none.
+   */
+  function populationIdInFileTree(fileId: string, popId: string): string | null {
+    const hid = hierarchyOfFile(fileId);
+    if (hid === state.active_hierarchy_id) return popId;
+    const copy = state.stored_hierarchies[hid];
+    const active = state.hierarchies.find((h) => h.id === state.active_hierarchy_id);
+    if (!copy || !active) return null;
+    const live = storeHierarchy(active, state);
+    return correspondingHierarchyId(live, popId, copy, { ...state.stored_hierarchies, [live.id]: live }, "population");
+  }
+
   /** Every loaded file with GateLab's counts under the hierarchy it is gated under. */
   function chorusFileCounts(): FileCounts[] {
     const out: FileCounts[] = [];
     for (const entry of samples) {
-      const hid = hierarchyOfFile(entry.id);
-      const live = hid === state.active_hierarchy_id;
-      const stored = live ? null : state.stored_hierarchies[hid];
-      if (!live && !stored) continue;
-      const treeState: CoreState = live ? state : {
-        ...state,
-        gates: stored!.gates, gate_order: stored!.gate_order, populations: stored!.populations,
-        root_population_id: stored!.root_population_id, active_population_id: stored!.active_population_id,
-        selected_pop_ids: stored!.selected_pop_ids,
-      };
+      const tree = treeStateForFile(entry.id);
+      if (!tree) continue;
+      const { treeState, live } = tree;
       const d = live && entry.id === activeSampleId ? derived : recompute(entry.sample, treeState);
       const rootId = treeState.root_population_id;
       const populations = rootId
@@ -2860,7 +2885,7 @@ export default function App() {
         : [];
       out.push({
         fileName: entry.name,
-        hierarchyName: state.hierarchies.find((h) => h.id === hid)?.name ?? "",
+        hierarchyName: state.hierarchies.find((h) => h.id === hierarchyOfFile(entry.id))?.name ?? "",
         events: entry.sample.fcs.nEvents,
         populations,
       });
@@ -3734,25 +3759,38 @@ export default function App() {
         setError("No population selected to export.");
         return false;
       }
-      const scopedEntries = scope === "active" ? [activeEntry] : analysisSamples;
+      // Every checked file, whichever tree it follows: the dialog lists them all as sources, and
+      // each is gated under its own tree below.
+      const scopedEntries = scope === "active" ? [activeEntry] : checkedSamples;
       if (scopedEntries.length === 0) {
         setError("No checked FCS files are available for this export scope.");
         return false;
       }
       const splitThreshold = Math.max(0, Math.floor(minimumEvents));
+      // Each file is gated under the tree it follows. A file tailored against the tree, or one
+      // in a group, has its own copy with its own population ids, so the dialog's ids (the live
+      // tree's) are mapped to the copy's by provenance before a mask or a count is read.
       const exportDerived = new Map<string, Derived>();
       for (const entry of scopedEntries) {
+        const tree = treeStateForFile(entry.id);
+        if (!tree) throw new Error(`Cannot export ${entry.name}: the tree it follows is missing.`);
         exportDerived.set(
           entry.id,
-          entry.id === activeSampleId ? derived : recompute(entry.sample, state),
+          tree.live && entry.id === activeSampleId ? derived : recompute(entry.sample, tree.treeState),
         );
       }
+      const popCountFor = (entry: SampleEntry, popId: string): number | null | undefined => {
+        const ownId = populationIdInFileTree(entry.id, popId);
+        return ownId ? exportDerived.get(entry.id)?.stats.event_count[ownId] : undefined;
+      };
       const popMaskFor = (entry: SampleEntry, popId: string): Uint8Array => {
-        const mask = exportDerived.get(entry.id)?.masks[popId];
+        const ownId = populationIdInFileTree(entry.id, popId);
+        const mask = ownId ? exportDerived.get(entry.id)?.masks[ownId] : undefined;
         if (!mask) {
-          throw new Error(
-            `Cannot export ${state.populations[popId]?.name ?? popId}: no population mask is available for ${entry.name}.`,
-          );
+          const name = state.populations[popId]?.name ?? popId;
+          throw new Error(ownId
+            ? `Cannot export ${name}: no population mask is available for ${entry.name}.`
+            : `Cannot export ${name}: the tree ${entry.name} follows has no such population.`);
         }
         return mask;
       };
@@ -3775,8 +3813,7 @@ export default function App() {
           out[schemeStem ? `${schemeStem}.fcs` : `combined_${popName}.fcs`] = exportPopulationFcsCombined(items, assay);
         } else if (scope === "split") {
           for (const e of scopedEntries) {
-            const eventCount = exportDerived.get(e.id)?.stats.event_count[popId];
-            if (!passesPopulationFcsExportThreshold(eventCount, splitThreshold)) continue;
+            if (!passesPopulationFcsExportThreshold(popCountFor(e, popId), splitThreshold)) continue;
             out[sanitizeFcsName(null, e.name, popName, null)] =
               exportPopulationFcs(e.sample, popMaskFor(e, popId), assay);
           }
@@ -3825,9 +3862,9 @@ export default function App() {
 
   const combinedFcsCompatibility = useMemo(
     () => inspectCombinedFcsCompatibility(
-      analysisSamples.map((entry) => ({ sample: entry.sample, name: entry.name })),
+      checkedSamples.map((entry) => ({ sample: entry.sample, name: entry.name })),
     ),
-    [analysisSamples, sampleDataRevisionKey, panelVersion],
+    [checkedSamples, sampleDataRevisionKey, panelVersion],
   );
 
   function toggleCompensation(on: boolean): boolean {
@@ -7002,6 +7039,19 @@ export default function App() {
         counts.set(entry.id, gatingDerived.stats.event_count);
         continue;
       }
+      // A file that follows a tailored or group copy is counted under that copy, keyed by the
+      // live tree's population ids the dialog lists. The background cache holds live-tree masks,
+      // so the copy is gated here, and only while the dialog is open.
+      const tree = treeStateForFile(entry.id);
+      if (tree && !tree.live) {
+        if (!fcsExportOpen) continue;
+        const own = recompute(entry.sample, tree.treeState).stats.event_count;
+        counts.set(entry.id, Object.fromEntries(Object.keys(state.populations).map((popId) => {
+          const ownId = populationIdInFileTree(entry.id, popId);
+          return [popId, ownId ? own[ownId] ?? null : null];
+        })));
+        continue;
+      }
       const cached = inactiveGatingCacheRef.current.get(entry.id);
       if (
         cached &&
@@ -7013,12 +7063,15 @@ export default function App() {
       }
     }
     return counts;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     samples,
     activeSampleId,
     gatingDerived,
     inactiveGatingCacheVersion,
     state.gate_version,
+    fcsExportOpen,
+    fileHierarchies,
   ]);
 
   /** A column the app just wrote is offered for colouring, and any values fetched before are dropped. */

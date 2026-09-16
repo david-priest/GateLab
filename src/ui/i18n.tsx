@@ -788,7 +788,7 @@ const JA: Readonly<Record<string, string>> = {
   "Another hierarchy already has that name.": "その名前の階層は既にあります。",
   "Delete the hierarchy \"{name}\" with its populations and gates? This can be undone.": "階層「{name}」をその集団とゲートごと削除しますか？ 元に戻せます。",
   "Each hierarchy holds its own populations and gates. Switch here, or create another for a second layout.": "各階層は独自の集団とゲートを持ちます。ここで切り替えるか、別のレイアウト用に新しい階層を作成します。",
-  "Hierarchy: {name} ({n} of {count}). Populations are exported from the active hierarchy; switch hierarchies to export the others.": "階層: {name}（{count}件中{n}件目）。集団は現在の階層から書き出されます。他の階層は切り替えてから書き出してください。",
+  "The populations listed are the viewed tree's. A file that follows a tailored or group copy of the tree is exported under that copy.": "一覧の集団は表示中のツリーのものです。ツリーの調整コピーまたはグループのコピーに従うファイルは、そのコピーで書き出されます。",
   "Check every population": "すべての集団をチェック",
   "Uncheck every population": "すべての集団のチェックを外す",
   "Add gate": "ゲートを追加",
