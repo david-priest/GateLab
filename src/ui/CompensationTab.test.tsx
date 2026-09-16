@@ -217,6 +217,7 @@ function renderTab(
       onProgress?: (progress: CompensationApplyProgress) => void,
     ) => Promise<void>;
     onCancelApply?: () => void;
+    onRemoveProfile?: () => Promise<void>;
     hasExistingGates?: boolean;
     applyStatus?: CompensationApplyUiStatus | null;
     installedProfile?: CompensationProfileRecord | null;
@@ -251,6 +252,7 @@ function renderTab(
         existingHostAssays={options.existingHostAssays}
         onAdoptExistingAssay={options.onAdoptExistingAssay}
         onCancelApply={options.onCancelApply}
+        onRemoveProfile={options.onRemoveProfile}
         hasExistingGates={options.hasExistingGates}
         applyStatus={options.applyStatus}
         installedProfile={options.installedProfile}
@@ -403,7 +405,7 @@ describe("CompensationTab common path", () => {
 
     const selector = host.querySelector<HTMLSelectElement>('select[aria-label="Compensation review population"]')!;
     expect(selector).not.toBeNull();
-    expect(selector.closest(".gl-comp-overview")).not.toBeNull();
+    expect(selector.closest(".gl-comp-inspector-left")).not.toBeNull();
     expect(host.querySelectorAll('select[aria-label="Compensation review population"]')).toHaveLength(1);
 
     act(() => {
@@ -1609,3 +1611,111 @@ describe("CompensationTab assay-layer fidelity", () => {
     expect(host.textContent).not.toContain("Apply embedded matrix");
   });
 });
+
+/** A slice of an S8 file: two detectors, three image-derived features, no spillover keyword. */
+function s8FlowSample(): Sample {
+  const n = 4;
+  const chans = [
+    { name: "FSC-A", marker: null, feature: "Area", range: 262144 },
+    { name: "V500-A", marker: "CD4-A", feature: "Area", range: 262144 },
+    { name: "PE-A", marker: "CD25-A", feature: "Area", range: 262144 },
+    { name: "Max Intensity (FSC)", marker: "Max Intensity (FSC)", feature: "MaxIntensity", range: 65536 },
+    { name: "Total Intensity (FSC)", marker: "Total Intensity (FSC)", feature: "TotalIntensity", range: 20000000 },
+    { name: "Size (FSC)", marker: "Size (FSC)", feature: "MaskSize", range: 10000 },
+    { name: "Time", marker: "Time", feature: "Time", range: 1024 },
+  ];
+  const fcs: FcsFile = {
+    version: "FCS3.2", nEvents: n, instrument: "flow", keywords: {}, spillover: null,
+    channels: chans.map((c, index) => ({ index, name: c.name, marker: c.marker, bits: 32, range: c.range, feature: c.feature })),
+    columns: chans.map((_, ci) => Float32Array.from({ length: n }, (_, i) => ci * 10 + i + 1)),
+  };
+  return new Sample(fcs);
+}
+
+describe("CompensationTab matrix panel", () => {
+  it("starts an empty matrix over the detectors only, not the S8 imaging features", async () => {
+    stubDeterministicCrypto();
+    const sample = s8FlowSample();
+    const applied = vi.fn(async (_profile: CompensationProfileRecord) => undefined);
+    renderTab(sample, { stateKey: "workspace-a:s8-empty", onApplyProfile: applied });
+
+    const start = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Start from an empty matrix")!;
+    await act(async () => {
+      start.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(applied).toHaveBeenCalledTimes(1);
+    const profile = applied.mock.calls[0][0];
+    expect(profile.scientific.kind).toBe("flow-spillover");
+    // Canonical order is alphabetical; what matters is that no imaging feature is a channel.
+    expect(profile.scientific.matrix.receiverChannels).toEqual(["PE-A", "V500-A"]);
+    expect(profile.scientific.matrix.sourceChannels).toEqual(["PE-A", "V500-A"]);
+  });
+
+  it("sizes the matrix label columns to the longest channel name", () => {
+    const names = ["Alexa Fluor 647-A", "Spark Blue 550-A"];
+    const markers = ["CD45RB-A", "CD14-A"];
+    const fcs: FcsFile = {
+      version: "FCS3.1", nEvents: 4, instrument: "flow", keywords: {},
+      channels: [
+        { index: 0, name: "FSC-A", marker: null, bits: 32, range: 262144 },
+        ...names.map((name, index) => ({ index: index + 1, name, marker: markers[index], bits: 32, range: 262144 })),
+      ],
+      columns: [Float32Array.from([1, 2, 3, 4]), Float32Array.from([10, 20, 30, 40]), Float32Array.from([5, 6, 7, 8])],
+      spillover: { channels: names, matrix: [[1, 0.05], [0.02, 1]] },
+    };
+    renderTab(new Sample(fcs), { stateKey: "workspace-a:labels" });
+
+    const stage = host.querySelector<HTMLElement>(".gl-comp-matrix-stage")!;
+    expect(stage).not.toBeNull();
+    const rowWidth = parseFloat(stage.style.getPropertyValue("--gl-comp-row-label-w"));
+    const headerHeight = parseFloat(stage.style.getPropertyValue("--gl-comp-col-label-h"));
+    expect(rowWidth).toBeGreaterThan(94);
+    expect(headerHeight).toBeGreaterThan(88);
+    expect(parseFloat(stage.style.width)).toBeGreaterThan(18 + rowWidth);
+  });
+
+  it("removes the installed matrix once the gate acknowledgement is given", async () => {
+    const sample = flowSample();
+    sample.installCompensatedLayer(profileLayer(sample, "flow-spillover"), { activeLayer: "compensated" });
+    const removed = vi.fn(async () => { sample.removeCompensatedLayer(); });
+    renderTab(sample, {
+      stateKey: "workspace-a:remove",
+      compensationOn: true,
+      hasExistingGates: true,
+      onRemoveProfile: removed,
+    });
+
+    const remove = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Remove the matrix")!;
+    expect(remove.disabled).toBe(false);
+    await act(async () => {
+      remove.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(removed).not.toHaveBeenCalled();
+    expect(host.querySelector(".gl-comp-error")?.textContent).toContain("original coordinates");
+
+    const acknowledgement = host.querySelector<HTMLInputElement>(
+      ".gl-comp-header-remove .gl-comp-gate-acknowledgement input",
+    )!;
+    act(() => acknowledgement.click());
+    await act(async () => {
+      remove.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(removed).toHaveBeenCalledTimes(1);
+    expect(sample.activeLayer).toBe("original");
+    expect(sample.compensatedLayerStatus().state).toBe("missing");
+  });
+
+  it("offers no removal under a host that owns the assay", () => {
+    const sample = flowSample();
+    sample.installCompensatedLayer(profileLayer(sample, "flow-spillover"));
+    renderTab(sample, { stateKey: "workspace-a:no-remove" });
+    expect([...host.querySelectorAll("button")].some((button) => button.textContent === "Remove the matrix")).toBe(false);
+  });
+});
+

@@ -1,8 +1,6 @@
-// illustration.ts — the Illustration tab data, ported from GateLabR strategy_utils.R
-// (compute_illustration_batch + build_gates_for_channels) and render_illustration_tab
-// (app.R:7689-8060). A grid of populations (rows) × x-channels (cols), each cell showing the
-// population's events on (x_channel, y_channel) with the gates on that channel pair overlaid.
-// Rendered through the reused mini_plot.js CytofMiniPlot.renderIllustrationGrid so output matches.
+// illustration.ts — Illustration plot data and gate overlays. The original fixed
+// populations-by-channels grid is still used by ridgelines; the structured editor composes the
+// same per-file payloads into configurable Files / Populations / Channels dimensions.
 
 import type { Sample } from "./sample";
 import { ellipseBoundary } from "./ellipse";
@@ -12,6 +10,7 @@ import { computeGateCounts, type GateCount } from "./populations";
 import type { AxisTicks } from "./ticks";
 import { displayLabelOffset, polygonOutline } from "../plots/gatePayload";
 import { computeRangeFromValues } from "./strategy";
+import { quadrantArmPoints } from "./gates";
 
 /** Even-spaced downsample of masked event indices (round(seq(1,N,len=cap))). */
 function sampledIndices(mask: Uint8Array, cap: number): number[] {
@@ -25,12 +24,19 @@ function sampledIndices(mask: Uint8Array, cap: number): number[] {
   return out;
 }
 
-interface GateOverlay {
+export interface GateOverlay {
   gate_id: string;
   name: string;
   percent_of_parent: number | null;
   gate_type: string;
-  vertices: [number, number][];
+  vertices?: [number, number][];
+  /** Quadrant crosshair and optional FlowJo-style bent positive arms, in cell-axis display space. */
+  center?: [number, number];
+  arms?: { h: [number, number][]; v: [number, number][] };
+  quadrant_counts?: number[];
+  quadrant_pcts?: number[];
+  /** Per-quadrant label offsets in the cell's screen order, display units, swapped when flipped. */
+  quadrant_label_offsets?: ([number, number] | null)[];
   /** True display-space boundary, present only when the transform actually bends the edges. */
   outline?: [number, number][];
   color: string;
@@ -48,29 +54,96 @@ function buildGatesForChannels(
   gateCounts: Record<string, GateCount>,
   xCh: string,
   yCh: string | null,
+  xRange: [number, number],
+  yRange: [number, number] | null,
 ): GateOverlay[] {
   if (!yCh) return [];
   const out: GateOverlay[] = [];
   const ids = gateOrder.length ? gateOrder : Object.keys(gates);
   for (const gid of ids) {
     const gate = gates[gid];
-    if (!gate || gate.gate_type === "quadrant") continue;
+    if (!gate) continue;
 
     let flipped: boolean;
     if (gate.x_channel === xCh && gate.y_channel === yCh) flipped = false;
     else if (gate.x_channel === yCh && gate.y_channel === xCh) flipped = true;
     else continue;
 
+    const toCellDisplay = ([vx, vy]: [number, number]): [number, number] => {
+      const cellX = flipped ? vy : vx;
+      const cellY = flipped ? vx : vy;
+      return [
+        sample.gateToDisplay(gate, xCh, cellX),
+        sample.gateToDisplay(gate, yCh, cellY),
+      ];
+    };
+
+    const c = gateCounts[gid];
+    if (gate.gate_type === "quadrant") {
+      let arms: GateOverlay["arms"];
+      if (gate.curl && yRange) {
+        const originalXDisplayEnd = flipped ? yRange[1] : xRange[1];
+        const originalYDisplayEnd = flipped ? xRange[1] : yRange[1];
+        const originalXEnd = sample.displayToGate(
+          gate,
+          gate.x_channel,
+          originalXDisplayEnd,
+        );
+        const originalYEnd = sample.displayToGate(
+          gate,
+          gate.y_channel,
+          originalYDisplayEnd,
+        );
+        const originalH = quadrantArmPoints(
+          gate.center,
+          gate.curl,
+          "h",
+          originalXEnd,
+        ).map(toCellDisplay);
+        const originalV = quadrantArmPoints(
+          gate.center,
+          gate.curl,
+          "v",
+          originalYEnd,
+        ).map(toCellDisplay);
+        if (originalH.length > 1 && originalV.length > 1) {
+          arms = flipped
+            ? { h: originalV, v: originalH }
+            : { h: originalH, v: originalV };
+        }
+      }
+      const quadrants = c?.quadrants ?? [];
+      // Cell quadrant order is Q1 top-left, Q2 top-right, Q3 bottom-right, Q4 bottom-left.
+      // Swapping axes maps those screen positions back to original Q3,Q2,Q1,Q4 respectively.
+      const order = flipped ? [2, 1, 0, 3] : [0, 1, 2, 3];
+      out.push({
+        gate_id: gid,
+        name: gate.name,
+        percent_of_parent: null,
+        gate_type: "quadrant",
+        center: toCellDisplay(gate.center),
+        ...(arms ? { arms } : {}),
+        quadrant_counts: order.map((index) => quadrants[index]?.event_count ?? 0),
+        quadrant_pcts: order.map((index) => quadrants[index]?.percent_of_parent ?? 0),
+        ...(gate.quadrant_label_offsets
+          ? { quadrant_label_offsets: order.map((index) => {
+              const o = gate.quadrant_label_offsets?.[index];
+              return o ? (flipped ? [o[1], o[0]] as [number, number] : o) : null;
+            }) }
+          : {}),
+        color: gate.color,
+        label_offset: gate.label_offset
+          ? (flipped ? [gate.label_offset[1], gate.label_offset[0]] : gate.label_offset)
+          : null,
+      });
+      continue;
+    }
+
     // Gate vertices (gating space) → display space on the cell's (xCh, yCh) axes.
     const raw = gate.gate_type === "rectangle" ? aabbCorners(gate.vertices)
       : gate.gate_type === "ellipse" ? ellipseBoundary(gate)
       : gate.vertices;
-    const verts: [number, number][] = raw.map(([vx, vy]) => {
-      // (vx,vy) are in (gate.x_channel, gate.y_channel) space.
-      const cellX = flipped ? vy : vx; // value on xCh
-      const cellY = flipped ? vx : vy; // value on yCh
-      return [sample.gateToDisplay(gate, xCh, cellX), sample.gateToDisplay(gate, yCh, cellY)];
-    });
+    const verts: [number, number][] = raw.map(toCellDisplay);
 
     // A gate is straight in the space it was drawn in, so it bows when an axis is shown on a
     // different scale. Rectangles are axis-aligned boxes in display space and provably cannot.
@@ -80,7 +153,6 @@ function buildGatesForChannels(
       verts,
     );
 
-    const c = gateCounts[gid];
     out.push({
       gate_id: gid,
       name: gate.name,
@@ -89,7 +161,9 @@ function buildGatesForChannels(
       vertices: verts,
       outline,
       color: gate.color,
-      label_offset: gate.label_offset ?? displayLabelOffset(verts),
+      label_offset: gate.label_offset
+        ? (flipped ? [gate.label_offset[1], gate.label_offset[0]] : gate.label_offset)
+        : displayLabelOffset(verts),
     });
   }
   return out;
@@ -115,6 +189,11 @@ export interface IllustrationFontSizes {
 
 // Every knob mini_plot.js renderIllustrationGrid reads (app.R collect_style_params + render site).
 export interface IllustrationOptions {
+  summaryStat?: "median" | "mean";
+  /** Explicit preview budget; Infinity is reserved for a user-requested full-data export. */
+  pointBudget?: number;
+  /** Independent figure grids retain a valid axes frame for genuine zero-event populations. */
+  includeEmpty?: boolean;
   displayMode: string;
   maxEvents: number;
   nColumns: number;
@@ -183,7 +262,7 @@ export function buildIllustrationPayload(
   // Preview point budget: cap per-panel events so a large max-events × many pop×channel panels
   // can't lock the browser up (app.R:7751-7761). Full max-events is reserved for export.
   const nPanels = Math.max(1, popIds.length) * Math.max(1, xChannels.length);
-  const PREVIEW_POINT_BUDGET = 300_000;
+  const PREVIEW_POINT_BUDGET = opts.pointBudget ?? 300_000;
   const cap = Math.min(opts.maxEvents, Math.max(500, Math.floor(PREVIEW_POINT_BUDGET / nPanels)));
 
   // GLOBAL scale per channel: the global-scale override, else the channel's full display range
@@ -218,7 +297,7 @@ export function buildIllustrationPayload(
     const nPop = eventCount[popId] ?? sampleIdx.length;
     popNames[popId] = populations[popId]?.name ?? popId;
     popCounts[popId] = nPop;
-    if (sampleIdx.length === 0) continue;
+    if (sampleIdx.length === 0 && !opts.includeEmpty) continue;
 
     const gateCounts = computeGateCounts(gates, mask, data);
 
@@ -243,7 +322,16 @@ export function buildIllustrationPayload(
         y_is_logicle: yTicks !== null,
         y_logicle_ticks: yTicks,
       };
-      gateOverlays[key] = buildGatesForChannels(sample, gates, gateOrder, gateCounts, xCh, yChannel);
+      gateOverlays[key] = buildGatesForChannels(
+        sample,
+        gates,
+        gateOrder,
+        gateCounts,
+        xCh,
+        yChannel,
+        xr,
+        yRange,
+      );
     }
   }
 

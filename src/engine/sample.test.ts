@@ -289,6 +289,30 @@ describe("Sample — singular spillover disables compensation", () => {
     s.setCompensation(true);
     expect(Array.from(s.gatingColumn(peIdx))).toEqual(before); // raw, uncompensated
   });
+
+  it("a snapshot restores the file's own matrix after an external one was installed and failed to apply", () => {
+    // A usable matrix in the file, compensation on; then a workspace's singular matrix replaces
+    // it and cannot be applied -- the case a gating import must be able to walk back from.
+    const fcs = singular();
+    fcs.spillover = { channels: ["PE-A", "APC-A"], matrix: [[1, 0.1], [0.2, 1]] };
+    const s = new Sample(fcs);
+    s.setCompensation(true);
+    expect(s.compensationEnabled).toBe(true);
+    const peIdx = s.index("PE-A")!;
+    const compensated = Array.from(s.gatingColumn(peIdx));
+    const snapshot = s.spilloverSnapshot();
+
+    s.installExternalSpillover({ channels: ["PE-A", "APC-A"], matrix: [[1, 1], [1, 1]] }, "the workspace", { replaceEmbedded: true });
+    s.setCompensation(true);
+    expect(s.compensationEnabled).toBe(false);
+    expect(s.spilloverOrigin.kind).toBe("external");
+
+    s.restoreSpillover(snapshot);
+    expect(s.spilloverOrigin.kind).toBe("fcs");
+    expect(s.spillover?.matrix).toEqual(snapshot.spillover?.matrix);
+    expect(s.compensationEnabled).toBe(true);
+    expect(Array.from(s.gatingColumn(peIdx))).toEqual(compensated);
+  });
 });
 
 describe("Sample — Panel display labels (identity `key` is preserved)", () => {

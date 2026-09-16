@@ -23,12 +23,53 @@
  */
 
 import type { SpilloverMatrix } from "./fcs";
-import type { TransformSpec } from "./models";
+import { FLOWJO_CURLY_QUAD_CURL, type QuadrantCurl, type TransformSpec } from "./models";
 import { transformFromSpec } from "./sample";
 import { biexTransform } from "./biex";
 
 /** Marker the converter writes and importGatingML reads back. Internal to that handoff. */
 export const WSP_GATE_SPACE_TAG = "gatelab_gate_space";
+/** Marks a population defined as the COMPLEMENT of its gate (FlowJo's <NotNode>). */
+export const WSP_COMPLEMENT_TAG = "gatelab_population_complement";
+
+/**
+ * Populations that are an intersection of OTHER populations rather than a gate of their own.
+ *
+ * FlowJo's `<AndNode>` carries no `<Gate>`: it names its operands by path in `<Dependents>`, and
+ * its population is their intersection within its parent. GateLab's Population already IS an
+ * intersection -- `gate_refs` with an include flag each -- so the two models line up exactly, and
+ * the only thing missing is a way to carry a gate-less population through a document whose every
+ * other population is keyed by a gate.
+ *
+ * It rides in one top-level `data-type:custom_info` rather than as `<gating:BooleanGate>`
+ * elements. A document containing BooleanGates is read as a Cytobank flat-Boolean export, where
+ * populations are built from the Boolean gates ALONE -- which discards every ordinary population
+ * of a FlowJo tree. That was tried; it collapsed a 34-gate strategy to two populations.
+ *
+ * Each intersection carries an id of its own, and whatever FlowJo gated beneath it names that id
+ * as its parent -- a gate as its ordinary `parent_id` attribute, a nested intersection as its
+ * `parent` here. The importer accepts those ids as parents because this block declares them.
+ */
+export const WSP_DERIVED_TAG = "gatelab_derived_populations";
+
+/** One `<AndNode>`: an intersection of gates, each included or excluded. */
+export interface WspDerivedPopulation {
+  /** Its own id, which what FlowJo gated beneath the intersection names as its parent. */
+  id: string;
+  name: string;
+  /** Gate or intersection whose population contains this one, or null at the top level. */
+  parent: string | null;
+  /** `quadrant` selects one quadrant (1–4) of a quadrant gate; absent for an ordinary gate. */
+  refs: Array<{ gate: string; include: boolean; quadrant?: number }>;
+}
+
+/**
+ * Marks a rectangle that stands for a whole curly quadrant gate: its two minima are the
+ * crosshair, and the four FlowJo populations that share that crosshair are written as derived
+ * populations naming one quadrant each. Carries the bend to give the arms, or null when the
+ * axes' display could not be carried and the crosshair imports straight.
+ */
+export const WSP_CURLY_TAG = "gatelab_curly_quadrant";
 
 const GATING_NS = "http://www.isac-net.org/std/Gating-ML/v2.0/gating";
 const DATATYPE_NS = "http://www.isac-net.org/std/Gating-ML/v2.0/datatypes";
@@ -42,7 +83,18 @@ const TRANSFORMS_NS = "http://www.isac-net.org/std/Gating-ML/v2.0/transformation
 const CONVENTIONAL_COMP_PREFIX = "Comp-";
 
 /** Gate elements this importer can carry across. Anything else is reported, never dropped. */
-const SUPPORTED_GATE_LOCAL_NAMES = new Set(["PolygonGate", "RectangleGate"]);
+const SUPPORTED_GATE_LOCAL_NAMES = new Set([
+  "PolygonGate", "RectangleGate", "EllipsoidGate", "CurlyQuad",
+]);
+
+/**
+ * How many display channels FlowJo divides an axis into.
+ *
+ * Not a guess: every `biex` transform in a 433-workspace corpus declares `length="256"`
+ * (463,325 of them, no other value), and an ellipsoid on a linear axis reproduces FlowJo's own
+ * event membership only at `maxRange/256` — every other scale selects essentially nothing.
+ */
+const FLOWJO_DISPLAY_CHANNELS = 256;
 
 /** One independent gating tree within a sample. GateLab holds exactly one at a time. */
 export interface FlowJoTreeSummary {
@@ -228,6 +280,32 @@ function writeGateSpace(doc: Document, el: Element, x: TransformSpec, y: Transfo
 }
 
 /**
+ * Mark a gate whose POPULATION is the complement of it.
+ *
+ * Written into the same data-type:custom_info the gate space uses, so the document stays in the
+ * flat parent_id form the importer already builds a population per gate from. Emitting a
+ * Gating-ML BooleanGate instead looks more faithful and is a trap: a document carrying one is
+ * read as a Cytobank flat-Boolean export, where populations come from the BooleanGates alone,
+ * and the thirty-six ordinary populations of a FlowJo tree disappear.
+ */
+function writeComplementMark(doc: Document, el: Element): void {
+  const info = doc.createElementNS(DATATYPE_NS, "data-type:custom_info");
+  const tag = doc.createElementNS(DATATYPE_NS, WSP_COMPLEMENT_TAG);
+  tag.textContent = "true";
+  info.appendChild(tag);
+  el.insertBefore(info, el.firstChild);
+}
+
+/** Mark the rectangle that stands for a whole curly quadrant gate; see WSP_CURLY_TAG. */
+function writeCurlyMark(doc: Document, el: Element, curl: QuadrantCurl | null): void {
+  const info = doc.createElementNS(DATATYPE_NS, "data-type:custom_info");
+  const tag = doc.createElementNS(DATATYPE_NS, WSP_CURLY_TAG);
+  tag.textContent = JSON.stringify({ curl });
+  info.appendChild(tag);
+  el.insertBefore(info, el.firstChild);
+}
+
+/**
  * The <Transformations> block that governs a sample's axes.
  *
  * It is a SIBLING of <SampleNode>, not a descendant: FlowJo nests
@@ -276,6 +354,17 @@ function specForTransformElement(el: Element): TransformSpec | null {
       const spec = { kind: "wsplog" as const, offset: n("offset"), decades: n("decades") };
       return spec.offset > 0 && spec.decades > 0 ? spec : null;
     }
+    case "fasinh": {
+      // FlowJo's ArcSinh axis is Gating-ML's fasinh with FlowJo's length and maxRange beside it.
+      // fasinh(x; T, M, A) = (asinh(x · sinh(M ln10) / T) + A ln10) / ((M + A) ln10) is affine
+      // in asinh(x / cf) with cf = T / sinh(M ln10), whatever A is: A only shifts and scales the
+      // axis, so a gate straight in FlowJo's display is straight in GateLab's asinh at that
+      // cofactor. Thirty-three of the 433 corpus workspaces declare it, all mass cytometry.
+      const T = n("T");
+      const M = n("M");
+      if (!(T > 0) || !(M > 0)) return null;
+      return { kind: "asinh", cofactor: T / Math.sinh(M * Math.LN10) };
+    }
     case "logicle": {
       // FlowJo can display an axis with logicle instead of biex. None of the workspaces this
       // importer was built against use it (seven files, 2016-2025, carry only linear/biex/log),
@@ -306,6 +395,232 @@ export function workspaceTransformSpecs(node: Element): Map<string, TransformSpe
     }
   }
   return out;
+}
+
+/**
+ * The affine map from FlowJo's 0-256 display channel space into the space GateLab holds a gate
+ * in, for one parameter: `display = offset + scale * channel`.
+ *
+ * Only ellipsoids need this. FlowJo writes polygon and rectangle coordinates RAW, but writes
+ * ellipsoid foci and edges in display channels -- in the same file, on the same axes. Measured
+ * over a 433-workspace corpus: 99.3% of the 5,830 ellipsoid coordinates fall inside [0,256],
+ * against 1.5% of polygon coordinates. Reading an ellipsoid as raw yields a gate a few hundred
+ * units wide at the origin, which selects nothing and reports no error.
+ *
+ * The map is affine for every transform this importer reads, and that is what makes it safe:
+ * an affine change of coordinates takes an ellipse to an ellipse, so the converted gate is
+ * exact rather than resampled.
+ *
+ *   linear   GateLab's display IS raw               ->  min + channel * (max - min) / 256
+ *   biex     forward(maxRange) == length == 256     ->  channel, the two spaces coincide
+ *   log      forward spans 0..1 across the decades  ->  channel / 256
+ *   logicle  forward spans 0..1                     ->  channel / 256
+ */
+interface ChannelMap {
+  offset: number;
+  scale: number;
+}
+
+function channelMapForTransformElement(el: Element): ChannelMap | null {
+  const n = (name: string): number => Number(el.getAttributeNS(TRANSFORMS_NS, name)
+    ?? el.getAttribute(`transforms:${name}`));
+  switch (el.localName) {
+    case "linear": {
+      const min = n("minRange");
+      const max = n("maxRange");
+      if (!Number.isFinite(min) || !Number.isFinite(max) || !(max > min)) return null;
+      return { offset: min, scale: (max - min) / FLOWJO_DISPLAY_CHANNELS };
+    }
+    case "biex": {
+      // biexTransform is built with channelRange = length, so its forward already returns
+      // FlowJo channel numbers. The two spaces are the same one; nothing to convert.
+      const length = Math.trunc(n("length"));
+      return length > 1 ? { offset: 0, scale: FLOWJO_DISPLAY_CHANNELS / length } : null;
+    }
+    case "log":
+    case "logicle":
+      return { offset: 0, scale: 1 / FLOWJO_DISPLAY_CHANNELS };
+    case "fasinh": {
+      // GateLab's display is asinh(x / cf) = fasinh · (M + A) ln10 − A ln10, with fasinh spanning
+      // 0..1 over the 256 channels.
+      const M = n("M");
+      const A = Number.isFinite(n("A")) ? n("A") : 0;
+      if (!(M > 0)) return null;
+      return { offset: -A * Math.LN10, scale: ((M + A) * Math.LN10) / FLOWJO_DISPLAY_CHANNELS };
+    }
+    default:
+      return null;
+  }
+}
+
+/** Each parameter's channel-to-display map, keyed the same way as workspaceTransformSpecs. */
+function workspaceChannelMaps(node: Element): Map<string, ChannelMap> {
+  const out = new Map<string, ChannelMap>();
+  const block = transformsBlockFor(node);
+  if (!block) return out;
+  for (let el = block.firstElementChild; el; el = el.nextElementSibling) {
+    const map = channelMapForTransformElement(el);
+    if (!map) continue;
+    for (const p of childrenByLocalName(el, "parameter")) {
+      const name = p.getAttributeNS(DATATYPE_NS, "name") ?? p.getAttribute("data-type:name");
+      if (name) out.set(name, map);
+    }
+  }
+  return out;
+}
+
+/** The (x, y) pairs under a `foci` or `edge` container, in document order. */
+function ellipseVertices(parent: Element | null): Array<[number, number]> {
+  if (!parent) return [];
+  const out: Array<[number, number]> = [];
+  for (const v of childrenByLocalName(parent, "vertex")) {
+    const cs = childrenByLocalName(v, "coordinate").map((c) =>
+      Number(c.getAttributeNS(DATATYPE_NS, "value") ?? c.getAttribute("data-type:value")));
+    if (cs.length >= 2 && cs.every((n) => Number.isFinite(n))) out.push([cs[0], cs[1]]);
+  }
+  return out;
+}
+
+/**
+ * Rewrite FlowJo's ellipsoid into the mean / covarianceMatrix / distanceSquare form Gating-ML
+ * defines and GateLab's own parser already reads, moved into the axis's display space.
+ *
+ * FlowJo describes the ellipse by its two foci plus a `distance` attribute, which is the sum of
+ * distances to the foci -- the major axis. The `edge` vertices are the axis endpoints but are
+ * rounded to whole channels, so they are the fallback rather than the source: on the reference
+ * workspace they place the boundary ~0.8% inside FlowJo's own, costing 8,450 events.
+ *
+ * Measured against 795,866 events FlowJo itself assigned to the gate: 794,031 selected, ZERO
+ * false positives, 1,835 false negatives (Jaccard 0.9977). The residual is FlowJo quantising
+ * events to display channels before it tests them, which GateLab deliberately does not do --
+ * its gates are continuous in the data. Rounding mode, the semi-minor axis and bin-centre
+ * offsets were each tested and are not the cause.
+ */
+function convertFlowJoEllipsoid(doc: Document, el: Element, mx: ChannelMap, my: ChannelMap): boolean {
+  const foci = ellipseVertices(childrenByLocalName(el, "foci")[0] ?? null);
+  if (foci.length !== 2) return false;
+  const [f1, f2] = foci;
+  const cx = (f1[0] + f2[0]) / 2;
+  const cy = (f1[1] + f2[1]) / 2;
+  const separation = Math.hypot(f2[0] - f1[0], f2[1] - f1[1]);
+  // A circle has coincident foci and so no defined major axis; any orientation describes it.
+  const ux = separation > 0 ? (f2[0] - f1[0]) / separation : 1;
+  const uy = separation > 0 ? (f2[1] - f1[1]) / separation : 0;
+  const halfFocal = separation / 2;
+
+  const declared = Number(el.getAttributeNS(GATING_NS, "distance") ?? el.getAttribute("gating:distance"));
+  let semiMajor = Number.isFinite(declared) && declared > 0 ? declared / 2 : NaN;
+  if (!Number.isFinite(semiMajor)) {
+    const edge = ellipseVertices(childrenByLocalName(el, "edge")[0] ?? null);
+    if (!edge.length) return false;
+    semiMajor = Math.max(...edge.map(([x, y]) => Math.hypot(x - cx, y - cy)));
+  }
+  if (!(semiMajor > halfFocal) || !Number.isFinite(semiMajor)) return false;
+  const semiMinor = Math.sqrt(semiMajor * semiMajor - halfFocal * halfFocal);
+  if (!(semiMinor > 0)) return false;
+
+  // Covariance of the ellipse in channel space, then pushed through the per-axis affine map.
+  // With distanceSquare = 1 the Mahalanobis boundary IS the ellipse with these semi-axes.
+  const A = semiMajor * semiMajor;
+  const B = semiMinor * semiMinor;
+  const c00 = (A * ux * ux + B * uy * uy) * mx.scale * mx.scale;
+  const c01 = (A - B) * ux * uy * mx.scale * my.scale;
+  const c11 = (A * uy * uy + B * ux * ux) * my.scale * my.scale;
+
+  for (const container of ["foci", "edge"]) {
+    for (const n of childrenByLocalName(el, container)) el.removeChild(n);
+  }
+  el.removeAttributeNS(GATING_NS, "distance");
+
+  const valued = (local: string, value: number): Element => {
+    const node = doc.createElementNS(GATING_NS, `gating:${local}`);
+    node.setAttributeNS(DATATYPE_NS, "data-type:value", String(value));
+    return node;
+  };
+  const mean = doc.createElementNS(GATING_NS, "gating:mean");
+  mean.appendChild(valued("coordinate", mx.offset + mx.scale * cx));
+  mean.appendChild(valued("coordinate", my.offset + my.scale * cy));
+  const cov = doc.createElementNS(GATING_NS, "gating:covarianceMatrix");
+  for (const [p, q] of [[c00, c01], [c01, c11]]) {
+    const row = doc.createElementNS(GATING_NS, "gating:row");
+    row.appendChild(valued("entry", p));
+    row.appendChild(valued("entry", q));
+    cov.appendChild(row);
+  }
+  el.appendChild(mean);
+  el.appendChild(cov);
+  el.appendChild(valued("distanceSquare", 1));
+  return true;
+}
+
+/**
+ * Carry a CurlyQuad across as the rectangle it actually describes.
+ *
+ * FlowJo's curly quadrant stores nothing but two dimensions with a min or a max -- the same
+ * content as a RectangleGate -- plus `percentX` / `percentY`, which bend the divider near the
+ * crosshair. Every one of the 1,368 curly quadrants in the corpus declares both as 0, i.e. a
+ * plain quadrant, and they arrive in complete sets of four. A non-zero percentage is reported
+ * by the caller rather than silently straightened.
+ */
+function curlyQuadAsRectangle(doc: Document, el: Element): Element {
+  const rect = doc.createElementNS(GATING_NS, "gating:RectangleGate");
+  for (const attr of Array.from(el.attributes)) {
+    if (attr.namespaceURI === "http://www.w3.org/2000/xmlns/") continue;
+    if (attr.localName === "percentX" || attr.localName === "percentY") continue;
+    if (attr.namespaceURI) rect.setAttributeNS(attr.namespaceURI, attr.name, attr.value);
+    else rect.setAttribute(attr.name, attr.value);
+  }
+  while (el.firstChild) rect.appendChild(el.firstChild);
+  return rect;
+}
+
+/** A curly quadrant declaring a percentage FlowJo does not document; every one in the public corpus declares 0. */
+function curlyQuadIsCurved(el: Element): boolean {
+  return ["percentX", "percentY"].some((name) => {
+    const raw = el.getAttribute(name);
+    return raw !== null && raw !== "" && Number(raw) !== 0;
+  });
+}
+
+/**
+ * The crosshair a CurlyQuad declares, and which quadrant of it the population is.
+ *
+ * Each of the four populations carries one bound per dimension: a min on an axis puts the
+ * population on that axis's positive side, a max on its negative side, and the bound's value is
+ * the crosshair coordinate either way. Quadrants are numbered as GateLab's: 1 = x−/y+,
+ * 2 = x+/y+, 3 = x+/y−, 4 = x−/y−.
+ */
+function curlyQuadCrosshair(el: Element): { cx: number; cy: number; quadrant: 1 | 2 | 3 | 4 } | null {
+  const dims = childrenByLocalName(el, "dimension");
+  if (dims.length !== 2) return null;
+  const read = (d: Element): { value: number; plus: boolean } | null => {
+    const min = d.getAttributeNS(GATING_NS, "min") ?? d.getAttribute("gating:min");
+    const max = d.getAttributeNS(GATING_NS, "max") ?? d.getAttribute("gating:max");
+    if (min !== null && min !== "") return Number.isFinite(Number(min)) ? { value: Number(min), plus: true } : null;
+    if (max !== null && max !== "") return Number.isFinite(Number(max)) ? { value: Number(max), plus: false } : null;
+    return null;
+  };
+  const x = read(dims[0]);
+  const y = read(dims[1]);
+  if (!x || !y) return null;
+  const quadrant = x.plus ? (y.plus ? 2 : 3) : (y.plus ? 1 : 4);
+  return { cx: x.value, cy: y.value, quadrant };
+}
+
+/** A RectangleGate whose two minima are the crosshair: the x+/y+ quadrant, standing for all four. */
+function curlyQuadGroupRectangle(doc: Document, el: Element): Element {
+  const rect = curlyQuadAsRectangle(doc, el);
+  for (const d of childrenByLocalName(rect, "dimension")) {
+    const min = d.getAttributeNS(GATING_NS, "min") ?? d.getAttribute("gating:min");
+    const max = d.getAttributeNS(GATING_NS, "max") ?? d.getAttribute("gating:max");
+    const value = min !== null && min !== "" ? min : max;
+    d.removeAttributeNS(GATING_NS, "min");
+    d.removeAttribute("gating:min");
+    d.removeAttributeNS(GATING_NS, "max");
+    d.removeAttribute("gating:max");
+    if (value !== null) d.setAttributeNS(GATING_NS, "gating:min", value);
+  }
+  return rect;
 }
 
 /**
@@ -341,7 +656,12 @@ export function isFlowJoWorkspace(xmlText: string): boolean {
 function gateElementOf(population: Element): { el: Element | null; unsupported: string | null } {
   const gate = childrenByLocalName(population, "Gate")[0];
   if (!gate) return { el: null, unsupported: null };
-  const candidates = Array.from(gate.children).filter((c) => c.localName.endsWith("Gate"));
+  // CurlyQuad is the one gate element FlowJo does not suffix with "Gate". Matching on the
+  // suffix alone made 1,324 populations in the corpus report as "has no gate" -- the wrong
+  // reason, and the wrong advice to anyone reading the warning.
+  const candidates = Array.from(gate.children).filter(
+    (c) => c.localName.endsWith("Gate") || c.localName === "CurlyQuad",
+  );
   if (!candidates.length) return { el: null, unsupported: null };
   const supported = candidates.find((c) => SUPPORTED_GATE_LOCAL_NAMES.has(c.localName));
   return supported
@@ -354,13 +674,11 @@ function eachPopulation(
   visit: (population: Element, depth: number) => boolean,
   depth = 0,
 ): void {
-  for (const subs of childrenByLocalName(container, "Subpopulations")) {
-    for (const pop of childrenByLocalName(subs, "Population")) {
-      // visit() returns false when the subtree must not be descended into, which happens when
-      // a gate could not be represented: its children's membership depends on it, so carrying
-      // them over re-parented would silently change what they mean.
-      if (visit(pop, depth)) eachPopulation(pop, visit, depth + 1);
-    }
+  for (const pop of populationChildren(container)) {
+    // visit() returns false when the subtree must not be descended into, which happens when
+    // a gate could not be represented: its children's membership depends on it, so carrying
+    // them over re-parented would silently change what they mean.
+    if (visit(pop, depth)) eachPopulation(pop, visit, depth + 1);
   }
 }
 
@@ -370,9 +688,24 @@ function sampleNodes(doc: Document): Element[] {
 
 /** Summarise every sample in the workspace, so the caller can choose one. */
 /** The independent gating trees of a sample: its top-level Population elements. */
+/**
+ * The element names FlowJo uses for a node in a gating tree.
+ *
+ * A <NotNode> is a <Population> in every structural respect -- it carries a <Gate>, it has
+ * <Subpopulations> beneath it, it has a count -- and differs only in meaning: it selects the
+ * events OUTSIDE its gate. Reading only <Population> made every Boolean node invisible to the
+ * walk, so its whole subtree vanished with it, and because the loop never saw the node there
+ * was no "skipped" warning either. On FR-FCM-Z2V4 that turned 38 gates into 4, silently.
+ */
+const POPULATION_NODES = new Set(["Population", "NotNode", "AndNode", "OrNode"]);
+
+function populationChildren(container: Element): Element[] {
+  return childrenByLocalName(container, "Subpopulations")
+    .flatMap((subs) => Array.from(subs.children).filter((el) => POPULATION_NODES.has(el.localName)));
+}
+
 function rootPopulations(sampleNode: Element): Element[] {
-  return childrenByLocalName(sampleNode, "Subpopulations")
-    .flatMap((subs) => childrenByLocalName(subs, "Population"));
+  return populationChildren(sampleNode);
 }
 
 /** Visit one tree, root included. `eachPopulation` starts below a container, not at it. */
@@ -385,6 +718,14 @@ function summariseTree(root: Element, index: number): FlowJoTreeSummary {
   let unsupportedCount = 0;
   const populations: string[] = [];
   walkTree(root, (pop) => {
+    // A Boolean node is a population without a gate of its own; it counts, and the walk goes
+    // on beneath it, as the converter does. Stopping at it made a sample gated only beneath a
+    // root-level intersection look ungated.
+    if (pop.localName === "AndNode" || pop.localName === "NotNode") {
+      gateCount++;
+      populations.push(pop.getAttribute("name") ?? "");
+      return true;
+    }
     const { el, unsupported } = gateElementOf(pop);
     if (el) {
       gateCount++;
@@ -441,7 +782,7 @@ function qualifiedPopulationNames(roots: Element[]): Map<Element, string> {
   for (const root of roots) {
     walkTree(root, (pop) => {
       const path: string[] = [];
-      for (let el: Element | null = pop; el && el.localName === "Population";
+      for (let el: Element | null = pop; el && POPULATION_NODES.has(el.localName);
            el = el.parentElement?.parentElement ?? null) {
         path.unshift(el.getAttribute("name") ?? "");
       }
@@ -516,6 +857,10 @@ export function listFlowJoWorkspaceSamples(xmlText: string): FlowJoSampleSummary
     let gateCount = 0;
     let unsupportedCount = 0;
     eachPopulation(node, (pop) => {
+      if (pop.localName === "AndNode" || pop.localName === "NotNode") {
+        gateCount++;
+        return true;
+      }
       const { el, unsupported } = gateElementOf(pop);
       if (el) {
         gateCount++;
@@ -625,6 +970,25 @@ export function resolveFlowJoWorkspaceFiles(
     }
     return { sampleIndex: sample.index, fileName: null, matchedName: null };
   });
+}
+
+/**
+ * The supplied files that belong to samples carrying no gates.
+ *
+ * Resolved together with the gated samples, gated first, as the open dialog lists them, so a
+ * file both could claim goes to the gated sample and is never reported as data.
+ */
+export function ungatedWorkspaceFiles(
+  gated: FlowJoSampleSummary[],
+  ungated: FlowJoSampleSummary[],
+  fileNames: readonly string[],
+): Set<string> {
+  const ungatedIndex = new Set(ungated.map((s) => s.index));
+  return new Set(
+    resolveFlowJoWorkspaceFiles([...gated, ...ungated], fileNames)
+      .filter((r) => r.fileName !== null && ungatedIndex.has(r.sampleIndex))
+      .map((r) => r.fileName!),
+  );
 }
 
 /**
@@ -800,14 +1164,25 @@ export function flowJoWorkspaceToGatingML(
   const warnings: string[] = [];
   const flowJoCounts: Record<string, number> = {};
   const idOf = new Map<Element, string>();
+  /** Each population's emitted gate, so a dropped intersection can take its subtree with it. */
+  const copyOf = new Map<Element, Element>();
+  /** AndNode and NotNode elements in walk order, resolved once every gate has an id. */
+  const booleanNodes: Element[] = [];
+  /** The gate copy a NotNode carries, kept only as a fallback when its Dependent cannot be read. */
+  const embeddedOf = new Map<Element, Element>();
+  let andSerial = 0;
+  let notSerial = 0;
   const spill = sampleSpillover(node);
   const unresolvedCompensated = new Set<string>();
   const transformKinds = workspaceTransformKinds(node);
   const transformSpecs = workspaceTransformSpecs(node);
+  const channelMaps = workspaceChannelMaps(node);
   /** gate name → the non-representable transforms its axes are displayed with. */
   const approximated = new Map<string, Set<string>>();
   let carried = 0;
   let serial = 0;
+  /** The gate element emitGate last appended, for a caller that must mark it. */
+  let lastEmitted: Element | null = null;
 
   const roots = rootPopulations(node);
   if (treeIndex !== null && !roots[treeIndex]) {
@@ -821,6 +1196,45 @@ export function flowJoWorkspaceToGatingML(
 
   const visitPopulation = (pop: Element, depth: number): boolean => {
     const name = qualifiedNames.get(pop) ?? pop.getAttribute("name") ?? `population_${serial + 1}`;
+    const count = Number(pop.getAttribute("count"));
+
+    // A Boolean node has no gate of its own: an AndNode names the populations it intersects,
+    // and a NotNode names the population it is the complement of. Resolving those needs gate
+    // ids that are still being assigned, so both are collected here and written out once the
+    // walk is done. Each takes an id of its own, so what FlowJo gated beneath it can name it as
+    // its parent, and the walk goes on into it.
+    if (pop.localName === "AndNode") {
+      booleanNodes.push(pop);
+      idOf.set(pop, `wsp_and_${++andSerial}`);
+      if (Number.isFinite(count)) flowJoCounts[name] = count;
+      return true;
+    }
+    if (pop.localName === "NotNode") {
+      // FlowJo stores a COPY of the negated gate inside the NotNode, and on a workspace whose
+      // gates are tailored per sample that copy goes stale: on FR-FCM-Z2V4 the copy inside
+      // "debris-" differs from the debris gate the sample carries, and FlowJo's own count for
+      // the NOT population is the complement of the current gate, not of the copy. Reading the
+      // copy put that population 6% of the file out and every population beneath it with it.
+      // The copy is kept only for the case where the named population cannot be read.
+      booleanNodes.push(pop);
+      idOf.set(pop, `wsp_not_${++notSerial}`);
+      if (Number.isFinite(count)) flowJoCounts[name] = count;
+      const embedded = gateElementOf(pop).el;
+      if (embedded) embeddedOf.set(pop, embedded);
+      return true;
+    }
+    if (pop.localName === "OrNode") {
+      // One operator per population is GateLab's model, and OR across references has no
+      // faithful form in it. Reported rather than imported as something else -- it used to be
+      // dropped in silence, along with everything beneath it.
+      if (Number.isFinite(count)) flowJoCounts[name] = count;
+      warnings.push(
+        `"${name}" combines its references with OR, which GateLab cannot represent; it and ` +
+        `anything below it were skipped.`,
+      );
+      return false;
+    }
+
     const { el, unsupported } = gateElementOf(pop);
 
     if (!el) {
@@ -832,10 +1246,30 @@ export function flowJoWorkspaceToGatingML(
       return false;
     }
 
-    const count = Number(pop.getAttribute("count"));
     if (Number.isFinite(count)) flowJoCounts[name] = count;
+    if (el.localName === "CurlyQuad") {
+      const cross = curlyQuadCrosshair(el);
+      if (cross) return visitCurlyQuad(pop, el, name, depth, cross);
+    }
+    return emitGate(pop, el, name, depth);
+  };
 
-    const copy = out.importNode(el, true) as Element;
+  /**
+   * Emit one population's gate into the document, in the space FlowJo evaluates it in. `gateId`
+   * overrides FlowJo's own id; the NotNode fallback passes the id the node's children already
+   * name as their parent, so they keep pointing at it. `register` false emits a gate that is
+   * not the population's own (a curly quadrant's shared crosshair), so the population keeps
+   * whatever id it was given and the element is only recorded in `lastEmitted`.
+   */
+  const emitGate = (
+    pop: Element, el: Element, name: string, depth: number, gateId?: string, register = true,
+  ): boolean => {
+    const imported = out.importNode(el, true) as Element;
+    // A curly quadrant whose crosshair could not be read carries a rectangle's content under
+    // another name; it becomes one here so every later step sees the gate kind it describes.
+    const copy = imported.localName === "CurlyQuad"
+      ? curlyQuadAsRectangle(out, imported)
+      : imported;
     nameDimensionsAndRefs(copy, spill, unresolvedCompensated);
 
     // FlowJo stores vertices raw but evaluates the gate as straight lines in the axis's DISPLAY
@@ -853,7 +1287,25 @@ export function flowJoWorkspaceToGatingML(
     const stepY = axes && timestep !== null && isTimeAxis(axes[1]) ? timestep : 1;
     const timeScaled = stepX !== 1 || stepY !== 1;
 
-    if (axes && sx && sy) {
+    if (copy.localName === "EllipsoidGate") {
+      // Ellipsoids arrive in display channels, not raw, so they take their own conversion and
+      // must NOT also go through the raw->display forward pass below.
+      const mapFor = (ch: string): ChannelMap | undefined =>
+        channelMaps.get(ch) ?? channelMaps.get(ch.replace(/^Comp-/, ""));
+      const mx = axes ? mapFor(axes[0]) : undefined;
+      const my = axes ? mapFor(axes[1]) : undefined;
+      if (!axes || !mx || !my || !sx || !sy || !convertFlowJoEllipsoid(out, copy, mx, my)) {
+        warnings.push(
+          `"${name}" is an ellipse on an axis whose display the workspace does not declare, so ` +
+          `its coordinates cannot be placed; it and anything below it were skipped.`,
+        );
+        return false;
+      }
+      if (sx.kind !== "identity" || sy.kind !== "identity") {
+        writeGateSpace(out, copy, sx, sy);
+        carried++;
+      }
+    } else if (axes && sx && sy) {
       // Both axes linear means the gate is already straight in raw; nothing to move or record.
       if (sx.kind !== "identity" || sy.kind !== "identity") {
         const fx = transformFromSpec(sx).forward;
@@ -890,23 +1342,291 @@ export function flowJoWorkspaceToGatingML(
     }
     // FlowJo ids are unique within one file, which is all that is needed here; a generated id
     // keeps the document valid when one is missing.
-    const gateId = el.getAttributeNS(GATING_NS, "id") ?? `wsp_gate_${++serial}`;
-    copy.setAttributeNS(GATING_NS, "gating:id", gateId);
+    const id = gateId ?? el.getAttributeNS(GATING_NS, "id") ?? `wsp_gate_${++serial}`;
+    copy.setAttributeNS(GATING_NS, "gating:id", id);
     copy.setAttributeNS(GATING_NS, "gating:name", name);
-    idOf.set(pop, gateId);
+    if (register) idOf.set(pop, id);
 
-    const parent = pop.parentElement?.parentElement ?? null; // Population -> Subpopulations -> Population
-    const parentId = parent && parent.localName === "Population" ? idOf.get(parent) : undefined;
+    const parent = pop.parentElement?.parentElement ?? null; // node -> Subpopulations -> node
+    const parentId = parent && POPULATION_NODES.has(parent.localName) ? idOf.get(parent) : undefined;
     if (parentId) copy.setAttributeNS(GATING_NS, "gating:parent_id", parentId);
     else if (depth > 0) {
       warnings.push(`"${name}" sits under a skipped gate, so it was attached to the top level.`);
     }
 
     root.appendChild(copy);
+    if (register) copyOf.set(pop, copy);
+    lastEmitted = copy;
+    return true;
+  };
+
+  /**
+   * A FlowJo CurlyQuad population: one quadrant of a crosshair whose arms FlowJo bends.
+   *
+   * FlowJo writes each quadrant as its own gate element and nothing about the bend but
+   * percentX = percentY = 0; against its own counts the arms follow FLOWJO_CURLY_QUAD_CURL in
+   * its 256-channel display space (models.ts). The four populations sharing a crosshair become
+   * ONE GateLab quadrant gate: emitted once, as a rectangle whose minima are the crosshair and
+   * marked with the bend, and each population becomes a derived one naming its quadrant, so
+   * what FlowJo gated beneath a quadrant gates beneath it here as it does beneath an
+   * intersection.
+   */
+  const curlyGroups = new Map<string, { gateId: string; curled: boolean }>();
+  const curlyPops: Array<{ pop: Element; name: string; gateId: string; quadrant: number }> = [];
+  let curlySerial = 0;
+  let curlyPopSerial = 0;
+  const visitCurlyQuad = (
+    pop: Element, el: Element, name: string, depth: number,
+    cross: { cx: number; cy: number; quadrant: number },
+  ): boolean => {
+    const container = pop.parentElement?.parentElement ?? null;
+    const containerId = container && POPULATION_NODES.has(container.localName)
+      ? idOf.get(container) ?? "?"
+      : "top";
+    const axes = gateAxisNames(el) ?? ["", ""];
+    const key = `${containerId}|${axes[0]}|${axes[1]}|${cross.cx}|${cross.cy}`;
+    let group = curlyGroups.get(key);
+    if (!group) {
+      const gateId = `wsp_curly_${++curlySerial}`;
+      const before = carried;
+      const rect = curlyQuadGroupRectangle(out, out.importNode(el, true) as Element);
+      if (!emitGate(pop, rect, `${axes[0]} × ${axes[1]} quadrant`, depth, gateId, false)) return false;
+      // The bend is a shape in FlowJo's display space. When that space could not be carried
+      // the crosshair imports straight in raw, and says so, rather than bending in raw units.
+      const curled = carried > before;
+      writeCurlyMark(out, lastEmitted!, curled ? { ...FLOWJO_CURLY_QUAD_CURL } : null);
+      if (!curled) {
+        warnings.push(
+          `"${name}" is a curly quadrant on axes whose display could not be carried, so its ` +
+          "arms were imported straight; its counts will differ from FlowJo's near the crosshair.",
+        );
+      }
+      group = { gateId, curled };
+      curlyGroups.set(key, group);
+    }
+    if (curlyQuadIsCurved(el)) {
+      warnings.push(
+        `"${name}" declares a curly-quadrant percentage FlowJo does not document; its arms ` +
+        "were given the bend fitted to FlowJo's own counts.",
+      );
+    }
+    idOf.set(pop, `wsp_cq_${++curlyPopSerial}`);
+    curlyPops.push({ pop, name, gateId: group.gateId, quadrant: cross.quadrant });
     return true;
   };
 
   for (const selected of selectedRoots) walkTree(selected, visitPopulation);
+
+  // ---- Derived populations: intersections, complements and curly quadrants, resolved now that
+  // every gate has an id ------------------------------------------------------------------------
+  const derived: WspDerivedPopulation[] = [];
+  // A dropped intersection takes everything gated beneath it: that was measured inside the
+  // intersection, and no population is left to measure it in. booleanNodes is in walk order, so
+  // an intersection's ancestors are settled before it is.
+  const dropped = new Set<Element>();
+  const containerOf = (node: Element): Element | null => {
+    const up = node.parentElement?.parentElement ?? null; // node -> Subpopulations -> node
+    return up && POPULATION_NODES.has(up.localName) ? up : null;
+  };
+  const beneathDropped = (node: Element): boolean => {
+    for (let up = containerOf(node); up; up = containerOf(up)) if (dropped.has(up)) return true;
+    return false;
+  };
+  const dropSubtree = (node: Element): number => {
+    let n = 0;
+    for (const child of populationChildren(node)) {
+      const copy = copyOf.get(child);
+      if (copy) root.removeChild(copy);
+      n += 1 + dropSubtree(child);
+    }
+    return n;
+  };
+  if (booleanNodes.length) {
+    // FlowJo names a dependent by its FULL path from the tree root, so the index is keyed the
+    // same way. Names are taken verbatim; nothing here depends on gate ids or on custom_info.
+    const byPath = new Map<string, Element>();
+    const indexFrom = (node: Element, prefix: string): void => {
+      for (const child of populationChildren(node)) {
+        const path = `${prefix}${child.getAttribute("name") ?? ""}`;
+        byPath.set(path, child);
+        indexFrom(child, `${path}/`);
+      }
+    };
+    for (const rootPop of selectedRoots) {
+      const rootPath = rootPop.getAttribute("name") ?? "";
+      byPath.set(rootPath, rootPop);
+      indexFrom(rootPop, `${rootPath}/`);
+    }
+
+    // An operand resolves to gate references. A gated population is its own gate -- excluded for
+    // a NotNode, whose population is the complement of the gate it carries. A nested AndNode is
+    // the conjunction of ITS operands, and a conjunction of conjunctions is one conjunction, so it
+    // flattens. That is exact because an operand sits beside its AndNode: 46,124 of the 46,144
+    // operands in a 433-workspace survey do, and of the rest 16 name no population and 4 lie in
+    // another branch. A population in another branch carries its own ancestors' gates, which a
+    // bare reference to its gate would drop, so such an operand is refused rather than widened.
+    /** `fallback` marks a NotNode that was emitted as its own gate copy rather than derived. */
+    type Resolution = { refs: WspDerivedPopulation["refs"]; fallback?: true } | { why: string };
+    const readable = new Set(booleanNodes);
+    const resolved = new Map<Element, Resolution>();
+    const inProgress = new Set<Element>();
+    const operandsOf = (node: Element): string[] => childrenByLocalName(node, "Dependents")
+      .flatMap((d) => childrenByLocalName(d, "Dependent"))
+      .map((d) => d.getAttribute("name") ?? "");
+    const resolveAnd = (node: Element): Resolution => {
+      const done = resolved.get(node);
+      if (done) return done;
+      if (inProgress.has(node)) return { why: "its operands refer back to it" };
+      inProgress.add(node);
+      const parentNode = node.parentElement?.parentElement ?? null;
+      const deps = operandsOf(node);
+      const refs: WspDerivedPopulation["refs"] = [];
+      let why: string | null = deps.length ? null : "it names no operand";
+      for (const path of deps) {
+        if (why) break;
+        const target = byPath.get(path);
+        const label = path.split("/").pop() || path;
+        if (!target) {
+          why = `"${label}" does not exist in this tree`;
+        } else if ((target.parentElement?.parentElement ?? null) !== parentNode) {
+          why = `"${label}" is not beside it, and a reference to its gate alone would drop its own ancestry`;
+        } else if (target.localName === "AndNode") {
+          const inner: Resolution = readable.has(target) ? resolveAnd(target) : { why: "it was itself skipped" };
+          if ("why" in inner) why = `"${label}" cannot be resolved: ${inner.why}`;
+          else refs.push(...inner.refs);
+        } else if (target.localName === "NotNode") {
+          // A NotNode operand contributes what it negates, excluded -- whichever way the
+          // NotNode itself was read.
+          const inner: Resolution = readable.has(target) ? resolveNot(target) : { why: "it was itself skipped" };
+          if ("why" in inner) why = `"${label}" cannot be resolved: ${inner.why}`;
+          else refs.push(...inner.refs);
+        } else if (target.localName === "OrNode") {
+          why = `"${label}" combines with OR, which GateLab cannot represent`;
+        } else {
+          const gate = idOf.get(target);
+          if (gate?.startsWith("wsp_cq_")) why = `"${label}" is one quadrant of a curly quadrant, which an intersection cannot name yet`;
+          else if (gate) refs.push({ gate, include: true });
+          else why = `"${label}" was itself skipped`;
+        }
+      }
+      inProgress.delete(node);
+      // The same gate reached through two nested intersections is one condition, not two.
+      const unique = [...new Map(refs.map((r) => [`${r.gate}|${r.include}`, r] as const)).values()];
+      const res: Resolution = why ? { why } : { refs: unique };
+      resolved.set(node, res);
+      return res;
+    };
+
+    // A NotNode is the complement, inside its container, of the one population it names. That
+    // is exact when the named population sits beside it, which is how FlowJo's own tool writes
+    // it: the complement then negates that population's gate and nothing else. The complement
+    // of an intersection is a union, which GateLab cannot hold, and a population in another
+    // branch carries its own ancestry, so both are refused rather than approximated. When the
+    // name cannot be read at all, the copy of the gate FlowJo stored inside the node is used,
+    // and the warning says so, because that copy can be stale.
+    const resolveNot = (node: Element): Resolution => {
+      const done = resolved.get(node);
+      if (done) return done;
+      if (inProgress.has(node)) return { why: "its operand refers back to it" };
+      inProgress.add(node);
+      const parentNode = node.parentElement?.parentElement ?? null;
+      const deps = operandsOf(node);
+      let res: Resolution;
+      if (deps.length !== 1) {
+        res = { why: deps.length ? `it names ${deps.length} populations` : "it names no population" };
+      } else {
+        const path = deps[0];
+        const target = byPath.get(path);
+        const label = path.split("/").pop() || path;
+        if (!target) {
+          res = { why: `"${label}" does not exist in this tree` };
+        } else if ((target.parentElement?.parentElement ?? null) !== parentNode) {
+          res = { why: `"${label}" is not beside it, and negating its gate alone would drop its own ancestry` };
+        } else if (target.localName === "AndNode") {
+          res = { why: `"${label}" is an intersection, whose complement is a union GateLab cannot represent` };
+        } else if (target.localName === "OrNode") {
+          res = { why: `"${label}" combines with OR, which GateLab cannot represent` };
+        } else if (target.localName === "NotNode") {
+          const inner: Resolution = readable.has(target) ? resolveNot(target) : { why: "it was itself skipped" };
+          if ("why" in inner) res = { why: `"${label}" cannot be resolved: ${inner.why}` };
+          else if (inner.refs.length !== 1) res = { why: `"${label}" negates more than one gate, and the complement of that is a union GateLab cannot represent` };
+          else res = { refs: [{ gate: inner.refs[0].gate, include: !inner.refs[0].include }] };
+        } else {
+          const gate = idOf.get(target);
+          res = gate?.startsWith("wsp_cq_")
+            ? { why: `"${label}" is one quadrant of a curly quadrant, which a complement cannot name yet` }
+            : gate ? { refs: [{ gate, include: false }] } : { why: `"${label}" was itself skipped` };
+        }
+      }
+      inProgress.delete(node);
+      if ("why" in res) {
+        const embedded = embeddedOf.get(node);
+        const name = qualifiedNames.get(node) ?? node.getAttribute("name") ?? "complement";
+        const id = idOf.get(node)!;
+        if (embedded && emitGate(node, embedded, name, parentNode ? 1 : 0, id)) {
+          writeComplementMark(out, copyOf.get(node)!);
+          warnings.push(
+            `"${name}" is the complement of a population that could not be read (${res.why}); ` +
+            "the copy of the gate FlowJo stored inside it was used instead, which can be stale " +
+            "when the workspace tailors gates per sample.",
+          );
+          res = { refs: [{ gate: id, include: false }], fallback: true };
+        }
+      }
+      resolved.set(node, res);
+      return res;
+    };
+
+    for (const node of booleanNodes) {
+      if (beneathDropped(node)) {
+        dropped.add(node);
+        continue;
+      }
+      const isAnd = node.localName === "AndNode";
+      const name = qualifiedNames.get(node) ?? node.getAttribute("name") ?? (isAnd ? "intersection" : "complement");
+      const res = isAnd ? resolveAnd(node) : resolveNot(node);
+      if ("why" in res) {
+        dropped.add(node);
+        const lost = dropSubtree(node);
+        warnings.push(
+          `"${name}" is ${isAnd ? "an intersection" : "a complement"} that was skipped: ${res.why}` +
+          (lost ? `; the ${lost} population(s) beneath it went with it.` : "."),
+        );
+        continue;
+      }
+      // Emitted as a gate of its own by the fallback; nothing to derive.
+      if (res.fallback) continue;
+      const parentNode = containerOf(node);
+      derived.push({
+        id: idOf.get(node)!,
+        name,
+        parent: parentNode ? idOf.get(parentNode) ?? null : null,
+        refs: res.refs,
+      });
+    }
+
+  }
+
+  // Curly-quadrant populations: one derived population per quadrant of the shared gate. One
+  // beneath a dropped intersection went with it.
+  for (const { pop, name, gateId, quadrant } of curlyPops) {
+    if (beneathDropped(pop)) continue;
+    const parentNode = containerOf(pop);
+    derived.push({
+      id: idOf.get(pop)!,
+      name,
+      parent: parentNode ? idOf.get(parentNode) ?? null : null,
+      refs: [{ gate: gateId, include: true, quadrant }],
+    });
+  }
+  const derivedRoots = derived.filter((d) => d.parent === null).length;
+  if (derived.length) {
+    const info = out.createElementNS(DATATYPE_NS, "data-type:custom_info");
+    const tag = out.createElementNS(DATATYPE_NS, `data-type:${WSP_DERIVED_TAG}`);
+    tag.textContent = JSON.stringify(derived);
+    info.appendChild(tag);
+    root.appendChild(info);
+  }
 
   const qualified = [...qualifiedNames.entries()]
     .filter(([pop, name]) => name !== (pop.getAttribute("name") ?? ""))
@@ -948,9 +1668,12 @@ export function flowJoWorkspaceToGatingML(
 
   // Parallel top-level trees mean the sample was gated under more than one strategy. They are
   // imported together, which is a merge the user did not ask for, so it is stated.
+  // Gate elements only: the custom_info block holding derived populations is also a child of
+  // the root, and counting it reported a single-root sample as two trees. A derived population
+  // written at the top level is a root of its own, so it counts.
   const rootTrees = Array.from(root.children).filter(
-    (el) => !el.getAttributeNS(GATING_NS, "parent_id"),
-  ).length;
+    (el) => el.localName.endsWith("Gate") && !el.getAttributeNS(GATING_NS, "parent_id"),
+  ).length + derivedRoots;
   if (rootTrees > 1) {
     warnings.push(
       `"${sampleName}" holds ${rootTrees} independent gating trees and all were imported ` +

@@ -114,6 +114,18 @@ async function baseline(
 }
 
 describe("compensation profile baseline records", () => {
+  it("accepts a manual origin, a matrix set by hand that started as the identity", async () => {
+    const record = await baseline("baseline.manual", flowScientific(), {
+      origin: { type: "manual", startedAs: "identity" },
+    });
+    expect(record.origin).toEqual({ type: "manual", startedAs: "identity" });
+    await expect(
+      baseline("baseline.manual-bad", flowScientific(), {
+        origin: { type: "manual", startedAs: "zeros" } as unknown as NewBaselineMetadata["origin"],
+      }),
+    ).rejects.toThrow(/started as the identity/);
+  });
+
   it("creates a canonical immutable baseline with self-consistent hashes and provenance", async () => {
     const origin = uploadedOrigin({
       fileName: "  Wing Lab QQ beads (2021-06-03), α β.CSV  ",

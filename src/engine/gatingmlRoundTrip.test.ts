@@ -120,6 +120,7 @@ describe("Gating-ML self round-trip", () => {
   const polyRaw: Vertex[] = [[-11, 0], [11, 0], [25, 32], [4, 61], [-11, 21]];
   // wsplog clamps at its offset, so its gate must sit strictly positive to stay meaningful.
   const wsplogRect: Vertex[] = [[2, 2], [25, 2], [25, 61], [2, 61]];
+  const wsplogPoly: Vertex[] = [[2, 2], [25, 4], [30, 32], [11, 61], [2, 40]];
 
   const asinhSpec = (cf: number): TransformSpec => ({ kind: "asinh", cofactor: cf });
   const logicleSpecFor = (key: string): TransformSpec =>
@@ -190,7 +191,7 @@ describe("Gating-ML self round-trip", () => {
     ]);
   });
 
-  it("Class 2: a rectangle under biex or wsplog is bounded by float precision at the boundary", () => {
+  it("Class 2: a rectangle under biex is bounded by float precision at the boundary", () => {
     // A monotonic transform maps an axis-aligned box to an axis-aligned box, so exporting these
     // raw preserves the GEOMETRY exactly. The arithmetic is what is not exact: GateLab evaluates
     // the original by forward-transforming each event and comparing against display-space corners,
@@ -206,13 +207,60 @@ describe("Gating-ML self round-trip", () => {
     // the day the fixture changes. The bound below is two orders of magnitude tighter than any
     // real geometric regression, which moves a percent-level share of the gate.
     //
-    // wsplog clamps below its offset, so its rectangle sits fully above it to stay meaningful.
     assertWithin([
       gateIn(sample, "biex rect", "rectangle", fx, fy, rectRaw,
         { x: biexSpec, y: biexSpec }),
-      gateIn(sample, "wsplog rect", "rectangle", fx, fy, wsplogRect,
-        { x: wsplogSpec, y: wsplogSpec }),
     ], 0.0005);
+  });
+
+  // wsplog moved from Class 2 to Class 1 when the exporter learned to declare flog. FlowJo's log
+  // and Gating-ML's flog are the same function (T = offset, M = decades, differing by the
+  // constant 1), so the gate is now DECLARED rather than flattened into raw with densified edges.
+  // wsplog clamps below its offset, so these gates sit fully above it to stay meaningful.
+  it("Class 1: wsplog gates return with identical membership, as declared flog", () => {
+    const spec = { x: wsplogSpec, y: wsplogSpec };
+    assertExact([
+      gateIn(sample, "wsplog rect", "rectangle", fx, fy, wsplogRect, spec),
+      gateIn(sample, "wsplog poly", "polygon", fx, fy, wsplogPoly, spec),
+    ]);
+  });
+
+  it("a wsplog polygon is declared, not densified, and comes back the shape it left as", () => {
+    // The reason the restriction above could be lifted: the polygon leaves as five vertices in
+    // log space and returns as five vertices in log space, instead of leaving as a densified raw
+    // outline. Densifying is what the raw path had to do to approximate a curve that only looks
+    // like a curve because raw is the wrong space to describe it in.
+    const g = gateIn(sample, "wsplog poly", "polygon", fx, fy, wsplogPoly,
+                     { x: wsplogSpec, y: wsplogSpec });
+    const ws = workspaceFor([g]);
+    const xml = exportGatingML({ ...ws, sample, format: "standard", timestamp: "t" });
+    expect(xml).toContain("<transforms:flog");
+    expect((xml.match(/<gating:vertex/g) ?? []).length).toBe(wsplogPoly.length);
+
+    const back = roundTrip(sample, [g]).get(g.name)! as unknown as {
+      space?: string; vertices: [number, number][];
+    };
+    expect(back.space).toBe("display");
+    expect(back.vertices.length).toBe(wsplogPoly.length);
+    expect(moved(maskOf(sample, g), maskOf(sample, back as unknown as Gate))).toBe(0);
+  });
+
+  it("declares flog for a wsplog rectangle, with FlowJo's own offset and decades", () => {
+    const g = gateIn(sample, "wsplog rect", "rectangle", fx, fy, wsplogRect,
+                     { x: wsplogSpec, y: wsplogSpec });
+    const ws = workspaceFor([g]);
+    const xml = exportGatingML({ ...ws, sample, format: "standard", timestamp: "t" });
+
+    // T and M are FlowJo's own offset and decades, verbatim.
+    expect(xml).toContain("<transforms:flog");
+    expect(xml).toMatch(/<transforms:flog[^>]*transforms:T="1"/);
+    expect(xml).toMatch(/<transforms:flog[^>]*transforms:M="4.5"/);
+    // The dimension references it rather than exporting raw with no transformation-ref.
+    expect(xml).toMatch(/gating:transformation-ref="Tr_Log_/);
+
+    // Declared, not flattened: a RectangleGate with min/max, not a densified raw polygon.
+    expect(xml).toContain("<gating:RectangleGate");
+    expect((xml.match(/<gating:vertex/g) ?? []).length).toBe(0);
   });
 
   it("Class 2: a polygon under biex is bounded by densification, and the bound is small", () => {
@@ -258,5 +306,41 @@ describe("Gating-ML self round-trip", () => {
     expect(analyzeGatingMLQuadrantOmissions(ws.gates, ws.populations).gateIds).toContain(q.gate_id);
     expect(() => exportGatingML({ ...ws, sample, format: "standard", timestamp: "t" }))
       .toThrow(/quadrant/i);
+  });
+});
+
+// FlowJo pins every sub-offset event to the floor of its log axis (y = 0), so a gate whose lower
+// edge sits on the floor holds those events. Declared as flog, the floor is y' = 1, and a reader
+// whose own floor lies below it drops them: on this fixture a corner at raw (0, 0) lost 424 of
+// 1,074 events on re-import. A rectangle edge at the floor is therefore written unbounded.
+describe("a wsplog rectangle at FlowJo's floor", () => {
+  const sample = load();
+  const fluor = sample.channels.filter((_, i) => sample.isLogicleChannel(i)).map((c) => c.key);
+  const [fx, fy] = fluor;
+  const wsplogSpec: TransformSpec = { kind: "wsplog", offset: 1, decades: 4.5 };
+  // Raw corners at 0, which wsplog clamps to its floor.
+  const floorRect: Vertex[] = [[0, 0], [25, 0], [25, 61], [0, 61]];
+
+  it("is written with no lower bound on the floored axes, and keeps every event through the trip", () => {
+    const g = gateIn(sample, "floor rect", "rectangle", fx, fy, floorRect, { x: wsplogSpec, y: wsplogSpec });
+    const stored = (g as unknown as { vertices: Vertex[] }).vertices;
+    expect(Math.min(...stored.map((v) => v[0]))).toBe(0);
+    const before = maskOf(sample, g);
+    const held = before.reduce((s, v) => s + v, 0);
+    expect(held).toBeGreaterThan(0);
+    expect(held).toBeLessThan(before.length);
+
+    const ws = workspaceFor([g]);
+    const xml = exportGatingML({ ...ws, sample, format: "standard", timestamp: "t" });
+    const dims = [...xml.matchAll(/<gating:dimension([^>]*)>/g)].map((m) => m[1]);
+    expect(dims.length).toBe(2);
+    for (const attrs of dims) {
+      expect(attrs).not.toMatch(/gating:min=/);
+      expect(attrs).toMatch(/gating:max=/);
+      expect(attrs).toMatch(/gating:transformation-ref="Tr_Log_/);
+    }
+
+    const back = roundTrip(sample, [g]).get(g.name)!;
+    expect(moved(before, maskOf(sample, back))).toBe(0);
   });
 });

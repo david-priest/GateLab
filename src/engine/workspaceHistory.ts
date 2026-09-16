@@ -34,6 +34,7 @@ export type WorkspaceCheckpointReason =
   | "after-fcs-import"
   | "after-metadata-import"
   | "before-compensation-apply"
+  | "before-compensation-remove"
   | "after-compensation-apply"
   | "before-active-layer-change"
   | "compensation-profile-import";

@@ -1,0 +1,471 @@
+.gl-figure-workspace {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #f4f6f9;
+  color: #26364a;
+  font-size: 13px;
+}
+.gl-figure-workspace button,
+.gl-figure-workspace input,
+.gl-figure-workspace select {
+  font: inherit;
+}
+.gl-figure-workspace button {
+  border: 1px solid #d5dde8;
+  border-radius: 5px;
+  background: white;
+  color: #33465e;
+  padding: 6px 9px;
+  cursor: pointer;
+}
+.gl-figure-workspace button:hover:not(:disabled) {
+  background: #edf3fd;
+  border-color: #9bb6de;
+}
+.gl-figure-workspace button:disabled {
+  opacity: 0.48;
+  cursor: default;
+}
+.gl-figure-workspace input:not([type="checkbox"]):not([type="range"]),
+.gl-figure-workspace select {
+  border: 1px solid #d5dde8;
+  border-radius: 4px;
+  padding: 6px;
+  min-width: 0;
+  max-width: 100%;
+  background: white;
+  color: #26364a;
+}
+.gl-figure-workspace input[type="checkbox"] {
+  accent-color: #2469c7;
+}
+.gl-figure-workspace :focus-visible {
+  outline: 2px solid #2469c7;
+  outline-offset: 2px;
+}
+.gl-figure-toolbar,
+.gl-figure-viewbar,
+.gl-figure-arrangement,
+.gl-figure-footer {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+}
+.gl-figure-toolbar {
+  background: white;
+  border-bottom: 1px solid #dce3ec;
+}
+.gl-figure-toolbar input {
+  width: 230px;
+  font-weight: 600;
+}
+.gl-figure-subtle,
+.gl-figure-viewbar,
+.gl-figure-footer {
+  color: #5a6a7f;
+  font-size: 12px;
+}
+.gl-figure-flex {
+  flex: 1;
+}
+.gl-figure-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  min-height: 0;
+}
+.gl-figure-inspector {
+  width: 290px;
+  flex: 0 0 290px;
+  background: white;
+  border-right: 1px solid #dce3ec;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.gl-figure-inspector-resize { flex: 0 0 6px; cursor: col-resize; background: transparent; }
+.gl-figure-inspector-resize:hover { background: #dce3ec; }
+/* The metadata chips in the figure's Data section: the file list's chips, but as a plain board of
+   their own -- a bordered block, one labelled row per column, chips wrapping -- rather than the
+   navigator's fixed-height grid with its lock column, which squashed them here. */
+.gl-figure-facets-fold { margin: 10px 0 6px; }
+.gl-figure-facets-fold > summary { cursor: pointer; font-size: 11px; font-weight: 600; color: #475569; list-style: none; }
+.gl-figure-facets-fold > summary::-webkit-details-marker { display: none; }
+.gl-figure-facets-fold > summary::before { content: "\25be "; color: #94a3b8; }
+.gl-figure-facets-fold:not([open]) > summary::before { content: "\25b8 "; }
+.gl-figure-facets {
+  display: block;
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  border: 1px solid #dce3ec;
+  border-radius: 6px;
+  background: #fff;
+  overflow: visible;
+}
+.gl-figure-facets .gl-sample-facet-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 0;
+  border-top: 1px solid #eef2f7;
+}
+.gl-figure-facets .gl-sample-facet-row:first-child { border-top: 0; padding-top: 0; }
+.gl-figure-facets .gl-sample-facet-lock { display: none; }
+.gl-figure-facets .gl-sample-facet-name {
+  flex: 0 0 76px;
+  padding-top: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.gl-figure-facets .gl-sample-facet-values { flex: 1 1 auto; display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.gl-figure-facets .gl-sample-facet-chip { font-size: 11px; line-height: 18px; }
+.gl-figure-inspector nav {
+  display: flex;
+  padding: 8px 6px;
+  border-bottom: 1px solid #dce3ec;
+  gap: 2px;
+}
+.gl-figure-inspector nav button {
+  border-color: transparent;
+  padding: 6px 7px;
+}
+.gl-figure-inspector nav button[aria-selected="true"] {
+  background: #eaf1fc;
+  color: #1d58a5;
+  border-color: #b6ccea;
+}
+.gl-figure-fields {
+  min-width: 0;
+  border: 0;
+  margin: 0;
+  padding: 10px 12px 14px;
+  overflow: auto;
+  flex: 1;
+}
+.gl-figure-fields section[hidden] {
+  display: none;
+}
+.gl-figure-fields h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+.gl-figure-fields h3:not(:first-child) {
+  margin-top: 14px;
+}
+.gl-figure-fields h3 span {
+  color: #66768b;
+  font-weight: 400;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.gl-figure-fields p {
+  font-size: 11.5px;
+  color: #5a6a7f;
+  line-height: 1.45;
+  margin: 4px 0 8px;
+}
+.gl-figure-fields label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin: 6px 0;
+}
+.gl-figure-fields label > select,
+.gl-figure-fields label > input:not([type="checkbox"]):not([type="range"]) {
+  flex: 1 1 130px;
+  width: 130px;
+}
+.gl-figure-fields input[type="search"] {
+  width: 100%;
+  margin: 6px 0 4px;
+  padding: 4px 6px;
+}
+/* The Files and Populations lists: the navigator's compact rows -- one line each, a hairline
+   between rows, the name trimmed with an ellipsis (the full name is the row's title) -- rather
+   than padded two-line entries. Populations indent by tree depth. */
+.gl-figure-list {
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid #e4e9f0;
+  border-radius: 5px;
+}
+.gl-figure-list-actions button {
+  padding: 3px 7px;
+  font-size: 11px;
+}
+.gl-figure-list label.gl-figure-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  min-height: 26px;
+  padding: 2px 6px;
+  margin: 0;
+  border-radius: 0;
+  border-bottom: 1px solid #eef2f7;
+  cursor: pointer;
+}
+.gl-figure-list label.gl-figure-row:last-child { border-bottom: 0; }
+.gl-figure-list label.gl-figure-row:hover { background: #f6f9fd; }
+.gl-figure-list label.gl-figure-row:has(input:checked) { background: #f0f5fc; }
+.gl-figure-list label.gl-figure-row input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
+.gl-figure-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.3;
+}
+.gl-figure-row-name small {
+  display: block;
+  font-size: 11px;
+  line-height: 1.25;
+  color: #69788c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gl-figure-fields .gl-figure-row-meta {
+  display: inline;
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: #69788c;
+  font-variant-numeric: tabular-nums;
+}
+.gl-figure-fields small {
+  display: block;
+  color: #69788c;
+  font-size: 11px;
+}
+.gl-figure-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.gl-figure-fields details {
+  margin-top: 12px;
+  border-top: 1px solid #e4e9f0;
+  padding-top: 8px;
+}
+.gl-figure-fields summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+.gl-figure-mapping {
+  margin-top: 12px;
+  font-size: 12px;
+}
+.gl-figure-plot-editor {
+  border: 1px solid #dce3ec;
+  background: #fafbfd;
+  border-radius: 5px;
+  padding: 8px;
+  margin: 8px 0;
+}
+.gl-figure-fields .gl-figure-note {
+  padding: 4px 0;
+  font-size: 11px;
+  background: none;
+}
+.gl-figure-shelf {
+  padding: 9px;
+  border: 1px dashed #c5d1e0;
+  border-radius: 5px;
+  margin: 10px 0;
+  min-height: 65px;
+}
+.gl-figure-shelf h4 {
+  margin: 0 0 8px;
+  text-transform: capitalize;
+  font-weight: 500;
+}
+.gl-figure-dimension,
+.gl-figure-order {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 5px 0;
+}
+.gl-figure-dimension > span,
+.gl-figure-order > span {
+  flex: 1;
+  min-width: 65px;
+  overflow-wrap: anywhere;
+}
+.gl-figure-dimension {
+  padding: 5px;
+  border: 1px solid #dce3ec;
+  border-radius: 4px;
+  background: #f5f8fd;
+  cursor: grab;
+}
+.gl-figure-canvas {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.gl-figure-arrangement {
+  background: white;
+  border-bottom: 1px solid #dce3ec;
+}
+.gl-figure-arrangement label,
+.gl-figure-viewbar label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.gl-figure-viewbar input {
+  width: 70px;
+}
+.gl-figure-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+}
+.gl-figure-paper {
+  width: max-content;
+  background: white;
+  padding: 14px;
+  box-shadow: 0 1px 5px #26364a18;
+}
+.gl-figure-grid {
+  border-collapse: separate;
+  border-spacing: 12px;
+  width: max-content;
+  background: white;
+  font-family: Arial, Helvetica, sans-serif;
+  color: #26364a;
+}
+.gl-figure-grid caption {
+  text-align: left;
+  font-size: 15px;
+  font-weight: 600;
+  padding: 8px 12px;
+}
+.gl-figure-grid th {
+  font-weight: 500;
+  font-size: 12px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.gl-figure-grid .gl-figure-row-heading {
+  min-width: 90px;
+  max-width: 150px;
+  text-align: left;
+  vertical-align: top;
+  padding-top: 20px;
+}
+.gl-figure-grid td {
+  padding: 0;
+  vertical-align: top;
+}
+.gl-figure-panel-meta,
+.gl-figure-tailored {
+  font-size: 11px;
+  color: #5a6a7f;
+  text-align: center;
+  min-height: 18px;
+}
+.gl-figure-missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  border: 1px dashed #cbd5e1;
+  color: #75502c;
+  background: #fffdfa;
+  text-align: center;
+  font-size: 12px;
+}
+.gl-figure-warning {
+  margin: 8px 12px;
+  padding: 10px;
+  border: 1px solid #e4c18d;
+  border-radius: 4px;
+  background: #fff7e9;
+  color: #69491e;
+  font-size: 12px;
+}
+.gl-figure-warning button {
+  margin-top: 8px;
+}
+.gl-figure-note {
+  padding: 6px 15px;
+  color: #5c687b;
+  font-size: 12px;
+  background: #edf2f9;
+}
+.gl-figure-footer {
+  border-top: 1px solid #dce3ec;
+  background: white;
+  flex-shrink: 0;
+}
+.gl-figure-not-applicable {
+  display: block;
+  padding: 20px;
+  color: #8795a6;
+  text-align: center;
+}
+.gl-figure-empty {
+  margin: 50px auto;
+  max-width: 370px;
+  color: #5a6a7f;
+  line-height: 1.6;
+}
+@media (max-width: 900px) {
+  .gl-figure-inspector {
+    width: 250px;
+    flex-basis: 250px;
+  }
+  .gl-figure-toolbar .gl-figure-subtle {
+    display: none;
+  }
+}
+@media (max-width: 620px) {
+  .gl-figure-body {
+    flex-direction: column;
+  }
+  .gl-figure-inspector {
+    width: 100%;
+    flex: 0 0 230px;
+    border-right: 0;
+    border-bottom: 1px solid #dce3ec;
+  }
+  .gl-figure-toolbar input {
+    width: 150px;
+  }
+}
+.gl-figure-grid th,
+.gl-figure-grid caption {
+  font-size: var(--figure-heading-size, 12px) !important;
+}
+.gl-figure-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 10px;
+  font-size: 11px;
+  padding-top: 5px;
+}
+.gl-figure-workspace {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}

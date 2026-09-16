@@ -1,3 +1,5 @@
+import { isImagingFeature } from "./channels";
+
 // transforms.ts — display-space transforms for FCS data, ported 1:1 from GateLabR.
 //
 // Two transforms:
@@ -290,6 +292,26 @@ export function isScatterChannel(name: string): boolean {
   return /^(forward|side|back|orthogonal)[\s_-]*(angle[\s_-]*)?scatter/i.test(name);
 }
 
+/** The S8's two image brightness features, which read like fluorescence and keep its default. */
+const INTENSITY_FEATURE = /^(MaxIntensity|TotalIntensity)$/i;
+const INTENSITY_FEATURE_NAME = /^(Max Intensity|Total Intensity) \(/i;
+
+/**
+ * An imaging GEOMETRY feature: a measurement the S8 derived from the cell's image that is a
+ * shape or a position, not a brightness -- Size, the axis and radial moments, Eccentricity,
+ * Diffusivity, Centre of Mass, Delta CoM, Correlation. They are bounded, mostly zero, and read
+ * on a linear axis, which is how FACSChorus shows them (Eccentricity and Radial Moment Linear
+ * in an S8 experiment file; Max and Total Intensity Biexponential). A logicle collapsed
+ * Eccentricity (0 to 1, median 0) to a single tick. The two intensity features stay with the
+ * fluorescence default. $PnFEATURE decides where the file carries it, the name otherwise.
+ */
+export function isImagingGeometryChannel(name: string, feature?: string): boolean {
+  if (!isImagingFeature(name, feature)) return false;
+  const f = (feature ?? "").trim();
+  if (f) return !INTENSITY_FEATURE.test(f);
+  return !INTENSITY_FEATURE_NAME.test(name);
+}
+
 const NON_METAL_EXACT = [
   "time", "event_length", "cell_length", "center", "offset", "width",
   "residual", "file_number", "beads", "dead", "live", "viability",
@@ -380,6 +402,11 @@ export function transformChannel(
     let cf = opts.scatterCofactor ?? 150;
     if (!Number.isFinite(cf) || cf <= 0) cf = 150;
     for (let i = 0; i < n; i++) out[i] = Math.asinh(raw[i] / cf);
+    return out;
+  }
+  // An imaging geometry feature is linear, as Sample.transform() has it by default.
+  if (isImagingGeometryChannel(name)) {
+    for (let i = 0; i < n; i++) out[i] = raw[i];
     return out;
   }
 

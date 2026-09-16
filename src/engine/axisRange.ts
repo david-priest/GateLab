@@ -7,8 +7,13 @@
 
 import { quantileType7 } from "./transforms";
 
-const LOWER_QUANTILE = 0.001;
-const UPPER_QUANTILE = 0.999;
+/**
+ * The robust quantile pair. Exported because colouring events by a marker frames its colour
+ * scale on the same rule as the axes: a marker read off the colour bar and the same marker read
+ * off an axis must not disagree about where the data ends.
+ */
+export const LOWER_QUANTILE = 0.001;
+export const UPPER_QUANTILE = 0.999;
 const PADDING_FRACTION = 0.05;
 const MAX_QUANTILE_SAMPLES = 100_000;
 
@@ -19,7 +24,12 @@ type PlotGateGeometry = Readonly<{
   label_offset?: unknown;
 }>;
 
-function finiteQuantileSample(values: ArrayLike<number>): number[] {
+/**
+ * A deterministic, bounded, sorted sample of the finite values, for quantiles. Exported for the
+ * same reason as the quantiles themselves: a second caller reading the same column must sample
+ * it the same way, or the two answers drift apart on large files for no visible reason.
+ */
+export function finiteQuantileSample(values: ArrayLike<number>): number[] {
   const n = values.length;
   if (n === 0) return [];
 

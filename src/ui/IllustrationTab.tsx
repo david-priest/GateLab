@@ -1,11 +1,6 @@
-// IllustrationTab.tsx — the Illustration tab, mirroring GateLabR feature-for-feature. A grid of
-// populations (rows) × x-channels (cols) on a shared y-channel, histograms, or a
-// population-by-channel summary heatmap,
-// each cell showing that population's events with gate overlays — rendered via mini_plot.js
-// renderIllustrationGrid. Exposes every control GateLabR's Illustration tab has: biplot/histogram,
-// display mode + KDE contour smoothing, colour-by-population, overlay-per-channel, histogram fill /
-// overlay behaviour, ridgeline (stacked) layout with heat-gradient fill, per-population colour
-// palette, point size/opacity, publication style, gate line width, and per-axis font sizes.
+// IllustrationTab.tsx — a structured figure editor for biplots, histograms and summary heatmaps.
+// Files, populations and channels can be rearranged between rows, columns and overlays without
+// turning the tab into a free-form canvas. It shares GateLab's transforms and static plot renderer.
 
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import type { CoreState, Derived } from "../store";
@@ -18,6 +13,13 @@ import {
   buildMultiSampleIllustrationPayload,
   type IllustrationSampleSource,
 } from "../engine/illustration";
+import {
+  buildIllustrationLayoutPayload,
+  legacyIllustrationLayout,
+  moveIllustrationDimension,
+  normalizeIllustrationLayout,
+  type IllustrationDimensionLayout,
+} from "../engine/illustrationLayout";
 import { populationColor } from "../engine/palettes";
 import {
   buildMultiSampleHeatmapPayload,
@@ -32,6 +34,8 @@ import { DensityColourControl } from "./DensityColourControl";
 import { IllustrationSelectionMatrix } from "./IllustrationSelectionMatrix";
 import { useI18n } from "./i18n";
 import { illustrationPickerPopulations } from "./illustrationPopulations";
+import { IllustrationLayoutBuilder } from "./IllustrationLayoutBuilder";
+import { renderIllustrationLayout } from "../plots/illustrationLayoutRender";
 
 interface Props {
   sample: Sample;
@@ -44,6 +48,11 @@ interface Props {
   activeSampleId: string | null;
   checkedSampleCount: number;
   pendingSampleCount: number;
+  hierarchyScope?: Readonly<{
+    index: number;
+    name: string;
+    excludedCheckedCount: number;
+  }>;
   state: CoreState;
   derived: Derived;
   globalScales: Record<string, [number, number]>;
@@ -69,6 +78,11 @@ function snapshotConfig(config: IllustrationConfig): IllustrationConfig {
     popIds: [...config.popIds],
     xChannels: [...config.xChannels],
     popColors: { ...config.popColors },
+    dimensionLayout: config.dimensionLayout ? {
+      rows: [...config.dimensionLayout.rows],
+      columns: [...config.dimensionLayout.columns],
+      overlay: [...config.dimensionLayout.overlay],
+    } : undefined,
     selectedPopulationsBySample: config.selectedPopulationsBySample
       ? Object.fromEntries(
           Object.entries(config.selectedPopulationsBySample)
@@ -89,6 +103,7 @@ export function IllustrationTab({
   activeSampleId,
   checkedSampleCount,
   pendingSampleCount,
+  hierarchyScope,
   state,
   derived,
   globalScales,
@@ -112,7 +127,13 @@ export function IllustrationTab({
   const c0 = configRef.current;
   const initialPlotType = c0?.plotType ?? (c0?.yChannel === "" ? "histogram" : "biplot");
   const [plotType, setPlotType] = useState<"biplot" | "histogram" | "heatmap">(initialPlotType);
-  const [combineSamples, setCombineSamples] = useState(c0?.combineSamples ?? false);
+  const [dimensionLayout, setDimensionLayout] = useState<IllustrationDimensionLayout>(() =>
+    normalizeIllustrationLayout(
+      c0?.dimensionLayout,
+      legacyIllustrationLayout(c0?.combineSamples ?? false, c0?.overlayPops ?? false),
+    ));
+  const combineSamples = dimensionLayout.overlay.includes("files");
+  const overlayPops = dimensionLayout.overlay.includes("populations");
   const [selectionMode, setSelectionMode] = useState<"uniform" | "matrix">(
     c0?.selectionMode ?? "uniform",
   );
@@ -135,7 +156,6 @@ export function IllustrationTab({
   const [allEvents, setAllEvents] = useState(c0?.allEvents ?? false);
   // Population colouring
   const [colorByPop, setColorByPop] = useState(c0?.colorByPop ?? false);
-  const [overlayPops, setOverlayPops] = useState(c0?.overlayPops ?? false);
   const [popColors, setPopColors] = useState<Record<string, string>>(c0?.popColors ?? {});
   // Biplot points / style
   const [pointSize, setPointSize] = useState(c0?.pointSize ?? 1.2);
@@ -162,10 +182,10 @@ export function IllustrationTab({
   const [heatmapCellSize, setHeatmapCellSize] = useState(c0?.heatmapCellSize ?? 30);
   const [heatmapShowValues, setHeatmapShowValues] = useState(c0?.heatmapShowValues ?? false);
   // Fonts
-  const [fontTick, setFontTick] = useState(c0?.fontTick ?? 9);
+  const [fontTick, setFontTick] = useState(c0?.fontTick ?? 12);
   const [fontAxis, setFontAxis] = useState(c0?.fontAxis ?? 12);
   const [fontTitle, setFontTitle] = useState(c0?.fontTitle ?? 12);
-  const [fontGate, setFontGate] = useState(c0?.fontGate ?? 10);
+  const [fontGate, setFontGate] = useState(c0?.fontGate ?? 12);
   const [scaleFontsWithPlot, setScaleFontsWithPlot] = useState(c0?.scaleFontsWithPlot ?? true);
 
   const [selectedPreset, setSelectedPreset] = useState("");
@@ -213,7 +233,7 @@ export function IllustrationTab({
   // Assemble the live config and mirror it into the App-held ref after every render, so the
   // settings survive a tab unmount (persist across tab switches) and App can save them.
   const currentConfig: IllustrationConfig = {
-    plotType, combineSamples, selectionMode, selectedPopulationsBySample,
+    plotType, combineSamples, selectionMode, selectedPopulationsBySample, dimensionLayout,
     popIds, xChannels, yChannel, displayMode, plotSize, nColumns,
     fitToColumns, maxEvents, allEvents,
     colorByPop, overlayPops, popColors, pointSize, pointAlpha, contourThreshold, kdeBandwidth, pubStyle,
@@ -237,7 +257,10 @@ export function IllustrationTab({
   // Apply a full config bundle (preset load).
   const applyConfig = (c: IllustrationConfig) => {
     setPlotType(c.plotType ?? (c.yChannel === "" ? "histogram" : "biplot"));
-    setCombineSamples(c.combineSamples ?? false);
+    setDimensionLayout(normalizeIllustrationLayout(
+      c.dimensionLayout,
+      legacyIllustrationLayout(c.combineSamples ?? false, c.overlayPops ?? false),
+    ));
     setSelectionMode(c.selectionMode ?? "uniform");
     setSelectedPopulationsBySample(c.selectedPopulationsBySample
       ? Object.fromEntries(
@@ -248,7 +271,7 @@ export function IllustrationTab({
     setPopIds(c.popIds); setXChannels(c.xChannels); setYChannel(c.yChannel);
     setDisplayMode(c.displayMode); setPlotSize(c.plotSize); setNColumns(c.nColumns);
     setFitToColumns(c.fitToColumns); setMaxEvents(c.maxEvents); setAllEvents(c.allEvents);
-    setColorByPop(c.colorByPop); setOverlayPops(c.overlayPops); setPopColors(c.popColors);
+    setColorByPop(c.colorByPop); setPopColors(c.popColors);
     setPointSize(c.pointSize); setPointAlpha(c.pointAlpha); setContourThreshold(c.contourThreshold);
     if (c.densityColorPower !== undefined) onDensityColorPowerChange(c.densityColorPower);
     if (c.kdeBandwidth > 0) manualKdeBandwidth.current = c.kdeBandwidth;
@@ -325,7 +348,59 @@ export function IllustrationTab({
     const renderedYChannel = renderedPlotType === "biplot"
       ? (c.yChannel || defaultY || sample.channels[0]?.key || null)
       : null;
-    const payload = buildMultiSampleIllustrationPayload(
+    const illustrationOptions = {
+      displayMode: c.displayMode,
+      maxEvents: cap,
+      nColumns: cols,
+      plotSize: c.plotSize,
+      fitToColumns: c.fitToColumns,
+      contourThreshold: c.contourThreshold,
+      pointAlpha: c.pointAlpha,
+      densityColorPower: c.densityColorPower ?? densityColorPower,
+      pointSize: c.pointSize,
+      kdeBandwidth: c.kdeBandwidth,
+      colorByPop: c.colorByPop,
+      overlayPops: c.overlayPops,
+      populationColors: Object.fromEntries(renderedPopIds.map((id) => [
+        id,
+        c.colorByPop || c.overlayPops ? renderedColorFor(id) : "#444444",
+      ])),
+      histLineWidth: c.histLineWidth,
+      histFill: c.histFill,
+      histFillAlpha: c.histFillAlpha,
+      histOverlayMode: c.histOverlayMode,
+      histLayout: c.histLayout,
+      ridgeOverlap: c.ridgeOverlap,
+      ridgeColGap: c.ridgeColGap,
+      ridgeGradient: c.ridgeGradient,
+      pubStyle: c.pubStyle,
+      gateLineWidth: c.gateLineWidth,
+      gateEdgeMode: c.gateEdgeMode ?? "straight-bow",
+      fontSizes: { tick: c.fontTick, axis_label: c.fontAxis, gate_label: c.fontGate, title: c.fontTitle },
+      scaleFontsWithPlot: c.scaleFontsWithPlot ?? true,
+    };
+    // Ridgelines have their own stacked-density renderer. Keep it intact while the structured
+    // grid owns biplots and ordinary histograms; its Files/Populations overlay choices still
+    // come from the same dimension shelf.
+    if (renderedPlotType === "histogram" && c.histLayout === "ridgeline") {
+      const ridgePayload = buildMultiSampleIllustrationPayload(
+        illustrationSources,
+        activeSampleId,
+        state.gates,
+        state.gate_order,
+        state.populations,
+        renderedPopIds,
+        c.xChannels,
+        null,
+        globalScales,
+        illustrationOptions,
+        c.combineSamples ?? false,
+        renderedSelection,
+      );
+      loadMiniPlots().renderIllustrationGrid("illustration-grid-container", ridgePayload);
+      return;
+    }
+    const payload = buildIllustrationLayoutPayload(
       illustrationSources,
       activeSampleId,
       state.gates,
@@ -335,40 +410,14 @@ export function IllustrationTab({
       c.xChannels,
       renderedYChannel,
       globalScales,
-      {
-        displayMode: c.displayMode,
-        maxEvents: cap,
-        nColumns: cols,
-        plotSize: c.plotSize,
-        fitToColumns: c.fitToColumns,
-        contourThreshold: c.contourThreshold,
-        pointAlpha: c.pointAlpha,
-        densityColorPower: c.densityColorPower ?? densityColorPower,
-        pointSize: c.pointSize,
-        kdeBandwidth: c.kdeBandwidth,
-        colorByPop: c.colorByPop,
-        overlayPops: c.overlayPops,
-        // Pass an explicit colour for EVERY displayed pop (stable slot ?? manual override) so the
-        // renderer never falls back to its own index-based palette (which would reshuffle on add).
-        populationColors: Object.fromEntries(renderedPopIds.map((id) => [id, renderedColorFor(id)])),
-        histLineWidth: c.histLineWidth,
-        histFill: c.histFill,
-        histFillAlpha: c.histFillAlpha,
-        histOverlayMode: c.histOverlayMode,
-        histLayout: c.histLayout,
-        ridgeOverlap: c.ridgeOverlap,
-        ridgeColGap: c.ridgeColGap,
-        ridgeGradient: c.ridgeGradient,
-        pubStyle: c.pubStyle,
-        gateLineWidth: c.gateLineWidth,
-        gateEdgeMode: c.gateEdgeMode ?? "straight-bow",
-        fontSizes: { tick: c.fontTick, axis_label: c.fontAxis, gate_label: c.fontGate, title: c.fontTitle },
-        scaleFontsWithPlot: c.scaleFontsWithPlot ?? true,
-      },
-      c.combineSamples ?? false,
+      illustrationOptions,
+      normalizeIllustrationLayout(
+        c.dimensionLayout,
+        legacyIllustrationLayout(c.combineSamples ?? false, c.overlayPops ?? false),
+      ),
       renderedSelection,
     );
-    loadMiniPlots().renderIllustrationGrid("illustration-grid-container", payload);
+    renderIllustrationLayout("illustration-grid-container", payload);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     sample, sampleViews, activeSampleId, renderedConfig, state.gates, state.gate_order,
@@ -402,10 +451,26 @@ export function IllustrationTab({
           >{t("Fit data + gates")}</button>
           {renderPending && <span className="gl-illust-pending">{t("Changes pending")}</span>}
           <span className="gl-illust-sample-status">
-            {t("{ready} of {checked} checked FCS ready", {
-              ready: sampleViews.length,
-              checked: checkedSampleCount,
-            })}
+            {hierarchyScope
+              ? t("{ready} of {checked} active-hierarchy FCS ready", {
+                  ready: sampleViews.length,
+                  checked: checkedSampleCount,
+                })
+              : t("{ready} of {checked} checked FCS ready", {
+                  ready: sampleViews.length,
+                  checked: checkedSampleCount,
+                })}
+            {hierarchyScope
+              ? ` · ${t("hierarchy {index}: {name}", {
+                  index: hierarchyScope.index,
+                  name: hierarchyScope.name,
+                })}`
+              : ""}
+            {hierarchyScope && hierarchyScope.excludedCheckedCount > 0
+              ? ` · ${t("{count} checked excluded (different hierarchies)", {
+                  count: hierarchyScope.excludedCheckedCount,
+                })}`
+              : ""}
             {pendingSampleCount > 0
               ? ` · ${t("preparing {count} population masks…", { count: pendingSampleCount })}`
               : ""}
@@ -486,24 +551,42 @@ export function IllustrationTab({
             />
             {t("Choose by FCS")}
           </label>
-          <label className="gl-check" title={t("Unchecked files in the Samples panel are excluded.")}>
-            <input
-              type="checkbox"
-              checked={combineSamples}
-              disabled={checkedSampleCount < 2}
-              onChange={(event) => setCombineSamples(event.target.checked)}
-            />
-            {t("Combine checked FCS files")}
-          </label>
+          {isHeatmap ? (
+            <label className="gl-check" title={t("Unchecked files in the Samples panel are excluded.")}>
+              <input
+                type="checkbox"
+                checked={combineSamples}
+                disabled={checkedSampleCount < 2}
+                onChange={(event) => setDimensionLayout((previous) =>
+                  moveIllustrationDimension(
+                    previous,
+                    "files",
+                    event.target.checked ? "overlay" : "rows",
+                    0,
+                  ))}
+              />
+              {t("Pool checked FCS files")}
+            </label>
+          ) : null}
           <span className="gl-hint">
             {combineSamples
-              ? t("One pooled illustration")
-              : t("Separate file-labelled rows")}
+              ? t("FCS files are pooled")
+              : t("FCS files remain separate")}
             {selectionMode === "matrix"
               ? ` · ${t("{count} selected combinations", { count: selectedCombinationCount })}`
               : ""}
           </span>
         </div>
+        {!isHeatmap ? (
+          <>
+            <IllustrationLayoutBuilder value={dimensionLayout} onChange={setDimensionLayout} />
+            {isRidgeline ? (
+              <div className="gl-hint">
+                {t("Ridgeline stacks populations within each channel. Row and column placement takes effect in Grid layout; file and population overlays still apply here.")}
+              </div>
+            ) : null}
+          </>
+        ) : null}
         {/* Plot type + display + contour smoothing */}
         <div className="gl-illust-row">
           {/* Explicit plot-type toggle — histograms used to be reachable only by picking a "no Y"
@@ -610,22 +693,18 @@ export function IllustrationTab({
         {/* Layout + sampling */}
         {!isHeatmap && <div className="gl-illust-row">
           <label className="gl-field-inline">
-            {t("Plot size")}
+            {t(fitToColumns ? "Maximum plot size" : "Plot size")}
             <input
               className="gl-size-slider"
               type="range" min={150} max={500} step={25} value={plotSize}
-              title="Rendered panel size; click Render Illustration to apply"
+              title="Maximum rendered panel size; Fit to columns may shrink it to prevent overflow"
               onChange={(e) => setPlotSize(Math.max(150, Math.min(500, +e.target.value || 200)))}
             />
             <span className="gl-num-badge">{plotSize}px</span>
           </label>
-          <label className="gl-field-inline">
-            {t("Columns")}
-            <input type="number" min={1} max={12} value={nColumns} onChange={(e) => setNColumns(Math.max(1, +e.target.value || 4))} />
-          </label>
           <label className="gl-check">
             <input type="checkbox" checked={fitToColumns} onChange={(e) => setFitToColumns(e.target.checked)} />
-            {t("Fit to columns")}
+            {t("Fit columns to width")}
           </label>
           <label className="gl-field-inline">
             {t("Max events")}
@@ -643,10 +722,7 @@ export function IllustrationTab({
             <input type="checkbox" checked={colorByPop} onChange={(e) => setColorByPop(e.target.checked)} />
             Colour each population
           </label>
-          <label className="gl-check">
-            <input type="checkbox" checked={overlayPops} onChange={(e) => setOverlayPops(e.target.checked)} />
-            Overlay populations per channel
-          </label>
+          {overlayPops ? <span className="gl-hint">{t("Population overlay uses these colours")}</span> : null}
         </div>}
 
         {/* Plot-family-specific appearance */}

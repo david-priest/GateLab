@@ -21,6 +21,7 @@ export interface CytofD3Api {
 /** mini_plot.js — the Strategy / Illustration grid renderer (window.CytofMiniPlot). */
 export interface MiniPlotApi {
   renderMiniPlot(container: HTMLElement, cfg: unknown): void;
+  renderRidgelinePanel(container: HTMLElement, cfg: unknown): void;
   renderStrategyGrid(containerId: string, data: unknown): void;
   renderMultiStrategyGrid(containerId: string, data: unknown): void;
   renderIllustrationGrid(containerId: string, data: unknown): void;
@@ -601,6 +602,99 @@ ${badgeNeedle}`;
     console.warn("[GateLab] cytof gate space-badge patch did not match.");
   }
 
+  // Quadrant labels: "55.7% (n = 747)", one per screen quadrant, each movable like a gate label
+  // with its own offset (quadrant_label_offsets, Q1 to Q4, display units), reported through
+  // gate_label_move with the quadrant index. The vendored labels sat fixed at the midpoints,
+  // ignored pointer events and read "747  55.7%".
+  const quadrantLabelNeedle =
+    "        // Four quadrant count/% labels, one per screen quadrant. The data quadrant\n" +
+    "        // for each screen corner is derived by inverting the midpoint, so it's\n" +
+    "        // correct in both normal and flipped orientation.\n" +
+    "        var counts = gate.quadrant_counts || [];\n" +
+    "        var pcts   = gate.quadrant_pcts || [];\n" +
+    "        var mids = [[cxp / 2, cyp / 2], [(cxp + W) / 2, cyp / 2],\n" +
+    "                    [(cxp + W) / 2, (cyp + H) / 2], [cxp / 2, (cyp + H) / 2]];\n" +
+    "        mids.forEach(function (pt) {\n" +
+    "            var dataX = isFlipped ? zy.invert(pt[1]) : zx.invert(pt[0]);\n" +
+    "            var dataY = isFlipped ? zx.invert(pt[0]) : zy.invert(pt[1]);\n" +
+    "            var q = (dataX < cx) ? (dataY >= cy ? 1 : 4) : (dataY >= cy ? 2 : 3);\n" +
+    "            var n = counts[q - 1], p = pcts[q - 1];\n" +
+    "            var txt = (n != null ? Number(n).toLocaleString() : '') +\n" +
+    "                      (p != null ? '  ' + Number(p).toFixed(1) + '%' : '');\n" +
+    "            if (!txt) return;\n" +
+    "            var lx = Math.max(6, Math.min(W - 6, pt[0]));\n" +
+    "            var ly = Math.max(12, Math.min(H - 6, pt[1]));\n" +
+    "            var lg = gg.append('g').attr('transform', 'translate(' + lx + ',' + ly + ')')\n" +
+    "                .style('pointer-events', 'none');\n" +
+    "            var t = lg.append('text').attr('text-anchor', 'middle').attr('fill', color)\n" +
+    "                .style('font-size', '11px').style('font-weight', '600').text(txt);\n" +
+    "            var bb = t.node().getBBox();\n" +
+    "            lg.insert('rect', 'text').attr('x', bb.x - 3).attr('y', bb.y - 1)\n" +
+    "                .attr('width', bb.width + 6).attr('height', bb.height + 2)\n" +
+    "                .attr('rx', 2).attr('fill', 'rgba(255,255,255,0.78)');\n" +
+    "        });\n";
+  const quadrantLabelPatch =
+    "        // GateLab: four quadrant labels, one per screen quadrant, reading \"55.7% (n = 747)\". Each\n" +
+    "        // is movable like a gate label: its place is the screen quadrant's midpoint plus a dragged\n" +
+    "        // offset in display units, kept per quadrant (quadrant_label_offsets, Q1 to Q4).\n" +
+    "        var counts = gate.quadrant_counts || [];\n" +
+    "        var pcts   = gate.quadrant_pcts || [];\n" +
+    "        var qOffs  = gate.quadrant_label_offsets || [];\n" +
+    "        var mids = [[cxp / 2, cyp / 2], [(cxp + W) / 2, cyp / 2],\n" +
+    "                    [(cxp + W) / 2, (cyp + H) / 2], [cxp / 2, (cyp + H) / 2]];\n" +
+    "        mids.forEach(function (pt) {\n" +
+    "            var dataX = isFlipped ? zy.invert(pt[1]) : zx.invert(pt[0]);\n" +
+    "            var dataY = isFlipped ? zx.invert(pt[0]) : zy.invert(pt[1]);\n" +
+    "            var q = (dataX < cx) ? (dataY >= cy ? 1 : 4) : (dataY >= cy ? 2 : 3);\n" +
+    "            var n = counts[q - 1], p = pcts[q - 1];\n" +
+    "            var txt = (p != null ? Number(p).toFixed(1) + '%' +\n" +
+    "                          (gate.percent_scope ? ' ' + gate.percent_scope : '') : '') +\n" +
+    "                      (n != null ? ' (n = ' + Number(n).toLocaleString() + ')' : '');\n" +
+    "            if (!txt) return;\n" +
+    "            var off = qOffs[q - 1] || [0, 0];\n" +
+    "            function qPos(o, zxs, zys) {\n" +
+    "                return isFlipped ? [zxs(dataY + o[1]), zys(dataX + o[0])] : [zxs(dataX + o[0]), zys(dataY + o[1])];\n" +
+    "            }\n" +
+    "            var pos = qPos(off, zx, zy);\n" +
+    "            var lg = gg.append('g').attr('class', 'quadrant-label')\n" +
+    "                .attr('transform', 'translate(' + pos[0] + ',' + pos[1] + ')')\n" +
+    "                .style('cursor', 'move').style('pointer-events', 'all');\n" +
+    "            var t = lg.append('text').attr('text-anchor', 'middle').attr('fill', color)\n" +
+    "                .style('font-size', '11px').style('font-weight', '600').text(txt);\n" +
+    "            var bb = t.node().getBBox();\n" +
+    "            lg.insert('rect', 'text').attr('x', bb.x - 3).attr('y', bb.y - 1)\n" +
+    "                .attr('width', bb.width + 6).attr('height', bb.height + 2)\n" +
+    "                .attr('rx', 2).attr('fill', 'rgba(255,255,255,0.78)');\n" +
+    "            (function (g_ref, qi) {\n" +
+    "                var origOffset, startX, startY;\n" +
+    "                lg.call(d3.drag()\n" +
+    "                    .on('start', function (event) {\n" +
+    "                        _dragging = true; event.sourceEvent.stopPropagation();\n" +
+    "                        origOffset = off.slice();\n" +
+    "                        var p0 = _ptr(event);\n" +
+    "                        startX = _zx().invert(p0[0]); startY = _zy().invert(p0[1]);\n" +
+    "                    })\n" +
+    "                    .on('drag', function (event) {\n" +
+    "                        var p1 = _ptr(event), zx2 = _zx(), zy2 = _zy();\n" +
+    "                        var ddx = zx2.invert(p1[0]) - startX, ddy = zy2.invert(p1[1]) - startY;\n" +
+    "                        off = isFlipped ? [origOffset[0] + ddy, origOffset[1] + ddx]\n" +
+    "                                        : [origOffset[0] + ddx, origOffset[1] + ddy];\n" +
+    "                        var np = qPos(off, zx2, zy2);\n" +
+    "                        lg.attr('transform', 'translate(' + np[0] + ',' + np[1] + ')');\n" +
+    "                    })\n" +
+    "                    .on('end', function () {\n" +
+    "                        _dragging = false;\n" +
+    "                        _shinyInput('gate_label_move', { gate_id: g_ref.gate_id, label_offset: off, quadrant: qi });\n" +
+    "                        _flushDeferredPlot();\n" +
+    "                    }));\n" +
+    "            }(gate, q - 1));\n" +
+    "        });\n";
+  if (out.includes(quadrantLabelNeedle) && !out.includes("quadrant_label_offsets")) {
+    out = out.replace(quadrantLabelNeedle, quadrantLabelPatch);
+  } else if (!out.includes("quadrant_label_offsets")) {
+    console.warn("[GateLab] cytof quadrant-label patch did not match — quadrant labels stay fixed.");
+  }
+
   // A gate count is exact for the file it was taken from. When the plot pools several checked
   // files the app supplies counts pooled over the same files and names that scope, and the label
   // says so beside the percentage: a bare "0.0%" under a dense pooled cloud is the misreading
@@ -617,15 +711,127 @@ ${badgeNeedle}`;
     "                labelG.append('title').text(gate.percent_scope_hint +\n" +
     "                    (gate.space_hint ? '\\n' + gate.space_hint : ''));\n" +
     "            }";
-  const quadrantScopeNeedle =
-    "                      (p != null ? '  ' + Number(p).toFixed(1) + '%' : '');";
-  const quadrantScopePatch =
-    "                      (p != null ? '  ' + Number(p).toFixed(1) + '%' +\n" +
-    "                        (gate.percent_scope ? ' ' + gate.percent_scope : '') : '');";
-  if (out.includes(scopeNeedle) && out.includes(quadrantScopeNeedle) && !out.includes("gate.percent_scope")) {
-    out = out.replace(scopeNeedle, scopePatch).replace(quadrantScopeNeedle, quadrantScopePatch);
-  } else if (!out.includes("gate.percent_scope")) {
+  // The quadrant labels carry the scope themselves (quadrantLabelPatch above).
+  if (out.includes(scopeNeedle) && !out.includes("labelG.append('title').text(gate.percent_scope_hint")) {
+    out = out.replace(scopeNeedle, scopePatch);
+  } else if (!out.includes("labelG.append('title').text(gate.percent_scope_hint")) {
     console.warn("[GateLab] cytof gate count-scope patch did not match.");
+  }
+
+  // Curly quadrants: a quadrant payload may carry `arms`, the bent dividers beyond the crosshair
+  // as display-space polylines (gatePayload.ts). They are drawn as paths, the straight halves
+  // stay lines, and when the gate is selected a handle at the end of each arm sets its bend:
+  // during the drag the arm's bend is scaled so its end follows the pointer, and on drop the
+  // handle's display position goes to the host, which recomputes the coefficient exactly.
+  const curlyLinesNeedle =
+    "        // Visible crosshair (non-interactive).\n" +
+    "        var vline = gg.append('line').attr('class', 'q-vline')\n" +
+    "            .attr('x1', cxp).attr('y1', 0).attr('x2', cxp).attr('y2', H)\n" +
+    "            .attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none');\n" +
+    "        var hline = gg.append('line').attr('class', 'q-hline')\n" +
+    "            .attr('x1', 0).attr('y1', cyp).attr('x2', W).attr('y2', cyp)\n" +
+    "            .attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none');";
+  const curlyLinesPatch =
+    "        // Visible crosshair (non-interactive); with bent arms, the straight halves only.\n" +
+    "        var arms = gate.arms && gate.arms.h && gate.arms.v ? gate.arms : null;\n" +
+    "        var _armPx = function (pts) { return pts.map(function (p) {\n" +
+    "            return isFlipped ? [zx(p[1]), zy(p[0])] : [zx(p[0]), zy(p[1])]; }); };\n" +
+    "        var _armPath = function (pts) { return pts.map(function (p, i) {\n" +
+    "            return (i ? 'L' : 'M') + p[0].toFixed(2) + ',' + p[1].toFixed(2); }).join(''); };\n" +
+    "        var vline = gg.append('line').attr('class', 'q-vline')\n" +
+    "            .attr('x1', cxp).attr('y1', arms ? cyp : 0).attr('x2', cxp).attr('y2', H)\n" +
+    "            .attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none');\n" +
+    "        var hline = gg.append('line').attr('class', 'q-hline')\n" +
+    "            .attr('x1', 0).attr('y1', cyp).attr('x2', arms ? cxp : W).attr('y2', cyp)\n" +
+    "            .attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none');\n" +
+    "        var armH = null, armV = null, armHpx = null, armVpx = null, armHandleSel = [];\n" +
+    "        if (arms) {\n" +
+    "            armHpx = _armPx(arms.h); armVpx = _armPx(arms.v);\n" +
+    "            armH = gg.append('path').attr('class', 'q-arm-h').attr('d', _armPath(armHpx))\n" +
+    "                .attr('fill', 'none').attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none');\n" +
+    "            armV = gg.append('path').attr('class', 'q-arm-v').attr('d', _armPath(armVpx))\n" +
+    "                .attr('fill', 'none').attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none');\n" +
+    "        }";
+  const curlyDragNeedle =
+    "                    vline.attr('x1', ncxp).attr('x2', ncxp);\n" +
+    "                    hline.attr('y1', ncyp).attr('y2', ncyp);\n" +
+    "                    handle.attr('cx', ncxp).attr('cy', ncyp);";
+  const curlyDragPatch =
+    "                    vline.attr('x1', ncxp).attr('x2', ncxp);\n" +
+    "                    hline.attr('y1', ncyp).attr('y2', ncyp);\n" +
+    "                    handle.attr('cx', ncxp).attr('cy', ncyp);\n" +
+    "                    if (arms) {\n" +
+    "                        vline.attr('y1', ncyp); hline.attr('x2', ncxp);\n" +
+    "                        var tr = 'translate(' + (ncxp - cxp) + ',' + (ncyp - cyp) + ')';\n" +
+    "                        if (armH) armH.attr('transform', tr);\n" +
+    "                        if (armV) armV.attr('transform', tr);\n" +
+    "                        armHandleSel.forEach(function (c) { c.attr('transform', tr); });\n" +
+    "                    }";
+  const curlyHandleNeedle =
+    "            handle.call(drag);\n" +
+    "        }\n" +
+    "    }\n" +
+    "\n" +
+    "    function _drawGates(zx, zy) {";
+  const curlyHandlePatch =
+    "            handle.call(drag);\n" +
+    "            if (arms && armHpx && armVpx && armHpx.length > 1 && armVpx.length > 1) {\n" +
+    "                var _armHandle = function (which, pathSel, pxs) {\n" +
+    "                    // The arm runs to the plot's edge; its handle sits part-way along it,\n" +
+    "                    // where it can be reached and where the bend is already visible.\n" +
+    "                    var base = pxs[0], end = pxs[Math.max(1, Math.round((pxs.length - 1) * 0.6))];\n" +
+    "                    // The arm runs along screen x when it is the data-x arm and the axes are\n" +
+    "                    // not flipped, or the data-y arm and they are; its bend is on the other axis.\n" +
+    "                    var alongX = (which === 'h') !== isFlipped;\n" +
+    "                    var hx = end[0], hy = end[1];\n" +
+    "                    var h = gg.append('circle').attr('class', 'vh')\n" +
+    "                        .attr('cx', hx).attr('cy', hy).attr('r', VRAD)\n" +
+    "                        .attr('fill', 'white').attr('stroke', color).attr('stroke-width', 2)\n" +
+    "                        .style('cursor', alongX ? 'ns-resize' : 'ew-resize').style('pointer-events', 'all');\n" +
+    "                    armHandleSel.push(h);\n" +
+    "                    var moved = false;\n" +
+    "                    var dragArm = d3.drag()\n" +
+    "                        .on('start', function (event) { _dragging = true; event.sourceEvent.stopPropagation(); })\n" +
+    "                        .on('drag', function (event) {\n" +
+    "                            var p = _ptr(event); moved = true;\n" +
+    "                            var n = pxs.length - 1, pts;\n" +
+    "                            if (alongX) {\n" +
+    "                                hy = p[1];\n" +
+    "                                var have = end[1] - base[1], want = hy - base[1];\n" +
+    "                                pts = pxs.map(function (q, i) { return [q[0], base[1] + (Math.abs(have) > 1\n" +
+    "                                    ? (q[1] - base[1]) * (want / have) : want * Math.pow(i / n, 1.5))]; });\n" +
+    "                            } else {\n" +
+    "                                hx = p[0];\n" +
+    "                                var haveX = end[0] - base[0], wantX = hx - base[0];\n" +
+    "                                pts = pxs.map(function (q, i) { return [base[0] + (Math.abs(haveX) > 1\n" +
+    "                                    ? (q[0] - base[0]) * (wantX / haveX) : wantX * Math.pow(i / n, 1.5)), q[1]]; });\n" +
+    "                            }\n" +
+    "                            h.attr('cx', hx).attr('cy', hy);\n" +
+    "                            pathSel.attr('d', _armPath(pts));\n" +
+    "                        })\n" +
+    "                        .on('end', function () {\n" +
+    "                            _dragging = false;\n" +
+    "                            if (!moved) return;\n" +
+    "                            _editSeq++;\n" +
+    "                            var at = isFlipped ? [zy.invert(hy), zx.invert(hx)] : [zx.invert(hx), zy.invert(hy)];\n" +
+    "                            _shinyInput('gate_quadrant_curl', { gate_id: gate.gate_id, arm: which, at: at, seq: _editSeq });\n" +
+    "                            _flushDeferredPlot();\n" +
+    "                        });\n" +
+    "                    h.call(dragArm);\n" +
+    "                };\n" +
+    "                _armHandle('h', armH, armHpx);\n" +
+    "                _armHandle('v', armV, armVpx);\n" +
+    "            }\n" +
+    "        }\n" +
+    "    }\n" +
+    "\n" +
+    "    function _drawGates(zx, zy) {";
+  if (out.includes(curlyLinesNeedle) && out.includes(curlyDragNeedle) && out.includes(curlyHandleNeedle)) {
+    out = out.replace(curlyLinesNeedle, curlyLinesPatch)
+      .replace(curlyDragNeedle, curlyDragPatch)
+      .replace(curlyHandleNeedle, curlyHandlePatch);
+  } else if (!out.includes("gate_quadrant_curl")) {
+    console.warn("[GateLab] cytof curly-quadrant patch did not match — bent arms will draw as a straight crosshair.");
   }
 
   // Two fixes to axis-label crowding, both around zero.
@@ -975,6 +1181,8 @@ ${applyModeNeedle}`,
 // columns) crams 18 lines into a tiny plot and looks too busy. Scale the level count and line
 // width with the panel's inner dimension (baseline ~270px = the original 18 levels / 1.0px).
 export function patchMiniPlot(src: string): string {
+  // Expose the existing renderer to the React figure compositor without modifying the submodule.
+  src = src.replace("renderMiniPlot: renderMiniPlot,", "renderMiniPlot: renderMiniPlot, renderRidgelinePanel: renderRidgelinePanel,");
   // Default the grid canvases to the DISPLAY's resolution, as the gating plot now does.
   //
   // mini_plot already supersamples, but at a hardcoded 2x. That happens to be right on a 2x
@@ -1004,29 +1212,161 @@ export function patchMiniPlot(src: string): string {
         var M = {
             top: _resolvedMargin('top', 22, 10, 40),
             right: _resolvedMargin('right', 8, 2, 30),
-            bottom: _resolvedMargin('bottom', 38, 24, 55),
-            left: _resolvedMargin('left', 42, 28, 65)
+            bottom: _resolvedMargin('bottom', 50, 24, 90),
+            left: _resolvedMargin('left', 54, 28, 100)
         };
-        // When the caller does NOT pin an explicit left margin (Strategy / Illustration grids),
-        // reserve enough left margin that the rotated y-axis TITLE clears the container's left edge
-        // at ANY font size. The title sits axisLabelOffset px left of the axis and its glyphs rise
-        // ~axisFs beyond that, so a fixed 42px margin clips it once the axis font grows. Widening
-        // M.left only TRANSLATES the whole y-axis group (labels + title) right — it never changes the
-        // title-vs-label spacing, so it cannot introduce an overlap. Compensation biplots pass an
-        // explicit left margin and are intentionally left untouched.
+        // Size the title offsets from the ACTUAL tick-label vocabulary. A fixed 32px offset put a
+        // rotated y title through labels such as "100K"; a wider outer margin alone only moved the
+        // overlap. Explicit compensation-inspector margins and offsets still win.
+        var _baseFs = cfg.font_sizes || {};
+        var _tickFsForMargin = Number(_baseFs.tick);
+        if (!isFinite(_tickFsForMargin)) _tickFsForMargin = 9;
+        var _axisFsForMargin = Number(_baseFs.axis_label);
+        if (!isFinite(_axisFsForMargin)) _axisFsForMargin = 11;
+        var _yTickLabels = cfg.y_logicle_ticks && cfg.y_logicle_ticks.major_labels;
+        var _maxYChars = Array.isArray(_yTickLabels) && _yTickLabels.length
+            ? Math.max.apply(null, _yTickLabels.map(function (label) { return String(label).length; }))
+            : 5;
+        var _estimatedYTickWidth = _maxYChars * _tickFsForMargin * 0.62;
+        if (!isFinite(Number(cfg.y_axis_label_offset))) {
+            cfg.y_axis_label_offset = Math.ceil(Math.max(32, _estimatedYTickWidth + 15));
+        }
+        if (!isFinite(Number(cfg.x_axis_label_offset))) {
+            cfg.x_axis_label_offset = Math.ceil(Math.max(34, _tickFsForMargin + 24));
+        }
         if (!isFinite(Number(requestedMargins.left)) && cfg.y_label) {
-            var _yTitleFs = Number((cfg.font_sizes || {}).axis_label);
-            if (!isFinite(_yTitleFs)) _yTitleFs = 11;
-            var _yTitleOffset = Number(cfg.axis_label_offset);
-            if (!isFinite(_yTitleOffset)) _yTitleOffset = 32;
-            _yTitleOffset = Math.max(14, Math.min(40, _yTitleOffset));
-            var _neededLeft = Math.ceil(_yTitleOffset + _yTitleFs + 4);
+            var _neededLeft = Math.ceil(Number(cfg.y_axis_label_offset) + _axisFsForMargin + 4);
             if (_neededLeft > M.left) M.left = Math.min(140, _neededLeft);
-        }`;
+        }
+        if (!isFinite(Number(requestedMargins.bottom))) {
+            var _neededBottom = Math.ceil(Number(cfg.x_axis_label_offset) + _axisFsForMargin + 4);
+            if (_neededBottom > M.bottom) M.bottom = Math.min(100, _neededBottom);
+        }
+        // Keep every tick mark, but suppress labels that cannot fit at the actual panel size.
+        // Zero has priority in the compressed region of a logicle axis.
+        function _spacedTicks(ticks, range, pixels, vertical) {
+            if (!ticks || !Array.isArray(ticks.major_pos) || !Array.isArray(ticks.major_labels) || !range || !(range[1] > range[0])) return ticks;
+            var labels = ticks.major_labels.map(function () { return ''; }), occupied = [];
+            var indices = ticks.major_pos.map(function (_, i) { return i; });
+            indices.sort(function (a, b) { return (String(ticks.major_labels[b]) === '0' ? 1 : 0) - (String(ticks.major_labels[a]) === '0' ? 1 : 0) || a - b; });
+            indices.forEach(function (i) {
+                var label = String(ticks.major_labels[i] || '');
+                var position = (ticks.major_pos[i] - range[0]) / (range[1] - range[0]) * pixels;
+                var half = (vertical ? _tickFsForMargin : label.length * _tickFsForMargin * 0.62) / 2 + 4;
+                if (label && occupied.every(function (other) { return position + half < other[0] || position - half > other[1]; })) {
+                    labels[i] = label; occupied.push([position - half, position + half]);
+                }
+            });
+            return Object.assign({}, ticks, { major_labels: labels });
+        }
+        cfg = Object.assign({}, cfg, {
+            x_logicle_ticks: _spacedTicks(cfg.x_logicle_ticks, cfg.x_range, Number(cfg.plot_size || 200) - M.left - M.right, false),
+            y_logicle_ticks: _spacedTicks(cfg.y_logicle_ticks, cfg.y_range, Number(cfg.plot_size || 200) - M.top - M.bottom, true)
+        });`;
   if (out.includes(marginNeedle)) {
     out = out.replace(marginNeedle, marginPatch);
   } else if (!out.includes("var requestedMargins = cfg.plot_margins || {};")) {
     console.warn("[GateLab] mini_plot configurable-margin patch did not match.");
+  }
+
+  // The Illustration payload has always dropped quadrant gates because mini_plot only understood
+  // closed polygons. Teach the shared static overlay renderer the same crosshair vocabulary as the
+  // interactive plot: straight or bent positive arms, four percentages, and publication styling.
+  const quadrantOverlayNeedle = `        var verts = gate.vertices;
+        if (!verts || verts.length < 2) return;`;
+  const quadrantOverlayPatch = `        if (gate.gate_type === 'quadrant') {
+            var qc = gate.center || [];
+            var qcx = xScale(qc[0]), qcy = yScale(qc[1]);
+            if (!isFinite(qcx) || !isFinite(qcy)) return;
+            var qColor = pubStyle ? '#000000' : (gate.color || '#e41a1c');
+            var qArms = gate.arms && gate.arms.h && gate.arms.v ? gate.arms : null;
+            var qg = g.append('g').attr('class', 'quadrant-gate mini-quadrant-gate');
+            function qPath(points) {
+                return points.map(function (point, index) {
+                    return (index ? 'L' : 'M') + xScale(point[0]) + ',' + yScale(point[1]);
+                }).join('');
+            }
+            // Negative halves remain straight. Positive x/y arms may carry FlowJo's curl.
+            qg.append('line').attr('x1', 0).attr('y1', qcy)
+                .attr('x2', qArms ? qcx : W).attr('y2', qcy)
+                .attr('stroke', qColor).attr('stroke-width', lineWidth);
+            qg.append('line').attr('x1', qcx).attr('y1', H)
+                .attr('x2', qcx).attr('y2', qArms ? qcy : 0)
+                .attr('stroke', qColor).attr('stroke-width', lineWidth);
+            if (qArms) {
+                qg.append('path').attr('d', qPath(qArms.h)).attr('fill', 'none')
+                    .attr('stroke', qColor).attr('stroke-width', lineWidth);
+                qg.append('path').attr('d', qPath(qArms.v)).attr('fill', 'none')
+                    .attr('stroke', qColor).attr('stroke-width', lineWidth);
+            }
+            var qCounts = gate.quadrant_counts || [];
+            var qPcts = gate.quadrant_pcts || [];
+            var qMids = [[qcx / 2, qcy / 2], [(qcx + W) / 2, qcy / 2],
+                         [(qcx + W) / 2, (qcy + H) / 2], [qcx / 2, (qcy + H) / 2]];
+            var qFs = parseFloat(gateFs);
+            if (!isFinite(qFs) || qFs <= 0) qFs = 9;
+            var qOffs = gate.quadrant_label_offsets || [];
+            qMids.forEach(function (point, index) {
+                var count = qCounts[index], pct = qPcts[index];
+                var text = (pct != null ? Number(pct).toFixed(1) + '%' : '') +
+                    (count != null ? ' (n = ' + Number(count).toLocaleString() + ')' : '');
+                // A label the user moved on the gating plot sits at the same offset here.
+                var qOff = qOffs[index];
+                if (qOff) point = [xScale(xScale.invert(point[0]) + qOff[0]), yScale(yScale.invert(point[1]) + qOff[1])];
+                var label = qg.append('g').attr('class', 'quadrant-label')
+                    .attr('transform', 'translate(' + point[0] + ',' + point[1] + ')');
+                // The host may let the label move: report its offset from the crosshair-relative
+                // resting point, in display units, with the quadrant it belongs to.
+                if (gateStyle && typeof gateStyle.on_label_move === 'function' && gate.gate_id) {
+                    var rest = qMids[index], qx = point[0], qy = point[1], qMoved = false;
+                    label.style('cursor', 'move').style('pointer-events', 'all')
+                        .call(d3.drag()
+                            .on('start', function (event) { if (event.sourceEvent) event.sourceEvent.stopPropagation(); })
+                            .on('drag', function (event) {
+                                qx += event.dx; qy += event.dy; qMoved = true;
+                                label.attr('transform', 'translate(' + qx + ',' + qy + ')');
+                            })
+                            .on('end', function () {
+                                if (!qMoved) return;
+                                gateStyle.on_label_move(gate.gate_id,
+                                    [xScale.invert(qx) - xScale.invert(rest[0]), yScale.invert(qy) - yScale.invert(rest[1])], index);
+                            }));
+                }
+                var textNode = label.append('text').attr('text-anchor', 'middle')
+                    .attr('fill', qColor).style('font-size', gateFs).style('font-weight', 600)
+                    .text(text);
+                if (!pubStyle) {
+                    var box;
+                    try { box = textNode.node().getBBox(); }
+                    catch (_quadrantBoxError) {
+                        box = { x: -text.length * qFs * 0.3, y: -qFs * 0.8,
+                                width: text.length * qFs * 0.6, height: qFs };
+                    }
+                    label.insert('rect', 'text').attr('x', box.x - 3).attr('y', box.y - 1)
+                        .attr('width', box.width + 6).attr('height', box.height + 2)
+                        .attr('rx', 2).attr('fill', 'rgba(255,255,255,0.78)');
+                }
+            });
+            return;
+        }
+
+        var verts = gate.vertices;
+        if (!verts || verts.length < 2) return;`;
+  if (out.includes(quadrantOverlayNeedle)) {
+    out = out.replace(quadrantOverlayNeedle, quadrantOverlayPatch);
+  } else if (!out.includes("mini-quadrant-gate")) {
+    console.warn("[GateLab] mini_plot quadrant-overlay patch did not match.");
+  }
+  const illustrationFitNeedle = `                // Expand to fit if possible, but never shrink below requested size.
+                effectivePlotSize = Math.max(plotSize, fitSize);`;
+  const illustrationFitPatch = `                // Fit is a ceiling: preserve the requested size when it fits and shrink only
+                // when the chosen columns would otherwise overflow. It must never inflate a
+                // 150px request into the same viewport-filling panel as a 500px request.
+                effectivePlotSize = Math.max(120, Math.min(plotSize, fitSize));`;
+  if (out.includes(illustrationFitNeedle)) {
+    out = out.replace(illustrationFitNeedle, illustrationFitPatch);
+  } else if (!out.includes("Fit is a ceiling")) {
+    console.warn("[GateLab] mini_plot illustration fit-to-columns patch did not match.");
   }
   // A gate is straight only in the space it was drawn in, so it bows once an axis is shown on a
   // different scale. The main gating plot has offered straight / straight+grey bow / bowed since
@@ -1068,7 +1408,7 @@ export function patchMiniPlot(src: string): string {
   const lineNeedle = "ctx.lineWidth = 1.0;";
   if (out.includes(levelNeedle)) {
     out = out.replace(levelNeedle, levelPatchedNeedle);
-  } else if (!out.includes(levelPatchedNeedle)) {
+  } else if (!out.includes(levelPatchedNeedle) && !out.includes("var requestedLevels = Number((cfg || {}).contour_levels)")) {
     console.warn("[GateLab] mini_plot contour-levels patch did not match.");
   }
   if (out.includes(lineNeedle)) {
@@ -1264,14 +1604,14 @@ export function patchMiniPlot(src: string): string {
   const titleFontNeedle = "var titleFs = (fs.title || 11) + 'px';";
   const axisOffsetPatch = `${titleFontNeedle}
         var axisLabelOffset = Number(cfg.axis_label_offset);
-        if (!isFinite(axisLabelOffset)) axisLabelOffset = 32;
-        axisLabelOffset = Math.max(14, Math.min(40, axisLabelOffset));
+        if (!isFinite(axisLabelOffset)) axisLabelOffset = 34;
+        axisLabelOffset = Math.max(14, Math.min(100, axisLabelOffset));
         var xAxisLabelOffset = Number(cfg.x_axis_label_offset);
         if (!isFinite(xAxisLabelOffset)) xAxisLabelOffset = axisLabelOffset;
-        xAxisLabelOffset = Math.max(14, Math.min(40, xAxisLabelOffset));
+        xAxisLabelOffset = Math.max(14, Math.min(100, xAxisLabelOffset));
         var yAxisLabelOffset = Number(cfg.y_axis_label_offset);
         if (!isFinite(yAxisLabelOffset)) yAxisLabelOffset = axisLabelOffset;
-        yAxisLabelOffset = Math.max(14, Math.min(40, yAxisLabelOffset));
+        yAxisLabelOffset = Math.max(14, Math.min(100, yAxisLabelOffset));
         var axisTickSize = Number(cfg.axis_tick_size);
         if (!isFinite(axisTickSize)) axisTickSize = 6;
         axisTickSize = Math.max(2, Math.min(8, axisTickSize));
@@ -1281,15 +1621,23 @@ export function patchMiniPlot(src: string): string {
   const xLabelNeedle = ".attr('x', W / 2).attr('y', H + 32)";
   const yLabelNeedle = ".attr('x', -H / 2).attr('y', -32)";
   const xTickNeedle = "xAxisSel.selectAll('text').style('font-size', tickFs);";
+  // The tick size applies to the major ticks; a minor tick, which _styleLogicleAxis had already
+  // drawn at half length, keeps that ratio rather than being stretched to the major length.
   const xTickPatch = `${xTickNeedle}
-        xAxisSel.selectAll('.tick line').attr('y2', axisTickSize);
+        xAxisSel.selectAll('.tick line').attr('y2', function () {
+            var was = Math.abs(Number(d3.select(this).attr('y2'))) || 6;
+            return was < 6 ? axisTickSize / 2 : axisTickSize;
+        });
         xAxisSel.selectAll('.tick text').attr('y', axisTickSize + 2);
         if (axisOuterTickSize === 0) {
             xAxisSel.select('.domain').attr('d', 'M0.5,0.5H' + (W + 0.5));
         }`;
   const yTickNeedle = "yAxisSel.selectAll('text').style('font-size', tickFs);";
   const yTickPatch = `${yTickNeedle}
-            yAxisSel.selectAll('.tick line').attr('x2', -axisTickSize);
+            yAxisSel.selectAll('.tick line').attr('x2', function () {
+                var was = Math.abs(Number(d3.select(this).attr('x2'))) || 6;
+                return -(was < 6 ? axisTickSize / 2 : axisTickSize);
+            });
             yAxisSel.selectAll('.tick text').attr('x', -(axisTickSize + 2));
             if (axisOuterTickSize === 0) {
                 yAxisSel.select('.domain').attr('d', 'M-0.5,' + (H + 0.5) + 'V0.5');
@@ -1297,6 +1645,31 @@ export function patchMiniPlot(src: string): string {
   if (out.includes(titleFontNeedle)) out = out.replace(titleFontNeedle, axisOffsetPatch);
   if (out.includes(xLabelNeedle)) out = out.replace(xLabelNeedle, ".attr('x', W / 2).attr('y', H + xAxisLabelOffset)");
   if (out.includes(yLabelNeedle)) out = out.replace(yLabelNeedle, ".attr('x', -H / 2).attr('y', -yAxisLabelOffset)");
+  // Illustration labels move: when the host passes `on_label_move`, each gate label carries a
+  // d3 drag that shifts it during the drag and reports the new offset, in the axes' display
+  // units, on release. The handler travels in gate_style: the label code runs in
+  // _drawGateOverlay, which sees the gate style and not the panel config. The Gating tab's own labels are untouched: the figure keeps its own.
+  const labelNeedle = "            var label = g.append('g').attr('transform', 'translate(' + lx + ',' + ly + ')');\n";
+  const labelPatch = labelNeedle +
+    "            if (gateStyle && typeof gateStyle.on_label_move === 'function' && gate.gate_id) {\n" +
+    "                var _lx = lx, _ly = ly, _moved = false;\n" +
+    "                label.style('cursor', 'move').style('pointer-events', 'all')\n" +
+    "                    .call(d3.drag()\n" +
+    "                        .on('start', function (event) { if (event.sourceEvent) event.sourceEvent.stopPropagation(); })\n" +
+    "                        .on('drag', function (event) {\n" +
+    "                            _lx += event.dx; _ly += event.dy; _moved = true;\n" +
+    "                            label.attr('transform', 'translate(' + _lx + ',' + _ly + ')');\n" +
+    "                        })\n" +
+    "                        .on('end', function () {\n" +
+    "                            if (!_moved) return;\n" +
+    "                            // The offset the label now has from the gate's centre, in display units.\n" +
+    "                            var ox2 = xScale.invert(_lx) - xScale.invert(cx);\n" +
+    "                            var oy2 = yScale.invert(_ly) - yScale.invert(cy);\n" +
+    "                            gateStyle.on_label_move(gate.gate_id, [ox2, oy2]);\n" +
+    "                        }));\n" +
+    "            }\n";
+  if (out.includes(labelNeedle)) out = out.replace(labelNeedle, labelPatch);
+  else console.warn("[GateLab] mini_plot label-drag patch did not match -- figure labels will not move.");
   if (out.includes(xTickNeedle)) out = out.replace(xTickNeedle, xTickPatch);
   if (out.includes(yTickNeedle)) out = out.replace(yTickNeedle, yTickPatch);
   if (

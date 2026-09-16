@@ -97,7 +97,7 @@ describe("App sample management", () => {
     expect(sampleRows[0].textContent).toContain("donor-a.fcs");
     expect(sampleRows[1].textContent).toContain("donor-b.fcs");
     expect(sampleRows[1].getAttribute("aria-selected")).toBe("true");
-    expect(host.textContent).toContain("2 / 2 included");
+    expect(host.textContent).toContain("2 of 2 selected");
 
     const manage = [...host.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Manage…")!;
@@ -119,7 +119,7 @@ describe("App sample management", () => {
     expect(host.querySelectorAll<HTMLElement>('[role="option"]')).toHaveLength(1);
     expect(host.textContent).not.toContain("donor-a.fcs");
     expect(host.textContent).toContain("donor-b.fcs");
-    expect(host.textContent).toContain("1 / 1 included");
+    expect(host.textContent).toContain("1 of 1 selected");
     expect(invalidateSample).toHaveBeenCalledTimes(1);
   });
 

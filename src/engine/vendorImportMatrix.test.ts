@@ -49,8 +49,11 @@ const MATRIX: VendorCase[] = [
     instrument: "FACSDiscover S8", vendor: "BD",
     path: join(VENDOR_DIR, "bd_facsdiscover_s8__19221995__Zam36_YFP.fcs"),
     version: "FCS3.2", mode: "flow", events: 10000, channels: 440,
-    cyt: "FACSDiscover S8", spilloverChannels: 78, asinh: 20, logicle: 419,
-    note: "The format stress case: FCS 3.2, 440 parameters, a 78-channel spillover.",
+    cyt: "FACSDiscover S8", spilloverChannels: 78, asinh: 20, logicle: 368,
+    note: "The format stress case: FCS 3.2, 440 parameters, a 78-channel spillover. Its 51 "
+      + "imaging geometry features (Size, moments, Eccentricity, Diffusivity, Centre of Mass, "
+      + "Delta CoM, Correlation) are linear, so neither arcsinh nor logicle; the 10 intensity "
+      + "features are logicle with the rest of the signal.",
   },
   {
     instrument: "ID7000", vendor: "Sony",
@@ -141,10 +144,12 @@ const MATRIX: VendorCase[] = [
     instrument: "CytoFLEX", vendor: "Beckman Coulter",
     path: join(VENDOR_DIR, "beckman_cytoflex__14018551__PI_wt_Rho+_25.fcs"),
     version: "FCS3.0", mode: "flow", events: 100000, channels: 14,
-    cyt: "CytoFLEX", spilloverChannels: 0, asinh: 4, logicle: 4,
+    cyt: "CytoFLEX", spilloverChannels: 0, asinh: 5, logicle: 8,
     note: "Zenodo 14018551, CC-BY-4.0. Its $PnS carries the fluorochrome ('FITC-A') "
-      + "over a positional $PnN ('FL1-A'), so the resolved key is 'FITC-A (FL1-A)' — the "
-      + "channel-resolution path, not the raw $PnN, is what a gate ends up bound to. "
+      + "over a positional $PnN ('FL1-A'), so every conjugate name ends '-A'. That used "
+      + "to trip the spectral-unmixed test in channels.ts and silently drop 5 of the 14 "
+      + "channels — the four fluorescence height partners and FSC-Width — which is why "
+      + "this row read asinh 4 / logicle 4 until 2026-09-09. All 14 now resolve. "
       + "Navios and DxFlex remain uncovered: the only deposit carrying them (Zenodo "
       + "17094078) is login-restricted despite its CC-BY label.",
   },

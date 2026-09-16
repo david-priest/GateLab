@@ -6,6 +6,8 @@ import {
   listFlowJoWorkspaceSamples,
   matchFlowJoSamples,
   resolveFlowJoWorkspaceFiles,
+  ungatedWorkspaceFiles,
+  type FlowJoSampleSummary,
 } from "./flowjoWorkspace";
 
 const ROOT =
@@ -152,5 +154,29 @@ describe("resolving a workspace's samples against the files a user supplies", ()
   it("ignores case and extension, as the rest of the matching does", () => {
     const [r] = resolveFlowJoWorkspaceFiles(samples, ["ON DISK.FCS"]);
     expect(r.fileName).toBe("ON DISK.FCS");
+  });
+});
+
+describe("the files of samples that carry no gates", () => {
+  const summary = (index: number, name: string, gateCount: number): FlowJoSampleSummary => ({
+    index, name, owningGroup: "", duplicateName: false,
+    rootCount: 1, eventCount: 1000, gateCount, unsupportedCount: 0,
+    candidateFileNames: [name],
+    trees: [],
+  });
+  const gated = [summary(0, "stained D1.fcs", 6)];
+  const ungated = [summary(1, "unstained.fcs", 0), summary(2, "single stain B1.fcs", 0)];
+
+  it("names the files that load as data, and not the one the strategy was drawn on", () => {
+    // Compensation controls come in beside the stained sample with no gates of their own, so
+    // they must stay out of a pooled view gated by a strategy that was never drawn on them.
+    const out = ungatedWorkspaceFiles(gated, ungated,
+      ["STAINED D1.fcs", "unstained.fcs", "single stain B1.fcs", "unrelated.fcs"]);
+    expect([...out].sort()).toEqual(["single stain B1.fcs", "unstained.fcs"]);
+  });
+
+  it("gives a file both could claim to the gated sample", () => {
+    const twin = [summary(3, "stained D1.fcs", 0)];
+    expect(ungatedWorkspaceFiles(gated, twin, ["stained D1.fcs"]).size).toBe(0);
   });
 });

@@ -125,4 +125,33 @@ describe("useContextualGlobalScales", () => {
     act(() => root.render(<Harness />));
     expect(host.textContent).toBe("{}");
   });
+
+  it("restores active and parked maps into a new workspace namespace", () => {
+    let replace!: (ranges: ReadonlyMap<string, GlobalScales>) => void;
+    let read!: (contextKey: string) => GlobalScales;
+    let context: string | null = "sample:D1";
+    let workspace = 0;
+    function Harness() {
+      const state = useContextualGlobalScales(context, workspace);
+      replace = state.replaceScalesForNextNamespace;
+      read = state.scalesForContext;
+      return <output>{JSON.stringify(state.globalScales)}</output>;
+    }
+
+    act(() => root.render(<Harness />));
+    act(() => {
+      replace(new Map([
+        ["sample:D1", { "FSC-A": [0, 10] }],
+        ["sample:D2", { "FSC-A": [20, 30] }],
+      ]));
+      workspace = 1;
+      root.render(<Harness />);
+    });
+    expect(host.textContent).toBe('{"FSC-A":[0,10]}');
+    expect(read("sample:D2")).toEqual({ "FSC-A": [20, 30] });
+
+    context = "sample:D2";
+    act(() => root.render(<Harness />));
+    expect(host.textContent).toBe('{"FSC-A":[20,30]}');
+  });
 });

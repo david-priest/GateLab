@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { PopulationMap } from "./models";
+import type { Gate, PopulationMap } from "./models";
 import type { Sample } from "./sample";
 import {
+  buildIllustrationPayload,
   buildMultiSampleIllustrationPayload,
   type IllustrationOptions,
   type IllustrationSampleSource,
@@ -186,5 +187,61 @@ describe("multi-sample Illustration payload", () => {
     expect(payload.pop_counts).toEqual({ pop: 3 });
     expect(payload.plots["pop|X"].x).toEqual([10, 20, 30]);
     expect(payload.plots["pop|X"].n_events).toBe(3);
+  });
+});
+
+describe("Illustration gate overlays", () => {
+  it("carries quadrant geometry and four population-relative counts into a biplot", () => {
+    const x = Float32Array.from([1, 3, 3, 1]);
+    const y = Float32Array.from([3, 3, 1, 1]);
+    const columns = { X: x, Y: y };
+    const sample = {
+      fcs: { nEvents: x.length },
+      gateAssayData: () => ({
+        n: x.length,
+        forGate: () => ({
+          n: x.length,
+          column: (key: string) => columns[key as keyof typeof columns],
+        }),
+      }),
+      index: (key: string) => key === "X" ? 0 : key === "Y" ? 1 : undefined,
+      displayColumn: (index: number) => index === 0 ? x : y,
+      channelTicks: () => null,
+      labelForKey: (key: string) => key,
+      gateToDisplay: (_gate: unknown, _key: string, value: number) => value,
+      displayToGate: (_gate: unknown, _key: string, value: number) => value,
+    } as unknown as Sample;
+    const gate = {
+      gate_id: "quadrant-1",
+      name: "Four-way split",
+      gate_type: "quadrant",
+      x_channel: "X",
+      y_channel: "Y",
+      center: [2, 2],
+      color: "#123456",
+      label_offset: null,
+    } satisfies Gate;
+
+    const payload = buildIllustrationPayload(
+      sample,
+      { "quadrant-1": gate },
+      ["quadrant-1"],
+      populations,
+      { pop: new Uint8Array(x.length).fill(1) },
+      { pop: x.length },
+      ["pop"],
+      ["X"],
+      "Y",
+      { X: [0, 4], Y: [0, 4] },
+      options,
+    ) as { gate_overlays: Record<string, Array<Record<string, unknown>>> };
+
+    expect(payload.gate_overlays["pop|X"]).toEqual([expect.objectContaining({
+      gate_id: "quadrant-1",
+      gate_type: "quadrant",
+      center: [2, 2],
+      quadrant_counts: [1, 1, 1, 1],
+      quadrant_pcts: [25, 25, 25, 25],
+    })]);
   });
 });

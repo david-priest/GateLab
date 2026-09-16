@@ -16,6 +16,13 @@ export interface FcsChannel {
   marker: string | null; // $PnS (antigen/marker label, may be absent)
   bits: number; // $PnB
   range: number; // $PnR
+  /** $PnE when the channel was logarithmically amplified in hardware (`decades > 0`).
+   *  Recorded for provenance and export; `columns` already holds decoded linear values. */
+  logAmp?: { decades: number; offset: number };
+  /** $PnFEATURE, on instruments that write it: what the parameter measures. A BD FACSDiscover
+   *  S8 says Area, Height or Width for a pulse and MaskSize, Eccentricity, TotalIntensity and
+   *  the like for a feature it derived from the cell's image. Absent when the file has none. */
+  feature?: string;
   /** Stable app identity supplied by a non-FCS host (for example an SCE row name). */
   appKey?: string;
   /** Cosmetic label supplied by a non-FCS host; never used for gate identity. */
@@ -106,6 +113,65 @@ function parseSpillover(raw: string | undefined, channels: FcsChannel[]): Spillo
   return { channels: chNames, matrix };
 }
 
+/** Parse `$PnE` as `f1,f2`. `f1 > 0` marks a channel that was logarithmically amplified
+ *  in hardware, so the stored integer is a log channel number rather than an intensity. */
+function parseLogAmp(raw: string | undefined): { decades: number; offset: number } | null {
+  if (!raw) return null;
+  const [a, b] = raw.split(",");
+  const decades = parseFloat(a);
+  if (!Number.isFinite(decades) || decades <= 0) return null;
+  const parsed = parseFloat(b ?? "");
+  // f2 = 0 is out of spec but common in the wild; every reader substitutes 1.
+  const offset = Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+  return { decades, offset };
+}
+
+/**
+ * Decode hardware log amplification in place, so `columns` always holds linear values.
+ *
+ * FCS 3.1 §3.2: for a log-amplified channel the stored value `x` over range `r` means
+ * `10^(f1 * x / r) * f2`. This is DECODING, not a display transform — the datum the
+ * instrument measured is the linear value, and every other reader (flowCore, FlowJo,
+ * flowio, fcsparser) linearises on read. Leaving it encoded would put GateLab's raw
+ * space in different units from every tool it exchanges gates with, so a Gating-ML
+ * coordinate would not survive a round trip.
+ *
+ * A channel with no usable `$PnR` cannot be decoded; it is left as stored and its
+ * `logAmp` is not set, so nothing downstream believes it was linearised.
+ */
+function decodeLogAmplification(
+  channels: FcsChannel[],
+  columns: NumericColumn[],
+  nEvents: number,
+): void {
+  for (const channel of channels) {
+    if (!channel.logAmp) continue;
+    const { decades, offset } = channel.logAmp;
+    if (!(channel.range > 0)) {
+      delete channel.logAmp;
+      continue;
+    }
+    // Float64, not Float32. The source is an integer over a small range, so the decode
+    // is exact in double precision. In single precision the decoded values of one stored
+    // integer can straddle a gate boundary, and because log-amplified data is heavily
+    // quantised a boundary tie group is large: on the FACSCalibur fixture a float32
+    // decode moved 1,374 of 20,000 events across a quantile gate edge.
+    const src = columns[channel.index];
+    const out = new Float64Array(nEvents);
+    const k = decades / channel.range;
+    // A stored integer above $PnR (flag bits, a vendor bug) would decode to 10^(more than the
+    // declared decades) -- up to Infinity. flowCore masks the value to the channel's bit width,
+    // ceil(log2($PnR)), before decoding; the same here, so an out-of-range word wraps rather
+    // than exploding.
+    // Modulo rather than a bitwise mask: a 32-bit word is negative to JavaScript's int32 ops.
+    const modulus = Math.pow(2, Math.ceil(Math.log2(channel.range)));
+    for (let i = 0; i < nEvents; i++) out[i] = Math.pow(10, k * (src[i] % modulus)) * offset;
+    columns[channel.index] = out;
+    // The range now describes the decoded values, as flowCore rewrites it: 10^decades · offset.
+    channel.range = Math.pow(10, decades) * offset;
+  }
+}
+
 export function parseFcs(buffer: ArrayBuffer): FcsFile {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
@@ -135,12 +201,20 @@ export function parseFcs(buffer: ArrayBuffer): FcsFile {
 
   const channels: FcsChannel[] = [];
   for (let i = 1; i <= par; i++) {
+    // Log amplification is a property of INTEGER data: FCS 3.1 requires $PnE/0,0/ for float and
+    // double files, and flowCore, the reference this decode follows, decodes only when the
+    // datatype is integer. A float file carrying a stray $PnE/4,1/ (a vendor keyword left over
+    // from an integer template) had its real intensities exponentiated -- 262144 became 10,000.
+    const logAmp = datatype === "I" ? parseLogAmp(get(`$P${i}E`)) : null;
+    const feature = (get(`$P${i}FEATURE`) ?? "").trim();
     channels.push({
       index: i - 1,
       name: (get(`$P${i}N`) || `P${i}`).trim(),
       marker: (get(`$P${i}S`) ?? null) as string | null,
       bits: parseInt(get(`$P${i}B`) || "32", 10),
       range: parseFloat(get(`$P${i}R`) || "0"),
+      ...(logAmp ? { logAmp } : {}),
+      ...(feature ? { feature } : {}),
     });
   }
   const nCh = channels.length;
@@ -224,6 +298,8 @@ export function parseFcs(buffer: ArrayBuffer): FcsFile {
   }
   void bytesPerVal;
   void dataEnd;
+
+  decodeLogAmplification(channels, columns, tot);
 
   const spillover = parseSpillover(get("$SPILLOVER") || get("$SPILL") || get("SPILL"), channels);
   const instrument = detectInstrumentType(channels.map((c) => c.name));

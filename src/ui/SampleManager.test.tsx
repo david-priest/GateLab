@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { compareSampleNames, FolderImportModal, SampleManagerModal, SampleNavigator, type SampleListItem } from "./SampleManager";
@@ -27,10 +27,50 @@ afterEach(() => {
 });
 
 describe("SampleNavigator", () => {
-  it("marks each file with its hierarchy chip when the workspace assigns hierarchies per file", () => {
+  it("selects visible ranges, toggles rows and supports keyboard focus independently of inspection", () => {
+    const onInspect = vi.fn();
+    const many = Array.from({ length: 6 }, (_, i) => ({ id: `D${i + 1}`, name: `D${i + 1}.fcs`, eventCount: 100, channelCount: 2 }));
+    function Harness() {
+      const [excluded, setExcluded] = useState(new Set(many.map(item => item.id)));
+      const select = (ids: readonly string[]) => setExcluded(new Set(many.filter(item => !ids.includes(item.id)).map(item => item.id)));
+      return <SampleNavigator items={many} activeId="D1" excludedIds={excluded} busy={false} importProgress={null}
+        onOpenFiles={vi.fn()} onOpenFolder={vi.fn()} onManage={vi.fn()} onManageSample={vi.fn()}
+        onActivate={id => select([id])} onInspect={onInspect} onSelectIds={select}
+        onToggleIncluded={(id, included) => setExcluded(previous => { const next = new Set(previous); included ? next.delete(id) : next.add(id); return next; })}
+        onIncludeAll={() => select(many.map(item => item.id))} onIncludeNone={() => select([])} onInvertIncluded={vi.fn()} />;
+    }
+    act(() => root.render(<Harness />));
+    const rows = () => [...host.querySelectorAll<HTMLElement>('.gl-sample-row')];
+    const selected = () => rows().filter(row => row.getAttribute('aria-selected') === 'true').map(row => row.querySelector('.gl-sample-name')!.textContent);
+    const click = (index: number, options = {}) => act(() => rows()[index].dispatchEvent(new MouseEvent('click', { bubbles: true, ...options })));
+    click(1); click(4, { shiftKey: true });
+    expect(selected()).toEqual(['D2.fcs', 'D3.fcs', 'D4.fcs', 'D5.fcs']);
+    click(2, { metaKey: true });
+    expect(selected()).toEqual(['D2.fcs', 'D4.fcs', 'D5.fcs']);
+    click(0, { ctrlKey: true });
+    expect(selected()).toEqual(['D1.fcs', 'D2.fcs', 'D4.fcs', 'D5.fcs']);
+    const key = (index: number, key: string, options = {}) => act(() => rows()[index].dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key, ...options })));
+    key(0, 'ArrowDown');
+    expect(document.activeElement).toBe(rows()[1]);
+    expect(selected()).toHaveLength(4);
+    key(1, 'Enter'); expect(onInspect).toHaveBeenCalledWith('D2');
+    key(1, 'a', { metaKey: true }); expect(selected()).toHaveLength(6);
+    click(4); key(4, 'ArrowUp', { shiftKey: true });
+    expect(selected()).toEqual(['D4.fcs', 'D5.fcs']);
+    expect(rows().filter(row => row.tabIndex === 0)).toHaveLength(1);
+    key(3, ' '); expect(selected()).toEqual(['D5.fcs']);
+    const search = host.querySelector<HTMLInputElement>('input[type="search"]')!;
+    act(() => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(search, 'D6'); search.dispatchEvent(new Event('input', { bubbles: true })); });
+    click(0, { shiftKey: true }); // hidden anchor: start a new range, never select hidden files
+    expect(selected()).toEqual(['D6.fcs']);
+    key(0, 'a', { ctrlKey: true });
+    expect(selected()).toEqual(['D6.fcs']);
+    expect(host.querySelector('[role="listbox"]')?.getAttribute('aria-multiselectable')).toBe('true');
+  });
+  it("marks a tailored file with how many gates it tailored, the names on hover", () => {
     const tagged: SampleListItem[] = [
-      { ...items[0], hierarchy: { index: 1, name: "Main", colour: "#7b3fa0" } },
-      { ...items[1], hierarchy: { index: 2, name: "Day 7 scheme", colour: "#e6820e" } },
+      { ...items[0] },
+      { ...items[1], tailored: ["Cells", "Singlets"] },
     ];
     act(() => root.render(
       <SampleNavigator
@@ -50,19 +90,56 @@ describe("SampleNavigator", () => {
         onInvertIncluded={vi.fn()}
       />,
     ));
-    // The list is narrow, so a row carries only the numbered badge; the name is on hover.
-    const chips = Array.from(host.querySelectorAll<HTMLElement>(".gl-sample-row .gl-hierarchy-chip"));
-    expect(chips.map((c) => c.querySelector(".gl-hierarchy-chip-index")!.textContent)).toEqual(["1", "2"]);
-    expect(chips.every((c) => c.classList.contains("compact") && c.querySelector(".gl-hierarchy-chip-name") === null)).toBe(true);
-    expect(chips[1].title).toBe("Hierarchy: Day 7 scheme");
-    // The badge: the hierarchy's colour, and the white ring inset from its edge.
-    const badge = chips[1].querySelector<HTMLElement>(".gl-hierarchy-chip-index")!;
-    expect(badge.style.background).toContain("230, 130, 14");
-    expect(badge.style.boxShadow).toContain("inset 0 0 0 2.5px #fff");
-    expect(host.querySelector(".gl-sample-scope-key")!.textContent).toContain("badge = hierarchy");
+    const badges = Array.from(host.querySelectorAll<HTMLElement>(".gl-sample-row .gl-sample-tailored"));
+    expect(badges.map((b) => b.textContent)).toEqual(["2"]);
+    expect(badges[0].title).toBe("2 gates tailored for this file: Cells, Singlets");
+    expect(badges[0].closest(".gl-sample-row")!.textContent).toContain("donor-b.fcs");
+    expect(host.querySelector(".gl-sample-scope-key")!.textContent).toContain("gates tailored for that file");
   });
 
-  it("shows no chip and no chip key while hierarchies are not assigned per file", () => {
+  it("tags a file with its group, and the Groups menu acts on the selected files", () => {
+    const onGroupAction = vi.fn();
+    const tagged: SampleListItem[] = [{ ...items[0], group: "Treated", groupColour: "#e6820e" }, { ...items[1] }];
+    act(() => root.render(
+      <SampleNavigator
+        items={tagged}
+        activeId="a"
+        excludedIds={new Set(["b"])}
+        busy={false}
+        importProgress={null}
+        groups={[{ id: "g1", name: "Treated" }]}
+        onGroupAction={onGroupAction}
+        onOpenFiles={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onManage={vi.fn()}
+        onManageSample={vi.fn()}
+        onActivate={vi.fn()}
+        onToggleIncluded={vi.fn()}
+        onIncludeAll={vi.fn()}
+        onIncludeNone={vi.fn()}
+        onInvertIncluded={vi.fn()}
+      />,
+    ));
+    const tags = [...host.querySelectorAll<HTMLElement>(".gl-sample-row .gl-sample-group")];
+    expect(tags.map((tag) => tag.textContent)).toEqual(["Treated"]);
+    expect(tags[0].closest(".gl-sample-row")!.textContent).toContain("donor-a.fcs");
+    expect(tags[0].style.background).toContain("230, 130, 14"); // the group's own colour
+    const item = (cls: string) => host.querySelector<HTMLButtonElement>(`.gl-sample-groups-menu .${cls}`)!;
+    expect(item("gl-sample-group-new").textContent).toBe("New group from the 1 selected…");
+    act(() => item("gl-sample-group-new").click());
+    expect(onGroupAction).toHaveBeenCalledWith({ kind: "new" });
+    expect(item("gl-sample-group-assign").textContent).toBe("Add the 1 selected to Treated");
+    act(() => item("gl-sample-group-assign").click());
+    expect(onGroupAction).toHaveBeenCalledWith({ kind: "assign", groupId: "g1" });
+    act(() => item("gl-sample-group-remove").click());
+    expect(onGroupAction).toHaveBeenCalledWith({ kind: "remove" });
+    act(() => item("gl-sample-group-rename").click());
+    expect(onGroupAction).toHaveBeenCalledWith({ kind: "rename", groupId: "g1" });
+    act(() => item("gl-sample-group-delete").click());
+    expect(onGroupAction).toHaveBeenCalledWith({ kind: "delete", groupId: "g1" });
+  });
+
+  it("shows no badge and no key while nothing is tailored", () => {
     act(() => root.render(
       <SampleNavigator
         items={items}
@@ -81,8 +158,8 @@ describe("SampleNavigator", () => {
         onInvertIncluded={vi.fn()}
       />,
     ));
-    expect(host.querySelector(".gl-hierarchy-chip")).toBeNull();
-    expect(host.querySelector(".gl-sample-scope-key")!.textContent).not.toContain("hierarchy");
+    expect(host.querySelector(".gl-sample-tailored")).toBeNull();
+    expect(host.querySelector(".gl-sample-scope-key")!.textContent).not.toContain("tailored");
   });
 
   it("keeps active-sample selection separate from display and analysis inclusion", () => {
@@ -115,12 +192,8 @@ describe("SampleNavigator", () => {
     act(() => rows[1].click());
     expect(onActivate).toHaveBeenCalledWith("b");
 
-    const includeB = host.querySelector<HTMLInputElement>(
-      'input[aria-label="Show donor-b.fcs in plots and analyses"]',
-    )!;
-    expect(includeB.checked).toBe(false);
-    expect(includeB.closest(".gl-sample-row")?.classList.contains("included")).toBe(false);
-    act(() => includeB.click());
+    expect(host.querySelector('.gl-sample-row input[type="checkbox"]')).toBeNull();
+    act(() => rows[1].dispatchEvent(new MouseEvent("click", { bubbles: true, metaKey: true })));
     expect(onToggleIncluded).toHaveBeenCalledWith("b", true);
     expect(onActivate).toHaveBeenCalledTimes(1);
 

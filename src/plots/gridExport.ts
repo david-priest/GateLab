@@ -19,8 +19,13 @@ function downloadBlob(blob: Blob, filename: string) {
 }
 
 /** High-resolution PNG of the whole grid (mini_plot.js rasterizer). */
-export function exportGridPNG(gridId: string, filename: string) {
-  loadMiniPlots().exportGridPNG(gridId, filename);
+export async function exportGridPNG(gridId: string, filename: string, dpi?: number) {
+  if (dpi === undefined) { loadMiniPlots().exportGridPNG(gridId, filename); return; }
+  const composed = composeGridSVG(gridId, dpi);
+  if (!composed) return;
+  const canvas = await rasterizeGrid(composed, dpi);
+  const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error("PNG export failed")), "image/png"));
+  downloadBlob(blob, filename + ".png");
 }
 
 /**
@@ -37,14 +42,15 @@ function cellDataUrlAtDpi(cell: HTMLElement, dpi: number): string | null {
     const exportSize = Math.max(1, Math.round(cr.width || (cfg.plot_size as number) || 200));
     const exportCfg = {
       ...cfg,
-      plot_size: exportSize,
+      plot_size: cfg.ridgeline ? cfg.plot_size : exportSize,
       canvas_scale: Math.max(1, dpi / 96),
       gates: [],
       title: null,
       legend_entries: [],
     };
     const offscreen = document.createElement("div");
-    loadMiniPlots().renderMiniPlot(offscreen, exportCfg);
+    if (cfg.ridgeline) loadMiniPlots().renderRidgelinePanel(offscreen, exportCfg);
+    else loadMiniPlots().renderMiniPlot(offscreen, exportCfg);
     const ec = offscreen.querySelector("canvas");
     return ec ? ec.toDataURL("image/png") : canvas ? canvas.toDataURL("image/png") : null;
   } catch {
@@ -111,14 +117,16 @@ export function exportGridSVG(gridId: string, filename: string, dpi = 300) {
 /** PDF export: rasterize the composed grid SVG at the export DPI onto a single jsPDF page (uses only
  *  jsPDF's stable addImage — avoids the vendored form-object/Matrix path that isn't jsPDF-4
  *  compatible; axes/gates are high-res raster rather than true vector). */
-export async function exportGridPDF(gridId: string, filename: string, dpi = 300) {
-  const composed = composeGridSVG(gridId, dpi);
-  if (!composed) return;
+async function rasterizeGrid(composed: NonNullable<ReturnType<typeof composeGridSVG>>, dpi: number): Promise<HTMLCanvasElement> {
   const { width, height } = composed;
   const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(composed.root);
   const url = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml" }));
   const scale = Math.max(1, Math.min(1200, dpi) / 96);
-  const dataUrl: string = await new Promise((resolve, reject) => {
+  if (width * scale > 16384 || height * scale > 16384 || width * height * scale * scale > 64_000_000) {
+    URL.revokeObjectURL(url);
+    throw new Error("Export exceeds the image size limit. Reduce DPI or panel size.");
+  }
+  return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
       const canvas = document.createElement("canvas");
@@ -130,26 +138,47 @@ export async function exportGridPDF(gridId: string, filename: string, dpi = 300)
       ctx.scale(scale, scale);
       ctx.drawImage(img, 0, 0);
       URL.revokeObjectURL(url);
-      resolve(canvas.toDataURL("image/png"));
+      resolve(canvas);
     };
-    img.onerror = reject;
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Could not render the exported figure")); };
     img.src = url;
   });
+}
+
+export async function exportGridPDF(gridId: string, filename: string, dpi = 300) {
+  const composed = composeGridSVG(gridId, dpi);
+  if (!composed) return;
+  const canvas = await rasterizeGrid(composed, dpi);
+  // CSS pixels are 1/96 inch; PDF points are 1/72 inch. DPI changes resolution, not paper size.
+  const width = composed.width * 72 / 96, height = composed.height * 72 / 96;
   const { jsPDF } = await import("jspdf");
   const pdf = new jsPDF({ orientation: width >= height ? "landscape" : "portrait", unit: "pt", format: [width, height] });
-  pdf.addImage(dataUrl, "PNG", 0, 0, width, height);
+  pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, width, height);
   pdf.save(filename + ".pdf");
 }
 
 function addHtmlText(root: SVGSVGElement, el: HTMLElement, gridRect: DOMRect) {
-  const r = el.getBoundingClientRect();
-  const t = document.createElementNS(SVG_NS, "text");
-  t.setAttribute("x", String(Math.round(r.left - gridRect.left)));
-  t.setAttribute("y", String(Math.round(r.top - gridRect.top + 12)));
-  t.setAttribute("font-size", "12");
-  t.setAttribute("font-family", "Arial, Helvetica, sans-serif");
-  t.setAttribute("font-weight", "600");
-  t.setAttribute("fill", "#334155");
-  t.textContent = el.textContent ?? "";
-  root.appendChild(t);
+  const style = getComputedStyle(el), fontSize = parseFloat(style.fontSize) || 12;
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let node: Node | null;
+  // Browser line boxes preserve wrapping, alignment and padding instead of guessing from the cell.
+  while ((node = walker.nextNode())) {
+    const content = node.textContent ?? "", range = document.createRange();
+    const lines: { text: string; left: number; top: number }[] = [];
+    for (let i = 0; i < content.length; i++) {
+      range.setStart(node, i); range.setEnd(node, i + 1);
+      const r = typeof range.getBoundingClientRect === "function" ? range.getBoundingClientRect() : el.getBoundingClientRect();
+      if (!r.width && !r.height) continue;
+      const previous = lines.at(-1);
+      if (previous && Math.abs(previous.top - r.top) < 1) previous.text += content[i];
+      else lines.push({ text: content[i], left: r.left, top: r.top });
+    }
+    for (const line of lines) {
+      const t = document.createElementNS(SVG_NS, "text");
+      t.setAttribute("x", String(line.left - gridRect.left)); t.setAttribute("y", String(line.top - gridRect.top + fontSize * .82));
+      t.setAttribute("font-size", String(fontSize)); t.setAttribute("font-family", style.fontFamily || "Arial, Helvetica, sans-serif");
+      t.setAttribute("font-weight", style.fontWeight || "400"); t.setAttribute("fill", style.color || "#334155");
+      t.textContent = line.text; root.appendChild(t);
+    }
+  }
 }

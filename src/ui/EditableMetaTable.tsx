@@ -30,12 +30,13 @@ interface Props {
   templateKeyHeader: string; // first CSV column header: "filename" | "population"
   hint: string;
   emptyMessage: string;
+  protectedColumns?: string[];
 }
 
 export function EditableMetaTable({
   title, rowHeader, fixedHeaders, rows, columns, values,
   onSetCell, onAddColumn, onRenameColumn, onDeleteColumn, onImport,
-  templateFilename, templateKeyHeader, hint, emptyMessage,
+  templateFilename, templateKeyHeader, hint, emptyMessage, protectedColumns = [],
 }: Props) {
   const { t } = useI18n();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -97,12 +98,13 @@ export function EditableMetaTable({
                     <div className="gl-meta-col-head">
                       <input
                         className="gl-field-input gl-meta-hdr-input"
+                        readOnly={protectedColumns.includes(c.name)}
                         value={draft[hdrKey(c.name)] ?? c.name}
                         onChange={(e) => setDraft((d) => ({ ...d, [hdrKey(c.name)]: e.target.value }))}
                         onBlur={(e) => { const v = e.currentTarget.value.trim(); if (v && v !== c.name) onRenameColumn(c.name, v); clear(hdrKey(c.name)); }}
                         onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
                       />
-                      <button className="gl-meta-del" title={t("Delete field")} onClick={() => onDeleteColumn(c.name)}>×</button>
+                      {!protectedColumns.includes(c.name) && <button className="gl-meta-del" title={t("Delete field")} onClick={() => onDeleteColumn(c.name)}>×</button>}
                     </div>
                   </th>
                 ))}

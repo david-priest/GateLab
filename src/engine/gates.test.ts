@@ -317,3 +317,54 @@ describe("polygon masks tolerate repeated vertices", () => {
     expect(Array.from(gateMaskPolygon([0.5], [0], [...tri, [0, 0]]))).toEqual([1]);
   });
 });
+
+import * as curly from "./gates";
+
+// FlowJo's curly quad: beyond the crosshair the horizontal arm rises and the vertical arm bends
+// right, by k · d^power; to the left and below, the dividers are straight. Membership is
+// decided against the divider's position at the event's own coordinate.
+describe("quadrant gate with curled arms", () => {
+  const curl = { power: 1.5, kx: 0.012, ky: 0.012 };
+  const centre: [number, number] = [100, 100];
+  // The horizontal arm at x = 200 sits at y = 100 + 0.012 · 100^1.5 = 112; the vertical arm at
+  // y = 200 sits at x = 112.
+  const xs = [200, 200, 112.5, 111.5, 50, 50, 100];
+  const ys = [111, 113, 200, 200, 150, 50, 100];
+
+  it("assigns events to quadrants against the bent dividers", () => {
+    const q = (n: number) => Array.from(curly.gateMaskQuadrant(xs, ys, centre, n, curl));
+    // (200, 111): right of the crosshair but BELOW the risen arm -> lower right, not upper.
+    expect(q(3)[0]).toBe(1); expect(q(2)[0]).toBe(0);
+    // (200, 113): just above the arm -> upper right.
+    expect(q(2)[1]).toBe(1);
+    // (112.5, 200): right of the bent vertical arm -> upper right; (111.5, 200): left of it.
+    expect(q(2)[2]).toBe(1); expect(q(1)[3]).toBe(1);
+    // Left of and below the crosshair the dividers are straight.
+    expect(q(1)[4]).toBe(1); expect(q(4)[5]).toBe(1);
+    // The crosshair itself falls in quadrant 2, as before.
+    expect(q(2)[6]).toBe(1);
+    // Exactly one quadrant per event.
+    for (let i = 0; i < xs.length; i++) {
+      expect(q(1)[i] + q(2)[i] + q(3)[i] + q(4)[i]).toBe(1);
+    }
+  });
+
+  it("is the straight crosshair when the curl is absent or zero", () => {
+    for (const c of [undefined, { power: 1.5, kx: 0, ky: 0 }]) {
+      const q2 = Array.from(curly.gateMaskQuadrant(xs, ys, centre, 2, c));
+      // (200, 111) is above the straight divider at y = 100.
+      expect(q2[0]).toBe(1);
+    }
+  });
+
+  it("traces each arm from the crosshair to the axis end, in the gate's own coordinates", () => {
+    const h = curly.quadrantArmPoints(centre, curl, "h", 200, 4);
+    expect(h[0]).toEqual([100, 100]);
+    expect(h[4][0]).toBe(200);
+    expect(h[4][1]).toBeCloseTo(112, 9);
+    const v = curly.quadrantArmPoints(centre, curl, "v", 200, 4);
+    expect(v[4]).toEqual([expect.closeTo(112, 9), 200]);
+    // An axis that ends before the crosshair has no arm to draw.
+    expect(curly.quadrantArmPoints(centre, curl, "h", 50)).toEqual([]);
+  });
+});

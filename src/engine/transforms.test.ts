@@ -1,5 +1,7 @@
+import { isImagingFeature } from "./channels";
 import { describe, it, expect } from "vitest";
 import {
+  isImagingGeometryChannel,
   Logicle,
   arcsinh,
   arcsinhInverse,
@@ -207,5 +209,39 @@ describe("isScatterChannel — worded names and the imaging-morphometrics guard"
   it("does not treat a bare mention of scatter as an axis", () => {
     expect(isScatterChannel("Scatter Ratio")).toBe(false);
     expect(isScatterChannel("CD45 backscatter-corrected")).toBe(false);
+  });
+});
+
+describe("isImagingFeature (the Panel tab's rename lock)", () => {
+  it("names every S8 image-derived feature, by keyword or by name, and no pulse or marker channel", () => {
+    for (const [name, feature] of [
+      ["Size (FSC)", "Size"], ["Max Intensity (LightLoss (Imaging))", "MaxIntensity"], ["Delta CoM (SSC (Imaging)/FSC)", "DeltaCoM"],
+      ["Eccentricity (FSC)", undefined], ["Center of Mass (X) (SSC (Imaging))", undefined], ["Total Intensity (FSC)", undefined],
+    ] as const) expect(isImagingFeature(name, feature), name).toBe(true);
+    for (const [name, feature] of [["CD3 (Blue 1-A)", "Area"], ["FSC-A", "Area"], ["Time", "Time"], ["CD19", undefined]] as const)
+      expect(isImagingFeature(name, feature), name).toBe(false);
+  });
+});
+
+describe("isImagingGeometryChannel", () => {
+  it("takes the shape and position features, not the intensities, scatter or detectors", () => {
+    for (const name of [
+      "Size (FSC)", "Eccentricity (SSC (Imaging))", "Long Axis Moment (LightLoss (Imaging))",
+      "Short Axis Moment (FSC)", "Radial Moment (FSC)", "Diffusivity (FSC)",
+      "Center of Mass (X) (FSC)", "Center of Mass (Y) (SSC (Imaging))",
+      "Delta CoM (SSC (Imaging)/FSC)", "Correlation (eGFP/eYFP)",
+    ]) expect(isImagingGeometryChannel(name), name).toBe(true);
+    for (const name of [
+      "Max Intensity (FSC)", "Total Intensity (SSC (Imaging))", "FSC-A", "SSC (Imaging)-A",
+      "LightLoss (Imaging)-A", "UV1 (375)-A", "CD4-A (V500-A)", "Time", "Saturated",
+    ]) expect(isImagingGeometryChannel(name), name).toBe(false);
+  });
+
+  it("lets $PnFEATURE decide when the file carries it", () => {
+    expect(isImagingGeometryChannel("Blobness (FSC)", "Blobness")).toBe(true);
+    expect(isImagingGeometryChannel("Blobness (FSC)")).toBe(false);
+    expect(isImagingGeometryChannel("Size (FSC)", "Area")).toBe(false);
+    expect(isImagingGeometryChannel("Brightness (FSC)", "MaxIntensity")).toBe(false);
+    expect(isImagingGeometryChannel("Total Intensity (FSC)", "TotalIntensity")).toBe(false);
   });
 });

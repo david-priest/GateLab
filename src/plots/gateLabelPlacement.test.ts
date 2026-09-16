@@ -55,6 +55,32 @@ describe("a label offset recorded under another transform", () => {
     expect(build(s, gate).label_offset).toBeNull();
   });
 
+  it("is judged the same way for each of a quadrant's four labels", () => {
+    const s = load();
+    const fluor = s.channels.findIndex((_, i) => s.isFluorChannel(i));
+    const key = s.channels[fluor].key;
+    const CENTRE: [number, number] = [100, 40000];
+    s.setFluorScale(fluor, "arcsinh");
+    const frame = s.displayRange(s.index(key)!);
+    const offsetX = frame[1] - s.rawToDisplay(key, CENTRE[0]);
+    const gate: Gate = {
+      gate_id: "g", name: "Q", gate_type: "quadrant",
+      x_channel: key, y_channel: "SSC-A",
+      center: CENTRE, label_offset: null,
+      quadrant_label_offsets: [[offsetX, 1], null, [0.2, 0.2], null],
+      vertices: [], color: "#888888",
+    } as unknown as Gate;
+    expect(build(s, gate).quadrant_label_offsets).toEqual([[offsetX, 1], null, [0.2, 0.2], null]);
+    // On the logicle axis the far-edge one lands off the plot and returns to its midpoint; the
+    // small one still means something and stays.
+    s.setFluorScale(fluor, "logicle");
+    expect(build(s, gate).quadrant_label_offsets).toEqual([null, null, [0.2, 0.2], null]);
+    // A gate without any is passed through without the field.
+    const plain = { ...gate } as Gate & { quadrant_label_offsets?: unknown };
+    delete plain.quadrant_label_offsets;
+    expect("quadrant_label_offsets" in build(s, plain)).toBe(false);
+  });
+
   it("is dropped on a polygon too, judged by where the label lands", () => {
     const s = load();
     const key = s.channels[s.channels.findIndex((_, i) => s.isFluorChannel(i))].key;
@@ -114,3 +140,26 @@ describe("a label can never take the axis over", () => {
     expect(far[1]).toBeCloseTo(near[1], 9);
   });
 });
+
+describe("a label moved into the plotted range beyond the data", () => {
+  it("keeps its offset when the plot's ranges are given, and drops it against the data alone", () => {
+    const s = load();
+    const xIdx = s.index("FSC-A")!, yIdx = s.index("SSC-A")!;
+    const [xlo, xhi] = s.displayRange(xIdx), [ylo, yhi] = s.displayRange(yIdx);
+    const gate = {
+      gate_id: "g", name: "G", gate_type: "rectangle", x_channel: "FSC-A", y_channel: "SSC-A", color: "#000",
+      vertices: [[s.displayToRaw("FSC-A", xlo + (xhi - xlo) * 0.3), s.displayToRaw("SSC-A", ylo + (yhi - ylo) * 0.3)],
+                 [s.displayToRaw("FSC-A", xlo + (xhi - xlo) * 0.6), s.displayToRaw("SSC-A", ylo + (yhi - ylo) * 0.6)]],
+      // Far above the data's extent, but inside a plot zoomed out to three times it.
+      label_offset: [0, (yhi - ylo) * 1.2],
+    } as unknown as Gate;
+    const zoomedOut: [[number, number], [number, number]] = [[xlo, xhi], [ylo, ylo + (yhi - ylo) * 3]];
+    const kept = buildPlotGates(s, { g: gate }, ["g"], {}, "FSC-A", "SSC-A", null, zoomedOut)[0];
+    expect(kept.label_offset).toEqual([0, (yhi - ylo) * 1.2]);
+    // Against the data alone the placement is dropped and the automatic one beside the gate takes over.
+    const dropped = buildPlotGates(s, { g: gate }, ["g"], {}, "FSC-A", "SSC-A")[0];
+    expect(dropped.label_offset).not.toEqual(kept.label_offset);
+    expect(Math.abs((dropped.label_offset as [number, number])[1])).toBeLessThan((yhi - ylo) * 0.5);
+  });
+});
+

@@ -7,6 +7,7 @@
 
 import type { Sample } from "../engine/sample";
 import type { MetadataColumn } from "../engine/metadata";
+import { SAMPLE_ID_FIELD, sampleDisplayId } from "../engine/metadata";
 import { EditableMetaTable, type MetaRow } from "./EditableMetaTable";
 import { useI18n } from "./i18n";
 
@@ -71,11 +72,12 @@ export function MetadataTab({
       )}
       <EditableMetaTable
         title={t("Sample metadata")}
-        rowHeader={t("Sample")}
+        rowHeader={t("Filename (read-only)")}
         fixedHeaders={[t("Events"), t("Ch"), t("Instr.")]}
         rows={sampleRows}
-        columns={columns}
-        values={metadata}
+        columns={[{ name: SAMPLE_ID_FIELD }, ...columns.filter(column => column.name !== SAMPLE_ID_FIELD)]}
+        protectedColumns={[SAMPLE_ID_FIELD]}
+        values={Object.fromEntries(samples.map(file => [file.id, { ...metadata[file.id], [SAMPLE_ID_FIELD]: sampleDisplayId(file.name, metadata[file.id]) }]))}
         onSetCell={onSetCell}
         onAddColumn={onAddColumn}
         onRenameColumn={onRenameColumn}
@@ -83,7 +85,7 @@ export function MetadataTab({
         onImport={onImport}
         templateFilename="metadata_template.csv"
         templateKeyHeader="filename"
-        hint={t("First column of an imported CSV/TSV must be the FCS file name; remaining columns become fields (joined by filename, extension-insensitive). Edit any cell inline. These fields drive the Proportions tab's Group / Unit / Facet.")}
+        hint={t("Sample ID (sample_id) is editable and saved with the workspace. It defaults to the filename; filenames are read-only. Import CSV/TSV using filename as the first column and sample_id plus any condition fields after it. Metadata drives Plotting groups, replicate units and facets.")}
         emptyMessage={t("Load one or more FCS files to add sample metadata.")}
       />
 

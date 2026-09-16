@@ -74,9 +74,28 @@ export function lastPickerLocation(): FileSystemHandle | null {
   return lastLocation;
 }
 
+/**
+ * The last FOLDER the user granted, kept apart from lastLocation.
+ *
+ * A file handle offers no route to its parent -- that is the point of the File System Access
+ * API, not an omission -- so a .wsp cannot look beside itself for the FCS it names. Once the
+ * user has granted a directory, though, GateLab may read it again without asking, which is what
+ * lets the second and later workspaces from the same folder resolve with no interaction.
+ */
+let lastDirectory: FileSystemDirectoryHandle | null = null;
+
+export function rememberDirectory(handle: FileSystemDirectoryHandle | null | undefined): void {
+  if (handle) lastDirectory = handle;
+}
+
+export function lastGrantedDirectory(): FileSystemDirectoryHandle | null {
+  return lastDirectory;
+}
+
 /** For tests. */
 export function resetPickerLocation(): void {
   lastLocation = null;
+  lastDirectory = null;
 }
 
 /** The id and start location every picker passes: a caller's startIn, else the last location. */
@@ -179,6 +198,7 @@ export async function pickDirectoryFiles(
       ...pickerPlacement(options),
     });
     rememberPickerLocation(handle);
+    rememberDirectory(handle);
     const allowed = new Set(extensions.map((extension) => extension.toLowerCase()));
     const files: PickedFileSource[] = [];
 

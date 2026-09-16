@@ -66,6 +66,57 @@ function populations(
   };
 }
 
+describe("mergeGatingStrategies — reusing identical gates", () => {
+  // A FlowJo workspace whose samples share a strategy converts to one copy of every gate PER
+  // SAMPLE. Importing each file's strategy into its own hierarchy therefore stacked three
+  // identical "Lymphocytes" gates on one plot, all with the same counts, before this.
+  const lymphocytes = (gateId: string): Gate => ({
+    gate_id: gateId, name: "Lymphocytes", gate_type: "rectangle",
+    x_channel: "FSC-A", y_channel: "SSC-A",
+    vertices: [[10, 10], [90, 90]], color: "#377eb8", label_offset: null,
+  });
+
+  const graphWith = (gate: Gate, rootId: string, popId: string): GatingStrategyGraph => ({
+    gates: { [gate.gate_id]: gate },
+    gate_order: [gate.gate_id],
+    populations: populations(rootId, popId, "Lymphocytes", gate.gate_id),
+    root_population_id: rootId,
+  });
+
+  it("maps an identical imported gate onto the existing one instead of cloning it", () => {
+    const current = graphWith(lymphocytes("g1"), "root", "pop1");
+    const imported = graphWith(lymphocytes("g2"), "import-root", "pop2");
+
+    const merged = mergeGatingStrategies(current, imported, "root", true);
+
+    expect(Object.keys(merged.gates)).toEqual(["g1"]);
+    expect(merged.gate_order).toEqual(["g1"]);
+    // The imported population now references the gate that was already there.
+    expect(merged.gateIdMap["g2"]).toBe("g1");
+  });
+
+  it("keeps a same-named gate whose geometry differs, which is a different gate", () => {
+    const current = graphWith(lymphocytes("g1"), "root", "pop1");
+    const moved = { ...lymphocytes("g2"), vertices: [[11, 10], [90, 90]] as [number, number][] };
+    const imported = graphWith(moved, "import-root", "pop2");
+
+    const merged = mergeGatingStrategies(current, imported, "root", true);
+
+    // Fusing these would silently change which events the population holds.
+    expect(Object.keys(merged.gates).sort()).toEqual(["g1", "g2"]);
+    expect(merged.gateIdMap["g2"]).toBe("g2");
+  });
+
+  it("does not reuse unless asked, so merging one strategy twice still gives two gates", () => {
+    const current = graphWith(lymphocytes("g1"), "root", "pop1");
+    const imported = graphWith(lymphocytes("g2"), "import-root", "pop2");
+
+    const merged = mergeGatingStrategies(current, imported, "root");
+
+    expect(Object.keys(merged.gates).sort()).toEqual(["g1", "g2"]);
+  });
+});
+
 describe("mergeGatingStrategies", () => {
   it("preserves the current graph and attaches a collision-safe imported hierarchy beneath its root", () => {
     const current: GatingStrategyGraph = {

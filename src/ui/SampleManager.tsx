@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { useI18n } from "./i18n";
-import { HierarchyChip, type HierarchyChipInfo } from "./HierarchyChip";
+import { MenuButton } from "./MenuButton";
 import { groupCheckedCount, type FacetColumn } from "../engine/sampleFacets";
 
 export interface SampleListItem {
@@ -9,11 +9,29 @@ export interface SampleListItem {
   eventCount: number;
   channelCount: number;
   sourcePath?: string;
-  /** The hierarchy this file is gated under, when the workspace assigns them per file. */
-  hierarchy?: HierarchyChipInfo;
+  /** The file's tailored gates, when it has any: their names, for the badge and its tooltip. */
+  tailored?: readonly string[];
+  /** The group the file is in, when it is in one, and its colour. */
+  group?: string;
+  groupColour?: string;
+  /**
+   * The file is checked but belongs to a hierarchy other than the active one, so it contributes
+   * nothing to the pooled display. Gates belong to their hierarchy and there is no way to draw
+   * several sets at once, so this is a real limit rather than an oversight -- shown rather than
+   * left for the user to infer from a count that does not add up.
+   */
+  gatedElsewhere?: boolean;
   /** This sample's metadata values, keyed by column. Absent where the workspace has none. */
   metadata?: Record<string, string>;
 }
+
+/** What the Groups menu asks the app to do; "new", "assign" and "remove" act on the selected files. */
+export type GroupAction =
+  | { kind: "new" }
+  | { kind: "assign"; groupId: string }
+  | { kind: "remove" }
+  | { kind: "rename"; groupId: string }
+  | { kind: "delete"; groupId: string };
 
 export interface FolderImportItem {
   id: string;
@@ -69,6 +87,7 @@ function matchesQuery(item: SampleListItem, query: string): boolean {
   const needle = query.trim().toLocaleLowerCase();
   if (!needle) return true;
   return item.name.toLocaleLowerCase().includes(needle) ||
+    (item.metadata?.sample_id?.toLocaleLowerCase().includes(needle) ?? false) ||
     (item.sourcePath?.toLocaleLowerCase().includes(needle) ?? false);
 }
 
@@ -86,6 +105,8 @@ export function SampleNavigator({
   onManage,
   onManageSample,
   onActivate,
+  onInspect,
+  onSelectIds,
   onToggleIncluded,
   onIncludeAll,
   onIncludeNone,
@@ -100,6 +121,8 @@ export function SampleNavigator({
   onToggleFacetLock,
   onSetFacetColumns,
   onDropFiles,
+  groups,
+  onGroupAction,
 }: {
   items: readonly SampleListItem[];
   activeId: string | null;
@@ -114,11 +137,17 @@ export function SampleNavigator({
   onManage: () => void;
   onManageSample: (id: string) => void;
   onActivate: (id: string) => void;
+  /** Inspect without replacing the working selection (Enter). */
+  onInspect?: (id: string) => void;
+  onSelectIds?: (ids: readonly string[]) => void;
   onToggleIncluded: (id: string, included: boolean) => void;
   onIncludeAll: () => void;
   onIncludeNone: () => void;
   onInvertIncluded: () => void;
   /** Metadata columns offered as chip rows, each with its values. Empty hides the board. */
+  /** The workspace's groups, for the Groups menu; absent hides the menu. */
+  groups?: readonly { id: string; name: string }[];
+  onGroupAction?: (action: GroupAction) => void;
   facets?: readonly FacetColumn[];
   /** Every metadata column in the workspace, so the columns control can offer the hidden ones. */
   facetColumnNames?: readonly string[];
@@ -157,6 +186,19 @@ export function SampleNavigator({
   const dragDepth = useRef(0);
   const dropEnabled = Boolean(onDropFiles) && showImportActions && !busy;
   const visible = useMemo(() => items.filter((item) => matchesQuery(item, query)), [items, query]);
+  const anchor = useRef<string | null>(null);
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const tabStop = visible.some(item => item.id === focusedId) ? focusedId
+    : visible.some(item => item.id === activeId) ? activeId : visible[0]?.id;
+  function selectRange(id: string, additive = false) {
+    const end = visible.findIndex(item => item.id === id);
+    const found = visible.findIndex(item => item.id === anchor.current);
+    const start = found < 0 ? end : found;
+    if (found < 0) anchor.current = id;
+    const ids = new Set(additive ? items.filter(item => !excludedIds.has(item.id)).map(item => item.id) : []);
+    for (const item of visible.slice(Math.min(start, end), Math.max(start, end) + 1)) ids.add(item.id);
+    onSelectIds?.([...ids]);
+  }
   const includedCount = items.reduce((count, item) => count + Number(!excludedIds.has(item.id)), 0);
   const localizedCompactNumber = useMemo(() => new Intl.NumberFormat(language === "ja" ? "ja-JP" : undefined, {
     notation: "compact",
@@ -210,8 +252,8 @@ export function SampleNavigator({
         <div className="gl-sample-drop-overlay">{t("Drop .fcs files to add them")}</div>
       )}
       <div className="gl-sample-heading">
-        <div className="gl-side-title">{t("Samples")}</div>
-        <span>{t("{included} / {total} included", { included: includedCount, total: items.length })}</span>
+        <div className="gl-side-title">{t("Files / samples")}</div>
+        <span>{t("{count} of {total} selected", { count: includedCount, total: items.length })}</span>
       </div>
       {(showImportActions || showManageActions) && (
         <div className="gl-sample-add-actions">
@@ -230,21 +272,53 @@ export function SampleNavigator({
               {t("Manage…")}
             </button>
           )}
+          {onGroupAction && (
+            <MenuButton
+              label={t("Groups")}
+              className="gl-sample-groups-menu"
+              items={[
+                {
+                  label: t("New group from the {count} selected…", { count: includedCount }),
+                  className: "gl-sample-group-new",
+                  title: t("A named set of files with gate coordinates of its own, between the tree and the files"),
+                  disabled: includedCount === 0,
+                  onClick: () => onGroupAction({ kind: "new" }),
+                },
+                ...(groups ?? []).map((group) => ({
+                  label: t("Add the {count} selected to {name}", { count: includedCount, name: group.name }),
+                  className: "gl-sample-group-assign",
+                  disabled: includedCount === 0,
+                  onClick: () => onGroupAction({ kind: "assign", groupId: group.id }),
+                })),
+                ...((groups ?? []).length
+                  ? [{
+                      label: t("Remove the {count} selected from their group", { count: includedCount }),
+                      className: "gl-sample-group-remove",
+                      disabled: includedCount === 0,
+                      onClick: () => onGroupAction({ kind: "remove" }),
+                    }]
+                  : []),
+                ...(groups ?? []).flatMap((group) => [
+                  { label: t("Rename {name}…", { name: group.name }), className: "gl-sample-group-rename", onClick: () => onGroupAction({ kind: "rename", groupId: group.id }) },
+                  { label: t("Delete {name}…", { name: group.name }), className: "gl-sample-group-delete", onClick: () => onGroupAction({ kind: "delete", groupId: group.id }) },
+                ]),
+              ]}
+            />
+          )}
         </div>
       )}
 
       {items.length > 0 && (
         <>
-          <div className="gl-sample-inclusion-actions" aria-label={t("Display and analysis inclusion")}>
+          <div className="gl-sample-inclusion-actions" aria-label={t("File selection")}>
             <button type="button" onClick={onIncludeAll}>{t("All")}</button>
             <button type="button" onClick={onIncludeNone}>{t("None")}</button>
             <button type="button" onClick={onInvertIncluded}>{t("Invert")}</button>
           </div>
           <div className="gl-sample-scope-key">
-            <span><span className="gl-sample-scope-check">☑</span>{t("checked = pooled display")}</span>
-            <span><span className="gl-sample-scope-blue" />{t("blue = active axes and gate editing")}</span>
-            {items.some((item) => item.hierarchy) && (
-              <span><span className="gl-hierarchy-chip compact"><span className="gl-hierarchy-chip-index" style={{ background: "#7b8491", boxShadow: "inset 0 0 0 1.5px #7b8491, inset 0 0 0 2.5px #fff" }}>n</span></span>{t("badge = hierarchy")}</span>
+            <span>{t("Shift: range · Cmd/Ctrl: add or remove · Enter: inspect")}</span>
+            {items.some((item) => item.tailored?.length) && (
+              <span><span className="gl-sample-tailored">n</span> {t("= gates tailored for that file")}</span>
             )}
           </div>
         </>
@@ -276,7 +350,7 @@ export function SampleNavigator({
             {facetLockOutside > 0 && (
               <span
                 className="gl-sample-facet-outside"
-                title={t("{count} checked outside the rows being held fixed, so no chip counts them. All / None / Invert stay global.", { count: facetLockOutside })}
+                title={t("{count} selected outside the rows being held fixed, so no chip counts them. All / None / Invert stay global.", { count: facetLockOutside })}
               >
                 +{facetLockOutside}
               </span>
@@ -303,7 +377,7 @@ export function SampleNavigator({
                     ? t("{column} is held at {values}. Chips in the other rows reach only these samples. Click to release it.",
                         { column: column.name, values: locked.join(", ") })
                     : lockable
-                      ? t("Hold {column} at what is checked in it, so chips in the other rows reach only those samples.",
+                      ? t("Hold {column} at what is selected in it, so chips in the other rows reach only those samples.",
                           { column: column.name })
                       : t("Check something in {column} first, then hold it fixed.", { column: column.name })}
                   onClick={() => onToggleFacetLock(column.name)}
@@ -359,10 +433,10 @@ export function SampleNavigator({
                     // clears, so without this the second click is only discoverable by trying it.
                     title={empty
                       ? t("{value}: no sample here under the rows being held fixed", { value: entry.value })
-                      : `${t("{value}: {on} of {total} checked", { value: entry.value, on, total })} \u2014 ${
+                      : `${t("{value}: {on} of {total} selected", { value: entry.value, on, total })} \u2014 ${
                           on === total
-                            ? t("click to uncheck all {total}", { total })
-                            : t("click to check all {total}", { total })
+                            ? t("click to deselect all {total}", { total })
+                            : t("click to select all {total}", { total })
                         }`}
                     onClick={() => onToggleFacet?.(column.name, entry.value)}
                   >
@@ -453,7 +527,7 @@ export function SampleNavigator({
         </div>
       )}
 
-      <div className="gl-sample-list" role="listbox" aria-label={t("Loaded FCS samples")}>
+      <div className="gl-sample-list" role="listbox" aria-multiselectable="true" aria-label={t("Loaded FCS samples")}>
         {items.length === 0 ? (
           <em className="gl-hint">{t("No files loaded.")}</em>
         ) : visible.length === 0 ? (
@@ -467,32 +541,72 @@ export function SampleNavigator({
               key={item.id}
               className={`gl-sample-row${included ? " included" : ""}${active ? " active" : ""}`}
               role="option"
-              aria-selected={active}
-              tabIndex={0}
+              aria-selected={included}
+              aria-current={active ? "true" : undefined}
+              tabIndex={item.id === tabStop ? 0 : -1}
               title={`${item.sourcePath ?? item.name}\n${exactSummary}`}
-              onClick={() => onActivate(item.id)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
+              onFocus={() => setFocusedId(item.id)}
+              onClick={(event) => {
+                event.currentTarget.focus();
+                if (event.shiftKey) selectRange(item.id, event.metaKey || event.ctrlKey);
+                else if (event.metaKey || event.ctrlKey) {
+                  anchor.current = item.id;
+                  onToggleIncluded(item.id, !included);
+                } else {
+                  anchor.current = item.id;
                   onActivate(item.id);
                 }
               }}
+              onKeyDown={(event) => {
+                if (event.target !== event.currentTarget) return;
+                if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+                  event.preventDefault();
+                  onSelectIds?.(visible.map(entry => entry.id));
+                } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+                  event.preventDefault();
+                  const index = visible.findIndex(entry => entry.id === item.id);
+                  const next = event.key === "Home" ? 0 : event.key === "End" ? visible.length - 1
+                    : Math.max(0, Math.min(visible.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
+                  const id = visible[next].id;
+                  if (event.shiftKey) {
+                    if (!anchor.current) anchor.current = item.id;
+                    selectRange(id, event.metaKey || event.ctrlKey);
+                  }
+                  (event.currentTarget.parentElement?.querySelectorAll<HTMLElement>('[role="option"]')[next])?.focus();
+                } else if (event.key === "Enter") {
+                  event.preventDefault();
+                  (onInspect ?? onActivate)(item.id);
+                } else if (event.key === " ") {
+                  event.preventDefault();
+                  if (event.shiftKey) selectRange(item.id);
+                  else { anchor.current = item.id; onToggleIncluded(item.id, !included); }
+                }
+              }}
             >
-              <input
-                type="checkbox"
-                className="gl-sample-include"
-                title={t("Show this sample in combined plots and include it in analyses and CyTOF compensation Apply")}
-                aria-label={t("Show {name} in plots and analyses", { name: item.name })}
-                checked={included}
-                onClick={(event) => event.stopPropagation()}
-                onChange={(event) => onToggleIncluded(item.id, event.target.checked)}
-              />
-              <span className="gl-sample-active-dot" aria-hidden="true" />
               <span className="gl-sample-name">
-                {item.hierarchy && <HierarchyChip info={item.hierarchy} compact title={t("Hierarchy: {name}", { name: item.hierarchy.name })} />}
+                {item.group && (
+                  <span
+                    className="gl-sample-group"
+                    style={item.groupColour ? { background: item.groupColour } : undefined}
+                    title={t("In the group {name}", { name: item.group })}
+                  >
+                    {item.group}
+                  </span>
+                )}
                 {item.name}
+                {item.metadata?.sample_id && item.metadata.sample_id !== item.name && <small className="gl-sample-display-id" title={`Sample ID: ${item.metadata.sample_id}`}>{item.metadata.sample_id}</small>}
               </span>
+              <span className="gl-sample-viewing">{active ? t("Viewing") : ""}</span>
               <span className="gl-sample-meta" title={exactSummary}>
+                {/* The tailored count sits with the counts, so its appearance never moves the name. */}
+                {item.tailored && item.tailored.length > 0 && (
+                  <span
+                    className={"gl-sample-tailored" + (item.gatedElsewhere ? " gl-hierarchy-elsewhere" : "")}
+                    title={t("{count} gates tailored for this file: {names}", { count: item.tailored.length, names: item.tailored.join(", ") })}
+                  >
+                    {item.tailored.length}
+                  </span>
+                )}
                 {localizedCompactNumber.format(item.eventCount)} · {item.channelCount}ch
               </span>
               {showManageActions && (
@@ -593,7 +707,7 @@ export function SampleManagerModal({
         <button type="button" onClick={() => selectVisible(true)}>{t("All visible")}</button>
         <button type="button" onClick={() => selectVisible(false)}>{t("None visible")}</button>
         <span className="gl-sample-manager-separator" />
-        <span>{t("Display / analyses")}</span>
+        <span>{t("Selected for actions")}</span>
         <button type="button" onClick={onIncludeAll}>{t("All")}</button>
         <button type="button" onClick={onIncludeNone}>{t("None")}</button>
         <button type="button" onClick={onInvertIncluded}>{t("Invert")}</button>
@@ -624,7 +738,7 @@ export function SampleManagerModal({
             <tr>
               <th aria-label={t("Select for management")} />
               <th>{t("Active")}</th>
-              <th>{t("Display / analyses")}</th>
+              <th>{t("Selected for actions")}</th>
               <th>{t("File")}</th>
               <th>{t("Events")}</th>
               <th>{t("Channels")}</th>
@@ -661,7 +775,7 @@ export function SampleManagerModal({
                 <td>
                   <input
                     type="checkbox"
-                    aria-label={t("Show {name} in plots and analyses", { name: item.name })}
+                    aria-label={t("Select {name} for actions", { name: item.name })}
                     checked={!excludedIds.has(item.id)}
                     onChange={(event) => onToggleIncluded(item.id, event.target.checked)}
                   />

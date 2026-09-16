@@ -92,6 +92,38 @@ function keepAll(fcs: FcsFile): ResolvedChannel[] {
   }));
 }
 
+/** $PnFEATURE values that are pulse measurements or timing, not features derived per event. */
+const PULSE_FEATURES = new Set(["area", "height", "width", "time to peak", "time"]);
+
+/** The per-event features a BD FACSDiscover S8 derives from its images, by the names it
+ *  writes: "Size (FSC)", "Eccentricity (SSC (Imaging))", "Delta CoM (FSC/eGFP)", … */
+const IMAGING_FEATURE_NAME =
+  /^(Size|Max Intensity|Long Axis Moment|Short Axis Moment|Radial Moment|Center of Mass \([XY]\)|Total Intensity|Eccentricity|Diffusivity|Delta CoM|Correlation) \(/i;
+
+/** An imaging feature: a measurement the instrument derived from the cell's image rather than
+ *  read from a pulse, one per imaging channel (size, eccentricity, moments, intensities, centre
+ *  of mass). $PnFEATURE settles it when the file carries the keyword: anything that is not a
+ *  pulse or timing feature. Without the keyword, an export that kept the names and dropped the
+ *  vendor keywords, the documented names decide. $PnS equals $PnN on these, so the unmixed
+ *  marker rule never sees them, and their names start with the feature, not the channel. */
+export function isImagingFeature(name: string, feature?: string): boolean {
+  const f = (feature ?? "").trim().toLowerCase();
+  if (f) return !PULSE_FEATURES.has(f);
+  return IMAGING_FEATURE_NAME.test(name);
+}
+
+/** A raw spectral detector: not scatter, not imaging scatter, not an imaging feature, not
+ *  QC/timing, and carrying no marker of its own. These are what the unmixed filter exists to
+ *  drop. */
+function isRawDetector(name: string, marker: string | null, feature?: string): boolean {
+  const desc = (marker ?? "").trim();
+  if (desc.length > 0 && desc !== name) return false;
+  if (/^(FSC|SSC)/i.test(name)) return false;
+  if (/^(LightLoss|Autofluorescence|Extinction)/i.test(name)) return false;
+  if (isImagingFeature(name, feature)) return false;
+  return !/^(Time|Event_length|Cell_length)$/i.test(name);
+}
+
 function filterFlowChannels(fcs: FcsFile): ResolvedChannel[] {
   // Detect spectral-unmixed: >= 2 channels whose $PnS differs from $PnN and ends "-A".
   const nUnmixed = fcs.channels.filter((c) => {
@@ -99,6 +131,18 @@ function filterFlowChannels(fcs: FcsFile): ResolvedChannel[] {
     return s.length > 0 && s !== c.name && endsWithA(s);
   }).length;
   if (nUnmixed < 2) return keepAll(fcs);
+
+  // ...and raw detectors to drop, more than one of them. An unmixed file is defined by carrying
+  // BOTH raw detectors and unmixed population channels; a file with no detectors at all is a
+  // conventional analyser whose $PnS happens to end "-A", and filtering it discards real
+  // data. The Xitogen XTG-1600 writes $PnN=FL1-A with $PnS=FITC-A on every conjugate, so
+  // the marker test alone fired thirteen times and silently dropped 14 of its 32 channels
+  // — every fluorescence height channel plus FSC-Width. One detector is not enough either:
+  // a conventional file with a single unlabelled fluorescence channel was taken for a
+  // spectral one, which dropped its height and width channels and changed every gate's
+  // channel identity between files of one panel. A spectral file carries dozens.
+  // See channels.test.ts. GateLabR's fcs_import.R applies the same rule.
+  if (fcs.channels.filter((c) => isRawDetector(c.name, c.marker, c.feature)).length < 2) return keepAll(fcs);
 
   const kept: ResolvedChannel[] = [];
   for (const c of fcs.channels) {
@@ -119,6 +163,13 @@ function filterFlowChannels(fcs: FcsFile): ResolvedChannel[] {
     }
     // Autofluorescence-A → keep.
     if (/^Autofluorescence/i.test(ch) && suffixAHW(ch)) {
+      kept.push({ key: ch, ...base });
+      continue;
+    }
+    // Imaging features → keep under their own names. The S8 writes 33 of them for a three-
+    // channel imaging set (11 features × LightLoss, FSC and SSC (Imaging)); they fell through
+    // every rule above and were dropped with the detectors. See channels.test.ts.
+    if (isImagingFeature(ch, c.feature)) {
       kept.push({ key: ch, ...base });
       continue;
     }

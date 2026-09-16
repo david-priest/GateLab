@@ -19,6 +19,7 @@ import { useI18n } from "./i18n";
 
 interface Props {
   sample: Sample;
+  sampleName?: string;
   state: CoreState;
   derived: Derived;
   globalScales: Record<string, [number, number]>;
@@ -62,6 +63,7 @@ export interface StrategyConfig {
 export function StrategyTab({
   onFitChannels,
   sample,
+  sampleName,
   state,
   derived,
   globalScales,
@@ -96,11 +98,23 @@ export function StrategyTab({
   const [pubStyle, setPubStyle] = useState(c0?.pubStyle ?? false);
   const [gateLineWidth, setGateLineWidth] = useState(c0?.gateLineWidth ?? 1.5);
   const [gateEdgeMode, setGateEdgeMode] = useState<GateEdgeMode>(c0?.gateEdgeMode ?? "straight-bow");
-  const [fontTick, setFontTick] = useState(c0?.fontTick ?? 8);
-  const [fontAxis, setFontAxis] = useState(c0?.fontAxis ?? 10);
-  const [fontTitle, setFontTitle] = useState(c0?.fontTitle ?? 10);
-  const [fontGate, setFontGate] = useState(c0?.fontGate ?? 8);
+  const [fontTick, setFontTick] = useState(c0?.fontTick ?? 12);
+  const [fontAxis, setFontAxis] = useState(c0?.fontAxis ?? 12);
+  const [fontTitle, setFontTitle] = useState(c0?.fontTitle ?? 12);
+  const [fontGate, setFontGate] = useState(c0?.fontGate ?? 12);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [renderPending, setRenderPending] = useState(true);
+  const [renderError, setRenderError] = useState("");
+  const [panelCount, setPanelCount] = useState(0);
+  const [availableWidth, setAvailableWidth] = useState(0);
+  useEffect(() => {
+    if (!containerRef.current || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(entries => setAvailableWidth(Math.round(entries[0].contentRect.width)));
+    observer.observe(containerRef.current); return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    setMultiPops(ids => ids.filter(id => !!state.populations[id]));
+  }, [state.active_hierarchy_id]); // Local population IDs must not leak into another hierarchy.
 
   // Follow the active population when it changes in the tree.
   useEffect(() => {
@@ -129,8 +143,10 @@ export function StrategyTab({
   // Render (reactive to controls + gate changes, debounced so rapid changes coalesce).
   useEffect(() => {
     if (!containerRef.current) return;
-    if (mode === "single" && !popId) return;
+    setRenderPending(true); setRenderError("");
     const id = setTimeout(() => {
+      try {
+      if (mode === "single" && !state.populations[popId]) { containerRef.current?.replaceChildren(); setPanelCount(0); return; }
       const fontSizes = { tick: fontTick, axis_label: fontAxis, gate_label: fontGate, title: fontTitle };
       const cap = allEvents ? Infinity : maxEvents;
 
@@ -154,6 +170,10 @@ export function StrategyTab({
           contextTitle: `${multiPops.length} population${multiPops.length === 1 ? "" : "s"}`,
         });
         loadMiniPlots().renderMultiStrategyGrid("strategy-grid-container", payload);
+        shownChannels.current = nodes.flatMap(node => node.gates.flatMap(g => {
+          const gate = state.gates[g.gate_id]; return gate ? [gate.x_channel, gate.y_channel] : [];
+        }));
+        setPanelCount(nodes.length);
         return;
       }
 
@@ -183,12 +203,15 @@ export function StrategyTab({
         contextTitle: state.populations[popId]?.name,
       });
       loadMiniPlots().renderStrategyGrid("strategy-grid-container", payload);
+      setPanelCount(steps.length);
+      } catch (error) { setRenderError(error instanceof Error ? error.message : String(error)); setPanelCount(0); containerRef.current?.replaceChildren(); }
+      finally { setRenderPending(false); }
     }, 200);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, multiPops, sample, popId, fullPath, gateView, displayMode, maxEvents, allEvents, plotSize, nColumns, fitToColumns,
       pointSize, pointAlpha, densityColorPower, contourThreshold, kdeBandwidth, pubStyle, gateLineWidth, gateEdgeMode, fontTick, fontAxis, fontTitle, fontGate,
-      state.gates, state.gate_version, globalScales, derived, dataRevision]);
+      state.gates, state.gate_version, globalScales, derived, dataRevision, availableWidth]);
 
   const toggleGateView = (v: GateView) =>
     setGateView((prev) => {
@@ -210,6 +233,7 @@ export function StrategyTab({
 
   return (
     <div className="gl-tab-panel gl-tab-fill">
+      <div className="gl-strategy-controls"><strong>Gating strategy</strong><span>{sampleName} · {state.hierarchies.find(h => h.id === state.active_hierarchy_id)?.name}</span><span>Trace a gating path or back-gate selected populations.</span></div>
       <div className="gl-strategy-controls">
         <span className="gl-stats-opt-label">{t("Mode")}</span>
         {(["single", "multi"] as const).map((m) => (
@@ -292,15 +316,16 @@ export function StrategyTab({
         </label>
         <button
           className="gl-mini-btn"
-          title={t("Fit every plot shown here to its data and the gates on it")}
+          disabled={renderPending || !panelCount}
+          title="Fit shown channels in the workspace Scales settings, including the current scale-lock scope"
           onClick={() => onFitChannels(shownChannels.current)}
         >{t("Fit data + gates")}</button>
-        <button className="gl-mini-btn" onClick={() => exportGridPNG("strategy-grid-container-grid", popName + "_strategy")}>PNG</button>
-        <button className="gl-mini-btn" onClick={() => exportGridSVG("strategy-grid-container-grid", popName + "_strategy", exportDpi)}>SVG</button>
-        <button className="gl-mini-btn" onClick={() => void exportGridPDF("strategy-grid-container-grid", popName + "_strategy", exportDpi)}>PDF</button>
+        <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => void exportGridPNG("strategy-grid-container-grid", popName + "_strategy", exportDpi).catch(e => setRenderError(String(e)))}>PNG</button>
+        <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => exportGridSVG("strategy-grid-container-grid", popName + "_strategy", exportDpi)}>SVG</button>
+        <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => void exportGridPDF("strategy-grid-container-grid", popName + "_strategy", exportDpi).catch(e => setRenderError(String(e)))}>PDF</button>
       </div>
 
-      <div className="gl-strategy-controls">
+      <details><summary style={{ cursor: "pointer", padding: "8px 12px" }}>Appearance</summary><div className="gl-strategy-controls">
         <label className="gl-field-inline">
           {t("Point size")}
           <input type="number" min={0.1} max={5} step={0.1} value={pointSize} onChange={num(setPointSize, 1.2)} />
@@ -313,10 +338,10 @@ export function StrategyTab({
         {displayMode === "pseudocolor" && (
           <DensityColourControl value={densityColorPower} onChange={onDensityColorPowerChange} />
         )}
-        <label className="gl-field-inline">
+        {isContour && <label className="gl-field-inline">
           {t("Contour %")}
           <input type="number" min={0} max={50} step={1} value={contourThreshold} onChange={num(setContourThreshold, 5)} />
-        </label>
+        </label>}
         {isContour && (
           <>
             <label className="gl-check" title="Choose a bandwidth automatically from the event count and panel size">
@@ -377,7 +402,7 @@ export function StrategyTab({
         <label className="gl-field-inline">{t("Axis")}<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 10)} /></label>
         <label className="gl-field-inline">{t("Title")}<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 10)} /></label>
         <label className="gl-field-inline">{t("Gate")}<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 8)} /></label>
-      </div>
+      </div></details>
 
       {mode === "multi" && (
         <CollapsiblePicker
@@ -406,7 +431,9 @@ export function StrategyTab({
           />
         </CollapsiblePicker>
       )}
-      <div id="strategy-grid-container" ref={containerRef} className="gl-mini-grid-container" />
+      {renderError && <p role="alert">{renderError}</p>}
+      <p role="status">{renderPending ? "Preparing strategy…" : !panelCount ? "Select a gated population to show its strategy." : `${panelCount} strategy steps · current file and hierarchy`}</p>
+      <div id="strategy-grid-container" ref={containerRef} aria-busy={renderPending} style={{ opacity: renderPending ? .5 : 1 }} className="gl-mini-grid-container" />
     </div>
   );
 }

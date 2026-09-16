@@ -41,24 +41,31 @@ export function branchScopedGateOrder(
   const visible = new Set<string>();
   const selectedOwner = selectedGateId ? gateOwner.get(selectedGateId) : undefined;
 
+  // The active population's branch, ALWAYS. This used to be the `else` of the selection case, so
+  // selecting a gate replaced the scope with that gate's siblings and everything else vanished
+  // from the plot -- and dragging a gate selects it, so moving one hid its neighbours and moving
+  // another brought them back. Selecting is not a scope change; it may widen what is shown, and
+  // it must never take a gate away.
+  const stack: Array<string | null> = [activePopulationId ?? rootPopulationId];
+  const seen = new Set<string | null>();
+  while (stack.length) {
+    const id = stack.pop() ?? null;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const pop of Object.values(populations)) {
+      if (pop.parent_id !== id) continue;
+      for (const ref of pop.gate_refs) visible.add(ref.gate_id);
+      stack.push(pop.population_id);
+    }
+  }
+
+  // A selected gate also brings its own siblings into view, which is what the selection case was
+  // for: click a gate deep in the tree and see the alternatives it was drawn against.
   if (selectedOwner) {
     const branchParent = populations[selectedOwner]?.parent_id ?? null;
     for (const pop of Object.values(populations)) {
       if (pop.parent_id !== branchParent) continue;
       for (const ref of pop.gate_refs) visible.add(ref.gate_id);
-    }
-  } else {
-    const stack: Array<string | null> = [activePopulationId ?? rootPopulationId];
-    const seen = new Set<string | null>();
-    while (stack.length) {
-      const id = stack.pop() ?? null;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      for (const pop of Object.values(populations)) {
-        if (pop.parent_id !== id) continue;
-        for (const ref of pop.gate_refs) visible.add(ref.gate_id);
-        stack.push(pop.population_id);
-      }
     }
   }
   if (selectedGateId) visible.add(selectedGateId);

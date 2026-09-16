@@ -1,5 +1,5 @@
-// ScalesTab.tsx — global per-channel display axis ranges. Compensation now has its own tab so
-// transforms and assay-layer changes are not mixed into one control surface.
+// ScalesTab.tsx — per-channel display axis ranges for the active file or locked comparison frame.
+// Compensation has its own tab so transforms and assay-layer changes stay separate.
 
 import type { Sample } from "../engine/sample";
 import { useI18n } from "./i18n";
@@ -8,19 +8,23 @@ interface Props {
   sample: Sample;
   globalScales: Record<string, [number, number]>;
   onSetGlobalScale: (key: string, range: [number, number] | null) => void;
+  lockedBetweenFiles: boolean;
 }
 
-export function ScalesTab({ sample, globalScales, onSetGlobalScale }: Props) {
+export function ScalesTab({ sample, globalScales, onSetGlobalScale, lockedBetweenFiles }: Props) {
   const { t } = useI18n();
   return (
     <div className="gl-tab-panel gl-tab-fill">
       <h2 className="gl-tab-title">{t("Scales")}</h2>
 
-      {/* ── Global Channel Scales ────────────────────────────────── */}
       <section className="gl-scales-section gl-scales-section-grow">
-        <div className="gl-section-header">{t("Global Channel Scales")}</div>
+        <div className="gl-section-header">
+          {t(lockedBetweenFiles ? "Locked Channel Scales" : "Per-file Channel Scales")}
+        </div>
         <p className="gl-hint" style={{ marginBottom: 8 }}>
-          {t("Min/Max are in display (transformed) units — the logicle scale for fluorescence channels, arcsinh for scatter / CyTOF — not raw values, so they won't match the axis's decade labels (100, 1K, 10K…, which are the raw values). A fixed range per channel is used whenever that channel is plotted (blank = auto), keeping axes uniform across panels. Pan/zoom on the Gating tab writes here too.")}
+          {t(lockedBetweenFiles
+            ? "These ranges are shared while the scale lock is on. Switching files keeps the same frame for direct comparison. Min/Max are display (transformed) units; blank means auto. Pan/zoom on the Gating tab writes here too."
+            : "These ranges belong to the selected file. Switching files loads that file's own fitted or edited frame. Min/Max are display (transformed) units; blank means auto. Pan/zoom on the Gating tab writes here too.")}
         </p>
         <div className="gl-stats-scroll gl-grow-scroll" style={{ maxWidth: 460 }}>
           <table className="gl-scales-table">

@@ -53,7 +53,7 @@ describe("GatingMlImportModal", () => {
     const importButton = [...host.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Import")!;
     act(() => importButton.click());
-    expect(onImport).toHaveBeenCalledWith("replace");
+    expect(onImport).toHaveBeenCalledWith("replace", "all");
   });
 
   it("disables merge and defaults to replacement when measurement spaces conflict", () => {

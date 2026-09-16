@@ -41,6 +41,11 @@ export type CompensationProfileOrigin =
       readonly presetVersion: string;
       /** SHA-256 of the exact bundled asset bytes. */
       readonly assetDigest: Sha256Digest;
+    }
+  | {
+      /** Made in GateLab by hand, from a matrix that started as the identity: no spillover. */
+      readonly type: "manual";
+      readonly startedAs: "identity";
     };
 
 export interface EstimationSoftware {
@@ -468,6 +473,14 @@ function canonicalOrigin(value: unknown): CompensationProfileOrigin {
     if (!presetVersion) throw new Error("presetVersion is required.");
     const assetDigest = canonicalDigest(origin.assetDigest, "Preset assetDigest");
     return Object.freeze({ type: "bundled-preset", presetId, presetVersion, assetDigest });
+  }
+  if (origin.type === "manual") {
+    assertExactKeys(origin, ["type", "startedAs"], "manual origin");
+    assertRequiredKeys(origin, ["type", "startedAs"], "manual origin");
+    if (origin.startedAs !== "identity") {
+      throw new Error("A manual compensation origin must have started as the identity matrix.");
+    }
+    return Object.freeze({ type: "manual", startedAs: "identity" });
   }
   throw new Error(`Unsupported compensation profile origin '${String(origin.type)}'.`);
 }

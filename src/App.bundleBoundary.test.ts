@@ -28,4 +28,29 @@ describe("App bundle boundaries", () => {
     inspect(source);
     expect(hasDynamicImport).toBe(true);
   });
+
+  it("keeps the Layout editor out of the gating startup bundle", () => {
+    const text = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const source = ts.createSourceFile("App.tsx", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const staticImports = source.statements.filter(ts.isImportDeclaration).filter((node) =>
+      ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text === "./ui/LayoutTab"
+    );
+    expect(staticImports).toHaveLength(0);
+
+    let hasDynamicImport = false;
+    const inspect = (node: ts.Node) => {
+      if (
+        ts.isCallExpression(node) &&
+        node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+        node.arguments.length === 1 &&
+        ts.isStringLiteral(node.arguments[0]) &&
+        node.arguments[0].text === "./ui/LayoutTab"
+      ) {
+        hasDynamicImport = true;
+      }
+      ts.forEachChild(node, inspect);
+    };
+    inspect(source);
+    expect(hasDynamicImport).toBe(true);
+  });
 });

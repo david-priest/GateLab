@@ -3,8 +3,9 @@
 // shows the active population's events plus its gates (display space).
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { usePopoverDismissal } from "./ui/usePopoverDismissal";
 import pkg from "../package.json";
-import { clearPersistedTabState } from "./ui/tabState";
+import { clearPersistedTabState, restorePlottingState, savedPlottingState } from "./ui/tabState";
 import { historyShortcutAction } from "./ui/historyShortcuts";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type NewGate } from "./plots/GatingPlot";
 import { startPanSession } from "./plots/panGesture";
@@ -16,19 +17,38 @@ import {
   flowJoWorkspaceToGatingML,
   matchFlowJoSamples,
   resolveFlowJoWorkspaceFiles,
+  ungatedWorkspaceFiles,
   type FlowJoSampleSummary,
   type FlowJoSampleMatchKey,
   type FlowJoSpillover,
 } from "./engine/flowjoWorkspace";
 import { isDivaWorkspace, listDivaGateTrees, divaToGatingML } from "./engine/divaWorkspace";
+import { isChorusExperimentFile, readChorusExperiment, listChorusTrees, chorusToGatingML, chorusRecordingToGatingML, hasChorusRecording, readChorusRecording, treeSignature, type ChorusExperiment, type ChorusTreeSummary } from "./engine/chorusExperiment";
+import { buildChorusTimeline, type LoadedChorusRecording } from "./engine/chorusTimeline";
+import { ChorusTimelineModal } from "./ui/ChorusTimelineModal";
+import { compareChorusStatistics, parseChorusStatistics, type ChorusImportRecord, type ChorusStatistics, type FileCounts } from "./engine/chorusStatistics";
+import { ChorusStatisticsModal } from "./ui/ChorusStatisticsModal";
+import { MenuButton } from "./ui/MenuButton";
+import { quadrantPopulationNames, shortChannelLabel, type QuadrantNaming } from "./engine/quadrantNames";
 import { covarianceFromAxes, ellipseBoundary } from "./engine/ellipse";
 import { ChannelScales } from "./engine/channelScales";
+import { restoreChannelScales } from "./engine/restoreChannelScales";
 import { fitChannelAxisRange, includePlotGatesInAxisRange } from "./engine/axisRange";
 import { parseFcs, type SpilloverMatrix } from "./engine/fcs";
 import { Sample, maxCoefficientDelta, type DisplayMode, type OverlaySpec } from "./engine/sample";
 import { populationTreeOrder } from "./engine/populations";
 import { resolvePartitionLevels, partitionAssign } from "./engine/factors";
-import { paletteColors, populationColor, UNGATED_COLOR, OVERLAY_PALETTES, type PaletteName } from "./engine/palettes";
+import { paletteColors, populationColor, UNGATED_COLOR, OVERLAY_PALETTES, MARKER_PALETTES, DEFAULT_MARKER_PALETTE, type PaletteName } from "./engine/palettes";
+import {
+  DEFAULT_MARKER_COLOR_POWER,
+  MARKER_MISSING_LEVEL,
+  markerColourFraction,
+  markerColourLevel,
+  markerColourLevels,
+  markerColourPalette,
+  markerColourScale,
+  type MarkerColourScale,
+} from "./engine/markerColour";
 import { assignDivisionLevel, divisionPalette } from "./engine/division";
 import { decodeUint8Base64, encodeFloat32Base64, encodeUint8Base64 } from "./engine/encode";
 import {
@@ -47,10 +67,12 @@ import {
   type GatingMLResult,
 } from "./engine/gatingml";
 import { exportGatingML, type GatingMLFormat } from "./engine/gatingmlExport";
+import { exportFlowJoWorkspace, planFlowJoExport, type FlowJoExportSample } from "./engine/flowjoExport";
 import {
   gatingMergeSpaceConflict,
   hasGatingStrategy,
   type GatingImportMode,
+  type GatingImportTarget,
 } from "./engine/gatingMerge";
 import {
   exportPopulationFcs,
@@ -77,6 +99,7 @@ import {
   type GatingFontSizes,
   type IllustrationConfig,
   type IllustrationPreset,
+  type WorkspaceStoredHierarchy,
 } from "./engine/workspace";
 import {
   WORKSPACE_VERSION_3,
@@ -108,8 +131,14 @@ import {
 import { BarcodeSchemeImportModal, type BarcodeImportDraft } from "./ui/BarcodeSchemeImportModal";
 import { BarcodeSaveModal, type BarcodeSaveChoice, type BarcodeSaveSummary } from "./ui/BarcodeSaveModal";
 import { HierarchyModal, type HierarchyModalMode } from "./ui/HierarchyModal";
-import { cloneHierarchyTree, emptyHierarchyTree, fileHierarchyId, hierarchyColour, newHierarchyId, uniqueHierarchyName } from "./engine/hierarchies";
-import type { HierarchyChipInfo } from "./ui/HierarchyChip";
+import type { GroupAction } from "./ui/SampleManager";
+import { cloneHierarchyTree, fileHierarchyId, newHierarchyId, referencedGateIds, uniqueHierarchyName, hierarchyColour } from "./engine/hierarchies";
+import { filesToHold, perFilePrimary } from "./engine/flowjoOpen";
+import { templateNameFromOrigin, type TailoredFile } from "./engine/tailoredImport";
+import { describeDiffering, planOneTreeImport, sameStructure, tailorFilesToTree } from "./engine/oneTreeImport";
+import { groupsOf, templateOf } from "./engine/groups";
+import { gateGeometryEquals, tailoredGateIds } from "./engine/templateSync";
+import type { HierarchyRef, StoredHierarchy } from "./engine/hierarchies";
 import {
   SAMPLE_ASSAY_BINDING_SCHEMA,
   type SampleAssayBinding,
@@ -136,6 +165,7 @@ import {
   pickFileSource,
   pickFiles,
   pickDirectoryFiles,
+  lastGrantedDirectory,
   pickFilesOrInput,
   writeHandle,
   writeHandleStream,
@@ -172,20 +202,20 @@ import {
 import { GateList } from "./ui/GateList";
 import { GATE_EDGE_MODES, type GateEdgeMode } from "./ui/gateEdgeModes";
 import { resolveFlowJoTarget } from "./engine/flowjoWorkspace";
-import type { GateSpace } from "./engine/models";
+import type { GateSpace, Gate } from "./engine/models";
 import type { ChannelLabelMode } from "./engine/sample";
 import { gateSpaceBadge } from "./engine/gateSpaceBadge";
-import { PopulationTree } from "./ui/PopulationTree";
+import { HierarchyControls, PopulationTree, type EditTarget, type TreeControlsProps } from "./ui/PopulationTree";
 import { GateModals } from "./ui/GateModals";
 import { GateToolbar, PopToolbar } from "./ui/Toolbars";
-import { RenameModal, CreatePopModal, EditPopModal, ConfirmModal, BulkRenameModal, FcsExportModal, GatingMlImportModal, GatingMlExportModal } from "./ui/CrudModals";
+import { RenameModal, CreatePopModal, EditPopModal, ConfirmModal, BulkRenameModal, FcsExportModal, GatingMlImportModal, GatingMlExportModal, FlowJoExportModal, type FlowJoExportScope } from "./ui/CrudModals";
 import { StatsTab } from "./ui/StatsTab";
 import { PanelTab } from "./ui/PanelTab";
 import { MetadataTab } from "./ui/MetadataTab";
 import type { MetaRow } from "./ui/EditableMetaTable";
 import { ProportionsTab } from "./ui/ProportionsTab";
 import { DivisionTab, type DivisionProfile } from "./ui/DivisionTab";
-import { parseMetadataTable, lookupMetadataRow, type MetadataColumn } from "./engine/metadata";
+import { parseMetadataTable, lookupMetadataRow, sampleDisplayId, SAMPLE_ID_FIELD, type MetadataColumn } from "./engine/metadata";
 import { ScalesTab } from "./ui/ScalesTab";
 import type {
   CompensationApplyUiStatus,
@@ -193,7 +223,7 @@ import type {
   CompensationSweepSolver,
 } from "./ui/CompensationTab";
 import { StrategyTab, type StrategyConfig } from "./ui/StrategyTab";
-import { IllustrationTab } from "./ui/IllustrationTab";
+import { FigureWorkspace } from "./ui/FigureWorkspace";
 import {
   allowedByLocks,
   checkedValues,
@@ -216,12 +246,17 @@ import { WorkspaceRelinkModal } from "./ui/WorkspaceRelinkModal";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
 import { NavigateIcon, RectIcon, PolyIcon, EllipseIcon, QuadIcon } from "./ui/icons";
 import { useSampleDataRevisionKey } from "./ui/useSampleDataRevisions";
-import { useContextualGlobalScales } from "./ui/useContextualGlobalScales";
+import { useContextualGlobalScales, type GlobalScales } from "./ui/useContextualGlobalScales";
 import {
   DEFAULT_DENSITY_COLOR_POWER,
   normalizeDensityColorPower,
 } from "./engine/pseudocolor";
+import { createDefaultLayoutWorkspace, normalizeLayoutWorkspace, type LayoutPlotRecipe, type LayoutStrategyRecipe, type LayoutWorkspace, cloneLayoutWorkspace, nextLayoutItemPosition } from "./engine/layout";
 import { DensityColourControl } from "./ui/DensityColourControl";
+import { MarkerColourBar, type MarkerColourBarTick } from "./ui/MarkerColourBar";
+import { MarkerColourControl } from "./ui/MarkerColourControl";
+import { SearchableSelect, type SearchableOption } from "./ui/SearchableSelect";
+import type { GatingImportSourceKind } from "./ui/CrudModals";
 import { UI_LANGUAGE_OPTIONS, useI18n, type UiLanguage } from "./ui/i18n";
 import { useOptionalGateLabHost } from "./host/HostContext";
 import { createBrowserHost } from "./host/browserHost";
@@ -269,10 +304,14 @@ const CompensationTab = lazy(lazyChunk("CompensationTab", async () => {
   const module = await import("./ui/CompensationTab");
   return { default: module.CompensationTab };
 }));
+const LayoutTab = lazy(lazyChunk("LayoutTab", async () => {
+  const module = await import("./ui/LayoutTab");
+  return { default: module.LayoutTab };
+}));
 
 const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
 /** Picker types for the tables and workspaces the sidebar imports through pickFilesOrInput. */
-const GATING_IMPORT_ACCEPT = { "application/xml": [".xml", ".wsp"] };
+const GATING_IMPORT_ACCEPT = { "application/xml": [".xml", ".wsp"], "application/zip": [".cef"] };
 const TABLE_FILE_ACCEPT = { "text/csv": [".csv", ".tsv", ".txt"] };
 
 
@@ -322,18 +361,112 @@ type LiveWorkspaceFile = WorkspaceFile | WorkspaceFileV3;
  * workspace -- the dialog offered a choice between two identical outcomes, so it is skipped and
  * the strategy simply loads.
  */
+/**
+ * A parked hierarchy as the store wants it, from a workspace file.
+ *
+ * Hierarchies own their gates. A workspace written before they did has none of its own and its
+ * populations reference the shared table, so the gates it actually uses are lifted out of that
+ * table -- giving the old file the same meaning it had, under the new arrangement.
+ */
+export function restoreStoredHierarchy(
+  stored: WorkspaceStoredHierarchy,
+  sharedGates: Record<string, Gate>,
+): StoredHierarchy {
+  if (stored.gates) {
+    return {
+      ...stored,
+      gates: stored.gates,
+      gate_order: stored.gate_order ?? Object.keys(stored.gates),
+      selected_pop_ids: [],
+    } as StoredHierarchy;
+  }
+  const used = referencedGateIds(stored.populations);
+  const gates: Record<string, Gate> = {};
+  for (const id of used) if (sharedGates[id]) gates[id] = sharedGates[id];
+  return {
+    ...stored,
+    gates,
+    gate_order: Object.keys(gates),
+    selected_pop_ids: [],
+  } as StoredHierarchy;
+}
+
 export function gatingImportNeedsDecision(
   pending: PendingGatingMLImport,
   state: Pick<CoreState, "gates" | "populations" | "root_population_id">,
+  /** How many files are loaded: with more than one, the tree needs a target, so the dialog shows. */
+  fileCount = 1,
 ): boolean {
-  if (pending.compensation.requiresConfirmation) return true;
-  if (pending.externalSpillover?.differsFromEmbedded) return true;
+  if (fileCount > 1) return true;
+  // Compensation rewrites every fluorescence value, so it is never applied unasked. A FlowJo
+  // workspace opened through its own dialog has been asked: that dialog states the matrix the gates
+  // were drawn under -- or asks which, when the file's differs -- before anything changes, and
+  // matrixAnswered is set only on that path. Confirming it again afterwards was the second dialog.
+  // Every other route to an import (one click onto a loaded file, the sample and tree pickers)
+  // states nothing, so it still asks.
+  if (pending.compensation.requiresConfirmation && !(pending.externalSpillover && pending.matrixAnswered)) return true;
+  if (pending.externalSpillover?.differsFromEmbedded && !pending.matrixAnswered) return true;
   if (state.root_population_id === null) return false;
   return hasGatingStrategy({ ...state, root_population_id: state.root_population_id });
 }
 
+/**
+ * Parse one further tree of a FlowJo import, against the file it belongs to.
+ *
+ * Under a per-file import the tree names the FCS it was drawn on. When that file is loaded and
+ * is not the primary, the tree is parsed with THAT sample's channels and instrument and carries
+ * its own compensation decision, made from the matrix the workspace holds for that sample and
+ * the matrix the file embeds -- the same decision the primary gets, per file. Parsed against the
+ * primary instead, a gate on a channel the primary lacked was dropped as "skipped", and the file
+ * itself was never compensated: its whole hierarchy evaluated fluorescence gates on
+ * uncompensated values while the result line said "compensation enabled" once for the lot.
+ */
+export function resolveSiblingImport(
+  tree: Readonly<{ name: string; gatingMl: string; fileName?: string; spillover?: FlowJoSpillover | null; origin?: string }>,
+  primary: Sample,
+  entries: readonly Readonly<{ id: string; name: string; sample: Sample }>[],
+  activeSampleId: string | null,
+): NonNullable<PendingGatingMLImport["siblingTrees"]>[number] {
+  const entry = tree.fileName
+    ? entries.find((e) => e.name.toLowerCase() === tree.fileName!.toLowerCase()) ?? null
+    : null;
+  const own = entry && entry.id !== activeSampleId ? entry : null;
+  const target = own ? own.sample : primary;
+  const pnn: Record<string, string> = {};
+  for (const c of target.channels) pnn[c.pnn] = c.key;
+  const result = importGatingML(
+    tree.gatingMl, target.channels.map((c) => c.key), pnn, target.instrument);
+  if (!own) return { name: tree.name, ...(tree.fileName ? { fileName: tree.fileName } : {}), ...(tree.origin ? { origin: tree.origin } : {}), result };
+  const external = tree.spillover && target.instrument === "flow"
+    ? target.externalSpilloverPreview(tree.spillover.matrix)
+    : null;
+  const delta = external?.display != null && target.spillover !== null
+    ? maxCoefficientDelta(target.spillover, external.display)
+    : null;
+  return {
+    name: tree.name,
+    fileName: tree.fileName,
+    ...(tree.origin ? { origin: tree.origin } : {}),
+    result,
+    sampleId: own.id,
+    compensation: resolveGatingMLCompensation(
+      result.compensation, result.compensation_refs, target.instrument === "flow",
+      external?.display ?? target.spillover ?? null),
+    externalSpillover: external?.display != null
+      ? {
+          matrix: tree.spillover!.matrix,
+          label: tree.spillover!.name || "the FlowJo workspace",
+          replacesEmbedded: target.spillover !== null,
+          differsFromEmbedded: delta !== null && delta > 1e-6,
+        }
+      : null,
+  };
+}
+
 interface PendingGatingMLImport {
   result: GatingMLResult;
+  /** What the Gating-ML was made from, for the dialog's title: a FlowJo workspace is not "a Gating-ML file" to the user. */
+  sourceKind?: GatingImportSourceKind;
   compensation: GatingMLCompensationResolution;
   sampleId: string;
   /**
@@ -344,7 +477,36 @@ interface PendingGatingMLImport {
    * parsed with the first and applied together, rather than asking the same questions once per
    * tree. Empty for every other import.
    */
-  siblingTrees?: readonly Readonly<{ name: string; result: GatingMLResult }>[];
+  siblingTrees?: readonly Readonly<{
+    name: string;
+    result: GatingMLResult;
+    /** The FCS this tree was drawn on, when each file is to get its own hierarchy. */
+    fileName?: string;
+    /** Where the strategy came from (a FlowJo group), to name the template it shares. */
+    origin?: string;
+    /**
+     * A tree drawn on ANOTHER loaded file is parsed against that file's channels and carries its
+     * own compensation decision, applied to that sample when the import goes ahead. A hierarchy
+     * applied to a file left on its original layer evaluated every fluorescence gate on
+     * uncompensated values, while the result line said "compensation enabled" once for the lot.
+     */
+    sampleId?: string;
+    compensation?: GatingMLCompensationResolution;
+    externalSpillover?: {
+      matrix: SpilloverMatrix;
+      label: string;
+      replacesEmbedded: boolean;
+      differsFromEmbedded: boolean;
+    } | null;
+  }>[];
+  /** The FCS the PRIMARY tree was drawn on, under per-file import. */
+  primaryFileName?: string;
+  /** The primary strategy's origin (a FlowJo group), for naming its template. */
+  primaryOrigin?: string;
+  /** The matrix question was already put in the workspace-open dialog; do not ask again. */
+  matrixAnswered?: boolean;
+  /** Files the workspace open loaded for this import; cancelling it removes them again. */
+  openedSampleIds?: readonly string[];
   mergeBlockedReason: string | null;
   compensationNote: string | null;
   /** Set when the gates came from a FlowJo workspace, so the result line can say which sample. */
@@ -458,12 +620,16 @@ const MODES: { id: DisplayMode; label: string }[] = [
 // Center-column tabs, mirroring GateLabR's tabsetPanel. The left (samples/import/export)
 // and right (gates/populations) panels are
 // shared across tabs — only the center switches, exactly as in GateLabR.
-type TabId = "gating" | "strategy" | "illustration" | "statistics" | "panel" | "compensation" | "scales" | "metadata" | "proportions" | "division";
+type TabId = "gating" | "strategy" | "illustration" | "layout" | "statistics" | "panel" | "compensation" | "scales" | "metadata" | "proportions" | "division";
+// The Layout tab needs more work before it is offered; its code stays and the flag brings it
+// back. While it is hidden nothing sends plots there.
+const LAYOUT_TAB_AVAILABLE = false;
 const TABS: { id: TabId; label: string }[] = [
   { id: "gating", label: "Gating" },
   { id: "strategy", label: "Strategy" },
   { id: "illustration", label: "Illustration" },
-  { id: "proportions", label: "Proportions" },
+  { id: "layout", label: "Layout" },
+  { id: "proportions", label: "Plotting" },
   { id: "division", label: "Division" },
   { id: "statistics", label: "Statistics" },
   { id: "metadata", label: "Metadata" },
@@ -488,6 +654,110 @@ interface SampleEntry {
     /** Zero-based original SCE columns for exact host write-back. */
     eventIndex: Uint32Array;
   }>;
+}
+
+function invertIdMap(sourceToCopy: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(sourceToCopy).map(([sourceId, copyId]) => [copyId, sourceId]));
+}
+
+function buildPerFileHierarchyCopies(
+  sourceRef: HierarchyRef,
+  source: StoredHierarchy,
+  targets: readonly SampleEntry[],
+  existing: readonly HierarchyRef[],
+): {
+  copies: StoredHierarchy[];
+  assignments: Record<string, string>;
+  populationIdMaps: Array<Record<string, string>>;
+} {
+  if (!source.root_population_id || !source.populations[source.root_population_id]) {
+    return { copies: [], assignments: {}, populationIdMaps: [] };
+  }
+  const taken = [...existing];
+  const copies: StoredHierarchy[] = [];
+  const assignments: Record<string, string> = {};
+  const populationIdMaps: Array<Record<string, string>> = [];
+  for (const entry of targets) {
+    const copy = cloneHierarchyTree(
+      source.populations,
+      source.root_population_id,
+      source.gates,
+      source.gate_order,
+    );
+    const id = newHierarchyId();
+    const baseName = sourceRef.source_hierarchy_id
+      ? `${entry.name} · copy of ${sourceRef.name}`
+      : `${entry.name} · ${sourceRef.name}`;
+    const name = uniqueHierarchyName(baseName, taken);
+    taken.push({ id, name });
+    copies.push({
+      id,
+      name,
+      owner_sample_id: entry.id,
+      structure_locked: true,
+      source_hierarchy_id: sourceRef.id,
+      source_gate_ids: invertIdMap(copy.gateIdMap),
+      source_population_ids: invertIdMap(copy.idMap),
+      gates: copy.gates,
+      gate_order: copy.gate_order,
+      populations: copy.populations,
+      root_population_id: copy.root_population_id,
+      active_population_id: copy.root_population_id,
+      selected_pop_ids: [],
+    });
+    assignments[entry.id] = id;
+    populationIdMaps.push(copy.idMap);
+  }
+  return { copies, assignments, populationIdMaps };
+}
+
+/** Axis ranges can be parked per file without splitting the shared display-transform registry. */
+function axisScaleContextKey(
+  sampleId: string | null,
+  workspaceScaleContextKey: string | null,
+  lockBetweenFiles: boolean,
+): string | null {
+  if (!workspaceScaleContextKey || (!lockBetweenFiles && !sampleId)) return null;
+  return JSON.stringify(lockBetweenFiles
+    ? ["locked", workspaceScaleContextKey]
+    : ["sample", sampleId, workspaceScaleContextKey]);
+}
+
+function autoFittedScaleKey(contextKey: string, channelKey: string): string {
+  return JSON.stringify([contextKey, channelKey]);
+}
+
+function sameGlobalScales(left: GlobalScales, right: GlobalScales): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => {
+    const a = left[key];
+    const b = right[key];
+    return !!b && a[0] === b[0] && a[1] === b[1];
+  });
+}
+
+function restoredAxisScaleMaps(
+  scales: WorkspaceFile["scales"],
+  entries: readonly SampleEntry[],
+  activeIndex: number,
+  lockBetweenFiles: boolean,
+): ReadonlyMap<string, GlobalScales> {
+  const restored = new Map<string, GlobalScales>();
+  for (const entry of entries) {
+    const key = axisScaleContextKey(entry.id, entry.sample.workspaceScaleContextKey, false);
+    const ranges = scales.perSampleGlobalScales?.[entry.id];
+    if (key && ranges) restored.set(key, ranges);
+  }
+  const active = entries[activeIndex];
+  if (!active) return restored;
+  const activeKey = axisScaleContextKey(
+    active.id,
+    active.sample.workspaceScaleContextKey,
+    lockBetweenFiles,
+  );
+  if (activeKey && !restored.has(activeKey)) restored.set(activeKey, scales.globalScales ?? {});
+  return restored;
 }
 
 interface ResolvedReferenceFcs {
@@ -591,12 +861,14 @@ export default function App() {
   // Global sample filter (R's rv$sample_mask): samples excluded from the multi-sample analysis
   // tabs (Statistics / Proportions). New samples are included by default; default = all included.
   const [excludedSampleIds, setExcludedSampleIds] = useState<Set<string>>(new Set());
-  // Per-file hierarchies: each file is gated under the hierarchy it is assigned to (an
-  // unassigned file, or one whose hierarchy was deleted, under the first), and the pooled
-  // display holds the checked files of the active hierarchy. Off, every file follows the active
-  // hierarchy as before. `includedSamples` and the sample list are derived below the core state.
-  const [perFileHierarchies, setPerFileHierarchies] = useState(false);
-  const [fileHierarchies, setFileHierarchies] = useState<Record<string, string>>({});
+  // Row selection is for actions. A pool captures its membership explicitly and never follows it.
+  const [plotPool, setPlotPool] = useState<{ ids: string[]; hierarchyId: string; editTemplate: boolean } | null>(null);
+  const [poolMembersOpen, setPoolMembersOpen] = useState(false);
+  const poolReadOnly = plotPool !== null && !plotPool.editTemplate;
+  // Groups: each file is gated under the tree it is assigned to, its own copy or a group's
+  // template (an unassigned file, or one whose tree was deleted, under the first). A template
+  // draws its whole group, a copy its file. `includedSamples` and the sample list are derived
+  // below the core state.
   const folderImportItems = useMemo<FolderImportItem[]>(() => {
     if (!pendingFolderImport) return [];
     const existingNames = new Set(samples.map((entry) => entry.name.toLocaleLowerCase()));
@@ -688,6 +960,7 @@ export default function App() {
   const [compensationApplyStatus, setCompensationApplyStatus] =
     useState<CompensationApplyUiStatus | null>(null);
   const [scaleCacheEpoch, setScaleCacheEpoch] = useState(0);
+  const [lockScalesBetweenFiles, setLockScalesBetweenFiles] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [workspaceEditRevision, setWorkspaceEditRevision] = useState(0);
   const workspaceEditRevisionRef = useRef(0);
@@ -747,7 +1020,10 @@ export default function App() {
   const [scalesVersion, setScalesVersion] = useState(0);
   // Set when a workspace finishes loading; consumed once the sample, gates and automatic
   // ranges exist, which is later than the load handler itself.
-  const pendingFitOnLoad = useRef(false);
+  const pendingFitOnLoad = useRef<Readonly<{
+    contextKey: string;
+    ranges: GlobalScales;
+  }> | null>(null);
   // Which global scales GateLab fitted itself, and under which display transform. A range the
   // user pinned in the Scales tab is absent here, which is what keeps it from being discarded.
   const autoFittedScales = useRef(new Map<string, string>());
@@ -758,6 +1034,11 @@ export default function App() {
   const [importMsg, setImportMsg] = useState<string | null>(null);
   const [leftWidth, setLeftWidth] = useState(INITIAL_LEFT_PANE_WIDTH);
   const [sideWidth, setSideWidth] = useState(INITIAL_RIGHT_PANE_WIDTH);
+  usePopoverDismissal();
+  const [autoSizePopulations, setAutoSizePopulations] = useState(true);
+  /** Bumped by the resize handle's double-click: the one fit that may narrow the pane. */
+  const [sideFitTick, setSideFitTick] = useState(0);
+  const sideFitApplied = useRef(0);
   const [xRange, setXRange] = useState<[number, number] | null>(null);
   const [yRange, setYRange] = useState<[number, number] | null>(null);
   const [maxEvents, setMaxEvents] = useState(50000); // 0 = all (no downsampling)
@@ -788,12 +1069,27 @@ export default function App() {
   const strategyConfigRef = useRef<StrategyConfig | null>(null); // Strategy controls, survive tab switches
   const [illustrationPresets, setIllustrationPresets] = useState<IllustrationPreset[]>([]);
   const [illustVersion, setIllustVersion] = useState(0); // bump to remount IllustrationTab on workspace load
+  const [layoutWorkspace, setLayoutWorkspace] = useState<LayoutWorkspace>(
+    () => createDefaultLayoutWorkspace(),
+  );
   const [fcsAssay, setFcsAssay] = useState<FcsExportAssay>("original");
   const [fcsScope, setFcsScope] = useState<"active" | "combined" | "split">("split");
   const [fcsMinimumEvents, setFcsMinimumEvents] = useState(0);
   const [fcsExportOpen, setFcsExportOpen] = useState(false);
   const [hierarchyModal, setHierarchyModal] = useState<HierarchyModalMode | null>(null);
+  const [promoteConfirmOpen, setPromoteConfirmOpen] = useState(false);
+  const [clearGatingConfirmOpen, setClearGatingConfirmOpen] = useState(false);
+  const [hierarchyCopyDraft, setHierarchyCopyDraft] = useState<{ sourceId: string; fileIds: string[]; revert?: boolean } | null>(null);
+  const [hierarchyActionMessage, setHierarchyActionMessage] = useState<string | null>(null);
+  /** Where edits go, chosen by the user and held until they choose again: the tree, the viewed file's group, or the file alone. */
+  const [editMode, setEditMode] = useState<EditTarget>("tree");
+  /** The group dialog: naming a new group of the selected files, renaming or deleting one. */
+  const [groupModal, setGroupModal] = useState<{ mode: "new" | "rename" | "delete"; groupId?: string } | null>(null);
   const [pendingGatingMlImport, setPendingGatingMlImport] = useState<PendingGatingMLImport | null>(null);
+  // One import at a time. The confirmation's Import button stayed live while the import ran, so a
+  // double-click applied it twice and every hierarchy of a per-file workspace appeared doubled.
+  const gatingImportBusyRef = useRef(false);
+  const [gatingImportBusy, setGatingImportBusy] = useState(false);
   const [barcodeImport, setBarcodeImport] = useState<BarcodeImportDraft | null>(null);
   const [barcodeSave, setBarcodeSave] = useState<{
     learned: LearnedBarcodeTemplate | null;
@@ -809,6 +1105,40 @@ export default function App() {
   const [treePicker, setTreePicker] = useState<
     { text: string; sample: FlowJoSampleSummary; matchedOn: FlowJoSampleMatchKey | null } | null
   >(null);
+  /** A FACSChorus experiment: the gates as they are now, and a snapshot per sort; pick one. */
+  const [chorusPicker, setChorusPicker] = useState<
+    { experiment: ChorusExperiment | null; trees: ChorusTreeSummary[] } | null
+  >(null);
+  // Every loaded FCS the S8 exported carries the recording it is and the gates it was made
+  // under (BDCHORUSDATARECORD); read once per file, since the keyword is half a megabyte.
+  const loadedChorusRecordings = useMemo<LoadedChorusRecording[]>(() => {
+    const out: LoadedChorusRecording[] = [];
+    for (const entry of samples) {
+      if (!hasChorusRecording(entry.sample.fcs.keywords)) continue;
+      try {
+        const recording = readChorusRecording(entry.sample.fcs.keywords);
+        if (recording) out.push({ fileId: entry.id, fileName: entry.name, recording });
+      } catch {
+        // An unreadable record is reported when the user tries to import it, not on load.
+      }
+    }
+    return out;
+  }, [samples]);
+  const chorusTimeline = useMemo(
+    () => (chorusPicker ? buildChorusTimeline(chorusPicker.experiment, loadedChorusRecordings) : null),
+    [chorusPicker, loadedChorusRecordings],
+  );
+  /** A .cef opened before its event data: load the chosen FCS, then apply this tree to it. */
+  const [pendingChorusImport, setPendingChorusImport] = useState<{
+    experiment: ChorusExperiment;
+    treeIndex: number;
+    targetSampleId: string | null;
+  } | null>(null);
+  // The last FACSChorus tree converted for import: which gates it held and what was done with
+  // each, so a Chorus statistics export can be set beside GateLab's counts with reasons.
+  const [chorusImport, setChorusImport] = useState<ChorusImportRecord | null>(null);
+  const [chorusStats, setChorusStats] = useState<ChorusStatistics | null>(null);
+  const chorusStatsRef = useRef<HTMLInputElement | null>(null);
   /**
    * Opening a .wsp directly. The workspace names the files it expects, so the FCS can be
    * gathered from what is already loaded plus whatever the user points at; samples whose file
@@ -821,14 +1151,156 @@ export default function App() {
       /** The .wsp's own handle, so the FCS picker opens in the folder it came from. */
       handle: FileSystemFileHandle | null;
       samples: FlowJoSampleSummary[];
+      /**
+       * Samples the workspace names but gates nothing on -- compensation controls, typically. They
+       * carry no strategy, but their files are data the workspace belongs with, so they are found
+       * and loaded beside the gated ones rather than dropped from the dialog.
+       */
+      dataSamples: FlowJoSampleSummary[];
       pending: { name: string; file: File }[];
       strategySample: number | null;
       strategyTree: number | "all" | null;
+      /** Give every resolved FCS its own hierarchy, drawn from its own sample. */
+      perFileTrees: boolean;
+      /** Which spillover matrix to gate under, answered here rather than in a second dialog. */
+      matrixChoice: "workspace" | "file";
     } | null
   >(null);
+  /**
+   * Resolve a freshly opened workspace's FCS from a folder the user has already granted.
+   *
+   * A file handle gives no route to its parent, so GateLab cannot look beside a .wsp by itself
+   * -- that is the API's security boundary, not an oversight, and no amount of trying gets round
+   * it. What it CAN do is remember a folder once granted and read it again without asking, so
+   * only the first workspace from a folder needs the button.
+   */
+  useEffect(() => {
+    const st = flowJoOpen;
+    if (!st || st.pending.length) return;
+    const directory = lastGrantedDirectory();
+    if (!directory) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        // A file already in the workspace counts as found without being read again.
+        const loaded = new Set(samples.map((s0) => s0.name.toLowerCase()));
+        const wanted = new Set([...st.samples, ...st.dataSamples]
+          .flatMap((x) => x.candidateFileNames.map((n) => n.toLowerCase()))
+          .filter((n) => !loaded.has(n)));
+        const found: { name: string; file: File }[] = [];
+        // A remembered folder is trusted only for a workspace it holds itself. The last folder
+        // granted may be unrelated, and files there that happen to share a name with the ones
+        // this workspace gates are not its files.
+        let holdsWorkspace = false;
+        for await (const entry of (directory as unknown as {
+          values(): AsyncIterable<FileSystemHandle>;
+        }).values()) {
+          if (entry.kind !== "file") continue;
+          if (entry.name.toLowerCase() === st.fileName.toLowerCase()) holdsWorkspace = true;
+          if (!wanted.has(entry.name.toLowerCase())) continue;
+          found.push({ name: entry.name, file: await (entry as FileSystemFileHandle).getFile() });
+        }
+        if (cancelled || !found.length || !holdsWorkspace) return;
+        setFlowJoOpen((cur) => cur && cur.fileName === st.fileName && !cur.pending.length
+          ? { ...cur, pending: found }
+          : cur);
+      } catch {
+        // Permission lapsed, or the folder moved. The button is still there.
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flowJoOpen?.fileName]);
+
+  /**
+   * Whether the workspace's spillover matrix and the chosen FCS's own differ, worked out while
+   * the open dialog is still up.
+   *
+   * This question used to arrive in a SECOND dialog after the first was dismissed, because the
+   * comparison needs the FCS parsed and that happened only once the import was under way. The
+   * file is right there in the dialog, so it is parsed here instead and the question is asked
+   * once, in the step that is already asking about files.
+   */
+  const [wspMatrixConflict, setWspMatrixConflict] =
+    useState<{ label: string; delta: number } | null>(null);
+  /**
+   * What the open dialog says about compensation when there is nothing to ask: the workspace
+   * carries the matrix its gates were drawn under, and it either matches the file's or is the only
+   * one there is. Saying so here, before anything changes, is what lets the import go ahead without
+   * a second dialog confirming it.
+   */
+  const [wspMatrixNote, setWspMatrixNote] =
+    useState<{ kind: "identical" | "workspace-only"; label: string; channels: number } | null>(null);
+  /** True while the comparison below is still running; Import waits for it. */
+  const [wspMatrixPending, setWspMatrixPending] = useState(false);
+  useEffect(() => {
+    const st = flowJoOpen;
+    const settle = (
+      conflict: { label: string; delta: number } | null,
+      note: { kind: "identical" | "workspace-only"; label: string; channels: number } | null,
+    ) => {
+      setWspMatrixConflict(conflict);
+      setWspMatrixNote(note);
+      setWspMatrixPending(false);
+    };
+    if (!st || st.strategySample === null) { settle(null, null); return; }
+    // The answer defaults to the workspace's matrix, so an Import clicked before the two matrices
+    // had been compared applied it without the question ever being shown.
+    setWspMatrixPending(true);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const chosen = st.samples.find((x) => x.index === st.strategySample);
+        if (!chosen) { if (!cancelled) settle(null, null); return; }
+        const conversion = flowJoWorkspaceToGatingML(st.text, chosen.index, null);
+        const workspaceSpillover = conversion.spillover;
+        if (!workspaceSpillover) { if (!cancelled) settle(null, null); return; }
+        const names = new Set(chosen.candidateFileNames.map((n) => n.toLowerCase()));
+        const loaded = samples.find((entry) => names.has(entry.name.toLowerCase()));
+        let target: Sample | null = loaded?.sample ?? null;
+        if (!target) {
+          // Not loaded yet: parse the file the user just chose. It is about to be imported
+          // anyway, so this reads nothing that was not going to be read.
+          const pendingFile = st.pending.find((f) => names.has(f.name.toLowerCase()));
+          if (pendingFile) target = new Sample(parseFcs(await pendingFile.file.arrayBuffer()));
+        }
+        if (cancelled) return;
+        if (!target || target.instrument !== "flow") { settle(null, null); return; }
+        const preview = target.externalSpilloverPreview(workspaceSpillover.matrix);
+        if (preview?.display == null) { settle(null, null); return; }
+        const label = workspaceSpillover.name || "the FlowJo workspace";
+        // Only gates drawn on compensated channels are affected. A workspace can carry a matrix its
+        // strategy never uses, and then there is nothing to say.
+        const usesCompensation = conversion.gatingMl.includes('compensation-ref="FCS"');
+        const channels = workspaceSpillover.matrix.channels.length - preview.dropped.length;
+        if (target.spillover === null) {
+          settle(null, usesCompensation ? { kind: "workspace-only", label, channels } : null);
+          return;
+        }
+        const delta = maxCoefficientDelta(target.spillover, preview.display);
+        if (delta > 1e-6) settle({ label, delta }, null);
+        else settle(null, usesCompensation ? { kind: "identical", label, channels } : null);
+      } catch {
+        // A file that cannot be parsed is the import's problem to report, not this preview's.
+        if (!cancelled) settle(null, null);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flowJoOpen?.text, flowJoOpen?.strategySample, flowJoOpen?.pending, samples]);
+
   /** Held until the sample the strategy belongs to is the active one. */
   const [pendingFlowJoStrategy, setPendingFlowJoStrategy] = useState<
-    { text: string; choice: FlowJoSampleSummary; treeIndex: number | "all" | null; targetNames: string[] } | null
+    {
+      text: string; choice: FlowJoSampleSummary;
+      treeIndex: number | "all" | null; targetNames: string[];
+      /** Resolved sample -> FCS, when each file is to get its own hierarchy. */
+      perFile?: readonly Readonly<{ sample: FlowJoSampleSummary; fileName: string }>[];
+      /** Answered in the open dialog, so the import never asks a second time. */
+      matrixChoice?: "workspace" | "file";
+      /** The files this open loaded, removed again if the strategy question is cancelled. */
+      openedSampleIds?: readonly string[];
+    } | null
   >(null);
   const wspFcsRef = useRef<HTMLInputElement>(null);
   // Space NEW gates are drawn in. A preference about how you work, not a property of the data —
@@ -870,10 +1342,18 @@ export default function App() {
     }
   };
   const [gatingMlExportOpen, setGatingMlExportOpen] = useState(false);
+  const [flowJoExportOpen, setFlowJoExportOpen] = useState(false);
   const [contourThreshold, setContourThreshold] = useState(5); // outer contour % of peak
+  const [contourLevels, setContourLevels] = useState(10);
   const [instrumentMode, setInstrumentMode] = useState<"auto" | "flow" | "cytof">("auto"); // active sample's instrument override
   // Colour-by-factor overlay on the main plot (population partition / division level).
-  const [overlayBy, setOverlayBy] = useState<"none" | "population" | "division" | "sample" | "coldata">("none");
+  const [overlayBy, setOverlayBy] = useState<"none" | "population" | "division" | "sample" | "coldata" | "channel">("none");
+  /**
+   * Which marker the "Colour by → Channel" overlay reads, held as the channel KEY rather than an
+   * index. An index means a different marker in the next file, and the pooled display draws
+   * several files at once; the key re-resolves per sample the way a division profile's does.
+   */
+  const [overlayChannelKey, setOverlayChannelKey] = useState<string | null>(null);
   // Scope the gates drawn on the plot to the displayed branch (default), or draw every gate
   // that shares the channel pair. The wide view is for comparing thresholds set on different
   // branches against each other, which the scoped view deliberately hides.
@@ -882,12 +1362,31 @@ export default function App() {
   // accident. On (the default) they stay visible regardless of the displayed branch.
   const [showUnownedGates, setShowUnownedGates] = useState(true);
   const [overlayPalette, setOverlayPalette] = useState<PaletteName>("default");
+  /**
+   * Kept apart from `overlayPalette` because the two choices are not interchangeable: the
+   * categorical overlays want hues that cycle, a marker wants a ramp that orders. Sharing one
+   * setting meant switching from Population to Channel carried Tableau across and painted the
+   * colour bar in a sequence that reads as unordered.
+   */
+  const [overlayMarkerPalette, setOverlayMarkerPalette] = useState<PaletteName>(DEFAULT_MARKER_PALETTE);
+  /** Marker contrast, the pseudocolour density slider's counterpart for a marker ramp. */
+  const [markerColorPower, setMarkerColorPower] = useState(DEFAULT_MARKER_COLOR_POWER);
   const activeDisplayContextKey = sample?.displayTransformContextKey ?? null;
   const activeWorkspaceScaleContextKey = sample?.workspaceScaleContextKey ?? null;
-  // Fixed ranges are workspace-wide within an assay family. Selecting another blue FCS row must
-  // not swap the scale map; Original and Compensated remain separate coordinate families.
-  const { globalScales, setGlobalScales, preserveScalesForContext } =
-    useContextualGlobalScales(activeWorkspaceScaleContextKey, scaleCacheEpoch);
+  const activeAxisScaleContextKey = axisScaleContextKey(
+    activeSampleId,
+    activeWorkspaceScaleContextKey,
+    lockScalesBetweenFiles,
+  );
+  // Transform settings stay workspace-wide. Only these display ranges switch between a file's
+  // own map and a deliberately frozen comparison map.
+  const {
+    globalScales,
+    setGlobalScales,
+    preserveScalesForContext,
+    scalesForContext,
+    replaceScalesForNextNamespace,
+  } = useContextualGlobalScales(activeAxisScaleContextKey, scaleCacheEpoch);
   // Per-sample metadata (Metadata tab): keyed by SampleEntry.id → { field: value }; ordered columns.
   const [metadata, setMetadata] = useState<Record<string, Record<string, string>>>({});
   const [metadataColumns, setMetadataColumns] = useState<MetadataColumn[]>([]);
@@ -1082,8 +1581,12 @@ export default function App() {
     };
   }, [sample]);
 
+  const [state, dispatch] = useReducer(coreReducer, undefined, initialCoreState);
+  /** Which tree each file is gated under; in the store so Undo restores it with the copies. */
+  const fileHierarchies = state.file_hierarchies;
   const startResize = (e: React.MouseEvent) => {
     e.preventDefault();
+    setAutoSizePopulations(false);
     const move = (ev: MouseEvent) => {
       const w = window.innerWidth - ev.clientX;
       setSideWidth(Math.max(320, Math.min(w, 900)));
@@ -1095,6 +1598,33 @@ export default function App() {
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   };
+  useEffect(() => {
+    if (!autoSizePopulations || activeTab !== "gating") return;
+    const fit = (exact: boolean) => {
+      const context = document.createElement("canvas").getContext("2d");
+      if (!context) return;
+      context.font = "12px Arial";
+      const rows = populationTreeOrder(state.populations, state.root_population_id ?? "");
+      const wanted = Math.max(INITIAL_RIGHT_PANE_WIDTH, ...rows.map(({ popId, depth }) => {
+        const population = state.populations[popId];
+        const gateWidth = Math.max(0, ...population.gate_refs.map(ref => context.measureText(state.gates[ref.gate_id]?.name ?? "").width + 28));
+        return Math.ceil(context.measureText(population.name).width + gateWidth + depth * 16 + 205);
+      }));
+      const target = Math.max(320, Math.min(wanted, 900, window.innerWidth - leftWidth - 420));
+      // Rounded up to a step, and never narrower than it is: a longer name may widen the pane
+      // once, but drawing, renaming and reordering do not move it back and forth. The handle's
+      // double-click and a window resize fit it exactly.
+      const stepped = Math.min(900, Math.ceil(target / 40) * 40);
+      setSideWidth((current) => (exact || stepped > current ? stepped : current));
+    };
+    fit(sideFitTick !== sideFitApplied.current);
+    sideFitApplied.current = sideFitTick;
+    const onResize = () => fit(true);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+    // Geometry and event counts do not change the text width.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSizePopulations, activeTab, sideFitTick, JSON.stringify([Object.values(state.populations).map(pop => [pop.name, pop.parent_id, pop.gate_refs]), Object.values(state.gates).map(gate => [gate.gate_id, gate.name])]), state.root_population_id, leftWidth]);
   const startLeftResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const left = e.currentTarget.parentElement?.getBoundingClientRect().left ?? 0;
@@ -1110,37 +1640,158 @@ export default function App() {
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   };
-  const [state, dispatch] = useReducer(coreReducer, undefined, initialCoreState);
   const hierarchyOfFile = useCallback(
     (id: string) => fileHierarchyId(fileHierarchies[id], state.hierarchies),
     [fileHierarchies, state.hierarchies],
   );
-  const hierarchyChipOf = useCallback((hierarchyId: string): HierarchyChipInfo => {
-    const index = state.hierarchies.findIndex((h) => h.id === hierarchyId);
-    return { index: index + 1, name: state.hierarchies[index]?.name ?? "", colour: hierarchyColour(Math.max(0, index)) };
-  }, [state.hierarchies]);
-  /** The checked files, before any hierarchy narrowing: what the assign action acts on. */
+  /** The checked files, before hierarchy narrowing: what Copy to selected acts on. */
   const checkedSamples = useMemo(
     () => samples.filter((s) => !excludedSampleIds.has(s.id)),
     [samples, excludedSampleIds, sampleDataRevisionKey],
   );
-  const includedSamples = useMemo(
-    () => (perFileHierarchies
-      ? checkedSamples.filter((s) => hierarchyOfFile(s.id) === state.active_hierarchy_id)
-      : checkedSamples),
-    [checkedSamples, perFileHierarchies, hierarchyOfFile, state.active_hierarchy_id],
+  // Only the viewed file or the explicitly captured pool feeds the Gating plot and its counts.
+  const includedSamples = useMemo(() => {
+    if (plotPool) {
+      const ids = new Set(plotPool.ids);
+      return samples.filter(entry => ids.has(entry.id));
+    }
+    return samples.filter(entry => entry.id === activeSampleId);
+  }, [samples, plotPool, activeSampleId, sampleDataRevisionKey]);
+  /**
+   * Whether a file's tree is the active tree or descends from it: every file under the
+   * workspace tree; a group's files under the group's copy; one file under its own copy. The
+   * earlier test walked a file's tree up to the workspace tree and so never matched a group's
+   * copy, which emptied the Statistics tab in group mode.
+   */
+  const fileUnderActiveTree = useCallback((fileId: string): boolean => {
+    const byId = new Map(state.hierarchies.map((h) => [h.id, h]));
+    const seen = new Set<string>();
+    let cur = byId.get(hierarchyOfFile(fileId));
+    while (cur && !seen.has(cur.id)) {
+      if (cur.id === state.active_hierarchy_id) return true;
+      seen.add(cur.id);
+      cur = cur.source_hierarchy_id ? byId.get(cur.source_hierarchy_id) : undefined;
+    }
+    return false;
+  }, [state.hierarchies, state.active_hierarchy_id, hierarchyOfFile]);
+  // Existing tree-scoped analysis/export actions still use the action selection, not the pool.
+  const analysisSamples = useMemo(
+    () => checkedSamples.filter((entry) => fileUnderActiveTree(entry.id)),
+    [checkedSamples, fileUnderActiveTree],
   );
-  /** Checked files gated under another hierarchy, so not pooled with the active one. */
-  const checkedInOtherHierarchies = checkedSamples.length - includedSamples.length;
+  /** The Statistics tab tabulates the viewed file whether or not it is checked, and compares the checked ones. */
+  const statsSamples = useMemo(() => {
+    const active = activeSampleId ? samples.find((entry) => entry.id === activeSampleId) : undefined;
+    if (!active || analysisSamples.some((entry) => entry.id === active.id) || !fileUnderActiveTree(active.id)) return analysisSamples;
+    return [active, ...analysisSamples];
+  }, [samples, activeSampleId, analysisSamples, fileUnderActiveTree]);
+  /** A hierarchy's tree, live or parked, for reading only. */
+  const treeOf = useCallback((id: string) => {
+    if (id === state.active_hierarchy_id) {
+      return state.root_population_id
+        ? { gates: state.gates, gate_order: state.gate_order, populations: state.populations, root_population_id: state.root_population_id }
+        : null;
+    }
+    const h = state.stored_hierarchies[id];
+    return h && h.root_population_id
+      ? { gates: h.gates, gate_order: h.gate_order, populations: h.populations, root_population_id: h.root_population_id }
+      : null;
+  }, [state.active_hierarchy_id, state.gates, state.gate_order, state.populations, state.root_population_id, state.stored_hierarchies]);
+  /** The live copy's gates whose coordinates differ from its template's: shown as tailored. */
+  const activeTailoredGateIds = useMemo<ReadonlySet<string>>(() => {
+    const live = state.hierarchies.find((h) => h.id === state.active_hierarchy_id);
+    if (!live?.owner_sample_id || !live.source_hierarchy_id || !state.root_population_id) return new Set();
+    return tailoredGateIds(
+      { ...live, gates: state.gates, gate_order: state.gate_order, populations: state.populations, root_population_id: state.root_population_id, active_population_id: state.active_population_id, selected_pop_ids: state.selected_pop_ids },
+      treeOf(live.source_hierarchy_id),
+    );
+  }, [state.hierarchies, state.active_hierarchy_id, state.gates, state.gate_order, state.populations, state.root_population_id, state.active_population_id, state.selected_pop_ids, treeOf]);
+  /** Each file's tailored gates, by name: the badge on its row, and what Revert all acts on. */
+  const tailoredGatesOfFile = useMemo(() => {
+    const out = new Map<string, string[]>();
+    for (const ref of state.hierarchies) {
+      if (!ref.owner_sample_id || !ref.source_hierarchy_id) continue;
+      const copy = storedTreeOf(ref.id);
+      if (!copy) continue;
+      const names = [...tailoredGateIds(copy, treeOf(ref.source_hierarchy_id))].map((id) => copy.gates[id]?.name ?? id);
+      if (names.length) out.set(ref.owner_sample_id, names);
+    }
+    return out;
+    // storedTreeOf reads the store directly; its inputs are listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.hierarchies, state.active_hierarchy_id, state.gates, state.gate_order, state.populations, state.root_population_id, state.stored_hierarchies, treeOf]);
   const sampleListItems = useMemo<SampleListItem[]>(() => samples.map((entry) => ({
     id: entry.id,
     name: entry.name,
     eventCount: entry.sample.fcs.nEvents,
     channelCount: entry.sample.channels.length,
     ...(entry.sourcePath ? { sourcePath: entry.sourcePath } : {}),
-    ...(perFileHierarchies ? { hierarchy: hierarchyChipOf(hierarchyOfFile(entry.id)) } : {}),
+    ...(tailoredGatesOfFile.has(entry.id) ? { tailored: tailoredGatesOfFile.get(entry.id) } : {}),
+    ...(state.file_groups[entry.id] ? (() => {
+      const index = state.groups.findIndex((g) => g.id === state.file_groups[entry.id]);
+      return index >= 0 ? { group: state.groups[index].name, groupColour: hierarchyColour(index) } : {};
+    })() : {}),
     ...(metadata[entry.id] ? { metadata: metadata[entry.id] } : {}),
-  })), [samples, sampleDataRevisionKey, perFileHierarchies, hierarchyChipOf, hierarchyOfFile, metadata]);
+  })), [samples, sampleDataRevisionKey, tailoredGatesOfFile, metadata, state.file_groups, state.groups]);
+  /** The files under the tree, tailored ones marked, for the summary line. */
+  const hierarchyGroups = useMemo(
+    () => groupsOf(state.hierarchies, samples.map((s0) => ({ id: s0.id, name: s0.name })), fileHierarchies, (copy) => {
+      if (!copy.source_hierarchy_id) return null;
+      const own = copy.id === state.active_hierarchy_id
+        ? (state.root_population_id ? { ...copy, gates: state.gates, gate_order: state.gate_order, populations: state.populations, root_population_id: state.root_population_id, active_population_id: state.active_population_id, selected_pop_ids: state.selected_pop_ids } : null)
+        : state.stored_hierarchies[copy.id] ?? null;
+      if (!own) return null;
+      return tailoredGateIds(own, treeOf(copy.source_hierarchy_id)).size > 0;
+    }),
+    [state.hierarchies, samples, fileHierarchies, state.active_hierarchy_id, state.gates, state.gate_order, state.populations, state.root_population_id, state.active_population_id, state.selected_pop_ids, state.stored_hierarchies, treeOf],
+  );
+  /** The live group in one line: how many files, and whether they follow the template or not. */
+  const groupSummary = useMemo(() => {
+    const templateId = templateOf(state.active_hierarchy_id, state.hierarchies)?.id;
+    const group = hierarchyGroups.find((g) => g.template.id === templateId);
+    if (!group || !group.members.length) return "";
+    const count = group.members.length;
+    const tailored = group.members.filter((m) => m.tailored).length;
+    if (!tailored) return t("{count} files · all following", { count });
+    // Every file on a copy, every copy tailored, and every copy the same as the first: the case
+    // after copying one file's gates to the rest, when the template is the odd one out.
+    const copies = group.members.map((m) => (m.copy ? storedTreeOf(m.copy.id) : null));
+    if (tailored === count && copies.every((c) => c)) {
+      const first = copies[0]!;
+      const alike = copies.every((c) => {
+        const bySource = (tree: StoredHierarchy) => Object.fromEntries(Object.entries(tree.source_gate_ids ?? {}).map(([own, src]) => [src, tree.gates[own]]));
+        const x = bySource(first), y = bySource(c!);
+        const keys = Object.keys(x);
+        return keys.length === Object.keys(y).length && keys.every((k) => x[k] && y[k] && gateGeometryEquals(x[k], y[k]));
+      });
+      if (alike) return t("{count} files · all identical, none following the tree", { count });
+    }
+    return t("{count} files · {tailored} tailored", { count, tailored });
+    // storedTreeOf reads the store directly; its inputs are listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hierarchyGroups, state.active_hierarchy_id, state.hierarchies, state.stored_hierarchies, state.gates, t]);
+  /** On the tree: which files have tailored each of its gates, by the tree's gate id. */
+  const templateTailoredInFiles = useMemo(() => {
+    const out = new Map<string, string[]>();
+    const live = state.hierarchies.find((h) => h.id === state.active_hierarchy_id);
+    if (!live || live.owner_sample_id || !state.root_population_id) return out;
+    const template = { gates: state.gates, gate_order: state.gate_order, populations: state.populations, root_population_id: state.root_population_id };
+    for (const ref of state.hierarchies) {
+      if (ref.source_hierarchy_id !== live.id || !(ref.owner_sample_id || ref.owner_group_id)) continue;
+      const copy = storedTreeOf(ref.id);
+      if (!copy) continue;
+      const name = ref.owner_group_id
+        ? (state.groups.find((g) => g.id === ref.owner_group_id)?.name ?? ref.name)
+        : samples.find((entry) => entry.id === ref.owner_sample_id)?.name ?? ref.name;
+      for (const own of tailoredGateIds(copy, template)) {
+        const source = copy.source_gate_ids?.[own];
+        if (!source) continue;
+        out.set(source, [...(out.get(source) ?? []), name]);
+      }
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.hierarchies, state.active_hierarchy_id, state.gates, state.gate_order, state.populations, state.root_population_id, state.stored_hierarchies, samples]);
   // The chip rows the samples panel offers, and the full column list behind its columns control.
   const sampleFacets = useMemo(
     () => facetColumns(metadata, metadataColumns, facetColumnChoice),
@@ -1248,7 +1899,7 @@ export default function App() {
     }
     markWorkspaceDirty();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.gate_version, state.tree_version, scalesVersion, sampleDataRevisionKey, instrumentMode, globalScales, mode, maxEvents, contourThreshold, densityColorPower, xIdx, yIdx, gatingFontSizes, workspaceCompensation]);
+  }, [state.gate_version, state.tree_version, scalesVersion, sampleDataRevisionKey, instrumentMode, globalScales, mode, maxEvents, contourThreshold, contourLevels, densityColorPower, xIdx, yIdx, gatingFontSizes, workspaceCompensation, layoutWorkspace]);
 
   // Autosave lightweight reference workspaces only. Repacking every embedded FCS on each
   // edit would stall large bundled workspaces; bundles retain their format via manual Save.
@@ -1288,6 +1939,9 @@ export default function App() {
     setSamples([]);
     setActiveSampleId(null);
     setExcludedSampleIds(new Set());
+    setPlotPool(null);
+    setPoolMembersOpen(false);
+    setEditMode("tree");
     setSampleManagerOpen(false);
     setSampleManagerSelection([]);
     setPendingFolderImport(null);
@@ -1314,6 +1968,8 @@ export default function App() {
     setActiveTab("gating");
 
     setInstrumentMode("auto");
+    pendingFitOnLoad.current = null;
+    setLockScalesBetweenFiles(false);
     setScaleCacheEpoch((epoch) => epoch + 1);
     setGlobalScales({});
     channelScales.clear();
@@ -1322,19 +1978,19 @@ export default function App() {
     setScalesVersion((version) => version + 1);
     setPanelVersion((version) => version + 1);
     setOverlayBy("none");
+    setOverlayChannelKey(null);
     setOverlayPalette("default");
 
     illustConfigRef.current = null;
     strategyConfigRef.current = null;
     setIllustrationPresets([]);
     setIllustVersion((version) => version + 1);
+    setLayoutWorkspace(createDefaultLayoutWorkspace());
     setMetadata({});
     setMetadataColumns([]);
     setPopulationMetadata({});
     setPopulationMetaColumns([]);
     setDivisionProfiles({});
-    setPerFileHierarchies(false);
-    setFileHierarchies({});
 
     setPending(null);
     setPendingGatingMlImport(null);
@@ -1390,75 +2046,392 @@ export default function App() {
   const xmlRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<HTMLInputElement>(null);
 
-  // ---- Population hierarchies: several trees over the one shared gate table -------------------
+  // ---- Hierarchies: each owns the gate table and population tree shown in the sidebar ----------
   const activeHierarchy = state.hierarchies.find((h) => h.id === state.active_hierarchy_id) ?? state.hierarchies[0];
   const activeHierarchyIndex = Math.max(0, state.hierarchies.findIndex((h) => h.id === state.active_hierarchy_id)) + 1;
+  const activeStructureLocked = activeHierarchy?.structure_locked === true;
+  /** The tree row above the gate list: the one tree, where edits go, and the ways back. */
+  const viewedGroup = activeSampleId ? state.groups.find((g) => g.id === state.file_groups[activeSampleId]) ?? null : null;
+  const viewedGroupCopy = viewedGroup ? state.hierarchies.find((h) => h.owner_group_id === viewedGroup.id) ?? null : null;
+  const viewedGroupTailored = !!viewedGroupCopy && viewedGroupCopy.source_hierarchy_id !== undefined
+    && (() => { const own = storedTreeOf(viewedGroupCopy.id); return !!own && tailoredGateIds(own, treeOf(viewedGroupCopy.source_hierarchy_id!)).size > 0; })();
+  /** Names every quadrant gate's four populations by the scheme, as the Create quadrant gate dialog would. */
+  const nameQuadrantPopulations = (scheme: QuadrantNaming) => {
+    if (!sample) return;
+    const labelOf = (key: string) => {
+      const idx = sample.index(key);
+      return shortChannelLabel(idx === undefined ? undefined : sample.channels[idx], key);
+    };
+    const names: Record<string, string> = {};
+    for (const gate of Object.values(state.gates)) {
+      if (gate.gate_type !== "quadrant") continue;
+      const four = quadrantPopulationNames(scheme, labelOf(gate.x_channel), labelOf(gate.y_channel));
+      for (const pop of Object.values(state.populations)) {
+        if (pop.gate_refs.length !== 1) continue;
+        const ref = pop.gate_refs[0];
+        if (ref.gate_id !== gate.gate_id || !ref.include || !ref.quadrant) continue;
+        names[pop.population_id] = four[ref.quadrant - 1];
+      }
+    }
+    if (Object.keys(names).length) dispatch({ type: "renamePopulations", names });
+  };
 
-  /** Under per-file hierarchies, the active file belongs to whichever hierarchy is made active. */
-  function assignActiveFile(hierarchyId: string) {
-    if (!perFileHierarchies || !activeSampleId) return;
-    setFileHierarchies((m) => (m[activeSampleId] === hierarchyId ? m : { ...m, [activeSampleId]: hierarchyId }));
-    markWorkspaceDirty();
+  const treeControls: TreeControlsProps = {
+    fileName: fileName || null,
+    editMode: viewedGroup ? editMode : editMode === "group" ? "tree" : editMode,
+    groupName: viewedGroup?.name ?? null,
+    groupColour: viewedGroup ? hierarchyColour(state.groups.findIndex((g) => g.id === viewedGroup.id)) : null,
+    groupFiles: viewedGroup ? Object.values(state.file_groups).filter((gid) => gid === viewedGroup.id).length : 0,
+    groupTailored: viewedGroupTailored,
+    sourceLabel: viewedGroup?.name ?? t("the tree"),
+    fileTailored: activeSampleId !== null && tailoredGatesOfFile.has(activeSampleId),
+    onEditTarget: setEditTarget,
+    onRename: () => setHierarchyModal("rename"),
+    onNameQuadrants: nameQuadrantPopulations,
+    onSwitchTree: switchHierarchyForFile,
+    onDeleteTree: () => setHierarchyModal("delete"),
+    checkedCount: checkedSamples.length,
+    tailoredFiles: tailoredGatesOfFile.size,
+    onRevertFile: revertViewedFile,
+    onRevertGroup: revertViewedGroup,
+    onRevertChecked: revertCheckedFilesToActiveGroup,
+    onRevertAll: revertAllFiles,
+    onPromote: promoteActiveCopyToGroup,
+    summary: groupSummary,
+    message: hierarchyActionMessage,
+  };
+
+  useEffect(() => {
+    if ((activeStructureLocked || poolReadOnly) && drawMode !== "navigate") setDrawMode("navigate");
+  }, [activeStructureLocked, poolReadOnly, drawMode]);
+
+  /** The hierarchy menu selects which owned gate table and population tree are being edited. */
+  function switchHierarchyForFile(id: string) {
+    setPlotPool(null);
+    const member = samples.find(entry => hierarchyOfFile(entry.id) === id)
+      ?? samples.find(entry => templateOf(hierarchyOfFile(entry.id), state.hierarchies)?.id === id);
+    if (member) selectSample(member.id, { keepTree: true });
+    dispatch({ type: "switchHierarchy", id });
   }
 
-  /** The hierarchy menu: switch, and under per-file hierarchies record that the active file is gated there. */
-  function switchHierarchyForFile(id: string) {
-    dispatch({ type: "switchHierarchy", id });
-    assignActiveFile(id);
+  function poolSelectedFiles() {
+    if (checkedSamples.length < 2) return;
+    const first = checkedSamples.find(entry => entry.id === activeSampleId) ?? checkedSamples[0];
+    const template = templateOf(hierarchyOfFile(first.id), state.hierarchies);
+    if (!template || checkedSamples.some(entry => templateOf(hierarchyOfFile(entry.id), state.hierarchies)?.id !== template.id)) {
+      setError("Cannot pool files from different hierarchy groups. Select files from one group, or compare their corresponding populations in Illustration. No files were omitted.");
+      return;
+    }
+    const incompatible = checkedSamples.filter(entry => panelKeyOf(entry.sample) !== panelKeyOf(first.sample)
+      || entry.sample.workspaceScaleContextKey !== first.sample.workspaceScaleContextKey);
+    if (incompatible.length) {
+      setError(`Cannot pool: different panel or assay/scale context in ${incompatible.map(entry => entry.name).join(", ")}. No files were omitted.`);
+      return;
+    }
+    selectSample(first.id, { keepTree: true });
+    dispatch({ type: "switchHierarchy", id: template.id });
+    setPlotPool({ ids: checkedSamples.map(entry => entry.id), hierarchyId: template.id, editTemplate: false });
+    setPoolMembersOpen(false);
+    setError(null);
+  }
+
+  function inspectSample(id: string) {
+    setPlotPool(null);
+    setPoolMembersOpen(false);
+    selectSample(id);
+    // The live tree follows: the effect below puts the right one live for the edit mode.
+  }
+
+  useEffect(() => {
+    if (!plotPool) return;
+    if (plotPool.ids.some(id => !samples.some(entry => entry.id === id)) || plotPool.hierarchyId !== state.active_hierarchy_id) {
+      setPlotPool(null);
+      setPoolMembersOpen(false);
+      setError("The pool was closed because a referenced file or hierarchy changed. Select files and pool again; no partial pool was shown.");
+      return;
+    }
+    const first = includedSamples[0];
+    if (!first) return;
+    if (includedSamples.some(entry => panelKeyOf(entry.sample) !== panelKeyOf(first.sample)
+      || entry.sample.workspaceScaleContextKey !== first.sample.workspaceScaleContextKey)) {
+      setPlotPool(null);
+      setError("The pool was closed because its files now have different panels or assay/scale contexts. No files were omitted.");
+      return;
+    }
+    if (!plotPool.ids.includes(activeSampleId ?? "")) selectSample(first.id, { keepTree: true });
+    // The captured pool owns its primary; action-selection changes never enter this effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plotPool, samples, sampleDataRevisionKey, state.active_hierarchy_id, activeSampleId, panelVersion, scalesVersion]);
+
+  /** Save gates, populations, scales and display settings into the R SingleCellExperiment. */
+  function saveToSce() {
+                  void saveHostedWorkspace(
+                    "explicit",
+                    workspaceEditRevisionRef.current,
+                  )
+                    .then(({ revision, memberships }) => {
+                      setImportMsg(
+                        `Saved GateLab workspace to SCE · revision ${revision}` +
+                          (memberships
+                            ? ` · memberships for ${memberships.populations} population` +
+                              `${memberships.populations === 1 ? "" : "s"} in ` +
+                              `${memberships.hierarchies} hierarch` +
+                              `${memberships.hierarchies === 1 ? "y" : "ies"}`
+                            // The core sent them; an R side that predates them stores nothing and
+                            // says nothing, so say it here rather than let the user find out later.
+                            : " · no memberships stored: this GateLabR predates them, reload it"),
+                      );
+                    })
+                    .catch((cause) => {
+                      setError(cause instanceof Error ? cause.message : String(cause));
+                    });
+  }
+
+  /** Drop every gate, population and hierarchy and keep the files, scales and metadata. */
+  function clearGating() {
+    setClearGatingConfirmOpen(false);
+    if (!sample) return;
+    setPlotPool(null);
+    setPoolMembersOpen(false);
+    dispatch({ type: "clearGating", nEvents: sample.fcs.nEvents });
+    setPopulationMetadata({});
+    setHierarchyActionMessage(null);
+    setChorusImport(null);
+    markWorkspaceDirty();
+    setImportMsg("Gates, populations and hierarchies cleared; the files, scales and metadata are kept. Undo brings them back.");
+  }
+
+  /** The tree a viewed file shows: its own copy while it has tailored gates, else the tree itself. */
+  /** A file's copy with nothing tailored in it goes, and the file follows the tree; not an undo entry. */
+  function dropCopyIfUntailored(fileId: string) {
+    const ref = state.hierarchies.find((h) => h.id === hierarchyOfFile(fileId));
+    if (!ref?.owner_sample_id || ref.owner_sample_id !== fileId || tailoredGatesOfFile.has(fileId)) return;
+    const source = sourceOfFile(fileId);
+    if (!source || source.id === ref.id) return;
+    dispatch({ type: "assignFileHierarchies", assignments: { [fileId]: source.id }, silent: true });
+  }
+
+  /** What a file follows: its group's tree when it is in a group, else the tree itself. */
+  function sourceOfFile(fileId: string): HierarchyRef | null {
+    const groupId = state.file_groups[fileId];
+    const groupCopy = groupId ? state.hierarchies.find((h) => h.owner_group_id === groupId) : undefined;
+    return groupCopy ?? templateOf(hierarchyOfFile(fileId), state.hierarchies);
+  }
+
+  /** The Groups menu in the file list: everything acts on the selected files, or names a group. */
+  function runGroupAction(action: GroupAction) {
+    setHierarchyActionMessage(null);
+    const fileIds = checkedSamples.map((entry) => entry.id);
+    if (action.kind === "new") { setGroupModal({ mode: "new" }); return; }
+    if (action.kind === "rename" || action.kind === "delete") { setGroupModal({ mode: action.kind, groupId: action.groupId }); return; }
+    if (!fileIds.length) return;
+    dispatch({ type: "setFileGroup", fileIds, groupId: action.kind === "assign" ? action.groupId : null });
+    markWorkspaceDirty();
+    const group = action.kind === "assign" ? state.groups.find((g) => g.id === action.groupId) : null;
+    setHierarchyActionMessage(group
+      ? `${fileIds.length} file${fileIds.length === 1 ? "" : "s"} now in "${group.name}". Undo is available.`
+      : `${fileIds.length} file${fileIds.length === 1 ? "" : "s"} out of their group; they follow the tree. Undo is available.`);
+  }
+
+  function applyGroupModal(name: string) {
+    if (!groupModal) return;
+    const modal = groupModal;
+    setGroupModal(null);
+    if (modal.mode === "new") {
+      const fileIds = checkedSamples.map((entry) => entry.id);
+      const id = newHierarchyId();
+      dispatch({ type: "addGroup", id, name, fileIds });
+      markWorkspaceDirty();
+      setHierarchyActionMessage(`Group "${name}" made with ${fileIds.length} file${fileIds.length === 1 ? "" : "s"}. Choose it as the edit target to tailor gates for the group.`);
+    } else if (modal.mode === "rename" && modal.groupId) {
+      dispatch({ type: "renameGroup", id: modal.groupId, name });
+      markWorkspaceDirty();
+    } else if (modal.mode === "delete" && modal.groupId) {
+      const group = state.groups.find((g) => g.id === modal.groupId);
+      dispatch({ type: "deleteGroup", id: modal.groupId });
+      markWorkspaceDirty();
+      if (editMode === "group") setEditMode("tree");
+      setHierarchyActionMessage(`Group "${group?.name ?? ""}" deleted; its files follow the tree. Undo is available.`);
+    }
+  }
+
+  /** The viewed file's group follows the tree again on every gate. */
+  function revertViewedGroup() {
+    if (!viewedGroupCopy) return;
+    dispatch({ type: "revertCopyToSource", id: viewedGroupCopy.id });
+    markWorkspaceDirty();
+    setHierarchyActionMessage(`"${viewedGroup?.name ?? ""}" follows the tree again; its tailoring is dropped. Undo is available.`);
+  }
+
+  /** Where edits go: the tree, for every file, or the viewed file alone. Held until chosen again. */
+  function setEditTarget(target: EditTarget) {
+    setPlotPool(null);
+    setEditMode(target);
+  }
+
+  // The mode holds whatever the viewed file, an undo or an import did to the live tree. This
+  // puts the right tree live again: in "this file only" mode the viewed file's own copy, made
+  // now, quietly, if it has none; otherwise the tree itself. A copy left behind with nothing
+  // tailored in it goes. None of this is an undo entry: it is navigation, not an edit. A pooled
+  // view is left alone, since it edits the tree by construction.
+  useEffect(() => {
+    if (!activeSampleId || plotPool) return;
+    const live = state.hierarchies.find((h) => h.id === state.active_hierarchy_id);
+    if (editMode === "file") {
+      if (live?.owner_sample_id === activeSampleId) return;
+      if (live?.owner_sample_id && !tailoredGatesOfFile.has(live.owner_sample_id)) {
+        dropCopyIfUntailored(live.owner_sample_id); // the source goes live; this runs again for the new copy
+        return;
+      }
+      const copyId = ensureCopyForFile(activeSampleId, { silent: true });
+      if (copyId && copyId !== state.active_hierarchy_id) dispatch({ type: "switchHierarchy", id: copyId, silent: true });
+      return;
+    }
+    // The tree, or the viewed file's group when it is in one and the group is chosen.
+    const groupId = state.file_groups[activeSampleId];
+    const groupCopy = editMode === "group" && groupId ? state.hierarchies.find((h) => h.owner_group_id === groupId) : undefined;
+    const wanted = groupCopy ?? (live ? templateOf(live.id, state.hierarchies) : null);
+    if (!wanted || wanted.id === state.active_hierarchy_id) return;
+    if (live?.owner_sample_id && !tailoredGatesOfFile.has(live.owner_sample_id)) {
+      dropCopyIfUntailored(live.owner_sample_id); // its source goes live; this runs again if that is not the one wanted
+      return;
+    }
+    dispatch({ type: "switchHierarchy", id: wanted.id, silent: true });
+    // ensureCopyForFile and dropCopyIfUntailored read the store directly; their inputs are listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editMode, activeSampleId, plotPool, state.active_hierarchy_id, state.hierarchies, state.file_hierarchies, tailoredGatesOfFile]);
+
+  /** Ask before the viewed file's coordinates become the tree's; the reducer's promoteCopyToTemplate does the rest. */
+  function promoteActiveCopyToGroup() {
+    if (!activeHierarchy || !(activeHierarchy.owner_sample_id || activeHierarchy.owner_group_id) || !activeHierarchy.source_hierarchy_id) return;
+    setPromoteConfirmOpen(true);
+  }
+
+  function confirmPromote() {
+    setPromoteConfirmOpen(false);
+    if (!activeHierarchy || !(activeHierarchy.owner_sample_id || activeHierarchy.owner_group_id)) return;
+    const source = state.hierarchies.find((h) => h.id === activeHierarchy.source_hierarchy_id);
+    const target = source?.owner_group_id ? `The group "${source.name}"` : `The tree "${source?.name ?? ""}"`;
+    const from = activeHierarchy.owner_group_id ? `"${activeHierarchy.name}"` : samples.find((entry) => entry.id === activeHierarchy.owner_sample_id)?.name ?? "this file";
+    dispatch({ type: "promoteCopyToTemplate", copyId: activeHierarchy.id });
+    markWorkspaceDirty();
+    setHierarchyActionMessage(`${target} now has ${from}'s gate coordinates, and every file following it follows again. Undo is available.`);
+  }
+
+  /** A hierarchy's stored form, live or parked, for copying from. */
+  function storedTreeOf(id: string): StoredHierarchy | null {
+    const ref = state.hierarchies.find((h) => h.id === id);
+    if (!ref) return null;
+    if (id === state.active_hierarchy_id) {
+      return {
+        ...ref,
+        gates: state.gates, gate_order: state.gate_order, populations: state.populations,
+        root_population_id: state.root_population_id, active_population_id: state.active_population_id, selected_pop_ids: state.selected_pop_ids,
+      };
+    }
+    return state.stored_hierarchies[id] ?? null;
   }
 
   /**
-   * Turning per-file hierarchies on assigns every unassigned file to the active hierarchy: that
-   * is the tree they were all being gated under, so nothing changes until a file is reassigned.
+   * The file's own copy, made the first time it is wanted: a locked copy of the tree the file is
+   * gated under, which then follows its template until the file tailors a gate. Returns the
+   * copy's id, existing or new, and makes a new one the live tree.
    */
-  function setPerFileHierarchyMode(enabled: boolean) {
-    setPerFileHierarchies(enabled);
-    if (enabled) {
-      setFileHierarchies((m) => {
-        const next = { ...m };
-        for (const entry of samples) if (!(entry.id in next)) next[entry.id] = state.active_hierarchy_id;
-        return next;
-      });
-    }
+  function ensureCopyForFile(fileId: string, options?: { silent?: boolean }): string | null {
+    const currentId = hierarchyOfFile(fileId);
+    const ref = state.hierarchies.find((h) => h.id === currentId);
+    const entry = samples.find((s0) => s0.id === fileId);
+    if (!ref || !entry) return null;
+    if (ref.owner_sample_id === fileId) return ref.id;
+    const source = storedTreeOf(currentId);
+    if (!source || !source.root_population_id) return null;
+    const built = buildPerFileHierarchyCopies(ref, source, [entry], state.hierarchies);
+    if (!built.copies.length) return null;
+    dispatch({ type: "addHierarchyCopies", copies: built.copies, activeHierarchyId: built.assignments[fileId], keepBrowsingPosition: true, assignments: built.assignments, ...(options?.silent ? { silent: true } : {}) });
+    setPopulationMetadata((current) => {
+      const next = { ...current };
+      for (const idMap of built.populationIdMaps) {
+        for (const [oldId, newId] of Object.entries(idMap)) if (current[oldId]) next[newId] = { ...current[oldId] };
+      }
+      return next;
+    });
     markWorkspaceDirty();
+    return built.assignments[fileId];
   }
 
-  function assignCheckedFilesToActiveHierarchy() {
-    if (!checkedSamples.length) return;
-    setFileHierarchies((m) => ({ ...m, ...Object.fromEntries(checkedSamples.map((e) => [e.id, state.active_hierarchy_id])) }));
+  function revertCheckedFilesToActiveGroup() {
+    if (!activeHierarchy || !checkedSamples.length) return;
+    const template = templateOf(activeHierarchy.id, state.hierarchies) ?? activeHierarchy;
+    // Files with nothing tailored already follow the tree; the confirmation names only files that change.
+    const fileIds = checkedSamples.filter((entry) => tailoredGatesOfFile.has(entry.id)).map((entry) => entry.id);
+    if (!fileIds.length) {
+      setHierarchyActionMessage("Every selected file already follows the tree. Nothing to revert.");
+      return;
+    }
+    setHierarchyActionMessage(null);
+    setHierarchyCopyDraft({ sourceId: template.id, fileIds, revert: true });
+  }
+
+  /** Every tailored file follows the tree again, after confirmation. */
+  function revertAllFiles() {
+    if (!activeHierarchy) return;
+    const template = templateOf(activeHierarchy.id, state.hierarchies) ?? activeHierarchy;
+    const fileIds = samples.filter((entry) => tailoredGatesOfFile.has(entry.id)).map((entry) => entry.id);
+    if (!fileIds.length) return;
+    setHierarchyActionMessage(null);
+    setHierarchyCopyDraft({ sourceId: template.id, fileIds, revert: true });
+  }
+
+  function applyHierarchyCopy() {
+    if (!hierarchyCopyDraft) return;
+    // Reverting is pointing the files back at the tree, as Revert does for one file: their copies
+    // go with the move, and one Undo restores every tree and link.
+    const assignments: Record<string, string> = {};
+    const targets = new Set<string>();
+    for (const id of hierarchyCopyDraft.fileIds) {
+      const source = sourceOfFile(id);
+      if (!source) continue;
+      assignments[id] = source.id;
+      targets.add(source.owner_group_id ? `"${source.name}"` : "the tree");
+    }
+    if (!Object.keys(assignments).length) { setError("The tree is no longer available."); return; }
+    dispatch({ type: "assignFileHierarchies", assignments });
+    setHierarchyCopyDraft(null);
     markWorkspaceDirty();
-    setImportMsg(`${checkedSamples.length} checked file${checkedSamples.length === 1 ? "" : "s"} assigned to "${activeHierarchy?.name ?? ""}".`);
+    const n = hierarchyCopyDraft.fileIds.length;
+    const target = targets.size === 1 ? [...targets][0] : "their groups";
+    setHierarchyActionMessage(`${n} file${n === 1 ? "" : "s"} follow ${target} again; their tailoring is dropped. Undo is available.`);
+  }
+
+  /** The viewed file follows the tree again: its copy, and every tailored gate in it, goes. */
+  function revertViewedFile() {
+    if (!activeSampleId) return;
+    const ref = state.hierarchies.find((h) => h.id === hierarchyOfFile(activeSampleId));
+    const source = sourceOfFile(activeSampleId);
+    if (!ref?.owner_sample_id || !source || source.id === ref.id) return;
+    // Pointing the file back at what it follows drops the copy and makes that live, as one undo entry.
+    dispatch({ type: "assignFileHierarchies", assignments: { [activeSampleId]: source.id } });
+    markWorkspaceDirty();
+    setHierarchyActionMessage(`${fileName} follows ${source.owner_group_id ? `"${source.name}"` : "the tree"} again; its tailoring is dropped. Undo is available.`);
   }
 
   function applyHierarchyAction(mode: HierarchyModalMode, name: string) {
     setHierarchyModal(null);
-    if (mode === "new") {
-      const tree = emptyHierarchyTree(sample?.fcs.nEvents ?? null);
-      const id = newHierarchyId();
-      dispatch({ type: "addHierarchy", id, name, ...tree });
-      assignActiveFile(id);
-      setImportMsg(`New hierarchy "${name}": All Events only, over the same gates.`);
-    } else if (mode === "duplicate") {
-      if (!state.root_population_id) return;
-      const copy = cloneHierarchyTree(state.populations, state.root_population_id);
-      const id = newHierarchyId();
-      dispatch({ type: "addHierarchy", id, name, populations: copy.populations, root_population_id: copy.root_population_id });
-      assignActiveFile(id);
-      // The populations have fresh ids; their metadata rows follow them.
-      setPopulationMetadata((m) => {
-        const next = { ...m };
-        for (const [oldId, newId] of Object.entries(copy.idMap)) if (m[oldId]) next[newId] = { ...m[oldId] };
-        return next;
-      });
-      setImportMsg(`Duplicated "${activeHierarchy?.name ?? "the hierarchy"}" as "${name}".`);
-    } else if (mode === "rename") {
-      dispatch({ type: "renameHierarchy", id: state.active_hierarchy_id, name });
+    const tree = templateOf(state.active_hierarchy_id, state.hierarchies) ?? activeHierarchy;
+    if (!tree) return;
+    if (mode === "rename") {
+      dispatch({ type: "renameHierarchy", id: tree.id, name });
     } else if (mode === "delete") {
-      const deleted = state.active_hierarchy_id;
-      dispatch({ type: "deleteHierarchy", id: deleted });
-      // Its files fall back to the first hierarchy, which is what an absent assignment means.
-      setFileHierarchies((m) => Object.fromEntries(Object.entries(m).filter(([, hid]) => hid !== deleted)));
-      setImportMsg(`Deleted the hierarchy "${activeHierarchy?.name ?? ""}"; its gates remain.`);
+      // Only a workspace saved with several trees offers this. The files under the deleted tree
+      // follow the tree that is left; their copies go with the move.
+      const remaining = state.hierarchies.find((h) => !h.owner_sample_id && h.id !== tree.id);
+      if (!remaining) return;
+      const assignments = Object.fromEntries(
+        samples.filter((entry) => templateOf(hierarchyOfFile(entry.id), state.hierarchies)?.id === tree.id).map((entry) => [entry.id, remaining.id]),
+      );
+      if (Object.keys(assignments).length) dispatch({ type: "assignFileHierarchies", assignments });
+      dispatch({ type: "deleteHierarchy", id: tree.id });
+      setImportMsg(`Deleted the tree "${tree.name}" with its gates; its files follow "${remaining.name}".`);
     }
   }
 
@@ -1487,7 +2460,6 @@ export default function App() {
       // means the workspace already has one.
       qc: parentId === (state.root_population_id ?? ""),
       reuse: true,
-      newHierarchyName: null,
     });
     setError(null);
   }
@@ -1638,23 +2610,19 @@ export default function App() {
         reuse: draft.reuse,
       });
       const hasStrategy = state.root_population_id !== null && state.populations[state.root_population_id] !== undefined;
-      pendingCheckpointReasonRef.current = "after-barcode-import";
-      // Into a new hierarchy: it is added first (fresh root, becomes active) and the strategy
-      // then merges under that root. The hierarchy the user was on is left as it was.
-      const newHierarchyName = draft.newHierarchyName?.trim() || null;
-      let attachTo: string | undefined = hasStrategy ? draft.parentId : undefined;
-      if (newHierarchyName) {
-        const tree = emptyHierarchyTree(sample.fcs.nEvents);
-        dispatch({ type: "addHierarchy", id: newHierarchyId(), name: newHierarchyName, ...tree });
-        attachTo = tree.root_population_id;
+      if (activeStructureLocked) {
+        throw new Error("Edits are set to this file only, so a strategy cannot be added here. Choose \"the tree\" as the edit target first; the strategy then goes into the tree for every file.");
       }
+      pendingCheckpointReasonRef.current = "after-barcode-import";
+      const attachTo: string | undefined = hasStrategy ? draft.parentId : undefined;
+      const strategy = result;
       dispatch({
         type: "importGating",
-        gates: result.gates,
-        gate_order: result.gate_order,
-        populations: result.populations,
-        root_population_id: result.root_population_id,
-        mode: hasStrategy || newHierarchyName ? "merge" : "replace",
+        gates: strategy.gates,
+        gate_order: strategy.gate_order,
+        populations: strategy.populations,
+        root_population_id: strategy.root_population_id,
+        mode: hasStrategy ? "merge" : "replace",
         attachTo,
       });
       // Imported ids are fresh UUIDs, which the merge keeps, so the metadata keys are final.
@@ -1685,9 +2653,7 @@ export default function App() {
               ? result.qc.populations.map((p) => `${p.name}${p.parent ? ` (under ${p.parent})` : ""}`).join(", ")
               : result.qc.populations.map((p) => p.name).join(" → ")}`
             : "") +
-          (newHierarchyName
-            ? ` in the new hierarchy "${newHierarchyName}"`
-            : hasStrategy ? ` in ${state.populations[draft.parentId]?.name ?? "the current root"}` : "") +
+          (hasStrategy ? ` in ${state.populations[draft.parentId]?.name ?? "the current root"}` : "") +
           ". Tweak the gates; the populations follow." +
           (result.qc.skipped.length ? ` Left out: ${result.qc.skipped.join(" ")}` : ""),
       );
@@ -1696,9 +2662,232 @@ export default function App() {
     }
   }
 
+  /** One tree of a FACSChorus experiment, rewritten as Gating-ML and taken through the ordinary path. */
+  async function importChorusTree(experiment: ChorusExperiment, index: number) {
+    try {
+      const conv = chorusToGatingML(experiment, index);
+      setChorusImport(conv.record);
+      if (conv.warnings.length) setError(conv.warnings.join("\n"));
+      await prepareGatingImportFromGatingML(
+        conv.gatingMl,
+        ` from FACSChorus experiment · ${conv.label}` +
+          (conv.warnings.length ? ` · ${conv.warnings.length} note(s)` : ""),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** Finish an open-first .cef import after the user chooses the FCS carrying its events. */
+  async function loadFcsForChorus(
+    pending: NonNullable<typeof pendingChorusImport>,
+    files: readonly File[],
+  ) {
+    const file = files[0];
+    if (!file) return;
+    const entries = await importFcsCandidates([{
+      id: crypto.randomUUID(),
+      name: file.name,
+      file,
+      handle: null,
+    }]);
+    const target = entries[entries.length - 1];
+    if (!target) {
+      setPendingChorusImport(null);
+      return;
+    }
+    setPendingChorusImport({ ...pending, targetSampleId: target.id });
+  }
+
+  /** Select a Chorus tree now; when no sample exists, ask for its event data first. */
+  async function chooseChorusTree(experiment: ChorusExperiment, treeIndex: number) {
+    setChorusPicker(null);
+    if (sample && activeSampleId) {
+      await importChorusTree(experiment, treeIndex);
+      return;
+    }
+    const pending = { experiment, treeIndex, targetSampleId: null };
+    setPendingChorusImport(pending);
+    setImportMsg("FACSChorus gates selected · choose the FCS file they belong to");
+    const usesNativePicker = supportsFileSystemAccess();
+    try {
+      const files = await pickFilesOrInput(
+        wspFcsRef.current,
+        FCS_FILE_ACCEPT,
+        "FCS file for FACSChorus gates",
+      );
+      if (files?.length) {
+        await loadFcsForChorus(pending, files);
+      } else if (usesNativePicker) {
+        setPendingChorusImport(null);
+        setImportMsg("FACSChorus import cancelled · no FCS file was opened");
+      }
+    } catch (cause) {
+      setPendingChorusImport(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  // addSampleEntries commits the newly loaded sample through React state. Apply the saved Chorus
+  // tree only after that exact sample is active, so parsing and channel matching see its data.
+  useEffect(() => {
+    if (
+      !pendingChorusImport?.targetSampleId ||
+      pendingChorusImport.targetSampleId !== activeSampleId ||
+      !sample
+    ) return;
+    const pending = pendingChorusImport;
+    setPendingChorusImport(null);
+    void importChorusTree(pending.experiment, pending.treeIndex);
+    // importChorusTree is a declaration whose inputs are captured above; re-running this effect
+    // after unrelated renders would apply the same tree twice.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSampleId, pendingChorusImport, sample]);
+
+  /**
+   * Import the tree each chosen file was recorded under, from the file itself. Files carrying
+   * identical gates share one hierarchy; every hierarchy is assigned to its files, so a sorted
+   * sample is gated under the gates it was sorted under without a picker or a clock. The active
+   * file's tree takes the active hierarchy while that is still empty; an existing strategy is
+   * left alone and every tree gets a new hierarchy.
+   */
+  function importChorusRecordings(fileIds: readonly string[]) {
+    setChorusPicker(null);
+    try {
+      const chosen = loadedChorusRecordings.filter((r) => fileIds.includes(r.fileId));
+      if (!chosen.length) throw new Error("None of the chosen files carries a FACSChorus recording.");
+      const existing = state.root_population_id !== null && hasGatingStrategy({
+        gates: state.gates, populations: state.populations, root_population_id: state.root_population_id,
+      });
+      // Every recording's tree, converted against its own file. The experiment's current gates,
+      // when a .cef is open, let the comparison later name a gate that moved since.
+      const currentGates = chorusPicker?.experiment?.panels[0]?.gates ?? null;
+      const treeLabels = chorusPicker?.experiment
+        ? listChorusTrees(chorusPicker.experiment).map((t) => ({ label: t.kind === "sort" ? t.label.replace(/ · .*$/, "") : t.label, sig: t.kind === "current"
+            ? treeSignature(chorusPicker.experiment!.panels[0].gates)
+            : treeSignature(chorusPicker.experiment!.sorts.find((so) => so.startedAt === t.sortedAt && t.label.startsWith(so.name))?.gates ?? []) }))
+        : [];
+      const warnings: string[] = [];
+      const files: TailoredFile[] = [];
+      let record: ChorusImportRecord | null = null;
+      for (const r of chosen) {
+        const entry = samples.find((e) => e.id === r.fileId);
+        if (!entry) continue;
+        const conv = chorusRecordingToGatingML(r.recording, { currentGates });
+        for (const w of conv.warnings) if (!warnings.includes(w)) warnings.push(w);
+        const pnn: Record<string, string> = {};
+        for (const c of entry.sample.channels) pnn[c.pnn] = c.key;
+        const res = importGatingML(conv.gatingMl, entry.sample.channels.map((c) => c.key), pnn, entry.sample.instrument);
+        const comp = resolveGatingMLCompensation(res.compensation, res.compensation_refs, entry.sample.instrument === "flow", entry.sample.spillover ?? null);
+        if (comp.target !== null && entry.sample.compensationEnabled !== comp.target) entry.sample.setCompensation(comp.target);
+        // Named after the sort whose snapshot the tree is, when a .cef says so, else the recording.
+        const sig = treeSignature(r.recording.panel.gates);
+        const origin = treeLabels.find((tl) => tl.sig === sig)?.label ?? null;
+        files.push({ fileId: r.fileId, fileName: r.fileName, tree: res, origin });
+        if (r.fileId === activeSampleId || !record) record = conv.record;
+      }
+      if (!files.length) throw new Error("None of the chosen files is loaded.");
+      // One tree for the workspace: the viewed file's recording, or the largest group of files
+      // recorded alike, and every other file tailored on the gates it shares with it. A file
+      // whose recording differs in structure is reported: what was dropped, what follows.
+      const templateId = templateOf(state.active_hierarchy_id, state.hierarchies)?.id ?? state.active_hierarchy_id;
+      const plan = planOneTreeImport(files, { templateId, name: "", leadFileId: activeSampleId, existing: state.hierarchies });
+      const name = plan.lead.origin ?? plan.lead.fileName.replace(/\.fcs$/i, "");
+      if (templateId !== state.active_hierarchy_id) dispatch({ type: "switchHierarchy", id: templateId, silent: true });
+      dispatch({
+        type: "importGating",
+        gates: plan.template.tree.gates, gate_order: plan.template.tree.gate_order,
+        populations: plan.template.tree.populations, root_population_id: plan.template.tree.root_population_id,
+        mode: "replace",
+      });
+      dispatch({ type: "renameHierarchy", id: templateId, name });
+      if (plan.copies.length) dispatch({ type: "addHierarchyCopies", copies: plan.copies, activeHierarchyId: templateId, assignments: plan.assignments });
+      else dispatch({ type: "assignFileHierarchies", assignments: plan.assignments });
+      const n = files.length;
+      setImportMsg(
+        `Imported one tree, "${name}", from ${plan.lead.fileName} for ${n} file${n === 1 ? "" : "s"}: ` +
+          `${plan.following} follow it as recorded, ${plan.copies.length} tailored.` +
+          (plan.differing.length
+            ? ` ${plan.differing.length} file${plan.differing.length === 1 ? "" : "s"} recorded a different tree: ${describeDiffering(plan.differing)}.`
+            : "") +
+          (existing ? " The previous gating is replaced; Undo brings it back." : ""),
+      );
+      setChorusImport(record);
+      setError(warnings.length ? warnings.join("\n") : null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /**
+   * A FACSChorus statistics export (`<experiment>_Statistics.csv`): Chorus's own population
+   * counts per recording, under the gates current when it was exported. Opened beside GateLab's
+   * counts on the loaded file of each recording's name; the comparison itself is computed when
+   * the dialog renders, from whatever the trees are then.
+   */
+  async function openChorusStatistics(file: File) {
+    try {
+      const text = await file.text();
+      setChorusStats(parseChorusStatistics(text));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** Every loaded file with GateLab's counts under the hierarchy it is gated under. */
+  function chorusFileCounts(): FileCounts[] {
+    const out: FileCounts[] = [];
+    for (const entry of samples) {
+      const hid = hierarchyOfFile(entry.id);
+      const live = hid === state.active_hierarchy_id;
+      const stored = live ? null : state.stored_hierarchies[hid];
+      if (!live && !stored) continue;
+      const treeState: CoreState = live ? state : {
+        ...state,
+        gates: stored!.gates, gate_order: stored!.gate_order, populations: stored!.populations,
+        root_population_id: stored!.root_population_id, active_population_id: stored!.active_population_id,
+        selected_pop_ids: stored!.selected_pop_ids,
+      };
+      const d = live && entry.id === activeSampleId ? derived : recompute(entry.sample, treeState);
+      const rootId = treeState.root_population_id;
+      const populations = rootId
+        ? populationTreeOrder(d.populations, rootId).filter(({ popId }) => popId !== rootId).map(({ popId, depth }) => {
+            const pop = d.populations[popId];
+            const parent = pop.parent_id && pop.parent_id !== rootId ? d.populations[pop.parent_id] : null;
+            return { name: pop.name, depth, parentName: parent?.name ?? null, events: pop.event_count ?? 0, percentParent: pop.percent_of_parent };
+          })
+        : [];
+      out.push({
+        fileName: entry.name,
+        hierarchyName: state.hierarchies.find((h) => h.id === hid)?.name ?? "",
+        events: entry.sample.fcs.nEvents,
+        populations,
+      });
+    }
+    return out;
+  }
+
   async function prepareGatingImport(file: File) {
     if (!sample || !activeSampleId) return;
     try {
+      // A FACSChorus experiment file is a zip rather than text. It holds the gates as they are
+      // now and a snapshot of them at the start of every sort — the gating a sorted sample was
+      // sorted under — so the user chooses which, unless there is only one.
+      if (isChorusExperimentFile(file.name)) {
+        const experiment = readChorusExperiment(new Uint8Array(await file.arrayBuffer()));
+        const trees = listChorusTrees(experiment).filter((t) => t.gateCount > 0);
+        if (!trees.length) throw new Error("This FACSChorus experiment contains no gates GateLab can read.");
+        // One tree and no recordings to set it beside: nothing to choose. Otherwise the timeline,
+        // which also offers each loaded recording's own tree.
+        if (trees.length === 1 && !loadedChorusRecordings.length) {
+          await importChorusTree(experiment, trees[0].index);
+          return;
+        }
+        setChorusPicker({ experiment, trees });
+        return;
+      }
+
       const text = await file.text();
 
       // A BD FACSDiva experiment export is rewritten into Gating-ML the same way a FlowJo
@@ -1788,7 +2977,7 @@ export default function App() {
 
     if (where.kind === "apply") {
       setPendingFlowJoStrategy(null);
-      void importFlowJoSample(p.text, p.choice, null, p.treeIndex);
+      void importFlowJoSample(p.text, p.choice, null, p.treeIndex, p.perFile ?? [], p.matrixChoice ?? null, p.openedSampleIds ?? []);
       return;
     }
     if (where.kind === "switch") {
@@ -1810,6 +2999,16 @@ export default function App() {
   }, [pendingFlowJoStrategy, sample, activeSampleId, fileName, samples]);
 
   /**
+   * Hold FCS for the open dialog, once each: a file already in the workspace is not loaded a
+   * second time (the dialog counts it as found), and a file already held is not held twice.
+   * Loading a file twice pooled a duplicate of it into the first hierarchy.
+   */
+  function holdFlowJoFiles(files: readonly { name: string; file: File }[]) {
+    const loaded = samples.map((s0) => s0.name);
+    setFlowJoOpen((cur) => cur && { ...cur, pending: [...cur.pending, ...filesToHold(cur.pending, loaded, files)] });
+  }
+
+  /**
    * Gather FCS for an open workspace, starting in the folder the .wsp came from.
    *
    * A plain <input type="file"> cannot be told where to open -- the browser decides, and it
@@ -1818,6 +3017,51 @@ export default function App() {
    * hint needed, since its FCS normally sit beside it. Falls back to the input where that API is
    * unavailable, which loses only the starting folder.
    */
+  /**
+   * Resolve a workspace's FCS from the folder it sits in, in one action.
+   *
+   * A .wsp names its files but the File System Access API hands back only the file the user
+   * picked -- there is no route from a file handle to its parent -- so GateLab cannot look
+   * beside the workspace on its own, however obvious that looks in Finder. Asking for the
+   * FOLDER is the one gesture that grants it, and from there every sample the workspace names
+   * can be matched without the user picking files one by one.
+   *
+   * Only files the workspace actually asks for are taken, so pointing this at a large folder
+   * does not drag its whole contents into the import.
+   */
+  async function chooseFlowJoFolder(state: NonNullable<typeof flowJoOpen>) {
+    if (!supportsDirectoryAccess) {
+      setError("This browser cannot open a folder; choose the FCS files instead.");
+      return;
+    }
+    try {
+      const picked = await pickDirectoryFiles(
+        [".fcs"],
+        state.handle ? { startIn: state.handle } : {},
+      );
+      if (!picked) return;
+      // Every file the workspace names, gated or not. The folder button is how a workspace is
+      // usually opened, and it kept its own gated-only list: the dialog had learned to show a
+      // workspace's compensation controls, and this button still dropped them.
+      const named = [...state.samples, ...state.dataSamples];
+      const wanted = new Set(
+        named.flatMap((sample) =>
+          sample.candidateFileNames.map((name) => name.toLowerCase())),
+      );
+      const matches = picked.files.filter((f) => wanted.has(f.name.toLowerCase()));
+      if (!matches.length) {
+        setError(
+          `No FCS in "${picked.name}" matches the ${named.length} file name(s) ` +
+          `"${state.fileName}" refers to.`,
+        );
+        return;
+      }
+      holdFlowJoFiles(matches.map((f) => ({ name: f.name, file: f.file })));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   async function chooseFlowJoFcs(state: NonNullable<typeof flowJoOpen>) {
     if (!supportsFileSystemAccess()) {
       wspFcsRef.current?.click();
@@ -1832,15 +3076,7 @@ export default function App() {
         state.handle ? { startIn: state.handle } : {},
       );
       if (!picked?.length) return;
-      setFlowJoOpen((cur) => cur && {
-        ...cur,
-        pending: [
-          ...cur.pending,
-          ...picked
-            .filter((f) => !cur.pending.some((q) => q.name === f.name))
-            .map((f) => ({ name: f.name, file: f.file })),
-        ],
-      });
+      holdFlowJoFiles(picked.map((f) => ({ name: f.name, file: f.file })));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -1848,14 +3084,18 @@ export default function App() {
 
   /** Load the files gathered for a .wsp, then hand its strategy to the ordinary import path. */
   async function completeFlowJoOpen(state: NonNullable<typeof flowJoOpen>) {
-    const chosen = state.samples.find((x) => x.index === state.strategySample);
-    if (!chosen) return;
-    setFlowJoOpen(null);
     const loadedNames = samples.map((s0) => s0.name);
     const resolutions = resolveFlowJoWorkspaceFiles(
       state.samples,
       [...loadedNames, ...state.pending.map((f) => f.name)],
     );
+    // One hierarchy per file needs a primary whose FCS was found, whichever row the radio was
+    // left on: the rows are disabled in that mode, so a missing primary had no way out.
+    const chosen = state.perFileTrees
+      ? perFilePrimary(state.samples, resolutions, state.strategySample)
+      : state.samples.find((x) => x.index === state.strategySample);
+    if (!chosen) return;
+    setFlowJoOpen(null);
     const target = resolutions.find((r) => r.sampleIndex === chosen.index);
     if (!target?.fileName) {
       setError(
@@ -1870,19 +3110,48 @@ export default function App() {
         `${skipped.length} of ${state.samples.length} sample(s) in ${state.fileName} had no matching FCS and were skipped.`,
       );
     }
-    // A tree is only chosen when there is a choice; one tree needs no question.
-    const treeIndex = state.strategyTree ?? (chosen.trees.length === 1 ? 0 : null);
+    // A tree is only chosen when there is a choice; one tree needs no question, and several
+    // default to importing ALL of them as separate hierarchies. Making that the default rather
+    // than a required answer is the point: a workspace holding three strategies is not an
+    // ambiguity to resolve, it is three strategies, and GateLab can hold all three.
+    const treeIndex = state.strategyTree ?? (chosen.trees.length === 1 ? 0 : "all");
+    // One hierarchy per file: every sample whose FCS was found, paired with that file. Offered
+    // only when more than one resolved, since a single file has nothing to be per-file about.
+    const resolvedPairs = resolutions
+      .filter((r) => r.fileName !== null)
+      .map((r) => ({
+        sample: state.samples.find((x) => x.index === r.sampleIndex)!,
+        fileName: r.fileName!,
+      }))
+      .filter((pair) => pair.sample);
+    // Files already in the workspace are not loaded a second time: the dialog counted them as
+    // found, and loading them again pooled a duplicate into the first hierarchy.
+    const toLoad = filesToHold([], loadedNames, state.pending);
+    let openedSampleIds: string[] = [];
+    if (toLoad.length) {
+      const added = await importFcsCandidates(toLoad.map((f) => ({
+        id: crypto.randomUUID(), name: f.name, file: f.file, handle: null,
+      })));
+      openedSampleIds = added.map((e) => e.id);
+      // Files whose samples carry no gates -- compensation controls, typically -- load
+      // unchecked. They are there to be used, but pooling them under a strategy drawn on another
+      // file would add their events to every population.
+      const data = ungatedWorkspaceFiles(state.samples, state.dataSamples,
+        [...loadedNames, ...state.pending.map((f) => f.name)]);
+      const dataIds = added.filter((e) => data.has(e.name)).map((e) => e.id);
+      if (dataIds.length) setExcludedSampleIds((prev) => new Set([...prev, ...dataIds]));
+    }
+    // Set once the files are in, so the record can name what this open loaded: cancelling the
+    // strategy question then undoes the open rather than leaving the files without their gates.
     setPendingFlowJoStrategy({
       text: state.text,
       choice: chosen,
       treeIndex,
       targetNames: [target.fileName, ...chosen.candidateFileNames],
+      ...(state.perFileTrees && resolvedPairs.length > 1 ? { perFile: resolvedPairs } : {}),
+      matrixChoice: state.matrixChoice,
+      openedSampleIds,
     });
-    if (state.pending.length) {
-      await importFcsCandidates(state.pending.map((f) => ({
-        id: crypto.randomUUID(), name: f.name, file: f.file, handle: null,
-      })));
-    }
   }
 
   async function importFlowJoSample(
@@ -1891,19 +3160,54 @@ export default function App() {
     matchedOn: FlowJoSampleMatchKey | null = null,
     /** Which of the sample's independent trees; null merges them all, and says so. */
     treeIndex: number | "all" | null = null,
+    /**
+     * One hierarchy per FCS: every OTHER resolved sample's strategy is imported too, each into
+     * its own hierarchy, and each file is bound to the hierarchy drawn on it.
+     *
+     * Gate geometry stays shared, which is what makes this safe to do in one pass — samples of
+     * a workspace that genuinely share a strategy converge on the same gates by name and
+     * channel rather than duplicating them, and only samples whose gates differ add new ones.
+     */
+    perFile: readonly Readonly<{ sample: FlowJoSampleSummary; fileName: string }>[] = [],
+    /** Answered in the open dialog. Null means the import may still need to ask. */
+    matrixChoice: "workspace" | "file" | null = null,
+    /** The files the workspace open loaded, so cancelling the import can unload them again. */
+    openedSampleIds: readonly string[] = [],
   ) {
     // "all": every tree of the sample, converted separately so each can become its own
     // hierarchy. The first is the one the dialog's merge/replace applies to; the rest follow it
     // into new hierarchies named after their root population.
-    const allTrees = treeIndex === "all";
-    const primaryIndex = allTrees ? 0 : treeIndex;
+    // Per-file import overrides the tree question: each file contributes one hierarchy holding
+    // all of its strategies, so there is no per-tree split to make.
+    const perFileImport = perFile.length > 1;
+    const allTrees = !perFileImport && treeIndex === "all";
+    const primaryIndex: number | null =
+      perFileImport ? null : allTrees ? 0 : (typeof treeIndex === "number" ? treeIndex : null);
     const converted = flowJoWorkspaceToGatingML(text, choice.index, primaryIndex);
-    const siblings = allTrees
+    const siblings: { name: string; gatingMl: string; fileName?: string; spillover?: FlowJoSpillover | null }[] = allTrees
       ? choice.trees.slice(1).map((tree) => ({
           name: tree.name,
           gatingMl: flowJoWorkspaceToGatingML(text, choice.index, tree.index).gatingMl,
         }))
       : [];
+    // Every other file's strategy, one hierarchy each, named after the file so the tree panel
+    // and the sample badges read the same way.
+    for (const other of perFile) {
+      if (other.sample.index === choice.index) continue;
+      // ONE hierarchy per file, holding every tree that file carries. Splitting per tree as
+      // well multiplied the two options together -- three files of three strategies produced
+      // nine hierarchies -- when what "one hierarchy per file" says is one. A null tree index
+      // takes all of the sample's top-level trees into a single strategy.
+      const own = flowJoWorkspaceToGatingML(text, other.sample.index, null);
+      siblings.push({
+        name: other.fileName,
+        gatingMl: own.gatingMl,
+        fileName: other.fileName,
+        // The matrix ITS gates were drawn under; a workspace can carry one per sample.
+        spillover: own.spillover,
+        ...(other.sample.owningGroup ? { origin: other.sample.owningGroup } : {}),
+      });
+    }
     if (converted.warnings.length) {
       // Skipped gates are surfaced, never dropped quietly: a hierarchy that silently loses a
       // branch looks like a successful import.
@@ -1912,7 +3216,9 @@ export default function App() {
     await prepareGatingImportFromGatingML(
       converted.gatingMl,
       ` from FlowJo workspace · ${converted.sampleName}` +
-        (allTrees
+        (perFileImport
+          ? ` · one hierarchy per file, ${perFile.length} files`
+          : allTrees
           ? ` · all ${choice.trees.length} strategies, one hierarchy each`
           : primaryIndex !== null && choice.trees.length > 1
             ? ` · ${choice.trees[primaryIndex]?.name ?? `tree ${primaryIndex + 1}`}`
@@ -1923,6 +3229,10 @@ export default function App() {
         (converted.warnings.length ? ` · ${converted.warnings.length} skipped` : ""),
       converted.spillover,
       siblings,
+      perFile.length ? (perFile.find((p0) => p0.sample.index === choice.index)?.fileName ?? null) : null,
+      matrixChoice,
+      openedSampleIds,
+      choice.owningGroup || null,
     );
   }
 
@@ -1930,10 +3240,31 @@ export default function App() {
     text: string,
     wspNote: string,
     workspaceSpillover: FlowJoSpillover | null = null,
-    /** Further top-level trees of the same sample, each destined for its own hierarchy. */
-    siblingTrees: readonly Readonly<{ name: string; gatingMl: string }>[] = [],
+    /** Further top-level trees, each destined for its own hierarchy. Under a per-file import
+     *  these come from OTHER samples too, and each carries the FCS it belongs to. */
+    siblingTrees: readonly Readonly<{ name: string; gatingMl: string; fileName?: string; spillover?: FlowJoSpillover | null; origin?: string }>[] = [],
+    /** The FCS the primary tree belongs to, when importing one hierarchy per file. */
+    primaryFileName: string | null = null,
+    /**
+     * The matrix already chosen in the workspace-open dialog. When set, the import applies it
+     * without asking again -- the question was put where the files were being chosen, which is
+     * the step that already has the context to answer it.
+     */
+    answeredMatrixChoice: "workspace" | "file" | null = null,
+    /** The files a workspace open loaded for this import; cancelling the import unloads them. */
+    openedSampleIds: readonly string[] = [],
+    /** The primary strategy's origin (a FlowJo group), for naming the template it shares. */
+    primaryOrigin: string | null = null,
   ) {
     if (!sample || !activeSampleId) return;
+    // The note names the format the Gating-ML was rewritten from; the dialog is titled after it.
+    const sourceKind: GatingImportSourceKind = wspNote.startsWith(" from FlowJo workspace")
+      ? "flowjo"
+      : wspNote.startsWith(" from FACSChorus")
+        ? "chorus"
+        : wspNote.startsWith(" from FACSDiva")
+          ? "diva"
+          : "gatingml";
     try {
       const pnnMap: Record<string, string> = {};
       for (const c of sample.channels) pnnMap[c.pnn] = c.key;
@@ -1967,13 +3298,13 @@ export default function App() {
       // raw space, CyTOF in arcsinh space.
       const res = importGatingML(
         text, sample.channels.map((c) => c.key), pnnMap, sample.instrument);
-      // Parsed now, with the same channels and instrument, so a tree that cannot be read stops
-      // the import before anything is applied rather than half-way through.
-      const siblings = siblingTrees.map((tree) => ({
-        name: tree.name,
-        result: importGatingML(
-          tree.gatingMl, sample.channels.map((c) => c.key), pnnMap, sample.instrument),
-      }));
+      // Parsed now, so a tree that cannot be read stops the import before anything is applied
+      // rather than half-way through. A tree drawn on ANOTHER loaded file is parsed against that
+      // file's channels and instrument, and gets its own compensation decision: parsed against
+      // the primary, a gate on a channel the primary lacks was dropped as "skipped", and the
+      // other file was never compensated at all.
+      const siblings = siblingTrees.map((tree) =>
+        resolveSiblingImport(tree, sample, samples, activeSampleId));
       const comp = resolveGatingMLCompensation(
         res.compensation,
         res.compensation_refs,
@@ -2015,6 +3346,13 @@ export default function App() {
             `The file's is typically the matrix recorded at acquisition; the workspace's is the ` +
             `compensation in force when these gates were drawn. Compensation will be enabled ` +
             `either way, and which matrix is used changes where every fluorescence gate falls.`;
+        } else if (comp.target && externalSpillover?.replacesEmbedded) {
+          // Both carry a matrix and they agree -- the differing case is handled above -- so this
+          // is the file's own compensation under the workspace's name. This branch used to be
+          // reached here too, and told the user a file that carries a matrix "carries none".
+          compensationNote =
+            `The workspace's spillover matrix "${externalSpillover.label}" matches the one in this ` +
+            `FCS; importing will enable compensation with it.`;
         } else if (comp.target && externalSpillover) {
           // The loaded FCS has no matrix of its own, so this is the only thing that can place the
           // gates. It changes every fluorescence value, so it is stated plainly rather than
@@ -2039,16 +3377,21 @@ export default function App() {
       }
       setPendingGatingMlImport({
         result: res,
+        sourceKind,
         compensation: comp,
         sampleId: activeSampleId,
         siblingTrees: siblings,
+        ...(primaryFileName ? { primaryFileName } : {}),
+        ...(primaryOrigin ? { primaryOrigin } : {}),
         mergeBlockedReason,
         compensationNote,
         sourceNote: wspNote,
         externalSpillover,
         // Defaulting to the workspace's, because that is the compensation the gates were drawn
         // under -- but it is offered as a choice, not asserted as the correct answer.
-        matrixChoice: "workspace",
+        matrixChoice: answeredMatrixChoice ?? "workspace",
+        ...(answeredMatrixChoice ? { matrixAnswered: true } : {}),
+        ...(openedSampleIds.length ? { openedSampleIds } : {}),
       });
       setError(null);
     } catch (e) {
@@ -2062,20 +3405,33 @@ export default function App() {
   // existing strategy, a compensation warning, or two different spillover matrices.
   useEffect(() => {
     if (!pendingGatingMlImport) return;
-    if (gatingImportNeedsDecision(pendingGatingMlImport, state)) return;
-    void applyGatingImport("replace");
+    if (gatingImportNeedsDecision(pendingGatingMlImport, state, samples.length)) return;
+    void applyGatingImport("replace", "all");
     // applyGatingImport is recreated every render and re-running on `state` would re-apply the
     // import; the pending record is what identifies one import, so it alone drives this.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingGatingMlImport]);
 
-  async function applyGatingImport(mode: GatingImportMode) {
+  async function applyGatingImport(mode: GatingImportMode, target: GatingImportTarget = "all") {
     const pendingImport = pendingGatingMlImport;
     if (!sample || !pendingImport || pendingImport.sampleId !== activeSampleId) {
       setPendingGatingMlImport(null);
       setError("The active sample changed before Gating-ML import could be applied. Please import the file again.");
       return;
     }
+    // A tree lands on a group's template, never on a file's copy: the reducer drops a structural
+    // change to a locked copy without a word, and a plain click on a file makes its copy the live
+    // tree. So the live tree's template becomes live first, and everything below lands there.
+    const activeId = templateOf(state.active_hierarchy_id, state.hierarchies)?.id ?? state.active_hierarchy_id;
+    if (activeId !== state.active_hierarchy_id) dispatch({ type: "switchHierarchy", id: activeId });
+    if (gatingImportBusyRef.current) return;
+    gatingImportBusyRef.current = true;
+    setGatingImportBusy(true);
+    // Every sample whose spillover this import touches, with its state before. A failure after
+    // a matrix had been installed used to leave that matrix in place with no strategy to go
+    // with it; until the strategy is committed, a failure puts every sample back.
+    const touched: { sample: Sample; snapshot: ReturnType<Sample["spilloverSnapshot"]> }[] = [];
+    let committed = false;
     try {
       const res = pendingImport.result;
       const comp = pendingImport.compensation;
@@ -2098,8 +3454,40 @@ export default function App() {
         // Replacing the hierarchy is destructive; merge mode retains the current strategy.
         await checkpointCurrentWorkspace("before-gatingml-replace");
       }
+      // Every tree drawn on another loaded file gets the same decision applied to ITS sample,
+      // and first: a file whose hierarchy was imported while it stayed on its original layer
+      // evaluated every fluorescence gate on uncompensated values. Done before the primary is
+      // touched, so a file whose matrix cannot be applied aborts the import with nothing changed.
+      for (const tree of pendingImport.siblingTrees ?? []) {
+        if (!tree.sampleId || !tree.compensation) continue;
+        const entry = samples.find((e) => e.id === tree.sampleId);
+        if (!entry) continue;
+        const target = entry.sample;
+        const own = tree.compensation;
+        touched.push({ sample: target, snapshot: target.spilloverSnapshot() });
+        if (
+          own.target === true &&
+          tree.externalSpillover &&
+          !(tree.externalSpillover.differsFromEmbedded && pendingImport.matrixChoice === "file")
+        ) {
+          target.installExternalSpillover(
+            tree.externalSpillover.matrix,
+            tree.externalSpillover.label,
+            { replaceEmbedded: tree.externalSpillover.replacesEmbedded },
+          );
+        }
+        if (own.target !== null) {
+          target.setCompensation(own.target);
+          if (target.compensationEnabled !== own.target) {
+            throw new Error(
+              `The spillover matrix could not be applied to ${entry.name}, so the gating strategy was not imported.`,
+            );
+          }
+        }
+      }
       // Installed only now that the import is going ahead. It rewrites every fluorescence value,
       // so it must not happen while the confirmation dialog can still be dismissed.
+      touched.push({ sample, snapshot: sample.spilloverSnapshot() });
       if (
         comp.target === true &&
         pendingImport.externalSpillover &&
@@ -2140,52 +3528,133 @@ export default function App() {
         setYRange(null);
         bumpScales();
       }
+      committed = true;
       pendingCheckpointReasonRef.current = "after-gatingml-import";
-      dispatch({
-        type: "importGating",
-        gates: res.gates,
-        gate_order: res.gate_order,
-        populations: res.populations,
-        root_population_id: res.root_population_id,
-        mode,
-        clearHistory: compensationChanged || restoredScales.transformsChanged,
-      });
-      // Each further tree becomes its own hierarchy: added first, so its fresh root is active,
-      // then merged under that root. Gates are shared across hierarchies by design, and the
-      // merge reuses any the first tree already created rather than duplicating them.
       const siblings = pendingImport.siblingTrees ?? [];
-      for (const tree of siblings) {
-        const fresh = emptyHierarchyTree(sample.fcs.nEvents);
-        dispatch({ type: "addHierarchy", id: newHierarchyId(), name: tree.name, ...fresh });
+      // Which hierarchy each FCS belongs to, when the workspace was imported one hierarchy per
+      // file. Collected as the hierarchies are created, because the id is only known here.
+      const assignments: Record<string, string> = {};
+      const entryIdFor = (fileName: string): string | null =>
+        samples.find((entry) => entry.name.toLowerCase() === fileName.toLowerCase())?.id ?? null;
+      // Per-file import, the way FlowJo means it: files whose strategies share a STRUCTURE
+      // (populations and gate identities, geometry aside) share one template hierarchy, and
+      // every file gets a file-owned, structure-locked copy of it carrying its own tailored
+      // coordinates, with provenance back to the template's gates. A file whose structure
+      // differs starts a template of its own. Each sample as its own unlinked hierarchy plus a
+      // copy on top doubled the hierarchies and lost the fact that they were one tree.
+      const perFileFiles: TailoredFile[] = [];
+      const primaryId = pendingImport.primaryFileName ? entryIdFor(pendingImport.primaryFileName) : null;
+      if (pendingImport.primaryFileName && primaryId) {
+        perFileFiles.push({ fileId: primaryId, fileName: pendingImport.primaryFileName, tree: res, origin: pendingImport.primaryOrigin ?? null });
+      }
+      if (pendingImport.primaryFileName) {
+        for (const tree of siblings) {
+          const id = tree.fileName ? entryIdFor(tree.fileName) : null;
+          if (id && tree.fileName) perFileFiles.push({ fileId: id, fileName: tree.fileName, tree: tree.result, origin: tree.origin ?? null });
+        }
+      }
+      let perFileSummary: string | null = null;
+      let tailoredCount: number | null = null;
+      const notImported = siblings.filter((tree) => !tree.fileName || !entryIdFor(tree.fileName)).map((tree) => tree.name);
+      if (perFileFiles.length > 1 && mode === "replace") {
+        // One tree, tailored per file: the primary's strategy is the tree, and every other file
+        // gets it with its own coordinates on the gates they share. Files whose strategy differs
+        // in structure are reported by name with what was dropped and what follows the tree.
+        const plan = planOneTreeImport(perFileFiles, { templateId: activeId, name: "", leadFileId: primaryId, existing: state.hierarchies });
+        const name = templateNameFromOrigin({ key: "", lead: plan.lead, files: perFileFiles }, "Imported strategy");
         dispatch({
           type: "importGating",
-          gates: tree.result.gates,
-          gate_order: tree.result.gate_order,
-          populations: tree.result.populations,
-          root_population_id: tree.result.root_population_id,
-          mode: "merge",
-          attachTo: fresh.root_population_id,
+          gates: plan.template.tree.gates,
+          gate_order: plan.template.tree.gate_order,
+          populations: plan.template.tree.populations,
+          root_population_id: plan.template.tree.root_population_id,
+          mode: "replace",
+          clearHistory: compensationChanged || restoredScales.transformsChanged,
         });
+        dispatch({ type: "renameHierarchy", id: activeId, name });
+        if (plan.copies.length) dispatch({ type: "addHierarchyCopies", copies: plan.copies, activeHierarchyId: activeId, assignments: plan.assignments });
+        else dispatch({ type: "assignFileHierarchies", assignments: plan.assignments });
+        perFileSummary =
+          `Imported one tree, "${name}", from ${plan.lead.fileName} for ${perFileFiles.length} files: ` +
+          `${plan.following} follow it as in the workspace, ${plan.copies.length} tailored.` +
+          (plan.differing.length
+            ? ` ${plan.differing.length} file${plan.differing.length === 1 ? "" : "s"} carried a different tree: ${describeDiffering(plan.differing)}.`
+            : "");
+      } else if (target !== "all" && samples.length > 1 && state.root_population_id) {
+        // The selected files, or the viewed file, take the imported coordinates as tailoring of
+        // the tree they already follow. That needs the tree's structure; the dialog only offers
+        // it then, and this is the same check.
+        const current = { gates: state.gates, gate_order: state.gate_order, populations: state.populations, root_population_id: state.root_population_id };
+        if (!sameStructure(current, res)) {
+          throw new Error("The imported tree differs in structure from this workspace's tree, so it cannot tailor files. Import it for all files to replace the tree, or open it in a new workspace.");
+        }
+        const targetIds = target === "viewed" ? (activeSampleId ? [activeSampleId] : []) : checkedSamples.map((entry) => entry.id);
+        const files: TailoredFile[] = targetIds.flatMap((id) => {
+          const entry = samples.find((candidate) => candidate.id === id);
+          return entry ? [{ fileId: id, fileName: entry.name, tree: res }] : [];
+        });
+        const tailoring = tailorFilesToTree({ id: activeId, name: activeHierarchy?.name ?? "", tree: current }, files, state.hierarchies, new Set(targetIds));
+        const viewedCopy = activeSampleId ? tailoring.copies.find((copy) => copy.owner_sample_id === activeSampleId)?.id : undefined;
+        if (viewedCopy) setEditMode("file"); // the user asked for this file's tailoring: show it
+        if (tailoring.copies.length) dispatch({ type: "addHierarchyCopies", copies: tailoring.copies, activeHierarchyId: viewedCopy ?? activeId, assignments: tailoring.assignments });
+        else if (Object.keys(tailoring.assignments).length) dispatch({ type: "assignFileHierarchies", assignments: tailoring.assignments });
+        tailoredCount = tailoring.copies.length;
+      } else {
+        dispatch({
+          type: "importGating",
+          gates: res.gates,
+          gate_order: res.gate_order,
+          populations: res.populations,
+          root_population_id: res.root_population_id,
+          mode,
+          clearHistory: compensationChanged || restoredScales.transformsChanged,
+        });
+        // Every file follows the tree; a copy a file had is dropped with the move, as the dialog said.
+        for (const entry of samples) assignments[entry.id] = activeId;
+        if (Object.keys(assignments).length) {
+          dispatch({ type: "assignFileHierarchies", assignments });
+        }
       }
       setPendingGatingMlImport(null);
       setError(null);
-      setImportMsg(
+      setImportMsg(perFileSummary
+        ? perFileSummary +
+          (comp.target === true ? " FCS compensation enabled." : "") +
+          (comp.target === false ? " Compensation disabled." : "") +
+          pendingImport.sourceNote
+        :
         `${mode === "merge" ? "Merged" : "Imported"} ${res.n_gates_imported} gates, ${res.n_pops_imported} populations` +
-          (siblings.length
-            ? ` · ${siblings.length} further strateg${siblings.length === 1 ? "y" : "ies"} in ` +
-              `${siblings.length === 1 ? "its own hierarchy" : "their own hierarchies"}: ` +
-              siblings.map((tree) => tree.name).join(", ")
-            : "") +
-          (mode === "merge" ? " · existing strategy retained" : " · current strategy replaced") +
+          (tailoredCount !== null
+            ? (target === "viewed"
+                ? ` · as ${fileName}'s tailoring${tailoredCount ? "" : " (same coordinates as the tree, so nothing is tailored)"}`
+                : ` · as tailoring for the ${checkedSamples.length} selected file${checkedSamples.length === 1 ? "" : "s"} (${tailoredCount} tailored)`)
+            : samples.length > 1 ? ` · applied to all ${samples.length} files` : "") +
+          (tailoredCount !== null ? "" : mode === "merge" ? " · existing strategy retained" : " · current strategy replaced") +
           (comp.target === true ? " · FCS compensation enabled" : "") +
           (comp.target === false ? " · compensation disabled" : "") +
+          (siblings.filter((tree) => tree.sampleId && tree.compensation?.target === true).length
+            ? ` · compensation applied to ${siblings.filter((tree) => tree.sampleId && tree.compensation?.target === true).length} further file(s)`
+            : "") +
+          (notImported.length || (siblings.length && mode === "merge")
+            ? ` · not imported, one tree per workspace: ${(mode === "merge" ? siblings.map((tree) => tree.name) : notImported).join(", ")}`
+            : "") +
           (res.skipped_channels.length
             ? ` · skipped channels: ${res.skipped_channels.join(", ")}`
             : "") +
           pendingImport.sourceNote,
       );
     } catch (e) {
+      if (!committed) {
+        for (const t0 of touched.reverse()) t0.sample.restoreSpillover(t0.snapshot);
+        if (touched.length) {
+          setXRange(null);
+          setYRange(null);
+        }
+      }
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      gatingImportBusyRef.current = false;
+      setGatingImportBusy(false);
     }
   }
 
@@ -2210,6 +3679,47 @@ export default function App() {
     }
   }
 
+  /**
+   * The files a FlowJo export writes, each with the tree it is gated under: the live tree for
+   * files on the active hierarchy, the parked one for the rest. A file whose hierarchy has no
+   * root yet is left out and named.
+   */
+  function flowJoExportSamples(scope: FlowJoExportScope): FlowJoExportSample[] {
+    const entries = scope === "checked" ? checkedSamples : samples;
+    const out: FlowJoExportSample[] = [];
+    for (const entry of entries) {
+      const hid = hierarchyOfFile(entry.id);
+      const tree = hid === state.active_hierarchy_id
+        ? { gates: state.gates, gate_order: state.gate_order, populations: state.populations, root_population_id: state.root_population_id }
+        : (() => {
+            const h = state.stored_hierarchies[hid];
+            return h ? { gates: h.gates, gate_order: h.gate_order, populations: h.populations, root_population_id: h.root_population_id } : null;
+          })();
+      if (!tree || !tree.root_population_id) {
+        throw new Error(`${entry.name} is gated under a hierarchy that has no tree; nothing to write for it.`);
+      }
+      out.push({ sample: entry.sample, fileName: entry.name, ...tree, root_population_id: tree.root_population_id });
+    }
+    return out;
+  }
+
+  function exportFlowJo(scope: FlowJoExportScope) {
+    try {
+      const wanted = flowJoExportSamples(scope);
+      const nameOf = new Map(samples.map((entry) => [entry.id, entry.name]));
+      const groups = state.groups.map((group) => ({
+        name: group.name,
+        fileNames: Object.entries(state.file_groups).filter(([, gid]) => gid === group.id).map(([fileId]) => nameOf.get(fileId) ?? "").filter(Boolean),
+      }));
+      const { xml } = exportFlowJoWorkspace({ samples: wanted, producer: "GateLab", groups });
+      const base = sanitizeFilePart((wanted.length === 1 ? wanted[0].fileName : (fileName || "gates")).replace(/\.[^.]+$/, ""));
+      downloadText(wanted.length === 1 ? `${base}.wsp` : `${base}_and_${wanted.length - 1}_more.wsp`, xml, "application/xml");
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   function exportFcs(
     assay: FcsExportAssay,
     scope: "active" | "combined" | "split",
@@ -2224,7 +3734,7 @@ export default function App() {
         setError("No population selected to export.");
         return false;
       }
-      const scopedEntries = scope === "active" ? [activeEntry] : includedSamples;
+      const scopedEntries = scope === "active" ? [activeEntry] : analysisSamples;
       if (scopedEntries.length === 0) {
         setError("No checked FCS files are available for this export scope.");
         return false;
@@ -2315,9 +3825,9 @@ export default function App() {
 
   const combinedFcsCompatibility = useMemo(
     () => inspectCombinedFcsCompatibility(
-      includedSamples.map((entry) => ({ sample: entry.sample, name: entry.name })),
+      analysisSamples.map((entry) => ({ sample: entry.sample, name: entry.name })),
     ),
-    [includedSamples, sampleDataRevisionKey, panelVersion],
+    [analysisSamples, sampleDataRevisionKey, panelVersion],
   );
 
   function toggleCompensation(on: boolean): boolean {
@@ -2351,6 +3861,48 @@ export default function App() {
     }
   }
 
+  /**
+   * Uninstall the active sample's matrix. Every file carrying that profile's layer returns to
+   * Original in one step, the profile's lineage leaves the workspace, and the axes re-fit: the
+   * "return to no matrix" the tab offers next to the installed-profile pill.
+   */
+  async function removeCompensationProfile(): Promise<void> {
+    if (!sample) throw new Error(t("No active sample is available for compensation."));
+    const manager = compensationManagerRef.current!;
+    if (compensationApplyGuardRef.current || manager.applyInProgress) {
+      const message = t("Compensation is already running. Follow or cancel the current job in the status bar before starting another Apply.");
+      setError(message);
+      throw new Error(message);
+    }
+    const status = sample.compensatedLayerStatus();
+    if (status.state === "missing" || status.metadata.runtimeIdentity !== "profile") return;
+    const profileId = status.metadata.profileId;
+    const record = findCompensationProfile(workspaceCompensation, profileId);
+    cancelCompensationSweepManagers("The compensation matrix was removed.");
+    cancelCompensationCandidatePreview("The compensation matrix was removed.");
+    await checkpointCurrentWorkspace("before-compensation-remove");
+    for (const entry of samples) {
+      const entryStatus = entry.sample.compensatedLayerStatus();
+      if (
+        entryStatus.state !== "missing" &&
+        entryStatus.metadata.runtimeIdentity === "profile" &&
+        entryStatus.metadata.profileId === profileId
+      ) entry.sample.removeCompensatedLayer();
+    }
+    manager.invalidateProfile(profileId);
+    const baselineId = record?.baselineProfileId ?? profileId;
+    setWorkspaceCompensation((current) => ({
+      ...current,
+      lineages: current.lineages.filter(({ baselineProfileId, records }) =>
+        baselineProfileId !== baselineId && !records.some((candidate) => candidate.profileId === profileId)),
+    }));
+    setXRange(null);
+    setYRange(null);
+    setError(null);
+    setImportMsg(t("Compensation matrix removed · original assay active"));
+    markWorkspaceDirty();
+  }
+
   async function applyCompensationProfile(
     profile: CompensationProfileRecord,
     onProgress?: (progress: CompensationApplyProgress) => void,
@@ -2378,7 +3930,7 @@ export default function App() {
       }
     }
     const targetEntries = profile.scientific.kind === "cytof-spillover"
-      ? includedSamples
+      ? checkedSamples
       : activeEntry
         ? [activeEntry]
         : [];
@@ -2875,6 +4427,16 @@ export default function App() {
   // before the user touched a control.
   const channelScales = useRef(new ChannelScales()).current;
   const attachedScales = useRef(new Map<Sample, () => void>());
+  function restoreWorkspaceTransforms(entries: readonly SampleEntry[], workspace: LiveWorkspaceFile, activeIndex: number): void {
+    // Commit only once loading/validation has succeeded. Do not render saved ranges under the
+    // previous workspace's transforms, or let old samples contribute to the new auto scales.
+    for (const detach of attachedScales.current.values()) detach();
+    attachedScales.current.clear();
+    restoreChannelScales(channelScales, entries.map(entry => entry.sample), workspace.samples, activeIndex);
+    for (const { sample } of entries) {
+      attachedScales.current.set(sample, sample.attachChannelScales(channelScales));
+    }
+  }
 
   useEffect(() => channelScales.onChange(() => setScalesVersion((version) => version + 1)),
     [channelScales]);
@@ -2993,14 +4555,57 @@ export default function App() {
     });
   };
 
-  const setGlobalScale = (key: string, range: [number, number] | null) => {
+  const setGlobalScale = useCallback((key: string, range: [number, number] | null) => {
+    if (activeAxisScaleContextKey) {
+      // An edit in the range strip or Scales tab pins this channel in the current scope. The old
+      // channel-only marker made a manual edit look auto-fitted after switching files.
+      autoFittedScales.current.delete(autoFittedScaleKey(activeAxisScaleContextKey, key));
+      // Clearing a range means "fit this channel again", so its plots are unmarked and the fit
+      // effect refits them from the active file into the current scope. Left marked, nothing
+      // refitted and the view fell back to each file's own automatic range: under the lock the
+      // files stopped sharing a frame the moment one channel was reset.
+      if (range === null) {
+        for (const pair of [...fittedAxisPairs.current]) {
+          try {
+            const [context, pairX, pairY] = JSON.parse(pair) as [string, string, string];
+            if (context === activeAxisScaleContextKey && (pairX === key || pairY === key)) fittedAxisPairs.current.delete(pair);
+          } catch {
+            fittedAxisPairs.current.delete(pair);
+          }
+        }
+      }
+    }
     setGlobalScales((prev) => {
       const next = { ...prev };
       if (range) next[key] = range;
       else delete next[key];
       return next;
     });
-  };
+  }, [activeAxisScaleContextKey, setGlobalScales]);
+
+  const toggleScaleLock = useCallback(() => {
+    const nextLocked = !lockScalesBetweenFiles;
+    if (nextLocked) {
+      const lockedContext = axisScaleContextKey(
+        activeSampleId,
+        activeWorkspaceScaleContextKey,
+        true,
+      );
+      // Entering comparison mode freezes exactly the frame on screen. A prior comparison frame
+      // is deliberately replaced; the button means "lock these scales now".
+      if (lockedContext) preserveScalesForContext(lockedContext);
+    }
+    setLockScalesBetweenFiles(nextLocked);
+    setXRange(null);
+    setYRange(null);
+    markWorkspaceDirty();
+  }, [
+    lockScalesBetweenFiles,
+    activeSampleId,
+    activeWorkspaceScaleContextKey,
+    preserveScalesForContext,
+    markWorkspaceDirty,
+  ]);
 
   // Panel tab: rename a channel's display label. Applies to every loaded sample that has the
   // channel (matched by identity `key`) so the shared gate tree stays consistent. Labels are
@@ -3401,6 +5006,8 @@ export default function App() {
     if (entries.length === 0) return;
     if (samples.length === 0) {
       setWorkspaceId(makeWorkspaceId());
+      pendingFitOnLoad.current = null;
+      setLockScalesBetweenFiles(false);
       setScaleCacheEpoch((epoch) => epoch + 1);
       setGlobalScales({});
       channelScales.clear();
@@ -3415,12 +5022,14 @@ export default function App() {
     const activeEntry = entries[entries.length - 1];
     const [nx, ny] = channelsFor(activeEntry.sample);
     setSamples((prev) => [...prev, ...entries]);
-    setActiveSampleId(activeEntry.id);
-    setXIdx(nx);
-    setYIdx(ny);
-    setXRange(null);
-    setYRange(null);
-    setInstrumentMode(activeEntry.sample.instrumentMode); // fresh sample → "auto"
+    if (!plotPool) {
+      setActiveSampleId(activeEntry.id);
+      setXIdx(nx);
+      setYIdx(ny);
+      setXRange(null);
+      setYRange(null);
+      setInstrumentMode(activeEntry.sample.instrumentMode); // fresh sample → "auto"
+    }
     if (state.root_population_id === null) {
       dispatch({ type: "loadSample", nEvents: entries[0].sample.fcs.nEvents });
     }
@@ -3541,6 +5150,25 @@ export default function App() {
               entries.length - 1,
             );
             const active = entries[activeIdx].sample;
+            const restoredScaleLock = workspace.scales.lockBetweenFiles !== false;
+            const restoredScaleMaps = restoredAxisScaleMaps(
+              workspace.scales,
+              entries,
+              activeIdx,
+              restoredScaleLock,
+            );
+            const restoredScaleContext = axisScaleContextKey(
+              entries[activeIdx].id,
+              active.workspaceScaleContextKey,
+              restoredScaleLock,
+            );
+            if (restoredScaleContext) {
+              pendingFitOnLoad.current = {
+                contextKey: restoredScaleContext,
+                ranges: restoredScaleMaps.get(restoredScaleContext) ?? {},
+              };
+            }
+            replaceScalesForNextNamespace(restoredScaleMaps);
             const nextWorkspaceId = workspace.workspaceId ?? makeWorkspaceId();
             compensationManagerRef.current!.resetWorkspace(nextWorkspaceId);
             pendingCheckpointReasonRef.current = "after-workspace-open";
@@ -3551,6 +5179,7 @@ export default function App() {
             } else {
               setWorkspaceCompensation(newEmptyWorkspaceCompensationState());
             }
+            restoreWorkspaceTransforms(entries, workspace, activeIdx);
             setActiveSampleId(entries[activeIdx].id);
             setPopulationMetadata(workspace.populationMetadata ?? {});
             setPopulationMetaColumns(workspace.populationMetaColumns ?? []);
@@ -3558,12 +5187,14 @@ export default function App() {
             setIllustrationPresets(workspace.illustrationPresets ?? []);
             setIllustVersion((version) => version + 1);
             clearPersistedTabState();
+            restorePlottingState(workspace.plotting);
+            setLockScalesBetweenFiles(restoredScaleLock);
             setScaleCacheEpoch((epoch) => epoch + 1);
-            setGlobalScales(workspace.scales.globalScales ?? {});
             setInstrumentMode(active.instrumentMode);
             setMode(workspace.display.mode);
             setMaxEvents(workspace.display.maxEvents);
             setContourThreshold(workspace.display.contourThreshold);
+            setContourLevels(workspace.display.contourLevels ?? 10);
             setDensityColorPower(
               normalizeDensityColorPower(workspace.display.densityColorPower),
             );
@@ -3578,7 +5209,6 @@ export default function App() {
               ...workspace.display.fontSizes,
             });
             const [defaultX, defaultY] = active.defaultChannelIndices();
-            pendingFitOnLoad.current = true;
             setXIdx(active.index(workspace.display.xChannel) ?? defaultX);
             setYIdx(active.index(workspace.display.yChannel) ?? defaultY);
             setXRange(null);
@@ -3588,6 +5218,14 @@ export default function App() {
             setWsStorage("reference");
             setWorkspaceId(nextWorkspaceId);
             setDirty(false);
+            // The SCE's sample order is the workspace's; a count mismatch means the samples
+            // changed under the workspace, and no assignment is safer than a shifted one.
+            const hostedFileHierarchies = workspace.samples.length === entries.length
+              ? Object.fromEntries(workspace.samples.flatMap((wss, i) => (wss.hierarchyId ? [[entries[i].id, wss.hierarchyId]] : [])))
+              : {};
+            const hostedFileGroups = workspace.samples.length === entries.length
+              ? Object.fromEntries(workspace.samples.flatMap((wss, i) => (wss.groupId ? [[entries[i].id, wss.groupId]] : [])))
+              : {};
             dispatch({
               type: "loadWorkspace",
               gates: workspace.gating.gates,
@@ -3600,14 +5238,13 @@ export default function App() {
               // only the active tree would drop them on every reload in GateLabR.
               hierarchies: workspace.gating.hierarchies,
               active_hierarchy_id: workspace.gating.active_hierarchy_id,
-              stored_hierarchies: workspace.gating.stored_hierarchies?.map((h) => ({ ...h, selected_pop_ids: [] })),
+              stored_hierarchies: workspace.gating.stored_hierarchies?.map(
+                (h) => restoreStoredHierarchy(h, workspace.gating.gates)),
+              // A workspace saved with per-file hierarchies off meant every file on the first tree.
+              file_hierarchies: workspace.gating.perFileHierarchies === true ? hostedFileHierarchies : {},
+              groups: workspace.gating.groups ?? [],
+              file_groups: hostedFileGroups,
             });
-            setPerFileHierarchies(workspace.gating.perFileHierarchies === true);
-            // The SCE's sample order is the workspace's; a count mismatch means the samples
-            // changed under the workspace, and no assignment is safer than a shifted one.
-            setFileHierarchies(workspace.samples.length === entries.length
-              ? Object.fromEntries(workspace.samples.flatMap((wss, i) => (wss.hierarchyId ? [[entries[i].id, wss.hierarchyId]] : [])))
-              : {});
             hostedStatus =
               `Restored ${workspace.gating.gate_order.length} gate` +
               `${workspace.gating.gate_order.length === 1 ? "" : "s"} and ` +
@@ -3637,51 +5274,93 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host]);
 
-  /**
-   * Make one file the ONLY checked file, and the primary.
-   *
-   * The checked set is the selection: there is no separate row for the user to keep in step with
-   * it. One checked file still has to supply channels, axes, transforms and the editable gates —
-   * nothing else can — so the first checked file plays that part rather than being chosen
-   * independently. Two selections to manage is what let the header, the plot and the population
-   * counts each describe a different file at the same time.
-   */
+  /** A plain click replaces the action selection; while pooling it leaves the captured view alone. */
   function selectOnlySample(id: string): void {
     if (!samples.some((s) => s.id === id)) return;
     setExcludedSampleIds(new Set(samples.filter((e) => e.id !== id).map((e) => e.id)));
-    selectSample(id);
+    if (!plotPool) inspectSample(id);
   }
 
-  function selectSample(id: string) {
+  function selectSample(id: string, options?: { keepTree?: boolean }) {
     const entry = samples.find((s) => s.id === id);
     if (!entry || id === activeSampleId) return;
     skipDirtyRef.current = true;
     const [nx, ny] = channelsFor(entry.sample);
     setActiveSampleId(id);
-    // Under per-file hierarchies the tree follows the file: its hierarchy becomes the active one.
-    if (perFileHierarchies) {
-      const hid = hierarchyOfFile(id);
-      if (hid !== state.active_hierarchy_id) dispatch({ type: "switchHierarchy", id: hid });
-    }
+    // The live tree follows the file according to the edit mode, in the effect beside
+    // setEditTarget; keepTree is honoured there too, since a pooled view is left alone.
+    void options;
     setXIdx(nx);
     setYIdx(ny);
     setInstrumentMode(entry.sample.instrumentMode);
   }
 
-  // Whenever the checked set changes, the primary must still be one of its members: it is what
-  // supplies the axes and the editable gates, and a primary nobody checked is exactly the state
-  // that showed an unstained control's empty plot beside another file's population counts.
+  // Removing a viewed file is the only selection-independent reason to choose another primary.
   useEffect(() => {
-    if (activeSampleId !== null && includedSamples.some((e) => e.id === activeSampleId)) return;
-    const first = includedSamples[0]?.id ?? null;
-    // With nothing checked, the last primary is KEPT rather than cleared. It still supplies the
-    // channels and axes, so the plot stays on screen and reports zero events; clearing it would
-    // take the whole gating view away and give no clue that the fix is to check a file.
+    if (activeSampleId !== null && samples.some((e) => e.id === activeSampleId)) return;
+    const first = samples[0]?.id ?? null;
     if (first === null) return;
-    selectSample(first);
+    inspectSample(first);
     // selectSample is recreated every render; the guard above is what stops this re-running.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [includedSamples, activeSampleId]);
+  }, [samples, activeSampleId]);
+
+  /** Plots from the Illustration tab, one Layout item each, on the current sheet. */
+  function addPlotsToLayout(recipes: LayoutPlotRecipe[]): void {
+    if (!recipes.length) return;
+    setLayoutWorkspace((current) => {
+      const next = cloneLayoutWorkspace(current);
+      const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
+      if (!sheet) return current;
+      for (const recipe of recipes) {
+        const frame = nextLayoutItemPosition(sheet);
+        sheet.items.push({ id: crypto.randomUUID(), ...frame, recipe });
+        sheet.width = Math.max(sheet.width, frame.x + frame.width + 48);
+        sheet.height = Math.max(sheet.height, frame.y + frame.height + 48);
+      }
+      return next;
+    });
+    markWorkspaceDirty();
+    setActiveTab("layout");
+    setImportMsg(`${recipes.length} plot${recipes.length === 1 ? "" : "s"} added to the Layout tab.`);
+  }
+
+  function openLayoutRecipeInGating(recipe: LayoutPlotRecipe | LayoutStrategyRecipe): void {
+    setPlotPool(null);
+    const entry = samples.find(({ id }) => id === recipe.sampleId);
+    if (!entry) {
+      setError(t("The FCS file referenced by this layout item is not currently loaded."));
+      return;
+    }
+    skipDirtyRef.current = true;
+    setExcludedSampleIds((previous) => {
+      const next = new Set(previous);
+      next.delete(entry.id);
+      return next;
+    });
+    setActiveSampleId(entry.id);
+    setInstrumentMode(entry.sample.instrumentMode);
+    if (state.populations[recipe.populationId]) {
+      dispatch({ type: "setActivePopulation", popId: recipe.populationId });
+    }
+    if (recipe.kind === "biplot") {
+      setXIdx(entry.sample.index(recipe.xChannel) ?? channelsFor(entry.sample)[0]);
+      setYIdx(entry.sample.index(recipe.yChannel ?? "") ?? channelsFor(entry.sample)[1]);
+    } else if (recipe.kind === "histogram") {
+      setXIdx(entry.sample.index(recipe.xChannel) ?? channelsFor(entry.sample)[0]);
+    } else {
+      const pop = state.populations[recipe.populationId];
+      const gate = pop?.gate_refs
+        .map(({ gate_id }) => state.gates[gate_id])
+        .find(Boolean);
+      const [fallbackX, fallbackY] = channelsFor(entry.sample);
+      setXIdx(gate ? entry.sample.index(gate.x_channel) ?? fallbackX : fallbackX);
+      setYIdx(gate ? entry.sample.index(gate.y_channel) ?? fallbackY : fallbackY);
+    }
+    setXRange(null);
+    setYRange(null);
+    setActiveTab("gating");
+  }
 
   function setSampleIncluded(id: string, included: boolean): void {
     setExcludedSampleIds((previous) => {
@@ -3751,7 +5430,8 @@ export default function App() {
     setExcludedSampleIds((previous) => new Set([...previous].filter((id) => !removed.has(id))));
     setMetadata((previous) => Object.fromEntries(Object.entries(previous).filter(([id]) => !removed.has(id))));
     setDivisionProfiles((previous) => Object.fromEntries(Object.entries(previous).filter(([id]) => !removed.has(id))));
-    setFileHierarchies((previous) => Object.fromEntries(Object.entries(previous).filter(([id]) => !removed.has(id))));
+    // Bookkeeping, not an edit: no undo entry, and a removed file's copy stays as a record.
+    dispatch({ type: "assignFileHierarchies", assignments: Object.fromEntries([...removed].map((id) => [id, null])), silent: true });
     if (activeSampleId !== null && removed.has(activeSampleId)) {
       skipDirtyRef.current = true;
       const na = next[0] ?? null;
@@ -3768,8 +5448,8 @@ export default function App() {
     setImportMsg(`Removed ${ids.length} sample${ids.length === 1 ? "" : "s"} from the workspace.`);
   }
 
-  async function importFcsCandidates(candidates: readonly FcsImportCandidate[]): Promise<void> {
-    if (candidates.length === 0) return;
+  async function importFcsCandidates(candidates: readonly FcsImportCandidate[]): Promise<SampleEntry[]> {
+    if (candidates.length === 0) return [];
     setBusy(true);
     setError(null);
     const entries: SampleEntry[] = [];
@@ -3800,6 +5480,7 @@ export default function App() {
       setSampleImportProgress(null);
       setBusy(false);
     }
+    return entries;
   }
 
   // Open (add) one or more FCS files — native handles where supported, input fallback elsewhere.
@@ -3857,6 +5538,14 @@ export default function App() {
 
   function buildWorkspaceFile(): LiveWorkspaceFile | null {
     if (samples.length === 0 || !sample) return null;
+    const perSampleGlobalScales = Object.fromEntries(samples.map((entry) => {
+      const contextKey = axisScaleContextKey(
+        entry.id,
+        entry.sample.workspaceScaleContextKey,
+        false,
+      );
+      return [entry.id, contextKey ? scalesForContext(contextKey) : {}];
+    }));
     const legacy: WorkspaceFile = {
       format: "gatelab-workspace",
       version: 2,
@@ -3875,9 +5564,10 @@ export default function App() {
         compensationOn: e.sample.compensationEnabled,
         instrumentMode: e.sample.instrumentMode,
         labels: e.sample.labelOverrides(),
-        metadata: metadata[e.id] ?? {},
+        metadata: { ...metadata[e.id], [SAMPLE_ID_FIELD]: sampleDisplayId(e.name, metadata[e.id]) },
         division: divisionProfiles[e.id],
         ...(fileHierarchies[e.id] ? { hierarchyId: fileHierarchies[e.id] } : {}),
+        ...(state.file_groups[e.id] ? { groupId: state.file_groups[e.id] } : {}),
       })),
       activeSample: Math.max(0, samples.findIndex((e) => e.id === activeSampleId)),
       gating: {
@@ -3886,19 +5576,36 @@ export default function App() {
         populations: state.populations,
         root_population_id: state.root_population_id,
         active_population_id: state.active_population_id,
-        selected_gate_id: state.selected_gate_id,
-        hierarchies: state.hierarchies.map((h) => ({ id: h.id, name: h.name })),
+        selected_gate_id: state.selected_gate_id && state.gates[state.selected_gate_id]
+          ? state.selected_gate_id
+          : null,
+        hierarchies: state.hierarchies.map((h) => ({ ...h })),
+        ...(state.groups.length ? { groups: state.groups.map((g) => ({ ...g })) } : {}),
         active_hierarchy_id: state.active_hierarchy_id,
         stored_hierarchies: Object.values(state.stored_hierarchies).map((h) => ({
           id: h.id,
           name: h.name,
+          ...(h.owner_sample_id ? { owner_sample_id: h.owner_sample_id } : {}),
+          ...(h.structure_locked !== undefined ? { structure_locked: h.structure_locked } : {}),
+          ...(h.source_hierarchy_id ? { source_hierarchy_id: h.source_hierarchy_id } : {}),
+          ...(h.source_gate_ids ? { source_gate_ids: h.source_gate_ids } : {}),
+          ...(h.source_population_ids ? { source_population_ids: h.source_population_ids } : {}),
+          // Its own geometry travels with it. Without this a parked hierarchy would come back
+          // pointing at gates that belong to whichever hierarchy happened to be active.
+          gates: h.gates,
+          gate_order: h.gate_order,
           populations: h.populations,
           root_population_id: h.root_population_id,
           active_population_id: h.active_population_id,
         })),
-        ...(perFileHierarchies ? { perFileHierarchies: true } : {}),
+        // Every file is in a group, so the assignments always mean what they say.
+        perFileHierarchies: true,
       },
-      scales: { globalScales },
+      scales: {
+        globalScales,
+        lockBetweenFiles: lockScalesBetweenFiles,
+        perSampleGlobalScales,
+      },
       display: {
         pointAlpha,
         pointSize,
@@ -3907,14 +5614,18 @@ export default function App() {
         mode,
         maxEvents,
         contourThreshold,
+        contourLevels,
         densityColorPower,
         fontSizes: gatingFontSizes,
         branchGatesOnly,
         showUnownedGates,
+        paneWidths: { left: leftWidth, right: sideWidth },
       },
       illustration: illustConfigRef.current ?? undefined,
       illustrationPresets,
-      metadataColumns,
+      layout: layoutWorkspace,
+      plotting: savedPlottingState(),
+      metadataColumns: [{ name: SAMPLE_ID_FIELD }, ...metadataColumns.filter(column => column.name !== SAMPLE_ID_FIELD)],
       populationMetadata,
       populationMetaColumns,
     };
@@ -3971,7 +5682,7 @@ export default function App() {
   /**
    * Every SCE sample, gated under any hierarchy on demand. The active hierarchy reuses the gating
    * already computed for the plot and the background cache; a parked hierarchy is evaluated here
-   * with its own tree over the shared gates.
+   * with its own tree and gate table.
    */
   function hostedMembershipSamples(datasetId: string): HostedMembershipSample[] {
     return samples.map((entry): HostedMembershipSample => {
@@ -4712,8 +6423,24 @@ export default function App() {
     setError(null);
     setImportMsg(`Opening ${wsFileName} · reading workspace`);
     try {
-      // "Workspace" means two different things now: a .gatelab bundle, and a FlowJo .wsp that
-      // carries gates only. Point at the right control rather than failing on the zip header.
+      // "Workspace" includes a .gatelab bundle and gate-only FlowJo/FACSChorus files. Point at
+      // the right control rather than failing on the zip header.
+      // A .cef holds the gates as they are now plus a snapshot per sort, but no event data.
+      // Choose its tree first, then request the FCS it belongs to just as a .wsp requests data.
+      if (isChorusExperimentFile(wsFileName)) {
+        const experiment = readChorusExperiment(new Uint8Array(await file.arrayBuffer()));
+        const trees = listChorusTrees(experiment).filter((tree) => tree.gateCount > 0);
+        if (!trees.length) throw new Error("This FACSChorus experiment contains no gates GateLab can read.");
+        if (sample && activeSampleId && trees.length === 1 && !loadedChorusRecordings.length) {
+          await importChorusTree(experiment, trees[0].index);
+        } else {
+          // Even one tree needs a button when no FCS is loaded: browsers only allow the second
+          // file picker to open directly from a user gesture.
+          setChorusPicker({ experiment, trees });
+          setImportMsg(null);
+        }
+        return;
+      }
       // A .wsp holds gates and the names of the files they were drawn on, but no data. Opening
       // one therefore means gathering its FCS first -- from what is already loaded, plus
       // whatever the user can point at -- rather than refusing until a file happens to be open.
@@ -4722,18 +6449,30 @@ export default function App() {
         if (!isFlowJoWorkspace(text)) {
           throw new Error(`"${wsFileName}" is not a FlowJo workspace GateLab can read.`);
         }
-        const wsSamples = listFlowJoWorkspaceSamples(text).filter((x) => x.gateCount > 0);
+        const allSamples = listFlowJoWorkspaceSamples(text);
+        const wsSamples = allSamples.filter((x) => x.gateCount > 0);
         if (!wsSamples.length) throw new Error("This workspace contains no gates GateLab can read.");
         setFlowJoOpen({
           fileName: wsFileName,
           text,
           handle: wsH,
           samples: wsSamples,
+          // The workspace refers to these files too. Leaving them out made a workspace of thirteen
+          // files report "1/1 found" and load one, with twelve compensation controls left behind.
+          dataSamples: allSamples.filter((x) => x.gateCount === 0),
           pending: [],
           // Pre-select the sample carrying the most gates: with one sample it is the only
           // answer, and with several it is the likeliest strategy of record.
           strategySample: wsSamples.reduce((best, x) => (x.gateCount > best.gateCount ? x : best)).index,
           strategyTree: null,
+          // On by default when the workspace has several samples: a workspace that gates more
+          // than one file is describing more than one file, and importing a single sample's
+          // strategy silently discards the rest. Where the samples share a strategy this costs
+          // nothing -- the gates converge by name and channel -- so the default is safe.
+          perFileTrees: wsSamples.length > 1,
+          // The workspace's, because that is the compensation the gates were drawn under. Only
+          // offered when the two matrices actually differ -- see wspMatrixConflict.
+          matrixChoice: "workspace",
         });
         setImportMsg(null);
         return;
@@ -4829,6 +6568,7 @@ export default function App() {
       const nextMetadata: Record<string, Record<string, string>> = {};
       const nextDivision: Record<string, DivisionProfile> = {};
       const nextFileHierarchies: Record<string, string> = {};
+      const nextFileGroups: Record<string, string> = {};
       for (const wss of ws.samples) {
         let fcsB = fcsByPath?.[wss.dataPath] ?? null;
         let fcsH: FileSystemFileHandle | null = null;
@@ -4897,6 +6637,7 @@ export default function App() {
         entry.sample.applyLabelOverrides(wss.labels ?? {});
         if (wss.metadata && Object.keys(wss.metadata).length) nextMetadata[entry.id] = wss.metadata;
         if (wss.hierarchyId) nextFileHierarchies[entry.id] = wss.hierarchyId;
+        if (wss.groupId) nextFileGroups[entry.id] = wss.groupId;
         if (wss.division) {
           const restoredCoordinateBinding = wss.division.coordinateBindingKey ??
             (entry.sample.index(wss.division.channelKey) === undefined
@@ -4983,9 +6724,29 @@ export default function App() {
       skipDirtyRef.current = true;
       const activeIdx = Math.min(Math.max(0, ws.activeSample), entries.length - 1);
       const active = entries[activeIdx].sample;
-      const targetDisplayContext = active.workspaceScaleContextKey;
-      preserveScalesForContext(targetDisplayContext);
+      restoreWorkspaceTransforms(entries, ws, activeIdx);
+      const restoredScaleLock = ws.scales.lockBetweenFiles !== false;
+      const restoredScaleMaps = restoredAxisScaleMaps(
+        ws.scales,
+        entries,
+        activeIdx,
+        restoredScaleLock,
+      );
+      const restoredScaleContext = axisScaleContextKey(
+        entries[activeIdx].id,
+        active.workspaceScaleContextKey,
+        restoredScaleLock,
+      );
+      if (restoredScaleContext) {
+        pendingFitOnLoad.current = {
+          contextKey: restoredScaleContext,
+          ranges: restoredScaleMaps.get(restoredScaleContext) ?? {},
+        };
+      }
+      replaceScalesForNextNamespace(restoredScaleMaps);
       setSamples(entries);
+      setPlotPool(null);
+      setPoolMembersOpen(false);
       setWorkspaceCompensation(
         ws.version === WORKSPACE_VERSION_3
           ? ws.compensation
@@ -4999,16 +6760,17 @@ export default function App() {
       illustConfigRef.current = ws.illustration ?? null;
       setIllustrationPresets(ws.illustrationPresets ?? []);
       setIllustVersion((v) => v + 1); // remount IllustrationTab so it re-reads the restored config
+      setLayoutWorkspace(normalizeLayoutWorkspace(ws.layout));
       clearPersistedTabState(); // drop old selections so a new workspace's tabs start clean
+      restorePlottingState(ws.plotting);
       setDivisionProfiles(nextDivision);
-      setFileHierarchies(nextFileHierarchies);
-      setPerFileHierarchies(ws.gating.perFileHierarchies === true);
+      setLockScalesBetweenFiles(restoredScaleLock);
       setScaleCacheEpoch((epoch) => epoch + 1);
-      setGlobalScales(ws.scales.globalScales ?? {});
       setInstrumentMode(active.instrumentMode);
       setMode(ws.display?.mode ?? "pseudocolor");
       setMaxEvents(ws.display?.maxEvents ?? 50000);
       setContourThreshold(ws.display?.contourThreshold ?? 5);
+      setContourLevels(ws.display?.contourLevels ?? 10);
       setDensityColorPower(normalizeDensityColorPower(ws.display?.densityColorPower));
       setBranchGatesOnly(
         (ws.display as { branchGatesOnly?: boolean } | undefined)?.branchGatesOnly !== false);
@@ -5017,8 +6779,11 @@ export default function App() {
       setPointAlpha(restoredPointAlpha(ws.display?.pointAlpha));
       setPointSize(restoredPointSize(ws.display?.pointSize));
       setGatingFontSizes({ ...DEFAULT_GATING_FONT_SIZES, ...ws.display?.fontSizes });
+      // The panes as the user left them; a saved right width is theirs, so the auto-fit stands down.
+      const panes = ws.display?.paneWidths;
+      if (panes?.left && Number.isFinite(panes.left)) setLeftWidth(Math.max(200, Math.min(900, panes.left)));
+      if (panes?.right && Number.isFinite(panes.right)) { setSideWidth(Math.max(320, Math.min(900, panes.right))); setAutoSizePopulations(false); }
       const [dx, dy] = active.defaultChannelIndices();
-      pendingFitOnLoad.current = true;
       setXIdx(active.index(ws.display?.xChannel ?? "") ?? dx);
       setYIdx(active.index(ws.display?.yChannel ?? "") ?? dy);
       setXRange(null);
@@ -5038,7 +6803,12 @@ export default function App() {
         selected_gate_id: ws.gating.selected_gate_id,
         hierarchies: ws.gating.hierarchies,
         active_hierarchy_id: ws.gating.active_hierarchy_id,
-        stored_hierarchies: ws.gating.stored_hierarchies?.map((h) => ({ ...h, selected_pop_ids: [] })),
+        stored_hierarchies: ws.gating.stored_hierarchies?.map(
+          (h) => restoreStoredHierarchy(h, ws.gating.gates)),
+        // A workspace saved with per-file hierarchies off meant every file on the first tree.
+        file_hierarchies: ws.gating.perFileHierarchies === true ? nextFileHierarchies : {},
+        groups: ws.gating.groups ?? [],
+        file_groups: nextFileGroups,
       });
       const nS = entries.length;
       setImportMsg(
@@ -5094,6 +6864,9 @@ export default function App() {
   const [pendingIncludedGatingIds, setPendingIncludedGatingIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const backgroundGatingSamples = useMemo(() => fcsExportOpen
+    ? [...new Set([...includedSamples, ...analysisSamples])]
+    : includedSamples, [fcsExportOpen, includedSamples, analysisSamples]);
 
   useEffect(() => {
     if (!activeEntry || !sample) return;
@@ -5127,7 +6900,7 @@ export default function App() {
       };
     }
 
-    const targets = includedSamples.filter((entry) => {
+    const targets = backgroundGatingSamples.filter((entry) => {
       if (entry.id === activeSampleId) return false;
       const cached = inactiveGatingCacheRef.current.get(entry.id);
       return !cached ||
@@ -5182,7 +6955,7 @@ export default function App() {
     fcsExportOpen,
     sample,
     activeSampleId,
-    includedSamples,
+    backgroundGatingSamples,
     samples,
     sampleDataRevisionKey,
     state.gate_version,
@@ -5412,40 +7185,6 @@ export default function App() {
     ],
   );
 
-  // Only the Illustration tab reads these, and each entry costs a full derivePopulationView --
-  // gate counts over every event of that sample, for every gate. Building them while another tab
-  // is showing rebuilds an analysis dataset for a hidden tree on every gate edit, which is the
-  // one thing the performance invariant forbids: on a four-file, 6M-event workspace it was about
-  // 465ms of each ~790ms gate commit, spent on counts nobody was looking at.
-  const illustrationSampleViews = useMemo(() => (activeTab !== "illustration" ? [] : includedSamples.flatMap((entry) => {
-    if (entry.id === activeSampleId) {
-      return [{ id: entry.id, name: entry.name, sample: entry.sample, derived }];
-    }
-    const cached = inactiveGatingCacheRef.current.get(entry.id);
-    if (
-      !cached ||
-      cached.sample !== entry.sample ||
-      cached.dataRevision !== entry.sample.dataRevision ||
-      cached.gateVersion !== state.gate_version
-    ) return [];
-    return [{
-      id: entry.id,
-      name: entry.name,
-      sample: entry.sample,
-      derived: derivePopulationView(entry.sample, state, cached.gating),
-    }];
-  })), [
-    activeTab,
-    includedSamples,
-    activeSampleId,
-    derived,
-    inactiveGatingCacheVersion,
-    state.active_population_id,
-    state.selected_pop_ids,
-    state.root_population_id,
-    state.gate_version,
-  ]);
-
   // Rows for the Population metadata table (Metadata tab): every gated population (root excluded),
   // with read-only derived Parent / Count / % Parent (from the active sample's stats).
   const populationRows = useMemo<MetaRow[]>(() => {
@@ -5479,6 +7218,7 @@ export default function App() {
 
   // gate_list_click also switches the plot axes to the gate's channels (app.R:5030).
   const uiDispatch = (a: Action) => {
+    if (poolReadOnly && !["selectGate", "toggleGateSelect", "clearGateSelection", "setActivePopulation", "togglePopSelect", "setPopSelection", "clearPopSelection"].includes(a.type)) return;
     if (a.type === "selectGate" && a.gateId && sample) {
       const g = state.gates[a.gateId];
       if (g) {
@@ -5541,6 +7281,122 @@ export default function App() {
       ? hostCategoricalValues[overlayColDataColumn] ?? null
       : null;
 
+  /**
+   * The marker overlay's shared colour scale, and the palette it is drawn in.
+   *
+   * One memo rather than one per consumer, because three places need the SAME scale: the
+   * single-file plot payload, the pooled one, and the colour bar beside the plot. A bar reporting
+   * a range the events were not coloured against is worse than no bar at all.
+   *
+   * The scale pools every displayed file that carries the channel, so one colour means one marker
+   * level across a pooled display. It is therefore recomputed when the checked set changes, which
+   * is deliberate: the bar's numbers must describe the events actually on screen.
+   */
+  const markerOverlay = useMemo<{
+    channelKey: string;
+    label: string;
+    scale: MarkerColourScale;
+    palette: string[];
+    power: number;
+    ticks?: MarkerColourBarTick[];
+  } | null>(() => {
+    if (overlayBy !== "channel" || !overlayChannelKey || !sample) return null;
+    // Every file that can be drawn beside this one, pooled into one scale. A file that lacks the
+    // channel has a different panel identity and is already refused from the pooled display with
+    // its own message, so it is skipped here rather than reported a second time.
+    const columns: Float32Array[] = [];
+    const seen = new Set<string>();
+    // The active sample under its own id, so that when it is also among the checked files it is
+    // pooled once: pooled twice, its quantiles weighed double in the scale every other file shared.
+    for (const entry of [{ id: activeSampleId ?? "__active__", sample }, ...includedSamples]) {
+      if (seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      const index = entry.sample.index(overlayChannelKey);
+      if (index === undefined) continue;
+      columns.push(entry.sample.displayColumn(index));
+    }
+    if (columns.length === 0) return null;
+    const activeIndex = sample.index(overlayChannelKey);
+    const scale = markerColourScale(columns);
+    // The bar is labelled by the SAME tick machinery as an axis on this channel, positioned by
+    // where each tick actually falls on the ramp. Reading "0.38" beside an axis reading "10K"
+    // describes one marker in a language the other does not speak, and a logicle channel puts
+    // its decades at uneven fractions, so evenly spaced labels would misplace every one of them.
+    const axisTicks = activeIndex === undefined
+      ? null
+      : sample.channelTicks(activeIndex, [scale.lo, scale.hi]);
+    // Positioned through markerColourFraction, the same function that decides an event's colour,
+    // so moving the contrast slider moves the labels to where those values now sit on the ramp.
+    const inRange = (position: number) => position >= scale.lo && position <= scale.hi;
+    const ticks = axisTicks?.major_pos
+      .map((position, i) => ({
+        position,
+        fraction: markerColourFraction(position, scale, markerColorPower),
+        label: axisTicks.major_labels[i] ?? "",
+      }))
+      .filter(({ position, label }) => label !== "" && inRange(position))
+      .map(({ fraction, label }) => ({ fraction, label }));
+    return {
+      channelKey: overlayChannelKey,
+      label: activeIndex === undefined ? overlayChannelKey : sample.channelLabel(activeIndex),
+      scale,
+      palette: markerColourPalette(overlayMarkerPalette),
+      power: markerColorPower,
+      ...(ticks?.length ? { ticks } : {}),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overlayBy, overlayChannelKey, overlayMarkerPalette, markerColorPower, sample, activeDataRevision, includedSamples, scalesVersion]);
+
+  /**
+   * Everything "Colour by" can be set to, in one list so the picker can search across all of it.
+   *
+   * A spectral panel puts forty-odd channels in here, which is why it is searchable at all: the
+   * plain menu that came before was a scroll to the bottom to find CD8. Typing filters on the
+   * option's own name and on its group heading, so "channel" reaches every marker.
+   */
+  const overlayByOptions = useMemo<SearchableOption[]>(() => {
+    const options: SearchableOption[] = [{ value: "none", label: t("None") }];
+    if (samples.length > 1) options.push({ value: "sample", label: t("Sample") });
+    options.push({ value: "population", label: t("Population") });
+    if (activeSampleId && compatibleDivisionProfiles[activeSampleId]) {
+      options.push({ value: "division", label: t("Division") });
+    }
+    if (sample) {
+      for (const [i, channel] of sample.channels.entries()) {
+        options.push({
+          value: `channel:${channel.key}`,
+          label: sample.channelLabel(i),
+          group: t("Channel"),
+        });
+      }
+    }
+    if (isSceHost) {
+      for (const column of hostCategoricalColumns) {
+        options.push({
+          value: `coldata:${column.name}`,
+          label: `${column.name} (${column.levelCount})`,
+          group: t("colData"),
+        });
+      }
+    }
+    return options;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t, samples.length, activeSampleId, compatibleDivisionProfiles, sample, panelVersion,
+      isSceHost, hostCategoricalColumns]);
+
+  /**
+   * A channel the workspace no longer has is not a colouring, it is a stale pick. Clear it rather
+   * than leaving "Colour by: CD4" selected over a plot drawn in one flat colour.
+   */
+  useEffect(() => {
+    if (overlayBy !== "channel") return;
+    if (!sample || !overlayChannelKey) return;
+    if (sample.index(overlayChannelKey) === undefined) {
+      setOverlayChannelKey(null);
+      setOverlayBy("none");
+    }
+  }, [overlayBy, overlayChannelKey, sample]);
+
   // Per-event colour index for the "Colour by" overlay (population Partition or division level).
   const overlaySpec = useMemo<OverlaySpec | null>(() => {
     if (!sample || overlayBy === "none") return null;
@@ -5565,6 +7421,18 @@ export default function App() {
       // reshuffles the others); the ungated remainder gets the fixed grey, not a moving palette slot.
       const palette = [...levels.map((l) => populationColor(overlayPalette, state.populations[l.popId]?.colorSlot)), UNGATED_COLOR];
       return { colors, palette, labels: [...levels.map((l) => l.name), "ungated"] };
+    }
+    if (overlayBy === "channel") {
+      if (!markerOverlay) return null;
+      const idx = sample.index(markerOverlay.channelKey);
+      if (idx === undefined) return null;
+      // No labels: 256 of them is not a key, it is a wall. The colour bar below the plot carries
+      // the channel name and the ends of the scale instead.
+      return {
+        colors: markerColourLevels(sample.displayColumn(idx), markerOverlay.scale, markerOverlay.power),
+        palette: markerOverlay.palette,
+        labels: [],
+      };
     }
     if (overlayBy === "coldata") {
       const sampleId = activeEntry?.hostSource?.sampleId;
@@ -5592,7 +7460,7 @@ export default function App() {
     for (let e = 0; e < n; e++) colors[e] = assignDivisionLevel(dye[e], prof.boundaries);
     return { colors, palette: divisionPalette(nLevels), labels: Array.from({ length: nLevels }, (_, i) => `Div${i}`) };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, activeDataRevision, overlayBy, overlayPalette, fileName, state.populations, state.root_population_id, state.gate_version, derived, activeSampleId, compatibleDivisionProfiles, activeEntry, overlayColDataValues]);
+  }, [sample, activeDataRevision, overlayBy, overlayPalette, fileName, state.populations, state.root_population_id, state.gate_version, derived, activeSampleId, compatibleDivisionProfiles, activeEntry, overlayColDataValues, markerOverlay]);
 
   // Hierarchy-scoped gate visibility; see branchScopedGateOrder for the rule.
   //
@@ -5637,23 +7505,24 @@ export default function App() {
       !activeYChannelKey ||
       !activeWorkspaceScaleContextKey
     ) return null;
-    const inputs = samples.flatMap((entry): CombinedSamplePlotInput[] => {
-      if (entry.sample.workspaceScaleContextKey !== activeWorkspaceScaleContextKey) return [];
-      const xIndex = entry.sample.index(activeXChannelKey);
-      const yIndex = entry.sample.index(activeYChannelKey);
-      if (xIndex === undefined || yIndex === undefined) return [];
-      return [{
-        id: entry.id,
-        name: entry.name,
-        sample: entry.sample,
-        xIndex,
-        yIndex,
-        mask: null,
-      }];
-    });
+    const xIndex = sample.index(activeXChannelKey);
+    const yIndex = sample.index(activeYChannelKey);
+    if (xIndex === undefined || yIndex === undefined) return null;
+    // "Unlocked" means the blue file fits the plot area. In a pooled display that same blue file
+    // supplies the axes, so its frame remains the deterministic reference until the user locks it.
+    const inputs: CombinedSamplePlotInput[] = [{
+      id: activeSampleId ?? "active",
+      name: fileName,
+      sample,
+      xIndex,
+      yIndex,
+      mask: null,
+    }];
     return buildWorkspaceAxisRanges(inputs);
   }, [
-    samples,
+    sample,
+    activeSampleId,
+    fileName,
     sampleDataRevisionKey,
     activeXChannelKey,
     activeYChannelKey,
@@ -5738,12 +7607,12 @@ export default function App() {
     return pooledGateCounts.counts
       ? {
           text: t("pooled"),
-          hint: t("Pooled over {count} checked files: events inside the gate as a share of the active population, both summed across those files.", { count }),
+          hint: t("Pooled over {count} files: events inside the gate as a share of the active population, both summed across those files.", { count }),
           listText: t("pooled · {count} FCS", { count }),
         }
       : {
           text: t("blue file only"),
-          hint: t("Counts from the blue file alone while the other checked files are gated in the background; the plot pools {count} files.", { count }),
+          hint: t("Counts from the axes file alone while the other pooled files are gated in the background; the plot pools {count} files.", { count }),
           listText: t("blue file only · pooling…"),
         };
   }, [pooledGateCounts, t]);
@@ -5755,14 +7624,22 @@ export default function App() {
 
   const mainPlotGates = useMemo(() => {
     if (!sample) return [];
+    const xKey = sample.channels[xIdx].key;
+    const yKey = sample.channels[yIdx].key;
     return buildPlotGates(
       sample,
       state.gates,
       branchGateOrder,
       labelGateCounts,
-      sample.channels[xIdx].key,
-      sample.channels[yIdx].key,
+      xKey,
+      yKey,
       gateCountScope && { text: gateCountScope.text, hint: gateCountScope.hint },
+      // The ranges the plot shows (per-view, explicit workspace scale, automatic frame), so a
+      // curly quadrant's arms reach the edge of the plot rather than the edge of the data.
+      [
+        xRange ?? globalScales[xKey] ?? workspaceAutomaticRanges?.xRange ?? null,
+        yRange ?? globalScales[yKey] ?? workspaceAutomaticRanges?.yRange ?? null,
+      ],
     );
     // activeDisplayContextKey and scalesVersion are load-bearing: buildPlotGates converts
     // each gate out of raw space with the CURRENT transform, so without them the gate keeps
@@ -5770,7 +7647,27 @@ export default function App() {
     // event cloud and the axis both move to the new one. The gate then appears to slide off
     // its own events even though membership, evaluated in raw space, never changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, state.gates, branchGateOrder, labelGateCounts, gateCountScope, xIdx, yIdx, activeDisplayContextKey, scalesVersion]);
+  }, [sample, state.gates, branchGateOrder, labelGateCounts, gateCountScope, xIdx, yIdx, activeDisplayContextKey, scalesVersion, xRange, yRange, globalScales, workspaceAutomaticRanges]);
+
+  /**
+   * The Gating tab's axis range for every channel of the viewed file: its explicit workspace
+   * scale where one is set, else the automatic frame the Gating tab would fit for it. The
+   * Illustration tab draws a channel on this under "As on the Gating tab", so it matches the
+   * Gating tab whether or not the user has touched that channel's scale. Computed only while
+   * the Illustration tab is open: it walks every channel's events.
+   */
+  const figureGatingRanges = useMemo(() => {
+    const out: Record<string, [number, number]> = {};
+    if (!sample || activeTab !== "illustration") return out;
+    sample.channels.forEach((channel, idx) => {
+      const explicit = globalScales[channel.key];
+      if (explicit) { out[channel.key] = explicit; return; }
+      const auto = buildWorkspaceAxisRanges([{ id: activeSampleId ?? "active", name: fileName, sample, xIndex: idx, yIndex: idx, mask: null }]);
+      if (auto) out[channel.key] = auto.xRange;
+    });
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sample, activeSampleId, fileName, sampleDataRevisionKey, globalScales, scalesVersion, instrumentMode, activeTab]);
 
   const payload = useMemo(() => {
     if (!sample) return null;
@@ -5878,6 +7775,23 @@ export default function App() {
           return best < 0 ? ungated : best;
         };
       });
+    } else if (overlayBy === "channel" && markerOverlay) {
+      // One scale for every file (markerOverlay pools them), so a colour means the same marker
+      // level in each. A file that does not carry the channel contributes no colouring at all:
+      // painting it at level 0 would read as "uniformly negative for this marker", which is a
+      // claim about the data rather than about the panel.
+      colorPalette = markerOverlay.palette;
+      colorLabels = [];
+      compatible.forEach(({ entry }, index) => {
+        const channelIndex = entry.sample.index(markerOverlay.channelKey);
+        if (channelIndex === undefined) {
+          inputs[index].colorIndex = MARKER_MISSING_LEVEL;
+          return;
+        }
+        const values = entry.sample.displayColumn(channelIndex);
+        inputs[index].colorAt = (eventIndex) =>
+          markerColourLevel(values[eventIndex], markerOverlay.scale, markerOverlay.power);
+      });
     } else if (overlayBy === "coldata" && overlayColDataValues) {
       const column = overlayColDataValues;
       const missing = column.levels.length;
@@ -5965,6 +7879,7 @@ export default function App() {
     overlaySpec,
     overlayBy,
     overlayPalette,
+    markerOverlay,
     includedDisplaySelections,
     pendingIncludedGatingIds,
     activeSampleId,
@@ -6003,26 +7918,56 @@ export default function App() {
   // transform no longer describes the data. Holding it would pin the axis to a stale frame
   // while the events move underneath — which is exactly what made the W slider look dead.
   useEffect(() => {
-    if (!sample || !workspaceAutomaticRanges) return;
+    if (!sample || !workspaceAutomaticRanges || !activeAxisScaleContextKey) return;
+    const pendingRestore = pendingFitOnLoad.current;
+    if (pendingRestore) {
+      // Workspace open and this passive fit race each other. Wait until the contextual cache has
+      // actually put the saved map on screen; otherwise the old workspace's map (or an empty one)
+      // can be fitted and written over the restored values in the same commit.
+      if (
+        pendingRestore.contextKey !== activeAxisScaleContextKey ||
+        !sameGlobalScales(globalScales, pendingRestore.ranges)
+      ) return;
+      pendingFitOnLoad.current = null;
+    }
     const bindingKeyFor = (key: string): string | null => {
       try {
-        return sample.displayCoordinateBindingKey(key);
+        // Locked comparisons share coordinates even across file-specific compensation profiles.
+        // Unlocked auto-fit must still notice a new assay result on the same file.
+        return JSON.stringify([key, sample.transformSpec(key), lockScalesBetweenFiles ? null : sample.activeAssayBindingKey]);
       } catch {
         return null;
       }
     };
+    const xKey = sample.channels[xIdx]?.key;
+    const yKey = sample.channels[yIdx]?.key;
+    if (!xKey || !yKey) return;
 
     // Discard auto-fits whose channel has since been re-transformed, and allow their pairs to
     // fit again at the new transform.
     const stale: string[] = [];
-    for (const [key, fittedUnder] of autoFittedScales.current) {
+    for (const key of [xKey, yKey]) {
+      const fittedUnder = autoFittedScales.current.get(
+        autoFittedScaleKey(activeAxisScaleContextKey, key),
+      );
+      if (!fittedUnder) continue;
       const current = bindingKeyFor(key);
       if (current !== null && current !== fittedUnder) stale.push(key);
     }
     if (stale.length) {
-      for (const key of stale) autoFittedScales.current.delete(key);
+      for (const key of stale) {
+        autoFittedScales.current.delete(autoFittedScaleKey(activeAxisScaleContextKey, key));
+      }
       for (const pair of [...fittedAxisPairs.current]) {
-        if (stale.some((key) => pair.includes(key))) fittedAxisPairs.current.delete(pair);
+        try {
+          const [context, pairX, pairY] = JSON.parse(pair) as [string, string, string];
+          if (
+            context === activeAxisScaleContextKey &&
+            stale.some((key) => key === pairX || key === pairY)
+          ) fittedAxisPairs.current.delete(pair);
+        } catch {
+          fittedAxisPairs.current.delete(pair);
+        }
       }
       setGlobalScales((prev) => {
         const next = { ...prev };
@@ -6032,30 +7977,32 @@ export default function App() {
       return; // refit on the next pass, once the cleared map has committed
     }
 
-    const xKey = sample.channels[xIdx]?.key;
-    const yKey = sample.channels[yIdx]?.key;
-    if (!xKey || !yKey) return;
-    const pairKey = JSON.stringify([activeWorkspaceScaleContextKey, xKey, yKey]);
+    const pairKey = JSON.stringify([activeAxisScaleContextKey, xKey, yKey]);
     if (fittedAxisPairs.current.has(pairKey)) return;
     // Marked fitted on first sight even when the plot has no gates yet, so that later drawing
     // or editing a gate cannot trigger a fit: the viewport invariant is that gate edits never
     // rescale. Fitting belongs to arriving at a plot, not to changing what is on one.
     fittedAxisPairs.current.add(pairKey);
-    pendingFitOnLoad.current = false;
 
     const axes = [
       { key: xKey, idx: xIdx, auto: workspaceAutomaticRanges.xRange, axis: "x" as const },
       { key: yKey, idx: yIdx, auto: workspaceAutomaticRanges.yRange, axis: "y" as const },
     ];
     for (const { key, idx, auto, axis } of axes) {
-      if (globalScales[key] && !autoFittedScales.current.has(key)) continue; // user-pinned
+      const fittedKey = autoFittedScaleKey(activeAxisScaleContextKey, key);
+      if (globalScales[key] && (lockScalesBetweenFiles || !autoFittedScales.current.has(fittedKey))) continue;
       const binding = bindingKeyFor(key);
-      if (binding) autoFittedScales.current.set(key, binding);
-      setGlobalScale(key, includePlotGatesInAxisRange(auto ?? sample.displayRange(idx), mainPlotGates, axis));
+      if (binding) autoFittedScales.current.set(fittedKey, binding);
+      const range = includePlotGatesInAxisRange(
+        auto ?? sample.displayRange(idx),
+        mainPlotGates,
+        axis,
+      );
+      setGlobalScales((previous) => ({ ...previous, [key]: range }));
     }
   }, [
     sample, workspaceAutomaticRanges, mainPlotGates, xIdx, yIdx, globalScales,
-    activeWorkspaceScaleContextKey, scalesVersion,
+    activeAxisScaleContextKey, scalesVersion, setGlobalScales, lockScalesBetweenFiles,
   ]);
 
   /** Fit both axes to the robust event distribution plus every gate drawn on them. */
@@ -6081,14 +8028,22 @@ export default function App() {
    */
   const fitChannels = useCallback((keys: readonly string[]) => {
     if (!sample) return;
-    const seen = new Set<string>();
-    for (const key of keys) {
-      if (seen.has(key)) continue;
-      seen.add(key);
+    // Only gates that are ON one of the plots being fitted. The button says "fit every plot
+    // shown here to its data and the gates on it", and the Gating tab's fit means exactly that:
+    // buildPlotGates gives it the gates for the two channels on screen and nothing else.
+    //
+    // This gathered every gate in the workspace that touched the channel, in either orientation.
+    // A channel used by a plot that is NOT shown -- Time, or a scatter axis paired with something
+    // else further down the strategy -- brought its gate's coordinates along, and because a fit
+    // only ever expands a range, one gate sitting below the data stretched the axis down and
+    // pressed the events into the top of the plot. Which is the opposite of fitting.
+    const shown = new Set(keys);
+    for (const key of shown) {           // the Set also dedupes a channel used by several plots
       const idx = sample.index(key);
       if (idx === undefined) continue;
       const coords: number[] = [];
       for (const gate of Object.values(state.gates)) {
+        if (!shown.has(gate.x_channel) || !shown.has(gate.y_channel)) continue;
         for (const axis of ["x", "y"] as const) {
           const channel = axis === "x" ? gate.x_channel : gate.y_channel;
           if (channel !== key) continue;
@@ -6163,7 +8118,7 @@ export default function App() {
       payload.x_label, payload.y_label, payload.x_range, payload.y_range,
       payload.display_mode, payload.n_events, payload.contour_threshold,
       payload.x_binding ?? null, payload.y_binding ?? null,
-      pointAlpha, pointSize, densityColorPower,
+      pointAlpha, pointSize, contourLevels, densityColorPower,
     ]);
     const prev = lastSentPayload.current;
     const gatesOnly =
@@ -6176,6 +8131,7 @@ export default function App() {
       ...payload,
       point_alpha: pointAlpha, // user-adjustable opacity (was frozen at the payload's 0.4)
       point_size: pointSize, // mark radius only; density colouring is computed on a fixed grid
+      contour_levels: contourLevels,
       density_color_power: densityColorPower,
       color_labels: undefined, // suppress cytof's in-canvas legend — we render it below the plot
       x_label: lbl(payload.x_label),
@@ -6190,7 +8146,7 @@ export default function App() {
     lastDisplayed.current = out;
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [payload, sample, panelVersion, pointAlpha, pointSize, densityColorPower, gateEdgeMode]);
+  }, [payload, sample, panelVersion, pointAlpha, pointSize, contourLevels, densityColorPower, gateEdgeMode]);
 
   // Colour-by overlay legend (population / division / sample) rendered OUTSIDE the plot.
   const overlayLegend = useMemo(() => {
@@ -6253,8 +8209,8 @@ export default function App() {
               {t("This differs from FlowJo and from Gating-ML 2.0, which both treat a polygon as straight lines in the space the axis is showing. Under that model the gate changes when the view changes. The cost of doing it the other way is that a gate drawn straight in raw values looks bowed on a transformed axis, which the gate-edge control shows you rather than hides.")}
             </p>
             <p>
-              <b>{t("One hierarchy for every file, unless you assign them.")}</b>{" "}
-              {t("GateLab applies the active population hierarchy to every file you have checked. Turn on per-file hierarchies in the population panel to gate each file under its own hierarchy instead: choosing a hierarchy assigns the active file to it, files carry their hierarchy's badge in the sample list, and the pooled display holds the checked files of the active hierarchy. Gates stay shared either way; Cytobank's per-file tailoring of one gate's coordinates has no equivalent here.")}
+              <b>{t("One tree, tailored per file.")}</b>{" "}
+              {t("A workspace holds one tree: its populations and gates apply to every file. Edits change the tree for every file, or, with \"this file only\" chosen, tailor a gate's coordinates for the viewed file alone; a tailored gate stops following the tree's until it is reverted. Revert gate restores one gate, Revert this file restores every gate of a file, and Apply to tree or Use for the tree pushes a file's coordinates back into the tree. The tree's structure is the same for every file; a different tree belongs in a different workspace.")}
             </p>
             <p>
               <b>{t("Gating-ML interchange is still being worked on.")}</b>{" "}
@@ -6262,6 +8218,135 @@ export default function App() {
             </p>
           </span>
         </span>
+        <nav className="gl-header-menus" aria-label={t("Workspace, import and export")}>
+          {isSceHost ? (
+            <MenuButton
+              label="R host"
+              items={[
+                {
+                  label: `Save to SCE${dirty ? " ●" : ""}`,
+                  title: "Save gates, populations, scales, and display settings into the R SingleCellExperiment",
+                  disabled: !sample || !host.workspaces || hostWorkspaceStatus === "saving",
+                  onClick: saveToSce,
+                },
+                ...(host.capabilities.dataModel.writeBackColumns && host.colData
+                  ? [{
+                      label: "Export populations to colData…",
+                      title: "Write exact full-data population memberships into SingleCellExperiment colData",
+                      disabled: !sample || hostColDataBusy || Object.keys(state.populations).length <= 1,
+                      onClick: () => setCrud({ kind: "exportSceColData" }),
+                    }]
+                  : []),
+              ]}
+            />
+          ) : (
+            <MenuButton
+              label={t("Workspace")}
+              items={[
+                {
+                  label: t("New Workspace…"),
+                  title: "Close the current data, gates, and workspace settings and begin an empty workspace",
+                  disabled: busy || !sample || compensationApplyStatus !== null,
+                  onClick: () => setCrud({ kind: "confirmNewWorkspace" }),
+                },
+                {
+                  label: t("Open Workspace…"),
+                  title: "Open a saved .gatelab workspace, a FlowJo .wsp, or a FACSChorus .cef. FlowJo and FACSChorus files hold gates rather than event data, so GateLab will ask for the corresponding FCS.",
+                  disabled: busy || compensationApplyStatus !== null,
+                  onClick: openWorkspace,
+                },
+                {
+                  label: wsHandle ? `${t("Save")}${dirty ? " ●" : ""}` : t("Save Workspace…"),
+                  title: wsHandle
+                    ? wsStorage === "bundle"
+                      ? "Save changes in place while preserving the embedded FCS data"
+                      : "Save gates/populations/scales/compensation back to the linked workspace file (in place)"
+                    : "Choose a location and save the workspace",
+                  disabled: !sample,
+                  onClick: saveWorkspace,
+                },
+                {
+                  label: t("Save As…"),
+                  title: "Save a lightweight reference workspace. Source FCS and compensated values are not embedded; use Save Portable Copy for a self-contained archive.",
+                  disabled: !sample,
+                  onClick: saveWorkspaceAs,
+                },
+                {
+                  label: t("Save Portable Copy…"),
+                  title: "Save a self-contained .gatelab with the exact source FCS and any computed compensated assay, so it can reopen without rerunning compensation.",
+                  disabled: !sample,
+                  onClick: saveBundledCopy,
+                },
+                "separator",
+                {
+                  label: t("Clear gates and populations…"),
+                  className: "gl-clear-gating",
+                  title: "Remove every gate, population and hierarchy and start gating again on the same files. Scales, compensation and metadata are kept, and Undo brings the gating back.",
+                  disabled: !sample || (Object.keys(state.gates).length === 0 && state.hierarchies.length < 2 && Object.keys(state.populations).length < 2),
+                  onClick: () => setClearGatingConfirmOpen(true),
+                },
+              ]}
+            />
+          )}
+          <MenuButton
+            label={t("Import")}
+            disabled={!sample}
+            items={[
+              {
+                label: t("Import gating (GatingML / FlowJo / FACSChorus)…"),
+                title: "Import Gating-ML 2.0 (.xml), a FlowJo workspace (.wsp) or a FACSChorus experiment (.cef), then choose whether to merge into the current hierarchy or replace the current strategy. A workspace carries population names, which FlowJo's own Gating-ML export omits; a Chorus experiment carries the gates as they are now and a snapshot per sort.",
+                onClick: () => void pickFilesOrInput(xmlRef.current, GATING_IMPORT_ACCEPT, "Gating-ML or FlowJo workspace").then((files) => { if (files?.[0]) prepareGatingImport(files[0]); }),
+              },
+              {
+                label: `${t("Import gates recorded in the loaded files…")}${loadedChorusRecordings.length ? ` (${loadedChorusRecordings.length})` : ""}`,
+                title: "Every FCS the FACSDiscover S8 exports carries the gates it was recorded under. Lay the loaded recordings out in time and import each file's own tree, one hierarchy per distinct tree, assigned to its files.",
+                disabled: !loadedChorusRecordings.length,
+                onClick: () => setChorusPicker({ experiment: null, trees: [] }),
+              },
+              {
+                label: t("Import hierarchy CSV…"),
+                title: "Import a hierarchy from a CSV: gate lines, population lines naming their parents, and, for a CyTOF debarcoding scheme, a table with one row per sample and one 0/1 column per barcode channel. Gates come from the file or from a template, so you tweak them rather than draw them.",
+                onClick: () => void pickFilesOrInput(barcodeRef.current, TABLE_FILE_ACCEPT, "Barcode scheme table").then((files) => { if (files?.[0]) void prepareBarcodeImport(files[0]); }),
+              },
+              "separator",
+              {
+                label: t("Compare with FACSChorus statistics…"),
+                title: "Open the statistics FACSChorus exports beside an experiment (<experiment>_Statistics.csv): its event count for every population of every recording, set beside GateLab's count on the loaded file of the same name, with the reason for each difference.",
+                onClick: () => void pickFilesOrInput(chorusStatsRef.current, TABLE_FILE_ACCEPT, "FACSChorus statistics export").then((files) => { if (files?.[0]) void openChorusStatistics(files[0]); }),
+              },
+            ]}
+          />
+          <MenuButton
+            label={t("Export")}
+            disabled={!sample}
+            items={[
+              {
+                label: t("Export GatingML…"),
+                title: "Open the GatingML export dialog: choose standard GateLab/GateLabR or Cytobank-compatible format and review fidelity warnings.",
+                disabled: Object.keys(state.gates).length === 0,
+                onClick: () => setGatingMlExportOpen(true),
+              },
+              {
+                label: t("Export FlowJo workspace…"),
+                title: "Write the loaded files and their gating trees as a FlowJo workspace (.wsp), in the layout FlowJo 10.10 writes, which FlowJo opens and BD FACSChorus imports sort gates from.",
+                disabled: Object.keys(state.gates).length === 0,
+                onClick: () => setFlowJoExportOpen(true),
+              },
+              {
+                label: t("Save hierarchy CSV…"),
+                title: "Write this workspace's gates and populations as a CSV the import reads back: for a debarcoding strategy, the sample table plus every gate and the QC populations, and a gate template (JSON); for any other workspace, every polygon and rectangle gate and every population.",
+                disabled: Object.keys(state.gates).length === 0,
+                onClick: openBarcodeSave,
+              },
+              "separator",
+              {
+                label: t("Export FCS…"),
+                title: "Open the FCS export dialog: choose populations, original/compensated/transformed values, and sample scope.",
+                onClick: () => setFcsExportOpen(true),
+              },
+            ]}
+          />
+        </nav>
         {sample && (
           <span className="gl-meta">
             {/* With several files checked the plot is pooled, so naming one of them and its own
@@ -6414,12 +8499,31 @@ export default function App() {
         </div>
       )}
 
+      {/* The tab strip spans the whole window beneath the header, not the centre column: a tab
+          decides which side panes exist, so the strip cannot live inside a column whose left edge
+          moves with them. Its position is the same on every tab. */}
+      {sample && (
+        <div className="gl-tabs" role="tablist">
+          {TABS.filter((tab) => tab.id !== "layout" || LAYOUT_TAB_AVAILABLE).map((tab) => (
+            <button
+              key={tab.id}
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              className={"gl-tab" + (activeTab === tab.id ? " active" : "")}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              {t(tab.label)}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div className="gl-body">
-        <aside className="gl-left" style={{ width: leftWidth }} aria-label="Samples and workspace">
+        <aside className="gl-left" style={{ width: leftWidth, display: ["illustration", "layout", "proportions", "statistics", "compensation"].includes(activeTab) ? "none" : undefined }} aria-label="Samples and workspace">
           <div className="gl-left-resize" onMouseDown={startLeftResize} title="Drag to resize samples panel" />
           <SampleNavigator
             items={sampleListItems}
-            activeId={activeSampleId}
+            activeId={plotPool ? null : activeSampleId}
             excludedIds={excludedSampleIds}
             busy={busy}
             importProgress={sampleImportProgress}
@@ -6437,6 +8541,11 @@ export default function App() {
               setSampleManagerOpen(true);
             }}
             onActivate={selectOnlySample}
+            onInspect={inspectSample}
+            onSelectIds={(ids) => {
+              const selected = new Set(ids);
+              setExcludedSampleIds(new Set(samples.filter(entry => !selected.has(entry.id)).map(entry => entry.id)));
+            }}
             onToggleIncluded={setSampleIncluded}
             onIncludeAll={includeAllSamples}
             onIncludeNone={includeNoSamples}
@@ -6450,6 +8559,8 @@ export default function App() {
             onToggleFacetLock={toggleSampleFacetLock}
             onToggleFacet={toggleSampleFacet}
             onSetFacetColumns={setFacetColumnChoice}
+            groups={state.groups}
+            onGroupAction={runGroupAction}
             onDropFiles={isSceHost ? undefined : (dropped, directoryCount) => {
               // Same ingestion as "+ Files…": the drop is only another way to pick the files.
               const files = dropped.filter((file) => file.name.toLowerCase().endsWith(".fcs"));
@@ -6525,140 +8636,22 @@ export default function App() {
               const picked = Array.from(e.target.files ?? []);
               e.target.value = "";
               if (!picked.length) return;
+              if (pendingChorusImport) {
+                void loadFcsForChorus(pendingChorusImport, picked);
+                return;
+              }
               // Held rather than loaded: the dialog resolves them by name first, so the user can
               // see what matched before anything is added to the workspace.
-              setFlowJoOpen((cur) => cur && {
-                ...cur,
-                pending: [
-                  ...cur.pending,
-                  ...picked
-                    .filter((f) => !cur.pending.some((q) => q.name === f.name))
-                    .map((f) => ({ name: f.name, file: f })),
-                ],
-              });
+              holdFlowJoFiles(picked.map((f) => ({ name: f.name, file: f })));
             }}
           />
 
-          <div className="gl-side-title" style={{ marginTop: 10 }}>
-            {isSceHost ? "R host" : t("Workspace")}
-          </div>
-          {isSceHost ? (
-            <>
-              <div className="gl-hint">
-                SingleCellExperiment · workspace revision {hostWorkspaceRevision}
-                {hostWorkspaceStatus === "saving"
-                  ? " · saving…"
-                  : hostWorkspaceStatus === "saved"
-                    ? " · saved"
-                    : hostWorkspaceStatus === "error"
-                      ? " · save failed"
-                      : " · unsaved"}
-              </div>
-              <button
-                className="gl-btn-ghost gl-btn-block"
-                disabled={!sample || !host.workspaces || hostWorkspaceStatus === "saving"}
-                title="Save gates, populations, scales, and display settings into the R SingleCellExperiment"
-                onClick={() => {
-                  void saveHostedWorkspace(
-                    "explicit",
-                    workspaceEditRevisionRef.current,
-                  )
-                    .then(({ revision, memberships }) => {
-                      setImportMsg(
-                        `Saved GateLab workspace to SCE · revision ${revision}` +
-                          (memberships
-                            ? ` · memberships for ${memberships.populations} population` +
-                              `${memberships.populations === 1 ? "" : "s"} in ` +
-                              `${memberships.hierarchies} hierarch` +
-                              `${memberships.hierarchies === 1 ? "y" : "ies"}`
-                            // The core sent them; an R side that predates them stores nothing and
-                            // says nothing, so say it here rather than let the user find out later.
-                            : " · no memberships stored: this GateLabR predates them, reload it"),
-                      );
-                    })
-                    .catch((cause) => {
-                      setError(cause instanceof Error ? cause.message : String(cause));
-                    });
-                }}
-              >
-                Save to SCE{dirty ? " ●" : ""}
-              </button>
-              {host.capabilities.dataModel.writeBackColumns && host.colData && (
-                <button
-                  className="gl-btn-ghost gl-btn-block"
-                  disabled={
-                    !sample ||
-                    hostColDataBusy ||
-                    Object.keys(state.populations).length <= 1
-                  }
-                  title="Write exact full-data population memberships into SingleCellExperiment colData"
-                  onClick={() => setCrud({ kind: "exportSceColData" })}
-                >
-                  Export populations to colData…
-                </button>
-              )}
-            </>
-          ) : (
-            <>
-              {wsName && (
-                <div className="gl-hint" title={wsName} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {dirty ? "● " : ""}
-                  {wsName}
-                  {dirty ? ` (${t("unsaved")})` : ""}
-                </div>
-              )}
-              <button
-                className="gl-btn-ghost gl-btn-block"
-                disabled={busy || !sample || compensationApplyStatus !== null}
-                title="Close the current data, gates, and workspace settings and begin an empty workspace"
-                onClick={() => setCrud({ kind: "confirmNewWorkspace" })}
-              >
-                {t("New Workspace…")}
-              </button>
-              <button
-                className="gl-btn-ghost gl-btn-block"
-                disabled={busy || compensationApplyStatus !== null}
-                title="Open a saved .gatelab workspace, or a FlowJo .wsp — a workspace holds gates rather than data, so GateLab will ask for the FCS files it refers to"
-                onClick={openWorkspace}
-              >
-                {t("Open Workspace…")}
-              </button>
-              <button
-                className="gl-btn-ghost gl-btn-block"
-                disabled={!sample}
-                title={
-                  wsHandle
-                    ? wsStorage === "bundle"
-                      ? "Save changes in place while preserving the embedded FCS data"
-                      : "Save gates/populations/scales/compensation back to the linked workspace file (in place)"
-                    : "Choose a location and save the workspace"
-                }
-                onClick={saveWorkspace}
-              >
-                {wsHandle ? `${t("Save")}${dirty ? " ●" : ""}` : t("Save Workspace…")}
-              </button>
-              <button
-                className="gl-btn-ghost gl-btn-block"
-                disabled={!sample}
-                title="Save a lightweight reference workspace. Source FCS and compensated values are not embedded; use Save Portable Copy for a self-contained archive."
-                onClick={saveWorkspaceAs}
-              >
-                {t("Save As…")}
-              </button>
-              <button
-                className="gl-btn-ghost gl-btn-block"
-                disabled={!sample}
-                title="Save a self-contained .gatelab with the exact source FCS and any computed compensated assay, so it can reopen without rerunning compensation."
-                onClick={saveBundledCopy}
-              >
-                {t("Save Portable Copy…")}
-              </button>
-            </>
-          )}
+          {/* Workspace, import and export are the header menus; the sidebar keeps the file list,
+              the hidden pickers those menus drive, and the workspace's name and status. */}
           <input
             ref={wsRef}
             type="file"
-            accept={`.${WORKSPACE_EXT},.wsp`}
+            accept={`.${WORKSPACE_EXT},.wsp,.cef`}
             style={{ display: "none" }}
             onChange={async (e) => {
               const f = e.target.files?.[0];
@@ -6666,24 +8659,10 @@ export default function App() {
               if (f) await openWorkspaceFromFile(f, null, f.name);
             }}
           />
-          {!sample && importMsg && <div className="gl-hint">{t(importMsg)}</div>}
-
-          {sample && (
-            <>
-              <div className="gl-side-title" style={{ marginTop: 10 }}>
-                {t("Gating")}
-              </div>
-              <button
-                className="gl-btn-ghost gl-btn-block"
-                title="Import Gating-ML 2.0 (.xml) or a FlowJo workspace (.wsp), then choose whether to merge into the current hierarchy or replace the current strategy. A workspace also carries population names, which FlowJo's own Gating-ML export omits."
-                onClick={() => void pickFilesOrInput(xmlRef.current, GATING_IMPORT_ACCEPT, "Gating-ML or FlowJo workspace").then((files) => { if (files?.[0]) prepareGatingImport(files[0]); })}
-              >
-                {t("Import gating (GatingML / FlowJo)…")}
-              </button>
               <input
                 ref={xmlRef}
                 type="file"
-                accept=".xml,.wsp"
+                accept=".xml,.wsp,.cef"
                 style={{ display: "none" }}
                 onChange={(e) => {
                   const f = e.target.files?.[0];
@@ -6691,14 +8670,17 @@ export default function App() {
                   e.target.value = "";
                 }}
               />
-              {importMsg && <div className="gl-hint">{t(importMsg)}</div>}
-              <button
-                className="gl-btn-ghost gl-btn-block"
-                title="Import a hierarchy from a CSV: gate lines, population lines naming their parents, and, for a CyTOF debarcoding scheme, a table with one row per sample and one 0/1 column per barcode channel. Gates come from the file or from a template, so you tweak them rather than draw them."
-                onClick={() => void pickFilesOrInput(barcodeRef.current, TABLE_FILE_ACCEPT, "Barcode scheme table").then((files) => { if (files?.[0]) void prepareBarcodeImport(files[0]); })}
-              >
-                {t("Import hierarchy CSV…")}
-              </button>
+              <input
+                ref={chorusStatsRef}
+                type="file"
+                accept=".csv"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void openChorusStatistics(f);
+                  e.target.value = "";
+                }}
+              />
               <input
                 ref={barcodeRef}
                 type="file"
@@ -6710,68 +8692,44 @@ export default function App() {
                   e.target.value = "";
                 }}
               />
-              <button
-                className="gl-btn-ghost gl-btn-block"
-                disabled={Object.keys(state.gates).length === 0}
-                title="Write this workspace's gates and populations as a CSV the import reads back: for a debarcoding strategy, the sample table plus every gate and the QC populations, and a gate template (JSON); for any other workspace, every polygon and rectangle gate and every population."
-                onClick={openBarcodeSave}
-              >
-                {t("Save hierarchy CSV…")}
-              </button>
-              <button
-                className="gl-btn-ghost gl-btn-block"
-                disabled={Object.keys(state.gates).length === 0}
-                title="Open the GatingML export dialog: choose standard GateLab/GateLabR or Cytobank-compatible format and review fidelity warnings."
-                onClick={() => setGatingMlExportOpen(true)}
-              >
-                {t("Export GatingML…")}
-              </button>
-              <button
-                className="gl-btn-ghost gl-btn-block"
-                style={{ marginTop: 4 }}
-                title="Open the FCS export dialog: choose populations, original/compensated/transformed values, and sample scope."
-                onClick={() => setFcsExportOpen(true)}
-              >
-                {t("Export FCS…")}
-              </button>
-
-              <div className="gl-side-title" style={{ marginTop: 10 }}>
-                {t("Display")}
+          <div className="gl-side-status">
+            {isSceHost ? (
+              <div className="gl-hint">
+                SingleCellExperiment · workspace revision {hostWorkspaceRevision}
+                {hostWorkspaceStatus === "saving"
+                  ? " · saving…"
+                  : hostWorkspaceStatus === "saved"
+                    ? " · saved"
+                    : hostWorkspaceStatus === "error"
+                      ? " · save failed"
+                      : " · unsaved"}
               </div>
-              <label className="gl-field" title="Downsample the points drawn on the plot. Empty or 0 = plot all events (no downsampling). Counts/percentages always use every event.">
-                <span>{t("Max events to plot")}</span>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  className="gl-field-input"
-                  placeholder="all"
-                  value={maxEvents === 0 ? "" : String(maxEvents)}
-                  onChange={(e) => {
-                    const digits = e.target.value.replace(/[^0-9]/g, "");
-                    setMaxEvents(digits === "" ? 0 : parseInt(digits, 10));
-                  }}
-                />
-              </label>
-              <div className="gl-hint">{t("empty = all events (no downsampling)")}</div>
-            </>
-          )}
+            ) : (
+              <div className="gl-side-status-row">
+                {wsName ? (
+                  <div className="gl-hint" title={wsName}>
+                    {dirty ? "● " : ""}
+                    {wsName}
+                    {dirty ? ` (${t("unsaved")})` : ""}
+                  </div>
+                ) : <div className="gl-hint">{t("No workspace file yet")}</div>}
+                <button
+                  type="button"
+                  className="gl-mini-btn gl-side-save"
+                  disabled={!sample}
+                  title={wsHandle ? t("Save the workspace in place") : t("Choose a location and save the workspace")}
+                  onClick={saveWorkspace}
+                >
+                  {wsHandle ? `${t("Save")}${dirty ? " ●" : ""}` : t("Save…")}
+                </button>
+              </div>
+            )}
+            {importMsg && <div className="gl-hint" title={t(importMsg)}>{t(importMsg)}</div>}
+          </div>
         </aside>
 
         {sample ? (
           <div className="gl-center" role="main" aria-label={t("Plot and analysis tabs")}>
-            <div className="gl-tabs" role="tablist">
-              {TABS.map((tab) => (
-                <button
-                  key={tab.id}
-                  role="tab"
-                  aria-selected={activeTab === tab.id}
-                  className={"gl-tab" + (activeTab === tab.id ? " active" : "")}
-                  onClick={() => setActiveTab(tab.id)}
-                >
-                  {t(tab.label)}
-                </button>
-              ))}
-            </div>
             {/* Gating tab stays mounted (hidden) so the plot + pan/zoom listeners survive
                 tab switches without a re-decode. A render error here is contained to the
                 gating view rather than white-screening the whole app. */}
@@ -6780,31 +8738,89 @@ export default function App() {
               className="gl-gating-tab"
               style={{ display: activeTab === "gating" ? "flex" : "none" }}
             >
+            <div className="gl-pool-toolbar" aria-label={t("Plot file scope")}>
+              <strong>{plotPool ? t("Pooled view · {count} files", { count: plotPool.ids.length }) : t("Viewing: {name}", { name: fileName })}</strong>
+              {plotPool ? <>
+                <button type="button" aria-expanded={poolMembersOpen} onClick={() => setPoolMembersOpen(open => !open)}>{t("Change files…")}</button>
+                <button type="button" onClick={() => activeSampleId && inspectSample(activeSampleId)}>{t("Return to single file")}</button>
+                <button type="button" aria-pressed={plotPool.editTemplate} onClick={() => setPlotPool(pool => pool && ({ ...pool, editTemplate: !pool.editTemplate }))}>
+                  {plotPool.editTemplate ? t("Stop editing the tree") : t("Edit the tree")}
+                </button>
+                <small>{poolReadOnly ? t("Read-only tree preview") : t("Editing the tree · every file follows, tailored gates excepted")}. {t("The tree's gates apply to every pooled file; these are not per-file tailored counts.")}</small>
+                {poolMembersOpen && <div className="gl-pool-members">
+                  {plotPool.ids.map(id => <span key={id}>{samples.find(entry => entry.id === id)?.name ?? t("Missing file")}</span>)}
+                  <button type="button" disabled={checkedSamples.length < 2} onClick={poolSelectedFiles}>{t("Use current selection ({count})", { count: checkedSamples.length })}</button>
+                </div>}
+              </> : <>
+                <button type="button" disabled={checkedSamples.length < 2} onClick={poolSelectedFiles}>{t("Pool selected files ({count})", { count: checkedSamples.length })}</button>
+                <small>{activeHierarchy?.owner_sample_id
+                  ? t("Editing {name} only · its tailored gates", { name: fileName })
+                  : activeHierarchy?.owner_group_id
+                    ? t("Editing {name} · its files follow, tailored gates excepted", { name: activeHierarchy.name })
+                    : t("Editing the tree · every file follows, tailored gates excepted")}</small>
+              </>}
+              <span className="gl-pool-toolbar-right">
+                {/* Mounted always, hidden when there is nothing to say, so the buttons beside it stay put. */}
+                <span className={"gl-display-pops-banner" + (derived.displayPopCount > 1 ? "" : " is-idle")} aria-hidden={derived.displayPopCount <= 1}>
+                  {t("Displaying {count} populations (union)", { count: Math.max(2, derived.displayPopCount) })}
+                </span>
+                <button
+                  type="button"
+                  className="gl-mini-btn"
+                  title={t("Fit the current view to the robust event distribution and every gate on these axes")}
+                  onClick={fitDataAndGates}
+                >
+                  {t("Fit data + gates")}
+                </button>
+                <button className="gl-tool" title={t("Reset X/Y to auto range in the current scale mode")}
+                  aria-label={t("Reset X and Y ranges to auto")}
+                  onClick={() => {
+                    setXRange(null);
+                    setYRange(null);
+                    setGlobalScale(sample.channels[xIdx].key, null);
+                    setGlobalScale(sample.channels[yIdx].key, null);
+                  }}>⟲</button>
+                <button
+                  type="button"
+                  className={`gl-scale-lock-button${lockScalesBetweenFiles ? " active" : ""}`}
+                  aria-pressed={lockScalesBetweenFiles}
+                  title={t(lockScalesBetweenFiles
+                    ? "Scales locked: the current axis ranges stay fixed when you switch files. Click to let each file fit its own data."
+                    : "Per-file scales: each file keeps its own fitted or edited ranges. Click to freeze the current ranges across files. Fixed ranges per channel are set in the Scales tab.")}
+                  onClick={toggleScaleLock}
+                >
+                  {t("Lock scales between files")}
+                </button>
+                <span className="gl-hint">{t("drag to pan · shift-drag to stretch · click an axis label to change its channel")}</span>
+              </span>
+            </div>
             <div className="gl-controls">
-              {/* X and Y travel together: on a narrow screen the strip wraps, and
-                  splitting the axis pair across two rows reads as unrelated controls. */}
-              <div className="gl-axis-pickers">
-                <label>
-                  X
-                  <select value={xIdx} onChange={(e) => setXIdx(+e.target.value)}>
-                    {sample.channels.map((_, i) => (
-                      <option key={i} value={i}>
-                        {sample.channelLabel(i)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Y
-                  <select value={yIdx} onChange={(e) => setYIdx(+e.target.value)}>
-                    {sample.channels.map((_, i) => (
-                      <option key={i} value={i}>
-                        {sample.channelLabel(i)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+              <div className="gl-draw-tools">
+                {DRAW_TOOLS.map((tool) => {
+                  const disabled = (activeStructureLocked || poolReadOnly) && tool.id !== "navigate";
+                  const title = disabled
+                    ? t("This tree follows its group's template — add gates there, or unlink it from its group")
+                    : t(tool.title);
+                  return (
+                  <button
+                    key={tool.id}
+                    className={"gl-icon-chip" + (drawMode === tool.id ? " active" : "")}
+                    title={title}
+                    aria-label={title}
+                    disabled={disabled}
+                    onClick={() => setDrawMode(tool.id)}
+                  >
+                    <tool.Icon />
+                  </button>
+                  );
+                })}
               </div>
+              {/* Set once per session, so they live behind one button that says what is set. */}
+              <details className="gl-display-popover gl-popover">
+                <summary title={t("Point opacity and size, density colour, how many events to draw, and the plot mode")}>
+                  {t("Display")} · <span className="gl-display-summary-mode">{t(MODES.find((m) => m.id === mode)?.label ?? mode)}</span> · <span className="gl-display-summary-events">{maxEvents ? t("{count} events", { count: maxEvents.toLocaleString() }) : t("all events")}</span>
+                </summary>
+                <div className="gl-display-popover-body">
               <label className="gl-alpha" title={t("Point opacity")} style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 α
                 <input
@@ -6830,27 +8846,27 @@ export default function App() {
                   style={{ width: 72 }}
                 />
               </label>
-              {mode === "pseudocolor" && (
-                <DensityColourControl value={densityColorPower} onChange={changeDensityColorPower} />
-              )}
-              <div className="gl-draw-tools">
-                {DRAW_TOOLS.map((tool) => (
-                  <button
-                    key={tool.id}
-                    className={"gl-icon-chip" + (drawMode === tool.id ? " active" : "")}
-                    title={t(tool.title)}
-                    aria-label={t(tool.title)}
-                    onClick={() => setDrawMode(tool.id)}
-                  >
-                    <tool.Icon />
-                  </button>
-                ))}
-              </div>
-              <div className="gl-modes">
-                {mode === "contour" && (
+              <DensityColourControl value={densityColorPower} onChange={changeDensityColorPower} disabled={mode !== "pseudocolor"} />
+                <label className="gl-field-inline" title="Downsample the points drawn on the plot. Empty or 0 = plot all events (no downsampling). Counts/percentages always use every event.">
+                  {t("Max events")}
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    aria-label={t("Max events to plot")}
+                    placeholder={t("all")}
+                    style={{ width: 62 }}
+                    value={maxEvents === 0 ? "" : String(maxEvents)}
+                    onChange={(e) => {
+                      const digits = e.target.value.replace(/[^0-9]/g, "");
+                      setMaxEvents(digits === "" ? 0 : parseInt(digits, 10));
+                    }}
+                  />
+                </label>
+                <label className="gl-field-inline">Contours<select disabled={mode !== "contour"} value={contourLevels} onChange={event => setContourLevels(+event.target.value)}>{[4, 6, 8, 10, 12, 18, 24, 30].map(value => <option key={value} value={value}>{value}</option>)}</select></label>
                   <label className="gl-contour-outer" title="Outer contour = this % of the peak density">
                     {t("Outer")}
                     <select
+                      disabled={mode !== "contour"}
                       value={contourThreshold}
                       onChange={(e) => setContourThreshold(+e.target.value)}
                     >
@@ -6861,7 +8877,6 @@ export default function App() {
                       ))}
                     </select>
                   </label>
-                )}
                 {MODES.map((m) => (
                   <button
                     key={m.id}
@@ -6871,7 +8886,9 @@ export default function App() {
                     {t(m.label)}
                   </button>
                 ))}
-                <span className="gl-ctl-sep" />
+                </div>
+              </details>
+              <div className="gl-modes">
                 {sample.instrument !== "cytof" && (
                   <label
                     className="gl-field-inline"
@@ -6903,55 +8920,60 @@ export default function App() {
                   </select>
                 </label>
                 <span className="gl-ctl-sep" />
-                <label className="gl-field-inline">
+                <span className="gl-field-inline">
                   {t("Colour by")}
-                  <select
-                    value={overlayBy === "coldata" ? `coldata:${overlayColDataColumn ?? ""}` : overlayBy}
-                    onChange={(e) => {
-                      const value = e.target.value;
+                  <SearchableSelect
+                    label={t("Colour by")}
+                    value={
+                      overlayBy === "coldata"
+                        ? `coldata:${overlayColDataColumn ?? ""}`
+                        : overlayBy === "channel"
+                          ? `channel:${overlayChannelKey ?? ""}`
+                          : overlayBy
+                    }
+                    options={overlayByOptions}
+                    onChange={(value) => {
                       if (value.startsWith("coldata:")) {
                         setOverlayColDataColumn(value.slice("coldata:".length));
                         setOverlayBy("coldata");
+                      } else if (value.startsWith("channel:")) {
+                        setOverlayChannelKey(value.slice("channel:".length));
+                        setOverlayBy("channel");
                       } else {
-                        setOverlayBy(value as Exclude<typeof overlayBy, "coldata">);
+                        setOverlayBy(value as Exclude<typeof overlayBy, "coldata" | "channel">);
                       }
                     }}
-                  >
-                    <option value="none">{t("None")}</option>
-                    {samples.length > 1 && <option value="sample">{t("Sample")}</option>}
-                    <option value="population">{t("Population")}</option>
-                    {activeSampleId && compatibleDivisionProfiles[activeSampleId] && <option value="division">{t("Division")}</option>}
-                    {isSceHost && hostCategoricalColumns.length > 0 && (
-                      <optgroup label={t("colData")}>
-                        {hostCategoricalColumns.map((column) => (
-                          <option key={column.name} value={`coldata:${column.name}`}>
-                            {`${column.name} (${column.levelCount})`}
-                          </option>
-                        ))}
-                      </optgroup>
-                    )}
-                  </select>
-                </label>
+                  />
+                </span>
                 {overlayBy === "coldata" && overlayColDataColumn && !overlayColDataValues && (
                   <span className="gl-muted">{t("loading {column}…", { column: overlayColDataColumn })}</span>
                 )}
-                {overlayBy !== "none" && (
                   <label
-                    className="gl-field-inline"
+                    className="gl-field-inline gl-palette-field"
                     title={overlayColDataValues?.colors
                       ? t("Colours for this column are fixed in metadata(sce)$gatelab_palettes, so the palette does not apply.")
                       : undefined}
                   >
                     {t("Palette")}
-                    <select value={overlayPalette} disabled={!!overlayColDataValues?.colors} onChange={(e) => setOverlayPalette(e.target.value as PaletteName)}>
-                      {OVERLAY_PALETTES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-                    </select>
+                    {overlayBy === "channel" ? (
+                      <select
+                        value={overlayMarkerPalette}
+                        onChange={(e) => setOverlayMarkerPalette(e.target.value as PaletteName)}
+                      >
+                        {MARKER_PALETTES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+                      </select>
+                    ) : (
+                      <select value={overlayPalette} disabled={overlayBy === "none" || !!overlayColDataValues?.colors} onChange={(e) => setOverlayPalette(e.target.value as PaletteName)}>
+                        {OVERLAY_PALETTES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+                      </select>
+                    )}
                   </label>
-                )}
+                <MarkerColourControl value={markerColorPower} onChange={setMarkerColorPower} disabled={overlayBy !== "channel"} />
                 <span
                   className={`gl-sample-scope-badge${pendingIncludedGatingIds.size > 0 ? " is-pending" : ""}`}
                   title={[
-                    t("Checked files are plotted together; the blue row supplies channels, axes, and editable gates."),
+                    t("The plot follows its explicit file scope, independently of the row selection."),
+                    ...(activeHierarchy?.owner_sample_id ? [t("Editing {name} only", { name: fileName })] : []),
                     ...includedSamples.map((entry) => entry.name),
                     ...(pendingIncludedGatingIds.size === 0
                       ? [
@@ -6969,12 +8991,11 @@ export default function App() {
                       ? t("Pooled display")
                       : includedSamples.length === 1
                         ? t("Single-file display")
-                        : t("No checked files")}
+                        : t("No plotted files")}
                   </strong>
+                  {activeHierarchy?.owner_sample_id && ` · ${t("{name} only", { name: fileName })}`}
                   {includedSamples.length > 0 &&
-                    ` · ${t("{count} checked FCS", { count: includedSamples.length })}`}
-                  {checkedInOtherHierarchies > 0 &&
-                    ` · ${t("{count} checked in other hierarchies", { count: checkedInOtherHierarchies })}`}
+                    ` · ${t("{count} plotted files", { count: includedSamples.length })}`}
                   {pendingIncludedGatingIds.size > 0
                     ? ` · ${t("preparing {count} population masks…", {
                         count: pendingIncludedGatingIds.size,
@@ -6994,7 +9015,7 @@ export default function App() {
                   className="gl-active-sample-key"
                   title={panelMismatchNames.length > 0
                     ? t("Files whose panel differs from {name} are not pooled with it: the same channel name can carry a different marker between panels, so a shared name is not a shared measurement. Uncheck them, or check them alone.", { name: fileName })
-                    : t("The first checked file supplies the channels, axes and editable gates. Clicking a row checks that file alone.")}
+                    : t("The viewed file supplies axes. Selection changes do not change a captured pool; Enter inspects a file.")}
                 >
                   {panelMismatchNames.length > 0
                     ? `⚠ ${t("{count} checked file(s) not pooled — different panel", {
@@ -7004,90 +9025,6 @@ export default function App() {
                 </span>
               </div>
             </div>
-            <div className="gl-scales gl-ranges">
-              <span className="gl-scales-label">{t("Range")}</span>
-              {(() => {
-                const r3 = (n: number) => Math.round(n * 1000) / 1000;
-                const xName = sample.channels[xIdx].key;
-                const yName = sample.channels[yIdx].key;
-                const effX = xRange ?? globalScales[xName] ??
-                  workspaceAutomaticRanges?.xRange ?? payload?.x_range ?? sample.displayRange(xIdx);
-                const effY = yRange ?? globalScales[yName] ??
-                  workspaceAutomaticRanges?.yRange ?? payload?.y_range ?? sample.displayRange(yIdx);
-                return (
-                  <>
-                    {/* Editing a Range sets the SHARED per-channel scale (globalScales), which the
-                        gating plot honours AND the Strategy / Illustration tabs inherit — a
-                        transient pan (xRange) is cleared so the typed scale takes effect. */}
-                    <div className="gl-range-row">
-                      <span className="gl-scale-axis">X</span>
-                      <input type="number" step={0.1} value={r3(effX[0])}
-                        onChange={(e) => { setGlobalScale(xName, [+e.target.value, effX[1]]); setXRange(null); }} />
-                      <span className="gl-range-dash">–</span>
-                      <input type="number" step={0.1} value={r3(effX[1])}
-                        onChange={(e) => { setGlobalScale(xName, [effX[0], +e.target.value]); setXRange(null); }} />
-                    </div>
-                    <div className="gl-range-row">
-                      <span className="gl-scale-axis">Y</span>
-                      <input type="number" step={0.1} value={r3(effY[0])}
-                        onChange={(e) => { setGlobalScale(yName, [+e.target.value, effY[1]]); setYRange(null); }} />
-                      <span className="gl-range-dash">–</span>
-                      <input type="number" step={0.1} value={r3(effY[1])}
-                        onChange={(e) => { setGlobalScale(yName, [effY[0], +e.target.value]); setYRange(null); }} />
-                    </div>
-                  </>
-                );
-              })()}
-              <button
-                type="button"
-                className="gl-mini-btn"
-                title="Fit the current view to the robust event distribution and every gate on these axes"
-                onClick={fitDataAndGates}
-              >
-                {t("Fit data + gates")}
-              </button>
-              <button className="gl-tool" title="Reset X/Y to auto range (also clears the shared per-channel scale)"
-                aria-label={t("Reset X and Y ranges to auto")}
-                onClick={() => {
-                  setXRange(null);
-                  setYRange(null);
-                  setGlobalScale(sample.channels[xIdx].key, null);
-                  setGlobalScale(sample.channels[yIdx].key, null);
-                }}>⟲</button>
-              <span
-                className="gl-workspace-scale-badge"
-                title={t("Automatic and edited ranges are shared across compatible FCS files in this workspace.")}
-              >
-                {t("Workspace scales")}
-              </span>
-              {derived.displayPopCount > 1 && (
-                <span className="gl-display-pops-banner">
-                  {t("Displaying {count} populations (union)", { count: derived.displayPopCount })}
-                </span>
-              )}
-              <span className="gl-hint" style={{ marginLeft: "auto" }}>
-                {t("drag to pan · shift-drag to stretch")}
-              </span>
-            </div>
-            {/* Shown only when a gate on this plot actually curves, and only in the modes where that
-                is visible — and dismissible, because it answers a question once. The full explanation
-                stays on the control's tooltip, available on demand rather than occupying the plot for
-                everyone who already knows. */}
-            {!gateEdgeNoteHidden && gateEdgeMode !== "straight"
-              && mainPlotGates.some((g) => g.outline) && (
-              <div className="gl-hint" style={{ display: "flex", alignItems: "center", gap: 6, padding: "1px 6px" }}>
-                <span>{t("Straight edges can look curved here \u2014 gates are stored in raw values, so the curve is where the gate really falls. Gating is unchanged.")}</span>
-                <button
-                  className="gl-chip"
-                  style={{ padding: "0 5px", lineHeight: 1.3 }}
-                  title={t("Hide this note")}
-                  aria-label={t("Hide this note")}
-                  onClick={() => setGateEdgeNoteHidden(true)}
-                >
-                  ×
-                </button>
-              </div>
-            )}
             <div className="gl-scales gl-gating-fonts" aria-label="Gating plot font sizes">
               <span className="gl-scales-label">{t("Fonts")}</span>
               {([
@@ -7114,71 +9051,82 @@ export default function App() {
                   />
                 </label>
               ))}
-              {(sample.isScatterAxis(xIdx) || sample.isScatterAxis(yIdx)) && (
-                <div className="gl-scatter-inline">
-                  <span className="gl-scales-label">{t("Scatter")}</span>
-                  {([
-                  ["X", xIdx],
-                  ["Y", yIdx],
-                ] as const).map(([axis, idx]) => {
-                  if (!sample.isScatterAxis(idx)) return null;
-                  const isLinear = sample.scatterScale(idx) === "linear";
-                  return (
-                    <div className="gl-scale-row" key={axis}>
-                      <span className="gl-scale-axis">
-                        {axis} · {sample.channelLabel(idx)}
-                      </span>
-                      <select
-                        className="gl-scatter-scale"
-                        aria-label={`${axis} scatter scale`}
-                        title={t("Arcsinh (cofactor 150) renders near-zero and negative scatter that a linear axis cannot. Linear matches how FlowJo and Cytobank display scatter.")}
-                        value={isLinear ? "linear" : "arcsinh"}
-                        onChange={(e) => {
-                          sample.setScatterScale(idx, e.target.value === "linear" ? "linear" : "arcsinh");
-                          pendingScaleRefit.current = true;
-                          bumpScales();
-                        }}
-                      >
-                        <option value="arcsinh">{t("Arcsinh")}</option>
-                        <option value="linear">{t("Linear")}</option>
-                      </select>
-                    </div>
-                  );
-                })}
-                </div>
-              )}
             </div>
             {/* Fluorescence scale — logicle (default) or arcsinh 150. Keyed on the channel's
                 CLASS, not on what it currently shows, so the control stays put after switching
                 to arcsinh; the Logicle W row below is what comes and goes. CyTOF is excluded:
                 it is arcsinh throughout and the choice would be meaningless. */}
-            {(sample.isFluorChannel(xIdx) || sample.isFluorChannel(yIdx)) && (
-              <div className="gl-scales">
-                <span className="gl-scales-label">{t("Signal")}</span>
+            {/* Transforms: one slot per axis, X then Y, whatever kind of channel each is, so the
+                editors never move or change width when the axes change. A slot holds the axis
+                label, the kind of transform, and a parameter area that is the same width whether
+                it carries the logicle W slider, the arcsinh cofactor slider, or nothing. Keyed on
+                the channel's CLASS, so the control stays put after switching to arcsinh. CyTOF is
+                excluded: it is arcsinh throughout and the choice would be meaningless. */}
+            {(sample.isFluorChannel(xIdx) || sample.isFluorChannel(yIdx) || sample.isScatterAxis(xIdx) || sample.isScatterAxis(yIdx) || sample.isImagingFeatureAxis(xIdx) || sample.isImagingFeatureAxis(yIdx)) && (
+              <div className="gl-scales gl-transforms">
+                <span className="gl-scales-label">{t("Transforms")}</span>
                 {([
                   ["X", xIdx],
                   ["Y", yIdx],
-                ] as const).map(([axis, idx]) =>
-                  sample.isFluorChannel(idx) ? (
-                    <div className="gl-scale-row" key={axis}>
-                      <span className="gl-scale-axis">
+                ] as const).map(([axis, idx]) => {
+                  const kind = sample.isFluorChannel(idx) ? "fluor" : sample.isScatterAxis(idx) ? "scatter" : sample.isImagingFeatureAxis(idx) ? "imaging" : null;
+                  return (
+                    <div className="gl-scale-row gl-scale-slot" key={axis}>
+                      <span className="gl-scale-axis" title={sample.channelLabel(idx)}>
                         {axis} · {sample.channelLabel(idx)}
                       </span>
-                      <select
-                        className="gl-scatter-scale"
-                        aria-label={`${axis} signal scale`}
-                        title={t("Logicle is estimated per channel and shaped by W. Arcsinh is shaped by its cofactor, which sets where the linear region around zero gives way to log. Gates live in raw space, so neither moves an event in or out of a gate.")}
-                        value={sample.fluorScale(idx)}
-                        onChange={(e) => {
-                          sample.setFluorScale(idx, e.target.value === "arcsinh" ? "arcsinh" : "logicle");
-                          pendingScaleRefit.current = true;
-                          bumpScales();
-                        }}
-                      >
-                        <option value="logicle">{t("Logicle")}</option>
-                        <option value="arcsinh">{t("Arcsinh")}</option>
-                      </select>
-                      {sample.fluorScale(idx) === "logicle" ? (
+                      {kind === "scatter" ? (
+                        <select
+                                                className="gl-scatter-scale"
+                                                aria-label={`${axis} scatter scale`}
+                                                title={t("Arcsinh (cofactor 150) renders near-zero and negative scatter that a linear axis cannot. Linear matches how FlowJo and Cytobank display scatter.")}
+                                                value={sample.scatterScale(idx) === "linear" ? "linear" : "arcsinh"}
+                                                onChange={(e) => {
+                                                  sample.setScatterScale(idx, e.target.value === "linear" ? "linear" : "arcsinh");
+                                                  pendingScaleRefit.current = true;
+                                                  bumpScales();
+                                                }}
+                                              >
+                                                <option value="arcsinh">{t("Arcsinh")}</option>
+                                                <option value="linear">{t("Linear")}</option>
+                                              </select>
+                      ) : kind === "imaging" ? (
+                        <select
+                                                className="gl-scatter-scale"
+                                                aria-label={`${axis} imaging scale`}
+                                                title={t("A shape or position feature the instrument derived from the cell's image. Linear is how FACSChorus shows it; arcsinh (cofactor 150) spreads the values near zero. Gates live in raw space, so neither moves an event in or out of a gate.")}
+                                                value={sample.featureScale(idx)}
+                                                onChange={(e) => {
+                                                  sample.setFeatureScale(idx, e.target.value === "arcsinh" ? "arcsinh" : "linear");
+                                                  pendingScaleRefit.current = true;
+                                                  bumpScales();
+                                                }}
+                                              >
+                                                <option value="linear">{t("Linear")}</option>
+                                                <option value="arcsinh">{t("Arcsinh")}</option>
+                                              </select>
+                      ) : kind === "fluor" ? (
+                        <select
+                                                className="gl-scatter-scale"
+                                                aria-label={`${axis} signal scale`}
+                                                title={t("Logicle is estimated per channel and shaped by W. Arcsinh is shaped by its cofactor, which sets where the linear region around zero gives way to log. Gates live in raw space, so neither moves an event in or out of a gate.")}
+                                                value={sample.fluorScale(idx)}
+                                                onChange={(e) => {
+                                                  sample.setFluorScale(idx, e.target.value === "arcsinh" ? "arcsinh" : "logicle");
+                                                  pendingScaleRefit.current = true;
+                                                  bumpScales();
+                                                }}
+                                              >
+                                                <option value="logicle">{t("Logicle")}</option>
+                                                <option value="arcsinh">{t("Arcsinh")}</option>
+                                              </select>
+                      ) : (
+                        <select className="gl-scatter-scale" aria-label={`${axis} scale`} disabled value="fixed" title={t("This axis has one scale.")}>
+                          <option value="fixed">{t("Linear")}</option>
+                        </select>
+                      )}
+                      <span className="gl-scale-params">
+                        {kind === "fluor" && (sample.fluorScale(idx) === "logicle" ? (
                         <>
                           <input
                             type="range"
@@ -7244,10 +9192,11 @@ export default function App() {
                             A
                           </button>
                         </>
-                      )}
+                      ))}
+                      </span>
                     </div>
-                  ) : null,
-                )}
+                  );
+                })}
               </div>
             )}
             {/* The scatter scale control sits above, in the chrome block; it is shown only for
@@ -7255,10 +9204,29 @@ export default function App() {
                 field convention and is not offered as a choice. Gates live in raw space for
                 flow, so nothing there moves a gate; it only changes what the axis looks like. */}
             <div
-              className="gl-plot-area"
+              className={`gl-plot-area${poolReadOnly ? " gl-pool-readonly" : ""}`}
               ref={plotAreaRef}
               style={{ cursor: drawMode === "navigate" ? "grab" : "crosshair" }}
             >
+            {/* An overlay on the plot, so it never moves the plot. Shown only when a gate on this plot actually curves, and only in the modes where that
+                is visible — and dismissible, because it answers a question once. The full explanation
+                stays on the control's tooltip, available on demand rather than occupying the plot for
+                everyone who already knows. */}
+            {!gateEdgeNoteHidden && gateEdgeMode !== "straight"
+              && mainPlotGates.some((g) => g.outline) && (
+              <div className="gl-hint gl-plot-note">
+                <span>{t("Straight edges can look curved here \u2014 gates are stored in raw values, so the curve is where the gate really falls. Gating is unchanged.")}</span>
+                <button
+                  className="gl-chip"
+                  style={{ padding: "0 5px", lineHeight: 1.3 }}
+                  title={t("Hide this note")}
+                  aria-label={t("Hide this note")}
+                  onClick={() => setGateEdgeNoteHidden(true)}
+                >
+                  ×
+                </button>
+              </div>
+            )}
               <GatingPlot
                 payload={displayed}
                 mode={drawMode}
@@ -7266,6 +9234,7 @@ export default function App() {
                 interactionToken={plotInteractionToken ?? undefined}
                 fontSizes={gatingFontSizes}
                 onNewGate={(g) => {
+                  if (poolReadOnly) return;
                   if (!plotInteractionIsCurrent()) return;
                   // cytof reports the drawn gate's channels as DISPLAY labels — translate back to
                   // identity keys so the gate stores/masks in identity space.
@@ -7285,6 +9254,7 @@ export default function App() {
                   setDrawMode("navigate"); // drawing done → back to navigate (like GateLabR)
                 }}
                 onGateEdit={(e) => {
+                  if (poolReadOnly) return;
                   if (!plotInteractionIsCurrent()) return;
                   // Dragged poly/rect vertices come back in DISPLAY space on the current axes;
                   // convert to gating space via the gate's stored channel keys, then persist.
@@ -7312,6 +9282,7 @@ export default function App() {
                   dispatch({ type: "editGate", gateId: e.gate_id, vertices: verts });
                 }}
                 onEllipseEdit={(e) => {
+                  if (poolReadOnly) return;
                   if (!plotInteractionIsCurrent()) return;
                   const g = state.gates[e.gate_id];
                   if (!g || g.gate_type !== "ellipse") return;
@@ -7342,6 +9313,7 @@ export default function App() {
                   });
                 }}
                 onQuadrantMove={(e) => {
+                  if (poolReadOnly) return;
                   if (!plotInteractionIsCurrent()) return;
                   const g = state.gates[e.gate_id];
                   if (!g || g.gate_type !== "quadrant") return;
@@ -7350,6 +9322,32 @@ export default function App() {
                     gateId: e.gate_id,
                     center: [sample.displayToGate(g, g.x_channel, e.center[0]), sample.displayToGate(g, g.y_channel, e.center[1])],
                   });
+                }}
+                onQuadrantCurl={(e) => {
+                  if (poolReadOnly) return;
+                  if (!plotInteractionIsCurrent()) return;
+                  const g = state.gates[e.gate_id];
+                  if (!g || g.gate_type !== "quadrant" || !g.curl) return;
+                  // The handle sits at the end of the arm; where it was dropped, in the gate's
+                  // own space, fixes that arm's coefficient: the bend there must equal k · d^p.
+                  const at: [number, number] = [
+                    sample.displayToGate(g, g.x_channel, e.at[0]),
+                    sample.displayToGate(g, g.y_channel, e.at[1]),
+                  ];
+                  const [cx, cy] = g.center;
+                  const p = g.curl.power;
+                  const next = { ...g.curl };
+                  if (e.arm === "h") {
+                    const d = at[0] - cx;
+                    if (!(d > 0)) return;
+                    next.kx = (at[1] - cy) / Math.pow(d, p);
+                  } else {
+                    const d = at[1] - cy;
+                    if (!(d > 0)) return;
+                    next.ky = (at[0] - cx) / Math.pow(d, p);
+                  }
+                  if (!Number.isFinite(next.kx) || !Number.isFinite(next.ky)) return;
+                  dispatch({ type: "setQuadrantCurl", gateId: e.gate_id, curl: next });
                 }}
                 onGateSelect={(id) => {
                   if (!plotInteractionIsCurrent()) return;
@@ -7385,11 +9383,23 @@ export default function App() {
                   setYRange(null);
                 }}
                 onGateLabelMove={(e) => {
+                  if (poolReadOnly) return;
                   if (!plotInteractionIsCurrent()) return;
-                  dispatch({ type: "moveGateLabel", gateId: e.gate_id, labelOffset: e.label_offset });
+                  dispatch({ type: "moveGateLabel", gateId: e.gate_id, labelOffset: e.label_offset, ...(e.quadrant !== undefined ? { quadrant: e.quadrant } : {}) });
                 }}
               />
             </div>
+            {/* A slot of its own height, so a legend appearing or growing does not resize the plot. */}
+            <div className="gl-plot-legend-slot">
+            {markerOverlay && (
+              <MarkerColourBar
+                label={markerOverlay.label}
+                scale={markerOverlay.scale}
+                palette={markerOverlay.palette}
+                ticks={markerOverlay.ticks}
+                power={markerOverlay.power}
+              />
+            )}
             {overlayLegend && (
               <div
                 className="gl-overlay-legend"
@@ -7404,13 +9414,14 @@ export default function App() {
               </div>
             )}
             </div>
+            </div>
             </ErrorBoundary>
             {/* One boundary for the conditionally-mounted data tabs, keyed by activeTab so a
                 crashed tab clears itself when you switch away (Shiny-like per-panel isolation). */}
             <ErrorBoundary key={activeTab} label={activeTab}>
             {activeTab === "statistics" && (
               <StatsTab
-                samples={includedSamples}
+                samples={statsSamples}
                 activeSampleId={activeSampleId}
                 state={state}
                 derived={derived}
@@ -7420,7 +9431,7 @@ export default function App() {
             )}
             {activeTab === "proportions" && (
               <ProportionsTab
-                samples={includedSamples}
+                samples={samples.map(entry => ({ ...entry, hierarchyId: hierarchyOfFile(entry.id) }))}
                 activeSampleId={activeSampleId}
                 state={state}
                 derived={derived}
@@ -7428,6 +9439,7 @@ export default function App() {
                 metadataColumns={metadataColumns}
                 divisionProfiles={compatibleDivisionProfiles}
                 dataRevisionKey={sampleDataRevisionKey}
+                onConfigChange={markWorkspaceDirty}
               />
             )}
             {activeTab === "division" && (
@@ -7487,10 +9499,12 @@ export default function App() {
                 sample={sample}
                 globalScales={globalScales}
                 onSetGlobalScale={setGlobalScale}
+                lockedBetweenFiles={lockScalesBetweenFiles}
               />
             )}
             {activeTab === "strategy" && (
               <StrategyTab
+                sampleName={samples.find(entry => entry.id === activeSampleId)?.name}
                 onFitChannels={fitChannels}
                 sample={sample}
                 state={state}
@@ -7503,17 +9517,11 @@ export default function App() {
               />
             )}
             {activeTab === "illustration" && (
-              <IllustrationTab
-                onFitChannels={fitChannels}
+              <FigureWorkspace
                 key={illustVersion}
-                sample={sample}
-                sampleViews={illustrationSampleViews}
-                activeSampleId={activeSampleId}
-                checkedSampleCount={includedSamples.length}
-                pendingSampleCount={pendingIncludedGatingIds.size}
+                samples={samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id), metadata: metadata[entry.id] }))}
+                checkedSampleIds={checkedSamples.map(entry => entry.id)}
                 state={state}
-                derived={derived}
-                globalScales={globalScales}
                 defaultX={sample.channels[xIdx].key}
                 defaultY={sample.channels[yIdx].key}
                 configRef={illustConfigRef}
@@ -7521,10 +9529,31 @@ export default function App() {
                 onSavePreset={saveIllustrationPreset}
                 onDeletePreset={deleteIllustrationPreset}
                 onConfigChange={markWorkspaceDirty}
-                dataRevision={activeDataRevision}
-                densityColorPower={densityColorPower}
-                onDensityColorPowerChange={changeDensityColorPower}
+                dataRevision={sampleDataRevisionKey}
+                onOpenGating={() => setActiveTab("gating")}
+                globalScales={figureGatingRanges}
+                onFitChannels={fitChannels}
+                onAddToLayout={LAYOUT_TAB_AVAILABLE ? addPlotsToLayout : undefined}
               />
+            )}
+            {activeTab === "layout" && (
+              <Suspense fallback={<div className="gl-empty">{t("Loading Layout editor…")}</div>}>
+                <LayoutTab
+                  workspace={layoutWorkspace}
+                  onChange={setLayoutWorkspace}
+                  samples={samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id) }))}
+                  activeSampleId={activeSampleId}
+                  activePopulationId={state.active_population_id}
+                  state={state}
+                  globalScales={globalScales}
+                  defaultX={sample.channels[xIdx].key}
+                  defaultY={sample.channels[yIdx].key}
+                  illustrationConfig={illustConfigRef.current}
+                  dataRevision={sampleDataRevisionKey}
+                  densityColorPower={densityColorPower}
+                  onOpenInGating={openLayoutRecipeInGating}
+                />
+              </Suspense>
             )}
             </ErrorBoundary>
             {/* Mount on first visit, then retain only CompensationTab's lightweight state keeper
@@ -7538,6 +9567,7 @@ export default function App() {
                   hostedCompensationMatrix={hostDatasetDescriptor?.compensationMatrix}
                   compensationOn={compensationOn}
                   onApplyProfile={applyCompensationProfile}
+                  onRemoveProfile={isSceHost ? undefined : removeCompensationProfile}
                   existingHostAssays={hostExistingCompensatedAssays}
                   onAdoptExistingAssay={
                     isSceHost && host.compensation
@@ -7548,9 +9578,9 @@ export default function App() {
                   hasExistingGates={Object.keys(state.gates).length > 0}
                   applyStatus={compensationApplyStatus}
                   installedProfile={activeCompensationProfile}
-                  applyTargetCount={sample.instrument === "cytof" ? includedSamples.length : 1}
+                  applyTargetCount={sample.instrument === "cytof" ? checkedSamples.length : 1}
                   applyTargetEventCount={sample.instrument === "cytof"
-                    ? includedSamples.reduce((total, entry) => total + entry.sample.fcs.nEvents, 0)
+                    ? checkedSamples.reduce((total, entry) => total + entry.sample.fcs.nEvents, 0)
                     : sample.fcs.nEvents}
                   applyWorkerCount={compensationWorkerCount}
                   applyWorkerLimit={compensationWorkerLimit}
@@ -7579,14 +9609,17 @@ export default function App() {
 
         <aside
           className="gl-side"
-          style={{ width: sideWidth, display: activeTab === "compensation" ? "none" : undefined }}
+          style={{ width: sideWidth, display: ["compensation", "illustration", "layout", "proportions", "statistics"].includes(activeTab) ? "none" : undefined }}
           aria-label={t("Gates and populations")}
         >
-          <div className="gl-side-resize" onMouseDown={startResize} title="Drag to resize" />
+          <div className="gl-side-resize" onMouseDown={startResize} onDoubleClick={() => { setAutoSizePopulations(true); setSideFitTick((n) => n + 1); }} title="Drag to resize; double-click to fit content" />
+          <div className="gl-side-section gl-hierarchy-section">
+            <HierarchyControls state={state} perFile={treeControls} />
+          </div>
           <div className="gl-side-section">
             <div className="gl-side-head">
               <div className="gl-side-title">{t("Gates")}</div>
-              <GateToolbar
+              <fieldset className="gl-readonly-tools" disabled={poolReadOnly}><GateToolbar
                 state={state}
                 dispatch={dispatch}
                 onRename={() => {
@@ -7594,12 +9627,14 @@ export default function App() {
                   if (g) setCrud({ kind: "renameGate", id: g.gate_id, initial: g.name });
                 }}
                 onDelete={(ids) => ids.length && setCrud({ kind: "confirmDelete", what: "gates", ids })}
-              />
+              /></fieldset>
             </div>
             <GateList state={state} derived={gateListDerived} dispatch={uiDispatch}
               labelForKey={(k) => sample?.labelForKey(k) ?? k}
               badgeFor={(g) => (sample ? gateSpaceBadge(sample, g) : null)}
-              countScope={gateCountScope?.listText ?? null} />
+              countScope={gateCountScope?.listText ?? null}
+              tailoredGateIds={activeTailoredGateIds}
+              tailoredInFiles={templateTailoredInFiles} />
           </div>
           <div className="gl-side-section gl-side-grow">
             <div className="gl-side-head">
@@ -7615,20 +9650,19 @@ export default function App() {
                 />
                 {t("Branch gates")}
               </label>
-              {branchGatesOnly && (
-                <label
-                  className="gl-branch-gates-toggle"
-                  title={t("Always draw gates that belong to no population. Such a gate is in no branch, so branch scoping would otherwise hide it whenever it is not selected or ticked.")}
-                >
-                  <input
-                    type="checkbox"
-                    checked={showUnownedGates}
-                    onChange={(e) => setShowUnownedGates(e.target.checked)}
-                  />
-                  {t("Unowned gates")}
-                </label>
-              )}
-              <PopToolbar
+              <label
+                className="gl-branch-gates-toggle"
+                title={t("Always draw gates that belong to no population. Such a gate is in no branch, so branch scoping would otherwise hide it whenever it is not selected or ticked.")}
+              >
+                <input
+                  type="checkbox"
+                  disabled={!branchGatesOnly}
+                  checked={showUnownedGates}
+                  onChange={(e) => setShowUnownedGates(e.target.checked)}
+                />
+                {t("Unowned gates")}
+              </label>
+              <fieldset className="gl-readonly-tools" disabled={poolReadOnly}><PopToolbar
                 state={state}
                 dispatch={dispatch}
                 onAdd={() => setCrud({ kind: "createPop" })}
@@ -7639,7 +9673,7 @@ export default function App() {
                 onDelete={(ids) => ids.length && setCrud({ kind: "confirmDelete", what: "pops", ids })}
                 onDuplicate={(ids) => ids.length && dispatch({ type: "duplicateSelectedPopulations", popIds: ids })}
                 onBulkRename={() => setCrud({ kind: "bulkRename" })}
-              />
+              /></fieldset>
             </div>
             <div
               id="population_tree_container"
@@ -7660,18 +9694,13 @@ export default function App() {
               }}
             >
               <PopulationTree
+                readOnly={poolReadOnly}
                 state={state}
                 derived={populationTreeDerived}
                 dispatch={uiDispatch}
-                onHierarchyAction={setHierarchyModal}
-                onSwitchHierarchy={switchHierarchyForFile}
-                perFile={{
-                  enabled: perFileHierarchies,
-                  chip: hierarchyChipOf(state.active_hierarchy_id),
-                  onToggle: setPerFileHierarchyMode,
-                  onAssignChecked: assignCheckedFilesToActiveHierarchy,
-                  checkedCount: checkedSamples.length,
-                }}
+                tailoredGateIds={activeTailoredGateIds}
+                showHierarchyControls={false}
+                perFile={treeControls}
                 statsPending={populationStatsPending}
                 statsSampleCount={includedSamples.length}
                 displayContributorCount={
@@ -7707,7 +9736,7 @@ export default function App() {
             setSampleManagerOpen(false);
             setSampleManagerSelection([]);
           }}
-          onActivate={selectOnlySample}
+          onActivate={inspectSample}
           onToggleIncluded={setSampleIncluded}
           onIncludeAll={includeAllSamples}
           onIncludeNone={includeNoSamples}
@@ -7795,6 +9824,15 @@ export default function App() {
           }}
         />
       )}
+      {clearGatingConfirmOpen && (
+        <ConfirmModal
+          title="Clear gates and populations?"
+          message="Every gate, population and hierarchy of this workspace is removed; the files, their scales, compensation and metadata stay. Undo brings the gating back."
+          confirmLabel="Clear"
+          onCancel={() => setClearGatingConfirmOpen(false)}
+          onConfirm={clearGating}
+        />
+      )}
       {crud?.kind === "confirmNewWorkspace" && (
         <ConfirmModal
           title="Start a new workspace?"
@@ -7876,16 +9914,49 @@ export default function App() {
         </div>
       )}
 
+      {chorusStats && (
+        <ChorusStatisticsModal
+          stats={chorusStats}
+          comparison={compareChorusStatistics(chorusStats, chorusFileCounts(), chorusImport)}
+          record={chorusImport}
+          onClose={() => setChorusStats(null)}
+        />
+      )}
+
+      {chorusPicker && chorusTimeline && (
+        <ChorusTimelineModal
+          experimentName={chorusPicker.experiment?.name ?? null}
+          timeline={chorusTimeline}
+          hasSample={!!sample}
+          onImportTree={(treeIndex) => {
+            const picked = chorusPicker;
+            if (picked.experiment) void chooseChorusTree(picked.experiment, treeIndex);
+          }}
+          onImportRecordings={(fileIds) => importChorusRecordings(fileIds)}
+          onCancel={() => setChorusPicker(null)}
+        />
+      )}
+
       {flowJoOpen && (() => {
         // Resolve against everything available right now: the samples already open plus the
         // files chosen in this dialog. Recomputed on render so adding files updates the list.
+        // Gated and ungated together, so one file cannot be claimed twice and the count is of every
+        // file the workspace names -- not only the ones it gates.
         const resolutions = resolveFlowJoWorkspaceFiles(
-          flowJoOpen.samples,
+          [...flowJoOpen.samples, ...flowJoOpen.dataSamples],
           [...samples.map((s0) => s0.name), ...flowJoOpen.pending.map((f) => f.name)],
         );
         const found = resolutions.filter((r) => r.fileName !== null).length;
+        const total = flowJoOpen.samples.length + flowJoOpen.dataSamples.length;
         const chosen = flowJoOpen.samples.find((x) => x.index === flowJoOpen.strategySample);
         const chosenResolved = resolutions.find((r) => r.sampleIndex === flowJoOpen.strategySample)?.fileName;
+        // Per file, any found gated sample can be the primary; otherwise the chosen one must be.
+        const canImport = flowJoOpen.perFileTrees
+          ? perFilePrimary(flowJoOpen.samples, resolutions, flowJoOpen.strategySample) !== undefined
+          : !!chosenResolved;
+        const loadedLower = new Set(samples.map((s0) => s0.name.toLowerCase()));
+        const foundLabel = (name: string) =>
+          `${loadedLower.has(name.toLowerCase()) ? t("already open") : t("found")}: ${name}`;
         return (
           <div className="gl-modal-backdrop" onClick={() => setFlowJoOpen(null)}>
             <div
@@ -7898,7 +9969,18 @@ export default function App() {
               <div className="gl-modal-note">
                 {t("A workspace holds gates, not data. Choose the FCS files it refers to; any it cannot find are skipped.")}
                 {" "}
-                <strong>{found}/{flowJoOpen.samples.length}</strong> {t("found")}
+                <strong>{found}/{total}</strong> {t("found")}
+              </div>
+              {/* The selected row was marked only by a blue outline, which said nothing about
+                  what it meant. In shared-hierarchy mode GateLab imports one sample's strategy,
+                  and this is where that sample is chosen. Say so, and use a radio, so the choice
+                  reads as a choice. */}
+              <div className="gl-modal-note">
+                {flowJoOpen.perFileTrees
+                  ? t("One tree is imported, the chosen sample's. Every other file found gets it with its own gate coordinates where the workspace tailors them; a sample whose tree differs is reported.")
+                  : flowJoOpen.samples.length > 1
+                    ? t("One shared hierarchy will be imported, so choose the sample whose strategy it should use.")
+                    : t("The strategy below will be imported.")}
               </div>
 
               <div className="gl-wsp-list">
@@ -7908,33 +9990,115 @@ export default function App() {
                   return (
                     <button
                       key={x.index}
-                      className="gl-wsp-row"
+                      className={"gl-wsp-row" + (isStrategy ? " is-strategy" : "")}
                       aria-pressed={isStrategy}
-                      style={isStrategy ? { outline: "2px solid var(--gl-accent, #2563eb)" } : undefined}
                       onClick={() => setFlowJoOpen({ ...flowJoOpen, strategySample: x.index, strategyTree: null })}
                     >
                       <span className="gl-wsp-name">
+                        <input
+                          type="radio"
+                          name="gatelab-wsp-strategy-sample"
+                          checked={isStrategy}
+                          readOnly
+                          tabIndex={-1}
+                          aria-label={t("Import this sample's strategy")}
+                          style={{ marginRight: 7 }}
+                        />
                         {x.name || `(unnamed sample ${x.index + 1})`}
                         {x.duplicateName && <span className="gl-wsp-dupe">{t("position")} {x.index + 1}</span>}
                       </span>
                       <span className="gl-wsp-meta">
                         {r?.fileName
-                          ? `${t("found")}: ${r.fileName}`
+                          ? foundLabel(r.fileName)
                           : `${t("not found")} — ${x.candidateFileNames.join(" / ")}`}
                         {` · ${x.gateCount} ${t("gates")}`}
                         {x.rootCount > 1 ? ` · ${x.rootCount} ${t("trees")}` : ""}
-                        {isStrategy ? ` · ${t("strategy to import")}` : ""}
+
                       </span>
                     </button>
                   );
                 })}
               </div>
 
-              {chosen && chosen.trees.length > 1 && (
+              {flowJoOpen.dataSamples.length > 0 && (
+                <div className="gl-wsp-list">
+                  <div className="gl-modal-note">{t("Also in the workspace, with no gates: loaded unselected for actions. Pooling is an explicit action above the plot.")}</div>
+                  {flowJoOpen.dataSamples.map((x) => {
+                    const r = resolutions.find((q) => q.sampleIndex === x.index);
+                    return (
+                      <div key={x.index} className="gl-wsp-row">
+                        <span className="gl-wsp-name">{x.name || `(unnamed sample ${x.index + 1})`}</span>
+                        <span className="gl-wsp-meta">
+                          {r?.fileName
+                            ? foundLabel(r.fileName)
+                            : `${t("not found")} — ${x.candidateFileNames.join(" / ")}`}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {wspMatrixConflict && (
+                <div className="gl-modal-field">
+                  <span>
+                    {t("This FCS and the workspace each carry a spillover matrix, and they differ by up to {delta}. Which should the gates be evaluated with?",
+                       { delta: wspMatrixConflict.delta.toFixed(4) })}
+                  </span>
+                  <label style={{ display: "flex", alignItems: "flex-start", gap: 7, color: "var(--text)" }}>
+                    <input
+                      type="radio"
+                      name="gatelab-wsp-matrix"
+                      checked={flowJoOpen.matrixChoice === "workspace"}
+                      onChange={() => setFlowJoOpen({ ...flowJoOpen, matrixChoice: "workspace" })}
+                    />
+                    <span>{t("The workspace's — {name}. This is the compensation in force when the gates were drawn.", { name: wspMatrixConflict.label })}</span>
+                  </label>
+                  <label style={{ display: "flex", alignItems: "flex-start", gap: 7, color: "var(--text)" }}>
+                    <input
+                      type="radio"
+                      name="gatelab-wsp-matrix"
+                      checked={flowJoOpen.matrixChoice === "file"}
+                      onChange={() => setFlowJoOpen({ ...flowJoOpen, matrixChoice: "file" })}
+                    />
+                    <span>{t("The file's — the matrix stored in the FCS, typically the one recorded at acquisition.")}</span>
+                  </label>
+                </div>
+              )}
+
+              {wspMatrixNote && !wspMatrixConflict && (
                 <div className="gl-modal-note">
-                  {t("This sample holds several strategies; choose one")}:{" "}
+                  {wspMatrixNote.kind === "workspace-only"
+                    ? t("These gates were drawn on compensated data and this file carries no spillover matrix, so the workspace's \"{name}\" will be applied to {n} channel(s).",
+                        { name: wspMatrixNote.label, n: String(wspMatrixNote.channels) })
+                    : t("The workspace's spillover matrix \"{name}\" matches the one in this file; compensation will be enabled with it.",
+                        { name: wspMatrixNote.label })}
+                </div>
+              )}
+
+              {flowJoOpen.samples.length > 1 && (
+                <div className="gl-modal-note">
+                  <label style={{ display: "flex", alignItems: "flex-start", gap: 7 }}>
+                    <input
+                      type="checkbox"
+                      checked={flowJoOpen.perFileTrees}
+                      onChange={(e) => setFlowJoOpen({ ...flowJoOpen, perFileTrees: e.target.checked })}
+                    />
+                    <span>
+                      <strong>{t("One hierarchy per file")}</strong><br />
+                      <span className="gl-modal-note">
+                        {t("Import every found file's own strategy into its own hierarchy, and assign the file to it. Files sharing a strategy converge on the same gates.")}
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              )}
+
+              {chosen && chosen.trees.length > 1 && !flowJoOpen.perFileTrees && (
+                <div className="gl-modal-note">
+                  {t("This sample holds several strategies")}:{" "}
                   <select
-                    value={flowJoOpen.strategyTree ?? ""}
+                    value={flowJoOpen.strategyTree ?? "all"}
                     onChange={(e) => setFlowJoOpen({
                       ...flowJoOpen,
                       strategyTree: e.target.value === ""
@@ -7942,7 +10106,6 @@ export default function App() {
                         : e.target.value === "all" ? "all" : Number(e.target.value),
                     })}
                   >
-                    <option value="">{t("Choose…")}</option>
                     <option value="all">
                       {t("Every strategy, one hierarchy each")} — {chosen.trees.length}
                     </option>
@@ -7956,11 +10119,20 @@ export default function App() {
               )}
 
               <div className="gl-modal-actions">
+                <button onClick={() => void chooseFlowJoFolder(flowJoOpen)}>{t("Use the workspace's folder…")}</button>
                 <button onClick={() => void chooseFlowJoFcs(flowJoOpen)}>{t("Choose FCS files…")}</button>
                 <button onClick={() => setFlowJoOpen(null)}>{t("Cancel")}</button>
                 <button
-                  disabled={!chosenResolved || (!!chosen && chosen.trees.length > 1 && flowJoOpen.strategyTree === null)}
-                  title={chosenResolved ? undefined : t("The FCS for the selected strategy has not been found yet")}
+                  disabled={!canImport || wspMatrixPending}
+                  title={
+                    !canImport
+                      ? (flowJoOpen.perFileTrees
+                          ? t("None of the workspace's FCS files has been found yet")
+                          : t("The FCS for the selected strategy has not been found yet"))
+                      : wspMatrixPending
+                        ? t("Checking the workspace's compensation…")
+                        : undefined
+                  }
                   onClick={() => void completeFlowJoOpen(flowJoOpen)}
                 >
                   {t("Import")}
@@ -8027,10 +10199,8 @@ export default function App() {
           canLearn={learnedBarcodeTemplate !== null}
           qcPreview={barcodeQcPreview}
           reusePreview={barcodeReusePreview}
-          suggestedHierarchyName={uniqueHierarchyName(`Hierarchy ${state.hierarchies.length + 1}`, state.hierarchies)}
           onPlanesChange={(planes) => setBarcodeImport((d) => (d ? { ...d, planes } : d))}
           onParentChange={(parentId) => setBarcodeImport((d) => (d ? { ...d, parentId } : d))}
-          onNewHierarchyChange={(name) => setBarcodeImport((d) => (d ? { ...d, newHierarchyName: name, ...(name !== null ? { qc: true } : {}) } : d))}
           onQcChange={(qc) => setBarcodeImport((d) => (d ? { ...d, qc } : d))}
           onReuseChange={(reuse) => setBarcodeImport((d) => (d ? { ...d, reuse } : d))}
           onTemplateDefault={() => setBarcodeImport((d) => (d ? { ...d, template: DEFAULT_BARCODE_TEMPLATE, templateLabel: "GateLab default" } : d))}
@@ -8048,22 +10218,60 @@ export default function App() {
           onImport={applyBarcodeImport}
         />
       )}
+      {groupModal && (
+        <HierarchyModal
+          mode={groupModal.mode}
+          kind="group"
+          currentName={state.groups.find((g) => g.id === groupModal.groupId)?.name ?? ""}
+          initialName={groupModal.mode === "rename"
+            ? state.groups.find((g) => g.id === groupModal.groupId)?.name ?? ""
+            : groupModal.mode === "new" ? uniqueHierarchyName("Group", state.groups) : ""}
+          takenNames={state.groups.map((g) => g.name)}
+          onCancel={() => setGroupModal(null)}
+          onConfirm={applyGroupModal}
+        />
+      )}
       {hierarchyModal && (
         <HierarchyModal
           mode={hierarchyModal}
-          currentName={activeHierarchy?.name ?? ""}
-          initialName={
-            hierarchyModal === "rename"
-              ? activeHierarchy?.name ?? ""
-              : hierarchyModal === "duplicate"
-                ? uniqueHierarchyName(`${activeHierarchy?.name ?? "Hierarchy"} copy`, state.hierarchies)
-                : hierarchyModal === "new"
-                  ? uniqueHierarchyName(`Hierarchy ${state.hierarchies.length + 1}`, state.hierarchies)
-                  : ""
-          }
+          currentName={(templateOf(state.active_hierarchy_id, state.hierarchies) ?? activeHierarchy)?.name ?? ""}
+          initialName={hierarchyModal === "rename" ? (templateOf(state.active_hierarchy_id, state.hierarchies) ?? activeHierarchy)?.name ?? "" : ""}
           takenNames={state.hierarchies.map((h) => h.name)}
           onCancel={() => setHierarchyModal(null)}
           onConfirm={(name) => applyHierarchyAction(hierarchyModal, name)}
+        />
+      )}
+      {hierarchyCopyDraft && (
+        <div className="gl-modal-backdrop" onClick={() => setHierarchyCopyDraft(null)}>
+          <div className="gl-modal" role="dialog" aria-label={t("Revert files to the tree")} aria-modal="true" onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === "Escape") setHierarchyCopyDraft(null);
+              if (event.key === "Tab") {
+                const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>("button");
+                const first = buttons[0], last = buttons[buttons.length - 1];
+                if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+                else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+              }
+            }}>
+            <div className="gl-modal-title">{t("Revert {count} files to the tree?", { count: hierarchyCopyDraft.fileIds.length })}</div>
+            <p>{t("These files will follow the tree again: every tailored gate in them takes the tree's coordinates. Other files and the tree itself stay unchanged.")}</p>
+            <ul style={{ maxHeight: 180, overflow: "auto" }}>{hierarchyCopyDraft.fileIds.map((id) => <li key={id}>{samples.find((file) => file.id === id)?.name}</li>)}</ul>
+            <p>{t("Files with nothing tailored are not listed. One Undo brings every tailored gate back.")}</p>
+            <div className="gl-modal-actions">
+              <button type="button" className="gl-btn-ghost" autoFocus onClick={() => setHierarchyCopyDraft(null)}>{t("Cancel")}</button>
+              <button type="button" className="gl-btn" onClick={applyHierarchyCopy}>{t("Revert listed files")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {promoteConfirmOpen && activeHierarchy && (activeHierarchy.owner_sample_id || activeHierarchy.owner_group_id) && (
+        <ConfirmModal
+          title={activeHierarchy.owner_group_id ? "Use this group's gates for the tree?" : viewedGroup && activeHierarchy.source_hierarchy_id === viewedGroupCopy?.id ? `Use this file's gates for ${viewedGroup.name}?` : "Use this file's gates for the tree?"}
+          message={`${activeHierarchy.owner_group_id ? "The tree" : viewedGroup && activeHierarchy.source_hierarchy_id === viewedGroupCopy?.id ? `The group "${viewedGroup.name}"` : "The tree"} takes ${activeHierarchy.owner_group_id ? `"${activeHierarchy.name}"` : samples.find((entry) => entry.id === activeHierarchy.owner_sample_id)?.name ?? "this file"}'s gate coordinates, and every file following it follows again; any tailoring they had is dropped. Populations and gate names are unchanged. Undo brings everything back.`}
+          confirmLabel={activeHierarchy.owner_group_id ? "Use for the tree" : viewedGroup && activeHierarchy.source_hierarchy_id === viewedGroupCopy?.id ? `Use for ${viewedGroup.name}` : "Use for the tree"}
+          onCancel={() => setPromoteConfirmOpen(false)}
+          onConfirm={confirmPromote}
         />
       )}
       {barcodeSave && (
@@ -8073,16 +10281,23 @@ export default function App() {
           onCancel={() => setBarcodeSave(null)}
         />
       )}
-      {pendingGatingMlImport && gatingImportNeedsDecision(pendingGatingMlImport, state) && (
+      {pendingGatingMlImport && gatingImportNeedsDecision(pendingGatingMlImport, state, samples.length) && (
         <GatingMlImportModal
           nGates={pendingGatingMlImport.result.n_gates_imported}
           nPopulations={pendingGatingMlImport.result.n_pops_imported}
+          sourceKind={pendingGatingMlImport.sourceKind ?? "gatingml"}
           sourceLabel={
-            pendingGatingMlImport.result.source === "gatelabr"
-              ? "a GateLab / GateLabR export"
-              : pendingGatingMlImport.result.source === "cytobank"
-                ? "a Cytobank Gating-ML file"
-                : "a Gating-ML file"
+            pendingGatingMlImport.sourceKind === "flowjo"
+              ? "a FlowJo workspace"
+              : pendingGatingMlImport.sourceKind === "chorus"
+                ? "a FACSChorus experiment"
+                : pendingGatingMlImport.sourceKind === "diva"
+                  ? "a FACSDiva experiment"
+                  : pendingGatingMlImport.result.source === "gatelabr"
+                    ? "a GateLab / GateLabR export"
+                    : pendingGatingMlImport.result.source === "cytobank"
+                      ? "a Cytobank Gating-ML file"
+                      : "a Gating-ML file"
           }
           currentRootName={
             state.root_population_id
@@ -8097,6 +10312,12 @@ export default function App() {
             })
           }
           mergeBlockedReason={pendingGatingMlImport.mergeBlockedReason}
+          structureMatches={
+            state.root_population_id !== null && sameStructure(
+              { gates: state.gates, gate_order: state.gate_order, populations: state.populations, root_population_id: state.root_population_id },
+              pendingGatingMlImport.result,
+            )
+          }
           compensationNote={pendingGatingMlImport.compensationNote}
           matrixChoice={
             pendingGatingMlImport.externalSpillover?.differsFromEmbedded
@@ -8111,11 +10332,30 @@ export default function App() {
             setPendingGatingMlImport((cur) => cur && { ...cur, matrixChoice: value })
           }
           compensationNeedsConfirmation={pendingGatingMlImport.compensation.requiresConfirmation}
+          files={samples.length > 1
+            ? {
+                total: samples.length,
+                selected: checkedSamples.length,
+                viewedName: fileName,
+                tailored: hierarchyGroups.flatMap((group) => group.members).filter((member) => member.tailored === true).length,
+              }
+            : null}
           onCancel={() => {
+            const opened = pendingGatingMlImport.openedSampleIds ?? [];
             setPendingGatingMlImport(null);
-            setImportMsg("Gating-ML import cancelled; the current strategy was not changed.");
+            if (opened.length) {
+              // Cancelling the strategy cancels the open: the files it loaded go too, rather than
+              // staying as a workspace with its gates left out.
+              void removeSamples(opened).then(() => setImportMsg(
+                `Workspace open cancelled; the ${opened.length === 1 ? "file it loaded was" : `${opened.length} files it loaded were`} ` +
+                "removed again and the current strategy was not changed.",
+              ));
+            } else {
+              setImportMsg("Gating-ML import cancelled; the current strategy was not changed.");
+            }
           }}
           onImport={applyGatingImport}
+          busy={gatingImportBusy}
         />
       )}
       {crud?.kind === "exportSceColData" && isSceHost && (
@@ -8179,6 +10419,28 @@ export default function App() {
           onExport={(format) => {
             exportGating(format);
             setGatingMlExportOpen(false);
+          }}
+        />
+      )}
+      {flowJoExportOpen && sample && (
+        <FlowJoExportModal
+          files={samples.map((e) => ({
+            id: e.id,
+            name: e.name,
+            hierarchy: state.hierarchies.find((h) => h.id === hierarchyOfFile(e.id))?.name ?? "",
+            checked: checkedSamples.some((c) => c.id === e.id),
+          }))}
+          plan={(scope) => {
+            try {
+              return planFlowJoExport(flowJoExportSamples(scope));
+            } catch (e) {
+              return { error: e instanceof Error ? e.message : String(e) };
+            }
+          }}
+          onCancel={() => setFlowJoExportOpen(false)}
+          onExport={(scope) => {
+            exportFlowJo(scope);
+            setFlowJoExportOpen(false);
           }}
         />
       )}
