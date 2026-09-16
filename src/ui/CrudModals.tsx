@@ -503,11 +503,7 @@ export function FcsExportModal({
     <ModalShell title="Export FCS">
       {hierarchy && hierarchy.count > 1 && (
         <div className="gl-modal-note">
-          {t("Hierarchy: {name} ({n} of {count}). Populations are exported from the active hierarchy; switch hierarchies to export the others.", {
-            name: hierarchy.name,
-            n: hierarchy.index,
-            count: hierarchy.count,
-          })}
+          {t("The populations listed are the viewed tree's. A file that follows a tailored or group copy of the tree is exported under that copy.")}
         </div>
       )}
       <div className="gl-modal-field">
