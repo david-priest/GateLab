@@ -43,6 +43,32 @@ function makeWs(): WorkspaceFile {
       densityColorPower: 1.8,
       fontSizes: { tick: 12, axis: 14, title: 11, gate: 12 },
     },
+    layout: {
+      version: 1,
+      activeSheetId: "sheet-overview",
+      sheets: [{
+        id: "sheet-overview",
+        name: "Overview",
+        width: 1200,
+        height: 800,
+        items: [{
+          id: "plot-one",
+          x: 24,
+          y: 24,
+          width: 280,
+          height: 300,
+          z: 1,
+          recipe: {
+            kind: "biplot",
+            sampleId: "sample-run-1",
+            populationId: "p1",
+            xChannel: "FSC-A",
+            yChannel: "SSC-A",
+            displayMode: "pseudocolor",
+          },
+        }],
+      }],
+    },
     metadataColumns: [{ name: "condition", levels: ["unstim", "stim"] }, { name: "donor" }],
   };
 }
@@ -120,6 +146,11 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     expect(back.display.fontSizes).toEqual({ tick: 12, axis: 14, title: 11, gate: 12 });
     expect(back.gating.selected_gate_id).toBe("g1");
     expect(back.workspaceId).toBe("workspace-test-1");
+    expect(back.layout?.sheets[0].items[0].recipe).toMatchObject({
+      kind: "biplot",
+      sampleId: "sample-run-1",
+      populationId: "p1",
+    });
   });
 
   it("preserves a manually arranged, non-alphabetical population order", () => {
@@ -171,6 +202,33 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     expect(validateWorkspace(older)).toBe(true);
     expect(readWorkspaceBytes(packWorkspaceReference(older)).ws.display.fontSizes).toBeUndefined();
     expect(readWorkspaceBytes(packWorkspaceReference(older)).ws.display.densityColorPower).toBeUndefined();
+  });
+
+  it("round-trips the scale lock and per-sample axis ranges", () => {
+    const ranged = cloneWs(ws);
+    ranged.scales = {
+      globalScales: { "FSC-A": [10, 20] },
+      lockBetweenFiles: false,
+      perSampleGlobalScales: {
+        "sample-run-1": { "FSC-A": [0, 10] },
+        "sample-run-2": { "FSC-A": [10, 20] },
+      },
+    };
+
+    const back = readWorkspaceBytes(packWorkspaceReference(ranged)).ws;
+    expect(back.scales).toEqual(ranged.scales);
+  });
+
+  it("rejects malformed scale-mode settings", () => {
+    const badLock = cloneWs(ws);
+    (badLock.scales as unknown as Record<string, unknown>).lockBetweenFiles = "yes";
+    expect(() => validateWorkspace(badLock)).toThrow(/scale-lock/i);
+
+    const badPerSampleRange = cloneWs(ws);
+    badPerSampleRange.scales.perSampleGlobalScales = {
+      "sample-run-1": { "FSC-A": [10, 5] },
+    };
+    expect(() => validateWorkspace(badPerSampleRange)).toThrow(/sample-run-1/i);
   });
 
   it("rejects duplicate or blank persisted sample identities", () => {
@@ -421,6 +479,7 @@ describe("per-file hierarchies in the workspace file", () => {
   it("round-trips the mode flag and each sample's hierarchy, tolerating an id that no longer exists", () => {
     const ws = makeWs();
     ws.gating.perFileHierarchies = true;
+    ws.gating.perFileHierarchyCopiesInitialized = true;
     ws.samples[0].hierarchyId = "main";
     // A hierarchy deleted after the file was assigned: the reader keeps the id and the app falls
     // back to the first hierarchy, so an old assignment never makes a workspace unreadable.
@@ -428,6 +487,7 @@ describe("per-file hierarchies in the workspace file", () => {
     expect(validateWorkspace(ws)).toBe(true);
     const { ws: back } = readWorkspaceBytes(packWorkspace(ws, fcsByPath));
     expect(back.gating.perFileHierarchies).toBe(true);
+    expect(back.gating.perFileHierarchyCopiesInitialized).toBe(true);
     expect(back.samples.map((s) => s.hierarchyId)).toEqual(["main", "deleted-later"]);
     // Absent stays absent, which reads as off / first hierarchy.
     const plain = readWorkspaceBytes(packWorkspace(makeWs(), fcsByPath)).ws;
@@ -435,10 +495,130 @@ describe("per-file hierarchies in the workspace file", () => {
     expect(plain.samples[0].hierarchyId).toBeUndefined();
   });
 
+  it("round-trips file ownership, structural lock, and source correspondence", () => {
+    const ws = makeWs();
+    ws.gating.perFileHierarchies = true;
+    ws.gating.perFileHierarchyCopiesInitialized = true;
+    ws.gating.hierarchies = [
+      { id: "main", name: "Main" },
+      {
+        id: "file-1",
+        name: "D1.fcs · Main",
+        owner_sample_id: "sample-run-1",
+        structure_locked: true,
+        source_hierarchy_id: "main",
+        source_gate_ids: { "file-g1": "g1" },
+        source_population_ids: { "file-root": "root", "file-p1": "p1" },
+      },
+    ];
+    ws.gating.active_hierarchy_id = "main";
+    ws.gating.stored_hierarchies = [{
+      ...ws.gating.hierarchies[1],
+      gates: {
+        "file-g1": {
+          ...ws.gating.gates.g1,
+          gate_id: "file-g1",
+        },
+      },
+      gate_order: ["file-g1"],
+      populations: {
+        "file-root": {
+          ...ws.gating.populations.root,
+          population_id: "file-root",
+          children: ["file-p1"],
+        },
+        "file-p1": {
+          ...ws.gating.populations.p1,
+          population_id: "file-p1",
+          parent_id: "file-root",
+          gate_refs: [{ gate_id: "file-g1", include: true }],
+        },
+      },
+      root_population_id: "file-root",
+      active_population_id: "file-root",
+    }];
+    ws.samples[0].hierarchyId = "file-1";
+
+    expect(validateWorkspace(ws)).toBe(true);
+    const { ws: back } = readWorkspaceBytes(packWorkspace(ws, fcsByPath));
+    expect(back.gating.hierarchies?.[1]).toMatchObject({
+      owner_sample_id: "sample-run-1",
+      structure_locked: true,
+      source_hierarchy_id: "main",
+      source_gate_ids: { "file-g1": "g1" },
+      source_population_ids: { "file-root": "root", "file-p1": "p1" },
+    });
+    expect(back.gating.stored_hierarchies?.[0]).toMatchObject({
+      owner_sample_id: "sample-run-1",
+      structure_locked: true,
+      source_hierarchy_id: "main",
+    });
+
+    const unknownOwner = cloneWs(ws);
+    unknownOwner.gating.hierarchies![1].owner_sample_id = "missing-sample";
+    expect(() => validateWorkspace(unknownOwner)).toThrow(/file owner/);
+
+    const missingSource = cloneWs(ws);
+    delete missingSource.gating.hierarchies![1].source_hierarchy_id;
+    expect(() => validateWorkspace(missingSource)).toThrow(/source correspondence/);
+  });
+
+  it("round-trips a group's tree: locked, owned by a listed group, never by a file as well", () => {
+    const ws = makeWs();
+    ws.gating.groups = [{ id: "grp-1", name: "Treated" }];
+    ws.gating.hierarchies = [
+      { id: "main", name: "Main" },
+      {
+        id: "group-1",
+        name: "Treated",
+        owner_group_id: "grp-1",
+        structure_locked: true,
+        source_hierarchy_id: "main",
+        source_gate_ids: { "group-g1": "g1" },
+        source_population_ids: { "group-root": "root", "group-p1": "p1" },
+      },
+    ];
+    ws.gating.active_hierarchy_id = "main";
+    ws.gating.stored_hierarchies = [{
+      ...ws.gating.hierarchies[1],
+      gates: { "group-g1": { ...ws.gating.gates.g1, gate_id: "group-g1" } },
+      gate_order: ["group-g1"],
+      populations: {
+        "group-root": { ...ws.gating.populations.root, population_id: "group-root", children: ["group-p1"] },
+        "group-p1": { ...ws.gating.populations.p1, population_id: "group-p1", parent_id: "group-root", gate_refs: [{ gate_id: "group-g1", include: true }] },
+      },
+      root_population_id: "group-root",
+      active_population_id: "group-root",
+    }];
+    ws.samples[0].groupId = "grp-1";
+    ws.samples[0].hierarchyId = "group-1";
+
+    expect(validateWorkspace(ws)).toBe(true);
+    const { ws: back } = readWorkspaceBytes(packWorkspace(ws, fcsByPath));
+    expect(back.gating.groups).toEqual([{ id: "grp-1", name: "Treated" }]);
+    expect(back.gating.hierarchies?.[1]).toMatchObject({ owner_group_id: "grp-1", structure_locked: true, source_hierarchy_id: "main" });
+    expect(back.samples[0].groupId).toBe("grp-1");
+
+    const unlisted = cloneWs(ws);
+    unlisted.gating.groups = [];
+    expect(() => validateWorkspace(unlisted)).toThrow(/names a group/);
+
+    const both = cloneWs(ws);
+    both.gating.hierarchies![1].owner_sample_id = "sample-run-1";
+    expect(() => validateWorkspace(both)).toThrow(/both a file and a group/);
+
+    const noOwner = cloneWs(ws);
+    delete noOwner.gating.hierarchies![1].owner_group_id;
+    expect(() => validateWorkspace(noOwner)).toThrow(/file or group owner/);
+  });
+
   it("rejects a malformed flag or hierarchy id", () => {
     const flag = makeWs();
     (flag.gating as { perFileHierarchies?: unknown }).perFileHierarchies = "yes";
     expect(() => validateWorkspace(flag)).toThrow(/perFileHierarchies/);
+    const copies = makeWs();
+    (copies.gating as { perFileHierarchyCopiesInitialized?: unknown }).perFileHierarchyCopiesInitialized = "yes";
+    expect(() => validateWorkspace(copies)).toThrow(/perFileHierarchyCopiesInitialized/);
     const id = makeWs();
     (id.samples[0] as { hierarchyId?: unknown }).hierarchyId = 7;
     expect(() => validateWorkspace(id)).toThrow(/hierarchyId/);

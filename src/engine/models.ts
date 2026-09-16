@@ -23,6 +23,10 @@ export type GateSpace = "raw" | "display";
 /**
  * A display transform, in a form that can be serialised and rebuilt exactly.
  *
+ * `flog` is Gating-ML's logarithmic scale, carried for the same reason: a gate imported from a
+ * Gating-ML document declares the space its vertices are straight in, and §4.2.3 makes that space
+ * part of the gate. Holding it is what lets a log polygon come back the shape it left as.
+ *
  * `biex` and `wsplog` are FlowJo's own display transforms. GateLab never *displays* on them —
  * they arrive only on gates imported from a .wsp, where they record the space FlowJo evaluates
  * the gate in. That separation is why they cost nothing in the UI: a gate can live in biex space,
@@ -34,7 +38,8 @@ export type TransformSpec =
   | { kind: "asinh"; cofactor: number }
   | { kind: "logicle"; T: number; W: number; M: number; A: number }
   | { kind: "biex"; maxValue: number; pos: number; neg: number; widthBasis: number; channelRange: number }
-  | { kind: "wsplog"; offset: number; decades: number };
+  | { kind: "wsplog"; offset: number; decades: number }
+  | { kind: "flog"; T: number; M: number };
 
 /** The transform each axis was drawn under. Only meaningful when `space` is `display`. */
 export type GateTransforms = Record<string, TransformSpec>;
@@ -54,6 +59,50 @@ export interface PolyRectGate {
   label_offset: [number, number] | null;
 }
 
+/**
+ * Curved quadrant arms: FlowJo's "curly quad".
+ *
+ * Beyond the crosshair, the arm running to the right rises and the arm running up bends to the
+ * right, each by k · d^power in the gate's own coordinates, where d is the distance along the
+ * axis from the crosshair; the arms to the left of and below the crosshair stay straight. `kx`
+ * bends the horizontal arm (y rises with x), `ky` the vertical one (x moves with y). FlowJo
+ * curves them to follow photon-counting noise (p2 = a·p1^0.5 + b, docs.flowjo.com), computes
+ * the bend itself, and writes nothing but percentX = percentY = 0 into the workspace. Against
+ * FlowJo's own counts for 44 curly-quad populations in three public FlowRepository workspaces,
+ * power 1.5 with k = 0.012 in FlowJo's 256-channel display space reproduces every quadrant
+ * within 0.6% of its parent, most within 0.3% (scripts/curlyquad-calibrate.ts in the paper
+ * repository); a straight crosshair is out by up to 23%. A quadrant gate without `curl` is a
+ * plain crosshair.
+ */
+export interface QuadrantCurl {
+  power: number;
+  kx: number;
+  ky: number;
+}
+
+/** FlowJo's bend, in its 256-channel display space, as fitted against its own counts. */
+export const FLOWJO_CURLY_QUAD_CURL: Readonly<QuadrantCurl> = { power: 1.5, kx: 0.012, ky: 0.012 };
+
+/**
+ * FlowJo's bend carried into a display space whose axes span `spanX` and `spanY` units.
+ *
+ * FlowJo's k applies with both axes on 256 channels. A bend of k · d^p in those units is, on
+ * axes of the given spans, kx' = k · 256^(p−1) · spanY / spanX^p and ky' = k · 256^(p−1) ·
+ * spanX / spanY^p, so a quadrant drawn on GateLab's own axes starts with the same curve FlowJo
+ * would give it. The handles then set it by eye.
+ */
+export function flowJoCurlForDisplay(spanX: number, spanY: number): QuadrantCurl {
+  const { power, kx, ky } = FLOWJO_CURLY_QUAD_CURL;
+  const scale = Math.pow(256, power - 1);
+  const sx = spanX > 0 ? spanX : 1;
+  const sy = spanY > 0 ? spanY : 1;
+  return {
+    power,
+    kx: kx * scale * sy / Math.pow(sx, power),
+    ky: ky * scale * sx / Math.pow(sy, power),
+  };
+}
+
 export interface QuadrantGate {
   gate_id: string;
   name: string;
@@ -61,12 +110,19 @@ export interface QuadrantGate {
   x_channel: string;
   y_channel: string;
   center: [number, number];
+  /** Curved arms beyond the crosshair; absent means a straight crosshair. */
+  curl?: QuadrantCurl;
   /** Space the vertices are straight in; absent = this sample's pre-field default. */
   space?: GateSpace;
   /** Per-axis transform the gate was drawn under. Present only when space is display. */
   transforms?: GateTransforms;
   color: string;
   label_offset: [number, number] | null;
+  /**
+   * Where each quadrant's label sits, Q1 to Q4, as a dragged delta in display units from the
+   * screen quadrant's midpoint; null or absent means the midpoint. Cosmetic, like label_offset.
+   */
+  quadrant_label_offsets?: ([number, number] | null)[];
 }
 
 /**
@@ -228,7 +284,19 @@ export function validateGate(gate: Gate): true {
   if (gate.gate_type === "quadrant" && (gate as QuadrantGate).center.length !== 2) {
     throw new Error("Quadrant gate must have a center of length 2");
   }
+  if (gate.gate_type === "quadrant" && (gate as QuadrantGate).curl !== undefined && !validCurl((gate as QuadrantGate).curl)) {
+    throw new Error("Quadrant gate curl must have a positive finite power and finite kx, ky");
+  }
   return true;
+}
+
+/** A curl is usable when its power is positive and every coefficient is finite. */
+export function validCurl(curl: unknown): curl is QuadrantCurl {
+  if (!curl || typeof curl !== "object") return false;
+  const c = curl as Record<string, unknown>;
+  return typeof c.power === "number" && Number.isFinite(c.power) && c.power > 0
+    && typeof c.kx === "number" && Number.isFinite(c.kx)
+    && typeof c.ky === "number" && Number.isFinite(c.ky);
 }
 
 /** Add a child population to a parent (idempotent on children). */

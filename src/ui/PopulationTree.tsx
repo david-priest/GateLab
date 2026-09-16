@@ -5,7 +5,7 @@
 // Row click → setActivePopulation (pop_tree_click) + focus the container for arrow nav.
 // The blue highlight is the move selection: a click highlights one row (the active population),
 // Shift-click highlights the range from the active row to the clicked one, Cmd/Ctrl-click adds or
-// removes a row, and Shift-drag moves every highlighted row together. The checkboxes are separate:
+// removes a row, and a plain drag moves every highlighted row together. The checkboxes are separate:
 // they pool the display and feed the toolbar's duplicate / move / delete actions.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -13,43 +13,238 @@ import type { CoreState, Derived, Action } from "../store";
 import { wouldCreateCycle, type Gate, type GateRef } from "../engine/models";
 import { TreeConnectors } from "./TreeConnectors";
 import { useI18n } from "./i18n";
+import { MenuButton } from "./MenuButton";
+import type { QuadrantNaming } from "../engine/quadrantNames";
 import { gateRefLabel, EXCLUDE_HINT } from "./gateRefLabel";
-import { HierarchyChip, type HierarchyChipInfo } from "./HierarchyChip";
+import { isCopyRef, type HierarchyRef } from "../engine/hierarchies";
 
-export type HierarchyMenuAction = "new" | "duplicate" | "rename" | "delete";
+export type EditTarget = "tree" | "group" | "file";
 
-/** The per-file hierarchy controls: a switch, the active hierarchy's colour, and bulk assignment. */
-export interface PerFileHierarchyProps {
-  enabled: boolean;
-  /** The active hierarchy's chip, the same one its files carry in the sample list. */
-  chip: HierarchyChipInfo;
-  onToggle: (enabled: boolean) => void;
-  /** Assign every checked file to the active hierarchy. */
-  onAssignChecked: () => void;
+/** The tree row: its name, where edits go, how the files stand, and the ways back. */
+export interface TreeControlsProps {
+  /** The viewed file's name; null with nothing loaded. */
+  fileName: string | null;
+  /** Where edits go, as the user chose it: the tree, the viewed file's group, or the file alone. */
+  editMode: EditTarget;
+  /** The viewed file's group, when it is in one, and its colour. */
+  groupName: string | null;
+  groupColour?: string | null;
+  groupFiles: number;
+  /** The group's tree has gates whose coordinates differ from the tree's. */
+  groupTailored: boolean;
+  /** What the viewed file follows: "the tree", or its group's name. */
+  sourceLabel: string;
+  /** The viewed file has gates whose coordinates differ from what it follows. */
+  fileTailored: boolean;
+  onEditTarget: (target: EditTarget) => void;
+  onRename: () => void;
+  /** Name every quadrant gate's four populations by a scheme; a tree edit, so only in tree mode. */
+  onNameQuadrants?: (scheme: QuadrantNaming) => void;
+  /** A workspace saved with several trees: switch between them, and delete one, until one is left. */
+  onSwitchTree?: (id: string) => void;
+  onDeleteTree?: () => void;
   checkedCount: number;
+  /** How many files have tailored gates, for Revert all. */
+  tailoredFiles: number;
+  /** Drop the viewed file's tailoring: it follows the tree, or its group, again. */
+  onRevertFile?: () => void;
+  /** Drop the group's tailoring: every gate of the group's tree takes the tree's coordinates. */
+  onRevertGroup?: () => void;
+  /** Drop the selected files' tailoring, after confirmation. */
+  onRevertChecked?: () => void;
+  /** Drop every file's tailoring, after confirmation. */
+  onRevertAll?: () => void;
+  /** The tree takes this file's coordinates and every file follows it again. */
+  onPromote?: () => void;
+  /** "17 files · all following", or how many are tailored. */
+  summary?: string;
+  message?: string | null;
 }
 
 interface Props {
   state: CoreState;
   derived: Derived;
   dispatch: (a: Action) => void;
-  /** The hierarchy menu's actions that need a dialog; switching is dispatched directly. */
-  onHierarchyAction?: (action: HierarchyMenuAction) => void;
-  /**
-   * Switching hierarchies goes through the app when it also assigns the active file; without
-   * this the switch is dispatched directly.
-   */
-  onSwitchHierarchy?: (id: string) => void;
-  perFile?: PerFileHierarchyProps;
+  perFile?: TreeControlsProps;
+  /** Render the tree controls here; false when App places them above the gate list. */
+  showHierarchyControls?: boolean;
   statsPending?: boolean;
   statsSampleCount?: number;
   displayContributorCount?: number;
   displayContributorNames?: readonly string[];
+  /** Gates of this copy whose geometry differs from the tree's: FlowJo's tailored marks. */
+  tailoredGateIds?: ReadonlySet<string>;
+  readOnly?: boolean;
 }
 
 function focusTreeContainer() {
   const c = document.getElementById("population_tree_container");
   if (c) c.focus({ preventScroll: true });
+}
+
+/** The tree the live hierarchy belongs to: itself, or the tree its copy (or its copy's group) follows. */
+function treeOfLive(hierarchies: readonly HierarchyRef[], activeId: string): HierarchyRef | undefined {
+  let cur = hierarchies.find((h) => h.id === activeId);
+  const seen = new Set<string>();
+  while (cur && isCopyRef(cur) && cur.source_hierarchy_id && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    cur = hierarchies.find((h) => h.id === cur!.source_hierarchy_id) ?? cur;
+    if (seen.has(cur.id)) break;
+  }
+  return cur;
+}
+
+/** The one tree's row above the gate list: name, edit target, summary, promote and revert. */
+export function HierarchyControls({ state, perFile }: { state: CoreState; perFile?: TreeControlsProps }) {
+  const { t } = useI18n();
+  const hierarchies = state.hierarchies ?? [];
+  const activeHierarchyId = state.active_hierarchy_id ?? hierarchies[0]?.id ?? "";
+  const templates = hierarchies.filter((hierarchy) => !isCopyRef(hierarchy));
+  const tree = treeOfLive(hierarchies, activeHierarchyId);
+  // A workspace saved under the old model can hold several trees; they stay reachable, and
+  // deletable, until one is left. Nothing here makes a second one.
+  const legacy = templates.length > 1;
+  const hasQuadrants = Object.values(state.gates).some((gate) => gate.gate_type === "quadrant");
+  const namingBlocked = perFile?.editMode !== "tree";
+  const namingTitle = namingBlocked
+    ? t("Population names belong to the tree: choose Tree as the edit target first.")
+    : t("Renames the four populations of every quadrant gate; the names shown in the Create quadrant gate dialog.");
+  const nameItems = [
+    { label: t("Rename the tree…"), className: "population-tree-rename", onClick: () => perFile?.onRename() },
+    ...(perFile?.onNameQuadrants && hasQuadrants
+      ? [
+          { label: t("Name quadrant populations DN, DP, SP"), className: "population-tree-name-quadrants-dndp", title: namingTitle, disabled: namingBlocked, onClick: () => perFile.onNameQuadrants?.("dndp") },
+          { label: t("Name quadrant populations by signs"), className: "population-tree-name-quadrants-signs", title: namingTitle, disabled: namingBlocked, onClick: () => perFile.onNameQuadrants?.("signs") },
+        ]
+      : []),
+    ...(legacy && perFile?.onSwitchTree
+      ? templates.filter((candidate) => candidate.id !== tree?.id).map((candidate) => ({
+          label: t("Switch to {name}", { name: candidate.name }),
+          className: "population-tree-switch",
+          onClick: () => perFile.onSwitchTree?.(candidate.id),
+        }))
+      : []),
+    ...(legacy && perFile?.onDeleteTree
+      ? [{ label: t("Delete this tree…"), className: "population-tree-delete", title: t("Its gates go with it; its files follow the tree that is left."), onClick: perFile.onDeleteTree }]
+      : []),
+  ];
+  return (
+    <div className="population-tree-hierarchy">
+      <span title={t("The workspace's one tree. Its populations and gates apply to every file; a file can tailor a gate's coordinates without leaving it.")}>
+        {t("Tree")}
+      </span>
+      <MenuButton label={tree?.name ?? ""} className="population-tree-name-menu" items={nameItems} />
+      {legacy && (
+        <span
+          className="population-tree-hierarchy-count"
+          title={t("This workspace was saved with several trees. GateLab now keeps one per workspace: switch to another from the tree menu, or delete it there, until one is left.")}
+        >
+          {t("also here: {names} · switch or delete from the tree menu", { names: templates.filter((candidate) => candidate.id !== tree?.id).map((candidate) => candidate.name).join(", ") })}
+        </span>
+      )}
+      {perFile && (
+        <span className="population-tree-edit-target" role="group" aria-label={t("Edits change")}>
+          <span className="population-tree-edit-target-label">{t("Edits change")}</span>
+          <button
+            type="button"
+            className="gl-mini-btn population-tree-edit-tree"
+            aria-pressed={perFile.editMode === "tree"}
+            title={t("Moving a gate moves it for every file, except where a group or a file has tailored that gate.")}
+            onClick={() => perFile.onEditTarget("tree")}
+          >
+            {t("the tree · all files")}
+          </button>
+          {/* A slot the group button fills, so the file button beside it holds its place. */}
+          <span className="population-tree-edit-group-slot" hidden={!state.groups?.length}>
+          {perFile.groupName && (
+            <button
+              type="button"
+              className="gl-mini-btn population-tree-edit-group"
+              style={perFile.groupColour ? { borderColor: perFile.groupColour, color: perFile.editMode === "group" ? undefined : perFile.groupColour } : undefined}
+              aria-pressed={perFile.editMode === "group"}
+              title={t("Moving a gate moves it for every file in this group, except where a file has tailored that gate; the tree and the other files keep theirs.")}
+              onClick={() => perFile.onEditTarget("group")}
+            >
+              {t("{name} · {count} files", { name: perFile.groupName, count: perFile.groupFiles })}
+            </button>
+          )}
+          </span>
+          <button
+            type="button"
+            className="gl-mini-btn population-tree-edit-file"
+            aria-pressed={perFile.editMode === "file"}
+            disabled={!perFile.fileName}
+            title={t("Moving a gate tailors it for this file alone; the tree and the other files keep theirs.")}
+            onClick={() => perFile.onEditTarget("file")}
+          >
+            {perFile.fileName ? t("{name} only", { name: perFile.fileName }) : t("this file only")}
+          </button>
+        </span>
+      )}
+      {perFile?.summary && <span className="population-tree-hierarchy-count" title={perFile.summary}>{perFile.summary}</span>}
+      {/* The promote button appears in a slot of fixed width, so the Revert menu never moves. */}
+      {perFile?.onPromote && <span className="population-tree-promote-slot">
+      {((perFile.editMode === "file" && perFile.fileTailored) || (perFile.editMode === "group" && perFile.groupTailored)) && (
+        <button
+          type="button"
+          className="gl-mini-btn population-tree-promote"
+          title={perFile.editMode === "group"
+            ? t("The tree takes this group's gate coordinates and every file follows it again, other tailoring dropped. Undo is available.")
+            : t("{target} takes this file's gate coordinates and every file following it follows again, its own tailoring dropped. FlowJo's Apply to group, for the whole tree. Undo is available.", { target: perFile.sourceLabel })}
+          onClick={perFile.onPromote}
+        >
+          {t("Use for {target}…", { target: perFile.editMode === "group" ? t("the tree") : perFile.sourceLabel })}
+        </button>
+      )}
+      </span>}
+      {perFile && (perFile.onRevertFile || perFile.onRevertChecked || perFile.onRevertAll) && (
+        <MenuButton
+          label={t("Revert")}
+          className="population-tree-revert-menu"
+          items={[
+            ...(perFile.onRevertFile
+              ? [{
+                  label: perFile.fileName ? t("Revert {name} to {target}", { name: perFile.fileName, target: perFile.sourceLabel }) : t("Revert this file"),
+                  className: "population-tree-revert-group",
+                  title: t("Drop this file's tailoring: every gate takes the coordinates it follows again"),
+                  disabled: !perFile.fileTailored,
+                  onClick: perFile.onRevertFile,
+                }]
+              : []),
+            ...(perFile.groupName && perFile.onRevertGroup
+              ? [{
+                  label: t("Revert {name} to the tree", { name: perFile.groupName }),
+                  className: "population-tree-revert-groupcopy",
+                  title: t("Drop the group's tailoring: every gate of the group's tree takes the tree's coordinates again; files following the group follow along"),
+                  disabled: !perFile.groupTailored,
+                  onClick: perFile.onRevertGroup,
+                }]
+              : []),
+            ...(perFile.onRevertChecked
+              ? [{
+                  label: t("Revert {count} selected files…", { count: perFile.checkedCount }),
+                  className: "population-tree-revert-checked",
+                  title: t("Drop the selected files' tailoring, after confirmation. Unselected files and the tree stay unchanged."),
+                  disabled: perFile.checkedCount === 0,
+                  onClick: perFile.onRevertChecked,
+                }]
+              : []),
+            ...(perFile.onRevertAll
+              ? [{
+                  label: t("Revert all files…"),
+                  className: "population-tree-revert-all",
+                  title: t("Drop every file's tailoring, after confirmation: every file follows the tree."),
+                  disabled: perFile.tailoredFiles === 0,
+                  onClick: perFile.onRevertAll,
+                }]
+              : []),
+          ]}
+        />
+      )}
+      {/* Always a line, so a message does not push the lists below down. */}
+      <span role="status" className="hierarchy-action-status">{perFile?.message ?? "\u00a0"}</span>
+    </div>
+  );
 }
 
 type DropPlacement = "before" | "inside" | "after";
@@ -131,16 +326,25 @@ export function PopulationTree({
   statsSampleCount = 1,
   displayContributorCount,
   displayContributorNames,
-  onHierarchyAction,
-  onSwitchHierarchy,
   perFile,
-}: Props) {
+  readOnly = false,
+  showHierarchyControls = true, tailoredGateIds }: Props) {
   const { t } = useI18n();
   const { populations, root_population_id, active_population_id, selected_gate_id, selected_pop_ids, gates } = state;
+  const structureLocked = readOnly || state.hierarchies.some(
+    (hierarchy) => hierarchy.id === state.active_hierarchy_id && hierarchy.structure_locked === true,
+  );
   const stats = derived.stats;
   const checkedPops = new Set(selected_pop_ids);
   const choices = useMemo(() => gateChoices(state), [state.gate_order, state.gates]);
   const [editingName, setEditingName] = useState<{ popId: string; value: string } | null>(null);
+  /** Branches folded away: their rows are not shown, and the branch draws as a leaf. */
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleCollapsed = (popId: string) => setCollapsed((current) => {
+    const next = new Set(current);
+    if (next.has(popId)) next.delete(popId); else next.add(popId);
+    return next;
+  });
   const [draggingPopIds, setDraggingPopIds] = useState<readonly string[]>([]);
   /** Rows highlighted besides the active population; cleared whenever the active row changes. */
   const [extraHighlight, setExtraHighlight] = useState<readonly string[]>([]);
@@ -213,7 +417,7 @@ export function PopulationTree({
   const orderedPopIds: string[] = [];
 
   const startRename = (event: React.MouseEvent, popId: string) => {
-    if (popId === root_population_id) return;
+    if (structureLocked || popId === root_population_id) return;
     event.preventDefault();
     event.stopPropagation();
     setEditingName({ popId, value: populations[popId].name });
@@ -231,6 +435,7 @@ export function PopulationTree({
     popId: string,
     refIndex: number | null,
   ) => {
+    if (structureLocked) return;
     event.preventDefault();
     event.stopPropagation();
     const rect = event.currentTarget.getBoundingClientRect();
@@ -366,6 +571,12 @@ export function PopulationTree({
     };
   };
 
+  const descendantCount = (popId: string): number => {
+    let n = 0;
+    const walk = (id: string) => { for (const c of populations[id]?.children ?? []) { n += 1; walk(c); } };
+    walk(popId);
+    return n;
+  };
   const appendRows = (popId: string, depth: number, isLastPath: boolean[]) => {
     if (visited.has(popId)) return;
     visited.add(popId);
@@ -425,7 +636,16 @@ export function PopulationTree({
           focusTreeContainer();
         }}
         onPointerDown={(event) => {
-          if (isRoot || !event.shiftKey || event.button !== 0) return;
+          // A plain drag moves rows. Shift and Cmd/Ctrl are the SELECTION modifiers and never
+          // start a drag, so shift-click still highlights a range and cmd-click still toggles a
+          // row. A plain click is unaffected because a drag needs 8 px of movement before it
+          // becomes one, so press-and-release still just makes the row active.
+          //
+          // Dragging a highlighted row still moves the whole highlighted set: dragSetFor()
+          // returns it, so select-then-drag works without the modifier being held during the
+          // drag itself, which is what made the old gesture awkward.
+          if (structureLocked || isRoot || event.button !== 0) return;
+          if (event.shiftKey || event.metaKey || event.ctrlKey) return;
           const target = event.target instanceof Element ? event.target : null;
           if (target?.closest("button, input, .pop-tree-gate-badge")) return;
           pointerDragRef.current = {
@@ -444,7 +664,9 @@ export function PopulationTree({
           if (!drag || drag.pointerId !== event.pointerId) return;
           if (!drag.active) {
             const moved = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
-            if (moved < 4) return;
+            // 8 px, not 4: a click that slips a little on a trackpad became a drag, and a drop on
+            // the row below reparented the population.
+            if (moved < 8) return;
             drag.active = true;
             setDraggingPopIds(drag.popIds);
           }
@@ -464,10 +686,14 @@ export function PopulationTree({
             }, 0);
           }
           if (drag.active && drag.dropTarget?.valid) {
+            // Option (Alt) held at the drop copies the rows there, gates shared, the originals
+            // staying put: the way to gate the same quadrant under several parents.
             dispatch(
-              drag.popIds.length === 1
-                ? { type: "movePopulation", popId: drag.popIds[0], targetId: drag.dropTarget.popId, placement: drag.dropTarget.placement }
-                : { type: "movePopulations", popIds: drag.popIds, targetId: drag.dropTarget.popId, placement: drag.dropTarget.placement },
+              event.altKey
+                ? { type: "copyPopulations", popIds: drag.popIds, targetId: drag.dropTarget.popId, placement: drag.dropTarget.placement }
+                : drag.popIds.length === 1
+                  ? { type: "movePopulation", popId: drag.popIds[0], targetId: drag.dropTarget.popId, placement: drag.dropTarget.placement }
+                  : { type: "movePopulations", popIds: drag.popIds, targetId: drag.dropTarget.popId, placement: drag.dropTarget.placement },
             );
           }
           resetPointerDrag(event.currentTarget, event.pointerId);
@@ -490,7 +716,23 @@ export function PopulationTree({
           />
         </span>
         <span className="pop-row-name-col">
-          <TreeConnectors depth={depth} isLastPath={isLastPath} />
+          <TreeConnectors depth={depth} isLastPath={isLastPath} fill />
+          {pop.children.length > 0 ? (
+            <button
+              type="button"
+              className="pop-row-disclosure"
+              aria-label={collapsed.has(popId) ? t("Show the populations under {name}", { name: pop.name }) : t("Hide the populations under {name}", { name: pop.name })}
+              aria-expanded={!collapsed.has(popId)}
+              title={collapsed.has(popId) ? t("{count} hidden", { count: descendantCount(popId) }) : undefined}
+              onClick={(event) => { event.stopPropagation(); toggleCollapsed(popId); }}
+              onDoubleClick={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              {collapsed.has(popId) ? "\u25b8" : "\u25be"}
+            </button>
+          ) : (
+            <span className="pop-row-disclosure is-leaf" aria-hidden="true" />
+          )}
           {editingName?.popId === popId ? (
             <input
               className="pop-row-name-input"
@@ -530,6 +772,7 @@ export function PopulationTree({
               const isSelGate = ref.gate_id === selected_gate_id;
               const cls =
                 "gate-ref-badge pop-tree-gate-badge" +
+                (tailoredGateIds?.has(ref.gate_id) ? " is-tailored" : "") +
                 (!ref.include ? " exclude" : "") +
                 (isSelGate ? " selected-gate" : "");
               return (
@@ -539,10 +782,12 @@ export function PopulationTree({
                   style={{ background: gate.color }}
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (e.shiftKey && !isRoot) openGatePicker(e, popId, i);
+                    if (e.shiftKey && !isRoot && !structureLocked) openGatePicker(e, popId, i);
                     else dispatch({ type: "selectGate", gateId: ref.gate_id });
                   }}
-                  title={t("Click to select; Shift-click to change, exclude (NOT), or remove")}
+                  title={structureLocked
+                    ? t("Click to select. This tree follows its group's template: change the reference there, or unlink the tree from its group.")
+                    : t("Click to select; Shift-click to change, exclude (NOT), or remove")}
                 >
                   {gateRefLabel(gate.name, ref.include, ref.quadrant)}
                 </span>
@@ -553,7 +798,10 @@ export function PopulationTree({
                 type="button"
                 className="gate-ref-badge pop-tree-gate-add"
                 aria-label={t("Add a gate to this population")}
-                title={t("Add a gate to this population")}
+                title={structureLocked
+                  ? t("Add the gate on the group's template, or unlink this tree from its group")
+                  : t("Add a gate to this population")}
+                disabled={structureLocked}
                 onClick={(event) => openGatePicker(event, popId, null)}
               >
                 +
@@ -567,7 +815,7 @@ export function PopulationTree({
     );
 
     const childIds = [...new Set(pop.children)].filter((c) => c in populations);
-    childIds.forEach((cid, i) => appendRows(cid, depth + 1, [...isLastPath, i === childIds.length - 1]));
+    if (!collapsed.has(popId)) childIds.forEach((cid, i) => appendRows(cid, depth + 1, [...isLastPath, i === childIds.length - 1]));
   };
 
   appendRows(root_population_id, 0, []);
@@ -591,63 +839,16 @@ export function PopulationTree({
   );
   const checkable = Object.keys(populations).filter((id) => id !== root_population_id);
 
-  const hierarchies = state.hierarchies ?? [];
-  const activeHierarchyId = state.active_hierarchy_id ?? hierarchies[0]?.id ?? "";
-
   return (
     <div className="population-tree-panel">
-      <div className="population-tree-hierarchy">
-        <span title={t("Every hierarchy shares the same gates; only the populations differ. Switch here, or create another for a second layout over the same gates.")}>
-          {t("Hierarchy")}
-        </span>
-        {perFile?.enabled && <HierarchyChip info={perFile.chip} title={t("Files assigned to this hierarchy carry this badge")} />}
-        <select
-          aria-label={t("Hierarchy")}
-          value={activeHierarchyId}
-          onChange={(e) => {
-            const v = e.target.value;
-            if (v.startsWith("__")) onHierarchyAction?.(v.slice(2) as HierarchyMenuAction);
-            else if (v !== activeHierarchyId) {
-              if (onSwitchHierarchy) onSwitchHierarchy(v);
-              else dispatch({ type: "switchHierarchy", id: v });
-            }
-          }}
-        >
-          {hierarchies.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
-          <optgroup label={t("Actions")}>
-            <option value="__new">{t("New empty hierarchy…")}</option>
-            <option value="__duplicate">{t("Duplicate this hierarchy…")}</option>
-            <option value="__rename">{t("Rename this hierarchy…")}</option>
-            <option value="__delete" disabled={hierarchies.length < 2}>{t("Delete this hierarchy…")}</option>
-          </optgroup>
-        </select>
-        {hierarchies.length > 1 && (
-          <span className="population-tree-hierarchy-count">{t("{n} of {total}", { n: hierarchies.findIndex((h) => h.id === activeHierarchyId) + 1, total: hierarchies.length })}</span>
-        )}
-        {perFile && (
-          <label
-            className="population-tree-per-file"
-            title={t("Gate each file under the hierarchy it is assigned to. Choosing a hierarchy here assigns the active file to it, files carry their hierarchy's badge in the sample list, and the pooled display holds the checked files of the active hierarchy.")}
-          >
-            <input type="checkbox" checked={perFile.enabled} onChange={(e) => perFile.onToggle(e.target.checked)} />
-            {t("Per-file hierarchies")}
-          </label>
-        )}
-        {perFile?.enabled && (
-          <button
-            type="button"
-            className="gl-mini-btn population-tree-assign-checked"
-            disabled={perFile.checkedCount === 0}
-            title={t("Assign every checked file to this hierarchy")}
-            onClick={perFile.onAssignChecked}
-          >
-            {t("Assign {count} checked", { count: perFile.checkedCount })}
-          </button>
-        )}
-      </div>
+      {showHierarchyControls && (
+        <HierarchyControls state={state} perFile={perFile} />
+      )}
       <div className="population-tree-hint">
         <span>
-          {t("Double-click a name to rename · Shift-click to highlight a range, Cmd/Ctrl-click to add or remove a row · Shift-drag to move the highlighted rows · Shift-click a gate to change/remove · + adds a gate")}
+          {readOnly ? t("Read-only tree preview · Select populations to inspect; enable tree editing above the plot to change gates") : structureLocked
+            ? t("Editing this file only · Gate boundaries and labels move on the plot for this file alone · Click a gate to select it")
+            : t("Double-click a name to rename · Drag to move rows, Option-drag to copy them · Shift-click to highlight a range, Cmd/Ctrl-click to add or remove a row · Shift-click a gate to change/remove · + adds a gate")}
         </span>
         {checkable.length > 0 && (
           <span className="gl-sample-inclusion-actions population-tree-check-actions" aria-label={t("Checked populations")}>
@@ -682,9 +883,9 @@ export function PopulationTree({
             }
           >
             {statsPending
-              ? t("Pooling {count} checked FCS…", { count: statsSampleCount })
+              ? t("Pooling {count} files…", { count: statsSampleCount })
               : displayContributorCount === undefined
-                ? t("Counts pooled across {count} checked FCS", { count: statsSampleCount })
+                ? t("Counts pooled across {count} files", { count: statsSampleCount })
                 : t("Pooled counts: {count} FCS · selected display: {contributing} contribute", {
                     count: statsSampleCount,
                     contributing: displayContributorCount,

@@ -1,0 +1,28 @@
+# Citation metadata for GateLab. Zenodo reads this file (and .zenodo.json) when a GitHub release
+# is archived, and GitHub shows a "Cite this repository" button from it. Keep `version` and
+# `date-released` in step with the release being cut.
+cff-version: 1.2.0
+message: "If you use GateLab, please cite it as below."
+type: software
+title: "GateLab"
+version: 0.8.0
+date-released: "2026-09-16"
+license: MIT
+repository-code: "https://github.com/david-priest/GateLab"
+url: "https://david-priest.github.io/GateLab/"
+abstract: "Browser-based manual gating of flow and mass cytometry data. FCS files are parsed, transformed and gated locally; one population tree per workspace, tailored per file or per group; FlowJo workspace and FACSChorus import and export; Gating-ML 2.0; compensation; statistics and publication figures."
+keywords:
+  - flow cytometry
+  - mass cytometry
+  - CyTOF
+  - manual gating
+  - Gating-ML
+  - FCS
+  - FlowJo
+authors:
+  - family-names: Priest
+    given-names: David G.
+    affiliation: "Wing Lab, Center for Infectious Disease Education and Research (CiDER), Osaka University"
+  - family-names: Wing
+    given-names: James B.
+    affiliation: "Wing Lab, Center for Infectious Disease Education and Research (CiDER), Osaka University"

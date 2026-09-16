@@ -139,9 +139,13 @@ const WORKSPACE_V3_ALLOWED_KEYS = [
   "workspaceId",
   "illustration",
   "illustrationPresets",
+  "layout",
   "metadataColumns",
   "populationMetadata",
   "populationMetaColumns",
+  // The Plotting tab's saved state (#217). Every top-level key the saver writes must be listed
+  // here, or a workspace with a compensation profile refuses to reopen with "Unexpected: …".
+  "plotting",
 ] as const;
 
 const SAMPLE_V3_REQUIRED_KEYS = ["fileName", "dataPath", "logicleW", "assay"] as const;
@@ -161,6 +165,10 @@ const SAMPLE_V3_ALLOWED_KEYS = [
   "labels",
   "metadata",
   "division",
+  "hierarchyId",
+  // A file's group (#236). Missed here when the saver gained it, so a workspace with a group
+  // refused to reopen: "sample 1 has an invalid field set. Unexpected: groupId" (2026-09-16).
+  "groupId",
 ] as const;
 
 /**

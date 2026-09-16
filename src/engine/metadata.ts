@@ -10,6 +10,12 @@ export interface MetadataColumn {
   levels?: string[];
 }
 
+/** A human label, never the immutable UUID used for data, gates and figure references. */
+export const SAMPLE_ID_FIELD = "sample_id";
+export function sampleDisplayId(fileName: string, fields?: Record<string, string>): string {
+  return fields?.[SAMPLE_ID_FIELD]?.trim() || fileName;
+}
+
 export interface ParsedMetadata {
   /** Header of the first (join-key) column. */
   fileNameColumn: string;

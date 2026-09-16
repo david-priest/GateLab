@@ -25,7 +25,9 @@ import {
   type TransformSpec,
   type Vertex,
 } from "./models";
-import { WSP_GATE_SPACE_TAG } from "./flowjoWorkspace";
+import { WSP_GATE_SPACE_TAG, WSP_COMPLEMENT_TAG, WSP_DERIVED_TAG, WSP_CURLY_TAG } from "./flowjoWorkspace";
+import { validCurl, type QuadrantCurl } from "./models";
+import type { WspDerivedPopulation } from "./flowjoWorkspace";
 import type { DisplaySpillover } from "./compensation";
 import type { Sample } from "./sample";
 import { Logicle, isCytofRawChannel, isQcChannel, isScatterChannel } from "./transforms";
@@ -231,31 +233,79 @@ export function normalizeChannel(ch: string): string {
   return ch.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+/**
+ * Case-folded, punctuation-removed, but EVERY alphanumeric kept.
+ *
+ * FlowJo writes a detector as `v-FLT525_30-E-A` where the FCS calls it `v-FLT525/30-E-A`;
+ * the separator is the only thing the two disagree about. Dropping punctuation resolves that and
+ * nothing else -- `b-FLT525/30-B-A` stays a different string, which is the point.
+ */
+function punctuationInsensitive(ch: string): string {
+  return ch.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
 function resolveChannel(
   ch: string,
   sessionChannels: string[],
   pnnToChannel: Record<string, string>,
+  instrument: "flow" | "cytof" = "cytof",
 ): string | null {
-  if (sessionChannels.includes(ch)) return ch;
-
   const pnnKeys = Object.keys(pnnToChannel);
-  if (pnnKeys.length) {
-    if (ch in pnnToChannel && sessionChannels.includes(pnnToChannel[ch])) return pnnToChannel[ch];
-    const nn = normalizeChannel(ch);
-    if (nn) {
-      for (const k of pnnKeys) {
-        if (normalizeChannel(k) === nn && sessionChannels.includes(pnnToChannel[k])) {
-          return pnnToChannel[k];
-        }
+  const viaPnn = (key: string): string | null =>
+    sessionChannels.includes(pnnToChannel[key]) ? pnnToChannel[key] : null;
+
+  if (sessionChannels.includes(ch)) {
+    // A name that is one channel's session key AND another channel's $PnN names two channels
+    // at once (a $PnS equal to a neighbour's $PnN). Taking the key would put a gate written
+    // against the $PnN on the wrong detector, so it is refused as ambiguous.
+    const viaPnnHit = ch in pnnToChannel ? viaPnn(ch) : null;
+    if (viaPnnHit && viaPnnHit !== ch) return null;
+    return ch;
+  }
+
+  if (pnnKeys.length && ch in pnnToChannel) {
+    const hit = viaPnn(ch);
+    if (hit) return hit;
+  }
+
+  // Exact on every alphanumeric, so it cannot conflate two detectors -- tried before any
+  // normalisation that discards characters.
+  const punct = punctuationInsensitive(ch);
+  if (punct) {
+    for (const k of pnnKeys) {
+      if (punctuationInsensitive(k) === punct) {
+        const hit = viaPnn(k);
+        if (hit) return hit;
       }
     }
   }
 
   const lower = ch.toLowerCase();
   for (const s of sessionChannels) if (s.toLowerCase() === lower) return s;
+  if (punct) for (const s of sessionChannels) if (punctuationInsensitive(s) === punct) return s;
 
+  /*
+   * Last resort, for mass cytometry only, and only when it names ONE channel.
+   *
+   * normalizeChannel exists for CyTOF metal names (`Nd145Di` -> `nd145`): it keeps the first
+   * letter+number token and throws the rest away. On conventional flow detectors that discards
+   * the laser prefix, so `b-FLT525/30-B-A` and `v-FLT525/30-E-A` both reduce to `flt525` --
+   * and taking the first match silently evaluated a violet-laser viability gate against the blue
+   * laser's detector. The gate resolved, drew, and reported a plausible count; nothing failed.
+   * Refusing an ambiguous match (2026-09-10) covered a file holding BOTH detectors; a file
+   * holding only the blue one still resolved the violet gate onto it, with nothing reported.
+   * A flow name that survives every exact and punctuation-insensitive test above is not present,
+   * and the import says so.
+   */
+  if (instrument !== "cytof") return null;
   const nn = normalizeChannel(ch);
-  for (const s of sessionChannels) if (normalizeChannel(s) === nn) return s;
+  if (nn) {
+    const byPnn = pnnKeys.filter((k) => normalizeChannel(k) === nn && viaPnn(k) !== null);
+    if (byPnn.length === 1) return pnnToChannel[byPnn[0]];
+    if (byPnn.length > 1) return null;
+    const bySession = sessionChannels.filter((s) => normalizeChannel(s) === nn);
+    if (bySession.length === 1) return bySession[0];
+  }
 
   return null;
 }
@@ -306,7 +356,18 @@ function specFromGmlTransform(
     return { spec: { kind: "asinh", cofactor }, toGateUnits: (v) => v };
   }
 
-  return null; // flog — GateLab has no log display transform
+  if (tr.type === "flog") {
+    // Held as a gate space rather than inverted to raw. §4.2.3 makes the transform part of the
+    // gate, so a polygon declared under flog is straight in LOG coordinates; inverting its
+    // vertices into raw and joining them with straight raw edges gives a different, bowed gate.
+    // GateLab does not draw a log axis, but it does not need to — a gate can live in a space the
+    // app never displays on, exactly as biex and wsplog already do (models.ts).
+    const { T, M } = tr;
+    if (!Number.isFinite(T) || T <= 0 || !Number.isFinite(M) || M <= 0) return null;
+    return { spec: { kind: "flog", T, M }, toGateUnits: (v) => v };
+  }
+
+  return null;
 }
 
 function makeInverter(
@@ -391,6 +452,44 @@ interface WspGateSpace {
  * Keyed by axis position rather than channel name, because the names in the document still have
  * to be resolved to session channels and x/y are what survive that resolution unchanged.
  */
+/**
+ * A gate colour a converter recorded, as "#rrggbb". Gating-ML has no colour, and FlowJo's own
+ * export carries none, but a FACSChorus experiment records the colour every gate was drawn in,
+ * and a strategy that comes back in its own colours is recognisable at a glance.
+ */
+export const GATE_COLOR_TAG = "gatelab_gate_color";
+
+function parseGateColor(node: Element): string | undefined {
+  for (const info of Array.from(node.getElementsByTagName("*"))) {
+    if (info.localName !== GATE_COLOR_TAG) continue;
+    const v = (info.textContent ?? "").trim();
+    return /^#[0-9a-fA-F]{6}$/.test(v) ? v.toLowerCase() : undefined;
+  }
+  return undefined;
+}
+
+/** True when the FlowJo converter marked this gate's POPULATION as its complement (a NotNode). */
+function parseWspComplement(node: Element): boolean {
+  for (const info of Array.from(node.getElementsByTagName("*"))) {
+    if (info.localName === WSP_COMPLEMENT_TAG) return (info.textContent ?? "").trim() === "true";
+  }
+  return false;
+}
+
+/** The curly-quadrant mark on a rectangle, if any: the bend to give the arms, or null for straight. */
+function parseWspCurly(node: Element): { curl: QuadrantCurl | null } | undefined {
+  for (const info of Array.from(node.getElementsByTagName("*"))) {
+    if (info.localName !== WSP_CURLY_TAG) continue;
+    try {
+      const v = JSON.parse(info.textContent ?? "") as { curl?: unknown };
+      return { curl: validCurl(v?.curl) ? v.curl : null };
+    } catch {
+      return { curl: null }; // a malformed mark still makes it a quadrant gate, just a straight one
+    }
+  }
+  return undefined;
+}
+
 function parseWspGateSpace(node: Element): WspGateSpace | null {
   for (const info of Array.from(node.getElementsByTagName("*"))) {
     if (info.localName !== WSP_GATE_SPACE_TAG) continue;
@@ -405,6 +504,11 @@ function parseWspGateSpace(node: Element): WspGateSpace | null {
 }
 
 interface RawGate {
+  wsp_complement?: boolean;
+  /** A colour a converter recorded (GATE_COLOR_TAG); the palette is used when absent. */
+  color?: string;
+  /** Present on the rectangle that stands for a whole curly quadrant gate (WSP_CURLY_TAG). */
+  wsp_curly?: { curl: QuadrantCurl | null };
   gml_id: string;
   name: string;
   gate_type: "rectangle" | "polygon" | "ellipse" | "boolean";
@@ -458,6 +562,9 @@ function parseGateNode(node: Element): RawGate | null {
       channels: [x.channel, y.channel],
       dims: [x, y],
       wsp_space: parseWspGateSpace(node),
+      wsp_complement: parseWspComplement(node),
+      color: parseGateColor(node),
+      wsp_curly: parseWspCurly(node),
     };
   }
 
@@ -483,6 +590,11 @@ function parseGateNode(node: Element): RawGate | null {
       channels: [dims[0].channel, dims[1].channel],
       dims,
       wsp_space: parseWspGateSpace(node),
+      // Read for every gate kind: a NotNode's copy can be a polygon or an ellipse as easily as
+      // a rectangle, and reading the mark on rectangles alone imported the other two as the
+      // gate itself -- exactly the events the user had excluded.
+      wsp_complement: parseWspComplement(node),
+      color: parseGateColor(node),
     };
   }
 
@@ -523,6 +635,8 @@ function parseGateNode(node: Element): RawGate | null {
       channels: [dims[0].channel, dims[1].channel],
       dims,
       wsp_space: parseWspGateSpace(node),
+      wsp_complement: parseWspComplement(node),
+      color: parseGateColor(node),
     };
   }
 
@@ -637,12 +751,13 @@ function missingChannelProblems(
   rawGates: Record<string, RawGate>,
   sessionChannels: string[],
   pnnToChannel: Record<string, string>,
+  instrument: "flow" | "cytof",
 ): string[] {
   const problems: string[] = [];
   for (const gate of Object.values(rawGates)) {
     if (gate.gate_type === "boolean") continue;
     const missing = [...new Set(gate.channels)].filter(
-      (channel) => resolveChannel(channel, sessionChannels, pnnToChannel) == null,
+      (channel) => resolveChannel(channel, sessionChannels, pnnToChannel, instrument) == null,
     );
     if (missing.length) {
       problems.push(
@@ -855,6 +970,19 @@ export function restoreGatingMLScaleState(
       sample.setScatterCofactor(idx, state.cofactor);
       transformsChanged = true;
     }
+    // An imaging geometry feature is linear by default and writes a cofactor only when shown
+    // with arcsinh, so a cofactor is both the choice and its parameter.
+    if (sample.instrument === "flow" && sample.isImagingFeatureAxis(idx) &&
+        state.cofactor !== undefined && state.w === undefined) {
+      if (sample.featureScale(idx) !== "arcsinh") {
+        sample.setFeatureScale(idx, "arcsinh");
+        transformsChanged = true;
+      }
+      if (sample.currentScatterCofactor(idx) !== state.cofactor) {
+        sample.setScatterCofactor(idx, state.cofactor);
+        transformsChanged = true;
+      }
+    }
   }
 
   const ranges: Record<string, [number, number]> = {};
@@ -1031,9 +1159,12 @@ export function importGatingML(
     if (g.gate_type === "boolean") boolOrder.push(g.gml_id);
   }
   importProblems.push(...unsupportedBooleanLogicProblems(rawGates, hierarchyNode));
-  importProblems.push(...missingChannelProblems(rawGates, sessionChannels, pnnToChannel));
+  importProblems.push(...missingChannelProblems(rawGates, sessionChannels, pnnToChannel, instrument));
   const gatelabrState = parseGatelabrState(root);
   const compensationRefs = parseCompensationRefs(rawGates);
+  const derivedPopulations = parseDerivedPopulations(root);
+  // A FlowJo intersection is a parent too. It is declared in custom_info, not as a gate.
+  const intersectionIds = new Set(derivedPopulations.map((d) => d.id));
 
   for (const gate of Object.values(rawGates)) {
     for (const dim of gate.dims ?? []) {
@@ -1042,7 +1173,7 @@ export function importGatingML(
         importProblems.push(`${gate.gml_id} references unsupported or missing transformation ${ref}.`);
       }
     }
-    if (gate.parent_id && !rawGates[gate.parent_id]) {
+    if (gate.parent_id && !rawGates[gate.parent_id] && !intersectionIds.has(gate.parent_id)) {
       importProblems.push(`${gate.gml_id} references missing parent gate ${gate.parent_id}.`);
     }
     if (gate.gate_type === "boolean") {
@@ -1096,7 +1227,7 @@ export function importGatingML(
 
     const channels = [...new Set(g.channels)];
     const resolved: Record<string, string | null> = {};
-    for (const ch of channels) resolved[ch] = resolveChannel(ch, sessionChannels, pnnToChannel);
+    for (const ch of channels) resolved[ch] = resolveChannel(ch, sessionChannels, pnnToChannel, instrument);
     const missing = channels.filter((ch) => resolved[ch] == null);
     if (missing.length) {
       unresolved.push(...missing);
@@ -1165,6 +1296,28 @@ export function importGatingML(
     }
 
     const appId = uuid();
+    if (g.wsp_curly) {
+      // The rectangle stands for a whole curly quadrant gate: its minima are the crosshair,
+      // and the four FlowJo populations that share it arrive as derived populations naming one
+      // quadrant each. The bend is a shape in the display space the converter carried, so a
+      // crosshair that could not be carried imports straight (the converter has said so).
+      const curl = spaceFields.space === "display" && validCurl(g.wsp_curly.curl) ? g.wsp_curly.curl : null;
+      appGates[appId] = {
+        gate_id: appId,
+        name: g.name,
+        gate_type: "quadrant",
+        x_channel: xCh,
+        y_channel: yCh,
+        center: [verts[0][0], verts[0][1]],
+        ...(curl ? { curl: { ...curl } } : {}),
+        color: g.color ?? nextGateColor(Object.keys(appGates).length),
+        label_offset: null,
+        ...spaceFields,
+      };
+      gateOrder.push(appId);
+      gmlToApp[gmlId] = appId;
+      continue;
+    }
     if (g.gate_type === "ellipse" && g.ellipse) {
       // An ellipse's parameters live in the space its dimensions declare, exactly like polygon
       // vertices. The per-axis unit change (toGateUnits) is linear for every transform GateLab
@@ -1191,7 +1344,7 @@ export function importGatingML(
           [e.covariance[1][0] * ky * kx, e.covariance[1][1] * ky * ky],
         ],
         distance_square: e.distance_square,
-        color: nextGateColor(Object.keys(appGates).length),
+        color: g.color ?? nextGateColor(Object.keys(appGates).length),
         label_offset: null,
         ...spaceFields,
       };
@@ -1203,7 +1356,7 @@ export function importGatingML(
         x_channel: xCh,
         y_channel: yCh,
         vertices: verts,
-        color: nextGateColor(Object.keys(appGates).length),
+        color: g.color ?? nextGateColor(Object.keys(appGates).length),
         label_offset: null, // auto-position (buildPlotGates computes it in display space)
         ...spaceFields,
       };
@@ -1277,7 +1430,8 @@ export function importGatingML(
 
     for (const top of childrenLocal(hierarchyNode, "PopulationGatePair")) processPair(top, rootPopId);
   } else {
-    buildPopulationsFromBooleans(rawGates, boolOrder, gmlToApp, appGates, gateOrder, populations, rootPopId);
+    buildPopulationsFromBooleans(rawGates, boolOrder, gmlToApp, appGates, gateOrder, populations,
+      rootPopId, derivedPopulations);
   }
 
   return {
@@ -1299,6 +1453,26 @@ export function importGatingML(
 }
 
 /** Cytobank flat-boolean → population hierarchy (no <GatingHierarchy> present). */
+/**
+ * Gate-less populations carried across from FlowJo `<AndNode>`s: an intersection of other
+ * populations. See WSP_DERIVED_TAG for why they ride in custom_info rather than as BooleanGates.
+ */
+function parseDerivedPopulations(root: Element): WspDerivedPopulation[] {
+  for (const el of Array.from(root.children)) {
+    if (el.localName !== "custom_info") continue;
+    for (const info of Array.from(el.children)) {
+      if (info.localName !== WSP_DERIVED_TAG) continue;
+      try {
+        const parsed = JSON.parse(info.textContent ?? "[]");
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return []; // a malformed block loses the intersections, never the tree
+      }
+    }
+  }
+  return [];
+}
+
 function buildPopulationsFromBooleans(
   rawGates: Record<string, RawGate>,
   boolOrder: string[],
@@ -1307,6 +1481,7 @@ function buildPopulationsFromBooleans(
   gateOrder: string[],
   populations: PopulationMap,
   rootPopId: string,
+  derived: WspDerivedPopulation[] = [],
 ): void {
   const boolNames: Record<string, string> = {};
   const boolPrim: Record<string, string[]> = {};
@@ -1379,14 +1554,63 @@ function buildPopulationsFromBooleans(
     const gidToPid: Record<string, string> = {};
     for (const gid of ordered) gidToPid[gid] = uuid();
 
-    for (const gid of ordered) {
-      const pid = gidToPid[gid];
-      const parentApp = parentAppOf(gid);
-      const parentPid = parentApp ? gidToPid[parentApp] ?? rootPopId : rootPopId;
-      const pop = newPopulation(appGates[gid].name, [newGateRef(gid, true)], parentPid);
-      pop.population_id = pid; // preserve the id used for parent links
-      populations[pid] = pop;
-      linkChildToParent(populations, pid, parentPid);
+    // An intersection is a population with SEVERAL gate refs, which is what Population already
+    // is, parented by the node it was written under so it is measured inside that parent. It has
+    // an id of its own, and what FlowJo gated beneath it names that id as its parent. So gates and
+    // intersections are placed in passes, each once what contains it exists: the root, a gate's
+    // population, or an intersection's. A workspace with nothing beneath an intersection places
+    // every gate in the first pass, in the order it always had, and every intersection after them.
+    const derivedIds = new Set(derived.map((d) => d.id));
+    const derivedPid: Record<string, string> = {};
+    const placed = new Set<string>();
+    /** The population to parent under, or undefined while that is still to be placed. */
+    const containerOf = (parentGml: string | null | undefined, self: string | null): string | undefined => {
+      if (parentGml && derivedIds.has(parentGml)) return derivedPid[parentGml];
+      const parentApp = parentGml ? gmlToApp[parentGml] : undefined;
+      if (!parentApp || parentApp === self || !gidToPid[parentApp]) return rootPopId;
+      return placed.has(parentApp) ? gidToPid[parentApp] : undefined;
+    };
+
+    let gatesLeft = ordered;
+    let derivedLeft = derived;
+    while (gatesLeft.length || derivedLeft.length) {
+      const gatesWaiting: string[] = [];
+      for (const gid of gatesLeft) {
+        // A curly quadrant's shared gate has no population of its own; its four populations
+        // are the derived ones that name its quadrants.
+        if (rawGates[appToGml[gid]]?.wsp_curly) { placed.add(gid); continue; }
+        const parentPid = containerOf(rawGates[appToGml[gid]]?.parent_id, gid);
+        if (parentPid === undefined) { gatesWaiting.push(gid); continue; }
+        const pid = gidToPid[gid];
+        // A NotNode's population is the complement of its gate: the events OUTSIDE it. Importing
+        // it as an ordinary reference would select precisely the events the user excluded.
+        const complement = rawGates[appToGml[gid]]?.wsp_complement === true;
+        const pop = newPopulation(appGates[gid].name, [newGateRef(gid, !complement)], parentPid);
+        pop.population_id = pid; // preserve the id used for parent links
+        populations[pid] = pop;
+        linkChildToParent(populations, pid, parentPid);
+        placed.add(gid);
+      }
+      const derivedWaiting: WspDerivedPopulation[] = [];
+      for (const d of derivedLeft) {
+        const parentPid = containerOf(d.parent, null);
+        if (parentPid === undefined) { derivedWaiting.push(d); continue; }
+        const refs: GateRef[] = [];
+        for (const r of d.refs ?? []) {
+          const app = gmlToApp[r.gate];
+          if (!app || !appGates[app]) { refs.length = 0; break; }
+          refs.push(newGateRef(app, r.include, r.quadrant));
+        }
+        if (!refs.length) continue;
+        const pop = newPopulation(d.name, refs, parentPid);
+        populations[pop.population_id] = pop;
+        linkChildToParent(populations, pop.population_id, parentPid);
+        derivedPid[d.id] = pop.population_id;
+      }
+      // Whatever still waits sits beneath something that was never placed, and never will be.
+      if (gatesWaiting.length === gatesLeft.length && derivedWaiting.length === derivedLeft.length) break;
+      gatesLeft = gatesWaiting;
+      derivedLeft = derivedWaiting;
     }
     return;
   }

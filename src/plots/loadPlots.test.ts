@@ -28,6 +28,15 @@ describe("GateLab cytof interaction patches", () => {
     expect(patched).toContain("outline: step.outline");
     // The draw code that consumes it must still be present.
     expect(patched).toContain("gate.outline && gate.outline.length > 2");
+  });
+
+  it("lets a figure's gate labels be dragged when the host listens, reporting display-unit offsets", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const patched = patchMiniPlot(miniSrc);
+    warning.mockRestore();
+    expect(miniSrc).not.toContain("on_label_move");
+    expect(patched).toContain("typeof gateStyle.on_label_move === 'function'");
+    expect(patched).toContain("gateStyle.on_label_move(gate.gate_id, [ox2, oy2])");
 
     warning.mockRestore();
   });
@@ -210,6 +219,25 @@ describe("GateLab cytof interaction patches", () => {
     warning.mockRestore();
   });
 
+  it("labels each quadrant as percent then n, movable with its own offset", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(cytofSrc).not.toContain("quadrant_label_offsets");
+    // "55.7% (n = 747)", not the vendored "747  55.7%".
+    expect(patched).toContain("(n != null ? ' (n = ' + Number(n).toLocaleString() + ')' : '')");
+    expect(patched).not.toContain("(n != null ? Number(n).toLocaleString() : '') +");
+    // Each label is a drag target reporting its quadrant, and sits at midpoint + its own offset.
+    expect(patched).toContain("var qOffs  = gate.quadrant_label_offsets || [];");
+    expect(patched).toContain("_shinyInput('gate_label_move', { gate_id: g_ref.gate_id, label_offset: off, quadrant: qi });");
+    expect(patched).toContain(".style('cursor', 'move').style('pointer-events', 'all');\n            var t = lg.append('text')");
+    // Applied once, not once per re-patch.
+    expect(patchCytofForGateLab(patched)).toBe(patched);
+
+    warning.mockRestore();
+  });
+
   it("names the scope of a pooled count beside the percentage, on plain and quadrant labels", () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const patched = patchCytofForGateLab(cytofSrc);
@@ -350,6 +378,41 @@ describe("GateLab mini-plot gate-edge patches", () => {
 });
 
 describe("GateLab mini-plot density patches", () => {
+  it("renders Illustration quadrant crosshairs, arms and four labels", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchMiniPlot(miniSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(patched).toContain("mini-quadrant-gate");
+    expect(patched).toContain("gate.quadrant_counts || []");
+    expect(patched).toContain("gate.quadrant_pcts || []");
+    expect(patched).toContain("qArms.h");
+    expect(patched).toContain("qArms.v");
+    // The labels read as on the gating plot, and a label moved there sits at the same offset.
+    expect(patched).toContain("(count != null ? ' (n = ' + Number(count).toLocaleString() + ')' : '')");
+    expect(patched).toContain("var qOffs = gate.quadrant_label_offsets || [];");
+    expect(() => new Function(patched)).not.toThrow();
+
+    warning.mockRestore();
+  });
+
+  it("treats fit-to-columns as a maximum and sizes axis-title offsets from tick labels", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchMiniPlot(miniSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(patched).toContain("Math.max(120, Math.min(plotSize, fitSize))");
+    // The one remaining expanding fit belongs to Strategy; Illustration's separately-labelled
+    // block is the only one this change owns.
+    expect(patched.match(/Math\.max\(plotSize, fitSize\)/g) ?? []).toHaveLength(1);
+    expect(patched).toContain("cfg.y_logicle_ticks && cfg.y_logicle_ticks.major_labels");
+    expect(patched).toContain("_estimatedYTickWidth + 15");
+    expect(patched).toContain("cfg.y_axis_label_offset");
+    expect(patched).toContain("Math.min(140, _neededLeft)");
+
+    warning.mockRestore();
+  });
+
   it("uses opt-in clipping, a gating-matched density kernel, and a shared ceiling without dropping events", () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const patched = patchMiniPlot(miniSrc);

@@ -36,11 +36,12 @@ export function renderCompensationDensityBiplotSurface(
 ): void {
   const linearScale = options.size / 220;
   const typographyScale = Math.sqrt(linearScale);
-  const axisFontSize = Math.max(7, Math.min(11, 10 * typographyScale));
-  // The y title sits yAxisLabelOffset pixels left of the axis. Reserve its font height too so
-  // multi-character FlowJo ticks and the rotated title cannot touch the SVG boundary.
-  const yAxisLabelOffset = 20;
-  const leftMargin = Math.ceil(yAxisLabelOffset + axisFontSize + 4);
+  // The Gating tab's sizes, scaled down a little for a panel a third the size: a tick label
+  // must still be read, and the rotated y title must clear "100K". No fixed label offsets or
+  // margins are passed: the renderer sizes them from the tick labels it is about to draw,
+  // which is what stopped the title running through the labels on the Strategy grid.
+  const tickFontSize = Math.max(9, Math.min(12, 11 * typographyScale));
+  const axisFontSize = Math.max(10, Math.min(13, 12 * typographyScale));
   loadMiniPlots().renderMiniPlot(container, {
     plot_size: options.size,
     canvas_scale: options.canvasScale ?? 3,
@@ -62,16 +63,14 @@ export function renderCompensationDensityBiplotSurface(
     density_color_power: options.densityColorPower,
     density_color_ceiling: options.densityColorCeiling,
     density_smoothing: options.densitySmoothingRadius,
-    x_axis_label_offset: 24,
-    y_axis_label_offset: yAxisLabelOffset,
-    axis_tick_size: 3,
+    axis_tick_size: 6,
     axis_outer_tick_size: 0,
-    plot_margins: { top: 20, right: 2, bottom: 30, left: leftMargin },
+    plot_margins: { top: 22, right: 8 },
     font_sizes: {
-      tick: Math.max(6.5, Math.min(10, 9 * typographyScale)),
+      tick: tickFontSize,
       axis_label: axisFontSize,
-      title: Math.max(7.5, Math.min(12, 11 * typographyScale)),
-      gate_label: Math.max(6.5, Math.min(10, 9 * typographyScale)),
+      title: Math.max(10, Math.min(13, 12 * typographyScale)),
+      gate_label: tickFontSize,
     },
   });
 }

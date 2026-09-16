@@ -2,6 +2,8 @@ import type { Gate, Population, PopulationMap } from "./models";
 import { sortPopulationTree } from "./models";
 
 export type GatingImportMode = "replace" | "merge";
+/** Which files an imported tree is for: every loaded file, the selected ones, or the viewed file alone. */
+export type GatingImportTarget = "all" | "selected" | "viewed";
 
 export interface GatingStrategyGraph {
   gates: Record<string, Gate>;
@@ -28,6 +30,29 @@ function importedId(sourceId: string, used: Set<string>): string {
   }
   used.add(candidate);
   return candidate;
+}
+
+/**
+ * A gate's identity as geometry, ignoring its id, colour and label placement.
+ *
+ * Two gates with this key are the same gate drawn twice: same name, same channels, same space
+ * and transforms, same coordinates. A workspace whose samples share a strategy converts to one
+ * such gate per sample, and importing them all is how three identical "Lymphocytes" gates ended
+ * up stacked on one plot.
+ *
+ * Deliberately strict. Name alone would fuse two genuinely different gates that happen to share
+ * a label, which is far worse than a duplicate: membership would silently change.
+ */
+function gateIdentity(gate: Gate): string {
+  const shape =
+    gate.gate_type === "quadrant" ? { center: gate.center }
+      : gate.gate_type === "ellipse"
+        ? { mean: gate.mean, covariance: gate.covariance, distance_square: gate.distance_square }
+        : { vertices: gate.vertices };
+  return JSON.stringify([
+    gate.name, gate.gate_type, gate.x_channel, gate.y_channel,
+    gate.space ?? null, gate.transforms ?? null, shape,
+  ]);
 }
 
 function cloneGate(gate: Gate, gateId: string): Gate {
@@ -86,6 +111,14 @@ export function mergeGatingStrategies(
    * population rather than under All Events.
    */
   attachTo: string = current.root_population_id,
+  /**
+   * Map an imported gate onto an existing one when the two are identical geometry.
+   *
+   * Off by default: merging the same strategy twice on purpose should produce two gates. On for
+   * a per-file workspace import, where every sample sharing a strategy would otherwise
+   * contribute its own copy of every gate.
+   */
+  reuseIdenticalGates: boolean = false,
 ): GatingMergeResult {
   if (!current.populations[current.root_population_id]) {
     throw new Error("The current population hierarchy has no valid root.");
@@ -100,14 +133,34 @@ export function mergeGatingStrategies(
   const gates: Record<string, Gate> = { ...current.gates };
   const gateIdMap: Record<string, string> = {};
   const usedGateIds = new Set(Object.keys(gates));
+  const existingByIdentity = new Map<string, string>();
+  if (reuseIdenticalGates) {
+    // Last writer wins is fine: identical gates are interchangeable by construction.
+    for (const [id, gate] of Object.entries(current.gates)) existingByIdentity.set(gateIdentity(gate), id);
+  }
+  const reusedGateIds: string[] = [];
   for (const sourceId of Object.keys(imported.gates)) {
+    const gate = imported.gates[sourceId];
+    const twin = reuseIdenticalGates ? existingByIdentity.get(gateIdentity(gate)) : undefined;
+    if (twin) {
+      // Point the imported population's references at the gate that is already there. The
+      // hierarchies then share it, which is what "one gate table for the workspace" means.
+      gateIdMap[sourceId] = twin;
+      reusedGateIds.push(twin);
+      continue;
+    }
     const targetId = importedId(sourceId, usedGateIds);
     gateIdMap[sourceId] = targetId;
-    gates[targetId] = cloneGate(imported.gates[sourceId], targetId);
+    gates[targetId] = cloneGate(gate, targetId);
+    if (reuseIdenticalGates) existingByIdentity.set(gateIdentity(gate), targetId);
   }
 
   const currentOrder = orderedIds(current.gate_order, current.gates);
-  const importedOrder = orderedIds(imported.gate_order, imported.gates).map((id) => gateIdMap[id]);
+  const reused = new Set(reusedGateIds);
+  const importedOrder = orderedIds(imported.gate_order, imported.gates)
+    .map((id) => gateIdMap[id])
+    // A reused gate already sits in currentOrder; adding it again would list it twice.
+    .filter((id) => !reused.has(id));
   const gate_order = [...currentOrder, ...importedOrder];
 
   const populations: PopulationMap = Object.fromEntries(

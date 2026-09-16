@@ -102,7 +102,7 @@ function b64id(name: string): string {
 }
 
 /** sprintf("%.15g", x): 15 significant figures, trailing zeros trimmed. */
-function fmtNum(x: number): string {
+export function fmtNum(x: number): string {
   const n = Number(x);
   if (!Number.isFinite(n)) return "0";
   if (n === 0) return "0";
@@ -118,6 +118,7 @@ const gateIdStr = (numericId: number, name: string): string => `Gate_${numericId
 // ── Transform registry ───────────────────────────────────────────────────────
 type TrDef =
   | { type: "fasinh"; T: number; M: number; A: number }
+  | { type: "flog"; T: number; M: number }
   | { type: "logicle"; T: number; W: number; M: number; A: number };
 
 interface GateAxisExport {
@@ -129,6 +130,14 @@ interface GateAxisExport {
   convert(v: number): number;
   /** True when `convert` bends straight edges, so a polygon must be subdivided to stay faithful. */
   needsDensify?: boolean;
+  /**
+   * A stored coordinate at or below which a rectangle's lower bound means "everything below".
+   * FlowJo's log display pins every sub-offset event to y = 0, so a gate whose lower edge sits
+   * there holds those events; written as a bound at the declared floor, a reader whose own
+   * floor lies lower drops them. The bound is omitted instead, which every reader takes as
+   * unbounded below.
+   */
+  floorAt?: number;
   /**
    * RAW value → the coordinate written to the file. Distinct from `convert`, which starts from
    * the gate's own stored space. Needed to state the axis range Cytobank should draw, which is a
@@ -176,6 +185,13 @@ function buildGateExportPlan(
     return trId;
   };
 
+  /** Gating-ML flog for a FlowJo log axis. See the wsplog branch for why this is exact. */
+  const flog = (T: number, M: number): string => {
+    const trId = `Tr_Log_${idNum(T)}_${idNum(M)}`;
+    if (!trDefs.has(trId)) trDefs.set(trId, { type: "flog", T, M });
+    return trId;
+  };
+
   const plan = (gate: Gate, channelKey: string): GateAxisExport => {
     const space = sample.gateSpace(gate);
     const own: TransformSpec = space === "raw"
@@ -199,6 +215,44 @@ function buildGateExportPlan(
     // exact for a rectangle (a monotonic transform maps an axis-aligned box to an axis-aligned
     // box) and for a quadrant's single point; a polygon's edges are densified instead — see
     // densifyAxes below — so the boundary survives to well under a pixel.
+    if (own.kind === "wsplog") {
+      // FlowJo's log IS Gating-ML's flog, so this is a declaration rather than an approximation.
+      //   FlowJo  y  = log10(v / offset) / decades          (biex.ts wspLogTransform)
+      //   flog    y' = log10(x / T) / M + 1                 (Gating-ML 2.0)
+      // With T = offset and M = decades the two agree exactly, differing only by the constant
+      // 1: y' = y + 1. That offset is AFFINE, which is what makes this worth doing — a straight
+      // edge stays straight, so nothing is densified, a rectangle survives as a rectangle, and
+      // an ellipse keeps its covariance (the caller's linearity factor convert(1) − convert(0)
+      // comes out at exactly 1). The importer already inverts flog as x = T·10^((y−1)·M), so a
+      // GateLab round trip is exact by construction.
+      //
+      // FlowJo's clamp is the one thing the declaration alone does not carry: wspLogTransform
+      // pins values below `offset` to y = 0 rather than letting them go to −Infinity, and flog
+      // has no such rule, so a reader places sub-offset EVENTS below the axis floor where
+      // FlowJo piles them on it. For a rectangle that is handled by `floorAt` below: a lower
+      // edge at the floor is written with no gating:min, so every reader keeps those events. A
+      // polygon with a vertex on the floor still loses them on a strict reader; on the Aria
+      // fixture that was 424 of 1,074 events for a corner at (0, 0).
+      // Every gate type, not just rectangles. This was restricted to rectangles when the
+      // importer still inverted a flog gate into raw: a polygon's edges are straight in the space
+      // it was drawn in, so straight-in-log came back straight-in-raw and the boundary bowed by
+      // 20 events on the Aria fixture. Now that flog is a gate space GateLab can hold, the
+      // vertices come back where they left and a polygon survives exactly.
+      const { offset, decades } = own;
+      if (offset > 0 && decades > 0) {
+        return {
+          trId: flog(offset, decades),
+          cofactor: sample.arcsinhCofactor,
+          convert: (v) => v + 1,
+          rawToExport: (v) => Math.log10(Math.max(v, offset) / offset) / decades + 1,
+          // The clamp IS carried for a rectangle after all: a lower edge at FlowJo's floor is
+          // written unbounded, so a reader keeps the sub-offset events FlowJo piled on the floor.
+          floorAt: 0,
+        };
+      }
+      // Degenerate parameters cannot describe a log axis; fall through to the raw path below.
+    }
+
     if (own.kind === "biex" || own.kind === "wsplog") {
       // RAW, for BOTH flavours, and measured rather than assumed.
       //
@@ -222,6 +276,28 @@ function buildGateExportPlan(
       };
     }
 
+    if (own.kind === "flog") {
+      // A gate already living in Gating-ML's own log space: declare it and write the vertices
+      // verbatim. Nothing to convert and nothing to densify — this IS the export space, and
+      // Cytobank reads flog (its own flow exports declare it), so both formats take this path.
+      // This block sat BELOW the Cytobank logicle branch until 2026-09-11, so in Cytobank format
+      // a flog gate was treated as logicle: its coordinates scaled by the logicle span and
+      // inverted, which put every such gate far off the top of the axis.
+      if (own.T > 0 && own.M > 0) {
+        return {
+          trId: flog(own.T, own.M),
+          cofactor: sample.arcsinhCofactor,
+          convert: (v) => v,
+          rawToExport: transformFromSpec(own).forward,
+        };
+      }
+      const inv0 = transformFromSpec(own).inverse;
+      return {
+        trId: null, cofactor: sample.arcsinhCofactor, convert: inv0,
+        needsDensify: true, rawToExport: (v) => v,
+      };
+    }
+
     // Logicle.
     if (cytobankMode) {
       // Cytobank knows Linear (1), Log (2) and Arcsinh (4) only — there is no logicle to declare,
@@ -236,6 +312,7 @@ function buildGateExportPlan(
         rawToExport: (v) => Math.asinh(v / cf),
       };
     }
+
     const W = clampW(own.W);
     const trId = `Tr_Logicle_${channelKey.replace(/[^A-Za-z0-9]/g, "_")}_W${idNum(W)}`;
     if (!trDefs.has(trId)) trDefs.set(trId, { type: "logicle", T: own.T, W, M: own.M, A: own.A });
@@ -276,7 +353,7 @@ function buildGateExportPlan(
  * half, so the two stages together keep the same 0.2% total bound rather than doubling it.
  * Original vertices are forced anchors: a true corner can never be simplified away.
  */
-function collapseDensifiedRing(
+export function collapseDensifiedRing(
   ring: [number, number][],
   edgeBreaks: number[],
   span: [number, number],
@@ -352,6 +429,10 @@ function scaleJson(
     // Only reachable in the standard format, which Cytobank never reads. Cytobank knows
     // Linear (1), Log (2) and Arcsinh (4) only; flag 5 is not one of its scale types.
     flag = 5; arg = "4.5";
+  } else if (trId.startsWith("Tr_Log_")) {
+    // Cytobank's own flow exports pair transforms:flog with Log (2), argument "1". Saying
+    // Arcsinh here, with the CyTOF cofactor, told Cytobank to read log coordinates as arcsinh.
+    flag = 2; arg = "1";
   } else {
     flag = 4; arg = String(cofactor);
   }
@@ -504,6 +585,8 @@ function rectangleXml(
   xCompRef: "FCS" | "uncompensated", yCompRef: "FCS" | "uncompensated",
   xRange: [number, number], yRange: [number, number],
   compensationId: number,
+  /** Per axis, whether the lower bound sits at a clamp floor and is written unbounded. */
+  openLow: { x: boolean; y: boolean } = { x: false, y: false },
 ): string[] {
   const xs = gate.vertices.map((v) => v[0]);
   const ys = gate.vertices.map((v) => v[1]);
@@ -511,8 +594,8 @@ function rectangleXml(
   return [
     `  <gating:RectangleGate gating:id="${gmlId}">`,
     ...customInfo(gate.name, numId, seq, "RectangleGate", def, compensationId),
-    ...dimXml(xName, xTr, xCompRef, Math.min(...xs), Math.max(...xs)),
-    ...dimXml(yName, yTr, yCompRef, Math.min(...ys), Math.max(...ys)),
+    ...dimXml(xName, xTr, xCompRef, openLow.x ? undefined : Math.min(...xs), Math.max(...xs)),
+    ...dimXml(yName, yTr, yCompRef, openLow.y ? undefined : Math.min(...ys), Math.max(...ys)),
     "  </gating:RectangleGate>",
   ];
 }
@@ -546,6 +629,8 @@ function transformXml(trId: string, tr: TrDef): string[] {
   const body =
     tr.type === "fasinh"
       ? `    <transforms:fasinh transforms:T="${fmtNum(tr.T)}" transforms:M="${fmtNum(tr.M)}" transforms:A="${fmtNum(tr.A)}" />`
+      : tr.type === "flog"
+      ? `    <transforms:flog transforms:T="${fmtNum(tr.T)}" transforms:M="${fmtNum(tr.M)}" />`
       : `    <transforms:logicle transforms:T="${fmtNum(tr.T)}" transforms:W="${fmtNum(tr.W)}" transforms:M="${fmtNum(tr.M)}" transforms:A="${fmtNum(tr.A)}" />`;
   return [`  <transforms:transformation transforms:id="${trId}">`, body, "  </transforms:transformation>"];
 }
@@ -828,9 +913,15 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
       : sample.spilloverOrigin.kind === "fcs" ? 0
       : EXPORTED_MATRIX_ID;
     if (g.gate_type === "rectangle") {
+      // A lower edge at a clamp floor, judged on the STORED vertices: the floor is a property of
+      // the gate's own space, and every event pinned there belongs to the gate.
+      const openLow = {
+        x: xAxis.floorAt !== undefined && Math.min(...g.vertices.map((v) => v[0])) <= xAxis.floorAt,
+        y: yAxis.floorAt !== undefined && Math.min(...g.vertices.map((v) => v[1])) <= yAxis.floorAt,
+      };
       gateLines.push(...rectangleXml(
         dg, gmlId, numId, i + 1, xTr, yTr, isFlow, xCofactor, yCofactor,
-        xName, yName, xCompRef, yCompRef, xRange, yRange, compId,
+        xName, yName, xCompRef, yCompRef, xRange, yRange, compId, openLow,
       ));
     } else {
       gateLines.push(...polygonXml(

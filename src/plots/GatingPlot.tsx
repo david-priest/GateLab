@@ -11,8 +11,8 @@ import type { GatingFontSizes } from "../engine/workspace";
 
 export const DEFAULT_GATING_FONT_SIZES: GatingFontSizes = {
   tick: 12,
-  axis: 14,
-  title: 11,
+  axis: 16,
+  title: 12,
   gate: 12,
 };
 
@@ -41,9 +41,12 @@ interface Props {
   /** Ellipse handle drag: display-space centre and principal axes at the gate's distanceSquare. */
   onEllipseEdit?: (v: { gate_id: string; mean: [number, number]; major: number; minor: number; angle: number }) => void;
   onQuadrantMove?: (e: { gate_id: string; center: [number, number] }) => void;
+  /** An arm handle of a curly quadrant was dragged to `at` (display coords). */
+  onQuadrantCurl?: (e: { gate_id: string; arm: "h" | "v"; at: [number, number] }) => void;
   onGateSelect?: (gateId: string) => void;
   onAxisLabelClick?: (e: { axis: "x" | "y"; selected: string }) => void;
-  onGateLabelMove?: (e: { gate_id: string; label_offset: [number, number] }) => void;
+  /** `quadrant` names one of a quadrant gate's four labels (0 to 3); absent for a gate label. */
+  onGateLabelMove?: (e: { gate_id: string; label_offset: [number, number]; quadrant?: number }) => void;
   /**
    * The renderer changed the view itself -- its own pan and stretch mutate the plot's ranges
    * locally and report them here. Without this React never learns, so the next payload it
@@ -101,6 +104,7 @@ export function GatingPlot({
   onGateEdit,
   onEllipseEdit,
   onQuadrantMove,
+  onQuadrantCurl,
   onGateSelect,
   onAxisLabelClick,
   onGateLabelMove,
@@ -122,6 +126,7 @@ export function GatingPlot({
     onGateEdit,
     onEllipseEdit,
     onQuadrantMove,
+    onQuadrantCurl,
     onGateSelect,
     onAxisLabelClick,
     onGateLabelMove,
@@ -136,6 +141,7 @@ export function GatingPlot({
     onGateEdit,
     onEllipseEdit,
     onQuadrantMove,
+    onQuadrantCurl,
     onGateSelect,
     onAxisLabelClick,
     onGateLabelMove,
@@ -274,6 +280,10 @@ export function GatingPlot({
         if (!interactionIsCurrent()) return;
         callbacksRef.current.onQuadrantMove?.(v as { gate_id: string; center: [number, number] });
       }),
+      bus.on("gate_quadrant_curl", (v: unknown) => {
+        if (!interactionIsCurrent()) return;
+        callbacksRef.current.onQuadrantCurl?.(v as { gate_id: string; arm: "h" | "v"; at: [number, number] });
+      }),
       bus.on("gate_select", (v: unknown) => {
         if (!interactionIsCurrent()) return;
         callbacksRef.current.onGateSelect?.(v as string);
@@ -284,7 +294,7 @@ export function GatingPlot({
       }),
       bus.on("gate_label_move", (v: unknown) => {
         if (!interactionIsCurrent()) return;
-        callbacksRef.current.onGateLabelMove?.(v as { gate_id: string; label_offset: [number, number] });
+        callbacksRef.current.onGateLabelMove?.(v as { gate_id: string; label_offset: [number, number]; quadrant?: number });
       }),
       bus.on("plot_range", (v: unknown) => {
         if (!interactionIsCurrent()) return;

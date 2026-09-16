@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import { importGatingML } from "./gatingml";
+import { flogTransform } from "./biex";
 
 /**
  * A real Cytobank Gating-ML export of a FLOW experiment, inlined.
@@ -82,7 +83,7 @@ const CYTOBANK_FLOW_EXPORT = `<?xml version="1.0" encoding="UTF-8"?>
 `;
 
 describe("Cytobank flow export imports", () => {
-  it("reads a log-scaled Cytobank flow gate into raw space", () => {
+  it("keeps a log-scaled Cytobank flow gate in log space, over the same raw boundary", () => {
     const res = importGatingML(CYTOBANK_FLOW_EXPORT, ["BUV805-A", "PE-A"], {}, "flow");
     expect(res.n_gates_imported).toBe(1);
 
@@ -93,16 +94,27 @@ describe("Cytobank flow export imports", () => {
     expect(gate.x_channel).toBe("BUV805-A");
     expect(gate.y_channel).toBe("PE-A");
 
-    // gating:min for BUV805-A is 4.168799557730493 in flog space with T = M = 1, so the raw
-    // value is 10^(4.1688 - 1). The same gate's Cytobank definition JSON carries 3.1688 for
-    // that edge, which is log10 of the same number — an independent confirmation that the
-    // inverse runs the right way round.
-    const xs = gate.vertices.map((v) => v[0]);
-    expect(Math.min(...xs)).toBeCloseTo(Math.pow(10, 4.168799557730493 - 1), 3);
-    expect(Math.max(...xs)).toBeCloseTo(Math.pow(10, 6.519773990963408 - 1), 0);
+    // The gate is HELD in the space the file declares — Gating-ML §4.2.3 — so the vertices are
+    // the file's own flog coordinates, not inverted into raw. Before 2026-09-10 they were
+    // inverted on import, which is a different gate for any polygon.
+    const g2 = gate as unknown as {
+      space?: string; transforms?: Record<string, { kind: string; T?: number; M?: number }>;
+    };
+    expect(g2.space).toBe("display");
+    expect(g2.transforms?.["BUV805-A"]).toEqual({ kind: "flog", T: 1, M: 1 });
 
-    // Raw space, not log space: the gate must sit where the events are, not at ~4.
-    expect(Math.min(...xs)).toBeGreaterThan(1000);
+    const xs = gate.vertices.map((v) => v[0]);
+    expect(Math.min(...xs)).toBeCloseTo(4.168799557730493, 9);
+    expect(Math.max(...xs)).toBeCloseTo(6.519773990963408, 9);
+
+    // The boundary is unchanged, only its coordinates are: pushing the gate's own transform
+    // through gives the same raw edges the importer used to store. Cytobank's definition JSON
+    // carries 3.1688 for that edge, which is log10 of the raw value — the independent check
+    // that the transform runs the right way round, kept from the previous version of this test.
+    const raw = flogTransform({ T: 1, M: 1 }).inverse;
+    expect(raw(Math.min(...xs))).toBeCloseTo(Math.pow(10, 4.168799557730493 - 1), 3);
+    expect(raw(Math.min(...xs))).toBeGreaterThan(1000);
+    expect(Math.log10(raw(Math.min(...xs)))).toBeCloseTo(3.168799557730493, 9);
   });
 
   it("leaves a CyTOF import in arcsinh space, unchanged", () => {

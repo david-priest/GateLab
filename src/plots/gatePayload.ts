@@ -6,6 +6,7 @@
 import type { Sample } from "../engine/sample";
 import { axesFromCovariance, ellipseBoundary } from "../engine/ellipse";
 import type { Gate } from "../engine/models";
+import { } from "../engine/gates";
 import { gateSpaceBadge } from "../engine/gateSpaceBadge";
 import type { GateCount } from "../engine/populations";
 
@@ -17,6 +18,8 @@ export interface PlotGate {
   color: string;
   name: string;
   label_offset: [number, number] | null;
+  /** A quadrant gate's four label positions, Q1 to Q4, as dragged deltas in display units. */
+  quadrant_label_offsets?: ([number, number] | null)[];
   vertices?: [number, number][];
   /**
    * The gate's true boundary in display space, for drawing.
@@ -47,6 +50,11 @@ export interface PlotGate {
   percent_scope?: string;
   percent_scope_hint?: string;
   center?: [number, number];
+  /**
+   * A curly quadrant's bent dividers, in display coordinates: the horizontal arm from the
+   * crosshair rightwards and the vertical arm upwards. Absent for a straight crosshair.
+   */
+  arms?: { h: [number, number][]; v: [number, number][] };
   quadrant_counts?: number[];
   quadrant_pcts?: number[];
 }
@@ -242,6 +250,11 @@ export function buildPlotGates(
   xChannel: string,
   yChannel: string,
   countScope: GateCountScope | null = null,
+  /**
+   * The ranges the plot shows, when known: a curly quadrant's arms run to the edge of what is
+   * on screen. Labels keep judging themselves against the data's own extent (axisFrames).
+   */
+  viewFrames: AxisFrames = [null, null],
 ): PlotGate[] {
   const out: PlotGate[] = [];
   // The display extent of the DATA on each axis — the frame a label has to land inside.
@@ -253,6 +266,12 @@ export function buildPlotGates(
     return Number.isFinite(lo) && Number.isFinite(hi) && hi > lo ? [lo, hi] : null;
   };
   const axisFrames: AxisFrames = [frameOf(xChannel), frameOf(yChannel)];
+  // A label is kept wherever it lands within the wider of the data's extent and the plotted
+  // range: zooming in does not throw placements away (the data extent still covers them), and
+  // zooming out lets a label sit in the empty part of the plot rather than snapping back.
+  const union = (a: [number, number] | null, b: [number, number] | null): [number, number] | null =>
+    a && b ? [Math.min(a[0], b[0]), Math.max(a[1], b[1])] : a ?? b;
+  const labelFrames: AxisFrames = [union(axisFrames[0], viewFrames[0]), union(axisFrames[1], viewFrames[1])];
   const ids = gateOrder.length ? gateOrder : Object.keys(gates);
   for (const gid of ids) {
     const gate = gates[gid];
@@ -281,13 +300,47 @@ export function buildPlotGates(
     };
 
     if (gate.gate_type === "quadrant") {
+      // Bent arms run from the crosshair to the far edge of what the plot shows, sampled evenly
+      // ON SCREEN (a transformed axis packs most of its pixels near the crosshair, where the
+      // bend starts, so sampling evenly in the gate's space drew the first segment as a chord)
+      // with each point evaluated in the gate's own space, so the curve on screen is the curve
+      // the mask evaluates.
+      let arms: { h: [number, number][]; v: [number, number][] } | undefined;
+      const [xFrame, yFrame] = axisFrames;
+      const xEnd = viewFrames[0]?.[1] ?? xFrame?.[1];
+      const yEnd = viewFrames[1]?.[1] ?? yFrame?.[1];
+      if (gate.curl && xEnd !== undefined && yEnd !== undefined) {
+        const curl = gate.curl;
+        const [cx, cy] = gate.center;
+        const armTo = (arm: "h" | "v", displayEnd: number): [number, number][] => {
+          const channel = arm === "h" ? xChannel : yChannel;
+          const origin = arm === "h" ? cx : cy;
+          const start = sample.gateToDisplay(gate, channel, origin);
+          if (!(displayEnd > start)) return [];
+          const steps = 48;
+          const pts: [number, number][] = [];
+          for (let i = 0; i <= steps; i++) {
+            const along = sample.displayToGate(gate, channel, start + ((displayEnd - start) * i) / steps);
+            const d = along - origin;
+            if (!(d >= 0)) continue;
+            const bend = Math.pow(d, curl.power);
+            pts.push(toDisplay(arm === "h" ? [cx + d, cy + curl.kx * bend] : [cx + curl.ky * bend, cy + d]));
+          }
+          return pts;
+        };
+        arms = { h: armTo("h", xEnd), v: armTo("v", yEnd) };
+      }
       out.push({
         ...common,
         gate_type: "quadrant",
-        label_offset: usableLabelOffset(gate.label_offset, [toDisplay(gate.center)], axisFrames),
+        label_offset: usableLabelOffset(gate.label_offset, [toDisplay(gate.center)], labelFrames),
         center: toDisplay(gate.center),
+        ...(arms ? { arms } : {}),
         quadrant_counts: counts?.quadrants?.map((q) => q.event_count),
         quadrant_pcts: counts?.quadrants?.map((q) => q.percent_of_parent),
+        ...(gate.quadrant_label_offsets
+          ? { quadrant_label_offsets: gate.quadrant_label_offsets.map((o) => usableLabelOffset(o, [toDisplay(gate.center)], labelFrames)) }
+          : {}),
       });
     } else if (gate.gate_type === "rectangle") {
       // Render as the axis-aligned box (mask uses min/max), so 2- or 4-corner
@@ -310,7 +363,7 @@ export function buildPlotGates(
         gate_type: "rectangle",
         vertices: displayVerts,
         // Label offset must be in DISPLAY space (cytof applies it to display coords).
-        label_offset: usableLabelOffset(gate.label_offset, displayVerts, axisFrames)
+        label_offset: usableLabelOffset(gate.label_offset, displayVerts, labelFrames)
           ?? displayLabelOffset(displayVerts),
         percent_of_parent: counts?.percent_of_parent ?? null,
       });
@@ -361,7 +414,7 @@ export function buildPlotGates(
         ...(handleGeom ? { ellipse: handleGeom } : {}),
         vertices: displayVerts,
         outline: polygonOutline(boundary, toDisplay, displayVerts),
-        label_offset: usableLabelOffset(gate.label_offset, displayVerts, axisFrames)
+        label_offset: usableLabelOffset(gate.label_offset, displayVerts, labelFrames)
           ?? displayLabelOffset(displayVerts),
         percent_of_parent: counts?.percent_of_parent ?? null,
       });
@@ -372,7 +425,7 @@ export function buildPlotGates(
         gate_type: gate.gate_type,
         vertices: displayVerts,
         outline: polygonOutline(gate.vertices, toDisplay, displayVerts),
-        label_offset: usableLabelOffset(gate.label_offset, displayVerts, axisFrames)
+        label_offset: usableLabelOffset(gate.label_offset, displayVerts, labelFrames)
           ?? displayLabelOffset(displayVerts),
         percent_of_parent: counts?.percent_of_parent ?? null,
       });

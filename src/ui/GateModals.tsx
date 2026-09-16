@@ -9,7 +9,14 @@ import { useMemo, useState } from "react";
 import type { NewGate } from "../plots/GatingPlot";
 import type { Sample } from "../engine/sample";
 import type { Action } from "../store";
-import type { GateSpace, PopulationMap, Vertex } from "../engine/models";
+import { flowJoCurlForDisplay, type GateSpace, type PopulationMap, type Vertex } from "../engine/models";
+import {
+  quadrantPopulationNames,
+  rememberQuadrantNaming,
+  rememberedQuadrantNaming,
+  shortChannelLabel,
+  type QuadrantNaming,
+} from "../engine/quadrantNames";
 import { useI18n } from "./i18n";
 
 interface Props {
@@ -64,22 +71,57 @@ export function GateModals({
   ];
 
   if (pending.gate_type === "quadrant") {
+    // A curly quadrant bends in the space it is drawn in, so like an ellipse it is created in
+    // DISPLAY space with the axes' transforms captured, whatever the new-gate space selector
+    // says; a straight crosshair follows the selector as before. The bend starts as FlowJo's,
+    // carried into these axes' spans, and the arm handles take it from there.
+    const curlySpaceFields = gateSpace
+      ? sample.newGateSpaceFields("display", pending.x_channel, pending.y_channel)
+      : {};
+    const spanOf = (channel: string): number => {
+      const idx = sample.index(channel);
+      if (idx === undefined) return 1;
+      const [lo, hi] = sample.displayRange(idx);
+      return Number.isFinite(lo) && Number.isFinite(hi) && hi > lo ? hi - lo : 1;
+    };
+    // The population names take the marker alone where the channel has one, else the
+    // detector: "CD4+ CD8-" rather than "CD4 (FITC-A)+ CD8 (PE-A)-".
+    const shortLabel = (key: string) => {
+      const idx = sample.index(key);
+      return shortChannelLabel(idx === undefined ? undefined : sample.channels[idx], key);
+    };
+    const xLabel = shortLabel(pending.x_channel);
+    const yLabel = shortLabel(pending.y_channel);
     return (
       <QuadrantModal
         pending={pending}
+        xLabel={xLabel}
+        yLabel={yLabel}
         parentChoices={parentChoices}
         defaultParent={defaultParent}
         onCancel={onCancel}
-        onConfirm={(prefix, parentId) => {
-          const c = toGating(pending.vertices[0]);
+        onConfirm={(prefix, parentId, curly, naming) => {
+          const fields = curly ? curlySpaceFields : spaceFields;
+          const v = pending.vertices[0];
+          const c: Vertex = [
+            sample.displayToGate(fields, pending.x_channel, v[0]),
+            sample.displayToGate(fields, pending.y_channel, v[1]),
+          ];
+          rememberQuadrantNaming(naming);
           onConfirm({
             type: "addQuadrant",
             xChannel: pending.x_channel,
             yChannel: pending.y_channel,
+            xLabel,
+            yLabel,
+            names: quadrantPopulationNames(naming, xLabel, yLabel),
             center: c,
             prefix,
             parentId,
-            ...spaceFields,
+            ...fields,
+            ...(curly
+              ? { curl: flowJoCurlForDisplay(spanOf(pending.x_channel), spanOf(pending.y_channel)) }
+              : {}),
           });
         }}
       />
@@ -267,20 +309,27 @@ function GateModal({
 
 function QuadrantModal({
   pending,
+  xLabel,
+  yLabel,
   parentChoices,
   defaultParent,
   onCancel,
   onConfirm,
 }: {
   pending: NewGate;
+  xLabel: string;
+  yLabel: string;
   parentChoices: ParentChoice[];
   defaultParent: string;
   onCancel: () => void;
-  onConfirm: (prefix: string, parentId: string) => void;
+  onConfirm: (prefix: string, parentId: string, curly: boolean, naming: QuadrantNaming) => void;
 }) {
   const { t } = useI18n();
   const [prefix, setPrefix] = useState("");
   const [parentId, setParentId] = useState(defaultParent);
+  const [curly, setCurly] = useState(false);
+  // The scheme chosen last time holds until it is changed; each option reads as the names it gives.
+  const [naming, setNaming] = useState<QuadrantNaming>(rememberedQuadrantNaming);
   return (
     <ModalShell title={t("Create quadrant gate")}>
       <div className="gl-modal-note">
@@ -290,12 +339,32 @@ function QuadrantModal({
         {t("Name prefix (optional):")}
         <input autoFocus value={prefix} onChange={(e) => setPrefix(e.target.value)} />
       </label>
+      <label className="gl-modal-field">
+        {t("Population names:")}
+        <select
+          aria-label={t("Quadrant population names")}
+          value={naming}
+          onChange={(e) => setNaming(e.target.value === "signs" ? "signs" : "dndp")}
+        >
+          <option value="dndp">{quadrantPopulationNames("dndp", xLabel, yLabel).join(", ")}</option>
+          <option value="signs">{quadrantPopulationNames("signs", xLabel, yLabel).join(", ")}</option>
+        </select>
+      </label>
       <ParentSelect choices={parentChoices} value={parentId} onChange={setParentId} />
+      <label className="gl-modal-check">
+        <input type="checkbox" checked={curly} onChange={(e) => setCurly(e.target.checked)} />
+        {t("Curly arms (FlowJo-style)")}
+      </label>
+      {curly && (
+        <div className="gl-modal-note">
+          {t("Beyond the crosshair the dividers bend toward the upper right, following photon-counting spread; drag the handle at the end of either arm to set the bend.")}
+        </div>
+      )}
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={onCancel}>
           {t("Cancel")}
         </button>
-        <button className="gl-btn" onClick={() => onConfirm(prefix, parentId)}>
+        <button className="gl-btn" onClick={() => onConfirm(prefix, parentId, curly, naming)}>
           {t("Create 4 populations")}
         </button>
       </div>

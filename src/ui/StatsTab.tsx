@@ -10,7 +10,6 @@ import { computePopulationStats, MFI_STATS, type StatType, type ValueSpace } fro
 import { significantNumber } from "./compensationUiFormat";
 import { populationTreeOrder } from "../engine/populations";
 import { TreeConnectors } from "./TreeConnectors";
-import { MultiColumnChecklist } from "./MultiColumnChecklist";
 import { useI18n } from "./i18n";
 
 interface SampleRef {
@@ -66,7 +65,6 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
   };
   const anyMfi = MFI_STATS.some((s) => statTypes.has(s.key));
   const root = state.root_population_id ?? "";
-  const channelPickerRows = Math.min(10, Math.max(4, Math.ceil(allChannels.length / 4)));
 
   // Per-sample Derived: reuse the active sample's; recompute the others on demand.
   const derivedFor = (id: string): Derived => {
@@ -178,24 +176,24 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
-  if (samples.length === 0 || (!isCompare && (!table || table.rows.length === 0))) {
-    return <div className="gl-tab-panel gl-tab-empty">{t("No populations yet — draw a gate to populate the tree.")}</div>;
-  }
+  const empty = samples.length === 0 || (!isCompare && (!table || table.rows.length === 0));
 
   return (
-    <div className="gl-tab-panel">
-      <div className="gl-tab-head">
-        <h2 className="gl-tab-title">{t("Population statistics")}</h2>
-        <button className="gl-btn-ghost" onClick={downloadCsv}>{t("Download CSV")}</button>
-        <button className="gl-btn-ghost" onClick={copyCsv}>
-          {copied ? t("Copied ✓") : t("Copy CSV")}
-        </button>
+    <div className="gl-tab-panel gl-tab-fill gl-plotting-workspace gl-stats-workspace">
+      <div className="gl-plotting-head">
+        <strong>{t("Statistics")}</strong>
+        <span>{t("Population counts and statistics per file")}</span>
+        <span className="gl-plotting-head-actions">
+          <button className="gl-btn-ghost" onClick={downloadCsv} disabled={empty}>{t("Download CSV")}</button>
+          <button className="gl-btn-ghost" onClick={copyCsv} disabled={empty}>
+            {copied ? t("Copied ✓") : t("Copy CSV")}
+          </button>
+        </span>
       </div>
-
-      <div className="gl-stats-opts">
-        <div className="gl-stats-opt-group">
-          <span className="gl-stats-opt-label">{t("Sample")}</span>
-          <select value={viewSampleId} onChange={(e) => setViewSampleId(e.target.value)} className="gl-field-input" style={{ textAlign: "left", width: "auto" }}>
+      <aside className="gl-plotting-inspector" aria-label={t("Statistics controls")}>
+        <section className="gl-stats-opt-group">
+          <h3>{t("File")}</h3>
+          <select aria-label={t("Statistics file")} value={viewSampleId} onChange={(e) => setViewSampleId(e.target.value)}>
             {samples.map((e) => (
               <option key={e.id} value={e.id}>
                 {e.name}
@@ -204,60 +202,63 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
             ))}
             {samples.length > 1 && <option value={COMPARE}>{t("All samples (compare)")}</option>}
           </select>
-        </div>
+        </section>
         {isCompare ? (
-          <div className="gl-stats-opt-group">
-            <span className="gl-stats-opt-label">{t("Metric")}</span>
+          <section className="gl-stats-opt-group">
+            <h3>{t("Metric")}</h3>
             {COMPARE_METRICS.map((m) => (
               <label key={m.key} className="gl-check">
                 <input type="radio" name="cmp-metric" checked={compareMetric === m.key} onChange={() => setCompareMetric(m.key)} />
                 {t(m.label)}
               </label>
             ))}
-          </div>
+          </section>
         ) : (
           <>
-            <div className="gl-stats-opt-group">
-              <span className="gl-stats-opt-label">{t("Statistics")}</span>
+            <section className="gl-stats-opt-group">
+              <h3>{t("Statistics")}</h3>
               {ALL_STAT_OPTS.map((s) => (
                 <label key={s.key} className="gl-check">
                   <input type="checkbox" checked={statTypes.has(s.key)} onChange={() => toggleStat(s.key)} />
                   {t(s.label)}
                 </label>
               ))}
-            </div>
-            <div className="gl-stats-opt-group">
-              <span className="gl-stats-opt-label">{t("MFI space")}</span>
+            </section>
+            <section className="gl-stats-opt-group">
+              <h3>{t("MFI space")}</h3>
               {(["raw", "transformed"] as ValueSpace[]).map((v) => (
                 <label key={v} className="gl-check">
                   <input type="radio" name="mfi-space" checked={valueSpace === v} onChange={() => setValueSpace(v)} />
                   {v === "raw" ? t("Raw") : t("Transformed")}
                 </label>
               ))}
-            </div>
+            </section>
+            {anyMfi && (
+              <section className="gl-stats-opt-group gl-stats-channel-picker">
+                <h3>{t("Channels")} <span>{channels.length} {t("selected")}</span></h3>
+                <div className="gl-plotting-actions">
+                  <button className="gl-mini-btn" onClick={() => setChannels(allChannels)}>{t("All")}</button>
+                  <button className="gl-mini-btn" onClick={() => setChannels([])}>{t("None")}</button>
+                </div>
+                <div className="gl-plotting-filelist" aria-label={t("Statistics channels")}>
+                  {allChannels.map((channel) => (
+                    <label className="gl-check" key={channel}>
+                      <input type="checkbox" checked={channels.includes(channel)} onChange={() => toggleChannel(channel)} />
+                      {labelOf(channel)}
+                    </label>
+                  ))}
+                </div>
+              </section>
+            )}
           </>
         )}
-      </div>
-
-      {!isCompare && anyMfi && (
-        <div className="gl-stats-channel-picker">
-          <div className="gl-picker-head">
-            <span className="gl-stats-opt-label">{t("Channels")}</span>
-            <button className="gl-mini-btn gl-picker-first-action" onClick={() => setChannels(allChannels)}>{t("All")}</button>
-            <button className="gl-mini-btn" onClick={() => setChannels([])}>{t("None")}</button>
-          </div>
-          <MultiColumnChecklist
-            items={allChannels}
-            ariaLabel="Statistics channels"
-            selected={(channel) => channels.includes(channel)}
-            onToggle={toggleChannel}
-            getKey={(channel) => channel}
-            getLabel={labelOf}
-            visibleRows={channelPickerRows}
-          />
-        </div>
-      )}
-
+      </aside>
+      <div className="gl-prop-body">
+      {empty ? (
+        <p className="gl-tab-empty">{samples.length === 0
+          ? t("No file to tabulate: check a file, or view one, under this tree.")
+          : t("No populations yet — draw a gate to populate the tree.")}</p>
+      ) : (
       <div className="gl-stats-scroll">
         {isCompare && compare ? (
           <table className="gl-stats-table">
@@ -318,6 +319,8 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
             </tbody>
           </table>
         ) : null}
+      </div>
+      )}
       </div>
     </div>
   );

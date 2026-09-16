@@ -10,15 +10,18 @@ export const SEG = 16; // px per depth level
 const HGT = 20; // connector SVG height (rows must be ~this tall for the │ segments to join)
 const LINE_COLOR = "#bfc5cf";
 
-// `fill`: stretch the glyphs vertically to the row height (preserveAspectRatio="none") so the │
-// segments join across rows even when the row is taller than HGT — used by the Statistics table,
-// whose <td> rows are taller than a tree row. The tree view leaves it off (rows are HGT-sized).
+// `fill`: the glyphs follow the row height, so the │ segments join across rows taller than HGT —
+// a population row whose gate badges wrap to several lines, or a Statistics <td>. The vertical
+// lines run in percentages of the SVG's own height and the SVG sits absolutely inside a
+// row-height placeholder of the same width, so nothing is stretched (a stretched SVG thickened
+// the ├ tick with the row) and the placeholder adds no height of its own to the row.
 export function TreeConnectors({ depth, isLastPath, fill }: { depth: number; isLastPath: boolean[]; fill?: boolean }) {
   if (depth === 0) return null;
   const total = depth * SEG;
-  const mid = Math.floor(HGT / 2);
+  const mid: number | string = fill ? "50%" : Math.floor(HGT / 2);
+  const bottom: number | string = fill ? "100%" : HGT;
   const lines: React.ReactNode[] = [];
-  const line = (x1: number, y1: number, x2: number, y2: number, key: string) => (
+  const line = (x1: number, y1: number | string, x2: number, y2: number | string, key: string) => (
     <line key={key} x1={x1} y1={y1} x2={x2} y2={y2} stroke={LINE_COLOR} strokeWidth={1.5} strokeLinecap="square" />
   );
   for (let i = 1; i <= depth; i++) {
@@ -30,22 +33,25 @@ export function TreeConnectors({ depth, isLastPath, fill }: { depth: number; isL
         lines.push(line(cx, 0, cx, mid, `v${i}`)); // └
         lines.push(line(cx, mid, total, mid, `h${i}`));
       } else {
-        lines.push(line(cx, 0, cx, HGT, `v${i}`)); // ├
+        lines.push(line(cx, 0, cx, bottom, `v${i}`)); // ├
         lines.push(line(cx, mid, total, mid, `h${i}`));
       }
     } else if (!isLast) {
-      lines.push(line(cx, 0, cx, HGT, `a${i}`)); // │
+      lines.push(line(cx, 0, cx, bottom, `a${i}`)); // │
     }
   }
+  if (!fill) {
+    return (
+      <svg width={total} height={HGT} viewBox={`0 0 ${total} ${HGT}`} style={{ flexShrink: 0, overflow: "visible" }}>
+        {lines}
+      </svg>
+    );
+  }
   return (
-    <svg
-      width={total}
-      height={HGT}
-      viewBox={`0 0 ${total} ${HGT}`}
-      preserveAspectRatio={fill ? "none" : undefined}
-      style={{ flexShrink: 0, overflow: "visible", ...(fill ? { height: "100%" } : null) }}
-    >
-      {lines}
-    </svg>
+    <span className="tree-connectors-fill" style={{ position: "relative", display: "block", width: total, flexShrink: 0, alignSelf: "stretch" }}>
+      <svg width={total} height="100%" style={{ position: "absolute", top: 0, left: 0, overflow: "visible" }}>
+        {lines}
+      </svg>
+    </span>
   );
 }

@@ -201,6 +201,25 @@ export interface WspLogParams {
   decades: number;
 }
 
+/**
+ * Gating-ML 2.0 flog: `y = log10(x / T) / M + 1`, inverse `x = T · 10^((y − 1) · M)`.
+ *
+ * The standard leaves x <= 0 undefined, and real data is full of zeros and negatives, so the
+ * input is clamped to the bottom of the declared scale — `T · 10^(−M)`, the value where y = 0.
+ * That is the same shape of rule FlowJo applies in wspLogTransform, one scale-span lower: FlowJo
+ * pins at its offset (its own y = 0), flog pins M decades below T. Both keep the axis finite
+ * rather than sending an event to −Infinity, and neither moves a gate whose lower edge sits above
+ * the floor, which is every log gate that means anything.
+ */
+export function flogTransform(p: { T: number; M: number }): BiexTransform {
+  const { T, M } = p;
+  const floor = T * Math.pow(10, -M);
+  return {
+    forward: (v) => Math.log10(Math.max(v, floor) / T) / M + 1,
+    inverse: (v) => T * Math.pow(10, (v - 1) * M),
+  };
+}
+
 export function wspLogTransform(p: WspLogParams): BiexTransform {
   const { offset, decades } = p;
   const logOffset = Math.log10(offset);

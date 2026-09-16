@@ -20,6 +20,7 @@ const LETTER: Record<TransformSpec["kind"], string> = {
   logicle: "L",
   biex: "B",
   wsplog: "G",
+  flog: "O",
 };
 
 function describe(spec: TransformSpec | undefined): string {
@@ -30,6 +31,7 @@ function describe(spec: TransformSpec | undefined): string {
   if (spec.kind === "biex") {
     return `FlowJo biex (width ${spec.widthBasis.toPrecision(4)}, neg ${spec.neg}, pos ${spec.pos})`;
   }
+  if (spec.kind === "flog") return `log (T ${spec.T.toPrecision(4)}, M ${spec.M.toPrecision(4)})`;
   return `FlowJo log (offset ${spec.offset.toPrecision(4)}, ${spec.decades.toPrecision(4)} decades)`;
 }
 
@@ -55,6 +57,7 @@ function sameSpec(a: TransformSpec, b: TransformSpec): boolean {
   if (a.kind === "wsplog" && b.kind === "wsplog") {
     return a.offset === b.offset && a.decades === b.decades;
   }
+  if (a.kind === "flog" && b.kind === "flog") return a.T === b.T && a.M === b.M;
   return true; // identity
 }
 

@@ -1,0 +1,16 @@
+{
+  "title": "GateLab",
+  "upload_type": "software",
+  "license": "MIT",
+  "access_right": "open",
+  "description": "<p>Browser-based manual gating of flow and mass cytometry data. FCS files are parsed, transformed and gated locally; one population tree per workspace, tailored per file or per group; FlowJo workspace and FACSChorus import and export; Gating-ML 2.0; compensation; statistics and publication figures.</p>",
+  "creators": [
+    { "name": "Priest, David G.", "affiliation": "Wing Lab, Center for Infectious Disease Education and Research (CiDER), Osaka University" },
+    { "name": "Wing, James B.", "affiliation": "Wing Lab, Center for Infectious Disease Education and Research (CiDER), Osaka University" }
+  ],
+  "keywords": ["flow cytometry", "mass cytometry", "CyTOF", "manual gating", "Gating-ML", "FCS", "FlowJo"],
+  "related_identifiers": [
+    { "identifier": "https://github.com/david-priest/GateLab", "relation": "isSupplementTo", "scheme": "url" },
+    { "identifier": "https://david-priest.github.io/GateLab/", "relation": "isIdenticalTo", "scheme": "url" }
+  ]
+}

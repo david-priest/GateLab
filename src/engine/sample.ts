@@ -12,8 +12,8 @@
 import type { FcsFile, NumericColumn } from "./fcs";
 import type { AssayData, GateAssayData } from "./gates";
 import type { Gate, GateSpace, GateTransforms, TransformSpec } from "./models";
-import { resolveChannels, type ResolvedChannel } from "./channels";
-import { biexTransform, wspLogTransform } from "./biex";
+import { resolveChannels, type ResolvedChannel, isImagingFeature } from "./channels";
+import { biexTransform, flogTransform, wspLogTransform } from "./biex";
 import type { MatrixChannelBinding } from "./compensationCompatibility";
 import type {
   PersistedCompensatedLayerBinding,
@@ -34,6 +34,7 @@ import {
   solveFlowCompensation,
 } from "./flowCompensationEngine";
 import {
+  isImagingGeometryChannel,
   Logicle,
   isCytofRawChannel,
   isQcChannel,
@@ -86,6 +87,10 @@ export function transformFromSpec(spec: TransformSpec): ChannelTransform {
   }
   if (spec.kind === "wsplog") {
     const t = wspLogTransform(spec);
+    return { kind: "asinh", forward: t.forward, inverse: t.inverse };
+  }
+  if (spec.kind === "flog") {
+    const t = flogTransform(spec);
     return { kind: "asinh", forward: t.forward, inverse: t.inverse };
   }
   const lg = new Logicle(spec.T, spec.W, spec.M, spec.A);
@@ -172,6 +177,13 @@ export interface OverlaySpec {
  * are not interchangeable as provenance: only the embedded one can be re-derived from the file,
  * so an external matrix has to be recorded wherever the compensation state is written down.
  */
+/** What `Sample.spilloverSnapshot()` records and `restoreSpillover()` puts back. */
+export interface SpilloverSnapshot {
+  spillover: DisplaySpillover | null;
+  origin: SpilloverOrigin;
+  compensationEnabled: boolean;
+}
+
 export type SpilloverOrigin =
   | { kind: "fcs" }
   | {
@@ -472,6 +484,26 @@ export class Sample {
     return this._spilloverOrigin;
   }
 
+  /**
+   * The spillover state as it stands -- matrix, origin, whether compensation is on -- so a step
+   * that changes it and then fails can put it back. A gating import installs a workspace's
+   * matrix before it knows the strategy will go in; without this, a failed import left the
+   * matrix in place with no gates to go with it.
+   */
+  spilloverSnapshot(): SpilloverSnapshot {
+    return { spillover: this._spillover, origin: this._spilloverOrigin, compensationEnabled: this.compensationEnabled };
+  }
+
+  /** Put the spillover state back exactly as a snapshot recorded it. */
+  restoreSpillover(snapshot: SpilloverSnapshot): void {
+    // Compensation off before the matrix beneath it changes, as installExternalSpillover does,
+    // so no compensated layer computed from the matrix being discarded survives.
+    if (this.compensationEnabled) this.setCompensation(false);
+    this._spillover = snapshot.spillover;
+    this._spilloverOrigin = snapshot.origin;
+    if (snapshot.compensationEnabled) this.setCompensation(true);
+  }
+
   constructor(fcs: FcsFile, opts: SampleOpts = {}) {
     this.fcs = fcs;
     this.detectedInstrument = fcs.instrument;
@@ -581,7 +613,7 @@ export class Sample {
       transformBinding = ["identity"];
     } else if (this.instrument === "cytof") {
       transformBinding = ["asinh", this.cytofCofactor];
-    } else if (isScatterChannel(channel.pnn) || isScatterChannel(channel.key)) {
+    } else if (isScatterChannel(channel.pnn) || isScatterChannel(channel.key) || this.isImagingFeatureAxis(idx)) {
       transformBinding = ["asinh", this.currentScatterCofactor(idx)];
     } else if (transform.kind === "logicle") {
       transformBinding = ["logicle", this.logicleT(idx), this.currentLogicleW(idx)];
@@ -1676,6 +1708,17 @@ export class Sample {
   private readonly wOverride = new Map<number, number>();
   /** Workspace-wide owner of display scales; absent in single-sample and unit-test use. */
   private channelScales?: ChannelScales;
+  private scaleRosterVersion = -1;
+
+  /** Roster changes can change shared W and T even on a file whose columns are already cached. */
+  private syncScaleRoster(): void {
+    const version = this.channelScales?.rosterVersion ?? -1;
+    if (version === this.scaleRosterVersion) return;
+    this.scaleRosterVersion = version;
+    this.transformCache.clear();
+    this.displayCache.clear();
+    this.rangeCache.clear();
+  }
 
   /**
    * Join a workspace's shared display scales. Registering also contributes this file's own auto
@@ -1683,6 +1726,10 @@ export class Sample {
    */
   attachChannelScales(scales: ChannelScales): () => void {
     this.channelScales = scales;
+    // A newly added sample can be rendered once before React's attachment effect runs. Any
+    // transforms, display columns or ranges warmed in that render used the sample's fallback
+    // scales, so discard them before the shared settings become authoritative.
+    for (let idx = 0; idx < this.channels.length; idx++) this.invalidateChannel(idx);
     scales.register(this);
     return () => {
       scales.unregister(this);
@@ -1701,6 +1748,7 @@ export class Sample {
 
   /** Lazily build + cache the raw→display transform for one channel. */
   private transform(idx: number): ChannelTransform {
+    this.syncScaleRoster();
     const hit = this.transformCache.get(idx);
     if (hit) return hit;
     const { key: name, pnn } = this.channels[idx];
@@ -1717,6 +1765,10 @@ export class Sample {
       // Linear scatter reuses the identity transform rather than introducing a new kind:
       // raw == display for that channel, which axis ticks and gate rendering already handle.
       t = this.scatterIsLinear(idx) ? IDENTITY : asinhTransform(this.currentScatterCofactor(idx));
+    } else if (this.isImagingFeatureAxis(idx)) {
+      // Linear unless asked for arcsinh: a shape feature is bounded and mostly zero, and a
+      // logicle collapsed it. FACSChorus shows these Linear too.
+      t = this.fluorIsArcsinh(idx) ? asinhTransform(this.currentScatterCofactor(idx)) : IDENTITY;
     } else if (this.fluorIsArcsinh(idx)) {
       // Arcsinh cofactor 150 for a fluorescence channel, chosen per channel. It is the same
       // transform the unhealthy-logicle path below falls back to, and the same one GateLabR uses
@@ -1724,7 +1776,7 @@ export class Sample {
       // Flow gates live in raw space, so this moves no event in or out of a gate.
       t = asinhTransform(this.currentFluorCofactor(idx));
     } else {
-      const { t: tv } = this.logicleParams(idx);
+      const tv = this.logicleT(idx);
       const w = this.currentLogicleW(idx);
       const lg = new Logicle(tv, w, 4.5, 0);
       // GateLabR (fcs_import.R:862) falls back to asinh(x/150) when the logicle can't be built /
@@ -1766,6 +1818,11 @@ export class Sample {
   }
   /** Logicle T (top-of-scale) for a channel — used when exporting a logicle transform. */
   logicleT(idx: number): number {
+    return this.channelScales?.logicleT(this.workspaceScaleContextKey, this.channels[idx].key)
+      ?? this.ownAutoLogicleT(idx);
+  }
+
+  ownAutoLogicleT(idx: number): number {
     return this.logicleParams(idx).t;
   }
   /** CyTOF arcsinh cofactor (for exporting the fasinh transform). */
@@ -1821,7 +1878,64 @@ export class Sample {
     const channel = this.channels[idx];
     if (!channel) return false;
     if (isQcChannel(channel.key) || isQcChannel(channel.pnn)) return false;
+    if (this.isImagingFeatureAxis(idx)) return false;
     return !isScatterChannel(channel.key) && !isScatterChannel(channel.pnn);
+  }
+
+  /** $PnFEATURE of the channel's parameter, where the file carries it. */
+  private featureOf(idx: number): string | undefined {
+    const channel = this.channels[idx];
+    return channel ? this.fcs.channels[channel.columnIndex]?.feature : undefined;
+  }
+
+  /**
+   * True for an imaging GEOMETRY feature of a flow file: a shape or position the instrument
+   * derived from the cell's image (Size, Eccentricity, the moments, Centre of Mass, Delta CoM,
+   * Correlation). Linear by default, arcsinh on request: the reverse of scatter's default, on
+   * the same control and the same cofactor store. The two intensity features (Max and Total
+   * Intensity) are fluorescence channels. See isImagingGeometryChannel().
+   */
+  isImagingFeatureAxis(idx: number): boolean {
+    if (this.instrument !== "flow") return false;
+    const channel = this.channels[idx];
+    if (!channel) return false;
+    const feature = this.featureOf(idx);
+    return isImagingGeometryChannel(channel.key, feature) || isImagingGeometryChannel(channel.pnn, feature);
+  }
+
+  /**
+   * True for ANY per-event feature the S8 derived from an image, the two intensity features
+   * included. Broader than isImagingFeatureAxis: Max and Total Intensity scale like fluorescence
+   * but are not detectors, so a spillover matrix has no row for them.
+   */
+  isImagingFeatureChannel(idx: number): boolean {
+    if (this.instrument !== "flow") return false;
+    const channel = this.channels[idx];
+    if (!channel) return false;
+    const feature = this.featureOf(idx);
+    return isImagingFeature(channel.key, feature) || isImagingFeature(channel.pnn, feature);
+  }
+
+  /** Display scale for an imaging geometry feature. */
+  featureScale(idx: number): "linear" | "arcsinh" {
+    return this.isImagingFeatureAxis(idx) && this.fluorIsArcsinh(idx) ? "arcsinh" : "linear";
+  }
+
+  /**
+   * Switch an imaging geometry feature between linear and arcsinh (the scatter cofactor, 150
+   * by default). Gates live in raw space for flow, so this never moves a gate. The choice is
+   * kept in the arcsinh store fluorescence uses, so it persists as a fluorArcsinh key.
+   */
+  setFeatureScale(idx: number, scale: "linear" | "arcsinh"): void {
+    if (!this.isImagingFeatureAxis(idx)) return;
+    const key = this.channels[idx]?.key;
+    if (this.channelScales && key) {
+      this.channelScales.setFluorArcsinh(this.workspaceScaleContextKey, key, scale === "arcsinh");
+      return;
+    }
+    if (scale === "arcsinh") this.fluorArcsinh.add(idx);
+    else this.fluorArcsinh.delete(idx);
+    this.invalidateChannel(idx);
   }
 
   /** Display scale for a flow fluorescence channel. */
@@ -1849,16 +1963,7 @@ export class Sample {
 
   /** Channel keys displayed with arcsinh instead of logicle, for workspace save. */
   fluorArcsinhKeys(): string[] {
-    const keys = new Set(
-      [...this.fluorArcsinh].map((idx) => this.channels[idx]?.key).filter((k): k is string => !!k),
-    );
-    if (this.channelScales) {
-      const context = this.workspaceScaleContextKey;
-      for (const channel of this.channels) {
-        if (this.channelScales.isFluorArcsinh(context, channel.key)) keys.add(channel.key);
-      }
-    }
-    return [...keys];
+    return this.channels.filter((_, idx) => this.fluorIsArcsinh(idx)).map(channel => channel.key);
   }
 
   /** Restore arcsinh fluorescence channels from a saved workspace. */
@@ -1866,7 +1971,7 @@ export class Sample {
     this.fluorArcsinh.clear();
     for (const key of keys) {
       const idx = this.byName.get(key);
-      if (idx !== undefined && this.isFluorChannel(idx)) {
+      if (idx !== undefined && (this.isFluorChannel(idx) || this.isImagingFeatureAxis(idx))) {
         if (this.channelScales) {
           this.channelScales.setFluorArcsinh(this.workspaceScaleContextKey, key, true);
           continue;
@@ -1886,8 +1991,7 @@ export class Sample {
   currentFluorCofactor(idx: number): number {
     const key = this.channels[idx]?.key;
     if (this.channelScales && key) {
-      const shared = this.channelScales.scatterCofactor(this.workspaceScaleContextKey, key);
-      if (shared !== undefined) return shared;
+      return this.channelScales.scatterCofactor(this.workspaceScaleContextKey, key) ?? FLUOR_ARCSINH_COFACTOR;
     }
     return this.scatterCofactorOverride.get(idx) ?? FLUOR_ARCSINH_COFACTOR;
   }
@@ -1948,16 +2052,7 @@ export class Sample {
 
   /** Channel keys displayed linearly, for workspace save. */
   scatterLinearKeys(): string[] {
-    const keys = new Set(
-      [...this.scatterLinear].map((idx) => this.channels[idx]?.key).filter((k): k is string => !!k),
-    );
-    if (this.channelScales) {
-      const context = this.workspaceScaleContextKey;
-      for (const channel of this.channels) {
-        if (this.channelScales.isScatterLinear(context, channel.key)) keys.add(channel.key);
-      }
-    }
-    return [...keys];
+    return this.channels.filter((_, idx) => this.scatterIsLinear(idx)).map(channel => channel.key);
   }
 
   /** Restore linear scatter channels from a saved workspace. */
@@ -1978,6 +2073,11 @@ export class Sample {
 
   /** Clear a scatter cofactor override, reverting to the 150 default. */
   resetScatterCofactor(idx: number): void {
+    const key = this.channels[idx]?.key;
+    if (this.channelScales && key) {
+      this.channelScales.resetScatterCofactor(this.workspaceScaleContextKey, key);
+      return;
+    }
     this.scatterCofactorOverride.delete(idx);
     this.invalidateChannel(idx);
   }
@@ -1986,8 +2086,7 @@ export class Sample {
   currentScatterCofactor(idx: number): number {
     const key = this.channels[idx]?.key;
     if (this.channelScales && key) {
-      const shared = this.channelScales.scatterCofactor(this.workspaceScaleContextKey, key);
-      if (shared !== undefined) return shared;
+      return this.channelScales.scatterCofactor(this.workspaceScaleContextKey, key) ?? 150;
     }
     return this.scatterCofactorOverride.get(idx) ?? 150;
   }
@@ -2005,8 +2104,8 @@ export class Sample {
   /** User-set flow-scatter cofactors, keyed by channel key (for workspace save). */
   scatterCofactorOverrides(): Record<string, number> {
     const out: Record<string, number> = {};
-    for (const [idx, cofactor] of this.scatterCofactorOverride) {
-      out[this.channels[idx].key] = cofactor;
+    if (!this.channelScales) {
+      for (const [idx, cofactor] of this.scatterCofactorOverride) out[this.channels[idx].key] = cofactor;
     }
     if (this.channelScales) {
       // Shared settings are saved into every sample's record, so the on-disk format is
@@ -2074,7 +2173,9 @@ export class Sample {
   /** User-set logicle W overrides, keyed by channel key (for workspace save). */
   logicleWOverrides(): Record<string, number> {
     const out: Record<string, number> = {};
-    for (const [idx, w] of this.wOverride) out[this.channels[idx].key] = w;
+    if (!this.channelScales) {
+      for (const [idx, w] of this.wOverride) out[this.channels[idx].key] = w;
+    }
     if (this.channelScales) {
       for (const [key, w] of Object.entries(
         this.channelScales.logicleWEntries(this.workspaceScaleContextKey),
@@ -2167,10 +2268,15 @@ export class Sample {
     this.channels[idx].label = trimmed && trimmed !== key ? trimmed : undefined;
   }
 
-  /** True when a channel may be renamed — scatter (FSC/SSC) and QC/Time channels are locked. */
+  /**
+   * True when a channel may be renamed. Scatter (FSC/SSC), QC/Time and the S8's imaging
+   * features (Size, the moments, Eccentricity, the intensities, Centre of Mass, Delta CoM) are
+   * locked: their names are what the instrument derived, not a marker anyone chose.
+   */
   isRenamable(idx: number): boolean {
-    const key = this.channels[idx].key;
-    return !isQcChannel(key) && !isScatterChannel(key);
+    const { key, pnn } = this.channels[idx];
+    const feature = this.featureOf(idx);
+    return !isQcChannel(key) && !isScatterChannel(key) && !isImagingFeature(key, feature) && !isImagingFeature(pnn, feature);
   }
 
   /** Non-default display labels, keyed by identity key (for workspace save). */
@@ -2196,6 +2302,7 @@ export class Sample {
 
   /** Display-space column (what the plot shows). Cached. */
   displayColumn(idx: number): Float32Array {
+    this.syncScaleRoster();
     const hit = this.displayCache.get(idx);
     if (hit) return hit;
     const raw = this.activeLinearColumn(idx);
@@ -2282,7 +2389,7 @@ export class Sample {
     }
     if (this.instrument === "cytof") return { kind: "asinh", cofactor: this.cytofCofactor };
     const { key, pnn } = this.channels[idx];
-    if (isScatterChannel(key) || isScatterChannel(pnn)) {
+    if (isScatterChannel(key) || isScatterChannel(pnn) || this.isImagingFeatureAxis(idx)) {
       return { kind: "asinh", cofactor: this.currentScatterCofactor(idx) };
     }
     // A fluorescence channel on arcsinh (chosen), or the unhealthy-logicle fallback: both
@@ -2401,6 +2508,7 @@ export class Sample {
 
   /** Robust auto display range for an axis (0.1st–99.9th percentiles), cached. */
   displayRange(idx: number): [number, number] {
+    this.syncScaleRoster();
     const hit = this.rangeCache.get(idx);
     if (hit) return hit;
     const r = robustAxisRange(this.displayColumn(idx));
@@ -2434,9 +2542,16 @@ export class Sample {
         ? linearScatterTicks(axisRange)
         : scatterTicks(fwd, inv, axisRange, this.currentScatterCofactor(idx));
     }
+    // An imaging geometry feature: evenly spaced ticks on its linear axis, raw-unit decades
+    // when switched to arcsinh, exactly as a scatter axis.
+    if (this.instrument === "flow" && this.isImagingFeatureAxis(idx)) {
+      return t.kind === "identity"
+        ? linearScatterTicks(axisRange)
+        : scatterTicks(fwd, inv, axisRange, this.currentScatterCofactor(idx));
+    }
     // Flow signal (fluorophore): logicle display, biexponential decade labels.
     if (t.kind === "logicle") {
-      return logicleTicks(fwd, inv, axisRange, this.logicleParams(idx).t);
+      return logicleTicks(fwd, inv, axisRange, this.logicleT(idx));
     }
     // Flow signal on arcsinh -- either chosen, or the unhealthy-logicle fallback. scatterTicks
     // is not scatter-specific: it lays out raw-unit decades over the visible range and is what

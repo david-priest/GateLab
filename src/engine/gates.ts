@@ -2,7 +2,7 @@
 // Ported from GateLabR inst/app/R/gate_engine.R (gate_mask_* + get_gate_mask).
 // Masks are Uint8Array (1 = in-gate, 0 = out) over display-space channel columns.
 
-import type { EllipseGate, Gate, Vertex } from "./models";
+import type { EllipseGate, Gate, QuadrantCurl, Vertex } from "./models";
 import { ellipseQuadraticForm } from "./ellipse";
 
 /** Column accessor for the currently-displayed (transformed) assay data. */
@@ -184,12 +184,18 @@ export function gateMaskRectangle(
  * One quadrant of a quadrant gate. Numbering (matching gate_engine.R):
  *   1 = x-/y+, 2 = x+/y+, 3 = x+/y-, 4 = x-/y-  (>= on the positive side;
  *   a point exactly on the crosshair falls in quadrant 2).
+ *
+ * With `curl`, the two dividers bend beyond the crosshair (see QuadrantCurl): an event is to
+ * the right of the vertical divider where its x is at or beyond the divider's position AT ITS
+ * OWN y, and above the horizontal divider where its y is at or beyond the divider's position
+ * at its own x. The straight case is the same test with both dividers flat.
  */
 export function gateMaskQuadrant(
   xVals: ArrayLike<number>,
   yVals: ArrayLike<number>,
   center: [number, number],
   quadrant: number,
+  curl?: QuadrantCurl,
 ): Uint8Array {
   const cx = center[0];
   const cy = center[1];
@@ -197,18 +203,51 @@ export function gateMaskQuadrant(
   if (!Number.isFinite(q)) q = 1;
   const n = xVals.length;
   const out = new Uint8Array(n);
+  const bent = !!curl && curl.power > 0 && (curl.kx !== 0 || curl.ky !== 0);
   for (let i = 0; i < n; i++) {
     const x = xVals[i];
     const y = yVals[i];
+    let xdiv = cx;
+    let ydiv = cy;
+    if (bent) {
+      if (y > cy) xdiv = cx + curl!.ky * Math.pow(y - cy, curl!.power);
+      if (x > cx) ydiv = cy + curl!.kx * Math.pow(x - cx, curl!.power);
+    }
+    const right = x >= xdiv;
+    const up = y >= ydiv;
     let inq: boolean;
     switch (q) {
-      case 1: inq = x < cx && y >= cy; break;
-      case 2: inq = x >= cx && y >= cy; break;
-      case 3: inq = x >= cx && y < cy; break;
-      case 4: inq = x < cx && y < cy; break;
+      case 1: inq = !right && up; break;
+      case 2: inq = right && up; break;
+      case 3: inq = right && !up; break;
+      case 4: inq = !right && !up; break;
       default: inq = false;
     }
     out[i] = inq ? 1 : 0;
+  }
+  return out;
+}
+
+/**
+ * Points along one bent arm of a quadrant gate, in the gate's own coordinates, from the
+ * crosshair to `end` on that axis: the horizontal arm as (x, ydiv(x)) for `arm` "h", the
+ * vertical one as (xdiv(y), y) for "v". For drawing; membership uses gateMaskQuadrant.
+ */
+export function quadrantArmPoints(
+  center: [number, number],
+  curl: QuadrantCurl,
+  arm: "h" | "v",
+  end: number,
+  steps = 32,
+): [number, number][] {
+  const [cx, cy] = center;
+  const from = arm === "h" ? cx : cy;
+  if (!(end > from)) return [];
+  const out: [number, number][] = [];
+  for (let i = 0; i <= steps; i++) {
+    const d = ((end - from) * i) / steps;
+    const bend = Math.pow(d, curl.power);
+    out.push(arm === "h" ? [cx + d, cy + curl.kx * bend] : [cx + curl.ky * bend, cy + d]);
   }
   return out;
 }
@@ -221,7 +260,7 @@ export function getGateMask(gate: Gate, data: AssayData, quadrant?: number): Uin
 
   if (gate.gate_type === "polygon") return gateMaskPolygon(x, y, gate.vertices);
   if (gate.gate_type === "rectangle") return gateMaskRectangle(x, y, gate.vertices);
-  if (gate.gate_type === "quadrant") return gateMaskQuadrant(x, y, gate.center, quadrant ?? 1);
+  if (gate.gate_type === "quadrant") return gateMaskQuadrant(x, y, gate.center, quadrant ?? 1, gate.curl);
   if (gate.gate_type === "ellipse") return gateMaskEllipse(x, y, gate);
   return new Uint8Array(data.n);
 }

@@ -101,6 +101,47 @@ describe("channel resolution", () => {
     expect(normalizeChannel("CD3 (Y89Di)")).toBe("y89");
   });
 
+  // A conventional flow panel puts the same optical filter behind several lasers, so the laser
+  // prefix is the only thing separating two detectors. normalizeChannel is a CyTOF metal-name
+  // helper -- it keeps the first letter+number token and discards the rest -- so both of these
+  // reduce to "flt525". Matching the first hit evaluated a violet-laser viability gate against the
+  // BLUE laser's detector: the gate resolved, drew, and reported a plausible count. On a real
+  // FlowJo workspace that put the top gate 14% out with nothing reported.
+  it("does not confuse two detectors behind the same filter", () => {
+    expect(normalizeChannel("v-FLT525/30-E-A")).toBe(normalizeChannel("b-FLT525/30-B-A"));
+
+    const rect = (channel: string) => `
+      <gating:RectangleGate gating:id="g1" gating:name="Live">
+        <gating:dimension gating:min="10" gating:max="20">
+          <data-type:fcs-dimension data-type:name="${channel}"/></gating:dimension>
+        <gating:dimension gating:min="10" gating:max="20">
+          <data-type:fcs-dimension data-type:name="SSC-A"/></gating:dimension>
+      </gating:RectangleGate>`;
+    const doc = (channel: string) => `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">${rect(channel)}
+      </gating:Gating-ML>`;
+    // The session names channels by marker, so resolution runs through the $PnN map.
+    const session = ["Viability (v-FLT525/30-E-A)", "Spare (b-FLT525/30-B-A)", "SSC-A"];
+    const pnn = {
+      "v-FLT525/30-E-A": "Viability (v-FLT525/30-E-A)",
+      "b-FLT525/30-B-A": "Spare (b-FLT525/30-B-A)",
+      "SSC-A": "SSC-A",
+    };
+
+    // FlowJo writes the separator as "_", the FCS as "/". That difference alone must still resolve,
+    // and must resolve to the VIOLET detector.
+    const viaUnderscore = importGatingML(doc("v-FLT525_30-E-A"), session, pnn, "flow");
+    expect(Object.values(viaUnderscore.gates)[0].x_channel).toBe("Viability (v-FLT525/30-E-A)");
+
+    const exact = importGatingML(doc("b-FLT525/30-B-A"), session, pnn, "flow");
+    expect(Object.values(exact.gates)[0].x_channel).toBe("Spare (b-FLT525/30-B-A)");
+
+    // A name that matches NEITHER detector exactly is ambiguous under the metal normaliser, and
+    // an ambiguous match must fail the import rather than pick one.
+    expect(() => importGatingML(doc("FLT525"), session, pnn, "flow")).toThrow(/FLT525/);
+  });
+
   it("reads logicle vertices on the flowCore [0,M] scale, not flowutils [0,1]", () => {
     // Gating-ML/flowCore logicle spans [0, M+A]; GateLab's spans [0, 1]. A vertex at M must land
     // at exactly 1.0 in GateLab units. Reading it as [0,1] would leave it at 4.5 — off the top of
@@ -127,6 +168,49 @@ describe("channel resolution", () => {
     // than being inverted into raw — which per Gating-ML §2.3.2 would be a different gate.
     expect(g.space).toBe("display");
     expect(g.transforms?.CD19).toEqual({ kind: "logicle", T, W: 1.5, M: 4.5, A: 0 });
+  });
+
+  // The metal normaliser is a CyTOF helper. Refusing an AMBIGUOUS flow match (2026-09-10)
+  // covered a file holding both detectors behind one filter; a file holding only the other
+  // laser's detector still resolved the gate onto it, with nothing reported. A flow name that
+  // survives no exact test is absent, and the import says so.
+  it("does not resolve a flow gate onto a different detector through the metal normaliser", () => {
+    const rect = (channel: string) => `
+      <gating:RectangleGate gating:id="g1" gating:name="Live">
+        <gating:dimension gating:min="10" gating:max="20">
+          <data-type:fcs-dimension data-type:name="${channel}"/></gating:dimension>
+        <gating:dimension gating:min="10" gating:max="20">
+          <data-type:fcs-dimension data-type:name="SSC-A"/></gating:dimension>
+      </gating:RectangleGate>`;
+    const doc = (channel: string) => `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">${rect(channel)}
+      </gating:Gating-ML>`;
+    // Only the BLUE detector is loaded; the gate names the violet one.
+    const session = ["Spare (b-FLT525/30-B-A)", "SSC-A"];
+    const pnn = { "b-FLT525/30-B-A": "Spare (b-FLT525/30-B-A)", "SSC-A": "SSC-A" };
+    expect(() => importGatingML(doc("v-FLT525_30-E-A"), session, pnn, "flow")).toThrow(/v-FLT525_30-E-A/);
+    // PE-CF594 is not CF594 either.
+    expect(() => importGatingML(doc("PE-CF594-A"), ["PE-A", "CF594-A", "SSC-A"],
+      { "PE-A": "PE-A", "CF594-A": "CF594-A", "SSC-A": "SSC-A" }, "flow")).toThrow(/PE-CF594-A/);
+  });
+
+  // ch1: $PnN FL1-A, $PnS FITC-A (key "FITC-A"); ch2: $PnN FITC-A, $PnS CD3 (key "CD3"). A gate on
+  // "FITC-A" names ch2 by $PnN and ch1 by key at once; taking the key put it on the wrong detector.
+  it("refuses a name that is one channel's key and another channel's $PnN", () => {
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
+        <gating:RectangleGate gating:id="g1" gating:name="Pos">
+          <gating:dimension gating:min="10" gating:max="20"><data-type:fcs-dimension data-type:name="FITC-A"/></gating:dimension>
+          <gating:dimension gating:min="10" gating:max="20"><data-type:fcs-dimension data-type:name="SSC-A"/></gating:dimension>
+        </gating:RectangleGate>
+      </gating:Gating-ML>`;
+    const session = ["FITC-A", "CD3", "SSC-A"];
+    const pnn = { "FL1-A": "FITC-A", "FITC-A": "CD3", "SSC-A": "SSC-A" };
+    expect(() => importGatingML(xml, session, pnn, "flow")).toThrow(/FITC-A/);
+    // With no such collision the key resolves as it always did.
+    expect(importGatingML(xml, session, { "FL1-A": "FITC-A", "SSC-A": "SSC-A" }, "flow").n_gates_imported).toBe(1);
   });
 
   it("resolves metal $PnN via the pnn→channel bridge", () => {
@@ -296,9 +380,9 @@ describe("strict import safety", () => {
     expect(res.untranslatable_transform_gates).toEqual([]);
   });
 
-  it("falls back to raw for a transform GateLab cannot hold, and says which gates", () => {
-    // A log scale has no GateLab display transform. Inverting into raw is a well-defined gate but
-    // not the one the file describes, so it is reported rather than imported silently.
+  it("keeps a flog gate in log space rather than inverting it into raw", () => {
+    // Gating-ML makes the transform part of the gate, and GateLab can hold a log space even
+    // though it never draws a log axis — the same arrangement biex and wsplog already use.
     const xml = `<?xml version="1.0"?>
       <gating:Gating-ML xmlns:gating="${G}" xmlns:data-type="${D}"
         xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations">
@@ -312,9 +396,37 @@ describe("strict import safety", () => {
         </gating:RectangleGate>
       </gating:Gating-ML>`;
     const res = importGatingML(xml, ["PE-A"], {}, "flow");
+    const g = Object.values(res.gates)[0] as {
+      space?: string; vertices: [number, number][];
+      transforms?: Record<string, { kind: string; T?: number; M?: number }>;
+    };
+    expect(g.space).toBe("display");
+    expect(g.transforms?.["PE-A"]).toEqual({ kind: "flog", T: 10000, M: 4 });
+    // Vertices stay in the declared units, not inverted to 10^(...)·T.
+    expect(Math.min(...g.vertices.map((v) => v[0]))).toBeCloseTo(1, 12);
+    expect(res.untranslatable_transform_gates).toEqual([]);
+  });
+
+  it("falls back to raw for a transform GateLab cannot hold, and says which gates", () => {
+    // A non-canonical fasinh: GateLab's arcsinh is asinh(x / cofactor), which is fasinh only for
+    // M = log10 e and A = 0. Any other scaling has no exact GateLab spec, so the gate is inverted
+    // into raw — a well-defined gate, but not the one the file describes — and reported.
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="${G}" xmlns:data-type="${D}"
+        xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations">
+        <transforms:transformation transforms:id="Tr_Odd">
+          <transforms:fasinh transforms:T="1000" transforms:M="2" transforms:A="0.5"/>
+        </transforms:transformation>
+        <gating:RectangleGate gating:id="r1" gating:name="Odd">
+          <gating:dimension gating:min="1" gating:max="2" gating:transformation-ref="Tr_Odd">
+            <data-type:fcs-dimension data-type:name="PE-A"/>
+          </gating:dimension>
+        </gating:RectangleGate>
+      </gating:Gating-ML>`;
+    const res = importGatingML(xml, ["PE-A"], {}, "flow");
     const g = Object.values(res.gates)[0] as { space?: string };
     expect(g.space).toBe("raw");
-    expect(res.untranslatable_transform_gates).toEqual(["Logged"]);
+    expect(res.untranslatable_transform_gates).toEqual(["Odd"]);
   });
 
   it("rejects a gating:parent_id that names no gate in the file", () => {

@@ -53,7 +53,7 @@ describe("HierarchyModal", () => {
     expect(onConfirm).toHaveBeenCalledWith("Scheme B");
   });
 
-  it("confirms a deletion by name and says the gates stay", () => {
+  it("confirms a deletion by name and says the gates go with it", () => {
     const onConfirm = vi.fn();
     act(() => {
       root.render(
@@ -62,7 +62,7 @@ describe("HierarchyModal", () => {
         </I18nProvider>,
       );
     });
-    expect(host.textContent).toContain('Delete the hierarchy "Scheme B" and its populations? The gates stay');
+    expect(host.textContent).toContain('Delete the hierarchy "Scheme B" with its populations and gates?');
     expect(host.querySelector("input")).toBeNull();
     act(() => button("Delete").click());
     expect(onConfirm).toHaveBeenCalledWith("");

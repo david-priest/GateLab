@@ -59,6 +59,51 @@ export function partitionCountsFor(
   return { counts, ungated };
 }
 
+/**
+ * Count events per level for ONE sample, within a parent: only the parent's events are placed,
+ * each in the deepest selected level containing it; the parent's events in no level are `rest`.
+ * A composition is the children of one parent, so this is what the Plotting tab stacks.
+ */
+export function partitionCountsWithin(
+  masks: Record<string, Uint8Array>,
+  levels: PartitionLevel[],
+  parentId: string | null,
+  nEvents: number,
+): { counts: number[]; rest: number } {
+  const parent = parentId ? masks[parentId] ?? null : null;
+  if (parentId && !parent) return { counts: new Array(levels.length).fill(0), rest: 0 };
+  const counts = new Array(levels.length).fill(0);
+  let rest = 0;
+  const maskList = levels.map((l) => masks[l.popId] ?? null);
+  for (let e = 0; e < nEvents; e++) {
+    if (parent && !parent[e]) continue;
+    let best = -1;
+    let bestDepth = -1;
+    for (let li = 0; li < levels.length; li++) {
+      const m = maskList[li];
+      if (m && m[e] && levels[li].depth > bestDepth) { best = li; bestDepth = levels[li].depth; }
+    }
+    if (best >= 0) counts[best]++;
+    else rest++;
+  }
+  return { counts, rest };
+}
+
+/**
+ * A population's name for a list or legend: its own name, or "Parent › name" where another
+ * population in the tree has the same name, so the same quadrant under two parents reads as two.
+ */
+export function populationDisplayNames(populations: PopulationMap): Record<string, string> {
+  const byName = new Map<string, number>();
+  for (const pop of Object.values(populations)) byName.set(pop.name, (byName.get(pop.name) ?? 0) + 1);
+  const out: Record<string, string> = {};
+  for (const pop of Object.values(populations)) {
+    const parent = pop.parent_id ? populations[pop.parent_id] : null;
+    out[pop.population_id] = (byName.get(pop.name) ?? 0) > 1 && parent ? `${parent.name} › ${pop.name}` : pop.name;
+  }
+  return out;
+}
+
 // ── Category: per-event division level (from a Division-tab profile) ───────────
 export interface DivisionProfileLike {
   channelKey: string;

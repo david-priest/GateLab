@@ -280,6 +280,32 @@ function workspaceV2(samples: WorkspaceSample[] = [fullSample()]): WorkspaceFile
         },
       },
     ],
+    layout: {
+      version: 1,
+      activeSheetId: "sheet-overview",
+      sheets: [{
+        id: "sheet-overview",
+        name: "Overview",
+        width: 1200,
+        height: 800,
+        items: [{
+          id: "layout-plot",
+          x: 24,
+          y: 24,
+          width: 280,
+          height: 300,
+          z: 1,
+          recipe: {
+            kind: "biplot",
+            sampleId: samples[0].sampleId ?? "sample-alpha",
+            populationId: "cells",
+            xChannel: "A",
+            yChannel: "B",
+            displayMode: "pseudocolor",
+          },
+        }],
+      }],
+    },
     metadataColumns: [
       { name: "donor" },
       { name: "condition", levels: ["unstim", "stim"] },
@@ -619,6 +645,32 @@ describe("uncompensated v3 validation", () => {
     sample.fluorArcsinh = [3];
     const error = await expectV3Error(validateWorkspaceV3(candidate), "invalid-workspace-v3");
     expect(error.message).toContain("arcsinh-fluorescence");
+  });
+
+  it("accepts and preserves a file's group, which the saver writes beside its hierarchy", async () => {
+    const source = workspaceV2([fullSample({ hierarchyId: "main", groupId: "group-1" })]);
+    const validated = await validateWorkspaceV3(migrateWorkspaceV2ToV3(source));
+    expect(validated.samples[0].groupId).toBe("group-1");
+    expect(validated.samples[0].hierarchyId).toBe("main");
+  });
+
+  it("accepts and preserves the per-file hierarchy fields the app saves", async () => {
+    const source = workspaceV2([fullSample({ hierarchyId: "main" })]);
+    source.gating.perFileHierarchies = true;
+    source.gating.perFileHierarchyCopiesInitialized = true;
+    const validated = await validateWorkspaceV3(migrateWorkspaceV2ToV3(source));
+    expect(validated.samples[0].hierarchyId).toBe("main");
+    expect(validated.gating.perFileHierarchies).toBe(true);
+    expect(validated.gating.perFileHierarchyCopiesInitialized).toBe(true);
+  });
+
+  // Regression for #217: the saver writes the Plotting tab's state at the top level, always, so
+  // without this key every workspace with a compensation profile refused to reopen.
+  it("accepts and preserves the plotting state the app saves", async () => {
+    const candidate = clone(migrateWorkspaceV2ToV3(workspaceV2())) as unknown as Record<string, unknown>;
+    candidate.plotting = { "prop.groupSel": "batch", "prop.files": ["s1"] };
+    const validated = await validateWorkspaceV3(JSON.parse(JSON.stringify(candidate)));
+    expect(validated.plotting).toEqual({ "prop.groupSel": "batch", "prop.files": ["s1"] });
   });
 
   it("rejects unknown top-level fields", async () => {

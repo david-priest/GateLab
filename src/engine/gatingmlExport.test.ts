@@ -1020,3 +1020,45 @@ describe("densified polygon vertex collapse", () => {
     });
   });
 });
+
+// A gate held in Gating-ML's own log space (the form a Cytobank flow export arrives in, and the
+// form a FlowJo log axis is declared as) must leave the Cytobank format as flog with its
+// coordinates verbatim. Until 2026-09-11 the Cytobank branch for logicle came first and treated a
+// flog gate as logicle: coordinates scaled by the logicle span and inverted, then declared as
+// arcsinh, so every such gate sat far off the top of the axis on upload.
+describe("Cytobank format declares a flog gate as log, with its coordinates verbatim", () => {
+  const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+  const fluor = sample.channels.filter((_, i) => sample.isLogicleChannel(i)).map((c) => c.key);
+  const [fx, fy] = fluor;
+  const flog = { kind: "flog" as const, T: 1, M: 1 };
+  const gate: Gate = {
+    gate_id: uuid(), name: "log rect", gate_type: "rectangle", x_channel: fx, y_channel: fy,
+    vertices: [[2, 2], [4, 2], [4, 4], [2, 4]] as Vertex[],
+    space: "display", transforms: { [fx]: flog, [fy]: flog },
+    color: "#377eb8", label_offset: null,
+  };
+  const root = newRootPopulation();
+  const pop = newPopulation(gate.name, [newGateRef(gate.gate_id, true)], root.population_id);
+  const populations: PopulationMap = linkChildToParent(
+    { [root.population_id]: root, [pop.population_id]: pop }, pop.population_id, root.population_id);
+  const xml = exportGatingML({
+    gates: { [gate.gate_id]: gate }, gate_order: [gate.gate_id], populations,
+    root_population_id: root.population_id, sample, format: "cytobank", timestamp: "t",
+  });
+
+  it("declares transforms:flog with the gate's own T and M, and no arcsinh", () => {
+    expect(xml).toMatch(/<transforms:flog transforms:T="1" transforms:M="1"/);
+    expect(xml).toMatch(/gating:transformation-ref="Tr_Log_/);
+    expect(xml).not.toContain("transforms:fasinh");
+  });
+
+  it("writes the log coordinates unchanged", () => {
+    expect(xml).toContain('gating:min="2"');
+    expect(xml).toContain('gating:max="4"');
+  });
+
+  it("tells Cytobank the axis is Log, as its own flow exports do", () => {
+    expect(xml).toContain('"flag":2,"argument":"1"');
+    expect(xml).not.toContain('"flag":4');
+  });
+});

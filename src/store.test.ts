@@ -8,7 +8,7 @@ import {
   type CoreState,
 } from "./store";
 import { Sample } from "./engine/sample";
-import { emptyHierarchyTree } from "./engine/hierarchies";
+import { cloneHierarchyTree, emptyHierarchyTree } from "./engine/hierarchies";
 import { newRootPopulation as rootPopulation, type Gate as GateRecord } from "./engine/models";
 import type { FcsFile } from "./engine/fcs";
 
@@ -659,7 +659,7 @@ describe("moving several populations at once", () => {
   });
 });
 
-describe("several population hierarchies over shared gates", () => {
+describe("several population hierarchies, each owning its gates", () => {
   function withGates() {
     let state = coreReducer(initialCoreState(), { type: "loadSample", nEvents: 10 });
     const root = state.root_population_id!;
@@ -681,8 +681,11 @@ describe("several population hierarchies over shared gates", () => {
     expect(next.active_hierarchy_id).toBe("h2");
     expect(Object.keys(next.populations)).toEqual([tree.root_population_id]);
     expect(next.root_population_id).toBe(tree.root_population_id);
-    // The gates are untouched and the parked tree is intact.
-    expect(next.gates).toBe(state.gates);
+    // A new hierarchy owns its geometry, so it starts with NO gates rather than inheriting
+    // whatever was on screen. The parked one keeps its own, tree and gates together.
+    expect(next.gates).toEqual({});
+    expect(next.gate_order).toEqual([]);
+    expect(next.stored_hierarchies.main.gates).toBe(state.gates);
     expect(Object.keys(next.stored_hierarchies.main.populations)).toHaveLength(3);
     expect(next.stored_hierarchies.main.root_population_id).toBe(state.root_population_id);
     // Undo brings the first hierarchy back as active, with the second gone again.
@@ -692,7 +695,7 @@ describe("several population hierarchies over shared gates", () => {
     expect(undone.populations).toEqual(state.populations);
   });
 
-  it("switches between hierarchies, parking the live tree and its selection", () => {
+  it("parks trees but does not restore an unrelated hierarchy's old browsing selection", () => {
     const { state, popId } = withGates();
     let s = coreReducer(state, { type: "togglePopSelect", popId: popId("A"), checked: true });
     s = coreReducer(s, { type: "setActivePopulation", popId: popId("B") });
@@ -700,8 +703,8 @@ describe("several population hierarchies over shared gates", () => {
     expect(s.selected_pop_ids).toEqual([]);
     s = coreReducer(s, { type: "switchHierarchy", id: "main" });
     expect(s.active_hierarchy_id).toBe("main");
-    expect(s.active_population_id).toBe(popId("B"));
-    expect(s.selected_pop_ids).toEqual([popId("A")]);
+    expect(s.active_population_id).toBe(s.root_population_id);
+    expect(s.selected_pop_ids).toEqual([]);
     expect(Object.keys(s.stored_hierarchies)).toEqual(["h2"]);
     expect(coreReducer(s, { type: "switchHierarchy", id: "main" })).toBe(s);
     expect(coreReducer(s, { type: "switchHierarchy", id: "nope" })).toBe(s);
@@ -722,19 +725,315 @@ describe("several population hierarchies over shared gates", () => {
     expect(coreReducer(s, { type: "deleteHierarchy", id: "main" })).toBe(s);
   });
 
-  it("deleting a gate removes its references from every hierarchy", () => {
+  it("editing a gate in one hierarchy leaves the others alone", () => {
+    // The reason hierarchies own their gates. Three files each gated by their own hierarchy is
+    // not per-file gating at all if moving a boundary in one moves it in the others.
+    const { state, gateId } = withGates();
+    const a = gateId("A");
+    let s = coreReducer(state, { type: "addHierarchy", id: "h2", name: "B", ...emptyHierarchyTree(10) });
+    s = coreReducer(s, { type: "switchHierarchy", id: "main" });
+    s = coreReducer(s, {
+      type: "updateGate",
+      gateId: a,
+      patch: { vertices: [[5, 5], [6, 6]] },
+    } as unknown as Parameters<typeof coreReducer>[1]);
+    const gateA = s.gates[a];
+    const movedHere = gateA && "vertices" in gateA ? gateA.vertices : null;
+    expect(movedHere).not.toBeNull();
+    s = coreReducer(s, { type: "switchHierarchy", id: "h2" });
+    // The other hierarchy never had this gate, and gains nothing from the edit.
+    expect(s.gates[a]).toBeUndefined();
+    s = coreReducer(s, { type: "switchHierarchy", id: "main" });
+    const back = s.gates[a];
+    expect(back && "vertices" in back ? back.vertices : null).toEqual(movedHere);
+  });
+
+  it("deleting a gate touches only the hierarchy it belongs to", () => {
     const { state, gateId, popId } = withGates();
     const a = popId("A");
     let s = coreReducer(state, { type: "addHierarchy", id: "h2", name: "B", ...emptyHierarchyTree(10) });
+    s = coreReducer(s, { type: "switchHierarchy", id: "main" });
     s = coreReducer(s, { type: "deleteGates", gateIds: [gateId("A")] });
     expect(s.gates[gateId("A")]).toBeUndefined();
-    expect(s.stored_hierarchies.main.populations[a].gate_refs).toEqual([]);
-    expect(s.stored_hierarchies.main.populations[popId("B")].gate_refs).toHaveLength(1);
+    expect(s.populations[a].gate_refs).toEqual([]);
+    expect(s.populations[popId("B")].gate_refs).toHaveLength(1);
   });
 
-  it("replacing the active hierarchy's strategy keeps gates the parked ones still use", () => {
+  it("a duplicated hierarchy carries its own copy of every gate, and a tree with dangling references is refused", () => {
+    const { state, gateId, popId } = withGates();
+    const copy = cloneHierarchyTree(state.populations, state.root_population_id!, state.gates, state.gate_order);
+    let s = coreReducer(state, {
+      type: "addHierarchy", id: "h2", name: "Copy",
+      populations: copy.populations, root_population_id: copy.root_population_id,
+      gates: copy.gates, gate_order: copy.gate_order,
+    });
+    expect(s.active_hierarchy_id).toBe("h2");
+    expect(Object.keys(s.gates)).toHaveLength(2);
+    expect(s.gate_order).toEqual(copy.gate_order);
+    for (const pop of Object.values(s.populations)) for (const r of pop.gate_refs) expect(s.gates[r.gate_id]).toBeDefined();
+    expect(s.gates[gateId("A")]).toBeUndefined(); // the copy has ids of its own
+    expect(s.stored_hierarchies.main.gates).toBe(state.gates);
+    // Deleting a copied gate in the copy leaves the original hierarchy's gate where it was.
+    const copiedA = copy.gateIdMap[gateId("A")];
+    s = coreReducer(s, { type: "deleteGates", gateIds: [copiedA] });
+    expect(s.gates[copiedA]).toBeUndefined();
+    expect(s.stored_hierarchies.main.gates[gateId("A")]).toBeDefined();
+    expect(s.stored_hierarchies.main.populations[popId("A")].gate_refs).toHaveLength(1);
+    // The same tree without its gates cannot become a hierarchy: its populations would name
+    // gates that do not exist, and the workspace could not be saved.
+    const refused = coreReducer(state, {
+      type: "addHierarchy", id: "h3", name: "Broken",
+      populations: copy.populations, root_population_id: copy.root_population_id,
+    });
+    expect(refused).toBe(state);
+  });
+
+  it("carries a template's edits to its locked copies, and never a copy's tailoring back", () => {
+    const { state, root, gateId, popId } = withGates();
+    const invert = (m: Record<string, string>) => Object.fromEntries(Object.entries(m).map(([a, b]) => [b, a]));
+    const copyOf = (id: string, owner: string) => {
+      const c = cloneHierarchyTree(state.populations, state.root_population_id!, state.gates, state.gate_order);
+      return {
+        id, name: `${owner}.fcs · Main`, owner_sample_id: owner, structure_locked: true, source_hierarchy_id: "main",
+        source_gate_ids: invert(c.gateIdMap), source_population_ids: invert(c.idMap),
+        gates: c.gates, gate_order: c.gate_order, populations: c.populations, root_population_id: c.root_population_id,
+        active_population_id: c.root_population_id, selected_pop_ids: [],
+      };
+    };
+    // Two locked copies of Main, Main stays active.
+    let s = coreReducer(state, { type: "addHierarchyCopies", activeHierarchyId: "main", copies: [copyOf("file-1", "D1"), copyOf("file-2", "D2")] });
+    expect(s.active_hierarchy_id).toBe("main");
+    const copyGate = (hid: string, name: string) => Object.values(s.stored_hierarchies[hid].gates).find((g) => g.name === name)!;
+    const copyPop = (hid: string, name: string) => Object.values(s.stored_hierarchies[hid].populations).find((p) => p.name === name);
+    const verts = (g: unknown) => (g as { vertices: [number, number][] }).vertices;
+
+    // D2 tailors gate A. (Switching parks Main; the copy is live and its geometry is editable.)
+    s = coreReducer(s, { type: "switchHierarchy", id: "file-2" });
+    const d2A = Object.values(s.gates).find((g) => g.name === "A")!.gate_id;
+    s = coreReducer(s, { type: "editGate", gateId: d2A, vertices: [[5, 5], [50, 50]] });
+    expect(verts(s.gates[d2A])[0]).toEqual([5, 5]);
+    // Tailoring a copy touches neither the template nor the sibling.
+    expect(verts(s.stored_hierarchies.main.gates[gateId("A")])[0]).toEqual([-1, -1]);
+    expect(verts(copyGate("file-1", "A"))[0]).toEqual([-1, -1]);
+    s = coreReducer(s, { type: "switchHierarchy", id: "main" });
+
+    // Main moves gate A: D1 follows, D2 keeps its own; B is untouched everywhere.
+    s = coreReducer(s, { type: "editGate", gateId: gateId("A"), vertices: [[0, 0], [1000, 1000]] });
+    expect(verts(copyGate("file-1", "A"))[0]).toEqual([0, 0]);
+    expect(verts(copyGate("file-2", "A"))[0]).toEqual([5, 5]);
+    expect(verts(copyGate("file-1", "B"))[0]).toEqual([-1, -1]);
+    // Ids and provenance are unchanged by a geometry edit.
+    const d1A = copyGate("file-1", "A").gate_id;
+    expect(s.hierarchies.find((h) => h.id === "file-1")!.source_gate_ids![d1A]).toBe(gateId("A"));
+
+    // Main adds a gate and population under A: both copies gain them, with their own ids.
+    s = coreReducer(s, { type: "addGate", gateType: "rectangle", xChannel: "FSC-A", yChannel: "SSC-A", vertices: [[1, 1], [2, 2]], name: "C", createPop: { name: "C", parentId: popId("A") } });
+    for (const hid of ["file-1", "file-2"]) {
+      const c = copyPop(hid, "C")!;
+      expect(c).toBeDefined();
+      expect(c.population_id).not.toBe(Object.values(s.populations).find((p) => p.name === "C")!.population_id);
+      expect(s.stored_hierarchies[hid].populations[c.parent_id!].name).toBe("A");
+      expect(s.stored_hierarchies[hid].gates[c.gate_refs[0].gate_id].name).toBe("C");
+      expect(s.hierarchies.find((h) => h.id === hid)!.source_population_ids![c.population_id]).toBe(Object.values(s.populations).find((p) => p.name === "C")!.population_id);
+    }
+    // Rename and delete follow too.
+    s = coreReducer(s, { type: "renamePopulation", popId: popId("B"), name: "B renamed" });
+    expect(copyPop("file-1", "B renamed")).toBeDefined();
+    expect(copyPop("file-1", "B")).toBeUndefined();
+    s = coreReducer(s, { type: "deletePopulations", popIds: [popId("B")] });
+    expect(copyPop("file-1", "B renamed")).toBeUndefined();
+    expect(copyPop("file-2", "B renamed")).toBeUndefined();
+    // Undo restores every copy along with the template.
+    const undone = coreReducer(s, { type: "undo" });
+    expect(Object.values(undone.stored_hierarchies["file-1"].populations).some((p) => p.name === "B renamed")).toBe(true);
+
+    // A copy unlocked and changed is out of step and no longer follows.
+    s = coreReducer(s, { type: "setHierarchyStructureLocked", id: "file-2", locked: false });
+    s = coreReducer(s, { type: "switchHierarchy", id: "file-2" });
+    s = coreReducer(s, { type: "addPopulation", name: "Own", parentId: s.root_population_id!, gateRefs: [] });
+    s = coreReducer(s, { type: "switchHierarchy", id: "main" });
+    s = coreReducer(s, { type: "setHierarchyStructureLocked", id: "file-2", locked: true });
+    s = coreReducer(s, { type: "editGate", gateId: gateId("A"), vertices: [[7, 7], [70, 70]] });
+    expect(verts(copyGate("file-1", "A"))[0]).toEqual([7, 7]);
+    expect(verts(copyGate("file-2", "A"))[0]).toEqual([5, 5]);
+    expect(copyPop("file-2", "Own")).toBeDefined();
+    void root;
+  });
+
+  it("adds independent per-file copies atomically and clears gate selection when one becomes active", () => {
+    const { state, gateId } = withGates();
+    const first = cloneHierarchyTree(state.populations, state.root_population_id!, state.gates, state.gate_order);
+    const second = cloneHierarchyTree(state.populations, state.root_population_id!, state.gates, state.gate_order);
+    let selected = coreReducer(state, { type: "selectGate", gateId: gateId("A") });
+    selected = coreReducer(selected, { type: "toggleGateSelect", gateId: gateId("B"), checked: true });
+    let next = coreReducer(selected, {
+      type: "addHierarchyCopies",
+      activeHierarchyId: "file-1",
+      copies: [
+        {
+          id: "file-1", name: "D1.fcs · Main",
+          owner_sample_id: "sample-1", structure_locked: true, source_hierarchy_id: "main",
+          source_gate_ids: Object.fromEntries(Object.entries(first.gateIdMap).map(([source, copy]) => [copy, source])),
+          source_population_ids: Object.fromEntries(Object.entries(first.idMap).map(([source, copy]) => [copy, source])),
+          gates: first.gates, gate_order: first.gate_order,
+          populations: first.populations, root_population_id: first.root_population_id,
+          active_population_id: first.root_population_id, selected_pop_ids: [],
+        },
+        {
+          id: "file-2", name: "D2.fcs · Main",
+          owner_sample_id: "sample-2", structure_locked: true, source_hierarchy_id: "main",
+          source_gate_ids: Object.fromEntries(Object.entries(second.gateIdMap).map(([source, copy]) => [copy, source])),
+          source_population_ids: Object.fromEntries(Object.entries(second.idMap).map(([source, copy]) => [copy, source])),
+          gates: second.gates, gate_order: second.gate_order,
+          populations: second.populations, root_population_id: second.root_population_id,
+          active_population_id: second.root_population_id, selected_pop_ids: [],
+        },
+      ],
+    });
+    expect(next.hierarchies.map((hierarchy) => hierarchy.id)).toEqual(["main", "file-1", "file-2"]);
+    expect(next.active_hierarchy_id).toBe("file-1");
+    expect(next.selected_gate_id).toBeNull();
+    expect(next.selected_gate_ids).toEqual([]);
+    expect(Object.keys(next.gates)).toHaveLength(2);
+    expect(new Set([...Object.keys(first.gates), ...Object.keys(second.gates)]).size).toBe(4);
+
+    const firstGate = first.gate_order[0];
+    next = coreReducer(next, { type: "editGate", gateId: firstGate, vertices: [[5, 5], [6, 6]] });
+    expect(coreReducer(next, { type: "renameGate", gateId: firstGate, name: "Changed structure" })).toBe(next);
+    // Deleting the template unlinks its copies: each stays, as a tree of its own, following nothing.
+    const gone = coreReducer(next, { type: "deleteHierarchy", id: "main" });
+    expect(gone.hierarchies.map((hierarchy) => hierarchy.id)).toEqual(["file-1", "file-2"]);
+    expect(gone.active_hierarchy_id).toBe("file-1");
+    for (const hierarchy of [...gone.hierarchies, gone.stored_hierarchies["file-2"]!]) {
+      expect(hierarchy.owner_sample_id).toBeUndefined();
+      expect(hierarchy.structure_locked).toBeUndefined();
+      expect(hierarchy.source_hierarchy_id).toBeUndefined();
+      expect(hierarchy.source_gate_ids).toBeUndefined();
+      expect(hierarchy.source_population_ids).toBeUndefined();
+    }
+    expect(Object.keys(gone.stored_hierarchies)).toEqual(["file-2"]);
+    expect(coreReducer(gone, { type: "renameGate", gateId: firstGate, name: "Free now" }).gates[firstGate].name).toBe("Free now");
+    next = coreReducer(next, { type: "switchHierarchy", id: "file-2" });
+    const untouched = next.gates[second.gate_order[0]];
+    expect(untouched && "vertices" in untouched ? untouched.vertices : null).not.toEqual([[5, 5], [6, 6]]);
+  });
+
+  it("allows a locked file hierarchy to tailor geometry, then permits structure after explicit unlock", () => {
+    const { state, gateId } = withGates();
+    const copy = cloneHierarchyTree(state.populations, state.root_population_id!, state.gates, state.gate_order);
+    let next = coreReducer(state, {
+      type: "addHierarchyCopies",
+      activeHierarchyId: "file-1",
+      copies: [{
+        id: "file-1",
+        name: "D1.fcs · Main",
+        owner_sample_id: "sample-1",
+        structure_locked: true,
+        source_hierarchy_id: "main",
+        source_gate_ids: Object.fromEntries(Object.entries(copy.gateIdMap).map(([source, child]) => [child, source])),
+        source_population_ids: Object.fromEntries(Object.entries(copy.idMap).map(([source, child]) => [child, source])),
+        gates: copy.gates,
+        gate_order: copy.gate_order,
+        populations: copy.populations,
+        root_population_id: copy.root_population_id,
+        active_population_id: copy.root_population_id,
+        selected_pop_ids: [],
+      }],
+    });
+    const copiedGate = copy.gateIdMap[gateId("A")];
+
+    next = coreReducer(next, { type: "editGate", gateId: copiedGate, vertices: [[2, 2], [3, 3]] });
+    const tailored = next.gates[copiedGate];
+    expect(tailored && "vertices" in tailored ? tailored.vertices : null).toEqual([[2, 2], [3, 3]]);
+    expect(coreReducer(next, { type: "renameGate", gateId: copiedGate, name: "Blocked" })).toBe(next);
+    expect(coreReducer(next, { type: "deleteGates", gateIds: [copiedGate] })).toBe(next);
+
+    next = coreReducer(next, { type: "setHierarchyStructureLocked", id: "file-1", locked: false });
+    expect(next.hierarchies.find((hierarchy) => hierarchy.id === "file-1")?.structure_locked).toBe(false);
+    next = coreReducer(next, { type: "renameGate", gateId: copiedGate, name: "Allowed" });
+    expect(next.gates[copiedGate].name).toBe("Allowed");
+  });
+
+  it("unlinks a copy from its group: a tree of its own with no owner, lock or source, undoably", () => {
+    const { state, gateId } = withGates();
+    const copy = cloneHierarchyTree(state.populations, state.root_population_id!, state.gates, state.gate_order);
+    let next = coreReducer(state, {
+      type: "addHierarchyCopies",
+      activeHierarchyId: "main",
+      copies: [{
+        id: "file-1",
+        name: "D1.fcs · Main",
+        owner_sample_id: "sample-1",
+        structure_locked: true,
+        source_hierarchy_id: "main",
+        source_gate_ids: Object.fromEntries(Object.entries(copy.gateIdMap).map(([source, child]) => [child, source])),
+        source_population_ids: Object.fromEntries(Object.entries(copy.idMap).map(([source, child]) => [child, source])),
+        gates: copy.gates,
+        gate_order: copy.gate_order,
+        populations: copy.populations,
+        root_population_id: copy.root_population_id,
+        active_population_id: copy.root_population_id,
+        selected_pop_ids: [],
+      }],
+    });
+    expect(coreReducer(next, { type: "unlinkHierarchy", id: "main" })).toBe(next);
+    expect(coreReducer(next, { type: "unlinkHierarchy", id: "nope" })).toBe(next);
+
+    // Parked: the stored copy and its menu entry both lose the link.
+    const parked = coreReducer(next, { type: "unlinkHierarchy", id: "file-1" });
+    const ref = parked.hierarchies.find((hierarchy) => hierarchy.id === "file-1")!;
+    expect(ref).toEqual({ id: "file-1", name: "D1.fcs · Main" });
+    expect(parked.stored_hierarchies["file-1"]!.source_hierarchy_id).toBeUndefined();
+    expect(parked.stored_hierarchies["file-1"]!.owner_sample_id).toBeUndefined();
+    expect(Object.keys(parked.stored_hierarchies["file-1"]!.gates)).toEqual(Object.keys(copy.gates));
+    // A template edit no longer reaches it.
+    const copiedGate = copy.gateIdMap[gateId("A")];
+    const edited = coreReducer(parked, { type: "editGate", gateId: gateId("A"), vertices: [[7, 7], [8, 8]] });
+    const stored = edited.stored_hierarchies["file-1"]!.gates[copiedGate];
+    expect(stored && "vertices" in stored ? stored.vertices : null).not.toEqual([[7, 7], [8, 8]]);
+    expect(coreReducer(parked, { type: "undo" }).hierarchies.find((hierarchy) => hierarchy.id === "file-1")?.source_hierarchy_id).toBe("main");
+
+    // Live: structure opens up at once.
+    next = coreReducer(next, { type: "switchHierarchy", id: "file-1" });
+    expect(coreReducer(next, { type: "renameGate", gateId: copiedGate, name: "Blocked" })).toBe(next);
+    next = coreReducer(next, { type: "unlinkHierarchy", id: "file-1" });
+    expect(next.hierarchies.find((hierarchy) => hierarchy.id === "file-1")).toEqual({ id: "file-1", name: "D1.fcs · Main" });
+    expect(coreReducer(next, { type: "renameGate", gateId: copiedGate, name: "Allowed" }).gates[copiedGate].name).toBe("Allowed");
+  });
+
+  it("clears a selected gate whenever a different hierarchy is activated", () => {
+    const { state, gateId } = withGates();
+    let next = coreReducer(state, { type: "addHierarchy", id: "h2", name: "B", ...emptyHierarchyTree(10) });
+    next = coreReducer(next, { type: "switchHierarchy", id: "main" });
+    next = coreReducer(next, { type: "selectGate", gateId: gateId("A") });
+    expect(next.selected_gate_id).toBe(gateId("A"));
+    next = coreReducer(next, { type: "switchHierarchy", id: "h2" });
+    expect(next.selected_gate_id).toBeNull();
+    expect(next.selected_gate_ids).toEqual([]);
+  });
+
+  it("deleting a gate in one hierarchy leaves a parked hierarchy that holds the same gate id untouched", () => {
+    const { state, gateId, popId } = withGates();
+    // A workspace written before hierarchies owned their gates gave every hierarchy the shared
+    // table's ids; the same id in two tables is two gates.
+    const tree = cloneHierarchyTree(state.populations, state.root_population_id!);
+    let s = coreReducer(state, {
+      type: "addHierarchy", id: "h2", name: "Same ids",
+      populations: tree.populations, root_population_id: tree.root_population_id,
+      gates: state.gates, gate_order: state.gate_order,
+    });
+    s = coreReducer(s, { type: "deleteGates", gateIds: [gateId("A")] });
+    expect(s.gates[gateId("A")]).toBeUndefined();
+    expect(s.stored_hierarchies.main.gates[gateId("A")]).toBeDefined();
+    expect(s.stored_hierarchies.main.populations[popId("A")].gate_refs).toHaveLength(1);
+  });
+
+  it("replacing the active hierarchy's strategy leaves the parked ones untouched", () => {
+    // This used to retain any gate a parked hierarchy referenced, because one table served them
+    // all. Each owns its own now, so a replace is confined to the hierarchy being replaced.
     const { state, gateId } = withGates();
     let s = coreReducer(state, { type: "addHierarchy", id: "h2", name: "B", ...emptyHierarchyTree(10) });
+    s = coreReducer(s, { type: "switchHierarchy", id: "main" });
     const root = rootPopulation(10);
     const g: GateRecord = { gate_id: "new-g", name: "New", gate_type: "rectangle", x_channel: "FSC-A", y_channel: "SSC-A", vertices: [[0, 0], [1, 1]], color: "#000", label_offset: null };
     s = coreReducer(s, {
@@ -745,9 +1044,12 @@ describe("several population hierarchies over shared gates", () => {
       populations: { [root.population_id]: root },
       root_population_id: root.population_id,
     });
-    expect(Object.keys(s.gates).sort()).toEqual([gateId("A"), gateId("B"), "new-g"].sort());
-    expect(s.gate_order).toEqual([gateId("A"), gateId("B"), "new-g"]);
+    expect(Object.keys(s.gates)).toEqual(["new-g"]);
+    expect(s.gate_order).toEqual(["new-g"]);
     expect(s.root_population_id).toBe(root.population_id);
+    // The parked hierarchy is empty because it was created empty, not because it lost anything.
+    expect(s.stored_hierarchies.h2.gates).toEqual({});
+    void gateId;
   });
 
   it("loads a workspace with parked hierarchies and defaults to one without", () => {
@@ -763,7 +1065,8 @@ describe("several population hierarchies over shared gates", () => {
       selected_gate_id: null,
       hierarchies: [{ id: "main", name: "Scheme A" }, { id: "h2", name: "Scheme B" }],
       active_hierarchy_id: "main",
-      stored_hierarchies: [{ id: "h2", name: "Scheme B", populations: parked.populations, root_population_id: parked.root_population_id, active_population_id: null, selected_pop_ids: [] }],
+      // A parked hierarchy carries its own gates now, so a switch to it brings its geometry.
+      stored_hierarchies: [{ id: "h2", name: "Scheme B", gates: {}, gate_order: [], populations: parked.populations, root_population_id: parked.root_population_id, active_population_id: null, selected_pop_ids: [] }],
     });
     expect(loaded.hierarchies.map((h) => h.name)).toEqual(["Scheme A", "Scheme B"]);
     expect(Object.keys(loaded.stored_hierarchies)).toEqual(["h2"]);

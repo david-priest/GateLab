@@ -13,7 +13,7 @@ import { renderCompensationDensityBiplotSurface } from "./compensationDensityPlo
 describe("compensation density plot frame", () => {
   beforeEach(() => renderMiniPlot.mockClear());
 
-  it("reserves enough left margin for the y tick labels and rotated axis title", () => {
+  it("leaves the label offsets and margins to the renderer, with visible ticks and readable fonts", () => {
     renderCompensationDensityBiplotSurface(document.createElement("div"), {
       title: "Compensated",
       panel: { x: [0, 1], y: [0, 1], zeroPile: { source: 0, receiver: 0, corner: 0 } },
@@ -27,9 +27,14 @@ describe("compensation density plot frame", () => {
     });
 
     const config = renderMiniPlot.mock.calls[0][1];
-    expect(config.x_axis_label_offset).toBe(24);
-    expect(config.y_axis_label_offset).toBe(20);
-    expect(config.font_sizes.axis_label).toBe(10);
-    expect(config.plot_margins.left).toBe(34);
+    // The renderer sizes the title offsets and the left and bottom margins from the tick labels
+    // it draws; a fixed 20px offset put the rotated y title through "100".
+    expect(config.x_axis_label_offset).toBeUndefined();
+    expect(config.y_axis_label_offset).toBeUndefined();
+    expect(config.plot_margins.left).toBeUndefined();
+    expect(config.plot_margins.bottom).toBeUndefined();
+    expect(config.axis_tick_size).toBe(6);
+    expect(config.font_sizes.tick).toBeGreaterThanOrEqual(9);
+    expect(config.font_sizes.axis_label).toBeGreaterThanOrEqual(10);
   });
 });

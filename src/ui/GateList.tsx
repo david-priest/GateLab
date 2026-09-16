@@ -18,9 +18,13 @@ interface Props {
   badgeFor?: (gate: Gate) => GateSpaceBadge | null;
   /** What the counts were taken over when not the blue file alone, e.g. "pooled · 3 FCS". */
   countScope?: string | null;
+  /** Gates of this copy whose geometry differs from the template's: FlowJo's tailored marks. */
+  tailoredGateIds?: ReadonlySet<string>;
+  /** On a template: the files whose copy has tailored each gate, by the template's gate id. */
+  tailoredInFiles?: ReadonlyMap<string, readonly string[]>;
 }
 
-export function GateList({ state, derived, dispatch, labelForKey = (k) => k, badgeFor, countScope }: Props) {
+export function GateList({ state, derived, dispatch, labelForKey = (k) => k, badgeFor, countScope, tailoredGateIds, tailoredInFiles }: Props) {
   const { t } = useI18n();
   const { gates, gate_order, selected_gate_id, selected_gate_ids } = state;
   const checked = new Set(selected_gate_ids);
@@ -39,6 +43,12 @@ export function GateList({ state, derived, dispatch, labelForKey = (k) => k, bad
       {ids.map((gid) => {
         const gate = gates[gid];
         if (!gate) return null;
+        const hierarchy = state.hierarchies.find((h) => h.id === state.active_hierarchy_id);
+        const sourceId = hierarchy?.source_gate_ids?.[gid];
+        const canRevert = hierarchy && (hierarchy.owner_sample_id || hierarchy.owner_group_id) && hierarchy.structure_locked && sourceId &&
+          state.stored_hierarchies[hierarchy.source_hierarchy_id ?? ""]?.gates[sourceId];
+        const sourceRef = hierarchy?.source_hierarchy_id ? state.hierarchies.find((h) => h.id === hierarchy.source_hierarchy_id) : undefined;
+        const applyTarget = sourceRef?.owner_group_id ? sourceRef.name : t("the tree");
         const isSel = gid === selected_gate_id;
         const isQuad = gate.gate_type === "quadrant";
         const counts = derived.gateCounts[gid];
@@ -69,6 +79,16 @@ export function GateList({ state, derived, dispatch, labelForKey = (k) => k, bad
             <div className="gate-color-swatch" style={{ background: gate.color }} />
             <div className="gate-card-name">
               {gate.name}
+              {(tailoredInFiles?.get(gid)?.length ?? 0) > 0 && (
+                <span className="gate-tailored-badge gate-tailored-in" title={tailoredInFiles!.get(gid)!.join(", ")}>
+                  {t("tailored in {count} files", { count: tailoredInFiles!.get(gid)!.length })}
+                </span>
+              )}
+              {tailoredGateIds?.has(gid) && (
+                <span className="gate-tailored-badge" title={t("Tailored for this file: its coordinates differ from the tree's and no longer follow it")}>
+                  {t("tailored")}
+                </span>
+              )}
               {(() => {
                 // Which space this gate lives in, beside its name — a raw and a display gate are
                 // otherwise indistinguishable in this list.
@@ -89,6 +109,30 @@ export function GateList({ state, derived, dispatch, labelForKey = (k) => k, bad
             </div>
             <div className="gate-card-channels">{chText}</div>
             <div className="gate-card-info">{countText}</div>
+            <span className="gate-card-actions">
+            {tailoredGateIds?.has(gid) && canRevert && (
+              <button
+                type="button"
+                className="gl-mini-btn gate-revert-group"
+                aria-label={t("Revert {name} to {target}", { name: gate.name, target: applyTarget })}
+                title={t("This gate takes the coordinates it follows again; other tailored gates stay unchanged. Undo is available.")}
+                onClick={(event) => { event.stopPropagation(); dispatch({ type: "revertGateToGroup", gateId: gid }); }}
+              >
+                {t("Revert gate")}
+              </button>
+            )}
+            {tailoredGateIds?.has(gid) && canRevert && (
+              <button
+                type="button"
+                className="gl-mini-btn gate-apply-group"
+                aria-label={t("Apply {name} to {target}", { name: gate.name, target: applyTarget })}
+                title={t("{target} takes this gate's coordinates, and every file that followed its gate follows the new ones. Undo is available.", { target: applyTarget })}
+                onClick={(event) => { event.stopPropagation(); dispatch({ type: "applyGateToGroup", gateId: gid }); }}
+              >
+                {t("Apply to {target}", { target: applyTarget })}
+              </button>
+            )}
+            </span>
           </div>
         );
       })}

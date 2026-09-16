@@ -7,6 +7,10 @@ interface ContextualGlobalScales {
   setGlobalScales: Dispatch<SetStateAction<GlobalScales>>;
   /** Keep ranges restored from a file when the corresponding target context next becomes active. */
   preserveScalesForContext(contextKey: string): void;
+  /** Read an active or parked range map without switching the displayed context. */
+  scalesForContext(contextKey: string): GlobalScales;
+  /** Replace every cached context when the next workspace namespace is installed. */
+  replaceScalesForNextNamespace(scalesByContext: ReadonlyMap<string, GlobalScales>): void;
 }
 
 /**
@@ -14,10 +18,10 @@ interface ContextualGlobalScales {
  *
  * Switching context must not apply old-coordinate ranges, but it also must not destroy a user's
  * settings. The most recently used range map for each context is therefore kept in memory and
- * restored when that exact context returns. Only the active map is persisted by today's workspace
- * format; changing `namespaceKey` deliberately drops the in-memory alternatives. A file import can
- * explicitly install its own target ranges with `preserveScalesForContext` before React commits the
- * context transition.
+ * restored when that exact context returns. The workspace persists those parked maps and installs
+ * them together on restore; changing `namespaceKey` deliberately drops every context from the old
+ * workspace lineage. A mode change can explicitly carry the visible frame into its target context
+ * with `preserveScalesForContext` before React commits the transition.
  */
 export function useContextualGlobalScales(
   contextKey: string | null,
@@ -27,22 +31,48 @@ export function useContextualGlobalScales(
   const scalesByContextRef = useRef(new Map<string, GlobalScales>());
   const displayedContextRef = useRef<string | null>(null);
   const preserveContextRef = useRef<string | null>(null);
+  const replacementRef = useRef<ReadonlyMap<string, GlobalScales> | null>(null);
   const namespaceRef = useRef(namespaceKey);
 
   const preserveScalesForContext = useCallback((targetContext: string) => {
     preserveContextRef.current = targetContext;
   }, []);
 
+  const scalesForContext = useCallback((targetContext: string): GlobalScales => {
+    if (displayedContextRef.current === targetContext) return globalScales;
+    return scalesByContextRef.current.get(targetContext) ?? {};
+  }, [globalScales]);
+
+  const replaceScalesForNextNamespace = useCallback(
+    (scalesByContext: ReadonlyMap<string, GlobalScales>) => {
+      replacementRef.current = scalesByContext;
+    },
+    [],
+  );
+
   useLayoutEffect(() => {
     if (!Object.is(namespaceRef.current, namespaceKey)) {
-      // A context string can recur in unrelated workspaces (notably Original and the legacy
-      // embedded-compensation identity). Keep the just-restored active ranges, but discard every
-      // off-context cache entry from the previous workspace lineage.
+      // A context string can recur in unrelated workspaces. A workspace restore can provide all
+      // of its parked per-file maps up front; otherwise keep only the just-restored active map.
       namespaceRef.current = namespaceKey;
       scalesByContextRef.current.clear();
+      const replacement = replacementRef.current;
+      replacementRef.current = null;
+      if (replacement) {
+        for (const [key, ranges] of replacement) {
+          scalesByContextRef.current.set(key, ranges);
+        }
+      }
       displayedContextRef.current = contextKey;
       preserveContextRef.current = null;
-      if (contextKey) scalesByContextRef.current.set(contextKey, globalScales);
+      if (contextKey) {
+        const restored = scalesByContextRef.current.get(contextKey);
+        if (restored) {
+          setGlobalScales(restored);
+        } else {
+          scalesByContextRef.current.set(contextKey, globalScales);
+        }
+      }
       return;
     }
 
@@ -72,5 +102,11 @@ export function useContextualGlobalScales(
     setGlobalScales(scalesByContextRef.current.get(contextKey) ?? {});
   }, [contextKey, globalScales, namespaceKey]);
 
-  return { globalScales, setGlobalScales, preserveScalesForContext };
+  return {
+    globalScales,
+    setGlobalScales,
+    preserveScalesForContext,
+    scalesForContext,
+    replaceScalesForNextNamespace,
+  };
 }

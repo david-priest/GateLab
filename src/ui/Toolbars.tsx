@@ -46,18 +46,21 @@ export function GateToolbar({
   const hasSelected = !!state.selected_gate_id;
   const nChecked = state.selected_gate_ids.length;
   const canDelete = nChecked > 0 || hasSelected;
+  const structureLocked = state.hierarchies.some(
+    (hierarchy) => hierarchy.id === state.active_hierarchy_id && hierarchy.structure_locked === true,
+  );
   return (
     <div className="gl-tools">
       <Tool label="A↓" title={t("Sort gates alphabetically")} onClick={() => dispatch({ type: "sortGatesAlpha" })} disabled={state.gate_order.length < 2} />
-      <Tool label="✎" title={t("Rename selected gate")} onClick={onRename} disabled={!hasSelected} />
+      <Tool label="✎" title={structureLocked ? t("Unlock structure to rename gates") : t("Rename selected gate")} onClick={onRename} disabled={!hasSelected || structureLocked} />
       <Tool label="↶" title={t("Undo")} onClick={() => dispatch({ type: "undo" })} disabled={state.undo.length === 0} />
       <Tool label="↷" title={t("Redo")} onClick={() => dispatch({ type: "redo" })} disabled={state.redo.length === 0} />
       <Tool label="✕" title={t("Clear gate selection")} onClick={() => dispatch({ type: "clearGateSelection" })} disabled={nChecked === 0} />
       <Tool
         label="🗑"
-        title={t("Delete checked gates (or selected gate if none checked)")}
+        title={structureLocked ? t("Unlock structure to delete gates") : t("Delete checked gates (or selected gate if none checked)")}
         danger
-        disabled={!canDelete}
+        disabled={!canDelete || structureLocked}
         onClick={() => onDelete(nChecked > 0 ? state.selected_gate_ids : hasSelected ? [state.selected_gate_id!] : [])}
       />
     </div>
@@ -85,18 +88,21 @@ export function PopToolbar({
   const active = state.active_population_id;
   const canRename = !!active && active !== state.root_population_id;
   const nChecked = state.selected_pop_ids.length;
+  const structureLocked = state.hierarchies.some(
+    (hierarchy) => hierarchy.id === state.active_hierarchy_id && hierarchy.structure_locked === true,
+  );
   return (
     <div className="gl-tools">
       <Tool label="A↓" title={t("Sort populations alphabetically")} onClick={() => dispatch({ type: "sortPopulationsAlpha" })} disabled={Object.keys(state.populations).length < 3} />
-      <Tool label="＋" title={t("Create population")} onClick={onAdd} disabled={Object.keys(state.gates).length === 0} />
-      <Tool label="✎" title={t("Edit active population (name, parent, gates)")} onClick={onRename} disabled={!canRename} />
-      <Tool label="⧉" title={t("Duplicate checked populations")} onClick={() => onDuplicate(state.selected_pop_ids)} disabled={nChecked === 0} />
-      <Tool label="⇞" title={t("Bulk-edit population names and gate definitions via CSV")} onClick={onBulkRename} disabled={Object.keys(state.populations).length < 2} />
+      <Tool label="＋" title={structureLocked ? t("Unlock structure to create populations") : t("Create population")} onClick={onAdd} disabled={Object.keys(state.gates).length === 0 || structureLocked} />
+      <Tool label="✎" title={structureLocked ? t("Unlock structure to edit populations") : t("Edit active population (name, parent, gates)")} onClick={onRename} disabled={!canRename || structureLocked} />
+      <Tool label="⧉" title={structureLocked ? t("Unlock structure to duplicate populations") : t("Duplicate checked populations")} onClick={() => onDuplicate(state.selected_pop_ids)} disabled={nChecked === 0 || structureLocked} />
+      <Tool label="⇞" title={structureLocked ? t("Unlock structure to bulk-edit populations") : t("Bulk-edit population names and gate definitions via CSV")} onClick={onBulkRename} disabled={Object.keys(state.populations).length < 2 || structureLocked} />
       <Tool
         label="🗑"
-        title={t("Delete checked populations")}
+        title={structureLocked ? t("Unlock structure to delete populations") : t("Delete checked populations")}
         danger
-        disabled={nChecked === 0}
+        disabled={nChecked === 0 || structureLocked}
         onClick={() => onDelete(state.selected_pop_ids)}
       />
     </div>

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { parseFcs } from "./fcs";
-import { ARIA_SMALL } from "../testFixtures";
+import { ARIA_SMALL, VENDOR_MATRIX_DIR } from "../testFixtures";
 
 // Ground truth extracted independently (fcsparser for metadata; a raw big-endian
 // struct read for the data values) from the real Aria III test file. This is a
@@ -302,5 +302,153 @@ describe("parseFcs — rare but valid FCS encodings", () => {
     });
     replaceAsciiInPlace(buffer, "$P1B/16", "$P1B/12");
     expect(() => parseFcs(buffer)).toThrow(/only byte-aligned integer widths/i);
+  });
+});
+
+describe("parseFcs — $PnE hardware log amplification", () => {
+  /** Minimal FCS 3.0, one channel, 1-byte integers, with the given $PnE and $PnR. */
+  function logAmpFile(pne: string, pnr: string, values: number[]): ArrayBuffer {
+    const text =
+      `/$BEGINANALYSIS/0/$ENDANALYSIS/0/$BYTEORD/1,2,3,4/$DATATYPE/I/$MODE/L` +
+      `/$NEXTDATA/0/$PAR/1/$TOT/${values.length}` +
+      `/$P1B/8/$P1E/${pne}/$P1N/FL1-H/$P1R/${pnr}/$P1S/FITC-H/`;
+    const HEAD = 256;
+    const textStart = HEAD;
+    const textEnd = textStart + text.length - 1;
+    const dataStart = textEnd + 1;
+    const dataEnd = dataStart + values.length - 1;
+    const buf = new Uint8Array(dataEnd + 1);
+    const put = (s: string, at: number) => {
+      for (let i = 0; i < s.length; i++) buf[at + i] = s.charCodeAt(i);
+    };
+    put("FCS3.0  ", 0);
+    put(String(textStart).padStart(8), 10);
+    put(String(textEnd).padStart(8), 18);
+    put(String(dataStart).padStart(8), 26);
+    put(String(dataEnd).padStart(8), 34);
+    put(text, textStart);
+    values.forEach((v, i) => (buf[dataStart + i] = v));
+    return buf.buffer;
+  }
+
+  it("linearises a log-amplified channel as 10^(f1 x / r) * f2", () => {
+    // 4 decades over a range of 256: stored 0 -> 1, stored 64 -> 10, stored 256 -> 10^4.
+    const fcs = parseFcs(logAmpFile("4,1", "256", [0, 64, 128, 255]));
+    expect(fcs.channels[0].logAmp).toEqual({ decades: 4, offset: 1 });
+    const col = Array.from(fcs.columns[0]);
+    expect(col[0]).toBeCloseTo(1, 12);
+    expect(col[1]).toBeCloseTo(10, 10);
+    expect(col[2]).toBeCloseTo(100, 8);
+    expect(col[3]).toBeCloseTo(Math.pow(10, 4 * 255 / 256), 8);
+  });
+
+  it("reads f2 = 0 as 1, which is out of spec but common", () => {
+    const fcs = parseFcs(logAmpFile("4,0", "256", [0, 64]));
+    expect(fcs.channels[0].logAmp).toEqual({ decades: 4, offset: 1 });
+    expect(Array.from(fcs.columns[0])[0]).toBeCloseTo(1, 12);
+  });
+
+  it("leaves a linear channel ($PnE 0,0) as stored", () => {
+    const fcs = parseFcs(logAmpFile("0,0", "256", [0, 64, 128]));
+    expect(fcs.channels[0].logAmp).toBeUndefined();
+    expect(Array.from(fcs.columns[0])).toEqual([0, 64, 128]);
+  });
+
+  it("cannot decode without a usable $PnR, so leaves the values alone", () => {
+    const fcs = parseFcs(logAmpFile("4,1", "0", [0, 64, 128]));
+    expect(fcs.channels[0].logAmp).toBeUndefined();
+    expect(Array.from(fcs.columns[0])).toEqual([0, 64, 128]);
+  });
+
+  it("decodes into float64, so one stored integer maps to one exact value", () => {
+    const fcs = parseFcs(logAmpFile("4,1", "1024", [100, 100, 101]));
+    expect(fcs.columns[0]).toBeInstanceOf(Float64Array);
+    const col = Array.from(fcs.columns[0]);
+    expect(col[0]).toBe(col[1]);
+    expect(col[2]).toBeGreaterThan(col[1]);
+  });
+});
+
+// Log amplification is a property of integer data. FCS 3.1 requires $PnE/0,0/ on float and
+// double files, and flowCore decodes only when the datatype is integer; a float file carrying a
+// stray $PnE/4,1/ had its real intensities exponentiated (262144 became 10,000) until 2026-09-11.
+describe("parseFcs — $PnE is ignored on float data, and bounded on integer data", () => {
+  function floatFile(pne: string, values: number[]): ArrayBuffer {
+    const text =
+      `/$BEGINANALYSIS/0/$ENDANALYSIS/0/$BYTEORD/1,2,3,4/$DATATYPE/F/$MODE/L` +
+      `/$NEXTDATA/0/$PAR/1/$TOT/${values.length}` +
+      `/$P1B/32/$P1E/${pne}/$P1N/FL1-A/$P1R/262144/$P1S/FITC-A/`;
+    const HEAD = 256;
+    const textStart = HEAD;
+    const textEnd = textStart + text.length - 1;
+    // Data 4-aligned, as the fast path expects.
+    const dataStart = Math.ceil((textEnd + 1) / 4) * 4;
+    const dataEnd = dataStart + values.length * 4 - 1;
+    const buf = new Uint8Array(dataEnd + 1);
+    const put = (s: string, at: number) => {
+      for (let i = 0; i < s.length; i++) buf[at + i] = s.charCodeAt(i);
+    };
+    put("FCS3.1  ", 0);
+    put(String(textStart).padStart(8), 10);
+    put(String(textEnd).padStart(8), 18);
+    put(String(dataStart).padStart(8), 26);
+    put(String(dataEnd).padStart(8), 34);
+    put(text, textStart);
+    new Float32Array(buf.buffer, dataStart, values.length).set(values);
+    return buf.buffer;
+  }
+
+  it("leaves float intensities alone whatever $PnE says", () => {
+    const fcs = parseFcs(floatFile("4,1", [0, 1000, 50000, 262144]));
+    expect(fcs.channels[0].logAmp).toBeUndefined();
+    expect(Array.from(fcs.columns[0])).toEqual([0, 1000, 50000, 262144]);
+    expect(fcs.channels[0].range).toBe(262144);
+  });
+
+  it("wraps a stored integer above $PnR to the channel's bit width, as flowCore does", () => {
+    // Range 128 is 7 bits; a stored 200 wraps to 72 rather than decoding beyond the declared decades.
+    const buf = (() => {
+      const text =
+        `/$BEGINANALYSIS/0/$ENDANALYSIS/0/$BYTEORD/1,2,3,4/$DATATYPE/I/$MODE/L` +
+        `/$NEXTDATA/0/$PAR/1/$TOT/2/$P1B/8/$P1E/4,1/$P1N/FL1-H/$P1R/128/$P1S/FITC-H/`;
+      const textStart = 256, textEnd = textStart + text.length - 1, dataStart = textEnd + 1;
+      const out = new Uint8Array(dataStart + 2);
+      const put = (s: string, at: number) => { for (let i = 0; i < s.length; i++) out[at + i] = s.charCodeAt(i); };
+      put("FCS3.0  ", 0);
+      put(String(textStart).padStart(8), 10); put(String(textEnd).padStart(8), 18);
+      put(String(dataStart).padStart(8), 26); put(String(dataStart + 1).padStart(8), 34);
+      put(text, textStart);
+      out[dataStart] = 72; out[dataStart + 1] = 200;
+      return out.buffer;
+    })();
+    const fcs = parseFcs(buf);
+    const col = Array.from(fcs.columns[0]);
+    expect(col[1]).toBe(col[0]);
+    expect(col[0]).toBeCloseTo(Math.pow(10, 4 * 72 / 128), 8);
+    // The range describes the decoded values now.
+    expect(fcs.channels[0].range).toBe(10000);
+  });
+});
+
+
+/** Public S8 recording (Zenodo 19221995): 440 parameters, $PnFEATURE on each. */
+const S8_PUBLIC = `${VENDOR_MATRIX_DIR}/bd_facsdiscover_s8__19221995__Zam36_YFP.fcs`;
+
+describe.runIf(existsSync(S8_PUBLIC))("parseFcs — $PnFEATURE", () => {
+  it("carries the instrument's word for what a parameter measures, and nothing when it has none", () => {
+    const fcs = parseFcs(loadArrayBuffer(S8_PUBLIC));
+    const byName = new Map(fcs.channels.map((c) => [c.name, c]));
+    expect(byName.get("FSC-A")?.feature).toBe("Area");
+    expect(byName.get("FSC-H")?.feature).toBe("Height");
+    expect(byName.get("FSC-W")?.feature).toBe("Width");
+    expect(byName.get("Size (FSC)")?.feature).toBe("MaskSize");
+    expect(byName.get("Eccentricity (FSC)")?.feature).toBe("Eccentricity");
+    expect(byName.get("Delta CoM (SSC (Imaging)/FSC)")?.feature).toBe("Delta CoM");
+    // The S8's bookkeeping columns carry no feature, and the field is then absent, not "".
+    expect(byName.get("Saturated")).toBeDefined();
+    expect("feature" in byName.get("Saturated")!).toBe(false);
+    // A file without the keyword has no such field on any channel.
+    const aria = parseFcs(loadArrayBuffer(ARIA_SMALL));
+    expect(aria.channels.every((c) => !("feature" in c))).toBe(true);
   });
 });

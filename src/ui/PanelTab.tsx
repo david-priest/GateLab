@@ -153,7 +153,7 @@ export function PanelTab({
         </div>
       </div>
       <p className="gl-hint gl-panel-hint">
-        {t("Rename the display name (marker) for each channel. The FCS channel id ($PnN) is fixed. Scatter and Time/QC channels are locked. Renames apply to every loaded sample and are cosmetic — gates and statistics are unaffected. Download the template to edit display names in Excel, then upload it here; omitted channels remain unchanged.")}
+        {t("Rename the display name (marker) for each channel. The FCS channel id ($PnN) is fixed. Scatter, Time/QC and imaging-feature channels are locked. Renames apply to every loaded sample and are cosmetic — gates and statistics are unaffected. Download the template to edit display names in Excel, then upload it here; omitted channels remain unchanged.")}
       </p>
 
       {importError && (
@@ -221,7 +221,7 @@ export function PanelTab({
                       className="gl-field-input gl-panel-input"
                       value={draft[r.key] ?? r.label}
                       disabled={!r.renamable}
-                      title={r.renamable ? "" : t("Locked (scatter / QC channel)")}
+                      title={r.renamable ? "" : t("Locked (scatter, QC or imaging feature)")}
                       onChange={(e) => setDraft((d) => ({ ...d, [r.key]: e.target.value }))}
                       onBlur={(e) => commit(r.key, e.currentTarget.value)}
                       onKeyDown={(e) => {

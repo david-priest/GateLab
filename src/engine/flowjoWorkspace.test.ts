@@ -58,17 +58,365 @@ describe("FlowJo workspace import", () => {
   // An unreadable gate invalidates everything below it: those populations are defined as
   // subsets of it, so re-parenting them would silently change what they mean.
   it("skips an unsupported gate together with its descendants, and says so", () => {
-    const child = polygonPop("UnderEllipse", "g2");
+    const child = polygonPop("UnderQuadrant", "g2");
     const xml = synthetic(
-      `<Population name="Ellipsoid" count="9"><Gate>
-         <gating:EllipsoidGate xmlns:gating="${G}" gating:id="g1"/></Gate>
+      `<Population name="Quadrant" count="9"><Gate>
+         <gating:QuadrantGate xmlns:gating="${G}" gating:id="g1"/></Gate>
          <Subpopulations>${child}</Subpopulations></Population>` + polygonPop("Fine", "g3"),
     );
     const out = flowJoWorkspaceToGatingML(xml, 0);
     expect(out.gatingMl).toContain('gating:name="Fine"');
-    expect(out.gatingMl).not.toContain("UnderEllipse");
-    expect(out.warnings.join(" ")).toMatch(/EllipsoidGate/);
+    expect(out.gatingMl).not.toContain("UnderQuadrant");
+    expect(out.warnings.join(" ")).toMatch(/QuadrantGate/);
     expect(out.warnings.join(" ")).toMatch(/skipped/);
+  });
+
+  it("skips an ellipsoid whose axes the workspace declares no display for", () => {
+    const xml = synthetic(
+      `<Population name="Blob" count="9"><Gate>
+         <gating:EllipsoidGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="e1"
+                               gating:distance="52">
+           <gating:dimension><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+           <gating:dimension><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+         </gating:EllipsoidGate></Gate>
+         <Subpopulations>${polygonPop("UnderBlob", "g2")}</Subpopulations></Population>`
+      + polygonPop("Fine", "g3"),
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.gatingMl).toContain('gating:name="Fine"');
+    expect(out.gatingMl).not.toContain("UnderBlob");
+    expect(out.warnings.join(" ")).toMatch(/ellipse/);
+    expect(out.warnings.join(" ")).toMatch(/skipped/);
+  });
+
+  // A CurlyQuad is one quadrant of a crosshair FlowJo bends beyond it (see QuadrantCurl). Here
+  // the axes declare no display, so the bend cannot be placed and the crosshair imports straight,
+  // as a quadrant gate whose one population names its quadrant -- and says why.
+  it("reads a CurlyQuad as a quadrant gate, straight when its axes' display is unknown", () => {
+    const xml = synthetic(
+      `<Population name="DoublePositive" count="9"><Gate>
+         <gating:CurlyQuad xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="q1"
+                           percentX="0" percentY="0">
+           <gating:dimension gating:min="500"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+           <gating:dimension gating:min="700"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+         </gating:CurlyQuad></Gate>
+         <Subpopulations>${polygonPop("UnderQuad", "g2")}</Subpopulations></Population>`,
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.gatingMl).toContain("RectangleGate");
+    expect(out.gatingMl).not.toContain("CurlyQuad");
+    expect(out.warnings.some((w) => /"DoublePositive".*straight/.test(w))).toBe(true);
+    const res = importGatingML(out.gatingMl, ["X", "Y"], {}, "flow");
+    const quad = Object.values(res.gates).find((g) => g.gate_type === "quadrant") as unknown as
+      { center: [number, number]; curl?: unknown } | undefined;
+    expect(quad).toBeDefined();
+    expect(quad!.center).toEqual([500, 700]);
+    expect(quad!.curl).toBeUndefined();
+    const pops = Object.values(res.populations) as unknown as Array<{
+      population_id: string; name: string; parent_id: string | null;
+      gate_refs: Array<{ gate_id: string; include: boolean; quadrant?: number }>;
+    }>;
+    const dp = pops.find((p) => p.name === "DoublePositive")!;
+    expect(dp.gate_refs).toHaveLength(1);
+    expect(dp.gate_refs[0].quadrant).toBe(2);
+    // The point of reading it at all: the subtree below survives, beneath the quadrant.
+    expect(pops.find((p) => p.name === "UnderQuad")!.parent_id).toBe(dp.population_id);
+  });
+
+  // <AndNode> carries no gate: it names the populations it intersects, by full path. GateLab's
+  // Population is already an intersection of gate refs, so the two line up -- but a gate-less
+  // population has to reach the importer somehow, and emitting BooleanGates instead flips the
+  // document onto the Cytobank flat-Boolean reading, which discards every ordinary population.
+  it("imports an AndNode as the intersection of the populations it names", () => {
+    const xml = synthetic(
+      `<Population name="Parent" count="100"><Gate>
+         <gating:RectangleGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="p1">
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+         </gating:RectangleGate></Gate>
+         <Subpopulations>
+           ${polygonPop("A", "a1")}
+           ${polygonPop("B", "b1")}
+           <NotNode name="B-" count="7"><Gate>
+             <gating:RectangleGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="b1copy">
+               <gating:dimension gating:min="1"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+               <gating:dimension gating:min="1"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+             </gating:RectangleGate></Gate>
+             <Dependents><Dependent name="Parent/B"/></Dependents></NotNode>
+           <AndNode name="A+B-" count="3">
+             <Dependents>
+               <Dependent name="Parent/A"/>
+               <Dependent name="Parent/B-"/>
+             </Dependents></AndNode>
+         </Subpopulations></Population>`,
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    const res = importGatingML(out.gatingMl, ["X", "Y"], {}, "flow");
+    const pops = Object.values(res.populations) as unknown as Array<{
+      name: string; gate_refs: Array<{ gate_id: string; include: boolean }>; parent_id: string | null;
+    }>;
+    const gateNamed = (name: string) =>
+      (Object.entries(res.gates).find(([, g]) => (g as unknown as { name: string }).name === name) ?? [])[0];
+    const and = pops.find((p) => p.name.endsWith("A+B-"));
+    expect(and).toBeDefined();
+    // Two operands, and the NotNode one is EXCLUDED: its population is the complement of the
+    // population it names, so depending on it means excluding THAT population's gate.
+    expect(and!.gate_refs).toHaveLength(2);
+    expect(and!.gate_refs.filter((r) => r.include).map((r) => r.gate_id)).toEqual([gateNamed("A")]);
+    expect(and!.gate_refs.filter((r) => !r.include).map((r) => r.gate_id)).toEqual([gateNamed("B")]);
+    // It sits under the node it was written in, so it is measured inside that parent.
+    const parent = pops.find((p) => p.name === "Parent");
+    expect(and!.parent_id).toBe((parent as unknown as { population_id: string }).population_id);
+    // and the ordinary populations are all still there -- the failure mode this guards.
+    expect(pops.map((p) => p.name)).toEqual(expect.arrayContaining(["Parent", "A", "B", "B-"]));
+  });
+
+  // FlowJo stores a COPY of the negated gate inside a NotNode, and when the workspace tailors
+  // gates per sample the copy goes stale. FlowJo's own count for the NOT population is the
+  // complement of the population it names, with that population's CURRENT gate; on FR-FCM-Z2V4
+  // reading the copy instead put the root NOT population 6% of the file out, and every
+  // population beneath it with it.
+  it("reads a NOT population as the complement of the population it names, not of the copy it carries", () => {
+    const xml = synthetic(
+      `<Population name="Parent" count="100"><Gate>
+         <gating:RectangleGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="p1">
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+         </gating:RectangleGate></Gate>
+         <Subpopulations>
+           ${polygonPop("A", "a1")}
+           <NotNode name="A-" count="90"><Gate>
+             <gating:RectangleGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="stale">
+               <gating:dimension gating:min="50"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+               <gating:dimension gating:min="50"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+             </gating:RectangleGate></Gate>
+             <Dependents><Dependent name="Parent/A"/></Dependents>
+             <Subpopulations>${polygonPop("UnderNot", "u1")}</Subpopulations></NotNode>
+         </Subpopulations></Population>`,
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    // The stale copy is not emitted at all.
+    expect(out.gatingMl).not.toContain('gating:id="stale"');
+    expect(out.warnings.filter((w) => /A-/.test(w))).toEqual([]);
+    const res = importGatingML(out.gatingMl, ["X", "Y"], {}, "flow");
+    const pops = Object.values(res.populations) as unknown as Array<{
+      population_id: string; name: string; parent_id: string | null;
+      gate_refs: Array<{ gate_id: string; include: boolean }>;
+    }>;
+    const a = Object.entries(res.gates).find(([, g]) => (g as unknown as { name: string }).name === "A")![0];
+    const notPop = pops.find((p) => p.name === "A-")!;
+    expect(notPop.gate_refs).toEqual([{ gate_id: a, include: false }]);
+    expect(notPop.parent_id).toBe(pops.find((p) => p.name === "Parent")!.population_id);
+    // What FlowJo gated beneath the NOT population is measured inside it.
+    expect(pops.find((p) => p.name === "UnderNot")!.parent_id).toBe(notPop.population_id);
+    expect(out.flowJoCounts["A-"]).toBe(90);
+  });
+
+  it("falls back to the copy a NOT population carries when the population it names is absent, and says so", () => {
+    const xml = synthetic(
+      `<Population name="Parent" count="100"><Gate>
+         <gating:RectangleGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="p1">
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+         </gating:RectangleGate></Gate>
+         <Subpopulations>
+           <NotNode name="Gone-" count="90"><Gate>
+             <gating:RectangleGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="copy">
+               <gating:dimension gating:min="5"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+               <gating:dimension gating:min="5"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+             </gating:RectangleGate></Gate>
+             <Dependents><Dependent name="Parent/Gone"/></Dependents>
+             <Subpopulations>${polygonPop("UnderNot", "u1")}</Subpopulations></NotNode>
+         </Subpopulations></Population>`,
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.warnings.some((w) => /"Gone-".*copy.*stale/.test(w))).toBe(true);
+    const res = importGatingML(out.gatingMl, ["X", "Y"], {}, "flow");
+    const pops = Object.values(res.populations) as unknown as Array<{
+      population_id: string; name: string; parent_id: string | null;
+      gate_refs: Array<{ gate_id: string; include: boolean }>;
+    }>;
+    const notPop = pops.find((p) => p.name === "Gone-")!;
+    // The copy, as the complement it is, with the subtree still beneath it.
+    expect(notPop.gate_refs).toHaveLength(1);
+    expect(notPop.gate_refs[0].include).toBe(false);
+    expect((res.gates[notPop.gate_refs[0].gate_id] as unknown as { name: string }).name).toBe("Gone-");
+    expect(pops.find((p) => p.name === "UnderNot")!.parent_id).toBe(notPop.population_id);
+  });
+
+  it("refuses the complement of an intersection, which is a union, together with what lies beneath it", () => {
+    const xml = synthetic(
+      `<Population name="Parent" count="100"><Gate>
+         <gating:RectangleGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="p1">
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+         </gating:RectangleGate></Gate>
+         <Subpopulations>
+           ${polygonPop("A", "a1")}
+           ${polygonPop("B", "b1")}
+           <AndNode name="A+B" count="3"><Dependents>
+             <Dependent name="Parent/A"/><Dependent name="Parent/B"/></Dependents></AndNode>
+           <NotNode name="not A+B" count="97">
+             <Dependents><Dependent name="Parent/A+B"/></Dependents>
+             <Subpopulations>${polygonPop("UnderNot", "u1")}</Subpopulations></NotNode>
+         </Subpopulations></Population>`,
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.warnings.some((w) => /"not A\+B".*union/.test(w) && /1 population\(s\) beneath/.test(w))).toBe(true);
+    const res = importGatingML(out.gatingMl, ["X", "Y"], {}, "flow");
+    const names = Object.values(res.populations).map((p) => (p as unknown as { name: string }).name);
+    expect(names).toEqual(expect.arrayContaining(["Parent", "A", "B", "A+B"]));
+    expect(names).not.toContain("not A+B");
+    expect(names).not.toContain("UnderNot");
+  });
+
+  it("skips an intersection whose operands it could not read, rather than widening it", () => {
+    const xml = synthetic(
+      `<Population name="Parent" count="100"><Gate>
+         <gating:RectangleGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="p1">
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+         </gating:RectangleGate></Gate>
+         <Subpopulations>
+           ${polygonPop("A", "a1")}
+           <AndNode name="A+Missing" count="3">
+             <Dependents>
+               <Dependent name="Parent/A"/>
+               <Dependent name="Parent/NoSuchPopulation"/>
+             </Dependents></AndNode>
+         </Subpopulations></Population>`,
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.warnings.join(" ")).toMatch(/NoSuchPopulation/);
+    const res = importGatingML(out.gatingMl, ["X", "Y"], {}, "flow");
+    const names = Object.values(res.populations).map((p) => (p as unknown as { name: string }).name);
+    expect(names).not.toContain("A+Missing");
+    expect(names).toEqual(expect.arrayContaining(["Parent", "A"]));
+  });
+
+  // A conjunction of conjunctions is one conjunction: an AndNode whose operand is another
+  // AndNode flattens into that node's operands. 23,864 operands in the survey corpus are AndNodes.
+  it("flattens an AndNode whose operand is another AndNode", () => {
+    const rect = (id: string, name: string, lo: number) => `<Population name="${name}" count="5"><Gate>
+         <gating:RectangleGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="${id}">
+           <gating:dimension gating:min="${lo}"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+           <gating:dimension gating:min="${lo}"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+         </gating:RectangleGate></Gate></Population>`;
+    const xml = synthetic(
+      `<Population name="Parent" count="100"><Gate>
+         <gating:RectangleGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="p1">
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+         </gating:RectangleGate></Gate>
+         <Subpopulations>
+           ${rect("a1", "A", 1)}${rect("b1", "B", 2)}${rect("c1", "C", 3)}
+           <AndNode name="A+B" count="3"><Dependents>
+             <Dependent name="Parent/A"/><Dependent name="Parent/B"/></Dependents></AndNode>
+           <AndNode name="A+B+C" count="2"><Dependents>
+             <Dependent name="Parent/A+B"/><Dependent name="Parent/C"/></Dependents></AndNode>
+         </Subpopulations></Population>`,
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.warnings.join(" ")).not.toMatch(/skipped/);
+    const res = importGatingML(out.gatingMl, ["X", "Y"], {}, "flow");
+    const gates = res.gates as unknown as Record<string, { name: string }>;
+    const pops = Object.values(res.populations) as unknown as Array<{
+      name: string; gate_refs: Array<{ gate_id: string; include: boolean }>;
+    }>;
+    const abc = pops.find((p) => p.name.endsWith("A+B+C"))!;
+    expect(abc.gate_refs.map((r) => gates[r.gate_id].name).sort()).toEqual(["A", "B", "C"]);
+    expect(abc.gate_refs.every((r) => r.include)).toBe(true);
+  });
+
+  // An operand from another branch carries its own ancestors' gates; a reference to its gate
+  // alone would silently widen the intersection, so the node is refused and named instead.
+  it("refuses an AndNode operand from another branch rather than dropping its ancestry", () => {
+    const box = (id: string, bound: "min" | "max") => `<Gate>
+         <gating:RectangleGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="${id}">
+           <gating:dimension gating:${bound}="0"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+           <gating:dimension gating:${bound}="0"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+         </gating:RectangleGate></Gate>`;
+    const xml = synthetic(
+      `<Population name="Left" count="100">${box("l1", "min")}
+         <Subpopulations>${polygonPop("Deep", "d1")}</Subpopulations></Population>
+       <Population name="Right" count="100">${box("r1", "max")}
+         <Subpopulations>
+           ${polygonPop("Near", "n1")}
+           <AndNode name="Near+Deep" count="1"><Dependents>
+             <Dependent name="Right/Near"/><Dependent name="Left/Deep"/></Dependents></AndNode>
+         </Subpopulations></Population>`,
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.warnings.join(" ")).toMatch(/Near\+Deep/);
+    expect(out.warnings.join(" ")).toMatch(/ancestry/);
+    const names = Object.values(importGatingML(out.gatingMl, ["X", "Y"], {}, "flow").populations)
+      .map((p) => (p as unknown as { name: string }).name);
+    expect(names.some((n) => n.endsWith("Near+Deep"))).toBe(false);
+    expect(names).toEqual(expect.arrayContaining(["Left", "Right"]));
+  });
+
+  // FlowJo gates freely beneath an intersection: 17,197 populations in the survey corpus sit
+  // under an AndNode. Each is measured inside it, so each is parented under it -- a gate through
+  // its parent_id, a nested intersection through the id the outer one carries.
+  it("nests what is gated beneath an intersection under it", () => {
+    const xml = synthetic(
+      `<Population name="Parent" count="100"><Gate>
+         <gating:RectangleGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="p1">
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+         </gating:RectangleGate></Gate>
+         <Subpopulations>
+           ${polygonPop("A", "a1")}${polygonPop("B", "b1")}
+           <AndNode name="A+B" count="5"><Dependents>
+             <Dependent name="Parent/A"/><Dependent name="Parent/B"/></Dependents>
+             <Subpopulations>
+               ${polygonPop("C", "c1")}${polygonPop("D", "d1")}
+               <AndNode name="C+D" count="2"><Dependents>
+                 <Dependent name="Parent/A+B/C"/><Dependent name="Parent/A+B/D"/></Dependents>
+                 <Subpopulations>${polygonPop("E", "e1")}</Subpopulations></AndNode>
+             </Subpopulations></AndNode>
+         </Subpopulations></Population>`,
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.warnings.join(" ")).not.toMatch(/skipped/);
+    const res = importGatingML(out.gatingMl, ["X", "Y"], {}, "flow");
+    const gates = res.gates as unknown as Record<string, { name: string }>;
+    const pops = Object.values(res.populations) as unknown as Array<{
+      population_id: string; name: string; parent_id: string | null;
+      gate_refs: Array<{ gate_id: string; include: boolean }>;
+    }>;
+    const find = (n: string) => pops.find((p) => p.name === n || p.name.endsWith(`/${n}`))!;
+    const ab = find("A+B"), c = find("C"), cd = find("C+D"), e = find("E");
+    expect(c.parent_id).toBe(ab.population_id);
+    expect(c.gate_refs.map((r) => gates[r.gate_id].name)).toEqual(["C"]);
+    expect(cd.parent_id).toBe(ab.population_id);
+    expect(cd.gate_refs.map((r) => gates[r.gate_id].name).sort()).toEqual(["C", "D"]);
+    expect(e.parent_id).toBe(cd.population_id);
+  });
+
+  it("drops what is gated beneath an intersection it could not resolve", () => {
+    // It was measured inside that intersection, and there is no population left to measure it in.
+    const xml = synthetic(
+      `<Population name="Parent" count="100"><Gate>
+         <gating:RectangleGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="p1">
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+           <gating:dimension gating:min="0"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+         </gating:RectangleGate></Gate>
+         <Subpopulations>
+           ${polygonPop("A", "a1")}
+           <AndNode name="A+Missing" count="3"><Dependents>
+             <Dependent name="Parent/A"/><Dependent name="Parent/NoSuchPopulation"/></Dependents>
+             <Subpopulations>${polygonPop("Under", "u1", polygonPop("Deeper", "u2"))}</Subpopulations></AndNode>
+         </Subpopulations></Population>`,
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.warnings.join(" ")).toMatch(/A\+Missing.*2 population\(s\) beneath it/);
+    expect(out.gatingMl).not.toContain('gating:name="Under"');
+    expect(out.gatingMl).not.toContain('gating:name="Deeper"');
+    const names = Object.values(importGatingML(out.gatingMl, ["X", "Y"], {}, "flow").populations)
+      .map((p) => (p as unknown as { name: string }).name);
+    expect(names).toEqual(expect.arrayContaining(["Parent", "A"]));
+    expect(names.some((n) => n.endsWith("Under") || n.endsWith("Deeper"))).toBe(false);
   });
 
   it("reports how many samples there are when the index is out of range", () => {
@@ -220,6 +568,40 @@ const linearFor = (param: string): string =>
      <data-type:parameter data-type:name="${param}"/></transforms:linear>`;
 
 describe("FlowJo transform carriage", () => {
+  // FlowJo writes an ellipsoid's foci in DISPLAY CHANNELS while the polygons beside it are raw,
+  // so the conversion is what decides whether the gate lands on the data or a few hundred units
+  // from the origin. Foci 20 channels apart with a 52-channel major axis give semi-axes 26 and
+  // 24; on a 0..262144 linear axis one channel is 1024 raw units.
+  it("converts a FlowJo ellipsoid out of display channels into raw", () => {
+    const xml = syntheticWithTransforms(
+      linearFor("X") + linearFor("Y"),
+      `<Population name="Blob" count="9"><Gate>
+         <gating:EllipsoidGate xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="e1"
+                               gating:distance="52">
+           <gating:dimension><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+           <gating:dimension><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+           <gating:foci>
+             <gating:vertex><gating:coordinate data-type:value="100"/><gating:coordinate data-type:value="128"/></gating:vertex>
+             <gating:vertex><gating:coordinate data-type:value="120"/><gating:coordinate data-type:value="128"/></gating:vertex>
+           </gating:foci>
+         </gating:EllipsoidGate></Gate></Population>`,
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.warnings.join(" ")).not.toMatch(/skipped/);
+    const gates = Object.values(importGatingML(out.gatingMl, ["X", "Y"], {}, "flow").gates);
+    expect(gates).toHaveLength(1);
+    const g = gates[0] as unknown as {
+      gate_type: string; mean: [number, number]; covariance: number[][]; distance_square: number;
+    };
+    expect(g.gate_type).toBe("ellipse");
+    expect(g.mean).toEqual([110 * 1024, 128 * 1024]);
+    // Axis-aligned here, so the covariance is diag(a^2, b^2) scaled by the channel width squared.
+    expect(g.covariance[0][0]).toBeCloseTo(676 * 1024 * 1024, 0);
+    expect(g.covariance[1][1]).toBeCloseTo(576 * 1024 * 1024, 0);
+    expect(g.covariance[0][1]).toBeCloseTo(0, 6);
+    expect(g.distance_square).toBe(1);
+  });
+
   it("carries a biex pair and marks the gate's space", () => {
     const xml = syntheticWithTransforms(biexFor("X") + biexFor("Y"), polygonPop("A", "g1"));
     const out = flowJoWorkspaceToGatingML(xml, 0);
@@ -338,5 +720,56 @@ describe("FlowJo workspace import — names and units from a public ICS workspac
     );
     const out = flowJoWorkspaceToGatingML(xml, 0);
     expect(rectangleRanges(out.gatingMl, "g1")).toEqual([[0.5, 23], [100, 900]]);
+  });
+});
+
+// Four CurlyQuads sharing one crosshair under biex-displayed axes: ONE quadrant gate carrying
+// FlowJo's bend in that display space, four populations naming its quadrants, and the subtree
+// beneath a quadrant kept beneath it.
+describe("FlowJo curly quadrants", () => {
+  const curlyPop = (name: string, id: string, xBound: "min" | "max", yBound: "min" | "max", inner = "") =>
+    `<Population name="${name}" count="10"><Gate>
+       <gating:CurlyQuad xmlns:gating="${G}" xmlns:data-type="${D}" gating:id="${id}" percentX="0" percentY="0">
+         <gating:dimension gating:${xBound}="1000"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+         <gating:dimension gating:${yBound}="2000"><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+       </gating:CurlyQuad></Gate>
+       ${inner ? `<Subpopulations>${inner}</Subpopulations>` : ""}</Population>`;
+
+  it("becomes one quadrant gate with FlowJo's bend and four quadrant populations", () => {
+    const xml = syntheticWithTransforms(
+      biexFor("X") + biexFor("Y"),
+      polygonPop("Parent", "p1",
+        curlyPop("Q1", "q1", "max", "min") +
+        curlyPop("Q2", "q2", "min", "min", polygonPop("UnderQ2", "u1")) +
+        curlyPop("Q3", "q3", "min", "max") +
+        curlyPop("Q4", "q4", "max", "max")),
+    );
+    const out = flowJoWorkspaceToGatingML(xml, 0);
+    expect(out.warnings.filter((w) => /straight|skipped/.test(w))).toEqual([]);
+    expect(out.gatingMl).toContain("gatelab_curly_quadrant");
+    const res = importGatingML(out.gatingMl, ["X", "Y"], {}, "flow");
+    const quads = Object.values(res.gates).filter((g) => g.gate_type === "quadrant") as unknown as
+      Array<{ gate_id: string; center: [number, number]; curl?: { power: number; kx: number; ky: number }; space?: string }>;
+    expect(quads).toHaveLength(1);
+    const [quad] = quads;
+    expect(quad.space).toBe("display");
+    expect(quad.curl).toEqual({ power: 1.5, kx: 0.012, ky: 0.012 });
+    // The crosshair was carried into FlowJo's display space along with the vertices.
+    expect(quad.center[0]).toBeGreaterThan(0);
+    expect(quad.center[0]).toBeLessThan(256);
+    const pops = Object.values(res.populations) as unknown as Array<{
+      population_id: string; name: string; parent_id: string | null;
+      gate_refs: Array<{ gate_id: string; include: boolean; quadrant?: number }>;
+    }>;
+    const parent = pops.find((p) => p.name === "Parent")!;
+    for (const [name, q] of [["Q1", 1], ["Q2", 2], ["Q3", 3], ["Q4", 4]] as const) {
+      const pop = pops.find((p) => p.name === name)!;
+      expect(pop.gate_refs).toEqual([{ gate_id: quad.gate_id, include: true, quadrant: q }]);
+      expect(pop.parent_id).toBe(parent.population_id);
+    }
+    expect(pops.find((p) => p.name === "UnderQ2")!.parent_id).toBe(pops.find((p) => p.name === "Q2")!.population_id);
+    // The shared gate has no population of its own.
+    expect(pops.filter((p) => p.gate_refs.some((r) => r.gate_id === quad.gate_id))).toHaveLength(4);
+    expect(out.flowJoCounts["Q1"]).toBe(10);
   });
 });

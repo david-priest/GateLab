@@ -14,7 +14,7 @@ import {
   type FcsExportAssay,
 } from "../engine/fcsExport";
 import { analyzeGatingMLQuadrantOmissions, type GatingMLFormat } from "../engine/gatingmlExport";
-import type { GatingImportMode } from "../engine/gatingMerge";
+import type { GatingImportMode, GatingImportTarget } from "../engine/gatingMerge";
 import {
   parsePopulationEditTable,
   serializePopulationEditTemplate,
@@ -36,11 +36,21 @@ function ModalShell({ title, children }: { title: string; children: React.ReactN
   );
 }
 
-/** Gating-ML import summary and explicit replace/merge strategy choice. */
+/** What a gating import was read from. Every kind arrives as Gating-ML, but the user chose a file. */
+export type GatingImportSourceKind = "gatingml" | "flowjo" | "chorus" | "diva";
+const IMPORT_TITLES: Record<GatingImportSourceKind, string> = {
+  gatingml: "Import Gating-ML",
+  flowjo: "Import FlowJo workspace",
+  chorus: "Import FACSChorus gates",
+  diva: "Import FACSDiva gates",
+};
+
+/** Gating import summary and explicit replace/merge strategy choice. */
 export function GatingMlImportModal({
   nGates,
   nPopulations,
   sourceLabel,
+  sourceKind = "gatingml",
   currentRootName,
   hasExistingStrategy,
   mergeBlockedReason,
@@ -48,17 +58,28 @@ export function GatingMlImportModal({
   compensationNeedsConfirmation,
   matrixChoice,
   onMatrixChoice,
+  files = null,
   onCancel,
   onImport,
+  structureMatches,
+  busy = false,
 }: {
   nGates: number;
   nPopulations: number;
   sourceLabel: string;
+  sourceKind?: GatingImportSourceKind;
   currentRootName: string;
   hasExistingStrategy: boolean;
   mergeBlockedReason: string | null;
   compensationNote: string | null;
   compensationNeedsConfirmation: boolean;
+  /**
+   * The loaded files, when there is more than one: the tree needs a target. `tailored` counts
+   * the files with a tailored copy of their own, which "all files" drops.
+   */
+  files?: { total: number; selected: number; viewedName: string; tailored: number } | null;
+  /** An import is running: Import is disabled so a second click cannot apply it twice. */
+  busy?: boolean;
   /**
    * Offered when the loaded FCS and the workspace each carry a spillover matrix and they are not
    * the same. Both are legitimate — the file's is what the instrument recorded, the workspace's
@@ -67,15 +88,27 @@ export function GatingMlImportModal({
   matrixChoice: { workspaceLabel: string; maxDelta: number; value: "workspace" | "file" } | null;
   onMatrixChoice: (value: "workspace" | "file") => void;
   onCancel: () => void;
-  onImport: (mode: GatingImportMode) => void;
+  onImport: (mode: GatingImportMode, target: GatingImportTarget) => void;
+  /**
+   * The imported tree has the workspace tree's structure, so it can tailor files instead of
+   * replacing the tree. False, or absent, when there is no tree yet or the structures differ.
+   */
+  structureMatches?: boolean;
 }) {
   const { t } = useI18n();
   const [mode, setMode] = useState<GatingImportMode>(
     hasExistingStrategy && !mergeBlockedReason ? "merge" : "replace",
   );
+  const canTailor = hasExistingStrategy && structureMatches === true;
+  // Every file unless some file has tailored gates of its own, which applying to all would
+  // discard; then the selection, which the user chose.
+  const [target, setTarget] = useState<GatingImportTarget>(
+    canTailor && files && files.tailored > 0 && files.selected > 0 ? "selected" : "all",
+  );
+  const askTarget = !!files && files.total > 1;
 
   return (
-    <ModalShell title="Import GatingML">
+    <ModalShell title={t(IMPORT_TITLES[sourceKind])}>
       <div className="gl-modal-note">{t("Parsed {gates} gates and {populations} populations from {source}.", { gates: nGates, populations: nPopulations, source: sourceLabel })}</div>
       {compensationNote && (
         <div className={compensationNeedsConfirmation ? "gl-modal-warning" : "gl-modal-note"} role={compensationNeedsConfirmation ? "alert" : undefined}>
@@ -109,6 +142,11 @@ export function GatingMlImportModal({
           </label>
         </div>
       )}
+      {/* With nothing in the workspace there is nothing to merge with and nothing to replace,
+          so the question has no answer that means anything. It stays on "replace", which on an
+          empty workspace is simply "import". Asking it anyway made a first import look as
+          though it were about to destroy work that does not exist. */}
+      {hasExistingStrategy && (
       <div className="gl-modal-field">
         <span>{t("How should the imported strategy be applied?")}</span>
         <label style={{ display: "flex", alignItems: "flex-start", gap: 7, color: "var(--text)" }}>
@@ -121,7 +159,7 @@ export function GatingMlImportModal({
             onChange={() => setMode("merge")}
           />
           <span>
-            <strong>{t(hasExistingStrategy ? "Merge with current strategy (recommended)" : "Merge with current strategy")}</strong><br />
+            <strong>{t("Merge with current strategy (recommended)")}</strong><br />
             <span className="gl-modal-note">
               {t("Keep current gates and populations; add imported top-level populations beneath {root}. Scientific labels are preserved.", { root: currentRootName })}
             </span>
@@ -141,10 +179,126 @@ export function GatingMlImportModal({
           </span>
         </label>
       </div>
-      {mergeBlockedReason && <div className="gl-modal-warning" role="alert">{mergeBlockedReason}</div>}
+      )}
+      {hasExistingStrategy && mergeBlockedReason &&
+        <div className="gl-modal-warning" role="alert">{mergeBlockedReason}</div>}
+      {askTarget && files && (
+      <div className="gl-modal-field">
+        <span>{t("Which files should be gated with it?")}</span>
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 7, color: "var(--text)" }}>
+          <input type="radio" name="gatingml-import-target" value="all" checked={target === "all"} onChange={() => setTarget("all")} />
+          <span>
+            <strong>{t("All {count} files", { count: files.total })}</strong><br />
+            <span className="gl-modal-note">
+              {files.tailored > 0
+                ? t("It becomes the tree every file follows; the {count} with tailored gates of their own lose them.", { count: files.tailored })
+                : t("It becomes the tree every file follows. Tailor a gate for one file later by editing that file only.")}
+            </span>
+          </span>
+        </label>
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 7, color: "var(--text)" }}>
+          <input type="radio" name="gatingml-import-target" value="selected" checked={target === "selected"} disabled={!canTailor || files.selected === 0} onChange={() => setTarget("selected")} />
+          <span>
+            <strong>{t("The {count} selected files", { count: files.selected })}</strong><br />
+            <span className="gl-modal-note">{t("Its coordinates become their tailoring of the tree; the other files keep theirs.")}</span>
+          </span>
+        </label>
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 7, color: "var(--text)" }}>
+          <input type="radio" name="gatingml-import-target" value="viewed" checked={target === "viewed"} disabled={!canTailor} onChange={() => setTarget("viewed")} />
+          <span>
+            <strong>{t("Only the viewed file, {name}", { name: files.viewedName })}</strong><br />
+            <span className="gl-modal-note">{t("Its coordinates become this file's tailoring of the tree; the tree and the other files keep theirs.")}</span>
+          </span>
+        </label>
+        {!canTailor && (
+          <span className="gl-modal-note">
+            {hasExistingStrategy
+              ? t("Its structure differs from this workspace's tree, so it can only replace the tree for every file. A different tree belongs in a different workspace.")
+              : t("There is no tree yet, so it becomes the tree for every file.")}
+          </span>
+        )}
+      </div>
+      )}
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
-        <button className="gl-btn" onClick={() => onImport(mode)}>{t("Import")}</button>
+        <button className="gl-btn" disabled={busy} onClick={() => onImport(mode, askTarget ? target : "all")}>{busy ? t("Importing…") : t("Import")}</button>
+      </div>
+    </ModalShell>
+  );
+}
+
+/** One loaded file as the FlowJo export dialog lists it. */
+export interface FlowJoExportFile {
+  id: string;
+  name: string;
+  /** The hierarchy this file is gated under, as the file's sample will carry it. */
+  hierarchy: string;
+  checked: boolean;
+}
+
+export type FlowJoExportScope = "checked" | "all";
+
+/**
+ * FlowJo workspace export: which files, what the file will carry, and what was approximated.
+ * The warnings come from a dry run of the export, so what the dialog says is what the file does.
+ */
+export function FlowJoExportModal({
+  files,
+  plan,
+  onCancel,
+  onExport,
+}: {
+  files: FlowJoExportFile[];
+  plan: (scope: FlowJoExportScope) => { warnings: string[]; sampleCount: number; gateCount: number } | { error: string };
+  onCancel: () => void;
+  onExport: (scope: FlowJoExportScope) => void;
+}) {
+  const { t } = useI18n();
+  const checked = files.filter((f) => f.checked);
+  const [scope, setScope] = useState<FlowJoExportScope>(checked.length ? "checked" : "all");
+  const listed = scope === "checked" ? checked : files;
+  const preview = useMemo(() => plan(scope), [plan, scope]);
+  const blocked = "error" in preview;
+  return (
+    <ModalShell title="Export FlowJo workspace">
+      <div className="gl-modal-note">
+        {t("Written in the layout of a FlowJo 10.10 workspace: one sample per file, holding the tree that file is gated under, gate vertices in raw values, and each parameter's axis declared as FlowJo declares it (linear, biexponential, log, or arcsinh for mass cytometry). FlowJo opens it, and BD FACSChorus reads it with Import from FlowJo.")}
+      </div>
+      <div className="gl-modal-field">
+        <span>{t("Files")}</span>
+        <label className="gl-radio-row">
+          <input type="radio" name="flowjo-export-scope" checked={scope === "checked"} disabled={!checked.length} onChange={() => setScope("checked")} />
+          <span>{t("Checked files ({count})", { count: checked.length })}</span>
+        </label>
+        <label className="gl-radio-row">
+          <input type="radio" name="flowjo-export-scope" checked={scope === "all"} onChange={() => setScope("all")} />
+          <span>{t("All loaded files ({count})", { count: files.length })}</span>
+        </label>
+      </div>
+      <ul className="gl-modal-list">
+        {listed.map((f) => (
+          <li key={f.id}>{f.name} <span className="gl-muted">· {f.hierarchy}</span></li>
+        ))}
+      </ul>
+      {"error" in preview ? (
+        <div className="gl-modal-warning" role="alert">{preview.error}</div>
+      ) : (
+        <>
+          <div className="gl-modal-note">
+            {t("{gates} gate element(s) across {samples} sample(s).", { gates: preview.gateCount, samples: preview.sampleCount })}
+          </div>
+          {preview.warnings.length > 0 && (
+            <div className="gl-modal-warning" role="alert">
+              <ul>
+                {preview.warnings.map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+      <div className="gl-modal-actions">
+        <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
+        <button className="gl-btn" disabled={blocked || listed.length === 0} onClick={() => onExport(scope)}>{t("Export")}</button>
       </div>
     </ModalShell>
   );

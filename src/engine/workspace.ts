@@ -6,7 +6,7 @@
 
 import { zipSync, unzipSync, strToU8, strFromU8 } from "fflate";
 import type { GateEdgeMode } from "../ui/gateEdgeModes";
-import type { Gate, PopulationMap } from "./models";
+import { validCurl, type Gate, type PopulationMap } from "./models";
 import type { DisplayMode } from "./sample";
 import { readZipFileEntries } from "./workspaceArchiveStream";
 import {
@@ -15,6 +15,10 @@ import {
   portableAssayExpectedFileSizes,
   type PortableAssayArchiveEnvelope,
 } from "./workspacePortableAssays";
+import type { LayoutWorkspace } from "./layout";
+import type { HierarchyRef } from "./hierarchies";
+import type { IllustrationDimensionLayout } from "./illustrationLayout";
+import { isFigureSpec } from "./figureSchema";
 
 export const WORKSPACE_EXT = "gatelab";
 export const WORKSPACE_FORMAT = "gatelab-workspace";
@@ -56,6 +60,8 @@ export interface WorkspaceSample {
    * naming a hierarchy that no longer exists, reads as the first hierarchy.
    */
   hierarchyId?: string;
+  /** The group this file is in, when `gating.groups` lists it. Absent: no group. */
+  groupId?: string;
 }
 
 export interface WorkspaceFile {
@@ -79,7 +85,7 @@ export interface WorkspaceFile {
      * Every hierarchy in menu order, the active one included. Absent in a workspace saved
      * before 0.7.4: the tree above is then the one and only hierarchy.
      */
-    hierarchies?: { id: string; name: string }[];
+    hierarchies?: HierarchyRef[];
     active_hierarchy_id?: string;
     /** The parked hierarchies' trees (every id in `hierarchies` except the active one). */
     stored_hierarchies?: WorkspaceStoredHierarchy[];
@@ -88,14 +94,33 @@ export interface WorkspaceFile {
      * than under the active one. Absent reads as false: one hierarchy for every file.
      */
     perFileHierarchies?: boolean;
+    /**
+     * Named sets of files, each with a working tree of its own listed in `hierarchies` (the one
+     * whose `owner_group_id` is the group's id). A file's `groupId` names its group.
+     */
+    groups?: { id: string; name: string }[];
+    /**
+     * Per-file mode has created or imported independent working hierarchies. This separates an
+     * older workspace that only pointed every file at Main from one whose assignments are
+     * intentional, including files deliberately reassigned back to a shared hierarchy.
+     */
+    perFileHierarchyCopiesInitialized?: boolean;
   };
-  scales: { globalScales: Record<string, [number, number]> }; // shared per-channel axis ranges
+  scales: {
+    /** The active range map, retained for compatibility with workspaces saved before range modes. */
+    globalScales: Record<string, [number, number]>;
+    /** False lets each file retain its own axis ranges; absent preserves the legacy shared mode. */
+    lockBetweenFiles?: boolean;
+    /** Parked per-file range maps, keyed by the stable sample id. */
+    perSampleGlobalScales?: Record<string, Record<string, [number, number]>>;
+  };
   display: {
     xChannel: string;
     yChannel: string;
     mode: DisplayMode;
     maxEvents: number;
     contourThreshold: number;
+    contourLevels?: number;
     /** Shared pseudocolour transfer exponent. Higher values reserve warm colours for denser cores. */
     densityColorPower?: number;
     /** Main-plot mark opacity. Optional: workspaces saved before the control existed have none. */
@@ -115,10 +140,15 @@ export interface WorkspaceFile {
     showUnownedGates?: boolean;
     /** Main Gating plot typography. Optional for workspaces saved before these controls existed. */
     fontSizes?: GatingFontSizes;
+    /** The side panes' widths as the user left them, in px; absent keeps the defaults and the auto-fit. */
+    paneWidths?: { left?: number; right?: number };
   };
   /** Illustration-tab settings + named presets (capture_illust_settings / illust_presets). */
   illustration?: IllustrationConfig;
   illustrationPresets?: IllustrationPreset[];
+  /** Renameable freeform plot sheets. Optional for every workspace saved before Layout existed. */
+  layout?: LayoutWorkspace;
+  plotting?: Record<string, unknown>;
   /** Ordered metadata field columns (names + optional categorical level order). Shared. */
   metadataColumns?: { name: string; levels?: string[] }[];
   /** Population annotation (Metadata tab, 2nd table): keyed by population_id → { field: value }. */
@@ -126,10 +156,14 @@ export interface WorkspaceFile {
   populationMetaColumns?: { name: string; levels?: string[] }[];
 }
 
-/** A hierarchy that was not active when the workspace was saved. Gates are the shared table. */
-export interface WorkspaceStoredHierarchy {
-  id: string;
-  name: string;
+/** A hierarchy that was not active when the workspace was saved, including its own gate table. */
+export interface WorkspaceStoredHierarchy extends HierarchyRef {
+  /**
+   * The hierarchy's own gates. Optional for workspaces written before hierarchies owned their
+   * geometry: those reference the file's shared gate table, and are read that way on load.
+   */
+  gates?: Record<string, Gate>;
+  gate_order?: string[];
   populations: PopulationMap;
   root_population_id: string | null;
   active_population_id: string | null;
@@ -137,6 +171,8 @@ export interface WorkspaceStoredHierarchy {
 
 /** Illustration-tab configuration (capture_illust_settings) — persisted per-workspace + as presets. */
 export interface IllustrationConfig {
+  /** Independent, provenance-aware figure editor. Legacy fields remain readable by Layout. */
+  figure?: import("./figure").FigureSpec;
   /** Explicit plot family. Optional so workspaces saved before heatmaps remain valid. */
   plotType?: "biplot" | "histogram" | "heatmap";
   /** Pool matching populations across checked FCS files; false keeps file-labelled rows. */
@@ -145,11 +181,15 @@ export interface IllustrationConfig {
   selectionMode?: "uniform" | "matrix";
   /** Population IDs selected for each persisted sample ID when selectionMode is matrix. */
   selectedPopulationsBySample?: Record<string, string[]>;
+  /** Structured figure dimensions. Optional for workspaces saved before the layout editor. */
+  dimensionLayout?: IllustrationDimensionLayout;
   popIds: string[];
   xChannels: string[];
   yChannel: string;
   displayMode: string;
   plotSize: number;
+  /** The inspector pane's width as the user left it, in px. */
+  inspectorWidth?: number;
   nColumns: number;
   fitToColumns: boolean;
   maxEvents: number;
@@ -162,6 +202,7 @@ export interface IllustrationConfig {
   /** Shared pseudocolour transfer exponent captured with illustration presets. */
   densityColorPower?: number;
   contourThreshold: number;
+  contourLevels?: number;
   kdeBandwidth: number;
   pubStyle: boolean;
   gateLineWidth: number;
@@ -430,6 +471,8 @@ export function validateWorkspace(ws: WorkspaceFile): true {
   if (!Number.isInteger(ws.activeSample) || ws.activeSample < 0 || ws.activeSample >= ws.samples.length) {
     invalidWorkspace("activeSample is outside the sample list.");
   }
+  if (ws.illustration?.figure !== undefined && !isFigureSpec(ws.illustration.figure)) invalidWorkspace("illustration figure settings are malformed.");
+  if (ws.illustrationPresets !== undefined && (!Array.isArray(ws.illustrationPresets) || ws.illustrationPresets.some(p => !isRecord(p) || !isRecord(p.config) || (p.config.figure !== undefined && !isFigureSpec(p.config.figure))))) invalidWorkspace("illustration preset settings are malformed.");
 
   if (!isRecord(ws.scales) || !isRecord(ws.scales.globalScales)) {
     invalidWorkspace("shared scale settings are missing or invalid.");
@@ -437,6 +480,27 @@ export function validateWorkspace(ws: WorkspaceFile): true {
   for (const [channel, range] of Object.entries(ws.scales.globalScales)) {
     if (!channel || !finitePair(range) || range[1] <= range[0]) {
       invalidWorkspace(`shared scale for "${channel}" is invalid.`);
+    }
+  }
+  if (
+    ws.scales.lockBetweenFiles !== undefined &&
+    typeof ws.scales.lockBetweenFiles !== "boolean"
+  ) {
+    invalidWorkspace("the scale-lock setting is invalid.");
+  }
+  if (ws.scales.perSampleGlobalScales !== undefined) {
+    if (!isRecord(ws.scales.perSampleGlobalScales)) {
+      invalidWorkspace("per-sample scale settings are invalid.");
+    }
+    for (const [sampleId, sampleScales] of Object.entries(ws.scales.perSampleGlobalScales)) {
+      if (!sampleId || !isRecord(sampleScales)) {
+        invalidWorkspace("per-sample scale settings are invalid.");
+      }
+      for (const [channel, range] of Object.entries(sampleScales)) {
+        if (!channel || !finitePair(range) || range[1] <= range[0]) {
+          invalidWorkspace(`scale for "${channel}" in sample "${sampleId}" is invalid.`);
+        }
+      }
     }
   }
   if (!isRecord(ws.display) || typeof ws.display.xChannel !== "string" || typeof ws.display.yChannel !== "string" ||
@@ -477,6 +541,9 @@ export function validateWorkspace(ws: WorkspaceFile): true {
       }
     } else if (gate.gate_type === "quadrant") {
       if (!finitePair(gate.center)) invalidWorkspace(`quadrant gate "${gateId}" has an invalid center.`);
+      if (gate.curl !== undefined && !validCurl(gate.curl)) {
+        invalidWorkspace(`quadrant gate "${gateId}" has an invalid curl.`);
+      }
     } else if (gate.gate_type === "ellipse") {
       // An ellipse carries the Gating-ML form and no vertices at all: mean, a symmetric 2x2
       // covariance, and the distanceSquare the boundary sits at. Everything drawn or evaluated
@@ -515,6 +582,13 @@ export function validateWorkspace(ws: WorkspaceFile): true {
   }
 
   validatePopulationTree(gates, populations, ws.gating.root_population_id, ws.gating.active_population_id);
+  const groups = ws.gating.groups;
+  if (groups !== undefined) {
+    if (!Array.isArray(groups)) invalidWorkspace("groups must be a list.");
+    for (const g of groups) {
+      if (!isRecord(g) || typeof g.id !== "string" || !g.id || typeof g.name !== "string") invalidWorkspace("a group needs an id and a name.");
+    }
+  }
   const hierarchyRefs = ws.gating.hierarchies;
   if (hierarchyRefs !== undefined) {
     if (!Array.isArray(hierarchyRefs) || hierarchyRefs.length === 0) invalidWorkspace("hierarchies must be a non-empty list.");
@@ -524,7 +598,47 @@ export function validateWorkspace(ws: WorkspaceFile): true {
         invalidWorkspace("every hierarchy needs an id and a name.");
       }
       if (ids.has(ref.id)) invalidWorkspace(`hierarchy id "${ref.id}" is listed twice.`);
+      if (ref.owner_sample_id !== undefined && (typeof ref.owner_sample_id !== "string" || !ref.owner_sample_id)) {
+        invalidWorkspace(`hierarchy "${ref.name}" has a malformed owner_sample_id.`);
+      }
+      if (ref.owner_sample_id !== undefined && !sampleIds.has(ref.owner_sample_id)) {
+        invalidWorkspace(`hierarchy "${ref.name}" names a file owner that is not in the workspace.`);
+      }
+      if (ref.structure_locked !== undefined && typeof ref.structure_locked !== "boolean") {
+        invalidWorkspace(`hierarchy "${ref.name}" has a malformed structure_locked flag.`);
+      }
+      // A group's tree is owned by its group; it is locked the way a file's copy is.
+      if (ref.owner_group_id !== undefined && (typeof ref.owner_group_id !== "string" || !ref.owner_group_id)) {
+        invalidWorkspace(`hierarchy "${ref.name}" has a malformed owner_group_id.`);
+      }
+      if (ref.owner_group_id !== undefined && !(ws.gating.groups ?? []).some((g) => isRecord(g) && g.id === ref.owner_group_id)) {
+        invalidWorkspace(`hierarchy "${ref.name}" names a group that is not in the workspace.`);
+      }
+      if (ref.owner_sample_id !== undefined && ref.owner_group_id !== undefined) {
+        invalidWorkspace(`hierarchy "${ref.name}" cannot belong to both a file and a group.`);
+      }
+      if (ref.structure_locked === true && !ref.owner_sample_id && !ref.owner_group_id) {
+        invalidWorkspace(`hierarchy "${ref.name}" cannot lock structure without a file or group owner.`);
+      }
+      for (const [field, mapping] of [
+        ["source_gate_ids", ref.source_gate_ids],
+        ["source_population_ids", ref.source_population_ids],
+      ] as const) {
+        if (mapping !== undefined && (!isRecord(mapping) ||
+            Object.entries(mapping).some(([copyId, sourceId]) => !copyId || typeof sourceId !== "string" || !sourceId))) {
+          invalidWorkspace(`hierarchy "${ref.name}" has a malformed ${field}.`);
+        }
+      }
+      if ((ref.source_gate_ids !== undefined || ref.source_population_ids !== undefined) && !ref.source_hierarchy_id) {
+        invalidWorkspace(`hierarchy "${ref.name}" has source correspondence without a source hierarchy.`);
+      }
       ids.add(ref.id);
+    }
+    for (const ref of hierarchyRefs) {
+      if (ref.source_hierarchy_id !== undefined &&
+          (typeof ref.source_hierarchy_id !== "string" || !ids.has(ref.source_hierarchy_id) || ref.source_hierarchy_id === ref.id)) {
+        invalidWorkspace(`hierarchy "${ref.name}" has an invalid source_hierarchy_id.`);
+      }
     }
     const activeId = ws.gating.active_hierarchy_id;
     if (typeof activeId !== "string" || !ids.has(activeId)) invalidWorkspace("active_hierarchy_id does not name a listed hierarchy.");
@@ -538,7 +652,13 @@ export function validateWorkspace(ws: WorkspaceFile): true {
       if (storedIds.has(h.id)) invalidWorkspace(`hierarchy "${h.id}" is stored twice.`);
       storedIds.add(h.id);
       if (!isRecord(h.populations)) invalidWorkspace(`hierarchy "${h.name}" has no population map.`);
-      validatePopulationTree(gates, h.populations as PopulationMap, h.root_population_id, h.active_population_id, `hierarchy "${h.name}": `);
+      // Against its OWN gates where it has them; against the shared table for a workspace
+      // written before hierarchies owned their geometry.
+      if (h.gates !== undefined && !isRecord(h.gates)) {
+        invalidWorkspace(`hierarchy "${h.name}" has a malformed gate table.`);
+      }
+      const hierarchyGates = (h.gates as Record<string, Gate> | undefined) ?? gates;
+      validatePopulationTree(hierarchyGates, h.populations as PopulationMap, h.root_population_id, h.active_population_id, `hierarchy "${h.name}": `);
     }
     for (const id of ids) {
       if (id !== activeId && !storedIds.has(id)) invalidWorkspace(`hierarchy "${id}" is listed but its tree is missing.`);
@@ -546,10 +666,18 @@ export function validateWorkspace(ws: WorkspaceFile): true {
   }
   const perFile = ws.gating.perFileHierarchies;
   if (perFile !== undefined && typeof perFile !== "boolean") invalidWorkspace("perFileHierarchies must be true or false.");
+  const perFileCopies = ws.gating.perFileHierarchyCopiesInitialized;
+  if (perFileCopies !== undefined && typeof perFileCopies !== "boolean") {
+    invalidWorkspace("perFileHierarchyCopiesInitialized must be true or false.");
+  }
   for (const wss of ws.samples) {
     // An unknown id is tolerated (the file falls back to the first hierarchy), a non-string is not.
     if (wss.hierarchyId !== undefined && (typeof wss.hierarchyId !== "string" || !wss.hierarchyId)) {
       invalidWorkspace(`sample "${wss.fileName}" has a malformed hierarchyId.`);
+    }
+    // Likewise a group id: one naming no listed group is dropped on load, a non-string is refused.
+    if (wss.groupId !== undefined && (typeof wss.groupId !== "string" || !wss.groupId)) {
+      invalidWorkspace(`sample "${wss.fileName}" has a malformed groupId.`);
     }
   }
   const selectedGate = ws.gating.selected_gate_id;

@@ -53,12 +53,19 @@ describe("hierarchy-scoped gate visibility", () => {
     ]);
   });
 
-  it("narrows to the selected gate's sub-branch", () => {
-    // Clicking EarlyMem CD27+ while viewing IgD+ leaves it and its sibling only.
-    expect(visible("IgD+", "g-early-pos")).toEqual(["g-early-pos", "g-early-neg"]);
-    // Selecting across branches follows the selection, which is how a gate in another
-    // population is inspected without losing the rest of its own branch.
-    expect(visible("IgD+", "g-cs-pos")).toEqual(["g-cs-pos", "g-cs-neg"]);
+  it("adds the selected gate's siblings without taking the branch away", () => {
+    // Selecting used to REPLACE the scope with the selected gate's siblings, so everything else
+    // left the plot -- and dragging a gate selects it, which meant moving one hid its
+    // neighbours and moving another brought them back. Selection may widen what is shown; it
+    // must never remove a gate that was already there.
+    const unselected = visible("IgD+", null);
+    for (const id of unselected) {
+      expect(visible("IgD+", "g-early-pos")).toContain(id);
+      expect(visible("IgD+", "g-cs-pos")).toContain(id);
+    }
+    // Selecting a gate in ANOTHER branch brings that branch's alternatives in as well, which is
+    // what the selection case was for.
+    expect(visible("IgD+", "g-cs-pos")).toContain("g-cs-neg");
   });
 
   it("never hides the gate the user just selected", () => {

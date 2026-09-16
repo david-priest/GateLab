@@ -4,7 +4,7 @@
 // inferno) and the qualitative Set 2 / Dark 3 are sampled from embedded anchor stops so GateLab
 // needs no colour package (R used grDevices::hcl.colors). Visually equivalent for a preview.
 
-export type PaletteName = "paired" | "default" | "viridis" | "plasma" | "cividis" | "inferno" | "set2" | "dark3";
+export type PaletteName = "paired" | "default" | "viridis" | "plasma" | "cividis" | "inferno" | "magma" | "turbo" | "jet" | "greys" | "set2" | "dark3";
 
 export const OVERLAY_PALETTES: { value: PaletteName; label: string }[] = [
   { value: "paired", label: "Paired (matches Division)" },
@@ -16,6 +16,28 @@ export const OVERLAY_PALETTES: { value: PaletteName; label: string }[] = [
   { value: "set2", label: "Set 2" },
   { value: "dark3", label: "Dark 3" },
 ];
+
+/**
+ * Palettes offered when the overlay is a continuous marker rather than a set of categories.
+ *
+ * Only sequential ramps appear here. A qualitative palette (Paired, Tableau, Set 2) carries no
+ * order: sampled across 256 levels it cycles hues, so a brighter event can come back a colour
+ * that reads as lower than a dimmer one, which makes the colour bar a lie. They stay available
+ * for the categorical overlays, where cycling hues is the point.
+ */
+export const MARKER_PALETTES: { value: PaletteName; label: string }[] = [
+  { value: "viridis", label: "Viridis" },
+  { value: "magma", label: "Magma" },
+  { value: "plasma", label: "Plasma" },
+  { value: "inferno", label: "Inferno" },
+  { value: "cividis", label: "Cividis (colour-blind safe)" },
+  { value: "turbo", label: "Turbo" },
+  { value: "jet", label: "Jet (FlowJo-like)" },
+  { value: "greys", label: "Greys" },
+];
+
+/** The marker palette a workspace starts on: perceptually uniform, and safe for most readers. */
+export const DEFAULT_MARKER_PALETTE: PaletteName = "viridis";
 
 const PAIRED = ["#a6cee3", "#1f78b4", "#b2df8a", "#33a02c", "#fb9a99", "#e31a1c",
   "#fdbf6f", "#ff7f00", "#cab2d6", "#6a3d9a", "#ffff99", "#b15928"];
@@ -30,6 +52,14 @@ const VIRIDIS = ["#440154", "#472d7b", "#3b528b", "#2c728e", "#21918c", "#28ae80
 const PLASMA = ["#0d0887", "#5402a3", "#8b0aa5", "#b93289", "#db5c68", "#f48849", "#febd2a", "#f0f921"];
 const CIVIDIS = ["#00204d", "#00336f", "#39486b", "#575d6d", "#707173", "#8a8779", "#a69d75", "#c4b56c", "#e4cf5b", "#ffea46"];
 const INFERNO = ["#000004", "#1b0c41", "#4a0c6b", "#781c6d", "#a52c60", "#cf4446", "#ed6925", "#fb9b06", "#f7d13d", "#fcffa4"];
+const MAGMA = ["#000004", "#180f3d", "#440f76", "#721f81", "#9e2f7f", "#cd4071", "#f1605d", "#fd9668", "#feca8d", "#fcfdbf"];
+const TURBO = ["#30123b", "#4145ab", "#4675ed", "#39a2fc", "#1bcfd4", "#24eca6", "#61fc6c", "#a4fc3b", "#d1e834", "#f3c63a",
+  "#fe9b2d", "#f36315", "#d93806", "#b11901", "#7a0403"];
+// The FlowJo/legacy "jet" ramp, for readers who expect a cytometry plot to look like one. It is
+// not perceptually uniform -- that is the whole reason viridis is the default here -- but a
+// marker histogram read against a decade of published figures is easier in the familiar colours.
+const JET = ["#00007f", "#0000ff", "#007fff", "#00ffff", "#7fff7f", "#ffff00", "#ff7f00", "#ff0000", "#7f0000"];
+const GREYS = ["#f0f0f0", "#252525"];
 
 function hexToRgb(hex: string): [number, number, number] {
   const h = hex.replace("#", "");
@@ -88,6 +118,10 @@ export function paletteColors(name: PaletteName, k: number): string[] {
     case "plasma": return sampleRamp(PLASMA, n);
     case "cividis": return sampleRamp(CIVIDIS, n);
     case "inferno": return sampleRamp(INFERNO, n);
+    case "magma": return sampleRamp(MAGMA, n);
+    case "turbo": return sampleRamp(TURBO, n);
+    case "jet": return sampleRamp(JET, n);
+    case "greys": return sampleRamp(GREYS, n);
     default: return qualRamp(PAIRED, n);
   }
 }

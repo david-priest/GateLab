@@ -8,6 +8,7 @@ import type {
   TransformSpec,
   Vertex,
 } from "../engine/models";
+import { validCurl } from "../engine/models";
 import {
   migrateWorkspaceToV2,
   validateWorkspace,
@@ -91,6 +92,7 @@ const TRANSFORM_PARAMETERS: Record<TransformSpec["kind"], readonly string[]> = {
   logicle: ["T", "W", "M", "A"],
   biex: ["maxValue", "pos", "neg", "widthBasis", "channelRange"],
   wsplog: ["offset", "decades"],
+  flog: ["T", "M"],
 };
 
 function transformSpec(value: unknown, label: string): TransformSpec {
@@ -165,10 +167,16 @@ function normalizeGate(value: unknown, gateId: string, index: number): Gate {
     ...gateSpaceFields(source, name),
   };
   if (source.gate_type === "quadrant") {
+    // A curl that does not validate is dropped rather than refused: the crosshair is still a
+    // gate, and a hand-edited coefficient is not worth losing the workspace over.
+    const curl = validCurl(source.curl)
+      ? { power: source.curl.power, kx: source.curl.kx, ky: source.curl.ky }
+      : null;
     return {
       ...common,
       gate_type: "quadrant",
       center: pair(source.center, `centre for gate '${name}'`),
+      ...(curl ? { curl } : {}),
     };
   }
   if (source.gate_type === "ellipse") {
@@ -464,8 +472,13 @@ export function convertHostedGateSpace<
   const gates = Object.fromEntries(
     Object.entries(workspace.gating.gates).map(([gateId, gate]) => {
       if (gate.gate_type === "quadrant") {
+        // A bend is a shape in the gate's own space and means nothing in another, so a space
+        // change straightens the crosshair. No hosted workspace written before curly quadrants
+        // existed carries one, which is the only kind this legacy converter sees.
+        const { curl: _curl, ...rest } = gate;
+        void _curl;
         return [gateId, {
-          ...gate,
+          ...rest,
           center: [
             convert(gate.x_channel, gate.center[0]),
             convert(gate.y_channel, gate.center[1]),

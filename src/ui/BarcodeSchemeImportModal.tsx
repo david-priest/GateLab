@@ -30,7 +30,6 @@ export interface BarcodeImportDraft {
    * When set, the strategy goes into a new hierarchy of this name (its own All Events, the
    * QC chain beneath) and the current hierarchy is left untouched; `parentId` is ignored.
    */
-  newHierarchyName: string | null;
 }
 
 export function BarcodeSchemeImportModal({
@@ -41,10 +40,8 @@ export function BarcodeSchemeImportModal({
   canLearn,
   qcPreview,
   reusePreview,
-  suggestedHierarchyName,
   onPlanesChange,
   onParentChange,
-  onNewHierarchyChange,
   onQcChange,
   onReuseChange,
   onTemplateDefault,
@@ -63,12 +60,8 @@ export function BarcodeSchemeImportModal({
   qcPreview: QcPreviewWithSource | null;
   /** What a build would reuse and create, when the scheme has no problems. */
   reusePreview: { reused: number; created: number } | null;
-  /** The name a new hierarchy is offered with. */
-  suggestedHierarchyName: string;
   onPlanesChange: (planes: BarcodePlane[] | null) => void;
   onParentChange: (populationId: string) => void;
-  /** null returns to attaching under a population of the current hierarchy. */
-  onNewHierarchyChange: (name: string | null) => void;
   onQcChange: (qc: boolean) => void;
   onReuseChange: (reuse: boolean) => void;
   onTemplateDefault: () => void;
@@ -84,12 +77,10 @@ export function BarcodeSchemeImportModal({
   const planes = draft.planes ?? scheme.planes;
   const channelKeys = channels.map((c) => c.key);
   const problems = scheme.problems;
-  const toNewHierarchy = draft.newHierarchyName !== null;
   const hierarchyOnly = scheme.hierarchyOnly;
   const canImport =
     problems.length === 0 &&
-    (hierarchyOnly ? !!qcPreview && qcPreview.populations.length > 0 && draft.qc : scheme.samples.length > 0 && planes.length > 0) &&
-    (!toNewHierarchy || (draft.newHierarchyName ?? "").trim().length > 0);
+    (hierarchyOnly ? !!qcPreview && qcPreview.populations.length > 0 && draft.qc : scheme.samples.length > 0 && planes.length > 0);
 
   const setPlane = (i: number, patch: Partial<BarcodePlane>) => {
     const next = planes.map((p, j) => (j === i ? { ...p, ...patch } : p));
@@ -126,31 +117,14 @@ export function BarcodeSchemeImportModal({
         <label className="gl-modal-field">
           <span>{t("Attach under")}</span>
           <select
-            value={toNewHierarchy ? "__new-hierarchy" : draft.parentId}
-            onChange={(e) => {
-              if (e.target.value === "__new-hierarchy") onNewHierarchyChange(suggestedHierarchyName);
-              else {
-                onNewHierarchyChange(null);
-                onParentChange(e.target.value);
-              }
-            }}
+            value={draft.parentId}
+            onChange={(e) => onParentChange(e.target.value)}
           >
             {order.map(({ popId, depth }) => (
               <option key={popId} value={popId}>{" ".repeat(depth * 2)}{state.populations[popId]?.name ?? popId}</option>
             ))}
-            <option value="__new-hierarchy">{t("New hierarchy… (the current one is kept; gates are shared)")}</option>
           </select>
         </label>
-        {toNewHierarchy && (
-          <label className="gl-modal-field">
-            <span>{t("New hierarchy name")}</span>
-            <input
-              value={draft.newHierarchyName ?? ""}
-              onChange={(e) => onNewHierarchyChange(e.target.value)}
-              aria-label={t("New hierarchy name")}
-            />
-          </label>
-        )}
 
         <div className="gl-modal-field">
           <span>{t("Template")}: {draft.templateLabel}</span>

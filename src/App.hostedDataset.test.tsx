@@ -190,8 +190,15 @@ describe("App SCE host loading", () => {
     expect(container.textContent).toContain("Save to SCE");
     expect(container.textContent).not.toContain("+ Files…");
     expect(container.textContent).not.toContain("Open Workspace…");
+    await act(async () => {
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.startsWith("Pool selected files"))!.click();
+      await new Promise(resolve => setTimeout(resolve, 30));
+    });
     expect(plotHarness.eventCount).toBe(3);
 
+    await act(async () => {
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Edit the tree")!.click();
+    });
     await act(async () => {
       plotHarness.onNewGate?.({
         gate_type: "polygon",
@@ -282,18 +289,34 @@ describe("App SCE host loading", () => {
       );
       await new Promise((resolve) => setTimeout(resolve, 30));
     });
+    await act(async () => {
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.startsWith("Pool selected files"))!.click();
+      await new Promise(resolve => setTimeout(resolve, 30));
+    });
     expect(plotHarness.eventCount).toBe(3);
 
+    // "Colour by" is a searchable picker: its options exist only while the panel is open.
+    const openColourBy = () => {
+      if (!container.querySelector(".gl-searchable-select-panel")) {
+        act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Colour by"]')!.click());
+      }
+      return container.querySelector<HTMLSelectElement>(".gl-searchable-select-panel select")!;
+    };
+    const chooseColourBy = async (value: string) => {
+      const list = openColourBy();
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(list, value);
+        list.dispatchEvent(new Event("change", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      });
+    };
+
+    openColourBy();
     const option = container.querySelector<HTMLOptionElement>('option[value="coldata:cluster"]');
     expect(option?.textContent).toBe("cluster (2)");
     // The numeric column is not offered: there is nothing categorical to colour by.
     expect(container.querySelector('option[value="coldata:score"]')).toBeNull();
-    const select = option!.closest("select")!;
-    await act(async () => {
-      select.value = "coldata:cluster";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 30));
-    });
+    await chooseColourBy("coldata:cluster");
 
     expect(readCategoricalColumn).toHaveBeenCalledTimes(1);
     expect(readCategoricalColumn.mock.calls[0][0]).toMatchObject({ datasetId: "sce", columnName: "cluster" });
@@ -311,13 +334,8 @@ describe("App SCE host loading", () => {
     expect([...Uint8Array.from(atob(payload.color_b64!), (c) => c.charCodeAt(0))]).toEqual([0, 1, 1]);
 
     // Choosing it again does not fetch again.
-    await act(async () => {
-      select.value = "none";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-      select.value = "coldata:cluster";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 30));
-    });
+    await chooseColourBy("none");
+    await chooseColourBy("coldata:cluster");
     expect(readCategoricalColumn).toHaveBeenCalledTimes(1);
   });
 
