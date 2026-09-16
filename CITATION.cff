@@ -8,6 +8,14 @@ title: "GateLab"
 version: 0.8.0
 date-released: "2026-09-16"
 license: MIT
+doi: 10.5281/zenodo.22787966
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.22787965
+    description: "The concept DOI: every version of GateLab."
+  - type: doi
+    value: 10.5281/zenodo.22787966
+    description: "GateLab 0.8.0."
 repository-code: "https://github.com/david-priest/GateLab"
 url: "https://david-priest.github.io/GateLab/"
 abstract: "Browser-based manual gating of flow and mass cytometry data. FCS files are parsed, transformed and gated locally; one population tree per workspace, tailored per file or per group; FlowJo workspace and FACSChorus import and export; Gating-ML 2.0; compensation; statistics and publication figures."

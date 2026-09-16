@@ -9,6 +9,8 @@ entirely in the browser with no R backend.
 
 ## [Launch GateLab in your browser →](https://david-priest.github.io/GateLab/)
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22787965.svg)](https://doi.org/10.5281/zenodo.22787965)
+
 No installation is required for the hosted app. Your FCS files and workspaces are
 processed locally in your browser and are not uploaded for analysis. GateLab can also be
 installed and run locally using the instructions below.
