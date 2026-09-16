@@ -248,6 +248,39 @@ function defaultBiex(sample: Sample, range: number): BiexParams {
   return { maxValue: halfDecadeCeil(range), pos: 4.5, neg: 0, widthBasis: -10, channelRange: FLOWJO_CHANNELS };
 }
 
+/**
+ * The candidate width bases for a default biex, FlowJo's -10 first. FlowJo itself writes any
+ * negative value here (-22.68, -36.91, -60.32 on one published workspace), so nothing about the
+ * ladder is special beyond covering four decades of negative range.
+ */
+const WIDTH_BASIS_LADDER = [-10, -20, -50, -100, -200, -500, -1000, -2000, -5000, -10000, -20000, -50000, -100000];
+
+/**
+ * A biex declaration whose display reaches down to `needMin`, the most negative raw value any
+ * gate on this parameter has to show. The default width basis of -10 puts the floor of the
+ * display at about -113 on a 316,228 top; a polygon vertex at -611 is then traced in a space
+ * that cannot hold it, and comes out at the floor. That moved two gates of a published strategy
+ * on their way through GateLab (2026-09-16). Widening the width basis lowers the floor and
+ * changes nothing above zero except the linear region near it, which is what FlowJo's own
+ * auto-width does.
+ */
+function coveringBiex(base: BiexParams, needMin: number | undefined): { params: BiexParams; covered: boolean } {
+  if (needMin === undefined || !Number.isFinite(needMin) || needMin >= 0) return { params: base, covered: true };
+  const target = needMin * 1.05;
+  const ladder = [base.widthBasis, ...WIDTH_BASIS_LADDER.filter((w) => w < base.widthBasis)];
+  let last = base;
+  for (const widthBasis of ladder) {
+    const params = { ...base, widthBasis };
+    try {
+      if (biexTransform(params).inverse(0) <= target) return { params, covered: true };
+    } catch {
+      break;
+    }
+    last = params;
+  }
+  return { params: last, covered: false };
+}
+
 /** Extent of a channel's raw values, sampled; null for an empty column. */
 function columnExtent(sample: Sample, idx: number): [number, number] | null {
   const raw = sample.rawColumnData(idx);
@@ -282,6 +315,8 @@ function declareAxis(
   displaySpecs: readonly TransformSpec[],
   timestep: number | null,
   warnings: string[],
+  /** The most negative raw value a gate on this parameter has to show; the default biex must reach it. */
+  gateMin?: number,
 ): { decl: AxisDecl; fileScale: number } {
   const ch = sample.channels[idx];
   const fileScale = timestep !== null && isTimeAxis(ch.pnn) ? timestep : 1;
@@ -311,7 +346,10 @@ function declareAxis(
   }
   const fluor = sample.instrument === "flow" && sample.isFluorChannel(idx);
   if (fluor && (spec.kind === "logicle" || spec.kind === "asinh")) {
-    const params = defaultBiex(sample, ch.range);
+    const { params, covered } = coveringBiex(defaultBiex(sample, ch.range), gateMin);
+    if (!covered) {
+      warnings.push(`No biex width reaches ${fmtNum(gateMin ?? 0)} on ${ch.pnn}; a gate there is written at the axis floor.`);
+    }
     try {
       biexTransform(params);
       return { decl: { kind: "biex", params }, fileScale };
@@ -374,7 +412,7 @@ function vertexXml(v: Vertex): string[] {
  */
 function polygonXml(
   sample: Sample, gate: Gate, ring: readonly Vertex[], ax: Axis, ay: Axis, id: string, quadId: number,
-  corners?: readonly number[],
+  corners?: readonly number[], warnings?: string[],
 ): { lines: string[]; densified: boolean } {
   const toFile = (p: Vertex): Vertex => [
     sample.gateToRaw(gate, gate.x_channel, p[0]) * ax.fileScale,
@@ -402,6 +440,20 @@ function polygonXml(
       const spanX = Math.max(...xs) - Math.min(...xs);
       const spanY = Math.max(...ys) - Math.min(...ys);
       detail.span = [spanX > 0 ? spanX : Infinity, spanY > 0 ? spanY : Infinity];
+    }
+    // A vertex the declared display cannot hold is pinned at its floor or ceiling by the
+    // transform, and the traced polygon would carry the pinned position as if it were the gate.
+    // The axis declaration is built to cover every vertex, so this is the check on that promise.
+    for (const p of ring) {
+      const f = toFile(p);
+      const back: Vertex = [ax.inverse(ax.forward(f[0])), ay.inverse(ay.forward(f[1]))];
+      for (const k of [0, 1] as const) {
+        if (Math.abs(back[k] - f[k]) > 1e-6 * Math.max(1, Math.abs(f[k]))) {
+          const axis = k === 0 ? ax : ay;
+          warnings?.push(`${gate.name}: a vertex at ${fmtNum(f[k])} on ${axis.name} lies outside the declared axis and is written at its edge.`);
+          break;
+        }
+      }
     }
     if (dense) {
       const breaks = detail.edgeBreaks && corners
@@ -587,19 +639,19 @@ function gateFor(ctx: SampleContext, ref: GateRef, id: string): GateSpec | null 
     return { lines: rectangleXml(ctx.sample, gate, ax, ay, id), densified: false, recast: null };
   }
   if (gate.gate_type === "polygon") {
-    const { lines, densified } = polygonXml(ctx.sample, gate, gate.vertices, ax, ay, id, -1);
+    const { lines, densified } = polygonXml(ctx.sample, gate, gate.vertices, ax, ay, id, -1, undefined, ctx.warnings);
     return { lines, densified, recast: null };
   }
   if (gate.gate_type === "ellipse") {
     const exact = ellipsoidXml(ctx.sample, gate, ax, ay, id);
     if (exact) return { lines: exact, densified: false, recast: null };
-    const { lines, densified } = polygonXml(ctx.sample, gate, ellipseBoundary(gate, 128), ax, ay, id, -1, [0]);
+    const { lines, densified } = polygonXml(ctx.sample, gate, ellipseBoundary(gate, 128), ax, ay, id, -1, [0], ctx.warnings);
     return { lines, densified, recast: "ellipse" };
   }
   if (gate.gate_type !== "quadrant") return null;
   const q = ref.quadrant ?? 1;
   const { ring, corners } = quadrantRing(ctx.sample, gate, q, ax, ay);
-  const { lines, densified } = polygonXml(ctx.sample, gate, ring, ax, ay, id, FLOWJO_QUAD_ID[q] ?? -1, corners);
+  const { lines, densified } = polygonXml(ctx.sample, gate, ring, ax, ay, id, FLOWJO_QUAD_ID[q] ?? -1, corners, ctx.warnings);
   return { lines, densified, recast: "quadrant" };
 }
 
@@ -867,10 +919,30 @@ function sampleBlock(entry: FlowJoExportSample, sampleId: number, opts: FlowJoEx
     }
   }
 
+  // The lowest raw value each channel's gates reach, so a declared biex is built to show it.
+  const gateMins = new Map<string, number>();
+  const noteMin = (ch: string, v: number) => {
+    if (!Number.isFinite(v)) return;
+    const cur = gateMins.get(ch);
+    if (cur === undefined || v < cur) gateMins.set(ch, v);
+  };
+  for (const g of Object.values(entry.gates)) {
+    if (!g) continue;
+    const points: readonly Vertex[] = g.gate_type === "quadrant"
+      ? [g.center]
+      : g.gate_type === "ellipse"
+        ? ellipseBoundary(g, 32)
+        : g.vertices;
+    for (const pt of points) {
+      noteMin(g.x_channel, sample.gateToRaw(g, g.x_channel, pt[0]));
+      noteMin(g.y_channel, sample.gateToRaw(g, g.y_channel, pt[1]));
+    }
+  }
+
   const axes = new Map<string, Axis>();
   const transformLines: string[] = [];
   sample.channels.forEach((ch, idx) => {
-    const { decl, fileScale } = declareAxis(sample, idx, displaySpecs.get(ch.key) ?? [], timestep, warnings);
+    const { decl, fileScale } = declareAxis(sample, idx, displaySpecs.get(ch.key) ?? [], timestep, warnings, gateMins.get(ch.key));
     const maps = axisMaps(decl);
     const name = compensated.has(ch.key) ? `Comp-${ch.pnn || ch.key}` : (ch.pnn || ch.key);
     axes.set(ch.key, { key: ch.key, name, decl, fileScale, straightIn: (s) => straightIn(decl, s), ...maps });

@@ -22,7 +22,8 @@ import {
   linkChildToParent, newGate, newGateRef, newPopulation, newQuadrantGate, newRootPopulation,
   flowJoCurlForDisplay, type Gate, type PopulationMap, type Vertex,
 } from "./models";
-import { ARIA_SMALL, FIXTURES_ROOT, Z2DR_WORKSPACE } from "../testFixtures";
+import { ARIA_SMALL, FIXTURES_ROOT, S6_FCS, S6_WORKSPACE, Z2DR_WORKSPACE } from "../testFixtures";
+import { biexTransform } from "./biex";
 
 const CYTOF_FILE = `${FIXTURES_ROOT}/PUBLIC - Screenshot Safe/Bodenmiller BCR-XL CyTOF benchmark/source-fcs/PBMC8_30min_patient1_BCR-XL.fcs`;
 
@@ -81,6 +82,58 @@ class TreeBuilder {
   tree(): Tree {
     return { gates: this.gates, gate_order: this.gate_order, populations: this.populations, root_population_id: this.root };
   }
+}
+
+
+/** The biex a workspace declares for one parameter, by its $PnN. */
+function declaredBiex(xml: string, pnn: string): { maxRange: number; width: number } | null {
+  const re = new RegExp(`<transforms:biex ([^>]*)>\\s*<data-type:parameter[^>]*data-type:name="${pnn.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`);
+  const m = xml.match(re);
+  if (!m) return null;
+  const attr = (name: string) => Number(m[1].match(new RegExp(`transforms:${name}="([^"]+)"`))![1]);
+  return { maxRange: attr("maxRange"), width: attr("width") };
+}
+
+/** A polygon gate's vertices as written, by the population's name. */
+function writtenPolygon(xml: string, name: string): Vertex[] | null {
+  const re = new RegExp(`<Population name="${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"[^>]*>[\\s\\S]*?<gating:PolygonGate[\\s\\S]*?</gating:PolygonGate>`);
+  const m = xml.match(re);
+  if (!m) return null;
+  const v = [...m[0].matchAll(/data-type:value="([^"]+)"/g)].map((x) => Number(x[1]));
+  const out: Vertex[] = [];
+  for (let i = 0; i + 1 < v.length; i += 2) out.push([v[i], v[i + 1]]);
+  return out;
+}
+
+/** A FlowJo workspace's one gated sample, imported the way the application imports it. */
+function importWorkspace(text: string, sample: Sample, index = 0): Tree {
+  const conv = flowJoWorkspaceToGatingML(text, index, null);
+  const pnn: Record<string, string> = {};
+  for (const c of sample.channels) pnn[c.pnn] = c.key;
+  const res = importGatingML(conv.gatingMl, sample.channels.map((c) => c.key), pnn, sample.instrument);
+  const external = conv.spillover && sample.instrument === "flow" ? sample.externalSpilloverPreview(conv.spillover.matrix) : null;
+  const comp = resolveGatingMLCompensation(res.compensation, res.compensation_refs, sample.instrument === "flow", external?.display ?? sample.spillover ?? null);
+  if (comp.target === true && conv.spillover && external?.display != null) {
+    sample.installExternalSpillover(conv.spillover.matrix, conv.spillover.name || "the workspace", { replaceEmbedded: sample.spillover !== null });
+  }
+  if (comp.target !== null) sample.setCompensation(comp.target);
+  return { gates: res.gates, gate_order: Object.keys(res.gates), populations: res.populations, root_population_id: res.root_population_id };
+}
+
+/** Every gate of a tree held in raw space: what a workspace saved before gates carried a space holds. */
+function inRawSpace(sample: Sample, tree: Tree): Tree {
+  const gates: Record<string, Gate> = {};
+  for (const [id, g] of Object.entries(tree.gates)) {
+    if (g.gate_type === "polygon" || g.gate_type === "rectangle") {
+      const vertices: Vertex[] = g.vertices.map((v) => [sample.gateToRaw(g, g.x_channel, v[0]), sample.gateToRaw(g, g.y_channel, v[1])]);
+      const { space: _s, transforms: _t, ...rest } = g;
+      void _s; void _t;
+      gates[id] = { ...rest, vertices, space: "raw" } as Gate;
+    } else {
+      gates[id] = g;
+    }
+  }
+  return { ...tree, gates };
 }
 
 /**
@@ -238,6 +291,37 @@ describe.runIf(existsSync(ARIA_SMALL))("FlowJo workspace export, conventional fl
     expect(warnings.some((w) => /quadrant population/.test(w))).toBe(true);
     expect(warnings.some((w) => /helper population/.test(w))).toBe(true);
     expect(warnings.filter((w) => /left out/.test(w))).toEqual([]);
+  });
+
+  it("writes a raw polygon that reaches below FlowJo's default biex floor whole, on an axis that shows it", () => {
+    // FlowJo's default width basis of -10 puts the biex floor near -113 on a 316,228 top. A gate
+    // drawn in GateLab has no such floor: this one runs to -800 on x and -300 on y.
+    const b = new TreeBuilder();
+    const [x2, y2] = [quantile(sample, f1, 0.8), quantile(sample, f2, 0.8)];
+    const deep = b.gate(newGate("Deep negative", "polygon", f1, f2, [[-800, -300], [x2, -300], [x2, y2], [(x2 - 800) / 2, y2 * 1.2], [-800, y2]]));
+    b.pop("Deep negative", [{ gate: deep }], b.root);
+    const tree = b.tree();
+    const before = evaluate(sample, tree);
+    const fresh = load(ARIA_SMALL);
+    const { masks: after, xml, warnings } = roundTrip({ sample, fileName: "sample_Bmem_purity_small.fcs", ...tree }, fresh);
+
+    const pnnX = sample.channels[sample.index(f1)!].pnn;
+    const pnnY = sample.channels[sample.index(f2)!].pnn;
+    for (const [pnn, need] of [[pnnX, -800], [pnnY, -300]] as const) {
+      const decl = declaredBiex(xml, pnn)!;
+      expect(decl, pnn).not.toBeNull();
+      expect(decl.width, `${pnn} declared wider than FlowJo's -10`).toBeLessThan(-10);
+      const floor = biexTransform({ maxValue: decl.maxRange, pos: 4.5, neg: 0, widthBasis: decl.width, channelRange: 256 }).inverse(0);
+      expect(floor, `${pnn}: the declared axis reaches the gate`).toBeLessThanOrEqual(need);
+    }
+    const written = writtenPolygon(xml, "Deep negative")!;
+    expect(Math.min(...written.map((v) => v[0]))).toBeLessThanOrEqual(-800 * 0.99);
+    expect(Math.min(...written.map((v) => v[1]))).toBeLessThanOrEqual(-300 * 0.99);
+    expect(warnings.filter((w) => /outside the declared axis/.test(w))).toEqual([]);
+    const n = count(before.get("Deep negative")!);
+    expect(n).toBeGreaterThan(0);
+    const m = moved(before.get("Deep negative")!, lookup(after, tree, "Deep negative")!);
+    expect(m, `${m} of ${n} moved`).toBeLessThanOrEqual(Math.max(2, Math.ceil(n * 0.005)));
   });
 
   it("writes FlowJo's layout: one Sample per file, every parameter declared, counts on every node", () => {
@@ -408,3 +492,116 @@ describe.runIf(existsSync(Z2DR_WORKSPACE))("a FlowJo workspace through GateLab a
     expect(compared).toBeGreaterThan(5);
   });
 });
+
+describe.runIf(existsSync(S6_WORKSPACE) && existsSync(S6_FCS))("the published S6 strategy through GateLab and back", () => {
+  // Priest et al. 2024, Supplementary Figure 10A: 17 populations, polygons and rectangles in
+  // biex space with FlowJo's own width bases per parameter, two polygons reaching well below
+  // zero. This is the workspace whose export came back with two gates moved (2026-09-16).
+  const text = readFileSync(S6_WORKSPACE, "utf-8");
+  const fileName = S6_FCS.split("/").pop()!;
+  const WIDTHS: Record<string, number> = { "BUV805-A": -60.315659717, "APC-Cy7-A": -60.315659717, "BV786-A": -36.9131837468, "PE-Cy7-A": -22.6786880536 };
+
+  function polygonExtents(tree: Tree, sample: Sample): Map<string, { minX: number; minY: number }> {
+    const out = new Map<string, { minX: number; minY: number }>();
+    for (const g of Object.values(tree.gates)) {
+      if (g.gate_type !== "polygon") continue;
+      const xs = g.vertices.map((v) => sample.gateToRaw(g, g.x_channel, v[0]));
+      const ys = g.vertices.map((v) => sample.gateToRaw(g, g.y_channel, v[1]));
+      out.set(g.name, { minX: Math.min(...xs), minY: Math.min(...ys) });
+    }
+    return out;
+  }
+
+  it("leaves in the biex it arrived in, whole, and comes back with every population intact", () => {
+    const sample = load(S6_FCS);
+    const tree = importWorkspace(text, sample);
+    expect(Object.keys(tree.populations).length).toBeGreaterThanOrEqual(18);
+    const before = evaluate(sample, tree);
+    const extents = polygonExtents(tree, sample);
+    // The two polygons that were clipped: their true reach below zero.
+    expect(extents.get("cd19+cd3-")!.minX).toBeLessThan(-600);
+    expect(extents.get("NotDCs")!.minY).toBeLessThan(-190);
+
+    const fresh = load(S6_FCS);
+    const { masks: after, xml, warnings } = roundTrip({ sample, fileName, ...tree }, fresh);
+
+    // FlowJo's own width bases go back verbatim, and no polygon is traced.
+    for (const [pnn, width] of Object.entries(WIDTHS)) {
+      const decl = declaredBiex(xml, pnn);
+      expect(decl, pnn).not.toBeNull();
+      expect(decl!.width, pnn).toBeCloseTo(width, 6);
+    }
+    expect(warnings.filter((w) => /extra vertices|outside the declared axis/.test(w))).toEqual([]);
+    for (const [name, ext] of extents) {
+      const written = writtenPolygon(xml, name);
+      expect(written, name).not.toBeNull();
+      expect(Math.min(...written!.map((v) => v[0])), `${name} min x`).toBeLessThanOrEqual(ext.minX + Math.abs(ext.minX) * 0.01 + 1e-6);
+      expect(Math.min(...written!.map((v) => v[1])), `${name} min y`).toBeLessThanOrEqual(ext.minY + Math.abs(ext.minY) * 0.01 + 1e-6);
+    }
+    let compared = 0;
+    for (const [name, mask] of before) {
+      if (name.includes("/")) continue;
+      const back = lookup(after, tree, name);
+      expect(back, name).toBeDefined();
+      compared++;
+      const n = count(mask);
+      const m = moved(mask, back!);
+      expect(m, `${name}: ${m} of ${n} moved`).toBeLessThanOrEqual(Math.max(5, Math.ceil(n * 0.002)));
+    }
+    expect(compared).toBe(18);
+  });
+
+  it("goes whole when the same gates are held in raw space", () => {
+    // A workspace saved before gates carried a space holds these polygons as raw vertices. They
+    // are then traced in the declared biex, which must reach every vertex.
+    const sample = load(S6_FCS);
+    const tree = inRawSpace(sample, importWorkspace(text, sample));
+    const before = evaluate(sample, tree);
+    const extents = polygonExtents(tree, sample);
+    const fresh = load(S6_FCS);
+    const { masks: after, xml, warnings } = roundTrip({ sample, fileName, ...tree }, fresh);
+    expect(warnings.filter((w) => /outside the declared axis/.test(w))).toEqual([]);
+    for (const [name, ext] of extents) {
+      const written = writtenPolygon(xml, name)!;
+      expect(Math.min(...written.map((v) => v[0])), `${name} min x`).toBeLessThanOrEqual(ext.minX + Math.abs(ext.minX) * 0.01 + 1e-6);
+      expect(Math.min(...written.map((v) => v[1])), `${name} min y`).toBeLessThanOrEqual(ext.minY + Math.abs(ext.minY) * 0.01 + 1e-6);
+    }
+    let compared = 0;
+    for (const [name, mask] of before) {
+      if (name.includes("/")) continue;
+      const back = lookup(after, tree, name);
+      expect(back, name).toBeDefined();
+      compared++;
+      const n = count(mask);
+      const m = moved(mask, back!);
+      expect(m, `${name}: ${m} of ${n} moved`).toBeLessThanOrEqual(Math.max(5, Math.ceil(n * 0.005)));
+    }
+    expect(compared).toBe(18);
+  });
+
+  it("changes nothing on a second trip", () => {
+    const sample = load(S6_FCS);
+    const tree = importWorkspace(text, sample);
+    const first = exportFlowJoWorkspace({ samples: [{ sample, fileName, ...tree }], now: new Date("2026-09-16T00:00:00Z"), producer: "GateLab test" }).xml;
+    const again = load(S6_FCS);
+    const tree2 = importWorkspace(first, again);
+    const second = exportFlowJoWorkspace({ samples: [{ sample: again, fileName, ...tree2 }], now: new Date("2026-09-16T00:00:00Z"), producer: "GateLab test" }).xml;
+    let polygons = 0;
+    for (const g of Object.values(tree.gates)) {
+      if (g.gate_type !== "polygon") continue;
+      const a = writtenPolygon(first, g.name)!;
+      const b = writtenPolygon(second, g.name)!;
+      expect(b.length, g.name).toBe(a.length);
+      for (let i = 0; i < a.length; i++) {
+        expect(b[i][0], `${g.name} vertex ${i} x`).toBeCloseTo(a[i][0], 3);
+        expect(b[i][1], `${g.name} vertex ${i} y`).toBeCloseTo(a[i][1], 3);
+      }
+      polygons++;
+    }
+    expect(polygons).toBeGreaterThanOrEqual(5);
+    for (const pnn of Object.keys(WIDTHS)) {
+      expect(declaredBiex(second, pnn)!.width).toBeCloseTo(declaredBiex(first, pnn)!.width, 6);
+    }
+  });
+});
+

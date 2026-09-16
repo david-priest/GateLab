@@ -47,3 +47,13 @@ export const MULTI_HIERARCHY_DIR =
   "data/flowrepo-multi-hierarchy";
 export const Z2V4_WORKSPACE = `${MULTI_HIERARCHY_DIR}/FR-FCM-Z2V4/S_1.wsp`;
 export const Z2DR_WORKSPACE = `${MULTI_HIERARCHY_DIR}/FR-FCM-Z2DR/Fig_1A.wsp`;
+
+/** The published B cell sort strategy of Priest et al. 2024 (Supplementary Figure 10A) as a FlowJo
+ *  10.9 workspace over a FACSDiva file: polygons and rectangles in biex space with FlowJo's own
+ *  per-parameter width bases, two of the polygons reaching well below zero. Private data. */
+export const S6_STRATEGY_DIR =
+  `${FIXTURES_ROOT}/../GateLab-2026-08-15-B flowjo-and-cytobank-concordance/` +
+  "data/bass12-priest2024-s6/source/flowjo-workspace";
+export const S6_WORKSPACE = `${S6_STRATEGY_DIR}/25-Sep-2023.wsp`;
+export const S6_FCS = `${S6_STRATEGY_DIR}/Specimen_001_B cell presort.fcs`;
+
