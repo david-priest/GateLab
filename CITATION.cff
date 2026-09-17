@@ -5,8 +5,8 @@ cff-version: 1.2.0
 message: "If you use GateLab, please cite it as below."
 type: software
 title: "GateLab"
-version: 0.8.0
-date-released: "2026-09-16"
+version: 0.8.1
+date-released: "2026-09-17"
 license: MIT
 doi: 10.5281/zenodo.22787966
 identifiers:

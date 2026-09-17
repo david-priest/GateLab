@@ -18,8 +18,9 @@
 // workspace that already holds a debarcoding strategy, in which case the exact QC chain above
 // the sample populations and the per-plane shapes are kept.
 
-import type { Gate, PolyRectGate, Population, PopulationMap, Vertex } from "./models";
+import type { Gate, PolyRectGate, Population, PopulationMap, TransformSpec, Vertex } from "./models";
 import { isDnaChannel, massLabel } from "./barcodeMass";
+import { gateCorners, resolveGateSpace, toAsinhUnits, type GateSpaceContext } from "./gateSpace";
 
 /** x state then y state: "+-" is x positive, y negative. */
 export type BarcodeStateKey = "--" | "+-" | "-+" | "++";
@@ -44,6 +45,11 @@ export interface QcGateTemplate {
   space: "raw" | "display";
   /** Present when space is display. */
   transforms?: { x: QcAxisTransform; y: QcAxisTransform };
+  /**
+   * The cofactor each arcsinh axis was written at, when known. A sample displayed at another
+   * cofactor rescales the vertices on import, so the gate keeps the events it held.
+   */
+  cofactors?: { x?: number; y?: number };
   /**
    * Stretch the x extent to the loaded sample's full range of that channel. Used for gates
    * drawn against Time, whose span differs from file to file while the y limits do not.
@@ -185,14 +191,9 @@ function centroid(vs: Vertex[]): [number, number] {
   return [vs.reduce((s, v) => s + v[0], 0) / n, vs.reduce((s, v) => s + v[1], 0) / n];
 }
 
-function asinhVertices(gate: PolyRectGate, cofactor: number): Vertex[] {
-  const raw = gate.space !== "display";
-  const f = (v: number): number => (raw ? Math.asinh(v / cofactor) : v);
-  if (gate.gate_type === "rectangle" && gate.vertices.length === 2) {
-    const [[x0, y0], [x1, y1]] = gate.vertices;
-    return [[f(x0), f(y0)], [f(x1), f(y0)], [f(x1), f(y1)], [f(x0), f(y1)]];
-  }
-  return gate.vertices.map(([x, y]) => [f(x), f(y)]);
+function asinhVertices(gate: PolyRectGate, cofactor: number, context?: GateSpaceContext): Vertex[] {
+  const { x, y } = resolveGateSpace(gate, context, cofactor);
+  return gateCorners(gate).map(([vx, vy]) => [toAsinhUnits(x, vx, cofactor), toAsinhUnits(y, vy, cofactor)]);
 }
 
 /** A one-barcode plane: the barcode channel drawn against an intercalator, two gates. */
@@ -211,7 +212,7 @@ export interface DisplayPlanePair {
  * axis is an intercalator and the other is not already a two-barcode plane axis. The gate with
  * the lower centroid on the barcode axis is the negative one.
  */
-export function findDisplayPlanes(gates: Gate[], cofactor: number, takenChannels: ReadonlySet<string>): DisplayPlanePair[] {
+export function findDisplayPlanes(gates: Gate[], cofactor: number, takenChannels: ReadonlySet<string>, context?: GateSpaceContext): DisplayPlanePair[] {
   const byPair = new Map<string, PolyRectGate[]>();
   for (const g of gates) {
     if (g.gate_type !== "polygon" && g.gate_type !== "rectangle") continue;
@@ -229,7 +230,8 @@ export function findDisplayPlanes(gates: Gate[], cofactor: number, takenChannels
     const channel = barcodeAxis ? y : x;
     if (takenChannels.has(channel)) continue;
     const centroid = (g: PolyRectGate): number => {
-      const vs = g.vertices.map((v) => (g.space === "display" ? v[barcodeAxis] : Math.asinh(v[barcodeAxis] / cofactor)));
+      const spec = resolveGateSpace(g, context, cofactor)[barcodeAxis ? "y" : "x"];
+      const vs = g.vertices.map((v) => toAsinhUnits(spec, v[barcodeAxis], cofactor));
       return vs.reduce((s, v) => s + v, 0) / (vs.length || 1);
     };
     const [neg, pos] = centroid(pair[0]) <= centroid(pair[1]) ? [pair[0], pair[1]] : [pair[1], pair[0]];
@@ -257,22 +259,33 @@ export interface LearnedBarcodeTemplate {
   notes: string[];
 }
 
-/** A stored gate as a QC template entry, in its own space. */
-function qcGateFromGate(gate: PolyRectGate): QcGateTemplate {
-  const kindOf = (ch: string): QcAxisTransform =>
-    gate.transforms?.[ch]?.kind === "identity" ? "identity" : "asinh";
-  const display = gate.space === "display";
-  const vertices: Vertex[] = gate.gate_type === "rectangle" && gate.vertices.length === 2
-    ? [[gate.vertices[0][0], gate.vertices[0][1]], [gate.vertices[1][0], gate.vertices[0][1]],
-       [gate.vertices[1][0], gate.vertices[1][1]], [gate.vertices[0][0], gate.vertices[1][1]]]
-    : gate.vertices.map(([x, y]) => [x, y]);
+/**
+ * A stored gate as a QC template entry, in the space its vertices are read in: a gate drawn
+ * before the per-gate fields existed is resolved through the context, as evaluation resolves
+ * it. An axis on a transform the file cannot name is written in arcsinh units at the template's
+ * cofactor, and noted.
+ */
+function qcGateFromGate(gate: PolyRectGate, cofactor: number, context: GateSpaceContext | undefined, notes: string[]): QcGateTemplate {
+  const resolved = resolveGateSpace(gate, context, cofactor);
+  const display = resolved.space === "display";
+  const axis = (spec: TransformSpec, channel: string): { kind: QcAxisTransform; cofactor?: number; convert: (v: number) => number } => {
+    if (spec.kind === "identity") return { kind: "identity", convert: (v) => v };
+    if (spec.kind === "asinh") return { kind: "asinh", cofactor: spec.cofactor, convert: (v) => v };
+    notes.push(`${gate.name}: its ${channel} axis is ${spec.kind}, which the file cannot name; written in arcsinh units at cofactor ${cofactor}, exact for a rectangle and approximate along a polygon's edges.`);
+    return { kind: "asinh", cofactor, convert: (v) => toAsinhUnits(spec, v, cofactor) };
+  };
+  const ax = axis(resolved.x, gate.x_channel);
+  const ay = axis(resolved.y, gate.y_channel);
+  const vertices: Vertex[] = gateCorners(gate).map(([x, y]) => [ax.convert(x), ay.convert(y)]);
+  const cofactors = { ...(ax.cofactor !== undefined ? { x: ax.cofactor } : {}), ...(ay.cofactor !== undefined ? { y: ay.cofactor } : {}) };
   return {
     name: gate.name,
     x: gate.x_channel,
     y: gate.y_channel,
     gate_type: gate.gate_type,
-    space: display ? "display" : "raw",
-    ...(display ? { transforms: { x: kindOf(gate.x_channel), y: kindOf(gate.y_channel) } } : {}),
+    space: resolved.space,
+    ...(display ? { transforms: { x: ax.kind, y: ay.kind } } : {}),
+    ...(display && Object.keys(cofactors).length ? { cofactors } : {}),
     ...(gate.gate_type === "rectangle" && /^time$/i.test(gate.x_channel) ? { xFull: true } : {}),
     vertices,
   };
@@ -283,7 +296,8 @@ function qcGateFromGate(gate: PolyRectGate): QcGateTemplate {
  *
  * A barcode plane is a pair of channels carrying exactly four polygon or rectangle gates whose
  * centroids fall one in each quadrant about the mean centroid. Gates in raw space are converted
- * with the given cofactor. When the populations are given, the QC chain is the path of
+ * with the given cofactor; a gate without a space field is read as the context (the sample)
+ * reads it. When the populations are given, the QC chain is the path of
  * populations from the root down to the common parent of the populations that reference the
  * plane gates, each recorded with its gates as drawn. Returns null when no plane exists.
  */
@@ -293,6 +307,7 @@ export function learnBarcodeTemplate(
   source = "learned from the current workspace",
   populations?: PopulationMap,
   rootPopulationId?: string | null,
+  context?: GateSpaceContext,
 ): LearnedBarcodeTemplate | null {
   const byPlane = new Map<string, PolyRectGate[]>();
   for (const g of gates) {
@@ -304,7 +319,7 @@ export function learnBarcodeTemplate(
   for (const [key, planeGates] of byPlane) {
     if (planeGates.length !== 4) continue;
     const [x, y] = key.split(" ");
-    const verts = planeGates.map((g) => asinhVertices(g, cofactor));
+    const verts = planeGates.map((g) => asinhVertices(g, cofactor, context));
     const cs = verts.map(centroid);
     const mx = cs.reduce((s, c) => s + c[0], 0) / 4;
     const my = cs.reduce((s, c) => s + c[1], 0) / 4;
@@ -349,7 +364,7 @@ export function learnBarcodeTemplate(
     const taken = new Set(learned.flatMap((l) => [l.plane.x, l.plane.y]));
     const planeGateIds = new Set([
       ...learned.flatMap((l) => l.gateIds),
-      ...findDisplayPlanes(gates, cofactor, taken).flatMap((d) => [d.negId, d.posId]),
+      ...findDisplayPlanes(gates, cofactor, taken, context).flatMap((d) => [d.negId, d.posId]),
     ]);
     const gateById = new Map(gates.map((g) => [g.gate_id, g]));
     const samplePops = Object.values(populations).filter(
@@ -372,7 +387,7 @@ export function learnBarcodeTemplate(
             continue;
           }
           if (!ref.include) entry.excluded = [...(entry.excluded ?? []), g.name];
-          entry.gates.push(qcGateFromGate(g));
+          entry.gates.push(qcGateFromGate(g, cofactor, context, notes));
         }
         if (entry.gates.length) qc.push(entry);
       }

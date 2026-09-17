@@ -23,7 +23,7 @@ export async function exportGridPNG(gridId: string, filename: string, dpi?: numb
   if (dpi === undefined) { loadMiniPlots().exportGridPNG(gridId, filename); return; }
   const composed = composeGridSVG(gridId, dpi);
   if (!composed) return;
-  const canvas = await rasterizeGrid(composed, dpi);
+  const canvas = await rasterizeSvg(composed, dpi);
   const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error("PNG export failed")), "image/png"));
   downloadBlob(blob, filename + ".png");
 }
@@ -33,13 +33,14 @@ export async function exportGridPNG(gridId: string, filename: string, dpi?: numb
  * those stay vector in the cloned cell <svg>), mirroring mini_plot's _buildPdfDataLayer via the
  * public renderMiniPlot. Falls back to the on-screen canvas if the cell has no cached cfg.
  */
-function cellDataUrlAtDpi(cell: HTMLElement, dpi: number): string | null {
+export function cellDataUrlAtDpi(cell: HTMLElement, dpi: number, sizePx?: number): string | null {
   const canvas = cell.querySelector("canvas");
   const cfg = (cell as unknown as { __miniPlotCfg?: Record<string, unknown> }).__miniPlotCfg;
   if (!cfg) return canvas ? canvas.toDataURL("image/png") : null;
   try {
     const cr = cell.getBoundingClientRect();
-    const exportSize = Math.max(1, Math.round(cr.width || (cfg.plot_size as number) || 200));
+    // A caller that knows the cell's unscaled size (a zoomed Layout page) passes it.
+    const exportSize = Math.max(1, Math.round(sizePx || cr.width || (cfg.plot_size as number) || 200));
     const exportCfg = {
       ...cfg,
       plot_size: cfg.ridgeline ? cfg.plot_size : exportSize,
@@ -117,7 +118,7 @@ export function exportGridSVG(gridId: string, filename: string, dpi = 300) {
 /** PDF export: rasterize the composed grid SVG at the export DPI onto a single jsPDF page (uses only
  *  jsPDF's stable addImage — avoids the vendored form-object/Matrix path that isn't jsPDF-4
  *  compatible; axes/gates are high-res raster rather than true vector). */
-async function rasterizeGrid(composed: NonNullable<ReturnType<typeof composeGridSVG>>, dpi: number): Promise<HTMLCanvasElement> {
+export async function rasterizeSvg(composed: { root: SVGSVGElement; width: number; height: number }, dpi: number): Promise<HTMLCanvasElement> {
   const { width, height } = composed;
   const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(composed.root);
   const url = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml" }));
@@ -148,7 +149,7 @@ async function rasterizeGrid(composed: NonNullable<ReturnType<typeof composeGrid
 export async function exportGridPDF(gridId: string, filename: string, dpi = 300) {
   const composed = composeGridSVG(gridId, dpi);
   if (!composed) return;
-  const canvas = await rasterizeGrid(composed, dpi);
+  const canvas = await rasterizeSvg(composed, dpi);
   // CSS pixels are 1/96 inch; PDF points are 1/72 inch. DPI changes resolution, not paper size.
   const width = composed.width * 72 / 96, height = composed.height * 72 / 96;
   const { jsPDF } = await import("jspdf");

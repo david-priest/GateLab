@@ -24,6 +24,8 @@ import {
   type Population,
 } from "./models";
 import { isDnaChannel, massLabel, massToken, tokenMatchesChannel, type MassToken } from "./barcodeMass";
+import { DEFAULT_BARCODE_TEMPLATE } from "./barcodeTemplate";
+import { gateCorners, resolveGateSpace, toAsinhUnits, toRawUnits, type GateSpaceContext, type ResolvedGateSpace } from "./gateSpace";
 import {
   findDisplayPlanes,
   templateShapesFor,
@@ -61,7 +63,10 @@ export interface PlaneDeclaration {
  *
  * Fields are separated by "|": name, type, the two channels joined by "x", the scale, then the
  * shape. The scale is "raw" (raw values), "asinh" (both axes in arcsinh display units), "linear"
- * (both axes untransformed display units) or one per axis as "linear, asinh". A rectangle is
+ * (both axes untransformed display units) or one per axis as "linear, asinh". An arcsinh axis
+ * may name the cofactor its coordinates were written at, "asinh(5)": a sample displayed at
+ * another cofactor rescales them on import, and without one the sample's cofactor is assumed.
+ * A rectangle is
  * written as ranges, "x lo..hi" and "y lo..hi"; "x full" spans the loaded file's whole range
  * (the Time axis). A polygon is a list of "(x,y)" points.
  */
@@ -72,6 +77,8 @@ export interface GateDeclaration {
   y: string;
   space: "raw" | "display";
   transforms: { x: "identity" | "asinh"; y: "identity" | "asinh" };
+  /** The cofactor an arcsinh axis was written at, when the scale names it ("asinh(5)"). */
+  cofactors?: { x?: number; y?: number };
   vertices: Vertex[];
   xFull: boolean;
   yFull: boolean;
@@ -164,21 +171,41 @@ function parsePlaneDeclaration(text: string, line: number): PlaneDeclaration | s
 
 const NUMBER = String.raw`[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?`;
 
-function parseScale(text: string, line: number): { space: "raw" | "display"; transforms: { x: "identity" | "asinh"; y: "identity" | "asinh" } } | string {
-  const words = text.split(/\s*[,;/]\s*|\s+/).map((w) => w.trim().toLowerCase()).filter(Boolean);
-  const one = (w: string): "identity" | "asinh" | null =>
-    w === "asinh" || w === "arcsinh" || w === "display" ? "asinh" : w === "linear" || w === "identity" || w === "lin" ? "identity" : null;
+interface ScaleAxis {
+  kind: "identity" | "asinh";
+  cofactor?: number;
+}
+
+function parseScale(text: string, line: number): Pick<GateDeclaration, "space" | "transforms" | "cofactors"> | string {
+  // "asinh (5)" → "asinh(5)", so a cofactor stays with its word when the words are split.
+  const words = text.replace(/\s*\(\s*([^)]*?)\s*\)/g, "($1)").split(/\s*[,;/]\s*|\s+/).map((w) => w.trim().toLowerCase()).filter(Boolean);
+  const one = (w: string): ScaleAxis | null => {
+    const m = new RegExp(String.raw`^(?:asinh|arcsinh|display)(?:\((${NUMBER})\))?$`).exec(w);
+    if (m) {
+      if (m[1] === undefined) return { kind: "asinh" };
+      const cofactor = Number(m[1]);
+      return cofactor > 0 ? { kind: "asinh", cofactor } : null;
+    }
+    return w === "linear" || w === "identity" || w === "lin" ? { kind: "identity" } : null;
+  };
+  const display = (x: ScaleAxis, y: ScaleAxis): Pick<GateDeclaration, "space" | "transforms" | "cofactors"> => ({
+    space: "display",
+    transforms: { x: x.kind, y: y.kind },
+    ...(x.cofactor !== undefined || y.cofactor !== undefined
+      ? { cofactors: { ...(x.cofactor !== undefined ? { x: x.cofactor } : {}), ...(y.cofactor !== undefined ? { y: y.cofactor } : {}) } }
+      : {}),
+  });
   if (words.length === 1 && words[0] === "raw") return { space: "raw", transforms: { x: "identity", y: "identity" } };
   if (words.length === 1) {
     const k = one(words[0]);
-    if (k) return { space: "display", transforms: { x: k, y: k } };
+    if (k) return display(k, k);
   }
   if (words.length === 2) {
     const kx = one(words[0]);
     const ky = one(words[1]);
-    if (kx && ky) return { space: "display", transforms: { x: kx, y: ky } };
+    if (kx && ky) return display(kx, ky);
   }
-  return `Line ${line}: the scale must be "raw", "asinh", "linear" or one per axis such as "linear, asinh" (got "${text}").`;
+  return `Line ${line}: the scale must be "raw", "asinh", "linear", "asinh(5)" naming the cofactor, or one per axis such as "linear, asinh(5)" (got "${text}").`;
 }
 
 /** Parse one "# gate:" line; see GateDeclaration for the form. */
@@ -714,6 +741,7 @@ function qcGateFromDeclaration(g: GateDeclaration): QcGateTemplate {
     gate_type: g.gate_type,
     space: g.space,
     ...(g.space === "display" ? { transforms: g.transforms } : {}),
+    ...(g.cofactors ? { cofactors: g.cofactors } : {}),
     vertices: g.vertices.map(([x, y]) => [x, y] as Vertex),
     ...(g.xFull ? { xFull: true } : {}),
   };
@@ -1082,7 +1110,15 @@ function qcGateFor(
   cofactor: number,
   xRange: [number, number] | undefined,
 ): PolyRectGate {
-  let vertices: Vertex[] = g.vertices.map(([vx, vy]) => [vx, vy]);
+  // Coordinates written at another cofactor are rescaled to this sample's: the same raw values.
+  const rescale = (axis: "x" | "y"): ((v: number) => number) => {
+    const written = g.cofactors?.[axis];
+    if (g.space !== "display" || (g.transforms?.[axis] ?? "asinh") !== "asinh" || written === undefined || written === cofactor) return (v) => v;
+    return (v) => Math.asinh((Math.sinh(v) * written) / cofactor);
+  };
+  const rx = rescale("x");
+  const ry = rescale("y");
+  let vertices: Vertex[] = g.vertices.map(([vx, vy]) => [rx(vx), ry(vy)]);
   if (g.xFull) {
     const xs = vertices.map((v) => v[0]);
     const xMin = Math.min(...xs);
@@ -1132,7 +1168,8 @@ function csvCell(value: string): string {
  * The barcode planes come from the learned template; a display-only plane (one barcode
  * channel drawn against an intercalator channel, two gates) is found here from the gates.
  * Columns are ordered so that automatic pairing reproduces the planes, and the planes are
- * declared in the header regardless.
+ * declared in the header regardless. `context` (the sample) resolves the space of gates drawn
+ * before the per-gate space field existed, as evaluation resolves it.
  */
 export function exportBarcodeScheme(
   gates: Gate[],
@@ -1141,6 +1178,7 @@ export function exportBarcodeScheme(
   learned: LearnedBarcodeTemplate,
   metadata: Record<string, Record<string, string>> = {},
   source = "the current workspace",
+  context?: GateSpaceContext,
 ): BarcodeSchemeExport {
   const cofactor = learned.template.cofactor;
   /** Per gate, the barcode channels it decides and their state. */
@@ -1156,7 +1194,7 @@ export function exportBarcodeScheme(
     }
   }
   const barcodeChannels = new Set(planes.flatMap((p) => [p.x, p.y]));
-  for (const d of findDisplayPlanes(gates, cofactor, barcodeChannels)) {
+  for (const d of findDisplayPlanes(gates, cofactor, barcodeChannels, context)) {
     gateStates.set(d.negId, [{ channel: d.channel, state: "-" }]);
     gateStates.set(d.posId, [{ channel: d.channel, state: "+" }]);
     planes.push({ x: d.x, y: d.y, xIsBarcode: d.barcodeAxis === 0, yIsBarcode: d.barcodeAxis === 1, gateIds: [d.negId, d.posId] });
@@ -1201,13 +1239,15 @@ export function exportBarcodeScheme(
   const header = ["name", "file_name", ...metaColumns, ...channels.map(label)];
   // The whole strategy in the file: every QC gate and barcode gate as a "# gate:" line and the
   // QC chain as "# population:" lines, so the table alone reproduces the hierarchy.
-  const fmt = (v: number): string => String(Number(v.toFixed(3)));
+  // Seven significant digits: three decimals lost events at a gate's edge on re-import, since
+  // 0.001 in arcsinh units is a tenth of a percent of the raw value.
+  const fmt = (v: number): string => String(Number(v.toPrecision(7)));
   const gateLine = (g: QcGateTemplate): string => {
-    const scale = g.space === "raw"
-      ? "raw"
-      : g.transforms && g.transforms.x !== g.transforms.y
-        ? `${g.transforms.x === "asinh" ? "asinh" : "linear"}, ${g.transforms.y === "asinh" ? "asinh" : "linear"}`
-        : g.transforms?.x === "identity" ? "linear" : "asinh";
+    const token = (kind: "identity" | "asinh" | undefined, written: number | undefined): string =>
+      kind === "identity" ? "linear" : written !== undefined ? `asinh(${fmt(written)})` : "asinh";
+    const tx = token(g.transforms?.x, g.cofactors?.x);
+    const ty = token(g.transforms?.y, g.cofactors?.y);
+    const scale = g.space === "raw" ? "raw" : tx === ty ? tx : `${tx}, ${ty}`;
     const chans = `${label(g.x)} x ${label(g.y)}`;
     if (g.gate_type === "rectangle") {
       const xs = g.vertices.map((v) => v[0]);
@@ -1224,9 +1264,11 @@ export function exportBarcodeScheme(
   const barcodeLines = planes.flatMap((p) => p.gateIds.flatMap((id) => {
     const g = gateById.get(id);
     if (!g || (g.gate_type !== "polygon" && g.gate_type !== "rectangle")) return [];
-    const display = g.space === "display";
-    const vertices = g.vertices.map(([x, y]) => [display ? x : Math.asinh(x / cofactor), display ? y : Math.asinh(y / cofactor)] as Vertex);
-    return [gateLine({ name: g.name, x: g.x_channel, y: g.y_channel, gate_type: "polygon", space: "display", transforms: { x: "asinh", y: "asinh" }, vertices })];
+    // In arcsinh units at the template's cofactor whatever space the gate is stored in, and a
+    // rectangle as its four corners, since the line is written as a polygon.
+    const { x: sx, y: sy } = resolveGateSpace(g, context, cofactor);
+    const vertices = gateCorners(g).map(([x, y]) => [toAsinhUnits(sx, x, cofactor), toAsinhUnits(sy, y, cofactor)] as Vertex);
+    return [gateLine({ name: g.name, x: g.x_channel, y: g.y_channel, gate_type: "polygon", space: "display", transforms: { x: "asinh", y: "asinh" }, cofactors: { x: cofactor, y: cofactor }, vertices })];
   }));
   const lines = [
     `# GateLab barcode scheme, saved ${new Date().toISOString().slice(0, 10)} from ${source}.`,
@@ -1261,21 +1303,35 @@ export interface HierarchyCsvExport {
   notes: string[];
 }
 
+export interface HierarchyCsvOptions {
+  /** The sample the gates are read on: resolves a gate drawn before the per-gate space field existed. */
+  context?: GateSpaceContext;
+  /** The arcsinh cofactor assumed for a display gate that records none, when there is no context. */
+  cofactor?: number;
+}
+
 /**
  * Any workspace's gates and populations as the same CSV grammar, with no sample table: every
  * polygon and rectangle as a "# gate:" line (raw gates in raw units; display gates in their
- * arcsinh or linear units) and every population as a "# population:" line naming its parent.
- * What the grammar cannot carry, a quadrant or ellipse gate or a display space that is not
- * arcsinh or linear, is left out and listed in the notes and in the file's header.
+ * arcsinh or linear units, the cofactor named) and every population as a "# population:" line
+ * naming its parent. A gate's space is resolved as evaluation resolves it, through the sample
+ * for a gate drawn before the per-gate field existed. What the grammar cannot carry, a quadrant
+ * or ellipse gate or a polygon on a display transform it cannot name, is left out and listed in
+ * the notes and in the file's header; a rectangle on such a transform is written in raw units,
+ * which is exact.
  */
 export function exportHierarchyCsv(
   gates: Gate[],
   populations: PopulationMap,
   rootPopulationId: string | null,
   source = "the current workspace",
+  options: HierarchyCsvOptions = {},
 ): HierarchyCsvExport {
   const notes: string[] = [];
-  const fmt = (v: number): string => String(Number(v.toFixed(3)));
+  const cofactor = options.cofactor ?? DEFAULT_BARCODE_TEMPLATE.cofactor;
+  // Seven significant digits: three decimals lost events at a gate's edge on re-import, since
+  // 0.001 in arcsinh units is a tenth of a percent of the raw value.
+  const fmt = (v: number): string => String(Number(v.toPrecision(7)));
   const label = (ch: string): string => massLabel(ch) ?? ch;
   const written = new Map<string, string>();
   for (const g of gates) {
@@ -1283,28 +1339,35 @@ export function exportHierarchyCsv(
       notes.push(`${g.name}: a ${g.gate_type} gate cannot be written as a "# gate:" line.`);
       continue;
     }
+    const resolved = resolveGateSpace(g, options.context, cofactor);
     let scale: string;
-    if (g.space !== "display") scale = "raw";
+    let vertices: Vertex[] = g.vertices;
+    if (resolved.space === "raw") scale = "raw";
     else {
-      const kind = (ch: string): "asinh" | "linear" | null => {
-        const k = g.transforms?.[ch]?.kind;
-        return k === "asinh" ? "asinh" : k === "identity" || k === undefined ? "linear" : null;
-      };
-      const kx = kind(g.x_channel);
-      const ky = kind(g.y_channel);
-      if (!kx || !ky) {
-        notes.push(`${g.name}: drawn in a ${g.transforms?.[g.x_channel]?.kind ?? "?"} display space, which the file cannot carry.`);
-        continue;
+      const token = (spec: ResolvedGateSpace["x"]): string | null =>
+        spec.kind === "identity" ? "linear" : spec.kind === "asinh" ? `asinh(${fmt(spec.cofactor)})` : null;
+      const tx = token(resolved.x);
+      const ty = token(resolved.y);
+      if (tx && ty) scale = tx === ty ? tx : `${tx}, ${ty}`;
+      else {
+        const unnamed = [resolved.x, resolved.y].find((spec) => spec.kind !== "identity" && spec.kind !== "asinh")!;
+        if (g.gate_type !== "rectangle") {
+          notes.push(`${g.name}: a polygon drawn on a ${unnamed.kind} axis, which the file cannot name.`);
+          continue;
+        }
+        // Any monotone transform maps a rectangle to a rectangle, so raw units are exact.
+        vertices = g.vertices.map(([x, y]) => [toRawUnits(resolved.x, x), toRawUnits(resolved.y, y)]);
+        scale = "raw";
+        notes.push(`${g.name}: drawn on a ${unnamed.kind} axis, which the file cannot name; written in raw units, which is exact for a rectangle.`);
       }
-      scale = kx === ky ? kx : `${kx}, ${ky}`;
     }
     const chans = `${label(g.x_channel)} x ${label(g.y_channel)}`;
     if (g.gate_type === "rectangle") {
-      const xs = g.vertices.map((v) => v[0]);
-      const ys = g.vertices.map((v) => v[1]);
+      const xs = vertices.map((v) => v[0]);
+      const ys = vertices.map((v) => v[1]);
       written.set(g.gate_id, `# gate: ${g.name} | rectangle | ${chans} | ${scale} | x ${fmt(Math.min(...xs))}..${fmt(Math.max(...xs))} | y ${fmt(Math.min(...ys))}..${fmt(Math.max(...ys))}`);
     } else {
-      written.set(g.gate_id, `# gate: ${g.name} | polygon | ${chans} | ${scale} | ${g.vertices.map(([x, y]) => `(${fmt(x)},${fmt(y)})`).join(" ")}`);
+      written.set(g.gate_id, `# gate: ${g.name} | polygon | ${chans} | ${scale} | ${vertices.map(([x, y]) => `(${fmt(x)},${fmt(y)})`).join(" ")}`);
     }
   }
   const gateById = new Map(gates.map((g) => [g.gate_id, g]));

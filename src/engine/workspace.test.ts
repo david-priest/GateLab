@@ -44,11 +44,12 @@ function makeWs(): WorkspaceFile {
       fontSizes: { tick: 12, axis: 14, title: 11, gate: 12 },
     },
     layout: {
-      version: 1,
+      version: 2,
       activeSheetId: "sheet-overview",
       sheets: [{
         id: "sheet-overview",
         name: "Overview",
+        page: { preset: "custom", orientation: "portrait", widthMm: 317.5, heightMm: 211.7, marginMm: 0, dpi: 300, columns: 1, rows: 1 },
         width: 1200,
         height: 800,
         items: [{
