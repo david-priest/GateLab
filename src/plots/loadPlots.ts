@@ -503,8 +503,9 @@ export function patchCytofForGateLab(src: string): string {
   // and the axis-label pickers are untouched.
   //
   // _panActive therefore stays false throughout a drag. That is fine: the only thing it gated was
-  // degrading contour to scatter for speed mid-pan, and App already holds the range back to
-  // drag-end in contour mode, so the KDE still rebuilds exactly once.
+  // degrading contour to scatter for speed mid-pan, and App does that itself, drawing a
+  // contour-mode drag as dots and restoring contours when the drag commits, so the KDE still
+  // rebuilds exactly once.
   const navPanNeedle = "_svg.on('pointerdown.navigate', _onNavigatePointerDown)";
   const navPanPatched = "// GateLab: the renderer's pan is disabled; App owns the view. See loadPlots.ts.";
   if (!out.includes(navPanPatched)) {
@@ -525,8 +526,9 @@ export function patchCytofForGateLab(src: string): string {
   // The comment on the _finishPan call claims "contour rebuilds at the final range"; nothing
   // rebuilds it. Pseudocolour is unaffected because _redraw() recomputes it from the scales.
   //
-  // Clearing the cache where the domain is set is enough: during a drag _panActive is true and
-  // _drawScatter runs instead of _drawContour, so the KDE is recomputed exactly once, on release.
+  // Clearing the cache where the domain is set is enough: during a drag App sends the plot as
+  // dots, so _drawScatter runs instead of _drawContour and the KDE is recomputed exactly once,
+  // on release.
   const panFlushNeedle = "_yBase.domain(_plotData.y_range);";
   const panFinishNeedle = "_xBase.domain(pend.x); _yBase.domain(pend.y);";
   const panPatched = "_contourCache = null; // GateLab: base domain changed";

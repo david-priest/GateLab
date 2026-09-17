@@ -21,6 +21,8 @@ import {
   type FigurePopulation,
   type FigureSample,
   type FigureSpec,
+  type FigurePage,
+  type FigurePanelData,
 } from "../engine/figure";
 import {
   defaultIllustrationConfig,
@@ -247,6 +249,24 @@ export function FigureWorkspace({
     [page, built.data, config.heatmapScale, config.heatmapPalette],
   ); // eslint-disable-line react-hooks/exhaustive-deps
   const pending = prepared.pending > 0 || built.pending;
+  // The last figure drawn in full stays on screen while a rebuild is pending, so an edit to a
+  // plot does not blank its cells until the new panels land: a panel whose key changed had no
+  // data yet and showed its placeholder, a white flash on every edit. The dim that marks the
+  // wait is held back until the rebuild has run long enough to notice, for the same reason.
+  const lastComplete = useRef<{ page: FigurePage; panels: Record<string, FigurePanelData> } | null>(null);
+  useEffect(() => {
+    if (!pending && page) lastComplete.current = { page, panels: panelData };
+  }, [pending, page, panelData]);
+  const shown = pending && page && lastComplete.current ? lastComplete.current : page ? { page, panels: panelData } : null;
+  const [settling, setSettling] = useState(false);
+  useEffect(() => {
+    if (!pending) {
+      setSettling(false);
+      return;
+    }
+    const timer = setTimeout(() => setSettling(true), 400);
+    return () => clearTimeout(timer);
+  }, [pending]);
   useEffect(() => {
     if (!paper.current || typeof ResizeObserver === "undefined") return;
     const element = paper.current;
@@ -1740,7 +1760,7 @@ export function FigureWorkspace({
               Files across columns
             </button>
             <span role="status">
-              {pending
+              {settling
                 ? `Preparing figure${prepared.pending ? ` · ${prepared.pending} files remaining` : ""}…`
                 : `${new Set(page?.panels.flatMap((p) => p.samples) ?? []).size} of ${selectedSamples.length} files on this page · ${validPanels} panels ready${problems.length ? ` · ${problems.length} need attention` : ""}`}
             </span>
@@ -1805,7 +1825,7 @@ export function FigureWorkspace({
             ref={viewport}
             aria-busy={pending}
           >
-            {!page ? (
+            {!shown ? (
               <div className="gl-figure-empty">
                 <h3>Build a file / sample comparison</h3>
                 <p>Select files and populations, then add plots to repeat.</p>
@@ -1821,11 +1841,11 @@ export function FigureWorkspace({
               <div
                 className="gl-figure-paper"
                 ref={paper}
-                style={{ zoom: scale, opacity: pending ? 0.55 : 1 }}
+                style={{ zoom: scale, opacity: settling ? 0.55 : 1 }}
               >
                 <FigureGrid
-                  page={page}
-                  panels={panelData}
+                  page={shown.page}
+                  panels={shown.panels}
                   config={config}
                   size={figure.panelSize}
                   showGates={figure.showGates}

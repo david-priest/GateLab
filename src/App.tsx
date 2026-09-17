@@ -623,7 +623,9 @@ const MODES: { id: DisplayMode; label: string }[] = [
 type TabId = "gating" | "strategy" | "illustration" | "layout" | "statistics" | "panel" | "compensation" | "scales" | "metadata" | "proportions" | "division";
 // The Layout tab needs more work before it is offered; its code stays and the flag brings it
 // back. While it is hidden nothing sends plots there.
-const LAYOUT_TAB_AVAILABLE = false;
+// The Layout tab is shown while it is being finished only when the page is opened with ?layout,
+// so it can be tried on a test server without reaching users.
+const LAYOUT_TAB_AVAILABLE = typeof location !== "undefined" && new URLSearchParams(location.search).has("layout");
 const TABS: { id: TabId; label: string }[] = [
   { id: "gating", label: "Gating" },
   { id: "strategy", label: "Strategy" },
@@ -1010,6 +1012,11 @@ export default function App() {
   const [xIdx, setXIdx] = useState(0);
   const [yIdx, setYIdx] = useState(1);
   const [mode, setMode] = useState<DisplayMode>("pseudocolor");
+  // While a pan or stretch is under way in contour mode the plot is drawn as dots: the contours
+  // rebuild their density on every range change, and holding the range until release froze the
+  // view instead, so the drag could not be judged. Cleared when the drag commits.
+  const [dragPreview, setDragPreview] = useState<DisplayMode | null>(null);
+  const plotMode: DisplayMode = dragPreview ?? mode;
   const [busy, setBusy] = useState(false);
   const [sampleManagerOpen, setSampleManagerOpen] = useState(false);
   const [sampleManagerSelection, setSampleManagerSelection] = useState<string[]>([]);
@@ -1517,16 +1524,17 @@ export default function App() {
       pX = nx;
       pY = ny;
       // Contour rebuilds the KDE on every range change (~0.5s) — doing that per frame is
-      // unusable. In contour mode, hold the pending range and apply it once on drag-end
-      // (the view freezes during the drag, then reforms). Cheap modes pan live per frame.
-      if (pzRef.current.mode === "contour") return;
+      // unusable. In contour mode the drag is drawn as dots, which pan live per frame like the
+      // cheap modes, and the contours reform once when the drag commits.
+      if (pzRef.current.mode === "contour") setDragPreview("dots");
       if (!raf) raf = requestAnimationFrame(flush);
     };
     /** Commit the drag's final view to the shared per-channel scale. */
     const commitDrag = () => {
-      const fx = pX ?? pzRef.current.xRange; // pending (contour mode) else the last live-panned range
+      const fx = pX ?? pzRef.current.xRange; // queued for the next frame, else the last live-panned range
       const fy = pY ?? pzRef.current.yRange;
-      flush(); // apply any deferred range (contour mode) once at drag-end
+      flush(); // apply a range still queued for the next frame
+      setDragPreview(null); // back to contours, rebuilt once at the final range
       // Commit to the SHARED per-channel scale so the Gating plot AND the Strategy / Illustration
       // tabs inherit it (persisting per-channel, GateLabR-style); then clear the transient
       // per-view range so globalScales is the single source of truth.
@@ -2479,7 +2487,7 @@ export default function App() {
 
   const learnedBarcodeTemplate = useMemo(() => {
     if (!barcodeImport || !sample) return null;
-    return learnBarcodeTemplate(Object.values(state.gates), sample.arcsinhCofactor, "learned from the current workspace", state.populations, state.root_population_id);
+    return learnBarcodeTemplate(Object.values(state.gates), sample.arcsinhCofactor, "learned from the current workspace", state.populations, state.root_population_id, sample);
   }, [barcodeImport, sample, state.gates, state.populations, state.root_population_id]);
 
   /** A dry build, to tell the dialog how many gates would be reused and created. */
@@ -2519,10 +2527,11 @@ export default function App() {
       `learned from ${sourceName}`,
       state.populations,
       state.root_population_id,
+      sample,
     );
     if (!learned) {
       // No barcode plane: the file holds the plain hierarchy, every gate and population.
-      const out = exportHierarchyCsv(Object.values(state.gates), state.populations, state.root_population_id, sourceName);
+      const out = exportHierarchyCsv(Object.values(state.gates), state.populations, state.root_population_id, sourceName, { context: sample, cofactor: sample.arcsinhCofactor });
       setBarcodeSave({
         learned: null,
         csv: out.csv,
@@ -2531,7 +2540,7 @@ export default function App() {
       setError(null);
       return;
     }
-    const exported = exportBarcodeScheme(Object.values(state.gates), state.populations, state.root_population_id, learned, populationMetadata, sourceName);
+    const exported = exportBarcodeScheme(Object.values(state.gates), state.populations, state.root_population_id, learned, populationMetadata, sourceName, sample);
     setBarcodeSave({
       learned,
       csv: exported.csv,
@@ -7711,7 +7720,7 @@ export default function App() {
    */
   const figureGatingRanges = useMemo(() => {
     const out: Record<string, [number, number]> = {};
-    if (!sample || activeTab !== "illustration") return out;
+    if (!sample || (activeTab !== "illustration" && activeTab !== "layout")) return out;
     sample.channels.forEach((channel, idx) => {
       const explicit = globalScales[channel.key];
       if (explicit) { out[channel.key] = explicit; return; }
@@ -7733,7 +7742,7 @@ export default function App() {
     const base = sample.plotPayload(
       xIdx,
       yIdx,
-      mode,
+      plotMode,
       mainPlotGates,
       derived.displayMask ?? derived.activeMask, // union of checked pops, else active
       state.selected_gate_id,
@@ -7917,7 +7926,7 @@ export default function App() {
     activeDataRevision,
     xIdx,
     yIdx,
-    mode,
+    plotMode,
     mainPlotGates,
     state.selected_gate_id,
     derived,
@@ -9594,11 +9603,15 @@ export default function App() {
                 <LayoutTab
                   workspace={layoutWorkspace}
                   onChange={setLayoutWorkspace}
-                  samples={samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id) }))}
+                  samples={samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id), metadata: metadata[entry.id] }))}
+                  checkedSampleIds={samples.filter((entry) => !excludedSampleIds.has(entry.id)).map((entry) => entry.id)}
+                  groups={state.groups}
+                  fileGroups={state.file_groups}
+                  metadataColumns={metadataColumnNames}
                   activeSampleId={activeSampleId}
                   activePopulationId={state.active_population_id}
                   state={state}
-                  globalScales={globalScales}
+                  globalScales={figureGatingRanges}
                   defaultX={sample.channels[xIdx].key}
                   defaultY={sample.channels[yIdx].key}
                   illustrationConfig={illustConfigRef.current}

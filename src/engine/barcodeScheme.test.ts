@@ -524,7 +524,7 @@ describe("gates and QC populations declared in the file", () => {
       'Line 1: gate "Oops" must be a rectangle or a polygon (got "circle").',
       'Line 2: rectangle "NoShape" needs "x lo..hi" or "x full" (got "y 1..2").',
       'Line 3: polygon "Few" needs at least three "(x,y)" points (got "(1,2) (3,4)").',
-      'Line 4: the scale must be "raw", "asinh", "linear" or one per axis such as "linear, asinh" (got "cubic").',
+      'Line 4: the scale must be "raw", "asinh", "linear", "asinh(5)" naming the cofactor, or one per axis such as "linear, asinh(5)" (got "cubic").',
       'Line 5: population "Empty" lists no gates.',
       'Line 7: population "Cells" is declared twice.',
     ]);
@@ -568,7 +568,7 @@ describe("gates and QC populations declared in the file", () => {
       "# population: Live = Live",
     ]);
     expect(lines.find((l) => l.startsWith("# gate: CenterGate"))).toBe("# gate: CenterGate | rectangle | Time x Center | raw | x full | y 321.283..615.828");
-    expect(lines.find((l) => l.startsWith("# gate: SingletsGate"))).toBe("# gate: SingletsGate | rectangle | Event_length x 103Rh | linear, asinh | x -3.458..55.468 | y 1.043..8.508");
+    expect(lines.find((l) => l.startsWith("# gate: SingletsGate"))).toBe("# gate: SingletsGate | rectangle | Event_length x 103Rh | linear, asinh(5) | x -3.458..55.468 | y 1.043..8.508");
     // An empty template: everything must come from the file.
     const bare = { ...DEFAULT_BARCODE_TEMPLATE, qc: [], states: { "--": [[0, 0], [1, 0], [1, 1]], "+-": [[0, 0], [1, 0], [1, 1]], "-+": [[0, 0], [1, 0], [1, 1]], "++": [[0, 0], [1, 0], [1, 1]] } } as typeof DEFAULT_BARCODE_TEMPLATE;
     const again = resolveBarcodeScheme(parseBarcodeTable(out.csv), channels);
@@ -665,7 +665,7 @@ describe("a hierarchy CSV with no sample table", () => {
       "# population: T cells < Cells = CD3+",
       "# population: B cells < Cells = CD19+, not CD3+",
     ]);
-    expect(lines.find((l) => l.startsWith("# gate: CD3+"))).toBe("# gate: CD3+ | rectangle | CD3 x SSC-A | asinh, linear | x 2..8 | y 0..200000");
+    expect(lines.find((l) => l.startsWith("# gate: CD3+"))).toBe("# gate: CD3+ | rectangle | CD3 x SSC-A | asinh(5), linear | x 2..8 | y 0..200000");
     const again = resolveBarcodeScheme(parseBarcodeTable(out.csv), FLOW_CHANNELS);
     expect(again.problems).toEqual([]);
     const rebuilt = buildBarcodeGating(again, { ...DEFAULT_BARCODE_TEMPLATE, qc: [] }, 5, { qc: true, channels: FLOW_CHANNELS });

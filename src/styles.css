@@ -3139,6 +3139,24 @@ input[type="number"]::-webkit-outer-spin-button {
   cursor: nwse-resize;
 }
 
+.gl-layout-item.is-selected .gl-layout-plot-host { cursor: move; }
+.gl-layout-item.is-locked { outline: 1px dashed #cbd5e1; }
+.gl-layout-page { position: absolute; border: 1px dashed #94a3b8; pointer-events: none; box-sizing: border-box; }
+.gl-layout-tab.is-preview .gl-layout-page { border-color: transparent; }
+.gl-layout-arrange { flex-wrap: wrap; }
+.gl-layout-page-label { font-size: 12px; color: #475569; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-layout-plot-host { overflow: hidden; }
+.gl-layout-canvas .moveable-control-box { z-index: 10000; }
+.gl-layout-canvas-scroll:focus { outline: none; }
+.gl-layout-canvas-scroll:focus-visible .gl-layout-item.is-selected { box-shadow: 0 0 0 3px rgb(59 130 246 / 35%); }
+.gl-layout-item-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.gl-layout-zoom { position: relative; flex: 0 0 auto; }
+.gl-layout-canvas { min-width: 0; min-height: 0; transform-origin: 0 0; }
+.gl-layout-page-margin { position: absolute; border: 1px dashed #cbd5e1; pointer-events: none; }
+.gl-layout-page-margin { border-color: #e2e8f0; }
+.gl-layout-tab.is-preview .gl-layout-page-margin { display: none; }
+.gl-layout-zoom-level { min-width: 44px; text-align: center; font-size: 12px; color: #475569; font-variant-numeric: tabular-nums; }
+.gl-layout-controls h3 { margin: 14px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #64748b; }
 .gl-layout-workspace { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .gl-layout-controls { width: 278px; flex: 0 0 278px; overflow: auto; background: white; border-right: 1px solid #d7dee8; padding: 14px; }
 .gl-presentation-tabs { display: flex; gap: 4px; margin: -8px -8px 16px; padding-bottom: 8px; border-bottom: 1px solid #e2e8f0; }
@@ -3149,7 +3167,7 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-layout-controls .gl-layout-inspector { padding: 14px 0; background: white; border-top: 1px solid #e2e8f0; border-bottom: none; }
 .gl-layout-controls select, .gl-layout-controls input:not([type="checkbox"]) { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
 .gl-layout-dimensions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.gl-layout-dimensions label { display: grid; gap: 4px; text-transform: capitalize; }
+.gl-layout-dimensions label { display: grid; gap: 4px; }
 .gl-layout-item { min-width: 140px; min-height: 140px; border: 1px solid transparent; background: transparent; box-shadow: none; border-radius: 0; overflow: visible; }
 .gl-layout-item.is-text { min-width: 24px; min-height: 20px; }
 .gl-layout-item.has-frame { border-color: #94a3b8; }
@@ -3452,4 +3470,21 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-plotting-arm { max-height: 320px; overflow: auto; margin-top: 6px; }
 .gl-plotting-inspector .gl-check.gl-plotting-arm-row { align-items: stretch; margin: 0; min-width: 0; }
 .gl-plotting-inspector .gl-check.gl-plotting-arm-row input { margin-top: 3px; }
+
+/* Layout tab: the style fields, for the sheet and for an item's own values. */
+.gl-layout-style-fields {
+  display: grid;
+  gap: 4px;
+}
+.gl-layout-style-fields .is-own {
+  font-weight: 600;
+}
+.gl-layout-item-style {
+  margin: 6px 0;
+}
+.gl-layout-item-style > summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
 
