@@ -75,6 +75,8 @@ interface Props {
   /** Gates of this copy whose geometry differs from the tree's: FlowJo's tailored marks. */
   tailoredGateIds?: ReadonlySet<string>;
   readOnly?: boolean;
+  /** Line the gate badges up in one column after the longest name; off, each row's follow its own name. */
+  alignGates?: boolean;
 }
 
 function focusTreeContainer() {
@@ -130,19 +132,61 @@ export function HierarchyControls({ state, perFile }: { state: CoreState; perFil
   ];
   return (
     <div className="population-tree-hierarchy">
-      <span title={t("The workspace's one tree. Its populations and gates apply to every file; a file can tailor a gate's coordinates without leaving it.")}>
-        {t("Tree")}
-      </span>
-      <MenuButton label={tree?.name ?? ""} className="population-tree-name-menu" items={nameItems} />
-      {legacy && (
-        <span
-          className="population-tree-hierarchy-count"
-          title={t("This workspace was saved with several trees. GateLab now keeps one per workspace: switch to another from the tree menu, or delete it there, until one is left.")}
-        >
-          {t("also here: {names} · switch or delete from the tree menu", { names: templates.filter((candidate) => candidate.id !== tree?.id).map((candidate) => candidate.name).join(", ") })}
+      {/* Line one: the tree, how its files stand, and Revert; line two: what edits change. */}
+      <div className="population-tree-hierarchy-row">
+        <span title={t("The workspace's one tree. Its populations and gates apply to every file; a file can tailor a gate's coordinates without leaving it.")}>
+          {t("Tree")}
         </span>
-      )}
+        <MenuButton label={tree?.name ?? ""} className="population-tree-name-menu" items={nameItems} />
+        {perFile?.summary && <span className="population-tree-hierarchy-count" title={perFile.summary}>{perFile.summary}</span>}
+        <span className="population-tree-hierarchy-spacer" />
+        {perFile && (perFile.onRevertFile || perFile.onRevertChecked || perFile.onRevertAll) && (
+          <MenuButton
+            label={t("Revert")}
+            className="population-tree-revert-menu"
+            items={[
+              ...(perFile.onRevertFile
+                ? [{
+                    label: perFile.fileName ? t("Revert {name} to {target}", { name: perFile.fileName, target: perFile.sourceLabel }) : t("Revert this file"),
+                    className: "population-tree-revert-group",
+                    title: t("Drop this file's tailoring: every gate takes the coordinates it follows again"),
+                    disabled: !perFile.fileTailored,
+                    onClick: perFile.onRevertFile,
+                  }]
+                : []),
+              ...(perFile.groupName && perFile.onRevertGroup
+                ? [{
+                    label: t("Revert {name} to the tree", { name: perFile.groupName }),
+                    className: "population-tree-revert-groupcopy",
+                    title: t("Drop the group's tailoring: every gate of the group's tree takes the tree's coordinates again; files following the group follow along"),
+                    disabled: !perFile.groupTailored,
+                    onClick: perFile.onRevertGroup,
+                  }]
+                : []),
+              ...(perFile.onRevertChecked
+                ? [{
+                    label: t("Revert {count} selected files…", { count: perFile.checkedCount }),
+                    className: "population-tree-revert-checked",
+                    title: t("Drop the selected files' tailoring, after confirmation. Unselected files and the tree stay unchanged."),
+                    disabled: perFile.checkedCount === 0,
+                    onClick: perFile.onRevertChecked,
+                  }]
+                : []),
+              ...(perFile.onRevertAll
+                ? [{
+                    label: t("Revert all files…"),
+                    className: "population-tree-revert-all",
+                    title: t("Drop every file's tailoring, after confirmation: every file follows the tree."),
+                    disabled: perFile.tailoredFiles === 0,
+                    onClick: perFile.onRevertAll,
+                  }]
+                : []),
+            ]}
+          />
+        )}
+      </div>
       {perFile && (
+        <div className="population-tree-hierarchy-row">
         <span className="population-tree-edit-target" role="group" aria-label={t("Edits change")}>
           <span className="population-tree-edit-target-label">{t("Edits change")}</span>
           <button
@@ -180,10 +224,8 @@ export function HierarchyControls({ state, perFile }: { state: CoreState; perFil
             {perFile.fileName ? t("{name} only", { name: perFile.fileName }) : t("this file only")}
           </button>
         </span>
-      )}
-      {perFile?.summary && <span className="population-tree-hierarchy-count" title={perFile.summary}>{perFile.summary}</span>}
-      {/* The promote button appears in a slot of fixed width, so the Revert menu never moves. */}
-      {perFile?.onPromote && <span className="population-tree-promote-slot">
+        {/* The promote button appears in a slot, so the line keeps its height without it. */}
+        {perFile.onPromote && <span className="population-tree-promote-slot">
       {((perFile.editMode === "file" && perFile.fileTailored) || (perFile.editMode === "group" && perFile.groupTailored)) && (
         <button
           type="button"
@@ -197,49 +239,15 @@ export function HierarchyControls({ state, perFile }: { state: CoreState; perFil
         </button>
       )}
       </span>}
-      {perFile && (perFile.onRevertFile || perFile.onRevertChecked || perFile.onRevertAll) && (
-        <MenuButton
-          label={t("Revert")}
-          className="population-tree-revert-menu"
-          items={[
-            ...(perFile.onRevertFile
-              ? [{
-                  label: perFile.fileName ? t("Revert {name} to {target}", { name: perFile.fileName, target: perFile.sourceLabel }) : t("Revert this file"),
-                  className: "population-tree-revert-group",
-                  title: t("Drop this file's tailoring: every gate takes the coordinates it follows again"),
-                  disabled: !perFile.fileTailored,
-                  onClick: perFile.onRevertFile,
-                }]
-              : []),
-            ...(perFile.groupName && perFile.onRevertGroup
-              ? [{
-                  label: t("Revert {name} to the tree", { name: perFile.groupName }),
-                  className: "population-tree-revert-groupcopy",
-                  title: t("Drop the group's tailoring: every gate of the group's tree takes the tree's coordinates again; files following the group follow along"),
-                  disabled: !perFile.groupTailored,
-                  onClick: perFile.onRevertGroup,
-                }]
-              : []),
-            ...(perFile.onRevertChecked
-              ? [{
-                  label: t("Revert {count} selected files…", { count: perFile.checkedCount }),
-                  className: "population-tree-revert-checked",
-                  title: t("Drop the selected files' tailoring, after confirmation. Unselected files and the tree stay unchanged."),
-                  disabled: perFile.checkedCount === 0,
-                  onClick: perFile.onRevertChecked,
-                }]
-              : []),
-            ...(perFile.onRevertAll
-              ? [{
-                  label: t("Revert all files…"),
-                  className: "population-tree-revert-all",
-                  title: t("Drop every file's tailoring, after confirmation: every file follows the tree."),
-                  disabled: perFile.tailoredFiles === 0,
-                  onClick: perFile.onRevertAll,
-                }]
-              : []),
-          ]}
-        />
+        </div>
+      )}
+      {legacy && (
+        <div
+          className="population-tree-hierarchy-row population-tree-legacy-note"
+          title={t("This workspace was saved with several trees. GateLab now keeps one per workspace: switch to another from the tree menu, or delete it there, until one is left.")}
+        >
+          {t("also here: {names} · switch or delete from the tree menu", { names: templates.filter((candidate) => candidate.id !== tree?.id).map((candidate) => candidate.name).join(", ") })}
+        </div>
       )}
       {/* Always a line, so a message does not push the lists below down. */}
       <span role="status" className="hierarchy-action-status">{perFile?.message ?? "\u00a0"}</span>
@@ -328,7 +336,7 @@ export function PopulationTree({
   displayContributorNames,
   perFile,
   readOnly = false,
-  showHierarchyControls = true, tailoredGateIds }: Props) {
+  showHierarchyControls = true, tailoredGateIds, alignGates = true }: Props) {
   const { t } = useI18n();
   const { populations, root_population_id, active_population_id, selected_gate_id, selected_pop_ids, gates } = state;
   const structureLocked = readOnly || state.hierarchies.some(
@@ -656,8 +664,9 @@ export function PopulationTree({
             active: false,
             dropTarget: null,
           };
-          event.currentTarget.setPointerCapture?.(event.pointerId);
-          event.preventDefault();
+          // The pointer is captured only once the drag is real (below): capturing here sent the
+          // click and double-click to the row instead of the name, so double-click to rename
+          // worked only with Shift held, which skips the drag altogether.
         }}
         onPointerMove={(event) => {
           const drag = pointerDragRef.current;
@@ -668,6 +677,7 @@ export function PopulationTree({
             // the row below reparented the population.
             if (moved < 8) return;
             drag.active = true;
+            event.currentTarget.setPointerCapture?.(event.pointerId);
             setDraggingPopIds(drag.popIds);
           }
           event.preventDefault();
@@ -893,7 +903,7 @@ export function PopulationTree({
           </strong>
         )}
       </div>
-      {rows}
+      <div className={`population-tree-rows${alignGates ? " is-aligned" : ""}`}>{rows}</div>
       {gatePicker && pickerPopulation && (
         <div
           ref={gatePickerRef}

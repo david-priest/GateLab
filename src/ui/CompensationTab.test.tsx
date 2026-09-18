@@ -1444,7 +1444,8 @@ describe("CompensationTab CyTOF import path", () => {
       evidenceMode.value = "biological";
       evidenceMode.dispatchEvent(new Event("change", { bubbles: true }));
     });
-    expect(host.querySelector('select[aria-label="Follow-up source channel"]')).not.toBeNull();
+    expect(host.querySelector('button[aria-label="Follow-up source channel"]')).not.toBeNull();
+    expect(host.querySelector('input[aria-label="Compensation biplot point size"]')).not.toBeNull();
     expect([...host.querySelectorAll<HTMLButtonElement>("button")]
       .some((button) => button.textContent === "Recompute suggestions")).toBe(true);
     expect(host.textContent).toContain("Sweep workers are separate from full-Apply workers");

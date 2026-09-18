@@ -170,6 +170,9 @@ export interface WorkspaceStoredHierarchy extends HierarchyRef {
 }
 
 /** Illustration-tab configuration (capture_illust_settings) — persisted per-workspace + as presets. */
+/** What a gate's label says on a figure. */
+export type GateLabelFormat = "name-percent" | "percent" | "number" | "name" | "none";
+
 export interface IllustrationConfig {
   /** Independent, provenance-aware figure editor. Legacy fields remain readable by Layout. */
   figure?: import("./figure").FigureSpec;
@@ -209,6 +212,8 @@ export interface IllustrationConfig {
   /** Gate-edge display, saved with the preset so a figure's look does not depend on
    *  whatever the gating plot happened to be set to. Optional: presets predate it. */
   gateEdgeMode?: GateEdgeMode;
+  /** Name and percentage (the default), percentage, the number alone, the name, or nothing. */
+  gateLabelFormat?: GateLabelFormat;
   histLineWidth: number;
   histFill: boolean;
   histFillAlpha: number;
@@ -218,8 +223,14 @@ export interface IllustrationConfig {
   ridgeColGap: number;
   ridgeGradient: boolean;
   heatmapStat?: "median" | "mean";
-  heatmapScale?: "none" | "column_minmax" | "row_minmax" | "column_zscore";
-  heatmapPalette?: "heat" | "viridis" | "blue_white_yellow_red";
+  /** How the matrix is scaled; column_quantile is per channel by the 1st and 99th percentiles of the events, as plotExprHeatmap1 scales. */
+  heatmapScale?: "none" | "column_minmax" | "row_minmax" | "column_zscore" | "column_quantile";
+  heatmapPalette?: "heat" | "viridis" | "blue_white_yellow_red" | "rdylbu";
+  /** Rows and columns ordered by average-linkage clustering, with dendrograms; off unless set on. */
+  heatmapClusterRows?: boolean;
+  heatmapClusterColumns?: boolean;
+  /** Event counts as bars beside the rows. */
+  heatmapBars?: "none" | "counts";
   heatmapCellSize?: number;
   heatmapShowValues?: boolean;
   fontTick: number;
@@ -618,7 +629,13 @@ export function validateWorkspace(ws: WorkspaceFile): true {
         invalidWorkspace(`hierarchy "${ref.name}" cannot belong to both a file and a group.`);
       }
       if (ref.structure_locked === true && !ref.owner_sample_id && !ref.owner_group_id) {
-        invalidWorkspace(`hierarchy "${ref.name}" cannot lock structure without a file or group owner.`);
+        // A tree locked with no owner: files saved by 0.8.0 carry a group's tree this way, the
+        // group named as the tree is. The tree is given to that group; without one it is
+        // unlocked, an ordinary copy, rather than the whole workspace refused.
+        const group = (ws.gating.groups ?? []).find((g) =>
+          isRecord(g) && typeof g.name === "string" && typeof g.id === "string" && g.name.trim().toLowerCase() === ref.name.trim().toLowerCase());
+        if (group) ref.owner_group_id = group.id as string;
+        else delete ref.structure_locked;
       }
       for (const [field, mapping] of [
         ["source_gate_ids", ref.source_gate_ids],

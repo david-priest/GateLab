@@ -7,6 +7,8 @@ import {
   mmToPx,
   pageSizePx,
   pxToMm,
+  layoutItemZoom,
+  zoomField,
   type LayoutItem,
   type LayoutSheet,
 } from "./layout";
@@ -109,7 +111,7 @@ export function fitPageToContent(sheet: LayoutSheet): void {
  * as far as its proportions allow, centred; the page is unchanged. Sizes are never made smaller
  * than an item's minimum.
  */
-export function fitContentToPage(sheet: LayoutSheet, minimum: (item: LayoutItem) => { width: number; height: number }): void {
+export function fitContentToPage(sheet: LayoutSheet): void {
   const bounds = contentBounds(sheet.items);
   if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
   const box = pageContentBox(sheet);
@@ -118,10 +120,15 @@ export function fitContentToPage(sheet: LayoutSheet, minimum: (item: LayoutItem)
   const originX = box.x + (box.width - scaledWidth) / 2;
   const originY = box.y + (box.height - scaledHeight) / 2;
   for (const item of sheet.items) {
-    const min = minimum(item);
     item.x = Math.round(originX + (item.x - bounds.x) * scale);
     item.y = Math.round(originY + (item.y - bounds.y) * scale);
-    item.width = Math.max(min.width, Math.round(item.width * scale));
-    item.height = Math.max(min.height, Math.round(item.height * scale));
+    item.width = Math.max(1, Math.round(item.width * scale));
+    item.height = Math.max(1, Math.round(item.height * scale));
+    // Shrinking zooms the item as a whole: it is still drawn at the size it had, so a plot's
+    // fonts, gates and margins shrink with it instead of a smaller plot being drawn. Growing
+    // undoes that zoom first and then draws larger, so nothing is ever a raster scaled up.
+    const zoom = zoomField(Math.min(1, layoutItemZoom(item) * scale));
+    if (zoom.zoom === undefined) delete item.zoom;
+    else item.zoom = zoom.zoom;
   }
 }

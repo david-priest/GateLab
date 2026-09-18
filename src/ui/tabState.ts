@@ -12,6 +12,7 @@
 
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { OVERLAY_PALETTES } from "../engine/palettes";
+import { normalizeProportionsSettings, type ProportionsSettings } from "../engine/proportionsSettings";
 
 const store: Record<string, unknown> = {};
 
@@ -44,6 +45,22 @@ export function savedPlottingState(): Record<string, unknown> {
   );
 }
 
+/**
+ * The Plotting tab's settings as it would show them now: what the store holds over the defaults
+ * given, so a chart can be taken from the tab whether or not it has been opened.
+ */
+export function readProportionsSettings(defaults: ProportionsSettings): ProportionsSettings {
+  const held = Object.fromEntries(
+    Object.entries(store).filter(([key]) => key.startsWith("prop.")).map(([key, value]) => [key.slice(5), value]),
+  );
+  return normalizeProportionsSettings(held, defaults);
+}
+
+/** Put a chart's settings into the Plotting tab, so it opens showing that chart. */
+export function writeProportionsSettings(settings: ProportionsSettings): void {
+  for (const [key, value] of Object.entries(settings)) store[`prop.${key}`] = structuredClone(value);
+}
+
 /** Only known presentation settings are restored; malformed values fall back to UI defaults. */
 export function restorePlottingState(value: unknown): void {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
@@ -65,7 +82,7 @@ export function restorePlottingState(value: unknown): void {
     const field = key.slice(5);
     if (
       enums[field]?.includes(item as string) ||
-      (["groupSel", "unitSel", "facetSel", "hierarchy"].includes(field) &&
+      (["groupSel", "unitSel", "facetSel", "hierarchy", "parent"].includes(field) &&
         typeof item === "string") ||
       ([
         "includeUngated",

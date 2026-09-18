@@ -16,6 +16,10 @@ export interface CytofD3Api {
   setMode(mode: string): void;
   clear(): void;
   clearPendingEdit(gateId: string, seq?: number): void;
+  /** GateLab's addition: the selected polygon or rectangle grows until each side meets a facing gate edge or the plot's edge. */
+  extendSelectedGateToEdges?(): boolean;
+  /** GateLab's addition: the facing edges of neighbouring gates move onto one shared line; the gates named, or every one drawn. */
+  closeGateGaps?(gateIds?: readonly string[]): boolean;
 }
 
 /** mini_plot.js — the Strategy / Illustration grid renderer (window.CytofMiniPlot). */
@@ -338,6 +342,414 @@ export function patchCytofForGateLab(src: string): string {
     console.warn(
       "[GateLab] cytof ellipse handle-follow patch: needle not found — handles will lag a body move.",
     );
+  }
+
+  // A dragged or drawn vertex snaps to another gate's vertex within 8 px, or onto its edge within
+  // 6 px, so adjacent gates meet without a gap or an overlap where a quadrant gate does not fit.
+  // Off with Alt held, or when the plot's snap_to_gates is false (the Gating tab's toggle).
+  if (!out.includes("function _snapToGates(")) {
+    const helpersAnchor = "    function _makeVertexDrag(gate, vertIdx, gg, fillEl, outlineEl,";
+    const helpers =
+      "    // GateLab: a dragged or drawn vertex snaps to another gate's vertex within 8 px, or onto\n" +
+      "    // its edge within 6 px, so adjacent gates meet without a gap or an overlap. Off with Alt\n" +
+      "    // held, or when the plot's snap_to_gates is false. See loadPlots.ts.\n" +
+      "    function _otherGatePx(other, zx, zy) {\n" +
+      "        if (!_plotData || !other || !other.vertices || other.vertices.length < 2) return null;\n" +
+      "        if (other.gate_type !== 'polygon' && other.gate_type !== 'rectangle') return null;\n" +
+      "        var xCh = _plotData.x_label, yCh = _plotData.y_label;\n" +
+      "        if (other.x_channel === xCh && other.y_channel === yCh) return _toPx(other.vertices, zx, zy);\n" +
+      "        if (other.x_channel === yCh && other.y_channel === xCh) return other.vertices.map(function (v) { return [zx(v[1]), zy(v[0])]; });\n" +
+      "        return null;\n" +
+      "    }\n" +
+      "    function _nearestOnSegment(px, py, a, b) {\n" +
+      "        var dx = b[0] - a[0], dy = b[1] - a[1], len2 = dx * dx + dy * dy;\n" +
+      "        var t = len2 > 0 ? Math.max(0, Math.min(1, ((px - a[0]) * dx + (py - a[1]) * dy) / len2)) : 0;\n" +
+      "        return [a[0] + t * dx, a[1] + t * dy];\n" +
+      "    }\n" +
+      "    function _snapToGates(gate, px, py, zx, zy, sourceEvent) {\n" +
+      "        if (!_plotData || _plotData.snap_to_gates === false || !_plotData.gates) return [px, py];\n" +
+      "        // Alt places a point freely; Shift is the angle hold's, which has the last word instead.\n" +
+      "        if (sourceEvent && (sourceEvent.altKey || sourceEvent.shiftKey)) return [px, py];\n" +
+      "        var VERTEX_PX = 8, EDGE_PX = 6;\n" +
+      "        var vertex = null, vertexD = Infinity, edge = null, edgeD = Infinity;\n" +
+      "        _plotData.gates.forEach(function (other) {\n" +
+      "            if (!other || (gate && other.gate_id === gate.gate_id)) return;\n" +
+      "            var pts = _otherGatePx(other, zx, zy);\n" +
+      "            if (!pts) return;\n" +
+      "            for (var i = 0; i < pts.length; i++) {\n" +
+      "                var d = Math.hypot(pts[i][0] - px, pts[i][1] - py);\n" +
+      "                if (d < vertexD) { vertexD = d; vertex = pts[i]; }\n" +
+      "                var q = _nearestOnSegment(px, py, pts[i], pts[(i + 1) % pts.length]);\n" +
+      "                var e = Math.hypot(q[0] - px, q[1] - py);\n" +
+      "                if (e < edgeD) { edgeD = e; edge = q; }\n" +
+      "            }\n" +
+      "        });\n" +
+      "        if (vertex && vertexD <= VERTEX_PX) return [vertex[0], vertex[1]];\n" +
+      "        if (edge && edgeD <= EDGE_PX) return edge;\n" +
+      "        // The plot's own borders snap like a neighbour's edge: the axis limits, in pixels.\n" +
+      "        if (_plotData.x_range && _plotData.y_range) {\n" +
+      "            var sx = [zx(_plotData.x_range[0]), zx(_plotData.x_range[1])], sy = [zy(_plotData.y_range[0]), zy(_plotData.y_range[1])];\n" +
+      "            var out = [px, py];\n" +
+      "            sx.forEach(function (b) { if (Math.abs(px - b) <= EDGE_PX) out[0] = b; });\n" +
+      "            sy.forEach(function (b) { if (Math.abs(py - b) <= EDGE_PX) out[1] = b; });\n" +
+      "            return out;\n" +
+      "        }\n" +
+      "        return [px, py];\n" +
+      "    }\n" +
+      "    // A moved gate snaps as a whole: the vertex nearest another gate lands on it, and the\n" +
+      "    // rest follow, so a whole border can be laid against a neighbour's.\n" +
+      "    function _snapGateMove(gate, zx, zy, flipped, sourceEvent) {\n" +
+      "        if (!_plotData || _plotData.snap_to_gates === false || !_plotData.gates) return;\n" +
+      "        if (sourceEvent && (sourceEvent.altKey || sourceEvent.shiftKey)) return;\n" +
+      "        var best = null, bestD = Infinity;\n" +
+      "        gate.vertices.forEach(function (v) {\n" +
+      "            var px = flipped ? zx(v[1]) : zx(v[0]), py = flipped ? zy(v[0]) : zy(v[1]);\n" +
+      "            var s = _snapToGates(gate, px, py, zx, zy, null);\n" +
+      "            var d = Math.hypot(s[0] - px, s[1] - py);\n" +
+      "            if (d > 0 && d < bestD) { bestD = d; best = [s[0] - px, s[1] - py]; }\n" +
+      "        });\n" +
+      "        if (!best) return;\n" +
+      "        var ddx = zx.invert(best[0]) - zx.invert(0), ddy = zy.invert(best[1]) - zy.invert(0);\n" +
+      "        gate.vertices = gate.vertices.map(function (v) { return flipped ? [v[0] + ddy, v[1] + ddx] : [v[0] + ddx, v[1] + ddy]; });\n" +
+      "    }\n" +
+      "    // GateLab: \"Extend to edges\". The selected polygon or rectangle grows outward. A side is a run\n" +
+      "    // of consecutive edges facing the same way (left, right, up or down), and it moves as one: to\n" +
+      "    // the first facing edge of another gate in its way, landing on that edge's line when it faces\n" +
+      "    // that one edge (a sloped one counts), else moving until it touches the nearer of them; to the\n" +
+      "    // plot's edge when nothing is in the way. Both ways: a side short of its stop is pushed out, a\n" +
+      "    // side past it is brought back, and no vertex ends beyond the axis range. A corner goes where\n" +
+      "    // its two sides' lines meet. A rectangle stays a rectangle: its side stops where it touches.\n" +
+      "    function _extendSelectedGateToEdges() {\n" +
+      "        if (!_plotData || !_plotData.gates || !_plotData.x_range || !_plotData.y_range || !_xBase) return false;\n" +
+      "        var zx = _zx(), zy = _zy();\n" +
+      "        var xCh = _plotData.x_label, yCh = _plotData.y_label;\n" +
+      "        var orient = function (g) {\n" +
+      "            if (!g || !g.vertices) return null;\n" +
+      "            if (g.x_channel === xCh && g.y_channel === yCh) return 'normal';\n" +
+      "            if (g.x_channel === yCh && g.y_channel === xCh) return 'flipped';\n" +
+      "            return null;\n" +
+      "        };\n" +
+      "        var toPx = function (g, v) { return orient(g) === 'flipped' ? [zx(v[1]), zy(v[0])] : [zx(v[0]), zy(v[1])]; };\n" +
+      "        var gate = null;\n" +
+      "        _plotData.gates.forEach(function (g) { if (g && g.gate_id === _plotData.selected_gate_id) gate = g; });\n" +
+      "        if (!gate || !orient(gate) || gate.vertices.length < 3 || (gate.gate_type !== 'polygon' && gate.gate_type !== 'rectangle')) return false;\n" +
+      "        var pts = gate.vertices.map(function (v) { return toPx(gate, v); });\n" +
+      "        var n = pts.length;\n" +
+      "        var centroid = function (q) { var c = [0, 0]; q.forEach(function (p) { c[0] += p[0] / q.length; c[1] += p[1] / q.length; }); return c; };\n" +
+      "        var segDist = function (p, a, b) {\n" +
+      "            var ex = b[0] - a[0], ey = b[1] - a[1], L = ex * ex + ey * ey;\n" +
+      "            var t = L ? Math.max(0, Math.min(1, ((p[0] - a[0]) * ex + (p[1] - a[1]) * ey) / L)) : 0;\n" +
+      "            return Math.hypot(p[0] - a[0] - t * ex, p[1] - a[1] - t * ey);\n" +
+      "        };\n" +
+      "        // Every edge of every other gate on these axes, with the normal that points out of its gate:\n" +
+      "        // only an edge facing the pushed side stands in its way, never a gate's far side.\n" +
+      "        var walls = [];\n" +
+      "        _plotData.gates.forEach(function (g) {\n" +
+      "            if (!g || g === gate || g.gate_id === gate.gate_id || !orient(g) || g.vertices.length < 2) return;\n" +
+      "            if (g.gate_type !== 'polygon' && g.gate_type !== 'rectangle') return;\n" +
+      "            var q = g.vertices.map(function (v) { return toPx(g, v); });\n" +
+      "            if (q.length === 2) q = [[q[0][0], q[0][1]], [q[1][0], q[0][1]], [q[1][0], q[1][1]], [q[0][0], q[1][1]]];\n" +
+      "            var c = centroid(q);\n" +
+      "            for (var i = 0; i < q.length; i++) {\n" +
+      "                var a = q[i], b = q[(i + 1) % q.length], ex = b[0] - a[0], ey = b[1] - a[1], len = Math.hypot(ex, ey);\n" +
+      "                if (len < 1e-6) continue;\n" +
+      "                var nx = -ey / len, ny = ex / len;\n" +
+      "                if ((c[0] - a[0]) * nx + (c[1] - a[1]) * ny > 0) { nx = -nx; ny = -ny; }\n" +
+      "                walls.push({ a: a, b: b, nx: nx, ny: ny, poly: q, index: i });\n" +
+      "            }\n" +
+      "        });\n" +
+      "        var xs = [zx(_plotData.x_range[0]), zx(_plotData.x_range[1])], ys = [zy(_plotData.y_range[0]), zy(_plotData.y_range[1])];\n" +
+      "        var bx = [Math.min(xs[0], xs[1]), Math.max(xs[0], xs[1])], by = [Math.min(ys[0], ys[1]), Math.max(ys[0], ys[1])];\n" +
+      "        var BEHIND = 12, SLACK = 4, ACROSS = Math.cos(45 * Math.PI / 180);\n" +
+      "        var inside = function (p, poly) {\n" +
+      "            var c = false;\n" +
+      "            for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {\n" +
+      "                var xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];\n" +
+      "                if ((yi > p[1]) !== (yj > p[1]) && p[0] < (xj - xi) * (p[1] - yi) / (yj - yi) + xi) c = !c;\n" +
+      "            }\n" +
+      "            return c;\n" +
+      "        };\n" +
+      "        // A point that crossed into a gate is behind the gate's edge nearest to it, not behind\n" +
+      "        // whichever of the gate's edges a ray happens to reach.\n" +
+      "        var behindWall = function (p, w) {\n" +
+      "            if (!inside(p, w.poly)) return false;\n" +
+      "            var own = segDist(p, w.a, w.b);\n" +
+      "            if (own <= 0.5) return false;\n" +
+      "            for (var i = 0; i < w.poly.length; i++) {\n" +
+      "                if (i !== w.index && segDist(p, w.poly[i], w.poly[(i + 1) % w.poly.length]) < own) return false;\n" +
+      "            }\n" +
+      "            return true;\n" +
+      "        };\n" +
+      "        // Where the ray from p along d meets the segment a-b: the distance along d, else null.\n" +
+      "        var hit = function (p, d, a, b) {\n" +
+      "            var ex = b[0] - a[0], ey = b[1] - a[1], den = d[0] * ey - d[1] * ex;\n" +
+      "            if (Math.abs(den) < 1e-9) return null;\n" +
+      "            var wx = a[0] - p[0], wy = a[1] - p[1];\n" +
+      "            var t = (wx * ey - wy * ex) / den, s = (wx * d[1] - wy * d[0]) / den;\n" +
+      "            var slack = SLACK / (Math.hypot(ex, ey) || 1);\n" +
+      "            return s < -slack || s > 1 + slack ? null : t;\n" +
+      "        };\n" +
+      "        var meet = function (L1, L2) {\n" +
+      "            var den = L1.u[0] * L2.u[1] - L1.u[1] * L2.u[0];\n" +
+      "            if (Math.abs(den) < 1e-6) return null;\n" +
+      "            var t = ((L2.p[0] - L1.p[0]) * L2.u[1] - (L2.p[1] - L1.p[1]) * L2.u[0]) / den;\n" +
+      "            return [L1.p[0] + t * L1.u[0], L1.p[1] + t * L1.u[1]];\n" +
+      "        };\n" +
+      "        var along = function (p, L) { return meet({ p: p, u: L.d }, L) || p; };\n" +
+      "        // One pass: the way each edge faces, the runs of edges facing one way, per run the line its\n" +
+      "        // edges land on and the direction they travel, then each corner where its two lines meet.\n" +
+      "        var settle = function (pts, prev) {\n" +
+      "            var c0 = centroid(pts);\n" +
+      "            var edges = pts.map(function (a, i) {\n" +
+      "                var b = pts[(i + 1) % n], ex = b[0] - a[0], ey = b[1] - a[1], len = Math.hypot(ex, ey);\n" +
+      "                if (len < 1e-6) return null;\n" +
+      "                var nx = -ey / len, ny = ex / len;\n" +
+      "                if ((c0[0] - a[0]) * nx + (c0[1] - a[1]) * ny > 0) { nx = -nx; ny = -ny; }\n" +
+      "                var d = Math.abs(nx) >= Math.abs(ny) ? [nx > 0 ? 1 : -1, 0] : [0, ny > 0 ? 1 : -1];\n" +
+      "                return { a: a, b: b, u: [ex / len, ey / len], d: d, key: d[0] + ',' + d[1], line: null };\n" +
+      "            });\n" +
+      "            // Runs of consecutive edges facing the same way, cyclic: start after a change of way.\n" +
+      "            var first = 0;\n" +
+      "            for (var i = 0; i < n; i++) { var prevEdge = edges[(i - 1 + n) % n], cur = edges[i]; if (cur && (!prevEdge || prevEdge.key !== cur.key)) { first = i; break; } }\n" +
+      "            var runs = [], run = null;\n" +
+      "            for (var k = 0; k < n; k++) {\n" +
+      "                var ei = (first + k) % n, e = edges[ei];\n" +
+      "                if (!e) { run = null; continue; }\n" +
+      "                if (!run || run.key !== e.key) { run = { key: e.key, d: e.d, edges: [], first: ei, last: ei }; runs.push(run); }\n" +
+      "                run.edges.push(e); run.last = ei;\n" +
+      "            }\n" +
+      "            // A wall lies along a line when both its ends are within a couple of pixels of it.\n" +
+      "            var onLine = function (L, w) {\n" +
+      "                if (!L) return false;\n" +
+      "                var off = function (q) { return Math.abs((q[0] - L.p[0]) * L.u[1] - (q[1] - L.p[1]) * L.u[0]); };\n" +
+      "                return off(w.a) <= 2 && off(w.b) <= 2;\n" +
+      "            };\n" +
+      "            runs.forEach(function (run) {\n" +
+      "                var d = run.d, best = null, hits = [];\n" +
+      "                var note = function (t, w, p) { if (t === null) return; if (t < -BEHIND && !behindWall(p, w)) return; hits.push({ t: t, wall: w }); if (!best || t < best.t) best = { t: t, wall: w }; };\n" +
+      "                var far = -Infinity;\n" +
+      "                // A neighbour touching the side only at a corner does not block it when the side\n" +
+      "                // adjacent at that corner lies on the neighbour's line (as the previous pass placed\n" +
+      "                // it): the corner then slides along that line where the two sides' lines meet, and\n" +
+      "                // the side goes on to its own stop. Otherwise the neighbour blocks as any other.\n" +
+      "                var resting = [];\n" +
+      "                if (prev) [[run.edges[0].a, prev[(run.first - 1 + n) % n]], [run.edges[run.edges.length - 1].b, prev[(run.last + 1) % n]]].forEach(function (end) {\n" +
+      "                    walls.forEach(function (w) {\n" +
+      "                        if (w.nx * d[0] + w.ny * d[1] > -0.1 || resting.indexOf(w) !== -1) return;\n" +
+      "                        var t = hit(end[0], d, w.a, w.b);\n" +
+      "                        if (t !== null && Math.abs(t) <= 2 && onLine(end[1], w)) resting.push(w);\n" +
+      "                    });\n" +
+      "                });\n" +
+      "                run.edges.forEach(function (e) {\n" +
+      "                    var m = [(e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2];\n" +
+      "                    [e.a, e.b].forEach(function (p) { far = Math.max(far, p[0] * d[0] + p[1] * d[1]); });\n" +
+      "                    walls.forEach(function (w) {\n" +
+      "                        if (w.nx * d[0] + w.ny * d[1] > -0.1) return; // not facing the side: a far side or one running alongside\n" +
+      "                        if (resting.indexOf(w) !== -1) return;\n" +
+      "                        [e.a, e.b, m].forEach(function (p) { note(hit(p, d, w.a, w.b), w, p); });\n" +
+      "                        // The wall's own corners, which the side may reach before its corners reach the wall.\n" +
+      "                        [w.a, w.b].forEach(function (q) { var t = hit(q, [-d[0], -d[1]], e.a, e.b); if (t !== null) note(t, w, [q[0] - d[0] * t, q[1] - d[1] * t]); });\n" +
+      "                    });\n" +
+      "                });\n" +
+      "                var limit = d[0] ? (d[0] > 0 ? bx[1] : -bx[0]) - far : (d[1] > 0 ? by[1] : -by[0]) - far;\n" +
+      "                if (best && best.t <= limit + SLACK) {\n" +
+      "                    var w = best.wall, wx = w.b[0] - w.a[0], wy = w.b[1] - w.a[1], wl = Math.hypot(wx, wy) || 1;\n" +
+      "                    var across = Math.abs((wx * d[0] + wy * d[1]) / wl) <= ACROSS;\n" +
+      "                    var oneWall = hits.length >= 2 && hits.every(function (h) { return h.wall === w; });\n" +
+      "                    var land = gate.gate_type === 'polygon' && across && oneWall ? { p: w.a, u: [wx / wl, wy / wl] } : null;\n" +
+      "                    run.edges.forEach(function (e) { e.line = land ? { p: land.p, u: land.u, d: d } : { p: [e.a[0] + d[0] * best.t, e.a[1] + d[1] * best.t], u: e.u, d: d }; });\n" +
+      "                } else {\n" +
+      "                    var bound = d[0] ? { p: [d[0] > 0 ? bx[1] : bx[0], 0], u: [0, 1], d: d } : { p: [0, d[1] > 0 ? by[1] : by[0]], u: [1, 0], d: d };\n" +
+      "                    run.edges.forEach(function (e) { e.line = bound; });\n" +
+      "                }\n" +
+      "            });\n" +
+      "            return { lines: edges.map(function (e) { return e && e.line; }), pts: pts.map(function (p, i) {\n" +
+      "                var before = edges[(i - 1 + n) % n], after = edges[i];\n" +
+      "                var L1 = before && before.line, L2 = after && after.line;\n" +
+      "                if (L1 && L2) return meet(L1, L2) || along(p, L2);\n" +
+      "                return L2 ? along(p, L2) : L1 ? along(p, L1) : p;\n" +
+      "            }) };\n" +
+      "        };\n" +
+      "        // Twice: a side measured before a neighbouring side moved is measured again after it did,\n" +
+      "        // and a corner resting on a neighbour can slide once its adjacent side's line is known.\n" +
+      "        var pass1 = settle(pts, null), out = settle(pass1.pts, pass1.lines).pts;\n" +
+      "        // Two sides that met on one line leave a corner twice over; keep one.\n" +
+      "        var tidy = [];\n" +
+      "        out.forEach(function (p) { var last = tidy[tidy.length - 1]; if (!last || Math.hypot(p[0] - last[0], p[1] - last[1]) > 0.5) tidy.push(p); });\n" +
+      "        if (tidy.length > 1 && Math.hypot(tidy[0][0] - tidy[tidy.length - 1][0], tidy[0][1] - tidy[tidy.length - 1][1]) <= 0.5) tidy.pop();\n" +
+      "        if (tidy.length < 3) return false;\n" +
+      "        tidy = tidy.map(function (p) { return [Math.min(bx[1], Math.max(bx[0], p[0])), Math.min(by[1], Math.max(by[0], p[1]))]; });\n" +
+      "        if (gate.gate_type === 'rectangle') {\n" +
+      "            var qx = tidy.map(function (p) { return p[0]; }), qy = tidy.map(function (p) { return p[1]; });\n" +
+      "            var x0 = Math.min.apply(null, qx), x1 = Math.max.apply(null, qx), y0 = Math.min.apply(null, qy), y1 = Math.max.apply(null, qy);\n" +
+      "            tidy = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];\n" +
+      "        }\n" +
+      "        var changed = tidy.length !== n || tidy.some(function (p, i) { return Math.hypot(p[0] - pts[i][0], p[1] - pts[i][1]) > 0.01; });\n" +
+      "        if (!changed) return false;\n" +
+      "        var flipped = orient(gate) === 'flipped';\n" +
+      "        gate.vertices = tidy.map(function (p) { return flipped ? [zy.invert(p[1]), zx.invert(p[0])] : [zx.invert(p[0]), zy.invert(p[1])]; });\n" +
+      "        _notifyGateEdit(gate);\n" +
+      "        _drawGates(zx, zy);\n" +
+      "        return true;\n" +
+      "    }\n" +
+      "    // GateLab: \"Close gaps\". The facing edges of neighbouring gates, near-parallel, within\n" +
+      "    // GAP_PX of each other and overlapping along their length, are grouped; one line is fitted\n" +
+      "    // through every endpoint of a group, axis-aligned when a rectangle's edge is in it, and the\n" +
+      "    // endpoints move onto it, so the gates touch along a shared segment with neither a gap nor a\n" +
+      "    // sliver of overlap. Acts on the gates named, else on every polygon and rectangle drawn here.\n" +
+      "    function _closeGateGaps(gateIds) {\n" +
+      "        if (!_plotData || !_plotData.gates || !_xBase) return false;\n" +
+      "        var zx = _zx(), zy = _zy();\n" +
+      "        var want = null;\n" +
+      "        if (gateIds && gateIds.length) { want = {}; gateIds.forEach(function (id) { want[id] = true; }); }\n" +
+      "        var xCh = _plotData.x_label, yCh = _plotData.y_label;\n" +
+      "        var GAP_PX = 30, PARALLEL = Math.cos(30 * Math.PI / 180), MIN_OVERLAP = 12;\n" +
+      "        var entries = [];\n" +
+      "        _plotData.gates.forEach(function (g) {\n" +
+      "            if (!g || !g.vertices || g.vertices.length < 3) return;\n" +
+      "            if (g.gate_type !== 'polygon' && g.gate_type !== 'rectangle') return;\n" +
+      "            if (want && !want[g.gate_id]) return;\n" +
+      "            var flipped = g.x_channel === yCh && g.y_channel === xCh;\n" +
+      "            if (!flipped && !(g.x_channel === xCh && g.y_channel === yCh)) return;\n" +
+      "            var px = g.vertices.map(function (v) { return flipped ? [zx(v[1]), zy(v[0])] : [zx(v[0]), zy(v[1])]; });\n" +
+      "            entries.push({ gate: g, flipped: flipped, px: px, changed: false });\n" +
+      "        });\n" +
+      "        if (entries.length < 2) return false;\n" +
+      "        var edges = [];\n" +
+      "        entries.forEach(function (e, gi) {\n" +
+      "            var n = e.px.length, cx = 0, cy = 0;\n" +
+      "            e.px.forEach(function (p) { cx += p[0] / n; cy += p[1] / n; });\n" +
+      "            for (var i = 0; i < n; i++) {\n" +
+      "                var a = e.px[i], b = e.px[(i + 1) % n];\n" +
+      "                var dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy);\n" +
+      "                if (len < 1e-6) continue;\n" +
+      "                // Outward normal: the perpendicular that points away from the gate's centroid.\n" +
+      "                var nx = -dy / len, ny = dx / len;\n" +
+      "                if ((cx - a[0]) * nx + (cy - a[1]) * ny > 0) { nx = -nx; ny = -ny; }\n" +
+      "                edges.push({ g: gi, i: i, j: (i + 1) % n, a: a, b: b, ux: dx / len, uy: dy / len, nx: nx, ny: ny, len: len });\n" +
+      "            }\n" +
+      "        });\n" +
+      "        var along = function (p, e) { return (p[0] - e.a[0]) * e.ux + (p[1] - e.a[1]) * e.uy; };\n" +
+      "        var apart = function (p, e) { return Math.abs((p[0] - e.a[0]) * -e.uy + (p[1] - e.a[1]) * e.ux); };\n" +
+      "        var parent = edges.map(function (_, i) { return i; });\n" +
+      "        var find = function (i) { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };\n" +
+      "        var any = false;\n" +
+      "        for (var i = 0; i < edges.length; i++) for (var j = i + 1; j < edges.length; j++) {\n" +
+      "            var e1 = edges[i], e2 = edges[j];\n" +
+      "            if (e1.g === e2.g) continue;\n" +
+      "            if (Math.abs(e1.ux * e2.ux + e1.uy * e2.uy) < PARALLEL) continue;\n" +
+      "            if (e1.nx * e2.nx + e1.ny * e2.ny > 0) continue; // both face the same way: not a gap\n" +
+      "            if ((apart(e2.a, e1) + apart(e2.b, e1)) / 2 > GAP_PX) continue;\n" +
+      "            var lo = Math.max(0, Math.min(along(e2.a, e1), along(e2.b, e1)));\n" +
+      "            var hi = Math.min(e1.len, Math.max(along(e2.a, e1), along(e2.b, e1)));\n" +
+      "            if (hi - lo < Math.min(MIN_OVERLAP, 0.4 * Math.min(e1.len, e2.len))) continue;\n" +
+      "            parent[find(i)] = find(j); any = true;\n" +
+      "        }\n" +
+      "        if (!any) return false;\n" +
+      "        var groups = {};\n" +
+      "        edges.forEach(function (e, i) { var r = find(i); (groups[r] = groups[r] || []).push(e); });\n" +
+      "        // One line per group; a vertex names every line it must lie on, and a vertex on two lines\n" +
+      "        // goes to their intersection, so a corner shared by two closed gaps closes both.\n" +
+      "        var lines = [], onLines = entries.map(function (e) { return e.px.map(function () { return []; }); });\n" +
+      "        Object.keys(groups).forEach(function (key) {\n" +
+      "            var group = groups[key];\n" +
+      "            if (group.length < 2) return;\n" +
+      "            var pts = [];\n" +
+      "            group.forEach(function (e) { pts.push(e.a, e.b); });\n" +
+      "            var mx = 0, my = 0;\n" +
+      "            pts.forEach(function (p) { mx += p[0]; my += p[1]; });\n" +
+      "            mx /= pts.length; my /= pts.length;\n" +
+      "            var rect = null;\n" +
+      "            group.forEach(function (e) { if (entries[e.g].gate.gate_type === 'rectangle') rect = e; });\n" +
+      "            var ux, uy;\n" +
+      "            if (rect) { if (Math.abs(rect.ux) >= Math.abs(rect.uy)) { ux = 1; uy = 0; } else { ux = 0; uy = 1; } }\n" +
+      "            else {\n" +
+      "                var sxx = 0, sxy = 0, syy = 0;\n" +
+      "                pts.forEach(function (p) { var dx = p[0] - mx, dy = p[1] - my; sxx += dx * dx; sxy += dx * dy; syy += dy * dy; });\n" +
+      "                var theta = 0.5 * Math.atan2(2 * sxy, sxx - syy);\n" +
+      "                ux = Math.cos(theta); uy = Math.sin(theta);\n" +
+      "            }\n" +
+      "            var li = lines.push({ mx: mx, my: my, ux: ux, uy: uy }) - 1;\n" +
+      "            group.forEach(function (e) { onLines[e.g][e.i].push(li); onLines[e.g][e.j].push(li); });\n" +
+      "        });\n" +
+      "        var project = function (p, L) { var t = (p[0] - L.mx) * L.ux + (p[1] - L.my) * L.uy; return [L.mx + t * L.ux, L.my + t * L.uy]; };\n" +
+      "        entries.forEach(function (entry, gi) {\n" +
+      "            entry.px.forEach(function (p, i) {\n" +
+      "                var ids = onLines[gi][i]; if (!ids.length) return;\n" +
+      "                var seen = {}, own = ids.filter(function (id) { if (seen[id]) return false; seen[id] = true; return true; });\n" +
+      "                var q = project(p, lines[own[0]]);\n" +
+      "                if (own.length > 1) {\n" +
+      "                    var A = lines[own[0]], B = lines[own[1]], cross = A.ux * B.uy - A.uy * B.ux;\n" +
+      "                    if (Math.abs(cross) > 0.05) {\n" +
+      "                        var t = ((B.mx - A.mx) * B.uy - (B.my - A.my) * B.ux) / cross;\n" +
+      "                        q = [A.mx + t * A.ux, A.my + t * A.uy];\n" +
+      "                    }\n" +
+      "                }\n" +
+      "                if (Math.hypot(q[0] - p[0], q[1] - p[1]) > 1e-6) { entry.px[i] = q; entry.changed = true; }\n" +
+      "            });\n" +
+      "        });\n" +
+      "        var changed = false;\n" +
+      "        entries.forEach(function (entry) {\n" +
+      "            if (!entry.changed) return;\n" +
+      "            var g = entry.gate;\n" +
+      "            if (g.gate_type === 'rectangle') {\n" +
+      "                var xs = entry.px.map(function (p) { return p[0]; }), ys = entry.px.map(function (p) { return p[1]; });\n" +
+      "                var x0 = Math.min.apply(null, xs), x1 = Math.max.apply(null, xs), y0 = Math.min.apply(null, ys), y1 = Math.max.apply(null, ys);\n" +
+      "                entry.px = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];\n" +
+      "            }\n" +
+      "            g.vertices = entry.px.map(function (p) { return entry.flipped ? [zy.invert(p[1]), zx.invert(p[0])] : [zx.invert(p[0]), zy.invert(p[1])]; });\n" +
+      "            _notifyGateEdit(g);\n" +
+      "            changed = true;\n" +
+      "        });\n" +
+      "        if (changed) _drawGates(zx, zy);\n" +
+      "        return changed;\n" +
+      "    }\n\n";
+    // The vertex drag alone: the gate move and label drags read the pointer the same way.
+    const dragSite =
+      "                var [px, py] = _ptr(event);\n" +
+      "                // Screen coordinates → gate's native data coordinates\n";
+    const dragSnapped =
+      "                var [px, py] = _ptr(event);\n" +
+      "                var _snapped = _snapToGates(gate, px, py, zx, zy, event.sourceEvent);\n" +
+      "                px = _snapped[0]; py = _snapped[1];\n" +
+      "                // Screen coordinates → gate's native data coordinates\n";
+    const polySite = "        var dx = zx.invert(px), dy = zy.invert(py);\n        _polyVerts.push({ dx: dx, dy: dy });\n";
+    const polySnapped =
+      "        var _snappedPoly = _snapToGates(null, px, py, zx, zy, event);\n" +
+      "        px = _snappedPoly[0]; py = _snappedPoly[1];\n" + polySite;
+    const rectStartSite = "        _rectStart   = { dx: zx.invert(px), dy: zy.invert(py) };\n";
+    const rectMoveSite = "        _rectCurrent = { dx: zx.invert(px), dy: zy.invert(py) };\n";
+    const rectSnap = "        var _snappedRect = _snapToGates(null, px, py, zx, zy, event);\n        px = _snappedRect[0]; py = _snappedRect[1];\n";
+    // The gate move drag: the multi-line map is this handler's alone.
+    const moveSite =
+      "                } else {\n" +
+      "                    gate.vertices = origVerts.map(function (v) {\n" +
+      "                        return [v[0] + ddx, v[1] + ddy];\n" +
+      "                    });\n" +
+      "                }\n";
+    const moveSnapped = moveSite + "                _snapGateMove(gate, zx, zy, flipped, event.sourceEvent);\n";
+    const apiSite = "        clearPendingEdit: clearPendingEdit\n    };";
+    const apiPatched = "        clearPendingEdit: clearPendingEdit,\n        extendSelectedGateToEdges: _extendSelectedGateToEdges,\n        closeGateGaps: _closeGateGaps\n    };";
+    const counts = [
+      out.split(helpersAnchor).length - 1,
+      out.split(dragSite).length - 1,
+      out.split(polySite).length - 1,
+      out.split(rectStartSite).length - 1,
+      out.split(rectMoveSite).length - 1,
+      out.split(moveSite).length - 1,
+      out.split(apiSite).length - 1,
+    ];
+    if (counts.join(",") === "1,1,1,1,2,1,1") {
+      out = out.replace(helpersAnchor, helpers + helpersAnchor);
+      out = out.replace(dragSite, dragSnapped);
+      out = out.replace(polySite, polySnapped);
+      out = out.replace(rectStartSite, rectSnap + rectStartSite);
+      out = out.split(rectMoveSite).join(rectSnap + rectMoveSite);
+      out = out.replace(moveSite, moveSnapped);
+      out = out.replace(apiSite, apiPatched);
+    } else {
+      console.warn(`[GateLab] cytof gate-snap patch matched ${counts.join("/")} of 1/1/1/1/2/1/1 sites — vertices do not snap to other gates.`);
+    }
   }
 
   const dragVertexNeedle = "gate.vertices = origVerts.map(";
@@ -1063,6 +1475,84 @@ ${applyModeNeedle}`,
     console.warn("[GateLab] cytof pseudocolour-transfer patch did not match.");
   }
 
+  // GateLab: a right-click on a polygon's vertex handle, or on its edge, asks the host for a
+  // menu (gate_vertex_menu): the vertex's index, or the edge's index with the clicked point
+  // projected onto it in display units, in the gate's own axis order. The host removes or
+  // inserts the vertex through the edit a dragged vertex makes.
+  const vertexMenuNeedle =
+    "                vertCircles.each(function (d, i) {\n" +
+    "                    d3.select(this).call(\n" +
+    "                        _makeVertexDrag(gate, i, gg, fillEl, outlineEl,\n" +
+    "                                        vertCircles, labelG, zx, zy, isFlipped)\n" +
+    "                    );\n" +
+    "                });\n";
+  const vertexMenuPatch =
+    "                vertCircles.each(function (d, i) {\n" +
+    "                    d3.select(this).call(\n" +
+    "                        _makeVertexDrag(gate, i, gg, fillEl, outlineEl,\n" +
+    "                                        vertCircles, labelG, zx, zy, isFlipped)\n" +
+    "                    );\n" +
+    "                    if (gate.gate_type === 'polygon') d3.select(this).on('contextmenu', function (event) {\n" +
+    "                        event.preventDefault(); event.stopPropagation();\n" +
+    "                        _shinyInput('gate_vertex_menu', { gate_id: gate.gate_id, gate_type: gate.gate_type, vertex: i, client: [event.clientX, event.clientY] });\n" +
+    "                    });\n" +
+    "                });\n";
+  // Bound on the edge's hit stroke and on the fill, which is above it and takes a click on the
+  // boundary itself; from the fill the menu is offered only close to an edge.
+  const edgeMenuNeedle =
+    "                .attr('fill-opacity', 0.001)\n" +
+    "                .attr('stroke', 'none')\n" +
+    "                .style('pointer-events', 'all')\n" +
+    "                .style('cursor', 'move');\n";
+  const edgeMenuPatch = edgeMenuNeedle +
+    "            if (gate.gate_type === 'polygon') fillEl.on('contextmenu', _edgeMenu).call(function () { hitEl.on('contextmenu', _edgeMenu); });\n" +
+    "            function _edgeMenu(event) {\n" +
+    "                var p = _ptr(event), verts = gate.vertices, best = null;\n" +
+    "                for (var vi = 0; vi < verts.length; vi++) {\n" +
+    "                    var a = verts[vi], b = verts[(vi + 1) % verts.length];\n" +
+    "                    var ax = isFlipped ? zx(a[1]) : zx(a[0]), ay = isFlipped ? zy(a[0]) : zy(a[1]);\n" +
+    "                    var bx = isFlipped ? zx(b[1]) : zx(b[0]), by = isFlipped ? zy(b[0]) : zy(b[1]);\n" +
+    "                    var ex = bx - ax, ey = by - ay, L = ex * ex + ey * ey;\n" +
+    "                    var t = L ? Math.max(0, Math.min(1, ((p[0] - ax) * ex + (p[1] - ay) * ey) / L)) : 0;\n" +
+    "                    var qx = ax + t * ex, qy = ay + t * ey, dist = Math.hypot(p[0] - qx, p[1] - qy);\n" +
+    "                    if (!best || dist < best.dist) best = { edge: vi, dist: dist, qx: qx, qy: qy };\n" +
+    "                }\n" +
+    "                if (!best || best.dist > 12) return;\n" +
+    "                event.preventDefault(); event.stopPropagation();\n" +
+    "                var dx = zx.invert(best.qx), dy = zy.invert(best.qy);\n" +
+    "                _shinyInput('gate_vertex_menu', { gate_id: gate.gate_id, gate_type: gate.gate_type, edge: best.edge, point: isFlipped ? [dy, dx] : [dx, dy], client: [event.clientX, event.clientY] });\n" +
+    "            }\n";
+  if (!out.includes("gate_vertex_menu")) {
+    if (out.includes(vertexMenuNeedle) && out.includes(edgeMenuNeedle)) {
+      out = out.replace(vertexMenuNeedle, vertexMenuPatch).replace(edgeMenuNeedle, edgeMenuPatch);
+    } else {
+      console.warn("[GateLab] cytof vertex-menu patch did not match -- polygon vertices cannot be added or removed from the plot.");
+    }
+  }
+
+  // GateLab: Shift while dragging a polygon's vertex, held at the press or pressed during the
+  // drag, holds the edge to the previous vertex horizontal, vertical or at 45 degrees, whichever
+  // is nearest the pointer, in pixel space, as shape editors do; let go of Shift and the vertex
+  // follows the pointer again. Read from the drag's move events. A rectangle's corner is
+  // axis-aligned already.
+  // Anchored on the vertex drag's own comment, after the pointer is read (and after any snapping
+  // another patch puts there), so the hold is the last word on where the vertex goes.
+  const vertexHoldNeedle =
+    "                // Screen coordinates → gate's native data coordinates\n";
+  const vertexHoldPatch =
+    "                if (gate.gate_type !== 'rectangle' && event.sourceEvent && event.sourceEvent.shiftKey && gate.vertices.length > 1) {\n" +
+    "                    var prevV = gate.vertices[(vertIdx - 1 + gate.vertices.length) % gate.vertices.length];\n" +
+    "                    var hx = flipped ? zx(prevV[1]) : zx(prevV[0]), hy = flipped ? zy(prevV[0]) : zy(prevV[1]);\n" +
+    "                    var hAng = Math.round(Math.atan2(py - hy, px - hx) / (Math.PI / 4)) * (Math.PI / 4);\n" +
+    "                    var hT = (px - hx) * Math.cos(hAng) + (py - hy) * Math.sin(hAng);\n" +
+    "                    px = hx + hT * Math.cos(hAng); py = hy + hT * Math.sin(hAng);\n" +
+    "                }\n" +
+    "                // Screen coordinates → gate's native data coordinates\n";
+  if (!out.includes("var hAng = ")) {
+    if (out.includes(vertexHoldNeedle)) out = out.replace(vertexHoldNeedle, vertexHoldPatch);
+    else console.warn("[GateLab] cytof vertex-hold patch did not match -- Shift during a vertex drag holds no angle.");
+  }
+
   // Robust auto ranges intentionally leave a small tail off-scale. Keep those events visible
   // as a pile-up on the corresponding plot edge (the FlowJo/Cytobank convention), while the
   // underlying scales remain unclamped so gates and pointer-coordinate inversion are untouched.
@@ -1310,8 +1800,15 @@ export function patchMiniPlot(src: string): string {
             var qOffs = gate.quadrant_label_offsets || [];
             qMids.forEach(function (point, index) {
                 var count = qCounts[index], pct = qPcts[index];
-                var text = (pct != null ? Number(pct).toFixed(1) + '%' : '') +
-                    (count != null ? ' (n = ' + Number(count).toLocaleString() + ')' : '');
+                var qFormat = (gateStyle && gateStyle.label_format) || 'name-percent';
+                var qPctText = pct != null ? Number(pct).toFixed(1) : null;
+                var text = qFormat === 'none' ? ''
+                    : qFormat === 'number' ? (qPctText !== null ? qPctText : '')
+                    : qFormat === 'percent' ? (qPctText !== null ? qPctText + '%' : '')
+                    : qFormat === 'name' ? (count != null ? 'n = ' + Number(count).toLocaleString() : '')
+                    : (qPctText !== null ? qPctText + '%' : '') +
+                      (count != null ? ' (n = ' + Number(count).toLocaleString() + ')' : '');
+                if (!text) return;
                 // A label the user moved on the gating plot sits at the same offset here.
                 var qOff = qOffs[index];
                 if (qOff) point = [xScale(xScale.invert(point[0]) + qOff[0]), yScale(yScale.invert(point[1]) + qOff[1])];
@@ -1403,6 +1900,50 @@ export function patchMiniPlot(src: string): string {
     out = out.replace(edgeNeedle, edgePatch);
   } else if (!out.includes("var _edgeMode = gateStyle.gate_edge_mode")) {
     console.warn("[GateLab] mini_plot gate-edge-mode patch did not match.");
+  }
+
+  // The density behind a contour is estimated in the Gating plot's own pixel space (its inner
+  // width at full size, 560 px, or cfg.contour_reference_size) with the Gating plot's bandwidth,
+  // and the contours are scaled to the panel afterwards, so a panel of any size carries the
+  // Gating tab's contours. The vendored code estimated in the panel's own pixels with a bandwidth
+  // scaled from 320 px, so a small panel was smoother and its contours another shape.
+  const kdeNeedle =
+    "        var bw = _computeContourBandwidth(pts, cfg || {}, W, H);\n" +
+    "        var kde = d3.contourDensity()\n" +
+    "            .x(function (d) { return d[0]; })\n" +
+    "            .y(function (d) { return d[1]; })\n" +
+    "            .size([W, H])\n" +
+    "            .bandwidth(bw);";
+  const kdePatch =
+    "        // GateLab: the density is estimated in the Gating plot's pixel space and the contours are\n" +
+    "        // scaled to this panel, so every panel carries the Gating tab's contours. See loadPlots.ts.\n" +
+    "        var _refSize = Number((cfg || {}).contour_reference_size);\n" +
+    "        if (!isFinite(_refSize) || _refSize <= 0) _refSize = 560;\n" +
+    "        var _refSx = _refSize / W, _refSy = _refSize / H;\n" +
+    "        var _refPts = pts.map(function (p) { return [p[0] * _refSx, p[1] * _refSy]; });\n" +
+    "        var bw = (cfg && isFinite(cfg.kde_bandwidth) && cfg.kde_bandwidth > 0)\n" +
+    "            ? cfg.kde_bandwidth\n" +
+    "            : Math.max(2, Math.min(10, Math.round(1200 / Math.sqrt(_refPts.length || 1))));\n" +
+    "        var kde = d3.contourDensity()\n" +
+    "            .x(function (d) { return d[0]; })\n" +
+    "            .y(function (d) { return d[1]; })\n" +
+    "            .size([_refSize, _refSize])\n" +
+    "            .bandwidth(bw);";
+  const coarseNeedle = "var coarseC = kde.thresholds(20)(pts);";
+  const contoursNeedle = "var contours = kde.thresholds(logThresholds)(pts);";
+  const contoursPatch =
+    "var contours = kde.thresholds(logThresholds)(_refPts);\n" +
+    "        contours.forEach(function (contour) {\n" +
+    "            contour.coordinates.forEach(function (polygon) {\n" +
+    "                polygon.forEach(function (ring) {\n" +
+    "                    ring.forEach(function (pt) { pt[0] /= _refSx; pt[1] /= _refSy; });\n" +
+    "                });\n" +
+    "            });\n" +
+    "        });";
+  if (out.includes(kdeNeedle) && out.includes(coarseNeedle) && out.includes(contoursNeedle)) {
+    out = out.replace(kdeNeedle, kdePatch).replace(coarseNeedle, "var coarseC = kde.thresholds(20)(_refPts);").replace(contoursNeedle, contoursPatch);
+  } else if (!out.includes("_refPts")) {
+    console.warn("[GateLab] mini_plot contour reference-space patch did not match — grid contours may differ from the Gating tab's.");
   }
 
   const levelNeedle = "var nLevels = 18;";
@@ -1650,7 +2191,8 @@ export function patchMiniPlot(src: string): string {
   // Illustration labels move: when the host passes `on_label_move`, each gate label carries a
   // d3 drag that shifts it during the drag and reports the new offset, in the axes' display
   // units, on release. The handler travels in gate_style: the label code runs in
-  // _drawGateOverlay, which sees the gate style and not the panel config. The Gating tab's own labels are untouched: the figure keeps its own.
+  // _drawGateOverlay, which sees the gate style and not the panel config. The host places the
+  // reported offset in the store, where it is the gate's own on every tab.
   const labelNeedle = "            var label = g.append('g').attr('transform', 'translate(' + lx + ',' + ly + ')');\n";
   const labelPatch = labelNeedle +
     "            if (gateStyle && typeof gateStyle.on_label_move === 'function' && gate.gate_id) {\n" +
@@ -1672,6 +2214,51 @@ export function patchMiniPlot(src: string): string {
     "            }\n";
   if (out.includes(labelNeedle)) out = out.replace(labelNeedle, labelPatch);
   else console.warn("[GateLab] mini_plot label-drag patch did not match -- figure labels will not move.");
+  // Gate labels say what gate_style.label_format asks: the name and the percentage (the default,
+  // as before), the percentage alone, the number alone with no sign (how a quadrant plot reads in
+  // a paper figure), the name alone, or nothing. Quadrant labels, added by the overlay patch
+  // above, follow the same setting; "name" gives them their count, since a quadrant has no name.
+  const labelFormatNeedle = "        // Label (name on line 1, percentage on line 2 — matching gating editor)\n        if (gate.name) {\n";
+  const labelFormatPatch =
+    "        // Label (name on line 1, percentage on line 2 — matching gating editor)\n" +
+    "        // GateLab: gate_style.label_format chooses what the label says; see loadPlots.ts.\n" +
+    "        var _glFormat = (gateStyle && gateStyle.label_format) || 'name-percent';\n" +
+    "        var _glPct = (gate.percent_of_parent != null) ? Number(gate.percent_of_parent).toFixed(1) : null;\n" +
+    "        var _glName = String(gate.name || '');\n" +
+    "        var _glLines = _glFormat === 'none' ? []\n" +
+    "            : _glFormat === 'name' ? [_glName]\n" +
+    "            : _glFormat === 'percent' ? (_glPct !== null ? [_glPct + '%'] : [])\n" +
+    "            : _glFormat === 'number' ? (_glPct !== null ? [_glPct] : [])\n" +
+    "            : (_glPct !== null ? [_glName, _glPct + '%'] : [_glName]);\n" +
+    "        if (gate.name && _glLines.length) {\n";
+  const labelLinesNeedle =
+    "            text.append('tspan')\n" +
+    "                .attr('x', 0)\n" +
+    "                .attr('dy', pctLine ? '-0.55em' : '0.35em')\n" +
+    "                .text(gate.name);\n" +
+    "            if (pctLine) {\n" +
+    "                text.append('tspan')\n" +
+    "                    .attr('x', 0).attr('dy', '1.3em')\n" +
+    "                    .style('font-size', (fsNum - 1) + 'px')\n" +
+    "                    .text(pctLine);\n" +
+    "            }\n";
+  const labelLinesPatch =
+    "            _glLines.forEach(function (line, index) {\n" +
+    "                var span = text.append('tspan').attr('x', 0)\n" +
+    "                    .attr('dy', index === 0 ? (_glLines.length > 1 ? '-0.55em' : '0.35em') : '1.3em')\n" +
+    "                    .text(line);\n" +
+    "                if (index > 0) span.style('font-size', (fsNum - 1) + 'px');\n" +
+    "            });\n";
+  const labelWidthNeedle = "            var longerTxt = nameTxt.length > pctTxt.length ? nameTxt : pctTxt;\n";
+  const labelWidthPatch = "            var longerTxt = _glLines.reduce(function (a, b) { return b.length > a.length ? b : a; }, '');\n";
+  const labelHeightNeedle = "                    var estH = pctLine ? fsNum * 2.2 : fsNum * 1.1;\n";
+  const labelHeightPatch = "                    var estH = _glLines.length > 1 ? fsNum * 2.2 : fsNum * 1.1;\n";
+  if (out.includes(labelFormatNeedle) && out.includes(labelLinesNeedle) && out.includes(labelWidthNeedle) && out.includes(labelHeightNeedle)) {
+    out = out.replace(labelFormatNeedle, labelFormatPatch).replace(labelLinesNeedle, labelLinesPatch)
+      .replace(labelWidthNeedle, labelWidthPatch).replace(labelHeightNeedle, labelHeightPatch);
+  } else if (!out.includes("_glFormat")) {
+    console.warn("[GateLab] mini_plot label-format patch did not match -- labels keep the name and percentage.");
+  }
   if (out.includes(xTickNeedle)) out = out.replace(xTickNeedle, xTickPatch);
   if (out.includes(yTickNeedle)) out = out.replace(yTickNeedle, yTickPatch);
   if (
@@ -1699,6 +2286,19 @@ export function patchMiniPlot(src: string): string {
     }
   }
 
+  // A Layout plot's title is what the user asked for (a file name, a condition), which is
+  // often longer than the plot is wide; the vendored title just ran off the edge. The font size
+  // stays as set (shrinking it to fit made the Title font control look broken).
+  const titleFitNeedle = "        if (cfg.title) {\n            svg.append('text')\n                .attr('x', size / 2).attr('y', 14)\n                .attr('text-anchor', 'middle')\n                .style('font-size', titleFs)\n                .style('font-weight', '600')\n                .text(cfg.title);";
+  const titleFitPatch = "        if (cfg.title) {\n            svg.append('text')\n                .attr('x', size / 2).attr('y', 14)\n                .attr('text-anchor', 'middle')\n                .style('font-size', titleFs)\n                .style('font-weight', '600')\n                .text(cfg.title)\n                .each(function () {\n                    // GateLab: a title longer than the plot is wide loses its end at the font\n                    // size asked for, the whole title as its tooltip; the size is the user's.\n                    if (typeof this.getComputedTextLength !== 'function') return;\n                    var el = d3.select(this), full = String(cfg.title), room = Math.max(20, size - 8);\n                    var shown = full;\n                    while (shown.length > 1 && this.getComputedTextLength() > room) { shown = shown.slice(0, -1); el.text(shown + '\\u2026'); }\n                    if (shown !== full) el.append('title').text(full);\n                });";
+  if (out.includes(titleFitNeedle)) out = out.replace(titleFitNeedle, titleFitPatch);
+  else console.warn("[GateLab] mini_plot title-fit patch did not match -- long plot titles will overflow.");
+  // Gates drawn past a panel's axes (a file's tailored gate, or one extended to a wider range
+  // than the panel shows) ran over the margins and into the neighbouring panel.
+  const gateClipNeedle = "        if (cfg.gates && cfg.gates.length > 0) {\n            var gateStyle = cfg.gate_style || {};\n            cfg.gates.forEach(function (gate) {\n                _drawGateOverlay(g, gate, xScale, yScale, W, H, gateFs, gateStyle);\n            });\n        }";
+  const gateClipPatch = "        if (cfg.gates && cfg.gates.length > 0) {\n            var gateStyle = cfg.gate_style || {};\n            // GateLab: a panel's gates stay inside its axes. A gate tailored or extended beyond\n            // the range drawn here is cut at the frame instead of running over the margins.\n            var gateClipId = 'gl-gate-clip-' + Math.random().toString(36).slice(2);\n            svg.append('defs').append('clipPath').attr('id', gateClipId)\n                .append('rect').attr('width', W).attr('height', H);\n            var gateLayer = g.append('g').attr('class', 'gate-overlays').attr('clip-path', 'url(#' + gateClipId + ')');\n            cfg.gates.forEach(function (gate) {\n                _drawGateOverlay(gateLayer, gate, xScale, yScale, W, H, gateFs, gateStyle);\n            });\n        }";
+  if (out.includes(gateClipNeedle)) out = out.replace(gateClipNeedle, gateClipPatch);
+  else console.warn("[GateLab] mini_plot gate-clip patch did not match -- gates may draw outside a panel's axes.");
   return out;
 }
 

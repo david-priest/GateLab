@@ -142,8 +142,8 @@ describe("hidden tabs and gating-only updates", () => {
     // regression reads as 3 rather than as an off-by-one.
     expect(onGatingTab).toBe(1);
 
-    // The Layout tab is hidden for now (App.tsx, LAYOUT_TAB_AVAILABLE); it is not in the strip.
-    expect(buttonWithText("Layout")).toBeUndefined();
+    // The Layout tab is in the strip (App.tsx, LAYOUT_TAB_AVAILABLE) unless the page asks not to.
+    expect(buttonWithText("Layout")).toBeDefined();
 
     // Switching to Illustration is where those views are read as well.
     act(() => buttonWithText("Illustration")!.click());

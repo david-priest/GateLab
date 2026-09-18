@@ -35,6 +35,24 @@ vi.mock("./plots/GatingPlot", () => ({
 }));
 
 function syntheticFcs(seed: number): FcsFile {
+  // Seed 6 is a stained file with a spillover matrix, so it has a compensated view as well.
+  if (seed === 6) {
+    return {
+      version: "FCS3.1",
+      nEvents: 4,
+      instrument: "flow",
+      keywords: {},
+      channels: [
+        { index: 0, name: "FL1-A", marker: "CD3", bits: 32, range: 262144 },
+        { index: 1, name: "FL2-A", marker: "CD19", bits: 32, range: 262144 },
+      ],
+      columns: [
+        Float32Array.from([500, 4000, 30000, 200000]),
+        Float32Array.from([300, 6000, 20000, 150000]),
+      ],
+      spillover: { channels: ["FL1-A", "FL2-A"], matrix: [[1, 0.5], [0.4, 1]] },
+    };
+  }
   const count = seed === 1 ? 3 : 4;
   // Seed 3 stands for a DIFFERENT panel: same detectors, a different stain on the second one.
   // That is the case that must not pool — a shared channel name is not a shared measurement.
@@ -512,10 +530,12 @@ describe("App file selection and plot scope", () => {
     expect(host.textContent).not.toContain("Editing D2.fcs only");
     expect(plottedCount()).toBe(4);
     expect([...host.querySelectorAll<HTMLButtonElement>(".gl-draw-tools button")].slice(1).some((button) => !button.disabled)).toBe(true);
-    // Editing this file only locks the structure; the tree's gates are still where they were.
+    // Editing this file only locks the structure; the tree's gates are still where they were. The
+    // draw tools stay on: a gate drawn here goes into the tree for every file.
     await editFile();
     expect(host.textContent).toContain("Editing D2.fcs only");
-    expect([...host.querySelectorAll<HTMLButtonElement>(".gl-draw-tools button")].slice(1).every((button) => button.disabled)).toBe(true);
+    expect([...host.querySelectorAll<HTMLButtonElement>(".gl-draw-tools button")].slice(1).every((button) => !button.disabled)).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>(".gl-draw-tools button:nth-child(2)")?.title).toContain("goes into the tree for every file");
     expect(host.querySelector(".gate-tailored-badge")).toBeNull();
     expect(summary()).toBe("2 files · all following");
 
@@ -665,6 +685,50 @@ describe("App file selection and plot scope", () => {
     await settle();
     expect(plottedCount()).toBe(3);
     expect(host.textContent).toContain("0 of 3 selected");
+  });
+
+  it("holds a locked frame across the original and compensated views of a file", async () => {
+    act(() => root.render(<App />));
+    const directInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(directInput, "files", { configurable: true, value: [testFile("D6.fcs", 6)] });
+    await act(async () => {
+      directInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await settle();
+    const range = () => [...plotHarness.props!.payload.x_range] as [number, number];
+    const assay = () => host.querySelector<HTMLSelectElement>('select[aria-label="Active assay layer for all tabs"]')!;
+    const view = async (layer: "original" | "compensated") => {
+      await act(async () => {
+        assay().value = layer;
+        assay().dispatchEvent(new Event("change", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await settle();
+    };
+    expect(assay().querySelector<HTMLOptionElement>('option[value="compensated"]')?.disabled).toBe(false);
+    const original = range();
+    // Unlocked, each view is fitted to its own values.
+    await view("compensated");
+    const compensated = range();
+    expect(compensated).not.toEqual(original);
+    await view("original");
+    expect(range()).toEqual(original);
+    // Locked, the frame on screen holds across the views too.
+    const lock = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Lock scales between files")!;
+    act(() => lock.click());
+    await settle();
+    await view("compensated");
+    expect(range()).toEqual(original);
+    await view("original");
+    expect(range()).toEqual(original);
+    // Unlocked again, the compensated view goes back to its own frame.
+    act(() => lock.click());
+    await settle();
+    await view("compensated");
+    expect(range()).toEqual(compensated);
   });
 
   it("fits each file independently and freezes the current frame when scale locking is enabled", async () => {

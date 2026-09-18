@@ -214,6 +214,9 @@ describe("FigureWorkspace", () => {
         "value",
       )!.set!.call(size, "360");
       size.dispatchEvent(new Event("input", { bubbles: true }));
+      // The field keeps what is typed until Enter or leaving it, so a value below the minimum
+      // can be typed; leaving it commits.
+      size.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
     });
     await flush();
     expect(draws.calls.length).toBeGreaterThan(oldCount);
@@ -226,6 +229,72 @@ describe("FigureWorkspace", () => {
     await flush();
     expect(props.configRef.current!.figure!.rows).toEqual(columns);
   });
+  it("moves a gate label without building every panel again", async () => {
+    const props = fixture();
+    act(() => root.render(<FigureWorkspace {...props} />));
+    await flush();
+    const before = draws.calls.length;
+    const move = (draws.calls.at(-1)!.gate_style as { on_label_move: (gateId: string, offset: [number, number]) => void }).on_label_move;
+    act(() => move("no-such-gate", [5, 6]));
+    await flush();
+    // The offset is kept on the figure; the panel, which has no such gate, is not drawn again,
+    // which a rebuild of every panel would have done.
+    expect(props.configRef.current!.figure!.labelOffsets).toEqual({ "no-such-gate": [5, 6] });
+    expect(draws.calls.length).toBe(before);
+    expect(host.querySelector(".gl-figure-paper")?.getAttribute("style")).not.toContain("0.55");
+  });
+
+  it("zooms the figure with Option-scroll and shows the zoom it landed on", async () => {
+    const props = fixture();
+    act(() => root.render(<FigureWorkspace {...props} />));
+    await flush();
+    const viewport = host.querySelector<HTMLElement>(".gl-figure-viewport")!;
+    const select = host.querySelector<HTMLSelectElement>('select[aria-label="Preview zoom"]')!;
+    expect(select.value).toBe("fit");
+    const plain = new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 100 });
+    act(() => { viewport.dispatchEvent(plain); });
+    expect(plain.defaultPrevented).toBe(false);
+    expect(select.value).toBe("fit");
+    // Fit is 1 here (the viewport has no width in this test); a scroll up zooms in from there.
+    const zoom = new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -200, altKey: true });
+    act(() => { viewport.dispatchEvent(zoom); });
+    expect(zoom.defaultPrevented).toBe(true);
+    expect(select.value).toBe("1.65");
+    expect([...select.options].map((o) => o.textContent)).toContain("165%");
+    expect(host.querySelector<HTMLElement>(".gl-figure-paper")?.style.zoom).toBe("1.65");
+  });
+
+  it("places a moved label in the store for the gate's tree, and moves a figure's own placements there once", async () => {
+    const props = fixture();
+    // A gate on the tree, and D17's copy of it, the copy the figure's panel draws.
+    const copy = props.state.stored_hierarchies["copy-16"];
+    props.state.gates["g-main"] = { gate_id: "g-main", name: "Cells", gate_type: "rectangle", x_channel: "FSC-A", y_channel: "SSC-A", vertices: [[0, 0], [1, 1]], color: "#000", label_offset: null };
+    copy.gates["g-copy"] = { ...props.state.gates["g-main"], gate_id: "g-copy" };
+    copy.source_gate_ids = { "g-copy": "g-main" };
+    const moves: unknown[][] = [];
+    const onGateLabelMove = (...args: unknown[]) => moves.push(args);
+    // A figure saved with a placement of its own, under the id the copy descends from.
+    props.configRef.current!.figure = undefined;
+    act(() => root.render(<FigureWorkspace {...props} />));
+    await flush();
+    const move = (draws.calls.at(-1)!.gate_style as { on_label_move: (gateId: string, offset: [number, number]) => void }).on_label_move;
+    act(() => move("g-copy", [1, 2]));
+    await flush();
+    expect(props.configRef.current!.figure!.labelOffsets).toEqual({ "g-main": [1, 2] });
+    act(() => root.unmount());
+    root = createRoot(host);
+    act(() => root.render(<FigureWorkspace {...props} onGateLabelMove={onGateLabelMove} />));
+    await flush();
+    // On load the figure's placement went to the store, named for the tree that holds the original.
+    expect(moves).toEqual([["main", "g-main", [1, 2], undefined]]);
+    expect(props.configRef.current!.figure!.labelOffsets).toBeUndefined();
+    const moveAgain = (draws.calls.at(-1)!.gate_style as { on_label_move: (gateId: string, offset: [number, number]) => void }).on_label_move;
+    act(() => moveAgain("g-copy", [5, 6]));
+    await flush();
+    expect(moves.at(-1)).toEqual(["copy-16", "g-copy", [5, 6], undefined]);
+    expect(props.configRef.current!.figure!.labelOffsets).toBeUndefined();
+  });
+
   it("gives an actionable warning for a deleted selection and blocks export", async () => {
     const props = fixture();
     props.configRef.current!.popIds = ["deleted-population"];
@@ -238,6 +307,145 @@ describe("FigureWorkspace", () => {
     await flush();
     expect(host.textContent).toContain("Build a file / sample comparison");
   });
+  it("selects panels by clicking and puts them on the Layout tab in their arrangement", async () => {
+    const props = fixture();
+    const onAddToLayout = vi.fn();
+    act(() => root.render(<FigureWorkspace {...props} onAddToLayout={onAddToLayout} />));
+    await flush();
+    const panels = [...host.querySelectorAll<HTMLElement>("td[data-figure-panel]")];
+    expect(panels.length).toBeGreaterThan(2);
+    const click = (el: HTMLElement, init: MouseEventInit = {}) => act(() => {
+      el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: 10, clientY: 10 }));
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 10, clientY: 10, ...init }));
+    });
+    click(panels[0]);
+    expect(panels[0].classList.contains("is-selected")).toBe(true);
+    click(panels[2], { metaKey: true });
+    expect(host.textContent).toContain("2 panels selected");
+    // Shift takes the block between the anchor and the clicked panel.
+    click(panels[1], { shiftKey: true });
+    expect(host.textContent).toContain("2 panels selected");
+    act(() => button("Add selected panels to the Layout tab").click());
+    expect(onAddToLayout).toHaveBeenCalledTimes(1);
+    const [recipes, cells, headings] = onAddToLayout.mock.calls[0];
+    expect(recipes).toHaveLength(2);
+    // Two rows of one column: the row headings go along, as text that reads each row's plot.
+    expect(headings.columns).toEqual([]);
+    expect(headings.rows).toHaveLength(2);
+    expect(headings.rows.every((heading: { text: string; template?: string }) => heading.text.length > 0 && heading.template)).toBe(true);
+    // The fixture's panels are one column, so the two chosen sit one below the other, closed up to
+    // the block they span.
+    expect(cells).toEqual([{ row: 0, column: 0 }, { row: 1, column: 0 }]);
+    // Escape clears; a moved press is not a click.
+    act(() => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+    expect(host.querySelectorAll("td.is-selected")).toHaveLength(0);
+    act(() => {
+      panels[0].dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: 10, clientY: 10 }));
+      panels[0].dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 40, clientY: 10 }));
+    });
+    expect(host.querySelectorAll("td.is-selected")).toHaveLength(0);
+  });
+
+  it("selects the panels a drag crosses, adds with Cmd, and clears on a click on blank paper", async () => {
+    const props = fixture();
+    act(() => root.render(<FigureWorkspace {...props} onAddToLayout={vi.fn()} />));
+    await flush();
+    const panels = [...host.querySelectorAll<HTMLElement>("td[data-figure-panel]")];
+    expect(panels.length).toBeGreaterThan(2);
+    // The fixture's panels are one column: give each a place on screen, 100 px apart.
+    panels.forEach((cell, i) => vi.spyOn(cell, "getBoundingClientRect").mockReturnValue({ x: 20, y: 100 * i + 20, left: 20, top: 100 * i + 20, right: 120, bottom: 100 * i + 110, width: 100, height: 90, toJSON: () => ({}) }));
+    const paper = host.querySelector<HTMLElement>(".gl-figure-paper")!;
+    const drag = (from: [number, number], to: [number, number], init: MouseEventInit = {}) => {
+      act(() => { paper.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, clientX: from[0], clientY: from[1], ...init })); });
+      act(() => { window.dispatchEvent(new MouseEvent("mousemove", { clientX: to[0], clientY: to[1] })); });
+      expect(host.querySelector(".gl-figure-marquee")).not.toBeNull();
+      act(() => { window.dispatchEvent(new MouseEvent("mouseup")); });
+      expect(host.querySelector(".gl-figure-marquee")).toBeNull();
+    };
+    // A band over the first two panels selects them.
+    drag([5, 5], [60, 150]);
+    expect(host.textContent).toContain("2 panels selected");
+    expect(panels[0].classList.contains("is-selected")).toBe(true);
+    expect(panels[1].classList.contains("is-selected")).toBe(true);
+    expect(panels[2].classList.contains("is-selected")).toBe(false);
+    // Cmd keeps what was selected and adds the third; without it the band replaces.
+    drag([5, 215], [60, 230], { metaKey: true });
+    expect(host.textContent).toContain("3 panels selected");
+    drag([5, 215], [60, 230]);
+    expect(host.textContent).toContain("1 panel selected");
+    // A press on blank paper that does not move clears; one that starts on a control is ignored.
+    act(() => { paper.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, clientX: 5, clientY: 5 })); });
+    act(() => { window.dispatchEvent(new MouseEvent("mouseup")); });
+    expect(host.querySelectorAll("td.is-selected")).toHaveLength(0);
+  });
+
+  it("puts one panel on the Layout tab from a right-click, and opens it in Gating", async () => {
+    const props = fixture();
+    const onAddToLayout = vi.fn();
+    const onOpenInGating = vi.fn();
+    act(() => root.render(<FigureWorkspace {...props} onAddToLayout={onAddToLayout} onOpenInGating={onOpenInGating} />));
+    await flush();
+    const panel = host.querySelector<HTMLElement>("td[data-figure-panel]")!;
+    expect(panel).not.toBeNull();
+    act(() => { panel.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 90 })); });
+    const menuItem = (label: string) => [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent === label)!;
+    act(() => menuItem("Add this panel to the Layout tab").click());
+    expect(onAddToLayout).toHaveBeenCalledTimes(1);
+    expect(onAddToLayout.mock.calls[0][0]).toHaveLength(1);
+    expect(onAddToLayout.mock.calls[0][1]).toEqual([{ row: 0, column: 0 }]);
+    expect(onAddToLayout.mock.calls[0][0][0]).toMatchObject({ kind: "biplot", sampleId: expect.any(String), populationId: expect.any(String) });
+    act(() => { panel.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 90 })); });
+    act(() => menuItem("Open in Gating").click());
+    expect(onOpenInGating).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects every listed population, none, the leaves or the Gating tab's ticked ones, and finds one by name", async () => {
+    const props = fixture();
+    props.state.selected_pop_ids = [props.state.root_population_id!];
+    act(() => root.render(<FigureWorkspace {...props} />));
+    await flush();
+    // The second row of actions: the first is the files'.
+    const actions = host.querySelectorAll(".gl-figure-list-actions")[1];
+    const click = (text: string) => act(() => [...actions.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === text)!.click());
+    const populations = () => props.configRef.current!.figure!.populations;
+    const listed = host.querySelectorAll('input[aria-label="Find figure populations"] ~ .gl-figure-list .gl-figure-row').length;
+    expect(listed).toBeGreaterThan(0);
+    click("All");
+    expect(populations()).toHaveLength(listed);
+    click("None");
+    expect(populations()).toHaveLength(0);
+    click("Leaves");
+    expect(populations().length).toBeGreaterThan(0);
+    click("Use checked populations");
+    expect(populations()).toHaveLength(1);
+    expect(populations()[0].populationId).toBe(props.state.root_population_id);
+    const find = host.querySelector<HTMLInputElement>('input[aria-label="Find figure populations"]')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(find, "no such population");
+      find.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(host.querySelectorAll('input[aria-label="Find figure populations"] ~ .gl-figure-list .gl-figure-row')).toHaveLength(0);
+  });
+
+  it("picks a plot's channel through the searchable picker, typing part of a name and pressing Enter", async () => {
+    const props = fixture();
+    act(() => root.render(<FigureWorkspace {...props} />));
+    await flush();
+    act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Plots")!.click());
+    const trigger = host.querySelector<HTMLButtonElement>('button[aria-label="X channel"]')!;
+    expect(trigger).not.toBeNull();
+    expect(trigger.textContent).toBe("FSC-A");
+    act(() => trigger.click());
+    const search = host.querySelector<HTMLInputElement>('input[aria-label="Search X channel"]')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "ssc");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => { search.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter" })); });
+    expect(props.configRef.current!.figure!.plots[0].x).toBe("SSC-A");
+    expect(host.querySelector('input[aria-label="Search X channel"]')).toBeNull();
+  });
+
   it("offers the Gating tab's ranges, fits channels there, and puts one plot per file on the Layout tab", async () => {
     const props = fixture();
     const onFitChannels = vi.fn();
@@ -254,13 +462,15 @@ describe("FigureWorkspace", () => {
     expect(onFitChannels).toHaveBeenCalledWith(["FSC-A", "SSC-A"]);
     expect(props.configRef.current!.figure!.scalePolicy).toBe("gating");
     act(() => button("Export").click());
-    act(() => button("Add these plots to the Layout tab").click());
+    act(() => button("Add as separate plots to the Layout tab").click());
     expect(onAddToLayout).toHaveBeenCalledTimes(1);
     const recipes = onAddToLayout.mock.calls[0][0];
     expect(recipes).toHaveLength(17);
     expect(recipes[0]).toMatchObject({ kind: "biplot", sampleId: "D1", xChannel: "FSC-A", yChannel: "SSC-A" });
     expect(["pseudocolor", "scatter", "contour"]).toContain(recipes[0].displayMode);
-    expect(recipes[0].title).toContain("D1.fcs");
+    // Titled by the sheet's template on the Layout tab, not here; a named plot would carry its name as label.
+    expect(recipes[0].title).toBeUndefined();
+    expect(recipes[0].label).toBeUndefined();
     expect(recipes[0].populationId).toBe(props.state.stored_hierarchies["copy-0"].root_population_id);
   });
 

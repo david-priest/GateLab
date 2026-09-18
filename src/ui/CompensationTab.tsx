@@ -9,6 +9,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { SearchableSelect } from "./SearchableSelect";
 import { pickFilesOrInput } from "../engine/fsAccess";
 import { DEFAULT_DENSITY_COLOR_POWER } from "../engine/pseudocolor";
 import {
@@ -84,6 +85,7 @@ import { ScrubbableNumberInput } from "./ScrubbableNumberInput";
 import {
   CompensationPairBiplots,
   CompensationPointAlphaContext,
+  CompensationPointSizeContext,
   DensityBiplot,
   DensityColorPowerContext,
   GlobalCompensationPlotTile,
@@ -623,6 +625,10 @@ function CompensationTabImpl({
     "compensation.pointAlpha.v1",
     0.85,
   );
+  const [pointSize, setPointSize] = usePersistedTabState<number>(
+    "compensation.pointSize.v1",
+    1,
+  );
   const [pairPreviewEventLimit, setPairPreviewEventLimit] = usePersistedTabState<PairPreviewEventLimit>(
     "compensation.pairPreviewEventLimit.v1",
     DEFAULT_PAIR_PREVIEW_EVENT_LIMIT,
@@ -1146,6 +1152,7 @@ function CompensationTabImpl({
   const resolvedGlobalPlotSize = Math.max(120, Math.min(220, Math.round(globalPlotSize) || 120));
   const resolvedDensitySmoothing = Math.max(1, Math.min(10, Math.round(densitySmoothing) || 6));
   const resolvedPointAlpha = Math.max(0.1, Math.min(1, Number(pointAlpha) || 0.85));
+  const resolvedPointSize = Math.max(0.3, Math.min(3, Number(pointSize) || 1));
   const flaggedPairs = useMemo(() => {
     if (!profileRecord || !matrixView || installedStatus.state !== "ready") return [];
     return flaggedPairKeys.flatMap((pairKey): CompensationEvidenceCandidate[] => {
@@ -2725,6 +2732,7 @@ function CompensationTabImpl({
       densitySmoothing: resolvedDensitySmoothing,
       densityColorPower,
       pointAlpha: resolvedPointAlpha,
+      pointSize: resolvedPointSize,
     }, format, onProgress);
   };
 
@@ -2745,6 +2753,7 @@ function CompensationTabImpl({
   return (
     <DensityColorPowerContext.Provider value={densityColorPower}>
     <CompensationPointAlphaContext.Provider value={resolvedPointAlpha}>
+    <CompensationPointSizeContext.Provider value={resolvedPointSize}>
     <div
       className="gl-tab-panel gl-tab-fill gl-compensation-tab gl-plotting-workspace gl-comp-workspace"
     >
@@ -3061,6 +3070,22 @@ function CompensationTabImpl({
                 onChange={(event) => setPointAlpha(Number(event.currentTarget.value))}
               />
               <output>{resolvedPointAlpha.toFixed(2)}</output>
+            </label>
+            <label
+              className="gl-comp-point-alpha"
+              title={t("Point size for every compensation biplot, as a factor on the size each panel's width gives")}
+            >
+              <span>{t("Point size")}</span>
+              <input
+                type="range"
+                min="0.3"
+                max="3"
+                step="0.1"
+                value={resolvedPointSize}
+                aria-label={t("Compensation biplot point size")}
+                onChange={(event) => setPointSize(Number(event.currentTarget.value))}
+              />
+              <output>{resolvedPointSize.toFixed(1)}×</output>
             </label>
             <DensityColourControl
               className="gl-comp-density-colour"
@@ -3891,34 +3916,27 @@ function CompensationTabImpl({
                   <strong>{t("Add a pair")}</strong>
                   <label>
                     <span>{t("Source channel")}</span>
-                    <select
-                      aria-label={t("Follow-up source channel")}
+                    <SearchableSelect
+                      label={t("Follow-up source channel")}
                       value={manualSourceKey}
-                      onChange={(event) => {
-                        const nextSource = event.currentTarget.value;
+                      options={matrixView.sourceAxisKeys.flatMap((key, index) => includedProfileChannels.has(key) ? [{ value: key, label: sourceChannels[index].combined }] : [])}
+                      onChange={(nextSource) => {
                         setManualSourceKey(nextSource);
                         if (manualReceiverKey === nextSource) {
                           setManualReceiverKey(matrixView.receiverAxisKeys.find((key) => key !== nextSource && includedProfileChannels.has(key)) ?? "");
                         }
                       }}
-                    >
-                      {matrixView.sourceAxisKeys.map((key, index) => includedProfileChannels.has(key) ? (
-                        <option value={key} key={key}>{sourceChannels[index].combined}</option>
-                      ) : null)}
-                    </select>
+                    />
                   </label>
                   <span aria-hidden="true">→</span>
                   <label>
                     <span>{t("Receiver")}</span>
-                    <select
-                      aria-label={t("Follow-up receiver channel")}
+                    <SearchableSelect
+                      label={t("Follow-up receiver channel")}
                       value={manualReceiverKey}
-                      onChange={(event) => setManualReceiverKey(event.currentTarget.value)}
-                    >
-                      {matrixView.receiverAxisKeys.map((key, index) => key !== manualSourceKey && includedProfileChannels.has(key) ? (
-                        <option value={key} key={key}>{receiverChannels[index].combined}</option>
-                      ) : null)}
-                    </select>
+                      options={matrixView.receiverAxisKeys.flatMap((key, index) => key !== manualSourceKey && includedProfileChannels.has(key) ? [{ value: key, label: receiverChannels[index].combined }] : [])}
+                      onChange={setManualReceiverKey}
+                    />
                   </label>
                   <button
                     type="button"
@@ -4290,6 +4308,7 @@ function CompensationTabImpl({
       )}
       </div>
     </div>
+    </CompensationPointSizeContext.Provider>
     </CompensationPointAlphaContext.Provider>
     </DensityColorPowerContext.Provider>
   );

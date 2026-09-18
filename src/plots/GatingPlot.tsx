@@ -5,8 +5,16 @@
 // re-renders are never swallowed by the engine's staleness guard. Plot → app inputs
 // (new_gate/gate_edit/…) are delivered through the shim to typed callbacks.
 
-import { useEffect, useRef, type CSSProperties } from "react";
+import { useEffect, useRef, type CSSProperties, type MutableRefObject } from "react";
 import { loadPlots, type CytofD3Api } from "./loadPlots";
+
+/** Commands App can send the renderer once it has loaded. */
+export interface GatingPlotActions {
+  /** The selected polygon or rectangle grows until each side meets a facing gate edge or the plot's edge; false when nothing changed. */
+  extendSelectedGateToEdges(): boolean;
+  /** The facing edges of neighbouring gates move onto one shared line, so they touch; the gates named, or every one drawn. */
+  closeGateGaps(gateIds?: readonly string[]): boolean;
+}
 import type { GatingFontSizes } from "../engine/workspace";
 
 export const DEFAULT_GATING_FONT_SIZES: GatingFontSizes = {
@@ -28,6 +36,8 @@ export interface NewGate {
 interface Props {
   payload?: object | null;
   mode?: string;
+  /** Filled once the renderer is loaded, so App can drive commands that live in the renderer. */
+  actions?: MutableRefObject<GatingPlotActions | null>;
   visible?: boolean;
   /**
    * Identity of the sample/display coordinate system represented by `payload`.
@@ -47,12 +57,28 @@ interface Props {
   onAxisLabelClick?: (e: { axis: "x" | "y"; selected: string }) => void;
   /** `quadrant` names one of a quadrant gate's four labels (0 to 3); absent for a gate label. */
   onGateLabelMove?: (e: { gate_id: string; label_offset: [number, number]; quadrant?: number }) => void;
+  /** A right-click on a polygon's vertex handle (`vertex`) or on its edge (`edge`, with the point on it in display units). */
+  onVertexMenu?: (e: GateVertexMenuEvent) => void;
   /**
    * The renderer changed the view itself -- its own pan and stretch mutate the plot's ranges
    * locally and report them here. Without this React never learns, so the next payload it
    * sends carries the range from before and the view snaps back to it.
    */
   onRangeChange?: (e: { x_range: [number, number]; y_range: [number, number] }) => void;
+}
+
+/** A right-click on a polygon's vertex handle, or on its edge with the clicked point projected onto it. */
+export interface GateVertexMenuEvent {
+  gate_id: string;
+  gate_type: string;
+  /** The vertex's index, for a right-click on a handle. */
+  vertex?: number;
+  /** The edge's index (from this vertex to the next), for a right-click on an edge. */
+  edge?: number;
+  /** The clicked point on that edge, in display units in the gate's own axis order. */
+  point?: [number, number];
+  /** Where the menu opens, in client pixels. */
+  client: [number, number];
 }
 
 interface GateEditEvent {
@@ -109,6 +135,8 @@ export function GatingPlot({
   onAxisLabelClick,
   onGateLabelMove,
   onRangeChange,
+  actions,
+  onVertexMenu,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<CytofD3Api | null>(null);
@@ -131,6 +159,7 @@ export function GatingPlot({
     onAxisLabelClick,
     onGateLabelMove,
     onRangeChange,
+    onVertexMenu,
   });
   payloadRef.current = payload;
   modeRef.current = mode;
@@ -146,6 +175,7 @@ export function GatingPlot({
     onAxisLabelClick,
     onGateLabelMove,
     onRangeChange,
+    onVertexMenu,
   };
 
   const cancelScheduledPaint = () => {
@@ -246,11 +276,19 @@ export function GatingPlot({
     mountedRef.current = true;
     const { CytofD3, bus } = loadPlots();
     apiRef.current = CytofD3;
+    if (actions) actions.current = {
+      extendSelectedGateToEdges: () => apiRef.current?.extendSelectedGateToEdges?.() ?? false,
+      closeGateGaps: (gateIds) => apiRef.current?.closeGateGaps?.(gateIds) ?? false,
+    };
 
     const offs = [
       bus.on("new_gate", (v: unknown) => {
         if (!interactionIsCurrent()) return;
         callbacksRef.current.onNewGate?.(v as NewGate);
+      }),
+      bus.on("gate_vertex_menu", (v: unknown) => {
+        if (!interactionIsCurrent()) return;
+        callbacksRef.current.onVertexMenu?.(v as GateVertexMenuEvent);
       }),
       bus.on("gate_edit", (v: unknown) => {
         const e = v as GateEditEvent;

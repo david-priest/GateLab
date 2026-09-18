@@ -4,6 +4,8 @@ import type { Sample } from "./sample";
 import {
   buildIllustrationPayload,
   buildMultiSampleIllustrationPayload,
+  cellLabelOffsets,
+  treeLabelMove,
   type IllustrationOptions,
   type IllustrationSampleSource,
 } from "./illustration";
@@ -243,5 +245,49 @@ describe("Illustration gate overlays", () => {
       quadrant_counts: [1, 1, 1, 1],
       quadrant_pcts: [25, 25, 25, 25],
     })]);
+  });
+});
+
+describe("Illustration label placements", () => {
+  it("swaps a tree gate's offsets for a cell that shows the gate flipped, and a cell move maps back", () => {
+    const gate = { label_offset: [1, 2] as [number, number], quadrant_label_offsets: [[3, 4] as [number, number], null, null, [5, 6] as [number, number]] };
+    expect(cellLabelOffsets(gate, false)).toEqual({ label_offset: [1, 2], quadrant_label_offsets: [[3, 4], null, null, [5, 6]] });
+    // Flipped: the axes swap, and the cell's top-left shows the gate's bottom-right quadrant.
+    expect(cellLabelOffsets(gate, true)).toEqual({ label_offset: [2, 1], quadrant_label_offsets: [null, null, [4, 3], [6, 5]] });
+    expect(cellLabelOffsets({ label_offset: null }, true)).toEqual({ label_offset: null });
+    // A drag in the cell comes back in the gate's own orientation.
+    expect(treeLabelMove([2, 1], undefined, true)).toEqual({ offset: [1, 2] });
+    expect(treeLabelMove([4, 3], 2, true)).toEqual({ offset: [3, 4], quadrant: 0 });
+    expect(treeLabelMove([4, 3], 1, false)).toEqual({ offset: [4, 3], quadrant: 1 });
+  });
+
+  it("marks an overlay drawn with its axes swapped, offsets swapped to match", () => {
+    const x = Float32Array.from([1, 3, 3, 1]);
+    const y = Float32Array.from([3, 3, 1, 1]);
+    const columns = { X: x, Y: y };
+    const sample = {
+      fcs: { nEvents: x.length },
+      gateAssayData: () => ({
+        n: x.length,
+        forGate: () => ({ n: x.length, column: (key: string) => columns[key as keyof typeof columns] }),
+      }),
+      index: (key: string) => key === "X" ? 0 : key === "Y" ? 1 : undefined,
+      displayColumn: (index: number) => index === 0 ? x : y,
+      channelTicks: () => null,
+      labelForKey: (key: string) => key,
+      gateToDisplay: (_gate: unknown, _key: string, value: number) => value,
+      displayToGate: (_gate: unknown, _key: string, value: number) => value,
+    } as unknown as Sample;
+    // Drawn on (Y, X); the cell plots (X, Y).
+    const gate = {
+      gate_id: "rect-1", name: "Cells", gate_type: "rectangle", x_channel: "Y", y_channel: "X",
+      vertices: [[0, 0], [2, 4]], color: "#123456", label_offset: [1, 2],
+    } satisfies Gate;
+    const payload = buildIllustrationPayload(
+      sample, { "rect-1": gate }, ["rect-1"], populations,
+      { pop: new Uint8Array(x.length).fill(1) }, { pop: x.length }, ["pop"], ["X"], "Y",
+      { X: [0, 4], Y: [0, 4] }, options,
+    ) as { gate_overlays: Record<string, Array<Record<string, unknown>>> };
+    expect(payload.gate_overlays["pop|X"]).toEqual([expect.objectContaining({ gate_id: "rect-1", flipped: true, label_offset: [2, 1] })]);
   });
 });

@@ -52,7 +52,12 @@ describe("SampleNavigator", () => {
     const key = (index: number, key: string, options = {}) => act(() => rows()[index].dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key, ...options })));
     key(0, 'ArrowDown');
     expect(document.activeElement).toBe(rows()[1]);
+    // A plain arrow views the file it lands on and leaves the selection alone.
+    expect(onInspect).toHaveBeenCalledWith('D2');
     expect(selected()).toHaveLength(4);
+    key(1, 'ArrowDown', { metaKey: true });
+    expect(document.activeElement).toBe(rows()[2]);
+    expect(onInspect).not.toHaveBeenCalledWith('D3');
     key(1, 'Enter'); expect(onInspect).toHaveBeenCalledWith('D2');
     key(1, 'a', { metaKey: true }); expect(selected()).toHaveLength(6);
     click(4); key(4, 'ArrowUp', { shiftKey: true });
@@ -137,6 +142,35 @@ describe("SampleNavigator", () => {
     expect(onGroupAction).toHaveBeenCalledWith({ kind: "rename", groupId: "g1" });
     act(() => item("gl-sample-group-delete").click());
     expect(onGroupAction).toHaveBeenCalledWith({ kind: "delete", groupId: "g1" });
+    // Groups from a metadata column: offered only when the workspace has columns.
+    expect(item("gl-sample-group-from-metadata").disabled).toBe(true);
+    act(() => root.render(
+      <SampleNavigator
+        items={tagged}
+        activeId="a"
+        excludedIds={new Set(["b"])}
+        busy={false}
+        importProgress={null}
+        groups={[{ id: "g1", name: "Treated" }]}
+        facetColumnNames={["condition"]}
+        onGroupAction={onGroupAction}
+        onOpenFiles={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onManage={vi.fn()}
+        onManageSample={vi.fn()}
+        onActivate={vi.fn()}
+        onToggleIncluded={vi.fn()}
+        onIncludeAll={vi.fn()}
+        onIncludeNone={vi.fn()}
+        onInvertIncluded={vi.fn()}
+      />,
+    ));
+    expect(item("gl-sample-group-from-metadata").disabled).toBe(false);
+    act(() => item("gl-sample-group-from-metadata").click());
+    expect(onGroupAction).toHaveBeenCalledWith({ kind: "fromMetadata" });
+    // Creation first, then the assignments, then each group's own entries, separated.
+    const labels = [...host.querySelectorAll<HTMLElement>(".gl-sample-groups-menu [role='menuitem'], .gl-sample-groups-menu [role='separator']")].map((el) => el.getAttribute("role") === "separator" ? "—" : el.textContent);
+    expect(labels).toEqual(["New group from the 1 selected…", "Groups from a metadata column…", "—", "Add the 1 selected to Treated", "Remove the 1 selected from their group", "—", "Rename Treated…", "Delete Treated…"]);
   });
 
   it("shows no badge and no key while nothing is tailored", () => {

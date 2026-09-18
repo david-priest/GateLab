@@ -38,7 +38,7 @@ import {
 } from "./engine/populations";
 import { mergeGatingStrategies, type GatingImportMode } from "./engine/gatingMerge";
 import { populationTreeOrder } from "./engine/populations";
-import { DEFAULT_HIERARCHY_ID, DEFAULT_HIERARCHY_NAME, storeHierarchy, selectionAcrossHierarchies, correspondingHierarchyId, type HierarchyRef, type StoredHierarchy, isCopyRef, fileHierarchyId, cloneHierarchyTree, newHierarchyId } from "./engine/hierarchies";
+import { DEFAULT_HIERARCHY_ID, DEFAULT_HIERARCHY_NAME, storeHierarchy, selectionAcrossHierarchies, correspondingHierarchyId, canonicalGateId, type HierarchyRef, type StoredHierarchy, isCopyRef, fileHierarchyId, cloneHierarchyTree, newHierarchyId } from "./engine/hierarchies";
 import { syncLockedCopy, gateGeometryEquals, copyInStep, withGeometryOf, type TemplateTree } from "./engine/templateSync";
 import type { Sample } from "./engine/sample";
 
@@ -252,8 +252,16 @@ export type Action =
   | { type: "togglePopSelect"; popId: string; checked: boolean }
   | { type: "renameGate"; gateId: string; name: string }
   /** `quadrant` (0 to 3, Q1 to Q4) moves one of a quadrant gate's four labels instead of the gate label. */
-  | { type: "moveGateLabel"; gateId: string; labelOffset: [number, number]; quadrant?: number }
+  /**
+   * Place a gate's label, or one quadrant label of a quadrant gate. The placement is the gate's
+   * own wherever it is drawn: it reaches every tree whose gate descends from the same original,
+   * so the Gating, Illustration and Layout tabs show one placement. `hierarchyId` names the
+   * tree the gate id belongs to; the active tree by default.
+   */
+  | { type: "moveGateLabel"; gateId: string; labelOffset: [number, number]; quadrant?: number; hierarchyId?: string }
   | { type: "editGate"; gateId: string; vertices: [number, number][] } // dragged poly/rect vertices (gating space)
+  /** Several gates' vertices at once, as one undo step: the border snap after a pan or stretch. */
+  | { type: "editGates"; edits: { gateId: string; vertices: [number, number][] }[] }
   | { type: "moveEllipse"; gateId: string; mean: [number, number] } // ellipse translation (gate space)
   | { type: "reshapeEllipse"; gateId: string; mean: [number, number]; covariance: [[number, number], [number, number]] } // handle drag (gate space)
   | { type: "moveQuadrantCenter"; gateId: string; center: [number, number] } // dragged crosshair (gating space)
@@ -403,11 +411,12 @@ const LOCKED_STRUCTURE_ACTIONS = new Set<Action["type"]>([
 
 /**
  * Edits to a hierarchy that reach its structure-locked copies: everything that changes the
- * tree's structure, and every change of a gate's geometry. Cosmetic moves of a label stay local.
+ * tree's structure, and every change of a gate's geometry. A label move reaches its gate's
+ * family itself (moveGateLabel), copies and originals alike, not only the locked copies.
  */
 const PROPAGATED_ACTIONS = new Set<Action["type"]>([
   ...LOCKED_STRUCTURE_ACTIONS,
-  "editGate", "moveEllipse", "reshapeEllipse", "moveQuadrantCenter", "setQuadrantCurl",
+  "editGate", "editGates", "moveEllipse", "reshapeEllipse", "moveQuadrantCenter", "setQuadrantCurl",
   "sortGatesAlpha", "sortPopulationsAlpha",
 ]);
 
@@ -628,9 +637,61 @@ function moveFilesToGroup(state: CoreState, fileIds: readonly string[], groupId:
   return { ...next, gate_version: state.gate_version + 1, tree_version: state.tree_version + 1 };
 }
 
+/** The structural edits a copy passes up to its template: things added, which is where a drawn gate goes. */
+const ROUTED_ADDITIONS = new Set<Action["type"]>(["addGate", "addEllipse", "addQuadrant", "addPopulation"]);
+
+/**
+ * A gate or population added while a group's or a file's copy is live goes into the template the
+ * copy follows, for every file, exactly as it would with the tree as the edit target; the copy
+ * then follows the template again and stays live, so the edit target holds. The structure is
+ * one for every file and a copy tailors coordinates only, so the other structural edits on a
+ * copy are still refused. Null when the action is not an addition or cannot be routed.
+ */
+function routeAdditionToTemplate(state: CoreState, action: Action): CoreState | null {
+  if (!ROUTED_ADDITIONS.has(action.type)) return null;
+  const live = liveCopyAndTemplate(state);
+  if (!live) return null;
+  const { copy, template, all } = live;
+  // The parent named in the copy's ids, in the template's.
+  const toSource = (popId: string): string | null => copy.source_population_ids?.[popId] ?? null;
+  let routed: Action = action;
+  if ((action.type === "addGate" || action.type === "addEllipse") && action.createPop) {
+    const parentId = toSource(action.createPop.parentId);
+    if (!parentId) return null;
+    routed = { ...action, createPop: { ...action.createPop, parentId } };
+  } else if (action.type === "addQuadrant" || action.type === "addPopulation") {
+    const parentId = toSource(action.parentId);
+    if (!parentId) return null;
+    routed = { ...action, parentId };
+  }
+  // The template live, the copy parked, the addition made and carried to every copy that
+  // follows, then the copy live again with the new gate selected in its own ids.
+  const stored = { ...all };
+  delete stored[template.id];
+  const onTemplate: CoreState = {
+    ...state,
+    active_hierarchy_id: template.id,
+    gates: template.gates,
+    gate_order: template.gate_order,
+    populations: template.populations,
+    root_population_id: template.root_population_id,
+    active_population_id: template.active_population_id,
+    selected_gate_id: null,
+    selected_gate_ids: [],
+    selected_pop_ids: [],
+    stored_hierarchies: stored,
+  };
+  const added = coreReducer(onTemplate, routed);
+  if (added === onTemplate) return null;
+  const back = reduceCore(added, { type: "switchHierarchy", id: copy.id, silent: true });
+  return { ...back, ...pushUndo(state) };
+}
+
 function reduceCore(state: CoreState, action: Action): CoreState {
   const activeHierarchy = state.hierarchies.find((hierarchy) => hierarchy.id === state.active_hierarchy_id);
-  if (activeHierarchy?.structure_locked === true && LOCKED_STRUCTURE_ACTIONS.has(action.type)) return state;
+  if (activeHierarchy?.structure_locked === true && LOCKED_STRUCTURE_ACTIONS.has(action.type)) {
+    return routeAdditionToTemplate(state, action) ?? state;
+  }
   switch (action.type) {
     case "newWorkspace":
       return {
@@ -837,18 +898,38 @@ function reduceCore(state: CoreState, action: Action): CoreState {
     }
 
     case "moveGateLabel": {
-      const g = state.gates[action.gateId];
-      if (!g) return state;
-      // Cosmetic — no undo/version bump; new gates ref so the plot payload re-renders.
-      if (action.quadrant !== undefined) {
-        if (g.gate_type !== "quadrant" || !Number.isInteger(action.quadrant) || action.quadrant < 0 || action.quadrant > 3) return state;
-        const offsets = [0, 1, 2, 3].map((i) => (i === action.quadrant ? action.labelOffset : g.quadrant_label_offsets?.[i] ?? null));
-        return { ...state, gates: { ...state.gates, [action.gateId]: { ...g, quadrant_label_offsets: offsets } } };
-      }
-      return {
-        ...state,
-        gates: { ...state.gates, [action.gateId]: { ...g, label_offset: action.labelOffset } },
+      const active = state.hierarchies.find((h) => h.id === state.active_hierarchy_id);
+      if (!active) return state;
+      const trees: Record<string, StoredHierarchy> = { ...state.stored_hierarchies, [active.id]: storeHierarchy(active, state) };
+      const home = trees[action.hierarchyId ?? active.id];
+      const g = home?.gates[action.gateId];
+      if (!home || !g) return state;
+      if (action.quadrant !== undefined && (g.gate_type !== "quadrant" || !Number.isInteger(action.quadrant) || action.quadrant < 0 || action.quadrant > 3)) return state;
+      const place = (gate: Gate): Gate => {
+        if (action.quadrant === undefined) return { ...gate, label_offset: action.labelOffset };
+        if (gate.gate_type !== "quadrant") return gate;
+        const offsets = [0, 1, 2, 3].map((i) => (i === action.quadrant ? action.labelOffset : gate.quadrant_label_offsets?.[i] ?? null));
+        return { ...gate, quadrant_label_offsets: offsets };
       };
+      // One gate, however many trees draw a copy of it: the placement goes to every gate that
+      // descends from the same original, the active tree's included. Cosmetic — no undo entry
+      // and no version bump; new gates refs so the plot payloads re-render.
+      const canonical = canonicalGateId(action.gateId, home, trees);
+      let gates = state.gates;
+      const stored_hierarchies = { ...state.stored_hierarchies };
+      let storedTouched = false;
+      for (const tree of Object.values(trees)) {
+        for (const id of Object.keys(tree.gates)) {
+          if (canonicalGateId(id, tree, trees) !== canonical) continue;
+          if (tree.id === active.id) gates = { ...gates, [id]: place(gates[id]) };
+          else {
+            const stored = stored_hierarchies[tree.id];
+            stored_hierarchies[tree.id] = { ...stored, gates: { ...stored.gates, [id]: place(stored.gates[id]) } };
+            storedTouched = true;
+          }
+        }
+      }
+      return { ...state, gates, ...(storedTouched ? { stored_hierarchies } : {}) };
     }
 
     case "editGate": {
@@ -858,6 +939,19 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       // silently convert the covariance form into 64 fixed points.
       if (!g || g.gate_type === "quadrant" || g.gate_type === "ellipse") return state;
       const gates = { ...state.gates, [action.gateId]: { ...g, vertices: action.vertices } };
+      return { ...state, ...pushUndo(state), gates, gate_version: state.gate_version + 1 };
+    }
+
+    case "editGates": {
+      const gates = { ...state.gates };
+      let changed = false;
+      for (const edit of action.edits) {
+        const g = gates[edit.gateId];
+        if (!g || g.gate_type === "quadrant" || g.gate_type === "ellipse") continue;
+        gates[edit.gateId] = { ...g, vertices: edit.vertices };
+        changed = true;
+      }
+      if (!changed) return state;
       return { ...state, ...pushUndo(state), gates, gate_version: state.gate_version + 1 };
     }
 

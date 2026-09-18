@@ -41,6 +41,47 @@ export interface GateOverlay {
   outline?: [number, number][];
   color: string;
   label_offset: [number, number] | null;
+  /** The cell shows the gate with its axes swapped; its label offsets are swapped to match. */
+  flipped?: true;
+}
+
+/** Which of a gate's own quadrants each screen quadrant of the cell shows. An involution, so it maps back too. */
+export function cellQuadrantOrder(flipped: boolean): number[] {
+  return flipped ? [2, 1, 0, 3] : [0, 1, 2, 3];
+}
+
+/**
+ * A tree gate's label offsets as the cell shows them: the axes swapped when the cell shows the
+ * gate flipped, and the quadrant labels in the cell's screen order.
+ */
+export function cellLabelOffsets(
+  gate: { label_offset: [number, number] | null; quadrant_label_offsets?: ([number, number] | null)[] },
+  flipped: boolean,
+): { label_offset: [number, number] | null; quadrant_label_offsets?: ([number, number] | null)[] } {
+  const flip = (o: [number, number]): [number, number] => (flipped ? [o[1], o[0]] : o);
+  return {
+    label_offset: gate.label_offset ? flip(gate.label_offset) : null,
+    ...(gate.quadrant_label_offsets
+      ? {
+          quadrant_label_offsets: cellQuadrantOrder(flipped).map((index) => {
+            const o = gate.quadrant_label_offsets?.[index];
+            return o ? flip(o) : null;
+          }),
+        }
+      : {}),
+  };
+}
+
+/** A label dragged in a cell, as the tree keeps it: the offset and quadrant put back in the gate's own orientation. */
+export function treeLabelMove(
+  offset: [number, number],
+  quadrant: number | undefined,
+  flipped: boolean,
+): { offset: [number, number]; quadrant?: number } {
+  return {
+    offset: flipped ? [offset[1], offset[0]] : offset,
+    ...(quadrant === undefined ? {} : { quadrant: cellQuadrantOrder(flipped)[quadrant] ?? quadrant }),
+  };
 }
 
 /**
@@ -115,7 +156,7 @@ function buildGatesForChannels(
       const quadrants = c?.quadrants ?? [];
       // Cell quadrant order is Q1 top-left, Q2 top-right, Q3 bottom-right, Q4 bottom-left.
       // Swapping axes maps those screen positions back to original Q3,Q2,Q1,Q4 respectively.
-      const order = flipped ? [2, 1, 0, 3] : [0, 1, 2, 3];
+      const order = cellQuadrantOrder(flipped);
       out.push({
         gate_id: gid,
         name: gate.name,
@@ -125,16 +166,9 @@ function buildGatesForChannels(
         ...(arms ? { arms } : {}),
         quadrant_counts: order.map((index) => quadrants[index]?.event_count ?? 0),
         quadrant_pcts: order.map((index) => quadrants[index]?.percent_of_parent ?? 0),
-        ...(gate.quadrant_label_offsets
-          ? { quadrant_label_offsets: order.map((index) => {
-              const o = gate.quadrant_label_offsets?.[index];
-              return o ? (flipped ? [o[1], o[0]] as [number, number] : o) : null;
-            }) }
-          : {}),
         color: gate.color,
-        label_offset: gate.label_offset
-          ? (flipped ? [gate.label_offset[1], gate.label_offset[0]] : gate.label_offset)
-          : null,
+        ...cellLabelOffsets(gate, flipped),
+        ...(flipped ? { flipped: true } : {}),
       });
       continue;
     }
@@ -161,9 +195,8 @@ function buildGatesForChannels(
       vertices: verts,
       outline,
       color: gate.color,
-      label_offset: gate.label_offset
-        ? (flipped ? [gate.label_offset[1], gate.label_offset[0]] : gate.label_offset)
-        : displayLabelOffset(verts),
+      label_offset: cellLabelOffsets(gate, flipped).label_offset ?? displayLabelOffset(verts),
+      ...(flipped ? { flipped: true } : {}),
     });
   }
   return out;
@@ -218,6 +251,8 @@ export interface IllustrationOptions {
   pubStyle: boolean; // black gates, no label background
   gateLineWidth: number;
   gateEdgeMode?: GateEdgeMode;
+  /** What a gate's label says; the renderer reads it as gate_style.label_format. */
+  gateLabelFormat?: string;
   fontSizes: IllustrationFontSizes;
   scaleFontsWithPlot: boolean;
 }
@@ -370,6 +405,7 @@ export function buildIllustrationPayload(
       pub_style: opts.pubStyle,
       line_width: opts.gateLineWidth,
       gate_edge_mode: opts.gateEdgeMode ?? "straight-bow",
+      label_format: opts.gateLabelFormat ?? "name-percent",
     },
   };
 }

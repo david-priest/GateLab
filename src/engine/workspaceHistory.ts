@@ -37,7 +37,44 @@ export type WorkspaceCheckpointReason =
   | "before-compensation-remove"
   | "after-compensation-apply"
   | "before-active-layer-change"
-  | "compensation-profile-import";
+  | "compensation-profile-import"
+  | "before-revert";
+
+/** What each checkpoint is called where the user chooses one to go back to. */
+export const CHECKPOINT_REASON_LABELS: Readonly<Record<WorkspaceCheckpointReason, string>> = {
+  "automatic": "Automatic",
+  "before-workspace-open": "Before another workspace was opened",
+  "before-new-workspace": "Before a new workspace",
+  "after-workspace-open": "As opened",
+  "before-gatingml-replace": "Before the gating was replaced",
+  "after-gatingml-import": "After a gating import",
+  "after-barcode-import": "After a hierarchy CSV import",
+  "before-gate-delete": "Before a gate was deleted",
+  "before-population-delete": "Before a population was deleted",
+  "before-sample-remove": "Before a file was removed",
+  "after-fcs-import": "After files were added",
+  "after-metadata-import": "After a metadata import",
+  "before-compensation-apply": "Before compensation was applied",
+  "before-compensation-remove": "Before compensation was removed",
+  "after-compensation-apply": "After compensation was applied",
+  "before-active-layer-change": "Before the data view was changed",
+  "compensation-profile-import": "After a compensation profile import",
+  "before-revert": "Before a revert",
+};
+
+/** How long ago a checkpoint was taken, as a person would say it. */
+export function checkpointAge(createdAt: string, nowMs = Date.now()): string {
+  const at = Date.parse(createdAt);
+  if (!Number.isFinite(at)) return "";
+  const seconds = Math.max(0, Math.round((nowMs - at) / 1000));
+  if (seconds < 45) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours < 6 && minutes % 60 ? `${hours} h ${minutes % 60} min ago` : `${hours} h ago`;
+  const days = Math.floor(hours / 24);
+  return days === 1 ? "yesterday" : `${days} days ago`;
+}
 
 export interface WorkspaceCheckpoint {
   id: string;

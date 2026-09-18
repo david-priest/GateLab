@@ -47,7 +47,7 @@ export function figureStyle(
     ...config,
     maxEvents: exportAll
       ? Infinity
-      : Math.max(1, Math.min(config.maxEvents || 10000, 50000)),
+      : Math.max(1, Math.min(config.maxEvents || 10000, 1_000_000)),
     populationColors: config.popColors,
     scaleFontsWithPlot: false,
     densityColorPower: config.densityColorPower ?? 1.6,

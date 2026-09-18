@@ -8,6 +8,7 @@ import {
   normalizeLayoutStyle,
   normalizeLayoutWorkspace,
   nextLayoutItemPosition,
+  layoutGridFrames,
   pageForPreset,
   pageSizeMm,
   pageSizePx,
@@ -154,11 +155,94 @@ describe("layout pages", () => {
   });
 });
 
+describe("figure block", () => {
+  it("keeps an Illustration figure block through a save and a load, and drops one without a figure", () => {
+    const workspace = createDefaultLayoutWorkspace();
+    const illustration = { popIds: [], xChannels: [], yChannel: "", displayMode: "pseudocolor", plotSize: 200, figure: { version: 1, name: "F", sampleIds: ["D1"], populations: [], plots: [], rows: [], columns: [], pages: [], composition: "separate", scalePolicy: "gating", transforms: {}, showGates: true, panelSize: 200 } };
+    workspace.sheets[0].items.push({ id: "f", x: 0, y: 0, width: 400, height: 300, z: 0, recipe: { kind: "figure", illustration: illustration as never, page: 2 } });
+    workspace.sheets[0].items.push({ id: "g", x: 0, y: 0, width: 400, height: 300, z: 1, recipe: { kind: "figure", illustration: { popIds: [] } as never, page: 0 } });
+    const loaded = normalizeLayoutWorkspace(JSON.parse(JSON.stringify(workspace)));
+    expect(loaded.sheets[0].items).toHaveLength(1);
+    expect(loaded.sheets[0].items[0].recipe).toMatchObject({ kind: "figure", page: 2, illustration: { figure: { name: "F" } } });
+  });
+});
+
+describe("plots added as a grid", () => {
+  it("keeps rows as rows below the sheet's content, however wide the page, and steps plots sharing a cell", () => {
+    const workspace = createDefaultLayoutWorkspace();
+    const sheet = workspace.sheets[0];
+    sheet.items.push({ id: "t", x: 57, y: 57, width: 100, height: 40, z: 3, recipe: { kind: "text", text: "a", fontSize: 12 } });
+    const frames = layoutGridFrames(sheet, [
+      { row: 0, column: 0 }, { row: 0, column: 1 }, { row: 0, column: 2 }, { row: 0, column: 3 }, { row: 0, column: 4 },
+      { row: 1, column: 0 }, { row: 1, column: 0 },
+    ]);
+    const top = 57 + 40 + 12;
+    expect(frames.slice(0, 5).map((f) => [f.x, f.y])).toEqual([[57, top], [329, top], [601, top], [873, top], [1145, top]]);
+    expect(frames[5]).toMatchObject({ x: 57, y: top + 292, z: 9 });
+    expect(frames[6]).toMatchObject({ x: 77, y: top + 312, z: 10 });
+    expect(frames[0].z).toBe(4);
+  });
+});
+
+describe("placing a block nothing on the page holds", () => {
+  it("puts it below everything rather than over the last item", () => {
+    const workspace = createDefaultLayoutWorkspace();
+    const sheet = workspace.sheets[0];
+    // Wider than half the page and most of its height: only one fits, and the next has no slot.
+    const tall = { width: 900, height: 700 };
+    const first = nextLayoutItemPosition(sheet, tall.width, tall.height);
+    sheet.items.push({ id: "a", ...first, recipe: { kind: "text", text: "a", fontSize: 12 } });
+    const second = nextLayoutItemPosition(sheet, tall.width, tall.height);
+    expect(second.x).toBe(first.x);
+    expect(second.y).toBe(first.y + tall.height + 12);
+  });
+});
+
+describe("iteration on load", () => {
+  it("makes the plots of a saved sheet follow an iteration that nothing followed, and leaves one that has a follower", () => {
+    const workspace = createDefaultLayoutWorkspace();
+    const plot = (id: string, iterated?: boolean) => ({ id, x: 0, y: 0, width: 200, height: 200, z: 0, recipe: { kind: "biplot" as const, sampleId: "D1", populationId: "p1", xChannel: "FSC-A", yChannel: "SSC-A", displayMode: "pseudocolor" as const, ...(iterated ? { iterated } : {}) } });
+    const text = { id: "t", x: 0, y: 0, width: 100, height: 40, z: 1, recipe: { kind: "text" as const, text: "{population}", fontSize: 12 } };
+    workspace.sheets[0].items.push(plot("a"), plot("b"), text);
+    workspace.sheets[0].iteration = { mode: "populations", source: { kind: "checked" }, populations: { kind: "all" }, arrangement: { kind: "page-per-unit" } } as never;
+    const loaded = normalizeLayoutWorkspace(JSON.parse(JSON.stringify(workspace)));
+    expect(loaded.sheets[0].items.map((item) => "iterated" in item.recipe && item.recipe.iterated === true)).toEqual([true, true, false]);
+
+    const chosen = createDefaultLayoutWorkspace();
+    chosen.sheets[0].items.push(plot("a"), plot("b", true));
+    chosen.sheets[0].iteration = workspace.sheets[0].iteration;
+    const kept = normalizeLayoutWorkspace(JSON.parse(JSON.stringify(chosen)));
+    expect(kept.sheets[0].items.map((item) => "iterated" in item.recipe && item.recipe.iterated === true)).toEqual([false, true]);
+
+    const off = createDefaultLayoutWorkspace();
+    off.sheets[0].items.push(plot("a"));
+    expect("iterated" in normalizeLayoutWorkspace(JSON.parse(JSON.stringify(off))).sheets[0].items[0].recipe).toBe(false);
+  });
+});
+
+describe("Plotting chart block", () => {
+  it("keeps a chart block's settings through a save and a load, within range, and drops one without settings", () => {
+    const workspace = createDefaultLayoutWorkspace();
+    const settings = { files: ["D1", "D2"], hierarchy: "h1", plotType: "box", selectedPops: ["p1"], height: 9000, palette: "paired", groupSel: "day" };
+    workspace.sheets[0].items.push({ id: "p", x: 0, y: 0, width: 400, height: 300, z: 0, recipe: { kind: "proportions", settings: settings as never, title: "Composition by day" } });
+    workspace.sheets[0].items.push({ id: "q", x: 0, y: 0, width: 400, height: 300, z: 1, recipe: { kind: "proportions" } as never });
+    const loaded = normalizeLayoutWorkspace(JSON.parse(JSON.stringify(workspace)));
+    expect(loaded.sheets[0].items).toHaveLength(1);
+    expect(loaded.sheets[0].items[0].recipe).toMatchObject({
+      kind: "proportions",
+      title: "Composition by day",
+      settings: { files: ["D1", "D2"], hierarchy: "h1", plotType: "box", selectedPops: ["p1"], height: 800, groupSel: "day", categoryKind: "population", legend: true },
+    });
+  });
+});
+
 describe("plot style", () => {
   it("keeps known fields within range and drops the rest", () => {
     expect(normalizeLayoutStyle(undefined)).toEqual({});
     expect(normalizeLayoutStyle({ pointSize: 99, pointAlpha: -1, maxEvents: 1234.6, contourLevels: 0, pubStyle: true, histFill: "yes", colour: "red" }))
       .toEqual({ pointSize: 6, pointAlpha: 0.05, maxEvents: 1235, contourLevels: 2, pubStyle: true });
+    expect(normalizeLayoutStyle({ gateLabels: "number" })).toEqual({ gateLabels: "number" });
+    expect(normalizeLayoutStyle({ gateLabels: "shouting" })).toEqual({});
   });
 
   it("layers the item's own values over the sheet's over the defaults", () => {

@@ -67,6 +67,33 @@ describe("groups", () => {
     expect(coreReducer(next, { type: "addGroup", id: "gB", name: "Group A", fileIds: [] })).toBe(next);
   });
 
+  it("adds a gate drawn while the group's tree is live to the tree for every file, the group and its files following", () => {
+    const state = coreReducer(fixture(), { type: "addGroup", id: "gA", name: "Group A", fileIds: ["D1", "D2"] });
+    const copy = groupCopy(state, "gA");
+    const onGroup = coreReducer(state, { type: "switchHierarchy", id: copy.id, silent: true });
+    const parentId = live(onGroup).root_population_id!;
+    const next = coreReducer(onGroup, { type: "addGate", gateType: "rectangle", name: "CD8_positive",
+      xChannel: "FSC-A", yChannel: "SSC-A", vertices: [[10, 10], [60, 60]], createPop: { name: "CD8_positive", parentId } });
+    // The edit target holds: the group's tree is still live, with the new gate selected in its own ids.
+    expect(next.active_hierarchy_id).toBe(copy.id);
+    const own = gateNamed(live(next), "CD8_positive");
+    expect(own).toBeDefined();
+    expect(next.selected_gate_id).toBe(own.gate_id);
+    expect(Object.values(live(next).populations).some((p) => p.name === "CD8_positive")).toBe(true);
+    // The tree has it, for every file, and the group's copy maps its own ids to the tree's.
+    const inTree = gateNamed(treeOf(next, "main"), "CD8_positive");
+    expect(inTree).toBeDefined();
+    expect(live(next).source_gate_ids?.[own.gate_id]).toBe(inTree.gate_id);
+    expect(gateGeometryEquals(own, inTree)).toBe(true);
+    // One undo entry, and it puts everything back with the group's tree still live.
+    expect(next.undo).toHaveLength(onGroup.undo.length + 1);
+    const undone = coreReducer(next, { type: "undo" });
+    expect(undone.active_hierarchy_id).toBe(copy.id);
+    expect(Object.values(treeOf(undone, "main").gates).some((g) => g.name === "CD8_positive")).toBe(false);
+    // Other structural edits on the copy are still refused.
+    expect(coreReducer(next, { type: "renameGate", gateId: own.gate_id, name: "Renamed" })).toBe(next);
+  });
+
   it("carries a tree edit through the group's tree to a file following the group", () => {
     let state = coreReducer(fixture(), { type: "addGroup", id: "gA", name: "Group A", fileIds: ["D1"] });
     const copyId = groupCopy(state, "gA").id;

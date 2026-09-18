@@ -1,6 +1,6 @@
 import type { CoreState, GatingDerived } from "../store";
 import { recomputeGating } from "../store";
-import { storeHierarchy, type StoredHierarchy } from "./hierarchies";
+import { canonicalGateId, storeHierarchy, type StoredHierarchy } from "./hierarchies";
 import type { TransformSpec } from "./models";
 import { transformFromSpec, type Sample } from "./sample";
 import { linearScatterTicks, logicleTicks, scatterTicks } from "./ticks";
@@ -36,7 +36,9 @@ export type FigureDimension =
   | "samples"
   | "populations"
   | "plots"
-  | `metadata:${string}`;
+  | `metadata:${string}`
+  /** A population metadata field, from the Metadata tab's population table: groups the populations. */
+  | `popmeta:${string}`;
 export interface FigureSpec {
   version: 1;
   name: string;
@@ -66,6 +68,10 @@ export interface FigureSpec {
    * Where the figure draws each gate's label, as an offset from the gate in display units,
    * keyed by the gate's id in the tree the figure was made on (a copy's gate maps to it). The
    * Gating tab keeps its own placement: panels are smaller, so labels are placed again here.
+   */
+  /**
+   * Label placements a figure kept for itself before placements were the gate's own, kept in
+   * the trees: the Illustration tab moves them into the store on load and clears this.
    */
   labelOffsets?: Record<string, [number, number]>;
 }
@@ -152,6 +158,36 @@ export function canonicalPopulation(
     populationId,
     label: trees[hierarchyId]?.populations[populationId]?.name ?? ref.label,
   };
+}
+
+/**
+ * The population a Layout plot names, in the file's tree. As named when the tree has it. When it
+ * does not (a workspace reopened with the file on another copy of the tree, or the plot added
+ * while another file was viewed), the tree the id belongs to is found among the workspace's
+ * trees and the population followed into this file's tree by provenance; failing that, a
+ * population of the same name, when the tree has exactly one. `templateTreeId` names the tree
+ * the id was taken from when the caller knows it.
+ */
+export function resolvePopulationInTree(
+  populationId: string,
+  tree: StoredHierarchy,
+  trees: Record<string, StoredHierarchy>,
+  templateTreeId?: string,
+): { id: string; missing: boolean } {
+  if (tree.populations[populationId]) return { id: populationId, missing: false };
+  const origins = templateTreeId && trees[templateTreeId]?.populations[populationId]
+    ? [templateTreeId]
+    : Object.keys(trees).filter((treeId) => treeId !== tree.id && trees[treeId].populations[populationId]);
+  for (const hierarchyId of origins) {
+    const resolved = resolveFigurePopulation({ hierarchyId, populationId, label: "" }, tree, trees);
+    if (resolved.id) return { id: resolved.id, missing: false };
+  }
+  const name = origins.length ? trees[origins[0]].populations[populationId]?.name : undefined;
+  if (name) {
+    const sameName = Object.keys(tree.populations).filter((id) => tree.populations[id].name === name);
+    if (sameName.length === 1) return { id: sameName[0], missing: false };
+  }
+  return { id: populationId, missing: true };
 }
 
 export function resolveFigurePopulation(
@@ -451,6 +487,8 @@ export function layoutFigure(
   figure: FigureSpec,
   samples: readonly FigureSample[],
   trees?: Record<string, StoredHierarchy>,
+  /** Per-population metadata, by population id, for `popmeta:` groupings; without it every population is "Unassigned". */
+  populationMetadata?: Readonly<Record<string, Readonly<Record<string, string>>>>,
 ): FigurePage[] {
   if (
     !figure.sampleIds.length ||
@@ -492,6 +530,8 @@ export function layoutFigure(
       })),
     ],
   ]);
+  const populationValue = (ref: FigurePopulation, field: string) =>
+    populationMetadata?.[ref.populationId]?.[field] ?? "Unassigned";
   for (const dimension of [...figure.rows, ...figure.columns, ...figure.pages])
     if (dimension.startsWith("metadata:")) {
       const name = dimension.slice(9);
@@ -500,6 +540,13 @@ export function layoutFigure(
         [
           ...new Set(selected.map((s) => s.metadata?.[name] ?? "Unassigned")),
         ].map((value) => ({ dimension, id: value, label: value })),
+      );
+    } else if (dimension.startsWith("popmeta:")) {
+      const name = dimension.slice(8);
+      values.set(
+        dimension,
+        [...new Set(figure.populations.map((ref) => populationValue(ref, name)))]
+          .map((value) => ({ dimension, id: value, label: value })),
       );
     }
   const visible = (dims: FigureDimension[]) =>
@@ -538,7 +585,14 @@ export function layoutFigure(
             !figure.pages.includes("populations")
               ? figure.populations
               : undefined;
-          const sampleIds = selected
+          // A population metadata grouping is a property of the population, as file metadata is
+          // of a file: a panel whose population is not in the group is empty and trimmed away.
+          const populationInGroup = dimensions.every(
+            (d) =>
+              !d.dimension.startsWith("popmeta:") ||
+              populationValue(population, d.dimension.slice(8)) === d.id,
+          );
+          const sampleIds = !populationInGroup ? [] : selected
             .filter(
               (s) =>
                 (!value("samples") || s.id === value("samples")) &&
@@ -638,27 +692,18 @@ export interface FigurePanelData {
   mappings: { sample: string; status: PopulationResolution["status"] }[];
 }
 
+/** `n` evenly spaced quantiles of the values, from the minimum to the maximum. */
+export function quantileSketch(values: number[], n: number): number[] {
+  if (!values.length) return [];
+  const sorted = Float64Array.from(values).sort();
+  return Array.from({ length: n }, (_, i) => sorted[Math.min(sorted.length - 1, Math.round((i / (n - 1)) * (sorted.length - 1)))]);
+}
+
 /**
  * A gate's id in the tree its copies descend from: a copy's gate maps to its source's, up the
  * chain, so one label offset holds for the gate in every file's tree.
  */
-export function canonicalGateId(
-  gateId: string,
-  tree: StoredHierarchy,
-  trees: Record<string, StoredHierarchy>,
-): string {
-  let current: StoredHierarchy | undefined = tree;
-  let id = gateId;
-  const seen = new Set<string>();
-  while (current && !seen.has(current.id)) {
-    seen.add(current.id);
-    const mapped = current.source_gate_ids?.[id];
-    if (!mapped || !current.source_hierarchy_id) break;
-    id = mapped;
-    current = trees[current.source_hierarchy_id];
-  }
-  return id;
-}
+export { canonicalGateId };
 
 /** The key a figure keeps a label offset under: the gate, and for a quadrant gate the quadrant too. */
 export function figureLabelKey(canonicalGate: string, quadrant?: number): string {
@@ -963,7 +1008,7 @@ export function buildFigurePanel(
         ...options,
         maxEvents: cap,
         includeEmpty: true,
-        pointBudget: fullData ? Infinity : 300_000,
+        pointBudget: fullData ? Infinity : 1_000_000,
       },
     );
     const key = `${resolved.id}|${x}`;
@@ -994,6 +1039,9 @@ export function buildFigurePanel(
             ? summaryValues.reduce((a, b) => a + b, 0) / summaryValues.length
             : exactMedian(summaryValues)
           : null,
+        // A quantile sketch of the events, so the matrix can scale a channel by the percentiles
+        // of the events pooled over its rows without holding every event.
+        summary_quantiles: quantileSketch(summaryValues, 101),
         n_events: totalCount,
         x_label: panel.plot.name,
         x: [],

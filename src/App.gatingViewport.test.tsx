@@ -10,9 +10,10 @@ interface CapturedPlotProps {
   payload: {
     x_range: [number, number];
     y_range: [number, number];
-    gates: Array<{ gate_id: string; gate_type: string }>;
+    gates: Array<{ gate_id: string; gate_type: string; vertices?: [number, number][] }>;
     gates_only?: boolean;
     gate_edge_mode?: string;
+    snap_to_gates?: boolean;
     x_b64: string;
     y_b64: string;
   };
@@ -21,6 +22,7 @@ interface CapturedPlotProps {
   onQuadrantMove: (edit: { gate_id: string; center: [number, number] }) => void;
   onGateSelect: (gateId: string) => void;
   onGateLabelMove: (edit: { gate_id: string; label_offset: [number, number] }) => void;
+  onVertexMenu: (e: { gate_id: string; gate_type: string; vertex?: number; edge?: number; point?: [number, number]; client: [number, number] }) => void;
 }
 
 const plotHarness = vi.hoisted(() => ({
@@ -175,6 +177,39 @@ describe("App gating viewport invariant", () => {
     expect(ranges()).toEqual(initial);
   });
 
+  it("undoes and redoes a vertex move from the buttons beside the draw tools", async () => {
+    act(() => root.render(<App />));
+    const fcsInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(fcsInput, "files", { configurable: true, value: [testFile()] });
+    await act(async () => {
+      fcsInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const undo = () => host.querySelector<HTMLButtonElement>('.gl-history-tools button[aria-label="Undo"]')!;
+    const redo = () => host.querySelector<HTMLButtonElement>('.gl-history-tools button[aria-label="Redo"]')!;
+    expect(undo().disabled).toBe(true);
+    expect(redo().disabled).toBe(true);
+    const polygonId = await createGate({
+      gate_type: "polygon",
+      vertices: [[10, 10], [11, 10], [11, 11]],
+      x_channel: "FSC-A",
+      y_channel: "SSC-A",
+    }, "Create");
+    const vertices = () => plotHarness.props!.payload.gates.find((gate) => gate.gate_id === polygonId)!.vertices;
+    const drawn = JSON.stringify(vertices());
+    act(() => plotHarness.props!.onGateEdit({ gate_id: polygonId, vertices: [[20, 20], [21, 20], [21, 21]] }));
+    const moved = JSON.stringify(vertices());
+    expect(moved).not.toBe(drawn);
+    expect(undo().disabled).toBe(false);
+    act(() => undo().click());
+    expect(JSON.stringify(vertices())).toBe(drawn);
+    expect(redo().disabled).toBe(false);
+    act(() => redo().click());
+    expect(JSON.stringify(vertices())).toBe(moved);
+    expect(redo().disabled).toBe(true);
+  });
+
   it("updates gates without repainting the cells", async () => {
     // cytof has a fast path that redraws gate overlays and leaves the canvas alone. GateLab never
     // set it, so every gate edit, label move and selection sent a full payload, re-decoded the
@@ -242,5 +277,56 @@ describe("App gating viewport invariant", () => {
       });
       expect(plotHarness.props!.payload.gate_edge_mode).toBe(next);
     }
+    // Snapping to other gates is on unless the toggle beside it is unticked.
+    expect(plotHarness.props!.payload.snap_to_gates).toBe(true);
+    const snap = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+      .find((el) => el.closest("label")?.textContent?.includes("Snap to other gates"))!;
+    expect(snap).toBeTruthy();
+    act(() => snap.click());
+    expect(plotHarness.props!.payload.snap_to_gates).toBe(false);
+    // Close gaps needs two polygons or rectangles to join; a fresh file has none, so it waits.
+    const closeGaps = [...host.querySelectorAll<HTMLButtonElement>("button")].find((el) => el.textContent === "Close gaps")!;
+    expect(closeGaps).toBeTruthy();
+    expect(closeGaps.disabled).toBe(true);
+  });
+
+  it("removes or adds a polygon vertex from the plot's right-click menu, keeping three at least", async () => {
+    act(() => root.render(<App />));
+    const fcsInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(fcsInput, "files", { configurable: true, value: [testFile()] });
+    await act(async () => {
+      fcsInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const polygonId = await createGate({
+      gate_type: "polygon",
+      vertices: [[10, 10], [14, 10], [14, 14], [10, 14]],
+      x_channel: "FSC-A",
+      y_channel: "SSC-A",
+    }, "Create");
+    const vertices = () => plotHarness.props!.payload.gates.find((gate) => gate.gate_id === polygonId)!.vertices!;
+    const menuItem = (label: string) => [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent === label);
+    expect(vertices()).toHaveLength(4);
+    // A right-click on the second handle: Delete vertex takes that one out.
+    act(() => plotHarness.props!.onVertexMenu({ gate_id: polygonId, gate_type: "polygon", vertex: 1, client: [40, 40] }));
+    expect(menuItem("Delete vertex")!.disabled).toBe(false);
+    act(() => menuItem("Delete vertex")!.click());
+    expect(vertices()).toHaveLength(3);
+    expect(menuItem("Delete vertex")).toBeUndefined(); // the menu closed
+    // Three left: the menu offers the deletion but refuses it.
+    act(() => plotHarness.props!.onVertexMenu({ gate_id: polygonId, gate_type: "polygon", vertex: 0, client: [40, 40] }));
+    expect(menuItem("Delete vertex")!.disabled).toBe(true);
+    act(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
+    // A right-click on the first edge: Add vertex here puts the point between its ends.
+    const before = vertices().map((v) => [...v]);
+    act(() => plotHarness.props!.onVertexMenu({ gate_id: polygonId, gate_type: "polygon", edge: 0, point: [12, 10], client: [40, 40] }));
+    act(() => menuItem("Add vertex here")!.click());
+    const after = vertices();
+    expect(after).toHaveLength(4);
+    expect(after[0]).toEqual(before[0]);
+    expect(after[2]).toEqual(before[1]);
+    expect(after[1][0]).toBeGreaterThan(before[0][0]);
+    expect(after[1][0]).toBeLessThan(before[1][0]);
   });
 });

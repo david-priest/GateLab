@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { StoredHierarchy } from "../engine/hierarchies";
+import type { Gate } from "../engine/models";
+import { cellLabelOffsets, type GateOverlay } from "../engine/illustration";
 import {
   buildFigurePanel,
   figureDisplaySample,
@@ -8,11 +10,28 @@ import {
   type FigurePanelData,
   type FigureSource,
   type FigureSpec,
+  withFigureLabelOffsets,
 } from "../engine/figure";
 import {
   defaultIllustrationConfig,
   figureStyle,
 } from "../engine/figureDefaults";
+
+/** A tree's gates without their label placements: what a panel is built from, so a moved label repaints rather than rebuilds. */
+function gateShapes(gates: Record<string, Gate>): unknown[] {
+  return Object.values(gates).map((gate) => {
+    const { label_offset: _label, quadrant_label_offsets: _quadrants, ...shape } = gate as Gate & { quadrant_label_offsets?: unknown };
+    return shape;
+  });
+}
+
+/** The trees' label placements alone, as a key: a change repaints the panels that show them. */
+function gatePlacements(trees: Record<string, StoredHierarchy>): unknown[] {
+  return Object.values(trees).map((tree) => [
+    tree.id,
+    Object.values(tree.gates).map((gate) => [gate.gate_id, gate.label_offset, (gate as Gate & { quadrant_label_offsets?: unknown }).quadrant_label_offsets ?? null]),
+  ]);
+}
 
 export function useFigurePanels(
   page: FigurePage | undefined,
@@ -73,7 +92,6 @@ export function useFigurePanels(
     figure.scalePolicy,
     figure.samplePopulations,
     figure.populationOverrides,
-    figure.labelOffsets,
     maxEvents,
     summaryStat,
     specsKey,
@@ -85,7 +103,7 @@ export function useFigurePanels(
       s.id,
       s.name,
       s.sample.dataRevision,
-      s.tree.gates,
+      gateShapes(s.tree.gates),
       s.tree.populations,
       s.tree.source_population_ids,
     ]),
@@ -94,7 +112,7 @@ export function useFigurePanels(
       tree.source_hierarchy_id,
       tree.source_population_ids,
       tree.source_gate_ids,
-      tree.gates,
+      gateShapes(tree.gates),
       tree.populations,
     ]),
   ]);
@@ -113,7 +131,7 @@ export function useFigurePanels(
       heatmapStat: summaryStat,
       maxEvents: Math.min(
         maxEvents,
-        Math.max(100, Math.floor(300000 / Math.max(1, page.panels.length))),
+        Math.max(100, Math.floor(1_000_000 / Math.max(1, page.panels.length))),
       ),
     });
     function next() {
@@ -122,7 +140,9 @@ export function useFigurePanels(
         const panel = page!.panels[index++];
         data[panel.key] = buildFigurePanel(
           panel,
-          { ...figure, showGates: true },
+          // Built without the figure's label offsets: those only move labels on a built panel,
+          // and are put on below, so a label drag repaints its panel rather than rebuilding all.
+          { ...figure, showGates: true, labelOffsets: undefined },
           projected,
           trees,
           options,
@@ -148,8 +168,47 @@ export function useFigurePanels(
     // Style and panel dimensions are intentionally excluded: those repaint existing data only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
+  // Label placements are the gates' own and live in the trees, so a move changes no panel's
+  // events: the built panels stay and the placements are laid over them here, keyed by the
+  // placements alone. A figure saved with placements of its own still lays those on top.
+  const offsetsKey = JSON.stringify(figure.labelOffsets ?? null);
+  const placementsKey = JSON.stringify(gatePlacements(trees));
+  const latest = useRef({ projected, trees });
+  latest.current = { projected, trees };
+  const data = useMemo(() => {
+    if (!page) return result.data;
+    const { projected, trees } = latest.current;
+    const legacy = !!figure.labelOffsets && Object.keys(figure.labelOffsets).length > 0;
+    const out: Record<string, FigurePanelData> = {};
+    let changed = false;
+    for (const [panelKey, panel] of Object.entries(result.data)) {
+      const gates = panel.config?.gates as GateOverlay[] | undefined;
+      const sampleId = page.panels.find((p) => p.key === panelKey)?.samples[0];
+      const source = sampleId ? projected.find((s) => s.id === sampleId) : undefined;
+      if (!gates?.length || !source || !panel.config) {
+        out[panelKey] = panel;
+        continue;
+      }
+      let placed = gates.map((gate) => {
+        const own = source.tree.gates[gate.gate_id];
+        if (!own) return gate;
+        const cell = cellLabelOffsets(own, !!gate.flipped);
+        return {
+          ...gate,
+          ...(cell.label_offset ? { label_offset: cell.label_offset } : {}),
+          ...(cell.quadrant_label_offsets ? { quadrant_label_offsets: cell.quadrant_label_offsets } : {}),
+        };
+      });
+      if (legacy) placed = withFigureLabelOffsets(placed, figure, source.tree, trees);
+      out[panelKey] = { ...panel, config: { ...panel.config, gates: placed } };
+      changed = true;
+    }
+    return changed ? out : result.data;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result.data, offsetsKey, placementsKey, page]);
   return {
     ...result,
+    data,
     pending: pending || result.key !== key || result.pending,
     projected,
     ranges,

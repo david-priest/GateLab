@@ -795,6 +795,58 @@ export function ConfirmModal({
   );
 }
 
+export interface MetadataGroupsPreview {
+  groups: { value: string; count: number; existing: boolean }[];
+  /** Files with no value in the column: they stay as they are. */
+  unassigned: number;
+}
+
+/** One group per value of a metadata column: the column is chosen and what it would make is shown. */
+export function GroupsFromMetadataModal({
+  columns,
+  preview,
+  onConfirm,
+  onCancel,
+}: {
+  columns: readonly string[];
+  preview: (column: string) => MetadataGroupsPreview;
+  onConfirm: (column: string) => void;
+  onCancel: () => void;
+}) {
+  const { t } = useI18n();
+  const [column, setColumn] = useState(columns[0] ?? "");
+  const shown = column ? preview(column) : { groups: [], unassigned: 0 };
+  return (
+    <ModalShell title={t("Groups from a metadata column")}>
+      <label className="gl-modal-field">
+        {t("Column:")}
+        <select autoFocus value={column} onChange={(e) => setColumn(e.target.value)}>
+          {columns.map((name) => <option key={name} value={name}>{name}</option>)}
+        </select>
+      </label>
+      <div className="gl-modal-preview" aria-label={t("Groups this makes")}>
+        {shown.groups.length === 0 ? (
+          <p className="gl-hint">{t("No file has a value in this column.")}</p>
+        ) : (
+          <ul className="gl-modal-preview-list">
+            {shown.groups.map((g) => (
+              <li key={g.value}>
+                <strong>{g.value}</strong> · {t("{count} files", { count: g.count })}
+                {g.existing && <small> · {t("into the group of that name")}</small>}
+              </li>
+            ))}
+          </ul>
+        )}
+        {shown.unassigned > 0 && <p className="gl-hint">{t("{count} files without a value stay as they are.", { count: shown.unassigned })}</p>}
+      </div>
+      <div className="gl-modal-actions">
+        <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
+        <button className="gl-btn" disabled={!shown.groups.length} onClick={() => onConfirm(column)}>{t("Make groups")}</button>
+      </div>
+    </ModalShell>
+  );
+}
+
 export function RenameModal({
   title,
   initial,

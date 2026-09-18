@@ -1,11 +1,14 @@
 import { memo, useEffect, useRef } from "react";
 import type {
   FigurePage,
+  FigurePanel,
   FigurePanelData,
   FigureValue,
 } from "../engine/figure";
 import type { IllustrationConfig } from "../engine/workspace";
 import { drawFigurePlot } from "../plots/figurePlot";
+import { buildHeatmapMatrix, splitHeatmapPage } from "../engine/figureHeatmap";
+import { FigureHeatmap } from "./FigureHeatmap";
 
 export function styledFigurePlot(
   data: Record<string, unknown>,
@@ -46,6 +49,7 @@ export function styledFigurePlot(
       pub_style: config.pubStyle,
       line_width: config.gateLineWidth,
       gate_edge_mode: config.gateEdgeMode,
+      label_format: config.gateLabelFormat ?? "name-percent",
     },
   };
 }
@@ -61,7 +65,7 @@ const FigurePlot = memo(function FigurePlot({
   config: IllustrationConfig;
   size: number;
   showGates: boolean;
-  onLabelMove?: (gateId: string, offset: [number, number], quadrant?: number) => void;
+  onLabelMove?: (gateId: string, offset: [number, number], quadrant?: number, flipped?: boolean) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   // The latest handler, so a drag started on one render lands on the current figure.
@@ -77,7 +81,7 @@ const FigurePlot = memo(function FigurePlot({
     config.ridgeGradient, config.heatmapShowValues, config.densityColorPower, config.contourThreshold,
     config.contourLevels, config.kdeBandwidth, config.histLineWidth, config.histFill, config.histFillAlpha,
     config.histOverlayMode, config.fontTick, config.fontAxis, config.fontTitle, config.fontGate,
-    config.scaleFontsWithPlot, config.pubStyle, config.gateLineWidth, config.gateEdgeMode,
+    config.scaleFontsWithPlot, config.pubStyle, config.gateLineWidth, config.gateEdgeMode, config.gateLabelFormat,
   ]);
   useEffect(() => {
     if (!ref.current || !data.config) return;
@@ -94,7 +98,10 @@ const FigurePlot = memo(function FigurePlot({
         ? {
             gate_style: {
               ...(styled.gate_style as Record<string, unknown>),
-              on_label_move: (gateId: string, offset: [number, number], quadrant?: number) => onLabelMoveRef.current?.(gateId, offset, quadrant),
+              on_label_move: (gateId: string, offset: [number, number], quadrant?: number) => {
+                const gate = (data.config?.gates as { gate_id: string; flipped?: boolean }[] | undefined)?.find((g) => g.gate_id === gateId);
+                onLabelMoveRef.current?.(gateId, offset, quadrant, !!gate?.flipped);
+              },
             },
           }
         : {}),
@@ -271,6 +278,10 @@ export function FigureGrid({
   showGates,
   id = "figure-preview-grid",
   onLabelMove,
+  onPanelContextMenu,
+  onMatrixContextMenu,
+  selectedPanels,
+  onPanelClick,
 }: {
   page: FigurePage;
   panels: Record<string, FigurePanelData>;
@@ -278,11 +289,31 @@ export function FigureGrid({
   size: number;
   showGates: boolean;
   id?: string;
-  /** A gate label was dragged in a panel: the gate's id (in that panel's tree), its new offset, and the quadrant for a quadrant gate's label. */
-  onLabelMove?: (gateId: string, offset: [number, number], quadrant?: number) => void;
+  /** A gate label was dragged in a panel: the gate's id (in that panel's tree), its new offset, the quadrant for a quadrant gate's label, and whether the panel showed the gate with its axes swapped. */
+  onLabelMove?: (gateId: string, offset: [number, number], quadrant?: number, flipped?: boolean) => void;
+  /** A right-click on a panel, for a menu about it. */
+  onPanelContextMenu?: (panel: FigurePanel, event: React.MouseEvent<HTMLElement>) => void;
+  /** A right-click on the summary heatmap matrix. */
+  onMatrixContextMenu?: (event: React.MouseEvent<HTMLElement>) => void;
+  /** The panels chosen, by key, and a click on a panel, which chooses. */
+  selectedPanels?: ReadonlySet<string>;
+  onPanelClick?: (panel: FigurePanel, event: React.MouseEvent<HTMLElement>) => void;
 }) {
-  const rowDepth = page.rows[0]?.length ?? 0;
-  const colDepth = Math.max(1, page.columns[0]?.length ?? 0);
+  // A press that moved, as when a gate label is dragged, is not a click on the panel.
+  const pressed = useRef<[number, number] | null>(null);
+  const clickPanel = (panel: FigurePanel, event: React.MouseEvent<HTMLElement>) => {
+    const from = pressed.current;
+    pressed.current = null;
+    if (from && Math.hypot(event.clientX - from[0], event.clientY - from[1]) > 4) return;
+    onPanelClick?.(panel, event);
+  };
+  // Summary heatmap panels are drawn as one matrix beneath the plot table; the table keeps the
+  // other panels, and is left out when every panel on the page is a heatmap.
+  const { table } = splitHeatmapPage(page);
+  const matrix = buildHeatmapMatrix(page, panels, config);
+  const grid = table ?? page;
+  const rowDepth = grid.rows[0]?.length ?? 0;
+  const colDepth = Math.max(1, grid.columns[0]?.length ?? 0);
   return (
     <table
       id={id}
@@ -295,22 +326,24 @@ export function FigureGrid({
       }
     >
       <caption className="illustration-row-header">{page.label}</caption>
+      {table && (
+        <>
       <thead>
         {Array.from({ length: colDepth }, (_, depth) => (
           <tr key={depth}>
             {depth === 0 && rowDepth > 0 && (
               <th rowSpan={colDepth} colSpan={rowDepth} />
             )}
-            {page.columns.flatMap((group, index) => {
+            {grid.columns.flatMap((group, index) => {
               if (
                 index &&
-                prefix(page.columns[index - 1], depth) === prefix(group, depth)
+                prefix(grid.columns[index - 1], depth) === prefix(group, depth)
               )
                 return [];
               let span = 1;
               while (
-                index + span < page.columns.length &&
-                prefix(page.columns[index + span], depth) ===
+                index + span < grid.columns.length &&
+                prefix(grid.columns[index + span], depth) ===
                   prefix(group, depth)
               )
                 span++;
@@ -330,18 +363,18 @@ export function FigureGrid({
         ))}
       </thead>
       <tbody>
-        {page.rows.map((group, row) => (
+        {grid.rows.map((group, row) => (
           <tr key={row}>
             {group.flatMap((value, depth) => {
               if (
                 row &&
-                prefix(page.rows[row - 1], depth) === prefix(group, depth)
+                prefix(grid.rows[row - 1], depth) === prefix(group, depth)
               )
                 return [];
               let span = 1;
               while (
-                row + span < page.rows.length &&
-                prefix(page.rows[row + span], depth) === prefix(group, depth)
+                row + span < grid.rows.length &&
+                prefix(grid.rows[row + span], depth) === prefix(group, depth)
               )
                 span++;
               return (
@@ -355,15 +388,23 @@ export function FigureGrid({
                 </th>
               );
             })}
-            {page.columns.map((_, column) => {
-              const panel = page.panels[row * page.columns.length + column];
+            {grid.columns.map((_, column) => {
+              const panel = grid.panels[row * grid.columns.length + column];
               const data = panels[panel.key];
               const panelSize =
                 data?.config && "figure_summary" in data.config
                   ? Math.max(50, config.heatmapCellSize ?? 80)
                   : size;
               return (
-                <td key={column} data-figure-panel={panel.key}>
+                <td
+                  key={column}
+                  data-figure-panel={panel.key}
+                  className={selectedPanels?.has(panel.key) ? "is-selected" : undefined}
+                  aria-selected={selectedPanels ? selectedPanels.has(panel.key) : undefined}
+                  onPointerDown={onPanelClick ? (event) => { pressed.current = [event.clientX, event.clientY]; } : undefined}
+                  onClick={onPanelClick ? (event) => clickPanel(panel, event) : undefined}
+                  onContextMenu={onPanelContextMenu ? (event) => onPanelContextMenu(panel, event) : undefined}
+                >
                   {data ? (
                     <FigurePlot
                       data={data}
@@ -386,6 +427,17 @@ export function FigureGrid({
           </tr>
         ))}
       </tbody>
+        </>
+      )}
+      {matrix && (
+        <tbody className="gl-figure-heatmap-body">
+          <tr>
+            <td colSpan={Math.max(1, rowDepth + grid.columns.length)} data-figure-panel="heatmap-matrix" onContextMenu={onMatrixContextMenu}>
+              <FigureHeatmap matrix={matrix} config={config} cellSize={Math.max(12, Math.min(120, config.heatmapCellSize ?? 28))} />
+            </td>
+          </tr>
+        </tbody>
+      )}
     </table>
   );
 }

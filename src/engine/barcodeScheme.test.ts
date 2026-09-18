@@ -208,13 +208,12 @@ describe("building the strategy", () => {
     expect(r.metadataColumns).toEqual(["condition", "file_name"]);
   });
 
-  it("draws every barcode gate as a polygon of seven or eight vertices, the display-plane pair split at the boundary", () => {
+  it("draws every barcode gate as a polygon of five vertices, or eight for the display-plane pair split at the boundary", () => {
     const s = resolveBarcodeScheme(parseBarcodeTable(TABLE), CHANNELS);
     const r = buildBarcodeGating(s, DEFAULT_BARCODE_TEMPLATE, 5);
     for (const g of Object.values(r.gates) as PolyRectGate[]) {
       expect(g.gate_type).toBe("polygon");
-      expect(g.vertices.length).toBeGreaterThanOrEqual(7);
-      expect(g.vertices.length).toBeLessThanOrEqual(8);
+      expect([5, 8]).toContain(g.vertices.length);
     }
     const neg = Object.values(r.gates).find((g) => g.name === "89-") as PolyRectGate;
     const pos = Object.values(r.gates).find((g) => g.name === "89+") as PolyRectGate;
@@ -350,10 +349,9 @@ function planeGates(x: string, y: string, shapes: Record<string, [number, number
 }
 
 describe("templates", () => {
-  it("the default has a polygon of seven or eight vertices per state and serves either orientation", () => {
+  it("the default has a polygon of five vertices per state and serves either orientation", () => {
     for (const k of ["--", "+-", "-+", "++"] as const) {
-      expect(DEFAULT_BARCODE_TEMPLATE.states[k].length).toBeGreaterThanOrEqual(7);
-      expect(DEFAULT_BARCODE_TEMPLATE.states[k].length).toBeLessThanOrEqual(8);
+      expect(DEFAULT_BARCODE_TEMPLATE.states[k]).toHaveLength(5);
     }
     const t: BarcodeTemplate = {
       ...DEFAULT_BARCODE_TEMPLATE,
@@ -383,8 +381,8 @@ describe("templates", () => {
     rawPlane.forEach((v, i) => {
       expect(v[0]).toBeCloseTo(DEFAULT_BARCODE_TEMPLATE.states["++"][i][0], 9);
     });
-    // Mean of the "--" box's far edges and the "+-"/"-+" near edges: (1.5 + 1.8 + 1.55 + 1.8) / 4.
-    expect(learned.template.boundary).toBeCloseTo(1.66, 2);
+    // Mean of the "--" box's far edges and the "+-"/"-+" near edges: (1.5 + 1.8 + 1.5 + 1.8) / 4.
+    expect(learned.template.boundary).toBeCloseTo(1.65, 2);
   });
 
   it("writes the scheme table back out of a workspace so that it imports to the same strategy", () => {

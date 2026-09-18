@@ -29,6 +29,8 @@ import { percentText, significantNumber } from "./compensationUiFormat";
 
 export const DensityColorPowerContext = createContext(DEFAULT_DENSITY_COLOR_POWER);
 export const CompensationPointAlphaContext = createContext(0.85);
+/** The Point size slider's factor on every compensation biplot's point radius. */
+export const CompensationPointSizeContext = createContext(1);
 
 export interface CompensationChannelDisplay {
   readonly key: string;
@@ -127,6 +129,7 @@ export function DensityBiplot({
   const { t } = useI18n();
   const densityColorPower = useContext(DensityColorPowerContext);
   const pointAlpha = useContext(CompensationPointAlphaContext);
+  const pointSize = useContext(CompensationPointSizeContext);
   const containerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const container = containerRef.current;
@@ -156,6 +159,7 @@ export function DensityBiplot({
         densitySmoothingRadius,
         densityColorPower,
         pointAlpha,
+        pointSize,
       });
     };
     const schedule = () => {
@@ -171,7 +175,7 @@ export function DensityBiplot({
       resizeObserver?.disconnect();
       if (animationFrame !== null) cancelAnimationFrame(animationFrame);
     };
-  }, [densityColorCeiling, densityColorPower, densitySmoothing, maximumSize, minimumSize, panel, pointAlpha, preview, receiverLabel, sourceLabel, title]);
+  }, [densityColorCeiling, densityColorPower, densitySmoothing, maximumSize, minimumSize, panel, pointAlpha, pointSize, preview, receiverLabel, sourceLabel, title]);
   const zeroPercent = (count: number) => preview.eventCount > 0
     ? `${(count / preview.eventCount * 100).toFixed(1)}%`
     : "0.0%";
@@ -222,6 +226,7 @@ export function CachedDensityBiplot({
   const { t } = useI18n();
   const densityColorPower = useContext(DensityColorPowerContext);
   const pointAlpha = useContext(CompensationPointAlphaContext);
+  const pointSize = useContext(CompensationPointSizeContext);
   const containerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const container = containerRef.current;
@@ -254,6 +259,7 @@ export function CachedDensityBiplot({
         densitySmoothingRadius,
         densityColorPower,
         pointAlpha,
+        pointSize,
         canvasScale: 2,
       });
       const originalCanvas = container.querySelector("canvas");
@@ -271,6 +277,7 @@ export function CachedDensityBiplot({
         densitySmoothingRadius,
         densityColorPower,
         pointAlpha,
+        pointSize,
         canvasScale: 2,
       });
       const compensatedCanvas = compensatedHost.querySelector("canvas");
@@ -296,7 +303,7 @@ export function CachedDensityBiplot({
       resizeObserver?.disconnect();
       cancelQueuedRender?.();
     };
-  }, [densityColorCeiling, densityColorPower, densitySmoothing, maximumSize, minimumSize, pointAlpha, preview, receiverLabel, sourceLabel, title]);
+  }, [densityColorCeiling, densityColorPower, densitySmoothing, maximumSize, minimumSize, pointAlpha, pointSize, preview, receiverLabel, sourceLabel, title]);
 
   return (
     <figure

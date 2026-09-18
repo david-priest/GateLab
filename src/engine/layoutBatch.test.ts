@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createLayoutSheet, type LayoutItem } from "./layout";
-import { expandLayoutSheet, fillPlaceholders, iterationUnits, normalizeIteration, templateFrame, type LayoutUnit } from "./layoutBatch";
+import { expandLayoutSheet, fillPlaceholders, iterationUnits, normalizeIteration, populationUnits, templateFrame, type LayoutUnit } from "./layoutBatch";
 
 const units: LayoutUnit[] = [
   { id: "f1", name: "D1", fileName: "D1.fcs", groupName: "treated", metadata: { donor: "D1", day: "7" } },
@@ -19,6 +19,30 @@ describe("placeholders", () => {
     expect(fillPlaceholders("{sample} ({file}) {group} {meta:day} {n} of {N} {other}", units[0], 1, 3)).toBe("D1 (D1.fcs) treated 7 1 of 3 {other}");
     expect(fillPlaceholders("{sample} {n}", null, 2, 5)).toBe("{sample} 2");
     expect(fillPlaceholders("{group}{meta:missing}", units[2], 3, 3)).toBe("");
+  });
+});
+
+describe("text that reads from a plot", () => {
+  const describe_ = (recipe: { sampleId: string; populationId: string }) =>
+    recipe.sampleId === "f2"
+      ? { population: "CD4_positive", file: "D2.fcs", sample: "D2", x: "FSC-A", y: "SSC-A", metadata: { condition: "6um 13psi" } }
+      : { population: "CD4_positive", file: "D1.fcs", sample: "D1", x: "FSC-A", y: "SSC-A", metadata: { condition: "5um 10psi" } };
+
+  it("fills the text from the plot it reads, on a static sheet and per tile when iterating", () => {
+    const sheet = createLayoutSheet("S");
+    const heading = text("h", 57, 20, "{meta:condition}");
+    heading.recipe = { ...heading.recipe, readsFrom: "a" } as typeof heading.recipe;
+    const plain = text("p", 300, 20, "{meta:condition} stays");
+    sheet.items = [plot("a", 57, 57, true), heading, plain];
+    const single = expandLayoutSheet(sheet, [], describe_);
+    expect(single[0].items.map((i) => i.recipe.kind === "text" ? i.recipe.text : "")).toEqual(["", "5um 10psi", "{meta:condition} stays"]);
+    // Tiled over the files, each tile's heading reads its own plot's file.
+    sheet.iteration = { mode: "files", source: { kind: "all" }, arrangement: { kind: "tiles", rows: 1, columns: 3, order: "row-major", gap: 24 } };
+    const tiled = expandLayoutSheet(sheet, units.slice(0, 2), describe_);
+    const headings = tiled[0].items.filter((i) => i.templateId === "h").map((i) => i.recipe.kind === "text" ? i.recipe.text : "");
+    expect(headings).toEqual(["5um 10psi", "6um 13psi"]);
+    // Without a describer the text is left as written.
+    expect(expandLayoutSheet(sheet, [], undefined)[0].items[1].recipe).toMatchObject({ text: "{meta:condition}" });
   });
 });
 
@@ -69,6 +93,33 @@ describe("expandLayoutSheet", () => {
   });
 });
 
+describe("populationUnits", () => {
+  const populations = {
+    root: { population_id: "root", name: "All Events", parent_id: null, children: ["a", "b"], gate_refs: [], gate_logic: "and", event_count: null, percent_of_parent: null },
+    a: { population_id: "a", name: "Lymphocytes", parent_id: "root", children: ["a1"], gate_refs: [], gate_logic: "and", event_count: null, percent_of_parent: null },
+    a1: { population_id: "a1", name: "T cells", parent_id: "a", children: [], gate_refs: [], gate_logic: "and", event_count: null, percent_of_parent: null },
+    b: { population_id: "b", name: "Beads", parent_id: "root", children: [], gate_refs: [], gate_logic: "and", event_count: null, percent_of_parent: null },
+  } as never;
+  const tree = { populations, root_population_id: "root" };
+  const file = { id: "f1", name: "D1", fileName: "D1.fcs" };
+  it("takes every population but the root in tree order, or those under a branch, on the one file", () => {
+    const all = populationUnits({ mode: "populations", source: { kind: "checked" }, arrangement: { kind: "page-per-unit" } }, tree, file);
+    expect(all.map((u) => [u.id, u.name, u.populationId, u.sampleName, u.fileName])).toEqual([["a", "Lymphocytes", "a", "D1", "D1.fcs"], ["a1", "T cells", "a1", "D1", "D1.fcs"], ["b", "Beads", "b", "D1", "D1.fcs"]]);
+    const under = populationUnits({ mode: "populations", source: { kind: "checked" }, populations: { kind: "branch", populationId: "a" }, arrangement: { kind: "page-per-unit" } }, tree, file);
+    expect(under.map((u) => u.id)).toEqual(["a1"]);
+  });
+  it("expands a sheet once per population, binding the population and filling its name", () => {
+    const sheet = createLayoutSheet("S");
+    sheet.iteration = { mode: "populations", source: { kind: "checked" }, arrangement: { kind: "page-per-unit" } };
+    sheet.items = [plot("p", 57, 57, true), text("t", 57, 300, "{population} of {sample}")];
+    const pages = expandLayoutSheet(sheet, populationUnits(sheet.iteration, tree, file));
+    expect(pages).toHaveLength(3);
+    expect(pages[1].items[0].recipe).toMatchObject({ sampleId: "f1", populationId: "a1", title: "D1 · 2/3" });
+    expect(pages[1].items[0].templateSampleId).toBeUndefined();
+    expect(pages[1].items[1].recipe).toMatchObject({ text: "T cells of D1" });
+  });
+});
+
 describe("iterationUnits", () => {
   const files = units.map((u) => ({ id: u.id, name: u.name, fileName: u.fileName, metadata: u.metadata }));
   const groups = [{ id: "g1", name: "treated" }];
@@ -87,5 +138,7 @@ describe("normalizeIteration", () => {
     expect(normalizeIteration({ mode: "files", source: { kind: "group", groupId: "g" }, arrangement: { kind: "tiles", rows: 99, columns: 0, order: "sideways", gap: -1 } }))
       .toEqual({ mode: "files", source: { kind: "group", groupId: "g" }, arrangement: { kind: "tiles", rows: 12, columns: 1, order: "row-major", gap: 0 } });
     expect(normalizeIteration({ mode: "files", source: { kind: "metadata" } }).source).toEqual({ kind: "checked" });
+    expect(normalizeIteration({ mode: "populations", populations: { kind: "branch", populationId: "a" } })).toMatchObject({ mode: "populations", populations: { kind: "branch", populationId: "a" } });
+    expect(normalizeIteration({ mode: "populations", populations: { kind: "odd" } }).populations).toEqual({ kind: "all" });
   });
 });
