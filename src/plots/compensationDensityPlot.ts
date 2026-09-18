@@ -22,6 +22,8 @@ export interface CompensationDensityPlotOptions {
   readonly densitySmoothingRadius: number;
   readonly densityColorPower: number;
   readonly pointAlpha: number;
+  /** A factor on the size-based point radius; 1 is the radius the panel's size gives. */
+  readonly pointSize?: number;
   readonly canvasScale?: number;
 }
 
@@ -57,7 +59,7 @@ export function renderCompensationDensityBiplotSurface(
     x_label: options.sourceLabel,
     y_label: options.receiverLabel,
     title: options.title,
-    point_size: Math.max(0.55, Math.min(1.2, 1.15 * linearScale)),
+    point_size: Math.max(0.55, Math.min(1.2, 1.15 * linearScale)) * (options.pointSize ?? 1),
     point_alpha: options.pointAlpha,
     density_clip_quantile: 0.95,
     density_color_power: options.densityColorPower,

@@ -602,6 +602,15 @@ export class Sample {
     ]);
   }
 
+  /**
+   * The context a locked comparison shares: the assay family alone. Locking the scales means
+   * one frame for every file, and for the original and compensated views of each, so the
+   * active layer is left out on purpose.
+   */
+  get lockedScaleContextKey(): string {
+    return JSON.stringify([this.instrument]);
+  }
+
   /** Exact active assay + display-transform identity for one channel's annotations. */
   displayCoordinateBindingKey(channelKey: string): string {
     const idx = this.byName.get(channelKey);

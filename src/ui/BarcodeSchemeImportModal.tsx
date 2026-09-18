@@ -3,6 +3,7 @@
 // gates, and every problem the table has. Nothing is created until Import.
 
 import { useRef } from "react";
+import { SearchableSelect } from "./SearchableSelect";
 import type { CoreState } from "../store";
 import { populationTreeOrder } from "../engine/populations";
 import type { BarcodeChannelLike, BarcodePlane, BarcodeScheme, BarcodeTable, QcChainPreview } from "../engine/barcodeScheme";
@@ -206,17 +207,13 @@ export function BarcodeSchemeImportModal({
                 {planes.map((p, i) => (
                   <tr key={i}>
                     <td>
-                      <select value={p.x} onChange={(e) => setPlane(i, { x: e.target.value, xIsBarcode: scheme.channels.includes(e.target.value) })}>
-                        {channelKeys.map((k) => <option key={k} value={k}>{k}</option>)}
-                      </select>
+                      <SearchableSelect label="X channel" value={p.x} options={channelKeys.map((k) => ({ value: k, label: k }))} onChange={(value) => setPlane(i, { x: value, xIsBarcode: scheme.channels.includes(value) })} />
                     </td>
                     <td style={{ textAlign: "center" }}>
                       <input type="checkbox" checked={p.xIsBarcode} onChange={(e) => setPlane(i, { xIsBarcode: e.target.checked })} />
                     </td>
                     <td>
-                      <select value={p.y} onChange={(e) => setPlane(i, { y: e.target.value, yIsBarcode: scheme.channels.includes(e.target.value) })}>
-                        {channelKeys.map((k) => <option key={k} value={k}>{k}</option>)}
-                      </select>
+                      <SearchableSelect label="Y channel" value={p.y} options={channelKeys.map((k) => ({ value: k, label: k }))} onChange={(value) => setPlane(i, { y: value, yIsBarcode: scheme.channels.includes(value) })} />
                     </td>
                     <td style={{ textAlign: "center" }}>
                       <input type="checkbox" checked={p.yIsBarcode} onChange={(e) => setPlane(i, { yIsBarcode: e.target.checked })} />

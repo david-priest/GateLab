@@ -608,9 +608,22 @@ describe("per-file hierarchies in the workspace file", () => {
     both.gating.hierarchies![1].owner_sample_id = "sample-run-1";
     expect(() => validateWorkspace(both)).toThrow(/both a file and a group/);
 
+    // A locked tree with no owner, as 0.8.0 saved a group's tree: given to the group named as
+    // it is, and read rather than refused.
     const noOwner = cloneWs(ws);
     delete noOwner.gating.hierarchies![1].owner_group_id;
-    expect(() => validateWorkspace(noOwner)).toThrow(/file or group owner/);
+    expect(validateWorkspace(noOwner)).toBe(true);
+    expect(noOwner.gating.hierarchies![1]).toMatchObject({ owner_group_id: "grp-1", structure_locked: true });
+    expect(readWorkspaceBytes(packWorkspace(noOwner, fcsByPath)).ws.gating.hierarchies?.[1]).toMatchObject({ owner_group_id: "grp-1" });
+
+    // No group of that name: the lock goes, the tree stays as an ordinary copy.
+    const orphan = cloneWs(ws);
+    delete orphan.gating.hierarchies![1].owner_group_id;
+    orphan.gating.groups = [{ id: "grp-2", name: "Control" }];
+    orphan.samples[0].groupId = "grp-2";
+    expect(validateWorkspace(orphan)).toBe(true);
+    expect(orphan.gating.hierarchies![1].structure_locked).toBeUndefined();
+    expect(orphan.gating.hierarchies![1].owner_group_id).toBeUndefined();
   });
 
   it("rejects a malformed flag or hierarchy id", () => {

@@ -1,4 +1,5 @@
 import type { StoredHierarchy } from "./hierarchies";
+import { isFigureSpec } from "./figureSchema";
 import { describe, expect, it } from "vitest";
 import { coreReducer, initialCoreState } from "../store";
 import { newPopulation, newRootPopulation, newGate } from "./models";
@@ -17,6 +18,7 @@ import {
   withFigureLabelOffsets,
   prepareFigureSource,
   resolveFigurePopulation,
+  resolvePopulationInTree,
   type FigureSample,
   type FigureSpec,
 } from "./figure";
@@ -87,6 +89,29 @@ export function figureFixture() {
   const figure = migrateFigure(null, samples, trees, "main", "FSC-A", "SSC-A");
   return { state, root, pop, gate, leaf, copy, samples, trees, figure };
 }
+
+describe("population metadata groupings", () => {
+  it("groups populations by a field of the population table, trimming the panels outside each group", () => {
+    const f = figureFixture();
+    f.figure.populations = [
+      { hierarchyId: "main", populationId: f.root.population_id, label: "All Events" },
+      { hierarchyId: "main", populationId: f.pop.population_id, label: "Singlets" },
+    ];
+    f.figure.rows = ["popmeta:kind", "populations"];
+    f.figure.columns = ["samples", "plots"];
+    f.figure.pages = [];
+    const table = { [f.root.population_id]: { kind: "everything" }, [f.pop.population_id]: { kind: "gated" } };
+    const page = layoutFigure(f.figure, f.samples, f.trees, table)[0];
+    expect(page.rows.map((row) => row.map((v) => v.label))).toEqual([["everything", "All Events"], ["gated", "Singlets"]]);
+    expect(page.panels).toHaveLength(4);
+    expect(page.panels.every((p) => p.samples.length === 1)).toBe(true);
+    expect(page.panels.filter((p) => p.row === 0).every((p) => p.population.label === "All Events")).toBe(true);
+    // Without the table every population is "Unassigned", one group, and the figure lays out as ungrouped.
+    const bare = layoutFigure(f.figure, f.samples, f.trees)[0];
+    expect(bare.rows.map((row) => row.map((v) => v.label))).toEqual([["Unassigned", "All Events"], ["Unassigned", "Singlets"]]);
+    expect(isFigureSpec(f.figure)).toBe(true);
+  });
+});
 
 describe("independent figures", () => {
   it("scopes populations to their assigned hierarchy group without matching duplicate names", () => {
@@ -276,6 +301,23 @@ describe("independent figures", () => {
       ),
     ).toBe(true);
   });
+  it("resolves a Layout plot's population into the file's tree by provenance, then by unique name", () => {
+    const f = figureFixture();
+    const leafId = Object.entries(f.leaf.source_population_ids).find(([, source]) => source === f.pop.population_id)![0];
+    const main = f.trees.main;
+    // Present as named; a main id followed into the copy and a copy id back into main; unknown stays missing.
+    expect(resolvePopulationInTree(f.pop.population_id, main, f.trees)).toEqual({ id: f.pop.population_id, missing: false });
+    expect(resolvePopulationInTree(f.pop.population_id, f.leaf, f.trees)).toEqual({ id: leafId, missing: false });
+    expect(resolvePopulationInTree(leafId, main, f.trees)).toEqual({ id: f.pop.population_id, missing: false });
+    expect(resolvePopulationInTree("nowhere", f.leaf, f.trees)).toEqual({ id: "nowhere", missing: true });
+    // A tree of no shared lineage with one population of the same name matches by name.
+    const stranger = cloneHierarchyTree(f.state.populations, f.root.population_id, f.state.gates, f.state.gate_order);
+    const other = storeHierarchy({ id: "other", name: "Other" }, { ...f.state, ...stranger });
+    const trees = { ...f.trees, other };
+    const otherSinglets = Object.values(other.populations).find((pop) => pop.name === "Singlets")!.population_id;
+    expect(resolvePopulationInTree(f.pop.population_id, other, trees)).toEqual({ id: otherSinglets, missing: false });
+  });
+
   it("maps a persisted leaf UUID back to a shared lineage without matching names", () => {
     const f = figureFixture();
     const cfg = {

@@ -7,20 +7,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { usePersistedTabState } from "./tabState";
-import { recompute, type CoreState, type Derived } from "../store";
+import type { CoreState, Derived } from "../store";
 import type { Sample } from "../engine/sample";
 import { populationTreeOrder } from "../engine/populations";
 import { TreeConnectors } from "./TreeConnectors";
-import {
-  resolvePartitionLevels,
-  partitionCountsWithin,
-  populationDisplayNames,
-  resolvePerSampleValue,
-  divisionLevels,
-  divisionCountsFor,
-  type PerSampleFactor,
-  type DivisionProfileLike,
-} from "../engine/factors";
+import type { DivisionProfileLike } from "../engine/factors";
 import {
   computeStackedBars,
   computeBoxes,
@@ -29,17 +20,18 @@ import {
   type SampleComposition,
 } from "../engine/proportions";
 import type { PopulationMap } from "../engine/models";
-import {
-  OVERLAY_PALETTES,
-  paletteColors,
-  populationColor,
-  UNGATED_COLOR,
-  type PaletteName,
-} from "../engine/palettes";
+import { OVERLAY_PALETTES, paletteColors, type PaletteName } from "../engine/palettes";
 import type { MetadataColumn } from "../engine/metadata";
-import { sampleDisplayId, SAMPLE_ID_FIELD } from "../engine/metadata";
+import { SAMPLE_ID_FIELD } from "../engine/metadata";
 import { useI18n } from "./i18n";
-import { figureHierarchies, resolveFigurePopulation } from "../engine/figure";
+import { figureHierarchies } from "../engine/figure";
+import {
+  buildProportionsModel,
+  defaultProportionsSettings,
+  proportionsCategoryColors,
+  type ProportionsSettings,
+} from "../engine/proportionsModel";
+import { BASE_PROPORTIONS_SETTINGS, PROPORTIONS_NO_FACTOR, PROPORTIONS_SAMPLE_FACTOR } from "../engine/proportionsSettings";
 
 interface SampleRef {
   id: string;
@@ -58,15 +50,12 @@ interface Props {
   /** Aggregate Sample revision snapshot; every sample contributes to the model. */
   dataRevisionKey: string;
   onConfigChange?: () => void;
+  /** Put the chart as it is now on the Layout tab, as one block that keeps these settings. */
+  onAddToLayout?: (settings: ProportionsSettings) => void;
 }
 
-const SAMPLE_OPT = "__sample__";
-const NONE_OPT = "";
-function parseFactor(v: string): PerSampleFactor | null {
-  if (v === NONE_OPT) return null;
-  if (v === SAMPLE_OPT) return { kind: "sample" };
-  return { kind: "metadata", field: v };
-}
+const SAMPLE_OPT = PROPORTIONS_SAMPLE_FACTOR;
+const NONE_OPT = PROPORTIONS_NO_FACTOR;
 
 export function ProportionsTab({
   samples: files,
@@ -76,36 +65,25 @@ export function ProportionsTab({
   divisionProfiles,
   dataRevisionKey,
   onConfigChange,
+  onAddToLayout,
 }: Props) {
   const { t } = useI18n();
   const [section, setSection] = useState("data");
-  const [selectedFiles, setSelectedFiles] = usePersistedTabState<string[]>(
-    "prop.files",
-    () => files.map((file) => file.id),
-  );
-  const [hierarchyId, setHierarchyId] = usePersistedTabState(
-    "prop.hierarchy",
-    activeState.active_hierarchy_id,
-  );
+  // The settings before the user touches anything, shared with the Layout tab, so a chart taken
+  // from there before this tab has been opened is the chart this tab would show.
+  const [defaults] = useState(() => defaultProportionsSettings(files, activeState, metadataColumns));
+  const [selectedFiles, setSelectedFiles] = usePersistedTabState<string[]>("prop.files", () => defaults.files);
+  const [hierarchyId, setHierarchyId] = usePersistedTabState("prop.hierarchy", defaults.hierarchy);
   const trees = figureHierarchies(activeState);
   const tree = trees[hierarchyId] ?? trees[activeState.active_hierarchy_id];
   const state = { ...activeState, ...tree };
   const samples = files.filter((file) => selectedFiles.includes(file.id));
-  const [chartHeight, setChartHeight] = usePersistedTabState(
-    "prop.height",
-    280,
-  );
-  const [showGrid, setShowGrid] = usePersistedTabState("prop.grid", true);
-  const [showPoints, setShowPoints] = usePersistedTabState("prop.points", true);
-  const [showLegend, setShowLegend] = usePersistedTabState("prop.legend", true);
-  const [pointRadius, setPointRadius] = usePersistedTabState(
-    "prop.pointRadius",
-    2,
-  );
+  const [chartHeight, setChartHeight] = usePersistedTabState("prop.height", defaults.height);
+  const [showGrid, setShowGrid] = usePersistedTabState("prop.grid", defaults.grid);
+  const [showPoints, setShowPoints] = usePersistedTabState("prop.points", defaults.points);
+  const [showLegend, setShowLegend] = usePersistedTabState("prop.legend", defaults.legend);
+  const [pointRadius, setPointRadius] = usePersistedTabState("prop.pointRadius", defaults.pointRadius);
   const rootId = state.root_population_id ?? "";
-  const order = populationTreeOrder(state.populations, rootId).filter(
-    ({ popId }) => popId !== rootId,
-  );
   const divisionSamples = useMemo(
     () => samples.filter((entry) => divisionProfiles[entry.id]),
     [samples, divisionProfiles, dataRevisionKey],
@@ -114,15 +92,12 @@ export function ProportionsTab({
 
   const [categoryKind, setCategoryKind] = usePersistedTabState<
     "population" | "division"
-  >("prop.categoryKind", "population");
-  const [plotType, setPlotType] = usePersistedTabState<"stacked" | "box">(
-    "prop.plotType",
-    "stacked",
-  );
+  >("prop.categoryKind", defaults.categoryKind);
+  const [plotType, setPlotType] = usePersistedTabState<"stacked" | "box">("prop.plotType", defaults.plotType);
   // A composition is the children of ONE parent, stacked to 100% with the rest of that parent:
   // never a mix of levels, which double-counted nested populations and could not tell the same
   // quadrant under two parents apart.
-  const [parentSel, setParentSel] = usePersistedTabState<string>("prop.parent", rootId);
+  const [parentSel, setParentSel] = usePersistedTabState<string>("prop.parent", defaults.parent);
   const parentId = state.populations[parentSel] ? parentSel : rootId;
   // The whole tree, root first, for the arm picker: clicking a population makes it the parent
   // the proportions are shown within.
@@ -144,11 +119,7 @@ export function ProportionsTab({
     return out;
   }, [state.populations, parentId]);
   const armIds = useMemo(() => new Set(armRows.map((r) => r.popId)), [armRows]);
-  const displayNames = useMemo(() => populationDisplayNames(state.populations), [state.populations]);
-  const [selectedPopsRaw, setSelectedPops] = usePersistedTabState<string[]>(
-    "prop.selectedPops",
-    () => order.map((o) => o.popId),
-  );
+  const [selectedPopsRaw, setSelectedPops] = usePersistedTabState<string[]>("prop.selectedPops", () => defaults.selectedPops);
   // Only populations beneath the parent count; a selection saved against another arm, or a
   // whole tree, reads as "the parent's children". Each event goes to the deepest selected
   // population holding it, so nested selections nest rather than double-count.
@@ -156,37 +127,16 @@ export function ProportionsTab({
     const within = selectedPopsRaw.filter((id) => armIds.has(id));
     return within.length || selectedPopsRaw.length === 0 ? within : childIds;
   }, [selectedPopsRaw, armIds, childIds]);
-  const [includeUngated, setIncludeUngated] = usePersistedTabState(
-    "prop.includeUngated",
-    true,
-  );
-  const [groupSel, setGroupSel] = usePersistedTabState<string>(
-    "prop.groupSel",
-    metadataColumns[0]?.name ?? SAMPLE_OPT,
-  );
-  const [unitSel, setUnitSel] = usePersistedTabState<string>(
-    "prop.unitSel",
-    SAMPLE_OPT,
-  );
-  const [facetSel, setFacetSel] = usePersistedTabState<string>(
-    "prop.facetSel",
-    NONE_OPT,
-  );
-  const [palette, setPalette] = usePersistedTabState<PaletteName>(
-    "prop.palette",
-    "paired",
-  );
-  const [averagePerUnit, setAveragePerUnit] = usePersistedTabState(
-    "prop.averagePerUnit",
-    true,
-  );
+  const [includeUngated, setIncludeUngated] = usePersistedTabState("prop.includeUngated", defaults.includeUngated);
+  const [groupSel, setGroupSel] = usePersistedTabState<string>("prop.groupSel", defaults.groupSel);
+  const [unitSel, setUnitSel] = usePersistedTabState<string>("prop.unitSel", defaults.unitSel);
+  const [facetSel, setFacetSel] = usePersistedTabState<string>("prop.facetSel", defaults.facetSel);
+  const [palette, setPalette] = usePersistedTabState<PaletteName>("prop.palette", defaults.palette);
+  const [averagePerUnit, setAveragePerUnit] = usePersistedTabState("prop.averagePerUnit", defaults.averagePerUnit);
   // Chart font sizes (px) — axis ticks / axis title / legend.
-  const [fontTick, setFontTick] = usePersistedTabState("prop.fontTick", 9);
-  const [fontAxis, setFontAxis] = usePersistedTabState("prop.fontAxis", 10);
-  const [fontLegend, setFontLegend] = usePersistedTabState(
-    "prop.fontLegend",
-    11,
-  );
+  const [fontTick, setFontTick] = usePersistedTabState("prop.fontTick", defaults.fontTick);
+  const [fontAxis, setFontAxis] = usePersistedTabState("prop.fontAxis", defaults.fontAxis);
+  const [fontLegend, setFontLegend] = usePersistedTabState("prop.fontLegend", defaults.fontLegend);
   useEffect(() => {
     onConfigChange?.();
   }, [
@@ -216,117 +166,27 @@ export function ProportionsTab({
       setCategoryKind("population");
   }, [categoryKind, hasDivision, setCategoryKind]);
 
-  const model = useMemo(() => {
-    const groupSpec = parseFactor(groupSel) ?? { kind: "sample" as const };
-    const unitSpec = parseFactor(unitSel) ?? { kind: "sample" as const };
-    const facetSpec = parseFactor(facetSel);
-    const scalar = (e: SampleRef) => {
-      const md = {
-        ...metadata[e.id],
-        [SAMPLE_ID_FIELD]: sampleDisplayId(e.name, metadata[e.id]),
-      };
-      return {
-        unit:
-          unitSpec.kind === "sample"
-            ? e.id
-            : resolvePerSampleValue(unitSpec, e.name, md),
-        group: resolvePerSampleValue(groupSpec, e.name, md),
-        facet: facetSpec ? resolvePerSampleValue(facetSpec, e.name, md) : null,
-      };
-    };
-
-    if (categoryKind === "division") {
-      const maxN = Math.max(
-        0,
-        ...divisionSamples.map((e) => divisionProfiles[e.id].n),
-      );
-      const catLevels = divisionLevels(maxN);
-      const perSample: SampleComposition[] = divisionSamples.map((e) => ({
-        ...scalar(e),
-        catCounts: divisionCountsFor(e.sample, divisionProfiles[e.id], maxN),
-      }));
-      return { catLevels, perSample, hasFacet: !!facetSpec };
-    }
-
-    const levels = resolvePartitionLevels(
-      state.populations,
-      rootId,
-      selectedPops,
-    );
-    if (!levels.length) return { catLevels: [], perSample: [] as SampleComposition[], hasFacet: !!facetSpec, excluded: [] as string[] };
-    const restName = parentId === rootId ? "ungated" : `rest of ${displayNames[parentId] ?? state.populations[parentId]?.name ?? "parent"}`;
-    const catLevels = includeUngated
-      ? [...levels.map((l) => displayNames[l.popId] ?? l.name), restName]
-      : levels.map((l) => displayNames[l.popId] ?? l.name);
-    const excluded: string[] = [];
-    const perSample: SampleComposition[] = samples.flatMap((e) => {
-      const own = trees[e.hierarchyId ?? tree.id];
-      if (!own) {
-        excluded.push(e.name);
-        return [];
-      }
-      const matches = levels.map((level) =>
-        resolveFigurePopulation(
-          {
-            hierarchyId: tree.id,
-            populationId: level.popId,
-            label: level.name,
-          },
-          own,
-          trees,
-        ),
-      );
-      if (matches.some((match) => !match.id || match.status === "changed")) {
-        excluded.push(e.name);
-        return [];
-      }
-      const localLevels = levels.map((level, index) => ({
-        ...level,
-        popId: matches[index].id!,
-      }));
-      const masks = recompute(e.sample, { ...activeState, ...own }).masks;
-      // The parent in this file's own tree: the same population by provenance.
-      const localParent = parentId === rootId
-        ? null
-        : resolveFigurePopulation({ hierarchyId: tree.id, populationId: parentId, label: state.populations[parentId]?.name ?? "" }, own, trees);
-      if (parentId !== rootId && (!localParent?.id || localParent.status === "changed")) {
-        excluded.push(e.name);
-        return [];
-      }
-      const { counts, rest } = partitionCountsWithin(masks, localLevels, localParent?.id ?? null, e.sample.fcs.nEvents);
-      return [
-        {
-          ...scalar(e),
-          catCounts: includeUngated ? [...counts, rest] : counts,
-        },
-      ];
-    });
-    // `levels` (popId + depth) lets the chart nest daughter populations inside their parents.
-    return {
-      catLevels,
-      perSample,
-      hasFacet: !!facetSpec,
-      levels: levels.map((l) => ({ popId: l.popId, depth: l.depth })),
-      excluded,
-    };
+  // The model's inputs, apart from how it is drawn, so a font or plot type change never recounts events.
+  const modelSettings = useMemo<ProportionsSettings>(
+    () => ({
+      ...BASE_PROPORTIONS_SETTINGS,
+      files: selectedFiles,
+      hierarchy: hierarchyId,
+      categoryKind,
+      parent: parentSel,
+      selectedPops: selectedPopsRaw,
+      includeUngated,
+      groupSel,
+      unitSel,
+      facetSel,
+    }),
+    [selectedFiles, hierarchyId, categoryKind, parentSel, selectedPopsRaw, includeUngated, groupSel, unitSel, facetSel],
+  );
+  const model = useMemo(
+    () => buildProportionsModel(modelSettings, files, activeState, metadata, divisionProfiles),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    files,
-    selectedFiles,
-    categoryKind,
-    divisionProfiles,
-    activeState.gate_version,
-    activeState.stored_hierarchies,
-    hierarchyId,
-    rootId,
-    selectedPops,
-    includeUngated,
-    groupSel,
-    unitSel,
-    facetSel,
-    metadata,
-    dataRevisionKey,
-  ]);
+    [modelSettings, files, divisionProfiles, activeState.gate_version, activeState.stored_hierarchies, metadata, dataRevisionKey],
+  );
 
   const factorOptions = (
     <>
@@ -343,21 +203,26 @@ export function ProportionsTab({
   );
 
   const nCat = model.catLevels.length;
-  // Population categories are coloured by each population's STABLE slot (frozen — adding a population
-  // never reshuffles the others), ungated in fixed grey. Division categories (Div0..DivN) stay
-  // position-based (they're a fixed ladder, not incrementally added).
-  const catColors = model.levels
-    ? [
-        ...model.levels.map((l) =>
-          populationColor(palette, state.populations[l.popId]?.colorSlot),
-        ),
-        ...(includeUngated ? [UNGATED_COLOR] : []),
-      ]
-    : paletteColors(palette, Math.max(1, nCat));
+  const catColors = proportionsCategoryColors(model, { palette, includeUngated }, state.populations);
   const toggle = <T,>(arr: T[], v: T) =>
     arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v];
   const exportSvg = (kind: "svg" | "png") =>
     downloadChart("gl-prop-svg", "proportions", kind);
+  const addToLayout = () =>
+    onAddToLayout?.({
+      ...modelSettings,
+      plotType,
+      palette,
+      averagePerUnit,
+      fontTick,
+      fontAxis,
+      fontLegend,
+      height: chartHeight,
+      grid: showGrid,
+      points: showPoints,
+      legend: showLegend,
+      pointRadius,
+    });
 
   return (
     <div
@@ -366,6 +231,19 @@ export function ProportionsTab({
       <div className="gl-plotting-head">
         <strong>Plotting</strong>
         <span>Population composition and replicate-level distributions</span>
+        {onAddToLayout && (
+          <div className="gl-plotting-head-actions">
+            <button
+              type="button"
+              className="gl-mini-btn"
+              disabled={samples.length === 0 || nCat === 0}
+              title={t("One block on the Layout tab, drawn there as it is here; its files and populations stay its own")}
+              onClick={addToLayout}
+            >
+              {t("Add to Layout")}
+            </button>
+          </div>
+        )}
       </div>
       <aside className="gl-plotting-inspector" aria-label="Plotting controls">
         <nav className="gl-presentation-tabs" aria-label="Plotting inspector">
@@ -817,6 +695,8 @@ interface ChartProps {
     showLegend: boolean;
     pointRadius: number;
   };
+  /** The card's element id, which the export composer finds it by; each chart on a page needs its own. */
+  containerId?: string;
 }
 
 export interface ProportionPanelLayout {
@@ -874,6 +754,7 @@ export function ProportionsChart({
   populations,
   fonts,
   appearance,
+  containerId = "gl-prop-svg",
 }: ChartProps) {
   const { catLevels, perSample, hasFacet, levels } = model;
   const [hoveredLegend, setHoveredLegend] = useState<number | null>(null);
@@ -1176,7 +1057,7 @@ export function ProportionsChart({
 
   return (
     <div
-      id="gl-prop-svg"
+      id={containerId}
       className="gl-prop-chart"
       style={{ minWidth: Math.max(360, legendColumns * 145) }}
     >
@@ -1240,9 +1121,9 @@ function svgDimension(svg: SVGSVGElement, name: "width" | "height"): number {
  * SVG alongside every facet panel rather than serializing only the first chart SVG.
  */
 export function composeProportionsChartSvg(
-  containerId: string,
+  chart: string | HTMLElement,
 ): ProportionsExport | null {
-  const container = document.getElementById(containerId);
+  const container = typeof chart === "string" ? document.getElementById(chart) : chart;
   if (!container) return null;
   const panels = [
     ...container.querySelectorAll<SVGSVGElement>("svg.gl-prop-panel"),
@@ -1251,6 +1132,9 @@ export function composeProportionsChartSvg(
 
   const containerRect = container.getBoundingClientRect();
   const hasLiveLayout = containerRect.width > 0 && containerRect.height > 0;
+  // Under a CSS zoom (a Layout block fits its chart to its frame) client rects are zoomed and the
+  // panels' own sizes are not, so every measure is taken back to the chart's own scale.
+  const k = hasLiveLayout ? container.offsetWidth / containerRect.width : 1;
   const padding = 10;
   const panelGap = 12;
   const fallbackPanelSizes = panels.map((panel) => ({
@@ -1287,11 +1171,11 @@ export function composeProportionsChartSvg(
     fallbackLegendTop + 10 + legendRows * legendRowHeight + padding;
   const width = Math.max(
     1,
-    Math.ceil(hasLiveLayout ? containerRect.width : fallbackWidth),
+    Math.ceil(hasLiveLayout ? containerRect.width * k : fallbackWidth),
   );
   const height = Math.max(
     1,
-    Math.ceil(hasLiveLayout ? containerRect.height : fallbackHeight),
+    Math.ceil(hasLiveLayout ? containerRect.height * k : fallbackHeight),
   );
 
   const root = document.createElementNS(SVG_NS, "svg");
@@ -1312,8 +1196,8 @@ export function composeProportionsChartSvg(
   panels.forEach((panel, index) => {
     const rect = panel.getBoundingClientRect();
     const useRect = hasLiveLayout && rect.width > 0 && rect.height > 0;
-    const x = useRect ? rect.left - containerRect.left : fallbackX;
-    const y = useRect ? rect.top - containerRect.top : padding;
+    const x = useRect ? (rect.left - containerRect.left) * k : fallbackX;
+    const y = useRect ? (rect.top - containerRect.top) * k : padding;
     const group = document.createElementNS(SVG_NS, "g");
     group.setAttribute(
       "transform",
@@ -1332,12 +1216,12 @@ export function composeProportionsChartSvg(
     const useLegendRect =
       hasLiveLayout && legendRect.width > 0 && legendRect.height > 0;
     const legendX = useLegendRect
-      ? legendRect.left - containerRect.left
+      ? (legendRect.left - containerRect.left) * k
       : padding;
     const legendTop = useLegendRect
-      ? legendRect.top - containerRect.top
+      ? (legendRect.top - containerRect.top) * k
       : fallbackLegendTop;
-    const legendWidth = useLegendRect ? legendRect.width : width - padding * 2;
+    const legendWidth = useLegendRect ? legendRect.width * k : width - padding * 2;
 
     const divider = document.createElementNS(SVG_NS, "line");
     divider.setAttribute("x1", String(Math.round(legendX)));
@@ -1356,12 +1240,12 @@ export function composeProportionsChartSvg(
       const column = index % legendColumns;
       const row = Math.floor(index / legendColumns);
       const itemX = useItemRect
-        ? itemRect.left - containerRect.left
+        ? (itemRect.left - containerRect.left) * k
         : legendX + column * fallbackColumnWidth;
       const itemY = useItemRect
-        ? itemRect.top - containerRect.top
+        ? (itemRect.top - containerRect.top) * k
         : legendTop + 10 + row * legendRowHeight;
-      const itemHeight = useItemRect ? itemRect.height : legendRowHeight;
+      const itemHeight = useItemRect ? itemRect.height * k : legendRowHeight;
       const swatch = item.querySelector<HTMLElement>(".gl-prop-swatch");
       const label =
         item

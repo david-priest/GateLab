@@ -41,6 +41,29 @@ export interface StoredHierarchy extends HierarchyRef {
   selected_pop_ids: string[];
 }
 
+/**
+ * The gate a copied gate descends from: its id in the tree at the root of the copy chain. Two
+ * gates in two trees are the same gate when this agrees, which is how a label placement, one
+ * per gate, reaches every tree the gate is drawn in.
+ */
+export function canonicalGateId(
+  gateId: string,
+  tree: StoredHierarchy,
+  trees: Record<string, StoredHierarchy>,
+): string {
+  let current: StoredHierarchy | undefined = tree;
+  let id = gateId;
+  const seen = new Set<string>();
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    const mapped = current.source_gate_ids?.[id];
+    if (!mapped || !current.source_hierarchy_id) break;
+    id = mapped;
+    current = trees[current.source_hierarchy_id];
+  }
+  return id;
+}
+
 /** A working copy, a file's or a group's, as opposed to the tree itself. */
 export function isCopyRef(h: Pick<HierarchyRef, "owner_sample_id" | "owner_group_id">): boolean {
   return !!h.owner_sample_id || !!h.owner_group_id;

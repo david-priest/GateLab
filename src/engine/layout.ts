@@ -1,6 +1,11 @@
+import { normalizeProportionsSettings, type ProportionsSettings } from "./proportionsSettings";
+
 export const LAYOUT_WORKSPACE_VERSION = 2 as const;
 
 export type LayoutDisplayMode = "scatter" | "pseudocolor" | "contour";
+
+export type LayoutGateLabels = "name-percent" | "percent" | "number" | "name" | "none";
+export const LAYOUT_GATE_LABELS: readonly LayoutGateLabels[] = ["name-percent", "percent", "number", "name", "none"];
 
 /** How a sheet's plots are drawn. The sheet sets it; a plot or strategy may override any part. */
 export interface LayoutPlotStyle {
@@ -16,6 +21,8 @@ export interface LayoutPlotStyle {
   gateLineWidth: number;
   /** Black gates and labels, for print. */
   pubStyle: boolean;
+  /** What a gate's label says. */
+  gateLabels: LayoutGateLabels;
   histLineWidth: number;
   histFill: boolean;
   histFillAlpha: number;
@@ -28,12 +35,13 @@ export interface LayoutPlotStyle {
 export const DEFAULT_LAYOUT_STYLE: Readonly<LayoutPlotStyle> = {
   pointSize: 1.1,
   pointAlpha: 0.4,
-  maxEvents: 20000,
+  maxEvents: 50000,
   contourThreshold: 5,
   contourLevels: 10,
   kdeBandwidth: 0,
   gateLineWidth: 1.5,
   pubStyle: false,
+  gateLabels: "name-percent",
   histLineWidth: 1.8,
   histFill: true,
   histFillAlpha: 0.22,
@@ -43,7 +51,7 @@ export const DEFAULT_LAYOUT_STYLE: Readonly<LayoutPlotStyle> = {
   fontGate: 9,
 };
 
-export type LayoutStyleNumber = Exclude<keyof LayoutPlotStyle, "pubStyle" | "histFill">;
+export type LayoutStyleNumber = Exclude<keyof LayoutPlotStyle, "pubStyle" | "histFill" | "gateLabels">;
 
 /** The range each numeric style field is kept within, on input and when a workspace is read. */
 export const LAYOUT_STYLE_RANGES: Readonly<Record<LayoutStyleNumber, readonly [number, number]>> = {
@@ -76,6 +84,7 @@ export function normalizeLayoutStyle(value: unknown): Partial<LayoutPlotStyle> {
   }
   if (typeof candidate.pubStyle === "boolean") out.pubStyle = candidate.pubStyle;
   if (typeof candidate.histFill === "boolean") out.histFill = candidate.histFill;
+  if (LAYOUT_GATE_LABELS.includes(candidate.gateLabels as LayoutGateLabels)) out.gateLabels = candidate.gateLabels as LayoutGateLabels;
   return out;
 }
 
@@ -87,7 +96,7 @@ export function effectiveLayoutStyle(
   return {
     ...DEFAULT_LAYOUT_STYLE,
     ...(sheet?.style ?? {}),
-    ...(recipe && recipe.kind !== "text" ? recipe.style ?? {} : {}),
+    ...(recipe && isPlotLikeRecipe(recipe) ? recipe.style ?? {} : {}),
   };
 }
 
@@ -101,6 +110,11 @@ export interface LayoutItemFrame {
   showFrame?: boolean;
   /** A locked item is not selected on the page, so it cannot be moved or resized by accident. */
   locked?: boolean;
+  /**
+   * The item is drawn at width/zoom × height/zoom and scaled by zoom, so a plot shrinks or grows
+   * as a whole, fonts and all, instead of being redrawn smaller. Fit content to page sets it.
+   */
+  zoom?: number;
 }
 
 export interface LayoutPlotRecipe {
@@ -110,7 +124,10 @@ export interface LayoutPlotRecipe {
   xChannel: string;
   yChannel: string | null;
   displayMode: LayoutDisplayMode;
+  /** The plot's own title; empty means the sheet's template. Placeholders are filled. */
   title?: string;
+  /** The plot's name where it came from (an Illustration plot's), what {plot} says. */
+  label?: string;
   /** This item's own settings; anything unset follows the sheet. */
   style?: Partial<LayoutPlotStyle>;
   /** Drawn once per unit when the sheet iterates; sampleId is then the template file. */
@@ -129,13 +146,75 @@ export interface LayoutStrategyRecipe {
   iterated?: boolean;
 }
 
+export type LayoutChartStatistic = "percent_of_parent" | "percent_of_total" | "count" | "median";
+export type LayoutChartType = "bars" | "dots" | "box";
+
+/**
+ * A summary chart: one statistic of one population, per file, grouped by a metadata column,
+ * with a rank test between the groups. It summarises across files, so it never iterates.
+ */
+export interface LayoutChartRecipe {
+  kind: "chart";
+  /** The file the population was chosen on; other files resolve it by provenance. */
+  sampleId: string;
+  populationId: string;
+  statistic: LayoutChartStatistic;
+  /** The channel, for a median. */
+  channel?: string;
+  /** The files drawn: those checked in the Samples pane, or every file. */
+  files: "checked" | "all";
+  /** A metadata column to group by; empty for one group. */
+  groupBy: string;
+  chartType: LayoutChartType;
+  showPoints: boolean;
+  test: boolean;
+  title?: string;
+}
+
+/**
+ * An Illustration figure as one block: the figure's spec and style as they were when it was
+ * added, drawn by the Illustration tab's own panel builder and grid, so it looks on the page as
+ * it does there. It holds its own files and populations, so it never iterates.
+ */
+export interface LayoutFigureRecipe {
+  kind: "figure";
+  /** The Illustration config, `figure` included; "Edit in Illustration" loads it back. */
+  illustration: import("./workspace").IllustrationConfig;
+  /** Which page of the figure's own paging to draw, 0-based. */
+  page: number;
+  title?: string;
+}
+
 export interface LayoutTextRecipe {
   kind: "text";
   text: string;
   fontSize: number;
+  /**
+   * The id of a plot on the sheet whose file and population fill this text's placeholders
+   * ({file}, {sample}, {population}, {meta:column}, {popmeta:field}, {x}, {y}, {plot}, {count}),
+   * so a heading reads what the plot beneath it shows. Unset: a plain text block.
+   */
+  readsFrom?: string;
+  bold?: boolean;
 }
 
-export type LayoutRecipe = LayoutPlotRecipe | LayoutStrategyRecipe | LayoutTextRecipe;
+/**
+ * The Plotting tab's chart as one block: its settings as they were when it was added, drawn by
+ * the tab's own model and chart, so it looks on the page as it does there. It holds its own
+ * files and populations, so it never iterates.
+ */
+export interface LayoutProportionsRecipe {
+  kind: "proportions";
+  settings: ProportionsSettings;
+  title?: string;
+}
+
+export type LayoutRecipe = LayoutPlotRecipe | LayoutStrategyRecipe | LayoutChartRecipe | LayoutFigureRecipe | LayoutProportionsRecipe | LayoutTextRecipe;
+
+/** A plot or strategy block: the kinds bound to a file and a population, styled by the sheet, able to follow an iteration. */
+export function isPlotLikeRecipe(recipe: LayoutRecipe): recipe is LayoutPlotRecipe | LayoutStrategyRecipe {
+  return recipe.kind !== "text" && recipe.kind !== "chart" && recipe.kind !== "figure" && recipe.kind !== "proportions";
+}
 
 export interface LayoutItem extends LayoutItemFrame {
   recipe: LayoutRecipe;
@@ -250,12 +329,15 @@ export function defaultLayoutPage(): LayoutPage {
 
 /** How a sheet iterates over files: which files, and how their pages or tiles are laid out. */
 export interface LayoutIteration {
-  mode: "off" | "files";
+  /** Once; once per file of `source`; or once per population of the iterated items' file. */
+  mode: "off" | "files" | "populations";
   source:
     | { kind: "checked" }
     | { kind: "all" }
     | { kind: "group"; groupId: string }
     | { kind: "metadata"; column: string; value: string };
+  /** For "populations": every population of the tree but the root, or those under one. */
+  populations?: { kind: "all" } | { kind: "branch"; populationId: string };
   arrangement:
     | { kind: "page-per-unit" }
     | { kind: "tiles"; rows: number; columns: number; order: "row-major" | "column-major"; gap: number };
@@ -272,7 +354,13 @@ const MAX_TILE_GRID = 12;
 export function normalizeIteration(value: unknown): LayoutIteration {
   if (!value || typeof value !== "object" || Array.isArray(value)) return { ...DEFAULT_ITERATION };
   const c = value as Record<string, unknown>;
-  const mode: LayoutIteration["mode"] = c.mode === "files" ? "files" : "off";
+  const mode: LayoutIteration["mode"] = c.mode === "files" ? "files" : c.mode === "populations" ? "populations" : "off";
+  const p = (c.populations && typeof c.populations === "object" ? c.populations : null) as Record<string, unknown> | null;
+  const populations: LayoutIteration["populations"] | undefined = !p
+    ? undefined
+    : p.kind === "branch" && typeof p.populationId === "string"
+      ? { kind: "branch", populationId: p.populationId }
+      : { kind: "all" };
   const s = (c.source && typeof c.source === "object" ? c.source : {}) as Record<string, unknown>;
   let source: LayoutIteration["source"] = { kind: "checked" };
   if (s.kind === "all") source = { kind: "all" };
@@ -290,7 +378,7 @@ export function normalizeIteration(value: unknown): LayoutIteration {
         gap: typeof a.gap === "number" && Number.isFinite(a.gap) ? Math.max(0, Math.round(a.gap)) : 24,
       }
     : { kind: "page-per-unit" };
-  return { mode, source, arrangement };
+  return { mode, source, ...(populations ? { populations } : {}), arrangement };
 }
 
 export interface LayoutSheet {
@@ -301,6 +389,11 @@ export interface LayoutSheet {
   iteration?: LayoutIteration;
   /** How the sheet's plots are drawn; anything unset is the default. */
   style?: Partial<LayoutPlotStyle>;
+  /**
+   * What the sheet's plots are titled, with placeholders (see layoutTitle.ts); a plot's own
+   * title takes precedence. Absent or empty: what differs across the page.
+   */
+  titleTemplate?: string;
   /** The sheet in CSS pixels, kept equal to sheetSizePx(page): every page of the grid. */
   width: number;
   height: number;
@@ -314,7 +407,7 @@ export interface LayoutWorkspace {
 }
 
 export function layoutItemMinimum(kind: LayoutRecipe["kind"]) {
-  return kind === "text" ? { width: 24, height: 20 } : { width: 140, height: 140 };
+  return kind === "text" ? { width: 24, height: 20 } : kind === "chart" ? { width: 160, height: 120 } : kind === "figure" || kind === "proportions" ? { width: 200, height: 150 } : { width: 140, height: 140 };
 }
 
 /** Set a sheet's page and the pixel size that follows from it. */
@@ -355,6 +448,45 @@ function normalizeRecipe(value: unknown): LayoutRecipe | null {
       kind: "text",
       text: typeof candidate.text === "string" ? candidate.text : "Text",
       fontSize: finiteAtLeast(candidate.fontSize, 8, 18),
+      ...(candidate.bold === true ? { bold: true } : {}),
+      ...(typeof candidate.readsFrom === "string" && candidate.readsFrom ? { readsFrom: candidate.readsFrom } : {}),
+    };
+  }
+  if (candidate.kind === "figure") {
+    const illustration = candidate.illustration;
+    if (!illustration || typeof illustration !== "object" || Array.isArray(illustration)) return null;
+    const figure = (illustration as { figure?: unknown }).figure;
+    if (!figure || typeof figure !== "object") return null;
+    return {
+      kind: "figure",
+      illustration: illustration as LayoutFigureRecipe["illustration"],
+      page: finiteAtLeast(candidate.page, 0, 0),
+      title: typeof candidate.title === "string" ? candidate.title : undefined,
+    };
+  }
+  if (candidate.kind === "proportions") {
+    if (!candidate.settings || typeof candidate.settings !== "object" || Array.isArray(candidate.settings)) return null;
+    return {
+      kind: "proportions",
+      settings: normalizeProportionsSettings(candidate.settings),
+      title: typeof candidate.title === "string" ? candidate.title : undefined,
+    };
+  }
+  if (candidate.kind === "chart") {
+    const statistic = candidate.statistic;
+    const chartType = candidate.chartType;
+    return {
+      kind: "chart",
+      sampleId: nonBlank(candidate.sampleId, ""),
+      populationId: nonBlank(candidate.populationId, ""),
+      statistic: statistic === "percent_of_total" || statistic === "count" || statistic === "median" ? statistic : "percent_of_parent",
+      ...(typeof candidate.channel === "string" && candidate.channel ? { channel: candidate.channel } : {}),
+      files: candidate.files === "all" ? "all" : "checked",
+      groupBy: typeof candidate.groupBy === "string" ? candidate.groupBy : "",
+      chartType: chartType === "dots" || chartType === "box" ? chartType : "bars",
+      showPoints: candidate.showPoints !== false,
+      test: candidate.test !== false,
+      title: typeof candidate.title === "string" ? candidate.title : undefined,
     };
   }
   if (candidate.kind === "strategy") {
@@ -380,11 +512,24 @@ function normalizeRecipe(value: unknown): LayoutRecipe | null {
         : nonBlank(candidate.yChannel, "") || null,
       displayMode: validDisplayMode(candidate.displayMode),
       title: typeof candidate.title === "string" ? candidate.title : undefined,
+      ...(typeof candidate.label === "string" && candidate.label.trim() ? { label: candidate.label.trim() } : {}),
       ...(candidate.iterated === true ? { iterated: true } : {}),
       ...styleField(candidate.style),
     };
   }
   return null;
+}
+
+/** An item's zoom, 1 when it has none. */
+export function layoutItemZoom(item: Pick<LayoutItemFrame, "zoom">): number {
+  return typeof item.zoom === "number" && Number.isFinite(item.zoom) && item.zoom > 0 ? item.zoom : 1;
+}
+
+/** A zoom field for a record: kept within 0.1 to 4 at three decimals, absent when it is 1. */
+export function zoomField(value: unknown): { zoom?: number } {
+  if (typeof value !== "number" || !Number.isFinite(value)) return {};
+  const zoom = Math.round(Math.min(4, Math.max(0.1, value)) * 1000) / 1000;
+  return Math.abs(zoom - 1) < 0.0005 ? {} : { zoom };
 }
 
 /** A style field for a record, present only when it sets something. */
@@ -406,6 +551,7 @@ function normalizeItem(value: unknown, index: number): LayoutItem | null {
     height: finiteAtLeast(candidate.height, layoutItemMinimum(recipe.kind).height, recipe.kind === "text" ? 32 : recipe.kind === "strategy" ? 300 : 280),
     showFrame: candidate.showFrame === true,
     locked: candidate.locked === true,
+    ...zoomField(candidate.zoom),
     z: finiteAtLeast(candidate.z, 0, index),
     recipe,
   };
@@ -466,12 +612,19 @@ function normalizeSheet(value: unknown, index: number): LayoutSheet | null {
     finiteAtLeast(candidate.height, 1, 800),
   );
   const size = sheetSizePx(page);
+  const iteration = candidate.iteration ? normalizeIteration(candidate.iteration) : null;
+  // A sheet saved with its iteration on and nothing following it drew every plot unchanged on
+  // every page; its plots follow the iteration, as they do when it is switched on now.
+  if (iteration && iteration.mode !== "off" && !items.some((item) => isPlotLikeRecipe(item.recipe) && item.recipe.iterated === true)) {
+    for (const item of items) if (isPlotLikeRecipe(item.recipe)) item.recipe.iterated = true;
+  }
   return {
     id: nonBlank(candidate.id, `layout-sheet-${index + 1}`),
     name: nonBlank(candidate.name, `Layout ${index + 1}`),
     page,
-    ...(candidate.iteration ? { iteration: normalizeIteration(candidate.iteration) } : {}),
+    ...(iteration ? { iteration } : {}),
     ...styleField(candidate.style),
+    ...(typeof candidate.titleTemplate === "string" && candidate.titleTemplate.trim() ? { titleTemplate: candidate.titleTemplate } : {}),
     width: size.width,
     height: size.height,
     items,
@@ -556,10 +709,57 @@ export function nextLayoutItemPosition(
       if (!overlaps(x, y)) return { x, y, width, height, z };
     }
   }
-  const last = sheet.items[sheet.items.length - 1];
-  const x = last ? Math.min(last.x + PLACEMENT_STEP, Math.max(inset, page.width - inset - width)) : inset;
-  const y = last ? Math.min(last.y + PLACEMENT_STEP, Math.max(inset, page.height - inset - height)) : inset;
-  return { x, y, width, height, z };
+  // Nothing on the page holds it: it goes below everything, and the sheet grows to show it,
+  // rather than over whatever was placed last.
+  const bottom = Math.max(inset - gap, ...sheet.items.map((item) => item.y + item.height));
+  return { x: inset, y: bottom + gap, width, height, z };
+}
+
+/** Where a plot sits in a grid of plots added together: row and column from the top left. */
+export interface LayoutGridCell {
+  row: number;
+  column: number;
+}
+
+/**
+ * Frames for plots added together as a grid, one per cell, in the arrangement they had where
+ * they came from. The grid goes below whatever the sheet holds, at the page margin, and the
+ * caller grows the sheet to hold it: a row stays a row however wide the page is. Plots sharing a
+ * cell are stepped so that each can be seen.
+ */
+/** A heading for a row or column of plots put on a sheet: its text, and a template a text block bound to the first plot reads instead, when the heading is what that plot's file or population says. */
+export interface LayoutGridHeading {
+  text: string;
+  template?: string;
+}
+export interface LayoutGridHeadings {
+  columns: LayoutGridHeading[];
+  rows: LayoutGridHeading[];
+}
+
+export function layoutGridFrames(
+  sheet: LayoutSheet,
+  cells: readonly LayoutGridCell[],
+  width = 260,
+  height = 280,
+): Pick<LayoutItemFrame, "x" | "y" | "width" | "height" | "z">[] {
+  const inset = Math.max(24, mmToPx(sheet.page.marginMm));
+  const gap = 12;
+  const top = sheet.items.length ? Math.max(...sheet.items.map((item) => item.y + item.height)) + gap : inset;
+  let z = Math.max(0, ...sheet.items.map((item) => item.z));
+  const seen = new Map<string, number>();
+  return cells.map((cell) => {
+    const key = `${cell.row},${cell.column}`;
+    const k = seen.get(key) ?? 0;
+    seen.set(key, k + 1);
+    return {
+      x: inset + cell.column * (width + gap) + k * PLACEMENT_STEP,
+      y: top + cell.row * (height + gap) + k * PLACEMENT_STEP,
+      width,
+      height,
+      z: ++z,
+    };
+  });
 }
 
 export function cloneLayoutWorkspace(workspace: LayoutWorkspace): LayoutWorkspace {

@@ -146,3 +146,21 @@ describe("browser-local workspace checkpoints", () => {
     expect(kept.has("frequent-299")).toBe(false);
   });
 });
+
+describe("checkpoint labels and ages", () => {
+  it("names every reason and says how long ago a checkpoint was taken", async () => {
+    const { CHECKPOINT_REASON_LABELS, checkpointAge } = await import("./workspaceHistory");
+    expect(CHECKPOINT_REASON_LABELS["after-workspace-open"]).toBe("As opened");
+    expect(CHECKPOINT_REASON_LABELS["before-revert"]).toBe("Before a revert");
+    expect(Object.values(CHECKPOINT_REASON_LABELS).every((label) => label.length > 0)).toBe(true);
+    const now = Date.parse("2026-09-18T12:00:00.000Z");
+    const at = (msAgo: number) => new Date(now - msAgo).toISOString();
+    expect(checkpointAge(at(10_000), now)).toBe("just now");
+    expect(checkpointAge(at(5 * 60_000), now)).toBe("5 min ago");
+    expect(checkpointAge(at(90 * 60_000), now)).toBe("1 h 30 min ago");
+    expect(checkpointAge(at(9 * 3_600_000), now)).toBe("9 h ago");
+    expect(checkpointAge(at(30 * 3_600_000), now)).toBe("yesterday");
+    expect(checkpointAge(at(3 * 86_400_000), now)).toBe("3 days ago");
+    expect(checkpointAge("not a date", now)).toBe("");
+  });
+});

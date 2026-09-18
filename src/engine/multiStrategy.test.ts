@@ -195,7 +195,7 @@ describe("buildMultiStrategyPayload", () => {
     expect(payload.strategy_context_title).toBe("2 populations");
     expect(payload.strategy_context_title_font).toBe(11); // title(10) + 1
     expect(payload.gate_style).toEqual({
-      pub_style: false, line_width: 1.5, gate_edge_mode: "straight-bow",
+      pub_style: false, line_width: 1.5, gate_edge_mode: "straight-bow", label_format: "name-percent",
     });
   });
 });

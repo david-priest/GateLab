@@ -7,16 +7,22 @@ import {
   type FigureSource,
 } from "../engine/figure";
 
-/** Mounted only in Illustration. One file per task, with cancellation on tab exit or data changes. */
+/**
+ * Prepared sources by file, shared by every mount of the hook. The Illustration and Layout tabs
+ * are mounted only while shown, so a cache inside the hook was rebuilt on every switch to either,
+ * regating every file each time; here it outlives the tab, and an entry is dropped when its file
+ * leaves the workspace or its data or tree changes.
+ */
+const preparedSources = new Map<string, { signature: string; source: FigureSource }>();
+
+/** One file per task, with cancellation on tab exit or data changes. */
 export function useFigureSources(
   samples: readonly FigureSample[],
   sampleIds: readonly string[],
   state: CoreState,
   dataRevision: string | number,
 ) {
-  const cache = useRef(
-    new Map<string, { signature: string; source: FigureSource }>(),
-  );
+  const cache = useRef(preparedSources);
   const [result, setResult] = useState<{
     key: string;
     sources: FigureSource[];
@@ -79,9 +85,11 @@ export function useFigureSources(
           error: null,
         });
         if (index < sampleIds.length) timer = setTimeout(next, 0);
-        else
-          for (const id of cache.current.keys())
-            if (!sampleIds.includes(id)) cache.current.delete(id);
+        else {
+          // Files gone from the workspace leave the cache; files the other tab prepared stay.
+          const known = new Set(samples.map((s) => s.id));
+          for (const id of cache.current.keys()) if (!known.has(id)) cache.current.delete(id);
+        }
       } catch (error) {
         setResult({
           key,

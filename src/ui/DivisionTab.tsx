@@ -5,6 +5,10 @@
 // Category in the Proportions tab. Optional biplot: dye vs a marker (e.g. Ki-67), coloured by level.
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { SearchableSelect } from "./SearchableSelect";
+
+/** The Y marker picker's row for no marker; the picker cannot choose an empty value. */
+const NO_MARKER = "__none__";
 import { usePersistedTabState } from "./tabState";
 import type { Derived } from "../store";
 import type { Sample } from "../engine/sample";
@@ -180,9 +184,12 @@ export function DivisionTab({
       <div className="gl-strategy-controls">
         <label className="gl-field-inline">
           {t("Dye channel")}
-          <select value={dyeIdx} onChange={(e) => setDyeIdx(+e.target.value)}>
-            {sample.channels.map((_, i) => <option key={i} value={i}>{sample.channelLabel(i)}</option>)}
-          </select>
+          <SearchableSelect
+            label={t("Dye channel")}
+            value={String(dyeIdx)}
+            options={sample.channels.map((_, i) => ({ value: String(i), label: sample.channelLabel(i) }))}
+            onChange={(value) => setDyeIdx(+value)}
+          />
         </label>
         <label className="gl-field-inline">
           {t("# divisions")}
@@ -204,10 +211,12 @@ export function DivisionTab({
         <span className="gl-ctl-sep" />
         <label className="gl-field-inline">
           {t("Y marker")}
-          <select value={yMarker} onChange={(e) => setYMarker(e.target.value)}>
-            <option value="">{t("(none)")}</option>
-            {sample.channels.map((c, i) => <option key={c.key} value={c.key}>{sample.channelLabel(i)}</option>)}
-          </select>
+          <SearchableSelect
+            label={t("Y marker")}
+            value={yMarker || NO_MARKER}
+            options={[{ value: NO_MARKER, label: t("(none)") }, ...sample.channels.map((c, i) => ({ value: c.key, label: sample.channelLabel(i) }))]}
+            onChange={(value) => setYMarker(value === NO_MARKER ? "" : value)}
+          />
         </label>
         <label className="gl-field-inline">{t("Opacity")}<input type="range" min={0.02} max={1} step={0.05} value={pointAlpha} onChange={(e) => setPointAlpha(+e.target.value)} /></label>
         <span className="gl-ctl-sep" />

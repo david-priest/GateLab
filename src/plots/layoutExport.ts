@@ -8,6 +8,7 @@ import { cellDataUrlAtDpi, rasterizeSvg } from "./gridExport";
 import type { LayoutSheet } from "../engine/layout";
 import { pageOrigins, pageSizeMm, pageSizePx } from "../engine/layout";
 import { sanitizeFilePart } from "../engine/fcsExport";
+import { composeProportionsChartSvg } from "../ui/ProportionsTab";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -69,7 +70,19 @@ function addCell(root: SVGSVGElement, cell: HTMLElement, origin: DOMRect, zoom: 
     g.appendChild(img);
   }
   const svg = cell.querySelector("svg");
-  if (svg) g.appendChild(svg.cloneNode(true));
+  if (svg) {
+    const clone = svg.cloneNode(true) as SVGSVGElement;
+    // A figure block draws its grid under a CSS zoom to fit its frame; the cloned <svg> keeps its
+    // own size, so it is scaled by the ratio of the cell as placed to the cell as laid out.
+    const natural = svg.clientWidth || Number(svg.getAttribute("width")) || rect.width;
+    const scale = natural > 0 ? rect.width / natural : 1;
+    if (Math.abs(scale - 1) > 1e-3) {
+      const scaled = document.createElementNS(SVG_NS, "g");
+      scaled.setAttribute("transform", `scale(${scale})`);
+      scaled.appendChild(clone);
+      g.appendChild(scaled);
+    } else g.appendChild(clone);
+  }
   root.appendChild(g);
 }
 
@@ -119,9 +132,12 @@ export function composeLayoutSVG(
       const content = text instanceof HTMLTextAreaElement ? text.value : (text.textContent ?? "");
       const style = getComputedStyle(text);
       const rect = pageRect(text, origin, options.zoom, offset);
-      const fontSize = parseFloat(style.fontSize) || 14;
-      const padLeft = parseFloat(style.paddingLeft) || 0;
-      const padTop = parseFloat(style.paddingTop) || 0;
+      // A zoomed item (data-zoom) draws its text at the size written and scales it as a whole;
+      // computed lengths are as written, so the item's zoom is applied here.
+      const itemZoom = Number(item.dataset.zoom) || 1;
+      const fontSize = (parseFloat(style.fontSize) || 14) * itemZoom;
+      const padLeft = (parseFloat(style.paddingLeft) || 0) * itemZoom;
+      const padTop = (parseFloat(style.paddingTop) || 0) * itemZoom;
       textLines(root, content.split("\n"), rect.left + padLeft, rect.top + padTop, fontSize, style);
       continue;
     }
@@ -131,11 +147,30 @@ export function composeLayoutSVG(
       addCell(root, host, origin, options.zoom, options.dpi, offset);
       continue;
     }
-    // A strategy block: a grid of cells with an HTML title.
-    host.querySelectorAll<HTMLElement>(".strategy-context-title").forEach((title) => {
+    // A Plotting chart block is the tab's card: its panels and legend composed as one SVG at the
+    // card's own scale, placed and scaled to where the card sits on the page.
+    const chart = host.querySelector<HTMLElement>(".gl-prop-chart");
+    if (chart) {
+      const composed = composeProportionsChartSvg(chart);
+      if (composed) {
+        const rect = pageRect(chart, origin, options.zoom, offset);
+        const scale = composed.width > 0 ? rect.width / composed.width : 1;
+        const g = document.createElementNS(SVG_NS, "g");
+        g.setAttribute("transform", `translate(${rect.left},${rect.top}) scale(${scale})`);
+        g.appendChild(composed.root);
+        root.appendChild(g);
+      }
+      continue;
+    }
+    // A strategy block is a grid of cells with an HTML title; a figure block is the Illustration
+    // grid with its HTML row and column headings, drawn under a zoom that the placed size shows.
+    host.querySelectorAll<HTMLElement>(".strategy-context-title, .illustration-row-header").forEach((title) => {
+      const text = (title.textContent ?? "").trim();
+      if (!text) return;
       const style = getComputedStyle(title);
       const rect = pageRect(title, origin, options.zoom, offset);
-      textLines(root, [title.textContent ?? ""], rect.left, rect.top, parseFloat(style.fontSize) || 12, style);
+      const zoomed = title.offsetWidth > 0 ? rect.width / title.offsetWidth : 1;
+      textLines(root, [text], rect.left, rect.top, (parseFloat(style.fontSize) || 12) * zoomed, style);
     });
     host.querySelectorAll<HTMLElement>(".mini-plot-cell").forEach((cell) => addCell(root, cell, origin, options.zoom, options.dpi, offset));
   }

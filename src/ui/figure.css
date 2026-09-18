@@ -150,7 +150,14 @@
   padding: 10px 12px 14px;
   overflow: auto;
   flex: 1;
+  display: flex;
+  flex-direction: column;
 }
+.gl-figure-fields > section { flex: 0 0 auto; }
+/* The Data section fills the inspector, and its population list takes whatever the files, the
+   controls and the notes leave, rather than stopping at a fixed height above empty space. */
+.gl-figure-fields > #figure-section-data { flex: 1 0 auto; display: flex; flex-direction: column; }
+#figure-section-data .gl-figure-list-populations { flex: 1 1 0; min-height: 160px; max-height: none; }
 .gl-figure-fields section[hidden] {
   display: none;
 }
@@ -336,11 +343,14 @@
   width: 70px;
 }
 .gl-figure-viewport {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow: auto;
   padding: 14px;
 }
+.gl-figure-viewport.is-marquee { user-select: none; cursor: crosshair; }
+.gl-figure-marquee { position: absolute; border: 1px solid #2f80ed; background: #2f80ed1f; pointer-events: none; z-index: 2; }
 .gl-figure-paper {
   width: max-content;
   background: white;
@@ -374,6 +384,8 @@
   vertical-align: top;
   padding-top: 20px;
 }
+/* A chosen panel: the selection is what "Add selected panels to the Layout tab" takes. */
+.gl-figure-grid td.is-selected { outline: 2px solid #2f80ed; outline-offset: -2px; border-radius: 3px; }
 .gl-figure-grid td {
   padding: 0;
   vertical-align: top;
@@ -469,3 +481,21 @@
 .gl-figure-workspace {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
+
+/* The chosen panels' count and actions in the footer, beside the page status. */
+.gl-figure-selection { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; font-size: 12px; color: #334155; }
+.gl-figure-selection button { padding: 2px 7px; font-size: 11px; }
+
+/* The Arrange tab's order lists: rows chosen like files in a finder and dragged to their place. */
+.gl-order-list { margin: 4px 0 10px; }
+.gl-order-list-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-bottom: 4px; }
+.gl-order-list-actions button { padding: 2px 7px; font-size: 11px; }
+.gl-order-list-hint { font-size: 11px; color: #64748b; }
+.gl-order-list-rows { border: 1px solid #e4e9f0; border-radius: 5px; max-height: 320px; overflow: auto; }
+.gl-order-row { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px; cursor: grab; user-select: none; -webkit-user-select: none; border-top: 1px solid #eef2f6; }
+.gl-order-row:first-child { border-top: 0; }
+.gl-order-row.is-chosen { background: #e6f0fc; }
+.gl-order-row.drop-before { box-shadow: inset 0 2px 0 #2f80ed; }
+.gl-order-row.drop-after { box-shadow: inset 0 -2px 0 #2f80ed; }
+.gl-order-row-grip { color: #b7c1cd; font-size: 10px; letter-spacing: -2px; }
+.gl-order-row-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

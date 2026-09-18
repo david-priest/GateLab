@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createLayoutSheet, layoutItemMinimum, pageForPreset, type LayoutItem } from "./layout";
+import { createLayoutSheet, pageForPreset, type LayoutItem } from "./layout";
 import { alignItems, contentBounds, distributeItems, fitContentToPage, fitPageToContent, pageContentBox } from "./layoutArrange";
 
 function item(id: string, x: number, y: number, width = 100, height = 80): LayoutItem {
@@ -62,12 +62,29 @@ describe("fitting", () => {
   it("fits the content to the page by scaling the group into the content box", () => {
     const sheet = sheetWith(item("a", 0, 0, 100, 100), item("b", 100, 100, 100, 100));
     sheet.page = pageForPreset("journal-1", "portrait", sheet.page); // 321 × 416, no margin
-    fitContentToPage(sheet, (i) => layoutItemMinimum(i.recipe.kind));
+    fitContentToPage(sheet);
     // content 200 × 200 scales by 321/200 = 1.605 and sits centred vertically
     expect(frames(sheet)).toEqual([
       { id: "a", x: 0, y: 48, width: 161, height: 161 },
       { id: "b", x: 161, y: 208, width: 161, height: 161 },
     ]);
+    // Growing draws larger rather than zooming a raster up: no zoom is set.
+    expect(sheet.items.map((i) => i.zoom)).toEqual([undefined, undefined]);
+  });
+
+  it("fits shrinking content by zooming the items down rather than redrawing them smaller", () => {
+    const sheet = sheetWith(item("a", 0, 0, 800, 800), item("b", 800, 0, 800, 800));
+    sheet.page = pageForPreset("journal-1", "portrait", sheet.page); // 321 × 416
+    sheet.items[0].zoom = 2;
+    fitContentToPage(sheet);
+    // 1600 × 800 scales by 321/1600 ≈ 0.2006; sizes go below the drawn minimum because the
+    // drawing is at width/zoom, and an existing zoom compounds.
+    expect(frames(sheet).map((f) => f.width)).toEqual([161, 161]);
+    expect(sheet.items.map((i) => i.zoom)).toEqual([0.401, 0.201]);
+    // Fitting to a larger page brings the zoom back towards 1 before anything is drawn larger.
+    sheet.page = { ...sheet.page, preset: "custom", widthMm: 300, heightMm: 300 };
+    fitContentToPage(sheet);
+    expect(sheet.items.map((i) => i.zoom)).toEqual([undefined, 0.708]);
   });
 
   it("reports the bounds of nothing as null", () => {

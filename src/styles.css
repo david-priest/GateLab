@@ -1959,6 +1959,8 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-axis-pickers select { flex: 0 1 auto; min-width: 7.5rem; }
 /* Everything else holds its natural width and wraps instead. */
 .gl-controls > label { flex: 0 0 auto; }
+.gl-history-tools { display: flex; gap: 2px; flex: 0 0 auto; margin-left: 2px; padding-left: 6px; border-left: 1px solid var(--line); }
+.gl-history-tools .gl-icon-chip { font-size: 15px; line-height: 1; }
 .gl-draw-tools {
   display: flex;
   gap: 4px;
@@ -2212,8 +2214,8 @@ input[type="number"]::-webkit-outer-spin-button {
   font-size: calc(var(--gl-gating-font-gate) - 1px) !important;
 }
 
-.gl-gating-fonts { gap: 12px; flex-wrap: wrap; }
-.gl-gating-fonts .gl-field-inline input[type="number"] {
+.gl-display-popover-fonts { flex-basis: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 2px; padding-top: 8px; border-top: 1px solid var(--line); }
+.gl-display-popover-fonts .gl-field-inline input[type="number"] {
   width: 48px;
   padding: 2px 4px;
   font-size: 11px;
@@ -2267,6 +2269,24 @@ input[type="number"]::-webkit-outer-spin-button {
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
+/* The Gates heading is a disclosure: the list folds away and the population tree takes the room. */
+.gl-side-disclosure {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.gl-side-disclosure-mark {
+  color: var(--muted);
+  font-size: 10px;
+  width: 10px;
+}
+.gl-side-collapsed { margin-bottom: 2px; }
 .gl-tools { display: flex; gap: 3px; }
 .gl-tool {
   background: var(--bg);
@@ -2342,14 +2362,17 @@ input[type="number"]::-webkit-outer-spin-button {
 .gate-list-panel { min-height: 120px; max-height: 220px; }
 .population-tree-panel { min-height: 200px; flex: 1; }
 .population-tree-hierarchy {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
-  padding: 3px 5px 2px; font-size: 11px; color: #4a5361;
+  display: flex; flex-direction: column; align-items: stretch; gap: 4px;
+  padding: 4px 5px 2px; font-size: 11px; color: #4a5361;
 }
+.population-tree-hierarchy-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.population-tree-hierarchy-spacer { flex: 1 1 auto; }
+.population-tree-legacy-note { color: #7b8491; font-size: 10px; }
 .population-tree-hierarchy > select {
   flex: 1 1 auto; min-width: 0; max-width: 260px; font-size: 11px; padding: 1px 2px;
 }
 .population-tree-hierarchy-count { color: #7b8491; font-size: 10px; white-space: nowrap; }
-.population-tree-hierarchy > button { flex: 0 0 auto; white-space: nowrap; }
+.population-tree-hierarchy-row > button { flex: 0 0 auto; white-space: nowrap; }
 /* The hierarchy badge: a coloured disc with a thin white ring inset from its edge and the menu
    number at its centre; beside the menu the name follows in the same colour. */
 /* The group a file is in: a pill in the group's colour, before the name. */
@@ -2365,7 +2388,7 @@ input[type="number"]::-webkit-outer-spin-button {
   background: #d9822b; color: #fff; font-size: 9px; font-weight: 700; line-height: 1; vertical-align: -2px;
 }
 .population-tree-edit-target { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; }
-.population-tree-edit-target-label { color: #7b8491; font-size: 10px; margin-right: 2px; white-space: nowrap; }
+.population-tree-edit-target-label { color: #7b8491; font-size: 11px; margin-right: 2px; white-space: nowrap; }
 .population-tree-edit-target .gl-mini-btn[aria-pressed="true"] { background: #2f6fe4; color: #fff; border-color: #2f6fe4; }
 .population-tree-per-file {
   display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;
@@ -2464,6 +2487,13 @@ input[type="number"]::-webkit-outer-spin-button {
   border: 1px solid #2f80ed; border-radius: 3px; background: #fff; color: #222;
   font: inherit; font-weight: 500;
 }
+/* Aligned gates: every row shares one name column, sized to the longest name in view, so the
+   badges start in one line. A name longer than half the pane wraps rather than pushing them. */
+.population-tree-rows.is-aligned {
+  display: grid; grid-template-columns: 18px fit-content(55%) minmax(0, 1fr) auto auto; column-gap: 6px;
+}
+.population-tree-rows.is-aligned .pop-row { display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; }
+.population-tree-rows.is-aligned .pop-row-name-col { min-width: 0; max-width: none; }
 /* Pills fill the middle and wrap as whole badges when the pane is narrow. */
 .pop-row-gates-col { display: flex; align-items: center; flex: 1 1 auto; min-width: 0; overflow: visible; }
 .pop-row-gates {
@@ -2589,6 +2619,17 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-modal-note { color: var(--muted); font-size: 11px; margin: 4px 0 12px; }
 .gl-modal-warning { color: #7a3e00; background: #fff4df; border: 1px solid #e9bd72; border-radius: 4px; font-size: 12px; line-height: 1.4; margin: 4px 0 12px; padding: 8px 10px; }
 .gl-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.gl-modal-preview { border: 1px solid var(--line); border-radius: 4px; background: var(--bg); font-size: 12px; margin: 0 0 12px; max-height: 220px; overflow-y: auto; padding: 6px 10px; }
+.gl-modal-preview-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.gl-modal-preview-list small { color: var(--muted); }
+.gl-modal-history { width: min(540px, calc(100vw - 32px)); }
+.gl-modal-history-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); padding: 4px; margin-bottom: 12px; }
+.gl-modal-history-list label { display: grid; grid-template-columns: auto 96px 1fr; gap: 8px; align-items: center; padding: 5px 6px; border-radius: 3px; font-size: 12px; cursor: pointer; }
+.gl-modal-history-list label:hover { background: rgba(47, 128, 237, 0.08); }
+.gl-modal-history-list label.is-chosen { background: rgba(47, 128, 237, 0.14); }
+.gl-modal-history-when { color: var(--muted); font-variant-numeric: tabular-nums; }
+.gl-modal-history-what { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.gl-modal-history-what small { color: var(--muted); }
 .gl-sce-coldata-modal { width: min(620px, calc(100vw - 32px)); }
 .gl-sce-coldata-toolbar {
   display: flex;
@@ -2910,6 +2951,13 @@ input[type="number"]::-webkit-outer-spin-button {
   cursor: pointer;
 }
 .gl-searchable-select-empty { margin: 4px 2px; font-size: 12px; color: var(--muted); }
+/* The picker in place of a channel select: full width in a block field, the select's size in an
+   inline field, the inspector's cap in the Layout inspector, the small pair fields in Compensation. */
+.gl-searchable-select-field, .gl-searchable-select-field .gl-searchable-select-trigger { width: 100%; max-width: none; }
+.gl-field-inline .gl-searchable-select-trigger { padding: 2px 5px; font-size: 12px; border-radius: 4px; }
+.gl-layout-inspector .gl-searchable-select-trigger { max-width: 180px; }
+.gl-comp-manual-followup .gl-searchable-select, .gl-comp-manual-followup .gl-searchable-select-trigger { width: 100%; min-width: 0; max-width: none; }
+.gl-comp-manual-followup .gl-searchable-select-trigger { height: 25px; font-size: 9px; }
 /* The key for "Colour by -> Channel". Sits where the categorical legend sits, under the plot,
    so it never covers data; a marker gets the ramp itself rather than 255 swatches. */
 .gl-marker-colour-bar {
@@ -3081,7 +3129,7 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-layout-title-field input { width: 150px; }
 .gl-layout-canvas-scroll { flex: 1 1 auto; min-height: 0; padding: 18px; overflow: auto; }
 .gl-layout-canvas {
-  position: relative; min-width: 720px; min-height: 560px; overflow: hidden;
+  position: relative; min-width: 720px; min-height: 560px; overflow: visible;
   border: 1px solid #cbd5e1; border-radius: 3px; background-color: #fff;
   background-image:
     linear-gradient(#eef2f7 1px, transparent 1px),
@@ -3127,6 +3175,11 @@ input[type="number"]::-webkit-outer-spin-button {
   color: #64748b; font-size: 11px;
 }
 .gl-layout-plot-host.is-missing { place-items: center; padding: 16px; text-align: center; }
+.gl-layout-item-body { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; min-height: 0; }
+.gl-title-builder { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); }
+.gl-title-builder-chosen, .gl-title-builder-fields { display: flex; flex-wrap: wrap; gap: 4px; min-height: 22px; align-items: center; }
+.gl-title-builder-fields { padding-top: 4px; border-top: 1px dashed var(--line); }
+.gl-title-builder-preview { font-variant-numeric: tabular-nums; }
 .gl-layout-text-surface {
   flex: 1 1 auto; overflow: hidden; padding: 14px;
   color: #1e293b; line-height: 1.3; white-space: pre-wrap;
@@ -3141,6 +3194,7 @@ input[type="number"]::-webkit-outer-spin-button {
 
 .gl-layout-item.is-selected .gl-layout-plot-host { cursor: move; }
 .gl-layout-item.is-locked { outline: 1px dashed #cbd5e1; }
+.gl-layout-item.gl-layout-ghost { opacity: 0.45; pointer-events: none; }
 .gl-layout-page { position: absolute; border: 1px dashed #94a3b8; pointer-events: none; box-sizing: border-box; }
 .gl-layout-tab.is-preview .gl-layout-page { border-color: transparent; }
 .gl-layout-arrange { flex-wrap: wrap; }
@@ -3176,7 +3230,8 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-layout-text-surface { display: block; width: 100%; height: 100%; padding: 2px; margin: 0; border: 0; outline: none; resize: none; background: transparent; font-family: inherit; box-sizing: border-box; }
 .gl-layout-item .gl-layout-resize { opacity: 0; }
 .gl-layout-item:hover .gl-layout-resize, .gl-layout-item.is-selected .gl-layout-resize { opacity: 1; }
-.gl-layout-tab.is-preview .gl-layout-canvas { background-image: none; }
+/* Editing, an item dragged past the page's edge overhangs it, still in reach; Preview clips to the page, as the export does. */
+.gl-layout-tab.is-preview .gl-layout-canvas { background-image: none; overflow: hidden; }
 .gl-layout-tab.is-preview .gl-layout-item { pointer-events: none; border-color: transparent; box-shadow: none; }
 .gl-layout-tab.is-preview .gl-layout-item.has-frame { border-color: #94a3b8; }
 .gl-layout-tab.is-preview .gl-layout-item-head, .gl-layout-tab.is-preview .gl-layout-resize { display: none; }
@@ -3429,11 +3484,11 @@ input[type="number"]::-webkit-outer-spin-button {
 .gate-list-panel { flex: 0 0 200px; height: 200px; min-height: 200px; max-height: 200px; }
 .gate-card-info { min-width: 15ch; text-align: right; font-variant-numeric: tabular-nums; }
 .gate-card-actions { display: inline-flex; justify-content: flex-end; gap: 4px; flex: 0 0 176px; width: 176px; margin-left: 6px; }
-.population-tree-hierarchy-count { display: inline-block; width: 24ch; min-width: 24ch; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.population-tree-hierarchy-count { display: inline-block; flex: 0 1 auto; min-width: 0; max-width: 40ch; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .population-tree-edit-group-slot { display: inline-flex; min-width: 96px; }
 .population-tree-edit-group-slot[hidden] { display: none; }
 .population-tree-edit-file { max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.population-tree-promote-slot { display: inline-flex; width: 112px; min-width: 112px; min-height: 21px; }
+.population-tree-promote-slot { display: inline-flex; min-height: 21px; }
 .hierarchy-action-status { min-height: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pop-row-count { min-width: 7ch; text-align: right; font-variant-numeric: tabular-nums; }
 .pop-row-pct { min-width: 16ch; font-variant-numeric: tabular-nums; }
@@ -3486,5 +3541,55 @@ input[type="number"]::-webkit-outer-spin-button {
   cursor: pointer;
   font-weight: 600;
   margin-bottom: 4px;
+}
+
+/* Layout tab: a summary chart fills its frame like a plot. */
+.gl-layout-chart-host {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Layout tab: an Illustration figure block, its grid zoomed to fit the frame. */
+.gl-layout-figure-host {
+  overflow: hidden;
+  background: #ffffff;
+}
+.gl-layout-figure-host.is-missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  font-size: 12px;
+  padding: 8px;
+}
+.gl-layout-figure-zoom {
+  transform-origin: top left;
+}
+
+/* Layout tab: a Plotting chart block, the tab's card zoomed to fit the frame. */
+.gl-layout-proportions-host {
+  overflow: hidden;
+  background: #ffffff;
+}
+.gl-layout-proportions-host.is-missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  font-size: 12px;
+  padding: 8px;
+}
+.gl-layout-proportions-host .gl-prop-chart {
+  border: none;
+  border-radius: 0;
+}
+
+/* A menu at the pointer, opened by a right-click; the header menus' look, fixed on screen. */
+.gl-menu-popover.gl-context-menu {
+  position: fixed;
+  top: auto;
+  left: auto;
+  min-width: 210px;
 }
 

@@ -61,7 +61,8 @@ export function isFigureSpec(v: unknown): v is FigureSpec {
     dimensions.some(
       (d) =>
         !["samples", "populations", "plots"].includes(d) &&
-        !d.startsWith("metadata:"),
+        !d.startsWith("metadata:") &&
+        !d.startsWith("popmeta:"),
     )
   )
     return false;

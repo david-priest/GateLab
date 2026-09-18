@@ -150,6 +150,37 @@ describe("the session ends exactly once, and stops listening when it does", () =
 });
 
 describe("a drag started with Shift already held", () => {
+  it("stretches both axes from a press in the margin beyond the plot", () => {
+    // Right of the plot (x past the rect), moving right: the x range magnifies; y is untouched.
+    const ranges: { xr: Range; yr: Range }[] = [];
+    let live = { xr: XR, yr: YR };
+    const dispose = startPanSession(
+      { clientX: RECT.left + RECT.width + 20, clientY: 250, shiftKey: true, altKey: false },
+      RECT, XR, YR,
+      { liveRanges: () => live, onRanges: (xr, yr) => { live = { xr, yr }; ranges.push({ xr, yr }); }, onEnd: () => {} },
+      window,
+    );
+    window.dispatchEvent(new MouseEvent("mousemove", { clientX: RECT.left + RECT.width + 120, clientY: 250, shiftKey: true, buttons: 1 }));
+    expect(ranges.at(-1)!.xr[1]).toBeLessThan(XR[1]);
+    expect(ranges.at(-1)!.xr[1]).toBeGreaterThan(XR[0]);
+    expect(ranges.at(-1)!.yr).toEqual(YR);
+    dispose();
+    // Above the plot, moving up: the y range magnifies; x is untouched.
+    ranges.length = 0;
+    live = { xr: XR, yr: YR };
+    const dispose2 = startPanSession(
+      { clientX: 300, clientY: RECT.top - 20, shiftKey: true, altKey: false },
+      RECT, XR, YR,
+      { liveRanges: () => live, onRanges: (xr, yr) => { live = { xr, yr }; ranges.push({ xr, yr }); }, onEnd: () => {} },
+      window,
+    );
+    window.dispatchEvent(new MouseEvent("mousemove", { clientX: 300, clientY: RECT.top - 120, shiftKey: true, buttons: 1 }));
+    expect(ranges.at(-1)!.yr[1]).toBeLessThan(YR[1]);
+    expect(ranges.at(-1)!.yr[1]).toBeGreaterThan(YR[0]);
+    expect(ranges.at(-1)!.xr).toEqual(XR);
+    dispose2();
+  });
+
   it("stretches from the first move", () => {
     h = begin({ shiftKey: true });
     move(340, 280, { shiftKey: true });

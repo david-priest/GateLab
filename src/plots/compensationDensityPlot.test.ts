@@ -37,4 +37,23 @@ describe("compensation density plot frame", () => {
     expect(config.font_sizes.tick).toBeGreaterThanOrEqual(9);
     expect(config.font_sizes.axis_label).toBeGreaterThanOrEqual(10);
   });
+
+  it("scales the point radius by the point size factor, from the size the panel's width gives", () => {
+    const options = {
+      title: "Compensated",
+      panel: { x: [0, 1], y: [0, 1], zeroPile: { source: 0, receiver: 0, corner: 0 } },
+      preview: { eventCount: 2, xRange: [0, 1] as [number, number], yRange: [0, 1] as [number, number], xTicks: null, yTicks: null },
+      sourceLabel: "149Sm_BLIMP1",
+      receiverLabel: "151Eu_IgD",
+      size: 220,
+      densitySmoothingRadius: 3,
+      densityColorPower: 1.6,
+      pointAlpha: 0.85,
+    };
+    renderCompensationDensityBiplotSurface(document.createElement("div"), options);
+    renderCompensationDensityBiplotSurface(document.createElement("div"), { ...options, pointSize: 2 });
+    const [one, two] = renderMiniPlot.mock.calls.map((call) => call[1].point_size as number);
+    expect(one).toBeCloseTo(1.15, 5);
+    expect(two).toBeCloseTo(2.3, 5);
+  });
 });

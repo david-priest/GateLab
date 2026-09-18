@@ -413,6 +413,8 @@ export interface MultiStrategyPayloadOptions {
   pubStyle: boolean; // black gates, no label background
   gateLineWidth: number;
   gateEdgeMode?: GateEdgeMode;
+  /** What a gate's label says; the renderer reads it as gate_style.label_format. */
+  gateLabelFormat?: string;
   fontSizes: StrategyFontSizes;
   contextTitle?: string;
 }
@@ -440,6 +442,7 @@ export function buildMultiStrategyPayload(
       pub_style: opts.pubStyle,
       line_width: opts.gateLineWidth,
       gate_edge_mode: opts.gateEdgeMode ?? "straight-bow",
+      label_format: opts.gateLabelFormat ?? "name-percent",
     },
   };
 }

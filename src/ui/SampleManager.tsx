@@ -28,6 +28,8 @@ export interface SampleListItem {
 /** What the Groups menu asks the app to do; "new", "assign" and "remove" act on the selected files. */
 export type GroupAction =
   | { kind: "new" }
+  /** One group per value of a metadata column. */
+  | { kind: "fromMetadata" }
   | { kind: "assign"; groupId: string }
   | { kind: "remove" }
   | { kind: "rename"; groupId: string }
@@ -284,24 +286,35 @@ export function SampleNavigator({
                   disabled: includedCount === 0,
                   onClick: () => onGroupAction({ kind: "new" }),
                 },
-                ...(groups ?? []).map((group) => ({
-                  label: t("Add the {count} selected to {name}", { count: includedCount, name: group.name }),
-                  className: "gl-sample-group-assign",
-                  disabled: includedCount === 0,
-                  onClick: () => onGroupAction({ kind: "assign", groupId: group.id }),
-                })),
+                {
+                  label: t("Groups from a metadata column…"),
+                  className: "gl-sample-group-from-metadata",
+                  title: t("One group per value of a column, each file in the group of its value; a group already named as a value takes the files"),
+                  disabled: !(facetColumnNames ?? []).length,
+                  onClick: () => onGroupAction({ kind: "fromMetadata" }),
+                },
                 ...((groups ?? []).length
-                  ? [{
-                      label: t("Remove the {count} selected from their group", { count: includedCount }),
-                      className: "gl-sample-group-remove",
-                      disabled: includedCount === 0,
-                      onClick: () => onGroupAction({ kind: "remove" }),
-                    }]
+                  ? [
+                      "separator" as const,
+                      ...(groups ?? []).map((group) => ({
+                        label: t("Add the {count} selected to {name}", { count: includedCount, name: group.name }),
+                        className: "gl-sample-group-assign",
+                        disabled: includedCount === 0,
+                        onClick: () => onGroupAction({ kind: "assign", groupId: group.id }),
+                      })),
+                      {
+                        label: t("Remove the {count} selected from their group", { count: includedCount }),
+                        className: "gl-sample-group-remove",
+                        disabled: includedCount === 0,
+                        onClick: () => onGroupAction({ kind: "remove" }),
+                      },
+                      "separator" as const,
+                      ...(groups ?? []).flatMap((group) => [
+                        { label: t("Rename {name}…", { name: group.name }), className: "gl-sample-group-rename", onClick: () => onGroupAction({ kind: "rename", groupId: group.id }) },
+                        { label: t("Delete {name}…", { name: group.name }), className: "gl-sample-group-delete", onClick: () => onGroupAction({ kind: "delete", groupId: group.id }) },
+                      ]),
+                    ]
                   : []),
-                ...(groups ?? []).flatMap((group) => [
-                  { label: t("Rename {name}…", { name: group.name }), className: "gl-sample-group-rename", onClick: () => onGroupAction({ kind: "rename", groupId: group.id }) },
-                  { label: t("Delete {name}…", { name: group.name }), className: "gl-sample-group-delete", onClick: () => onGroupAction({ kind: "delete", groupId: group.id }) },
-                ]),
               ]}
             />
           )}
@@ -316,7 +329,7 @@ export function SampleNavigator({
             <button type="button" onClick={onInvertIncluded}>{t("Invert")}</button>
           </div>
           <div className="gl-sample-scope-key">
-            <span>{t("Shift: range · Cmd/Ctrl: add or remove · Enter: inspect")}</span>
+            <span>{t("↑↓: view · Shift: range · Cmd/Ctrl: add or remove · Enter: inspect")}</span>
             {items.some((item) => item.tailored?.length) && (
               <span><span className="gl-sample-tailored">n</span> {t("= gates tailored for that file")}</span>
             )}
@@ -571,6 +584,11 @@ export function SampleNavigator({
                   if (event.shiftKey) {
                     if (!anchor.current) anchor.current = item.id;
                     selectRange(id, event.metaKey || event.ctrlKey);
+                  } else if (!(event.metaKey || event.ctrlKey) && id !== item.id) {
+                    // A plain arrow views the file it lands on, as Enter does, leaving the
+                    // checked selection as it is; Cmd or Ctrl moves the cursor alone, and Shift
+                    // extends the selection.
+                    (onInspect ?? onActivate)(id);
                   }
                   (event.currentTarget.parentElement?.querySelectorAll<HTMLElement>('[role="option"]')[next])?.focus();
                 } else if (event.key === "Enter") {

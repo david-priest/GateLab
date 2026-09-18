@@ -37,6 +37,13 @@ import { illustrationPickerPopulations } from "./illustrationPopulations";
 import { IllustrationLayoutBuilder } from "./IllustrationLayoutBuilder";
 import { renderIllustrationLayout } from "../plots/illustrationLayoutRender";
 
+// The figure editor's matrix (FigureHeatmap) scales by percentiles and defaults to RdYlBu; this
+// older tab draws the nearest it has when a workspace carries those settings.
+const legacyHeatmapScale = (scale: string | undefined): HeatmapScaleMode =>
+  !scale || scale === "column_quantile" ? "column_minmax" : (scale as HeatmapScaleMode);
+const legacyHeatmapPalette = (palette: string | undefined): HeatmapPalette =>
+  !palette || palette === "rdylbu" ? "blue_white_yellow_red" : (palette as HeatmapPalette);
+
 interface Props {
   sample: Sample;
   sampleViews: readonly Readonly<{
@@ -177,8 +184,8 @@ export function IllustrationTab({
   const [ridgeGradient, setRidgeGradient] = useState(c0?.ridgeGradient ?? true);
   // Heatmap summary / scaling
   const [heatmapStat, setHeatmapStat] = useState<HeatmapSummaryStat>(c0?.heatmapStat ?? "median");
-  const [heatmapScale, setHeatmapScale] = useState<HeatmapScaleMode>(c0?.heatmapScale ?? "column_minmax");
-  const [heatmapPalette, setHeatmapPalette] = useState<HeatmapPalette>(c0?.heatmapPalette ?? "blue_white_yellow_red");
+  const [heatmapScale, setHeatmapScale] = useState<HeatmapScaleMode>(legacyHeatmapScale(c0?.heatmapScale));
+  const [heatmapPalette, setHeatmapPalette] = useState<HeatmapPalette>(legacyHeatmapPalette(c0?.heatmapPalette));
   const [heatmapCellSize, setHeatmapCellSize] = useState(c0?.heatmapCellSize ?? 30);
   const [heatmapShowValues, setHeatmapShowValues] = useState(c0?.heatmapShowValues ?? false);
   // Fonts
@@ -280,8 +287,8 @@ export function IllustrationTab({
     setHistLineWidth(c.histLineWidth); setHistFill(c.histFill); setHistFillAlpha(c.histFillAlpha);
     setHistOverlayMode(c.histOverlayMode); setHistLayout(c.histLayout); setRidgeOverlap(c.ridgeOverlap);
     setRidgeColGap(c.ridgeColGap); setRidgeGradient(c.ridgeGradient);
-    setHeatmapStat(c.heatmapStat ?? "median"); setHeatmapScale(c.heatmapScale ?? "column_minmax");
-    setHeatmapPalette(c.heatmapPalette ?? "blue_white_yellow_red");
+    setHeatmapStat(c.heatmapStat ?? "median"); setHeatmapScale(legacyHeatmapScale(c.heatmapScale));
+    setHeatmapPalette(legacyHeatmapPalette(c.heatmapPalette));
     setHeatmapCellSize(c.heatmapCellSize ?? 30); setHeatmapShowValues(c.heatmapShowValues ?? false);
     setFontTick(c.fontTick); setFontAxis(c.fontAxis); setFontTitle(c.fontTitle); setFontGate(c.fontGate);
     setScaleFontsWithPlot(c.scaleFontsWithPlot ?? true);
@@ -328,8 +335,8 @@ export function IllustrationTab({
         c.combineSamples ?? false,
         {
           summaryStat: c.heatmapStat ?? "median",
-          scaleMode: c.heatmapScale ?? "column_minmax",
-          palette: c.heatmapPalette ?? "blue_white_yellow_red",
+          scaleMode: legacyHeatmapScale(c.heatmapScale),
+          palette: legacyHeatmapPalette(c.heatmapPalette),
           cellSize: c.heatmapCellSize ?? 30,
           showValues: c.heatmapShowValues ?? false,
         },

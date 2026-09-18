@@ -46,17 +46,21 @@ export interface PointerLike {
 }
 
 /**
- * Kept away from the exact edges: the stretch divides by the pointer's fractional position, so
- * 0 or 1 would send an axis to infinity.
+ * Kept away from the anchored edge only: the stretch divides by the pointer's fractional
+ * position from the pinned minimum, so a pointer at (or past) that edge would send an axis to
+ * infinity. The other side is open: a press in the margin beyond the plot's right edge or above
+ * its top still grabs a data point there and stretches that axis, which clamping both sides to
+ * the plot froze (a right-margin press stretched only vertically).
  */
-export const clampF = (f: number): number => Math.min(0.98, Math.max(0.02, f));
+export const clampFX = (f: number): number => Math.max(0.02, f);
+export const clampFY = (f: number): number => Math.min(0.98, f);
 
 export const panModeFor = (ev: { altKey: boolean; shiftKey: boolean }): PanMode =>
   ev.altKey || ev.shiftKey ? "stretch" : "pan";
 
 const grabbedAt = (base: PanBase, rect: PlotRect): { gx: number; gy: number } => ({
-  gx: base.xr[0] + clampF((base.px - rect.left) / rect.width) * (base.xr[1] - base.xr[0]),
-  gy: base.yr[1] - clampF((base.py - rect.top) / rect.height) * (base.yr[1] - base.yr[0]),
+  gx: base.xr[0] + clampFX((base.px - rect.left) / rect.width) * (base.xr[1] - base.xr[0]),
+  gy: base.yr[1] - clampFY((base.py - rect.top) / rect.height) * (base.yr[1] - base.yr[0]),
 });
 
 /** The state a drag starts in, from the mousedown event. */
@@ -88,8 +92,8 @@ export function panGestureStep(
   if (state.mode === "stretch") {
     // Anchored stretch: min pinned; the grabbed data point follows the cursor, so the max end
     // moves and the data stretches or compresses. FACS Chorus style.
-    const fx = clampF((ev.clientX - rect.left) / rect.width);
-    const fy = clampF((ev.clientY - rect.top) / rect.height);
+    const fx = clampFX((ev.clientX - rect.left) / rect.width);
+    const fy = clampFY((ev.clientY - rect.top) / rect.height);
     return {
       state,
       ranges: {

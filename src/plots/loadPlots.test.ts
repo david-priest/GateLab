@@ -4,6 +4,31 @@ import miniSrc from "../../vendor/GateLabR/inst/app/www/mini_plot.js?raw";
 import { ELLIPSE_PIXEL_GEOMETRY_SRC, patchCytofForGateLab, patchMiniPlot } from "./loadPlots";
 
 describe("GateLab cytof interaction patches", () => {
+  it("asks the host for a menu on a right-click on a polygon's vertex handle or edge", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const patched = patchCytofForGateLab(cytofSrc);
+    expect(warn).not.toHaveBeenCalled();
+    // One report from a handle (the vertex's index), one from an edge (its index and the point on it).
+    expect(patched.match(/_shinyInput\('gate_vertex_menu'/g) ?? []).toHaveLength(2);
+    expect(patched).toContain("vertex: i, client: [event.clientX, event.clientY]");
+    expect(patched).toContain("edge: best.edge, point: isFlipped ? [dy, dx] : [dx, dy]");
+    expect(() => new Function(patched)).not.toThrow();
+    // Applied once: a second pass leaves the patched source alone.
+    expect(patchCytofForGateLab(patched)).toBe(patched);
+    warn.mockRestore();
+  });
+
+  it("holds a dragged vertex's edge to the previous vertex at a multiple of 45 degrees while Shift is down", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const patched = patchCytofForGateLab(cytofSrc);
+    expect(warn).not.toHaveBeenCalled();
+    expect(patched.match(/var hAng = Math\.round\(Math\.atan2\(py - hy, px - hx\) \/ \(Math\.PI \/ 4\)\) \* \(Math\.PI \/ 4\);/g) ?? []).toHaveLength(1);
+    expect(patched).toContain("event.sourceEvent.shiftKey && gate.vertices.length > 1");
+    expect(() => new Function(patched)).not.toThrow();
+    expect(patchCytofForGateLab(patched)).toBe(patched);
+    warn.mockRestore();
+  });
+
   it("removes the delayed Shiny boot that clears GateLab's first painted FCS canvas", () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const patched = patchCytofForGateLab(cytofSrc);
@@ -41,6 +66,21 @@ describe("GateLab cytof interaction patches", () => {
     warning.mockRestore();
   });
 
+  it("lets gate_style.label_format choose what a gate label and a quadrant label say", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchMiniPlot(miniSrc);
+    expect(warning).not.toHaveBeenCalled();
+    expect(miniSrc).not.toContain("label_format");
+    // The polygon and rectangle label: lines chosen by the format, drawn as before by default.
+    expect(patched).toContain("var _glFormat = (gateStyle && gateStyle.label_format) || 'name-percent';");
+    expect(patched).toContain("_glFormat === 'number' ? (_glPct !== null ? [_glPct] : [])");
+    expect(patched).not.toContain(".text(gate.name);");
+    // The quadrant label, added by GateLab's own overlay patch, follows the same setting.
+    expect(patched).toContain("var qFormat = (gateStyle && gateStyle.label_format) || 'name-percent';");
+    expect(patched).toContain("if (!text) return;");
+    warning.mockRestore();
+  });
+
   it("applies the edge mode under publication style too", () => {
     // Publication style only swaps colours (black stroke, black label fill). It must keep using
     // the same path the edge-mode patch produces, or figures would silently revert to straight
@@ -54,6 +94,30 @@ describe("GateLab cytof interaction patches", () => {
     expect(pathAssign).toBeGreaterThan(-1);
     expect(pubStroke).toBeGreaterThan(pathAssign);   // the stroke uses the patched path
     expect(patched).not.toContain("var pathStr = 'M' + points.map(");
+
+    warning.mockRestore();
+  });
+
+  it("estimates a grid contour's density in the Gating plot's pixel space, then scales it to the panel", () => {
+    // The vendored renderer estimated in the panel's own pixels with a bandwidth scaled from
+    // 320 px, so a small panel was smoother and its contours another shape from the Gating tab's.
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchMiniPlot(miniSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(miniSrc).toContain("var bw = _computeContourBandwidth(pts, cfg || {}, W, H);");
+    expect(patched).not.toContain("var bw = _computeContourBandwidth(pts, cfg || {}, W, H);");
+    expect(patched).toContain(".size([_refSize, _refSize])");
+    expect(patched).toContain("if (!isFinite(_refSize) || _refSize <= 0) _refSize = 560;");
+    // The Gating plot's bandwidth: from the point count alone, or the smoothing setting.
+    expect(patched).toContain("Math.max(2, Math.min(10, Math.round(1200 / Math.sqrt(_refPts.length || 1))))");
+    expect(patched).toContain("kde.thresholds(20)(_refPts)");
+    expect(patched).toContain("kde.thresholds(logThresholds)(_refPts)");
+    expect(patched).toContain("pt[0] /= _refSx; pt[1] /= _refSy;");
+    // Applied again, the patch finds its own work and leaves it.
+    expect(patchMiniPlot(patched)).toContain("var coarseC = kde.thresholds(20)(_refPts);");
+    expect(patchMiniPlot(patched).match(/_refPts = pts\.map/g) ?? []).toHaveLength(1);
+    expect(() => new Function(patched)).not.toThrow();
 
     warning.mockRestore();
   });
@@ -120,6 +184,28 @@ describe("GateLab cytof interaction patches", () => {
     // clear() must not wipe in backing-store units once the context is pre-scaled.
     expect(patched).not.toContain("_ctx.clearRect(0, 0, _canvas.width, _canvas.height);");
 
+    warning.mockRestore();
+  });
+
+  it("ellipsises a long mini-plot title at the font size asked for, keeping the whole as a tooltip", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchMiniPlot(miniSrc);
+    expect(warning).not.toHaveBeenCalled();
+    expect(miniSrc).not.toContain("getComputedTextLength");
+    expect(patched.split("el.append('title').text(full)").length - 1).toBe(1);
+    expect(patched).toContain("shown = shown.slice(0, -1); el.text(shown + '\\u2026');");
+    // The size the user set is never shrunk to fit.
+    expect(patched).not.toContain("fs -= 0.5");
+    warning.mockRestore();
+  });
+
+  it("clips a mini plot's gate overlays to its axes", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchMiniPlot(miniSrc);
+    expect(warning).not.toHaveBeenCalled();
+    expect(miniSrc).not.toContain("gl-gate-clip-");
+    expect(patched.split("attr('class', 'gate-overlays')").length - 1).toBe(1);
+    expect(patched).toContain("_drawGateOverlay(gateLayer, gate, xScale, yScale, W, H, gateFs, gateStyle);");
     warning.mockRestore();
   });
 
@@ -457,6 +543,34 @@ describe("GateLab mini-plot density patches", () => {
     expect(warning).not.toHaveBeenCalled();
     expect(twice).toBe(once);
     expect(once.match(/__glContourDebug/g) ?? []).toHaveLength(1);
+
+    warning.mockRestore();
+  });
+
+  it("snaps a dragged or drawn vertex to another gate's vertex or edge", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(cytofSrc).not.toContain("_snapToGates");
+    expect(patched.match(/function _snapToGates\(/g) ?? []).toHaveLength(1);
+    // The vertex drag, a polygon's click, and a rectangle's start, move and release.
+    expect(patched.match(/_snapToGates\(gate, px, py, zx, zy, event\.sourceEvent\)/g) ?? []).toHaveLength(1);
+    expect(patched.match(/_snappedPoly = _snapToGates\(null, px, py, zx, zy, event\)/g) ?? []).toHaveLength(1);
+    expect(patched.match(/_snappedRect = _snapToGates\(null, px, py, zx, zy, event\)/g) ?? []).toHaveLength(3);
+    // A moved gate snaps as a whole, and the selected gate can be pushed out to the plot's edges.
+    expect(patched.match(/_snapGateMove\(gate, zx, zy, flipped, event\.sourceEvent\)/g) ?? []).toHaveLength(1);
+    expect(patched).toContain("extendSelectedGateToEdges: _extendSelectedGateToEdges");
+    expect(patched.match(/function _closeGateGaps\(/g) ?? []).toHaveLength(1);
+    expect(patched).toContain("closeGateGaps: _closeGateGaps");
+    // Alt places freely and Shift leaves the point to the angle hold.
+    expect(patched).toContain("if (sourceEvent && (sourceEvent.altKey || sourceEvent.shiftKey)) return [px, py];");
+    // The plot's own borders snap like a neighbour's edge.
+    expect(patched).toContain("sx.forEach(function (b) { if (Math.abs(px - b) <= EDGE_PX) out[0] = b; });");
+    // Off with Alt, or the plot's setting.
+    expect(patched).toContain("if (sourceEvent && (sourceEvent.altKey || sourceEvent.shiftKey)) return [px, py];");
+    expect(patched).toContain("_plotData.snap_to_gates === false");
+    expect(() => new Function(patched)).not.toThrow();
 
     warning.mockRestore();
   });

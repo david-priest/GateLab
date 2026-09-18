@@ -170,6 +170,19 @@ describe("PopulationTree gate pills", () => {
   });
 });
 
+describe("PopulationTree gate alignment", () => {
+  it("lines the gate badges up in one shared column unless told not to", () => {
+    const { state, derived } = makeInteractionFixture();
+    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} />));
+    const rows = host.querySelector<HTMLElement>(".population-tree-rows")!;
+    expect(rows.classList.contains("is-aligned")).toBe(true);
+    expect(rows.querySelectorAll(".pop-row")).toHaveLength(3);
+
+    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} alignGates={false} />));
+    expect(host.querySelector(".population-tree-rows")!.classList.contains("is-aligned")).toBe(false);
+  });
+});
+
 describe("PopulationTree direct editing", () => {
   it("renders the persisted sibling order and double-clicks a name into inline rename", () => {
     const { state, derived } = makeInteractionFixture();
@@ -800,7 +813,8 @@ describe("the tree row", () => {
     const perFile = controls();
     act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} perFile={perFile} />));
     expect(host.querySelector(".population-tree-name-menu")!.textContent).toContain("Scheme A");
-    expect(host.querySelector(".population-tree-hierarchy-count")!.textContent).toBe("also here: Scheme B · switch or delete from the tree menu");
+    expect(host.querySelector(".population-tree-legacy-note")!.textContent).toBe("also here: Scheme B · switch or delete from the tree menu");
+    expect(host.querySelector(".population-tree-hierarchy-count")!.textContent).toBe("3 files · all following");
     const sw = item("population-tree-switch")!;
     expect(sw.textContent).toBe("Switch to Scheme B");
     act(() => sw.click());
