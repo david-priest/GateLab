@@ -110,6 +110,8 @@ export interface LayoutItemFrame {
   showFrame?: boolean;
   /** A locked item is not selected on the page, so it cannot be moved or resized by accident. */
   locked?: boolean;
+  /** Items sharing a group id are one group: selected, moved, aligned and distributed together. */
+  group?: string;
   /**
    * The item is drawn at width/zoom × height/zoom and scaled by zoom, so a plot shrinks or grows
    * as a whole, fonts and all, instead of being redrawn smaller. Fit content to page sets it.
@@ -551,6 +553,7 @@ function normalizeItem(value: unknown, index: number): LayoutItem | null {
     height: finiteAtLeast(candidate.height, layoutItemMinimum(recipe.kind).height, recipe.kind === "text" ? 32 : recipe.kind === "strategy" ? 300 : 280),
     showFrame: candidate.showFrame === true,
     locked: candidate.locked === true,
+    ...(typeof candidate.group === "string" && candidate.group.trim() ? { group: candidate.group } : {}),
     ...zoomField(candidate.zoom),
     z: finiteAtLeast(candidate.z, 0, index),
     recipe,

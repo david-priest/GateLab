@@ -214,6 +214,7 @@ export function buildIllustrationLayoutPayload(
       yChannel,
       globalScales,
       sourceOptions,
+      source.gateMasks,
     ) as unknown as BuiltGridPayload,
   ]));
 

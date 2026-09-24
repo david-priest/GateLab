@@ -15,10 +15,14 @@ import {
   layoutFigure,
   migrateFigure,
   canonicalGateId,
+  panelsBetween,
   withFigureLabelOffsets,
   prepareFigureSource,
   resolveFigurePopulation,
   resolvePopulationInTree,
+  type FigurePanel,
+  type FigurePlot,
+  type FigurePopulation,
   type FigureSample,
   type FigureSpec,
 } from "./figure";
@@ -461,6 +465,19 @@ describe("independent figures", () => {
     );
     expect(captured.transforms["FSC-A"]).toEqual({ kind: "identity" });
   });
+  it("takes the block of panels between two on a grid, rows and columns alike", () => {
+    const population: FigurePopulation = { hierarchyId: "main", populationId: "p", label: "P" };
+    const plot: FigurePlot = { id: "x", name: "FSC-A", type: "biplot", x: "FSC-A", y: "SSC-A" };
+    const panel = (row: number, column: number): FigurePanel => ({ key: `${row}:${column}`, samples: [], population, plot, row, column });
+    const grid = [0, 1, 2].flatMap((row) => [0, 1, 2, 3].map((column) => panel(row, column)));
+    const keys = (panels: FigurePanel[]) => panels.map((p) => p.key);
+    // Either corner first, the same rectangle; one panel is itself; a row is a run along it.
+    expect(keys(panelsBetween(grid, grid[1], grid[10]))).toEqual(["0:1", "0:2", "1:1", "1:2", "2:1", "2:2"]);
+    expect(keys(panelsBetween(grid, grid[10], grid[1]))).toEqual(["0:1", "0:2", "1:1", "1:2", "2:1", "2:2"]);
+    expect(keys(panelsBetween(grid, grid[5], grid[5]))).toEqual(["1:1"]);
+    expect(keys(panelsBetween(grid, grid[4], grid[7]))).toEqual(["1:0", "1:1", "1:2", "1:3"]);
+  });
+
   it("supports transpose, metadata pages and distinct overlays versus pooling", () => {
     const f = figureFixture();
     const figure: FigureSpec = { ...f.figure, pages: ["metadata:condition"] };

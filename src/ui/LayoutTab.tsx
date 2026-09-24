@@ -20,6 +20,9 @@ import Moveable, {
   type OnResizeEnd,
   type OnResizeGroup,
   type OnResizeGroupEnd,
+  type OnResizeGroupStart,
+  type OnResizeStart,
+  type OnClick,
 } from "react-moveable";
 import Selecto, { type OnDragStart as OnSelectoDragStart, type OnSelectEnd } from "react-selecto";
 import type { OnClickGroup } from "react-moveable";
@@ -78,7 +81,7 @@ import { loadMiniPlots } from "../plots/loadPlots";
 import { composeSheetPages, writeComposedPages, type ComposedPage, type LayoutExportFormat } from "../plots/layoutExport";
 import { DEFAULT_ITERATION, expandLayoutSheet, followsIteration, iterationUnits, populationUnits, templateFrame, type DescribeBoundPlot, type LayoutIteration, type LayoutPage as ExpandedPage, type LayoutPageItem } from "../engine/layoutBatch";
 import { automaticTitleTemplate, fieldsFromTemplate, plotTitle, plotTitleContext, templateFromFields, titleFields, TITLE_PLACEHOLDERS, TITLE_PRESETS, TITLE_SEPARATORS } from "../engine/layoutTitle";
-import { alignItems, distributeItems, fitContentToPage, fitPageToContent, type AlignHow, type DistributeHow } from "../engine/layoutArrange";
+import { alignItems, arrangeUnits, distributeItems, fitContentToPage, fitPageToContent, groupItems, ungroupItems, type AlignHow, type DistributeHow } from "../engine/layoutArrange";
 import { useI18n } from "./i18n";
 import { historyShortcutAction } from "./historyShortcuts";
 import { NumberField } from "./NumberField";
@@ -151,10 +154,21 @@ const ALIGNMENTS: { how: AlignHow; label: string; title: string }[] = [
   { how: "bottom", label: "Bottom", title: "Align the bottom edges (one item: to the page margin)" },
 ];
 const DISTRIBUTIONS: { how: DistributeHow; label: string; title: string }[] = [
-  { how: "horizontal", label: "Spread ↔", title: "Equal gaps between three or more items, left to right" },
-  { how: "vertical", label: "Spread ↕", title: "Equal gaps between three or more items, top to bottom" },
+  { how: "horizontal", label: "Distribute ↔", title: "Equal spacing between three or more items or groups, left to right; the outer two stay where they are" },
+  { how: "vertical", label: "Distribute ↕", title: "Equal spacing between three or more items or groups, top to bottom; the outer two stay where they are" },
 ];
 /** The frame an element shows now, from its inline style: what Moveable moved or resized. */
+/**
+ * Stop the drag or resize Moveable has under way. With each item in its own frame the gesture
+ * belongs to one of the child frames, which the outer instance does not stop on its own.
+ */
+function stopMoveableDrags(moveable: Moveable | null): void {
+  if (!moveable) return;
+  moveable.stopDrag();
+  const manager = moveable.getManager?.() as { getMoveables?: () => { stopDrag?: () => void }[] } | undefined;
+  for (const child of manager?.getMoveables?.() ?? []) if (child !== (manager as unknown)) child.stopDrag?.();
+}
+
 function frameOfElement(el: HTMLElement): { x: number; y: number; width: number; height: number } {
   return {
     x: Math.round(parseFloat(el.style.left) || 0),
@@ -246,6 +260,14 @@ function LayoutPlotSurface({
     ? (templateSource?.tree.populations[recipe.kind === "text" ? "" : recipe.populationId]?.name ?? "the population")
     : null;
 
+  // The title as drawn, resolved here so the effect below keys on the words and not on the
+  // describe callback's identity: the plot is drawn again when its template, file or population
+  // changes, and not when the tab renders for a selection.
+  const boundContext = recipe.kind === "text" ? null : describe({ ...recipe, populationId });
+  const fillTitle = (template: string) => (boundContext ? plotTitle(template, boundContext) : template);
+  const drawnTitle = recipe.kind === "strategy" ? fillTitle(recipe.title?.trim() || "{population}") : fillTitle(titleTemplate);
+  const recipeKey = JSON.stringify(recipe);
+
   useEffect(() => {
     const host = hostRef.current;
     if (!host || recipe.kind === "text") return;
@@ -266,9 +288,6 @@ function LayoutPlotSurface({
         return;
       }
       host.className = "gl-layout-plot-host";
-      // The title from its template: the plot's own, else the sheet's, else what differs across the page.
-      const context = describe({ ...recipe, populationId });
-      const fillTitle = (template: string) => (context ? plotTitle(template, context) : template);
       const availableWidth = Math.max(120, item.width - 8);
       const availableHeight = Math.max(120, item.height - 8);
 
@@ -316,7 +335,7 @@ function LayoutPlotSurface({
             gateLineWidth: style.gateLineWidth,
             gateLabelFormat: style.gateLabels,
             fontSizes: fontSizesOf(style),
-            contextTitle: fillTitle(recipe.title?.trim() || "{population}"),
+            contextTitle: drawnTitle,
           },
         );
         host.id = `layout-strategy-${item.id}`;
@@ -366,6 +385,7 @@ function LayoutPlotSurface({
           fontSizes: fontSizesOf(style),
           scaleFontsWithPlot: true,
         },
+        source.derived.gateMasks,
       ) as {
         plots?: Record<string, Record<string, unknown>>;
         gate_overlays?: Record<string, unknown>;
@@ -392,7 +412,7 @@ function LayoutPlotSurface({
         hist_fill: style.histFill,
         hist_fill_alpha: style.histFillAlpha,
         hist_overlay_mode: "front_opaque",
-        title: fillTitle(titleTemplate),
+        title: drawnTitle,
         contour_levels: style.contourLevels,
         font_sizes: fontSizesOf(style),
         gate_style: { pub_style: style.pubStyle, line_width: style.gateLineWidth, label_format: style.gateLabels },
@@ -409,7 +429,7 @@ function LayoutPlotSurface({
     item.height,
     item.id,
     item.width,
-    recipe,
+    recipeKey,
     source,
     state.gate_order,
     state.gate_version,
@@ -420,8 +440,7 @@ function LayoutPlotSurface({
     populationId,
     missingPopulationName,
     canvasScale,
-    titleTemplate,
-    describe,
+    drawnTitle,
   ]);
 
   if (recipe.kind === "text") {
@@ -455,11 +474,12 @@ function LayoutItemFrame({
   sources,
   divisionProfiles,
   canvasScale,
-  onDelete,
-  onOpenInGating,
   onTextChange,
   onTextFocus,
-  onTextEscape,
+  textEditing,
+  onTextEditStart,
+  onTextEditEnd,
+  onIsolate,
 }: Readonly<{
   item: LayoutPageItem;
   canvasScale: number;
@@ -483,14 +503,16 @@ function LayoutItemFrame({
   sources: readonly FigureSource[];
   /** The files' division profiles, for a chart block of division categories. */
   divisionProfiles: Readonly<Record<string, DivisionProfileLike>>;
-  onDelete: () => void;
-  onOpenInGating: () => void;
   /** The text as committed, with the height its lines need, so the frame can grow to show them. */
   onTextChange: (text: string, contentHeight: number) => void;
   /** The text editor took focus: a click on a text block's words selects the block. */
   onTextFocus: () => void;
-  /** Escape in the text editor: the block stays selected and the page takes the keyboard. */
-  onTextEscape: () => void;
+  /** Whether this text block's editor is open; a double-click or Enter opens it, leaving it closes it. */
+  textEditing: boolean;
+  onTextEditStart: () => void;
+  onTextEditEnd: () => void;
+  /** A double-click on this member of a selected group: the member alone, when the tab allows it. */
+  onIsolate?: () => void;
 }>) {
   const { t } = useI18n();
   // A zoomed item is drawn at the size it had and scaled as a whole, so what Fit content to page
@@ -502,6 +524,9 @@ function LayoutItemFrame({
       data-item-id={item.id}
       data-template-id={item.templateId}
       data-zoom={zoom === 1 ? undefined : zoom}
+      title={`${item.locked ? `${t("Locked")} · ` : ""}${itemTitle(item, samples, state)}`}
+      data-title={itemTitle(item, samples, state)}
+      onDoubleClick={onIsolate ? (event) => { event.stopPropagation(); onIsolate(); } : undefined}
       className={`gl-layout-item${selected ? " is-selected" : ""}${item.showFrame ? " has-frame" : ""}${item.recipe.kind === "text" ? " is-text" : ""}${item.locked ? " is-locked" : ""}`}
       style={{
         left: item.x,
@@ -511,33 +536,6 @@ function LayoutItemFrame({
         zIndex: item.z,
       }}
     >
-      <header className="gl-layout-item-head">
-        <span title={itemTitle(item, samples, state)}>
-          {item.locked ? "🔒 " : ""}{itemTitle(item, samples, state)}
-        </span>
-        <div>
-          {isPlotLikeRecipe(item.recipe) && (
-            <button
-              type="button"
-              className="gl-layout-item-action"
-              title={t("Open in Gating")}
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={onOpenInGating}
-            >
-              ↗
-            </button>
-          )}
-          <button
-            type="button"
-            className="gl-layout-item-action"
-            title={t("Remove from layout")}
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={onDelete}
-          >
-            ×
-          </button>
-        </div>
-      </header>
       <div className="gl-layout-item-body" style={zoom === 1 ? undefined : { zoom, width: inner.width, height: inner.height }}>
       {item.recipe.kind === "text" ? (
         <LayoutTextEditor
@@ -545,9 +543,11 @@ function LayoutItemFrame({
           templateText={templateText ?? item.recipe.text}
           fontSize={item.recipe.fontSize}
           bold={item.recipe.bold}
+          editing={textEditing}
+          onEditStart={onTextEditStart}
+          onEditEnd={onTextEditEnd}
           onCommit={onTextChange}
           onFocus={onTextFocus}
-          onEscape={onTextEscape}
         />
       ) : item.recipe.kind === "figure" ? (
         <LayoutFigureSurface
@@ -681,14 +681,22 @@ function LayoutStyleFields({
   );
 }
 
+/**
+ * A text block's words. As placed they are static text, so the block is selected and dragged by
+ * its body like any other item; a double-click, or Enter with the block selected, opens the
+ * editor, which shows the template with its placeholders. Leaving the editor, by Escape, a
+ * click elsewhere or Tab, keeps what was typed, as the vector editors do.
+ */
 function LayoutTextEditor({
   text,
   templateText,
   fontSize,
   bold,
+  editing,
+  onEditStart,
+  onEditEnd,
   onCommit,
   onFocus,
-  onEscape,
 }: {
   /** The text as shown: the template's with its placeholders filled in. */
   text: string;
@@ -696,38 +704,57 @@ function LayoutTextEditor({
   templateText: string;
   fontSize: number;
   bold?: boolean;
+  editing: boolean;
+  onEditStart: () => void;
+  onEditEnd: () => void;
   onCommit: (text: string, contentHeight: number) => void;
   onFocus: () => void;
-  onEscape: () => void;
 }) {
-  const [draft, setDraft] = useState(text);
-  const [editing, setEditing] = useState(false);
-  useEffect(() => { if (!editing) setDraft(text); }, [text, editing]);
+  const { t } = useI18n();
+  const [draft, setDraft] = useState(templateText);
+  const areaRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (!editing) return;
+    setDraft(templateText);
+    const area = areaRef.current;
+    if (!area) return;
+    area.focus({ preventScroll: true });
+    area.setSelectionRange(area.value.length, area.value.length);
+    // The editor opens on the template as it is then; what it holds after is the draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing]);
+  const style = { fontSize, fontWeight: bold ? 700 : 400 };
+  if (!editing) {
+    return (
+      <div
+        className="gl-layout-text-surface is-static"
+        style={style}
+        title={t("Double-click to edit")}
+        onDoubleClick={(event) => {
+          event.stopPropagation();
+          onEditStart();
+        }}
+      >
+        {text}
+      </div>
+    );
+  }
   return (
     <textarea
+      ref={areaRef}
       className="gl-layout-text-surface"
       aria-label="Layout text"
       value={draft}
-      style={{ fontSize, fontWeight: bold ? 700 : 400 }}
+      style={style}
       onChange={(event) => setDraft(event.target.value)}
-      onFocus={() => {
-        // While editing, the placeholders themselves are shown, so they stay in the text.
-        setEditing(true);
-        setDraft(templateText);
-        onFocus();
-      }}
+      onFocus={onFocus}
       onBlur={(event) => {
-        setEditing(false);
         if (draft !== templateText) onCommit(draft, event.currentTarget.scrollHeight);
-        else setDraft(text);
+        onEditEnd();
       }}
       onKeyDown={(event) => {
         event.stopPropagation();
-        if (event.key === "Escape") {
-          setDraft(templateText);
-          event.currentTarget.blur();
-          onEscape();
-        }
+        if (event.key === "Escape") event.currentTarget.blur();
       }}
     />
   );
@@ -759,6 +786,8 @@ export function LayoutTab({
 }: Readonly<Props>) {
   const { t } = useI18n();
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  /** The text block whose editor is open, by its page id. */
+  const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const [snapToGrid, setSnapToGrid] = useState(true);
   // The elements Moveable acts on and snaps to are read from the page after each commit.
   const [pageEl, setPageEl] = useState<HTMLElement | null>(null);
@@ -774,6 +803,24 @@ export function LayoutTab({
   );
   const [section, setSection] = useState("item");
   const [preview, setPreview] = useState(false);
+  // The modifier keys as held, read on the window so a gesture under way changes with them:
+  // Shift keeps a resize's proportions and holds a drag to 45° steps, Cmd turns snapping off.
+  const [modifiers, setModifiers] = useState({ shift: false, meta: false });
+  useEffect(() => {
+    const read = (event: KeyboardEvent) => setModifiers((current) => {
+      const next = { shift: event.shiftKey, meta: event.metaKey || event.ctrlKey };
+      return next.shift === current.shift && next.meta === current.meta ? current : next;
+    });
+    const clear = () => setModifiers((current) => (current.shift || current.meta ? { shift: false, meta: false } : current));
+    window.addEventListener("keydown", read);
+    window.addEventListener("keyup", read);
+    window.addEventListener("blur", clear);
+    return () => {
+      window.removeEventListener("keydown", read);
+      window.removeEventListener("keyup", read);
+      window.removeEventListener("blur", clear);
+    };
+  }, []);
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
@@ -802,12 +849,12 @@ export function LayoutTab({
     state,
     dataRevision,
   );
-  const samples: LayoutSampleView[] = sourceResult.current
-    ? sourceResult.sources.map((source) => ({
-        ...source,
-        derived: source.gating,
-      }))
-    : [];
+  // One view per prepared source, held while the sources are: the plot surfaces key their
+  // drawing on these objects, so a render of the tab must not hand them new ones.
+  const samples: LayoutSampleView[] = useMemo(
+    () => (sourceResult.current ? sourceResult.sources.map((source) => ({ ...source, derived: source.gating })) : []),
+    [sourceResult.current, sourceResult.sources],
+  );
   const metadataById = useMemo(
     () => Object.fromEntries(files.map((file) => [file.id, file.metadata])) as Record<string, Readonly<Record<string, string>> | undefined>,
     [files],
@@ -890,6 +937,21 @@ export function LayoutTab({
   const selectedItems = activeSheet?.items.filter(({ id }) => selectedTemplateIds.includes(id)) ?? [];
   const selectedItem = selectedItems.length === 1 ? selectedItems[0] : null;
   const selectedPageItem = selectedItem ? currentPage.items.find((item) => item.templateId === selectedItem.id) ?? null : null;
+  /** The tile a page id carries, so a group on a tiled page is taken within its tile. */
+  const tileOf = (id: string) => id.split("::")[1] ?? "";
+  const groupOfPageId = (id: string) => currentPage.items.find((item) => item.id === id)?.group;
+  /** The ids with every member of their groups added: a group is selected whole, as in the vector editors. */
+  const withGroupMembers = (ids: readonly string[]): string[] => {
+    const groups = new Set(ids.map(groupOfPageId).filter((group): group is string => !!group));
+    if (!groups.size) return [...ids];
+    const tiles = new Set(ids.map(tileOf));
+    const out = new Set(ids);
+    for (const item of currentPage.items) if (item.group && groups.has(item.group) && tiles.has(tileOf(item.id))) out.add(item.id);
+    return [...out];
+  };
+  /** How many things the arrange tools would move: a group counts once. */
+  const selectedUnitCount = arrangeUnits(selectedItems).length;
+  const selectionGrouped = selectedItems.length > 1 && selectedItems.every((item) => item.group && item.group === selectedItems[0].group);
   /** A plot's own title, typed under Items; empty for none, or for one GateLab baked in before the template existed. */
   const ownTitleOf = (item: LayoutItem, templateSampleId?: string): string => {
     if (!isPlotLikeRecipe(item.recipe)) return "";
@@ -902,12 +964,34 @@ export function LayoutTab({
     ? plotTitle(sheetTitleTemplate, describePlot(selectedPageItem.recipe, selectedPageItem.templateSampleId) ?? { population: "", file: "", sample: "", x: "", y: "" })
     : "";
   const selectionLocked = selectedItems.some((item) => item.locked);
+  const lockedTemplateIds = new Set((activeSheet?.items ?? []).filter((item) => item.locked).map((item) => item.id));
+  // A locked item can be selected, to unlock it, but it keeps its place and size: Moveable takes
+  // only the selected items that are not locked, so a mixed selection moves the rest.
+  // A text block being edited keeps its selection but shows no frame, as the editors do, so the
+  // handles do not sit over the words being typed.
+  const movableElements = selectedElements.filter((el) => !lockedTemplateIds.has(templateIdOf(el.dataset.itemId ?? "")) && el.dataset.itemId !== editingTextId);
+  // Several items with no group among them each keep their own frame and handles, as PowerPoint
+  // and Keynote draw them, so Ungroup shows at once; a drag on any of them moves them all, and a
+  // handle resizes its own item. A group, alone or with other items, is drawn as one frame, which
+  // moves and scales the selection whole.
+  const ownFrames = movableElements.length > 1 && movableElements.every((el) => !groupOfPageId(el.dataset.itemId ?? ""));
+  const movableRef = useRef(movableElements);
+  movableRef.current = movableElements;
+  // A press Selecto handed to Moveable (an item selected and dragged in one press) was already
+  // Selecto's click: an item's own frame reports it again when it is released, and taken as a
+  // click it would undo the selection just made. Cleared by the next press.
+  const handedOffRef = useRef(false);
 
   useEffect(() => {
     if (selectedIds.length && selectedIds.some((id) => !currentPage.items.some((item) => item.id === id))) {
       setSelectedIds((current) => current.filter((id) => currentPage.items.some((item) => item.id === id)));
     }
   }, [currentPage, selectedIds]);
+  // After the page's items have been laid out again, the frame is measured again as well: the
+  // observers catch a changed style, and this catches what they do not (a zoom, a page change).
+  useLayoutEffect(() => {
+    moveableRef.current?.updateRect();
+  }, [currentPage, zoom, settledZoom]);
   useLayoutEffect(() => {
     if (!pageEl) return;
     const all = [...pageEl.querySelectorAll<HTMLElement>("[data-item-id]")];
@@ -916,6 +1000,9 @@ export function LayoutTab({
     const guides = all.filter((el) => !selectedIds.includes(el.dataset.itemId ?? ""));
     setSelectedElements((previous) => (same(previous, selected) ? previous : selected));
     setGuideElements((previous) => (same(previous, guides) ? previous : guides));
+    // Selecto keeps a list of its own; told what the page selected (Escape, Cmd-A, a group taken
+    // whole), it reports a Shift-click as the addition or removal it is.
+    selectoRef.current?.setSelectedTargets(selected);
   }, [pageEl, selectedIds, currentPage, activeSheet?.id]);
   useEffect(() => {
     fitZoom();
@@ -1057,15 +1144,23 @@ export function LayoutTab({
       const item = activeSheet?.items.find(({ id }) => id === templateIdOf(pageId));
       if (!item) return;
       const inSelection = selectedIds.includes(pageId);
-      if (!inSelection) selectMany([pageId]);
-      const ids = inSelection && selectedTemplateIds.length > 1 ? selectedTemplateIds : [item.id];
+      if (!inSelection) selectMany(withGroupMembers([pageId]));
+      // The menu acts on what the right-click selected: the selection it fell in, or the item with
+      // its group, since a group is selected whole. The ids are fixed here, because the menu's
+      // actions run after the selection has changed and would otherwise read the one before it.
+      const groupMates = item.group ? (activeSheet?.items ?? []).filter((other) => other.group === item.group).map(({ id }) => id) : [item.id];
+      const ids = inSelection && selectedTemplateIds.length > 1 ? selectedTemplateIds : groupMates;
       const many = ids.length > 1;
       const plotLike = isPlotLikeRecipe(item.recipe);
       const items: MenuEntry[] = [
         { label: many ? t("Duplicate {n} items", { n: ids.length }) : t("Duplicate"), onClick: () => duplicateItems(ids) },
         { label: t("Bring to front"), onClick: () => restackItems(ids, "front") },
+        { label: t("Bring forward"), onClick: () => restackItems(ids, "forward") },
+        { label: t("Send backward"), onClick: () => restackItems(ids, "backward") },
         { label: t("Send to back"), onClick: () => restackItems(ids, "back") },
         { label: item.locked ? t("Unlock") : t("Lock"), onClick: () => setLocked(ids, !item.locked) },
+        ...(inSelection && selectedUnitCount > 1 ? [{ label: t("Group"), onClick: groupSelected } satisfies MenuEntry] : []),
+        ...(item.group ? [{ label: t("Ungroup"), onClick: () => mutateActiveSheet((sheet) => ungroupItems(sheet, ids)) } satisfies MenuEntry] : []),
         "separator",
         ...(iteration.mode !== "off" && plotLike
           ? [
@@ -1107,7 +1202,10 @@ export function LayoutTab({
         { label: t("+ Illustration figure"), disabled: !ready || !illustrationConfig?.figure, onClick: here(addFigureBlock) },
         { label: t("+ Plotting chart"), disabled: !ready || !plottingSettings, onClick: here(addProportionsBlock) },
         "separator",
-        { label: t("Select all"), disabled: !currentPage.items.length, onClick: () => selectMany(currentPage.items.map(({ id }) => id)) },
+        // With a selection on the page, the menu on blank paper offers what the selection's own menu does for grouping, as Illustrator's does.
+        ...(selectedUnitCount > 1 ? [{ label: t("Group"), onClick: groupSelected } satisfies MenuEntry] : []),
+        ...(selectedItems.some((item) => item.group) ? [{ label: t("Ungroup"), onClick: ungroupSelected } satisfies MenuEntry] : []),
+        { label: t("Select all"), disabled: !currentPage.items.length, onClick: () => selectMany(currentPage.items.filter((item) => !lockedTemplateIds.has(item.templateId)).map(({ id }) => id)) },
       ],
     });
   };
@@ -1286,13 +1384,17 @@ export function LayoutTab({
     const created: string[] = [];
     mutateActiveSheet((sheet) => {
       let z = Math.max(0, ...sheet.items.map((item) => item.z));
+      // Copies of a group's members make a group of their own.
+      const copiedGroups = new Map<string, string>();
       for (const id of ids) {
         const source = sheet.items.find((item) => item.id === id);
         if (!source) continue;
         const copyId = crypto.randomUUID();
         created.push(copyId);
         const frame = frames?.[id] ?? { x: source.x + 20, y: source.y + 20, width: source.width, height: source.height };
-        sheet.items.push({ ...source, ...frame, id: copyId, locked: false, z: ++z, recipe: { ...source.recipe } });
+        const group = source.group ? copiedGroups.get(source.group) ?? crypto.randomUUID() : undefined;
+        if (source.group && group) copiedGroups.set(source.group, group);
+        sheet.items.push({ ...source, ...frame, id: copyId, locked: false, z: ++z, recipe: { ...source.recipe }, ...(group ? { group } : {}) });
       }
     });
     if (created.length) selectMany(created);
@@ -1302,22 +1404,49 @@ export function LayoutTab({
     mutateActiveSheet((sheet) => {
       for (const item of sheet.items) {
         if (!ids.includes(item.id) || item.locked) continue;
-        item.x = Math.max(0, item.x + dx);
-        item.y = Math.max(0, item.y + dy);
+        item.x += dx;
+        item.y += dy;
       }
     });
   };
-  /** Move items to the top or the bottom of the stack; z is then the stacking order 0…n−1. */
-  const restackItems = (ids: readonly string[], where: "front" | "back") => {
+  /**
+   * Move items to the top or the bottom of the stack, or one step up or down past the nearest
+   * item that is not moving; z is then the stacking order 0…n−1.
+   */
+  const restackItems = (ids: readonly string[], where: "front" | "back" | "forward" | "backward") => {
     mutateActiveSheet((sheet) => {
       const ordered = [...sheet.items].sort((a, b) => a.z - b.z);
       const moving = ordered.filter((item) => ids.includes(item.id));
       const rest = ordered.filter((item) => !ids.includes(item.id));
-      const next = where === "front" ? [...rest, ...moving] : [...moving, ...rest];
+      let next: LayoutItem[];
+      if (where === "front") next = [...rest, ...moving];
+      else if (where === "back") next = [...moving, ...rest];
+      else {
+        next = ordered;
+        // From the top down for forward, the bottom up for backward, so a block of moving items
+        // passes one still item together rather than leapfrogging itself.
+        const indices = next.map((_, index) => index);
+        if (where === "forward") indices.reverse();
+        for (const index of indices) {
+          const other = where === "forward" ? index + 1 : index - 1;
+          if (!ids.includes(next[index].id) || other < 0 || other >= next.length || ids.includes(next[other].id)) continue;
+          [next[index], next[other]] = [next[other], next[index]];
+        }
+      }
       next.forEach((entry, z) => {
         entry.z = z;
       });
     });
+  };
+  /** Cmd-G: the selected items become one group, and stay selected. */
+  const groupSelected = () => {
+    if (selectedUnitCount < 2) return;
+    mutateActiveSheet((sheet) => { groupItems(sheet, selectedTemplateIds); });
+  };
+  /** Shift-Cmd-G: every group among the selected items is dissolved; the items stay selected. */
+  const ungroupSelected = () => {
+    if (!selectedItems.some((item) => item.group)) return;
+    mutateActiveSheet((sheet) => ungroupItems(sheet, selectedTemplateIds));
   };
   const setLocked = (ids: readonly string[], locked: boolean) => {
     mutateActiveSheet((sheet) => {
@@ -1328,7 +1457,7 @@ export function LayoutTab({
     mutateActiveSheet((sheet) => alignItems(sheet, selectedTemplateIds.filter((id) => !sheet.items.find((item) => item.id === id)?.locked), how));
   };
   const spread = (how: DistributeHow) => {
-    mutateActiveSheet((sheet) => distributeItems(sheet, selectedTemplateIds, how));
+    mutateActiveSheet((sheet) => distributeItems(sheet, selectedTemplateIds.filter((id) => !sheet.items.find((item) => item.id === id)?.locked), how));
   };
   /** What Moveable moved or resized becomes the items' frames; an Option-drag leaves the originals and makes copies there. */
   const commitFrames = (targets: readonly Element[], asCopies: boolean) => {
@@ -1384,9 +1513,75 @@ export function LayoutTab({
   const removeGhosts = (ghosts: unknown) => {
     if (Array.isArray(ghosts)) for (const ghost of ghosts) (ghost as HTMLElement).remove();
   };
+  /** Put elements back where their items are: what a cancelled or negligible drag leaves. */
+  const restoreFrames = (targets: readonly Element[]) => {
+    for (const el of targets) {
+      const item = currentPage.items.find((candidate) => candidate.id === (el as HTMLElement).dataset.itemId);
+      if (item) Object.assign((el as HTMLElement).style, { left: `${item.x}px`, top: `${item.y}px`, width: `${item.width}px`, height: `${item.height}px` });
+    }
+  };
+  const restoreRef = useRef(restoreFrames);
+  restoreRef.current = restoreFrames;
+  /** The gesture under way, so Escape can cancel it and its end can tell a cancelled drag from a finished one. */
+  const gestureRef = useRef<{ targets: Element[]; ghosts?: HTMLElement[]; cancelled: boolean } | null>(null);
+  const beginGesture = (targets: Element[], ghosts?: HTMLElement[]) => {
+    const gesture = { targets, ghosts, cancelled: false };
+    gestureRef.current = gesture;
+    // A gesture ends when the pointer is released, whether or not Moveable says so: its end
+    // event does not come when the targets changed under it (a Shift-click handed back to
+    // Selecto), and a record left behind would swallow the next Escape.
+    const onRelease = () => {
+      window.removeEventListener("mouseup", onRelease, true);
+      window.removeEventListener("touchend", onRelease, true);
+      window.setTimeout(() => {
+        if (gestureRef.current !== gesture) return;
+        gestureRef.current = null;
+        removeGhosts(gesture.ghosts);
+      }, 0);
+    };
+    window.addEventListener("mouseup", onRelease, true);
+    window.addEventListener("touchend", onRelease, true);
+  };
+  /**
+   * The end of a drag or resize: a cancelled one, or one that moved less than 3 px (a press with a
+   * wobble, as tldraw and svg-edit read it), puts the elements back and is not an edit.
+   */
+  const endGesture = (targets: readonly Element[], lastEvent: { dist?: number[] } | null | undefined, isDrag: boolean, commit: () => void) => {
+    const gesture = gestureRef.current;
+    gestureRef.current = null;
+    removeGhosts(gesture?.ghosts);
+    const dist = lastEvent?.dist;
+    const moved = !dist || Math.hypot(dist[0] ?? 0, dist[1] ?? 0) >= 3;
+    if (gesture?.cancelled || !isDrag || !moved) restoreFrames(targets);
+    else commit();
+  };
   const applyDrag = (e: OnDrag) => {
     e.target.style.left = `${e.left}px`;
     e.target.style.top = `${e.top}px`;
+    // With each item in its own frame, the others in the selection follow the one dragged.
+    const companions = e.datas?.companions as { el: HTMLElement; left: number; top: number }[] | undefined;
+    if (!companions?.length) return;
+    const dx = e.left - (e.datas.startLeft as number);
+    const dy = e.top - (e.datas.startTop as number);
+    for (const { el, left, top } of companions) {
+      el.style.left = `${left + dx}px`;
+      el.style.top = `${top + dy}px`;
+    }
+  };
+  /** The elements a drag moves: the one pressed, and with own frames the rest of the selection. */
+  const dragTargets = (e: { target: HTMLElement | SVGElement; datas: Record<string, unknown> }): (HTMLElement | SVGElement)[] => {
+    const companions = e.datas?.companions as { el: HTMLElement }[] | undefined;
+    return [e.target, ...(companions ?? []).map(({ el }) => el)];
+  };
+  const startDrag = (e: OnDragStart) => {
+    e.datas.alt = !!e.inputEvent?.altKey;
+    const target = e.target as HTMLElement;
+    const others = ownFrames ? movableRef.current.filter((el) => el !== target) : [];
+    e.datas.startLeft = parseFloat(target.style.left) || 0;
+    e.datas.startTop = parseFloat(target.style.top) || 0;
+    e.datas.companions = others.map((el) => ({ el, left: parseFloat(el.style.left) || 0, top: parseFloat(el.style.top) || 0 }));
+    const targets = dragTargets(e);
+    beginGesture(targets, e.datas.alt ? leaveGhosts(targets) : undefined);
   };
   const applyResize = (e: OnResize) => {
     e.target.style.width = `${e.width}px`;
@@ -1407,17 +1602,49 @@ export function LayoutTab({
       e.stop();
       return;
     }
-    if (selectedElements.some((el) => el === target || el.contains(target))) {
+    if (movableElements.some((el) => el === target || el.contains(target))) {
       e.stop();
-      if (selectedElements.length > 1) moveable?.dragStart(e.inputEvent);
+      // Each item in its own frame drags itself, as a single selection does.
+      if (movableElements.length > 1 && !ownFrames) {
+        moveable?.dragStart(e.inputEvent);
+        // Moveable's own click does not fire for a drag it was handed, so a press that does not
+        // move is given back to Selecto as the click it was: Shift takes the item out of the
+        // selection, a plain click takes it alone (a group stays whole).
+        const down = e.inputEvent as MouseEvent;
+        const onUp = (up: MouseEvent) => {
+          window.removeEventListener("mouseup", onUp);
+          if (Math.hypot(up.clientX - down.clientX, up.clientY - down.clientY) < 4) selectoRef.current?.clickTarget(down, target);
+        };
+        window.addEventListener("mouseup", onUp);
+      }
     }
   };
   const onSelectEnd = (e: OnSelectEnd) => {
-    const ids = e.selected.map((el) => (el as HTMLElement).dataset.itemId ?? "").filter(Boolean);
+    // A press on an item takes it, a locked one included, so it can be unlocked (Selecto reports
+    // a press as a click or as a drag start); a marquee passes over locked items, as it does in
+    // the vector editors.
+    const pressed = e.isClick || e.isDragStart;
+    // A group is taken whole: a member selected brings the rest, a member taken out (Shift-click)
+    // takes the rest out too.
+    const removedGroups = new Set((e.removed ?? []).map((el) => groupOfPageId((el as HTMLElement).dataset.itemId ?? "")).filter(Boolean));
+    const ids = withGroupMembers(
+      e.selected
+        .map((el) => (el as HTMLElement).dataset.itemId ?? "")
+        .filter((id) => id && (pressed || !lockedTemplateIds.has(templateIdOf(id)))),
+    ).filter((id) => !removedGroups.has(groupOfPageId(id)));
     selectMany(ids);
-    if (e.isDragStart) {
-      // Pressing an unselected item and moving at once selects it and drags it.
+    // Pressing an unselected item and moving at once selects it and drags it. Only a real press
+    // is handed on: the click Selecto is handed back after a press on a multi-selection reports
+    // itself as a drag start too, and a drag begun from it would start after the pointer was
+    // released and follow the pointer until the next release. A locked item, or a text being
+    // edited, is selected but not dragged, so no drag waits for a target change that will not come.
+    if (e.isDragStart && !e.isClick) {
+      const movable = ids.filter((id) => !lockedTemplateIds.has(templateIdOf(id)) && id !== editingTextId);
+      if (!movable.length) return;
       e.inputEvent?.preventDefault?.();
+      handedOffRef.current = true;
+      const clear = () => { handedOffRef.current = false; };
+      window.setTimeout(() => window.addEventListener("mousedown", clear, { capture: true, once: true }), 0);
       void moveableRef.current?.waitToChangeTarget().then(() => moveableRef.current?.dragStart(e.inputEvent));
     }
   };
@@ -1566,6 +1793,14 @@ export function LayoutTab({
       return;
     }
     if (!selectedIds.length) return;
+    if (event.key === "Enter" && selectedIds.length === 1) {
+      const item = currentPage.items.find((candidate) => candidate.id === selectedIds[0]);
+      if (item?.recipe.kind === "text") {
+        event.preventDefault();
+        setEditingTextId(item.id);
+        return;
+      }
+    }
     if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
       removeItems(selectedTemplateIds);
@@ -1574,6 +1809,24 @@ export function LayoutTab({
     if (meta && event.key.toLowerCase() === "d") {
       event.preventDefault();
       duplicateItems(selectedTemplateIds);
+      return;
+    }
+    // Cmd-] and Cmd-[ one step, with Shift to the front or the back, as in the vector editors.
+    if (meta && (event.key === "]" || event.key === "[")) {
+      event.preventDefault();
+      restackItems(selectedTemplateIds, event.key === "]" ? (event.shiftKey ? "front" : "forward") : (event.shiftKey ? "back" : "backward"));
+      return;
+    }
+    if (meta && event.key.toLowerCase() === "g") {
+      event.preventDefault();
+      if (event.shiftKey) ungroupSelected();
+      else groupSelected();
+      return;
+    }
+    // Shift-Cmd-L, Figma's key: the browser keeps Cmd-L for its address bar and Cmd-2 for its tabs.
+    if (meta && event.shiftKey && event.key.toLowerCase() === "l") {
+      event.preventDefault();
+      setLocked(selectedTemplateIds, !selectionLocked);
       return;
     }
     const step = event.shiftKey ? 10 : 1;
@@ -1627,6 +1880,45 @@ export function LayoutTab({
     ].slice(0, 30);
     commit(next, false);
   };
+
+  // Undo and redo belong to the layout while this tab is shown, wherever the keyboard is: after a
+  // toolbar or inspector click the page no longer has it, and the app's own listener would undo
+  // the last gating edit instead. Taken on the window in the capture phase, so it comes first; a
+  // field keeps its own undo.
+  const historyRef = useRef({ undo, redo });
+  historyRef.current = { undo, redo };
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      // Escape while a drag or resize is under way cancels it: the elements go back and nothing is
+      // committed, as in Illustrator and Figma.
+      if (event.key === "Escape" && gestureRef.current) {
+        const gesture = gestureRef.current;
+        gesture.cancelled = true;
+        event.preventDefault();
+        event.stopPropagation();
+        restoreRef.current(gesture.targets);
+        removeGhosts(gesture.ghosts);
+        gesture.ghosts = undefined;
+        stopMoveableDrags(moveableRef.current);
+        return;
+      }
+      const action = historyShortcutAction(event);
+      if (!action) return;
+      if ((event.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable='true']")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (action === "undo") historyRef.current.undo();
+      else historyRef.current.redo();
+    };
+    // Moveable's drag outlives a window blur (Cmd-Tab); the ghost of an Option-drag is dropped then.
+    const onBlur = () => { const gesture = gestureRef.current; if (gesture) { removeGhosts(gesture.ghosts); gesture.ghosts = undefined; } };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
 
   if (!activeSheet) return null;
 
@@ -1706,9 +1998,9 @@ export function LayoutTab({
       <div
         className="gl-layout-toolbar"
         onMouseDown={(event) => {
-          // A toolbar click does not take the keyboard from the page, so Escape, Delete and the
-          // arrows still act on the selection afterwards.
-          if ((event.target as HTMLElement).closest("button") && selectedIds.length) event.preventDefault();
+          // A toolbar click does not take the keyboard from the page, so Escape, Delete, the
+          // arrows and undo still act on the page afterwards, with or without a selection.
+          if ((event.target as HTMLElement).closest("button")) event.preventDefault();
         }}
       >
         <div className="gl-layout-toolbar-group">
@@ -1747,7 +2039,7 @@ export function LayoutTab({
             <button key={how} className="gl-mini-btn" type="button" onClick={() => arrange(how)} disabled={!selectedIds.length || preview} title={t(title)}>{t(label)}</button>
           ))}
           {DISTRIBUTIONS.map(({ how, label, title }) => (
-            <button key={how} className="gl-mini-btn" type="button" onClick={() => spread(how)} disabled={selectedIds.length < 3 || preview} title={t(title)}>{t(label)}</button>
+            <button key={how} className="gl-mini-btn" type="button" onClick={() => spread(how)} disabled={selectedUnitCount < 3 || preview} title={t(title)}>{t(label)}</button>
           ))}
           <button className="gl-mini-btn" type="button" aria-pressed={snapToGrid} onClick={() => setSnapToGrid((was) => !was)} title={t("Snap moves and resizes to a 10 px grid; edges and centres of other items and the page snap always")}>
             {t("Snap grid")}
@@ -1878,20 +2170,22 @@ export function LayoutTab({
               {sourceResult.error && <p role="alert">{sourceResult.error}</p>}
               {selectedItems.length > 1 && (
                 <div className="gl-layout-inspector" aria-label={t("Selected layout items")}>
-                  <strong>{t("{count} items selected", { count: selectedItems.length })}</strong>
+                  <strong>{selectionGrouped ? t("{count} items selected, one group", { count: selectedItems.length }) : t("{count} items selected", { count: selectedItems.length })}</strong>
                   <div className="gl-layout-item-actions">
-                    <button type="button" className="gl-mini-btn" onClick={() => duplicateItems(selectedIds)} title={t("Copies of every selected item, 20 px down and right (Cmd-D)")}>{t("Duplicate")}</button>
-                    <button type="button" className="gl-mini-btn" onClick={() => restackItems(selectedIds, "front")} title={t("Draw the selected items over every other")}>{t("Bring to front")}</button>
-                    <button type="button" className="gl-mini-btn" onClick={() => restackItems(selectedIds, "back")} title={t("Draw the selected items under every other")}>{t("Send to back")}</button>
-                    <button type="button" className="gl-mini-btn" onClick={() => setLocked(selectedIds, !selectionLocked)} title={t("Lock or unlock the selected items")}>{selectionLocked ? t("Unlock") : t("Lock")}</button>
-                    <button type="button" className="gl-mini-btn" onClick={() => removeItems(selectedIds)} title={t("Remove the selected items (Delete)")}>{t("Remove")}</button>
+                    {selectedUnitCount > 1 && <button type="button" className="gl-mini-btn" onClick={groupSelected} title={t("One group: selected, moved, aligned and distributed together (Cmd-G)")}>{t("Group")}</button>}
+                    {selectedItems.some((item) => item.group) && <button type="button" className="gl-mini-btn" onClick={ungroupSelected} title={t("Dissolve the group; the items stay where they are (Shift-Cmd-G)")}>{t("Ungroup")}</button>}
+                    <button type="button" className="gl-mini-btn" onClick={() => duplicateItems(selectedTemplateIds)} title={t("Copies of every selected item, 20 px down and right (Cmd-D)")}>{t("Duplicate")}</button>
+                    <button type="button" className="gl-mini-btn" onClick={() => restackItems(selectedTemplateIds, "front")} title={t("Draw the selected items over every other")}>{t("Bring to front")}</button>
+                    <button type="button" className="gl-mini-btn" onClick={() => restackItems(selectedTemplateIds, "back")} title={t("Draw the selected items under every other")}>{t("Send to back")}</button>
+                    <button type="button" className="gl-mini-btn" onClick={() => setLocked(selectedTemplateIds, !selectionLocked)} title={t("Lock or unlock the selected items")}>{selectionLocked ? t("Unlock") : t("Lock")}</button>
+                    <button type="button" className="gl-mini-btn" onClick={() => removeItems(selectedTemplateIds)} title={t("Remove the selected items (Delete)")}>{t("Remove")}</button>
                   </div>
-                  <p className="gl-hint">{t("Align and spread them with the toolbar; drag any of them to move them together.")}</p>
+                  <p className="gl-hint">{t("Align and distribute them with the toolbar; drag any of them to move them together; Cmd-G makes them one group.")}</p>
                 </div>
               )}
               {!selectedItems.length && (
                 <p className="gl-hint">
-                  {t("Click an item to select it, drag empty page to select several, Shift-click to add. Drag to move; drag a corner handle or an edge to resize; Option-drag to copy. Delete removes, arrows nudge (Shift: 10 px), Cmd-D duplicates, Cmd-A selects all, Cmd-Z undoes.")}
+                  {t("Click an item to select it, drag empty page to select several, Shift-click to add or remove. Drag to move, Shift holds the direction; drag a corner handle or an edge to resize, Shift keeps the proportions, Option resizes from the centre; Cmd turns snapping off; Option-drag copies. Delete removes, arrows nudge (Shift: 10 px), Cmd-D duplicates, Cmd-A selects all, Cmd-] and Cmd-[ bring forward and send backward (Shift: to the front or back), Cmd-G groups and Shift-Cmd-G ungroups, Shift-Cmd-L locks, Cmd-Z undoes.")}
                 </p>
               )}
               {selectedItem && (
@@ -2882,7 +3176,9 @@ export function LayoutTab({
                 sources={sourceResult.sources}
                 divisionProfiles={divisionProfiles}
                 canvasScale={canvasScale}
-                onTextChange={(text, contentHeight) =>
+                onTextChange={(text, contentHeight) => {
+                  // A block left with no words is removed, as the editors remove an empty text; undo brings it back.
+                  if (!text.trim()) { removeItems([item.templateId]); return; }
                   mutateActiveSheet((sheet) => {
                     const target = sheet.items.find(
                       (candidate) => candidate.id === item.templateId,
@@ -2891,29 +3187,36 @@ export function LayoutTab({
                     target.recipe.text = text;
                     // A block grows to show every line it was given; it never shrinks on its own.
                     if (contentHeight > 0) target.height = Math.max(target.height, Math.ceil(contentHeight) + 4);
-                  })
-                }
-                onDelete={() => removeItems([item.templateId])}
-                onOpenInGating={() => {
-                  if (isPlotLikeRecipe(item.recipe)) onOpenInGating(item.recipe);
+                  });
                 }}
                 onTextFocus={() => { if (!selectedIds.includes(item.id) || selectedIds.length > 1) setSelectedIds([item.id]); }}
-                onTextEscape={() => canvasRef.current?.focus({ preventScroll: true })}
+                textEditing={editingTextId === item.id}
+                onTextEditStart={() => { setSelectedIds([item.id]); setEditingTextId(item.id); }}
+                // Double-click on a member of a selected group takes the member alone, as Excalidraw and Penpot do.
+                onIsolate={item.group && selectedIds.includes(item.id) && selectedIds.length > 1 ? () => setSelectedIds([item.id]) : undefined}
+                // The block stays selected and the page takes the keyboard back.
+                onTextEditEnd={() => { setEditingTextId((current) => (current === item.id ? null : current)); canvasRef.current?.focus({ preventScroll: true }); }}
               />
             ))}
-            {!preview && selectedElements.length > 0 && (
+            {!preview && (
               <Moveable
                 ref={moveableRef}
-                target={selectedElements.length === 1 ? selectedElements[0] : selectedElements}
+                target={movableElements.length === 1 ? movableElements[0] : movableElements}
                 zoom={1 / zoom}
                 origin={false}
                 checkInput
                 // The overlay Moveable draws over a group lets presses through, so a member's
                 // editor can take focus and a click on a member can select it alone.
                 passDragArea
-                draggable={!selectionLocked}
-                resizable={!selectionLocked}
-                snappable
+                draggable
+                resizable
+                // Moveable measures its targets only when told; an undo, a nudge, an alignment or an
+                // inspector edit moves an item by its style, so the targets are watched for that.
+                useMutationObserver
+                useResizeObserver
+                keepRatio={modifiers.shift}
+                throttleDragRotate={modifiers.shift ? 45 : 0}
+                snappable={!modifiers.meta}
                 snapThreshold={6}
                 // The red distance digits Moveable draws beside a snap guideline were large and
                 // startling on a zoomed page and say nothing the guideline does not; guidelines stay.
@@ -2928,17 +3231,32 @@ export function LayoutTab({
                 snapGridHeight={snapToGrid ? SNAP_GRID : 0}
                 renderDirections={["nw", "n", "ne", "w", "e", "sw", "s", "se"]}
                 edge
-                onDragStart={(e: OnDragStart) => { e.datas.alt = !!e.inputEvent?.altKey; if (e.datas.alt) e.datas.ghosts = leaveGhosts([e.target]); }}
+                individualGroupable={ownFrames}
+                // Each item's frame measures from its wrapper's container, which the wrapper has not
+                // yet attached when the frames first mount; naming it (the page, where the frame is
+                // drawn anyway) keeps the first measurement from failing.
+                container={ownFrames ? pageEl : undefined}
+                onDragStart={startDrag}
                 onDrag={applyDrag}
-                onDragEnd={(e: OnDragEnd) => { removeGhosts(e.datas.ghosts); if (e.isDrag) commitFrames([e.target], !!e.datas.alt); }}
-                onDragGroupStart={(e: OnDragGroupStart) => { e.datas.alt = !!e.inputEvent?.altKey; if (e.datas.alt) e.datas.ghosts = leaveGhosts(e.targets); }}
+                onDragEnd={(e: OnDragEnd) => { const targets = dragTargets(e); endGesture(targets, e.lastEvent, e.isDrag, () => commitFrames(targets, !!e.datas.alt)); }}
+                onDragGroupStart={(e: OnDragGroupStart) => { e.datas.alt = !!e.inputEvent?.altKey; beginGesture([...(e.targets ?? [])], e.datas.alt ? leaveGhosts(e.targets ?? []) : undefined); }}
                 onDragGroup={(e: OnDragGroup) => e.events.forEach(applyDrag)}
-                onDragGroupEnd={(e: OnDragGroupEnd) => { removeGhosts(e.datas.ghosts); if (e.isDrag) commitFrames(e.targets, !!e.datas.alt); }}
+                onDragGroupEnd={(e: OnDragGroupEnd) => endGesture(e.targets, e.lastEvent, e.isDrag, () => commitFrames(e.targets, !!e.datas.alt))}
+                // Option held as a handle is taken: the resize keeps the centre where it is.
+                onResizeStart={(e: OnResizeStart) => { beginGesture([e.target]); if (e.inputEvent?.altKey) e.setFixedDirection([0, 0]); }}
                 onResize={applyResize}
-                onResizeEnd={(e: OnResizeEnd) => { if (e.isDrag) commitFrames([e.target], false); }}
+                onResizeEnd={(e: OnResizeEnd) => endGesture([e.target], e.lastEvent, e.isDrag, () => commitFrames([e.target], false))}
+                onResizeGroupStart={(e: OnResizeGroupStart) => { beginGesture([...(e.targets ?? [])]); if (e.inputEvent?.altKey) e.events.forEach((event) => event.setFixedDirection([0, 0])); }}
                 onResizeGroup={(e: OnResizeGroup) => e.events.forEach(applyResize)}
-                onResizeGroupEnd={(e: OnResizeGroupEnd) => { if (e.isDrag) commitFrames(e.targets, false); }}
-                // A click on one member of a selected group selects that member alone (Shift keeps the group).
+                onResizeGroupEnd={(e: OnResizeGroupEnd) => endGesture(e.targets, e.lastEvent, e.isDrag, () => commitFrames(e.targets, false))}
+                // A press on a selected item is Moveable's, for the drag; a click that did not move is
+                // handed back to Selecto, so Shift-click takes the item out again and a click on one
+                // member of a selected group selects that member alone (a group re-selects whole).
+                // With own frames a plain click on one of several selected items takes it alone.
+                onClick={(e: OnClick) => {
+                  if (handedOffRef.current) { handedOffRef.current = false; return; }
+                  if (e.inputEvent?.shiftKey || ownFrames) selectoRef.current?.clickTarget(e.inputEvent, e.inputTarget);
+                }}
                 onClickGroup={(e: OnClickGroup) => { selectoRef.current?.clickTarget(e.inputEvent, e.inputTarget); }}
               />
             )}

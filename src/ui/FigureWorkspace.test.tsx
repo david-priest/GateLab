@@ -322,8 +322,29 @@ describe("FigureWorkspace", () => {
     expect(panels[0].classList.contains("is-selected")).toBe(true);
     click(panels[2], { metaKey: true });
     expect(host.textContent).toContain("2 panels selected");
-    // Shift takes the block between the anchor and the clicked panel.
+    // Cmd-click takes a panel out again; a plain click on a selected panel keeps it selected.
+    click(panels[2], { metaKey: true });
+    expect(host.textContent).toContain("1 panel selected");
+    click(panels[0]);
+    expect(host.textContent).toContain("1 panel selected");
+    // Shift-click takes the block from the last plain or Cmd click to the clicked panel, and a
+    // second Shift-click from the same anchor resizes that block: the fixture's panels are one
+    // column, so the block from the first to the third is three, and back to the second is two.
+    click(panels[2], { shiftKey: true });
+    expect(host.textContent).toContain("3 panels selected");
+    expect(panels[1].classList.contains("is-selected")).toBe(true);
     click(panels[1], { shiftKey: true });
+    expect(host.textContent).toContain("2 panels selected");
+    expect(panels[2].classList.contains("is-selected")).toBe(false);
+    // Cmd-click moves the anchor: the next block runs from the third panel to the second, and what
+    // was selected outside it stays.
+    click(panels[2], { metaKey: true });
+    expect(host.textContent).toContain("3 panels selected");
+    click(panels[1], { shiftKey: true });
+    expect(host.textContent).toContain("3 panels selected");
+    click(panels[0]);
+    expect(host.textContent).toContain("1 panel selected");
+    click(panels[2], { metaKey: true });
     expect(host.textContent).toContain("2 panels selected");
     act(() => button("Add selected panels to the Layout tab").click());
     expect(onAddToLayout).toHaveBeenCalledTimes(1);
@@ -336,9 +357,16 @@ describe("FigureWorkspace", () => {
     // The fixture's panels are one column, so the two chosen sit one below the other, closed up to
     // the block they span.
     expect(cells).toEqual([{ row: 0, column: 0 }, { row: 1, column: 0 }]);
-    // Escape clears; a moved press is not a click.
+    // Escape in a field is the field's; on the page it clears. Cmd-A takes every panel.
+    const field = host.querySelector<HTMLInputElement>("input")!;
+    act(() => { field.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
+    expect(host.querySelectorAll("td.is-selected")).toHaveLength(2);
     act(() => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
     expect(host.querySelectorAll("td.is-selected")).toHaveLength(0);
+    act(() => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "a", metaKey: true, cancelable: true })); });
+    expect(host.querySelectorAll("td.is-selected")).toHaveLength(panels.length);
+    act(() => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+    // A moved press is not a click.
     act(() => {
       panels[0].dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: 10, clientY: 10 }));
       panels[0].dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 40, clientY: 10 }));
@@ -388,6 +416,9 @@ describe("FigureWorkspace", () => {
     const panel = host.querySelector<HTMLElement>("td[data-figure-panel]")!;
     expect(panel).not.toBeNull();
     act(() => { panel.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 90 })); });
+    // The right-click selected the panel under the pointer.
+    expect(panel.classList.contains("is-selected")).toBe(true);
+    expect(host.querySelectorAll("td.is-selected")).toHaveLength(1);
     const menuItem = (label: string) => [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent === label)!;
     act(() => menuItem("Add this panel to the Layout tab").click());
     expect(onAddToLayout).toHaveBeenCalledTimes(1);

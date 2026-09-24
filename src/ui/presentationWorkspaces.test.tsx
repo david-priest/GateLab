@@ -48,6 +48,8 @@ describe("presentation workspaces", () => {
     const render = (activeSampleId: string) => act(() => root.render(<LayoutTab workspace={workspace} onChange={next => { workspace = next; render(activeSampleId); }} samples={f.files} activeSampleId={activeSampleId} activePopulationId={f.root.population_id} state={f.state} globalScales={{}} defaultX="FSC-A" defaultY="SSC-A" illustrationConfig={null} dataRevision={0} densityColorPower={1} onOpenInGating={() => {}} />));
     render("D1"); await settle(); expect(host.querySelector(".gl-layout-plot-host")?.textContent).toContain("D2.fcs");
     render("D2"); await settle(); expect(host.querySelector(".gl-layout-plot-host")?.textContent).toContain("D2.fcs");
+    // The words are static as placed; a double-click on them opens the editor.
+    act(() => host.querySelector<HTMLElement>(".gl-layout-text-surface")!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
     const text = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Layout text"]')!;
     change(text, "Panel B"); act(() => text.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
     expect(workspace.sheets[0].items[1].recipe).toMatchObject({ text: "Panel B" });
