@@ -26,6 +26,11 @@ const draws = vi.hoisted(() => ({
   exports: [] as { name: string; format: string; pages: number }[],
   moveable: null as Record<string, any> | null,
   selecto: null as Record<string, any> | null,
+  frameUpdates: 0,
+  dragStarts: [] as unknown[],
+  stopDrags: 0,
+  selectoTargets: [] as Element[],
+  selectoClicks: [] as { shift: boolean; target: Element }[],
 }));
 vi.mock("../plots/loadPlots", () => ({
   loadMiniPlots: () => ({
@@ -51,16 +56,22 @@ vi.mock("react-moveable", () => ({
     useImperativeHandle(ref, () => ({
       isMoveableElement: () => false,
       waitToChangeTarget: async () => {},
-      dragStart: () => {},
+      dragStart: (event: unknown) => { draws.dragStarts.push(event); },
+      stopDrag: () => { draws.stopDrags += 1; },
+      updateRect: () => { draws.frameUpdates += 1; },
     }));
     return null;
   }),
 }));
 vi.mock("react-selecto", () => ({
-  default: (props: Record<string, any>) => {
+  default: forwardRef((props: Record<string, any>, ref) => {
     draws.selecto = props;
+    useImperativeHandle(ref, () => ({
+      setSelectedTargets: (targets: Element[]) => { draws.selectoTargets = targets; },
+      clickTarget: (event: MouseEvent, target: Element) => { draws.selectoClicks.push({ shift: !!event.shiftKey, target }); },
+    }));
     return null;
-  },
+  }),
 }));
 
 let root: Root;
@@ -74,6 +85,10 @@ beforeEach(() => {
   draws.exports = [];
   draws.moveable = null;
   draws.selecto = null;
+  draws.selectoTargets = [];
+  draws.selectoClicks = [];
+  draws.dragStarts = [];
+  draws.stopDrags = 0;
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -98,14 +113,19 @@ const key = (init: KeyboardEventInit) => act(() => {
 const element = (id: string) => host.querySelector<HTMLElement>(`[data-item-id="${id}"]`)!;
 /** What Selecto reports when the user clicks or marquees these items. */
 const select = (...ids: string[]) => act(() => {
-  draws.selecto!.onSelectEnd({ selected: ids.map(element), isDragStart: false, inputEvent: {} });
+  draws.selecto!.onSelectEnd({ selected: ids.map(element), isDragStart: false, isClick: ids.length <= 1, inputEvent: {} });
 });
+/** Opens a text block's editor as a double-click on its words does, and returns the editor. */
+const openEditor = (id: string) => {
+  act(() => { element(id).querySelector<HTMLElement>(".gl-layout-text-surface")!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); });
+  return element(id).querySelector<HTMLTextAreaElement>("textarea")!;
+};
 /** What Moveable reports for a drag of one item to a new place. */
 const drag = (id: string, to: { x: number; y: number }, altKey = false) => act(() => {
   const el = element(id);
   const datas: Record<string, unknown> = {};
-  draws.moveable!.onDragStart({ datas, inputEvent: { altKey } });
-  draws.moveable!.onDrag({ target: el, left: to.x, top: to.y });
+  draws.moveable!.onDragStart({ target: el, datas, inputEvent: { altKey } });
+  draws.moveable!.onDrag({ target: el, left: to.x, top: to.y, datas });
   draws.moveable!.onDragEnd({ target: el, isDrag: true, datas });
 });
 
@@ -388,7 +408,7 @@ describe("LayoutTab moving, copying and arranging", () => {
     expect(Array.isArray(draws.moveable!.target)).toBe(true);
     act(() => button("Left").click());
     expect(items(changes).map((i) => i.x)).toEqual([100, 100, 100]);
-    act(() => button("Spread ↕").click());
+    act(() => button("Distribute ↕").click());
     expect(items(changes).map((i) => i.y)).toEqual([100, 250, 400]); // already even, so unchanged
 
     // The whole group moves with a group drag.
@@ -404,10 +424,12 @@ describe("LayoutTab moving, copying and arranging", () => {
     // Locking: the group is no longer draggable; nudges skip the locked items; unlocking restores it.
     act(() => button("Lock").click());
     expect(items(changes).every((i) => i.locked)).toBe(true);
-    expect(draws.moveable!.draggable).toBe(false);
+    // Locked items are not Moveable's to move: with every selected item locked, it has no target.
+    expect(draws.moveable!.target).toEqual([]);
     key({ key: "ArrowRight" });
     expect(items(changes).map((i) => i.x)).toEqual([10, 30, 50]);
     act(() => button("Unlock").click());
+    expect(draws.moveable!.draggable).toBe(true);
     key({ key: "ArrowRight" });
     expect(items(changes).map((i) => i.x)).toEqual([11, 31, 51]);
   });
@@ -471,23 +493,444 @@ describe("LayoutTab moving, copying and arranging", () => {
     key({ key: "z", metaKey: true, shiftKey: true });
     expect(items(changes)).toHaveLength(0);
   });
-});
 
-describe("LayoutTab text blocks", () => {
-  it("selects a text block when its editor takes focus, and hands the keyboard back on Escape", () => {
+  it("keeps the selection frame on the items: Moveable watches them and is re-measured after a nudge, an undo and an alignment", () => {
+    const changes = mount(fixture());
+    act(() => button("+ Text").click());
+    act(() => button("+ Text").click());
+    const [a, b] = items(changes);
+    select(a.id);
+    expect(draws.moveable).toMatchObject({ useMutationObserver: true, useResizeObserver: true });
+    // Every change of the page's items re-measures the frame, so it follows a move made by the
+    // keyboard, by undo or by the toolbar rather than by a drag of its own.
+    let measured = draws.frameUpdates;
+    key({ key: "ArrowRight" });
+    expect(items(changes)[0].x).toBe(58);
+    expect(draws.frameUpdates).toBeGreaterThan(measured);
+    measured = draws.frameUpdates;
+    key({ key: "z", metaKey: true });
+    expect(items(changes)[0].x).toBe(57);
+    expect(draws.frameUpdates).toBeGreaterThan(measured);
+    measured = draws.frameUpdates;
+    select(a.id, b.id);
+    act(() => button("Left").click());
+    expect(draws.frameUpdates).toBeGreaterThan(measured);
+  });
+
+  it("groups with Cmd-G: a member selects the group, Shift-click takes it out whole, copies form their own group, Shift-Cmd-G dissolves it", () => {
+    const changes = mount(fixture());
+    for (let i = 0; i < 3; i++) act(() => button("+ Text").click());
+    const [a, b, c] = items(changes);
+    const selected = () => [...host.querySelectorAll(".gl-layout-item.is-selected")].map((el) => el.getAttribute("data-item-id"));
+    select(a.id, b.id);
+    key({ key: "g", metaKey: true });
+    const group = items(changes)[0].group;
+    expect(group).toBeTruthy();
+    expect(items(changes).map((item) => item.group)).toEqual([group, group, undefined]);
+    expect(host.textContent).toContain("2 items selected, one group");
+    // A click on one member selects the group.
+    select(c.id);
+    expect(selected()).toEqual([c.id]);
+    select(a.id);
+    expect(selected()).toEqual([a.id, b.id]);
+    // Shift-click on a member takes the whole group out; Shift-click on the loose item adds it alone.
+    act(() => { draws.selecto!.onSelectEnd({ selected: [element(b.id)], removed: [element(a.id)], added: [], isDragStart: false, isClick: true, inputEvent: { shiftKey: true } }); });
+    expect(selected()).toEqual([]);
+    act(() => { draws.selecto!.onSelectEnd({ selected: [element(c.id), element(a.id)], removed: [], added: [element(a.id)], isDragStart: false, isClick: true, inputEvent: { shiftKey: true } }); });
+    expect(selected()).toEqual([a.id, b.id, c.id]);
+    // Distribute wants three units: the group counts once, so it is off; ungrouped, on.
+    expect(button("Distribute ↔").disabled).toBe(true);
+    // Copies of the group make a group of their own.
+    select(a.id);
+    key({ key: "d", metaKey: true });
+    const copies = items(changes).slice(3);
+    expect(copies).toHaveLength(2);
+    expect(copies[0].group).toBeTruthy();
+    expect(copies[0].group).toBe(copies[1].group);
+    expect(copies[0].group).not.toBe(group);
+    // Shift-Cmd-G dissolves the group under the selection; the items stay put and selected.
+    select(a.id);
+    const before = items(changes).slice(0, 2).map(({ x, y }) => [x, y]);
+    key({ key: "g", metaKey: true, shiftKey: true });
+    expect(items(changes).slice(0, 2).map((item) => item.group)).toEqual([undefined, undefined]);
+    expect(items(changes).slice(0, 2).map(({ x, y }) => [x, y])).toEqual(before);
+    expect(selected()).toEqual([a.id, b.id]);
+    select(a.id, b.id, c.id);
+    expect(button("Distribute ↔").disabled).toBe(false);
+  });
+
+  it("draws each item of a selection with no group in its own frame, so Ungroup shows at once, and a drag on one moves them all", () => {
+    const changes = mount(fixture());
+    for (let i = 0; i < 3; i++) act(() => button("+ Text").click());
+    const [a, b, c] = items(changes);
+    const ownFrames = () => !!draws.moveable!.individualGroupable;
+    // One item: its own frame, as ever. Several loose items: each its own.
+    select(a.id);
+    expect(ownFrames()).toBe(false);
+    select(a.id, b.id);
+    expect(ownFrames()).toBe(true);
+    // Grouped: one frame for the group; with a loose item beside it, still one frame.
+    key({ key: "g", metaKey: true });
+    expect(ownFrames()).toBe(false);
+    act(() => { draws.selecto!.onSelectEnd({ selected: [element(a.id), element(b.id), element(c.id)], removed: [], added: [element(c.id)], isDragStart: false, isClick: true, inputEvent: { shiftKey: true } }); });
+    expect(ownFrames()).toBe(false);
+    // Ungrouped with nothing else pressed: the two items are in their own frames on the same render.
+    select(a.id);
+    key({ key: "g", metaKey: true, shiftKey: true });
+    expect([...host.querySelectorAll(".gl-layout-item.is-selected")].map((el) => el.getAttribute("data-item-id"))).toEqual([a.id, b.id]);
+    expect(ownFrames()).toBe(true);
+    // A drag on one of them carries the other by the same distance, and both are committed.
+    const [ax, ay, bx, by] = [items(changes)[0].x, items(changes)[0].y, items(changes)[1].x, items(changes)[1].y];
+    drag(a.id, { x: ax + 40, y: ay + 25 });
+    expect(items(changes).slice(0, 2).map(({ x, y }) => [x, y])).toEqual([[ax + 40, ay + 25], [bx + 40, by + 25]]);
+    expect(items(changes)[2]).toMatchObject({ x: c.x, y: c.y });
+    // A plain click on one of them, which Moveable reports as its own click, takes it alone.
+    act(() => { draws.moveable!.onClick({ inputEvent: { shiftKey: false }, inputTarget: element(b.id) }); });
+    // Compared by identity: a deep match on a DOM element walks the whole document.
+    expect(draws.selectoClicks.at(-1)?.shift).toBe(false);
+    expect(draws.selectoClicks.at(-1)?.target).toBe(element(b.id));
+  });
+
+  it("acts on a right-clicked group whole from the item menu, Ungroup included, when the group was not selected", () => {
+    const changes = mount(fixture());
+    for (let i = 0; i < 3; i++) act(() => button("+ Text").click());
+    const [a, b] = items(changes);
+    select(a.id, b.id);
+    key({ key: "g", metaKey: true });
+    key({ key: "Escape" });
+    expect(host.querySelectorAll(".gl-layout-item.is-selected")).toHaveLength(0);
+    const menuItem = (label: string) => [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((entry) => entry.textContent === label)!;
+    const openOn = (id: string) => act(() => { element(id).dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 200, clientY: 150 })); });
+    // Lock from the menu takes the whole group, not the member under the pointer.
+    openOn(b.id);
+    act(() => menuItem("Lock").click());
+    expect(items(changes).slice(0, 2).map((item) => !!item.locked)).toEqual([true, true]);
+    openOn(b.id);
+    act(() => menuItem("Unlock").click());
+    key({ key: "Escape" });
+    // Ungroup from the menu of an unselected group dissolves it, and the members stay selected,
+    // each in a frame of its own.
+    openOn(b.id);
+    act(() => menuItem("Ungroup").click());
+    expect(items(changes).slice(0, 2).map((item) => item.group)).toEqual([undefined, undefined]);
+    expect([...host.querySelectorAll(".gl-layout-item.is-selected")].map((el) => el.getAttribute("data-item-id"))).toEqual([a.id, b.id]);
+    expect(draws.moveable!.individualGroupable).toBe(true);
+  });
+
+  it("cancels a drag of items in their own frames with Escape, putting every one back", () => {
+    const changes = mount(fixture());
+    for (let i = 0; i < 2; i++) act(() => button("+ Text").click());
+    const [a, b] = items(changes);
+    select(a.id, b.id);
+    const datas: Record<string, unknown> = {};
+    act(() => {
+      draws.moveable!.onDragStart({ target: element(a.id), datas, inputEvent: {} });
+      draws.moveable!.onDrag({ target: element(a.id), left: a.x + 80, top: a.y + 80, datas });
+    });
+    expect(element(b.id).style.left).toBe(`${b.x + 80}px`);
+    act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
+    expect([element(a.id).style.left, element(b.id).style.left]).toEqual([`${a.x}px`, `${b.x}px`]);
+    act(() => { draws.moveable!.onDragEnd({ target: element(a.id), isDrag: true, datas, lastEvent: { dist: [80, 80] } }); });
+    expect(items(changes).map(({ x }) => x)).toEqual([a.x, b.x]);
+  });
+
+  it("undoes and redoes the layout from anywhere on the window while the tab is shown, leaving a field's own undo alone", () => {
+    const changes = mount(fixture());
+    act(() => button("+ Text").click());
+    const first = items(changes)[0];
+    select(first.id);
+    key({ key: "ArrowRight" });
+    expect(items(changes)[0].x).toBe(58);
+    // The keyboard is on a toolbar button, as after a click on Align: the window still undoes the layout.
+    act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, cancelable: true })); });
+    expect(items(changes)[0].x).toBe(57);
+    act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, shiftKey: true, cancelable: true })); });
+    expect(items(changes)[0].x).toBe(58);
+    // In a field the keys are the field's.
+    const field = host.querySelector<HTMLInputElement>('input[type="text"], input[type="number"]') ?? host.querySelector("input")!;
+    act(() => { field.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true })); });
+    expect(items(changes)[0].x).toBe(58);
+    // A press on a toolbar button does not take the keyboard from the page.
+    const press = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    button("Left").dispatchEvent(press);
+    expect(press.defaultPrevented).toBe(true);
+  });
+
+  it("shows no frame on a text block while its editor is open", () => {
+    const changes = mount(fixture());
+    act(() => button("+ Text").click());
+    const first = items(changes)[0];
+    select(first.id);
+    expect(draws.moveable!.target).toBe(element(first.id));
+    const editor = openEditor(first.id);
+    expect(editor).not.toBeNull();
+    expect(draws.moveable!.target).toEqual([]);
+    act(() => { editor.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" })); });
+    expect(draws.moveable!.target).toBe(element(first.id));
+    expect(element(first.id).classList.contains("is-selected")).toBe(true);
+  });
+
+  it("hands Moveable the drag of a pressed item at once, even when nothing was selected before", async () => {
+    const changes = mount(fixture());
+    act(() => button("+ Text").click());
+    const first = items(changes)[0];
+    key({ key: "Escape" });
+    expect(draws.moveable!.target).toEqual([]);
+    const press = { target: element(first.id), clientX: 10, clientY: 10 };
+    act(() => { draws.selecto!.onSelectEnd({ selected: [element(first.id)], isDragStart: true, isClick: false, inputEvent: press }); });
+    await flush();
+    expect(draws.moveable!.target).toBe(element(first.id));
+    expect(draws.dragStarts).toEqual([press]);
+  });
+
+  it("hands no drag to Moveable for the click Selecto is handed back, which reports itself as a drag start as well", async () => {
     const changes = mount(fixture());
     act(() => button("+ Text").click());
     act(() => button("+ Text").click());
     const [a, b] = items(changes);
     select(a.id, b.id);
+    act(() => { draws.selecto!.onSelectEnd({ selected: [element(a.id)], removed: [element(b.id)], added: [], isDragStart: true, isClick: true, inputEvent: { target: element(a.id), type: "mousedown" } }); });
+    await flush();
+    expect([...host.querySelectorAll(".gl-layout-item.is-selected")].map((el) => el.getAttribute("data-item-id"))).toEqual([a.id]);
+    expect(draws.dragStarts).toEqual([]);
+  });
+
+  it("does not treat a press with a wobble as an edit, and cancels a drag on Escape", () => {
+    const changes = mount(fixture());
+    act(() => button("+ Text").click());
+    const first = items(changes)[0];
+    select(first.id);
+    const edits = changes.length;
+    const el = element(first.id);
+    // A 1 px wobble: the element is put back and nothing is committed.
+    act(() => {
+      const datas: Record<string, unknown> = {};
+      draws.moveable!.onDragStart({ target: el, datas, inputEvent: {} });
+      draws.moveable!.onDrag({ target: el, left: first.x + 1, top: first.y });
+      draws.moveable!.onDragEnd({ target: el, isDrag: true, datas, lastEvent: { dist: [1, 0] } });
+    });
+    expect(changes.length).toBe(edits);
+    expect(el.style.left).toBe(`${first.x}px`);
+    // Escape mid-drag: the element goes back, Moveable's drag is stopped, and the end commits nothing.
+    act(() => {
+      const datas: Record<string, unknown> = {};
+      draws.moveable!.onDragStart({ target: el, datas, inputEvent: {} });
+      draws.moveable!.onDrag({ target: el, left: first.x + 80, top: first.y + 60 });
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+      draws.moveable!.onDragEnd({ target: el, isDrag: true, datas, lastEvent: { dist: [80, 60] } });
+    });
+    expect(draws.stopDrags).toBe(1);
+    expect(changes.length).toBe(edits);
+    expect(el.style.left).toBe(`${first.x}px`);
+    expect(items(changes)[0]).toMatchObject({ x: first.x, y: first.y });
+    // A real drag still commits.
+    drag(first.id, { x: 200, y: 150 });
+    expect(items(changes)[0]).toMatchObject({ x: 200, y: 150 });
+  });
+
+  it("forgets a gesture on the pointer's release even when Moveable never ends it, so Escape still deselects", async () => {
+    const changes = mount(fixture());
+    act(() => button("+ Text").click());
+    const first = items(changes)[0];
+    select(first.id);
+    // A press starts a gesture; the selection changes under it and no end event comes.
+    act(() => { draws.moveable!.onDragStart({ target: element(first.id), datas: {}, inputEvent: {} }); });
+    act(() => { window.dispatchEvent(new MouseEvent("mouseup")); });
+    await flush();
+    key({ key: "Escape" });
+    expect(host.querySelectorAll(".gl-layout-item.is-selected")).toHaveLength(0);
+    expect(draws.stopDrags).toBe(0);
+  });
+
+  it("takes a member of a selected group alone on a double-click, and removes a text block left empty", () => {
+    const changes = mount(fixture());
+    act(() => button("+ Text").click());
+    act(() => button("+ Text").click());
+    const [a, b] = items(changes);
+    select(a.id, b.id);
+    key({ key: "g", metaKey: true });
+    select(a.id);
     expect(host.querySelectorAll(".gl-layout-item.is-selected")).toHaveLength(2);
-    const editor = element(a.id).querySelector<HTMLTextAreaElement>("textarea")!;
-    act(() => editor.focus());
+    act(() => { element(b.id).dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); });
+    expect([...host.querySelectorAll(".gl-layout-item.is-selected")].map((el) => el.getAttribute("data-item-id"))).toEqual([b.id]);
+    // Emptied in its editor, the block goes; undo brings it back.
+    const editor = openEditor(b.id);
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(editor, "   ");
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => editor.blur());
+    expect(items(changes)).toHaveLength(1);
+    key({ key: "z", metaKey: true });
+    expect(items(changes)).toHaveLength(2);
+  });
+
+  it("offers Group and Ungroup on the page's own menu while a selection exists", () => {
+    const changes = mount(fixture());
+    act(() => button("+ Text").click());
+    act(() => button("+ Text").click());
+    const [a, b] = items(changes);
+    const canvas = host.querySelector<HTMLElement>(".gl-layout-canvas")!;
+    const menuLabels = () => [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].map((el) => el.textContent);
+    const openPageMenu = () => act(() => { canvas.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 600, clientY: 500 })); });
+    openPageMenu();
+    expect(menuLabels()).not.toContain("Group");
+    act(() => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+    select(a.id, b.id);
+    openPageMenu();
+    expect(menuLabels()).toContain("Group");
+    expect(menuLabels()).not.toContain("Ungroup");
+    act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((el) => el.textContent === "Group")!.click());
+    expect(items(changes)[0].group).toBeTruthy();
+    openPageMenu();
+    expect(menuLabels()).toContain("Ungroup");
+    expect(menuLabels()).not.toContain("Group");
+  });
+
+  it("tells Selecto what is selected, and gives a still press on a multi-selection back to it as a click", () => {
+    const changes = mount(fixture());
+    act(() => button("+ Text").click());
+    act(() => button("+ Text").click());
+    const [a, b] = items(changes);
+    select(a.id, b.id);
+    expect(draws.selectoTargets).toEqual([element(a.id), element(b.id)]);
+    key({ key: "Escape" });
+    expect(draws.selectoTargets).toEqual([]);
+    select(a.id, b.id);
+    // A press on a member of a selected group is Moveable's, for the group's one frame; released
+    // without moving, it is the click Selecto is handed, with its Shift. (Loose items each have a
+    // frame of their own, which reports its own click.)
+    key({ key: "g", metaKey: true });
+    const stop = vi.fn();
+    act(() => { draws.selecto!.onDragStart({ inputEvent: { target: element(a.id), clientX: 10, clientY: 10, shiftKey: true }, stop }); });
+    expect(stop).toHaveBeenCalled();
+    act(() => { window.dispatchEvent(new MouseEvent("mouseup", { clientX: 12, clientY: 11 })); });
+    expect(draws.selectoClicks).toEqual([{ shift: true, target: element(a.id) }]);
+    // Moved, it was a drag and not a click.
+    act(() => { draws.selecto!.onDragStart({ inputEvent: { target: element(b.id), clientX: 10, clientY: 10 }, stop }); });
+    act(() => { window.dispatchEvent(new MouseEvent("mouseup", { clientX: 40, clientY: 30 })); });
+    expect(draws.selectoClicks).toHaveLength(1);
+  });
+
+  it("restacks one step with Cmd-] and Cmd-[, to the ends with Shift, and locks with Shift-Cmd-L", () => {
+    const changes = mount(fixture());
+    for (let i = 0; i < 3; i++) act(() => button("+ Text").click());
+    const [a, b, c] = items(changes);
+    const name = (id: string) => (id === a.id ? "a" : id === b.id ? "b" : "c");
+    /** The stack from the bottom up. */
+    const stack = () => [...items(changes)].sort((p, q) => p.z - q.z).map((item) => name(item.id)).join("");
+    expect(stack()).toBe("abc");
+    select(b.id);
+    key({ key: "]", metaKey: true });
+    expect(stack()).toBe("acb");
+    key({ key: "[", metaKey: true });
+    expect(stack()).toBe("abc");
+    key({ key: "[", metaKey: true });
+    expect(stack()).toBe("bac");
+    key({ key: "]", metaKey: true, shiftKey: true });
+    expect(stack()).toBe("acb");
+    key({ key: "[", metaKey: true, shiftKey: true });
+    expect(stack()).toBe("bac");
+    // Two moving items pass one still item together.
+    select(a.id, c.id);
+    key({ key: "[", metaKey: true });
+    expect(stack()).toBe("acb");
+    key({ key: "l", metaKey: true, shiftKey: true });
+    expect(items(changes).map((item) => item.locked === true)).toEqual([true, false, true]);
+    key({ key: "l", metaKey: true, shiftKey: true });
+    expect(items(changes).some((item) => item.locked)).toBe(false);
+  });
+
+  it("reads Shift, Cmd and Option as held: proportions kept, direction held, snapping off, resizing from the centre", () => {
+    const changes = mount(fixture());
+    act(() => button("+ Text").click());
+    select(items(changes)[0].id);
+    expect(draws.moveable).toMatchObject({ keepRatio: false, throttleDragRotate: 0, snappable: true });
+    act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Shift", shiftKey: true })); });
+    expect(draws.moveable).toMatchObject({ keepRatio: true, throttleDragRotate: 45 });
+    act(() => { window.dispatchEvent(new KeyboardEvent("keyup", { key: "Shift", shiftKey: false })); });
+    expect(draws.moveable).toMatchObject({ keepRatio: false, throttleDragRotate: 0 });
+    act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Meta", metaKey: true })); });
+    expect(draws.moveable!.snappable).toBe(false);
+    act(() => { window.dispatchEvent(new Event("blur")); });
+    expect(draws.moveable!.snappable).toBe(true);
+    const fixed = vi.fn();
+    act(() => draws.moveable!.onResizeStart({ inputEvent: { altKey: true }, setFixedDirection: fixed }));
+    expect(fixed).toHaveBeenCalledWith([0, 0]);
+    fixed.mockClear();
+    act(() => draws.moveable!.onResizeStart({ inputEvent: { altKey: false }, setFixedDirection: fixed }));
+    expect(fixed).not.toHaveBeenCalled();
+    act(() => draws.moveable!.onResizeGroupStart({ inputEvent: { altKey: true }, events: [{ setFixedDirection: fixed }, { setFixedDirection: fixed }] }));
+    expect(fixed).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets a click select a locked item to unlock it, while a marquee, select-all and a spread pass it over", () => {
+    const changes = mount(fixture());
+    for (let i = 0; i < 4; i++) act(() => button("+ Text").click());
+    const [a, b, c, d] = items(changes);
+    select(a.id); drag(a.id, { x: 100, y: 100 });
+    select(b.id); drag(b.id, { x: 100, y: 250 });
+    select(c.id); drag(c.id, { x: 100, y: 400 });
+    select(d.id); drag(d.id, { x: 100, y: 700 });
+    select(c.id);
+    act(() => [...host.querySelectorAll<HTMLLabelElement>("label.gl-check")].find((label) => label.textContent?.trim() === "Locked")!.querySelector("input")!.click());
+    expect(items(changes)[2].locked).toBe(true);
+    // A marquee over all four takes three.
+    act(() => draws.selecto!.onSelectEnd({ selected: [a, b, c, d].map((item) => element(item.id)), isDragStart: false, isClick: false, inputEvent: {} }));
+    const selected = () => [...host.querySelectorAll(".gl-layout-item.is-selected")].map((el) => el.getAttribute("data-item-id"));
+    expect(selected()).toEqual([a.id, b.id, d.id]);
+    key({ key: "a", metaKey: true });
+    expect(selected()).toEqual([a.id, b.id, d.id]);
+    // Spreading the selection leaves the locked item where it is.
+    act(() => button("Distribute ↕").click());
+    expect(items(changes).map((item) => item.y)).toEqual([100, 400, 400, 700]);
+    // A click still takes it, so it can be unlocked.
+    select(c.id);
+    expect(selected()).toEqual([c.id]);
+    expect(host.textContent).toContain("Locked");
+  });
+});
+
+describe("LayoutTab text blocks", () => {
+  it("shows a text block as static words, opens its editor on a double-click or Enter, and keeps what was typed on Escape", () => {
+    const changes = mount(fixture());
+    act(() => button("+ Text").click());
+    act(() => button("+ Text").click());
+    const [a, b] = items(changes);
+    // As placed: no editor, so the block is Moveable's to drag by its body.
+    expect(element(a.id).querySelector("textarea")).toBeNull();
+    expect(element(a.id).querySelector(".gl-layout-text-surface.is-static")?.textContent).toBe("Text");
+    select(a.id, b.id);
+    expect(host.querySelectorAll(".gl-layout-item.is-selected")).toHaveLength(2);
+    // A double-click on the words opens the editor on that block alone, with the keyboard in it.
+    const editor = openEditor(a.id);
+    expect(editor).not.toBeNull();
     expect(host.querySelectorAll(".gl-layout-item.is-selected")).toHaveLength(1);
     expect(element(a.id).classList.contains("is-selected")).toBe(true);
+    expect(document.activeElement).toBe(editor);
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(editor, "Figure 1");
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+    });
     act(() => { editor.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" })); });
-    expect(document.activeElement).toBe(page());
+    // Escape leaves the editor keeping the words; the block stays selected and the page has the keyboard.
+    expect(items(changes)[0].recipe).toMatchObject({ kind: "text", text: "Figure 1" });
+    expect(element(a.id).querySelector("textarea")).toBeNull();
+    expect(element(a.id).querySelector(".gl-layout-text-surface")?.textContent).toBe("Figure 1");
     expect(element(a.id).classList.contains("is-selected")).toBe(true);
+    expect(document.activeElement).toBe(page());
+    // Enter with the block selected opens the editor too; a click elsewhere (blur) closes it.
+    key({ key: "Enter" });
+    const again = element(a.id).querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(again).not.toBeNull();
+    expect(again.value).toBe("Figure 1");
+    act(() => again.blur());
+    expect(element(a.id).querySelector("textarea")).toBeNull();
+    // Enter opens the editor of whichever text block is the one selected.
+    select(b.id);
+    key({ key: "Enter" });
+    expect(element(b.id).querySelector("textarea")).not.toBeNull();
+    expect(element(a.id).querySelector("textarea")).toBeNull();
   });
 });
 
@@ -525,7 +968,7 @@ describe("LayoutTab page, zoom and export", () => {
     expect(changes.at(-1)?.sheets[0].page.columns).toBe(2);
     expect(canvas().style.width).toBe("1512px");
     expect(host.querySelectorAll(".gl-layout-page")).toHaveLength(2);
-    expect(draws.moveable).toBeNull(); // nothing selected, nothing to move
+    expect(draws.moveable!.target).toEqual([]); // nothing selected, nothing to move
   });
 
   it("fits the page to the content and the content to the page", () => {
@@ -560,6 +1003,41 @@ describe("LayoutTab page, zoom and export", () => {
     expect(host.querySelector(".gl-layout-zoom-level")?.textContent).toBe("100%");
     expect(wheel({ deltaY: 100, ctrlKey: true })).toBe(true);
     expect(host.querySelector(".gl-layout-zoom-level")?.textContent).toBe("78%");
+  });
+
+  it("draws a plot once when it is added and again only when its size changes, not for a selection or a move", async () => {
+    const changes = mount(fixture());
+    await flush();
+    act(() => button("+ Biplot").click());
+    await flush();
+    act(() => button("+ Biplot").click());
+    await flush();
+    const [first, second] = items(changes);
+    expect(second).toBeDefined();
+    // Each plot was drawn exactly once: adding the second did not redraw the first.
+    expect(draws.plots).toHaveLength(2);
+    select(first.id);
+    await flush();
+    expect(draws.plots).toHaveLength(2);
+    drag(first.id, { x: 200, y: 150 });
+    await flush();
+    expect(items(changes)[0]).toMatchObject({ x: 200, y: 150 });
+    expect(draws.plots).toHaveLength(2);
+    select();
+    key({ key: "a", metaKey: true });
+    key({ key: "ArrowRight" });
+    await flush();
+    expect(host.querySelectorAll(".gl-layout-item.is-selected")).toHaveLength(2);
+    expect(draws.plots).toHaveLength(2);
+    // A resize changes what the plot draws, so that plot, and only that plot, is drawn again.
+    act(() => {
+      const el = element(first.id);
+      draws.moveable!.onResize({ target: el, width: 320, height: 320, drag: { left: 201, top: 150 } });
+      draws.moveable!.onResizeEnd({ target: el, isDrag: true, datas: {} });
+    });
+    await flush();
+    expect(draws.plots).toHaveLength(3);
+    expect(draws.plots.at(-1)!.host).toBe(element(first.id).querySelector(".gl-layout-plot-host"));
   });
 
   it("draws a plot's canvas at the display ratio times the page zoom, once the zoom has settled", async () => {
@@ -621,8 +1099,7 @@ describe("LayoutTab iteration", () => {
     await flush();
     const [plot, note] = items(changes);
     // The text reads a placeholder; while it is edited the placeholder itself is shown.
-    const editor = element(note.id).querySelector<HTMLTextAreaElement>("textarea")!;
-    act(() => editor.focus());
+    const editor = openEditor(note.id);
     act(() => {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(editor, "Donor {sample}, day {meta:day} ({n}/{N})");
       editor.dispatchEvent(new Event("input", { bubbles: true }));
@@ -637,11 +1114,11 @@ describe("LayoutTab iteration", () => {
     expect(items(changes)[0].recipe).toMatchObject({ iterated: true });
     expect(host.textContent).toContain("Page 1 of 2");
     expect(host.textContent).toContain("2 files → 2 pages");
-    expect(element(note.id).querySelector("textarea")?.value).toBe("Donor D1.fcs, day 7 (1/2)");
+    expect(element(note.id).querySelector(".gl-layout-text-surface")?.textContent).toBe("Donor D1.fcs, day 7 (1/2)");
     draws.plots = [];
     act(() => host.querySelector<HTMLButtonElement>('button[aria-label="Next page"]')!.click());
     expect(host.textContent).toContain("Page 2 of 2");
-    expect(element(note.id).querySelector("textarea")?.value).toBe("Donor D2.fcs, day 0 (2/2)");
+    expect(element(note.id).querySelector(".gl-layout-text-surface")?.textContent).toBe("Donor D2.fcs, day 0 (2/2)");
     await flush();
     // On page 2 the plot is drawn for D2. Unticked, it would show D1 on every page.
     expect(draws.plots.at(-1)?.config.title).toBe("All Events · D2.fcs");
@@ -823,12 +1300,12 @@ describe("LayoutTab titles, bound text and zoom", () => {
     setSelect(labelled<HTMLSelectElement>("Reads from", "select"), plot.id);
     await flush();
     expect(items(changes)[1].recipe).toMatchObject({ readsFrom: plot.id, text: "{population} of {sample}, day {meta:day}" });
-    const surface = () => host.querySelector<HTMLTextAreaElement>(`[data-item-id="${text.id}"] .gl-layout-text-surface`)!;
-    expect(surface().value).toBe("All Events of D1.fcs, day 7");
+    const surface = () => host.querySelector<HTMLElement>(`[data-item-id="${text.id}"] .gl-layout-text-surface`)!;
+    expect(surface().textContent).toBe("All Events of D1.fcs, day 7");
     setSelect(labelled<HTMLSelectElement>("Reads from", "select"), "");
     await flush();
     expect(items(changes)[1].recipe).not.toHaveProperty("readsFrom");
-    expect(surface().value).toBe("{population} of {sample}, day {meta:day}");
+    expect(surface().textContent).toBe("{population} of {sample}, day {meta:day}");
   });
 
   it("fits the content to a smaller page by zooming the items, drawn at their size and scaled", async () => {

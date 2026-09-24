@@ -4,6 +4,7 @@
 // embedded as a PNG <image> — a valid, editable .svg where labels/axes stay vector.
 
 import { loadMiniPlots } from "./loadPlots";
+import { cellTitle, exportId, finishExportSvg, nameCell, pdfVectorPage, pngBlob } from "./exportSvg";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -24,8 +25,7 @@ export async function exportGridPNG(gridId: string, filename: string, dpi?: numb
   const composed = composeGridSVG(gridId, dpi);
   if (!composed) return;
   const canvas = await rasterizeSvg(composed, dpi);
-  const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error("PNG export failed")), "image/png"));
-  downloadBlob(blob, filename + ".png");
+  downloadBlob(await pngBlob(canvas, dpi), filename + ".png");
 }
 
 /**
@@ -80,7 +80,7 @@ export function composeGridSVG(gridId: string, dpi: number): { root: SVGSVGEleme
   grid.parentElement?.querySelectorAll<HTMLElement>(".strategy-context-title").forEach((h) => addHtmlText(root, h, gridRect));
   grid.querySelectorAll<HTMLElement>(".illustration-row-header").forEach((h) => addHtmlText(root, h, gridRect));
 
-  grid.querySelectorAll<HTMLElement>(".mini-plot-cell").forEach((cell) => {
+  grid.querySelectorAll<HTMLElement>(".mini-plot-cell").forEach((cell, index) => {
     const cr = cell.getBoundingClientRect();
     const g = document.createElementNS(SVG_NS, "g");
     g.setAttribute("transform", `translate(${Math.round(cr.left - gridRect.left)},${Math.round(cr.top - gridRect.top)})`);
@@ -101,10 +101,13 @@ export function composeGridSVG(gridId: string, dpi: number): { root: SVGSVGEleme
     }
     const svg = cell.querySelector("svg");
     if (svg) g.appendChild(svg.cloneNode(true));
+    nameCell(g, exportId("panel", index + 1, cellTitle(cell)));
     root.appendChild(g);
   });
 
-  return { root, width: Math.ceil(gridRect.width), height: Math.ceil(gridRect.height) };
+  const width = Math.ceil(gridRect.width), height = Math.ceil(gridRect.height);
+  finishExportSvg(root, { widthPx: width, heightPx: height });
+  return { root, width, height };
 }
 
 /** Composite SVG download: per-cell vector axes/gates over the data layer re-rendered at `dpi`. */
@@ -115,9 +118,7 @@ export function exportGridSVG(gridId: string, filename: string, dpi = 300) {
   downloadBlob(new Blob([xml], { type: "image/svg+xml" }), filename + ".svg");
 }
 
-/** PDF export: rasterize the composed grid SVG at the export DPI onto a single jsPDF page (uses only
- *  jsPDF's stable addImage — avoids the vendored form-object/Matrix path that isn't jsPDF-4
- *  compatible; axes/gates are high-res raster rather than true vector). */
+/** The composed SVG drawn onto a canvas at `dpi`: what the PNG export writes, and what a PDF page falls back to. */
 export async function rasterizeSvg(composed: { root: SVGSVGElement; width: number; height: number }, dpi: number): Promise<HTMLCanvasElement> {
   const { width, height } = composed;
   const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(composed.root);
@@ -137,7 +138,7 @@ export async function rasterizeSvg(composed: { root: SVGSVGElement; width: numbe
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.scale(scale, scale);
-      ctx.drawImage(img, 0, 0);
+      ctx.drawImage(img, 0, 0, width, height);
       URL.revokeObjectURL(url);
       resolve(canvas);
     };
@@ -149,12 +150,17 @@ export async function rasterizeSvg(composed: { root: SVGSVGElement; width: numbe
 export async function exportGridPDF(gridId: string, filename: string, dpi = 300) {
   const composed = composeGridSVG(gridId, dpi);
   if (!composed) return;
-  const canvas = await rasterizeSvg(composed, dpi);
   // CSS pixels are 1/96 inch; PDF points are 1/72 inch. DPI changes resolution, not paper size.
   const width = composed.width * 72 / 96, height = composed.height * 72 / 96;
   const { jsPDF } = await import("jspdf");
-  const pdf = new jsPDF({ orientation: width >= height ? "landscape" : "portrait", unit: "pt", format: [width, height] });
-  pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, width, height);
+  // With the document compressed, jsPDF deflates the images the writer embeds as well.
+  const pdf = new jsPDF({ orientation: width >= height ? "landscape" : "portrait", unit: "pt", format: [width, height], compress: true });
+  // Vector where the writer can take it, axes, gates and text as such over the events image at
+  // `dpi`; else the page as one deflated raster.
+  if (!(await pdfVectorPage(pdf, composed.root, { width, height }))) {
+    const canvas = await rasterizeSvg(composed, dpi);
+    pdf.addImage(canvas, "PNG", 0, 0, width, height, undefined, "FAST");
+  }
   pdf.save(filename + ".pdf");
 }
 

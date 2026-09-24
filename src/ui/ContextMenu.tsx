@@ -16,14 +16,30 @@ export interface ContextMenuState {
 export function ContextMenu({ menu, onClose }: { menu: ContextMenuState | null; onClose: () => void }) {
   const root = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({ left: 0, top: 0 });
+  /** What had the keyboard when the menu opened, given it back when the menu closes. */
+  const opener = useRef<HTMLElement | null>(null);
   // Kept on screen: a menu opened near the right or bottom edge is shifted back inside.
   useLayoutEffect(() => {
     if (!menu || !root.current) return;
+    opener.current = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
     const rect = root.current.getBoundingClientRect();
     const left = Math.max(4, Math.min(menu.x, window.innerWidth - rect.width - 4));
     const top = Math.max(4, Math.min(menu.y, window.innerHeight - rect.height - 4));
     setPosition({ left, top });
     root.current.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus();
+  }, [menu]);
+  // Closed by a choice, a click elsewhere or Escape, the menu returns the keyboard to where it was,
+  // so Escape, Delete and the arrows that follow reach the page the menu was opened on.
+  useEffect(() => {
+    if (!menu) return;
+    const menuRoot = root.current;
+    return () => {
+      const previous = opener.current;
+      opener.current = null;
+      const active = document.activeElement;
+      const lost = !active || active === document.body || (menuRoot ? menuRoot.contains(active) : false);
+      if (previous && previous.isConnected && lost) previous.focus({ preventScroll: true });
+    };
   }, [menu]);
   useEffect(() => {
     if (!menu) return;

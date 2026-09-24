@@ -3143,32 +3143,17 @@ input[type="number"]::-webkit-outer-spin-button {
 }
 .gl-layout-empty strong { color: #64748b; font-size: 14px; }
 .gl-layout-empty span { font-size: 12px; }
+/* Items sit on the page as a vector editor draws them: nothing but their contents until the
+   pointer is over one (a grey edge) or it is selected (the selection colour, shared with the
+   Illustration tab, and the handles). The item's actions are in its menu and the inspector. */
+.gl-layout-tab { --gl-select: #2f80ed; }
 .gl-layout-item {
   position: absolute; display: flex; flex-direction: column;
-  min-width: 180px; min-height: 180px; overflow: hidden;
-  border: 1px solid #cbd5e1; border-radius: 4px; background: #fff;
-  box-shadow: 0 1px 4px rgb(15 23 42 / 10%);
+  min-width: 140px; min-height: 140px; overflow: visible;
+  border: 1px solid transparent; border-radius: 0; background: transparent;
 }
 .gl-layout-item:hover { border-color: #94a3b8; }
-.gl-layout-item.is-selected {
-  border-color: #3b82f6; box-shadow: 0 0 0 2px rgb(59 130 246 / 20%);
-}
-.gl-layout-item-head {
-  display: flex; flex: 0 0 25px; align-items: center; justify-content: space-between;
-  gap: 8px; min-width: 0; padding: 0 4px 0 8px;
-  color: #475569; border-bottom: 1px solid #e2e8f0; background: #f8fafc;
-  font-size: 10px; cursor: grab; user-select: none;
-}
-.gl-layout-item-head:active { cursor: grabbing; }
-.gl-layout-item-head > span {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.gl-layout-item-head > div { display: flex; flex: 0 0 auto; }
-.gl-layout-item-action {
-  width: 22px; height: 21px; border: 0; border-radius: 3px; padding: 0;
-  color: #64748b; background: transparent; cursor: pointer;
-}
-.gl-layout-item-action:hover { color: #1e293b; background: #e2e8f0; }
+.gl-layout-item.is-selected { border-color: var(--gl-select); }
 .gl-layout-plot-host {
   display: grid; flex: 1 1 auto; min-width: 0; min-height: 0;
   place-items: start center; overflow: auto; padding: 4px;
@@ -3184,13 +3169,6 @@ input[type="number"]::-webkit-outer-spin-button {
   flex: 1 1 auto; overflow: hidden; padding: 14px;
   color: #1e293b; line-height: 1.3; white-space: pre-wrap;
 }
-.gl-layout-resize {
-  position: absolute; right: 0; bottom: 0; width: 17px; height: 17px; border: 0;
-  background:
-    linear-gradient(135deg, transparent 48%, #94a3b8 50%, #94a3b8 57%, transparent 59%),
-    linear-gradient(135deg, transparent 66%, #94a3b8 68%, #94a3b8 75%, transparent 77%);
-  cursor: nwse-resize;
-}
 
 .gl-layout-item.is-selected .gl-layout-plot-host { cursor: move; }
 .gl-layout-item.is-locked { outline: 1px dashed #cbd5e1; }
@@ -3201,8 +3179,19 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-layout-page-label { font-size: 12px; color: #475569; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gl-layout-plot-host { overflow: hidden; }
 .gl-layout-canvas .moveable-control-box { z-index: 10000; }
+/* Moveable's handles and lines in the selection colour: 8 px white squares with a blue edge,
+   as Illustrator draws them, in place of the library's 14 px filled circles. */
+.gl-layout-canvas .moveable-control-box { --moveable-color: var(--gl-select); }
+.gl-layout-canvas .moveable-control-box .moveable-control {
+  width: 8px; height: 8px; margin-top: -4px; margin-left: -4px;
+  border: 1px solid var(--gl-select); border-radius: 1px; background: #fff;
+}
+/* Selecto's marquee: the outline and a light fill, as the Illustration tab's. */
+.gl-layout-tab .selecto-selection {
+  border: 1px solid var(--gl-select) !important;
+  background: rgb(47 128 237 / 12%) !important;
+}
 .gl-layout-canvas-scroll:focus { outline: none; }
-.gl-layout-canvas-scroll:focus-visible .gl-layout-item.is-selected { box-shadow: 0 0 0 3px rgb(59 130 246 / 35%); }
 .gl-layout-item-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
 .gl-layout-zoom { position: relative; flex: 0 0 auto; }
 .gl-layout-canvas { min-width: 0; min-height: 0; transform-origin: 0 0; }
@@ -3222,19 +3211,16 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-layout-controls select, .gl-layout-controls input:not([type="checkbox"]) { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
 .gl-layout-dimensions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .gl-layout-dimensions label { display: grid; gap: 4px; }
-.gl-layout-item { min-width: 140px; min-height: 140px; border: 1px solid transparent; background: transparent; box-shadow: none; border-radius: 0; overflow: visible; }
 .gl-layout-item.is-text { min-width: 24px; min-height: 20px; }
 .gl-layout-item.has-frame { border-color: #94a3b8; }
-.gl-layout-item-head { position: absolute; bottom: 100%; left: -1px; right: -1px; height: 24px; opacity: 0; pointer-events: none; border: 1px solid #cbd5e1; background: #f8fafc; z-index: 1; }
-.gl-layout-item:hover .gl-layout-item-head, .gl-layout-item.is-selected .gl-layout-item-head { opacity: 1; pointer-events: auto; }
-.gl-layout-text-surface { display: block; width: 100%; height: 100%; padding: 2px; margin: 0; border: 0; outline: none; resize: none; background: transparent; font-family: inherit; box-sizing: border-box; }
-.gl-layout-item .gl-layout-resize { opacity: 0; }
-.gl-layout-item:hover .gl-layout-resize, .gl-layout-item.is-selected .gl-layout-resize { opacity: 1; }
+.gl-layout-text-surface { display: block; width: 100%; height: 100%; padding: 2px; margin: 0; border: 0; outline: none; resize: none; background: transparent; font-family: Arial, Helvetica, sans-serif; box-sizing: border-box; }
+/* As placed, the words are static and the block is taken by its body; the editor opens on a double-click or Enter. */
+.gl-layout-text-surface.is-static { user-select: none; cursor: default; overflow: hidden; }
+.gl-layout-item.is-selected .gl-layout-text-surface.is-static { cursor: move; }
 /* Editing, an item dragged past the page's edge overhangs it, still in reach; Preview clips to the page, as the export does. */
 .gl-layout-tab.is-preview .gl-layout-canvas { background-image: none; overflow: hidden; }
-.gl-layout-tab.is-preview .gl-layout-item { pointer-events: none; border-color: transparent; box-shadow: none; }
+.gl-layout-tab.is-preview .gl-layout-item { pointer-events: none; border-color: transparent; }
 .gl-layout-tab.is-preview .gl-layout-item.has-frame { border-color: #94a3b8; }
-.gl-layout-tab.is-preview .gl-layout-item-head, .gl-layout-tab.is-preview .gl-layout-resize { display: none; }
 
 .gl-plotting-workspace { display: grid !important; grid-template-columns: 290px minmax(0, 1fr); grid-template-rows: 46px minmax(0, 1fr); padding: 0 !important; overflow: hidden; background: #f3f5f8; }
 .gl-plotting-head { grid-column: 1 / -1; display: flex; align-items: center; gap: 18px; padding: 0 16px; border-bottom: 1px solid #d7dee8; background: white; }

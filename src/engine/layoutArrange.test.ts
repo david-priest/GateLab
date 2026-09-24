@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createLayoutSheet, pageForPreset, type LayoutItem } from "./layout";
-import { alignItems, contentBounds, distributeItems, fitContentToPage, fitPageToContent, pageContentBox } from "./layoutArrange";
+import { alignItems, contentBounds, distributeItems, fitContentToPage, fitPageToContent, groupItems, pageContentBox, ungroupItems } from "./layoutArrange";
 
 function item(id: string, x: number, y: number, width = 100, height = 80): LayoutItem {
   return { id, x, y, width, height, z: 0, recipe: { kind: "text", text: id, fontSize: 12 } };
@@ -41,6 +41,38 @@ describe("alignment", () => {
     expect(sheet.items.map((i) => i.x)).toEqual([0, 270, 500]);
     distributeItems(sheet, ["a", "b"], "horizontal"); // fewer than three: nothing
     expect(sheet.items.map((i) => i.x)).toEqual([0, 270, 500]);
+  });
+});
+
+describe("groups", () => {
+  it("aligns and distributes a group as one unit, its members keeping their places in it", () => {
+    // A heading (h) above its plot (p) make a group; a third item stands alone.
+    const sheet = sheetWith(item("h", 100, 100, 100, 20), item("p", 100, 130, 100, 100), item("c", 400, 300, 100, 100));
+    groupItems(sheet, ["h", "p"], "g1");
+    expect(sheet.items.map((i) => i.group)).toEqual(["g1", "g1", undefined]);
+    alignItems(sheet, ["h", "p", "c"], "right"); // the selection's right edge is 500
+    expect(frames(sheet).map(({ x }) => x)).toEqual([400, 400, 400]);
+    alignItems(sheet, ["h", "p", "c"], "bottom"); // bottom 400: the group's bottom is p's, h stays 30 above it
+    expect(frames(sheet).map(({ y }) => y)).toEqual([270, 300, 300]);
+    // One group alone aligns to the page as a single item would.
+    alignItems(sheet, ["h", "p"], "left");
+    expect(frames(sheet).slice(0, 2).map(({ x }) => x)).toEqual([57, 57]);
+    // Distributing counts the group once: with two units nothing moves; with a third, the group is spaced as one box.
+    distributeItems(sheet, ["h", "p", "c"], "horizontal");
+    expect(frames(sheet).map(({ x }) => x)).toEqual([57, 57, 400]);
+    sheet.items.push(item("d", 800, 300, 100, 100));
+    distributeItems(sheet, ["h", "p", "c", "d"], "horizontal"); // span 57..900, occupied 300, gaps of 271.5
+    expect(frames(sheet).map(({ x }) => x)).toEqual([57, 57, 429, 800]);
+  });
+
+  it("merges a group into a new one and dissolves groups without moving anything", () => {
+    const sheet = sheetWith(item("a", 0, 0), item("b", 200, 0), item("c", 400, 0), item("d", 600, 0));
+    groupItems(sheet, ["a", "b"], "g1");
+    groupItems(sheet, ["b", "c"], "g2"); // b's group comes along whole
+    expect(sheet.items.map((i) => i.group)).toEqual(["g2", "g2", "g2", undefined]);
+    ungroupItems(sheet, ["c"]);
+    expect(sheet.items.every((i) => i.group === undefined)).toBe(true);
+    expect(frames(sheet).map(({ x }) => x)).toEqual([0, 200, 400, 600]);
   });
 });
 

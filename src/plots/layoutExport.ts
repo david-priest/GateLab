@@ -9,6 +9,7 @@ import type { LayoutSheet } from "../engine/layout";
 import { pageOrigins, pageSizeMm, pageSizePx } from "../engine/layout";
 import { sanitizeFilePart } from "../engine/fcsExport";
 import { composeProportionsChartSvg } from "../ui/ProportionsTab";
+import { EXPORT_FONT, exportId, finishExportSvg, nameCell, nextTurn, pdfVectorPage, pngBlob } from "./exportSvg";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -36,25 +37,72 @@ function pageRect(el: Element, origin: DOMRect, zoom: number, offset: { x: numbe
   };
 }
 
-function textLines(root: SVGSVGElement, lines: readonly string[], left: number, top: number, fontSize: number, style: CSSStyleDeclaration) {
-  const lineHeight = fontSize * 1.3;
-  lines.forEach((line, index) => {
-    if (!line) return;
+interface ExportLine { text: string; left: number; top: number }
+
+/** Text lines under `parent`, each at its own offset from the block's top-left corner, the baseline 0.82 em below its line's top. */
+function textLines(parent: Element, lines: readonly ExportLine[], left: number, top: number, fontSize: number, style: CSSStyleDeclaration) {
+  lines.forEach((line) => {
+    if (!line.text) return;
     const t = document.createElementNS(SVG_NS, "text");
-    t.setAttribute("x", String(left));
-    t.setAttribute("y", String(top + index * lineHeight + fontSize * 0.82));
+    t.setAttribute("x", String(left + line.left));
+    t.setAttribute("y", String(top + line.top + fontSize * 0.82));
     t.setAttribute("font-size", String(fontSize));
-    t.setAttribute("font-family", style.fontFamily || "Arial, Helvetica, sans-serif");
+    t.setAttribute("font-family", style.fontFamily || EXPORT_FONT);
     t.setAttribute("font-weight", style.fontWeight || "400");
     t.setAttribute("fill", style.color || "#1e293b");
     t.setAttribute("xml:space", "preserve");
-    t.textContent = line;
-    root.appendChild(t);
+    t.textContent = line.text;
+    parent.appendChild(t);
   });
 }
 
+/**
+ * The lines a text block shows, from the browser's own line boxes: a mirror of the block, the
+ * same width and font, is laid out off screen and read character by character, so text that
+ * wraps on the page exports wrapped. Null where line boxes cannot be measured, and the block's
+ * newlines alone decide.
+ */
+function wrappedLines(block: HTMLElement, content: string): ExportLine[] | null {
+  if (typeof document.createRange !== "function" || !content.trim()) return null;
+  const range = document.createRange();
+  if (typeof range.getBoundingClientRect !== "function") return null;
+  const style = getComputedStyle(block);
+  const padding = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+  const mirror = document.createElement("div");
+  Object.assign(mirror.style, {
+    position: "fixed", left: "-100000px", top: "0", visibility: "hidden",
+    width: `${Math.max(1, block.clientWidth - padding)}px`, boxSizing: "content-box",
+    padding: "0", margin: "0", border: "0",
+    fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight, fontStyle: style.fontStyle,
+    lineHeight: style.lineHeight, letterSpacing: style.letterSpacing,
+    whiteSpace: "pre-wrap", overflowWrap: "break-word", wordBreak: style.wordBreak,
+  } as Partial<CSSStyleDeclaration>);
+  mirror.textContent = content;
+  document.body.appendChild(mirror);
+  try {
+    const node = mirror.firstChild;
+    if (!node) return null;
+    const origin = mirror.getBoundingClientRect();
+    const lines: ExportLine[] = [];
+    for (let i = 0; i < content.length; i++) {
+      if (content[i] === "\n") continue;
+      range.setStart(node, i);
+      range.setEnd(node, i + 1);
+      const r = range.getBoundingClientRect();
+      if (!r.width && !r.height) continue;
+      const top = r.top - origin.top;
+      const previous = lines.at(-1);
+      if (previous && Math.abs(previous.top - top) < 1) previous.text += content[i];
+      else lines.push({ text: content[i], left: r.left - origin.left, top });
+    }
+    return lines.length ? lines : null;
+  } finally {
+    mirror.remove();
+  }
+}
+
 /** One plot cell: the data layer as an image at `dpi`, the cell's own <svg> (axes, gates) on top. */
-function addCell(root: SVGSVGElement, cell: HTMLElement, origin: DOMRect, zoom: number, dpi: number, offset: { x: number; y: number }) {
+function addCell(root: SVGSVGElement, cell: HTMLElement, origin: DOMRect, zoom: number, dpi: number, offset: { x: number; y: number }, base: string) {
   const rect = pageRect(cell, origin, zoom, offset);
   const g = document.createElementNS(SVG_NS, "g");
   g.setAttribute("transform", `translate(${Math.round(rect.left)},${Math.round(rect.top)})`);
@@ -83,6 +131,7 @@ function addCell(root: SVGSVGElement, cell: HTMLElement, origin: DOMRect, zoom: 
       g.appendChild(scaled);
     } else g.appendChild(clone);
   }
+  nameCell(g, base);
   root.appendChild(g);
 }
 
@@ -113,10 +162,15 @@ export function composeLayoutSVG(
   const origin = canvas.getBoundingClientRect();
   const items = [...canvas.querySelectorAll<HTMLElement>(".gl-layout-item")]
     .sort((a, b) => (Number(a.style.zIndex) || 0) - (Number(b.style.zIndex) || 0));
+  // Items are numbered in stacking order and named by their heading, so an editor's layers
+  // panel reads plot-3-Lymphocytes rather than a row of anonymous groups.
+  let index = 0;
   for (const item of items) {
     const frame = pageRect(item, origin, options.zoom, offset);
     // An item wholly outside this page is left to the page it is on.
     if (frame.left >= width || frame.top >= height || frame.left + frame.width <= 0 || frame.top + frame.height <= 0) continue;
+    index += 1;
+    const heading = item.dataset.title ?? item.querySelector(".gl-layout-item-head span")?.textContent ?? "";
     if (item.classList.contains("has-frame")) {
       const r = document.createElementNS(SVG_NS, "rect");
       r.setAttribute("x", String(Math.round(frame.left) + 0.5));
@@ -125,6 +179,7 @@ export function composeLayoutSVG(
       r.setAttribute("height", String(Math.round(frame.height) - 1));
       r.setAttribute("fill", "none");
       r.setAttribute("stroke", "#94a3b8");
+      r.setAttribute("id", exportId("frame", index, heading));
       root.appendChild(r);
     }
     const text = item.querySelector<HTMLTextAreaElement | HTMLElement>(".gl-layout-text-surface");
@@ -138,13 +193,18 @@ export function composeLayoutSVG(
       const fontSize = (parseFloat(style.fontSize) || 14) * itemZoom;
       const padLeft = (parseFloat(style.paddingLeft) || 0) * itemZoom;
       const padTop = (parseFloat(style.paddingTop) || 0) * itemZoom;
-      textLines(root, content.split("\n"), rect.left + padLeft, rect.top + padTop, fontSize, style);
+      const lines = wrappedLines(text, content)?.map((line) => ({ text: line.text, left: line.left * itemZoom, top: line.top * itemZoom }))
+        ?? content.split("\n").map((line, row) => ({ text: line, left: 0, top: row * fontSize * 1.3 }));
+      const block = document.createElementNS(SVG_NS, "g");
+      block.setAttribute("id", exportId("text", index, content.trim().split(/\s+/).slice(0, 4).join(" ")));
+      textLines(block, lines, rect.left + padLeft, rect.top + padTop, fontSize, style);
+      root.appendChild(block);
       continue;
     }
     const host = item.querySelector<HTMLElement>(".gl-layout-plot-host");
     if (!host) continue;
     if ((host as unknown as { __miniPlotCfg?: unknown }).__miniPlotCfg) {
-      addCell(root, host, origin, options.zoom, options.dpi, offset);
+      addCell(root, host, origin, options.zoom, options.dpi, offset, exportId("plot", index, heading));
       continue;
     }
     // A Plotting chart block is the tab's card: its panels and legend composed as one SVG at the
@@ -156,6 +216,7 @@ export function composeLayoutSVG(
         const rect = pageRect(chart, origin, options.zoom, offset);
         const scale = composed.width > 0 ? rect.width / composed.width : 1;
         const g = document.createElementNS(SVG_NS, "g");
+        g.setAttribute("id", exportId("chart", index, heading));
         g.setAttribute("transform", `translate(${rect.left},${rect.top}) scale(${scale})`);
         g.appendChild(composed.root);
         root.appendChild(g);
@@ -170,20 +231,17 @@ export function composeLayoutSVG(
       const style = getComputedStyle(title);
       const rect = pageRect(title, origin, options.zoom, offset);
       const zoomed = title.offsetWidth > 0 ? rect.width / title.offsetWidth : 1;
-      textLines(root, [text], rect.left, rect.top, (parseFloat(style.fontSize) || 12) * zoomed, style);
+      textLines(root, [{ text, left: 0, top: 0 }], rect.left, rect.top, (parseFloat(style.fontSize) || 12) * zoomed, style);
     });
-    host.querySelectorAll<HTMLElement>(".mini-plot-cell").forEach((cell) => addCell(root, cell, origin, options.zoom, options.dpi, offset));
+    const block = exportId(host.querySelector(".gl-figure-grid") ? "figure" : "strategy", index, heading);
+    host.querySelectorAll<HTMLElement>(".mini-plot-cell").forEach((cell, k) => addCell(root, cell, origin, options.zoom, options.dpi, offset, `${block}-panel-${k + 1}`));
   }
+  finishExportSvg(root, { widthPx: width, heightPx: height, ...pageSizeMm(sheet.page) });
   return { root, width, height };
 }
 
 function serialize(root: SVGSVGElement): string {
   return '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(root);
-}
-
-async function pngBlob(raster: HTMLCanvasElement): Promise<Blob> {
-  return new Promise<Blob>((resolve, reject) =>
-    raster.toBlob((value) => (value ? resolve(value) : reject(new Error("PNG export failed"))), "image/png"));
 }
 
 export interface ComposedPage {
@@ -215,28 +273,39 @@ export async function writeComposedPages(composed: readonly ComposedPage[], shee
     downloadBlob(new Blob([zipSync(files) as BlobPart], { type: "application/zip" }), `${filename}.zip`);
     return;
   }
-  const rasters: HTMLCanvasElement[] = [];
-  for (const page of composed) rasters.push(await rasterizeSvg(page, dpi));
+  // One page at a time: a page's raster is tens of megabytes at print resolution, and it is let
+  // go before the next is drawn; a turn of the event loop between pages keeps the tab responsive.
   if (format === "png") {
-    if (rasters.length === 1) {
-      downloadBlob(await pngBlob(rasters[0]), `${filename}.png`);
+    if (composed.length === 1) {
+      downloadBlob(await pngBlob(await rasterizeSvg(composed[0], dpi), dpi), `${filename}.png`);
       return;
     }
     const files: Record<string, Uint8Array> = {};
-    for (const [index, raster] of rasters.entries()) {
-      files[`${filename}-p${index + 1}.png`] = new Uint8Array(await (await pngBlob(raster)).arrayBuffer());
+    for (const [index, page] of composed.entries()) {
+      const raster = await rasterizeSvg(page, dpi);
+      files[`${filename}-p${index + 1}.png`] = new Uint8Array(await (await pngBlob(raster, dpi)).arrayBuffer());
+      await nextTurn();
     }
     downloadBlob(new Blob([zipSync(files) as BlobPart], { type: "application/zip" }), `${filename}.zip`);
     return;
   }
-  // The PDF page is the physical page; the raster inside it carries the resolution.
+  // The PDF page is the physical page. It is written as vector art, axes, gates and text as
+  // such and the events image embedded at the sheet's dpi; a page the writer cannot take is
+  // drawn as one raster instead, deflated, since jsPDF stores an image uncompressed unless told
+  // otherwise, at fifty times the size.
   const { widthMm, heightMm } = pageSizeMm(sheet.page);
+  const orientation = widthMm >= heightMm ? "landscape" : "portrait";
   const { jsPDF } = await import("jspdf");
-  const pdf = new jsPDF({ orientation: widthMm >= heightMm ? "landscape" : "portrait", unit: "mm", format: [widthMm, heightMm] });
-  rasters.forEach((raster, index) => {
-    if (index > 0) pdf.addPage([widthMm, heightMm], widthMm >= heightMm ? "landscape" : "portrait");
-    pdf.addImage(raster.toDataURL("image/png"), "PNG", 0, 0, widthMm, heightMm);
-  });
+  // With the document compressed, jsPDF deflates the images the writer embeds as well.
+  const pdf = new jsPDF({ orientation, unit: "mm", format: [widthMm, heightMm], compress: true });
+  for (const [index, page] of composed.entries()) {
+    if (index > 0) pdf.addPage([widthMm, heightMm], orientation);
+    if (!(await pdfVectorPage(pdf, page.root, { width: widthMm, height: heightMm }))) {
+      const raster = await rasterizeSvg(page, dpi);
+      pdf.addImage(raster, "PNG", 0, 0, widthMm, heightMm, undefined, "FAST");
+    }
+    await nextTurn();
+  }
   pdf.save(`${filename}.pdf`);
 }
 

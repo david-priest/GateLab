@@ -19,6 +19,7 @@ import {
   figurePopulationApplies,
   layoutFigure,
   migrateFigure,
+  panelsBetween,
   resolveFigurePopulation,
   type FigureDimension,
   type FigurePanel,
@@ -170,9 +171,13 @@ export function FigureWorkspace({
     [populationSearch, setPopulationSearch] = useState("");
   const [panelMenu, setPanelMenu] = useState<ContextMenuState | null>(null);
   // Panels chosen by clicking them: what "Add selected panels to the Layout tab" takes. A plain
-  // click chooses one, Cmd or Ctrl adds or removes, Shift takes the block between; Escape clears.
+  // click chooses one; Cmd-click (Ctrl on Windows) adds one or takes it out; Shift-click takes the
+  // block between the panel last clicked without Shift and this one, as a file browser or a
+  // spreadsheet reads the keys and as the ordering lists here do; Cmd-A takes every panel on the
+  // page; Escape clears. The anchor remembers the block its last Shift-click took, so a second
+  // Shift-click from the same anchor resizes that block rather than piling another on it.
   const [selectedPanelKeys, setSelectedPanelKeys] = useState<ReadonlySet<string>>(() => new Set());
-  const selectionAnchor = useRef<string | null>(null);
+  const selectionAnchor = useRef<{ key: string; block: ReadonlySet<string> } | null>(null);
   const [pageIndex, setPageIndex] = useState(0),
     [zoom, setZoom] = useState("fit"),
     [previewWidth, setPreviewWidth] = useState(800);
@@ -375,43 +380,52 @@ export function FigureWorkspace({
   const selectedPanels = page ? page.panels.filter((p) => selectedPanelKeys.has(p.key)) : [];
   const onPanelClick = (panel: FigurePanel, event: ReactMouseEvent<HTMLElement>) => {
     const key = panel.key;
+    if (event.shiftKey && page) {
+      // With no anchor, or one from a page since left, the block starts here.
+      const anchor = page.panels.find((p) => p.key === selectionAnchor.current?.key) ?? panel;
+      const block = new Set(panelsBetween(page.panels, anchor, panel).map((p) => p.key));
+      const previous = selectionAnchor.current?.key === anchor.key ? selectionAnchor.current.block : new Set<string>();
+      selectionAnchor.current = { key: anchor.key, block };
+      setSelectedPanelKeys((current) => {
+        const next = new Set([...current].filter((k) => !previous.has(k)));
+        for (const k of block) next.add(k);
+        return next;
+      });
+      return;
+    }
+    selectionAnchor.current = { key, block: new Set() };
     setSelectedPanelKeys((current) => {
       const next = new Set(current);
-      if (event.shiftKey && selectionAnchor.current && page) {
-        const anchor = page.panels.find((p) => p.key === selectionAnchor.current);
-        if (anchor) {
-          const [r0, r1] = [Math.min(anchor.row, panel.row), Math.max(anchor.row, panel.row)];
-          const [c0, c1] = [Math.min(anchor.column, panel.column), Math.max(anchor.column, panel.column)];
-          if (!event.metaKey && !event.ctrlKey) next.clear();
-          for (const p of page.panels) if (p.row >= r0 && p.row <= r1 && p.column >= c0 && p.column <= c1) next.add(p.key);
-          return next;
-        }
-      }
       if (event.metaKey || event.ctrlKey) {
         if (next.has(key)) next.delete(key);
         else next.add(key);
-      } else if (next.size === 1 && next.has(key)) {
-        next.clear();
-      } else {
-        next.clear();
-        next.add(key);
+        return next;
       }
+      next.clear();
+      next.add(key);
       return next;
     });
-    if (!event.shiftKey) selectionAnchor.current = key;
   };
   useEffect(() => {
     // Another page is other panels.
     setSelectedPanelKeys(new Set());
+    selectionAnchor.current = null;
   }, [page?.key]);
   useEffect(() => {
-    if (!selectedPanelKeys.size) return;
+    if (!page) return;
+    const panelKeys = page.panels.map((p) => p.key);
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSelectedPanelKeys(new Set());
+      // The keys are the page's, not a field's: typing in the inspector is left alone.
+      if ((event.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable='true']")) return;
+      if (event.key === "Escape") setSelectedPanelKeys((current) => (current.size ? new Set() : current));
+      else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        setSelectedPanelKeys(new Set(panelKeys));
+      }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selectedPanelKeys.size]);
+  }, [page]);
   // Drag across the page to select the panels the band crosses. A press on a gate label is the
   // label's own drag (it stops the mousedown), and a press on a control is the control's. The
   // band replaces the selection, or adds to it with Cmd, Ctrl or Shift; a press that does not move
@@ -488,17 +502,24 @@ export function FigureWorkspace({
   /** The menu a right-click on a panel opens: the panel, its row or its column to the Layout tab; the Gating tab; the figure's data. */
   const openPanelMenu = (panel: FigurePanel, event: ReactMouseEvent<HTMLElement>) => {
     event.preventDefault();
+    // A right-click on a panel outside the selection selects that panel, as it does on the
+    // Layout tab and in the vector editors; inside it, the menu acts on the selection.
+    const chosen = selectedPanelKeys.has(panel.key) ? selectedPanels : [panel];
+    if (!selectedPanelKeys.has(panel.key)) {
+      setSelectedPanelKeys(new Set([panel.key]));
+      selectionAnchor.current = { key: panel.key, block: new Set() };
+    }
     const rowPanels = page ? page.panels.filter((p) => p.row === panel.row) : [panel];
     const columnPanels = page ? page.panels.filter((p) => p.column === panel.column) : [panel];
     const own = layoutRecipesFor([panel]);
     const heatmap = panel.plot.type === "heatmap";
     const items: MenuEntry[] = [
-      ...(selectedPanels.length > 1
+      ...(chosen.length > 1
         ? [{
-            label: `Add the ${selectedPanels.length} selected panels to the Layout tab`,
+            label: `Add the ${chosen.length} selected panels to the Layout tab`,
             title: "As arranged here: rows stay rows and columns stay columns, however wide the page",
             disabled: !onAddToLayout,
-            onClick: () => addPanelsToLayout(selectedPanels),
+            onClick: () => addPanelsToLayout(chosen),
           } satisfies MenuEntry]
         : []),
       {
@@ -2108,7 +2129,7 @@ export function FigureWorkspace({
                 {onAddToLayout && (
                   <button
                     type="button"
-                    title="As arranged here: rows stay rows and columns stay columns, however wide the page. Click a panel to select it, or drag across panels; Cmd or Ctrl adds, Shift takes the block between; Escape clears."
+                    title="As arranged here: rows stay rows and columns stay columns, however wide the page. Click a panel to select it, or drag across panels; Cmd-click adds or removes one, Shift-click takes the block from the last clicked panel to it; Cmd-A selects all; Escape clears."
                     onClick={() => addPanelsToLayout(selectedPanels)}
                   >
                     Add selected panels to the Layout tab

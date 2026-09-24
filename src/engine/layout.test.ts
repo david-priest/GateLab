@@ -270,3 +270,17 @@ describe("plot style", () => {
   });
 });
 
+describe("groups in a saved layout", () => {
+  it("keeps an item's group through normalisation and drops a blank one", () => {
+    const workspace = createDefaultLayoutWorkspace();
+    const sheet = workspace.sheets[0];
+    sheet.items = [
+      { id: "a", x: 0, y: 0, width: 100, height: 40, z: 0, group: "g1", recipe: { kind: "text", text: "A", fontSize: 12 } },
+      { id: "b", x: 0, y: 50, width: 100, height: 40, z: 1, recipe: { kind: "text", text: "B", fontSize: 12 } },
+    ];
+    const raw = JSON.parse(JSON.stringify(workspace)) as { sheets: { items: Record<string, unknown>[] }[] };
+    raw.sheets[0].items[1].group = "  ";
+    const items = normalizeLayoutWorkspace(raw).sheets[0].items;
+    expect(items.map((item) => item.group)).toEqual(["g1", undefined]);
+  });
+});

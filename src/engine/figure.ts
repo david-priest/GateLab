@@ -650,6 +650,18 @@ export function layoutFigure(
     .filter((page) => page.panels.length);
 }
 
+/**
+ * The block of a page's panels a Shift-click takes: every panel whose row and column lie between
+ * the anchor's and the target's, the anchor and target included. A range on a grid is the
+ * spreadsheet's rectangle, not the reading order's run across row ends: what is taken keeps its
+ * rows and columns, as the Layout tab places it.
+ */
+export function panelsBetween(panels: readonly FigurePanel[], anchor: FigurePanel, target: FigurePanel): FigurePanel[] {
+  const rows = [Math.min(anchor.row, target.row), Math.max(anchor.row, target.row)];
+  const columns = [Math.min(anchor.column, target.column), Math.max(anchor.column, target.column)];
+  return panels.filter((p) => p.row >= rows[0] && p.row <= rows[1] && p.column >= columns[0] && p.column <= columns[1]);
+}
+
 /** A population belongs to its hierarchy family, not every similarly named tree in a workspace. */
 export function figurePopulationApplies(
   ref: FigurePopulation,
@@ -1010,6 +1022,7 @@ export function buildFigurePanel(
         includeEmpty: true,
         pointBudget: fullData ? Infinity : 1_000_000,
       },
+      source.gating.gateMasks,
     );
     const key = `${resolved.id}|${x}`;
     const config = (result.plots as Record<string, Record<string, unknown>>)[

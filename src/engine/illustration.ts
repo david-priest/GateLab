@@ -6,7 +6,7 @@ import type { Sample } from "./sample";
 import { ellipseBoundary } from "./ellipse";
 import type { GateEdgeMode } from "../ui/gateEdgeModes";
 import type { Gate, PopulationMap } from "./models";
-import { computeGateCounts, type GateCount } from "./populations";
+import { computeGateCounts, type GateCount, type GateMaskCache } from "./populations";
 import type { AxisTicks } from "./ticks";
 import { displayLabelOffset, polygonOutline } from "../plots/gatePayload";
 import { computeRangeFromValues } from "./strategy";
@@ -263,6 +263,8 @@ export interface IllustrationSampleSource {
   sample: Sample;
   masks: Record<string, Uint8Array>;
   eventCount: Record<string, number | null>;
+  /** The sample's gate membership as computeGateMasks writes it, read by the payload instead of testing every event against every gate again. */
+  gateMasks?: GateMaskCache;
 }
 
 export type IllustrationPopulationSelection = Readonly<
@@ -292,6 +294,7 @@ export function buildIllustrationPayload(
   yChannel: string | null,
   globalScales: Record<string, [number, number]>,
   opts: IllustrationOptions,
+  gateMasks?: GateMaskCache,
 ): Record<string, unknown> {
   const data = sample.gateAssayData();
   // Preview point budget: cap per-panel events so a large max-events × many pop×channel panels
@@ -325,6 +328,18 @@ export function buildIllustrationPayload(
   const popNames: Record<string, string> = {};
   const popCounts: Record<string, number> = {};
 
+  // Counts are wanted only for the gates a panel draws: those on one of its channel pairs, in
+  // either orientation, which is the test buildGatesForChannels applies. The rest of the tree is
+  // left alone, and a gate the sample has already been evaluated against is read from `gateMasks`.
+  const drawnGates: Record<string, Gate> = {};
+  if (yChannel) {
+    for (const [gid, gate] of Object.entries(gates)) {
+      const onPanel = xChannels.some((xCh) =>
+        (gate.x_channel === xCh && gate.y_channel === yChannel) || (gate.x_channel === yChannel && gate.y_channel === xCh));
+      if (onPanel) drawnGates[gid] = gate;
+    }
+  }
+
   for (const popId of popIds) {
     const mask = masks[popId];
     if (!mask) continue;
@@ -334,7 +349,7 @@ export function buildIllustrationPayload(
     popCounts[popId] = nPop;
     if (sampleIdx.length === 0 && !opts.includeEmpty) continue;
 
-    const gateCounts = computeGateCounts(gates, mask, data);
+    const gateCounts = computeGateCounts(drawnGates, mask, data, gateMasks);
 
     for (const xCh of xChannels) {
       const xIdx = sample.index(xCh);
@@ -498,6 +513,7 @@ export function buildMultiSampleIllustrationPayload(
       yChannel,
       globalScales,
       sourceOptions,
+      source.gateMasks,
     )),
   }));
   const referenceIndex = Math.max(

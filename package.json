@@ -1,6 +1,6 @@
 {
   "name": "gatelab",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -19,7 +19,8 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-moveable": "^0.56.0",
-    "react-selecto": "^1.26.3"
+    "react-selecto": "^1.26.3",
+    "svg2pdf.js": "^2.8.1"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

@@ -2,14 +2,29 @@
 // The Layout sheet export composes the page from the live DOM: items in stacking order, plot
 // cells as an image plus their own vector overlay, text blocks as <text>, at any on-screen zoom.
 
-import { describe, expect, it, vi } from "vitest";
-import { composeLayoutSVG } from "./layoutExport";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { composeLayoutSVG, writeComposedPages } from "./layoutExport";
 import { createLayoutSheet, pageForPreset } from "../engine/layout";
 
+const pdfSpy = vi.hoisted(() => ({
+  pages: [] as unknown[][],
+  images: [] as unknown[][],
+  saved: [] as string[],
+  svg: vi.fn(),
+  rasters: [] as unknown[],
+}));
 vi.mock("./gridExport", () => ({
   cellDataUrlAtDpi: (_cell: HTMLElement, dpi: number, size: number) => `data:cell/${dpi}/${size}`,
-  rasterizeSvg: vi.fn(),
+  rasterizeSvg: async (page: { root: Element }) => { const raster = { canvasFor: page.root }; pdfSpy.rasters.push(raster); return raster; },
 }));
+vi.mock("jspdf", () => ({
+  jsPDF: class {
+    addPage(...args: unknown[]) { pdfSpy.pages.push(args); }
+    addImage(...args: unknown[]) { pdfSpy.images.push(args); }
+    save(name: string) { pdfSpy.saved.push(name); }
+  },
+}));
+vi.mock("svg2pdf.js", () => ({ svg2pdf: (...args: unknown[]) => pdfSpy.svg(...args) }));
 
 /** jsdom has no layout; every element reports the rectangle it is told to. */
 function rect(el: Element, left: number, top: number, width: number, height: number) {
@@ -36,12 +51,16 @@ function page(zoom: number) {
   const plot = document.createElement("article");
   plot.className = "gl-layout-item has-frame";
   plot.style.zIndex = "1";
+  plot.dataset.title = "Lymphocytes · D1";
   const host = document.createElement("div");
   host.className = "gl-layout-plot-host";
   (host as unknown as { __miniPlotCfg: object }).__miniPlotCfg = { plot_size: 252 };
   const plotCanvas = document.createElement("canvas");
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.appendChild(document.createElementNS("http://www.w3.org/2000/svg", "path"));
+  const hidden = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  hidden.setAttribute("style", "display: none; font-size: 9px;");
+  svg.appendChild(hidden);
   host.append(plotCanvas, svg);
   plot.appendChild(host);
   rect(plot, 100 + 24 * zoom, 50 + 24 * zoom, 260 * zoom, 280 * zoom);
@@ -71,7 +90,17 @@ describe("composeLayoutSVG", () => {
     expect(group.getAttribute("transform")).toBe("translate(28,28)");
     const image = group.querySelector("image")!;
     expect(image.getAttribute("width")).toBe("252");
-    expect(image.getAttribute("href")).toBe("data:cell/300/252");
+    expect(image.getAttributeNS("http://www.w3.org/1999/xlink", "href")).toBe("data:cell/300/252");
+    expect(image.getAttribute("href")).toBeNull();
+    // Finished for an editor: the page in millimetres, the plot and its parts named, one font on every text.
+    expect([root.getAttribute("width"), root.getAttribute("height")]).toEqual(["297mm", "210mm"]);
+    expect(group.getAttribute("id")).toBe("plot-1-Lymphocytes-D1");
+    expect(image.getAttribute("id")).toBe("plot-1-Lymphocytes-D1-events");
+    expect(frame.getAttribute("id")).toBe("frame-1-Lymphocytes-D1");
+    expect(root.querySelector("g#text-2-Donor-D1-day-7")).not.toBeNull();
+    expect(new Set([...root.querySelectorAll("text")].map((t) => t.getAttribute("font-family")))).toEqual(new Set(["Arial, Helvetica, sans-serif"]));
+    // The renderer's hidden tick label came along in the clone and is dropped.
+    expect(group.querySelectorAll("text")).toHaveLength(0);
     expect(group.querySelector("svg path")).not.toBeNull();
     const texts = [...root.querySelectorAll("text")].map((t) => [t.textContent, t.getAttribute("x"), t.getAttribute("y"), t.getAttribute("font-size")]);
     expect(texts).toEqual([
@@ -84,6 +113,44 @@ describe("composeLayoutSVG", () => {
     const sheet = createLayoutSheet("Panel", pageForPreset("journal-1", "portrait"));
     const { width, height } = composeLayoutSVG(page(1), sheet, { dpi: 300, zoom: 1 });
     expect([width, height]).toEqual([321, 416]);
+  });
+});
+
+describe("writeComposedPages as PDF", () => {
+  const svgNs = "http://www.w3.org/2000/svg";
+  const composed = () => [1, 2].map(() => ({ root: document.createElementNS(svgNs, "svg") as SVGSVGElement, width: 1123, height: 794 }));
+  beforeEach(() => {
+    pdfSpy.pages = []; pdfSpy.images = []; pdfSpy.saved = []; pdfSpy.rasters = [];
+    pdfSpy.svg.mockReset();
+  });
+
+  it("writes every page as vector art at the sheet's physical size, one PDF page each", async () => {
+    pdfSpy.svg.mockResolvedValue(undefined);
+    const sheet = createLayoutSheet("Figure 1");
+    const pages = composed();
+    await writeComposedPages(pages, sheet, "pdf");
+    expect(pdfSpy.svg).toHaveBeenCalledTimes(2);
+    expect(pdfSpy.svg.mock.calls.map((call) => [call[0], call[2]])).toEqual([
+      [pages[0].root, { x: 0, y: 0, width: 297, height: 210 }],
+      [pages[1].root, { x: 0, y: 0, width: 297, height: 210 }],
+    ]);
+    expect(pdfSpy.pages).toEqual([[[297, 210], "landscape"]]);
+    expect(pdfSpy.images).toEqual([]);
+    expect(pdfSpy.saved).toEqual(["Figure_1.pdf"]);
+    // The writer measures the page attached to the document, and leaves nothing behind.
+    expect(document.body.querySelector("svg")).toBeNull();
+  });
+
+  it("draws a page the writer cannot take as one deflated raster instead", async () => {
+    pdfSpy.svg.mockRejectedValueOnce(new Error("no")).mockResolvedValueOnce(undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await writeComposedPages(composed(), createLayoutSheet("Figure 1"), "pdf");
+    } finally {
+      warn.mockRestore();
+    }
+    expect(pdfSpy.images).toEqual([[pdfSpy.rasters[0], "PNG", 0, 0, 297, 210, undefined, "FAST"]]);
+    expect(pdfSpy.rasters).toHaveLength(1);
   });
 });
 

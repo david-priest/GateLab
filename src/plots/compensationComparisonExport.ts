@@ -1,4 +1,5 @@
 import { strToU8, zipSync } from "fflate";
+import { finishExportSvg } from "./exportSvg";
 import type { CompensationGlobalPairPreview } from "../engine/compensationGlobalInspector";
 import {
   compensationDensitySmoothingRadiusForPlot,
@@ -245,6 +246,7 @@ export function composeCompensationComparisonPageSvg(
 }
 
 function serializeSvg(root: SVGSVGElement): string {
+  finishExportSvg(root, { widthPx: COMPENSATION_COMPARISON_PAGE_WIDTH, heightPx: COMPENSATION_COMPARISON_PAGE_HEIGHT });
   return `<?xml version="1.0" encoding="UTF-8"?>\n${new XMLSerializer().serializeToString(root)}`;
 }
 

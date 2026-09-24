@@ -6,6 +6,7 @@
 // (composition per Group) or boxplot (per-unit fraction per Category, dodged by Group).
 
 import { useEffect, useMemo, useState } from "react";
+import { finishExportSvg, pngBlob } from "../plots/exportSvg";
 import { usePersistedTabState } from "./tabState";
 import type { CoreState, Derived } from "../store";
 import type { Sample } from "../engine/sample";
@@ -1272,7 +1273,8 @@ export function composeProportionsChartSvg(
       const exportLabel = document.createElementNS(SVG_NS, "text");
       exportLabel.setAttribute("x", String(Math.round(itemX + 18)));
       exportLabel.setAttribute("y", String(Math.round(itemY + itemHeight / 2)));
-      exportLabel.setAttribute("dominant-baseline", "middle");
+      // Illustrator ignores dominant-baseline; a shift of a third of an em centres the label the same way.
+      exportLabel.setAttribute("dy", "0.35em");
       exportLabel.setAttribute("font-size", String(legendFontSize));
       exportLabel.setAttribute("font-family", "Arial, Helvetica, sans-serif");
       exportLabel.setAttribute("fill", "#334155");
@@ -1290,6 +1292,7 @@ function downloadChart(containerId: string, name: string, kind: "svg" | "png") {
   const composed = composeProportionsChartSvg(containerId);
   if (!composed) return;
   const { root, width, height } = composed;
+  finishExportSvg(root, { widthPx: width, heightPx: height });
   const xml = new XMLSerializer().serializeToString(root);
   const blob = new Blob([`<?xml version="1.0"?>\n${xml}`], {
     type: "image/svg+xml",
@@ -1311,9 +1314,7 @@ function downloadChart(containerId: string, name: string, kind: "svg" | "png") {
     ctx.scale(scale, scale);
     ctx.drawImage(img, 0, 0, width, height);
     URL.revokeObjectURL(url);
-    canvas.toBlob((b) => {
-      if (b) triggerDownload(URL.createObjectURL(b), `${name}.png`);
-    });
+    void pngBlob(canvas, 96 * scale).then((b) => triggerDownload(URL.createObjectURL(b), `${name}.png`), () => undefined);
   };
   img.onerror = () => URL.revokeObjectURL(url);
   img.src = url;

@@ -246,6 +246,64 @@ describe("Illustration gate overlays", () => {
       quadrant_pcts: [25, 25, 25, 25],
     })]);
   });
+
+  it("reads gate membership from the sample's mask cache and evaluates only the gates the panel draws", () => {
+    const x = Float32Array.from([1, 3, 3, 1]);
+    const y = Float32Array.from([3, 3, 1, 1]);
+    const columns = { X: x, Y: y };
+    const sample = {
+      fcs: { nEvents: x.length },
+      gateAssayData: () => ({
+        n: x.length,
+        forGate: () => ({
+          n: x.length,
+          column: (key: string) => columns[key as keyof typeof columns],
+        }),
+      }),
+      index: (key: string) => key === "X" ? 0 : key === "Y" ? 1 : undefined,
+      displayColumn: (index: number) => index === 0 ? x : y,
+      channelTicks: () => null,
+      labelForKey: (key: string) => key,
+      gateToDisplay: (_gate: unknown, _key: string, value: number) => value,
+      displayToGate: (_gate: unknown, _key: string, value: number) => value,
+    } as unknown as Sample;
+    const square = {
+      gate_id: "poly-1",
+      name: "Square",
+      gate_type: "polygon",
+      x_channel: "X",
+      y_channel: "Y",
+      vertices: [[2, 2], [4, 2], [4, 4], [2, 4]] as [number, number][],
+      color: "#123456",
+      label_offset: null,
+    } satisfies Gate;
+    // A gate on a channel the panel does not show, and which the sample cannot even resolve.
+    const elsewhere = { ...square, gate_id: "poly-2", name: "Elsewhere", y_channel: "Z" } satisfies Gate;
+    const touched: string[] = [];
+    // The cache holds two events inside the square where its geometry holds one, so the
+    // percentage says which of the two was read.
+    const cache = new Proxy({ "poly-1": Uint8Array.from([1, 1, 0, 0]) } as Record<string, Uint8Array>, {
+      get(target, key) { touched.push(String(key)); return target[String(key)]; },
+    });
+
+    const payload = buildIllustrationPayload(
+      sample,
+      { "poly-1": square, "poly-2": elsewhere },
+      ["poly-1", "poly-2"],
+      populations,
+      { pop: new Uint8Array(x.length).fill(1) },
+      { pop: x.length },
+      ["pop"],
+      ["X"],
+      "Y",
+      { X: [0, 4], Y: [0, 4] },
+      options,
+      cache,
+    ) as { gate_overlays: Record<string, Array<Record<string, unknown>>> };
+
+    expect(payload.gate_overlays["pop|X"]).toEqual([expect.objectContaining({ gate_id: "poly-1", percent_of_parent: 50 })]);
+    expect(touched).toEqual(["poly-1"]);
+  });
 });
 
 describe("Illustration label placements", () => {
