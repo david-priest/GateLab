@@ -3,12 +3,14 @@ import type {
   GateRef,
   GateSpace,
   GateTransforms,
+  FlowJoGridAxis,
   Population,
   PopulationMap,
   TransformSpec,
   Vertex,
 } from "../engine/models";
-import { validCurl } from "../engine/models";
+import { isRectangleBounds, validCurl, type RectangleBounds } from "../engine/models";
+import { parseFlowJoGridAxis, parseFlowJoGridSpec } from "../engine/flowjoGrid";
 import {
   migrateWorkspaceToV2,
   validateWorkspace,
@@ -93,6 +95,8 @@ const TRANSFORM_PARAMETERS: Record<TransformSpec["kind"], readonly string[]> = {
   biex: ["maxValue", "pos", "neg", "widthBasis", "channelRange"],
   wsplog: ["offset", "decades"],
   flog: ["T", "M"],
+  // Its parameters are an axis object, not numbers; read whole below.
+  flowjoChannels: [],
 };
 
 function transformSpec(value: unknown, label: string): TransformSpec {
@@ -101,6 +105,19 @@ function transformSpec(value: unknown, label: string): TransformSpec {
   if (!(kind in TRANSFORM_PARAMETERS)) {
     throw new Error(`Saved GateLabR workspace has an unsupported ${label}.`);
   }
+  // FlowJo's grid and FlowJo's biex table carry what a list of required numbers cannot: an axis
+  // object, and an optional table resolution whose absence means the older table (biex.ts).
+  // Either is refused whole when malformed, since reading it as a default would move the gate.
+  if (kind === "flowjoChannels") {
+    const spec = parseFlowJoGridSpec(source);
+    if (!spec) throw new Error(`Saved GateLabR workspace has an invalid ${label}.`);
+    return spec;
+  }
+  const table = source.tableChannels;
+  if (kind === "biex" && table !== undefined
+    && !(typeof table === "number" && Number.isInteger(table) && table > 1)) {
+    throw new Error(`Saved GateLabR workspace has an invalid ${label}.`);
+  }
   const spec: Record<string, unknown> = { kind };
   for (const parameter of TRANSFORM_PARAMETERS[kind as TransformSpec["kind"]]) {
     const number = finiteNumber(source[parameter]);
@@ -108,6 +125,24 @@ function transformSpec(value: unknown, label: string): TransformSpec {
       throw new Error(`Saved GateLabR workspace has an invalid ${label}.`);
     }
     spec[parameter] = number;
+  }
+  if (kind === "biex" && table !== undefined) spec.tableChannels = table;
+  // Gating-ML's own flog, and a transformation's bounds: dropping either re-reads the gate with
+  // other events, so they are carried, and a malformed one throws like any other parameter.
+  if (kind === "flog" && source.standard !== undefined) {
+    if (typeof source.standard !== "boolean") throw new Error(`Saved GateLabR workspace has an invalid ${label}.`);
+    if (source.standard) spec.standard = true;
+  }
+  if (source.bounds !== undefined && kind !== "biex" && kind !== "wsplog") {
+    const bounds = record(source.bounds, label);
+    const out: Record<string, number> = {};
+    for (const side of ["min", "max"] as const) {
+      if (bounds[side] === undefined) continue;
+      const number = finiteNumber(bounds[side]);
+      if (number === null) throw new Error(`Saved GateLabR workspace has an invalid ${label}.`);
+      out[side] = number;
+    }
+    spec.bounds = out;
   }
   return spec as TransformSpec;
 }
@@ -147,6 +182,12 @@ function vertices(value: unknown, gateName: string): Vertex[] {
     throw new Error(`Saved GateLabR gate '${gateName}' has invalid vertices.`);
   }
   return value.map((entry) => pair(entry, `vertices for gate '${gateName}'`));
+}
+
+function rectangleBoundsField(value: unknown, name: string): RectangleBounds {
+  if (value === undefined || value === null) return "closed";
+  if (!isRectangleBounds(value)) throw new Error(`Saved GateLabR gate '${name}' has an invalid bounds value.`);
+  return value;
 }
 
 function normalizeGate(value: unknown, gateId: string, index: number): Gate {
@@ -206,7 +247,62 @@ function normalizeGate(value: unknown, gateId: string, index: number): Gate {
     ...common,
     gate_type: source.gate_type,
     vertices: vertices(source.vertices, name),
+    // A rectangle keeps its edge rule through the R host (models.ts, RectangleBounds). One the
+    // host stored without a rule was evaluated closed, by GateLab and by GateLabR's own engine,
+    // and stays closed; an unknown value is refused rather than read as a default.
+    ...(source.gate_type === "rectangle" ? { bounds: rectangleBoundsField(source.bounds, name) } : {}),
+    // A FlowJo grid polygon's raw vertices, which only the FlowJo export reads; membership never
+    // does, so a malformed list is dropped rather than refusing the workspace.
+    ...(source.gate_type === "polygon" ? flowJoVerticesField(source.flowjo_vertices, source.vertices) : {}),
+    ...(source.gate_type === "polygon" ? flowJoPolygonField(source.flowjo_polygon) : {}),
+    ...(source.gate_type === "rectangle" ? flowJoAxesField(source.flowjo_axes) : {}),
+    ...(source.gate_type === "rectangle" ? flowJoBoundsField(source.flowjo_bounds) : {}),
   };
+}
+
+/** A continuous FlowJo polygon's own attributes; export-only, so dropped when malformed. */
+function flowJoPolygonField(value: unknown): { flowjo_polygon?: { quadId: number; gateResolution: number | null } } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const v = value as Record<string, unknown>;
+  const quadId = v.quadId;
+  const res = v.gateResolution;
+  if (typeof quadId !== "number" || !Number.isInteger(quadId)) return {};
+  if (!(res === null || (typeof res === "number" && Number.isInteger(res)))) return {};
+  return { flowjo_polygon: { quadId, gateResolution: res as number | null } };
+}
+
+/** The bounds FlowJo saved where its rule opened one; export-only, so dropped whole when malformed. */
+function flowJoBoundsField(value: unknown): { flowjo_bounds?: Record<string, [number | null, number | null]> } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const ok = (n: unknown): n is number | null => n === null || (typeof n === "number" && Number.isFinite(n));
+  const out: Record<string, [number | null, number | null]> = {};
+  for (const [channel, pair] of Object.entries(value as Record<string, unknown>)) {
+    if (!Array.isArray(pair) || pair.length !== 2 || !ok(pair[0]) || !ok(pair[1])) return {};
+    out[channel] = [pair[0], pair[1]];
+  }
+  return Object.keys(out).length ? { flowjo_bounds: out } : {};
+}
+
+/** A rule-imported FlowJo rectangle's saved axes; export-only, so dropped whole when malformed. */
+function flowJoAxesField(value: unknown): { flowjo_axes?: Record<string, FlowJoGridAxis> } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, FlowJoGridAxis> = {};
+  for (const [channel, axis] of Object.entries(value as Record<string, unknown>)) {
+    const parsed = parseFlowJoGridAxis(axis);
+    if (!parsed) return {};
+    out[channel] = parsed;
+  }
+  return Object.keys(out).length ? { flowjo_axes: out } : {};
+}
+
+function flowJoVerticesField(value: unknown, stored: unknown): { flowjo_vertices?: Vertex[] } {
+  if (!Array.isArray(value) || !Array.isArray(stored) || value.length !== stored.length) return {};
+  const out: Vertex[] = [];
+  for (const entry of value) {
+    if (!Array.isArray(entry) || entry.length !== 2 || !entry.every((n) => typeof n === "number" && Number.isFinite(n))) return {};
+    out.push([entry[0], entry[1]]);
+  }
+  return { flowjo_vertices: out };
 }
 
 function normalizeGateRef(value: unknown): GateRef {
@@ -469,39 +565,52 @@ export function convertHostedGateSpace<
     sourceGateSpace === "display"
       ? sample.displayToGating(channel, value)
       : sample.rawToDisplay(channel, value);
-  const gates = Object.fromEntries(
-    Object.entries(workspace.gating.gates).map(([gateId, gate]) => {
-      if (gate.gate_type === "quadrant") {
-        // A bend is a shape in the gate's own space and means nothing in another, so a space
-        // change straightens the crosshair. No hosted workspace written before curly quadrants
-        // existed carries one, which is the only kind this legacy converter sees.
-        const { curl: _curl, ...rest } = gate;
-        void _curl;
-        return [gateId, {
-          ...rest,
-          center: [
-            convert(gate.x_channel, gate.center[0]),
-            convert(gate.y_channel, gate.center[1]),
-          ] as Vertex,
-        }];
-      }
-      // An ellipse under a nonlinear space change is not an ellipse, so this legacy converter
-      // cannot move one — and never needs to: ellipses postdate the per-gate space field, so a
-      // pre-space-field workspace (the only thing this converter exists for) cannot hold one.
-      // Passing it through unchanged is exact.
-      if (gate.gate_type === "ellipse") return [gateId, gate];
-      return [gateId, {
-        ...gate,
-        vertices: gate.vertices.map(([x, y]) => [
-          convert(gate.x_channel, x),
-          convert(gate.y_channel, y),
-        ] as Vertex),
-      }];
-    }),
-  );
+  const convertGate = (gate: Gate): Gate => {
+    // A gate that states its own space is evaluated in it whatever the sample's (models.ts,
+    // GateSpace), so its coordinates are already right; moving them would misplace it. A FlowJo
+    // grid gate's vertices are channels, which no display-to-raw map can move.
+    if (gate.space !== undefined) return gate;
+    if (gate.gate_type === "quadrant") {
+      // A bend is a shape in the gate's own space and means nothing in another, so a space
+      // change straightens the crosshair. No hosted workspace written before curly quadrants
+      // existed carries one, which is the only kind this legacy converter sees.
+      const { curl: _curl, ...rest } = gate;
+      void _curl;
+      return {
+        ...rest,
+        center: [
+          convert(gate.x_channel, gate.center[0]),
+          convert(gate.y_channel, gate.center[1]),
+        ] as Vertex,
+      };
+    }
+    // An ellipse under a nonlinear space change is not an ellipse, so this legacy converter
+    // cannot move one — and never needs to: ellipses postdate the per-gate space field, so a
+    // pre-space-field workspace (the only thing this converter exists for) cannot hold one.
+    // Passing it through unchanged is exact.
+    if (gate.gate_type === "ellipse") return gate;
+    return {
+      ...gate,
+      vertices: gate.vertices.map(([x, y]) => [
+        convert(gate.x_channel, x),
+        convert(gate.y_channel, y),
+      ] as Vertex),
+    };
+  };
+  const convertTable = (table: Record<string, Gate>): Record<string, Gate> =>
+    Object.fromEntries(Object.entries(table).map(([gateId, gate]) => [gateId, convertGate(gate)]));
+  // Every hierarchy owns its gates, so a parked one's table moves with the live one. A stored
+  // hierarchy with no table of its own (written before hierarchies owned their geometry) reads
+  // the shared table, converted with the live one.
+  const storedHierarchies = workspace.gating.stored_hierarchies?.map((hierarchy) =>
+    hierarchy.gates ? { ...hierarchy, gates: convertTable(hierarchy.gates) } : hierarchy);
   const converted = {
     ...workspace,
-    gating: { ...workspace.gating, gates },
+    gating: {
+      ...workspace.gating,
+      gates: convertTable(workspace.gating.gates),
+      ...(storedHierarchies ? { stored_hierarchies: storedHierarchies } : {}),
+    },
   } as TWorkspace;
   if (converted.version === 2) validateWorkspace(converted);
   return converted;

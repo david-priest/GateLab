@@ -432,6 +432,33 @@ describe("ellipse gates survive workspace validation", () => {
   });
 });
 
+describe("a rectangle's edge rule survives workspace validation", () => {
+  // models.ts, RectangleBounds: "closed" holds a rectangle's upper edges, "half-open" does not,
+  // and a rectangle saved before the field existed has none and is closed. Losing the field on
+  // save would move the events on those edges the next time the workspace opens.
+  it("keeps bounds on a rectangle through a save and a load, and accepts a rectangle without one", () => {
+    for (const bounds of ["closed", "half-open"]) {
+      const ws = cloneWs(makeWs());
+      (ws.gating.gates.g1 as unknown as { bounds: string }).bounds = bounds;
+      expect(validateWorkspace(ws)).toBe(true);
+      const { ws: back } = readWorkspaceBytes(packWorkspaceReference(ws));
+      expect((back.gating.gates.g1 as unknown as { bounds?: string }).bounds).toBe(bounds);
+    }
+    const legacy = cloneWs(makeWs());
+    expect((legacy.gating.gates.g1 as unknown as { bounds?: string }).bounds).toBeUndefined();
+    expect(validateWorkspace(legacy)).toBe(true);
+  });
+
+  it("refuses a bounds value it does not know, and bounds on anything but a rectangle", () => {
+    const unknown = cloneWs(makeWs());
+    (unknown.gating.gates.g1 as unknown as { bounds: string }).bounds = "open";
+    expect(() => validateWorkspace(unknown)).toThrow(/bounds/i);
+    const polygon = cloneWs(makeWs());
+    Object.assign(polygon.gating.gates.g1, { gate_type: "polygon", vertices: [[1, 2], [3, 4], [3, 2]], bounds: "closed" });
+    expect(() => validateWorkspace(polygon)).toThrow(/bounds/i);
+  });
+});
+
 describe("population hierarchies in the workspace file", () => {
   function withHierarchies(): WorkspaceFile {
     const ws = cloneWs(makeWs());

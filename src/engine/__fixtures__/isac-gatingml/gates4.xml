@@ -1,0 +1,288 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating" 
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+                  xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations" 
+                  xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes" 
+                  xsi:schemaLocation="http://www.isac-net.org/std/Gating-ML/v2.0/gating http://flowcyt.sourceforge.net/gating/2.0/xsd/Gating-ML.v2.0.xsd http://www.isac-net.org/std/Gating-ML/v2.0/transformations http://flowcyt.sourceforge.net/gating/2.0/xsd/Transformations.v2.0.xsd http://www.isac-net.org/std/Gating-ML/v2.0/datatypes http://flowcyt.sourceforge.net/gating/2.0/xsd/DataTypes.v2.0.xsd">
+  
+  <gating:RectangleGate gating:id="myRange1">
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="1.5" gating:max="18.5">
+      <data-type:new-dimension data-type:transformation-ref="myRatio1"/>
+    </gating:dimension>
+  </gating:RectangleGate>
+    
+  <gating:RectangleGate gating:id="myRange2">
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="0.5" gating:max="2">
+      <data-type:new-dimension data-type:transformation-ref="myRatio2"/>
+    </gating:dimension>
+  </gating:RectangleGate>
+  
+  <gating:RectangleGate gating:id="myRange3">
+    <gating:dimension gating:compensation-ref="FCS" gating:min="0.5" gating:max="2">
+      <data-type:new-dimension data-type:transformation-ref="myRatio2"/>
+    </gating:dimension>
+  </gating:RectangleGate>
+  
+  <gating:RectangleGate gating:id="myRange4">
+    <gating:dimension gating:compensation-ref="MySpillFromFCS" gating:min="0.5" gating:max="2">
+      <data-type:new-dimension data-type:transformation-ref="myRatio3"/>
+    </gating:dimension>
+  </gating:RectangleGate>
+
+  <gating:RectangleGate gating:id="myRange5">
+    <gating:dimension gating:compensation-ref="MyOtherSpill" gating:min="0.5" gating:max="2">
+      <data-type:new-dimension data-type:transformation-ref="myRatio4"/>
+    </gating:dimension>
+  </gating:RectangleGate>
+  
+  <gating:QuadrantGate gating:id="myQuadrant">
+    <gating:divider gating:id="D1" gating:compensation-ref="uncompensated">
+      <data-type:new-dimension data-type:transformation-ref="myRatio2"/>
+      <gating:value>1.3</gating:value>
+    </gating:divider>
+    <gating:divider gating:id="D2" gating:compensation-ref="uncompensated">
+      <data-type:fcs-dimension data-type:name="PerCP-Cy5-5-A"/>
+      <gating:value>500</gating:value>
+    </gating:divider>
+    <gating:Quadrant gating:id="myQuadrant_NN">
+      <gating:position gating:divider_ref="D1" gating:location="0"/>
+      <gating:position gating:divider_ref="D2" gating:location="0"/>
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="myQuadrant_PN">
+      <gating:position gating:divider_ref="D1" gating:location="2"/>
+      <gating:position gating:divider_ref="D2" gating:location="0"/>
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="myQuadrant_PP">
+      <gating:position gating:divider_ref="D1" gating:location="2"/>
+      <gating:position gating:divider_ref="D2" gating:location="1000000"/>
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="myQuadrant_NP">
+      <gating:position gating:divider_ref="D1" gating:location="0"/>
+      <gating:position gating:divider_ref="D2" gating:location="1000000"/>
+    </gating:Quadrant>
+  </gating:QuadrantGate>
+  
+  <gating:QuadrantGate gating:id="myQuadrant2">
+    <gating:divider gating:id="D21" gating:compensation-ref="FCS">
+      <data-type:new-dimension data-type:transformation-ref="myRatio2"/>
+      <gating:value>1.3</gating:value>
+    </gating:divider>
+    <gating:divider gating:id="D22" gating:compensation-ref="FCS">
+      <data-type:fcs-dimension data-type:name="PerCP-Cy5-5-A"/>
+      <gating:value>500</gating:value>
+    </gating:divider>
+    <gating:Quadrant gating:id="myQuadrant2_NN">
+      <gating:position gating:divider_ref="D21" gating:location="0"/>
+      <gating:position gating:divider_ref="D22" gating:location="0"/>
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="myQuadrant2_PN">
+      <gating:position gating:divider_ref="D21" gating:location="2"/>
+      <gating:position gating:divider_ref="D22" gating:location="0"/>
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="myQuadrant2_PP">
+      <gating:position gating:divider_ref="D21" gating:location="2"/>
+      <gating:position gating:divider_ref="D22" gating:location="1000000"/>
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="myQuadrant2_NP">
+      <gating:position gating:divider_ref="D21" gating:location="0"/>
+      <gating:position gating:divider_ref="D22" gating:location="1000000"/>
+    </gating:Quadrant>
+  </gating:QuadrantGate>
+  
+  <gating:QuadrantGate gating:id="myQuadrant3">
+    <gating:divider gating:id="D31" gating:compensation-ref="MySpillFromFCS">
+      <data-type:new-dimension data-type:transformation-ref="myRatio3"/>
+      <gating:value>1.3</gating:value>
+    </gating:divider>
+    <gating:divider gating:id="D32" gating:compensation-ref="MySpillFromFCS">
+      <data-type:fcs-dimension data-type:name="Comp-PerCP-Cy5-5"/>
+      <gating:value>500</gating:value>
+    </gating:divider>
+    <gating:Quadrant gating:id="myQuadrant3_NN">
+      <gating:position gating:divider_ref="D31" gating:location="0"/>
+      <gating:position gating:divider_ref="D32" gating:location="0"/>
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="myQuadrant3_PN">
+      <gating:position gating:divider_ref="D31" gating:location="2"/>
+      <gating:position gating:divider_ref="D32" gating:location="0"/>
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="myQuadrant3_PP">
+      <gating:position gating:divider_ref="D31" gating:location="2"/>
+      <gating:position gating:divider_ref="D32" gating:location="1000000"/>
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="myQuadrant3_NP">
+      <gating:position gating:divider_ref="D31" gating:location="0"/>
+      <gating:position gating:divider_ref="D32" gating:location="1000000"/>
+    </gating:Quadrant>
+  </gating:QuadrantGate>
+  
+  <gating:QuadrantGate gating:id="myQuadrant4">
+    <gating:divider gating:id="D41" gating:compensation-ref="MyOtherSpill">
+      <data-type:new-dimension data-type:transformation-ref="myRatio4"/>
+      <gating:value>1.3</gating:value>
+    </gating:divider>
+    <gating:divider gating:id="D42" gating:compensation-ref="MyOtherSpill">
+      <data-type:fcs-dimension data-type:name="Comp1-PerCP-Cy5-5"/>
+      <gating:value>500</gating:value>
+    </gating:divider>
+    <gating:Quadrant gating:id="myQuadrant4_NN">
+      <gating:position gating:divider_ref="D41" gating:location="0"/>
+      <gating:position gating:divider_ref="D42" gating:location="0"/>
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="myQuadrant4_PN">
+      <gating:position gating:divider_ref="D41" gating:location="2"/>
+      <gating:position gating:divider_ref="D42" gating:location="0"/>
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="myQuadrant4_PP">
+      <gating:position gating:divider_ref="D41" gating:location="2"/>
+      <gating:position gating:divider_ref="D42" gating:location="1000000"/>
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="myQuadrant4_NP">
+      <gating:position gating:divider_ref="D41" gating:location="0"/>
+      <gating:position gating:divider_ref="D42" gating:location="1000000"/>
+    </gating:Quadrant>
+  </gating:QuadrantGate>
+  
+  <transforms:transformation transforms:id="myRatio1">
+    <transforms:fratio transforms:A="5" transforms:B="1" transforms:C="2">
+      <data-type:custom_info>Custom info may be part of any transformation definition.</data-type:custom_info>
+      <data-type:fcs-dimension data-type:name="PE-A" />
+      <data-type:fcs-dimension data-type:name="APC-A" />
+    </transforms:fratio>
+  </transforms:transformation>
+  
+  <transforms:transformation transforms:id="myRatio2">
+    <transforms:fratio transforms:A="1" transforms:B="0" transforms:C="0">
+      <data-type:fcs-dimension data-type:name="PE-A" />
+      <data-type:fcs-dimension data-type:name="APC-A" />
+    </transforms:fratio>
+  </transforms:transformation>
+
+  <transforms:transformation transforms:id="myRatio3">
+    <transforms:fratio transforms:A="1" transforms:B="0" transforms:C="0">
+      <data-type:fcs-dimension data-type:name="Comp-PE" />
+      <data-type:fcs-dimension data-type:name="Comp-APC" />
+    </transforms:fratio>
+  </transforms:transformation>
+
+  <transforms:transformation transforms:id="myRatio4">
+    <transforms:fratio transforms:A="1" transforms:B="0" transforms:C="0">
+      <data-type:fcs-dimension data-type:name="Comp1-PE" />
+      <data-type:fcs-dimension data-type:name="Comp1-APC" />
+    </transforms:fratio>
+  </transforms:transformation>
+  
+  <transforms:transformation transforms:id="myLogicle">
+    <transforms:logicle transforms:T="300000" transforms:M="5" transforms:W="1" transforms:A="0.3" />
+  </transforms:transformation>
+  
+  <transforms:transformation transforms:id="myHyperlog">
+    <transforms:hyperlog transforms:T="250000" transforms:M="4" transforms:W="0.1" transforms:A="0" />
+  </transforms:transformation>
+  
+  <transforms:spectrumMatrix transforms:id="MySpillFromFCS">
+    <transforms:fluorochromes>
+      <data-type:fcs-dimension data-type:name="Comp-PE" />
+      <data-type:fcs-dimension data-type:name="Comp-PerCP-Cy5-5" />
+      <data-type:fcs-dimension data-type:name="Comp-APC" />
+      <data-type:fcs-dimension data-type:name="Comp-APC-Cy7" />
+      <data-type:fcs-dimension data-type:name="Comp-Pacific Blue" />
+    </transforms:fluorochromes>
+    <transforms:detectors>
+      <data-type:fcs-dimension data-type:name="PE-A" />
+      <data-type:fcs-dimension data-type:name="PerCP-Cy5-5-A" />
+      <data-type:fcs-dimension data-type:name="APC-A" />
+      <data-type:fcs-dimension data-type:name="APC-Cy7-A" />
+      <data-type:fcs-dimension data-type:name="Pacific Blue-A" />
+    </transforms:detectors>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="1" />
+      <transforms:coefficient transforms:value="0.341872057" />
+      <transforms:coefficient transforms:value="0.001349977" />
+      <transforms:coefficient transforms:value="4.499925e-04" />
+      <transforms:coefficient transforms:value="0.010217607" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.003401361" />
+      <transforms:coefficient transforms:value="1" />
+      <transforms:coefficient transforms:value="0.013674748" />
+      <transforms:coefficient transforms:value="3.022839e-03" />
+      <transforms:coefficient transforms:value="0.000774103" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.006864493" />
+      <transforms:coefficient transforms:value="0.043231700" />
+      <transforms:coefficient transforms:value="1" />
+      <transforms:coefficient transforms:value="4.256187e-02" />
+      <transforms:coefficient transforms:value="0.003046968" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.002191491" />
+      <transforms:coefficient transforms:value="0.008035467" />
+      <transforms:coefficient transforms:value="0.076173203" />
+      <transforms:coefficient transforms:value="1" />
+      <transforms:coefficient transforms:value="0.002980204" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.001097753" />
+      <transforms:coefficient transforms:value="0.004291216" />
+      <transforms:coefficient transforms:value="0" />
+      <transforms:coefficient transforms:value="9.291326e-05" />
+      <transforms:coefficient transforms:value="1" />
+    </transforms:spectrum>
+  </transforms:spectrumMatrix>
+  
+  <transforms:spectrumMatrix transforms:id="MyOtherSpill">
+    <transforms:fluorochromes>
+      <data-type:fcs-dimension data-type:name="Comp1-PE" />
+      <data-type:fcs-dimension data-type:name="Comp1-PerCP-Cy5-5" />
+      <data-type:fcs-dimension data-type:name="Comp1-APC" />
+      <data-type:fcs-dimension data-type:name="Comp1-APC-Cy7" />
+      <data-type:fcs-dimension data-type:name="Comp1-Pacific Blue" />
+    </transforms:fluorochromes>
+    <transforms:detectors>
+      <data-type:fcs-dimension data-type:name="PE-A" />
+      <data-type:fcs-dimension data-type:name="PerCP-Cy5-5-A" />
+      <data-type:fcs-dimension data-type:name="APC-A" />
+      <data-type:fcs-dimension data-type:name="APC-Cy7-A" />
+      <data-type:fcs-dimension data-type:name="Pacific Blue-A" />
+    </transforms:detectors>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="1" />
+      <transforms:coefficient transforms:value="0.341" />
+      <transforms:coefficient transforms:value="0.001" />
+      <transforms:coefficient transforms:value="4.499e-04" />
+      <transforms:coefficient transforms:value="0.010" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.003" />
+      <transforms:coefficient transforms:value="1" />
+      <transforms:coefficient transforms:value="0.013" />
+      <transforms:coefficient transforms:value="3.022e-03" />
+      <transforms:coefficient transforms:value="0.000" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.006" />
+      <transforms:coefficient transforms:value="0.043" />
+      <transforms:coefficient transforms:value="1" />
+      <transforms:coefficient transforms:value="4.256e-02" />
+      <transforms:coefficient transforms:value="0.003" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.002" />
+      <transforms:coefficient transforms:value="0.008" />
+      <transforms:coefficient transforms:value="0.076" />
+      <transforms:coefficient transforms:value="1" />
+      <transforms:coefficient transforms:value="0.002" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.001" />
+      <transforms:coefficient transforms:value="0.004" />
+      <transforms:coefficient transforms:value="0" />
+      <transforms:coefficient transforms:value="9.291" />
+      <transforms:coefficient transforms:value="1" />
+    </transforms:spectrum>
+  </transforms:spectrumMatrix>
+  
+</gating:Gating-ML>
+

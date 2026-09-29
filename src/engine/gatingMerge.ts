@@ -1,5 +1,5 @@
 import type { Gate, Population, PopulationMap } from "./models";
-import { sortPopulationTree } from "./models";
+import { rectangleRule, sortPopulationTree } from "./models";
 
 export type GatingImportMode = "replace" | "merge";
 /** Which files an imported tree is for: every loaded file, the selected ones, or the viewed file alone. */
@@ -48,7 +48,7 @@ function gateIdentity(gate: Gate): string {
     gate.gate_type === "quadrant" ? { center: gate.center }
       : gate.gate_type === "ellipse"
         ? { mean: gate.mean, covariance: gate.covariance, distance_square: gate.distance_square }
-        : { vertices: gate.vertices };
+        : { vertices: gate.vertices, ...(gate.gate_type === "rectangle" ? { bounds: rectangleRule(gate) } : {}) };
   return JSON.stringify([
     gate.name, gate.gate_type, gate.x_channel, gate.y_channel,
     gate.space ?? null, gate.transforms ?? null, shape,

@@ -273,3 +273,62 @@ describe.runIf(existsSync(XITOGEN_XTG1600))("resolveChannels — real Xitogen XT
     expect(keys).toContain("BV785-H");
   });
 });
+
+describe("resolveChannels — instrument parameters are not spectral detectors", () => {
+  // A MACSQuant FCS 3.1 export: three $PnS ending "-A" over positional $PnN, plus the HDR
+  // instrument parameters, whose $PnS equals $PnN and which carry no pulse suffix. Counted as
+  // raw detectors, those three made the file look spectral and 9 of 19 channels were dropped.
+  const macsLike = () => mkFcs("flow", [
+    { name: "Time", marker: "HDR-T" },
+    { name: "HDR-CE", marker: "HDR-CE" },
+    { name: "HDR-SE", marker: "HDR-SE" },
+    { name: "HDR-V", marker: "HDR-V" },
+    { name: "FSC-A", marker: "FSC-A" },
+    { name: "SSC-A", marker: "SSC-A" },
+    { name: "FL2-A", marker: "V2-A" },
+    { name: "FL2-H", marker: "V2-H" },
+    { name: "FL2-W", marker: "V2-W" },
+    { name: "FL4-A", marker: "Y2-A" },
+    { name: "FL4-H", marker: "Y2-H" },
+    { name: "FL7-A", marker: "B1-A" },
+  ]);
+
+  it("keeps every channel of a conventional file whatever its instrument parameters are called", () => {
+    const keys = resolveChannels(macsLike()).map((c) => c.key);
+    expect(keys).toHaveLength(12);
+    expect(keys).toEqual(expect.arrayContaining(["HDR-CE", "V2-H", "V2-W", "Y2-H", "V2-A"]));
+  });
+
+  it("still filters a spectral file, whose detectors are pulses", () => {
+    const fcs = macsLike();
+    fcs.channels.push({ index: 12, name: "UV1-A", marker: null, bits: 32, range: 262144 });
+    fcs.channels.push({ index: 13, name: "UV2-A", marker: null, bits: 32, range: 262144 });
+    fcs.columns.push(Float32Array.of(0), Float32Array.of(0));
+    const keys = resolveChannels(fcs).map((c) => c.key);
+    expect(keys).not.toContain("UV1-A");
+    expect(keys).toContain("V2-A (FL2-A)");
+  });
+});
+
+const MACS_31 = `${FIXTURES_ROOT}/PUBLIC - Screenshot Safe/Vendor FCS import matrix/source-fcs/curated-from-fcsparser/Miltenyi_MACSQuant.fcs`;
+const MACS_20 = `${FIXTURES_ROOT}/PUBLIC - Screenshot Safe/Vendor FCS import matrix/source-fcs/curated-from-fcsparser/Miltenyi_MACSQuant_FCS2.0.fcs`;
+
+describe.runIf(existsSync(MACS_31) && existsSync(MACS_20))("resolveChannels — real MACSQuant, FCS 3.1 and 2.0 exports", () => {
+  const keysOf = (path: string) => {
+    const b = readFileSync(path);
+    return resolveChannels(parseFcs(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength))).map((c) => c.key);
+  };
+
+  it("resolves all 19 parameters of the FCS 3.1 file, heights and widths included", () => {
+    const keys = keysOf(MACS_31);
+    expect(keys).toHaveLength(19);
+    for (const k of ["HDR-CE", "HDR-SE", "HDR-V", "V2-H", "V2-W", "Y2-H", "Y2-W", "B1-H", "B1-W"]) expect(keys).toContain(k);
+  });
+
+  it("keys a channel the same in both exports, so a gate transfers between them", () => {
+    const k31 = new Set(keysOf(MACS_31));
+    for (const k of ["V2-A", "Y2-A", "B1-A", "FSC-A", "SSC-A"]) expect(k31.has(k)).toBe(true);
+    const k20 = keysOf(MACS_20);
+    for (const k of k20.filter((key) => /^(V2|Y2|B1|FSC|SSC)-[AHW]$/.test(key))) expect(k31.has(k)).toBe(true);
+  });
+});

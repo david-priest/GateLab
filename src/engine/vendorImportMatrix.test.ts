@@ -15,7 +15,7 @@
 import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseFcs } from "./fcs";
+import { extractFcsDataSet, listFcsDataSets, parseFcs, type FcsFile } from "./fcs";
 import { Sample } from "./sample";
 import { FIXTURES_ROOT } from "../testFixtures";
 
@@ -31,7 +31,9 @@ interface VendorCase {
   version: string;
   /** What detectInstrumentType() must conclude. */
   mode: "flow" | "cytof";
-  events: number;
+  /** $TOT; one entry per data set for a file holding several ($NEXTDATA). */
+  events: number | number[];
+  /** Parameters in the file ($PAR), and channels the Sample exposes: every one of them. */
   channels: number;
   /** $CYT verbatim; null where the file carries none. */
   cyt: string | null;
@@ -107,7 +109,11 @@ const MATRIX: VendorCase[] = [
     instrument: "MACSQuant", vendor: "Miltenyi",
     path: join(VENDOR_DIR, "curated-from-fcsparser", "Miltenyi_MACSQuant.fcs"),
     version: "FCS3.1", mode: "flow", events: 10000, channels: 19,
-    cyt: "MACSQuant", spilloverChannels: 0, asinh: 6, logicle: 3,
+    cyt: "MACSQuant", spilloverChannels: 0, asinh: 6, logicle: 12,
+    note: "Its three instrument parameters HDR-CE, HDR-SE and HDR-V carry $PnS equal to $PnN, "
+      + "and three $PnS end '-A' (V2-A over FL2-A), which together made it look spectral: "
+      + "until 2026-09 nine of its 19 parameters (every fluorescence height and width, and the "
+      + "HDR parameters) were dropped, and this row read logicle 3. All 19 now resolve.",
   },
   {
     instrument: "CyFlow Cube 15", vendor: "Sysmex Partec",
@@ -118,11 +124,13 @@ const MATRIX: VendorCase[] = [
   {
     instrument: "Muse", vendor: "Guava / Luminex",
     path: join(VENDOR_DIR, "curated-from-fcsparser", "Guava_Muse.fcs"),
-    version: "FCS3.0", mode: "flow", events: 108, channels: 10,
+    version: "FCS3.0", mode: "flow", events: [108, 50081, 111496, 50037], channels: 10,
     cyt: "Guava Muse, Viacount 1.8", spilloverChannels: 0, asinh: 3, logicle: 6,
     note: "Its $PnS is prose — 'Forward Scatter (FSC-HLin)' — while $PnN is the "
       + "recognisable 'FSC-HLin'. This is the file that forced classification on $PnN "
-      + "as well as the display key; before that its scatter got a logicle.",
+      + "as well as the display key; before that its scatter got a logicle. It is also a "
+      + "plate export holding four wells, one data set each, chained by $NEXTDATA; until "
+      + "2026-09 only the first (108 events) was read, and the other three dropped without a word.",
   },
   {
     instrument: "FACSCalibur", vendor: "BD",
@@ -172,6 +180,15 @@ function load(path: string): ArrayBuffer {
   return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
 }
 
+/** Every data set of a file, each read as the app opens it: a file of its own. */
+function openAll(path: string): FcsFile[] {
+  const buf = load(path);
+  return listFcsDataSets(buf).map((set) => {
+    const own = extractFcsDataSet(buf, set.index);
+    return parseFcs(own.buffer.slice(own.byteOffset, own.byteOffset + own.byteLength) as ArrayBuffer);
+  });
+}
+
 const corpusPresent = existsSync(VENDOR_DIR) && existsSync(CYTOF_DIR);
 
 describe.skipIf(!corpusPresent)("vendor FCS import matrix", () => {
@@ -179,28 +196,33 @@ describe.skipIf(!corpusPresent)("vendor FCS import matrix", () => {
     describe(`${c.vendor} ${c.instrument} (${c.version})`, () => {
       it("imports with the expected shape, instrument mode and transforms", () => {
         expect(existsSync(c.path), `missing fixture: ${c.path}`).toBe(true);
-        const fcs = parseFcs(load(c.path));
+        const all = openAll(c.path);
+        expect(all.map((f) => f.nEvents)).toEqual(Array.isArray(c.events) ? c.events : [c.events]);
 
-        expect(fcs.version).toBe(c.version);
-        expect(fcs.nEvents).toBe(c.events);
-        expect(fcs.channels).toHaveLength(c.channels);
-        expect(fcs.keywords["$CYT"] ?? null).toBe(c.cyt);
-        expect(fcs.instrument).toBe(c.mode);
-        expect(fcs.spillover?.channels.length ?? 0).toBe(c.spilloverChannels);
+        for (const fcs of all) {
+          expect(fcs.version).toBe(c.version);
+          expect(fcs.channels).toHaveLength(c.channels);
+          expect(fcs.keywords["$CYT"] ?? null).toBe(c.cyt);
+          expect(fcs.instrument).toBe(c.mode);
+          expect(fcs.spillover?.channels.length ?? 0).toBe(c.spilloverChannels);
 
-        const sample = new Sample(fcs);
-        const kinds = sample.channels.map((_, i) => sample.transformKind(i));
-        expect(kinds.filter((k) => k === "asinh")).toHaveLength(c.asinh);
-        expect(kinds.filter((k) => k === "logicle")).toHaveLength(c.logicle);
+          const sample = new Sample(fcs);
+          // Every parameter reaches the user: the parser's count alone let the MACSQuant row pass
+          // while the Sample exposed 10 of its 19.
+          expect(sample.channels).toHaveLength(c.channels);
+          const kinds = sample.channels.map((_, i) => sample.transformKind(i));
+          expect(kinds.filter((k) => k === "asinh")).toHaveLength(c.asinh);
+          expect(kinds.filter((k) => k === "logicle")).toHaveLength(c.logicle);
+        }
       });
 
       it("yields finite gating values on every channel", () => {
-        const sample = new Sample(parseFcs(load(c.path)));
+        const sample = new Sample(openAll(c.path)[0]);
         const data = sample.gatingData();
         for (const channel of sample.channels) {
           const column = data.column(channel.key);
           expect(column, `no gating column for ${channel.key}`).toBeDefined();
-          expect(column!.length).toBe(c.events);
+          expect(column!.length).toBe(Array.isArray(c.events) ? c.events[0] : c.events);
           // A parse that silently misreads offsets or endianness shows up here as
           // NaN/Infinity long before it shows up as a wrong gate.
           let nonFinite = 0;
@@ -224,17 +246,17 @@ describe.skipIf(!corpusPresent)("vendor FCS import matrix", () => {
 
   it("refuses a truncated file rather than importing garbage", () => {
     // 3,931 bytes on disk, but the header declares $BEGINDATA=5912, $ENDDATA=2165911,
-    // $PAR=27, $TOT=20000 — 2.1 MB of data that is not there. Refusing is correct.
-    // The current failure is a raw RangeError rather than a diagnosed message; this
-    // asserts only that it refuses, so improving the message will not break the test.
+    // $PAR=27, $TOT=20000 — 2.1 MB of data that is not there. Refusing is correct, and says why.
     expect(existsSync(TRUNCATED)).toBe(true);
-    expect(() => parseFcs(load(TRUNCATED))).toThrow();
+    expect(() => parseFcs(load(TRUNCATED))).toThrow(/DATA segment is incomplete/);
   });
 
   it.runIf(process.env.GATELAB_EMIT_MATRIX)("emits the matrix for the manuscript", () => {
     const rows = MATRIX.map((c) =>
       `| ${c.vendor} | ${c.instrument} | ${c.version.replace("FCS", "")} | ${c.channels} | `
-      + `${c.events.toLocaleString("en-US")} | ${c.mode} | ${c.spilloverChannels || "—"} |`,
+      + `${Array.isArray(c.events)
+        ? `${c.events.reduce((a, b) => a + b, 0).toLocaleString("en-US")} in ${c.events.length} data sets`
+        : c.events.toLocaleString("en-US")} | ${c.mode} | ${c.spilloverChannels || "—"} |`,
     );
     console.log(
       "\n| Vendor | Instrument | FCS | Channels | Events | Detected | Spillover |\n"

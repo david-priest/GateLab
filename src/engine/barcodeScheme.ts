@@ -23,9 +23,10 @@ import {
   type Vertex,
   type Population,
 } from "./models";
-import { isDnaChannel, massLabel, massToken, tokenMatchesChannel, type MassToken } from "./barcodeMass";
+import { isDnaChannel, legacyMassLabel, legacyMassToken, massLabel, massToken, planeLabel, tokenMatchesChannel, type MassToken } from "./barcodeMass";
+import { punctuationInsensitive } from "./channelMatch";
 import { DEFAULT_BARCODE_TEMPLATE } from "./barcodeTemplate";
-import { gateCorners, resolveGateSpace, toAsinhUnits, toRawUnits, type GateSpaceContext, type ResolvedGateSpace } from "./gateSpace";
+import { gateCorners, resolveGateSpace, toAsinhUnits, type GateSpaceContext, type ResolvedGateSpace } from "./gateSpace";
 import {
   findDisplayPlanes,
   templateShapesFor,
@@ -36,10 +37,19 @@ import {
   type QcPopulationTemplate,
 } from "./barcodeTemplate";
 import { populationTreeOrder } from "./populations";
+import { rectangleRule, type RectangleBounds } from "./models";
+import { transformFromSpec } from "./sample";
+import { exactRawRange, nextRawValue, type RawPrecision } from "./float32Bounds";
+import { transformPhrase } from "./gateSpaceBadge";
 
-/** Gate names use the mass alone ("194+195-"), as the lab's workspaces and barcode strings do. */
+/**
+ * Gate names use the mass alone ("194+195-"), as the lab's workspaces and barcode strings do. A
+ * channel whose name spells no metal keeps the number GateLab took from it until 2026-09
+ * (legacyMassToken: "450-530+" on V450-A x B530-A), so that a gate built now has the name an earlier
+ * build gave it, and a scheme that version saved finds its gates' shapes by name.
+ */
 const massOnly = (channelKey: string): string => {
-  const t = massToken(channelKey);
+  const t = massToken(channelKey) ?? legacyMassToken(channelKey);
   return t ? String(t.mass) : channelKey;
 };
 
@@ -69,6 +79,15 @@ export interface PlaneDeclaration {
  * A rectangle is
  * written as ranges, "x lo..hi" and "y lo..hi"; "x full" spans the loaded file's whole range
  * (the Time axis). A polygon is a list of "(x,y)" points.
+ *
+ * A range "lo..hi" holds both of its ends, lo <= v <= hi, as every rectangle in this format has
+ * since it existed. "lo..<hi" holds lo but not hi, lo <= v < hi, which is Gating-ML's rule and
+ * the one a rectangle drawn in GateLab follows (models.ts, RectangleBounds):
+ *
+ *   # gate: Early | rectangle | Time x Center | raw | x 0..<500 | y 321.283..<615.828
+ *
+ * One rectangle has one rule, so its ranges are either all "..<" or all "..", a "full" axis
+ * aside, which reaches past the data and is the same under both.
  */
 export interface GateDeclaration {
   name: string;
@@ -82,6 +101,8 @@ export interface GateDeclaration {
   vertices: Vertex[];
   xFull: boolean;
   yFull: boolean;
+  /** A rectangle's edge rule: "closed" for "lo..hi", "half-open" for "lo..<hi". */
+  bounds?: RectangleBounds;
   line: number;
 }
 
@@ -231,23 +252,31 @@ function parseGateDeclaration(text: string, line: number): GateDeclaration | str
     const vertices: Vertex[] = pts.map((m) => [Number(m[1]), Number(m[2])]);
     return { name, gate_type, x: channels[0], y: channels[1], ...scale, vertices, xFull: false, yFull: false, line };
   }
-  const axis = (which: "x" | "y"): { lo: number; hi: number } | "full" | string => {
+  type Range = { lo: number; hi: number; halfOpen: boolean };
+  const axis = (which: "x" | "y"): Range | "full" | string => {
     const full = new RegExp(String.raw`(?:^|\s)${which}\s+full(?:\s|$)`, "i").test(shape);
-    const m = new RegExp(String.raw`(?:^|\s)${which}\s+(${NUMBER})\s*(?:\.\.|…|to|-)\s*(${NUMBER})(?:\s|$)`, "i").exec(shape);
+    const m = new RegExp(String.raw`(?:^|\s)${which}\s+(${NUMBER})\s*(\.\.<|\.\.|…|to|-)\s*(${NUMBER})(?:\s|$)`, "i").exec(shape);
     if (full) return "full";
-    if (!m) return `Line ${line}: rectangle "${name}" needs "${which} lo..hi" or "${which} full" (got "${shape}").`;
+    if (!m) return `Line ${line}: rectangle "${name}" needs "${which} lo..hi", "${which} lo..<hi" or "${which} full" (got "${shape}").`;
+    const halfOpen = m[2] === "..<";
     const lo = Number(m[1]);
-    const hi = Number(m[2]);
-    return lo <= hi ? { lo, hi } : { lo: hi, hi: lo };
+    const hi = Number(m[3]);
+    if (halfOpen && !(lo <= hi)) return `Line ${line}: rectangle "${name}" has "${which} ${m[1]}..<${m[3]}", whose upper end is below its lower one.`;
+    return lo <= hi ? { lo, hi, halfOpen } : { lo: hi, hi: lo, halfOpen };
   };
   const ax = axis("x");
   const ay = axis("y");
   if (typeof ax === "string" && ax !== "full") return ax;
   if (typeof ay === "string" && ay !== "full") return ay;
-  const xr = ax === "full" ? { lo: 0, hi: 1 } : (ax as { lo: number; hi: number });
-  const yr = ay === "full" ? { lo: 0, hi: 1 } : (ay as { lo: number; hi: number });
+  const ranges = [ax, ay].filter((r): r is Range => typeof r === "object");
+  if (ranges.some((r) => r.halfOpen) && !ranges.every((r) => r.halfOpen)) {
+    return `Line ${line}: rectangle "${name}" mixes "lo..hi" and "lo..<hi"; one rectangle has one rule, so write both ranges the same way.`;
+  }
+  const xr = ax === "full" ? { lo: 0, hi: 1 } : (ax as Range);
+  const yr = ay === "full" ? { lo: 0, hi: 1 } : (ay as Range);
   const vertices: Vertex[] = [[xr.lo, yr.lo], [xr.hi, yr.lo], [xr.hi, yr.hi], [xr.lo, yr.hi]];
-  return { name, gate_type, x: channels[0], y: channels[1], ...scale, vertices, xFull: ax === "full", yFull: ay === "full", line };
+  const bounds: RectangleBounds = ranges.some((r) => r.halfOpen) ? "half-open" : "closed";
+  return { name, gate_type, x: channels[0], y: channels[1], ...scale, vertices, xFull: ax === "full", yFull: ay === "full", bounds, line };
 }
 
 /** Parse one "# population: Cells = A, B, C" or "# population: B cells < Live = CD19+, not CD3+" line. */
@@ -417,7 +446,11 @@ function parseState(value: string): boolean | null {
   return null;
 }
 
-/** Resolve a scheme token to one loaded channel, or report the candidates. */
+/**
+ * Resolve a scheme token to one loaded channel, or report the candidates: by exact name, then by
+ * the isotope it carries (massToken), and last, for a token that carries none, as a label GateLab
+ * wrote until 2026-09 (legacyLabelChannel).
+ */
 export function resolveMassToken(
   token: string,
   channels: BarcodeChannelLike[],
@@ -425,9 +458,25 @@ export function resolveMassToken(
   const exact = channels.find((c) => c.key === token || c.pnn === token || c.marker === token);
   if (exact) return { key: exact.key };
   const t: MassToken | null = massToken(token);
-  if (!t) return { candidates: [] };
+  if (!t) return legacyLabelChannel(token, channels);
   const hits = channels.filter((c) =>
     tokenMatchesChannel(t, c.pnn) || tokenMatchesChannel(t, c.key) || (c.marker ? tokenMatchesChannel(t, c.marker) : false));
+  const keys = [...new Set(hits.map((c) => c.key))];
+  return keys.length === 1 ? { key: keys[0] } : { candidates: keys };
+}
+
+/**
+ * A token that spells no metal and is not a bare mass, read as the label GateLab wrote for a channel
+ * until 2026-09 (60a69a9, and the public release 0.8.3), which took any name's letters and digits for
+ * an isotope (legacyMassLabel): "67Ki" for Ki67, "220B" for B220, "450V" for V450-A. It names the
+ * channel whose name gives that label, where exactly one does; where several do, it names none and
+ * they are the candidates. Those versions read their own labels back this way; without this step a
+ * hierarchy CSV or scheme they saved loses every gate on such a channel.
+ */
+function legacyLabelChannel(token: string, channels: BarcodeChannelLike[]): { key: string } | { candidates: string[] } {
+  const s = token.trim();
+  if (!/^\d{2,3}[A-Z][a-z]?$/.test(s)) return { candidates: [] };
+  const hits = channels.filter((c) => [c.key, c.pnn, c.marker].some((n) => !!n && legacyMassLabel(n) === s));
   const keys = [...new Set(hits.map((c) => c.key))];
   return keys.length === 1 ? { key: keys[0] } : { candidates: keys };
 }
@@ -700,17 +749,29 @@ export interface BarcodeBuildOptions {
   reuse?: boolean;
 }
 
+/** The role words a QC gate may name its channel by (resolveQcChannel), as punctuationInsensitive gives them. */
+const QC_ROLE_WORDS = new Set(["time", "center", "offset", "width", "residual", "amplitude", "eventlength"]);
+
 /**
  * A QC gate's channel, by exact name, by isotope, or by role: "Time", "Center", "Offset",
  * "Width", "Residual", "Amplitude" and "Event_length" match the same word in the loaded names
- * regardless of case and punctuation; "DNA" matches an intercalator channel; "Live" a cisplatin
- * or viability channel.
+ * regardless of case and punctuation, or a loaded name that starts or ends with it; "DNA" matches
+ * an intercalator channel; "Live" a cisplatin or viability channel. Any other name is found as
+ * itself with case and punctuation ignored (channelMatch.punctuationInsensitive, which keeps the
+ * letters of every script and every sign), then by the metal it spells, and only where that finds
+ * one channel; then, where it spells no metal, as a label GateLab wrote until 2026-09 for the one
+ * channel that gives it ("67Ki" for Ki67; resolveMassToken), which no later step could take;
+ * otherwise it is refused, and the gate is left out by name.
+ *
+ * Until 2026-09 case and punctuation were ignored by keeping a-z and 0-9 only, so a gate line on
+ * TCRγδ was placed on TCRαβ over a file without TCRγδ, and on CD3- over one with CD3+; and any
+ * name, not only a role word, was taken for the one loaded name that started or ended with it, so
+ * a gate on CD3 was placed on CD38 over a file without CD3.
  */
 export function resolveQcChannel(pattern: string, channels: BarcodeChannelLike[]): string | null {
   const exact = channels.find((c) => c.key === pattern || c.pnn === pattern || c.marker === pattern);
   if (exact) return exact.key;
-  const squash = (v: string) => v.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const p = squash(pattern);
+  const p = punctuationInsensitive(pattern);
   const names = (c: BarcodeChannelLike) => [c.key, c.pnn, c.marker ?? ""];
   if (p === "dna") {
     const hit = channels.find((c) => names(c).some((n) => isDnaChannel(n)));
@@ -720,15 +781,21 @@ export function resolveQcChannel(pattern: string, channels: BarcodeChannelLike[]
     const hit = channels.find((c) => names(c).some((n) => /198pt|pt198|cisplatin|live|viab/i.test(n)));
     return hit ? hit.key : null;
   }
-  const byRole = channels.filter((c) => names(c).some((n) => squash(n) === p));
+  if (!p) return null;
+  const byRole = channels.filter((c) => names(c).some((n) => punctuationInsensitive(n) === p));
   if (byRole.length === 1) return byRole[0].key;
+  if (byRole.length > 1) return null;
   const byMass = resolveMassToken(pattern, channels);
   if ("key" in byMass) return byMass.key;
   // A learned template names the channel as its own file did ("103Rh_DNA", "198Pt_Live"); on a
   // file with another intercalator or viability isotope, fall back to the role.
   if (isDnaChannel(pattern)) return resolveQcChannel("DNA", channels);
   if (/198pt|pt198|cisplatin|live|viab/i.test(pattern)) return resolveQcChannel("Live", channels);
-  const loose = channels.filter((c) => names(c).some((n) => squash(n).startsWith(p) || squash(n).endsWith(p)));
+  if (!QC_ROLE_WORDS.has(p)) return null;
+  const loose = channels.filter((c) => names(c).some((n) => {
+    const q = punctuationInsensitive(n);
+    return q.startsWith(p) || q.endsWith(p);
+  }));
   return loose.length === 1 ? loose[0].key : null;
 }
 
@@ -744,6 +811,7 @@ function qcGateFromDeclaration(g: GateDeclaration): QcGateTemplate {
     ...(g.cofactors ? { cofactors: g.cofactors } : {}),
     vertices: g.vertices.map(([x, y]) => [x, y] as Vertex),
     ...(g.xFull ? { xFull: true } : {}),
+    ...(g.gate_type === "rectangle" && g.bounds ? { bounds: g.bounds } : {}),
   };
 }
 
@@ -955,8 +1023,8 @@ export function buildBarcodeGating(
   };
 
   for (const plane of scheme.planes) {
-    const xLabel = massLabel(plane.x) ?? plane.x;
-    const yLabel = massLabel(plane.y) ?? plane.y;
+    const xLabel = planeLabel(plane.x);
+    const yLabel = planeLabel(plane.y);
     const xName = massOnly(plane.x);
     const yName = massOnly(plane.y);
     const byState: Partial<Record<BarcodeStateKey | "-" | "+", string>> = {};
@@ -1111,6 +1179,9 @@ function qcGateFor(
   xRange: [number, number] | undefined,
 ): PolyRectGate {
   // Coordinates written at another cofactor are rescaled to this sample's: the same raw values.
+  // A rectangle too, as every file before 2026-09 was read. "Save hierarchy CSV" therefore never
+  // writes a rectangle at a cofactor other than the file's own; it writes that one in raw values,
+  // which bring it back holding the same events (exportHierarchyCsv).
   const rescale = (axis: "x" | "y"): ((v: number) => number) => {
     const written = g.cofactors?.[axis];
     if (g.space !== "display" || (g.transforms?.[axis] ?? "asinh") !== "asinh" || written === undefined || written === cofactor) return (v) => v;
@@ -1142,7 +1213,24 @@ function qcGateFor(
     ...(display
       ? { space: "display" as const, transforms: { [x]: spec(g.transforms?.x ?? "asinh"), [y]: spec(g.transforms?.y ?? "asinh") } }
       : { space: "raw" as const }),
+    // A template rectangle without a rule is closed, as it always was (models.ts, RectangleBounds).
+    ...(g.gate_type === "rectangle" ? { bounds: g.bounds ?? "closed" } : {}),
   };
+}
+
+/**
+ * A number as a "# gate:" line writes it: seven significant digits where that is the number
+ * itself, and every digit it takes otherwise. A rectangle's bounds must come back exactly, since
+ * an event lying on an edge is on the other side of a bound rounded past it.
+ */
+function exactFmt(v: number): string {
+  const short = String(Number(v.toPrecision(7)));
+  return Number(short) === v ? short : String(v);
+}
+
+/** A rectangle's ranges on a "# gate:" line: "lo..hi" closed, "lo..<hi" half-open. */
+function rangeText(lo: number, hi: number, bounds: RectangleBounds): string {
+  return `${exactFmt(lo)}${bounds === "half-open" ? "..<" : ".."}${exactFmt(hi)}`;
 }
 
 /** The template CSV offered for download, with the plane declarations spelled out. */
@@ -1252,8 +1340,9 @@ export function exportBarcodeScheme(
     if (g.gate_type === "rectangle") {
       const xs = g.vertices.map((v) => v[0]);
       const ys = g.vertices.map((v) => v[1]);
-      const xPart = g.xFull ? "x full" : `x ${fmt(Math.min(...xs))}..${fmt(Math.max(...xs))}`;
-      return `# gate: ${g.name} | rectangle | ${chans} | ${scale} | ${xPart} | y ${fmt(Math.min(...ys))}..${fmt(Math.max(...ys))}`;
+      const rule = g.bounds ?? "closed";
+      const xPart = g.xFull ? "x full" : `x ${rangeText(Math.min(...xs), Math.max(...xs), rule)}`;
+      return `# gate: ${g.name} | rectangle | ${chans} | ${scale} | ${xPart} | y ${rangeText(Math.min(...ys), Math.max(...ys), rule)}`;
     }
     return `# gate: ${g.name} | polygon | ${chans} | ${scale} | ${g.vertices.map(([x, y]) => `(${fmt(x)},${fmt(y)})`).join(" ")}`;
   };
@@ -1342,30 +1431,61 @@ export function exportHierarchyCsv(
     const resolved = resolveGateSpace(g, options.context, cofactor);
     let scale: string;
     let vertices: Vertex[] = g.vertices;
+    // A rectangle's rule as written; only an empty closed rectangle in raw values changes it.
+    let rule = rectangleRule(g);
     if (resolved.space === "raw") scale = "raw";
     else {
       const token = (spec: ResolvedGateSpace["x"]): string | null =>
         spec.kind === "identity" ? "linear" : spec.kind === "asinh" ? `asinh(${fmt(spec.cofactor)})` : null;
       const tx = token(resolved.x);
       const ty = token(resolved.y);
-      if (tx && ty) scale = tx === ty ? tx : `${tx}, ${ty}`;
+      // A rectangle at another cofactor would be rescaled to the file's on reading (qcGateFor),
+      // which moves an edge between float32 display values: written in raw values instead.
+      const otherCofactor = g.gate_type === "rectangle" && [resolved.x, resolved.y].find((spec) =>
+        spec.kind === "asinh" && spec.cofactor !== cofactor);
+      if (tx && ty && !otherCofactor) scale = tx === ty ? tx : `${tx}, ${ty}`;
       else {
-        const unnamed = [resolved.x, resolved.y].find((spec) => spec.kind !== "identity" && spec.kind !== "asinh")!;
+        const unnamed = [resolved.x, resolved.y].find((spec) => spec.kind !== "identity" && spec.kind !== "asinh");
         if (g.gate_type !== "rectangle") {
-          notes.push(`${g.name}: a polygon drawn on a ${unnamed.kind} axis, which the file cannot name.`);
+          notes.push(`${g.name}: a polygon on ${transformPhrase(unnamed!)}, which the file cannot name.`);
           continue;
         }
-        // Any monotone transform maps a rectangle to a rectangle, so raw units are exact.
-        vertices = g.vertices.map(([x, y]) => [toRawUnits(resolved.x, x), toRawUnits(resolved.y, y)]);
+        // Any monotone transform maps a rectangle to a rectangle, so raw units are exact: each
+        // edge is written as the raw value that selects the same events, those lying on the
+        // edge included, searched over the values the channel's raw column holds
+        // (float32Bounds.ts), which the inverse transform alone does not give.
+        const xs = g.vertices.map((v) => v[0]);
+        const ys = g.vertices.map((v) => v[1]);
+        const precision = (ch: string): RawPrecision => options.context?.rawPrecision?.(ch) ?? "float64";
+        const [px, py] = [precision(g.x_channel), precision(g.y_channel)];
+        let rx = exactRawRange(transformFromSpec(resolved.x), Math.min(...xs), Math.max(...xs), rule, px);
+        let ry = exactRawRange(transformFromSpec(resolved.y), Math.min(...ys), Math.max(...ys), rule, py);
         scale = "raw";
-        notes.push(`${g.name}: drawn on a ${unnamed.kind} axis, which the file cannot name; written in raw units, which is exact for a rectangle.`);
+        notes.push(unnamed
+          ? `${g.name}: drawn on ${transformPhrase(unnamed)}, which the file cannot name; written in raw units, which is exact for a rectangle.`
+          : `${g.name}: drawn at arcsinh cofactor ${fmt((otherCofactor as { cofactor: number }).cofactor)}, not this file's ${fmt(cofactor)}; written in raw units, which is exact for a rectangle.`);
+        // A closed range lying between the display values of two neighbouring raw values holds
+        // none of the values its column can hold, and comes back from exactRawRange with its
+        // ends crossed. No closed range of raw values holds nothing where every double is a
+        // possible value (a float64 column), and "hi..lo" reads as "lo..hi", which holds both
+        // neighbours; so the rectangle, which holds no event under either rule, is written
+        // half-open, "lo..<lo" on that axis, and its other axis as the half-open range holding
+        // the same raw values as its closed one.
+        if (rule === "closed" && (rx[0] > rx[1] || ry[0] > ry[1])) {
+          const open = ([lo, hi]: [number, number], p: RawPrecision): [number, number] =>
+            lo > hi ? [lo, lo] : [lo, nextRawValue(hi, p)];
+          [rx, ry] = [open(rx, px), open(ry, py)];
+          rule = "half-open";
+          notes.push(`${g.name}: a closed rectangle holding no value its channel can hold; written half-open, "lo..<lo", which holds the same: nothing.`);
+        }
+        vertices = [[rx[0], ry[0]], [rx[1], ry[0]], [rx[1], ry[1]], [rx[0], ry[1]]];
       }
     }
     const chans = `${label(g.x_channel)} x ${label(g.y_channel)}`;
     if (g.gate_type === "rectangle") {
       const xs = vertices.map((v) => v[0]);
       const ys = vertices.map((v) => v[1]);
-      written.set(g.gate_id, `# gate: ${g.name} | rectangle | ${chans} | ${scale} | x ${fmt(Math.min(...xs))}..${fmt(Math.max(...xs))} | y ${fmt(Math.min(...ys))}..${fmt(Math.max(...ys))}`);
+      written.set(g.gate_id, `# gate: ${g.name} | rectangle | ${chans} | ${scale} | x ${rangeText(Math.min(...xs), Math.max(...xs), rule)} | y ${rangeText(Math.min(...ys), Math.max(...ys), rule)}`);
     } else {
       written.set(g.gate_id, `# gate: ${g.name} | polygon | ${chans} | ${scale} | ${vertices.map(([x, y]) => `(${fmt(x)},${fmt(y)})`).join(" ")}`);
     }

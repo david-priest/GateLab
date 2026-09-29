@@ -119,3 +119,83 @@ describe("a spillover matrix supplied from outside the FCS", () => {
     expect(s.spillover).toBeNull();
   });
 });
+
+describe("an FCS's own matrix that names a parameter the file lacks", () => {
+  it("is cut down to the channels the file has, and says which it left out", () => {
+    // flowCore and FlowKit refuse such a matrix; GateLab compensates with what it has, as it does
+    // for a workspace's matrix, and records the loss instead of absorbing it.
+    const s = new Sample(flowFile({
+      spillover: { channels: ["FITC-A", "PE-A", "APC-A"], matrix: [[1, 0.2, 0], [0, 1, 0.5], [0, 0, 1]] },
+    }));
+    expect(s.spillover?.channels).toEqual(["PE-A", "APC-A"]);
+    expect(s.spilloverOrigin).toEqual({ kind: "fcs", droppedChannels: ["FITC-A"] });
+  });
+
+  it("records nothing when every parameter is present", () => {
+    const s = new Sample(flowFile({ spillover: PE_INTO_APC }));
+    expect(s.spilloverOrigin).toEqual({ kind: "fcs" });
+  });
+});
+
+// A saved workspace records the matrix as it was supplied (WorkspaceSample.externalSpillover), so a
+// reopened file is compensated with it again; the parameters the file lacks stay named.
+describe("the matrix as it was supplied", () => {
+  it("is kept whole for the saved workspace, gives the same origin again, and goes with a restored snapshot", () => {
+    const withOther = { channels: ["PE-A", "APC-A", "BV421-A"], matrix: [[1, 0.5, 0], [0, 1, 0], [0.1, 0, 1]] };
+    const s = new Sample(flowFile({ spillover: { channels: ["PE-A", "APC-A"], matrix: [[1, 0.1], [0, 1]] } }));
+    expect(s.externalSpillover).toBeNull();
+    const before = s.spilloverSnapshot();
+    s.installExternalSpillover(withOther, "Matrix_A", { replaceEmbedded: true });
+    // As supplied, and the parameter this file left out named.
+    expect(s.externalSpillover).toEqual({ label: "Matrix_A", ...withOther, leftOut: ["BV421-A"] });
+    // Installed again from the record, on a fresh sample of the file: the same compensation and origin.
+    const again = new Sample(flowFile({ spillover: { channels: ["PE-A", "APC-A"], matrix: [[1, 0.1], [0, 1]] } }));
+    const { label, channels, matrix, leftOut } = s.externalSpillover!;
+    again.installExternalSpillover({ channels, matrix }, label, { replaceEmbedded: true, leftOut });
+    expect(again.spilloverOrigin).toEqual(s.spilloverOrigin);
+    expect(again.spilloverOrigin).toMatchObject({ droppedChannels: ["BV421-A"] });
+    s.setCompensation(true);
+    again.setCompensation(true);
+    expect(Array.from(again.gatingColumn(again.index("APC-A")!))).toEqual(Array.from(s.gatingColumn(s.index("APC-A")!)));
+    // Put back to the file's own matrix, there is nothing to record.
+    s.restoreSpillover(before);
+    expect(s.externalSpillover).toBeNull();
+  });
+});
+
+// The record names what it left out on its file, so a reopened file on which the matrix would
+// leave out another parameter is refused rather than compensated otherwise without a word: a saved
+// matrix naming a parameter the file lacks (a hand-edited workspace; relinking checks the file's
+// identity) dropped that row and column, and the file reopened with other counts and no note.
+describe("a saved matrix installed again", () => {
+  const PE_APC = { channels: ["PE-A", "APC-A"], matrix: [[1, 0.5], [0, 1]] };
+
+  it("is refused where it would leave out a parameter it compensated when it was saved", () => {
+    const s = new Sample(flowFile());
+    // Saved with PE-A, APC-A and BV711-A, all compensated; BV711-A renamed since.
+    const renamed = { channels: ["PE-A", "APC-A", "BV711-X"], matrix: [[1, 0.5, 0.2], [0, 1, 0.1], [0.3, 0.4, 1]] };
+    expect(() => s.installExternalSpillover(renamed, "Matrix_A", { leftOut: [] }))
+      .toThrow(/"Matrix_A" no longer applies to this file as it did when the workspace was saved: BV711-X is not a fluorescence parameter of this file\./);
+    // Nothing changed.
+    expect(s.spillover).toBeNull();
+    expect(s.spilloverOrigin).toEqual({ kind: "fcs" });
+  });
+
+  it("is refused where it would compensate a parameter it left out when it was saved", () => {
+    const s = new Sample(flowFile());
+    const wide = { channels: ["PE-A", "APC-A", "BV711-A"], matrix: [[1, 0.5, 0.2], [0, 1, 0.1], [0.3, 0.4, 1]] };
+    expect(() => s.installExternalSpillover(wide, "Matrix_A", { leftOut: ["APC-A", "BV711-A"] }))
+      .toThrow(/APC-A was left out then and would be compensated now\./);
+    expect(s.spillover).toBeNull();
+  });
+
+  it("is installed where it leaves out exactly what it did", () => {
+    const s = new Sample(flowFile());
+    const wide = { channels: ["PE-A", "APC-A", "BV711-A"], matrix: [[1, 0.5, 0.2], [0, 1, 0.1], [0.3, 0.4, 1]] };
+    s.installExternalSpillover(wide, "Matrix_A", { leftOut: ["BV711-A"] });
+    expect(s.spilloverOrigin).toMatchObject({ kind: "external", droppedChannels: ["BV711-A"] });
+    const t = new Sample(flowFile());
+    t.installExternalSpillover(PE_APC, "Matrix_A", { leftOut: [] });
+    expect(t.externalSpillover).toEqual({ label: "Matrix_A", ...PE_APC });
+  });
+});

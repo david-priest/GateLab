@@ -1,7 +1,7 @@
 import type { CoreState, GatingDerived } from "../store";
 import { recomputeGating } from "../store";
 import { canonicalGateId, storeHierarchy, type StoredHierarchy } from "./hierarchies";
-import type { TransformSpec } from "./models";
+import { drawnRaw, type TransformSpec } from "./models";
 import { transformFromSpec, type Sample } from "./sample";
 import { linearScatterTicks, logicleTicks, scatterTicks } from "./ticks";
 import { populationTreeOrder } from "./populations";
@@ -442,7 +442,7 @@ export function figureDisplaySample(
   projected.displayToRaw = (key, value) =>
     transforms.get(key)?.inverse(value) ?? sample.displayToRaw(key, value);
   projected.gateToDisplay = (gate, key, value) =>
-    projected.rawToDisplay(key, sample.gateToRaw(gate, key, value));
+    projected.rawToDisplay(key, drawnRaw(sample.gateToRaw(gate, key, value)));
   projected.displayToGate = (gate, key, value) =>
     sample.rawToGate(gate, key, projected.displayToRaw(key, value));
   projected.channelTicks = (idx, range) => {

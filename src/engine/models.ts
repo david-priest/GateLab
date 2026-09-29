@@ -5,6 +5,27 @@
 export type Vertex = [number, number];
 
 /**
+ * A rectangle edge with no bound, as a coordinate: the largest finite double, so every event is
+ * within it in any space, and it survives a workspace save, which JSON cannot do for Infinity.
+ * Gating-ML import holds an absent gating:min or gating:max as −UNBOUNDED or +UNBOUNDED, and the
+ * exporters write such an edge unbounded again. It was ±1e9 until 2026-09, which is below real
+ * raw values (the public S8 file reaches 2.15e9), so an open range there left events out.
+ */
+export const UNBOUNDED = Number.MAX_VALUE;
+
+/** True for a coordinate at or beyond ±UNBOUNDED (Infinity too): an edge with no bound. */
+export const isUnbounded = (v: number): boolean => Math.abs(v) >= UNBOUNDED;
+
+/**
+ * Where an unbounded edge is drawn, as a raw value: past every event (the S8 file's largest is
+ * 2.15e9) and still a finite coordinate on a linear axis, where UNBOUNDED itself is not one.
+ */
+export const UNBOUNDED_DRAWN_AT = 1e12;
+
+/** A raw value to draw at: itself, or ±UNBOUNDED_DRAWN_AT for an edge with no bound. */
+export const drawnRaw = (v: number): number => (isUnbounded(v) ? Math.sign(v) * UNBOUNDED_DRAWN_AT : v);
+
+/**
  * The coordinate space a gate's vertices live in, and in which its edges are straight.
  *
  * `raw`     — straight in raw channel values. Membership cannot change when a display control
@@ -31,18 +52,114 @@ export type GateSpace = "raw" | "display";
  * they arrive only on gates imported from a .wsp, where they record the space FlowJo evaluates
  * the gate in. That separation is why they cost nothing in the UI: a gate can live in biex space,
  * evaluate exactly, and still be drawn on GateLab's own axis, where it bows to show honestly that
- * it was drawn under a different transform.
+ * it was drawn under a different transform. A `biex` spec's `tableChannels` says which table it
+ * is evaluated on: 4096 for FlowJo's own, absent for the one GateLab built before 2026-09-24,
+ * which a gate saved then keeps (biex.ts).
+ *
+ * `flowjoChannels` is FlowJo's gate grid (flowjoGrid.ts): the axis quantised to `channels`
+ * integer channels by FlowJo's rule for its `axis`, events clamped to the grid, vertices on it. It
+ * arrives only on polygons imported from a .wsp with "Evaluate gates as FlowJo does" on, and
+ * only on both axes of a gate at once. Editing such a gate keeps its vertices on channels; no
+ * gate is ever drawn on it.
+ *
+ * `bounds` is a Gating-ML 2.0 transformation's boundMin and boundMax, in the spec's own output
+ * units: a transformed value below `min` is taken as `min`, and one above `max` as `max`, before
+ * the gate is tested (Transformations.v2.0.xsd; flowCore applies them the same way). They arrive
+ * only from a Gating-ML file, and only on the kinds a Gating-ML transformation can become.
  */
 export type TransformSpec =
-  | { kind: "identity" }
-  | { kind: "asinh"; cofactor: number }
-  | { kind: "logicle"; T: number; W: number; M: number; A: number }
-  | { kind: "biex"; maxValue: number; pos: number; neg: number; widthBasis: number; channelRange: number }
+  | { kind: "identity"; bounds?: TransformBounds }
+  | { kind: "asinh"; cofactor: number; bounds?: TransformBounds }
+  | { kind: "logicle"; T: number; W: number; M: number; A: number; bounds?: TransformBounds }
+  | {
+    kind: "biex"; maxValue: number; pos: number; neg: number; widthBasis: number; channelRange: number;
+    /** 4096 on FlowJo's table; absent on a spec saved before it, which keeps the old table. */
+    tableChannels?: number;
+  }
   | { kind: "wsplog"; offset: number; decades: number }
-  | { kind: "flog"; T: number; M: number };
+  | {
+      kind: "flog"; T: number; M: number;
+      /**
+       * True for Gating-ML 2.0's flog exactly: −Infinity at x = 0 and NaN below, so an event
+       * below zero is in no gate and one at zero only in a rectangle with no lower bound on that
+       * axis (gateMaskRectangle), and nothing is clamped. Absent for the flog GateLab held before 2026-09,
+       * which pins every x below T·10^−M at y = 0 (biex.ts flogTransform); gates in saved
+       * workspaces and in GateLab's own older files keep that meaning.
+       */
+      standard?: boolean;
+      bounds?: TransformBounds;
+    }
+  | { kind: "flowjoChannels"; channels: number; axis: FlowJoGridAxis };
+
+/**
+ * One axis of FlowJo's gate grid, as the sample's <Transformations> element saved it: a linear
+ * axis's range, a log axis's offset and decades, or a biex axis's parameters (always evaluated on
+ * FlowJo's 4096-channel table, so no `tableChannels` is carried).
+ */
+export type FlowJoGridAxis =
+  | { kind: "linear"; minRange: number; maxRange: number }
+  | { kind: "wsplog"; offset: number; decades: number }
+  | { kind: "biex"; maxValue: number; pos: number; neg: number; widthBasis: number; channelRange: number };
+
+/** A Gating-ML transformation's boundMin / boundMax, in the transformed units; either may be absent. */
+export interface TransformBounds {
+  min?: number;
+  max?: number;
+}
 
 /** The transform each axis was drawn under. Only meaningful when `space` is `display`. */
 export type GateTransforms = Record<string, TransformSpec>;
+
+/**
+ * Which of a rectangle's edges hold the events that lie exactly on them.
+ *
+ * `half-open` is Gating-ML 2.0's rule (section 5.1.1): on each axis min <= x < max, the lower edge
+ * in and the upper edge out, "so that a set of rectangle gates that covers the data space will
+ * sum properly with no missing or duplicated events". FlowKit evaluates rectangles this way. A
+ * rectangle drawn in GateLab from 2026-09 on is half-open, and so is one read from a Gating-ML file
+ * whose writer cannot be identified.
+ *
+ * `closed` is min <= x <= max, the rule every GateLab rectangle followed before 2026-09. It is
+ * what a rectangle keeps when it was evaluated that way before: one saved in a workspace, a
+ * Gating-ML file or a hierarchy CSV without this field, and one imported from a writer whose own
+ * rule is closed (FlowJo, flowCore and flowUtils, CytoML), or whose rule has not been measured
+ * (Cytobank, FACSDiva, FACSChorus), where the previous behaviour stands. `rectangleRule` reads
+ * the field; the importers say which writer is which (gatingml.ts, GatingMLWriter).
+ *
+ * ABSENT MEANS CLOSED, and must never be defaulted to anything else: every workspace saved before
+ * the field existed evaluated its rectangles closed, and absent is what keeps that meaning.
+ * Everything GateLab writes from 2026-09 on states the rule explicitly.
+ *
+ * Polygons, ellipses and quadrants need no field: Gating-ML makes a polygon's and an ellipse's
+ * boundary inclusive and puts an event on a quadrant divider on the divider's upper side, and
+ * GateLab already evaluates all three that way.
+ */
+export type RectangleBounds = "closed" | "half-open";
+
+/** The edge rule a rectangle is evaluated under: its own, or closed when it has none. */
+export function rectangleRule(gate: { bounds?: RectangleBounds }): RectangleBounds {
+  return gate.bounds === "half-open" ? "half-open" : "closed";
+}
+
+/** A value `bounds` may hold in a file: anything else is refused rather than read as a default. */
+export function isRectangleBounds(value: unknown): value is RectangleBounds {
+  return value === "closed" || value === "half-open";
+}
+
+/**
+ * The same gates with every rectangle's edge rule stated. A rectangle with none is closed (see
+ * RectangleBounds), and saying so is what lets a file written now carry its meaning explicitly.
+ * Returns the input unchanged when there is nothing to state.
+ */
+export function withExplicitRectangleBounds<T extends Record<string, Gate>>(gates: T): T {
+  let out: T | null = null;
+  for (const [id, gate] of Object.entries(gates)) {
+    if (gate.gate_type !== "rectangle" || gate.bounds !== undefined) continue;
+    if (!out) out = { ...gates };
+    (out as Record<string, Gate>)[id] = { ...gate, bounds: "closed" };
+  }
+  return out ?? gates;
+}
 
 export interface PolyRectGate {
   gate_id: string;
@@ -55,6 +172,43 @@ export interface PolyRectGate {
   space?: GateSpace;
   /** Per-axis transform the gate was drawn under. Present only when space is display. */
   transforms?: GateTransforms;
+  /** Rectangles only: the edge rule; absent = closed, as before the field existed (RectangleBounds). */
+  bounds?: RectangleBounds;
+  /**
+   * FlowJo grid polygons only (`flowjoChannels` on both axes): the vertices as the FlowJo
+   * workspace saved them, in raw units, one per vertex. The FlowJo export writes them back, so
+   * FlowJo re-rounds the very coordinates it saved; a vertex whose channel has since been edited
+   * is written at its channel's centre instead (flowjoExport.ts). Evaluation never reads them.
+   */
+  flowjo_vertices?: Vertex[];
+  /**
+   * FlowJo rectangles imported under FlowJo's rule only: the axis FlowJo saved for each of the
+   * rectangle's channels, which the rule compares in raw units and so no longer names. The FlowJo
+   * export declares these axes again, so FlowJo pins an event below a biex table at the same
+   * bottom and draws the same axes. Evaluation never reads them.
+   */
+  flowjo_axes?: Record<string, FlowJoGridAxis>;
+  /**
+   * FlowJo rectangles imported under FlowJo's rule only: for each channel on which the rule opened
+   * a bound (an edge at or beyond where FlowJo pins its events), the [min, max] FlowJo saved, in
+   * raw units (a Time bound in the file's ticks, not in FlowJo's Time units), null for a bound the
+   * rule left as it was. The gate holds the opened bound as no bound. The FlowJo export writes
+   * FlowJo's own value in its place while it is still open and reaches the edge of the axis the file
+   * declares, so an import of the file reads FlowJo's rectangle again under whichever rule it is
+   * asked for; where it does not reach that edge the bound goes out as no bound (flowjoExport.ts,
+   * rectangleForFlowJo). That is the case for Time wherever an event lies past FlowJo's value, since
+   * the declared Time axis ends at the data's last tick: read with the option off, such a file holds
+   * FlowJo's count, not the source workspace's rectangle read with the option off (FR-FCM-Z2HV
+   * 28,033, 1,060 events otherwise than the source read so; bde2d12). Evaluation never reads them.
+   */
+  flowjo_bounds?: Record<string, [number | null, number | null]>;
+  /**
+   * FlowJo polygons evaluated continuously only: FlowJo's own quadId and gateResolution where they
+   * are not an ordinary polygon's (quadId -1, gateResolution 256), as for a quadrant panel or a
+   * polygon with no gateResolution. The FlowJo export writes them back, so neither FlowJo nor an
+   * import of the file puts the polygon on a grid it was not on. Evaluation never reads them.
+   */
+  flowjo_polygon?: { quadId: number; gateResolution: number | null };
   color: string;
   label_offset: [number, number] | null;
 }

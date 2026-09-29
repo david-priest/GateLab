@@ -22,6 +22,8 @@ type PlotGateGeometry = Readonly<{
   vertices?: unknown;
   center?: unknown;
   label_offset?: unknown;
+  /** A rectangle's sides with no bound, [low, high] per axis (PlotGate.unbounded). */
+  unbounded?: unknown;
 }>;
 
 /**
@@ -143,7 +145,15 @@ export function includePlotGatesInAxisRange(
     const finiteVertices = vertices
       .map(finitePair)
       .filter((point): point is [number, number] => point !== null);
-    for (const point of finiteVertices) geometry.push(point[axisIndex]);
+    // A side with no bound is drawn past every event (drawnRaw), and must not take the axis there.
+    const open = (gate.unbounded as Record<"x" | "y", [boolean, boolean]> | undefined)?.[axis];
+    const coords = finiteVertices.map((point) => point[axisIndex]);
+    const lo = Math.min(...coords);
+    const hi = Math.max(...coords);
+    for (const c of coords) {
+      if (open && ((open[0] && c === lo) || (open[1] && c === hi))) continue;
+      geometry.push(c);
+    }
 
     const center = finitePair(gate.center);
     if (center) geometry.push(center[axisIndex]);

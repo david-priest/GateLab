@@ -101,7 +101,8 @@ describe("Cytobank flow export imports", () => {
       space?: string; transforms?: Record<string, { kind: string; T?: number; M?: number }>;
     };
     expect(g2.space).toBe("display");
-    expect(g2.transforms?.["BUV805-A"]).toEqual({ kind: "flog", T: 1, M: 1 });
+    // Cytobank is not GateLab, so its flog is Gating-ML's own: nothing pinned at the floor.
+    expect(g2.transforms?.["BUV805-A"]).toEqual({ kind: "flog", T: 1, M: 1, standard: true });
 
     const xs = gate.vertices.map((v) => v[0]);
     expect(Math.min(...xs)).toBeCloseTo(4.168799557730493, 9);

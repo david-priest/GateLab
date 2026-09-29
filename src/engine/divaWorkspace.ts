@@ -44,9 +44,12 @@
 // column, with a named warning per channel; when name and type agree, nothing changes, and a
 // parameter with no type code keeps its name untouched.
 
+import { writeRectBoundsMark } from "./flowjoWorkspace";
 import { Logicle } from "./transforms";
 import type { SpilloverMatrix } from "./fcs";
 import type { FlowJoSpillover } from "./flowjoWorkspace";
+import { compareIdentity, identityKeywords, pairFile, type FilePairing, type RecordedIdentity } from "./fileIdentity";
+import { markConverterDocument } from "./flowjoWorkspace";
 
 const GATING_NS = "http://www.isac-net.org/std/Gating-ML/v2.0/gating";
 const DATATYPE_NS = "http://www.isac-net.org/std/Gating-ML/v2.0/datatypes";
@@ -65,9 +68,27 @@ export interface DivaGateTreeSummary {
   kind: "worksheet" | "tube";
   /** Worksheet name or tube name. */
   label: string;
+  /** A tube's specimen, which tells apart the tubes Diva names Tube_001 in every specimen. */
+  specimen?: string;
   /** The tube's FCS file name, for matching against the loaded file. Worksheets have none. */
   dataFilename: string | null;
   gateCount: number;
+  /** A tube tree's tube, as its position among the experiment's tubes (listDivaTubes). */
+  tubeIndex: number | null;
+}
+
+/**
+ * One tube of the experiment: the acquisition it recorded. Diva writes each tube's begin and end
+ * as ISO date-times, which are the FCS file's $DATE, $BTIM and $ETIM; the tube's "All Events"
+ * count is not its $TOT (0 on the lab's sort tubes) and its GUID keyword is not the file's, so
+ * neither is used.
+ */
+export interface DivaTubeSummary {
+  /** Position among the experiment's tubes, in document order. */
+  index: number;
+  name: string;
+  dataFilename: string | null;
+  recorded: RecordedIdentity;
 }
 
 export interface DivaConversion {
@@ -108,10 +129,13 @@ function childText(el: Element, tag: string): string | null {
 interface GateContainer {
   kind: "worksheet" | "tube";
   label: string;
+  /** The specimen a tube belongs to: Diva names tubes Tube_001 in every specimen. */
+  specimen?: string | null;
   dataFilename: string | null;
   gatesEl: Element;
   /** The tube element for a tube container, for its compensation. Null for worksheets. */
   tube: Element | null;
+  tubeIndex: number | null;
 }
 
 function gateContainers(doc: Document): GateContainer[] {
@@ -127,23 +151,26 @@ function gateContainers(doc: Document): GateContainer[] {
           dataFilename: null,
           gatesEl: gs,
           tube: null,
+          tubeIndex: null,
         });
       }
     }
   }
-  for (const tube of Array.from(doc.getElementsByTagName("tube"))) {
+  Array.from(doc.getElementsByTagName("tube")).forEach((tube, tubeIndex) => {
     for (const gs of Array.from(tube.children)) {
       if (gs.localName === "gates") {
         out.push({
           kind: "tube",
           label: tube.getAttribute("name") ?? "tube",
+          specimen: tube.parentElement?.localName === "specimen" ? tube.parentElement.getAttribute("name") : null,
           dataFilename: childText(tube, "data_filename"),
           gatesEl: gs,
           tube,
+          tubeIndex,
         });
       }
     }
-  }
+  });
   return out;
 }
 
@@ -161,9 +188,58 @@ export function listDivaGateTrees(xmlText: string): DivaGateTreeSummary[] {
     index,
     kind: c.kind,
     label: c.label,
+    ...(c.specimen ? { specimen: c.specimen } : {}),
     dataFilename: c.dataFilename,
     gateCount: regionGateCount(c.gatesEl),
+    tubeIndex: c.tubeIndex,
   }));
+}
+
+/** What each tube recorded about its acquisition, for telling which tube a loaded FCS is. */
+export function listDivaTubes(xmlText: string): DivaTubeSummary[] {
+  const doc = parseDiva(xmlText);
+  return Array.from(doc.getElementsByTagName("tube")).map((tube, index) => {
+    // Diva writes the begin and end as ISO date-times. Kept whole, each keyword read the same, and
+    // a contradiction printed "$DATE 2023-07-20T11:54:39 and $BTIM 2023-07-20T11:54:39"; split,
+    // they read as the file's $DATE, $BTIM and $ETIM do, and compare the same.
+    const split = (value: string): { date: string; time: string } => {
+      const iso = /^(\d{4}-\d{1,2}-\d{1,2})[T ](.+)$/.exec(value);
+      return iso ? { date: iso[1], time: iso[2].replace(/(Z|[+-]\d\d:?\d\d)$/, "") } : { date: value, time: value };
+    };
+    const begin = split(childText(tube, "data_begin_date")?.trim() ?? "");
+    const end = split(childText(tube, "data_end_date")?.trim() ?? "");
+    return {
+      index,
+      name: tube.getAttribute("name") ?? "tube",
+      dataFilename: childText(tube, "data_filename")?.trim() || null,
+      recorded: identityKeywords({ $DATE: begin.date, $BTIM: begin.time, $ETIM: end.time }),
+    };
+  });
+}
+
+/**
+ * Which tube of the experiment IS the loaded file.
+ *
+ * Diva names its files Specimen_001_Tube_001.fcs in every experiment, so a name alone pairs the
+ * tube of one experiment with the file of another. The tube's recorded begin and end decide: a
+ * same-named tube that records another acquisition is not the file. A renamed file (D1.fcs) is
+ * found by its $FIL, or failing that by the one tube whose times are its own.
+ */
+export function pairDivaTube(
+  tubes: readonly DivaTubeSummary[],
+  file: { name: string; keywords?: Readonly<Record<string, string>> | null },
+): { pairing: FilePairing<DivaTubeSummary>; byTimes: boolean } {
+  const pairing = pairFile(file, tubes, (t) => (t.dataFilename ? [t.dataFilename] : []), (t) => t.recorded);
+  if (pairing.kind !== "none") return { pairing, byTimes: false };
+  const own = identityKeywords(file.keywords);
+  const timed = tubes
+    .map((sample) => ({ sample, comparison: compareIdentity(sample.recorded, own) }))
+    .filter((c) => c.comparison.verdict === "confirmed");
+  if (timed.length === 1) {
+    return { pairing: { kind: "own", sample: timed[0].sample, comparison: timed[0].comparison, matchedOn: "name", rejected: [] }, byTimes: true };
+  }
+  if (timed.length > 1) return { pairing: { kind: "ambiguous", candidates: timed, matchedOn: "name", rejected: [] }, byTimes: true };
+  return { pairing, byTimes: false };
 }
 
 // ── bin → raw conversion ─────────────────────────────────────────────────────────────────────
@@ -318,10 +394,11 @@ export function divaToGatingML(
   xmlText: string,
   treeIndex: number,
   /**
-   * The loaded FCS's file name, used to pick which tube's compensation applies when importing a
-   * GLOBAL worksheet tree (a global sheet belongs to no tube, but the matrix does).
+   * The tube the loaded FCS IS (its position, from pairDivaTube), or failing that its file name:
+   * which tube's compensation applies when importing a GLOBAL worksheet tree (a global sheet
+   * belongs to no tube, but the matrix does). A name alone can be another experiment's tube.
    */
-  tubeHint: string | null = null,
+  tubeHint: string | number | null = null,
 ): DivaConversion {
   const doc = parseDiva(xmlText);
   const containers = gateContainers(doc);
@@ -342,10 +419,13 @@ export function divaToGatingML(
   const warnings: string[] = [];
   const divaCounts: Record<string, number> = {};
   const convCache = new Map<number, (bin: number) => number>();
-  const hintedTube = tubeHint
-    ? Array.from(doc.getElementsByTagName("tube")).find(
-        (t) => (childText(t, "data_filename") ?? "").toLowerCase() === tubeHint.toLowerCase()) ?? null
-    : null;
+  const tubeOf = (tubes: Element[]): Element | undefined =>
+    typeof tubeHint === "number"
+      ? tubes[tubeHint]
+      : tubeHint
+        ? tubes.find((t) => (childText(t, "data_filename") ?? "").toLowerCase() === tubeHint.toLowerCase())
+        : undefined;
+  const hintedTube = tubeOf(Array.from(doc.getElementsByTagName("tube"))) ?? null;
   const parmTypes = parameterTypes(settingsFor(doc, container.tube ?? hintedTube));
   const remapWarned = new Set<string>();
 
@@ -392,7 +472,7 @@ export function divaToGatingML(
     }
     if (type !== "Region_Classifier") {
       warnings.push(
-        `"${name}" is a ${type ?? "gate of unknown type"}, which this importer does not read; ` +
+        `"${name}" is ${type ? `${/^[aeiou]/i.test(type) ? "an" : "a"} ${type}` : "a gate of unknown type"}, which this importer does not read; ` +
           "it and anything below it were skipped.",
       );
       skipped.push(fullname);
@@ -461,6 +541,11 @@ export function divaToGatingML(
       return dim;
     });
     for (const d of dims) gate.appendChild(d);
+    // FACSDiva's own edge rule is unmeasured: on the one Diva experiment here with Diva's
+    // recorded counts (the S6 B cell assay, 13 rectangles) no event lies on a rectangle's upper
+    // edge, so the two rules give the same counts (2026-09-24). Its rectangles keep the rule they
+    // were read under before 2026-09, both edges in (models.ts, RectangleBounds).
+    if (isRect) writeRectBoundsMark(out, gate, "closed");
     if (!isRect) {
       for (const [x, y] of pts) {
         const v = out.createElementNS(GATING_NS, "gating:vertex");
@@ -490,9 +575,7 @@ export function divaToGatingML(
     spillover = tubeSpillover(container.tube, experimentName);
   } else {
     const tubes = Array.from(doc.getElementsByTagName("tube"));
-    const hinted = tubeHint
-      ? tubes.find((t) => (childText(t, "data_filename") ?? "").toLowerCase() === tubeHint.toLowerCase())
-      : undefined;
+    const hinted = tubeOf(tubes);
     const source = hinted ?? tubes.find((t) => tubeSpillover(t, experimentName) !== null) ?? null;
     if (source) {
       spillover = tubeSpillover(source, experimentName);
@@ -506,6 +589,7 @@ export function divaToGatingML(
     }
   }
 
+  markConverterDocument(out);
   return {
     gatingMl: new XMLSerializer().serializeToString(out),
     label: `${experimentName} · ${container.label}`,

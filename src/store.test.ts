@@ -1083,3 +1083,36 @@ describe("several population hierarchies, each owning its gates", () => {
     expect(plain.stored_hierarchies).toEqual({});
   });
 });
+
+describe("store: a rectangle's edge rule", () => {
+  // models.ts, RectangleBounds. A drawn rectangle is Gating-ML's half-open one; a rectangle that
+  // arrives without a rule (a workspace or import from before rules existed) is closed, and the
+  // store says so, so that the next save records it.
+  it("draws a rectangle half-open, and records the rule on the gate", () => {
+    const { state } = withGate();
+    const gate = state.gates[state.gate_order[0]];
+    expect(gate.gate_type === "rectangle" && gate.bounds).toBe("half-open");
+  });
+
+  it("states the closed rule of every rectangle a workspace or an import brings without one", () => {
+    const { state: drawn } = withGate();
+    const legacyGate = { ...drawn.gates[drawn.gate_order[0]] } as GateRecord & { bounds?: string };
+    delete legacyGate.bounds;
+    const gates = { [legacyGate.gate_id]: legacyGate as GateRecord };
+    const loaded = coreReducer(initialCoreState(), {
+      type: "loadWorkspace", gates, gate_order: [legacyGate.gate_id], populations: drawn.populations,
+      root_population_id: drawn.root_population_id, active_population_id: drawn.root_population_id, selected_gate_id: null,
+    });
+    expect((loaded.gates[legacyGate.gate_id] as { bounds?: string }).bounds).toBe("closed");
+    const imported = coreReducer(initialCoreState(), {
+      type: "importGating", mode: "replace", gates, gate_order: [legacyGate.gate_id], populations: drawn.populations,
+      root_population_id: drawn.root_population_id!,
+    } as Parameters<typeof coreReducer>[1]);
+    expect((imported.gates[legacyGate.gate_id] as { bounds?: string }).bounds).toBe("closed");
+    // An explicit rule is kept as it is.
+    expect(coreReducer(initialCoreState(), {
+      type: "loadWorkspace", gates: drawn.gates, gate_order: drawn.gate_order, populations: drawn.populations,
+      root_population_id: drawn.root_population_id, active_population_id: drawn.root_population_id, selected_gate_id: null,
+    }).gates[drawn.gate_order[0]]).toEqual(drawn.gates[drawn.gate_order[0]]);
+  });
+});

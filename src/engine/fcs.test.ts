@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
-import { parseFcs } from "./fcs";
+import {
+  extractFcsDataSet,
+  fcsDataSetFileName,
+  FcsMultipleDataSetsError,
+  listFcsDataSets,
+  parseFcs,
+  parseFcsDataSetFileName,
+} from "./fcs";
 import { ARIA_SMALL, VENDOR_MATRIX_DIR } from "../testFixtures";
 
 // Ground truth extracted independently (fcsparser for metadata; a raw big-endian
@@ -82,6 +89,8 @@ interface SynthOpts {
   events: number[][]; // event-major rows
   littleEndian?: boolean;
   dataOffsetsInText?: boolean; // zero HEADER DATA offsets; use $BEGINDATA/$ENDDATA
+  /** $PnR; defaults to the full width of an integer word (2^bits), 262144 for D. */
+  range?: number;
 }
 
 function buildFcs(opts: SynthOpts): ArrayBuffer {
@@ -102,7 +111,10 @@ function buildFcs(opts: SynthOpts): ArrayBuffer {
   ];
   opts.channels.forEach((nm, i) => {
     const p = i + 1;
-    kv.push(`$P${p}N`, nm, `$P${p}B`, String(opts.bits), `$P${p}R`, "262144", `$P${p}E`, "0,0");
+    // An integer word holds ceil(log2($PnR)) meaningful bits and readers mask the rest (FCS 3.1
+    // §3.2.20), so the declared range must cover the stored values.
+    const range = opts.range ?? (opts.datatype === "I" ? 2 ** opts.bits : 262144);
+    kv.push(`$P${p}N`, nm, `$P${p}B`, String(opts.bits), `$P${p}R`, String(range), `$P${p}E`, "0,0");
     const marker = opts.markers?.[i];
     if (marker !== undefined && marker !== null) kv.push(`$P${p}S`, marker);
   });
@@ -450,5 +462,330 @@ describe.runIf(existsSync(S8_PUBLIC))("parseFcs — $PnFEATURE", () => {
     // A file without the keyword has no such field on any channel.
     const aria = parseFcs(loadArrayBuffer(ARIA_SMALL));
     expect(aria.channels.every((c) => !("feature" in c))).toBe(true);
+  });
+});
+
+// ── Byte-level fixtures for the 2026-09 reader fixes ─────────────────────────
+// Every value here is synthetic: channels A/B/C, markers named after nothing real.
+
+/** One FCS data set: HEADER, TEXT from `keywords` (encoded as given), then `data`. */
+function rawDataSet(opts: {
+  version?: string;
+  keywords: [string, string][];
+  data: Uint8Array;
+  encode?: (text: string) => Uint8Array;
+}): Uint8Array {
+  const encode = opts.encode ?? ((t: string) => new TextEncoder().encode(t));
+  const textStart = 64;
+  let begin = 0;
+  let text: Uint8Array = new Uint8Array(0);
+  for (let i = 0; i < 4; i++) {
+    const kv: [string, string][] = [
+      ...opts.keywords,
+      ["$BEGINDATA", String(begin)],
+      ["$ENDDATA", String(begin + opts.data.length - 1)],
+    ];
+    text = encode("/" + kv.map(([k, v]) => `${k}/${v.replaceAll("/", "//")}`).join("/") + "/");
+    begin = textStart + text.length;
+  }
+  const out = new Uint8Array(begin + opts.data.length);
+  const put = (s: string, at: number) => { for (let i = 0; i < s.length; i++) out[at + i] = s.charCodeAt(i); };
+  put((opts.version ?? "FCS3.1").padEnd(10, " "), 0);
+  put(String(textStart).padStart(8), 10);
+  put(String(textStart + text.length - 1).padStart(8), 18);
+  put(String(begin).padStart(8), 26);
+  put(String(begin + opts.data.length - 1).padStart(8), 34);
+  put("       0       0", 42);
+  out.set(text, textStart);
+  out.set(opts.data, begin);
+  return out;
+}
+
+const ab = (u8: Uint8Array): ArrayBuffer => u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) as ArrayBuffer;
+
+/** Little-endian float32 rows. */
+function f32Rows(rows: number[][]): Uint8Array {
+  const out = new Uint8Array(rows.length * (rows[0]?.length ?? 0) * 4);
+  const dv = new DataView(out.buffer);
+  let off = 0;
+  for (const row of rows) for (const v of row) { dv.setFloat32(off, v, true); off += 4; }
+  return out;
+}
+
+function floatKeywords(names: string[], n: number, extra: [string, string][] = []): [string, string][] {
+  return [
+    ["$BYTEORD", "1,2,3,4"], ["$DATATYPE", "F"], ["$MODE", "L"], ["$NEXTDATA", "0"],
+    ["$PAR", String(names.length)], ["$TOT", String(n)],
+    ...names.flatMap((name, i): [string, string][] => [
+      [`$P${i + 1}N`, name], [`$P${i + 1}B`, "32"], [`$P${i + 1}E`, "0,0"], [`$P${i + 1}R`, "262144"],
+    ]),
+    ...extra,
+  ];
+}
+
+describe("parseFcs — TEXT is UTF-8, with Latin-1 only for bytes that are not", () => {
+  it("reads a UTF-8 marker label as written (FCS 3.1 §2.1.2)", () => {
+    const fcs = parseFcs(ab(rawDataSet({
+      keywords: floatKeywords(["A", "B"], 1, [["$P2S", "IFN-γ"], ["$P1S", "CD27−"]]),
+      data: f32Rows([[1, 2]]),
+    })));
+    expect(fcs.channels[1].marker).toBe("IFN-γ");
+    expect(fcs.channels[0].marker).toBe("CD27−");
+  });
+
+  it("falls back to Latin-1 when the TEXT is not valid UTF-8", () => {
+    const latin1 = (t: string) => Uint8Array.from(t, (c) => c.charCodeAt(0) & 0xff);
+    const fcs = parseFcs(ab(rawDataSet({
+      version: "FCS2.0",
+      keywords: floatKeywords(["A"], 1, [["$P1S", "Anti-hé"]]),
+      data: f32Rows([[1]]),
+      encode: latin1,
+    })));
+    expect(fcs.channels[0].marker).toBe("Anti-hé");
+  });
+});
+
+describe("parseFcs — refuses what is not an FCS data set", () => {
+  it("refuses a file that does not start with an FCS version", () => {
+    const junk = new TextEncoder().encode("oi21j08cn\n");
+    expect(() => parseFcs(ab(junk))).toThrow(/not an FCS file/i);
+    const longJunk = new TextEncoder().encode("x".repeat(200));
+    expect(() => parseFcs(ab(longJunk))).toThrow(/not an FCS file.*FCS version/i);
+  });
+
+  it("refuses an unknown $DATATYPE and a histogram $MODE instead of misreading them", () => {
+    const bad = floatKeywords(["A"], 1).map(([k, v]): [string, string] => [k, k === "$DATATYPE" ? "Q" : v]);
+    expect(() => parseFcs(ab(rawDataSet({ keywords: bad, data: f32Rows([[1]]) })))).toThrow(/Unsupported \$DATATYPE=Q/);
+    const hist = floatKeywords(["A"], 1).map(([k, v]): [string, string] => [k, k === "$MODE" ? "U" : v]);
+    expect(() => parseFcs(ab(rawDataSet({ keywords: hist, data: f32Rows([[1]]) })))).toThrow(/Unsupported \$MODE=U/);
+  });
+
+  it("says a DATA segment is incomplete rather than failing on a typed-array length", () => {
+    const short = rawDataSet({ keywords: floatKeywords(["A", "B"], 3), data: f32Rows([[1, 2]]) });
+    expect(() => parseFcs(ab(short))).toThrow(/DATA segment is incomplete/);
+  });
+});
+
+describe("parseFcs — $DATATYPE=A (ASCII)", () => {
+  const asciiKeywords = (pnb: string, n: number): [string, string][] => [
+    ["$BYTEORD", "1,2,3,4"], ["$DATATYPE", "A"], ["$MODE", "L"], ["$NEXTDATA", "0"],
+    ["$PAR", "2"], ["$TOT", String(n)],
+    ["$P1N", "A"], ["$P1B", pnb], ["$P1E", "0,0"], ["$P1R", "1024"],
+    ["$P2N", "B"], ["$P2B", pnb], ["$P2E", "0,0"], ["$P2R", "1024"],
+  ];
+
+  it("reads fixed-width values: $PnB characters each, no separators", () => {
+    const fcs = parseFcs(ab(rawDataSet({
+      version: "FCS3.0",
+      keywords: asciiKeywords("4", 2),
+      data: new TextEncoder().encode(" 123 456 7891000"),
+    })));
+    expect(Array.from(fcs.columns[0])).toEqual([123, 789]);
+    expect(Array.from(fcs.columns[1])).toEqual([456, 1000]);
+  });
+
+  it("reads free-format values when $PnB is *", () => {
+    const fcs = parseFcs(ab(rawDataSet({
+      version: "FCS3.0",
+      keywords: asciiKeywords("*", 2),
+      data: new TextEncoder().encode("123,456\n789 1000"),
+    })));
+    expect(Array.from(fcs.columns[0])).toEqual([123, 789]);
+    expect(Array.from(fcs.columns[1])).toEqual([456, 1000]);
+  });
+});
+
+describe("parseFcs — integer words are masked to $PnR's bit width", () => {
+  it("drops a flag bit on a LINEAR integer channel, as flowCore and flowio do", () => {
+    // 16-bit words, range 1024 (10 bits): the high bits carry no measurement (FCS 3.1 §3.2.20).
+    const fcs = parseFcs(buildFcs({
+      datatype: "I", bits: 16, range: 1024, channels: ["A"],
+      events: [[500], [0x8000 | 500], [1023], [0x0400 | 7]],
+    }));
+    expect(Array.from(fcs.columns[0])).toEqual([500, 500, 1023, 7]);
+  });
+
+  it("uses the next power of two when $PnR is not one, and leaves a full-width range alone", () => {
+    const odd = parseFcs(buildFcs({
+      datatype: "I", bits: 16, range: 1000, channels: ["A"], events: [[1001], [1024 + 3]],
+    }));
+    expect(Array.from(odd.columns[0])).toEqual([1001, 3]);
+    const full = parseFcs(buildFcs({
+      datatype: "I", bits: 16, range: 65536, channels: ["A"], events: [[65535]],
+    }));
+    expect(Array.from(full.columns[0])).toEqual([65535]);
+  });
+});
+
+describe("parseFcs — FCS 3.2 $PnDATATYPE", () => {
+  it("reads each parameter in its own type and width", () => {
+    // Float file with an integer parameter (4 bytes) and a double parameter (8 bytes) inside it.
+    const keywords: [string, string][] = [
+      ["$BYTEORD", "1,2,3,4"], ["$DATATYPE", "F"], ["$MODE", "L"], ["$NEXTDATA", "0"],
+      ["$PAR", "3"], ["$TOT", "2"],
+      ["$P1N", "A"], ["$P1B", "32"], ["$P1E", "0,0"], ["$P1R", "262144"],
+      ["$P2N", "B"], ["$P2B", "32"], ["$P2E", "0,0"], ["$P2R", "4294967296"], ["$P2DATATYPE", "I"],
+      ["$P3N", "C"], ["$P3B", "64"], ["$P3E", "0,0"], ["$P3R", "262144"], ["$P3DATATYPE", "D"],
+    ];
+    const data = new Uint8Array(2 * 16);
+    const dv = new DataView(data.buffer);
+    [[1.5, 1299868, 0.1], [2.5, 3186724541, 123456.789012345]].forEach((row, e) => {
+      dv.setFloat32(e * 16, row[0], true);
+      dv.setUint32(e * 16 + 4, row[1], true);
+      dv.setFloat64(e * 16 + 8, row[2], true);
+    });
+    const fcs = parseFcs(ab(rawDataSet({ version: "FCS3.2", keywords, data })));
+    expect(Array.from(fcs.columns[0])).toEqual([1.5, 2.5]);
+    expect(fcs.columns[1]).toBeInstanceOf(Uint32Array);
+    expect(Array.from(fcs.columns[1])).toEqual([1299868, 3186724541]);
+    expect(fcs.columns[2]).toBeInstanceOf(Float64Array);
+    expect(Array.from(fcs.columns[2])).toEqual([0.1, 123456.789012345]);
+  });
+});
+
+describe("parseFcs — $PnG is recorded, not applied", () => {
+  it("keeps the stored value and records the gain on the channel", () => {
+    const fcs = parseFcs(ab(rawDataSet({
+      keywords: floatKeywords(["FSC-H", "SSC-H"], 1, [["$P1G", "3.67"]]),
+      data: f32Rows([[323, 40]]),
+    })));
+    expect(fcs.columns[0][0]).toBe(323);
+    expect(fcs.channels[0].gain).toBe(3.67);
+    expect(fcs.channels[1].gain).toBeUndefined();
+  });
+});
+
+describe("parseFcs — $COMP is not read as a spillover matrix", () => {
+  it("leaves compensation to $SPILLOVER, as flowCore, flowio and FlowKit do", () => {
+    // FCS 3.0 defines $COMP as the compensation already SUBTRACTED ELECTRONICALLY, in percent,
+    // and FCS 3.1 retired it; vendors that still write it disagree about what it holds.
+    const fcs = parseFcs(ab(rawDataSet({
+      version: "FCS3.0",
+      keywords: floatKeywords(["A-A", "B-A"], 1, [["$COMP", "2,1,-0.1,-0.2,1"]]),
+      data: f32Rows([[1, 2]]),
+    })));
+    expect(fcs.spillover).toBeNull();
+  });
+});
+
+describe("parseFcs — several data sets in one file ($NEXTDATA)", () => {
+  /** Two data sets, each a full FCS data set, chained by $NEXTDATA relative to its own HEADER. */
+  function twoDataSets(): Uint8Array {
+    const first = (next: number) => rawDataSet({
+      keywords: floatKeywords(["A", "B"], 2, [["$WELLID", "A01"]]).map(([k, v]): [string, string] =>
+        [k, k === "$NEXTDATA" ? String(next).padStart(8, "0") : v]),
+      data: f32Rows([[1, 2], [3, 4]]),
+    });
+    const probe = first(0);
+    const one = first(probe.length);
+    const two = rawDataSet({
+      keywords: floatKeywords(["A", "B"], 3, [["$WELLID", "A02"]]),
+      data: f32Rows([[10, 20], [30, 40], [50, 60]]),
+    });
+    const out = new Uint8Array(one.length + two.length);
+    out.set(one, 0);
+    out.set(two, one.length);
+    return out;
+  }
+
+  it("refuses to read one data set silently, naming how many there are", () => {
+    expect(() => parseFcs(ab(twoDataSets()))).toThrow(FcsMultipleDataSetsError);
+    expect(() => parseFcs(ab(twoDataSets()))).toThrow(/holds 2 data sets \(2, 3 events\)/);
+  });
+
+  it("lists every data set and reads any one of them", () => {
+    const buf = ab(twoDataSets());
+    const sets = listFcsDataSets(buf);
+    expect(sets.map((s) => [s.events, s.label])).toEqual([[2, "A01"], [3, "A02"]]);
+    const second = parseFcs(buf, { dataSet: 1 });
+    expect(second.nEvents).toBe(3);
+    expect(Array.from(second.columns[1])).toEqual([20, 40, 60]);
+    expect(Array.from(parseFcs(buf, { dataSet: 0 }).columns[0])).toEqual([1, 3]);
+  });
+
+  it("takes a data set out as a file of its own, every byte but $NEXTDATA unchanged", () => {
+    const whole = twoDataSets();
+    const first = extractFcsDataSet(ab(whole), 0);
+    expect(listFcsDataSets(ab(first))).toHaveLength(1);
+    expect(parseFcs(ab(first)).nEvents).toBe(2);
+    const changed = first.reduce((n, byte, i) => n + (byte !== whole[i] ? 1 : 0), 0);
+    expect(changed).toBeGreaterThan(0);
+    expect(changed).toBeLessThanOrEqual(8); // the $NEXTDATA digits only
+    expect(Array.from(parseFcs(ab(extractFcsDataSet(ab(whole), 1))).columns[0])).toEqual([10, 30, 50]);
+  });
+
+  it("refuses a $NEXTDATA that points past the end of the file, rather than ending the chain there", () => {
+    // Three data sets whose writer stored each $NEXTDATA from the start of the FILE. FCS 3.1
+    // counts it from the start of the current data set, as flowCore does, so the second pointer
+    // lands past the end, and the third data set, which is in the file, was dropped silently.
+    const set = (rows: number[][], well: string, next: number) => rawDataSet({
+      keywords: floatKeywords(["A", "B"], rows.length, [["$WELLID", well]]).map(([k, v]): [string, string] =>
+        [k, k === "$NEXTDATA" ? String(next).padStart(8, "0") : v]),
+      data: f32Rows(rows),
+    });
+    const rows1 = Array.from({ length: 40 }, (_, i) => [i, i + 1]);
+    const len1 = set(rows1, "A01", 0).length;
+    const len2 = set([[5, 6]], "A02", 0).length;
+    const one = set(rows1, "A01", len1);
+    const two = set([[5, 6]], "A02", len1 + len2); // absolute: the third HEADER's file offset
+    const three = set([[7, 8], [9, 10]], "A03", 0);
+    const bytes = new Uint8Array(one.length + two.length + three.length);
+    bytes.set(one, 0);
+    bytes.set(two, one.length);
+    bytes.set(three, one.length + two.length);
+    expect(len1 + len1 + len2).toBeGreaterThan(bytes.length);
+    expect(() => listFcsDataSets(ab(bytes))).toThrow(
+      new RegExp(`\\$NEXTDATA points to byte ${len1 + len1 + len2}, past the end of the ${bytes.length}-byte file`));
+    expect(() => parseFcs(ab(bytes))).toThrow(/from the start of the file.*byte \d+ holds an FCS HEADER/);
+
+    // A single data set whose $NEXTDATA names a data set the file does not hold: cut short.
+    const cut = set([[1, 2]], "A01", 5000);
+    expect(() => parseFcs(ab(cut))).toThrow(/past the end of the \d+-byte file.*cut short/);
+    const atEnd = set([[1, 2]], "A01", set([[1, 2]], "A01", 0).length);
+    expect(atEnd.length).toBe(set([[1, 2]], "A01", 0).length);
+    expect(() => parseFcs(ab(atEnd))).toThrow(/past the end/);
+  });
+
+  it("names each data set's sample after its file and position, and reads the name back", () => {
+    const name = fcsDataSetFileName("plate 1.fcs", 1, 4, "A02");
+    expect(name).toBe("plate 1 (data set 2 of 4, A02).fcs");
+    expect(parseFcsDataSetFileName(name)).toEqual({ fileName: "plate 1.fcs", index: 1, count: 4, label: "A02" });
+    expect(parseFcsDataSetFileName("plate 1.fcs")).toBeNull();
+    expect(parseFcsDataSetFileName(fcsDataSetFileName("x.fcs", 0, 2, null))).toEqual({ fileName: "x.fcs", index: 0, count: 2, label: null });
+    // A label is written with the characters the name uses as punctuation replaced.
+    expect(parseFcsDataSetFileName(fcsDataSetFileName("x.fcs", 1, 2, "B1 (1/2)"))?.label).toBe("B1 _1_2_");
+  });
+});
+
+const MUSE = `${VENDOR_MATRIX_DIR}/curated-from-fcsparser/Guava_Muse.fcs`;
+
+describe.runIf(existsSync(MUSE))("parseFcs — Guava Muse plate export, four wells in one file", () => {
+  it("finds all four data sets, as flowio.read_multiple_data_sets and flowCore do", () => {
+    const buf = loadArrayBuffer(MUSE);
+    const sets = listFcsDataSets(buf);
+    expect(sets.map((s) => s.events)).toEqual([108, 50081, 111496, 50037]);
+    expect(sets.map((s) => s.label)).toEqual(["A01", "A02", "A03", "A04"]);
+    expect(() => parseFcs(buf)).toThrow(FcsMultipleDataSetsError);
+    for (let k = 0; k < 4; k++) {
+      const own = parseFcs(ab(extractFcsDataSet(buf, k)));
+      expect(own.nEvents).toBe(sets[k].events);
+      expect(own.channels).toHaveLength(10);
+    }
+  });
+});
+
+describe.runIf(existsSync(S8_PUBLIC))("parseFcs — S8 integer bookkeeping parameters ($PnDATATYPE=I)", () => {
+  it("reads event numbers as consecutive integers, not float32 denormals", () => {
+    const fcs = parseFcs(loadArrayBuffer(S8_PUBLIC));
+    const col = (name: string) => fcs.columns[fcs.channels.findIndex((c) => c.name === name)];
+    const events = col("EventNumber0");
+    expect(events).toBeInstanceOf(Uint32Array);
+    expect(events[0]).toBe(1299868);
+    for (let i = 1; i < events.length; i++) expect(events[i] - events[i - 1]).toBe(1);
+    const widths = Array.from(col("EventWidthInDrops"));
+    expect(Math.min(...widths)).toBe(29);
+    expect(Math.max(...widths)).toBe(167);
+    // Measurement parameters are still float32, as the file declares.
+    expect(col("FSC-A")).toBeInstanceOf(Float32Array);
   });
 });

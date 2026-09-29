@@ -5,7 +5,7 @@
 
 import type { Sample } from "../engine/sample";
 import { axesFromCovariance, ellipseBoundary } from "../engine/ellipse";
-import type { Gate } from "../engine/models";
+import { isUnbounded, type Gate } from "../engine/models";
 import { } from "../engine/gates";
 import { gateSpaceBadge } from "../engine/gateSpaceBadge";
 import type { GateCount } from "../engine/populations";
@@ -21,6 +21,11 @@ export interface PlotGate {
   /** A quadrant gate's four label positions, Q1 to Q4, as dragged deltas in display units. */
   quadrant_label_offsets?: ([number, number] | null)[];
   vertices?: [number, number][];
+  /**
+   * A rectangle's sides with no bound (UNBOUNDED), [low, high] per axis. They are drawn past every
+   * event (drawnRaw); the axis fit leaves them out, and the label sits among the data instead.
+   */
+  unbounded?: { x: [boolean, boolean]; y: [boolean, boolean] };
   /**
    * The gate's true boundary in display space, for drawing.
    *
@@ -358,13 +363,38 @@ export function buildPlotGates(
         [xmax, ymax],
         [xmin, ymax],
       ].map((c) => toDisplay(c as [number, number]));
+      const open = (ch: string, v: number) => isUnbounded(sample.gateToRaw(gate, ch, v));
+      const unbounded = {
+        x: [open(xChannel, xmin), open(xChannel, xmax)] as [boolean, boolean],
+        y: [open(yChannel, ymin), open(yChannel, ymax)] as [boolean, boolean],
+      };
+      const anyOpen = unbounded.x.some(Boolean) || unbounded.y.some(Boolean);
+      // The renderer anchors a label at the mean of the vertices. With a side drawn past every
+      // event that mean is far off the plot, so the automatic label is placed on the rectangle as
+      // it appears within the data's frame, and moved by the difference of the two means.
+      let autoLabel = displayLabelOffset(displayVerts);
+      if (anyOpen) {
+        const clip = (v: number, k: 0 | 1): number => {
+          const frame = labelFrames[k];
+          const sides = k === 0 ? unbounded.x : unbounded.y;
+          if (!frame) return v;
+          const ends = displayVerts.map((p) => p[k]);
+          if (sides[0] && v === Math.min(...ends)) return frame[0];
+          if (sides[1] && v === Math.max(...ends)) return frame[1];
+          return v;
+        };
+        const seen = displayVerts.map((p) => [clip(p[0], 0), clip(p[1], 1)] as [number, number]);
+        const mean = (pts: [number, number][], k: 0 | 1) => pts.reduce((sum, p) => sum + p[k], 0) / pts.length;
+        const own = displayLabelOffset(seen);
+        autoLabel = [own[0] + mean(seen, 0) - mean(displayVerts, 0), own[1] + mean(seen, 1) - mean(displayVerts, 1)];
+      }
       out.push({
         ...common,
         gate_type: "rectangle",
         vertices: displayVerts,
+        ...(anyOpen ? { unbounded } : {}),
         // Label offset must be in DISPLAY space (cytof applies it to display coords).
-        label_offset: usableLabelOffset(gate.label_offset, displayVerts, labelFrames)
-          ?? displayLabelOffset(displayVerts),
+        label_offset: usableLabelOffset(gate.label_offset, displayVerts, labelFrames) ?? autoLabel,
         percent_of_parent: counts?.percent_of_parent ?? null,
       });
     } else if (gate.gate_type === "ellipse") {

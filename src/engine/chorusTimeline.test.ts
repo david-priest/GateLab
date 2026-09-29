@@ -2,7 +2,7 @@
 
 import { describe, it, expect } from "vitest";
 import type { ChorusExperiment, ChorusGate, ChorusRecording } from "./chorusExperiment";
-import { buildChorusTimeline, chorusTime } from "./chorusTimeline";
+import { buildChorusTimeline, chorusTime, isRecordingOfExperiment, treesRecordedUnder } from "./chorusTimeline";
 
 const lin = (id: string) => ({ measurementId: id, fluorochrome: id.split(" ")[0], measurement: "A", scale: "Linear", parameterKind: "Scatter" });
 function poly(gateId: string, name: string, parent: string, pts: Array<[number, number]>): ChorusGate {
@@ -87,5 +87,34 @@ describe("the FACSChorus timeline", () => {
     expect(tl.current).toBeNull();
     expect(tl.treeGroups).toBe(1);
     expect(tl.items.every((i) => i.kind === "recording" && i.sameExperiment === null && i.matchesTrees.length === 0)).toBe(true);
+  });
+});
+
+describe("whether a loaded file is a recording of the experiment", () => {
+  const record = (associationId: string) => ({
+    BDCHORUSDATARECORD: JSON.stringify({ RecordingInfo: { Name: "D1", AssociationId: associationId }, RecordingConfiguration: {} }),
+  });
+  it("is true for the experiment's own or one of its panels', false for another's, null without a record", () => {
+    expect(isRecordingOfExperiment(experiment(), record("exp-1"))).toBe(true);
+    expect(isRecordingOfExperiment(experiment(), record("panel-1"))).toBe(true);
+    expect(isRecordingOfExperiment(experiment(), record("exp-9"))).toBe(false);
+    expect(isRecordingOfExperiment(experiment(), {})).toBeNull();
+    expect(isRecordingOfExperiment(experiment(), { BDCHORUSDATARECORD: "{not json" })).toBeNull();
+  });
+});
+
+// A recording of the experiment made during Sort_001 carries Sort_001's tree. Sort_002's snapshot
+// and the current gates are another tree, and importing either onto it was not said to be so.
+describe("the trees a recording of the experiment was made under", () => {
+  it("names the snapshot identical to its own tree and the sort it was recorded during", () => {
+    const during = treesRecordedUnder(experiment(), recording("D1 during", "2026-01-02T09:10:00Z", [CELLS_A, SINGLETS]));
+    // listChorusTrees: current gates 0, then the sorts in time order.
+    expect(during).toEqual({ treeIndices: [1], labels: ["Sort_001"], duringSort: "Sort_001" });
+    const later = treesRecordedUnder(experiment(), recording("D2 pre", "2026-01-02T09:50:00Z", [CELLS_B, SINGLETS]));
+    expect(later?.treeIndices).toEqual([0, 2]);
+    expect(later?.duringSort).toBeNull();
+    // Another experiment's recording, or none, is not made under any of these trees.
+    expect(treesRecordedUnder(experiment(), recording("other", "2026-01-02T11:00:00Z", [CELLS_A], "exp-9"))).toBeNull();
+    expect(treesRecordedUnder(experiment(), null)).toBeNull();
   });
 });

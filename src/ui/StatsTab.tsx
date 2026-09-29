@@ -4,8 +4,9 @@
 
 import { useMemo, useState } from "react";
 import { usePersistedTabState } from "./tabState";
-import { recompute, type CoreState, type Derived } from "../store";
+import { recomputeGating, type CoreState, type Derived, type TreeStats } from "../store";
 import type { Sample } from "../engine/sample";
+import { gatingStateForTree, hostedMembershipReader, type HierarchyTree } from "../host/hostedMemberships";
 import { computePopulationStats, MFI_STATS, type StatType, type ValueSpace } from "../engine/stats";
 import { significantNumber } from "./compensationUiFormat";
 import { populationTreeOrder } from "../engine/populations";
@@ -16,6 +17,19 @@ interface SampleRef {
   id: string;
   name: string;
   sample: Sample;
+  /** The hierarchy the file is gated under: the tree, its group's copy or its own. Absent: the live one. */
+  hierarchyId?: string;
+}
+
+/**
+ * One file's masks and counts for the live tree's populations, each read under the tree the file
+ * is gated under, and the populations that tree has no counterpart for (not evaluated).
+ */
+interface FileView {
+  masks: Record<string, Uint8Array>;
+  stats: TreeStats;
+  notEvaluated: ReadonlySet<string>;
+  notes: string[];
 }
 interface Props {
   samples: SampleRef[];
@@ -39,6 +53,21 @@ const COMPARE_METRICS: { key: "count" | "pct_parent" | "pct_total"; label: strin
   { key: "pct_parent", label: "% Parent" },
   { key: "pct_total", label: "% Total" },
 ];
+
+/**
+ * RFC 4180, so R's read.csv and Python's csv read back exactly what is on screen: records end in
+ * CRLF, and a field holding a comma, a double quote or a line break is enclosed in double quotes
+ * with each quote doubled. JSON's backslash escape is not CSV, and a sample or channel name with a
+ * comma in it shifted every later column. A field that starts or ends in white space is quoted as
+ * well: read.csv strips unquoted white space from the header line, which holds the sample names.
+ */
+function csvText(records: readonly (readonly (string | number)[])[]): string {
+  const field = (value: string | number) => {
+    const text = String(value);
+    return /[",\r\n]|^\s|\s$/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  return records.map((record) => record.map(field).join(",") + "\r\n").join("");
+}
 
 export function StatsTab({ samples, activeSampleId, state, derived, defaultChannels, dataRevisionKey }: Props) {
   const { t } = useI18n();
@@ -66,49 +95,89 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
   const anyMfi = MFI_STATS.some((s) => statTypes.has(s.key));
   const root = state.root_population_id ?? "";
 
-  // Per-sample Derived: reuse the active sample's; recompute the others on demand.
-  const derivedFor = (id: string): Derived => {
-    const e = samples.find((s) => s.id === id);
-    if (!e) return derived;
-    return e.id === activeSampleId ? derived : recompute(e.sample, state);
+  /**
+   * Each file under the tree it is gated under, read the way its memberships reach R
+   * (hostedMembershipReader): a tailored file from its own copy even while the tree is live, each
+   * population found there by provenance. The viewed file under the live tree reuses `derived`.
+   */
+  const fileViews = (entries: readonly SampleRef[]): FileView[] => {
+    const reader = hostedMembershipReader(state, entries.map((e) => ({
+      hierarchyId: e.hierarchyId ?? state.active_hierarchy_id,
+      name: e.name,
+      gatingFor: (tree: HierarchyTree) =>
+        tree.active && e.id === activeSampleId ? derived : recomputeGating(e.sample, gatingStateForTree(state, tree)),
+    })));
+    const live = reader.trees.find((tree) => tree.active);
+    return entries.map((e, index) => {
+      if (!live) {
+        const d = e.id === activeSampleId ? derived : recomputeGating(e.sample, state);
+        return { masks: d.masks, stats: d.stats, notEvaluated: new Set(), notes: [] };
+      }
+      const masks: Record<string, Uint8Array> = {};
+      const stats: TreeStats = { event_count: {}, percent_of_parent: {}, percent_of_total: {} };
+      const notEvaluated = new Set<string>();
+      const notes: string[] = [];
+      for (const popId of Object.keys(state.populations)) {
+        const from = reader.source(index, live, popId);
+        if (!from) {
+          notEvaluated.add(popId);
+          notes.push(reader.notEvaluatedNote(index, live, popId));
+          continue;
+        }
+        const gating = reader.gating(index, from.tree);
+        const mask = gating.masks[from.populationId];
+        if (mask) masks[popId] = mask;
+        stats.event_count[popId] = gating.stats.event_count[from.populationId] ?? null;
+        stats.percent_of_parent[popId] = gating.stats.percent_of_parent[from.populationId] ?? null;
+        stats.percent_of_total[popId] = gating.stats.percent_of_total[from.populationId] ?? null;
+      }
+      return { masks, stats, notEvaluated, notes };
+    });
   };
 
   // Single-sample detailed table.
   const table = useMemo(() => {
     if (isCompare || !viewEntry) return null;
-    const d = derivedFor(viewEntry.id);
-    return computePopulationStats(
+    const view = fileViews([viewEntry])[0];
+    const stats = computePopulationStats(
       viewEntry.sample,
       state.populations,
       root,
-      d.masks,
-      d.stats.event_count,
+      view.masks,
+      view.stats.event_count,
       anyMfi ? channels : [],
       [...statTypes],
       valueSpace,
     );
+    // Not evaluated for this file: no count, percentage or MFI, rather than another tree's.
+    for (const row of stats.rows) {
+      if (view.notEvaluated.has(row.popId)) for (const key of Object.keys(row.cells)) row.cells[key] = null;
+    }
+    return { ...stats, notes: view.notes };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isCompare, viewEntry, activeSampleId, derived, state.populations, state.gate_version, root, channels, statTypes, valueSpace, anyMfi, dataRevisionKey]);
+  }, [isCompare, viewEntry, activeSampleId, derived, state.populations, state.gate_version, state.hierarchies, state.stored_hierarchies, state.active_hierarchy_id, root, channels, statTypes, valueSpace, anyMfi, dataRevisionKey]);
 
   // All-samples compare table: rows = populations, columns = samples, cell = one metric.
   const compare = useMemo(() => {
     if (!isCompare) return null;
     const order = populationTreeOrder(state.populations, state.root_population_id ?? null);
-    const perSample = samples.map((e) => ({ name: e.name, d: derivedFor(e.id) }));
+    const views = fileViews(samples);
     const rows = order.map(({ popId, depth, isLastPath }) => ({
       popId,
       depth,
       isLastPath,
       name: state.populations[popId]?.name ?? popId,
-      cells: perSample.map(({ d }) => {
-        if (compareMetric === "count") return d.stats.event_count[popId] ?? null;
-        const src = compareMetric === "pct_parent" ? d.stats.percent_of_parent : d.stats.percent_of_total;
+      cells: views.map((view) => {
+        if (view.notEvaluated.has(popId)) return null;
+        if (compareMetric === "count") return view.stats.event_count[popId] ?? null;
+        const src = compareMetric === "pct_parent" ? view.stats.percent_of_parent : view.stats.percent_of_total;
         return depth === 0 ? 100 : src[popId] ?? null;
       }),
     }));
-    return { sampleNames: perSample.map((p) => p.name), rows };
+    return { sampleNames: samples.map((e) => e.name), rows, notes: views.flatMap((view) => view.notes) };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isCompare, samples, activeSampleId, derived, state.populations, state.gate_version, compareMetric, dataRevisionKey]);
+  }, [isCompare, samples, activeSampleId, derived, state.populations, state.gate_version, state.hierarchies, state.stored_hierarchies, state.active_hierarchy_id, compareMetric, dataRevisionKey]);
+  const notes = (isCompare ? compare?.notes : table?.notes) ?? [];
 
   const toggleStat = (k: StatType) =>
     setStatTypes((prev) => {
@@ -134,13 +203,16 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
 
   const buildCsv = (): string => {
     if (isCompare && compare) {
-      return ["Population", ...compare.sampleNames].join(",") + "\n" +
-        compare.rows.map((r) => [JSON.stringify(r.name), ...r.cells.map((c) => c ?? "")].join(",")).join("\n");
+      return csvText([
+        ["Population", ...compare.sampleNames],
+        ...compare.rows.map((r) => [r.name, ...r.cells.map((c) => c ?? "")]),
+      ]);
     }
     if (table) {
-      return ["Population", ...table.columns.map((c) => c.label)].join(",") + "\n" +
-        table.rows.map((r) => [
-          JSON.stringify(r.name),
+      return csvText([
+        ["Population", ...table.columns.map((c) => c.label)],
+        ...table.rows.map((r) => [
+          r.name,
           ...table.columns.map((c) => {
             const v = r.cells[c.key];
             if (v == null) return "";
@@ -148,7 +220,8 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
             // by something else, and full float noise (0.48391827364) helps nobody either.
             return isMfiColumn(c.key) ? significantNumber(v, 6) : v;
           }),
-        ].join(",")).join("\n");
+        ]),
+      ]);
     }
     return "";
   };
@@ -319,6 +392,9 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
             </tbody>
           </table>
         ) : null}
+        {notes.length > 0 && (
+          <p className="gl-stats-note">— {notes.join(" ")}</p>
+        )}
       </div>
       )}
       </div>

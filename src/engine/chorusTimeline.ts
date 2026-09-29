@@ -8,7 +8,7 @@
  * which sort was running, and which tree was in force — the recording's own, or the sort's.
  */
 
-import { listChorusTrees, treeSignature, type ChorusExperiment, type ChorusRecording, type ChorusTreeSummary } from "./chorusExperiment";
+import { listChorusTrees, readChorusRecording, treeSignature, type ChorusExperiment, type ChorusRecording, type ChorusTreeSummary } from "./chorusExperiment";
 
 export interface ChorusTimelineSort {
   kind: "sort";
@@ -40,6 +40,8 @@ export interface ChorusTimelineRecording {
   duringSort: string | null;
   /** Labels of the experiment's trees (current gates, sort snapshots) identical to its own. */
   matchesTrees: string[];
+  /** The same trees, as indices into listChorusTrees(experiment). */
+  matchesTreeIndices: number[];
   /** Recordings sharing one tree share a group; groups are numbered in time order. */
   treeGroup: number;
 }
@@ -73,6 +75,55 @@ export function chorusTime(iso: string | null | undefined): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
+/** The ids a recording of this experiment names as its association: the experiment's, or a panel's. */
+function experimentIdsOf(experiment: ChorusExperiment | null): Set<string> {
+  const ids = new Set<string>();
+  if (experiment) {
+    if (experiment.id) ids.add(experiment.id);
+    for (const p of experiment.panels) if (p.id) ids.add(p.id);
+  }
+  return ids;
+}
+
+/**
+ * Whether a loaded file is a recording of this experiment, from the BDCHORUSDATARECORD every FCS
+ * the S8 exports carries: true, false (another experiment's recording), or null when it carries
+ * no record (or no id to compare). A .cef holds no recordings, so this is the only way to tell
+ * that its gates belong to the file at all; applied to a file that is not, they are another
+ * experiment's gates.
+ */
+export function isRecordingOfExperiment(
+  experiment: ChorusExperiment | null,
+  keywords: Readonly<Record<string, string>>,
+): boolean | null {
+  let recording: ChorusRecording | null = null;
+  try {
+    recording = readChorusRecording(keywords as Record<string, string>);
+  } catch {
+    return null;
+  }
+  const ids = experimentIdsOf(experiment);
+  if (!recording?.experimentId || !ids.size) return null;
+  return ids.has(recording.experimentId);
+}
+
+/**
+ * The experiment's trees a recording of it was made under: those identical to the tree the file
+ * carries, vertex for vertex (as indices into listChorusTrees), and the sort running while it was
+ * recorded. Null when the file is not a recording of this experiment. A snapshot or the current
+ * gates that is not among them is another tree than the file's own, and importing it onto the file
+ * is a choice to be named, not the file's gating.
+ */
+export function treesRecordedUnder(
+  experiment: ChorusExperiment,
+  recording: ChorusRecording | null,
+): { treeIndices: number[]; labels: string[]; duringSort: string | null } | null {
+  if (!recording?.experimentId || !experimentIdsOf(experiment).has(recording.experimentId)) return null;
+  const item = buildChorusTimeline(experiment, [{ fileId: "", fileName: "", recording }]).items
+    .find((i): i is ChorusTimelineRecording => i.kind === "recording");
+  return item ? { treeIndices: item.matchesTreeIndices, labels: item.matchesTrees, duringSort: item.duringSort } : null;
+}
+
 function drawn(gates: readonly { gateKind: string }[]): number {
   return gates.filter((g) => g.gateKind !== "Saturated" && g.gateKind !== "Unsaturated").length;
 }
@@ -86,15 +137,11 @@ export function buildChorusTimeline(
   const treeSigs = experiment
     ? trees.map((t) => {
         const sort = t.kind === "sort" ? experiment.sorts.find((s) => s.startedAt === t.sortedAt && t.label.startsWith(s.name)) : null;
-        return { label: sort ? sort.name : t.label, sig: t.kind === "current" ? treeSignature(experiment.panels[0].gates) : treeSignature(sort?.gates ?? []) };
+        return { index: t.index, label: sort ? sort.name : t.label, sig: t.kind === "current" ? treeSignature(experiment.panels[0].gates) : treeSignature(sort?.gates ?? []) };
       })
     : [];
   // A recording names the panel it was made in as its association, or the experiment itself.
-  const experimentIds = new Set<string>();
-  if (experiment) {
-    if (experiment.id) experimentIds.add(experiment.id);
-    for (const p of experiment.panels) if (p.id) experimentIds.add(p.id);
-  }
+  const experimentIds = experimentIdsOf(experiment);
   const currentTree = trees.find((t) => t.kind === "current") ?? null;
 
   const sorts: ChorusTimelineSort[] = trees
@@ -128,7 +175,8 @@ export function buildChorusTimeline(
       const s1 = chorusTime(s.stoppedAt);
       return s0 !== null && s1 !== null && t0 < s1 && (t1 ?? t0) > s0;
     });
-    const matches = treeSigs.filter((t) => t.sig === sig).map((t) => t.label);
+    const matching = treeSigs.filter((t) => t.sig === sig);
+    const matches = matching.map((t) => t.label);
     return {
       kind: "recording" as const,
       fileId,
@@ -141,6 +189,7 @@ export function buildChorusTimeline(
       sameExperiment: experiment && recording.experimentId !== null && experimentIds.size ? experimentIds.has(recording.experimentId) : null,
       duringSort: during?.name ?? null,
       matchesTrees: matches,
+      matchesTreeIndices: matching.map((t) => t.index),
       treeGroup: groupOf.get(sig)!,
     };
   });

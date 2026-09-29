@@ -98,8 +98,8 @@ describe("Priest et al. 2024 published sort workspace", () => {
   // version of this lookup searched a subtree that never contains it and quietly left every gate
   // in raw space. Nothing about the imported gates looked wrong — they simply carried FlowJo's
   // straight-in-raw approximation instead of its actual boundary.
-  maybe("imports fluorescence gates in FlowJo's biex space and scatter gates raw", { timeout: 60000 }, () => {
-    const { gatingMl } = flowJoWorkspaceToGatingML(readFileSync(wspPath, "utf8"), 0);
+  maybe("imports fluorescence gates in FlowJo's biex space and scatter gates raw, evaluated continuously", { timeout: 60000 }, () => {
+    const { gatingMl } = flowJoWorkspaceToGatingML(readFileSync(wspPath, "utf8"), 0, null, undefined, { flowJoGrid: false });
     const res = importGatingML(gatingMl, [
       "FSC-A", "FSC-H", "FSC-W", "SSC-A", "SSC-H", "SSC-W",
       "PE-Cy7-A", "APC-A", "APC-Cy7-A", "BV421-A", "BV711-A", "BV786-A", "BUV805-A",
@@ -127,8 +127,39 @@ describe("Priest et al. 2024 published sort workspace", () => {
       expect(g.kinds.every((k) => k === "biex"), g.name).toBe(true);
     }
 
-    // Nothing was reported as unrepresentable: biex is now held, not approximated.
-    expect(res.untranslatable_transform_gates).toEqual([]);
+    // Nothing was left out: biex is held, not approximated.
+    expect(res.n_gates_skipped).toBe(0);
+  });
+
+  // Evaluated as FlowJo does (the import's default): every polygon on FlowJo's grid, over the
+  // axes this sample saved, and every rectangle compared in raw units, its FlowJo axes kept beside
+  // it for the way back out.
+  maybe("puts every polygon on FlowJo's grid and every rectangle in raw units, as FlowJo evaluates them", { timeout: 60000 }, () => {
+    const { gatingMl, gridPolygons } = flowJoWorkspaceToGatingML(readFileSync(wspPath, "utf8"), 0);
+    const res = importGatingML(gatingMl, [
+      "FSC-A", "FSC-H", "FSC-W", "SSC-A", "SSC-H", "SSC-W",
+      "PE-Cy7-A", "APC-A", "APC-Cy7-A", "BV421-A", "BV711-A", "BV786-A", "BUV805-A",
+    ], {}, "flow");
+    const gates = Object.values(res.gates);
+    expect(gates.length).toBe(18);
+    const polygons = gates.filter((g) => g.gate_type === "polygon");
+    const rectangles = gates.filter((g) => g.gate_type === "rectangle");
+    expect(polygons.length).toBe(5);
+    expect(gridPolygons).toBe(5);
+    for (const g of polygons) {
+      expect(g.space, g.name).toBe("display");
+      expect([g.transforms?.[g.x_channel]?.kind, g.transforms?.[g.y_channel]?.kind], g.name).toEqual(["flowjoChannels", "flowjoChannels"]);
+      expect(g.gate_type === "polygon" && g.vertices.flat().every(Number.isInteger), g.name).toBe(true);
+      expect(g.gate_type === "polygon" && g.flowjo_vertices?.length === g.vertices.length, g.name).toBe(true);
+    }
+    expect(rectangles.length).toBe(13);
+    for (const g of rectangles) {
+      expect(g.space ?? "raw", g.name).toBe("raw");
+      const axes = g.gate_type === "rectangle" ? g.flowjo_axes ?? {} : {};
+      expect(Object.values(axes).map((a) => a.kind), g.name).toEqual(["biex", "biex"]);
+    }
+    // Nothing was left out (fix/gatingml-transforms re-expresses no gate: what it cannot hold is left out).
+    expect(res.n_gates_skipped).toBe(0);
   });
 
   // The whole chain the app runs on import, against the real file: does every gate resolve to a

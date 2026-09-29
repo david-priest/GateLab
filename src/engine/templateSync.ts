@@ -13,7 +13,7 @@
 
 import type { Gate, PopulationMap } from "./models";
 import type { StoredHierarchy } from "./hierarchies";
-import { gateIdentity, strategyStructureKey } from "./tailoredImport";
+import { gateIdentity, onChannels, strategyStructureKey } from "./tailoredImport";
 
 export interface TemplateTree {
   gates: Record<string, Gate>;
@@ -34,12 +34,21 @@ export function gateGeometryEquals(a: Gate, b: Gate): boolean {
   return JSON.stringify(geometryOf(a)) === JSON.stringify(geometryOf(b));
 }
 
-/** `target` carrying `source`'s geometry: its own id, name and paint, everything else from `source`. */
+/**
+ * `target` carrying `source`'s geometry: its own id, name, paint and axes, everything else from
+ * `source`. The axes are the target's because they name channels of the target's own file: a
+ * file whose $PnS labels a detector differently from the tree's file keeps its gate on its own
+ * channel for that detector (a per-file import matches gates by detector), and taking the
+ * source's channel there put the gate on a channel the file does not have. What `source` keys by
+ * channel goes onto the target's channels with them (onChannels). Between a tree and a copy that
+ * share their axes, as every copy made any other way does, this changes nothing.
+ */
 export function withGeometryOf(target: Gate, source: Gate): Gate {
-  const { gate_id, name, color, label_offset, quadrant_label_offsets } = target as Gate & { label_offset?: unknown; quadrant_label_offsets?: unknown };
+  const { gate_id, name, color, label_offset, quadrant_label_offsets, x_channel, y_channel } = target as Gate & { label_offset?: unknown; quadrant_label_offsets?: unknown };
   const { quadrant_label_offsets: _sourceLabels, ...geometry } = structuredClone(source) as Gate & { quadrant_label_offsets?: unknown };
   void _sourceLabels;
-  return { ...geometry, gate_id, name, color, label_offset, ...(quadrant_label_offsets !== undefined ? { quadrant_label_offsets } : {}) } as Gate;
+  const carried = { ...geometry, gate_id, name, color, label_offset, ...(quadrant_label_offsets !== undefined ? { quadrant_label_offsets } : {}) } as Gate;
+  return onChannels(carried, x_channel, y_channel);
 }
 
 function invert(map: Record<string, string> | undefined): Record<string, string> {
@@ -51,6 +60,37 @@ export function copyInStep(copy: StoredHierarchy, template: TemplateTree): boole
   if (!copy.root_population_id) return false;
   return strategyStructureKey({ gates: copy.gates, gate_order: copy.gate_order, populations: copy.populations, root_population_id: copy.root_population_id })
     === strategyStructureKey(template);
+}
+
+/**
+ * Whether a copy holds a gate on other channels than the template's gate it follows: the copy of a
+ * file whose $PnS labels a detector differently from the tree's file, which keeps its gates on its
+ * own channel for that detector (a per-file import matches gates by detector). Such a file cannot
+ * be gated under the template itself, whose gates name channels the file does not have and would
+ * hold no event there; it follows the template on a copy of its own (withGeometryOf).
+ */
+export function copyOnOwnChannels(copy: StoredHierarchy, template: TemplateTree): boolean {
+  return Object.entries(copy.source_gate_ids ?? {}).some(([own, source]) => {
+    const a = copy.gates[own], b = template.gates[source];
+    return !!a && !!b && (a.x_channel !== b.x_channel || a.y_channel !== b.y_channel);
+  });
+}
+
+/**
+ * Whether a copy's structure is its template's once each of its gates is put on the channels of
+ * the template's gate it follows (onChannels): copyInStep for the copy of a file that labels a
+ * detector differently, whose gates name its own channels (copyOnOwnChannels). Its coordinates can
+ * become the template's as those of any copy in step can, each gate going onto the template's
+ * channels (withGeometryOf).
+ */
+export function copyInStepOnTemplateChannels(copy: StoredHierarchy, template: TemplateTree): boolean {
+  if (!copy.root_population_id) return false;
+  const gates = { ...copy.gates };
+  for (const [own, source] of Object.entries(copy.source_gate_ids ?? {})) {
+    const a = gates[own], b = template.gates[source];
+    if (a && b) gates[own] = onChannels(a, b.x_channel, b.y_channel);
+  }
+  return copyInStep({ ...copy, gates }, template);
 }
 
 /**

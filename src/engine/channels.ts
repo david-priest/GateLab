@@ -112,12 +112,19 @@ export function isImagingFeature(name: string, feature?: string): boolean {
   return IMAGING_FEATURE_NAME.test(name);
 }
 
-/** A raw spectral detector: not scatter, not imaging scatter, not an imaging feature, not
- *  QC/timing, and carrying no marker of its own. These are what the unmixed filter exists to
- *  drop. */
+/** A raw spectral detector: a pulse measurement (-A, -H or -W) that is not scatter, not imaging
+ *  scatter, not an imaging feature, not QC/timing, and carries no marker of its own. These are
+ *  what the unmixed filter exists to drop.
+ *
+ *  The pulse suffix is required because a detector is always read as a pulse. A MACSQuant FCS 3.1
+ *  export carries three instrument parameters, HDR-CE, HDR-SE and HDR-V, with $PnS equal to $PnN
+ *  and no suffix; counted as detectors they made the file look spectral, and 9 of its 19
+ *  parameters (every fluorescence height and width, and the three HDR parameters) were dropped,
+ *  while the same instrument's FCS 2.0 export kept all 16 under different keys. */
 function isRawDetector(name: string, marker: string | null, feature?: string): boolean {
   const desc = (marker ?? "").trim();
   if (desc.length > 0 && desc !== name) return false;
+  if (!suffixAHW(name)) return false;
   if (/^(FSC|SSC)/i.test(name)) return false;
   if (/^(LightLoss|Autofluorescence|Extinction)/i.test(name)) return false;
   if (isImagingFeature(name, feature)) return false;
@@ -141,7 +148,9 @@ function filterFlowChannels(fcs: FcsFile): ResolvedChannel[] {
   // a conventional file with a single unlabelled fluorescence channel was taken for a
   // spectral one, which dropped its height and width channels and changed every gate's
   // channel identity between files of one panel. A spectral file carries dozens.
-  // See channels.test.ts. GateLabR's fcs_import.R applies the same rule.
+  // See channels.test.ts. GateLabR's fcs_import.R applies the same rule, but with one detector
+  // enough and without the pulse-suffix requirement in isRawDetector (2026-09), so it still
+  // filters the MACSQuant FCS 3.1 file.
   if (fcs.channels.filter((c) => isRawDetector(c.name, c.marker, c.feature)).length < 2) return keepAll(fcs);
 
   const kept: ResolvedChannel[] = [];

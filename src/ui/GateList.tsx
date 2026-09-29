@@ -81,7 +81,9 @@ export function GateList({ state, derived, dispatch, labelForKey = (k) => k, bad
               {gate.name}
               {(tailoredInFiles?.get(gid)?.length ?? 0) > 0 && (
                 <span className="gate-tailored-badge gate-tailored-in" title={tailoredInFiles!.get(gid)!.join(", ")}>
-                  {t("tailored in {count} files", { count: tailoredInFiles!.get(gid)!.length })}
+                  {tailoredInFiles!.get(gid)!.length === 1
+                    ? t("tailored in 1 file")
+                    : t("tailored in {count} files", { count: tailoredInFiles!.get(gid)!.length })}
                 </span>
               )}
               {tailoredGateIds?.has(gid) && (

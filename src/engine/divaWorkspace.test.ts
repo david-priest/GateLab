@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { isDivaWorkspace, listDivaGateTrees, divaToGatingML } from "./divaWorkspace";
+import { isDivaWorkspace, listDivaGateTrees, listDivaTubes, pairDivaTube, divaToGatingML } from "./divaWorkspace";
 import { importGatingML } from "./gatingml";
 import { applyGatingStrategy } from "./populations";
 import { parseFcs } from "./fcs";
@@ -134,6 +134,56 @@ describe("Diva workspace import", () => {
       ["worksheet", "Sheet1", 1, null],
       ["tube", "T1", 1, "t1.fcs"],
     ]);
+  });
+});
+
+describe("which tube of an experiment IS the loaded file", () => {
+  // Diva names its files Specimen_001_Tube_001.fcs in every experiment. Synthetic experiment.
+  const tube = (name: string, file: string, begin: string, end: string, gates = "") =>
+    `<tube name="${name}"><data_filename>${file}</data_filename>` +
+    `<data_begin_date>${begin}</data_begin_date><data_end_date>${end}</data_end_date><gates>${ALL}${gates}</gates></tube>`;
+  const tri = poly("FSC-A", "SSC-A", [[0, 0], [1, 0], [1, 1]]);
+  const xml = synthetic(ALL,
+    tube("Tube_001", "Specimen_001_Tube_001.fcs", "2024-01-01T10:00:00", "2024-01-01T10:01:00", regionGate("All Events\\P1", "P1", "All Events", tri)) +
+    tube("Tube_002", "Specimen_001_Tube_002.fcs", "2024-01-01T10:05:00", "2024-01-01T10:06:00",
+      regionGate("All Events\\P1", "P1", "All Events", tri) + regionGate("All Events\\P2", "P2", "All Events", tri)));
+  const tubes = listDivaTubes(xml);
+
+  it("reads each tube's recorded acquisition times", () => {
+    // The date and times apart, as a file records them: kept whole, a contradiction printed the
+    // tube's "$DATE 2024-01-01T10:00:00 and $BTIM 2024-01-01T10:00:00".
+    expect(tubes.map((t) => [t.name, t.recorded])).toEqual([
+      ["Tube_001", { $DATE: "2024-01-01", $BTIM: "10:00:00", $ETIM: "10:01:00" }],
+      ["Tube_002", { $DATE: "2024-01-01", $BTIM: "10:05:00", $ETIM: "10:06:00" }],
+    ]);
+    expect(listDivaGateTrees(xml).map((t) => t.tubeIndex)).toEqual([null, 0, 1]);
+  });
+
+  it("names a tube's specimen, and reads a time zone off its times", () => {
+    const zoned = synthetic(ALL, `<specimen name="Specimen_002">${tube("Tube_001", "a.fcs", "2024-01-01T10:00:00+09:00", "2024-01-01T10:01:00Z")}</specimen>`);
+    expect(listDivaTubes(zoned)[0].recorded).toEqual({ $DATE: "2024-01-01", $BTIM: "10:00:00", $ETIM: "10:01:00" });
+    expect(listDivaGateTrees(zoned).find((t) => t.kind === "tube")?.specimen).toBe("Specimen_002");
+  });
+
+  it("pairs the file whose times are the tube's, and not another experiment's file of the same name", () => {
+    const own = pairDivaTube(tubes, { name: "Specimen_001_Tube_001.fcs", keywords: { $DATE: "01-JAN-2024", $BTIM: "10:00:00", $ETIM: "10:01:00" } });
+    expect(own.pairing.kind === "own" && own.pairing.sample.name).toBe("Tube_001");
+    const other = pairDivaTube(tubes, { name: "Specimen_001_Tube_001.fcs", keywords: { $DATE: "02-FEB-2024", $BTIM: "15:30:00", $ETIM: "15:31:00" } });
+    expect(other.pairing.kind).toBe("contradicted");
+  });
+
+  it("finds a renamed file by its $FIL, or by the one tube whose times are its own", () => {
+    const byFil = pairDivaTube(tubes, { name: "D1.fcs", keywords: { $FIL: "Specimen_001_Tube_001.fcs", $BTIM: "10:00:00" } });
+    expect(byFil.pairing.kind === "own" && byFil.pairing.sample.name).toBe("Tube_001");
+    const byTimes = pairDivaTube(tubes, { name: "D1.fcs", keywords: { $DATE: "01-JAN-2024", $BTIM: "10:00:00", $ETIM: "10:01:00" } });
+    expect(byTimes.byTimes).toBe(true);
+    expect(byTimes.pairing.kind === "own" && byTimes.pairing.sample.name).toBe("Tube_001");
+    expect(pairDivaTube(tubes, { name: "D1.fcs", keywords: { $BTIM: "23:00:00" } }).pairing.kind).toBe("none");
+  });
+
+  it("takes a worksheet tree's compensation from the tube the file IS, by position", () => {
+    // A tube index, not a name: the name can be another experiment's tube.
+    expect(() => divaToGatingML(xml, 1, 0)).not.toThrow();
   });
 });
 

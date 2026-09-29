@@ -870,7 +870,12 @@ function CompensationTabImpl({
                 `(${external.droppedChannels.join(", ")}) and were left out, which changes the ` +
                 "result for the channels they spill into."
               : "")
-          : "Applying the embedded matrix leaves its coefficients unchanged.",
+          : "Applying the embedded matrix leaves its coefficients unchanged." +
+            (origin.kind === "fcs" && origin.droppedChannels?.length
+              ? ` ${origin.droppedChannels.length} of its parameter(s) are not among this file's channels ` +
+                `(${origin.droppedChannels.join(", ")}) and were left out, which changes the ` +
+                "result for the channels they spill into."
+              : ""),
       };
     }
     if (!profileRecord || !profileMetadata) return null;

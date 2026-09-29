@@ -158,10 +158,16 @@ describe("hierarchy CSV membership round trip", () => {
     const again = resolveBarcodeScheme(parseBarcodeTable(out.csv), ten.channels);
     expect(again.problems).toEqual([]);
     const rebuilt = buildBarcodeGating(again, bareTemplate(), ten.arcsinhCofactor, { qc: true, channels: ten.channels });
+    // A polygon is rescaled: the same raw value, asinh(8/5) written, asinh(8/10) read.
+    const dna = Object.values(rebuilt.gates).find((g) => g.name === "DNA+") as PolyRectGate;
+    expect(dna.transforms?.["140Ce_Beads"]).toEqual({ kind: "asinh", cofactor: 10 });
+    expect(Math.max(...dna.vertices.map((v) => v[1]))).toBeCloseTo(Math.asinh(8 / 10), 5);
+    // So is a rectangle, as every file written before 2026-09 was read: asinh(20/5) written,
+    // asinh(20/10) read.
     const amp = Object.values(rebuilt.gates).find((g) => g.name === "Amp") as PolyRectGate;
     expect(amp.transforms).toEqual({ Time: { kind: "identity" }, Amplitude: { kind: "asinh", cofactor: 10 } });
-    // The same raw value: asinh(20/5) written, asinh(20/10) read.
     expect(Math.min(...amp.vertices.map((v) => v[1]))).toBeCloseTo(Math.asinh(20 / 10), 5);
+    expect(amp.bounds).toBe("closed");
     const after = membership(Object.values(rebuilt.gates), rebuilt.populations, rebuilt.root_population_id, ten);
     expectSameMembership(before, after, ws.names);
   });

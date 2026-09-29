@@ -476,6 +476,142 @@ describe("App SCE host loading", () => {
     ]);
     expect(container.textContent).toContain("workspace revision 1 · saved");
   });
+
+  // A gate on FlowJo's biex table needs a GateLab that has that table (workspaceFeatures.ts). Saved
+  // to the SCE as version 2 with the feature listed beside it, a GateLabR embedding 0.8.3 opened it
+  // as version 2 and misread the gate (a grid gate blanked the app). It is written as a file is:
+  // version 4, which 0.8.3 refuses by its version.
+  it("saves a workspace holding FlowJo's biex table to the SCE as a file is, version 4 with its feature listed", async () => {
+    const writeWorkspace = vi.fn(async (request: {
+      datasetId: string;
+      expectedRevision: number;
+      clientRevision: number;
+      reason: "autosave" | "explicit";
+      workspaceJson: string;
+    }) => ({
+      revision: request.expectedRevision + 1,
+      clientRevision: request.clientRevision,
+      savedAt: "2026-07-25T00:00:00Z",
+    }));
+    const host: GateLabHostAdapter = {
+      contractVersion: GATELAB_HOST_CONTRACT_VERSION,
+      id: "test-r-host",
+      kind: "r-sce",
+      label: "Test R host",
+      capabilities: {
+        dataSources: { fcsFiles: false, singleCellExperiment: true },
+        dataModel: {
+          multipleAssays: true,
+          sampleMetadata: true,
+          writeBackColumns: true,
+        },
+        persistence: {
+          workspaceFiles: false,
+          hostObject: true,
+          fileSystemAccess: false,
+          directoryAccess: false,
+        },
+        compute: { location: "host" },
+      },
+      datasets: {
+        async listDatasets() {
+          return [dataset];
+        },
+        async readAssay(_datasetId, sampleId) {
+          return sampleId === "sample-0"
+            ? bufferOf(new Float32Array([5, 10, 20, 25]))
+            : bufferOf(new Float32Array([15, 30]));
+        },
+        async readEventIndex(_datasetId, sampleId) {
+          return sampleId === "sample-0"
+            ? bufferOf(new Uint32Array([0, 2]))
+            : bufferOf(new Uint32Array([1]));
+        },
+      },
+      workspaces: {
+        async readWorkspace() {
+          return {
+            contractVersion: 1,
+            datasetId: "sce",
+            sourceFormat: "gatelabr-legacy",
+            revision: 0,
+            workspaceJson: JSON.stringify({
+              gates: {
+                "gate-restored": {
+                  gate_id: "gate-restored",
+                  name: "Saved CD3 gate",
+                  gate_type: "rectangle",
+                  x_channel: "CD3",
+                  y_channel: "CD19",
+                  vertices: [[1, 2.7], [2.4, 3.1]],
+                  color: "#377eb8",
+                  label_offset: null,
+                  space: "display",
+                  transforms: {
+                    CD3: { kind: "biex", maxValue: 262144, pos: 4.41854, neg: 0, widthBasis: -10, channelRange: 256, tableChannels: 4096 },
+                    CD19: { kind: "asinh", cofactor: 5 },
+                  },
+                },
+              },
+              gate_order: "gate-restored",
+              populations: {
+                root: {
+                  population_id: "root",
+                  name: "All Events",
+                  gate_refs: [],
+                  gate_logic: "and",
+                  parent_id: null,
+                  children: "saved-pop",
+                },
+                "saved-pop": {
+                  population_id: "saved-pop",
+                  name: "Saved population",
+                  gate_refs: { gate_id: "gate-restored", include: true },
+                  gate_logic: "and",
+                  parent_id: "root",
+                  children: [],
+                },
+              },
+              root_population_id: "root",
+              gate_value_space: "display",
+              global_scale_ranges: {
+                CD3: [0, 8],
+                CD19: [0, 7],
+              },
+            }),
+          };
+        },
+        writeWorkspace,
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        <GateLabHostProvider host={host}>
+          <App />
+        </GateLabHostProvider>,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+
+    expect(container.textContent).toContain("Saved CD3 gate");
+    expect(container.textContent).toContain("Saved population");
+    expect(container.textContent).toContain(
+      "Restored 1 gate and 2 populations from GateLabR SCE metadata",
+    );
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.startsWith("Save to SCE"))!;
+    await act(async () => {
+      save.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(writeWorkspace).toHaveBeenCalledTimes(1);
+    const savedWorkspace = JSON.parse(writeWorkspace.mock.calls[0][0].workspaceJson);
+    expect(savedWorkspace.version).toBe(4);
+    expect(savedWorkspace.requiredFeatures).toEqual(["flowjo-biex-table"]);
+    expect(savedWorkspace.gating.gates["gate-restored"].transforms.CD3.tableChannels).toBe(4096);
+    expect(container.textContent).toContain("workspace revision 1 · saved");
+  });
 });
 
 // The SCE advances on every accepted write, but the browser only learns the new revision from

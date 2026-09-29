@@ -1,4 +1,5 @@
 import type { FigureSpec } from "./figure";
+import { parseFlowJoGridSpec } from "./flowjoGrid";
 const record = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === "object" && !Array.isArray(v);
 const strings = (v: unknown): v is string[] =>
@@ -109,8 +110,14 @@ export function isFigureSpec(v: unknown): v is FigureSpec {
         ["maxValue", "pos", "channelRange"].every((k) => positive(spec[k])) &&
         ["neg", "widthBasis"].every(
           (k) => typeof spec[k] === "number" && Number.isFinite(spec[k]),
-        )
+        ) &&
+        // Absent is the table a spec saved before FlowJo's own was adopted (biex.ts).
+        (spec.tableChannels === undefined ||
+          (Number.isInteger(spec.tableChannels) && Number(spec.tableChannels) > 1))
       );
+    // A figure's axes are drawn on display transforms, never on FlowJo's gate grid, but a spec of
+    // that kind is held to the same checks the gate readers apply rather than refused unread.
+    if (spec.kind === "flowjoChannels") return parseFlowJoGridSpec(spec) !== null;
     if (spec.kind === "wsplog")
       return (
         positive(spec.decades) &&

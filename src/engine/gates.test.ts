@@ -5,8 +5,11 @@ import {
   gateMaskRectangle,
   gateMaskQuadrant,
   getGateMask,
+  rangeForReader,
+  upperBoundForReader,
   type AssayData,
 } from "./gates";
+import { fmtNum } from "./gatingmlExport";
 import { applyGatingStrategy, computeGateCounts } from "./populations";
 import {
   newGate,
@@ -83,14 +86,195 @@ describe("gateMaskPolygon boundary semantics (sp >= 1)", () => {
 });
 
 describe("gateMaskRectangle", () => {
-  it("is inclusive on both bounds regardless of corner order", () => {
-    const rect: Vertex[] = [
-      [2, 3], [-1, -1],
-    ]; // opposite corners, unordered
-    const x = [0, -1, 2, 2.5, -2];
-    const y = [0, -1, 3, 1, 1];
-    const m = gateMaskRectangle(x, y, rect);
-    expect(Array.from(m)).toEqual([1, 1, 1, 0, 0]);
+  // Events are placed exactly on each edge and corner of the box x in [-1, 2], y in [-1, 3],
+  // given by unordered opposite corners.
+  const rect: Vertex[] = [[2, 3], [-1, -1]];
+  const events: Record<string, [number, number]> = {
+    interior: [0, 0],
+    "left edge": [-1, 1], "bottom edge": [0.5, -1], "right edge": [2, 1], "top edge": [0.5, 3],
+    "lower-left corner": [-1, -1], "lower-right corner": [2, -1],
+    "upper-left corner": [-1, 3], "upper-right corner": [2, 3],
+    "just below the right edge": [Math.fround(2 - 1e-6), 1],
+    "beyond the right edge": [2.5, 1], "beyond the left edge": [-2, 1],
+  };
+  const names = Object.keys(events);
+  const x = Float32Array.from(names.map((k) => events[k][0]));
+  const y = Float32Array.from(names.map((k) => events[k][1]));
+  const inside = (m: Uint8Array) => names.filter((_, i) => m[i] === 1);
+  const CLOSED = [
+    "interior", "left edge", "bottom edge", "right edge", "top edge", "lower-left corner",
+    "lower-right corner", "upper-left corner", "upper-right corner", "just below the right edge",
+  ];
+
+  it("is closed without a rule, as every rectangle was before rules existed, whatever the corner order", () => {
+    expect(inside(gateMaskRectangle(x, y, rect))).toEqual(CLOSED);
+    expect(inside(gateMaskRectangle(x, y, rect, "closed"))).toEqual(CLOSED);
+    expect(Array.from(gateMaskRectangle(x, y, [[-1, -1], [2, -1], [2, 3], [-1, 3]])))
+      .toEqual(Array.from(gateMaskRectangle(x, y, rect)));
+  });
+
+  it("is half-open under Gating-ML's rule: lower edges in, upper edges out", () => {
+    expect(inside(gateMaskRectangle(x, y, rect, "half-open"))).toEqual([
+      "interior", "left edge", "bottom edge", "lower-left corner", "just below the right edge",
+    ]);
+  });
+
+  it("reads the rule from the gate in getGateMask, absent being closed", () => {
+    const data: AssayData = { n: names.length, column: (c) => (c === "X" ? x : c === "Y" ? y : undefined) };
+    const legacy = newGate("Box", "rectangle", "X", "Y", rect);
+    expect(legacy.bounds).toBeUndefined();
+    expect(inside(getGateMask(legacy, data))).toEqual(CLOSED);
+    expect(Array.from(getGateMask({ ...legacy, bounds: "half-open" }, data)))
+      .toEqual(Array.from(gateMaskRectangle(x, y, rect, "half-open")));
+  });
+
+  it("lets half-open rectangles that share an edge split the events on it, none twice and none missed", () => {
+    // The vertex snap puts neighbouring gates exactly on each other's edges; integer-valued
+    // channels (mass cytometry counts, Time) then put events exactly on those edges.
+    const gx = new Float32Array(121), gy = new Float32Array(121);
+    for (let i = 0; i < 121; i++) { gx[i] = i % 11; gy[i] = Math.floor(i / 11); }
+    const whole = gateMaskRectangle(gx, gy, [[2, 3], [8, 7]], "half-open");
+    const left = gateMaskRectangle(gx, gy, [[2, 3], [5, 7]], "half-open");
+    const right = gateMaskRectangle(gx, gy, [[5, 3], [8, 7]], "half-open");
+    for (let i = 0; i < 121; i++) {
+      expect(left[i] + right[i], `event (${gx[i]}, ${gy[i]})`).toBe(whole[i]);
+    }
+    expect(whole.reduce((s, v) => s + v, 0)).toBe(6 * 4);
+    expect(gateMaskRectangle(gx, gy, [[2, 3], [8, 7]], "closed").reduce((s, v) => s + v, 0)).toBe(7 * 5);
+  });
+
+  it("treats a one-dimensional range, both axes on one channel, by the same rule", () => {
+    const t = Float32Array.from([0, 1, 2, 3, 4, 5]);
+    expect(Array.from(gateMaskRectangle(t, t, [[1, 1], [4, 4]], "half-open"))).toEqual([0, 1, 1, 1, 0, 0]);
+    expect(Array.from(gateMaskRectangle(t, t, [[1, 1], [4, 4]]))).toEqual([0, 1, 1, 1, 1, 0]);
+  });
+
+  it("selects nothing when half-open and zero-width, and the events on it when closed", () => {
+    const t = Float32Array.from([0, 1, 2]);
+    expect(Array.from(gateMaskRectangle(t, t, [[1, 1], [1, 1]], "half-open"))).toEqual([0, 0, 0]);
+    expect(Array.from(gateMaskRectangle(t, t, [[1, 1], [1, 1]], "closed"))).toEqual([0, 1, 0]);
+  });
+});
+
+describe("upperBoundForReader", () => {
+  // Writing a rectangle for a tool with the other edge rule moves only its upper bounds, and
+  // only far enough that the tool's rule gives GateLab's answer on every float32 event.
+  const v = Float32Array.from([-3, -1e-40, 0, 1e-40, 0.5, 1, Math.fround(1 + 1e-7), 1000, Math.fround(1000.0001), 262143, 262144, 262145]);
+  const closedMask = (hi: number) => v.map((e) => (e >= -3 && e <= hi ? 1 : 0));
+  const halfOpenMask = (hi: number) => v.map((e) => (e >= -3 && e < hi ? 1 : 0));
+
+  it("writes a half-open gate for a closed reader just below the edge", () => {
+    for (const max of [0, 1, 1000, 262144, -1]) {
+      expect(Array.from(closedMask(upperBoundForReader(max, "half-open", "closed"))), `max ${max}`)
+        .toEqual(Array.from(halfOpenMask(max)));
+    }
+  });
+
+  it("writes a closed gate for a half-open reader just above the edge", () => {
+    for (const max of [0, 1, 1000, 262144, -1]) {
+      expect(Array.from(halfOpenMask(upperBoundForReader(max, "closed", "half-open"))), `max ${max}`)
+        .toEqual(Array.from(closedMask(max)));
+    }
+  });
+
+  it("leaves the bound alone when both sides use the same rule", () => {
+    expect(upperBoundForReader(1000, "half-open", "half-open")).toBe(1000);
+    expect(upperBoundForReader(1000, "closed", "closed")).toBe(1000);
+  });
+
+  it("leaves an edge with no bound, at or beyond the largest double or at the importer's 1e9, where it is", () => {
+    // An edge Gating-ML states no bound for is held at ±1e9 by the importer (gatingml.ts), and at
+    // the largest finite double on the Gating-ML hardening branch (its UNBOUNDED); an exporter
+    // writes either as no bound. Moved, it would become a bound, or Infinity.
+    for (const max of [Number.MAX_VALUE, -Number.MAX_VALUE, Infinity, -Infinity, 1e9, -1e9]) {
+      expect(upperBoundForReader(max, "half-open", "closed")).toBe(max);
+      expect(upperBoundForReader(max, "closed", "half-open")).toBe(max);
+    }
+    expect(rangeForReader(-Number.MAX_VALUE, Number.MAX_VALUE, "half-open", "closed")).toEqual([-Number.MAX_VALUE, Number.MAX_VALUE]);
+    expect(rangeForReader(5, Number.MAX_VALUE, "half-open", "closed")).toEqual([5, Number.MAX_VALUE]);
+    expect(rangeForReader(5, 1e9, "half-open", "closed")).toEqual([5, 1e9]);
+    // A bound near the importer's open one is a bound, and moves.
+    expect(upperBoundForReader(999999999, "half-open", "closed")).toBeLessThan(999999999);
+  });
+
+  it("keeps every float32 value on GateLab's side of a bound that lies within the shift of one", () => {
+    // The shift is 1e-13 of the bound, and float32 values are 6e-8 of their size apart, so none
+    // lies within it of a bound that is itself a float32 value. A bound a few doubles off one is
+    // not: 4203.130371093751, one double above the float32 4203.13037109375, was moved below it,
+    // and a closed reader dropped the events on it that the half-open gate holds.
+    const DV = new DataView(new ArrayBuffer(8));
+    const step = (x: number, k: number) => {
+      DV.setFloat64(0, x);
+      const b = DV.getBigUint64(0);
+      DV.setBigUint64(0, (x >= 0) === (k > 0) ? b + BigInt(Math.abs(k)) : b - BigInt(Math.abs(k)));
+      return DV.getFloat64(0);
+    };
+    const f32s = [4203.13037109375, 1, 0.5, 262143, 7.099999904632568, -60, -1e-3, 1e-30, 3.4e38].map(Math.fround);
+    for (const f of f32s) {
+      const nextUp = new Float32Array([f]);
+      const bits = new Int32Array(nextUp.buffer);
+      bits[0] += f > 0 ? 1 : -1;
+      const g = nextUp[0]; // the float32 after f, away from zero
+      for (const k of [1, 2, 3, 50, 1000]) {
+        for (const max of [step(f, k), step(f, -k), f * (1 + 1e-14), f * (1 - 1e-14)]) {
+          const top = upperBoundForReader(max, "half-open", "closed");
+          const low = upperBoundForReader(max, "closed", "half-open");
+          for (const e of [f, g].map(Math.fround)) {
+            expect(e <= top, `half-open ${max} for a closed reader, event ${e}`).toBe(e < max);
+            expect(e < low, `closed ${max} for a half-open reader, event ${e}`).toBe(e <= max);
+          }
+        }
+      }
+    }
+  });
+
+  it("keeps the shift through a file's fifteen significant digits", () => {
+    const written = Number(fmtNum(upperBoundForReader(262144, "closed", "half-open")));
+    expect(written).toBeGreaterThan(262144);
+    expect(written).toBeLessThan(Math.fround(262144 + 0.03125));
+  });
+});
+
+describe("polygon, ellipse and quadrant boundaries (Gating-ML 2.0 sections 5.2-5.4)", () => {
+  it("counts an event on any polygon edge or vertex as inside", () => {
+    // Horizontal, vertical and oblique edges, and a concave vertex. Section 5.2.1: "the boundary
+    // is considered as inclusive". FlowKit drops the right and upper edges; GateLab does not.
+    const poly: Vertex[] = [[0, 0], [8, 0], [8, 4], [4, 8], [0, 8], [2, 4]];
+    const pts: [number, number][] = [
+      [4, 0], [8, 2], [6, 6], [2, 8], [1, 6], [1, 2], // one on each edge
+      ...poly, // every vertex
+    ];
+    const m = gateMaskPolygon(Float32Array.from(pts.map((p) => p[0])), Float32Array.from(pts.map((p) => p[1])), poly);
+    expect(Array.from(m)).toEqual(pts.map(() => 1));
+    // And just outside each edge, out.
+    const out: [number, number][] = [[4, -0.01], [8.01, 2], [6.01, 6.01], [2, 8.01], [0.99, 6], [0.99, 2]];
+    const o = gateMaskPolygon(out.map((p) => p[0]), out.map((p) => p[1]), poly);
+    expect(Array.from(o)).toEqual(out.map(() => 0));
+  });
+
+  it("counts an event on an ellipse's boundary as inside", () => {
+    // Section 5.3.1: (x - mu)' C^-1 (x - mu) <= D^2. A circle of radius 5 about (10, 10), with
+    // boundary points whose quadratic form is exactly 25 in floating point.
+    const gate = {
+      gate_id: "e", name: "Round", gate_type: "ellipse" as const, x_channel: "X", y_channel: "Y",
+      mean: [10, 10] as [number, number], covariance: [[1, 0], [0, 1]] as [[number, number], [number, number]],
+      distance_square: 25, color: "#000", label_offset: null,
+    };
+    const px = [15, 10, 13, 7, 6, 15.001], py = [10, 15, 14, 6, 13, 10];
+    const data: AssayData = { n: px.length, column: (c) => (c === "X" ? px : py) };
+    expect(Array.from(getGateMask(gate, data))).toEqual([1, 1, 1, 1, 1, 0]);
+  });
+
+  it("puts an event on a quadrant divider on the divider's upper side", () => {
+    // Section 5.4.1: 500 <= x < 1000 for the middle quadrant, so a value equal to a divider
+    // belongs above it. The crosshair is at (0, 0).
+    const px = [0, 0, 0, -1, 1];
+    const py = [1, -1, 0, 0, 0];
+    const quad = (q: number) => Array.from(gateMaskQuadrant(px, py, [0, 0], q));
+    expect(quad(1)).toEqual([0, 0, 0, 1, 0]); // x-/y+: the left arm of the horizontal divider
+    expect(quad(2)).toEqual([1, 0, 1, 0, 1]); // x+/y+: the upper vertical arm, the crosshair, the right arm
+    expect(quad(3)).toEqual([0, 1, 0, 0, 0]); // x+/y-: the lower vertical arm
+    expect(quad(4)).toEqual([0, 0, 0, 0, 0]);
   });
 });
 
@@ -316,6 +500,29 @@ describe("polygon masks tolerate repeated vertices", () => {
     // The guard must not disable the on-boundary test for real edges.
     expect(Array.from(gateMaskPolygon([0.5], [0], [...tri, [0, 0]]))).toEqual([1]);
   });
+
+  // pointInPolygon had the same fault, and worse: its edge test took a zero-length edge for one of
+  // length 1, so a repeated vertex put EVERY point on the boundary, not just the bounding box. The
+  // Gating-ML export of a FlowJo grid polygon enumerates its cells with it, and a grid polygon with
+  // two vertices on one channel pair was written as a ring round the whole plane.
+  it("holds no point off the polygon in pointInPolygon either", () => {
+    const vx = [0, 1, 1, 0];
+    const vy = [0, 0, 0, 1];
+    for (let i = 0; i < xs.length; i++) expect(pointInPolygon(xs[i], ys[i], vx, vy)).toBe(expected[i] === 1);
+    expect(pointInPolygon(50, 50, vx, vy)).toBe(false);
+    expect(pointInPolygon(-3, 7, [0, 0, 1, 0], [0, 0, 0, 1])).toBe(false);
+  });
+
+  // A zero-length edge holds its one point, as every edge holds its own points: the boundary of a
+  // polygon whose vertices all coincide is that point. This is the rule the reference
+  // implementation of FlowJo's grid applies (a closed test on integers), and only a polygon with
+  // every vertex on one point differs by it; FlowJo's own count for one has not been measured.
+  it("holds the one point of a polygon whose vertices all coincide, and nothing else", () => {
+    const px = [5, 5, 6, 4.999999];
+    const py = [5, 6, 5, 5];
+    expect(Array.from(gateMaskPolygon(px, py, [[5, 5], [5, 5], [5, 5]]))).toEqual([1, 0, 0, 0]);
+    expect(px.map((x, i) => pointInPolygon(x, py[i], [5, 5, 5], [5, 5, 5]))).toEqual([true, false, false, false]);
+  });
 });
 
 import * as curly from "./gates";
@@ -367,4 +574,88 @@ describe("quadrant gate with curled arms", () => {
     // An axis that ends before the crosshair has no arm to draw.
     expect(curly.quadrantArmPoints(centre, curl, "h", 50)).toEqual([]);
   });
+});
+
+// ── Many edges ───────────────────────────────────────────────────────────────────────────────
+//
+// A polygon exported to be exact in raw space carries thousands of short edges (a biex polygon is
+// split at every entry of its table it crosses), and GateLab reads it back as such. Testing every
+// event against every edge made gating one of those twenty times slower than the polygon it came
+// from. The mask now tests each event against the edges of its own horizontal band only.
+describe("a polygon with thousands of edges", () => {
+  /** The mask as it was: every event against every edge. */
+  function everyEdge(xs: ArrayLike<number>, ys: ArrayLike<number>, vertices: Vertex[]): Uint8Array {
+    const out = new Uint8Array(xs.length);
+    const m = vertices.length;
+    for (let i = 0; i < xs.length; i++) {
+      const px = xs[i];
+      const py = ys[i];
+      let inside = false;
+      for (let k = 0; k < m; k++) {
+        const [ax, ay] = vertices[(k + m - 1) % m];
+        const [bx, by] = vertices[k];
+        const dx = bx - ax;
+        const dy = by - ay;
+        const len2 = dx * dx + dy * dy;
+        if (len2 > 0 && Math.abs(dx * (py - ay) - dy * (px - ax)) <= 1e-9 * Math.sqrt(len2)) {
+          const dot = (px - ax) * dx + (py - ay) * dy;
+          if (dot >= -1e-12 && dot <= len2 + 1e-12) { inside = true; break; }
+        }
+        if ((ay > py) !== (by > py) && px < ax + ((py - ay) * dx) / dy) inside = !inside;
+      }
+      out[i] = inside ? 1 : 0;
+    }
+    return out;
+  }
+  /** Deterministic uniform [0, 1). */
+  const rng = (seed: number) => () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  /** A wobbly ring of `m` vertices, with repeated vertices, flat runs, and a skirt out to -1e15. */
+  const ring = (m: number, seed: number): Vertex[] => {
+    const u = rng(seed);
+    const out: Vertex[] = [];
+    for (let k = 0; k < m; k++) {
+      const t = (2 * Math.PI * k) / m;
+      const r = 100 * (1 + 0.3 * Math.sin(7 * t) + 0.05 * u());
+      out.push([Math.round(r * Math.cos(t) * 8) / 8, k % 50 < 3 ? 0 : Math.round(r * Math.sin(t) * 8) / 8]);
+      if (k % 97 === 0) out.push(out[out.length - 1]);
+    }
+    const j = out.findIndex((v) => v[1] === 0);
+    out.splice(j + 1, 0, [out[j][0], -1e15], [out[j][0] - 5, -1e15], [out[j][0] - 5, 0]);
+    return out;
+  };
+
+  it("selects exactly what testing every edge selects, on edges, vertices and ties included", () => {
+    for (const seed of [1, 2, 3]) {
+      const verts = ring(1500, seed);
+      const u = rng(seed + 10);
+      const xs: number[] = [];
+      const ys: number[] = [];
+      for (let i = 0; i < 8000; i++) { xs.push(Math.round((260 * u() - 130) * 8) / 8); ys.push(Math.round((260 * u() - 130) * 8) / 8); }
+      // Every vertex, every edge's midpoint, and points far below the ring, where the skirt is.
+      verts.forEach(([x, y], k) => {
+        const [bx, by] = verts[(k + 1) % verts.length];
+        xs.push(x, (x + bx) / 2, x);
+        ys.push(y, (y + by) / 2, -1e14);
+      });
+      const want = everyEdge(xs, ys, verts);
+      expect(want.some((v) => v === 1) && want.some((v) => v === 0)).toBe(true);
+      expect(Array.from(gateMaskPolygon(xs, ys, verts))).toEqual(Array.from(want));
+    }
+  }, 60000);
+
+  it("costs about what a polygon of a few dozen edges costs", () => {
+    const verts = ring(20000, 4);
+    const u = rng(5);
+    const n = 100000;
+    const xs = Float32Array.from({ length: n }, () => 260 * u() - 130);
+    const ys = Float32Array.from({ length: n }, () => 260 * u() - 130);
+    const t0 = performance.now();
+    gateMaskPolygon(xs, ys, verts);
+    const ms = performance.now() - t0;
+    // Every event against every edge took about 10 s here.
+    expect(ms).toBeLessThan(1500);
+  }, 60000);
 });

@@ -90,8 +90,11 @@ function hostedFcs(
   const instrument = dataset.instrument === "unknown"
     ? detected
     : dataset.instrument;
+  // No $TOT. A hosted sample is an SCE's cells, not an acquisition, and its cell count is not the
+  // event count a cytometer recorded: set as $TOT, it read as the acquisition's own, so a .wsp
+  // sample recording $TOT 9,387 "contradicted" a hosted sample of 9,100 cells of the same name
+  // and its tree was refused. The count is nEvents.
   const keywords: Record<string, string> = {
-    "$TOT": String(sampleDescriptor.eventCount),
     "$PAR": String(channels.length),
     "$DATATYPE": "F",
     "$BYTEORD": "1,2,3,4",

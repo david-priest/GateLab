@@ -3,9 +3,9 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { parseFcs, type FcsFile } from "./fcs";
 import { Sample } from "./sample";
-import { analyzeGatingMLQuadrantOmissions, exportGatingML } from "./gatingmlExport";
+import { analyzeCytobankOrOmissions, analyzeGatingMLQuadrantOmissions, exportGatingML, fmtNum, skirtRing, splitAtKnots, tieBreakPolygon } from "./gatingmlExport";
 import { importGatingML, resolveGatingMLCompensation, restoreGatingMLScaleState } from "./gatingml";
-import { getGateMask } from "./gates";
+import { gateMaskPolygon, getGateMask } from "./gates";
 import { applyGatingStrategy } from "./populations";
 import {
   newRootPopulation,
@@ -17,6 +17,7 @@ import {
   type Vertex,
 } from "./models";
 import { ARIA_SMALL } from "../testFixtures";
+import { writeFcs } from "./fcsExport";
 
 
 function loadArrayBuffer(path: string): ArrayBuffer {
@@ -146,9 +147,11 @@ describe("Cytobank format never emits a scale Cytobank cannot read (flow)", () =
   it("declares nothing for raw-space gates, and writes their raw vertices", () => {
     expect(rawXml).not.toContain("transformation-ref");
     expect(rawXml).not.toContain("<transforms:");
-    // The rectangle's raw bounds, verbatim.
+    // The rectangle's raw bounds, verbatim, save the upper one: the fixture's rectangle has no
+    // edge rule, so it is closed, and goes out just above its edge for a reader that follows
+    // Gating-ML's [min, max) (gatingmlExport.ts, forEveryReader).
     expect(rawXml).toContain('gating:min="20000"');
-    expect(rawXml).toContain('gating:max="90000"');
+    expect(rawXml).toContain('gating:max="90000.000000009"');
     // And Cytobank is told the axis is Linear, which is exactly true of a raw-space gate.
     expect(rawXml).toContain('"flag":1');
   });
@@ -383,7 +386,10 @@ describe("GatingML export → import round-trip (Aria III flow)", () => {
         expect(xml).toContain("<gating:RectangleGate");
         expect(xml).toContain("<gating:PolygonGate");
         expect(xml).toContain(format === "cytobank" ? "Cytobank-compatible" : "re-importable");
-        if (format === "standard") expect(xml).toContain("<gating:GatingHierarchy");
+        // The standard format places populations with gating:parent_id; GatingHierarchy is not
+        // a Gating-ML 2.0 element.
+        expect(xml).not.toContain("<gating:GatingHierarchy");
+        if (format === "standard") expect(xml).toMatch(/<gating:BooleanGate gating:id="GateSet_\d+" gating:parent_id="GateSet_\d+">/);
       });
 
       it("re-imports both gates with the same channels", () => {
@@ -443,7 +449,8 @@ describe("GatingML export → import round-trip (Aria III flow)", () => {
           globalScales: { [chKey]: displayRange },
         });
         const back2 = importGatingML(xml2, sessionChannels, pnnMap);
-        expect(xml2).toContain('"version":3');
+        // Version 4 (2026-09): the compensation record's reference, so older readers refuse.
+        expect(xml2).toContain('"version":4');
         expect(back2.scales?.[chKey]?.lo).toBeCloseTo(displayRange[0], 6); // legacy reader field
         expect(back2.scales?.[chKey]?.hi).toBeCloseTo(displayRange[1], 6);
         expect(back2.scales?.[chKey]?.raw_lo).toBeCloseTo(300 * Math.sinh(displayRange[0]), 6);
@@ -497,7 +504,9 @@ describe("GatingML CyTOF cofactor/display fidelity", () => {
       root_population_id: root.population_id, sample: source, format: "standard",
       globalScales: { CD3: displayRange },
     });
-    const imported = importGatingML(xml, source.channelNames());
+    // The file names $PnN (Ce140Di), so the channel map the app always passes is needed here too.
+    const imported = importGatingML(xml, source.channelNames(),
+      Object.fromEntries(source.channels.map((c) => [c.pnn, c.key])));
     const destination = new Sample(fcs); // deliberately starts at the default cofactor 5
     const restored = restoreGatingMLScaleState(destination, imported.scales, imported.cytof_cofactor);
 
@@ -629,17 +638,19 @@ describe("GatingML positive-AND import policy", () => {
   }
 
   for (const format of ["standard", "cytobank"] as const) {
-    it(`rejects a root-level OR population exported in ${format} format`, () => {
+    it(`leaves out a root-level OR population exported in ${format} format, and imports the rest`, () => {
       const { ws } = rootOrWorkspace();
       const xml = exportGatingML({ ...ws, sample, format, timestamp: "2026-01-01T00:00:00" });
       expect(xml).toContain("<gating:or>");
-      expect(() => importGatingML(xml, sessionChannels, pnnMap)).toThrow(
-        /Population "Scatter OR signal" uses OR logic/,
-      );
+      const back = importGatingML(xml, sessionChannels, pnnMap);
+      const names = Object.values(back.populations).map((p) => p.name);
+      expect(names).not.toContain("Scatter OR signal");
+      expect(back.n_pops_imported).toBe(Object.keys(ws.populations).length - 2);
+      expect(back.warnings).toEqual([expect.stringMatching(/^"Scatter OR signal" combines its references with OR/)]);
     });
   }
 
-  it("rejects a nested OR population in standard format", () => {
+  it("leaves out a nested OR population in standard format, with everything beneath it", () => {
     const ws = buildWorkspace(sample);
     const parent = Object.values(ws.populations).find((p) => p.name === "Cells")!;
     const nested = newPopulation(
@@ -650,10 +661,16 @@ describe("GatingML positive-AND import policy", () => {
     );
     ws.populations[nested.population_id] = nested;
     linkChildToParent(ws.populations, nested.population_id, parent.population_id);
+    const child = newPopulation("Beneath the OR", [newGateRef(ws.gate_order[0], true)], nested.population_id);
+    ws.populations[child.population_id] = child;
+    linkChildToParent(ws.populations, child.population_id, nested.population_id);
     const xml = exportGatingML({ ...ws, sample, format: "standard" });
-    expect(() => importGatingML(xml, sessionChannels, pnnMap)).toThrow(
-      /Population "Nested OR" uses OR logic/,
-    );
+    const back = importGatingML(xml, sessionChannels, pnnMap);
+    const names = Object.values(back.populations).map((p) => p.name);
+    expect(names).not.toContain("Nested OR");
+    expect(names).not.toContain("Beneath the OR");
+    expect(back.n_pops_imported).toBe(Object.keys(ws.populations).length - 3);
+    expect(back.warnings).toEqual([expect.stringMatching(/^"Nested OR" combines its references with OR/)]);
   });
 
   it("blocks Cytobank-compatible export rather than corrupting a nested OR population", () => {
@@ -668,8 +685,46 @@ describe("GatingML positive-AND import policy", () => {
     ws.populations[nested.population_id] = nested;
     linkChildToParent(ws.populations, nested.population_id, parent.population_id);
     expect(() => exportGatingML({ ...ws, sample, format: "cytobank" })).toThrow(
-      /cannot safely represent the nested OR population "Nested OR"/,
+      /cannot represent the OR population "Nested OR" beneath another population/,
     );
+    // It must not send the user to a format GateLab would not read the population back from.
+    expect(() => exportGatingML({ ...ws, sample, format: "cytobank" })).toThrow(
+      /GateLab leaves OR populations out when it imports Gating-ML; the \.gatelab workspace keeps it/,
+    );
+  });
+
+  it("leaves what sits beneath a top-level OR population out of the Cytobank format, by name", () => {
+    // The Cytobank format ANDs every population with its whole ancestry. Beneath an OR that wrote
+    // the child as the AND of the OR's operands and its own gate, which is not the child: on the
+    // public PBMC file FlowKit read 213 events where GateLab holds 10,802, and with the tree mark
+    // gone, as in a file back from Cytobank, GateLab re-imported it re-homed with those 213.
+    const ws = buildWorkspace(sample);
+    const or = newPopulation("Top OR", ws.gate_order.map((gid) => newGateRef(gid, true)), ws.root_population_id, "or");
+    ws.populations[or.population_id] = or;
+    linkChildToParent(ws.populations, or.population_id, ws.root_population_id);
+    const child = newPopulation("Beneath the OR", [newGateRef(ws.gate_order[0], true)], or.population_id);
+    ws.populations[child.population_id] = child;
+    linkChildToParent(ws.populations, child.population_id, or.population_id);
+    const grandchild = newPopulation("Further beneath", [newGateRef(ws.gate_order[1], true)], child.population_id);
+    ws.populations[grandchild.population_id] = grandchild;
+    linkChildToParent(ws.populations, grandchild.population_id, child.population_id);
+
+    expect(analyzeCytobankOrOmissions(ws.populations, ws.root_population_id))
+      .toEqual({ populationIds: [child.population_id, grandchild.population_id], names: ["Beneath the OR"] });
+    const warnings: string[] = [];
+    const xml = exportGatingML({ ...ws, sample, format: "cytobank", warnings });
+    expect(xml).toContain("<name>Top OR</name>");
+    expect(xml).not.toContain("Beneath the OR");
+    expect(xml).not.toContain("Further beneath");
+    expect(warnings).toEqual([expect.stringMatching(/^"Beneath the OR" sits beneath the OR population "Top OR"/)]);
+    // Nor is anything beneath the OR re-imported, with the tree mark or without it.
+    for (const text of [xml, xml.replace(/\s*<gatelab_format>[^<]*<\/gatelab_format>/, "")]) {
+      const names = Object.values(importGatingML(text, sessionChannels, pnnMap).populations).map((p) => p.name);
+      expect(names).not.toContain("Beneath the OR");
+      expect(names).not.toContain("Further beneath");
+    }
+    // The standard format writes the child where it is, by parent_id, for other readers.
+    expect(exportGatingML({ ...ws, sample, format: "standard" })).toContain("Beneath the OR");
   });
 
   it("requires explicit quadrant omission and prunes the entire dependent branch", () => {
@@ -966,8 +1021,8 @@ describe("Cytobank export carries the active spillover matrix", () => {
 // in Cytobank. The exporter now subdivides at half the 0.2% tolerance and Douglas-Peuckers the
 // interior points at the other half — the same total bound (the round-trip suite measures moved
 // events and still passes), roughly half the vertices on the shapes that were worst.
-describe("densified polygon vertex collapse", () => {
-  it("halves the pathological case and never simplifies away an original vertex", () => {
+describe("a biex polygon's vertices in raw space", () => {
+  it("are its own, and one where an edge crosses each entry of the biex table", () => {
     const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
     const fluor = sample.channels.filter((_, i) => sample.transformKind(i) === "logicle")
       .map((c) => c.key);
@@ -994,9 +1049,19 @@ describe("densified polygon vertex collapse", () => {
     const xml = exportGatingML({ ...ws, sample, format: "standard", timestamp: "t" });
 
     const n = (xml.match(/<gating:vertex>/g) ?? []).length;
-    // Measured 36 with the collapse (67 without it; ~130 if only the finer subdivision ran).
-    expect(n).toBeLessThanOrEqual(45);
-    expect(n).toBeGreaterThanOrEqual(raw.length);
+    // GateLab's biex is linear between the entries of its table, one per display channel, so the
+    // polygon split at every entry its edges cross is the same boundary in raw space
+    // (splitAtKnots). It was densified to a tolerance until 2026-09, 36 vertices for this shape,
+    // which placed another file's events near an edge by chance. One vertex per channel crossed on
+    // either axis, the polygon's own, and the skirt loops that carry its clamped corner.
+    const vs = g.vertices as Vertex[];
+    let crossings = 0;
+    vs.forEach((v, i) => {
+      const w = vs[(i + 1) % vs.length];
+      for (const k of [0, 1]) crossings += Math.abs(Math.floor(w[k]) - Math.floor(v[k]));
+    });
+    expect(n).toBeGreaterThan(crossings / 2);
+    expect(n).toBeLessThanOrEqual(raw.length + crossings + 12);
 
     // Every ORIGINAL vertex survives as the gate actually holds it: corners are forced anchors
     // in the collapse. "As the gate holds it" matters — a raw coordinate outside the biex
@@ -1026,6 +1091,55 @@ describe("densified polygon vertex collapse", () => {
 // coordinates verbatim. Until 2026-09-11 the Cytobank branch for logicle came first and treated a
 // flog gate as logicle: coordinates scaled by the logicle span and inverted, then declared as
 // arcsinh, so every such gate sat far off the top of the axis on upload.
+describe("an edge along one axis is not split at the other axis's knots", () => {
+  // Each axis is written by a monotonic map of its own coordinate, so an edge along one axis is a
+  // straight line in the written space whatever the other axis crosses. Split at every entry of a
+  // biex table, an edge a polygon lays along the table's end was a third of the vertices of the
+  // verifier's PBMC strategy (5,116 of 15,421), each exactly on the line between its neighbours.
+  const knots = (lo: number, hi: number) => { const out: number[] = []; for (let k = Math.ceil(lo); k <= hi; k++) out.push(k); return out; };
+
+  it("splits a slanted edge at every knot it crosses and leaves an edge along an axis whole", () => {
+    const out = splitAtKnots([[0.5, 0.5], [10.5, 0.5], [10.5, 8.5], [0.5, 3.5]], knots, knots);
+    // The slanted edge crosses ten x knots and five y knots; the three along an axis cross none.
+    expect(out.filter((p) => p[1] === 0.5)).toEqual([[0.5, 0.5], [10.5, 0.5]]);
+    expect(out.filter((p) => p[0] === 10.5)).toEqual([[10.5, 0.5], [10.5, 8.5]]);
+    expect(out.length).toBe(4 + 10 + 5);
+  });
+
+  it("writes a biex polygon laid along its table's end with that edge's two ends alone", () => {
+    const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+    const [fx, fy] = sample.channels.filter((_, i) => sample.transformKind(i) === "logicle").map((c) => c.key);
+    const biex = { kind: "biex", maxValue: 262144, pos: 4.5, neg: 1, widthBasis: -100, channelRange: 4096 } as const;
+    const g = { gate_id: uuid(), name: "top corner", gate_type: "polygon", x_channel: fx, y_channel: fy,
+      color: "#000", label_offset: null, vertices: [], space: "display", transforms: { [fx]: biex, [fy]: biex } } as unknown as Gate & { vertices: Vertex[] };
+    g.vertices = ([[400, 300], [1e9, 200], [1e9, 1e9], [300, 1e9]] as Vertex[]).map(([vx, vy]) => [sample.rawToGate(g, fx, vx), sample.rawToGate(g, fy, vy)]);
+    const root = newRootPopulation();
+    let pops: PopulationMap = { [root.population_id]: root };
+    const pp = newPopulation("top corner", [newGateRef(g.gate_id, true)], root.population_id);
+    pops[pp.population_id] = pp;
+    pops = linkChildToParent(pops, pp.population_id, root.population_id);
+    const ws = { gates: { [g.gate_id]: g as Gate }, gate_order: [g.gate_id], populations: pops, root_population_id: root.population_id };
+    for (const format of ["standard", "cytobank"] as const) {
+      const xml = exportGatingML({ ...ws, sample, format, timestamp: "t" });
+      const vals = [...xml.split("<gating:vertex>").slice(1).join("").matchAll(/data-type:value="([^"]+)"/g)].map((m) => Number(m[1]));
+      const pts: [number, number][] = [];
+      for (let i = 0; i + 1 < vals.length; i += 2) pts.push([vals[i], vals[i + 1]]);
+      // The table's top end, written a hair inside it: the greatest coordinate below the skirts.
+      const top = (k: 0 | 1) => Math.max(...pts.map((p) => p[k]).filter((v) => v < 1e14));
+      for (const k of [0, 1] as const) {
+        const onEnd = new Set(pts.filter((p) => Math.abs(p[k] - top(k)) <= 1e-9 * top(k)).map((p) => String(p))).size;
+        // The edge's two ends and the few points of the skirt loops on it, not one per table entry.
+        expect(onEnd, `${format}, axis ${k}`).toBeLessThanOrEqual(8);
+      }
+      const back = importGatingML(xml, sample.channelNames(), Object.fromEntries(sample.channels.map((c) => [c.pnn, c.key])), "flow");
+      const mask = (w: { gates: Record<string, Gate>; populations: PopulationMap; root_population_id: string }) =>
+        applyGatingStrategy(w.gates, w.populations, w.root_population_id, sample.gateAssayData()).masks;
+      const pid = (w: { populations: PopulationMap }) => Object.values(w.populations).find((p) => p.name === "top corner")!.population_id;
+      expect(Array.from(mask(back)[pid(back)])).toEqual(Array.from(mask(ws)[pid(ws)]));
+    }
+  }, 60000);
+});
+
 describe("Cytobank format declares a flog gate as log, with its coordinates verbatim", () => {
   const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
   const fluor = sample.channels.filter((_, i) => sample.isLogicleChannel(i)).map((c) => c.key);
@@ -1034,7 +1148,7 @@ describe("Cytobank format declares a flog gate as log, with its coordinates verb
   const gate: Gate = {
     gate_id: uuid(), name: "log rect", gate_type: "rectangle", x_channel: fx, y_channel: fy,
     vertices: [[2, 2], [4, 2], [4, 4], [2, 4]] as Vertex[],
-    space: "display", transforms: { [fx]: flog, [fy]: flog },
+    space: "display", transforms: { [fx]: flog, [fy]: flog }, bounds: "half-open",
     color: "#377eb8", label_offset: null,
   };
   const root = newRootPopulation();
@@ -1054,11 +1168,328 @@ describe("Cytobank format declares a flog gate as log, with its coordinates verb
 
   it("writes the log coordinates unchanged", () => {
     expect(xml).toContain('gating:min="2"');
-    expect(xml).toContain('gating:max="4"');
+    // 4 less 1e-13 of itself: the rectangle is half-open, and its upper bound goes out just
+    // below the edge for a reader that holds both edges (gatingmlExport.ts, forEveryReader).
+    expect(xml).toContain('gating:max="3.9999999999996"');
   });
 
   it("tells Cytobank the axis is Log, as its own flow exports do", () => {
     expect(xml).toContain('"flag":2,"argument":"1"');
     expect(xml).not.toContain('"flag":4');
+  });
+});
+
+// A logicle gate carries its own T, W, M and A (a FlowKit-written W = 0 or A = 0.5 imports
+// exactly since #342). The standard format declared clampW(W), so W = 0 went out as 0.1 and
+// W = 2.2 as 2, and keyed the transform by channel and W alone, so a second gate on the channel
+// with the same W but another A was declared with the first gate's A. A faithfully imported
+// FlowKit strategy came back 34, 8,754 of 26,684 and 2,574 events different.
+describe("the standard format declares each logicle gate's own parameters", () => {
+  const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+  const logicle = sample.channels.map((_, i) => i).filter((i) => sample.transformKind(i) === "logicle");
+  const [xKey, yKey] = [sample.channels[logicle[0]].key, sample.channels[logicle[1]].key];
+  const specs = [
+    { name: "W0", T: 262144, W: 0, M: 4.5, A: 0 },
+    { name: "W22", T: 262144, W: 2.2, M: 4.5, A: 0 },
+    { name: "W05 A0", T: 262144, W: 0.5, M: 4.5, A: 0 },
+    { name: "W05 A05", T: 262144, W: 0.5, M: 4.5, A: 0.5 },
+    { name: "T1e5", T: 100000, W: 0.5, M: 4.5, A: 0 },
+  ];
+  const root = newRootPopulation();
+  let populations: PopulationMap = { [root.population_id]: root };
+  const gates: Record<string, Gate> = {};
+  for (const s of specs) {
+    const spec = { kind: "logicle" as const, T: s.T, W: s.W, M: s.M, A: s.A };
+    const g: Gate = {
+      gate_id: uuid(), name: s.name, gate_type: "rectangle", x_channel: xKey, y_channel: yKey,
+      vertices: [[0.25, 0.2], [0.7, 0.2], [0.7, 0.8], [0.25, 0.8]], color: "#e41a1c", label_offset: null,
+      space: "display", transforms: { [xKey]: spec, [yKey]: spec },
+    } as Gate;
+    gates[g.gate_id] = g;
+    const p = newPopulation(s.name, [newGateRef(g.gate_id, true)], root.population_id);
+    populations[p.population_id] = p;
+    populations = linkChildToParent(populations, p.population_id, root.population_id);
+  }
+  const ws = { gates, gate_order: Object.keys(gates), populations, root_population_id: root.population_id };
+  const xml = exportGatingML({ ...ws, sample, format: "standard", timestamp: "2026-01-01T00:00:00" });
+
+  it("writes every gate's T, W, M and A exactly, one transform per parameter set", () => {
+    const declared = new Map<string, number[]>();
+    for (const m of xml.matchAll(/transforms:id="([^"]+)">\s*<transforms:logicle transforms:T="([^"]+)" transforms:W="([^"]+)" transforms:M="([^"]+)" transforms:A="([^"]+)"/g)) {
+      declared.set(m[1], [m[2], m[3], m[4], m[5]].map(Number));
+    }
+    for (const s of specs) {
+      const el = (xml.match(/<gating:RectangleGate\b[\s\S]*?<\/gating:RectangleGate>/g) ?? [])
+        .find((g) => g.includes(`<name>${s.name}</name>`))!;
+      const refs = [...el.matchAll(/transformation-ref="([^"]+)"/g)].map((m) => m[1]);
+      expect(refs).toHaveLength(2);
+      for (const r of refs) expect(declared.get(r), `${s.name} via ${r}`).toEqual([s.T, s.W, s.M, s.A]);
+    }
+    expect(new Set([...declared.values()].map((v) => v.join())).size).toBe(declared.size);
+  });
+
+  it("re-imports every gate selecting the same events", () => {
+    const res = importGatingML(xml, sample.channels.map((c) => c.key), {}, sample.instrument);
+    for (const s of specs) {
+      const before = Object.values(gates).find((g) => g.name === s.name)!;
+      const after = Object.values(res.gates).find((g) => g.name === s.name)!;
+      expect(after.transforms?.[xKey], s.name).toEqual(before.transforms?.[xKey]);
+      expect(Array.from(getGateMask(after, sample.gatingDataFor(after))), s.name)
+        .toEqual(Array.from(getGateMask(before, sample.gatingDataFor(before))));
+    }
+  });
+});
+
+// An absent Gating-ML bound imports as ±UNBOUNDED. The exporters must write such an edge, and an
+// edge the export space cannot reach on its own side, as no bound: fmtNum turned a non-finite
+// coordinate into "0", so the Cytobank format wrote an open-top logicle range as max="0" (empty;
+// 20,732 to 29,019 events moved on re-import), and the FlowJo export the same.
+describe("an unbounded rectangle edge is written unbounded", () => {
+  const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+  const logicle = sample.channels.map((_, i) => i).filter((i) => sample.transformKind(i) === "logicle");
+  const [f1, f2] = [sample.channels[logicle[0]].key, sample.channels[logicle[1]].key];
+  const fsc = sample.channels.find((c) => /FSC-A/.test(c.key))!.key;
+  const root = newRootPopulation();
+  let populations: PopulationMap = { [root.population_id]: root };
+  const gates: Record<string, Gate> = {};
+  const add = (g: Omit<Gate, "gate_id" | "color" | "label_offset">) => {
+    const gate = { ...g, gate_id: uuid(), color: "#e41a1c", label_offset: null } as Gate;
+    gates[gate.gate_id] = gate;
+    const p = newPopulation(gate.name, [newGateRef(gate.gate_id, true)], root.population_id);
+    populations[p.population_id] = p;
+    populations = linkChildToParent(populations, p.population_id, root.population_id);
+  };
+  const lg = sample.gateTransformSnapshot(f1, f2);
+  const U = Number.MAX_VALUE;
+  add({ name: "Open-top logicle range", gate_type: "rectangle", x_channel: f1, y_channel: f1,
+    vertices: [[0.3, 0.3], [U, 0.3], [U, U], [0.3, U]], space: "display", transforms: { [f1]: lg[f1] } } as never);
+  add({ name: "Open-bottom logicle rectangle", gate_type: "rectangle", x_channel: f1, y_channel: f2,
+    vertices: [[0.2, -U], [0.8, -U], [0.8, 0.5], [0.2, 0.5]], space: "display", transforms: lg } as never);
+  add({ name: "Old stand-in logicle rectangle", gate_type: "rectangle", x_channel: f1, y_channel: f2,
+    vertices: [[0.2, 0.4], [0.8, 0.4], [0.8, 1e9], [0.2, 1e9]], space: "display", transforms: lg } as never);
+  add({ name: "Open raw range", gate_type: "rectangle", x_channel: fsc, y_channel: fsc,
+    vertices: [[20000, 20000], [U, 20000], [U, U], [20000, U]], space: "raw" } as never);
+  const ws = { gates, gate_order: Object.keys(gates), populations, root_population_id: root.population_id };
+  const masksOf = (g: Record<string, Gate>) => Object.fromEntries(Object.values(g).map((x) =>
+    [x.name, Array.from(getGateMask(x, sample.gatingDataFor(x)))]));
+
+  it("writes no finite bound for an unbounded edge, and re-imports the same events", () => {
+    const before = masksOf(gates);
+    for (const name of Object.keys(before)) expect(before[name].some(Boolean), name).toBe(true);
+    for (const format of ["standard", "cytobank"] as const) {
+      const xml = exportGatingML({ ...ws, sample, format, timestamp: "2026-01-01T00:00:00" });
+      // Every dimension of a rectangle keeps at least one bound, and none is at 0.
+      for (const el of xml.match(/<gating:RectangleGate\b[\s\S]*?<\/gating:RectangleGate>/g) ?? []) {
+        for (const d of el.match(/<gating:dimension\b[^>]*>/g) ?? []) {
+          expect(d, `${format}: ${d}`).toMatch(/gating:(min|max)="/);
+          expect(d, `${format}: ${d}`).not.toMatch(/gating:(min|max)="0"/);
+        }
+      }
+      const res = importGatingML(xml, sample.channels.map((c) => c.key), {}, sample.instrument);
+      const after = masksOf(res.gates);
+      for (const name of Object.keys(before)) expect(after[name], `${format}: ${name}`).toEqual(before[name]);
+    }
+  });
+
+  it("puts an unbounded edge in the Cytobank definition as unbounded too", () => {
+    const xml = exportGatingML({ ...ws, sample, format: "cytobank", timestamp: "2026-01-01T00:00:00" });
+    const el = (xml.match(/<gating:RectangleGate\b[\s\S]*?<\/gating:RectangleGate>/g) ?? [])
+      .find((g) => g.includes("<name>Open-top logicle range</name>"))!;
+    const def = JSON.parse(/<definition>([\s\S]*?)<\/definition>/.exec(el)![1]);
+    expect(def.rectangle.x2).toBe(U);
+    expect(def.rectangle.y2).toBe(U);
+    expect(Number.isFinite(def.label[0]) && Math.abs(def.label[0]) < 1e3).toBe(true);
+  });
+
+  it("refuses to write a coordinate that is not finite, rather than writing 0", () => {
+    expect(() => fmtNum(Infinity)).toThrow(/not finite/);
+    expect(() => fmtNum(NaN)).toThrow(/not finite/);
+    expect(Number(fmtNum(U))).toBe(U);
+    expect(Number(fmtNum(-U))).toBe(-U);
+  });
+});
+
+describe("tieBreakPolygon", () => {
+  // Events on the boundary, as GateLab decides them: held at a vertex and on an edge, and one left
+  // out on an edge (GateLab's single-precision value fell outside). A reader decides such an event
+  // by its own edge rule, so the boundary must pass beyond each, to GateLab's side.
+  const square: [number, number][] = [[0, 0], [10, 0], [10, 10], [0, 10]];
+  const pts: [number, number, number][] = [
+    [10, 10, 1], [10, 5, 1], [5, 0, 0], [0, 7, 1], [7, 10, 1],
+    [5, 5, 1], [11, 5, 0], [-3, -3, 0], [5, 10.5, 0], [9.9999, 5, 1],
+  ];
+  const x = pts.map((p) => p[0]);
+  const y = pts.map((p) => p[1]);
+  const inside = pts.map((p) => p[2]);
+  const strict = (w: [number, number][], px: number, py: number) => {
+    let c = false;
+    for (let a = 0, b = w.length - 1; a < w.length; b = a++) {
+      const [ax, ay] = w[a];
+      const [bx, by] = w[b];
+      if ((ay > py) !== (by > py) && px < ((bx - ax) * (py - ay)) / (by - ay) + ax) c = !c;
+    }
+    return c ? 1 : 0;
+  };
+  const gap = (w: [number, number][], px: number, py: number) => Math.min(...w.map((a, k) => {
+    const b = w[(k + 1) % w.length];
+    const dx = b[0] - a[0]; const dy = b[1] - a[1];
+    const u = Math.max(0, Math.min(1, ((px - a[0]) * dx + (py - a[1]) * dy) / (dx * dx + dy * dy)));
+    return Math.hypot(px - a[0] - u * dx, py - a[1] - u * dy);
+  }));
+
+  it("puts every event on the boundary a margin inside or outside, as GateLab decides it", () => {
+    // Without the notches a plain even-odd reader leaves out the vertex and two edge events.
+    expect(pts.filter(([px, py, want]) => strict(square, px, py) !== want).length).toBeGreaterThan(0);
+    const w = tieBreakPolygon(square, x, y, inside);
+    for (const [px, py, want] of pts) {
+      expect(strict(w, px, py), `${px},${py}`).toBe(want);
+      expect(gateMaskPolygon([px], [py], w)[0], `${px},${py}`).toBe(want);
+    }
+    // Far enough from the new boundary that no reader's rounding can move them: half the tie margin
+    // (1e-6) of the event's own magnitude on each axis, at least 0.01.
+    const own = (w: [number, number][], px: number, py: number) => {
+      const [rx, ry] = [Math.max(Math.abs(px), 0.01), Math.max(Math.abs(py), 0.01)];
+      return gap(w.map(([a, b]) => [a / rx, b / ry] as [number, number]), px / rx, py / ry);
+    };
+    for (const [px, py] of pts.slice(0, 5)) expect(own(w, px, py)).toBeGreaterThan(5e-7);
+    // A vertex no event lies near is kept, and nothing moves by more than 1e-3. The events GateLab
+    // holds on the right edge, at the top right vertex, on the top edge and on the left edge are
+    // settled by one notch, which moves the two vertices between them.
+    for (const v of square.slice(0, 2)) expect(w).toContainEqual(v);
+    for (const v of w) expect(Math.min(...square.map((q) => Math.hypot(v[0] - q[0], v[1] - q[1])), gap(square, v[0], v[1]))).toBeLessThan(1e-3);
+  });
+
+  it("leaves a polygon with no event on its boundary as it was", () => {
+    const off = pts.slice(5);
+    expect(tieBreakPolygon(square, off.map((p) => p[0]), off.map((p) => p[1]), off.map((p) => p[2]))).toEqual(square);
+  });
+
+  it("does not notch where the notch would change another event", () => {
+    // An event GateLab leaves out lies just beyond the vertex, where a notch holding the vertex's
+    // own event would take it in: the vertex is left as it was.
+    const w = tieBreakPolygon(square, [10, 10 + 1.2e-5], [10, 10 + 1.2e-5], [1, 0]);
+    expect(w).toEqual(square);
+  });
+
+  it("settles a polygon far below 1/16 as it settles the same polygon at 1/16 and above, scaled", () => {
+    // GateLab tests such a polygon at its own magnitude (polygonTestScale), and a fasinh with a small
+    // M is held at one: at M = 1e-4 the whole scale reached 2.3e-4. The least scale here was in the
+    // gate's units, so there every event lay within a notch's reach of an edge (the verifier: 45 s
+    // to write one polygon on the public PBMC file, and at M = 1e-6 no end).
+    const at = (f: number) => tieBreakPolygon(
+      square.map(([a, b]) => [a * f, b * f] as [number, number]), x.map((v) => v * f), y.map((v) => v * f), inside);
+    const unit = at(1 / 128); // the square spans 0.078: tested as it is
+    expect(unit).not.toEqual(square.map(([a, b]) => [a / 128, b / 128]));
+    for (const k of [2 ** -20, 2 ** -60]) {
+      expect(at(k / 128)).toEqual(unit.map(([a, b]) => [a * k, b * k]));
+    }
+  });
+});
+
+describe("skirtRing", () => {
+  // A corner skirt holds every event beyond both clamps, which GateLab holds when the polygon has a
+  // vertex there that ends an edge, and, since feat/flowjo-grid, when the whole ring is that one
+  // point: GateLab's polygon test holds a ring collapsed onto one point at that point (gates.ts),
+  // as FlowJo's grid holds a polygon all on one channel. fix/gatingml-hardening wrote such a ring
+  // without the skirt when GateLab held nothing for it.
+  const R = 251716.54911695892;
+  const L = -93.49809945251306;
+  const far = (ring: [number, number][]) => ring.some((v) => Math.abs(v[0]) >= 1e15 || Math.abs(v[1]) >= 1e15);
+
+  it("adds a corner loop to a ring collapsed onto the corner, whose point GateLab holds", () => {
+    expect(far(skirtRing([[R, R], [R, R], [R, R], [R, R]], { lo: L, hi: R }, { lo: L, hi: R }))).toBe(true);
+    expect(far(skirtRing([[R, L], [R, L], [R, L], [R, L]], { lo: L, hi: R }, { lo: L, hi: R }))).toBe(true);
+  });
+
+  it("skirts a lone vertex on a clamp only where GateLab holds events beyond it, and writes clamp points at the inset", () => {
+    // A vertex on a floor whose edges leave it at once: GateLab holds the events beyond the floor
+    // that it decides onto the vertex, a stack at the value the vertex was drawn on (23 of 883 events
+    // of a FlowJo log polygon on the public S8 file went to no reader). `ends` says how wide that is,
+    // and NaN where GateLab holds nothing there.
+    const ring: [number, number][] = [[L, 500], [2000, 800], [900, 3000]];
+    const inset: [{ lo?: number; hi?: number }, undefined] = [{ lo: L + 1e-6 }, undefined];
+    const held = (w: number, side: "lo" | "hi", _s: "lo" | "hi", alone?: boolean) => (alone ? w + (side === "lo" ? -0.5 : 0.5) : w);
+    const none = (w: number, _side: "lo" | "hi", _s: "lo" | "hi", alone?: boolean) => (alone ? NaN : w);
+    const a = skirtRing(ring, { lo: L, hi: R }, { lo: L, hi: R }, [undefined, held], inset);
+    expect(far(a)).toBe(true);
+    expect(a).toContainEqual([-1e15, 500.5]);
+    expect(a).toContainEqual([-1e15, 499.5]);
+    const b = skirtRing(ring, { lo: L, hi: R }, { lo: L, hi: R }, [undefined, none], inset);
+    expect(far(b)).toBe(false);
+    // No point is left on the clamp itself, where GateLab's own edge tolerance would hold the events there.
+    for (const r of [a, b]) expect(r.some((p) => p[0] === L)).toBe(false);
+    expect(b[0]).toEqual([L + 1e-6, 500]);
+  });
+
+  it("still skirts a corner that ends an edge, and an edge along a clamp", () => {
+    expect(far(skirtRing([[L, L], [3000, L], [L, 3000]], { lo: L, hi: R }, { lo: L, hi: R }))).toBe(true);
+    expect(far(skirtRing([[L, L], [L, L], [L, 3000], [L, 3000]], { lo: L, hi: R }, { lo: L, hi: R }))).toBe(true);
+    expect(far(skirtRing([[R, R], [R, R], [200, R], [R, R]], { lo: L, hi: R }, { lo: L, hi: R }))).toBe(true);
+  });
+});
+
+// The FlowJo export wrote a rectangle bound on a display at the edge's raw pre-image, where GateLab
+// decides an event lying on the edge in double precision on its float32 column, and FlowJo read the
+// events at 60 on a half-open asinh(60 / 15) edge the other way (flowjoExport.ts onGateLabSide). The
+// Gating-ML export places each written bound among the file's own events for a reader in double
+// precision (tieBreak), which covers the same events: checked here, for both formats and both edges.
+// Synthetic names and events.
+describe("Gating-ML export of an edge GateLab decides on its float32 display", () => {
+  const fl = Float32Array.from([58, 59, 60, 60, 60, 61, 62, 63]);
+  const fsc = new Float32Array(fl.length).fill(50000);
+  const bytes = writeFcs([fsc, fl], [{ name: "FSC-A", desc: "" }, { name: "FL1-A", desc: "CD4" }]);
+  const read = () => new Sample(parseFcs(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer));
+  const edge = Math.asinh(60 / 15);
+
+  it("writes each bound where a reader in double precision divides the events at the edge as GateLab does", () => {
+    expect(Math.fround(edge)).toBeLessThan(edge);
+    for (const format of ["standard", "cytobank"] as const) {
+      const sample = read();
+      const [x, y] = [sample.channels[0].key, sample.channels[1].key];
+      const root = newRootPopulation();
+      let populations: PopulationMap = { [root.population_id]: root };
+      const gates: Record<string, Gate> = {};
+      const add = (name: string, lo: number, hi: number, bounds: "closed" | "half-open") => {
+        const g = {
+          gate_id: uuid(), name, gate_type: "rectangle", x_channel: x, y_channel: y, color: "#000000", label_offset: null,
+          vertices: [[0, lo], [100000, lo], [100000, hi], [0, hi]], space: "display",
+          transforms: { [x]: { kind: "identity" }, [y]: { kind: "asinh", cofactor: 15 } }, bounds,
+        } as Gate;
+        gates[g.gate_id] = g;
+        const p = newPopulation(`${name}_cells`, [newGateRef(g.gate_id, true)], root.population_id, "and");
+        populations[p.population_id] = p;
+        populations = linkChildToParent(populations, p.population_id, root.population_id);
+        return { gate: g, pop: p.population_id };
+      };
+      const upper = add("Upper", Math.asinh(58.5 / 15), edge, "half-open");
+      const lower = add("Lower", edge, Math.asinh(62.5 / 15), "closed");
+      const { masks } = applyGatingStrategy(gates, populations, root.population_id, sample.gateAssayData());
+      expect(Array.from(masks[upper.pop])).toEqual([0, 1, 1, 1, 1, 0, 0, 0]);
+      expect(Array.from(masks[lower.pop])).toEqual([0, 0, 0, 0, 0, 1, 1, 0]);
+      const xml = exportGatingML({ gates, gate_order: Object.keys(gates), populations, root_population_id: root.population_id, sample, format, timestamp: "2026-01-01T00:00:00" });
+      const doc = new DOMParser().parseFromString(xml, "application/xml");
+      const transforms = new Map<string, (v: number) => number>();
+      for (const t of Array.from(doc.getElementsByTagNameNS("*", "transformation"))) {
+        const f = t.getElementsByTagNameNS("*", "fasinh")[0];
+        if (!f) continue;
+        const num = (k: string) => Number(f.getAttributeNS(f.namespaceURI, k) ?? f.getAttribute(`transforms:${k}`));
+        const [T, M, A] = [num("T"), num("M"), num("A") || 0];
+        transforms.set(t.getAttributeNS(t.namespaceURI, "id") ?? t.getAttribute("transforms:id") ?? "", (v) => (Math.asinh((v * Math.sinh(M * Math.LN10)) / T) + A * Math.LN10) / ((M + A) * Math.LN10));
+      }
+      // A standard reader: each rectangle's FL1-A dimension, half-open, on the file's fasinh of each event.
+      const dims = Array.from(doc.getElementsByTagNameNS("*", "RectangleGate")).flatMap((r) => Array.from(r.getElementsByTagNameNS("*", "dimension"))
+        .filter((d) => d.getElementsByTagNameNS("*", "fcs-dimension")[0]?.getAttribute("data-type:name") === "FL1-A"));
+      expect(dims.length).toBe(2);
+      const decide = (d: Element) => {
+        const tr = transforms.get(d.getAttribute("gating:transformation-ref") ?? "") ?? ((v: number) => v);
+        const min = d.getAttribute("gating:min");
+        const max = d.getAttribute("gating:max");
+        return Array.from(fl, (v) => ((min === null || tr(v) >= Number(min)) && (max === null || tr(v) < Number(max)) ? 1 : 0));
+      };
+      // The file's two rectangles, in the order written: GateLab's decisions, by a reader in double precision.
+      const decided = dims.map(decide);
+      expect(decided, format).toContainEqual(Array.from(masks[upper.pop]));
+      expect(decided, format).toContainEqual(Array.from(masks[lower.pop]));
+    }
   });
 });

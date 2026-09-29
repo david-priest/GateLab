@@ -3,8 +3,15 @@ export const GATELAB_HOST_COLDATA_CONTRACT_VERSION = 1 as const;
 export interface GateLabHostPopulationSampleMask {
   sampleId: string;
   eventCount: number;
-  /** LSB-first packed membership bits, then base64 encoded. */
+  /** LSB-first packed membership bits, then base64 encoded. Empty when `notEvaluated` is set. */
   membershipBitsBase64: string;
+  /**
+   * Present when the population was not evaluated for this sample: the tree the sample is gated
+   * under has no counterpart for it (a file's copy whose structure was unlocked and changed). The
+   * text names the file, the population and the file's tree. The host records NA for every event
+   * of the sample, never FALSE; a host that predates the field refuses the empty bits.
+   */
+  notEvaluated?: string;
 }
 
 export interface GateLabHostPopulationColumn {

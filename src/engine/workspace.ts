@@ -6,8 +6,8 @@
 
 import { zipSync, unzipSync, strToU8, strFromU8 } from "fflate";
 import type { GateEdgeMode } from "../ui/gateEdgeModes";
-import { validCurl, type Gate, type PopulationMap } from "./models";
-import type { DisplayMode } from "./sample";
+import { isRectangleBounds, validCurl, type Gate, type PopulationMap } from "./models";
+import type { DisplayMode, ExternalSpillover } from "./sample";
 import { readZipFileEntries } from "./workspaceArchiveStream";
 import {
   PORTABLE_ASSAY_MANIFEST_PATH,
@@ -19,6 +19,8 @@ import type { LayoutWorkspace } from "./layout";
 import type { HierarchyRef } from "./hierarchies";
 import type { IllustrationDimensionLayout } from "./illustrationLayout";
 import { isFigureSpec } from "./figureSchema";
+import { WORKSPACE_VERSION_2_WITH_FEATURES, assertKnownWorkspaceFeatures, stampWorkspaceV2 } from "./workspaceFeatures";
+import { parseFlowJoGridAxis, parseFlowJoGridSpec } from "./flowjoGrid";
 
 export const WORKSPACE_EXT = "gatelab";
 export const WORKSPACE_FORMAT = "gatelab-workspace";
@@ -62,6 +64,22 @@ export interface WorkspaceSample {
   hierarchyId?: string;
   /** The group this file is in, when `gating.groups` lists it. Absent: no group. */
   groupId?: string;
+  /**
+   * What the file recorded about its acquisition ($TOT, $DATE, $BTIM, $ETIM, GUID), so a linked
+   * workspace reopened later relinks the file it was saved with and not another of its name.
+   * Absent in workspaces saved by GateLab 0.8.3 and earlier, which relink by name alone.
+   */
+  identity?: Partial<Record<"$TOT" | "$DATE" | "$BTIM" | "$ETIM" | "GUID", string>>;
+  /**
+   * The spillover matrix this file is compensated with when it is not the file's own: one a FlowJo
+   * workspace carried and an import installed (Sample.installExternalSpillover), as it was
+   * supplied. Reopening installs it again before compensation is turned on, so the gates are
+   * evaluated under the matrix they were drawn under; without it a portable copy of a compensated
+   * FlowJo import reopened with the file's own matrix (51,715 events in a gate became 51,860).
+   * A workspace holding it names the feature (workspaceFeatures.ts), since a GateLab without it
+   * would compensate with the file's matrix and say nothing.
+   */
+  externalSpillover?: ExternalSpillover;
 }
 
 export interface WorkspaceFile {
@@ -252,6 +270,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function invalidWorkspace(detail: string): never {
   throw new Error(`Invalid GateLab workspace: ${detail}`);
+}
+
+/** A matrix as it was supplied: a label, at least two $PnN names, and a square matrix of finite numbers over them. */
+function isExternalSpillover(value: unknown): value is ExternalSpillover {
+  if (!isRecord(value) || typeof value.label !== "string") return false;
+  const { channels, matrix } = value;
+  if (!Array.isArray(channels) || channels.length < 2 || !channels.every((c) => typeof c === "string" && c.length > 0)) return false;
+  if (new Set(channels).size !== channels.length) return false;
+  const { leftOut } = value;
+  if (leftOut !== undefined && !(Array.isArray(leftOut) && leftOut.every((c) => typeof c === "string" && channels.includes(c)) &&
+    new Set(leftOut).size === leftOut.length)) return false;
+  return Array.isArray(matrix) && matrix.length === channels.length && matrix.every((row) =>
+    Array.isArray(row) && row.length === channels.length && row.every((v) => typeof v === "number" && Number.isFinite(v)));
 }
 
 function finitePair(value: unknown): value is [number, number] {
@@ -478,6 +509,9 @@ export function validateWorkspace(ws: WorkspaceFile): true {
       invalidWorkspace(`sample ${i + 1} has an invalid instrument mode.`);
     }
     if (sample.division !== undefined) validateDivisionProfile(sample.division, i);
+    if (sample.externalSpillover !== undefined && !isExternalSpillover(sample.externalSpillover)) {
+      invalidWorkspace(`sample ${i + 1} has an invalid spillover matrix.`);
+    }
   });
   if (!Number.isInteger(ws.activeSample) || ws.activeSample < 0 || ws.activeSample >= ws.samples.length) {
     invalidWorkspace("activeSample is outside the sample list.");
@@ -545,10 +579,47 @@ export function validateWorkspace(ws: WorkspaceFile): true {
     if (typeof gate.x_channel !== "string" || !gate.x_channel || typeof gate.y_channel !== "string" || !gate.y_channel) {
       invalidWorkspace(`gate "${gateId}" has invalid channel identifiers.`);
     }
+    // The transforms introduced with FlowJo's own rule are held to their readers' checks: a grid
+    // (flowjoChannels) that cannot be built, or a biex table this build cannot build, would
+    // otherwise be evaluated as something else. Every other kind is read as it always was.
+    for (const spec of Object.values((gate as { transforms?: Record<string, unknown> }).transforms ?? {})) {
+      if (!isRecord(spec)) continue;
+      const table = spec.tableChannels;
+      const bad = spec.kind === "flowjoChannels"
+        ? parseFlowJoGridSpec(spec) === null
+        : spec.kind === "biex" && table !== undefined && !(typeof table === "number" && Number.isInteger(table) && table > 1);
+      if (bad) invalidWorkspace(`gate "${gateId}" has an invalid ${String(spec.kind)} transform.`);
+    }
     if (gate.gate_type === "polygon" || gate.gate_type === "rectangle") {
       const minVertices = gate.gate_type === "polygon" ? 3 : 2;
       if (!Array.isArray(gate.vertices) || gate.vertices.length < minVertices || !gate.vertices.every(finitePair)) {
         invalidWorkspace(`${gate.gate_type} gate "${gateId}" has invalid geometry.`);
+      }
+      // A value this build does not know would be evaluated as the default rule without a word.
+      // Absent is valid: a rectangle saved before the field existed is closed (RectangleBounds).
+      if (gate.bounds !== undefined && (gate.gate_type !== "rectangle" || !isRectangleBounds(gate.bounds))) {
+        invalidWorkspace(`${gate.gate_type} gate "${gateId}" has an invalid bounds value.`);
+      }
+      // FlowJo's raw vertices for a grid polygon, and the axes a rule-imported FlowJo rectangle was
+      // saved on (models.ts): read only by the FlowJo export, and refused whole when malformed.
+      if (gate.flowjo_vertices !== undefined && (gate.gate_type !== "polygon" || !Array.isArray(gate.flowjo_vertices)
+        || gate.flowjo_vertices.length !== gate.vertices.length || !gate.flowjo_vertices.every(finitePair))) {
+        invalidWorkspace(`${gate.gate_type} gate "${gateId}" has invalid FlowJo vertices.`);
+      }
+      if (gate.flowjo_axes !== undefined && (gate.gate_type !== "rectangle" || !isRecord(gate.flowjo_axes)
+        || !Object.values(gate.flowjo_axes).every((axis) => parseFlowJoGridAxis(axis) !== null))) {
+        invalidWorkspace(`${gate.gate_type} gate "${gateId}" has invalid FlowJo axes.`);
+      }
+      // The bounds FlowJo saved where its rule opened one: finite or null, per channel.
+      const boundOrNull = (n: unknown): boolean => n === null || (typeof n === "number" && Number.isFinite(n));
+      if (gate.flowjo_bounds !== undefined && (gate.gate_type !== "rectangle" || !isRecord(gate.flowjo_bounds)
+        || !Object.values(gate.flowjo_bounds).every((b) => Array.isArray(b) && b.length === 2 && b.every(boundOrNull)))) {
+        invalidWorkspace(`${gate.gate_type} gate "${gateId}" has invalid FlowJo bounds.`);
+      }
+      const fp = gate.flowjo_polygon as unknown;
+      if (fp !== undefined && (gate.gate_type !== "polygon" || !isRecord(fp) || !Number.isInteger(fp.quadId)
+        || !(fp.gateResolution === null || Number.isInteger(fp.gateResolution)))) {
+        invalidWorkspace(`${gate.gate_type} gate "${gateId}" has invalid FlowJo polygon attributes.`);
       }
     } else if (gate.gate_type === "quadrant") {
       if (!finitePair(gate.center)) invalidWorkspace(`quadrant gate "${gateId}" has an invalid center.`);
@@ -675,6 +746,12 @@ export function validateWorkspace(ws: WorkspaceFile): true {
         invalidWorkspace(`hierarchy "${h.name}" has a malformed gate table.`);
       }
       const hierarchyGates = (h.gates as Record<string, Gate> | undefined) ?? gates;
+      for (const g of Object.values(hierarchyGates)) {
+        const bounds = isRecord(g) ? (g as { bounds?: unknown }).bounds : undefined;
+        if (bounds !== undefined && (g.gate_type !== "rectangle" || !isRectangleBounds(bounds))) {
+          invalidWorkspace(`hierarchy "${h.name}": gate "${g.gate_id}" has an invalid bounds value.`);
+        }
+      }
       validatePopulationTree(hierarchyGates, h.populations as PopulationMap, h.root_population_id, h.active_population_id, `hierarchy "${h.name}": `);
     }
     for (const id of ids) {
@@ -696,6 +773,13 @@ export function validateWorkspace(ws: WorkspaceFile): true {
     if (wss.groupId !== undefined && (typeof wss.groupId !== "string" || !wss.groupId)) {
       invalidWorkspace(`sample "${wss.fileName}" has a malformed groupId.`);
     }
+    // The acquisition keywords the file was saved with: an object of strings, nothing else.
+    if (wss.identity !== undefined && (
+      !wss.identity || typeof wss.identity !== "object" || Array.isArray(wss.identity) ||
+      Object.entries(wss.identity).some(([k, v]) => !["$TOT", "$DATE", "$BTIM", "$ETIM", "GUID"].includes(k) || typeof v !== "string")
+    )) {
+      invalidWorkspace(`sample "${wss.fileName}" has a malformed identity.`);
+    }
   }
   const selectedGate = ws.gating.selected_gate_id;
   if (selectedGate !== null && (typeof selectedGate !== "string" || !gates[selectedGate])) {
@@ -711,7 +795,7 @@ export function packWorkspace(
   gatingMLXml?: string,
 ): Uint8Array {
   validateWorkspace(ws);
-  const files: Record<string, Uint8Array> = { "workspace.json": strToU8(JSON.stringify(ws, null, 2)) };
+  const files: Record<string, Uint8Array> = { "workspace.json": strToU8(JSON.stringify(stampWorkspaceV2(ws), null, 2)) };
   for (const sample of ws.samples) {
     const bytes = fcsByPath[sample.dataPath];
     if (!(bytes instanceof Uint8Array)) {
@@ -726,7 +810,7 @@ export function packWorkspace(
 /** A lightweight reference workspace — JSON only; the FCS files are re-linked from disk on open. */
 export function packWorkspaceReference(ws: WorkspaceFile): Uint8Array {
   validateWorkspace(ws);
-  return strToU8(JSON.stringify(ws, null, 2));
+  return strToU8(JSON.stringify(stampWorkspaceV2(ws), null, 2));
 }
 
 /** Re-save a workspace without silently changing its storage format. */
@@ -750,10 +834,23 @@ export function migrateWorkspaceToV2(raw: unknown): WorkspaceFile {
     throw new Error("Unrecognized workspace format.");
   }
   const r = raw as Record<string, unknown>;
+  // Version 2 as a GateLabR host stores it may list what it needs (stampHostedWorkspace).
+  if (r.version === 2 && r.requiredFeatures !== undefined) {
+    assertKnownWorkspaceFeatures(r.requiredFeatures);
+    const { requiredFeatures: _features, ...rest } = r;
+    return rest as unknown as WorkspaceFile;
+  }
   if (r.version === 2) return raw as unknown as WorkspaceFile;
+  // Version 4 is the version 2 layout holding something an older GateLab would misread, which
+  // it names (workspaceFeatures.ts); read as version 2 once every feature is one this build has.
+  if (r.version === WORKSPACE_VERSION_2_WITH_FEATURES) {
+    assertKnownWorkspaceFeatures(r.requiredFeatures);
+    const { requiredFeatures: _features, ...rest } = r;
+    return { ...rest, version: 2 } as unknown as WorkspaceFile;
+  }
   if (r.version !== 1) {
     throw new Error(
-      `Unsupported GateLab workspace version '${String(r.version)}'; this app can open versions 1 and 2.`,
+      `Unsupported GateLab workspace version '${String(r.version)}'; this app can open versions 1 to 4.`,
     );
   }
   // v1 (single sample) → v2

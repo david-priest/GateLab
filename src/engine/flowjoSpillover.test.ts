@@ -152,11 +152,14 @@ describe("FlowJo workspace compensation", () => {
     expect(real.spillover).not.toBeNull();
     expect(real.spillover!.matrix.matrix[0][0]).toBeCloseTo(1.0000020054, 10);
 
-    // A half-unit diagonal is a different convention, not float noise. Using it would silently
-    // change every gated population, so the matrix is refused and the dimensions reported.
-    const wrong = flowJoWorkspaceToGatingML(workspace({ diag: 0.5 }), 0);
-    expect(wrong.spillover).toBeNull();
-    expect(wrong.warnings.join(" ")).toMatch(/no usable compensation matrix/);
+    // A half-unit diagonal is a different convention, not float noise, and its inverse's diagonal
+    // is not 1 either (the Accuri convention, flowjoSpectralMatrix.test.ts). Using it would silently
+    // change every gated population, so the matrix is declined, and the tree drawn on it refused
+    // by name: until 2026-09-26 its dimensions were reported and went downstream as the FCS
+    // file's own compensation, which a file with none evaluated on the stored values.
+    expect(() => flowJoWorkspaceToGatingML(workspace({ diag: 0.5 }), 0)).toThrow(
+      /the tree "Cells" cannot be imported.*"DivaCompMtx_19319\.fcs".*its diagonal is 0\.5 at "BV786-A", not 1, nor is its inverse's/,
+    );
   });
 });
 
