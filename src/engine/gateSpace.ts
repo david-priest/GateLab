@@ -7,11 +7,14 @@
 
 import type { GateSpace, PolyRectGate, TransformSpec } from "./models";
 import { transformFromSpec } from "./sample";
+import type { RawPrecision } from "./float32Bounds";
 
 /** What resolves a gate that lacks the per-gate fields: a Sample, or anything shaped like one. */
 export interface GateSpaceContext {
   readonly gatingSpace: GateSpace;
   transformSpec(channel: string): TransformSpec;
+  /** The values the channel's raw column holds (float32Bounds.ts); unknown is read as float64. */
+  rawPrecision?(channel: string): RawPrecision;
 }
 
 /** A gate's space with the transform of each axis; both identity for a raw gate. */

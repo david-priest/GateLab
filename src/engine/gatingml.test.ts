@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { importGatingML, normalizeChannel } from "./gatingml";
 import { applyGatingStrategy } from "./populations";
+import type { Gate } from "./models";
 
 const GATELABR = "vendor/GateLabR/Gates from GateLabR.xml";
 const CYTOBANK = "vendor/GateLabR/Gates from Cytobank.xml";
@@ -21,6 +22,15 @@ function membership(
   const { masks } = applyGatingStrategy(res.gates, res.populations, res.root_population_id, data);
   return Array.from(masks[popId]);
 }
+
+/** The non-root population with this name, and the names of all of them. */
+function populationNamed(res: ReturnType<typeof importGatingML>, name: string) {
+  const pop = Object.values(res.populations).find((p) => p.name === name);
+  expect(pop, name).toBeDefined();
+  return pop!;
+}
+const populationNames = (res: ReturnType<typeof importGatingML>) =>
+  Object.values(res.populations).filter((p) => p.population_id !== res.root_population_id).map((p) => p.name).sort();
 
 /** The single non-root population of a minimal import fixture. */
 function onlyPopulation(res: ReturnType<typeof importGatingML>) {
@@ -103,12 +113,14 @@ describe("channel resolution", () => {
 
   // A conventional flow panel puts the same optical filter behind several lasers, so the laser
   // prefix is the only thing separating two detectors. normalizeChannel is a CyTOF metal-name
-  // helper -- it keeps the first letter+number token and discards the rest -- so both of these
-  // reduce to "flt525". Matching the first hit evaluated a violet-laser viability gate against the
-  // BLUE laser's detector: the gate resolved, drew, and reported a plausible count. On a real
-  // FlowJo workspace that put the top gate 14% out with nothing reported.
+  // helper, and until 2026-09 it kept any name's first letter+number token and discarded the rest,
+  // so both of these reduced to "flt525". Matching the first hit evaluated a violet-laser viability
+  // gate against the BLUE laser's detector: the gate resolved, drew, and reported a plausible count.
+  // On a real FlowJo workspace that put the top gate 14% out with nothing reported. Neither names a
+  // metal now, and the metal step is left to mass cytometry data besides.
   it("does not confuse two detectors behind the same filter", () => {
-    expect(normalizeChannel("v-FLT525/30-E-A")).toBe(normalizeChannel("b-FLT525/30-B-A"));
+    expect(normalizeChannel("v-FLT525/30-E-A")).toBe("");
+    expect(normalizeChannel("b-FLT525/30-B-A")).toBe("");
 
     const rect = (channel: string) => `
       <gating:RectangleGate gating:id="g1" gating:name="Live">
@@ -142,32 +154,89 @@ describe("channel resolution", () => {
     expect(() => importGatingML(doc("FLT525"), session, pnn, "flow")).toThrow(/FLT525/);
   });
 
-  it("reads logicle vertices on the flowCore [0,M] scale, not flowutils [0,1]", () => {
-    // Gating-ML/flowCore logicle spans [0, M+A]; GateLab's spans [0, 1]. A vertex at M must land
-    // at exactly 1.0 in GateLab units. Reading it as [0,1] would leave it at 4.5 — off the top of
-    // the scale — and inverting THAT blows up to ~1e23, which is what this originally caught.
+  describe("the scale a file's logicle coordinates are on", () => {
     const T = 846653.2;
-    const xml = `<?xml version="1.0"?>
+    /** A logicle rectangle from 0 to `hi` on both axes, with `header` inside the root. */
+    const logicleFile = (hi: string, header = "") => `<?xml version="1.0"?>
       <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
         xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations"
-        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">${header}
         <transforms:transformation transforms:id="Tr_L">
           <transforms:logicle transforms:T="${T}" transforms:W="1.5" transforms:M="4.5" transforms:A="0"/>
         </transforms:transformation>
         <gating:RectangleGate gating:id="g1">
-          <gating:dimension gating:min="0" gating:max="4.5" gating:transformation-ref="Tr_L"><data-type:fcs-dimension data-type:name="CD19"/></gating:dimension>
-          <gating:dimension gating:min="0" gating:max="4.5" gating:transformation-ref="Tr_L"><data-type:fcs-dimension data-type:name="CD14"/></gating:dimension>
+          <gating:dimension gating:min="0" gating:max="${hi}" gating:transformation-ref="Tr_L"><data-type:fcs-dimension data-type:name="CD19"/></gating:dimension>
+          <gating:dimension gating:min="0" gating:max="${hi}" gating:transformation-ref="Tr_L"><data-type:fcs-dimension data-type:name="CD14"/></gating:dimension>
         </gating:RectangleGate>
       </gating:Gating-ML>`;
-    const res = importGatingML(xml, ["CD19", "CD14"]);
-    const g = Object.values(res.gates)[0];
-    const verts = "vertices" in g ? g.vertices : [];
-    expect(Math.max(...verts.map((v) => v[0]))).toBeCloseTo(1, 9);
-    expect(Math.min(...verts.map((v) => v[0]))).toBeCloseTo(0, 9);
-    // And the gate keeps the space the file declared, with the transform recorded on it, rather
-    // than being inverted into raw — which per Gating-ML §2.3.2 would be a different gate.
-    expect(g.space).toBe("display");
-    expect(g.transforms?.CD19).toEqual({ kind: "logicle", T, W: 1.5, M: 4.5, A: 0 });
+    const topOf = (xml: string) => {
+      const g = Object.values(importGatingML(xml, ["CD19", "CD14"]).gates)[0];
+      const verts = "vertices" in g ? g.vertices : [];
+      return { g, hi: Math.max(...verts.map((v) => v[0])), lo: Math.min(...verts.map((v) => v[0])) };
+    };
+
+    it("reads a file from another tool on Gating-ML 2.0's own scale, where T is 1", () => {
+      // Specification §6.4.1: the logicle scale maps T to 1. Reading every unmarked file on
+      // flowCore's scale (T at M) put a standard file's gate 4.5 times too low.
+      const { g, hi, lo } = topOf(logicleFile("1"));
+      expect(hi).toBeCloseTo(1, 12);
+      expect(lo).toBeCloseTo(0, 12);
+      // The gate keeps the space the file declared, with the transform recorded on it, rather
+      // than being inverted into raw, which per Gating-ML §2.3.2 would be a different gate.
+      expect(g.space).toBe("display");
+      expect(g.transforms?.CD19).toEqual({ kind: "logicle", T, W: 1.5, M: 4.5, A: 0 });
+    });
+
+    it("reads an unmarked GateLab or GateLabR file on flowCore's scale, where T is at M", () => {
+      // Each of the three things only GateLab and GateLabR write identifies such a file. A vertex
+      // at M must land at exactly 1 in GateLab units; read as [0, 1] it would sit at 4.5, off the
+      // top of the scale, and inverting that blows up to ~1e23, which is what this first caught.
+      const about = (who: string) => `<data-type:custom_info><cytobank>
+          <about>Gating-ML 2.0 export from ${who} (standard / re-importable)</about></cytobank></data-type:custom_info>`;
+      const scales = `<data-type:custom_info><gatelabr_scales><definition>{"version":3,"channels":{}}</definition></gatelabr_scales></data-type:custom_info>`;
+      for (const header of [about("GateLab"), about("GateLabR"), scales]) {
+        const { hi, lo } = topOf(logicleFile("4.5", header));
+        expect(hi).toBeCloseTo(1, 9);
+        expect(lo).toBeCloseTo(0, 9);
+      }
+      const hierarchy = logicleFile("4.5").replace("</gating:Gating-ML>",
+        `<gating:GatingHierarchy><gating:PopulationGatePair gating:gate-ref="g1"><gating:name>P</gating:name></gating:PopulationGatePair></gating:GatingHierarchy></gating:Gating-ML>`);
+      expect(topOf(hierarchy).hi).toBeCloseTo(1, 9);
+    });
+
+    it("reads flowCore's scale as Gating-ML's times M, whatever A is", () => {
+      // flowCore's logicleTransform maps T to M for every A (checked in R: A = 0, 0.5 and 1 all
+      // give 4.5 at T with M = 4.5), so its coordinate is Gating-ML's times M, not M + A. The two
+      // agree only for the A = 0 GateLab and GateLabR write; at A = 0.5 a vertex at 4.5 is T.
+      const scales = `<data-type:custom_info><gatelabr_scales><definition>{"version":3,"channels":{}}</definition></gatelabr_scales></data-type:custom_info>`;
+      const withA = logicleFile("4.5", scales).replace('transforms:A="0"', 'transforms:A="0.5"');
+      expect(topOf(withA).hi).toBeCloseTo(1, 9);
+      // Beside an axis on a non-canonical fasinh, which is held exactly too, the same factor
+      // applies: the vertex at 4.5 is the top of GateLab's logicle, T itself.
+      const mixed = withA
+        .replace("</transforms:transformation>", `</transforms:transformation>
+        <transforms:transformation transforms:id="Tr_Odd"><transforms:fasinh transforms:T="1000" transforms:M="2" transforms:A="0.5"/></transforms:transformation>`)
+        .replace(/(<gating:dimension gating:min="0" gating:max="4.5" gating:transformation-ref=")Tr_L("><data-type:fcs-dimension data-type:name="CD14")/, "$1Tr_Odd$2");
+      const res = importGatingML(mixed, ["CD19", "CD14"], {}, "flow");
+      const g = Object.values(res.gates)[0] as { space?: string; vertices: [number, number][] };
+      expect(g.space).toBe("display");
+      expect(Math.max(...g.vertices.map((v) => v[0]))).toBeCloseTo(1, 9);
+    });
+
+    it("lets the GateLab format mark name the scale, whoever wrote the rest", () => {
+      const mark = (logicle: string, extra = "") => `<data-type:custom_info>${extra}
+          <gatelab_format>{"version":2,"logicle":"${logicle}"}</gatelab_format></data-type:custom_info>`;
+      const gatelab = `<cytobank><about>Gating-ML 2.0 export from GateLab (standard / re-importable)</about></cytobank>`;
+      expect(topOf(logicleFile("1", mark("gating-ml", gatelab))).hi).toBeCloseTo(1, 12);
+      expect(topOf(logicleFile("4.5", mark("flowcore"))).hi).toBeCloseTo(1, 9);
+      // A mark that names no scale leaves the decision to who wrote the file.
+      const noScale = (extra = "") => `<data-type:custom_info>${extra}
+          <gatelab_format>{"version":2}</gatelab_format></data-type:custom_info>`;
+      expect(topOf(logicleFile("4.5", noScale(gatelab))).hi).toBeCloseTo(1, 9);
+      expect(topOf(logicleFile("1", noScale())).hi).toBeCloseTo(1, 12);
+      // A mark that names a scale GateLab does not know is refused, not read as no mark.
+      expect(() => topOf(logicleFile("1", mark("other")))).toThrow(/unknown logicle scale "other"/);
+    });
   });
 
   // The metal normaliser is a CyTOF helper. Refusing an AMBIGUOUS flow match (2026-09-10)
@@ -273,8 +342,9 @@ describe("strict import safety", () => {
 
     const res = importGatingML(xml, ["X"]);
     expect(res.n_gates_imported).toBe(1);
-    const pop = onlyPopulation(res);
-    expect(pop.name).toBe("Outside");
+    // Gating-ML 2.0: the range is a population too, and the NOT one beside it.
+    expect(populationNames(res)).toEqual(["Inside", "Outside"]);
+    const pop = populationNamed(res, "Outside");
     expect(pop.gate_refs).toHaveLength(1);
     expect(pop.gate_refs[0].include).toBe(false);
     // range-1 is X in [0, 1], so only the first event is inside it.
@@ -377,7 +447,7 @@ describe("strict import safety", () => {
     const g = Object.values(res.gates)[0] as { vertices: [number, number][]; space?: string };
     expect(g.space).toBe("raw");
     expect(g.vertices.map((v) => v[0])).toContain(200); // verbatim, nothing applied
-    expect(res.untranslatable_transform_gates).toEqual([]);
+    expect(res.n_gates_skipped).toBe(0);
   });
 
   it("keeps a flog gate in log space rather than inverting it into raw", () => {
@@ -401,32 +471,45 @@ describe("strict import safety", () => {
       transforms?: Record<string, { kind: string; T?: number; M?: number }>;
     };
     expect(g.space).toBe("display");
-    expect(g.transforms?.["PE-A"]).toEqual({ kind: "flog", T: 10000, M: 4 });
+    // Gating-ML's own flog: this file is not GateLab's, so nothing is pinned at the floor.
+    expect(g.transforms?.["PE-A"]).toEqual({ kind: "flog", T: 10000, M: 4, standard: true });
     // Vertices stay in the declared units, not inverted to 10^(...)·T.
     expect(Math.min(...g.vertices.map((v) => v[0]))).toBeCloseTo(1, 12);
-    expect(res.untranslatable_transform_gates).toEqual([]);
+    expect(res.n_gates_skipped).toBe(0);
   });
 
-  it("falls back to raw for a transform GateLab cannot hold, and says which gates", () => {
-    // A non-canonical fasinh: GateLab's arcsinh is asinh(x / cofactor), which is fasinh only for
-    // M = log10 e and A = 0. Any other scaling has no exact GateLab spec, so the gate is inverted
-    // into raw — a well-defined gate, but not the one the file describes — and reported.
+  it("holds a fasinh with any M and A exactly, as asinh with an affine change of units", () => {
+    // Gating-ML fasinh is (asinh(x / c) + A ln10) / ((M + A) ln10) with c = T / sinh(M ln10), which
+    // is affine in GateLab's asinh(x / c). This was inverted into raw instead, with the sign of A
+    // reversed, and reported in a field the app never showed. A polygon, which is straight in the
+    // declared space; a rectangle from another writer is held on raw values with its edges placed
+    // exactly (gatingmlTransforms.test.ts, "a rectangle edge on an event's own value").
     const xml = `<?xml version="1.0"?>
       <gating:Gating-ML xmlns:gating="${G}" xmlns:data-type="${D}"
         xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations">
         <transforms:transformation transforms:id="Tr_Odd">
           <transforms:fasinh transforms:T="1000" transforms:M="2" transforms:A="0.5"/>
         </transforms:transformation>
-        <gating:RectangleGate gating:id="r1" gating:name="Odd">
-          <gating:dimension gating:min="1" gating:max="2" gating:transformation-ref="Tr_Odd">
-            <data-type:fcs-dimension data-type:name="PE-A"/>
-          </gating:dimension>
-        </gating:RectangleGate>
+        <gating:PolygonGate gating:id="r1" gating:name="Odd">
+          <gating:dimension gating:transformation-ref="Tr_Odd"><data-type:fcs-dimension data-type:name="PE-A"/></gating:dimension>
+          <gating:dimension gating:transformation-ref="Tr_Odd"><data-type:fcs-dimension data-type:name="FITC-A"/></gating:dimension>
+          <gating:vertex><gating:coordinate data-type:value="1"/><gating:coordinate data-type:value="1"/></gating:vertex>
+          <gating:vertex><gating:coordinate data-type:value="2"/><gating:coordinate data-type:value="1"/></gating:vertex>
+          <gating:vertex><gating:coordinate data-type:value="2"/><gating:coordinate data-type:value="2"/></gating:vertex>
+        </gating:PolygonGate>
       </gating:Gating-ML>`;
-    const res = importGatingML(xml, ["PE-A"], {}, "flow");
-    const g = Object.values(res.gates)[0] as { space?: string };
-    expect(g.space).toBe("raw");
-    expect(res.untranslatable_transform_gates).toEqual(["Odd"]);
+    const res = importGatingML(xml, ["PE-A", "FITC-A"], {}, "flow");
+    const g = Object.values(res.gates)[0] as { space?: string; vertices: [number, number][];
+      transforms?: Record<string, { kind: string; cofactor?: number }> };
+    expect(g.space).toBe("display");
+    expect(g.transforms?.["PE-A"]?.kind).toBe("asinh");
+    const c = 1000 / Math.sinh(2 * Math.LN10);
+    expect(g.transforms?.["PE-A"]?.cofactor).toBeCloseTo(c, 9);
+    // Stored asinh(x / c) at the file's 1 and 2: y(M + A) ln10 − A ln10.
+    const xs = g.vertices.map((v) => v[0]);
+    expect(Math.min(...xs)).toBeCloseTo(2.5 * Math.LN10 - 0.5 * Math.LN10, 12);
+    expect(Math.max(...xs)).toBeCloseTo(5 * Math.LN10 - 0.5 * Math.LN10, 12);
+    expect(res.n_gates_skipped).toBe(0);
   });
 
   it("rejects a gating:parent_id that names no gate in the file", () => {
@@ -456,7 +539,8 @@ describe("strict import safety", () => {
       </gating:Gating-ML>`;
 
     const res = importGatingML(xml, ["X"]);
-    const pop = onlyPopulation(res);
+    expect(populationNames(res)).toEqual(["Inside", "Outside"]);
+    const pop = populationNamed(res, "Outside");
     expect(pop.gate_logic).toBe("and");
     expect(pop.gate_refs[0].include).toBe(false);
     expect(membership(res, pop.population_id, [0.5, 1.5, 2.5])).toEqual([0, 1, 1]);
@@ -483,7 +567,7 @@ describe("strict import safety", () => {
     expect(membership(res, pop.population_id, [0.5, 1.5, 2.5])).toEqual([0, 1, 1]);
   });
 
-  it("rejects OR logic and names the affected population", () => {
+  it("leaves an OR population out, names it, and imports the rest", () => {
     const xml = `<?xml version="1.0"?>
       <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
         xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
@@ -499,9 +583,52 @@ describe("strict import safety", () => {
             <gating:gateReference gating:ref="range-2"/>
           </gating:or>
         </gating:BooleanGate>
+        <gating:BooleanGate gating:id="and-1" gating:name="Low only">
+          <gating:and>
+            <gating:gateReference gating:ref="range-1"/>
+            <gating:gateReference gating:ref="range-1"/>
+          </gating:and>
+        </gating:BooleanGate>
       </gating:Gating-ML>`;
 
-    expect(() => importGatingML(xml, ["X"])).toThrow(/Population "Low or high" uses OR logic/);
+    // Refusing the whole file for one OR population, as GateLab did until 2026-09, lost every
+    // other population with it; the FlowJo workspace import already skipped an OrNode by name.
+    const res = importGatingML(xml, ["X"]);
+    expect(populationNames(res)).toEqual(["High", "Low", "Low only"]);
+    const pop = populationNamed(res, "Low only");
+    expect(membership(res, pop.population_id, [0.5, 1.5, 2.5])).toEqual([1, 0, 0]);
+    expect(res.warnings).toEqual([
+      '"Low or high" combines its references with OR, which GateLab cannot represent; it and anything below it were skipped.',
+    ]);
+  });
+
+  it("leaves an OR population of an older GateLab file out with its subtree", () => {
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
+        <gating:RectangleGate gating:id="range-1" gating:name="Low">
+          <gating:dimension gating:min="0" gating:max="1"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+        </gating:RectangleGate>
+        <gating:RectangleGate gating:id="range-2" gating:name="High">
+          <gating:dimension gating:min="2" gating:max="3"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+        </gating:RectangleGate>
+        <gating:BooleanGate gating:id="or-1">
+          <gating:or>
+            <gating:gateReference gating:ref="range-1"/>
+            <gating:gateReference gating:ref="range-2"/>
+          </gating:or>
+        </gating:BooleanGate>
+        <gating:GatingHierarchy>
+          <gating:PopulationGatePair gating:gate-ref="or-1">
+            <gating:name>Low or high</gating:name>
+            <gating:PopulationGatePair gating:gate-ref="range-2"><gating:name>High within</gating:name></gating:PopulationGatePair>
+          </gating:PopulationGatePair>
+          <gating:PopulationGatePair gating:gate-ref="range-1"><gating:name>Low</gating:name></gating:PopulationGatePair>
+        </gating:GatingHierarchy>
+      </gating:Gating-ML>`;
+    const res = importGatingML(xml, ["X"]);
+    expect(onlyPopulation(res).name).toBe("Low");
+    expect(res.warnings).toEqual([expect.stringMatching(/^"Low or high" combines its references with OR/)]);
   });
 
   it("applies De Morgan to a complemented AND population rather than rejecting it", () => {
@@ -640,5 +767,318 @@ describe("CyTOF Gaussian channel import", () => {
     const inside = width.map((w) => Math.asinh(w / cf) >= lo && Math.asinh(w / cf) <= hi);
     expect(inside).toEqual([true, true, false, false]);
     void data;
+  });
+});
+
+describe("a population whose gate could not be imported", () => {
+  // An ellipse with a ratio dimension (a Gating-ML new-dimension through fratio) cannot be
+  // imported: GateLab has no ratio channel. Such a population used to be built anyway, without the
+  // gate, and so held every event of its parent. (Until 2026-09 these tests used an ellipse on a
+  // fasinh with M = 4, which GateLab now holds exactly.)
+  const NS = `xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+    xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations"
+    xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes"`;
+  const oddScale = `<transforms:transformation transforms:id="Rat">
+      <transforms:fratio transforms:A="1" transforms:B="0" transforms:C="0">
+        <data-type:fcs-dimension data-type:name="X"/><data-type:fcs-dimension data-type:name="Y"/>
+      </transforms:fratio>
+    </transforms:transformation>`;
+  const range = (id: string, name: string, lo: number, hi: number, parent = "") =>
+    `<gating:RectangleGate gating:id="${id}" gating:name="${name}"${parent ? ` gating:parent_id="${parent}"` : ""}>
+      <gating:dimension gating:min="${lo}" gating:max="${hi}"><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+    </gating:RectangleGate>`;
+  const ellipse = (parent = "") =>
+    `<gating:EllipsoidGate gating:id="E" gating:name="Odd ellipse"${parent ? ` gating:parent_id="${parent}"` : ""}>
+      <gating:dimension><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+      <gating:dimension><data-type:new-dimension data-type:transformation-ref="Rat"/></gating:dimension>
+      <gating:mean><gating:coordinate data-type:value="0.5"/><gating:coordinate data-type:value="0.5"/></gating:mean>
+      <gating:covarianceMatrix>
+        <gating:row><gating:entry data-type:value="0.01"/><gating:entry data-type:value="0"/></gating:row>
+        <gating:row><gating:entry data-type:value="0"/><gating:entry data-type:value="0.01"/></gating:row>
+      </gating:covarianceMatrix>
+      <gating:distanceSquare data-type:value="1"/>
+    </gating:EllipsoidGate>`;
+  const xs = [0.5, 1.5, 2.5, 3.5];
+  const names = (res: ReturnType<typeof importGatingML>) =>
+    Object.values(res.populations).filter((p) => p.population_id !== res.root_population_id).map((p) => p.name).sort();
+
+  it("leaves it out with everything beneath it, and names it (GateLab standard format)", () => {
+    const pop = (id: string, name: string, refs: string[], parent = "") =>
+      `<gating:BooleanGate gating:id="${id}"${parent ? ` gating:parent_id="${parent}"` : ""}>
+        <data-type:custom_info><cytobank><name>${name}</name></cytobank></data-type:custom_info>
+        <gating:and>${refs.map((r) => `<gating:gateReference gating:ref="${r}"/>`).join("")}</gating:and>
+      </gating:BooleanGate>`;
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML ${NS}>
+        <data-type:custom_info><gatelab_format>{"version":2,"logicle":"gating-ml","hierarchy":"parent_id"}</gatelab_format></data-type:custom_info>
+        ${oddScale}
+        ${range("A", "Wide", 0, 3)}
+        ${range("B", "Low", 0, 1)}
+        ${ellipse()}
+        ${pop("P", "Wide", ["A", "A"])}
+        ${pop("Q", "In the ellipse", ["E", "E"], "P")}
+        ${pop("R", "Low in the ellipse", ["B", "B"], "Q")}
+        ${pop("S", "Low", ["B", "B"], "P")}
+      </gating:Gating-ML>`;
+    const res = importGatingML(xml, ["X", "Y"]);
+    expect(names(res)).toEqual(["Low", "Wide"]);
+    expect(res.warnings).toHaveLength(1);
+    expect(res.warnings[0]).toMatch(/^"In the ellipse" uses the gate "Odd ellipse", which has the ratio dimension Rat, which GateLab cannot hold; it and anything below it were skipped\.$/);
+    const low = Object.values(res.populations).find((p) => p.name === "Low")!;
+    expect(membership(res, low.population_id, xs)).toEqual([1, 0, 0, 0]);
+  });
+
+  it("does not move what sits beneath the gate to the top level (parent_id on gates)", () => {
+    // Standard Gating-ML as FlowJo and FlowKit write it: each gate is a population, placed by
+    // its own parent_id. The ellipse's child used to land at the top level, measured against
+    // every event.
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML ${NS}>
+        ${oddScale}
+        ${range("A", "Wide", 0, 3)}
+        ${ellipse("A")}
+        ${range("B", "Low", 0, 1, "E")}
+        ${range("C", "Lower", 0, 2, "A")}
+      </gating:Gating-ML>`;
+    const res = importGatingML(xml, ["X", "Y"]);
+    expect(names(res)).toEqual(["Lower", "Wide"]);
+    expect(res.warnings).toEqual([expect.stringMatching(/^"Odd ellipse" has the ratio dimension Rat, which GateLab cannot hold; it and anything below it were skipped\.$/)]);
+  });
+
+  it("leaves it out in a Cytobank file, whose chains carry the gate", () => {
+    const pop = (id: string, name: string, refs: string[]) =>
+      `<gating:BooleanGate gating:id="${id}">
+        <data-type:custom_info><cytobank><name>${name}</name></cytobank></data-type:custom_info>
+        <gating:and>${(refs.length === 1 ? [refs[0], refs[0]] : refs).map((r) => `<gating:gateReference gating:ref="${r}"/>`).join("")}</gating:and>
+      </gating:BooleanGate>`;
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML ${NS}>
+        ${oddScale}
+        ${range("A", "Wide", 0, 3)}
+        ${range("B", "Low", 0, 1)}
+        ${ellipse()}
+        ${pop("P", "Wide", ["A"])}
+        ${pop("Q", "In the ellipse", ["A", "E"])}
+        ${pop("R", "Low in the ellipse", ["A", "E", "B"])}
+        ${pop("S", "Low", ["A", "B"])}
+      </gating:Gating-ML>`;
+    const res = importGatingML(xml, ["X", "Y"]);
+    expect(names(res)).toEqual(["Low", "Wide"]);
+    expect(res.warnings).toHaveLength(2);
+    const low = Object.values(res.populations).find((p) => p.name === "Low")!;
+    expect(res.populations[low.parent_id!].name).toBe("Wide");
+    expect(membership(res, low.population_id, xs)).toEqual([1, 0, 0, 0]);
+  });
+});
+
+describe("an absent rectangle bound", () => {
+  // Gating-ML leaves a bound out for "no bound". The importer held it as ±1e9, which is below
+  // real raw values: the public S8 file reaches 2.15e9 on one channel, and an open range there
+  // left those events out. A bound written as xs:double's INF is the same thing.
+  const NS = `xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+    xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes"`;
+  const xs = [-3e38, -2.15e9, -5e8, 0, 5e8, 2.15e9, 3e38];
+  const rangePop = (dim: string) => {
+    const xml = `<?xml version="1.0"?><gating:Gating-ML ${NS}>
+      <gating:RectangleGate gating:id="R" gating:name="Open"><gating:dimension ${dim}><data-type:fcs-dimension data-type:name="X"/></gating:dimension></gating:RectangleGate>
+    </gating:Gating-ML>`;
+    const res = importGatingML(xml, ["X"], {}, "flow");
+    return membership(res, onlyPopulation(res).population_id, xs);
+  };
+
+  // The file names no writer, so its rectangle is read by Gating-ML 2.0's rule, min <= x < max
+  // (models.ts, RectangleBounds): the value 0 lies on the upper bound, and is out.
+  it("holds every value on the open side, however large", () => {
+    expect(rangePop('gating:min="0"')).toEqual([0, 0, 0, 1, 1, 1, 1]);
+    expect(rangePop('gating:max="0"')).toEqual([1, 1, 1, 0, 0, 0, 0]);
+  });
+
+  it("reads INF and -INF as no bound", () => {
+    expect(rangePop('gating:min="-INF" gating:max="0"')).toEqual([1, 1, 1, 0, 0, 0, 0]);
+    expect(rangePop('gating:min="0" gating:max="INF"')).toEqual([0, 0, 0, 1, 1, 1, 1]);
+  });
+});
+
+// Standard Gating-ML 2.0 as FlowKit and flowUtils/flowCore write it: every gate, geometric or
+// Boolean, is a population placed by its own parent_id, and a Boolean gate's operands are gates
+// whose membership includes their own parent chains. The importer read any file with a
+// BooleanGate as Cytobank's flattened format, which ignored parent_id and every geometric
+// population: a FlowKit file with Cells, CD4 and CD8 and an AND of the two came back as that AND
+// alone, at the top level, holding 1,616 events where FlowKit counts 1,247 under Cells.
+describe("a standard Gating-ML file with Boolean gates", () => {
+  const NS = `xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+    xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes"`;
+  const range = (id: string, ch: string, lo: number, hi: number, parent?: string) =>
+    `<gating:RectangleGate gating:id="${id}"${parent ? ` gating:parent_id="${parent}"` : ""}>
+      <gating:dimension gating:min="${lo}" gating:max="${hi}"><data-type:fcs-dimension data-type:name="${ch}"/></gating:dimension>
+    </gating:RectangleGate>`;
+  const bool = (id: string, op: "and" | "or" | "not", refs: (string | [string, true])[], parent?: string) =>
+    `<gating:BooleanGate gating:id="${id}"${parent ? ` gating:parent_id="${parent}"` : ""}>
+      <gating:${op}>${refs.map((r) => typeof r === "string"
+        ? `<gating:gateReference gating:ref="${r}"/>`
+        : `<gating:gateReference gating:ref="${r[0]}" gating:use-as-complement="true"/>`).join("")}</gating:${op}>
+    </gating:BooleanGate>`;
+  const doc = (...els: string[]) => `<?xml version="1.0"?><gating:Gating-ML ${NS}>${els.join("")}</gating:Gating-ML>`;
+  // X decides Cells (X in [0, 10]); Y decides CD4 (Y in [0, 5]) and CD8 (Y in [3, 8]).
+  const pts: [number, number][] = [[1, 1], [1, 4], [1, 7], [1, 9], [20, 4], [20, 1]];
+  const mask = (res: ReturnType<typeof importGatingML>, name: string) => {
+    const data = { n: pts.length, column: (ch: string) => (ch === "X" ? pts.map((p) => p[0]) : ch === "Y" ? pts.map((p) => p[1]) : undefined) };
+    const { masks } = applyGatingStrategy(res.gates, res.populations, res.root_population_id, data);
+    const pop = Object.values(res.populations).find((p) => p.name === name);
+    return pop ? Array.from(masks[pop.population_id]) : undefined;
+  };
+  const parentOf = (res: ReturnType<typeof importGatingML>, name: string) => {
+    const pop = Object.values(res.populations).find((p) => p.name === name)!;
+    return pop.parent_id === res.root_population_id ? null : res.populations[pop.parent_id!].name;
+  };
+  const tree = [range("Cells", "X", 0, 10), range("CD4", "Y", 0, 5, "Cells"), range("CD8", "Y", 3, 8, "Cells")];
+
+  it("imports every gate as a population in its place, and an AND within its parent", () => {
+    const res = importGatingML(doc(...tree, bool("CD4andCD8", "and", ["CD4", "CD8"], "Cells")), ["X", "Y"]);
+    expect(Object.values(res.populations).map((p) => p.name).sort()).toEqual(["All Events", "CD4", "CD4andCD8", "CD8", "Cells"].sort());
+    expect(parentOf(res, "CD4")).toBe("Cells");
+    expect(parentOf(res, "CD4andCD8")).toBe("Cells");
+    expect(mask(res, "CD4andCD8")).toEqual([0, 1, 0, 0, 0, 0]);
+    expect(mask(res, "CD4")).toEqual([1, 1, 0, 0, 0, 0]);
+    expect(res.warnings).toEqual([]);
+  });
+
+  it("leaves an OR out with what sits beneath it, by name, and keeps the rest", () => {
+    const res = importGatingML(doc(...tree, bool("CD4orCD8", "or", ["CD4", "CD8"], "Cells"), range("Big", "X", 0.5, 10, "CD4orCD8"),
+      bool("CD4andCD8", "and", ["CD4", "CD8"], "Cells")), ["X", "Y"]);
+    expect(Object.values(res.populations).map((p) => p.name).sort()).toEqual(["All Events", "CD4", "CD4andCD8", "CD8", "Cells"].sort());
+    expect(res.warnings).toEqual([expect.stringMatching(/^"CD4orCD8" combines its references with OR/)]);
+  });
+
+  it("reads NOT, exclusions and a Boolean operand, within the parent", () => {
+    const res = importGatingML(doc(...tree, bool("notCD4", "not", ["CD4"], "Cells"),
+      bool("CD8notCD4", "and", ["notCD4", "CD8"], "Cells"), bool("CD8butCD4", "and", ["CD8", ["CD4", true]], "Cells")), ["X", "Y"]);
+    expect(mask(res, "notCD4")).toEqual([0, 0, 1, 1, 0, 0]);
+    expect(mask(res, "CD8notCD4")).toEqual([0, 0, 1, 0, 0, 0]);
+    expect(mask(res, "CD8butCD4")).toEqual([0, 0, 1, 0, 0, 0]);
+    expect(parentOf(res, "CD8notCD4")).toBe("Cells");
+  });
+
+  it("leaves out, by name, a Boolean population GateLab cannot hold within one parent", () => {
+    // At the top level, CD4's membership carries Cells, which an AND of gates at the top level
+    // cannot say without it; and the NOT of an AND of two gates is an OR.
+    const res = importGatingML(doc(...tree, bool("CD4atTop", "and", ["CD4", "CD4"]), range("Under", "X", 0, 5, "CD4atTop"),
+      bool("both", "and", ["CD4", "CD8"], "Cells"), bool("notBoth", "not", ["both"], "Cells")), ["X", "Y"]);
+    const names = Object.values(res.populations).map((p) => p.name);
+    expect(names).not.toContain("CD4atTop");
+    expect(names).not.toContain("Under");
+    expect(names).not.toContain("notBoth");
+    expect(mask(res, "both")).toEqual([0, 1, 0, 0, 0, 0]);
+    expect(res.warnings).toEqual([
+      expect.stringMatching(/^"CD4atTop" uses the gate "CD4", which sits beneath "Cells", not above "CD4atTop"/),
+      expect.stringMatching(/^"notBoth" negates or combines gates in a way that is not one AND of gates/),
+    ]);
+  });
+
+  it("still reads a Cytobank file's flattened chains when it carries Cytobank's custom_info", () => {
+    const cb = (id: string, name: string, refs: string[]) =>
+      `<gating:BooleanGate gating:id="${id}"><data-type:custom_info><cytobank><name>${name}</name></cytobank></data-type:custom_info>
+        <gating:and>${refs.map((r) => `<gating:gateReference gating:ref="${r}"/>`).join("")}</gating:and></gating:BooleanGate>`;
+    const res = importGatingML(doc(range("C", "X", 0, 10), range("F", "Y", 0, 5), cb("P", "Cells", ["C", "C"]), cb("Q", "CD4", ["C", "F"])), ["X", "Y"]);
+    expect(Object.values(res.populations).map((p) => p.name).sort()).toEqual(["All Events", "CD4", "Cells"].sort());
+    expect(parentOf(res, "CD4")).toBe("Cells");
+  });
+});
+
+// An export exact in raw space can carry thousands of vertices in one polygon, three elements
+// each. Every gate's marks were read off getElementsByTagName("*"), whose live collection jsdom
+// indexes slowly, so such a file took 24 s to import in node (this suite, the headless harnesses)
+// where its gates took a fraction of a second to evaluate.
+describe("a polygon with thousands of vertices", () => {
+  it("imports in about the time it takes to parse", () => {
+    const m = 8000;
+    const verts = Array.from({ length: m }, (_, k) => {
+      const t = (2 * Math.PI * k) / m;
+      return `<gating:vertex><gating:coordinate data-type:value="${50 + 40 * Math.cos(t)}"/><gating:coordinate data-type:value="${50 + 40 * Math.sin(t)}"/></gating:vertex>`;
+    }).join("");
+    const xml = `<?xml version="1.0"?>
+      <gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+        xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes">
+        <gating:PolygonGate gating:id="ring">
+          <gating:dimension><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
+          <gating:dimension><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
+          ${verts}
+        </gating:PolygonGate>
+      </gating:Gating-ML>`;
+    const t0 = performance.now();
+    const res = importGatingML(xml, ["X", "Y"]);
+    const ms = performance.now() - t0;
+    expect(Object.values(res.gates)[0]).toMatchObject({ gate_type: "polygon" });
+    expect((Object.values(res.gates)[0] as { vertices: unknown[] }).vertices).toHaveLength(m);
+    expect(ms).toBeLessThan(3000);
+  }, 120000);
+});
+
+// Gating-ML 2.0's fasinh is (asinh(x · sinh(M ln10) / T) + A ln10) / ((M + A) ln10), so its inverse
+// is T / sinh(M ln10) · sinh(y (M + A) ln10 − A ln10). The raw fallback added A ln10 instead, and a
+// FlowKit rectangle with A = 0.3 on the public DiVa file held 10,398 events against FlowKit's 27,398.
+// fix/gatingml-transforms removed that fallback: every fasinh is held exactly, as GateLab's arcsinh
+// with cofactor T / sinh(M ln10) through the affine map y (M + A) ln10 − A ln10, and the raw values
+// its bounds stand for are checked here.
+describe("a fasinh gate GateLab cannot hold as its own arcsinh", () => {
+  const NS = `xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+    xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes"
+    xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations"`;
+  const T = 262144;
+  const M = 4.5;
+  const fasinh = (x: number, A: number) =>
+    (Math.asinh((x * Math.sinh(M * Math.LN10)) / T) + A * Math.LN10) / ((M + A) * Math.LN10);
+
+  for (const A of [0.3, 1]) {
+    it(`is held on raw values at the values the transform maps to its bounds (A = ${A})`, () => {
+      const xml = `<?xml version="1.0"?><gating:Gating-ML ${NS}>
+        <transforms:transformation transforms:id="Tr_A"><transforms:fasinh transforms:T="${T}" transforms:M="${M}" transforms:A="${A}"/></transforms:transformation>
+        <gating:RectangleGate gating:id="R_fasinh">
+          <gating:dimension gating:min="0.5" gating:max="0.8" gating:transformation-ref="Tr_A"><data-type:fcs-dimension data-type:name="FITC-A"/></gating:dimension>
+        </gating:RectangleGate></gating:Gating-ML>`;
+      const res = importGatingML(xml, ["FITC-A"], {}, "flow");
+      const g = Object.values(res.gates)[0] as Extract<Gate, { vertices: unknown }>;
+      expect(res.n_gates_skipped).toBe(0);
+      // fix/gatingml-transforms holds every fasinh exactly; a rectangle from another writer on a
+      // fasinh other than GateLab's own asinh is held on raw values, as it was before, with each
+      // edge the stored value from which on, or up to which, the transform puts a value inside.
+      expect(g.space).toBe("raw");
+      const xs = g.vertices.map((v) => v[0]);
+      expect(fasinh(Math.min(...xs), A)).toBeCloseTo(0.5, 12);
+      expect(fasinh(Math.max(...xs), A)).toBeCloseTo(0.8, 12);
+    });
+  }
+});
+
+// GateLab keeps one transform per channel on a gate. A polygon FlowKit writes with one channel on
+// both axes under two logicle transforms (A = 0 on one, A = 1 on the other) was imported with the
+// second on both, silently: 51,950 events on the public DiVa file where FlowKit counts none.
+describe("a gate with one channel on both axes under two transforms", () => {
+  const NS = `xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+    xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes"
+    xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations"`;
+  const dim = (tr: string) =>
+    `<gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="${tr}"><data-type:fcs-dimension data-type:name="PE-A"/></gating:dimension>`;
+  const file = (xTr: string, yTr: string) => `<?xml version="1.0"?><gating:Gating-ML ${NS}>
+    <transforms:transformation transforms:id="a0"><transforms:logicle transforms:T="262144" transforms:W="0.5" transforms:M="4.5" transforms:A="0"/></transforms:transformation>
+    <transforms:transformation transforms:id="a1"><transforms:logicle transforms:T="262144" transforms:W="0.5" transforms:M="4.5" transforms:A="1"/></transforms:transformation>
+    <gating:PolygonGate gating:id="P_a0a1">${dim(xTr)}${dim(yTr)}
+      ${[[0.3, 0.3], [0.9, 0.35], [0.85, 0.95], [0.35, 0.8]].map(([x, y]) =>
+        `<gating:vertex><gating:coordinate data-type:value="${x}"/><gating:coordinate data-type:value="${y}"/></gating:vertex>`).join("")}
+    </gating:PolygonGate>
+    <gating:RectangleGate gating:id="Kept">
+      <gating:dimension gating:min="0.2" gating:max="0.6" gating:transformation-ref="a0"><data-type:fcs-dimension data-type:name="PE-A"/></gating:dimension>
+    </gating:RectangleGate></gating:Gating-ML>`;
+
+  it("is left out, by name, and the rest imported", () => {
+    const res = importGatingML(file("a0", "a1"), ["PE-A"], {}, "flow");
+    expect(populationNames(res)).toEqual(["Kept"]);
+    expect(res.warnings).toEqual([expect.stringMatching(/^"P_a0a1" .*two different transforms.*; it and anything below it were skipped\.$/)]);
+  });
+
+  it("is imported when both axes share one transform", () => {
+    const res = importGatingML(file("a1", "a1"), ["PE-A"], {}, "flow");
+    expect(populationNames(res)).toEqual(["Kept", "P_a0a1"]);
+    expect(res.warnings).toEqual([]);
   });
 });

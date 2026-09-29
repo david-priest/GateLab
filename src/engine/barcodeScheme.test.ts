@@ -520,7 +520,7 @@ describe("gates and QC populations declared in the file", () => {
     ].join("\n"));
     expect(bad.problems).toEqual([
       'Line 1: gate "Oops" must be a rectangle or a polygon (got "circle").',
-      'Line 2: rectangle "NoShape" needs "x lo..hi" or "x full" (got "y 1..2").',
+      'Line 2: rectangle "NoShape" needs "x lo..hi", "x lo..<hi" or "x full" (got "y 1..2").',
       'Line 3: polygon "Few" needs at least three "(x,y)" points (got "(1,2) (3,4)").',
       'Line 4: the scale must be "raw", "asinh", "linear", "asinh(5)" naming the cofactor, or one per axis such as "linear, asinh(5)" (got "cubic").',
       'Line 5: population "Empty" lists no gates.',

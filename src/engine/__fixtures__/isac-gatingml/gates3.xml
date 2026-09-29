@@ -1,0 +1,853 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating" 
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+                  xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations" 
+                  xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes" 
+                  xsi:schemaLocation="http://www.isac-net.org/std/Gating-ML/v2.0/gating http://flowcyt.sourceforge.net/gating/2.0/xsd/Gating-ML.v2.0.xsd http://www.isac-net.org/std/Gating-ML/v2.0/transformations http://flowcyt.sourceforge.net/gating/2.0/xsd/Transformations.v2.0.xsd http://www.isac-net.org/std/Gating-ML/v2.0/datatypes http://flowcyt.sourceforge.net/gating/2.0/xsd/DataTypes.v2.0.xsd">
+  
+  
+  <gating:PolygonGate gating:id="myPolygonGate">
+    <data-type:custom_info>
+      <FlowRepository>
+        <name>Some Gate 1</name>
+        <id>1</id>
+        <type>Polygon</type>
+      </FlowRepository>
+    </data-type:custom_info>
+    <gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="APC-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="uncompensated">
+      <data-type:fcs-dimension data-type:name="SSC-A" />
+    </gating:dimension>
+    <gating:vertex>
+      <gating:coordinate data-type:value="3.4394654165794654" />
+      <gating:coordinate data-type:value="163840.375" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="1.0443070131177707" />
+      <gating:coordinate data-type:value="12288.953125" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="6.358564720798406" />
+      <gating:coordinate data-type:value="4096.984375" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="11.523125028262683" />
+      <gating:coordinate data-type:value="19456.92578125" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="9.651907525558237" />
+      <gating:coordinate data-type:value="178176.3203125" />
+    </gating:vertex>
+  </gating:PolygonGate>
+  
+  <gating:PolygonGate gating:id="myPolygonGate2ArcSinHLin">
+    <gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="APC-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="myLin">
+      <data-type:fcs-dimension data-type:name="SSC-A" />
+    </gating:dimension>
+    <gating:vertex>
+      <gating:coordinate data-type:value="3.4394654165794654" />
+      <gating:coordinate data-type:value="963.37" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="1.0443070131177707" />
+      <gating:coordinate data-type:value="128.25" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="6.358564720798406" />
+      <gating:coordinate data-type:value="46.75" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="11.523125028262683" />
+      <gating:coordinate data-type:value="19456.92578125" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="9.651907525558237" />
+      <gating:coordinate data-type:value="178176.3203125" />
+    </gating:vertex>
+  </gating:PolygonGate>
+  
+  <gating:PolygonGate gating:id="myPolygonGate3LogLin">
+    <gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="myLog">
+      <data-type:fcs-dimension data-type:name="FSC-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="myLin">
+      <data-type:fcs-dimension data-type:name="SSC-A" />
+    </gating:dimension>
+    <gating:vertex>
+      <gating:coordinate data-type:value="0.1" />
+      <gating:coordinate data-type:value="900" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="0.05" />
+      <gating:coordinate data-type:value="130" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="0.6" />
+      <gating:coordinate data-type:value="50" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="0.95" />
+      <gating:coordinate data-type:value="20000" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="0.8" />
+      <gating:coordinate data-type:value="178000" />
+    </gating:vertex>
+  </gating:PolygonGate>
+
+  <gating:RectangleGate gating:id="myRectangleGate">
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="68608.73828125" gating:max="159744.390625">
+      <data-type:fcs-dimension data-type:name="FSC-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="7.032203021772006" gating:max="10.026151026099125" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="APC-A" />
+    </gating:dimension>
+  </gating:RectangleGate>
+  
+  <gating:RectangleGate gating:id="myRectangleGate2Logicle">
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="0.2" gating:max="0.8" gating:transformation-ref="myLogicle">
+      <data-type:fcs-dimension data-type:name="PE-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="0.3" gating:max="0.7" gating:transformation-ref="myLogicle">
+      <data-type:fcs-dimension data-type:name="APC-Cy7-A" />
+    </gating:dimension>
+  </gating:RectangleGate>
+  
+  <gating:RectangleGate gating:id="myRectangleGate2bHyperlog">
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="0.2" gating:max="0.8" gating:transformation-ref="myHyperlog">
+      <data-type:fcs-dimension data-type:name="PE-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="0.3" gating:max="0.7" gating:transformation-ref="myHyperlog">
+      <data-type:fcs-dimension data-type:name="APC-Cy7-A" />
+    </gating:dimension>
+  </gating:RectangleGate>
+
+  <gating:RectangleGate gating:id="myRectangleGate3LogicleArcSinH">
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="0.2" gating:max="0.8" gating:transformation-ref="myLogicle">
+      <data-type:fcs-dimension data-type:name="PE-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="6.2" gating:max="9.9" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="APC-Cy7-A" />
+    </gating:dimension>
+  </gating:RectangleGate>
+
+  <gating:RectangleGate gating:id="myRectangleGate3bHyperlogArcSinH">
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="0.2" gating:max="0.8" gating:transformation-ref="myHyperlog">
+      <data-type:fcs-dimension data-type:name="PE-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="6.2" gating:max="9.9" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="APC-Cy7-A" />
+    </gating:dimension>
+  </gating:RectangleGate>
+
+  <gating:RectangleGate gating:id="myRectangleGate4LogicleArcSinHFCSCompensated">
+    <gating:dimension gating:compensation-ref="FCS" gating:min="0.2" gating:max="0.8" gating:transformation-ref="myLogicle">
+      <data-type:fcs-dimension data-type:name="PE-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="FCS" gating:min="6.2" gating:max="9.9" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="APC-Cy7-A" />
+    </gating:dimension>
+  </gating:RectangleGate>
+
+  <gating:RectangleGate gating:id="myRectangleGate4bHyperlogArcSinHFCSCompensated">
+    <gating:dimension gating:compensation-ref="FCS" gating:min="0.2" gating:max="0.8" gating:transformation-ref="myHyperlog">
+      <data-type:fcs-dimension data-type:name="PE-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="FCS" gating:min="6.2" gating:max="9.9" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="APC-Cy7-A" />
+    </gating:dimension>
+  </gating:RectangleGate>
+
+  <gating:RectangleGate gating:id="myRangeGate1">
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="68000" gating:max="160000">
+      <data-type:fcs-dimension data-type:name="FSC-A" />
+    </gating:dimension>
+  </gating:RectangleGate>
+
+  <gating:RectangleGate gating:id="myRangeGate2">
+    <gating:dimension gating:compensation-ref="FCS" gating:min="68000" gating:max="160000">
+      <data-type:fcs-dimension data-type:name="FSC-A" />
+    </gating:dimension>
+  </gating:RectangleGate>
+
+  <gating:RectangleGate gating:id="my3DRectangleGate">
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="100000" gating:max="180000">
+      <data-type:fcs-dimension data-type:name="FSC-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="7.1" gating:max="9.8" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="APC-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="uncompensated" gating:min="9876" gating:max="123456">
+      <data-type:fcs-dimension data-type:name="SSC-A" />
+    </gating:dimension>
+  </gating:RectangleGate>
+
+
+  <gating:EllipsoidGate gating:id="myEllipseGate">
+    <data-type:custom_info>
+      <FlowRepository>
+        <name>Some gate 3</name>
+        <id>3</id>
+        <type>Ellipse</type>
+      </FlowRepository>
+    </data-type:custom_info>
+    <gating:dimension gating:compensation-ref="uncompensated">
+      <data-type:fcs-dimension data-type:name="FSC-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="uncompensated">
+      <data-type:fcs-dimension data-type:name="SSC-A" />
+    </gating:dimension>
+    <gating:mean>
+      <gating:coordinate data-type:value="506.505859375" />
+      <gating:coordinate data-type:value="492.123456375" />
+    </gating:mean>
+    <gating:covarianceMatrix>
+      <gating:row>
+        <gating:entry data-type:value="179530.68214905568" />
+        <gating:entry data-type:value="-110162.6143415143" />
+      </gating:row>
+      <gating:row>
+        <gating:entry data-type:value="-110162.6143415143" />
+        <gating:entry data-type:value="186417.52690398344" />
+      </gating:row>
+    </gating:covarianceMatrix>
+    <gating:distanceSquare data-type:value="5000.0" />
+  </gating:EllipsoidGate>
+
+  <gating:QuadrantGate gating:id="myQuadrantGate">
+    <gating:divider gating:id="FSC" gating:compensation-ref="uncompensated">
+      <data-type:fcs-dimension data-type:name="FSC-A" />
+      <gating:value>20000</gating:value>
+      <gating:value>100000</gating:value>
+    </gating:divider>
+    <gating:divider gating:id="SSC" gating:compensation-ref="uncompensated">
+      <data-type:fcs-dimension data-type:name="SSC-A" />
+      <gating:value>15000</gating:value>
+    </gating:divider>    
+    <gating:Quadrant gating:id="Q1">
+      <gating:position gating:divider_ref="SSC" gating:location="0" />        
+      <gating:position gating:divider_ref="FSC" gating:location="0" />
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q2">
+      <gating:position gating:divider_ref="FSC" gating:location="25000" />
+      <gating:position gating:divider_ref="SSC" gating:location="0" />
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q3">
+      <gating:position gating:divider_ref="FSC" gating:location="150000" />
+      <gating:position gating:divider_ref="SSC" gating:location="0" />
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q4">
+      <gating:position gating:divider_ref="SSC" gating:location="20000" />
+      <gating:position gating:divider_ref="FSC" gating:location="0" />      
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q5">
+      <gating:position gating:divider_ref="FSC" gating:location="25000" />
+      <gating:position gating:divider_ref="SSC" gating:location="20000" />
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q6">
+      <gating:position gating:divider_ref="SSC" gating:location="20000" />
+      <gating:position gating:divider_ref="FSC" gating:location="125000" />      
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q7">
+      <gating:position gating:divider_ref="FSC" gating:location="5000" />      
+    </gating:Quadrant>
+  </gating:QuadrantGate>
+  
+  <gating:QuadrantGate gating:id="myQuadrantGateArcSinh">
+    <gating:divider gating:id="FSC1" gating:compensation-ref="uncompensated" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="FSC-A" />
+      <gating:value>10</gating:value>
+    </gating:divider>
+    <gating:divider gating:id="SSC1" gating:compensation-ref="uncompensated" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="SSC-A" />
+      <gating:value>11</gating:value>
+    </gating:divider>    
+    <gating:Quadrant gating:id="Q1A">
+      <gating:position gating:divider_ref="FSC1" gating:location="0" />
+      <gating:position gating:divider_ref="SSC1" gating:location="0" />      
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q2A">
+      <gating:position gating:divider_ref="FSC1" gating:location="20" />
+      <gating:position gating:divider_ref="SSC1" gating:location="0" />
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q3A">
+      <gating:position gating:divider_ref="FSC1" gating:location="0" />
+      <gating:position gating:divider_ref="SSC1" gating:location="20" />
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q4A">
+      <gating:position gating:divider_ref="FSC1" gating:location="20" />
+      <gating:position gating:divider_ref="SSC1" gating:location="20" />
+    </gating:Quadrant>
+  </gating:QuadrantGate>
+
+  <gating:QuadrantGate gating:id="myQuadrantGateArcSinhFCSComp">
+    <gating:divider gating:id="FSC2" gating:compensation-ref="FCS" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="FSC-A" />
+      <gating:value>10</gating:value>
+    </gating:divider>
+    <gating:divider gating:id="SSC2" gating:compensation-ref="FCS" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="SSC-A" />
+      <gating:value>11</gating:value>
+    </gating:divider>    
+    <gating:Quadrant gating:id="Q1B">
+      <gating:position gating:divider_ref="FSC2" gating:location="0" />
+      <gating:position gating:divider_ref="SSC2" gating:location="0" />      
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q2B">
+      <gating:position gating:divider_ref="FSC2" gating:location="20" />
+      <gating:position gating:divider_ref="SSC2" gating:location="0" />
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q3B">
+      <gating:position gating:divider_ref="FSC2" gating:location="0" />
+      <gating:position gating:divider_ref="SSC2" gating:location="20" />
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q4B">
+      <gating:position gating:divider_ref="FSC2" gating:location="20" />
+      <gating:position gating:divider_ref="SSC2" gating:location="20" />
+    </gating:Quadrant>
+  </gating:QuadrantGate>
+  
+  <gating:QuadrantGate gating:id="myQuadrantGateArcSinhFCSComp2">
+    <gating:divider gating:id="APC" gating:compensation-ref="FCS" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="APC-A" />
+      <gating:value>6</gating:value>
+    </gating:divider>
+    <gating:divider gating:id="PE" gating:compensation-ref="FCS" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="PE-A" />
+      <gating:value>6</gating:value>
+    </gating:divider>    
+    <gating:Quadrant gating:id="Q1C">
+      <gating:position gating:divider_ref="APC" gating:location="0" />
+      <gating:position gating:divider_ref="PE" gating:location="0" />      
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q2C">
+      <gating:position gating:divider_ref="APC" gating:location="20" />
+      <gating:position gating:divider_ref="PE" gating:location="0" />
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q3C">
+      <gating:position gating:divider_ref="APC" gating:location="0" />
+      <gating:position gating:divider_ref="PE" gating:location="20" />
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q4C">
+      <gating:position gating:divider_ref="APC" gating:location="20" />
+      <gating:position gating:divider_ref="PE" gating:location="20" />
+    </gating:Quadrant>
+  </gating:QuadrantGate>
+  
+  <gating:QuadrantGate gating:id="myQuadrantGateArcSinhCustomComp">
+    <gating:divider gating:id="APC1" gating:compensation-ref="MySpill" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="Comp-APC" />
+      <gating:value>6</gating:value>
+    </gating:divider>
+    <gating:divider gating:id="PE1" gating:compensation-ref="MySpill" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="Comp-PE" />
+      <gating:value>6</gating:value>
+    </gating:divider>    
+    <gating:Quadrant gating:id="Q1D">
+      <gating:position gating:divider_ref="APC1" gating:location="0" />
+      <gating:position gating:divider_ref="PE1" gating:location="0" />      
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q2D">
+      <gating:position gating:divider_ref="APC1" gating:location="20" />
+      <gating:position gating:divider_ref="PE1" gating:location="0" />
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q3D">
+      <gating:position gating:divider_ref="APC1" gating:location="0" />
+      <gating:position gating:divider_ref="PE1" gating:location="20" />
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q4D">
+      <gating:position gating:divider_ref="APC1" gating:location="20" />
+      <gating:position gating:divider_ref="PE1" gating:location="20" />
+    </gating:Quadrant>
+  </gating:QuadrantGate>
+
+  <gating:QuadrantGate gating:id="myQuadrantGateCustomComp">
+    <gating:divider gating:id="APC2" gating:compensation-ref="MySpill">
+      <data-type:fcs-dimension data-type:name="Comp-APC" />
+      <gating:value>500</gating:value>
+    </gating:divider>
+    <gating:divider gating:id="PE2" gating:compensation-ref="MySpill">
+      <data-type:fcs-dimension data-type:name="Comp-PE" />
+      <gating:value>500</gating:value>
+    </gating:divider>    
+    <gating:Quadrant gating:id="Q1E">
+      <gating:position gating:divider_ref="APC2" gating:location="0" />
+      <gating:position gating:divider_ref="PE2" gating:location="0" />      
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q2E">
+      <gating:position gating:divider_ref="APC2" gating:location="200000" />
+      <gating:position gating:divider_ref="PE2" gating:location="0" />
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q3E">
+      <gating:position gating:divider_ref="APC2" gating:location="0" />
+      <gating:position gating:divider_ref="PE2" gating:location="200000" />
+    </gating:Quadrant>
+    <gating:Quadrant gating:id="Q4E">
+      <gating:position gating:divider_ref="APC2" gating:location="200000" />
+      <gating:position gating:divider_ref="PE2" gating:location="200000" />
+    </gating:Quadrant>
+  </gating:QuadrantGate>
+
+  <!--
+  <transforms:transformation transforms:id="adjustedLogicle">
+    <transforms:logicle transforms:T="10000" transforms:W="0.7" transforms:M="4.5" transforms:A="0" />
+  </transforms:transformation>
+  -->
+
+  <gating:EllipsoidGate gating:id="myEllipsoidGate">
+    <gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="APC-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="PE-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="PerCP-Cy5-5-A" />
+    </gating:dimension>
+    <gating:mean>
+      <gating:coordinate data-type:value="0.2" />
+      <gating:coordinate data-type:value="0.3" />
+      <gating:coordinate data-type:value="0.25" />
+    </gating:mean>
+    <gating:covarianceMatrix>
+      <gating:row>
+        <gating:entry data-type:value="3" />
+        <gating:entry data-type:value="-2" />
+        <gating:entry data-type:value="11" />
+      </gating:row>
+      <gating:row>
+        <gating:entry data-type:value="-2" />
+        <gating:entry data-type:value="0.3" />
+        <gating:entry data-type:value="-1" />
+      </gating:row>
+      <gating:row>
+        <gating:entry data-type:value="11" />
+        <gating:entry data-type:value="-1" />
+        <gating:entry data-type:value="2" />
+      </gating:row>
+    </gating:covarianceMatrix>
+    <gating:distanceSquare data-type:value="3500" />
+  </gating:EllipsoidGate>
+  
+  <gating:BooleanGate gating:id="myBooleanOr">
+    <gating:or>
+      <gating:gateReference gating:ref="myPolygonGate" />
+      <gating:gateReference gating:ref="Q2" />
+    </gating:or>
+  </gating:BooleanGate>
+
+  <gating:BooleanGate gating:id="myBooleanOrWithParent" gating:parent_id="myEllipsoidGate">
+    <!-- Should give same result as myBooleanAnd -->
+    <gating:or>
+      <gating:gateReference gating:ref="myPolygonGate" />
+      <gating:gateReference gating:ref="Q2" />
+    </gating:or>
+  </gating:BooleanGate>
+
+  
+  <gating:BooleanGate gating:id="myBooleanAnd">
+    <gating:and>
+      <gating:gateReference gating:ref="myBooleanOr" />
+      <gating:gateReference gating:ref="myEllipsoidGate" />
+    </gating:and>
+  </gating:BooleanGate>
+
+  <gating:BooleanGate gating:id="myBooleanNot">
+    <gating:not>
+      <gating:gateReference gating:ref="myBooleanAnd" />
+    </gating:not>
+  </gating:BooleanGate>
+
+  <transforms:transformation transforms:id="Tr_Arcsinh">
+    <transforms:fasinh transforms:T="1.1752011936438014" transforms:M="0.43429448190325176" transforms:A="0.0" />
+  </transforms:transformation>
+
+  <gating:PolygonGate gating:id="myPolygonGateWithoutSpillover">
+    <gating:dimension gating:compensation-ref="uncompensated">
+      <data-type:fcs-dimension data-type:name="PE-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="uncompensated">
+        <data-type:fcs-dimension data-type:name="PerCP-Cy5-5-A" />
+    </gating:dimension>
+    <gating:vertex>
+      <gating:coordinate data-type:value="5" />
+      <gating:coordinate data-type:value="5" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="500" />
+      <gating:coordinate data-type:value="5" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="500" />
+      <gating:coordinate data-type:value="500" />
+    </gating:vertex>
+  </gating:PolygonGate>
+
+  <gating:PolygonGate gating:id="myPolygonGateWithFCSSpillover">
+    <gating:dimension gating:compensation-ref="FCS">
+      <data-type:fcs-dimension data-type:name="PE-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="FCS">
+        <data-type:fcs-dimension data-type:name="PerCP-Cy5-5-A" />
+    </gating:dimension>
+    <gating:vertex>
+      <gating:coordinate data-type:value="5" />
+      <gating:coordinate data-type:value="5" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="500" />
+      <gating:coordinate data-type:value="5" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="500" />
+      <gating:coordinate data-type:value="500" />
+    </gating:vertex>
+  </gating:PolygonGate>
+  
+  <gating:PolygonGate gating:id="myPolygonGateWithCustomSpillover">
+    <gating:dimension gating:compensation-ref="MySpill">
+      <data-type:fcs-dimension data-type:name="Comp-PE" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="MySpill">
+        <data-type:fcs-dimension data-type:name="Comp-PerCP-Cy5-5" />
+    </gating:dimension>
+    <gating:vertex>
+      <gating:coordinate data-type:value="5" />
+      <gating:coordinate data-type:value="5" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="500" />
+      <gating:coordinate data-type:value="5" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="500" />
+      <gating:coordinate data-type:value="500" />
+    </gating:vertex>
+  </gating:PolygonGate>
+
+  <gating:PolygonGate gating:id="myPolygonGateWithCustomInvertedAlreadySpillover">
+    <gating:dimension gating:compensation-ref="MyInvertedSpill">
+      <data-type:fcs-dimension data-type:name="Comp2-PE" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="MyInvertedSpill">
+        <data-type:fcs-dimension data-type:name="Comp2-PerCP-Cy5-5" />
+    </gating:dimension>
+    <gating:vertex>
+      <gating:coordinate data-type:value="5" />
+      <gating:coordinate data-type:value="5" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="500" />
+      <gating:coordinate data-type:value="5" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="500" />
+      <gating:coordinate data-type:value="500" />
+    </gating:vertex>
+  </gating:PolygonGate>
+  
+  <gating:PolygonGate gating:id="myPolygonGateWithCustomSpilloverAndArcSinH">
+    <gating:dimension gating:compensation-ref="MySpill" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="Comp-PE" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="MySpill" gating:transformation-ref="Tr_Arcsinh">
+        <data-type:fcs-dimension data-type:name="Comp-PerCP-Cy5-5" />
+    </gating:dimension>
+    <gating:vertex>
+      <gating:coordinate data-type:value="2" />
+      <gating:coordinate data-type:value="2" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="7" />
+      <gating:coordinate data-type:value="2" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="7" />
+      <gating:coordinate data-type:value="7" />
+    </gating:vertex>
+  </gating:PolygonGate>
+
+  <gating:PolygonGate gating:id="myPolygonGateWithFCSSpilloverAndArcSinH">
+    <gating:dimension gating:compensation-ref="FCS" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="PE-A" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="FCS" gating:transformation-ref="Tr_Arcsinh">
+        <data-type:fcs-dimension data-type:name="PerCP-Cy5-5-A" />
+    </gating:dimension>
+    <gating:vertex>
+      <gating:coordinate data-type:value="2" />
+      <gating:coordinate data-type:value="2" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="7" />
+      <gating:coordinate data-type:value="2" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="7" />
+      <gating:coordinate data-type:value="7" />
+    </gating:vertex>
+  </gating:PolygonGate>
+  
+  <gating:PolygonGate gating:id="myPolygonGateWithCustomNonSquareSpectrumMatrix">
+    <gating:dimension gating:compensation-ref="MyNonSquareSpectrum">
+      <data-type:fcs-dimension data-type:name="Deconvoluted-P1" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="MyNonSquareSpectrum">
+        <data-type:fcs-dimension data-type:name="Deconvoluted-P2" />
+    </gating:dimension>
+    <gating:vertex>
+      <gating:coordinate data-type:value="5" />
+      <gating:coordinate data-type:value="5" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="500" />
+      <gating:coordinate data-type:value="5" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="500" />
+      <gating:coordinate data-type:value="500" />
+    </gating:vertex>
+  </gating:PolygonGate>
+
+  <gating:PolygonGate gating:id="myPolygonGateWithCustomNonSquareSpectrumMatrixInvertedAlready">
+    <gating:dimension gating:compensation-ref="MyNonSquareSpectrumInvertedAlready">
+      <data-type:fcs-dimension data-type:name="Deconvoluted2-P1" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="MyNonSquareSpectrumInvertedAlready">
+        <data-type:fcs-dimension data-type:name="Deconvoluted2-P2" />
+    </gating:dimension>
+    <gating:vertex>
+      <gating:coordinate data-type:value="5" />
+      <gating:coordinate data-type:value="5" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="500" />
+      <gating:coordinate data-type:value="5" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="500" />
+      <gating:coordinate data-type:value="500" />
+    </gating:vertex>
+  </gating:PolygonGate>
+
+  <gating:PolygonGate gating:id="myPolygonGateWithCustomNonSquareSpectrumMatrixOnArcSinH">
+    <gating:dimension gating:compensation-ref="MyNonSquareSpectrum" gating:transformation-ref="Tr_Arcsinh">
+      <data-type:fcs-dimension data-type:name="Deconvoluted-P1" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="MyNonSquareSpectrum" gating:transformation-ref="Tr_Arcsinh">
+        <data-type:fcs-dimension data-type:name="Deconvoluted-P2" />
+    </gating:dimension>
+    <gating:vertex>
+      <gating:coordinate data-type:value="2" />
+      <gating:coordinate data-type:value="2" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="7" />
+      <gating:coordinate data-type:value="2" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="7" />
+      <gating:coordinate data-type:value="7" />
+    </gating:vertex>
+  </gating:PolygonGate>
+
+ 
+  <transforms:spectrumMatrix transforms:id="MySpill">
+    <transforms:fluorochromes>
+      <data-type:fcs-dimension data-type:name="Comp-PE" />
+      <data-type:fcs-dimension data-type:name="Comp-PerCP-Cy5-5" />
+      <data-type:fcs-dimension data-type:name="Comp-APC" />
+    </transforms:fluorochromes>
+    <transforms:detectors>
+      <data-type:fcs-dimension data-type:name="PE-A" />
+      <data-type:fcs-dimension data-type:name="PerCP-Cy5-5-A" />
+      <data-type:fcs-dimension data-type:name="APC-A" />
+    </transforms:detectors>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="1" />
+      <transforms:coefficient transforms:value="0.02" />
+      <transforms:coefficient transforms:value="0.06" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.11" />
+      <transforms:coefficient transforms:value="1" />
+      <transforms:coefficient transforms:value="0.07" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.09" />
+      <transforms:coefficient transforms:value="0.01" />
+      <transforms:coefficient transforms:value="1" />
+    </transforms:spectrum>
+  </transforms:spectrumMatrix>
+  
+  <transforms:spectrumMatrix transforms:id="MyInvertedSpill" transforms:matrix-inverted-already="true">
+    <transforms:fluorochromes>
+      <data-type:fcs-dimension data-type:name="Comp2-PE" />
+      <data-type:fcs-dimension data-type:name="Comp2-PerCP-Cy5-5" />
+      <data-type:fcs-dimension data-type:name="Comp2-APC" />
+    </transforms:fluorochromes>
+    <transforms:detectors>
+      <data-type:fcs-dimension data-type:name="PE-A" />
+      <data-type:fcs-dimension data-type:name="PerCP-Cy5-5-A" />
+      <data-type:fcs-dimension data-type:name="APC-A" />
+    </transforms:detectors>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="1.00746856" />
+      <transforms:coefficient transforms:value="-0.019558581" />
+      <transforms:coefficient transforms:value="-0.05907901" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="-0.10454767" />
+      <transforms:coefficient transforms:value="1.002730136" />
+      <transforms:coefficient transforms:value="-0.06391825" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="-0.08962669" />
+      <transforms:coefficient transforms:value="-0.008267029" />
+      <transforms:coefficient transforms:value="1.00595629" />
+    </transforms:spectrum>
+  </transforms:spectrumMatrix>
+  
+  <gating:PolygonGate gating:id="myPolygonGateWithSpilloverSameAsFCS">
+    <gating:dimension gating:compensation-ref="MySpillFromFCS">
+      <data-type:fcs-dimension data-type:name="Comp1-PE" />
+    </gating:dimension>
+    <gating:dimension gating:compensation-ref="MySpillFromFCS">
+        <data-type:fcs-dimension data-type:name="Comp1-PerCP-Cy5-5" />
+    </gating:dimension>
+    <gating:vertex>
+      <gating:coordinate data-type:value="5" />
+      <gating:coordinate data-type:value="5" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="500" />
+      <gating:coordinate data-type:value="5" />
+    </gating:vertex>
+    <gating:vertex>
+      <gating:coordinate data-type:value="500" />
+      <gating:coordinate data-type:value="500" />
+    </gating:vertex>
+  </gating:PolygonGate>
+  
+  <transforms:spectrumMatrix transforms:id="MySpillFromFCS">
+    <transforms:fluorochromes>
+      <data-type:fcs-dimension data-type:name="Comp1-PE" />
+      <data-type:fcs-dimension data-type:name="Comp1-PerCP-Cy5-5" />
+      <data-type:fcs-dimension data-type:name="Comp1-APC" />
+      <data-type:fcs-dimension data-type:name="Comp1-APC-Cy7" />
+      <data-type:fcs-dimension data-type:name="Comp1-Pacific Blue" />
+    </transforms:fluorochromes>
+    <transforms:detectors>
+      <data-type:fcs-dimension data-type:name="PE-A" />
+      <data-type:fcs-dimension data-type:name="PerCP-Cy5-5-A" />
+      <data-type:fcs-dimension data-type:name="APC-A" />
+      <data-type:fcs-dimension data-type:name="APC-Cy7-A" />
+      <data-type:fcs-dimension data-type:name="Pacific Blue-A" />
+    </transforms:detectors>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="1" />
+      <transforms:coefficient transforms:value="0.341872057" />
+      <transforms:coefficient transforms:value="0.001349977" />
+      <transforms:coefficient transforms:value="4.499925e-04" />
+      <transforms:coefficient transforms:value="0.010217607" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.003401361" />
+      <transforms:coefficient transforms:value="1" />
+      <transforms:coefficient transforms:value="0.013674748" />
+      <transforms:coefficient transforms:value="3.022839e-03" />
+      <transforms:coefficient transforms:value="0.000774103" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.006864493" />
+      <transforms:coefficient transforms:value="0.043231700" />
+      <transforms:coefficient transforms:value="1" />
+      <transforms:coefficient transforms:value="4.256187e-02" />
+      <transforms:coefficient transforms:value="0.003046968" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.002191491" />
+      <transforms:coefficient transforms:value="0.008035467" />
+      <transforms:coefficient transforms:value="0.076173203" />
+      <transforms:coefficient transforms:value="1" />
+      <transforms:coefficient transforms:value="0.002980204" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.001097753" />
+      <transforms:coefficient transforms:value="0.004291216" />
+      <transforms:coefficient transforms:value="0" />
+      <transforms:coefficient transforms:value="9.291326e-05" />
+      <transforms:coefficient transforms:value="1" />
+    </transforms:spectrum>
+  </transforms:spectrumMatrix>
+  
+  <transforms:spectrumMatrix transforms:id="MyNonSquareSpectrum">
+    <transforms:fluorochromes>
+      <data-type:fcs-dimension data-type:name="Deconvoluted-P1" />
+      <data-type:fcs-dimension data-type:name="Deconvoluted-P2" />
+    </transforms:fluorochromes>
+    <transforms:detectors>
+      <data-type:fcs-dimension data-type:name="PE-A" />
+      <data-type:fcs-dimension data-type:name="PerCP-Cy5-5-A" />
+      <data-type:fcs-dimension data-type:name="APC-A" />
+    </transforms:detectors>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.78" />
+      <transforms:coefficient transforms:value="0.13" />
+      <transforms:coefficient transforms:value="0.22" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="0.05" />
+      <transforms:coefficient transforms:value="0.57" />
+      <transforms:coefficient transforms:value="0.89" />
+    </transforms:spectrum>
+  </transforms:spectrumMatrix>
+    
+  <transforms:spectrumMatrix transforms:id="MyNonSquareSpectrumInvertedAlready" transforms:matrix-inverted-already="true">
+    <transforms:fluorochromes>
+      <data-type:fcs-dimension data-type:name="Deconvoluted2-P1" />
+      <data-type:fcs-dimension data-type:name="Deconvoluted2-P2" />
+    </transforms:fluorochromes>
+    <transforms:detectors>
+      <data-type:fcs-dimension data-type:name="PE-A" />
+      <data-type:fcs-dimension data-type:name="PerCP-Cy5-5-A" />
+      <data-type:fcs-dimension data-type:name="APC-A" />
+    </transforms:detectors>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="1.30203507" />
+      <transforms:coefficient transforms:value="-0.3146035" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="-0.04635483" />
+      <transforms:coefficient transforms:value="0.5219464" />
+    </transforms:spectrum>
+    <transforms:spectrum>
+      <transforms:coefficient transforms:value="-0.04346012" />
+      <transforms:coefficient transforms:value="0.8069896" />
+    </transforms:spectrum>
+  </transforms:spectrumMatrix>
+
+  <transforms:transformation transforms:id="myLin">
+    <transforms:flin transforms:T="1000" transforms:A="0" />
+  </transforms:transformation>
+
+  <transforms:transformation transforms:id="myLog">
+    <transforms:flog transforms:T="262144" transforms:M="4" />
+  </transforms:transformation>
+
+  <transforms:transformation transforms:id="myLogicle">
+    <transforms:logicle transforms:T="262144" transforms:M="5" transforms:W="1" transforms:A="0.5" />
+  </transforms:transformation>
+
+  <transforms:transformation transforms:id="myHyperlog">
+    <transforms:hyperlog transforms:T="262144" transforms:M="5" transforms:W="1" transforms:A="0.5" />
+  </transforms:transformation>
+
+
+</gating:Gating-ML>
+

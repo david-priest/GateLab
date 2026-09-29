@@ -29,6 +29,7 @@ import {
   type WorkspaceStorage,
   type WorkspaceSample,
 } from "./workspace";
+import { assertKnownWorkspaceFeatures, stampWorkspaceV3 } from "./workspaceFeatures";
 
 export const WORKSPACE_VERSION_3 = 3 as const;
 
@@ -146,6 +147,9 @@ const WORKSPACE_V3_ALLOWED_KEYS = [
   // The Plotting tab's saved state (#217). Every top-level key the saver writes must be listed
   // here, or a workspace with a compensation profile refuses to reopen with "Unexpected: …".
   "plotting",
+  // What the workspace needs of the GateLab that opens it (workspaceFeatures.ts). GateLab 0.8.3
+  // does not list it, and so refuses a workspace it would otherwise misread.
+  "requiredFeatures",
 ] as const;
 
 const SAMPLE_V3_REQUIRED_KEYS = ["fileName", "dataPath", "logicleW", "assay"] as const;
@@ -169,6 +173,10 @@ const SAMPLE_V3_ALLOWED_KEYS = [
   // A file's group (#236). Missed here when the saver gained it, so a workspace with a group
   // refused to reopen: "sample 1 has an invalid field set. Unexpected: groupId" (2026-09-16).
   "groupId",
+  // The file's acquisition keywords, which relinking checks a same-named file against.
+  "identity",
+  // A matrix the file is compensated with that is not its own (WorkspaceSample.externalSpillover).
+  "externalSpillover",
 ] as const;
 
 /**
@@ -229,6 +237,11 @@ export async function validateWorkspaceV3(
     "workspace",
     "invalid-workspace-v3",
   );
+  try {
+    assertKnownWorkspaceFeatures(untrusted.requiredFeatures);
+  } catch (cause) {
+    invalid("unsupported-workspace-version", cause instanceof Error ? cause.message : String(cause), { cause });
+  }
   if (typeof untrusted.savedAt !== "string" || typeof untrusted.app !== "string") {
     invalid("invalid-workspace-v3", "savedAt and app must be strings.");
   }
@@ -267,8 +280,8 @@ export async function validateWorkspaceV3(
     });
   }
 
-  const { compensation: _compensation, version: _version, samples: _samples, ...commonWorkspace } =
-    cloned;
+  const { compensation: _compensation, version: _version, samples: _samples, requiredFeatures: _features, ...commonWorkspace } =
+    cloned as typeof cloned & { requiredFeatures?: unknown };
   const v2Surrogate = {
     ...commonWorkspace,
     version: 2,
@@ -393,7 +406,7 @@ export function packWorkspaceV3(
 ): Uint8Array {
   assertPackableV3(workspace);
   const files: Record<string, Uint8Array> = {
-    "workspace.json": strToU8(JSON.stringify(workspace, null, 2)),
+    "workspace.json": strToU8(JSON.stringify(stampWorkspaceV3(workspace), null, 2)),
   };
   for (const sample of workspace.samples) {
     const bytes = fcsByPath[sample.dataPath];
@@ -410,7 +423,7 @@ export function packWorkspaceV3(
 
 export function packWorkspaceV3Reference(workspace: WorkspaceFileV3): Uint8Array {
   assertPackableV3(workspace);
-  return strToU8(JSON.stringify(workspace, null, 2));
+  return strToU8(JSON.stringify(stampWorkspaceV3(workspace), null, 2));
 }
 
 export function packWorkspaceV3ForStorage(
@@ -448,7 +461,7 @@ export async function createPortableWorkspaceV3ArchivePlan(
   const entries: StreamZipEntry[] = [
     Object.freeze({
       path: "workspace.json",
-      bytes: strToU8(JSON.stringify(workspace, null, 2)),
+      bytes: strToU8(JSON.stringify(stampWorkspaceV3(workspace), null, 2)),
     }),
     // The manifest precedes large payloads so streamed readers can allocate exact buffers.
     Object.freeze({ path: PORTABLE_ASSAY_MANIFEST_PATH, bytes: portable.manifestBytes }),

@@ -1,0 +1,964 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<gating:Gating-ML xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+    xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations"
+    xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes"
+    xsi:schemaLocation="
+        http://www.isac-net.org/std/Gating-ML/v2.0/gating ../../XSD/Gating-ML.v2.0.xsd
+        http://www.isac-net.org/std/Gating-ML/v2.0/transformations ../../XSD/Transformations.v2.0.xsd
+        http://www.isac-net.org/std/Gating-ML/v2.0/datatypes ../../XSD/DataTypes.v2.0.xsd">
+    <data-type:custom_info>
+        This Gating-ML 2.0 file is part of Gating-ML compliance tests - an informative part of Gating-ML 2.0 specification.
+        Gates in this file are supposed to be applied on data2.fcs.
+        <author>
+            <name>Josef Spidlen</name>
+            <email>jspidlen@bccrc.ca</email>
+        </author>
+        <copyright>
+            Copyright (c) 2012 ISAC (International Society for Advancement of Cytometry). 
+            Free of charge distribution and read-only usage permited. Modification
+            and all other rights reserved. For all other uses please contact ISAC.
+        </copyright>
+    </data-type:custom_info>
+    
+    <gating:PolygonGate gating:id="Poly1u">
+        <gating:dimension gating:compensation-ref="uncompensated">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="200000" />
+            <gating:coordinate data-type:value="100000" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="200000" />
+            <gating:coordinate data-type:value="200000" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="100000" />
+            <gating:coordinate data-type:value="200000" />
+        </gating:vertex>
+    </gating:PolygonGate>
+    
+    <gating:PolygonGate gating:id="Poly1c">
+        <data-type:custom_info>
+            Same as Poly1u except compesated values are used here.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="FCS">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="200000" />
+            <gating:coordinate data-type:value="100000" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="200000" />
+            <gating:coordinate data-type:value="200000" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="100000" />
+            <gating:coordinate data-type:value="200000" />
+        </gating:vertex>
+    </gating:PolygonGate>
+    
+    <transforms:transformation transforms:id="Logicle_262144_0.5_4.5_0">
+        <transforms:logicle transforms:T="262144" transforms:M="4.5" transforms:W="0.5" transforms:A="0" />
+    </transforms:transformation>
+    
+    <transforms:transformation transforms:id="Logicle_262144_0.5_4.5_0_Bound" transforms:boundMin="0.05" transforms:boundMax="0.95">
+        <transforms:logicle transforms:T="262144" transforms:M="4.5" transforms:W="0.5" transforms:A="0" />
+    </transforms:transformation>
+    
+    <gating:PolygonGate gating:id="Poly1ul">
+        <data-type:custom_info>
+            Now uncompensated on Logicle scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:transformation-ref="Logicle_262144_0.5_4.5_0">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:transformation-ref="Logicle_262144_0.5_4.5_0">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.90" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.90" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+    </gating:PolygonGate>
+    
+    <gating:PolygonGate gating:id="Poly1ulb">
+        <data-type:custom_info>
+            Now uncompensated on bound Logicle scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:transformation-ref="Logicle_262144_0.5_4.5_0_Bound">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:transformation-ref="Logicle_262144_0.5_4.5_0_Bound">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.90" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.90" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+    </gating:PolygonGate>
+    
+    <gating:PolygonGate gating:id="Poly1cl">
+        <data-type:custom_info>
+            Now compensated on Logicle scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="FCS" 
+            gating:transformation-ref="Logicle_262144_0.5_4.5_0">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS" 
+            gating:transformation-ref="Logicle_262144_0.5_4.5_0">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.90" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.90" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+    </gating:PolygonGate>
+    
+    <gating:PolygonGate gating:id="Poly1clb">
+        <data-type:custom_info>
+            Now compensated on bound Logicle scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="FCS" 
+            gating:transformation-ref="Logicle_262144_0.5_4.5_0_Bound">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS" 
+            gating:transformation-ref="Logicle_262144_0.5_4.5_0_Bound">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.90" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.90" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+    </gating:PolygonGate>
+    
+    <transforms:transformation transforms:id="Hyperlog_262144_0.5_4.5_0">
+        <transforms:hyperlog  transforms:T="262144" transforms:M="4.5" transforms:W="0.5" transforms:A="0" />
+    </transforms:transformation>
+    
+    <transforms:transformation transforms:id="Hyperlog_262144_0.5_4.5_0_Bound" transforms:boundMin="0.075">
+        <transforms:hyperlog  transforms:T="262144" transforms:M="4.5" transforms:W="0.5" transforms:A="0" />
+    </transforms:transformation>
+    
+    <gating:PolygonGate gating:id="Poly1uh">
+        <data-type:custom_info>
+            Now uncompensated on Hyperlog scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:transformation-ref="Hyperlog_262144_0.5_4.5_0">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:transformation-ref="Hyperlog_262144_0.5_4.5_0">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.90" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.90" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+    </gating:PolygonGate>
+    
+    <gating:PolygonGate gating:id="Poly1uhb">
+        <data-type:custom_info>
+            Now uncompensated on bound Hyperlog scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:transformation-ref="Hyperlog_262144_0.5_4.5_0_Bound">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:transformation-ref="Hyperlog_262144_0.5_4.5_0_Bound">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.90" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.90" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+    </gating:PolygonGate>
+
+    <gating:PolygonGate gating:id="Poly1ch">
+        <data-type:custom_info>
+            Now compensated on Hyperlog scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="FCS" 
+            gating:transformation-ref="Hyperlog_262144_0.5_4.5_0">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS" 
+            gating:transformation-ref="Hyperlog_262144_0.5_4.5_0">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.90" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.90" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+    </gating:PolygonGate>
+
+    <gating:PolygonGate gating:id="Poly1chb">
+        <data-type:custom_info>
+            Now compensated on bound Hyperlog scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="FCS" 
+            gating:transformation-ref="Hyperlog_262144_0.5_4.5_0_Bound">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS" 
+            gating:transformation-ref="Hyperlog_262144_0.5_4.5_0_Bound">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.90" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.90" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+    </gating:PolygonGate>
+    
+
+    <transforms:transformation transforms:id="Arcsinh_262144_4.5_0">
+        <transforms:fasinh transforms:T="262144" transforms:M="4.5" transforms:A="0" />
+    </transforms:transformation>
+    
+    <transforms:transformation transforms:id="Arcsinh_262144_4.5_0_Bound" transforms:boundMax="0.8912345">
+        <transforms:fasinh transforms:T="262144" transforms:M="4.5" transforms:A="0" />
+    </transforms:transformation>
+    
+    <gating:PolygonGate gating:id="Poly1ua">
+        <data-type:custom_info>
+            Now uncompensated on Arcsinh scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:transformation-ref="Arcsinh_262144_4.5_0">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:transformation-ref="Arcsinh_262144_4.5_0">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.90" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.90" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+    </gating:PolygonGate>
+    
+    <gating:PolygonGate gating:id="Poly1uab">
+        <data-type:custom_info>
+            Now uncompensated on bound Arcsinh and Arcsinh scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:transformation-ref="Arcsinh_262144_4.5_0_Bound">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:transformation-ref="Arcsinh_262144_4.5_0">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.90" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.90" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+    </gating:PolygonGate>
+    
+    <gating:PolygonGate gating:id="Poly1uab2">
+        <data-type:custom_info>
+            Now uncompensated on bound Arcsinh scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:transformation-ref="Arcsinh_262144_4.5_0_Bound">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:transformation-ref="Arcsinh_262144_4.5_0_Bound">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.90" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.90" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+    </gating:PolygonGate>
+    
+    <gating:PolygonGate gating:id="Poly1ca">
+        <data-type:custom_info>
+            Now compensated on Arcsinh scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="FCS" 
+            gating:transformation-ref="Arcsinh_262144_4.5_0">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS" 
+            gating:transformation-ref="Arcsinh_262144_4.5_0">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.90" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.90" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+    </gating:PolygonGate>
+    
+    <gating:PolygonGate gating:id="Poly1cab">
+        <data-type:custom_info>
+            Now compensated on bound Arcsinh scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="FCS" 
+            gating:transformation-ref="Arcsinh_262144_4.5_0_Bound">
+            <data-type:fcs-dimension data-type:name="FITC-A" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS" 
+            gating:transformation-ref="Arcsinh_262144_4.5_0_Bound">
+            <data-type:fcs-dimension data-type:name="PE-A" />
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0" />
+            <gating:coordinate data-type:value="0" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.90" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.97" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.90" />
+            <gating:coordinate data-type:value="0.97" />
+        </gating:vertex>
+    </gating:PolygonGate>
+    
+    <transforms:transformation transforms:id="Logicle_262144_0.3_4.2_0.5">
+        <transforms:logicle transforms:T="262144" transforms:M="4.2" transforms:W="0.3" transforms:A="0.5" />
+    </transforms:transformation>
+    
+    <transforms:transformation transforms:id="Logicle_262144_0.3_4.2_0.5_Bound1" transforms:boundMin="0.2" transforms:boundMax=".8">
+        <transforms:logicle transforms:T="262144" transforms:M="4.2" transforms:W="0.3" transforms:A="0.5" />
+    </transforms:transformation>
+    <transforms:transformation transforms:id="Logicle_262144_0.3_4.2_0.5_Bound2" transforms:boundMin="0.5">
+        <transforms:logicle transforms:T="262144" transforms:M="4.2" transforms:W="0.3" transforms:A="0.5" />
+    </transforms:transformation>
+    
+    <gating:EllipsoidGate gating:id="Ellipseul">
+        <data-type:custom_info>
+            Half-axes of this ellipse are 0.23 and 0.15, rotation 18 degress. 
+            Uncompensated on Logicle scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated"
+            gating:transformation-ref="Logicle_262144_0.3_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="PE-Cy5-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated"
+            gating:transformation-ref="Logicle_262144_0.3_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="APC-A"/>
+        </gating:dimension>
+        <gating:mean>
+            <gating:coordinate data-type:value="0.6587503"/>
+            <gating:coordinate data-type:value="0.6204246"/>
+        </gating:mean>
+        <gating:covarianceMatrix>
+            <gating:row>
+                <gating:entry data-type:value="0.0499970583" />
+                <gating:entry data-type:value="0.0089343358" />
+            </gating:row>
+            <gating:row>
+                <gating:entry data-type:value="0.0089343358" />
+                <gating:entry data-type:value="0.0254029417" />
+            </gating:row>
+        </gating:covarianceMatrix>
+        <gating:distanceSquare data-type:value="1"/>
+    </gating:EllipsoidGate>
+    
+    <gating:EllipsoidGate gating:id="Ellipseulb">
+        <data-type:custom_info>
+            Half-axes of this ellipse are 0.23 and 0.15, rotation 18 degress. 
+            Uncompensated on bound Logicle and Logicle scales.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated"
+            gating:transformation-ref="Logicle_262144_0.3_4.2_0.5_Bound1">
+            <data-type:fcs-dimension data-type:name="PE-Cy5-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated"
+            gating:transformation-ref="Logicle_262144_0.3_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="APC-A"/>
+        </gating:dimension>
+        <gating:mean>
+            <gating:coordinate data-type:value="0.6587503"/>
+            <gating:coordinate data-type:value="0.6204246"/>
+        </gating:mean>
+        <gating:covarianceMatrix>
+            <gating:row>
+                <gating:entry data-type:value="0.0499970583" />
+                <gating:entry data-type:value="0.0089343358" />
+            </gating:row>
+            <gating:row>
+                <gating:entry data-type:value="0.0089343358" />
+                <gating:entry data-type:value="0.0254029417" />
+            </gating:row>
+        </gating:covarianceMatrix>
+        <gating:distanceSquare data-type:value="1"/>
+    </gating:EllipsoidGate>
+    
+    <gating:EllipsoidGate gating:id="Ellipseulb2">
+        <data-type:custom_info>
+            Half-axes of this ellipse are 0.23 and 0.15, rotation 18 degress. 
+            Uncompensated on bound Logicle scales (different axes bound differently).
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated"
+            gating:transformation-ref="Logicle_262144_0.3_4.2_0.5_Bound1">
+            <data-type:fcs-dimension data-type:name="PE-Cy5-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated"
+            gating:transformation-ref="Logicle_262144_0.3_4.2_0.5_Bound2">
+            <data-type:fcs-dimension data-type:name="APC-A"/>
+        </gating:dimension>
+        <gating:mean>
+            <gating:coordinate data-type:value="0.6587503"/>
+            <gating:coordinate data-type:value="0.6204246"/>
+        </gating:mean>
+        <gating:covarianceMatrix>
+            <gating:row>
+                <gating:entry data-type:value="0.0499970583" />
+                <gating:entry data-type:value="0.0089343358" />
+            </gating:row>
+            <gating:row>
+                <gating:entry data-type:value="0.0089343358" />
+                <gating:entry data-type:value="0.0254029417" />
+            </gating:row>
+        </gating:covarianceMatrix>
+        <gating:distanceSquare data-type:value="1"/>
+    </gating:EllipsoidGate>    
+    
+    <gating:EllipsoidGate gating:id="Ellipsecl">
+        <data-type:custom_info>
+            Half-axes of this ellipse are 0.23 and 0.15, rotation 18 degress. 
+            Compensated on Logicle scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="FCS"
+            gating:transformation-ref="Logicle_262144_0.3_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="PE-Cy5-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS"
+            gating:transformation-ref="Logicle_262144_0.3_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="APC-A"/>
+        </gating:dimension>
+        <gating:mean>
+            <gating:coordinate data-type:value="0.6587503"/>
+            <gating:coordinate data-type:value="0.6204246"/>
+        </gating:mean>
+        <gating:covarianceMatrix>
+            <gating:row>
+                <gating:entry data-type:value="0.0499970583" />
+                <gating:entry data-type:value="0.0089343358" />
+            </gating:row>
+            <gating:row>
+                <gating:entry data-type:value="0.0089343358" />
+                <gating:entry data-type:value="0.0254029417" />
+            </gating:row>
+        </gating:covarianceMatrix>
+        <gating:distanceSquare data-type:value="1"/>
+    </gating:EllipsoidGate>
+    
+    <gating:EllipsoidGate gating:id="Ellipseclb">
+        <data-type:custom_info>
+            Half-axes of this ellipse are 0.23 and 0.15, rotation 18 degress. 
+            Compensated on Bound Logicle scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="FCS"
+            gating:transformation-ref="Logicle_262144_0.3_4.2_0.5_Bound1">
+            <data-type:fcs-dimension data-type:name="PE-Cy5-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS"
+            gating:transformation-ref="Logicle_262144_0.3_4.2_0.5_Bound1">
+            <data-type:fcs-dimension data-type:name="APC-A"/>
+        </gating:dimension>
+        <gating:mean>
+            <gating:coordinate data-type:value="0.6587503"/>
+            <gating:coordinate data-type:value="0.6204246"/>
+        </gating:mean>
+        <gating:covarianceMatrix>
+            <gating:row>
+                <gating:entry data-type:value="0.0499970583" />
+                <gating:entry data-type:value="0.0089343358" />
+            </gating:row>
+            <gating:row>
+                <gating:entry data-type:value="0.0089343358" />
+                <gating:entry data-type:value="0.0254029417" />
+            </gating:row>
+        </gating:covarianceMatrix>
+        <gating:distanceSquare data-type:value="1"/>
+    </gating:EllipsoidGate>
+
+    <transforms:transformation transforms:id="Hyperlog_262144_0.3_4.2_0.5">
+        <transforms:hyperlog transforms:T="262144" transforms:M="4.2" transforms:W="0.3" transforms:A="0.5" />
+    </transforms:transformation>
+    
+    <gating:EllipsoidGate gating:id="Ellipseuh">
+        <data-type:custom_info>
+            Half-axes of this ellipse are 0.23 and 0.15, rotation 18 degress. 
+            Uncompensated on Hyperlog scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated"
+            gating:transformation-ref="Hyperlog_262144_0.3_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="PE-Cy5-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated"
+            gating:transformation-ref="Hyperlog_262144_0.3_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="APC-A"/>
+        </gating:dimension>
+        <gating:mean>
+            <gating:coordinate data-type:value="0.6587503"/>
+            <gating:coordinate data-type:value="0.6204246"/>
+        </gating:mean>
+        <gating:covarianceMatrix>
+            <gating:row>
+                <gating:entry data-type:value="0.0499970583" />
+                <gating:entry data-type:value="0.0089343358" />
+            </gating:row>
+            <gating:row>
+                <gating:entry data-type:value="0.0089343358" />
+                <gating:entry data-type:value="0.0254029417" />
+            </gating:row>
+        </gating:covarianceMatrix>
+        <gating:distanceSquare data-type:value="1"/>
+    </gating:EllipsoidGate>
+    
+    <gating:EllipsoidGate gating:id="Ellipsech">
+        <data-type:custom_info>
+            Half-axes of this ellipse are 0.23 and 0.15, rotation 18 degress. 
+            Compensated on Hyperlog scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="FCS"
+            gating:transformation-ref="Hyperlog_262144_0.3_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="PE-Cy5-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS"
+            gating:transformation-ref="Hyperlog_262144_0.3_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="APC-A"/>
+        </gating:dimension>
+        <gating:mean>
+            <gating:coordinate data-type:value="0.6587503"/>
+            <gating:coordinate data-type:value="0.6204246"/>
+        </gating:mean>
+        <gating:covarianceMatrix>
+            <gating:row>
+                <gating:entry data-type:value="0.0499970583" />
+                <gating:entry data-type:value="0.0089343358" />
+            </gating:row>
+            <gating:row>
+                <gating:entry data-type:value="0.0089343358" />
+                <gating:entry data-type:value="0.0254029417" />
+            </gating:row>
+        </gating:covarianceMatrix>
+        <gating:distanceSquare data-type:value="1"/>
+    </gating:EllipsoidGate>
+    
+    <transforms:transformation transforms:id="Arcsinh_262144_4.2_0.5">
+        <transforms:fasinh transforms:T="262144" transforms:M="4.2" transforms:A="0.5" />
+    </transforms:transformation>
+    
+    <gating:EllipsoidGate gating:id="Ellipseua">
+        <data-type:custom_info>
+            Half-axes of this ellipse are 0.23 and 0.15, rotation 18 degress. 
+            Uncompensated on ASinH scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated"
+            gating:transformation-ref="Arcsinh_262144_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="PE-Cy5-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated"
+            gating:transformation-ref="Arcsinh_262144_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="APC-A"/>
+        </gating:dimension>
+        <gating:mean>
+            <gating:coordinate data-type:value="0.6587503"/>
+            <gating:coordinate data-type:value="0.6204246"/>
+        </gating:mean>
+        <gating:covarianceMatrix>
+            <gating:row>
+                <gating:entry data-type:value="0.0499970583" />
+                <gating:entry data-type:value="0.0089343358" />
+            </gating:row>
+            <gating:row>
+                <gating:entry data-type:value="0.0089343358" />
+                <gating:entry data-type:value="0.0254029417" />
+            </gating:row>
+        </gating:covarianceMatrix>
+        <gating:distanceSquare data-type:value="1"/>
+    </gating:EllipsoidGate>
+    
+    <gating:EllipsoidGate gating:id="Ellipseca">
+        <data-type:custom_info>
+            Half-axes of this ellipse are 0.23 and 0.15, rotation 18 degress. 
+            Compensated on ASinH scale.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="FCS"
+            gating:transformation-ref="Arcsinh_262144_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="PE-Cy5-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS"
+            gating:transformation-ref="Arcsinh_262144_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="APC-A"/>
+        </gating:dimension>
+        <gating:mean>
+            <gating:coordinate data-type:value="0.6587503"/>
+            <gating:coordinate data-type:value="0.6204246"/>
+        </gating:mean>
+        <gating:covarianceMatrix>
+            <gating:row>
+                <gating:entry data-type:value="0.0499970583" />
+                <gating:entry data-type:value="0.0089343358" />
+            </gating:row>
+            <gating:row>
+                <gating:entry data-type:value="0.0089343358" />
+                <gating:entry data-type:value="0.0254029417" />
+            </gating:row>
+        </gating:covarianceMatrix>
+        <gating:distanceSquare data-type:value="1"/>
+    </gating:EllipsoidGate>
+    
+    <transforms:transformation transforms:id="Logicle_262144_4_1_0">
+        <transforms:logicle transforms:T="262144" transforms:M="4" transforms:W="1" transforms:A="0" />
+    </transforms:transformation>
+    
+    <gating:RectangleGate gating:id="Rectul">
+        <gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="Logicle_262144_4_1_0" 
+            gating:min="0.12345" gating:max="0.6789">
+            <data-type:fcs-dimension data-type:name="AmCyan-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="Logicle_262144_4_1_0" 
+            gating:min="0.23456" gating:max="0.789">
+            <data-type:fcs-dimension data-type:name="Alexa-405-A"/>
+        </gating:dimension>
+    </gating:RectangleGate>
+    
+    <gating:RectangleGate gating:id="Rectcl">
+        <gating:dimension gating:compensation-ref="FCS" gating:transformation-ref="Logicle_262144_4_1_0" 
+            gating:min="0.12345" gating:max="0.6789">
+            <data-type:fcs-dimension data-type:name="AmCyan-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS" gating:transformation-ref="Logicle_262144_4_1_0" 
+            gating:min="0.23456" gating:max="0.789">
+            <data-type:fcs-dimension data-type:name="Alexa-405-A"/>
+        </gating:dimension>
+    </gating:RectangleGate>
+
+    <transforms:transformation transforms:id="Hyperlog_262144_4_1_0">
+        <transforms:hyperlog transforms:T="262144" transforms:M="4" transforms:W="1" transforms:A="0" />
+    </transforms:transformation>
+
+    <gating:RectangleGate gating:id="Rectuh">
+        <gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="Hyperlog_262144_4_1_0" 
+            gating:min="0.12345" gating:max="0.6789">
+            <data-type:fcs-dimension data-type:name="AmCyan-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="Hyperlog_262144_4_1_0" 
+            gating:min="0.23456" gating:max="0.789">
+            <data-type:fcs-dimension data-type:name="Alexa-405-A"/>
+        </gating:dimension>
+    </gating:RectangleGate>
+    
+    <gating:RectangleGate gating:id="Rectch">
+        <gating:dimension gating:compensation-ref="FCS" gating:transformation-ref="Hyperlog_262144_4_1_0" 
+            gating:min="0.12345" gating:max="0.6789">
+            <data-type:fcs-dimension data-type:name="AmCyan-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS" gating:transformation-ref="Hyperlog_262144_4_1_0" 
+            gating:min="0.23456" gating:max="0.789">
+            <data-type:fcs-dimension data-type:name="Alexa-405-A"/>
+        </gating:dimension>
+    </gating:RectangleGate>
+    
+    <gating:BooleanGate gating:id="RectclAndRectch">
+        <gating:and>
+            <gating:gateReference gating:ref="Rectcl"/>
+            <gating:gateReference gating:ref="Rectch"/>
+        </gating:and>
+    </gating:BooleanGate>
+
+    <gating:BooleanGate gating:id="RectclOrRectch">
+        <gating:or>
+            <gating:gateReference gating:ref="Rectcl"/>
+            <gating:gateReference gating:ref="Rectch"/>
+        </gating:or>
+    </gating:BooleanGate>
+    
+    <gating:BooleanGate gating:id="RectchAndNotRectcl">
+        <gating:and>
+            <gating:gateReference gating:ref="Rectch"/>
+            <gating:gateReference gating:ref="Rectcl" gating:use-as-complement="true"/>
+        </gating:and>
+    </gating:BooleanGate>
+    
+    <gating:BooleanGate gating:id="RectclAgain">
+        <data-type:custom_info>NOT(NOT(A) == A</data-type:custom_info>
+        <gating:not>
+            <gating:gateReference gating:ref="Rectcl" gating:use-as-complement="true"/>
+        </gating:not>
+    </gating:BooleanGate>
+    
+    <gating:BooleanGate gating:id="NotRectcl">
+        <gating:not>
+            <gating:gateReference gating:ref="Rectcl" gating:use-as-complement="false" />
+        </gating:not>
+    </gating:BooleanGate>
+
+    <gating:BooleanGate gating:id="RectchAndNotRectcl2">
+        <gating:and>
+            <gating:gateReference gating:ref="Rectch"/>
+            <gating:gateReference gating:ref="NotRectcl" />
+        </gating:and>
+    </gating:BooleanGate>
+    
+    <gating:RectangleGate gating:id="Cube3Du">
+        <gating:dimension gating:compensation-ref="uncompensated"  
+            gating:min="100" gating:max="89000">
+            <data-type:fcs-dimension data-type:name="AmCyan-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:min="65" gating:max="121333">
+            <data-type:fcs-dimension data-type:name="Alexa-405-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:min="12.5" gating:max="107789">
+            <data-type:fcs-dimension data-type:name="APC-Cy7-A"/>
+        </gating:dimension>
+    </gating:RectangleGate>    
+
+    <gating:RectangleGate gating:id="Cube3Dul">
+        <data-type:custom_info>
+            The results are exactly the same as Cube3Du since the min/max values are logicle(min/max) of Cube3Du
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated"  gating:transformation-ref="Logicle_262144_4_1_0" 
+            gating:min="0.25811667026097806" gating:max="0.8802467252235215">
+            <data-type:fcs-dimension data-type:name="AmCyan-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="Logicle_262144_4_1_0" 
+            gating:min="0.25527652868311457" gating:max="0.9148645329311738">
+            <data-type:fcs-dimension data-type:name="Alexa-405-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" gating:transformation-ref="Logicle_262144_4_1_0" 
+            gating:min="0.2510148102244318" gating:max="0.9016746939365867">
+            <data-type:fcs-dimension data-type:name="APC-Cy7-A"/>
+        </gating:dimension>
+    </gating:RectangleGate>    
+    
+    <gating:RectangleGate gating:id="Cube3DuP" gating:parent_id="Ellipseul">
+        <data-type:custom_info>
+            Same as Cube3Du but now applied on a parent gate
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated"  
+            gating:min="100" gating:max="89000">
+            <data-type:fcs-dimension data-type:name="AmCyan-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:min="65" gating:max="121333">
+            <data-type:fcs-dimension data-type:name="Alexa-405-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" 
+            gating:min="12.5" gating:max="107789">
+            <data-type:fcs-dimension data-type:name="APC-Cy7-A"/>
+        </gating:dimension>
+    </gating:RectangleGate>    
+    
+    <gating:BooleanGate gating:id="Cube3DuPAsBool">
+        <gating:and>
+            <gating:gateReference gating:ref="Cube3Du" />
+            <gating:gateReference gating:ref="Ellipseul" />
+        </gating:and>
+    </gating:BooleanGate>
+    
+    <gating:RectangleGate gating:id="RectMix1">
+        <gating:dimension gating:compensation-ref="uncompensated" gating:min="64" gating:max="198765">
+            <data-type:fcs-dimension data-type:name="FSC-H" />
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS" gating:transformation-ref="Logicle_262144_4_1_0"
+            gating:min="0.1911457" gating:max="0.76311738">
+            <data-type:fcs-dimension data-type:name="Alexa-405-A"/>
+        </gating:dimension>
+    </gating:RectangleGate>
+    
+    <gating:RectangleGate gating:id="HyperCube1">
+        <data-type:custom_info>
+            Finally, a strange 4D hypercube, FSC and SSC are on linear scale as in the FCS file, 
+            PE-Cy5-A is compensated and on Arcsinh; APC-A is on Hyperlog and uncompensated; strange but legal.
+        </data-type:custom_info>
+        <gating:dimension gating:compensation-ref="uncompensated" gating:min="64" gating:max="198765">
+            <data-type:fcs-dimension data-type:name="FSC-W"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" gating:min="33" gating:max="129765">
+            <data-type:fcs-dimension data-type:name="SSC-W"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS" gating:min="0.26" gating:max="0.79" 
+            gating:transformation-ref="Arcsinh_262144_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="PE-Cy5-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="uncompensated" gating:min="0.21" gating:max="0.65" 
+            gating:transformation-ref="Hyperlog_262144_0.3_4.2_0.5">
+            <data-type:fcs-dimension data-type:name="APC-A"/>
+        </gating:dimension>
+    </gating:RectangleGate>
+
+</gating:Gating-ML>

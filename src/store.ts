@@ -23,6 +23,8 @@ import {
   type GateSpace,
   type GateTransforms,
   type QuadrantCurl,
+  type RectangleBounds,
+  withExplicitRectangleBounds,
 } from "./engine/models";
 import {
   applyGatingStrategy,
@@ -39,8 +41,10 @@ import {
 import { mergeGatingStrategies, type GatingImportMode } from "./engine/gatingMerge";
 import { populationTreeOrder } from "./engine/populations";
 import { DEFAULT_HIERARCHY_ID, DEFAULT_HIERARCHY_NAME, storeHierarchy, selectionAcrossHierarchies, correspondingHierarchyId, canonicalGateId, type HierarchyRef, type StoredHierarchy, isCopyRef, fileHierarchyId, cloneHierarchyTree, newHierarchyId } from "./engine/hierarchies";
-import { syncLockedCopy, gateGeometryEquals, copyInStep, withGeometryOf, type TemplateTree } from "./engine/templateSync";
+import { syncLockedCopy, gateGeometryEquals, copyInStepOnTemplateChannels, copyOnOwnChannels, withGeometryOf, type TemplateTree } from "./engine/templateSync";
+import { onChannels } from "./engine/tailoredImport";
 import type { Sample } from "./engine/sample";
+import { realignFlowJoVertices } from "./engine/flowjoGrid";
 
 export interface CoreState {
   gates: Record<string, Gate>;
@@ -188,6 +192,19 @@ function hierarchyRefFromStored(hierarchy: StoredHierarchy): HierarchyRef {
   };
 }
 
+/**
+ * A polygon or rectangle with new vertices. A FlowJo grid polygon's FlowJo vertices follow them,
+ * one per vertex (flowjoGrid.ts, realignFlowJoVertices): adding or deleting a vertex left the two
+ * lists of different lengths, which a saved workspace refuses.
+ */
+function withVertices(g: Extract<Gate, { vertices: Vertex[] }>, vertices: Vertex[]): Gate {
+  if (!g.flowjo_vertices) return { ...g, vertices };
+  const flowjo = realignFlowJoVertices(g, vertices);
+  const { flowjo_vertices: _dropped, ...rest } = g;
+  void _dropped;
+  return flowjo ? { ...rest, vertices, flowjo_vertices: flowjo } : { ...rest, vertices };
+}
+
 /** Push an undo snapshot, clear redo (call before a structural change). */
 function pushUndo(s: CoreState, affectsGating = true): Pick<CoreState, "undo" | "redo"> {
   return { undo: [snapshot(s, affectsGating), ...s.undo].slice(0, MAX_UNDO), redo: [] };
@@ -212,6 +229,8 @@ export type Action =
       space?: GateSpace;
       /** Transform each axis was drawn under. Required when `space` is "display". */
       transforms?: GateTransforms;
+      /** A rectangle's edge rule; omitted = half-open, Gating-ML's rule for a drawn rectangle. */
+      bounds?: RectangleBounds;
     }
   | {
       type: "addEllipse";
@@ -397,6 +416,14 @@ export type Action =
   | { type: "deleteGroup"; id: string }
   /** Every gate of a copy takes its source's coordinates again; copies following it follow along. */
   | { type: "revertCopyToSource"; id: string }
+  /**
+   * Each file follows the tree it names again (file → that tree), as one undo entry: it goes on
+   * that tree, its copy dropped -- unless its copy follows that tree on channels of its own (the
+   * file labels a detector differently from the tree's file; copyOnOwnChannels), when the copy
+   * stays and takes the tree's coordinates (revertCopyToSource). On the tree itself such a file
+   * held no event on that detector: the tree's gates name a channel it does not have.
+   */
+  | { type: "followSourceAgain"; assignments: Record<string, string> }
   | { type: "undo" }
   | { type: "redo" };
 
@@ -528,6 +555,52 @@ function resyncGroup(
     // A group's tree that moved is a source in its own right: its files' copies follow it.
     if (synced) next = resyncGroup(next, tree, synced);
   }
+  return next;
+}
+
+/**
+ * Why a copy's gate coordinates cannot become its template's (promoteCopyToTemplate), or null when
+ * they can: it is no structure-locked copy with a template, its template is a file's copy itself
+ * (flatten first), or its structure is not the template's -- on the template's channels, so the
+ * copy of a file that labels a detector differently is promoted as any other is.
+ */
+export function promoteRefusal(state: CoreState, copyId: string): "not-a-copy" | "copy-of-a-copy" | "other-structure" | null {
+  const copyRef = state.hierarchies.find((h) => h.id === copyId);
+  if (!copyRef || !isCopyRef(copyRef) || !copyRef.structure_locked || !copyRef.source_hierarchy_id) return "not-a-copy";
+  const templateRef = state.hierarchies.find((h) => h.id === copyRef.source_hierarchy_id);
+  if (!templateRef) return "not-a-copy";
+  if (templateRef.owner_sample_id) return "copy-of-a-copy";
+  const parked = parkActiveHierarchy(state);
+  const all = { ...state.stored_hierarchies, [parked.id]: parked };
+  const copy = all[copyId];
+  const template = all[templateRef.id];
+  if (!copy?.root_population_id || !template?.root_population_id) return "not-a-copy";
+  return copyInStepOnTemplateChannels(copy, { ...template, root_population_id: template.root_population_id }) ? null : "other-structure";
+}
+
+/**
+ * Each file on the tree `assignments` names for it, as followSourceAgain describes; undo is the
+ * caller's. Unchanged when nothing moves.
+ */
+function followSourceAgain(state: CoreState, assignments: Record<string, string>): CoreState {
+  let next = state;
+  const assign: Record<string, string> = {};
+  for (const [fileId, sourceId] of Object.entries(assignments)) {
+    const treeId = fileHierarchyId(next.file_hierarchies[fileId], next.hierarchies);
+    const ref = next.hierarchies.find((h) => h.id === treeId);
+    if (ref?.owner_sample_id === fileId && ref.source_hierarchy_id === sourceId) {
+      const parked = parkActiveHierarchy(next);
+      const all = { ...next.stored_hierarchies, [parked.id]: parked };
+      const copy = all[ref.id];
+      const source = all[sourceId];
+      if (copy && source?.root_population_id && copyOnOwnChannels(copy, { ...source, root_population_id: source.root_population_id })) {
+        next = reduceCore(next, { type: "revertCopyToSource", id: ref.id });
+        continue;
+      }
+    }
+    assign[fileId] = sourceId;
+  }
+  if (Object.keys(assign).length) next = reduceCore(next, { type: "assignFileHierarchies", assignments: assign });
   return next;
 }
 
@@ -743,6 +816,9 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       // Recorded at creation and never rewritten: the gate's space is part of its identity.
       if (action.space) gate.space = action.space;
       if (action.transforms) gate.transforms = action.transforms;
+      // So is a rectangle's edge rule. A drawn rectangle follows Gating-ML 2.0 (models.ts,
+      // RectangleBounds), stated on the gate so that every file it is written to says so.
+      if (gate.gate_type === "rectangle") gate.bounds = action.bounds ?? "half-open";
       const gates = { ...state.gates, [gate.gate_id]: gate };
       const gate_order = [...state.gate_order, gate.gate_id];
       const base = { ...pushUndo(state), gates, gate_order, selected_gate_id: gate.gate_id };
@@ -938,7 +1014,7 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       // stray vertex edit reaching here must be refused, not written: accepting it would
       // silently convert the covariance form into 64 fixed points.
       if (!g || g.gate_type === "quadrant" || g.gate_type === "ellipse") return state;
-      const gates = { ...state.gates, [action.gateId]: { ...g, vertices: action.vertices } };
+      const gates = { ...state.gates, [action.gateId]: withVertices(g, action.vertices) };
       return { ...state, ...pushUndo(state), gates, gate_version: state.gate_version + 1 };
     }
 
@@ -948,7 +1024,7 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       for (const edit of action.edits) {
         const g = gates[edit.gateId];
         if (!g || g.gate_type === "quadrant" || g.gate_type === "ellipse") continue;
-        gates[edit.gateId] = { ...g, vertices: edit.vertices };
+        gates[edit.gateId] = withVertices(g, edit.vertices);
         changed = true;
       }
       if (!changed) return state;
@@ -1601,7 +1677,9 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       const source = sourceId ? state.stored_hierarchies[activeHierarchy.source_hierarchy_id]?.gates[sourceId] : null;
       if (!own || !source || gateGeometryEquals(own, source)) return state;
       // Keep local presentation and ids; restoring scientific geometry makes subsequent group edits follow again.
-      const restored: Gate = { ...structuredClone(source), gate_id: own.gate_id, name: own.name, color: own.color, label_offset: own.label_offset };
+      // The axes stay the copy's: they name its own file's channels (withGeometryOf says why), and
+      // what the source keys by channel goes onto them (onChannels).
+      const restored: Gate = onChannels({ ...structuredClone(source), gate_id: own.gate_id, name: own.name, color: own.color, label_offset: own.label_offset } as Gate, own.x_channel, own.y_channel);
       return { ...state, ...pushUndo(state), gates: { ...state.gates, [own.gate_id]: restored }, gate_version: state.gate_version + 1 };
     }
 
@@ -1619,17 +1697,15 @@ function reduceCore(state: CoreState, action: Action): CoreState {
     }
 
     case "promoteCopyToTemplate": {
-      const copyRef = state.hierarchies.find((h) => h.id === action.copyId);
-      if (!copyRef || !isCopyRef(copyRef) || !copyRef.structure_locked || !copyRef.source_hierarchy_id) return state;
-      const templateRef = state.hierarchies.find((h) => h.id === copyRef.source_hierarchy_id);
-      if (!templateRef || templateRef.owner_sample_id) return state; // a copy of a copy: flatten first
+      if (promoteRefusal(state, action.copyId)) return state;
+      const copyRef = state.hierarchies.find((h) => h.id === action.copyId)!;
       const parked = parkActiveHierarchy(state);
       const all = { ...state.stored_hierarchies, [parked.id]: parked };
       const copy = all[action.copyId];
-      const template = all[templateRef.id];
-      if (!copy?.root_population_id || !template?.root_population_id) return state;
-      if (!copyInStep(copy, { ...template, root_population_id: template.root_population_id })) return state;
+      const template = all[copyRef.source_hierarchy_id!];
       // The template's gates take the copy's geometry, id by id; names and paint stay the template's.
+      // A copy on channels of its own (its file labels a detector differently) gives each gate on
+      // the template's channels, as Apply to the tree does (withGeometryOf).
       const gates = { ...template.gates };
       for (const [copyGateId, sourceId] of Object.entries(copy.source_gate_ids ?? {})) {
         const own = copy.gates[copyGateId];
@@ -1637,16 +1713,22 @@ function reduceCore(state: CoreState, action: Action): CoreState {
         if (own && source && !gateGeometryEquals(own, source)) gates[sourceId] = withGeometryOf(source, own);
       }
       const after: StoredHierarchy = { ...template, gates };
-      let next = withTrees(state, resyncGroup(all, template, after), state.active_hierarchy_id);
-      // Every file of the group goes back on the template; their copies, this one included, go
-      // with the move, and the template becomes live if the live tree was one of them.
+      const next = withTrees(state, resyncGroup(all, template, after), state.active_hierarchy_id);
+      // Every file of the group follows the template again; their copies, this one included, go
+      // with the move, and the template becomes live if the live tree was one of them -- except
+      // the copy of a file on channels of its own, which stays and takes the template's
+      // coordinates (followSourceAgain).
       const assignments: Record<string, string> = {};
       for (const [fileId, treeId] of Object.entries(state.file_hierarchies)) {
         const ref = state.hierarchies.find((h) => h.id === treeId);
         if (ref?.owner_sample_id && ref.source_hierarchy_id === template.id) assignments[fileId] = template.id;
       }
-      if (Object.keys(assignments).length) next = reduceCore(next, { type: "assignFileHierarchies", assignments });
-      return withOneUndoEntry(state, next);
+      return withOneUndoEntry(state, followSourceAgain(next, assignments));
+    }
+
+    case "followSourceAgain": {
+      const next = followSourceAgain(state, action.assignments);
+      return next === state ? state : withOneUndoEntry(state, next);
     }
 
     case "replaceHierarchyCopies": {
@@ -1860,7 +1942,9 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       // Replacing the active hierarchy no longer touches the parked ones: each owns its gates,
       // so there is nothing to retain on their behalf. This used to hold on to any gate a parked
       // hierarchy referenced, which is what made one shared table necessary in the first place.
-      const gates = graph.gates;
+      // A rectangle arriving without an edge rule is closed (models.ts, RectangleBounds); it is
+      // stated here so that a file saved from now on says so.
+      const gates = withExplicitRectangleBounds(graph.gates);
       const gate_order = graph.gate_order;
       const activePopulationId = shouldMerge && state.active_population_id && importedPops[state.active_population_id]
         ? state.active_population_id
@@ -1904,11 +1988,18 @@ function reduceCore(state: CoreState, action: Action): CoreState {
         if (h.id === active_hierarchy_id || !hierarchies.some((ref) => ref.id === h.id)) continue;
         const pops = clonePops(h.populations);
         ensurePopColorSlots(pops, h.root_population_id);
-        stored_hierarchies[h.id] = { ...h, populations: pops, selected_pop_ids: [] };
+        // A workspace saved before rectangles carried an edge rule evaluated them closed, which
+        // is what a rectangle without one means; the rule is stated so the next save records it.
+        stored_hierarchies[h.id] = {
+          ...h,
+          ...(h.gates ? { gates: withExplicitRectangleBounds(h.gates) } : {}),
+          populations: pops,
+          selected_pop_ids: [],
+        };
       }
       return {
         ...state,
-        gates: action.gates,
+        gates: withExplicitRectangleBounds(action.gates),
         gate_order: action.gate_order,
         populations: loadedPops,
         root_population_id: action.root_population_id,
@@ -2145,16 +2236,91 @@ function round2(x: number): number {
  */
 const gateMaskMemos = new WeakMap<Sample, GateMaskMemo>();
 
+/**
+ * The memo for a file's own tree while another tree of its family is live (recomputeGatingUnder):
+ * kept apart from the live tree's, since a memo forgets every gate it is not given.
+ */
+const ownTreeMaskMemos = new WeakMap<Sample, GateMaskMemo>();
+
 /** Recompute full-data gate masks, population masks, and tree stats. */
 export function recomputeGating(sample: Sample | null, state: CoreState): GatingDerived {
-  if (!sample || !state.root_population_id || Object.keys(state.populations).length === 0) {
-    return EMPTY_GATING_DERIVED;
-  }
-  const data = sample.gateAssayData();
+  return recomputeGatingWith(sample, state, gateMaskMemos);
+}
+
+/** The parts of a tree its gating reads. */
+type GatingTree = Pick<CoreState, "gates" | "populations" | "root_population_id">;
+
+/**
+ * A file's gating under the tree it is gated under, `own`, while another tree of its family is
+ * live (`live`: the tree itself, or a group's copy, while the file keeps its tailored gates):
+ * each live population's mask and counts are its counterpart's in `own` (`counterpart`, by
+ * provenance), and a live population with no counterpart there holds no event and no count. The
+ * live tree's gate masks ride along, so the gates drawn on the plot, which edits move, are counted
+ * within the file's own populations. Evaluated with the live tree's gates instead, a tailored file
+ * showed the tree's gating and not its own, and none at all on a gate whose channel it labels
+ * differently.
+ */
+export function recomputeGatingUnder(
+  sample: Sample | null,
+  live: CoreState,
+  own: GatingTree,
+  counterpart: (livePopulationId: string) => string | null,
+): GatingDerived {
+  if (!sample || !live.root_population_id || !own.root_population_id) return recomputeGating(sample, live);
+  return gatingKeyedByLiveTree(sample, live, recomputeOwnTreeGating(sample, own), own.root_population_id, counterpart);
+}
+
+/**
+ * A file's own tree's gating, with a memo of its own (recomputeGatingUnder): its populations and
+ * gates do not change while the live tree is edited, so the caller can keep the result and only
+ * key it by the live tree again (gatingKeyedByLiveTree).
+ */
+export function recomputeOwnTreeGating(sample: Sample | null, own: GatingTree): GatingDerived {
+  return recomputeGatingWith(sample, own, ownTreeMaskMemos);
+}
+
+/** `own`, a file's own tree's gating, keyed by the live tree's populations; see recomputeGatingUnder. */
+export function gatingKeyedByLiveTree(
+  sample: Sample | null,
+  live: CoreState,
+  own: GatingDerived,
+  ownRootId: string,
+  counterpart: (livePopulationId: string) => string | null,
+): GatingDerived {
+  if (!sample || !live.root_population_id || !Object.keys(own.populations).length) return recomputeGating(sample, live);
   let memo = gateMaskMemos.get(sample);
   if (!memo) {
     memo = createGateMaskMemo();
     gateMaskMemos.set(sample, memo);
+  }
+  const gateMasks = computeGateMasks(live.gates, sample.gateAssayData(), memo);
+  const none = new Uint8Array(sample.fcs.nEvents);
+  const masks: MaskMap = {};
+  const populations: PopulationMap = {};
+  const event_count: Record<string, number | null> = {};
+  const percent_of_parent: Record<string, number | null> = {};
+  const percent_of_total: Record<string, number | null> = {};
+  for (const [pid, pop] of Object.entries(live.populations)) {
+    const ownId = pid === live.root_population_id ? ownRootId : counterpart(pid);
+    const found = ownId !== null && own.populations[ownId] !== undefined;
+    masks[pid] = found ? own.masks[ownId!] ?? none : none;
+    event_count[pid] = found ? own.stats.event_count[ownId!] ?? null : null;
+    percent_of_parent[pid] = found ? own.stats.percent_of_parent[ownId!] ?? null : null;
+    percent_of_total[pid] = found ? own.stats.percent_of_total[ownId!] ?? null : null;
+    populations[pid] = { ...pop, event_count: event_count[pid], percent_of_parent: percent_of_parent[pid] };
+  }
+  return { masks, stats: { event_count, percent_of_parent, percent_of_total }, populations, gateMasks };
+}
+
+function recomputeGatingWith(sample: Sample | null, state: GatingTree, memos: WeakMap<Sample, GateMaskMemo>): GatingDerived {
+  if (!sample || !state.root_population_id || Object.keys(state.populations).length === 0) {
+    return EMPTY_GATING_DERIVED;
+  }
+  const data = sample.gateAssayData();
+  let memo = memos.get(sample);
+  if (!memo) {
+    memo = createGateMaskMemo();
+    memos.set(sample, memo);
   }
   const gateMasks = computeGateMasks(state.gates, data, memo);
   const pops = clonePops(state.populations);

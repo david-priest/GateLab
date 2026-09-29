@@ -18,6 +18,13 @@ export interface StreamZipWriteProgress {
 export interface StreamZipWriteOptions {
   readonly chunkBytes?: number;
   readonly onProgress?: (progress: StreamZipWriteProgress) => void;
+  /**
+   * Hand the sink each chunk as fflate emits it instead of a copy: for a stored entry, a view of
+   * the entry's own bytes, and headers fflate allocates for each call (fflate 0.8's Zip and
+   * ZipPassThrough reuse no output buffer). For a sink that keeps every chunk, such as the parts
+   * of a Blob, this spares a whole copy of the archive; the entries' bytes must not change after.
+   */
+  readonly borrowChunks?: boolean;
 }
 
 export type ZipChunkSink = (chunk: Uint8Array) => void | Promise<void>;
@@ -69,8 +76,9 @@ export async function writeStoredZip(
       finalReject?.(error);
       return;
     }
-    // fflate may reuse its output view after the callback; the sink must receive an owned chunk.
-    const owned = chunk.slice();
+    // fflate may reuse its output view after the callback; the sink must receive an owned chunk,
+    // unless the caller takes fflate's own (borrowChunks).
+    const owned = options.borrowChunks ? chunk : chunk.slice();
     outputChain = outputChain.then(() => sink(owned));
     if (final) outputChain.then(() => finalResolve?.(), (cause) => finalReject?.(cause));
   });

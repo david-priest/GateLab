@@ -22,12 +22,20 @@ const DIR = join(homedir(), "flowrepo_workspaces", "FR-FCM-Z2W3");
 const WSP = join(DIR, "workspace_fc022-a_190923.wsp");
 const FCS = join(DIR, "specimen_001_016_b05_005.fcs");
 
+// The bend was fitted against counts whose parents were evaluated continuously, and it is checked
+// the way it was fitted: with the import's "Evaluate gates as FlowJo does" off. On FlowJo's grid
+// the quadrants' parent "live", a polygon, takes FlowJo's channels, and moves by the events near
+// its edges; its own parent, a rectangle on Time (a rule not established), is 1.3% above FlowJo's
+// count in either mode, so the parent does not become FlowJo's and Q1 moves from 3.6% to 5.5% of
+// FlowJo's count. The bend is not refitted for the grid, since FlowJo's curly-quadrant rule is not
+// established; there the worst quadrant's share of its parent moves from within 0.7 points of
+// FlowJo's to 0.8 points (Q2), which the second case below holds it to.
 describe.runIf(existsSync(WSP) && existsSync(FCS))("FlowJo curly quadrants, FR-FCM-Z2W3", () => {
   const text = readFileSync(WSP, "utf-8");
   const stem = (s: string) => s.trim().replace(/\.fcs$/i, "").toLowerCase();
   const sampleSummary = listFlowJoWorkspaceSamples(text)
     .find((s) => s.candidateFileNames.some((n) => stem(n) === stem("specimen_001_016_b05_005.fcs")))!;
-  const conv = flowJoWorkspaceToGatingML(text, sampleSummary.index, null);
+  const conv = flowJoWorkspaceToGatingML(text, sampleSummary.index, null, undefined, { flowJoGrid: false });
   const buf = readFileSync(FCS);
   const fcs = parseFcs(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer);
   const sample = new Sample(fcs);
@@ -97,5 +105,22 @@ describe.runIf(existsSync(WSP) && existsSync(FCS))("FlowJo curly quadrants, FR-F
     }
     expect(worstStraight).toBeGreaterThan(0.15);
     expect(worstBent).toBeLessThan(worstStraight / 4);
+  });
+
+  it("keeps each quadrant's share of its parent when the parents are on FlowJo's grid", () => {
+    const grid = flowJoWorkspaceToGatingML(text, sampleSummary.index, null, undefined, { flowJoGrid: true });
+    const onGrid = importGatingML(grid.gatingMl, sample.channels.map((c) => c.key), pnn, sample.instrument);
+    const { masks } = applyGatingStrategy(onGrid.gates, onGrid.populations, onGrid.root_population_id, sample.gateAssayData());
+    const countOf: Record<string, number> = {};
+    for (const [pid, pop] of Object.entries(onGrid.populations)) {
+      let n = 0; for (const v of masks[pid]) n += v; countOf[pop.name.split("/").pop()!] = n;
+    }
+    for (const name of curlyNames) {
+      const pop = Object.values(onGrid.populations).find((p) => p.name.endsWith(name))!;
+      const parent = onGrid.populations[pop.parent_id!];
+      const parentName = parent.name.split("/").pop()!;
+      const gap = Math.abs(countOf[name] / countOf[parentName] - grid.flowJoCounts[name] / grid.flowJoCounts[parent.name]);
+      expect(gap, `${name} as a fraction of ${parentName}`).toBeLessThan(0.01);
+    }
   });
 });

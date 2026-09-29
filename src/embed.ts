@@ -71,3 +71,9 @@ export {
   readHostedWorkspace,
   type HostedWorkspaceRestore,
 } from "./host/hostedWorkspace";
+// The Gating-ML 2.0 importer the embedded app runs, so a host can drive it directly: GateLabR's
+// tests import a file through it rather than asserting on strings in the bundle.
+export {
+  importGatingML,
+  type GatingMLResult,
+} from "./engine/gatingml";

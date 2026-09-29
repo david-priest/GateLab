@@ -56,6 +56,17 @@ describe("whether a gating import needs the user to decide", () => {
     expect(gatingImportNeedsDecision(differing, EMPTY)).toBe(true);
   });
 
+  // Under a per-file import, another file's own matrix can differ from its sample's while the
+  // primary's does not. The open dialog compared the primary's alone, and the other file was
+  // given the workspace's matrix without a word.
+  it("does, when another file of a per-file import carries a matrix that differs from its sample's", () => {
+    const sibling = pending({
+      matrixAnswered: true,
+      siblingTrees: [{ name: "D2.fcs", externalSpillover: { differsFromEmbedded: true } }],
+    } as unknown as Partial<Pending>);
+    expect(gatingImportNeedsDecision(sibling, EMPTY, 1)).toBe(true);
+  });
+
   it("does not, once that matrix question was answered in the workspace-open dialog", () => {
     // The .wsp dialog parses the chosen FCS and asks there, in the step already asking about
     // files. Asking again afterwards was a second dialog for a question already answered.

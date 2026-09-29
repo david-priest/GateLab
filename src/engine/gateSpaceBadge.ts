@@ -11,9 +11,12 @@
 
 import type { Gate, TransformSpec } from "./models";
 import type { Sample } from "./sample";
+import { describeFlowJoGridAxis, isFlowJoGridSpec, sameFlowJoGridSpec } from "./flowjoGrid";
 
 // B and G only ever appear on gates imported from a FlowJo workspace: GateLab does not display
 // on either, it only holds gates in those spaces so they evaluate the way FlowJo evaluates them.
+// F is FlowJo's gate grid (flowjoGrid.ts), on a polygon imported with "Evaluate gates as FlowJo
+// does": the gate is tested on FlowJo's channels, not on the drawn lines.
 const LETTER: Record<TransformSpec["kind"], string> = {
   identity: "N",
   asinh: "A",
@@ -21,6 +24,7 @@ const LETTER: Record<TransformSpec["kind"], string> = {
   biex: "B",
   wsplog: "G",
   flog: "O",
+  flowjoChannels: "F",
 };
 
 function describe(spec: TransformSpec | undefined): string {
@@ -29,10 +33,32 @@ function describe(spec: TransformSpec | undefined): string {
   if (spec.kind === "asinh") return `arcsinh (cofactor ${spec.cofactor})`;
   if (spec.kind === "logicle") return `logicle (T ${spec.T.toPrecision(4)}, W ${spec.W.toPrecision(3)})`;
   if (spec.kind === "biex") {
-    return `FlowJo biex (width ${spec.widthBasis.toPrecision(4)}, neg ${spec.neg}, pos ${spec.pos})`;
+    // Which table: two gates on the same biex parameters draw the same and can hold different
+    // events near their edges, so the tooltip says which one this gate is evaluated on (biex.ts).
+    const table = spec.tableChannels === undefined
+      ? "on the 256-channel table GateLab used before 2026-09-24, which this gate was saved on"
+      : `on FlowJo's ${spec.tableChannels}-channel table`;
+    return `FlowJo biex (width ${spec.widthBasis.toPrecision(4)}, neg ${spec.neg}, pos ${spec.pos}), ${table}`;
   }
   if (spec.kind === "flog") return `log (T ${spec.T.toPrecision(4)}, M ${spec.M.toPrecision(4)})`;
+  if (spec.kind === "flowjoChannels") return describeFlowJoGridAxis(spec);
   return `FlowJo log (offset ${spec.offset.toPrecision(4)}, ${spec.decades.toPrecision(4)} decades)`;
+}
+
+/**
+ * A transform named for a sentence a user reads ("…drawn on {name}, which the file cannot name"),
+ * with its article: never the code identifier a spec carries.
+ */
+export function transformPhrase(spec: TransformSpec): string {
+  switch (spec.kind) {
+    case "identity": return "a linear axis";
+    case "asinh": return "an arcsinh axis";
+    case "logicle": return "a logicle axis";
+    case "biex": return "a FlowJo biex axis";
+    case "wsplog": return "a FlowJo log axis";
+    case "flog": return "a Gating-ML log axis";
+    case "flowjoChannels": return `FlowJo's ${spec.channels}-channel grid`;
+  }
 }
 
 export interface GateSpaceBadge {
@@ -52,8 +78,10 @@ function sameSpec(a: TransformSpec, b: TransformSpec): boolean {
   }
   if (a.kind === "biex" && b.kind === "biex") {
     return a.maxValue === b.maxValue && a.pos === b.pos && a.neg === b.neg
-      && a.widthBasis === b.widthBasis && a.channelRange === b.channelRange;
+      && a.widthBasis === b.widthBasis && a.channelRange === b.channelRange
+      && a.tableChannels === b.tableChannels;
   }
+  if (a.kind === "flowjoChannels" && b.kind === "flowjoChannels") return sameFlowJoGridSpec(a, b);
   if (a.kind === "wsplog" && b.kind === "wsplog") {
     return a.offset === b.offset && a.decades === b.decades;
   }
@@ -110,6 +138,15 @@ export function gateSpaceBadge(sample: Sample, gate: Gate): GateSpaceBadge | nul
   const tx = gate.transforms?.[x];
   const ty = gate.transforms?.[y];
   const text = `${tx ? LETTER[tx.kind] : "?"}${ty ? LETTER[ty.kind] : "?"}${star}`;
+  if (isFlowJoGridSpec(tx) || isFlowJoGridSpec(ty)) {
+    return {
+      text,
+      hint: `FlowJo's grid — tested as FlowJo tests it: each event on its channel of FlowJo's grid, `
+        + `against the polygon's vertices on the same channels, edge included. x: ${describe(tx)} · `
+        + `y: ${describe(ty)}. Edited vertices stay on channels. Changing the axis scale redraws it `
+        + "but cannot move it." + warn,
+    };
+  }
   return {
     text,
     hint: `Display space — straight as drawn. x: ${describe(tx)} · y: ${describe(ty)}. `

@@ -11,9 +11,10 @@
 
 import type { FcsFile, NumericColumn } from "./fcs";
 import type { AssayData, GateAssayData } from "./gates";
-import type { Gate, GateSpace, GateTransforms, TransformSpec } from "./models";
+import { drawnRaw, isUnbounded, type Gate, type GateSpace, type GateTransforms, type TransformSpec } from "./models";
 import { resolveChannels, type ResolvedChannel, isImagingFeature } from "./channels";
 import { biexTransform, flogTransform, wspLogTransform } from "./biex";
+import { flowJoGridScale } from "./flowjoGrid";
 import type { MatrixChannelBinding } from "./compensationCompatibility";
 import type {
   PersistedCompensatedLayerBinding,
@@ -23,6 +24,7 @@ import { encodeFloat32Base64, encodeUint8Base64 } from "./encode";
 import { robustAxisRange } from "./axisRange";
 import { DEFAULT_DENSITY_COLOR_POWER } from "./pseudocolor";
 import type { ChannelScales } from "./channelScales";
+import type { RawPrecision } from "./float32Bounds";
 import { logicleTicks, scatterTicks, linearScatterTicks, type AxisTicks } from "./ticks";
 import {
   extractDisplaySpillover,
@@ -79,6 +81,22 @@ function asinhTransform(cf: number): ChannelTransform {
  * the whole difference between a stable Gating-ML gate and a FlowJo one.
  */
 export function transformFromSpec(spec: TransformSpec): ChannelTransform {
+  const bounds = "bounds" in spec ? spec.bounds : undefined;
+  if (bounds && (bounds.min !== undefined || bounds.max !== undefined)) {
+    // A Gating-ML transformation's boundMin / boundMax: the transformed value is taken to the
+    // bound before the gate is tested. NaN, which flog gives below zero, stays NaN, as in flowCore.
+    const inner = transformFromSpec({ ...spec, bounds: undefined } as TransformSpec);
+    const lo = bounds.min ?? -Infinity;
+    const hi = bounds.max ?? Infinity;
+    return {
+      kind: inner.kind === "identity" ? "asinh" : inner.kind,
+      forward: (v) => {
+        const y = inner.forward(v);
+        return y < lo ? lo : y > hi ? hi : y;
+      },
+      inverse: inner.inverse,
+    };
+  }
   if (spec.kind === "identity") return IDENTITY;
   if (spec.kind === "asinh") return asinhTransform(spec.cofactor);
   if (spec.kind === "biex") {
@@ -92,6 +110,13 @@ export function transformFromSpec(spec: TransformSpec): ChannelTransform {
   if (spec.kind === "flog") {
     const t = flogTransform(spec);
     return { kind: "asinh", forward: t.forward, inverse: t.inverse };
+  }
+  if (spec.kind === "flowjoChannels") {
+    // FlowJo's gate grid: an event goes to its channel, clamped to the grid; a channel goes back
+    // to the raw value in the middle of its events, where a vertex is drawn. Placing a vertex
+    // does not use `forward`, which clamps: see Sample.rawToGate.
+    const g = flowJoGridScale(spec);
+    return { kind: "asinh", forward: g.eventCell, inverse: g.centre };
   }
   const lg = new Logicle(spec.T, spec.W, spec.M, spec.A);
   const fallback = asinhTransform(150);
@@ -182,10 +207,41 @@ export interface SpilloverSnapshot {
   spillover: DisplaySpillover | null;
   origin: SpilloverOrigin;
   compensationEnabled: boolean;
+  /** The external matrix as it was supplied, when the origin is external. */
+  externalSource?: ExternalSpillover | null;
+}
+
+/**
+ * A matrix supplied from outside the file, as it was supplied: its label, and its parameters by
+ * $PnN with the coefficients, before the file's channels were taken out of it. Installing it
+ * again (Sample.installExternalSpillover) gives the same compensation and the same origin, the
+ * parameters the file lacks included; a saved workspace records it (WorkspaceSample.externalSpillover).
+ */
+export interface ExternalSpillover {
+  label: string;
+  channels: string[];
+  matrix: number[][];
+  /**
+   * The parameters of `channels` the matrix left out on the file it was installed on (not
+   * fluorescence parameters of it), when there were any; absent, none. Installed again from a
+   * saved workspace, a matrix that would leave out any other parameter, or compensate one of
+   * these, is refused: a saved matrix naming a parameter the file lacks lost that row and column,
+   * and the file reopened with other counts and no word.
+   */
+  leftOut?: string[];
 }
 
 export type SpilloverOrigin =
-  | { kind: "fcs" }
+  | {
+      kind: "fcs";
+      /**
+       * Parameters the file's own matrix names that are not among this sample's channels, so
+       * the matrix was cut down to the rest. Absent when nothing was left out. flowCore and
+       * FlowKit refuse such a matrix; GateLab compensates with the channels it has, as it does
+       * for a workspace's matrix, and says which it left out.
+       */
+      droppedChannels?: readonly string[];
+    }
   | {
       kind: "external";
       label: string;
@@ -473,6 +529,7 @@ export class Sample {
   readonly channels: ResolvedChannel[];
   private _spillover: DisplaySpillover | null;
   private _spilloverOrigin: SpilloverOrigin = { kind: "fcs" };
+  private _externalSource: ExternalSpillover | null = null;
 
   /** Spillover mapped to display-named fluorochrome channels (null when none is available). */
   get spillover(): DisplaySpillover | null {
@@ -491,7 +548,16 @@ export class Sample {
    * matrix in place with no gates to go with it.
    */
   spilloverSnapshot(): SpilloverSnapshot {
-    return { spillover: this._spillover, origin: this._spilloverOrigin, compensationEnabled: this.compensationEnabled };
+    return { spillover: this._spillover, origin: this._spilloverOrigin, compensationEnabled: this.compensationEnabled, externalSource: this._externalSource };
+  }
+
+  /**
+   * The external matrix as it was supplied, or null when the active matrix is the file's own. A
+   * saved workspace records it, so a reopened sample is compensated with the matrix its gates were
+   * drawn under rather than the one the file carries.
+   */
+  get externalSpillover(): ExternalSpillover | null {
+    return this._spilloverOrigin.kind === "external" ? this._externalSource : null;
   }
 
   /** Put the spillover state back exactly as a snapshot recorded it. */
@@ -501,6 +567,7 @@ export class Sample {
     if (this.compensationEnabled) this.setCompensation(false);
     this._spillover = snapshot.spillover;
     this._spilloverOrigin = snapshot.origin;
+    this._externalSource = snapshot.externalSource ?? null;
     if (snapshot.compensationEnabled) this.setCompensation(true);
   }
 
@@ -518,6 +585,21 @@ export class Sample {
       isScatterChannel,
       isQcChannel,
     );
+    // A matrix naming a parameter the file lacks (or one the channel filter left out) is cut
+    // down to the rest by extractDisplaySpillover. Dropping a channel that spills into the
+    // others changes the result, so it is recorded as the external path records it, instead of
+    // being absorbed silently. Scatter and QC channels are left out by design and not reported.
+    if (this._spillover && fcs.spillover) {
+      const kept = new Set(this._spillover.channels);
+      const dropped = fcs.spillover.channels.filter((pnn) => {
+        const key = pnnToKey.get(pnn);
+        if (key === undefined) return true;
+        return !kept.has(key) && !isScatterChannel(key) && !isQcChannel(key);
+      });
+      if (dropped.length) {
+        this._spilloverOrigin = Object.freeze({ kind: "fcs" as const, droppedChannels: Object.freeze(dropped) });
+      }
+    }
   }
 
   // ── Compensation ────────────────────────────────────────────────────────────
@@ -1134,7 +1216,14 @@ export class Sample {
   installExternalSpillover(
     matrix: { channels: string[]; matrix: number[][] },
     label: string,
-    opts: { replaceEmbedded?: boolean } = {},
+    opts: {
+      replaceEmbedded?: boolean;
+      /**
+       * The parameters the matrix must leave out on this file, no more and no fewer: what a saved
+       * workspace recorded it leaving out (ExternalSpillover.leftOut, absent meaning none).
+       */
+      leftOut?: readonly string[];
+    } = {},
   ): void {
     if (this.instrument !== "flow") {
       throw new Error("An external spillover matrix applies to flow data only.");
@@ -1153,10 +1242,27 @@ export class Sample {
           "matrix is an identity.",
       );
     }
+    if (opts.leftOut) {
+      const then = new Set(opts.leftOut);
+      const now = new Set(dropped);
+      const lost = dropped.filter((pnn) => !then.has(pnn));
+      const gained = opts.leftOut.filter((pnn) => !now.has(pnn));
+      if (lost.length || gained.length) {
+        const parts = [
+          ...(lost.length ? [`${lost.join(", ")} ${lost.length === 1 ? "is not a fluorescence parameter" : "are not fluorescence parameters"} of this file.`] : []),
+          ...(gained.length ? [`${gained.join(", ")} ${gained.length === 1 ? "was" : "were"} left out then and would be compensated now.`] : []),
+        ];
+        throw new Error(`"${label}" no longer applies to this file as it did when the workspace was saved: ${parts.join(" ")}`);
+      }
+    }
     // Compensation must be off before the layer beneath it changes, or the installed compensated
     // layer would keep values derived from the matrix being replaced.
     if (embedded !== null && this.compensationEnabled) this.setCompensation(false);
     this._spillover = display;
+    this._externalSource = {
+      label, channels: [...matrix.channels], matrix: matrix.matrix.map((row) => [...row]),
+      ...(dropped.length ? { leftOut: [...dropped] } : {}),
+    };
     this._spilloverOrigin = Object.freeze({
       kind: "external" as const,
       label,
@@ -1218,7 +1324,12 @@ export class Sample {
       }
       compensated = result.columns as readonly Float32Array[];
     } catch (error) {
-      if (error instanceof FlowCompensationError) return;
+      // Reported, never swallowed: this returned without a word until 2026-09, so a caller that
+      // did not check compensationEnabled afterwards (a FACSChorus import, a workspace opened with
+      // compensation on) went on with every fluorescence gate on uncompensated values.
+      if (error instanceof FlowCompensationError) {
+        throw new Error(`The spillover matrix could not be applied: ${error.message}`);
+      }
       throw error;
     }
     const bindings = resolvedIndices.map((index, matrixIndex) => {
@@ -2406,6 +2517,21 @@ export class Sample {
     return { kind: "asinh", cofactor: this.currentFluorCofactor(idx) };
   }
 
+  /**
+   * The values a channel's raw column holds (float32Bounds.ts, RawPrecision): float32 for a
+   * Float32Array; float64 for a $DATATYPE D file, a decoded log-amplified channel or an integer
+   * channel, which float32 cannot hold exactly above 2^24.
+   */
+  rawPrecision(channelKey: string): RawPrecision {
+    const idx = this.byName.get(channelKey);
+    if (idx === undefined) return "float64";
+    try {
+      return this.activeLinearColumn(idx) instanceof Float32Array ? "float32" : "float64";
+    } catch {
+      return "float64";
+    }
+  }
+
   /** Snapshot every axis of a gate at the current display transforms. */
   gateTransformSnapshot(xChannel: string, yChannel: string): Record<string, TransformSpec> {
     return { [xChannel]: this.transformSpec(xChannel), [yChannel]: this.transformSpec(yChannel) };
@@ -2423,18 +2549,34 @@ export class Sample {
    * currently on screen, so this inverts the gate's transform and never the sample's.
    */
   gateToRaw(gate: GateSpaceRef, channel: string, v: number): number {
-    if (this.gateSpace(gate) === "raw") return v;
+    // An edge with no bound has none in raw space either; a transform's inverse would make it
+    // Infinity or pin it to a table end.
+    if (this.gateSpace(gate) === "raw" || isUnbounded(v)) return v;
     const spec = gate.transforms?.[channel];
     if (!spec) return this.displayToRaw(channel, v); // legacy CyTOF: read in the current display
     return transformFromSpec(spec).inverse(v);
   }
 
-  /** Raw → the space this gate stores its vertices in. */
+  /**
+   * Raw → the space this gate stores its vertices in.
+   *
+   * On FlowJo's grid a vertex goes to its channel by FlowJo's rounding, so an edited grid polygon
+   * keeps its vertices on channels: beyond a linear or log axis too, where FlowJo leaves them
+   * unclamped, and on a biex axis on the table's channels 0 … N, as an event is (flowjoGrid.ts).
+   */
   rawToGate(gate: GateSpaceRef, channel: string, v: number): number {
     if (this.gateSpace(gate) === "raw") return v;
     const spec = gate.transforms?.[channel];
     if (!spec) return this.rawToDisplay(channel, v);
-    return transformFromSpec(spec).forward(v);
+    if (spec.kind === "flowjoChannels") return flowJoGridScale(spec).vertexCell(v);
+    const forward = transformFromSpec(spec).forward;
+    const y = forward(v);
+    // Gating-ML's own flog has no value at or below zero. A vertex dragged there is placed as
+    // far down as flog goes rather than becoming NaN, which no gate could hold.
+    if (!Number.isFinite(y) && Number.isFinite(v) && spec.kind === "flog" && spec.standard) {
+      return forward(Number.MIN_VALUE);
+    }
+    return y;
   }
 
   /**
@@ -2445,7 +2587,8 @@ export class Sample {
    * straight; when they differ, the difference IS the bow, which is the signal we want shown.
    */
   gateToDisplay(gate: GateSpaceRef, channel: string, v: number): number {
-    return this.rawToDisplay(channel, this.gateToRaw(gate, channel, v));
+    // An unbounded edge, or one past what its transform reaches, is drawn past every event.
+    return this.rawToDisplay(channel, drawnRaw(this.gateToRaw(gate, channel, v)));
   }
 
   /** A coordinate read off the current plot → the space this gate stores its vertices in. */

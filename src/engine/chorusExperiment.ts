@@ -37,7 +37,7 @@
 
 import { unzipSync, strFromU8 } from "fflate";
 import { GATE_COLOR_TAG } from "./gatingml";
-import { WSP_GATE_SPACE_TAG } from "./flowjoWorkspace";
+import { WSP_GATE_SPACE_TAG, markConverterDocument, writeRectBoundsMark } from "./flowjoWorkspace";
 import type { ChorusGateReport, ChorusImportRecord } from "./chorusStatistics";
 import { transformFromSpec } from "./sample";
 import type { TransformSpec } from "./models";
@@ -693,6 +693,12 @@ function convertTree(expName: string, tree: Tree, model: ChorusDisplayModel | nu
       info.appendChild(tag);
     }
     if (info.childNodes.length) el.appendChild(info);
+    // FACSChorus's own edge rule is unmeasured. Of 72 experiment files on this machine only two
+    // hold rectangles (10 gates), and on the 13 recordings Chorus exported counts for, no event
+    // lies on any edge of them, so the two rules give the same counts (scripts/chorus-edge-rule.ts,
+    // 2026-09-24). Its rectangles keep the rule they were read under before 2026-09, both edges
+    // in (models.ts, RectangleBounds).
+    if (isRect) writeRectBoundsMark(out, el, "closed");
 
     axisNames.forEach((axisName, i) => {
       const dim = out.createElementNS(GATING_NS, "gating:dimension");
@@ -739,6 +745,7 @@ function convertTree(expName: string, tree: Tree, model: ChorusDisplayModel | nu
   if (!emitted) {
     throw new Error(`"${tree.label}" contains no gates GateLab can read.` + (warnings.length ? ` ${warnings[0]}` : ""));
   }
+  markConverterDocument(out);
   return {
     gatingMl: new XMLSerializer().serializeToString(out),
     label: `${expName} · ${tree.label}`,

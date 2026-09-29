@@ -19,15 +19,18 @@ import {
   listFlowJoWorkspaceSamples,
   flowJoWorkspaceToGatingML,
   matchFlowJoSamples,
-  resolveFlowJoWorkspaceFiles,
+  pairFlowJoWorkspaceFiles,
   ungatedWorkspaceFiles,
   type FlowJoSampleSummary,
+  type FlowJoTreeSummary,
+  type FlowJoWorkspaceFile,
   type FlowJoSampleMatchKey,
+  type FlowJoWorkspacePairing,
   type FlowJoSpillover,
 } from "./engine/flowjoWorkspace";
-import { isDivaWorkspace, listDivaGateTrees, divaToGatingML } from "./engine/divaWorkspace";
+import { isDivaWorkspace, listDivaGateTrees, listDivaTubes, pairDivaTube, divaToGatingML, type DivaGateTreeSummary, type DivaTubeSummary } from "./engine/divaWorkspace";
 import { isChorusExperimentFile, readChorusExperiment, listChorusTrees, chorusToGatingML, chorusRecordingToGatingML, hasChorusRecording, readChorusRecording, treeSignature, type ChorusExperiment, type ChorusTreeSummary } from "./engine/chorusExperiment";
-import { buildChorusTimeline, type LoadedChorusRecording } from "./engine/chorusTimeline";
+import { buildChorusTimeline, isRecordingOfExperiment, treesRecordedUnder, type LoadedChorusRecording } from "./engine/chorusTimeline";
 import { ChorusTimelineModal } from "./ui/ChorusTimelineModal";
 import { compareChorusStatistics, parseChorusStatistics, type ChorusImportRecord, type ChorusStatistics, type FileCounts } from "./engine/chorusStatistics";
 import { ChorusStatisticsModal } from "./ui/ChorusStatisticsModal";
@@ -39,8 +42,22 @@ import { covarianceFromAxes, ellipseBoundary } from "./engine/ellipse";
 import { ChannelScales } from "./engine/channelScales";
 import { restoreChannelScales } from "./engine/restoreChannelScales";
 import { fitChannelAxisRange, includePlotGatesInAxisRange } from "./engine/axisRange";
-import { parseFcs, type SpilloverMatrix } from "./engine/fcs";
+import {
+  extractFcsDataSet,
+  extractNamedFcsDataSet,
+  fcsDataSetFileName,
+  FcsMultipleDataSetsError,
+  parseFcs,
+  parseFcsDataSetFileName,
+  readFcsFileKeywords,
+  readFcsKeywords,
+  type SpilloverMatrix,
+} from "./engine/fcs";
+import { gatingMlGains } from "./engine/gatingmlGain";
+import { gatingMLWriterOf } from "./engine/gatingmlWriter";
 import { Sample, maxCoefficientDelta, type DisplayMode, type OverlaySpec } from "./engine/sample";
+import type { DisplaySpillover } from "./engine/compensation";
+import { parseCompensationMatrixTable } from "./engine/compensationMatrixImport";
 import { populationTreeOrder } from "./engine/populations";
 import { resolvePartitionLevels, partitionAssign } from "./engine/factors";
 import { paletteColors, populationColor, UNGATED_COLOR, OVERLAY_PALETTES, MARKER_PALETTES, DEFAULT_MARKER_PALETTE, type PaletteName } from "./engine/palettes";
@@ -65,6 +82,10 @@ import {
   type PooledGateCountInput,
 } from "./engine/multiSamplePlot";
 import {
+  cytobankDocumentForFile,
+  cytobankTailoredFiles,
+  fcsDeclaresCompensation,
+  gatingMLImportOptionsFor,
   importGatingML,
   resolveGatingMLCompensation,
   restoreGatingMLScaleState,
@@ -72,7 +93,8 @@ import {
   type GatingMLResult,
 } from "./engine/gatingml";
 import { exportGatingML, type GatingMLFormat } from "./engine/gatingmlExport";
-import { exportFlowJoWorkspace, planFlowJoExport, type FlowJoExportSample } from "./engine/flowjoExport";
+import { exportFlowJoWorkspace, flowJoWorkspaceBytesAtMost, planFlowJoExport, type FlowJoExportSample } from "./engine/flowjoExport";
+import { formatByteSize, planFlowJoFolder, previewFlowJoFolder, writableName, writeFlowJoFolder, writeFlowJoZip } from "./engine/flowjoExportFolder";
 import {
   gatingMergeSpaceConflict,
   hasGatingStrategy,
@@ -138,11 +160,13 @@ import { BarcodeSaveModal, type BarcodeSaveChoice, type BarcodeSaveSummary } fro
 import { HierarchyModal, type HierarchyModalMode } from "./ui/HierarchyModal";
 import type { GroupAction } from "./ui/SampleManager";
 import { cloneHierarchyTree, correspondingHierarchyId, fileHierarchyId, newHierarchyId, referencedGateIds, storeHierarchy, uniqueHierarchyName, hierarchyColour } from "./engine/hierarchies";
-import { filesToHold, perFilePrimary } from "./engine/flowjoOpen";
+import { gateChannelKeys, gatesMissingChannels, planChannelKeyRemap, remapGateChannels, savedFileTreeGates } from "./engine/workspaceChannelKeys";
+import { briefReason, describeUnpaired, distinctFileNames, filesToHold, isPaired, namesInBrief, openTreeIndex, plannedFlowJoOpen, reasonWasCut, tiedDataSetsNote, workspaceFilesInFolder, type ChosenTree, type SkippedFile } from "./engine/flowjoOpen";
+import { compareIdentity, describeAgreement, describeContradiction, identityKeywords, sameFileName } from "./engine/fileIdentity";
 import { templateNameFromOrigin, type TailoredFile } from "./engine/tailoredImport";
 import { describeDiffering, planOneTreeImport, sameStructure, tailorFilesToTree } from "./engine/oneTreeImport";
 import { groupsOf, templateOf } from "./engine/groups";
-import { gateGeometryEquals, tailoredGateIds } from "./engine/templateSync";
+import { copyOnOwnChannels, gateGeometryEquals, tailoredGateIds } from "./engine/templateSync";
 import type { HierarchyRef, StoredHierarchy } from "./engine/hierarchies";
 import {
   SAMPLE_ASSAY_BINDING_SCHEMA,
@@ -172,6 +196,8 @@ import {
   pickDirectoryFiles,
   lastGrantedDirectory,
   pickFilesOrInput,
+  pickWritableDirectory,
+  rememberPickerLocation,
   writeHandle,
   writeHandleStream,
   saveAsHandle,
@@ -182,6 +208,8 @@ import {
   type PickedFileSource,
 } from "./engine/fsAccess";
 import {
+  describeRequirement,
+  indistinguishableDuplicateNames,
   planWorkspaceFcsRelink,
   type WorkspaceFcsRequirement,
 } from "./engine/workspaceRelink";
@@ -204,6 +232,9 @@ import {
   derivePopulationView,
   recompute,
   recomputeGating,
+  recomputeOwnTreeGating,
+  gatingKeyedByLiveTree,
+  promoteRefusal,
   type Action,
   type Derived,
   type GatingDerived,
@@ -212,12 +243,14 @@ import {
 import { GateList } from "./ui/GateList";
 import { GATE_EDGE_MODES, type GateEdgeMode } from "./ui/gateEdgeModes";
 import { resolveFlowJoTarget } from "./engine/flowjoWorkspace";
-import type { GateSpace, Gate } from "./engine/models";
+import { isUnbounded, type GateSpace, type Gate } from "./engine/models";
 import type { ChannelLabelMode } from "./engine/sample";
 import { gateSpaceBadge } from "./engine/gateSpaceBadge";
 import { HierarchyControls, PopulationTree, type EditTarget, type TreeControlsProps } from "./ui/PopulationTree";
 import { GateModals } from "./ui/GateModals";
 import { GateToolbar, PopToolbar } from "./ui/Toolbars";
+import { FlowJoGridOption } from "./ui/FlowJoGridOption";
+import { stampHostedWorkspace } from "./engine/workspaceFeatures";
 import { RenameModal, CreatePopModal, EditPopModal, ConfirmModal, BulkRenameModal, FcsExportModal, GatingMlImportModal, GatingMlExportModal, FlowJoExportModal, GroupsFromMetadataModal, type FlowJoExportScope, type MetadataGroupsPreview } from "./ui/CrudModals";
 import { StatsTab } from "./ui/StatsTab";
 import { PanelTab } from "./ui/PanelTab";
@@ -290,12 +323,15 @@ import {
 } from "./host/hostedWorkspace";
 import {
   buildHostedMemberships,
+  gatingStateForTree,
+  hostedMembershipReader,
+  hostedSampleMask,
+  notEvaluatedNotes,
   type HierarchyTree,
   type HostedMembershipSample,
 } from "./host/hostedMemberships";
 import {
   GATELAB_HOST_COLDATA_CONTRACT_VERSION,
-  packMembershipBits,
   type GateLabHostCategoricalColumn,
   type GateLabHostPopulationColumn,
 } from "./host/colDataContract";
@@ -408,6 +444,8 @@ export function gatingImportNeedsDecision(
   fileCount = 1,
 ): boolean {
   if (fileCount > 1) return true;
+  // "Evaluate gates as FlowJo does" has not been asked yet: the dialog is where it is asked.
+  if (pending.flowJoGridChoice) return true;
   // Compensation rewrites every fluorescence value, so it is never applied unasked. A FlowJo
   // workspace opened through its own dialog has been asked: that dialog states the matrix the gates
   // were drawn under -- or asks which, when the file's differs -- before anything changes, and
@@ -416,8 +454,37 @@ export function gatingImportNeedsDecision(
   // states nothing, so it still asks.
   if (pending.compensation.requiresConfirmation && !(pending.externalSpillover && pending.matrixAnswered)) return true;
   if (pending.externalSpillover?.differsFromEmbedded && !pending.matrixAnswered) return true;
+  // Another file of a per-file import whose own matrix differs from its sample's: the open
+  // dialog compared the primary's alone, so this is asked here whatever it answered.
+  if (pending.siblingTrees?.some((tree) => tree.externalSpillover?.differsFromEmbedded)) return true;
   if (state.root_population_id === null) return false;
   return hasGatingStrategy({ ...state, root_population_id: state.root_population_id });
+}
+
+/**
+ * A result line's " · N note(s)" raised by notes made after it was written; added when absent.
+ */
+export function withMoreNotes(line: string, more: number): string {
+  if (!more) return line;
+  const m = / · (\d+) note\(s\)$/.exec(line);
+  return m ? `${line.slice(0, m.index)} · ${Number(m[1]) + more} note(s)` : `${line} · ${more} note(s)`;
+}
+
+/**
+ * The matrix an import's gates are evaluated with, for an answer to the matrix question, as
+ * applyGatingImport installs it: the external one (a FlowJo workspace's, as
+ * Sample.externalSpilloverPreview maps it), unless it differs from the sample's own and the file's
+ * is kept. Null: the sample's own. Which gates the import can hold depends on it
+ * (gatingMLImportOptionsFor).
+ */
+export function appliedImportMatrix(
+  sample: Sample,
+  external: DisplaySpillover | null,
+  choice: "workspace" | "file",
+): DisplaySpillover | null {
+  if (!external) return null;
+  const differs = sample.spillover !== null && maxCoefficientDelta(sample.spillover, external) > 1e-6;
+  return differs && choice === "file" ? null : external;
 }
 
 /**
@@ -432,42 +499,61 @@ export function gatingImportNeedsDecision(
  * uncompensated values while the result line said "compensation enabled" once for the lot.
  */
 export function resolveSiblingImport(
-  tree: Readonly<{ name: string; gatingMl: string; fileName?: string; spillover?: FlowJoSpillover | null; origin?: string }>,
+  tree: Readonly<{ name: string; gatingMl: string; fileName?: string; entryId?: string | null; spillover?: FlowJoSpillover | null; origin?: string; sampleLabel?: string }>,
   primary: Sample,
   entries: readonly Readonly<{ id: string; name: string; sample: Sample }>[],
   activeSampleId: string | null,
+  /** The answer to the matrix question, which every tree's install follows (applyGatingImport). */
+  matrixChoice: "workspace" | "file" = "workspace",
+  /** The matrix the primary is evaluated with (appliedImportMatrix): a tree on no other file's. */
+  primaryMatrix: DisplaySpillover | null = null,
 ): NonNullable<PendingGatingMLImport["siblingTrees"]>[number] {
-  const entry = tree.fileName
-    ? entries.find((e) => e.name.toLowerCase() === tree.fileName!.toLowerCase()) ?? null
-    : null;
+  // The loaded file the open paired this tree's sample with, by id. Found by name, it was the
+  // first loaded file of that name -- another experiment's, where two share one.
+  const entry = tree.entryId ? entries.find((e) => e.id === tree.entryId) ?? null : null;
   const own = entry && entry.id !== activeSampleId ? entry : null;
   const target = own ? own.sample : primary;
   const pnn: Record<string, string> = {};
   for (const c of target.channels) pnn[c.pnn] = c.key;
-  const result = importGatingML(
-    tree.gatingMl, target.channels.map((c) => c.key), pnn, target.instrument);
-  if (!own) return { name: tree.name, ...(tree.fileName ? { fileName: tree.fileName } : {}), ...(tree.origin ? { origin: tree.origin } : {}), result };
   const external = tree.spillover && target.instrument === "flow"
     ? target.externalSpilloverPreview(tree.spillover.matrix)
     : null;
+  // Parsed against the matrix its sample will be evaluated with: its own workspace matrix as the
+  // choice installs it, or, for a tree imported onto the primary, the primary's.
+  const result = importGatingML(
+    tree.gatingMl, target.channels.map((c) => c.key), pnn, target.instrument,
+    gatingMLImportOptionsFor(target, own ? appliedImportMatrix(target, external?.display ?? null, matrixChoice) : primaryMatrix));
+  if (!own) {
+    return {
+      name: tree.name,
+      ...(tree.fileName ? { fileName: tree.fileName } : {}),
+      ...(tree.entryId ? { entryId: tree.entryId } : {}),
+      ...(tree.origin ? { origin: tree.origin } : {}),
+      ...(tree.sampleLabel ? { sampleLabel: tree.sampleLabel } : {}),
+      result,
+    };
+  }
   const delta = external?.display != null && target.spillover !== null
     ? maxCoefficientDelta(target.spillover, external.display)
     : null;
   return {
     name: tree.name,
     fileName: tree.fileName,
+    entryId: own.id,
     ...(tree.origin ? { origin: tree.origin } : {}),
+    ...(tree.sampleLabel ? { sampleLabel: tree.sampleLabel } : {}),
     result,
     sampleId: own.id,
     compensation: resolveGatingMLCompensation(
       result.compensation, result.compensation_refs, target.instrument === "flow",
-      external?.display ?? target.spillover ?? null),
+      external?.display ?? target.spillover ?? null, { fcsHasSpillover: fcsDeclaresCompensation(target.fcs) }),
     externalSpillover: external?.display != null
       ? {
           matrix: tree.spillover!.matrix,
           label: tree.spillover!.name || "the FlowJo workspace",
           replacesEmbedded: target.spillover !== null,
           differsFromEmbedded: delta !== null && delta > 1e-6,
+          maxDelta: delta,
         }
       : null,
   };
@@ -480,20 +566,22 @@ interface PendingGatingMLImport {
   compensation: GatingMLCompensationResolution;
   sampleId: string;
   /**
-   * The workspace's other top-level trees, each to become its own hierarchy.
-   *
-   * A FlowJo sample can hold several independent strategies side by side, and they are one
-   * decision, not several: same sample, same compensation, same matrix choice. So they are
-   * parsed with the first and applied together, rather than asking the same questions once per
-   * tree. Empty for every other import.
+   * Under a per-file FlowJo import, every other found file's strategy: each file follows the
+   * primary's tree or tailors its gate coordinates. They are one decision, not several -- same
+   * workspace, same matrix choice -- so they are parsed with the primary and applied together,
+   * rather than asking the same questions once per file. Empty for every other import.
    */
   siblingTrees?: readonly Readonly<{
     name: string;
     result: GatingMLResult;
     /** The FCS this tree was drawn on, when each file is to get its own hierarchy. */
     fileName?: string;
+    /** That FCS's loaded entry, by id. */
+    entryId?: string | null;
     /** Where the strategy came from (a FlowJo group), to name the template it shares. */
     origin?: string;
+    /** Which sample of the workspace it is ("sample 14"), to tell two files of one name apart. */
+    sampleLabel?: string;
     /**
      * A tree drawn on ANOTHER loaded file is parsed against that file's channels and carries its
      * own compensation decision, applied to that sample when the import goes ahead. A hierarchy
@@ -507,16 +595,44 @@ interface PendingGatingMLImport {
       label: string;
       replacesEmbedded: boolean;
       differsFromEmbedded: boolean;
+      maxDelta?: number | null;
     } | null;
   }>[];
   /** The FCS the PRIMARY tree was drawn on, under per-file import. */
   primaryFileName?: string;
+  /** Which sample of the workspace the primary file is ("sample 11"). */
+  primarySampleLabel?: string;
+  /**
+   * Whose tree the primary file gets by the user's choice, when it is not that file's own: the
+   * dialog said every file "gets its own sample's tree" of a file given another's.
+   */
+  primaryByChoice?: string;
+  /** That FCS's loaded entry, by id: the file the dialog paired, not the first of its name. */
+  primaryEntryId?: string;
   /** The primary strategy's origin (a FlowJo group), for naming its template. */
   primaryOrigin?: string;
   /** The matrix question was already put in the workspace-open dialog; do not ask again. */
   matrixAnswered?: boolean;
   /** Files the workspace open loaded for this import; cancelling it removes them again. */
   openedSampleIds?: readonly string[];
+  /** What the conversion skipped or could not read; shown beside the result, not cleared by it. */
+  notes?: readonly string[];
+  /**
+   * Under a per-file import, the found files whose own strategy could not be converted or
+   * parsed. They follow the imported tree without tailoring, and the result counts them.
+   */
+  unreadFiles?: readonly Readonly<{
+    name: string; entryId: string | null;
+    /** Its strategy could not be read, or it was read and could not be applied to this file. */
+    reason?: "unreadable" | "unapplied";
+  }>[];
+  /** Files the open loaded that no workspace sample is: they follow the tree, and are counted. */
+  followFiles?: readonly Readonly<{ name: string; entryId: string }>[];
+  /**
+   * A Cytobank file's per-file tailoring: each loaded file Cytobank tailored gates for, with the
+   * tree it used for that file, parsed against that file. Applied as that file's tailoring.
+   */
+  cytobankTailoring?: readonly Readonly<{ fileName: string; entryId: string; result: GatingMLResult }>[];
   mergeBlockedReason: string | null;
   compensationNote: string | null;
   /** Set when the gates came from a FlowJo workspace, so the result line can say which sample. */
@@ -535,9 +651,34 @@ interface PendingGatingMLImport {
     /** ...and the two are not the same compensation. */
     differsFromEmbedded: boolean;
     maxDelta: number | null;
+    /**
+     * Where the matrix came from: a FlowJo workspace, the Gating-ML file itself, or a file the
+     * user supplied for a compensation the Gating-ML file names and does not carry.
+     */
+    source: "workspace" | "gatingml" | "supplied";
   } | null;
   /** Which matrix to evaluate the gates with, when the two disagree. */
   matrixChoice: "workspace" | "file";
+  /**
+   * The import prepared for each answer, while the dialog asks which matrix: the gates GateLab can
+   * hold depend on the matrix installed (gatingMLImportOptionsFor), so choosing one swaps in what
+   * was prepared for it. Absent when the answer changes nothing the import holds.
+   */
+  byMatrixChoice?: Record<"workspace" | "file", Pick<PendingGatingMLImport,
+    "result" | "siblingTrees" | "compensation" | "mergeBlockedReason" | "compensationNote">>;
+  /**
+   * Gates drawn under a compensation the file names and does not carry
+   * (GatingMLResult.missing_compensation): the import waits for the user to supply that matrix
+   * or to choose the FCS file's own knowingly.
+   */
+  missingMatrix?: { supplied: string | null; useFcs: boolean; error: string | null };
+  /**
+   * "Evaluate gates as FlowJo does", for a FlowJo workspace imported onto the loaded files from
+   * the Import menu, which no earlier dialog asked: the import dialog offers it, and `redo` reads
+   * the workspace again with the other answer, staging the import afresh. Absent where the dialog
+   * that opened the workspace asked it.
+   */
+  flowJoGridChoice?: { value: boolean; redo: (value: boolean) => Promise<void> };
 }
 
 interface PendingNewGate {
@@ -621,6 +762,9 @@ const DRAW_TOOLS: { id: DrawMode; Icon: () => React.ReactElement; title: string 
  */
 export const CYTOF_OWNED_TARGETS = ".saved-gate, .gate-label, .cytof-xlabel, .cytof-ylabel";
 
+/** What to do instead of merging a sample's trees, under a per-file import onto loaded files. */
+const MERGED_TREES_ADVICE_LOADED = "To import one of them alone, import the workspace onto the viewed file again and choose that tree.";
+
 const MODES: { id: DisplayMode; label: string }[] = [
   { id: "pseudocolor", label: "Pseudocolor" },
   { id: "dots", label: "Dots" },
@@ -667,6 +811,18 @@ interface SampleEntry {
     /** Zero-based original SCE columns for exact host write-back. */
     eventIndex: Uint32Array;
   }>;
+}
+
+/**
+ * The end of a Save to SCE or colData message when a population was sent as not evaluated (NA)
+ * for some file, because the tree that file is gated under has no such population: the first
+ * notes in full, so the user sees which file and population, and a count of the rest.
+ */
+function notEvaluatedSummary(notes: readonly string[] | undefined): string {
+  if (!notes?.length) return "";
+  const shown = notes.slice(0, 3).join(" ");
+  const rest = notes.length - 3;
+  return ` · NA where not evaluated: ${shown}${rest > 0 ? ` And ${rest} more.` : ""}`;
 }
 
 function invertIdMap(sourceToCopy: Record<string, string>): Record<string, string> {
@@ -780,6 +936,8 @@ interface ResolvedReferenceFcs {
   bytes: Uint8Array;
   handle: FileSystemFileHandle | null;
   sourcePath?: string;
+  /** The open sample it was taken from, when it was. */
+  openId?: string;
 }
 
 interface IncludedDisplaySelection {
@@ -871,6 +1029,30 @@ export default function App() {
     useState<PendingWorkspaceRelink | null>(null);
   const [workspaceRelinkScanning, setWorkspaceRelinkScanning] = useState(false);
   const [workspaceRelinkError, setWorkspaceRelinkError] = useState<string | null>(null);
+  /**
+   * After a folder scan whose only problem is same-named files that record other acquisitions:
+   * the files it would take, if the user explicitly chooses them anyway. Never taken unasked.
+   */
+  const [workspaceRelinkOverride, setWorkspaceRelinkOverride] = useState<{
+    sourceName: string;
+    take: readonly { requirement: WorkspaceFcsRequirement; source: PickedFileSource }[];
+    byChoice: readonly { fileName: string; path: string }[];
+  } | null>(null);
+  /** Files relinked by that choice, named in the open's result. */
+  /**
+   * Samples a workspace was saved with compensation on for, whose matrix is not available now (a
+   * matrix taken from a FlowJo workspace or a Gating-ML file, saved before workspaces kept it, for a
+   * file that carries none). Saved with compensation still on while they have no matrix, so opening
+   * such a workspace does not write compensation off into it at the next autosave.
+   */
+  const compensationPendingRef = useRef<ReadonlySet<string>>(new Set());
+  const relinkedByChoiceRef = useRef<readonly { fileName: string; path: string }[]>([]);
+  /**
+   * Files relinked over other files of their name, in any case, that the identity they were saved
+   * with does not confirm (it agrees on $TOT or $DATE only, or their keywords could not be read):
+   * said with the result, which said nothing when the exact-named file was another acquisition.
+   */
+  const relinkedUnconfirmedRef = useRef<readonly { fileName: string; path: string; agree: readonly string[]; setAside: readonly string[] }[]>([]);
   const workspaceRelinkResolverRef = useRef<
     ((resolved: ReadonlyMap<string, ResolvedReferenceFcs> | null) => void) | null
   >(null);
@@ -1115,6 +1297,8 @@ export default function App() {
   // double-click applied it twice and every hierarchy of a per-file workspace appeared doubled.
   const gatingImportBusyRef = useRef(false);
   const [gatingImportBusy, setGatingImportBusy] = useState(false);
+  /** "Evaluate gates as FlowJo does" was changed in the import dialog; the workspace is being read again. */
+  const [flowJoGridRedoing, setFlowJoGridRedoing] = useState(false);
   const [barcodeImport, setBarcodeImport] = useState<BarcodeImportDraft | null>(null);
   const [barcodeSave, setBarcodeSave] = useState<{
     learned: LearnedBarcodeTemplate | null;
@@ -1124,12 +1308,103 @@ export default function App() {
   const barcodeRef = useRef<HTMLInputElement>(null);
   // A workspace whose sample could not be resolved unambiguously; the user picks one.
   const [wspPicker, setWspPicker] = useState<
-    { text: string; samples: FlowJoSampleSummary[]; reason: string } | null
+    {
+      text: string; samples: FlowJoSampleSummary[]; reason: string;
+      /** The loaded file the chosen sample's tree will be applied to; every row says so. */
+      fileName: string;
+      /** The loaded file's keywords, for showing what each sample records against them. */
+      keywords: Record<string, string>;
+      /** Every sample of the workspace, for pairing the other loaded files once one is chosen. */
+      wsSamples: FlowJoSampleSummary[];
+      /** The samples the file could be, where the keywords cannot tell; choosing one says which it is. */
+      couldBe: number[];
+      /** Asked by a workspace open: the choices it made, carried into the import of the sample picked. */
+      fromOpen?: {
+        strategyIndex: number; treeIndex: number | null;
+        matrixChoice: "workspace" | "file" | null; openedSampleIds: readonly string[];
+        flowJoGrid?: boolean;
+      };
+    } | null
+  >(null);
+  /**
+   * A .wsp imported onto the viewed file, where several other loaded files could each be one
+   * sample and nothing tells which: the user says, before the import. They used to follow the
+   * viewed file's sample's tree, and the result said "none was chosen" of a choice never offered.
+   */
+  const [loadedContest, setLoadedContest] = useState<
+    {
+      text: string; wsSamples: readonly FlowJoSampleSummary[]; choice: FlowJoSampleSummary;
+      matchedOn: FlowJoSampleMatchKey | null; crossTo: string | null; pairingNote: string | null;
+      contested: FlowJoWorkspacePairing["contested"];
+      /** Sample index -> the loaded file's id chosen for it, or "" for none. */
+      answers: Record<number, string>;
+      /**
+       * Loaded files several samples could each be -- two samples recording one acquisition -- and
+       * nothing tells which. They followed the viewed file's tree, and the result said "none was
+       * chosen" of a choice never offered.
+       */
+      undecided: FlowJoWorkspacePairing["ambiguous"];
+      /** Loaded file id -> the sample index chosen for it, or "" for none. */
+      fileAnswers: Record<string, string>;
+    } | null
   >(null);
   /** A sample holding more than one independent tree; GateLab can hold only one. */
   const [treePicker, setTreePicker] = useState<
-    { text: string; sample: FlowJoSampleSummary; matchedOn: FlowJoSampleMatchKey | null } | null
+    {
+      text: string; sample: FlowJoSampleSummary; matchedOn: FlowJoSampleMatchKey | null;
+      /** Set when the sample is not the file its tree is applied to, and the user chose so. */
+      crossTo?: string | null;
+      /** Answered in the open dialog, and carried to whichever tree is imported instead. */
+      matrixChoice?: "workspace" | "file" | null;
+      /** The files the workspace open loaded; cancelling the picker unloads them again. */
+      openedSampleIds?: readonly string[];
+      /** The trees chosen that could not be imported, and why, the latest last; the picker offers the rest. */
+      failed?: readonly { index: number; why: string }[];
+      /** Files the result names as following the tree, carried to whichever tree is imported. */
+      unpaired?: readonly Readonly<{ name: string; entryId: string | null; why: string }>[];
+      byChoice?: readonly Readonly<{ name: string; sample: string }>[];
+      pairingNote?: string | null;
+      loadNotes?: readonly string[];
+      /** "Evaluate gates as FlowJo does", as the open chose it; the tree imported instead keeps it. */
+      flowJoGrid?: boolean;
+      /** Not asked yet: the import dialog asks it (a workspace imported onto the loaded files). */
+      flowJoGridInDialog?: boolean;
+      /**
+       * Other loaded files that are gated samples of the workspace, the viewed file's first: the
+       * picker then also offers every tree of each file, each file its own sample's (one hierarchy
+       * per file). Choosing one tree instead imports it alone, and those files follow it by choice.
+       */
+      perFileOption?: readonly Readonly<{ sample: FlowJoSampleSummary; fileName: string; entryId: string | null }>[];
+    } | null
   >(null);
+  /**
+   * A Cytobank file whose per-file tailoring names a file that several loaded files are named
+   * like. Cytobank records a file by name alone, so which of them it is is the user's to say;
+   * the tailoring used to be applied to neither, without asking.
+   */
+  const [cytobankAsk, setCytobankAsk] = useState<{
+    text: string;
+    pairs: { fileName: string; entryId: string; gatingMl: string }[];
+    notes: string[];
+    ambiguous: { fileName: string; gates: number; entryIds: string[] }[];
+    /** The answer per ambiguous name: the loaded file's id, or null for none of them. */
+    answers: Record<string, string | null>;
+  } | null>(null);
+  /**
+   * A FACSDiva experiment whose tree for the loaded file is not decided: its tube is not in the
+   * experiment, or several trees could apply. The user chooses, and every row says what it
+   * imports onto which file.
+   */
+  const [divaPicker, setDivaPicker] = useState<{
+    text: string;
+    trees: DivaGateTreeSummary[];
+    tubes: DivaTubeSummary[];
+    reason: string;
+    fileName: string;
+    keywords: Record<string, string>;
+    /** The tube the loaded file IS, when one is, for a worksheet tree's compensation. */
+    tubeHint: number | null;
+  } | null>(null);
   /** A FACSChorus experiment: the gates as they are now, and a snapshot per sort; pick one. */
   const [chorusPicker, setChorusPicker] = useState<
     { experiment: ChorusExperiment | null; trees: ChorusTreeSummary[] } | null
@@ -1182,13 +1457,43 @@ export default function App() {
        * and loaded beside the gated ones rather than dropped from the dialog.
        */
       dataSamples: FlowJoSampleSummary[];
-      pending: { name: string; file: File }[];
+      /**
+       * Files chosen for the open, with their TEXT keywords, which pair them with their samples,
+       * and where they were chosen from, when that is known.
+       */
+      pending: { name: string; file: File; keywords: Record<string, string> | null; path?: string }[];
+      /**
+       * Files chosen that were not held, because a file of their name is already open or chosen
+       * and nothing says they are another acquisition. Named in the dialog and the result: they
+       * were dropped without a word.
+       */
+      notHeld?: { name: string; path?: string; sameAs: string; open: boolean; confirmed: boolean }[];
       strategySample: number | null;
-      strategyTree: number | "all" | null;
+      /**
+       * Whether the user chose the row. Until then the selection is the sample the viewed file
+       * (or the first file chosen) IS, and follows the files as they are found.
+       */
+      strategyTouched: boolean;
+      /**
+       * Which of the strategy sample's top-level trees to import, bound to that sample; null is its
+       * first. A workspace holds one tree, so a sample holding several imports the one chosen here
+       * and names the rest. A position chosen on one sample is never applied to another's trees.
+       */
+      strategyTree: ChosenTree | null;
+      /** Which sample a file is, where several could be and the keywords cannot tell: file key -> sample. */
+      fileChoices: Record<string, number>;
+      /** The user's explicit choice to apply the selected sample's tree to a file that is not it. */
+      crossFile: { sampleIndex: number; fileKey: string } | null;
       /** Give every resolved FCS its own hierarchy, drawn from its own sample. */
       perFileTrees: boolean;
       /** Which spillover matrix to gate under, answered here rather than in a second dialog. */
       matrixChoice: "workspace" | "file";
+      /**
+       * "Evaluate gates as FlowJo does": polygons on FlowJo's 256-channel grid and rectangles under
+       * FlowJo's axis rules (flowjoWorkspace.ts, FlowJoImportOptions). It holds for the whole open:
+       * every file of a per-file import, and a tree chosen again after one failed.
+       */
+      flowJoGrid: boolean;
     } | null
   >(null);
   /**
@@ -1207,12 +1512,10 @@ export default function App() {
     let cancelled = false;
     void (async () => {
       try {
-        // A file already in the workspace counts as found without being read again.
-        const loaded = new Set(samples.map((s0) => s0.name.toLowerCase()));
-        const wanted = new Set([...st.samples, ...st.dataSamples]
-          .flatMap((x) => x.candidateFileNames.map((n) => n.toLowerCase()))
-          .filter((n) => !loaded.has(n)));
-        const found: { name: string; file: File }[] = [];
+        // Every file the workspace names, or whose $FIL it names. One already in the workspace
+        // counts as found and is not loaded again -- unless its keywords say it is another
+        // acquisition of the same name, which filesToHold below tells apart.
+        const inFolder: { name: string; file: File }[] = [];
         // A remembered folder is trusted only for a workspace it holds itself. The last folder
         // granted may be unrelated, and files there that happen to share a name with the ones
         // this workspace gates are not its files.
@@ -1222,12 +1525,17 @@ export default function App() {
         }).values()) {
           if (entry.kind !== "file") continue;
           if (entry.name.toLowerCase() === st.fileName.toLowerCase()) holdsWorkspace = true;
-          if (!wanted.has(entry.name.toLowerCase())) continue;
-          found.push({ name: entry.name, file: await (entry as FileSystemFileHandle).getFile() });
+          if (!/\.fcs$/i.test(entry.name)) continue;
+          inFolder.push({ name: entry.name, file: await (entry as FileSystemFileHandle).getFile() });
         }
-        if (cancelled || !found.length || !holdsWorkspace) return;
+        if (cancelled || !holdsWorkspace) return;
+        const found = await workspaceFilesInFolder([...st.samples, ...st.dataSamples], inFolder, readFcsFileKeywords);
+        if (cancelled) return;
+        const skipped: SkippedFile<(typeof found)[number]>[] = [];
+        const held = filesToHold([], samples.map((s0) => ({ name: s0.name, keywords: s0.sample.fcs.keywords })), found, skipped);
+        if (!held.length) return;
         setFlowJoOpen((cur) => cur && cur.fileName === st.fileName && !cur.pending.length
-          ? { ...cur, pending: found }
+          ? { ...cur, pending: held, notHeld: [...(cur.notHeld ?? []), ...notHeldOf(skipped)] }
           : cur);
       } catch {
         // Permission lapsed, or the folder moved. The button is still there.
@@ -1237,6 +1545,71 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flowJoOpen?.fileName]);
 
+  /** The files the open dialog can pair with the workspace's samples: those loaded, then those chosen. */
+  const flowJoOpenFiles = (st: NonNullable<typeof flowJoOpen>): FlowJoWorkspaceFile[] => [
+    ...samples.map((entry) => ({
+      key: `loaded:${entry.id}`, name: entry.name, keywords: entry.sample.fcs.keywords,
+      path: entry.sourcePath ?? null, events: entry.sample.fcs.nEvents,
+    })),
+    // By position: two chosen files may share a name when their keywords say they are two acquisitions.
+    ...st.pending.map((f, i) => ({ key: `pending:${i}`, name: f.name, keywords: f.keywords, path: f.path ?? null })),
+  ];
+  /**
+   * The loaded files' names as a result should say them, by entry id: a name two loaded files
+   * share carries where each is, its event count and when it was recorded. "X (X is sample 14)"
+   * said nothing about which X.
+   */
+  const loadedFileNames = (): Map<string, string> => distinctFileNames(samples.map((entry) => ({
+    key: entry.id, name: entry.name, path: entry.sourcePath ?? null, keywords: entry.sample.fcs.keywords, events: entry.sample.fcs.nEvents,
+  })));
+  /** A loaded file as a message names it: told from another loaded file of its name, else its name. */
+  const calledLoaded = (name: string, entryId: string | null | undefined): string =>
+    (entryId ? loadedFileNames().get(entryId) : undefined) ?? name;
+  /**
+   * Whether a staged per-file import lists a file name more than once: among the files that get
+   * their own sample's tree, or there and among the files that follow the tree.
+   */
+  const stagedNameListedTwice = (pending: PendingGatingMLImport) => {
+    const nameOf = (f: { name: string; entryId?: string | null }) =>
+      (f.entryId ? samples.find((entry) => entry.id === f.entryId)?.name : undefined) ?? f.name;
+    const names = [
+      ...(pending.primaryFileName ? [nameOf({ name: pending.primaryFileName, entryId: pending.primaryEntryId })] : []),
+      ...(pending.siblingTrees ?? []).flatMap((tree) => (tree.fileName ? [nameOf({ name: tree.fileName, entryId: tree.entryId })] : [])),
+      ...[...(pending.unreadFiles ?? []), ...(pending.followFiles ?? [])].map(nameOf),
+    ];
+    return (name: string) => names.filter((n) => sameFileName(n, name)).length > 1;
+  };
+  /** What the open dialog and its result say of a file it did not hold. */
+  const notHeldOf = (skipped: readonly SkippedFile<{ name: string; path?: string }>[]) => skipped.map((k) => ({
+    name: k.file.name, ...(k.file.path ? { path: k.file.path } : {}),
+    sameAs: k.sameAs.name, open: k.open, confirmed: k.confirmed,
+  }));
+  /**
+   * Every sample of an open paired with the file that IS it, gated and ungated together, and
+   * what the dialog will import from that. One computation for the dialog's list, its tree
+   * choice, its compensation note and the import itself, so the four cannot disagree.
+   */
+  /**
+   * How the open dialog pairs a multi-data-set file: by the event counts of the files open, and a
+   * chosen file not yet read, which may hold one data set per well, for every sample recorded
+   * under it. Once read, its data sets are paired one by one (completeFlowJoOpen).
+   */
+  const flowJoOpenPairingOptions = () => ({
+    events: new Map(samples.map((s0) => [s0.name, s0.sample.fcs.nEvents] as const)),
+    shareAcrossWells: true,
+  });
+  const flowJoOpenPlanOf = (st: NonNullable<typeof flowJoOpen>) => {
+    const files = flowJoOpenFiles(st);
+    const all = [...st.samples, ...st.dataSamples].sort((a, b) => a.index - b.index);
+    const pairing = pairFlowJoWorkspaceFiles(all, files, st.fileChoices, flowJoOpenPairingOptions());
+    const preferred = [
+      ...(activeSampleId ? [`loaded:${activeSampleId}`] : []),
+      ...st.pending.map((_, i) => `pending:${i}`),
+      ...samples.map((entry) => `loaded:${entry.id}`),
+    ];
+    const plan = plannedFlowJoOpen(st, pairing.resolutions, files, preferred);
+    return { files, pairing, plan };
+  };
   /**
    * Whether the workspace's spillover matrix and the chosen FCS's own differ, worked out while
    * the open dialog is still up.
@@ -1258,35 +1631,49 @@ export default function App() {
     useState<{ kind: "identical" | "workspace-only"; label: string; channels: number } | null>(null);
   /** True while the comparison below is still running; Import waits for it. */
   const [wspMatrixPending, setWspMatrixPending] = useState(false);
+  /**
+   * Whether the comparison ran for the tree to be imported. It cannot for a tree the converter
+   * cannot read, and then the dialog neither asked nor said anything, so its default answer is
+   * not an answer: the import must ask. Carried as one, a tree chosen instead after that tree
+   * failed took the workspace's matrix without the question ever being put.
+   */
+  const [wspMatrixCompared, setWspMatrixCompared] = useState(false);
   useEffect(() => {
     const st = flowJoOpen;
     const settle = (
       conflict: { label: string; delta: number } | null,
       note: { kind: "identical" | "workspace-only"; label: string; channels: number } | null,
+      compared = true,
     ) => {
       setWspMatrixConflict(conflict);
       setWspMatrixNote(note);
+      setWspMatrixCompared(compared);
       setWspMatrixPending(false);
     };
-    if (!st || st.strategySample === null) { settle(null, null); return; }
+    // The sample whose tree will be imported, and the file it goes on: the same plan the dialog
+    // lists and the import follows. This note used to be worked out for the radio row's sample
+    // while the import took another's.
+    const planned = st ? flowJoOpenPlanOf(st).plan : null;
+    if (!st || !planned?.sample) { settle(null, null); return; }
     // The answer defaults to the workspace's matrix, so an Import clicked before the two matrices
     // had been compared applied it without the question ever being shown.
     setWspMatrixPending(true);
     let cancelled = false;
     void (async () => {
       try {
-        const chosen = st.samples.find((x) => x.index === st.strategySample);
-        if (!chosen) { if (!cancelled) settle(null, null); return; }
-        const conversion = flowJoWorkspaceToGatingML(st.text, chosen.index, null);
+        const chosen = planned.sample!;
+        // The tree that will be imported, so the note speaks of its gates and not another tree's.
+        const conversion = flowJoWorkspaceToGatingML(st.text, chosen.index, planned.treeIndex, undefined, { flowJoGrid: st.flowJoGrid, translate: t });
         const workspaceSpillover = conversion.spillover;
         if (!workspaceSpillover) { if (!cancelled) settle(null, null); return; }
-        const names = new Set(chosen.candidateFileNames.map((n) => n.toLowerCase()));
-        const loaded = samples.find((entry) => names.has(entry.name.toLowerCase()));
+        // The file this sample's tree goes onto: the one paired with it, or the one chosen for it.
+        const key = planned.target?.fileKey ?? null;
+        const loaded = key?.startsWith("loaded:") ? samples.find((entry) => `loaded:${entry.id}` === key) : undefined;
         let target: Sample | null = loaded?.sample ?? null;
-        if (!target) {
+        if (!target && key?.startsWith("pending:")) {
           // Not loaded yet: parse the file the user just chose. It is about to be imported
           // anyway, so this reads nothing that was not going to be read.
-          const pendingFile = st.pending.find((f) => names.has(f.name.toLowerCase()));
+          const pendingFile = st.pending[Number(key.slice("pending:".length))];
           if (pendingFile) target = new Sample(parseFcs(await pendingFile.file.arrayBuffer()));
         }
         if (cancelled) return;
@@ -1306,25 +1693,54 @@ export default function App() {
         if (delta > 1e-6) settle({ label, delta }, null);
         else settle(null, usesCompensation ? { kind: "identical", label, channels } : null);
       } catch {
-        // A file that cannot be parsed is the import's problem to report, not this preview's.
-        if (!cancelled) settle(null, null);
+        // A file that cannot be parsed, or a tree that cannot be converted, is the import's problem
+        // to report, not this preview's. Nothing was compared, so nothing was answered.
+        if (!cancelled) settle(null, null, false);
       }
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flowJoOpen?.text, flowJoOpen?.strategySample, flowJoOpen?.pending, samples]);
+  }, [flowJoOpen?.text, flowJoOpen?.strategySample, flowJoOpen?.strategyTouched, flowJoOpen?.strategyTree, flowJoOpen?.perFileTrees,
+      flowJoOpen?.pending, flowJoOpen?.fileChoices, flowJoOpen?.crossFile, samples, activeSampleId]);
 
   /** Held until the sample the strategy belongs to is the active one. */
   const [pendingFlowJoStrategy, setPendingFlowJoStrategy] = useState<
     {
       text: string; choice: FlowJoSampleSummary;
-      treeIndex: number | "all" | null; targetNames: string[];
+      treeIndex: number | null;
+      /** The loaded file the strategy goes on, by id, and its name for saying so while it waits. */
+      target: { entryId: string | null; names: string[] };
       /** Resolved sample -> FCS, when each file is to get its own hierarchy. */
-      perFile?: readonly Readonly<{ sample: FlowJoSampleSummary; fileName: string }>[];
+      perFile?: readonly Readonly<{ sample: FlowJoSampleSummary; fileName: string; entryId: string | null }>[];
+      /** Set when the user chose to apply this sample's tree to a file that is not this sample. */
+      crossTo?: string | null;
+      /** Files this open loaded that no sample is, and why; they follow the tree, and are named. */
+      unpaired?: readonly Readonly<{ name: string; entryId: string | null; why: string }>[];
+      /** Files that are other gated samples and follow this tree because the user chose one shared tree. */
+      byChoice?: readonly Readonly<{ name: string; sample: string }>[];
+      /** Files chosen for the open that could not be loaded, said with the import's notes. */
+      loadNotes?: readonly string[];
       /** Answered in the open dialog, so the import never asks a second time. */
       matrixChoice?: "workspace" | "file";
       /** The files this open loaded, removed again if the strategy question is cancelled. */
       openedSampleIds?: readonly string[];
+      /** "Evaluate gates as FlowJo does", as the open dialog left it. */
+      flowJoGrid?: boolean;
+      /** Not asked yet: the import dialog asks it (a workspace imported onto the loaded files). */
+      flowJoGridInDialog?: boolean;
+      /**
+       * Under a per-file import, the samples already tried as the primary whose strategy could
+       * not be read: the next file whose strategy reads becomes the primary instead.
+       */
+      triedPrimaries?: readonly number[];
+      /** Said with the result: how the viewed file was paired with its sample. */
+      pairingNote?: string | null;
+      mergedTreesAdvice?: string;
+      /**
+       * Nothing says which data set the strategy's sample is: once the first it could be is
+       * active, the sample picker asks which sample that data set is, instead of importing.
+       */
+      ask?: { samples: FlowJoSampleSummary[]; reason: string; wsSamples: FlowJoSampleSummary[] };
     } | null
   >(null);
   const wspFcsRef = useRef<HTMLInputElement>(null);
@@ -1748,9 +2164,12 @@ export default function App() {
   /** The Statistics tab tabulates the viewed file whether or not it is checked, and compares the checked ones. */
   const statsSamples = useMemo(() => {
     const active = activeSampleId ? samples.find((entry) => entry.id === activeSampleId) : undefined;
-    if (!active || analysisSamples.some((entry) => entry.id === active.id) || !fileUnderActiveTree(active.id)) return analysisSamples;
-    return [active, ...analysisSamples];
-  }, [samples, activeSampleId, analysisSamples, fileUnderActiveTree]);
+    const listed = !active || analysisSamples.some((entry) => entry.id === active.id) || !fileUnderActiveTree(active.id)
+      ? analysisSamples
+      : [active, ...analysisSamples];
+    // Each file is tabulated under the tree it is gated under, not the live one.
+    return listed.map((entry) => ({ ...entry, hierarchyId: hierarchyOfFile(entry.id) }));
+  }, [samples, activeSampleId, analysisSamples, fileUnderActiveTree, hierarchyOfFile]);
   /** A hierarchy's tree, live or parked, for reading only. */
   const treeOf = useCallback((id: string) => {
     if (id === state.active_hierarchy_id) {
@@ -1818,6 +2237,8 @@ export default function App() {
     if (!group || !group.members.length) return "";
     const count = group.members.length;
     const tailored = group.members.filter((m) => m.tailored).length;
+    // One file: "1 files · all following" said it of a crowd.
+    if (count === 1) return tailored ? t("1 file · tailored") : t("1 file · following");
     if (!tailored) return t("{count} files · all following", { count });
     // Every file on a copy, every copy tailored, and every copy the same as the first: the case
     // after copying one file's gates to the rest, when the template is the odd one out.
@@ -2251,14 +2672,15 @@ export default function App() {
                     "explicit",
                     workspaceEditRevisionRef.current,
                   )
-                    .then(({ revision, memberships }) => {
+                    .then(({ revision, memberships, notEvaluated }) => {
                       setImportMsg(
                         `Saved GateLab workspace to SCE · revision ${revision}` +
                           (memberships
                             ? ` · memberships for ${memberships.populations} population` +
                               `${memberships.populations === 1 ? "" : "s"} in ` +
                               `${memberships.hierarchies} hierarch` +
-                              `${memberships.hierarchies === 1 ? "y" : "ies"}`
+                              `${memberships.hierarchies === 1 ? "y" : "ies"}` +
+                              notEvaluatedSummary(notEvaluated)
                             // The core sent them; an R side that predates them stores nothing and
                             // says nothing, so say it here rather than let the user find out later.
                             : " · no memberships stored: this GateLabR predates them, reload it"),
@@ -2428,9 +2850,40 @@ export default function App() {
     const source = state.hierarchies.find((h) => h.id === activeHierarchy.source_hierarchy_id);
     const target = source?.owner_group_id ? `The group "${source.name}"` : `The tree "${source?.name ?? ""}"`;
     const from = activeHierarchy.owner_group_id ? `"${activeHierarchy.name}"` : samples.find((entry) => entry.id === activeHierarchy.owner_sample_id)?.name ?? "this file";
+    // Said as the reducer decides it: the success line used to follow a promotion that changed nothing.
+    const refusal = promoteRefusal(state, activeHierarchy.id);
+    if (refusal) {
+      setHierarchyActionMessage(refusal === "other-structure"
+        ? `${target} was left as it is: ${from} draws a gate as another kind or holds other populations, so its tree is not the same tree. Apply to the tree takes its gates one at a time.`
+        : `${target} was left as it is: ${from}'s tree does not follow it directly.`);
+      return;
+    }
+    // Files that cannot be gated under it keep a copy of their own, with its coordinates.
+    const ownChannels = source ? samples.filter((entry) => followsOnOwnChannels(entry.id, source.id)).map((entry) => entry.name) : [];
     dispatch({ type: "promoteCopyToTemplate", copyId: activeHierarchy.id });
     markWorkspaceDirty();
-    setHierarchyActionMessage(`${target} now has ${from}'s gate coordinates, and every file following it follows again. Undo is available.`);
+    const tree = source?.owner_group_id ? `the group "${source.name}"` : "the tree";
+    setHierarchyActionMessage(`${target} now has ${from}'s gate coordinates, and every file following it follows again.${ownChannelsNote(ownChannels, tree)} Undo is available.`);
+  }
+
+  /**
+   * Whether the file's own copy follows `sourceId` on channels of its own (copyOnOwnChannels): the
+   * file labels a detector differently from the tree's file, and following again keeps the copy.
+   */
+  function followsOnOwnChannels(fileId: string, sourceId: string): boolean {
+    const ref = state.hierarchies.find((h) => h.id === hierarchyOfFile(fileId));
+    if (ref?.owner_sample_id !== fileId || ref.source_hierarchy_id !== sourceId) return false;
+    const copy = storedTreeOf(ref.id);
+    const source = treeOf(sourceId);
+    return !!copy && !!source && copyOnOwnChannels(copy, source);
+  }
+
+  /** What following again does for files on channels of their own, as a sentence, or nothing. */
+  function ownChannelsNote(names: readonly string[], tree: string): string {
+    if (!names.length) return "";
+    const one = names.length === 1;
+    return ` ${names.join(", ")} ${one ? "labels" : "label"} a detector differently from the tree's file, so ${one ? "it keeps a copy of its own" : "each keeps a copy of its own"}, ` +
+      `with ${tree}'s coordinates on ${one ? "its" : "their"} own channels; edits to ${tree} do not reach ${one ? "that file" : "those files"}.`;
   }
 
   /** A hierarchy's stored form, live or parked, for copying from. */
@@ -2500,7 +2953,8 @@ export default function App() {
   function applyHierarchyCopy() {
     if (!hierarchyCopyDraft) return;
     // Reverting is pointing the files back at the tree, as Revert does for one file: their copies
-    // go with the move, and one Undo restores every tree and link.
+    // go with the move, and one Undo restores every tree and link. A file on channels of its own
+    // keeps its copy, which takes the tree's coordinates (followSourceAgain).
     const assignments: Record<string, string> = {};
     const targets = new Set<string>();
     for (const id of hierarchyCopyDraft.fileIds) {
@@ -2510,24 +2964,35 @@ export default function App() {
       targets.add(source.owner_group_id ? `"${source.name}"` : "the tree");
     }
     if (!Object.keys(assignments).length) { setError("The tree is no longer available."); return; }
-    dispatch({ type: "assignFileHierarchies", assignments });
+    const ownChannels = Object.entries(assignments).filter(([id, sourceId]) => followsOnOwnChannels(id, sourceId))
+      .map(([id]) => samples.find((entry) => entry.id === id)?.name ?? id);
+    dispatch({ type: "followSourceAgain", assignments });
     setHierarchyCopyDraft(null);
     markWorkspaceDirty();
     const n = hierarchyCopyDraft.fileIds.length;
     const target = targets.size === 1 ? [...targets][0] : "their groups";
-    setHierarchyActionMessage(`${n} file${n === 1 ? "" : "s"} follow ${target} again; their tailoring is dropped. Undo is available.`);
+    setHierarchyActionMessage(`${n === 1 ? "1 file follows" : `${n} files follow`} ${target} again; ${n === 1 ? "its" : "their"} tailoring is dropped.${ownChannelsNote(ownChannels, target)} Undo is available.`);
   }
 
-  /** The viewed file follows the tree again: its copy, and every tailored gate in it, goes. */
+  /**
+   * The viewed file follows the tree again: its copy, and every tailored gate in it, goes. A file
+   * that labels a detector differently from the tree's file keeps its copy, which takes the tree's
+   * coordinates on the file's own channels: on the tree itself every gate on that detector held
+   * no event, since the tree's gates name a channel the file does not have.
+   */
   function revertViewedFile() {
     if (!activeSampleId) return;
     const ref = state.hierarchies.find((h) => h.id === hierarchyOfFile(activeSampleId));
     const source = sourceOfFile(activeSampleId);
     if (!ref?.owner_sample_id || !source || source.id === ref.id) return;
+    const target = source.owner_group_id ? `"${source.name}"` : "the tree";
+    const ownChannels = followsOnOwnChannels(activeSampleId, source.id);
     // Pointing the file back at what it follows drops the copy and makes that live, as one undo entry.
-    dispatch({ type: "assignFileHierarchies", assignments: { [activeSampleId]: source.id } });
+    dispatch({ type: "followSourceAgain", assignments: { [activeSampleId]: source.id } });
     markWorkspaceDirty();
-    setHierarchyActionMessage(`${fileName} follows ${source.owner_group_id ? `"${source.name}"` : "the tree"} again; its tailoring is dropped. Undo is available.`);
+    setHierarchyActionMessage(ownChannels
+      ? `${fileName} takes ${target === "the tree" ? "the tree's" : `${target}'s`} gate coordinates again.${ownChannelsNote([fileName], target)} Undo is available.`
+      : `${fileName} follows ${target} again; its tailoring is dropped. Undo is available.`);
   }
 
   function applyHierarchyAction(mode: HierarchyModalMode, name: string) {
@@ -2778,16 +3243,94 @@ export default function App() {
     }
   }
 
-  /** One tree of a FACSChorus experiment, rewritten as Gating-ML and taken through the ordinary path. */
-  async function importChorusTree(experiment: ChorusExperiment, index: number) {
+  /** The trees of this experiment the viewed file was recorded under, when it is a recording of it. */
+  function chorusTreesOfViewedFile(experiment: ChorusExperiment): ReturnType<typeof treesRecordedUnder> {
+    if (!sample) return null;
+    try {
+      return treesRecordedUnder(experiment, readChorusRecording(sample.fcs.keywords));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Why applying this tree of the experiment to the viewed file is the user's choice rather than
+   * the file's own gating, or null when it is the file's own: the file is not a recording of the
+   * experiment, or it is one made under another tree (a snapshot of another sort, or gates changed
+   * since). A recording made during Sort 1 given Sort 2's snapshot was imported with nothing said.
+   */
+  function chorusCrossReason(experiment: ChorusExperiment, treeIndex: number): string | null {
+    if (!sample) return null;
+    if (isRecordingOfExperiment(experiment, sample.fcs.keywords) !== true) return "it is not a recording of this experiment";
+    const own = chorusTreesOfViewedFile(experiment);
+    if (!own || own.treeIndices.includes(treeIndex)) return null;
+    return `it was recorded under another tree${own.duringSort ? `, during ${own.duringSort}` : ""}` +
+      (own.labels.length ? ` (the same as ${own.labels.join(", ")})` : "");
+  }
+
+  /**
+   * One tree of a FACSChorus experiment, rewritten as Gating-ML and taken through the ordinary path.
+   * `cross` names the file, and why, when the tree is not the one the file was recorded under and
+   * the user chose to apply it anyway; the result says so.
+   */
+  async function importChorusTree(experiment: ChorusExperiment, index: number, cross: { file: string; why: string } | null = null) {
     try {
       const conv = chorusToGatingML(experiment, index);
       setChorusImport(conv.record);
-      if (conv.warnings.length) setError(conv.warnings.join("\n"));
+      // Every other loaded file that is a recording of this experiment gets the tree it was
+      // recorded under -- its own, read from the file -- as a FlowJo workspace's files get their
+      // own sample's. They used to follow the chosen tree under "applied to all N files", a
+      // recording made during Sort 2 given Sort 1's snapshot, and a file with no record at all,
+      // with nothing said. Files that are no recording of the experiment follow it and are named.
+      const siblings: { name: string; gatingMl: string; fileName: string; entryId: string; sampleLabel: string; warnings?: readonly string[]; unreadable?: string }[] = [];
+      const unpaired: { name: string; entryId: string; why: string }[] = [];
+      const currentGates = experiment.panels[0]?.gates ?? null;
+      for (const entry of samples) {
+        if (entry.id === activeSampleId) continue;
+        const ofExperiment = isRecordingOfExperiment(experiment, entry.sample.fcs.keywords);
+        if (ofExperiment !== true) {
+          unpaired.push({
+            name: entry.name, entryId: entry.id,
+            why: hasChorusRecording(entry.sample.fcs.keywords)
+              ? ofExperiment === false ? "it is a recording of another experiment" : "its FACSChorus record cannot be read"
+              : "it carries no FACSChorus record",
+          });
+          continue;
+        }
+        try {
+          const recording = readChorusRecording(entry.sample.fcs.keywords)!;
+          const own = chorusRecordingToGatingML(recording, { currentGates });
+          const under = treesRecordedUnder(experiment, recording);
+          siblings.push({
+            name: entry.name, gatingMl: own.gatingMl, fileName: entry.name, entryId: entry.id,
+            sampleLabel: under?.labels.length ? `recorded under ${under.labels.join(", ")}` : `recording "${recording.name}"`,
+            ...(own.warnings.length ? { warnings: own.warnings } : {}),
+          });
+        } catch (e) {
+          siblings.push({ name: entry.name, gatingMl: "", fileName: entry.name, entryId: entry.id, sampleLabel: "its recording", unreadable: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      const perFile = siblings.length > 0;
+      const notes = perFile && conv.warnings.length ? [`${calledLoaded(fileName, activeSampleId)}: ${conv.warnings.join(" ")}`] : conv.warnings;
+      const noteCount = conv.warnings.length + siblings.reduce((n, s0) => n + (s0.warnings?.length ?? 0) + (s0.unreadable !== undefined ? 1 : 0), 0);
+      // The notes travel with the import and are shown beside its result: set as the error here,
+      // they were cleared again as soon as the import was staged.
       await prepareGatingImportFromGatingML(
         conv.gatingMl,
         ` from FACSChorus experiment · ${conv.label}` +
-          (conv.warnings.length ? ` · ${conv.warnings.length} note(s)` : ""),
+          (perFile ? " · one tree per file: each other recording gets the tree it was recorded under" : "") +
+          (cross ? ` · applied to ${cross.file} by choice: ${cross.why}` : "") +
+          (unpaired.length
+            ? ` · following the tree without a tree of their own: ${unpaired.map((u) => `${u.name} (${u.why})`).join("; ")}`
+            : "") +
+          (noteCount ? ` · ${noteCount} note(s)` : ""),
+        null,
+        siblings,
+        perFile ? fileName : null,
+        null, [], null,
+        notes,
+        perFile ? activeSampleId : null,
+        unpaired,
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -2819,7 +3362,10 @@ export default function App() {
   async function chooseChorusTree(experiment: ChorusExperiment, treeIndex: number) {
     setChorusPicker(null);
     if (sample && activeSampleId) {
-      await importChorusTree(experiment, treeIndex);
+      // The picker's button said whose gates go onto which file when they are not the file's own
+      // tree; pressing it is that choice, and the result repeats it.
+      const why = chorusCrossReason(experiment, treeIndex);
+      await importChorusTree(experiment, treeIndex, why ? { file: fileName, why } : null);
       return;
     }
     const pending = { experiment, treeIndex, targetSampleId: null };
@@ -2854,7 +3400,9 @@ export default function App() {
     ) return;
     const pending = pendingChorusImport;
     setPendingChorusImport(null);
-    void importChorusTree(pending.experiment, pending.treeIndex);
+    // The user chose this file for the tree. Whether it is the tree the file was recorded under is said.
+    const why = chorusCrossReason(pending.experiment, pending.treeIndex);
+    void importChorusTree(pending.experiment, pending.treeIndex, why ? { file: fileName, why } : null);
     // importChorusTree is a declaration whose inputs are captured above; re-running this effect
     // after unrelated renders would apply the same tree twice.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2893,8 +3441,11 @@ export default function App() {
         for (const w of conv.warnings) if (!warnings.includes(w)) warnings.push(w);
         const pnn: Record<string, string> = {};
         for (const c of entry.sample.channels) pnn[c.pnn] = c.key;
-        const res = importGatingML(conv.gatingMl, entry.sample.channels.map((c) => c.key), pnn, entry.sample.instrument);
-        const comp = resolveGatingMLCompensation(res.compensation, res.compensation_refs, entry.sample.instrument === "flow", entry.sample.spillover ?? null);
+        const res = importGatingML(conv.gatingMl, entry.sample.channels.map((c) => c.key), pnn, entry.sample.instrument,
+          gatingMLImportOptionsFor(entry.sample));
+        for (const w of res.warnings) if (!warnings.includes(w)) warnings.push(w);
+        const comp = resolveGatingMLCompensation(res.compensation, res.compensation_refs, entry.sample.instrument === "flow",
+          entry.sample.spillover ?? null, { fcsHasSpillover: fcsDeclaresCompensation(entry.sample.fcs) });
         if (comp.target !== null && entry.sample.compensationEnabled !== comp.target) entry.sample.setCompensation(comp.target);
         // Named after the sort whose snapshot the tree is, when a .cef says so, else the recording.
         const sig = treeSignature(r.recording.panel.gates);
@@ -2907,8 +3458,10 @@ export default function App() {
       // recorded alike, and every other file tailored on the gates it shares with it. A file
       // whose recording differs in structure is reported: what was dropped, what follows.
       const templateId = templateOf(state.active_hierarchy_id, state.hierarchies)?.id ?? state.active_hierarchy_id;
-      const plan = planOneTreeImport(files, { templateId, name: "", leadFileId: activeSampleId, existing: state.hierarchies });
-      const name = plan.lead.origin ?? plan.lead.fileName.replace(/\.fcs$/i, "");
+      const plan = planOneTreeImport(files, {
+        templateId, name: (lead) => lead.origin ?? lead.fileName.replace(/\.fcs$/i, ""), leadFileId: activeSampleId, existing: state.hierarchies,
+      });
+      const name = plan.template.name;
       if (templateId !== state.active_hierarchy_id) dispatch({ type: "switchHierarchy", id: templateId, silent: true });
       dispatch({
         type: "importGating",
@@ -2922,7 +3475,7 @@ export default function App() {
       const n = files.length;
       setImportMsg(
         `Imported one tree, "${name}", from ${plan.lead.fileName} for ${n} file${n === 1 ? "" : "s"}: ` +
-          `${plan.following} follow it as recorded, ${plan.copies.length} tailored.` +
+          `${plan.following} ${plan.following === 1 ? "follows" : "follow"} it as recorded, ${plan.copies.length} tailored.` +
           (plan.differing.length
             ? ` ${plan.differing.length} file${plan.differing.length === 1 ? "" : "s"} recorded a different tree: ${describeDiffering(plan.differing)}.`
             : "") +
@@ -3009,8 +3562,99 @@ export default function App() {
     return out;
   }
 
+  /**
+   * One tree of a FACSDiva experiment, rewritten as Gating-ML and taken through the ordinary path.
+   * `crossTo` is set when the user chose to import it onto a file that is not its tube, and the
+   * result says so.
+   */
+  async function importDivaTree(
+    text: string,
+    tree: DivaGateTreeSummary,
+    tubeHint: number | null,
+    extraNotes: readonly string[],
+    crossTo: string | null,
+  ) {
+    try {
+      const conv = divaToGatingML(text, tree.index, tubeHint);
+      // Every other loaded file gets its own tube's tree, as a FlowJo workspace's files get their
+      // own sample's: they used to follow the chosen tube's tree under "applied to all N files",
+      // unpaired and unnamed, although the experiment held a tube for each. A tube's tree only: a
+      // global worksheet belongs to no tube, and every file follows it as it is.
+      const siblings: { name: string; gatingMl: string; fileName: string; entryId: string; spillover?: FlowJoSpillover | null; sampleLabel: string; warnings?: readonly string[]; unreadable?: string }[] = [];
+      const unpaired: { name: string; entryId: string; why: string }[] = [];
+      const others = samples.filter((entry) => entry.id !== activeSampleId);
+      if (others.length && tree.kind === "tube") {
+        const trees = listDivaGateTrees(text).filter((t0) => t0.gateCount > 0);
+        const tubes = listDivaTubes(text);
+        const label = (t0: DivaTubeSummary) => `tube "${t0.name}"${t0.dataFilename ? ` (${t0.dataFilename})` : ""}`;
+        for (const entry of others) {
+          const { pairing } = pairDivaTube(tubes, { name: entry.name, keywords: entry.sample.fcs.keywords });
+          if (pairing.kind !== "own") {
+            unpaired.push({
+              name: entry.name, entryId: entry.id,
+              why: pairing.kind === "contradicted"
+                ? pairing.candidates.map((c) => describeContradiction(label(c.sample), c.comparison.differ, "the file")).join("; ")
+                : pairing.kind === "ambiguous"
+                  ? `${pairing.candidates.length} tubes could be it, and their recorded times cannot tell which`
+                  : "no tube of this experiment is named like it or records its acquisition times",
+            });
+            continue;
+          }
+          const ownTree = trees.find((t0) => t0.tubeIndex === pairing.sample.index);
+          if (!ownTree) {
+            unpaired.push({ name: entry.name, entryId: entry.id, why: `it is ${label(pairing.sample)}, which carries no gates` });
+            continue;
+          }
+          try {
+            const own = divaToGatingML(text, ownTree.index, pairing.sample.index);
+            siblings.push({
+              name: entry.name, gatingMl: own.gatingMl, fileName: entry.name, entryId: entry.id, spillover: own.spillover,
+              sampleLabel: label(pairing.sample), ...(own.warnings.length ? { warnings: own.warnings } : {}),
+            });
+          } catch (e) {
+            siblings.push({ name: entry.name, gatingMl: "", fileName: entry.name, entryId: entry.id, sampleLabel: label(pairing.sample), unreadable: e instanceof Error ? e.message : String(e) });
+          }
+        }
+      }
+      const perFile = siblings.length > 0;
+      const ownNotes = [...extraNotes, ...conv.warnings];
+      // Under a per-file import each file's notes are shown under its name, the viewed file's first.
+      const notes = perFile && ownNotes.length ? [`${calledLoaded(fileName, activeSampleId)}: ${ownNotes.join(" ")}`] : ownNotes;
+      const noteCount = ownNotes.length + siblings.reduce((n, s0) => n + (s0.warnings?.length ?? 0) + (s0.unreadable !== undefined ? 1 : 0), 0);
+      // The notes travel with the import and are shown beside its result: set as the error
+      // here, they were cleared again as soon as the import was staged.
+      await prepareGatingImportFromGatingML(
+        conv.gatingMl,
+        ` from FACSDiva experiment · ${conv.label}` +
+          (perFile ? " · one tree per file, each its own tube's" : "") +
+          (crossTo ? ` · ${tree.kind === "tube" ? "tube" : "worksheet"} "${tree.label}" applied to ${crossTo} by choice` : "") +
+          // Files with no tube tree of their own follow the tree; they are named, with why.
+          (unpaired.length
+            ? ` · following the tree without a tree of their own: ${unpaired.map((u) => `${u.name} (${u.why})`).join("; ")}`
+            : "") +
+          // Every note shown is counted: the pairing note too, not only the converter's.
+          (noteCount ? ` · ${noteCount} note(s)` : ""),
+        conv.spillover,
+        siblings,
+        perFile ? fileName : null,
+        null, [], null,
+        notes,
+        perFile ? activeSampleId : null,
+        unpaired,
+        [],
+        perFile && tubeHint !== null ? { primarySampleLabel: `tube "${tree.label}"` } : {},
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   async function prepareGatingImport(file: File) {
     if (!sample || !activeSampleId) return;
+    // Every open sample, by name, events and $FIL, before `samples` below names the workspace's.
+    const openSamples = samples.map((s0) => ({
+      name: s0.name, events: s0.sample.fcs.nEvents, fil: s0.sample.fcs.keywords["$FIL"] ?? null,
+    }));
     try {
       // A FACSChorus experiment file is a zip rather than text. It holds the gates as they are
       // now and a snapshot of them at the start of every sort — the gating a sorted sample was
@@ -3019,12 +3663,11 @@ export default function App() {
         const experiment = readChorusExperiment(new Uint8Array(await file.arrayBuffer()));
         const trees = listChorusTrees(experiment).filter((t) => t.gateCount > 0);
         if (!trees.length) throw new Error("This FACSChorus experiment contains no gates GateLab can read.");
-        // One tree and no recordings to set it beside: nothing to choose. Otherwise the timeline,
-        // which also offers each loaded recording's own tree.
-        if (trees.length === 1 && !loadedChorusRecordings.length) {
-          await importChorusTree(experiment, trees[0].index);
-          return;
-        }
+        // The timeline, which also offers each loaded recording's own tree. The .cef holds no
+        // recordings, so nothing in it says the loaded file is its data: applying its one tree
+        // straight away put one experiment's gates on any file that happened to be viewed. The
+        // timeline names the file and whether it is a recording of this experiment, and applies
+        // nothing until a tree is chosen.
         setChorusPicker({ experiment, trees });
         return;
       }
@@ -3038,29 +3681,45 @@ export default function App() {
       if (isDivaWorkspace(text)) {
         const trees = listDivaGateTrees(text).filter((t) => t.gateCount > 0);
         if (!trees.length) throw new Error("This Diva experiment contains no gates GateLab can read.");
-        // Prefer the tree for the loaded file's tube; else a single tree is the only answer;
-        // else take the largest and SAY SO — quietly taking the first is how the FlowJo path
-        // imported another sample's gates before it grew a picker.
-        const byFile = trees.find(
-          (t) => (t.dataFilename ?? "").toLowerCase() === fileName.toLowerCase());
-        const pick = byFile ?? (trees.length === 1
-          ? trees[0]
-          : trees.reduce((best, t) => (t.gateCount > best.gateCount ? t : best)));
-        const conv = divaToGatingML(text, pick.index, fileName);
-        const notes = [...conv.warnings];
-        if (!byFile && trees.length > 1) {
-          notes.unshift(
-            `This experiment holds ${trees.length} gate trees and none names the loaded file; ` +
-              `"${pick.label}" (${pick.gateCount} gates) was imported. The others: ` +
-              trees.filter((t) => t !== pick).map((t) => `${t.label} (${t.gateCount})`).join(", ") + ".");
+        // Which tube IS the loaded file: named like it and recording its acquisition times, or,
+        // for a renamed file, the one tube whose times are its own. Diva names its files
+        // Specimen_001_Tube_001.fcs in every experiment, so the name alone imported another
+        // experiment's tube tree without a check.
+        const tubes = listDivaTubes(text);
+        const { pairing, byTimes } = pairDivaTube(tubes, { name: fileName, keywords: sample.fcs.keywords });
+        const own = pairing.kind === "own" ? pairing.sample : null;
+        const ownTree = own ? trees.find((t) => t.tubeIndex === own.index) : undefined;
+        const tubeTrees = trees.filter((t) => t.kind === "tube");
+        const worksheets = trees.filter((t) => t.kind === "worksheet");
+        const label = (t: DivaTubeSummary) => `tube "${t.name}"${t.dataFilename ? ` (${t.dataFilename})` : ""}`;
+        const why = pairing.kind === "contradicted"
+          ? `no tube of this experiment is "${fileName}": ` +
+            pairing.candidates.map((c) => describeContradiction(label(c.sample), c.comparison.differ)).join("; ")
+          : pairing.kind === "ambiguous"
+            ? `${pairing.candidates.length} tubes of this experiment could be "${fileName}", and their recorded times cannot tell which`
+            : pairing.kind === "none"
+              ? `no tube of this experiment is named "${fileName}" or records its acquisition times`
+              : null;
+        const found = own && byTimes
+          ? `"${fileName}" is ${label(own)}: its acquisition times are the tube's.`
+          : null;
+        // The file's own tube's tree; or the one global worksheet, which belongs to no tube and
+        // applies to any. Anything else is a choice: taking the largest tree, as this used to
+        // with only a note, imported another tube's gates without asking.
+        const pick = ownTree ?? (tubeTrees.length === 0 && worksheets.length === 1 ? worksheets[0] : undefined);
+        if (!pick) {
+          setDivaPicker({
+            text, trees, tubes, fileName, keywords: sample.fcs.keywords, tubeHint: own?.index ?? null,
+            reason: (why ? `${why[0].toUpperCase()}${why.slice(1)}. ` : found ? `${found} ` : "") +
+              (own && !ownTree
+                ? `The experiment holds ${trees.length} gate trees and none is that tube's. Choose the one to import onto "${fileName}".`
+                : `Choose the tree to import onto "${fileName}", or cancel.`),
+          });
+          return;
         }
-        if (notes.length) setError(notes.join("\n"));
-        await prepareGatingImportFromGatingML(
-          conv.gatingMl,
-          ` from FACSDiva experiment · ${conv.label}` +
-            (conv.warnings.length ? ` · ${conv.warnings.length} note(s)` : ""),
-          conv.spillover,
-        );
+        await importDivaTree(text, pick, own?.index ?? null,
+          [...(found ? [found] : []), ...(why && pick.kind === "worksheet" ? [`The worksheet's gates apply to any tube, but ${why}.`] : [])],
+          null);
         return;
       }
 
@@ -3069,56 +3728,161 @@ export default function App() {
       // FlowJo's own Gating-ML export omits gating:name, so importing a workspace is the only
       // way to get a NAMED hierarchy out of FlowJo without a separate recovery step.
       if (!isFlowJoWorkspace(text)) {
-        await prepareGatingImportFromGatingML(text, "");
-        return;
-      }
-
-      const samples = listFlowJoWorkspaceSamples(text);
-      const usable = samples.filter((s) => s.gateCount > 0);
-      if (!usable.length) throw new Error("This workspace contains no gates GateLab can read.");
-
-      // A FACSDiva export names its samples by the acquisition's $FIL keyword rather than by the
-      // file on disk, so the loaded file's own $FIL is offered as a second key.
-      const fil = sample.fcs.keywords["$FIL"] ?? null;
-      const { matches, matchedOn } = matchFlowJoSamples(usable, { fileName, fil });
-
-      // Exactly one match keeps the ordinary flow a single click. Anything else is ambiguous
-      // and gets a picker rather than a guess: FlowJo allows the same file to be added twice,
-      // and quietly taking the first would import another sample's gates.
-      if (matches.length === 1 && matchedOn !== null) {
-        const only = matches[0];
-        if (only.trees.length > 1) {
-          // GateLab holds one strategy. Merging several would combine trees FlowJo kept apart.
-          setTreePicker({ text, sample: only, matchedOn });
+        // A Cytobank file can carry gates tailored per FCS file. Each goes onto the loaded file it
+        // was tailored for, and none into the tree: they used to be imported as extra gates of the
+        // same name onto whatever file was loaded. Cytobank records a file by name alone, so a
+        // name two loaded files share is applied to neither.
+        const tailored = cytobankTailoredFiles(text);
+        if (!tailored.length) {
+          await prepareGatingImportFromGatingML(text, "");
           return;
         }
-        await importFlowJoSample(text, only, matchedOn, only.trees.length === 1 ? 0 : null);
+        const notes: string[] = [];
+        const pairs: { fileName: string; entryId: string; gatingMl: string }[] = [];
+        const ambiguous: { fileName: string; gates: number; entryIds: string[] }[] = [];
+        for (const f of tailored) {
+          const hits = samples.filter((e) => sameFileName(e.name, f.fileName));
+          if (hits.length === 1) {
+            pairs.push({ fileName: f.fileName, entryId: hits[0].id, gatingMl: cytobankDocumentForFile(text, f.fileName) });
+          } else if (hits.length > 1) {
+            ambiguous.push({ fileName: f.fileName, gates: f.gates, entryIds: hits.map((e) => e.id) });
+          } else {
+            notes.push(`Cytobank tailored ${f.gates} gate(s) for "${f.fileName}", which is not loaded; they were not imported.`);
+          }
+        }
+        // Several loaded files carry a name Cytobank tailored gates for: the user says which it is.
+        if (ambiguous.length) {
+          setCytobankAsk({ text, pairs, notes, ambiguous, answers: Object.fromEntries(ambiguous.map((a) => [a.fileName, null])) });
+          return;
+        }
+        await prepareGatingImportFromGatingML(cytobankDocumentForFile(text, null), "", null, [], null, null, [], null, notes, null, [], pairs);
         return;
       }
-      setWspPicker({
-        text,
-        samples: usable,
-        reason: matches.length > 1
-          ? `${matches.length} samples in this workspace are named "${matches[0].name}". Choose which one to import.`
-          : `No sample in this workspace matches the loaded file "${fileName}"` +
-            `${fil ? ` or its $FIL keyword "${fil}"` : ""}. Choose which sample's gates to import.`,
+
+      const wsSamples = listFlowJoWorkspaceSamples(text, t);
+      const usable = wsSamples.filter((s) => s.gateCount > 0);
+      if (!usable.length) throw new Error("This workspace contains no gates GateLab can read.");
+
+      // Which sample IS the loaded file. Names nominate -- the path FlowJo read, the node name,
+      // $FIL, and the file's own $FIL -- and the identity keywords FlowJo recorded for each sample
+      // decide. Every sample is considered, gated or not: a file whose own sample carries no gates
+      // is not given a same-named gated sample's tree.
+      const fil = sample.fcs.keywords["$FIL"] ?? null;
+      // One data set of a multi-data-set file is told apart from the file's other data sets by its
+      // well label, else its event count (matchFlowJoSamples), against the other samples open.
+      const { matchedOn, pairing, tiedWith, tiedOn, tiedUngated, tiedUnopened } = matchFlowJoSamples(wsSamples, {
+        fileName, fil, keywords: sample.fcs.keywords, events: sample.fcs.nEvents, open: openSamples,
       });
+      const label = (x: FlowJoSampleSummary) => `sample ${x.index + 1} "${x.name}"`;
+
+      // The file's own sample, with gates: one click, as before.
+      if (pairing.kind === "own" && pairing.sample.gateCount > 0) {
+        const only = pairing.sample;
+        // Found by the $FIL the file carries after the sample of its own name recorded another
+        // acquisition: a renamed or swapped file. Said, so the import does not look like the
+        // wrong sample's.
+        // A same-named sample that records nothing confirming the file gave way to the sample the
+        // file's $FIL names and its keywords confirm; said too, for the same reason.
+        const passedOver = pairing.passedOver ?? [];
+        const pairingNote = matchedOn === "fil" && (pairing.rejected.length || passedOver.length)
+          ? [
+              ...(pairing.rejected.length
+                ? [`${pairing.rejected.map((r) => label(r.sample)).join(" and ")}, named like the file, ` +
+                    `${pairing.rejected.length === 1 ? "records" : "record"} another acquisition`]
+                : []),
+              ...(passedOver.length
+                ? [`${passedOver.map((r) => label(r.sample)).join(" and ")}, named like the file, ` +
+                    `${passedOver.length === 1 ? "records" : "record"} nothing that confirms it is the file`]
+                : []),
+            ].join("; ") + `; the file's $FIL and keywords are ${label(only)}'s`
+          : null;
+        await importOntoLoadedFiles(text, wsSamples, only, matchedOn, null, pairingNote);
+        return;
+      }
+      // Anything else is a choice, never a guess, and every row says whose tree goes onto which
+      // file. Taking a same-named sample whose record contradicts the file imported another
+      // acquisition's gates without a word; taking the first of several imported another sample's.
+      let offered = usable;
+      let reason: string;
+      /** The samples the file could be, where the keywords cannot tell: choosing one is not a cross. */
+      let couldBe: number[] = [];
+      if (pairing.kind === "own") {
+        reason = `"${fileName}" is ${label(pairing.sample)} of this workspace, which carries no gates. ` +
+          "Choose another sample only if its tree should be applied to this file.";
+      } else if (pairing.kind === "contradicted") {
+        reason = `No sample in this workspace is "${fileName}": ` +
+          pairing.candidates.map((c) => describeContradiction(label(c.sample), c.comparison.differ)).join("; ") +
+          ". Its gates were not imported. Choose a sample only if its tree should be applied to this file anyway.";
+      } else if (pairing.kind === "ambiguous") {
+        const gated = pairing.candidates.map((c) => c.sample).filter((x) => x.gateCount > 0);
+        if (gated.length) offered = gated;
+        couldBe = pairing.candidates.map((c) => c.sample.index);
+        const dataSet = parseFcsDataSetFileName(fileName);
+        const others = (n: number) => (n === 1 ? "a sample" : `${n} samples`);
+        const n = pairing.candidates.length;
+        reason = dataSet && tiedOn
+          // One data set of a multi-data-set file, which the workspace records under the file:
+          // matched on an event count or a $FIL another sample or data set shares, nothing says
+          // which it is.
+          ? `${n === 1 ? "1 sample" : `${n} samples`} in this workspace could be ${fileName}: ` +
+            (tiedOn === "count"
+              ? `recorded under ${dataSet.fileName} with its ${sample.fcs.nEvents.toLocaleString("en-US")} events` +
+                (tiedWith?.length ? `, as ${tiedWith.join(" and ")} ${tiedWith.length === 1 ? "has" : "have"}` : "")
+              : `recorded under its $FIL "${fil}"` +
+                (tiedWith?.length ? `, which ${tiedWith.join(" and ")} ${tiedWith.length === 1 ? "carries" : "carry"} too` : "")) +
+            (tiedUngated ? `; ${others(tiedUngated)} without gates could be it too` : "") +
+            (tiedUnopened
+              ? `; ${tiedUnopened === 1 ? "another data set" : `${tiedUnopened} other data sets`} of ${dataSet.fileName}, ` +
+                "not open, could be it too"
+              : "") +
+            ", and no $WELLID or $SMNO says which. Choose which one to import."
+          : `${n} samples in this workspace could be "${fileName}", and the keywords they ` +
+            "record cannot tell which it is. Choose the one it is.";
+      } else {
+        reason = `No sample in this workspace matches the loaded file "${fileName}"` +
+          `${fil ? ` or its $FIL keyword "${fil}"` : ""}. Choose a sample only if its tree should be applied to this file.`;
+      }
+      setWspPicker({ text, samples: offered, reason, fileName, keywords: sample.fcs.keywords, wsSamples, couldBe });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   }
 
-  // A workspace's strategy can only be imported onto its own sample, and loading that sample is
-  // asynchronous, so the strategy waits here until it is the active one. Matching on any of the
-  // names the workspace records, because the file on disk may carry none of them but its own.
+  // A workspace's strategy can only be imported onto the file the open paired it with, and
+  // loading that file is asynchronous, so the strategy waits here until it is the active one. The
+  // file is the one the dialog decided on, by id: re-deriving it from names put the strategy on
+  // the first loaded file of that name, which with two of one name was another experiment's.
   useEffect(() => {
     const p = pendingFlowJoStrategy;
     if (!p || !sample || !activeSampleId) return;
-    const where = resolveFlowJoTarget(p.targetNames, fileName, samples);
+    const where = resolveFlowJoTarget(p.target, activeSampleId, samples);
 
     if (where.kind === "apply") {
       setPendingFlowJoStrategy(null);
-      void importFlowJoSample(p.text, p.choice, null, p.treeIndex, p.perFile ?? [], p.matrixChoice ?? null, p.openedSampleIds ?? []);
+      if (p.ask) {
+        // Nothing said which data set the strategy's sample was drawn on: the data set it could be
+        // is now viewed, and the user says which sample it is.
+        setWspPicker({
+          text: p.text,
+          samples: p.ask.samples,
+          reason: p.ask.reason,
+          fileName,
+          keywords: sample.fcs.keywords,
+          wsSamples: p.ask.wsSamples,
+          couldBe: p.ask.samples.map((x) => x.index),
+          fromOpen: {
+            strategyIndex: p.choice.index, treeIndex: p.treeIndex,
+            matrixChoice: p.matrixChoice ?? null, openedSampleIds: p.openedSampleIds ?? [],
+            flowJoGrid: p.flowJoGrid,
+          },
+        });
+        return;
+      }
+      void importFlowJoSample(p.text, p.choice, null, p.treeIndex, p.perFile ?? [], p.matrixChoice ?? null, p.openedSampleIds ?? [], [],
+        { crossTo: p.crossTo ?? null, unpaired: p.unpaired ?? [], byChoice: p.byChoice ?? [], loadNotes: p.loadNotes ?? [], flowJoGrid: p.flowJoGrid, flowJoGridInDialog: p.flowJoGridInDialog,
+          ...(p.triedPrimaries ? { triedPrimaries: p.triedPrimaries } : {}),
+          ...(p.pairingNote ? { pairingNote: p.pairingNote } : {}),
+          ...(p.mergedTreesAdvice ? { mergedTreesAdvice: p.mergedTreesAdvice } : {}) });
       return;
     }
     if (where.kind === "switch") {
@@ -3133,7 +3897,7 @@ export default function App() {
     setImportMsg(
       `Waiting for the FCS this workspace gates: ${where.wanted.slice(0, 3).join(", ")}` +
         (where.wanted.length > 3 ? `, and ${where.wanted.length - 3} more` : "") +
-        ". The loaded file(s) carry none of those names.",
+        ". It is not among the loaded files.",
     );
     // importFlowJoSample is recreated every render; depending on it would re-run this endlessly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3144,9 +3908,17 @@ export default function App() {
    * second time (the dialog counts it as found), and a file already held is not held twice.
    * Loading a file twice pooled a duplicate of it into the first hierarchy.
    */
-  function holdFlowJoFiles(files: readonly { name: string; file: File }[]) {
-    const loaded = samples.map((s0) => s0.name);
-    setFlowJoOpen((cur) => cur && { ...cur, pending: [...cur.pending, ...filesToHold(cur.pending, loaded, files)] });
+  async function holdFlowJoFiles(files: readonly { name: string; file: File; path?: string }[]) {
+    // Each file's TEXT keywords are read first: they are what pairs it with its sample, and what
+    // tells a same-named file of another acquisition from one already loaded.
+    const read = await Promise.all(files.map(async (f) => ({ ...f, keywords: await readFcsFileKeywords(f.file) })));
+    const loaded = samples.map((s0) => ({ name: s0.name, keywords: s0.sample.fcs.keywords }));
+    setFlowJoOpen((cur) => {
+      if (!cur) return cur;
+      const skipped: SkippedFile<(typeof read)[number]>[] = [];
+      const held = filesToHold(cur.pending, loaded, read, skipped);
+      return { ...cur, pending: [...cur.pending, ...held], notHeld: [...(cur.notHeld ?? []), ...notHeldOf(skipped)] };
+    });
   }
 
   /**
@@ -3171,7 +3943,7 @@ export default function App() {
    * does not drag its whole contents into the import.
    */
   async function chooseFlowJoFolder(state: NonNullable<typeof flowJoOpen>) {
-    if (!supportsDirectoryAccess) {
+    if (!supportsDirectoryAccess()) {
       setError("This browser cannot open a folder; choose the FCS files instead.");
       return;
     }
@@ -3181,23 +3953,21 @@ export default function App() {
         state.handle ? { startIn: state.handle } : {},
       );
       if (!picked) return;
-      // Every file the workspace names, gated or not. The folder button is how a workspace is
-      // usually opened, and it kept its own gated-only list: the dialog had learned to show a
-      // workspace's compensation controls, and this button still dropped them.
+      // Every file the workspace names, gated or not, and every file whose $FIL it names: a file
+      // renamed on disk is still its sample's, and choosing it by hand already paired it. The
+      // folder button is how a workspace is usually opened, and it kept its own gated-only list:
+      // the dialog had learned to show a workspace's compensation controls, and this button still
+      // dropped them.
       const named = [...state.samples, ...state.dataSamples];
-      const wanted = new Set(
-        named.flatMap((sample) =>
-          sample.candidateFileNames.map((name) => name.toLowerCase())),
-      );
-      const matches = picked.files.filter((f) => wanted.has(f.name.toLowerCase()));
+      const matches = await workspaceFilesInFolder(named, picked.files, readFcsFileKeywords);
       if (!matches.length) {
         setError(
           `No FCS in "${picked.name}" matches the ${named.length} file name(s) ` +
-          `"${state.fileName}" refers to.`,
+          `"${state.fileName}" refers to, by its name or its $FIL.`,
         );
         return;
       }
-      holdFlowJoFiles(matches.map((f) => ({ name: f.name, file: f.file })));
+      await holdFlowJoFiles(matches.map((f) => ({ name: f.name, file: f.file, path: `${picked.name}/${f.relativePath}` })));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -3217,90 +3987,383 @@ export default function App() {
         state.handle ? { startIn: state.handle } : {},
       );
       if (!picked?.length) return;
-      holdFlowJoFiles(picked.map((f) => ({ name: f.name, file: f.file })));
+      await holdFlowJoFiles(picked.map((f) => ({ name: f.name, file: f.file })));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   }
 
   /** Load the files gathered for a .wsp, then hand its strategy to the ordinary import path. */
+  /**
+   * Close the workspace sample picker. Raised by a workspace open, it is that open's question, so
+   * cancelling it cancels the open: the files it loaded go too, as cancelling its strategy question
+   * does (completeFlowJoOpen), rather than staying as a workspace with its gates left out.
+   */
+  function cancelWspPicker(): void {
+    const opened = wspPicker?.fromOpen?.openedSampleIds ?? [];
+    setWspPicker(null);
+    if (!opened.length) return;
+    void removeSamples(opened).then(() => setImportMsg(
+      `Workspace open cancelled; the ${opened.length === 1 ? "file it loaded was" : `${opened.length} files it loaded were`} ` +
+      "removed again and the current strategy was not changed.",
+    ));
+  }
+
   async function completeFlowJoOpen(state: NonNullable<typeof flowJoOpen>) {
-    const loadedNames = samples.map((s0) => s0.name);
-    const resolutions = resolveFlowJoWorkspaceFiles(
-      state.samples,
-      [...loadedNames, ...state.pending.map((f) => f.name)],
-    );
-    // One hierarchy per file needs a primary whose FCS was found, whichever row the radio was
-    // left on: the rows are disabled in that mode, so a missing primary had no way out.
-    const chosen = state.perFileTrees
-      ? perFilePrimary(state.samples, resolutions, state.strategySample)
-      : state.samples.find((x) => x.index === state.strategySample);
+    // The same plan the dialog showed: the sample whose trees it listed, the file that sample IS
+    // (or the one the user chose to apply its tree to), and under a per-file import every other
+    // file with the sample it is. Nothing here re-derives a pairing from names.
+    const first = flowJoOpenPlanOf(state);
+    const chosen = first.plan.sample;
     if (!chosen) return;
-    setFlowJoOpen(null);
-    const target = resolutions.find((r) => r.sampleIndex === chosen.index);
-    if (!target?.fileName) {
-      setError(
-        `The strategy belongs to "${chosen.name}", whose FCS was not among the files chosen. ` +
-          `Expected one of: ${chosen.candidateFileNames.join(", ")}.`,
-      );
+    const expected = (x: FlowJoSampleSummary) =>
+      `Expected one of: ${x.candidateFileNames.join(", ")}` +
+      (x.dataSetLabel ? `, the data set of well ${x.dataSetLabel}` : "") + ".";
+    // A sample that could be one of several data sets already open, where nothing says which, is
+    // imported too: the open then asks which sample the first of them is (below).
+    if (!first.plan.target && !first.plan.resolution?.tiedWith?.length) {
+      setError(`The strategy belongs to "${chosen.name}", whose FCS was not among the files chosen. ${expected(chosen)}`);
       return;
     }
-    const skipped = resolutions.filter((r) => r.fileName === null);
-    if (skipped.length) {
-      setImportMsg(
-        `${skipped.length} of ${state.samples.length} sample(s) in ${state.fileName} had no matching FCS and were skipped.`,
-      );
-    }
-    // A tree is only chosen when there is a choice; one tree needs no question, and several
-    // default to importing ALL of them as separate hierarchies. Making that the default rather
-    // than a required answer is the point: a workspace holding three strategies is not an
-    // ambiguity to resolve, it is three strategies, and GateLab can hold all three.
-    const treeIndex = state.strategyTree ?? (chosen.trees.length === 1 ? 0 : "all");
-    // One hierarchy per file: every sample whose FCS was found, paired with that file. Offered
-    // only when more than one resolved, since a single file has nothing to be per-file about.
-    const resolvedPairs = resolutions
-      .filter((r) => r.fileName !== null)
-      .map((r) => ({
-        sample: state.samples.find((x) => x.index === r.sampleIndex)!,
-        fileName: r.fileName!,
-      }))
-      .filter((pair) => pair.sample);
+    setFlowJoOpen(null);
+    const gatedIndex = new Set(state.samples.map((x) => x.index));
+    const everySample = [...state.samples, ...state.dataSamples].sort((a, b) => a.index - b.index);
+    // Every file the dialog paired is known by its key; the loaded ones already have an id, and
+    // the chosen ones get theirs as they load. The strategy then goes on that id, not on whichever
+    // loaded file carries the name.
+    const idOfKey = new Map<string, string>(samples.map((entry) => [`loaded:${entry.id}`, entry.id]));
     // Files already in the workspace are not loaded a second time: the dialog counted them as
     // found, and loading them again pooled a duplicate into the first hierarchy.
-    const toLoad = filesToHold([], loadedNames, state.pending);
+    const toLoad = filesToHold([], samples.map((s0) => ({ name: s0.name, keywords: s0.sample.fcs.keywords })), state.pending);
     let openedSampleIds: string[] = [];
+    // A file chosen that was not held, as a file already open or chosen, is named with the notes:
+    // it was dropped without a word, neither loaded nor named.
+    const loadNotes: string[] = (state.notHeld ?? []).map((k) =>
+      `${k.path ?? k.name} was not loaded: it has the name of ${k.sameAs}, ${k.open ? "already open" : "also chosen"}, and ` +
+      (k.confirmed ? "its keywords say it is the same acquisition" : "nothing says it is another acquisition"));
+    let added: SampleEntry[] = [];
     if (toLoad.length) {
-      const added = await importFcsCandidates(toLoad.map((f) => ({
-        id: crypto.randomUUID(), name: f.name, file: f.file, handle: null,
-      })));
+      // Each chosen file is bound to the entry it became by the candidate it was loaded as. Bound
+      // by name, in order, a file that failed to load handed its sample to the next file of the
+      // same name: that file got the failed file's sample's tree, and its own was dropped.
+      const candidates = toLoad.map((f) => ({ id: crypto.randomUUID(), name: f.name, file: f.file, handle: null, ...(f.path ? { sourcePath: f.path } : {}) }));
+      const became = new Map<string, SampleEntry>();
+      const failedToLoad = new Map<string, string>();
+      added = await importFcsCandidates(candidates, became, failedToLoad);
       openedSampleIds = added.map((e) => e.id);
-      // Files whose samples carry no gates -- compensation controls, typically -- load
-      // unchecked. They are there to be used, but pooling them under a strategy drawn on another
-      // file would add their events to every population.
-      const data = ungatedWorkspaceFiles(state.samples, state.dataSamples,
-        [...loadedNames, ...state.pending.map((f) => f.name)]);
-      const dataIds = added.filter((e) => data.has(e.name)).map((e) => e.id);
+      for (const e of added) idOfKey.set(`loaded:${e.id}`, e.id);
+      toLoad.forEach((f, i) => {
+        const entry = became.get(candidates[i].id);
+        if (entry) idOfKey.set(`pending:${state.pending.indexOf(f)}`, entry.id);
+        const why = failedToLoad.get(candidates[i].id);
+        // Said with the import's notes: the load error was cleared as soon as the import was staged,
+        // and a file chosen for the open vanished without a word.
+        if (why !== undefined) loadNotes.push(`${f.name} could not be loaded, so no tree was imported onto it: ${why}`);
+      });
+    }
+    const entryOf = (key: string): string | null => idOfKey.get(key) ?? null;
+    // A file holding several data sets opened as one sample per data set ("plate (data set 2 of 4,
+    // A02).fcs"), and each workspace sample recorded under that file is the data set of its own
+    // well, not the file, which no sample is named after. So the pairing is made again against the
+    // samples now open, as the dialog made it where they were open already; the answers the dialog
+    // took go with it, by the entry each file became. Until 2026-09 the strategy then waited for a
+    // "plate.fcs" that would never be loaded.
+    const nowOpen = [...samples, ...added];
+    const openEvents = new Map(nowOpen.map((e) => [e.name, e.sample.fcs.nEvents] as const));
+    const splitOnLoad = added.some((e) => parseFcsDataSetFileName(e.name) !== null);
+    let pairing = first.pairing;
+    let plan = first.plan;
+    let openFiles: readonly FlowJoWorkspaceFile[] = flowJoOpenFiles(state);
+    let fileChoices = state.fileChoices;
+    if (splitOnLoad) {
+      const loadedKey = (key: string) => {
+        const id = idOfKey.get(key);
+        return id ? `loaded:${id}` : null;
+      };
+      openFiles = nowOpen.map((entry) => ({
+        key: `loaded:${entry.id}`, name: entry.name, keywords: entry.sample.fcs.keywords,
+        path: entry.sourcePath ?? null, events: entry.sample.fcs.nEvents,
+      }));
+      fileChoices = Object.fromEntries(Object.entries(state.fileChoices).flatMap(([key, index]) => {
+        const k = loadedKey(key);
+        return k ? [[k, index] as const] : [];
+      }));
+      const crossKey = state.crossFile ? loadedKey(state.crossFile.fileKey) : null;
+      pairing = pairFlowJoWorkspaceFiles(everySample, openFiles, fileChoices, { events: openEvents });
+      const planFor = (index: number) => plannedFlowJoOpen(
+        {
+          ...state,
+          strategySample: index,
+          strategyTouched: true,
+          crossFile: state.crossFile && crossKey ? { sampleIndex: state.crossFile.sampleIndex, fileKey: crossKey } : null,
+        },
+        pairing.resolutions,
+        openFiles,
+        [],
+      );
+      plan = planFor(chosen.index);
+      // Under one hierarchy per file the lead is any gated sample paired with an FCS, as in the
+      // dialog; a lead that could be several data sets gives way to one that is paired.
+      if (!plan.target && state.perFileTrees) {
+        const paired = state.samples.find((x) => isPaired(pairing.resolutions.find((r) => r.sampleIndex === x.index)));
+        if (paired) plan = planFor(paired.index);
+      }
+    }
+    // Files named as the dialog named them: one sharing a name with another says which it is. Named
+    // from the files the pairing was made against, the data sets a plate opened as included.
+    const called = distinctFileNames(openFiles);
+    const calledAs = (key: string, name: string) => called.get(key) ?? name;
+    // Files whose samples carry no gates -- compensation controls, typically -- load unchecked.
+    // They are there to be used, but pooling them under a strategy drawn on another file would add
+    // their events to every population.
+    if (added.length) {
+      const data = ungatedWorkspaceFiles(state.samples, state.dataSamples, openFiles, fileChoices, { events: openEvents });
+      const dataIds = [...data].map((key) => idOfKey.get(key)).filter((id): id is string => !!id && openedSampleIds.includes(id));
       if (dataIds.length) setExcludedSampleIds((prev) => new Set([...prev, ...dataIds]));
     }
+    const lead = plan.sample ?? chosen;
+    const leadResolution = pairing.resolutions.find((r) => r.sampleIndex === lead.index);
+    if (!plan.target && leadResolution?.tiedWith?.length) {
+      // Nothing says which data set the strategy's sample was drawn on. Rather than import nothing,
+      // or take one of them on a guess, view the first it could be and ask which sample that data
+      // set is, with the sample picker Import gating uses.
+      const firstTied = leadResolution.tiedWith[0];
+      const candidates = state.samples.filter((x) =>
+        pairing.resolutions.find((r) => r.sampleIndex === x.index)?.tiedWith?.includes(firstTied));
+      const could = leadResolution.tiedWith.length === 1
+        ? `${firstTied}, which holds`
+        : `${leadResolution.tiedWith.slice(0, -1).join(", ")} or ${leadResolution.tiedWith[leadResolution.tiedWith.length - 1]}, each holding`;
+      const firstFile = openFiles.find((f) => f.name === firstTied);
+      setPendingFlowJoStrategy({
+        text: state.text,
+        choice: lead,
+        treeIndex: openTreeIndex(lead, state.strategyTree, false),
+        target: { entryId: firstFile ? entryOf(firstFile.key) : null, names: [firstTied] },
+        ...(loadNotes.length ? { loadNotes } : {}),
+        ...(wspMatrixCompared ? { matrixChoice: state.matrixChoice } : {}),
+        openedSampleIds,
+        flowJoGrid: state.flowJoGrid,
+        ask: {
+          samples: candidates.length ? candidates : [lead],
+          wsSamples: everySample,
+          reason:
+            `Nothing says which data set "${lead.name}", the strategy's sample, was drawn on: it could be ${could} ` +
+            `${(openEvents.get(firstTied) ?? 0).toLocaleString("en-US")} events, a count another data set or ` +
+            `sample of ${state.fileName} shares or may share, and no $WELLID or $SMNO says which. ` +
+            `Choose which sample ${firstTied} is; its gates are imported as the tree every file follows.`,
+        },
+      });
+      return;
+    }
+    if (!plan.target) {
+      setError(`The strategy belongs to "${lead.name}", and no FCS opened matches it. ${expected(lead)}`);
+      return;
+    }
+    const target = plan.target;
+    const skipped = pairing.resolutions.filter((r) => gatedIndex.has(r.sampleIndex) && !isPaired(r));
+    const missing = skipped.filter((r) => !r.tiedWith?.length);
+    // Data sets only a shared event count could pair with a gated sample: named, and they follow the
+    // tree as drawn.
+    const tied = tiedDataSetsNote(skipped, openEvents);
+    if (missing.length || tied) {
+      setImportMsg([
+        missing.length
+          ? `${missing.length} of ${state.samples.length} sample(s) in ${state.fileName} had no matching FCS and were skipped.`
+          : "",
+        tied ?? "",
+      ].filter(Boolean).join(" "));
+    }
+    // Files no sample is: named in the result, with why, and they follow the tree. That includes
+    // a file loaded before this open and named like no sample: it was left out as none of this
+    // workspace's business, and still followed the imported tree -- another sample's geometry --
+    // with the result counting the files around it.
+    const label = (index: number) => {
+      const x = everySample.find((y) => y.index === index);
+      return x ? `sample ${index + 1} "${x.name}"` : `sample ${index + 1}`;
+    };
+    const unpaired = pairing.unpaired
+      .filter((u) => u.fileKey !== target.fileKey && !plan.pairs.some((p0) => p0.fileKey === u.fileKey))
+      .map((u) => ({ name: calledAs(u.fileKey, u.fileName), entryId: entryOf(u.fileKey), why: describeUnpaired(u, label, calledAs) }));
+    // A file whose own sample carries no gates -- a compensation control the folder brought in --
+    // follows the tree too. It was neither counted nor named ("for 3 files" with 4 following), as
+    // the import onto a loaded file names it.
+    const ungatedIndex = new Set(state.dataSamples.map((x) => x.index));
+    for (const r of pairing.resolutions) {
+      if (!isPaired(r) || !ungatedIndex.has(r.sampleIndex)) continue;
+      for (const f of [{ fileKey: r.fileKey, fileName: r.fileName }, ...(r.copies ?? [])]) {
+        if (f.fileKey === target.fileKey || plan.pairs.some((p0) => p0.fileKey === f.fileKey)) continue;
+        unpaired.push({ name: calledAs(f.fileKey, f.fileName), entryId: entryOf(f.fileKey), why: `it is ${label(r.sampleIndex)}, which carries no gates` });
+      }
+    }
+    // With "One hierarchy per file" cleared, a file that IS another gated sample follows the
+    // chosen sample's tree. The user chose a shared tree, but the result used to say only
+    // "applied to all 2 files"; each such file is now named with the sample it is.
+    const byChoice = plan.perFile ? [] : pairing.resolutions
+      .filter((r) => isPaired(r) && gatedIndex.has(r.sampleIndex) && r.sampleIndex !== lead.index)
+      .flatMap((r) => [{ fileKey: r.fileKey!, fileName: r.fileName! }, ...(r.copies ?? [])]
+        .filter((f) => f.fileKey !== target.fileKey && entryOf(f.fileKey) !== null)
+        .map((f) => ({ name: calledAs(f.fileKey, f.fileName), sample: label(r.sampleIndex) })));
+    // Under a per-file import, a file that could not be loaded takes no tree, and when it was the
+    // primary's, the next file that did load is the primary: its sample's tree is the one it IS.
+    let primary: { sample: FlowJoSampleSummary; fileKey: string; fileName: string; cross: boolean } =
+      { sample: lead, fileKey: target.fileKey, fileName: target.fileName, cross: target.cross };
+    let pairs = plan.perFile ? plan.pairs.filter((p0) => entryOf(p0.fileKey) !== null) : [];
+    if (plan.perFile && entryOf(target.fileKey) === null && pairs.length) {
+      primary = { ...pairs[0], cross: false };
+    }
+    if (pairs.length < 2) pairs = [];
     // Set once the files are in, so the record can name what this open loaded: cancelling the
     // strategy question then undoes the open rather than leaving the files without their gates.
     setPendingFlowJoStrategy({
       text: state.text,
-      choice: chosen,
-      treeIndex,
-      targetNames: [target.fileName, ...chosen.candidateFileNames],
-      ...(state.perFileTrees && resolvedPairs.length > 1 ? { perFile: resolvedPairs } : {}),
-      matrixChoice: state.matrixChoice,
+      choice: primary.sample,
+      treeIndex: primary.sample === lead ? plan.treeIndex : openTreeIndex(primary.sample, state.strategyTree, pairs.length > 0),
+      target: { entryId: entryOf(primary.fileKey), names: [primary.fileName] },
+      ...(pairs.length
+        ? { perFile: pairs.map((p0) => ({ sample: p0.sample, fileName: p0.fileName, entryId: entryOf(p0.fileKey) })) }
+        : {}),
+      crossTo: primary.cross ? primary.fileName : null,
+      unpaired,
+      ...(byChoice.length ? { byChoice } : {}),
+      ...(loadNotes.length ? { loadNotes } : {}),
+      // The dialog's answer stands only where it compared the matrices; otherwise the import asks.
+      ...(wspMatrixCompared ? { matrixChoice: state.matrixChoice } : {}),
       openedSampleIds,
+      flowJoGrid: state.flowJoGrid,
     });
+  }
+
+  /**
+   * A .wsp imported onto the viewed file: `choice`'s tree onto it, and every OTHER loaded file
+   * that is a gated sample of this workspace gets its own sample's tree, one tree tailored per
+   * file, as the open dialog does. They used to follow the viewed file's sample's tree under
+   * "All N files" without a word, although the workspace held a confirmed sample for each.
+   * Loaded files with no tree of their own follow the tree and are named, with why.
+   * `crossTo` is set when `choice` is not the viewed file's sample and the user chose it.
+   */
+  async function importOntoLoadedFiles(
+    text: string,
+    wsSamples: readonly FlowJoSampleSummary[],
+    choice: FlowJoSampleSummary,
+    matchedOn: FlowJoSampleMatchKey | null,
+    crossTo: string | null,
+    pairingNote: string | null,
+    /**
+     * Which loaded file the user said each sample several could be is (file id -> sample), once
+     * asked; null until then, when such a sample is asked about before anything is imported.
+     */
+    fileChoices: Readonly<Record<string, number>> | null = null,
+  ) {
+    const others = samples.filter((entry) => entry.id !== activeSampleId);
+    const viewed = samples.find((entry) => entry.id === activeSampleId);
+    const ordered = [...wsSamples].sort((a, b) => a.index - b.index);
+    const label = (index: number) => {
+      const x = ordered.find((y) => y.index === index);
+      return x ? `sample ${index + 1} "${x.name}"` : `sample ${index + 1}`;
+    };
+    const perFile: { sample: FlowJoSampleSummary; fileName: string; entryId: string }[] = [];
+    /**
+     * Other loaded files that are the viewed file's own sample too: a copy of it. Under a per-file
+     * import each gets that sample's tree as its own; it followed the tree uncounted ("for 2 files"
+     * with 3 loaded) and uncompensated. Alone, they make nothing per file: the tree is theirs.
+     */
+    const ownCopies: { sample: FlowJoSampleSummary; fileName: string; entryId: string }[] = [];
+    const unpaired: { name: string; entryId: string | null; why: string }[] = [];
+    if (others.length) {
+      // The viewed file is paired too, as the chosen sample's file, unless its tree goes onto it by
+      // choice: another loaded file is then that sample's only as a confirmed copy of the viewed
+      // file. Any other file named like it was taken for a copy without its keywords being
+      // compared, and got the sample's tree as its own though it may be another acquisition.
+      const asViewed = !crossTo && viewed
+        ? [{ key: viewed.id, name: viewed.name, keywords: viewed.sample.fcs.keywords }]
+        : [];
+      const pairing = pairFlowJoWorkspaceFiles(
+        ordered,
+        [
+          ...asViewed,
+          ...others.map((entry) => ({ key: entry.id, name: entry.name, keywords: entry.sample.fcs.keywords })),
+        ],
+        { ...(fileChoices ?? {}), ...(asViewed.length ? { [asViewed[0].key]: choice.index } : {}) },
+        {
+          events: new Map(samples.map((entry) => [entry.name, entry.sample.fcs.nEvents] as const)),
+          // The viewed file is open too, paired or not: a data set of its file is not one that
+          // "might be" unopened.
+          alsoOpen: sample && !asViewed.length ? [{ name: fileName, events: sample.fcs.nEvents }] : [],
+        },
+      );
+      // Other loaded files several could be one sample, or a loaded file several samples could
+      // be, and nothing tells which: asked, once.
+      const undecided = pairing.ambiguous.filter((a) => a.fileKey !== activeSampleId && a.candidates.length > 1);
+      if (fileChoices === null && (pairing.contested.length || undecided.length)) {
+        setLoadedContest({
+          text, wsSamples, choice, matchedOn, crossTo, pairingNote, contested: pairing.contested,
+          answers: Object.fromEntries(pairing.contested.map((c) => [c.sampleIndex, ""])),
+          undecided,
+          fileAnswers: Object.fromEntries(undecided.map((a) => [a.fileKey, ""])),
+        });
+        return;
+      }
+      for (const r of pairing.resolutions) {
+        if (!isPaired(r)) continue;
+        // The chosen sample's own file is the viewed file -- or, when its tree goes onto the viewed
+        // file by choice, a further file that gets the same sample's tree as its own.
+        if (r.sampleIndex === choice.index && !crossTo) {
+          for (const f of [{ fileKey: r.fileKey, fileName: r.fileName }, ...(r.copies ?? [])]) {
+            if (f.fileKey !== activeSampleId) ownCopies.push({ sample: choice, fileName: f.fileName, entryId: f.fileKey });
+          }
+          continue;
+        }
+        const own = ordered.find((x) => x.index === r.sampleIndex)!;
+        // A sample's file and any copy of it (one acquisition loaded twice) are each that sample.
+        for (const f of [{ fileKey: r.fileKey, fileName: r.fileName }, ...(r.copies ?? [])]) {
+          if (own.gateCount > 0) perFile.push({ sample: own, fileName: f.fileName, entryId: f.fileKey });
+          else unpaired.push({ name: f.fileName, entryId: f.fileKey, why: `it is ${label(own.index)}, which carries no gates` });
+        }
+      }
+      // A loaded file named like no sample follows the tree like any other, so it is named too:
+      // it was skipped as none of this workspace's business, and took another sample's geometry
+      // without a word while the result counted the files around it. A name two loaded files
+      // share says which file it is.
+      const called = loadedFileNames();
+      const calledAs = (key: string, name: string) => called.get(key) ?? name;
+      for (const u of pairing.unpaired) {
+        if (u.fileKey === activeSampleId) continue;
+        unpaired.push({ name: calledAs(u.fileKey, u.fileName), entryId: u.fileKey, why: describeUnpaired(u, label, calledAs) });
+      }
+    }
+    // No dialog has asked "Evaluate gates as FlowJo does" yet: the import dialog asks it, on as in
+    // the dialog that opens a workspace, and changing it there reads the workspace again. A tree
+    // chosen by hand, or chosen again, comes to the same dialog.
+    const flowJoGrid = true;
+    const extra = { crossTo, unpaired, pairingNote, flowJoGrid, flowJoGridInDialog: true };
+    const perFileAll = [{ sample: choice, fileName, entryId: activeSampleId }, ...ownCopies, ...perFile];
+    // GateLab holds one strategy. Merging a sample's several trees would combine what FlowJo kept
+    // apart, so the viewed file's sample having several is a question -- asked before the other
+    // files' own trees were considered, which took every tree of every file with no way to choose
+    // one. The picker offers each tree alone, and, where other loaded files are samples of their
+    // own, every tree of each file, one hierarchy per file.
+    if (choice.trees.length > 1) {
+      setTreePicker({ text, sample: choice, matchedOn, crossTo, unpaired, pairingNote, flowJoGrid, flowJoGridInDialog: true, ...(perFile.length ? { perFileOption: perFileAll } : {}) });
+      return;
+    }
+    if (perFile.length) {
+      await importFlowJoSample(text, choice, matchedOn, null, perFileAll, null, [], [],
+        { ...extra, mergedTreesAdvice: MERGED_TREES_ADVICE_LOADED });
+      return;
+    }
+    await importFlowJoSample(text, choice, matchedOn, choice.trees.length === 1 ? 0 : null, [], null, [], [], extra);
   }
 
   async function importFlowJoSample(
     text: string,
     choice: FlowJoSampleSummary,
     matchedOn: FlowJoSampleMatchKey | null = null,
-    /** Which of the sample's independent trees; null merges them all, and says so. */
-    treeIndex: number | "all" | null = null,
+    /**
+     * Which of the sample's top-level trees to import. A workspace holds one tree, so the others
+     * are named in the result and not imported. Null takes every tree of the sample together, as
+     * one tree: what a sample with a single tree, and each file of a per-file import, amounts to.
+     */
+    treeIndex: number | null = null,
     /**
      * One hierarchy per FCS: every OTHER resolved sample's strategy is imported too, each into
      * its own hierarchy, and each file is bound to the hierarchy drawn on it.
@@ -3309,72 +4372,330 @@ export default function App() {
      * a workspace that genuinely share a strategy converge on the same gates by name and
      * channel rather than duplicating them, and only samples whose gates differ add new ones.
      */
-    perFile: readonly Readonly<{ sample: FlowJoSampleSummary; fileName: string }>[] = [],
+    perFile: readonly Readonly<{ sample: FlowJoSampleSummary; fileName: string; entryId?: string | null }>[] = [],
     /** Answered in the open dialog. Null means the import may still need to ask. */
     matrixChoice: "workspace" | "file" | null = null,
     /** The files the workspace open loaded, so cancelling the import can unload them again. */
     openedSampleIds: readonly string[] = [],
+    /** Trees of this sample already chosen and found unimportable, so they are not offered again. */
+    failedTrees: readonly { index: number; why: string }[] = [],
+    extra: Readonly<{
+      /**
+       * The file this sample's tree is applied to when that file is NOT this sample: only ever the
+       * user's explicit choice, and the result says so.
+       */
+      crossTo?: string | null;
+      /** Files the open loaded that no sample is; they follow the tree, and are named. */
+      unpaired?: readonly Readonly<{ name: string; entryId: string | null; why: string }>[];
+      /** Files that are other gated samples, following this tree because one shared tree was chosen. */
+      byChoice?: readonly Readonly<{ name: string; sample: string }>[];
+      /** Said with the result: how the file was paired with this sample, where that needs saying. */
+      pairingNote?: string | null;
+      /** What to do instead of merging a sample's trees, under a per-file import from this path. */
+      mergedTreesAdvice?: string;
+      /** Files chosen for the open that could not be loaded, shown and counted with the notes. */
+      loadNotes?: readonly string[];
+      /**
+       * "Evaluate gates as FlowJo does" for this import: the open dialog's answer, carried to
+       * every file and to a tree chosen again; FlowJo's rule, the default, where none was given.
+       */
+      flowJoGrid?: boolean;
+      /**
+       * No earlier dialog asked it (a workspace imported onto the loaded files, from the Import
+       * menu): the import dialog offers it, and changing it there reads the workspace again.
+       */
+      flowJoGridInDialog?: boolean;
+      /** Carried to the tree picker when a chosen tree fails: see its perFileOption. */
+      perFileOption?: readonly Readonly<{ sample: FlowJoSampleSummary; fileName: string; entryId: string | null }>[];
+      /** Under a per-file import, the samples tried as the primary whose strategy could not be read. */
+      triedPrimaries?: readonly number[];
+    }> = {},
   ) {
-    // "all": every tree of the sample, converted separately so each can become its own
-    // hierarchy. The first is the one the dialog's merge/replace applies to; the rest follow it
-    // into new hierarchies named after their root population.
-    // Per-file import overrides the tree question: each file contributes one hierarchy holding
-    // all of its strategies, so there is no per-tree split to make.
-    const perFileImport = perFile.length > 1;
-    const allTrees = !perFileImport && treeIndex === "all";
-    const primaryIndex: number | null =
-      perFileImport ? null : allTrees ? 0 : (typeof treeIndex === "number" ? treeIndex : null);
-    const converted = flowJoWorkspaceToGatingML(text, choice.index, primaryIndex);
-    const siblings: { name: string; gatingMl: string; fileName?: string; spillover?: FlowJoSpillover | null }[] = allTrees
-      ? choice.trees.slice(1).map((tree) => ({
-          name: tree.name,
-          gatingMl: flowJoWorkspaceToGatingML(text, choice.index, tree.index).gatingMl,
-        }))
-      : [];
-    // Every other file's strategy, one hierarchy each, named after the file so the tree panel
-    // and the sample badges read the same way.
-    for (const other of perFile) {
-      if (other.sample.index === choice.index) continue;
-      // ONE hierarchy per file, holding every tree that file carries. Splitting per tree as
-      // well multiplied the two options together -- three files of three strategies produced
-      // nine hierarchies -- when what "one hierarchy per file" says is one. A null tree index
-      // takes all of the sample's top-level trees into a single strategy.
-      const own = flowJoWorkspaceToGatingML(text, other.sample.index, null);
-      siblings.push({
-        name: other.fileName,
-        gatingMl: own.gatingMl,
-        fileName: other.fileName,
-        // The matrix ITS gates were drawn under; a workspace can carry one per sample.
-        spillover: own.spillover,
-        ...(other.sample.owningGroup ? { origin: other.sample.owningGroup } : {}),
-      });
-    }
-    if (converted.warnings.length) {
+    // Every caller but the .wsp-on-a-loaded-file path starts this without awaiting it -- from an
+    // effect, or from a picker's click -- so an error thrown here was an unhandled rejection the
+    // user never saw. It is caught and shown instead.
+    try {
+      // Per-file import overrides the tree question: each file contributes one hierarchy holding
+      // all of its strategies, so there is no per-tree split to make.
+      const perFileImport = perFile.length > 1;
+      // The open dialog's answer; FlowJo's own rule, its default, where no dialog asked.
+      const flowJoGrid = extra.flowJoGrid ?? true;
+      const primaryIndex: number | null = perFileImport ? null : treeIndex;
+      const primaryTree = primaryIndex === null ? undefined : choice.trees.find((tree) => tree.index === primaryIndex);
+      // A chosen tree that cannot be imported leaves the choice open: the sample's other trees are
+      // offered again, with why this one failed, rather than an error naming a list that had
+      // already closed and a workspace left with nothing but All Events.
+      const offerOtherTrees = (why: string): boolean => {
+        if (!primaryTree || choice.trees.length < 2) return false;
+        const failed = [...failedTrees.filter((f) => f.index !== primaryTree.index), { index: primaryTree.index, why }];
+        // Trees with no readable gate are never offered, so they count as tried. Every tree, each
+        // file its own sample's, is still a choice when other loaded files are samples: it was
+        // dropped once every tree of this sample had failed alone, though it would have imported.
+        const left = choice.trees.filter((tree) => tree.gateCount > 0 && !failed.some((f) => f.index === tree.index));
+        const perFileLeft = (extra.perFileOption?.length ?? 0) > 1;
+        if (!left.length && !perFileLeft) {
+          // Nothing is left to choose, which leaves the open where cancelling it would: the files
+          // it loaded go again, rather than staying with All Events only.
+          const said = `The tree "${primaryTree.name}" could not be imported: ${why} None of the sample's ${choice.trees.length} trees could be imported`;
+          if (openedSampleIds.length) {
+            const n = openedSampleIds.length;
+            void removeSamples(openedSampleIds).then(() => setError(
+              `${said}, so the workspace open was cancelled: the ${n === 1 ? "file it loaded was" : `${n} files it loaded were`} removed again.`,
+            ));
+          } else {
+            setError(`${said}.`);
+          }
+          return true;
+        }
+        // Everything the import carries goes with the tree chosen instead: what the open dialog
+        // answered, the files it loaded, and the files the result names.
+        setTreePicker({
+          text, sample: choice, matchedOn, crossTo: extra.crossTo ?? null, matrixChoice, openedSampleIds, failed,
+          unpaired: extra.unpaired ?? [], byChoice: extra.byChoice ?? [], pairingNote: extra.pairingNote ?? null,
+          loadNotes: extra.loadNotes ?? [], flowJoGrid, flowJoGridInDialog: extra.flowJoGridInDialog,
+          ...(extra.perFileOption ? { perFileOption: extra.perFileOption } : {}),
+        });
+        setError(`The tree "${primaryTree.name}" could not be imported: ${why} ` + (left.length
+          ? `Choose another of the sample's ${choice.trees.length} trees.`
+          : `None of the sample's ${choice.trees.length} trees can be imported alone; every tree, each file its own sample's, still can.`));
+        return true;
+      };
+      // Under a per-file import a sample's trees go in together, and no tree can be chosen there;
+      // the warning about that merge says what can be done instead.
+      const mergedTreesAdvice = perFileImport
+        ? extra.mergedTreesAdvice ?? 'To import one of them alone, open the workspace again with "One hierarchy per file" cleared and choose that tree.'
+        : undefined;
+      // Under a per-file import, a primary whose strategy cannot be read gives way to the next
+      // file whose strategy reads: that file's tree is the tree, and this file follows it without
+      // tailoring, named. The whole import used to stop, leaving the files the open loaded with
+      // All Events only and the other files without the trees they could have had.
+      const fallBackToAnotherPrimary = (why: string): boolean => {
+        if (!perFileImport) return false;
+        const tried = [...(extra.triedPrimaries ?? []), choice.index];
+        const next = perFile.find((p0) => !tried.includes(p0.sample.index) && p0.entryId);
+        const failedName = perFile.find((p0) => p0.sample.index === choice.index)?.fileName ?? choice.name;
+        if (!next) {
+          const said = `No file's strategy could be read; the last, ${failedName}'s: ${why}`;
+          if (openedSampleIds.length) {
+            const n = openedSampleIds.length;
+            void removeSamples(openedSampleIds).then(() => setError(
+              `${said} The workspace open was cancelled: the ${n === 1 ? "file it loaded was" : `${n} files it loaded were`} removed again.`,
+            ));
+          } else {
+            setError(said);
+          }
+          return true;
+        }
+        setPendingFlowJoStrategy({
+          text,
+          choice: next.sample,
+          treeIndex: null,
+          target: { entryId: next.entryId ?? null, names: [next.fileName] },
+          // Every file stays in: the one that failed is tried again as a further file, and named
+          // there as following the tree because its strategy could not be read.
+          perFile: perFile.map((p0) => ({ sample: p0.sample, fileName: p0.fileName, entryId: p0.entryId ?? null })),
+          unpaired: extra.unpaired ?? [],
+          ...(extra.byChoice?.length ? { byChoice: extra.byChoice } : {}),
+          ...(extra.loadNotes?.length ? { loadNotes: extra.loadNotes } : {}),
+          ...(extra.pairingNote ? { pairingNote: extra.pairingNote } : {}),
+          ...(extra.mergedTreesAdvice ? { mergedTreesAdvice: extra.mergedTreesAdvice } : {}),
+          // The dialog's matrix answer was about the file that failed; the new primary's is asked.
+          openedSampleIds,
+          triedPrimaries: tried,
+          // "Evaluate gates as FlowJo does" was answered for the whole import, or is still asked.
+          flowJoGrid,
+          flowJoGridInDialog: extra.flowJoGridInDialog,
+        });
+        return true;
+      };
+      let converted: ReturnType<typeof flowJoWorkspaceToGatingML>;
+      try {
+        converted = flowJoWorkspaceToGatingML(text, choice.index, primaryIndex, mergedTreesAdvice, { flowJoGrid, translate: t });
+      } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        if (offerOtherTrees(why)) return;
+        if (fallBackToAnotherPrimary(why)) return;
+        throw new Error(why);
+      }
+      const primaryPair = perFile.length ? perFile.find((p0) => p0.sample.index === choice.index) : undefined;
+      const primaryFileName = primaryPair?.fileName ?? null;
       // Skipped gates are surfaced, never dropped quietly: a hierarchy that silently loses a
-      // branch looks like a successful import.
-      setError(converted.warnings.join("\n"));
-    }
-    await prepareGatingImportFromGatingML(
-      converted.gatingMl,
-      ` from FlowJo workspace · ${converted.sampleName}` +
-        (perFileImport
-          ? ` · one hierarchy per file, ${perFile.length} files`
-          : allTrees
-          ? ` · all ${choice.trees.length} strategies, one hierarchy each`
-          : primaryIndex !== null && choice.trees.length > 1
-            ? ` · ${choice.trees[primaryIndex]?.name ?? `tree ${primaryIndex + 1}`}`
+      // branch looks like a successful import. They travel with the import and are shown beside
+      // its result, since an error set here was cleared as soon as the import was staged. Under a
+      // per-file import every file's notes are shown, each file's together under its name.
+      const loadNotes = extra.loadNotes ?? [];
+      const notes = [
+        ...loadNotes,
+        ...(perFileImport && primaryFileName && converted.warnings.length
+          ? [`${calledLoaded(primaryFileName, primaryPair?.entryId)}: ${converted.warnings.join(" ")}`]
+          : converted.warnings),
+      ];
+      let noteCount = loadNotes.length + converted.warnings.length;
+      let siblingGridPolygons = 0;
+      let siblingGateLabPolygons = 0;
+      const siblings: { name: string; gatingMl: string; fileName?: string; entryId?: string | null; spillover?: FlowJoSpillover | null; origin?: string; sampleLabel?: string; warnings?: readonly string[]; unreadable?: string }[] = [];
+      // Every other file's strategy, one hierarchy each, named after the file so the tree panel
+      // and the sample badges read the same way. A file whose strategy cannot be read is named
+      // and follows the tree, rather than failing the open of every other file.
+      for (const other of perFile) {
+        // The primary pair itself, not every file of the primary's sample: when the primary's tree
+        // goes onto another file by choice, the file that IS that sample gets it as its own.
+        if (other === primaryPair) continue;
+        // ONE hierarchy per file, holding every tree that file carries. Splitting per tree as
+        // well multiplied the two options together -- three files of three strategies produced
+        // nine hierarchies -- when what "one hierarchy per file" says is one. A null tree index
+        // takes all of the sample's top-level trees into a single strategy.
+        let own: ReturnType<typeof flowJoWorkspaceToGatingML>;
+        try {
+          own = flowJoWorkspaceToGatingML(text, other.sample.index, null, mergedTreesAdvice, { flowJoGrid, translate: t });
+        } catch (e) {
+          siblings.push({ name: other.fileName, gatingMl: "", fileName: other.fileName, sampleLabel: `sample ${other.sample.index + 1}`, entryId: other.entryId ?? null, unreadable: e instanceof Error ? e.message : String(e) });
+          // Its note is shown with the others, so it is counted with them.
+          noteCount += 1;
+          continue;
+        }
+        noteCount += own.warnings.length;
+        siblingGridPolygons += own.gridPolygons;
+        siblingGateLabPolygons += own.gateLabPolygons;
+        siblings.push({
+          name: other.fileName,
+          gatingMl: own.gatingMl,
+          fileName: other.fileName,
+          sampleLabel: `sample ${other.sample.index + 1}`,
+          // The loaded file this sample IS, by id: two loaded files may share its name.
+          entryId: other.entryId ?? null,
+          // The matrix ITS gates were drawn under; a workspace can carry one per sample.
+          spillover: own.spillover,
+          ...(other.sample.owningGroup ? { origin: other.sample.owningGroup } : {}),
+          ...(own.warnings.length ? { warnings: own.warnings } : {}),
+        });
+      }
+      const otherTrees = primaryTree ? choice.trees.filter((tree) => tree.index !== primaryTree.index) : [];
+      const failedOtherTrees = otherTrees.filter((tree) => failedTrees.some((f) => f.index === tree.index));
+      const notChosenTrees = otherTrees.filter((tree) => !failedTrees.some((f) => f.index === tree.index));
+      const unpaired = extra.unpaired ?? [];
+      const byChoice = extra.byChoice ?? [];
+      const failed = await prepareGatingImportFromGatingML(
+        converted.gatingMl,
+        ` from FlowJo workspace · ${converted.sampleName}` +
+          // The files are counted in the result; counted here as well, the two counts disagreed
+          // whenever a file followed the tree with none of its own ("for 4 files" and "3 files").
+          (perFileImport
+            ? " · one hierarchy per file"
+            : primaryTree && otherTrees.length
+              ? ` · tree "${primaryTree.name}", ${choice.trees.indexOf(primaryTree) + 1} of ${choice.trees.length}; ` +
+                // A sample can hold dozens of trees; the line names a few and counts the rest. A tree
+                // tried and failed is said to have failed, not listed as one left out by the rule.
+                [
+                  notChosenTrees.length ? `not imported, one tree per workspace: ${namesInBrief(notChosenTrees.map((tree) => tree.name))}` : "",
+                  failedOtherTrees.length ? `could not be imported: ${namesInBrief(failedOtherTrees.map((tree) => tree.name))}` : "",
+                ].filter(Boolean).join("; ")
+              : "") +
+          // The sample name will not look like the loaded file when $FIL was the matching key, so
+          // say why this sample was chosen rather than leaving it looking like the wrong one.
+          (matchedOn === "fil" ? ` (matched on $FIL)` : "") +
+          (extra.pairingNote ? ` · ${extra.pairingNote}` : "") +
+          // Another sample's tree on this file happens only by the user's choice, and says so.
+          (extra.crossTo
+            ? ` · ${choice.name}'s tree${primaryTree ? ` "${primaryTree.name}"` : ""} applied to ${extra.crossTo} by choice`
             : "") +
-        // The sample name will not look like the loaded file when $FIL was the matching key, so
-        // say why this sample was chosen rather than leaving it looking like the wrong one.
-        (matchedOn === "fil" ? ` (matched on $FIL)` : "") +
-        (converted.warnings.length ? ` · ${converted.warnings.length} skipped` : ""),
-      converted.spillover,
-      siblings,
-      perFile.length ? (perFile.find((p0) => p0.sample.index === choice.index)?.fileName ?? null) : null,
-      matrixChoice,
-      openedSampleIds,
-      choice.owningGroup || null,
-    );
+          // Files with no tree of their own follow the tree; they are named, with why.
+          (unpaired.length
+            ? ` · following the tree without a tree of their own: ${unpaired.map((u) => `${u.name} (${u.why})`).join("; ")}`
+            : "") +
+          // Files that are other samples, following this tree because one shared tree was chosen.
+          (byChoice.length
+            ? ` · following this tree by choice, though each is its own sample: ${byChoice.map((b) => `${b.name} (${b.sample})`).join("; ")}`
+            : "") +
+          // Not every note is a skipped gate -- a qualified name or a stale copy is a note too.
+          (noteCount ? ` · ${noteCount} note(s)` : "") +
+          // How the gates are evaluated, as the dialog that opened the workspace or the import
+          // dialog chose it: said with the result, which outlasts either dialog.
+          (flowJoGrid
+            ? ` · ${t("evaluated as FlowJo does ({count} polygon(s) on FlowJo's grid)", { count: converted.gridPolygons + siblingGridPolygons })}`
+            : ` · ${t("evaluated continuously, not on FlowJo's grid")}`) +
+          // Polygons GateLab wrote come back as it held them whichever way the option is set.
+          (converted.gateLabPolygons + siblingGateLabPolygons
+            ? ` · ${t("{count} polygon(s) GateLab wrote read as GateLab held them", { count: converted.gateLabPolygons + siblingGateLabPolygons })}`
+            : ""),
+        converted.spillover,
+        siblings,
+        primaryFileName,
+        matrixChoice,
+        openedSampleIds,
+        choice.owningGroup || null,
+        notes,
+        primaryPair?.entryId ?? null,
+        unpaired.flatMap((u) => (u.entryId ? [{ name: u.name, entryId: u.entryId }] : [])),
+        [],
+        {
+          ...(primaryPair
+            ? { primarySampleLabel: `sample ${choice.index + 1}`, ...(extra.crossTo ? { primaryByChoice: choice.name } : {}) }
+            : {}),
+          ...(extra.flowJoGridInDialog
+            ? {
+                flowJoGridChoice: {
+                  value: flowJoGrid,
+                  redo: (value: boolean) => importFlowJoSample(
+                    text, choice, matchedOn, treeIndex, perFile, matrixChoice, openedSampleIds, failedTrees,
+                    { ...extra, flowJoGrid: value },
+                  ),
+                },
+              }
+            : {}),
+        },
+      );
+      // A tree the converter read but the import could not parse is as unusable as one it could
+      // not read, and the other trees are offered the same way.
+      if (failed && !offerOtherTrees(failed)) fallBackToAnotherPrimary(failed);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /**
+   * A spillover matrix the user supplies for gates drawn under a compensation their Gating-ML file
+   * names and does not carry: a CSV or TSV table, as the Compensation tab reads one, square over the
+   * same channels. Held on the pending import, and installed only when the import is applied.
+   */
+  async function supplyMissingMatrix(file: File) {
+    const pending = pendingGatingMlImport;
+    if (!sample || !pending?.missingMatrix) return;
+    const fail = (message: string) => setPendingGatingMlImport((cur) => cur && cur.missingMatrix
+      ? { ...cur, missingMatrix: { ...cur.missingMatrix, error: `${file.name}: ${message}` } }
+      : cur);
+    try {
+      const { input } = parseCompensationMatrixTable(await file.text());
+      const channels = [...input.sourceChannels];
+      if (channels.length !== input.receiverChannels.length ||
+          channels.some((ch, i) => ch !== input.receiverChannels[i])) {
+        fail("its rows and columns name different channels; a spillover matrix is square over one set.");
+        return;
+      }
+      const matrix = { channels, matrix: input.matrix.map((row) => [...row]) };
+      const preview = sample.externalSpilloverPreview(matrix);
+      if (!preview.display) {
+        fail("fewer than two of its channels are fluorescence channels of the loaded file.");
+        return;
+      }
+      const delta = sample.spillover !== null ? maxCoefficientDelta(sample.spillover, preview.display) : null;
+      setPendingGatingMlImport((cur) => cur && cur.missingMatrix ? {
+        ...cur,
+        externalSpillover: {
+          matrix,
+          label: file.name,
+          dropped: preview.dropped,
+          replacesEmbedded: sample.spillover !== null,
+          differsFromEmbedded: delta !== null && delta > 1e-6,
+          maxDelta: delta,
+          source: "supplied",
+        },
+        matrixChoice: "workspace",
+        missingMatrix: { supplied: file.name, useFcs: false, error: null },
+      } : cur);
+    } catch (e) {
+      fail(e instanceof Error ? e.message : String(e));
+    }
   }
 
   async function prepareGatingImportFromGatingML(
@@ -3382,8 +4703,9 @@ export default function App() {
     wspNote: string,
     workspaceSpillover: FlowJoSpillover | null = null,
     /** Further top-level trees, each destined for its own hierarchy. Under a per-file import
-     *  these come from OTHER samples too, and each carries the FCS it belongs to. */
-    siblingTrees: readonly Readonly<{ name: string; gatingMl: string; fileName?: string; spillover?: FlowJoSpillover | null; origin?: string }>[] = [],
+     *  these come from OTHER samples too, and each carries the FCS it belongs to, the notes its
+     *  conversion made, and -- when its strategy could not be converted -- why. */
+    siblingTrees: readonly Readonly<{ name: string; gatingMl: string; fileName?: string; entryId?: string | null; spillover?: FlowJoSpillover | null; origin?: string; sampleLabel?: string; warnings?: readonly string[]; unreadable?: string }>[] = [],
     /** The FCS the primary tree belongs to, when importing one hierarchy per file. */
     primaryFileName: string | null = null,
     /**
@@ -3396,8 +4718,19 @@ export default function App() {
     openedSampleIds: readonly string[] = [],
     /** The primary strategy's origin (a FlowJo group), for naming the template it shares. */
     primaryOrigin: string | null = null,
-  ) {
-    if (!sample || !activeSampleId) return;
+    /** What the conversion skipped or could not read, shown with the import rather than lost. */
+    notes: readonly string[] = [],
+    /** The loaded entry the primary tree belongs to under a per-file import, by id. */
+    primaryEntryId: string | null = null,
+    /** Files the open loaded that no workspace sample is; they follow the tree. */
+    followFiles: readonly Readonly<{ name: string; entryId: string }>[] = [],
+    /** A Cytobank file's tree as tailored for each loaded file it names, by that file's id. */
+    cytobankTailoring: readonly Readonly<{ fileName: string; entryId: string; gatingMl: string }>[] = [],
+    /** Further fields of the staged import, set as given. */
+    more: Readonly<Pick<PendingGatingMLImport, "primarySampleLabel" | "primaryByChoice" | "flowJoGridChoice">> = {},
+  ): Promise<string | null> {
+    // Resolves to why the import could not be staged, or null; the error is shown either way.
+    if (!sample || !activeSampleId) return null;
     // The note names the format the Gating-ML was rewritten from; the dialog is titled after it.
     const sourceKind: GatingImportSourceKind = wspNote.startsWith(" from FlowJo workspace")
       ? "flowjo"
@@ -3410,14 +4743,44 @@ export default function App() {
       const pnnMap: Record<string, string> = {};
       for (const c of sample.channels) pnnMap[c.pnn] = c.key;
 
+      // The instrument decides whether an arcsinh vertex is inverted: flow stores gates in
+      // raw space, CyTOF in arcsinh space.
+      // The workspace's matrix, when it brings one. Which gates the import can hold depends on the
+      // matrix it installs (appliedImportMatrix): the workspace's unless the file's is kept.
+      const workspaceMatrix = workspaceSpillover && sample.instrument === "flow"
+        ? sample.externalSpilloverPreview(workspaceSpillover.matrix).display
+        : null;
+      // A standard Gating-ML file states coordinates on FCS scale values, stored value / $PnG, and
+      // GateLab gates the stored values, as FlowJo does: the importer restates them (options.gains),
+      // before GateLab's own record of a rectangle is checked. A converted FlowJo, FACSChorus or
+      // FACSDiva strategy is already on stored values and is not touched (gatingmlGain.ts).
+      const gains = sourceKind === "gatingml" ? gatingMlGains(sample) : null;
+      const parseFor = (choice: "workspace" | "file") => importGatingML(
+        text, sample.channels.map((c) => c.key), pnnMap, sample.instrument,
+        { ...gatingMLImportOptionsFor(sample, appliedImportMatrix(sample, workspaceMatrix, choice)), ...(gains?.size ? { gains } : {}) });
+      const res = parseFor(answeredMatrixChoice ?? "workspace");
+      // A Gating-ML file can carry the matrix its gates were compensated with (a spectrumMatrix
+      // its dimensions reference), and then it plays the part a FlowJo workspace's matrix does.
+      const fileMatrix: FlowJoSpillover | null = !workspaceSpillover && res.spectrum_matrix
+        ? {
+            // The matrix's own name, which a later export writes back as it is.
+            name: res.spectrum_matrix.name,
+            prefix: "",
+            suffix: "",
+            matrix: { channels: res.spectrum_matrix.channels, matrix: res.spectrum_matrix.matrix },
+          }
+        : null;
+      const gatesMatrix = workspaceSpillover ?? fileMatrix;
       // The workspace's matrix takes precedence over one embedded in the file, because it is the
       // record of what the gates were actually drawn under. A FACSDiva export writes the
       // ACQUISITION matrix into the FCS while the operator's later adjustment lives only in the
       // workspace, and the two are not the same. The preview does not touch the sample.
       const external =
-        workspaceSpillover && sample.instrument === "flow"
-          ? sample.externalSpilloverPreview(workspaceSpillover.matrix)
+        gatesMatrix && sample.instrument === "flow"
+          ? sample.externalSpilloverPreview(gatesMatrix.matrix)
           : null;
+      // Where that matrix comes from, in the notes below.
+      const matrixSource = fileMatrix ? "the Gating-ML file" : "the FlowJo workspace";
       const embeddedDelta =
         external?.display != null && sample.spillover !== null
           ? maxCoefficientDelta(sample.spillover, external.display)
@@ -3425,97 +4788,231 @@ export default function App() {
       const externalSpillover =
         external?.display != null
           ? {
-              matrix: workspaceSpillover!.matrix,
-              label: workspaceSpillover!.name || "the FlowJo workspace",
+              matrix: gatesMatrix!.matrix,
+              label: gatesMatrix!.name || matrixSource,
               dropped: external.dropped,
               replacesEmbedded: sample.spillover !== null,
               // Coefficients agreeing to this much are the same matrix round-tripped through a
               // text keyword; beyond it the two are genuinely different compensations.
               differsFromEmbedded: embeddedDelta !== null && embeddedDelta > 1e-6,
               maxDelta: embeddedDelta,
+              source: fileMatrix ? "gatingml" as const : "workspace" as const,
             }
           : null;
-      // The instrument decides whether an arcsinh vertex is inverted: flow stores gates in
-      // raw space, CyTOF in arcsinh space.
-      const res = importGatingML(
-        text, sample.channels.map((c) => c.key), pnnMap, sample.instrument);
+      // What the importer restated by $PnG, said with the result.
+      let gainNote = "";
+      if (gains?.size && res.gain) {
+        const restated = res.gain;
+        if (restated.converted.length) {
+          const channels = [...gains].map(([key, g]) => `${key} ×${g}`).join(", ");
+          const differing = samples.filter((entry) => entry.id !== activeSampleId && [...gains].some(([key, g]) => {
+            const own = gatingMlGains(entry.sample).get(key) ?? 1;
+            return entry.sample.index(key) !== undefined && own !== g;
+          })).map((entry) => entry.name);
+          gainNote =
+            ` · ${restated.converted.length} gate(s) converted from Gating-ML scale values by $PnG (${channels})` +
+            (differing.length ? `; ${differing.join(", ")} state a different gain, so these gates fit ${fileName} only` : "");
+        }
+        if (restated.unconverted.length) {
+          gainNote += ` · not converted by $PnG: ${restated.unconverted.join(", ")}`;
+        }
+      } else if (sourceKind === "gatingml") {
+        // FlowJo, flowUtils and CytoML files are read on stored values by default (gatingmlWriter.ts,
+        // writerGainConvention), which differs from the standard only where a gated channel has a
+        // gain; say so there.
+        const writer = gatingMLWriterOf(text);
+        const by = { flowjo: "FlowJo", flowutils: "flowUtils", cytoml: "CytoML" } as const;
+        const onGain = writer === "flowjo" || writer === "flowutils" || writer === "cytoml"
+          ? [...(gains ?? [])].filter(([key]) => Object.values(res.gates).some((g) => g.x_channel === key || g.y_channel === key))
+          : [];
+        if (onGain.length && (writer === "flowjo" || writer === "flowutils" || writer === "cytoml")) {
+          gainNote = ` · read on stored values, as ${by[writer]} writes Gating-ML; ` +
+            `$PnG not applied (${onGain.map(([key, g]) => `${key} ×${g}`).join(", ")})`;
+        }
+      }
       // Parsed now, so a tree that cannot be read stops the import before anything is applied
       // rather than half-way through. A tree drawn on ANOTHER loaded file is parsed against that
       // file's channels and instrument, and gets its own compensation decision: parsed against
       // the primary, a gate on a channel the primary lacks was dropped as "skipped", and the
       // other file was never compensated at all.
-      const siblings = siblingTrees.map((tree) =>
-        resolveSiblingImport(tree, sample, samples, activeSampleId));
-      const comp = resolveGatingMLCompensation(
-        res.compensation,
-        res.compensation_refs,
+      // A further file's tree that cannot be converted or parsed is named, and that file follows
+      // the tree, rather than failing the import of every other file. Each file's notes are
+      // shown together, under its name, after the primary's.
+      // One line per note in the header, which breaks the notes at newlines: a reason written over
+      // several lines -- a Gating-ML refusal lists a gate per line -- became lines naming no file.
+      const oneLine = (text: string) => text.replace(/\s*\n\s*/g, " ").trim();
+      const allNotes = notes.map(oneLine);
+      // Notes made here, after the caller counted its own: a further file whose tree cannot be
+      // parsed, or a Cytobank tailoring that cannot be read. The count in the note line covers them.
+      let laterNotes = 0;
+      const unreadFiles: { name: string; entryId: string | null; reason: "unreadable" | "unapplied" }[] = [];
+      // Each tree is parsed against the matrix the answer to the matrix question installs
+      // (appliedImportMatrix); its notes are said once, for the answer the import is prepared with.
+      const siblingsFor = (choice: "workspace" | "file", say: boolean) => siblingTrees.flatMap((tree) => {
+        const said = tree.warnings?.length ? ` ${oneLine(tree.warnings.join(" "))}` : "";
+        // Each file's notes are headed by its name, told from another loaded file of that name.
+        const heading = tree.fileName ? calledLoaded(tree.fileName, tree.entryId) : tree.name;
+        if (tree.unreadable !== undefined) {
+          if (!say) return [];
+          allNotes.push(`${heading}: its strategy could not be read, so it follows the imported tree without tailoring. ${oneLine(tree.unreadable)}`);
+          if (tree.fileName) unreadFiles.push({ name: tree.fileName, entryId: tree.entryId ?? null, reason: "unreadable" });
+          return [];
+        }
+        try {
+          const resolved = resolveSiblingImport(tree, sample, samples, activeSampleId, choice, appliedImportMatrix(sample, workspaceMatrix, choice));
+          if (said && say) allNotes.push(`${heading}:${said}`);
+          return [resolved];
+        } catch (e) {
+          // Its tree was read, and could not be applied to this file -- a channel it lacks, say. What
+          // the conversion said about that tree is not said of this file, onto which nothing went.
+          if (!say) return [];
+          laterNotes += 1;
+          allNotes.push(`${heading}: its tree could not be applied to it, so it follows the imported tree without tailoring. ${oneLine(e instanceof Error ? e.message : String(e))}`);
+          if (tree.fileName) unreadFiles.push({ name: tree.fileName, entryId: tree.entryId ?? null, reason: "unapplied" });
+          return [];
+        }
+      });
+      const siblings = siblingsFor(answeredMatrixChoice ?? "workspace", true);
+      const compensationFor = (r: GatingMLResult) => resolveGatingMLCompensation(
+        r.compensation,
+        r.compensation_refs,
         sample.instrument === "flow",
         external?.display ?? sample.spillover ?? null,
+        { fcsHasSpillover: fcsDeclaresCompensation(sample.fcs) },
       );
+      // Each file Cytobank tailored gates for, its tree parsed against that file's channels.
+      const cytobank = cytobankTailoring.flatMap((c) => {
+        const entry = samples.find((e) => e.id === c.entryId);
+        if (!entry) return [];
+        const pnn: Record<string, string> = {};
+        for (const ch of entry.sample.channels) pnn[ch.pnn] = ch.key;
+        try {
+          return [{ fileName: c.fileName, entryId: c.entryId, result: importGatingML(c.gatingMl, entry.sample.channels.map((ch) => ch.key), pnn, entry.sample.instrument) }];
+        } catch (e) {
+          allNotes.push(`${calledLoaded(c.fileName, c.entryId)}: Cytobank's gates tailored for it could not be read, so it follows the tree. ${e instanceof Error ? e.message : String(e)}`);
+          laterNotes += 1;
+          return [];
+        }
+      });
+      const comp = compensationFor(res);
       const existingStrategy = state.root_population_id !== null && hasGatingStrategy({
         gates: state.gates,
         populations: state.populations,
         root_population_id: state.root_population_id,
       });
-      const mergeBlockedReason = gatingMergeSpaceConflict({
+      const mergeBlockedFor = (c: GatingMLCompensationResolution) => gatingMergeSpaceConflict({
         hasExistingStrategy: existingStrategy,
         isFlow: sample.instrument === "flow",
         currentCompensation: sample.compensationEnabled,
-        importedCompensationTarget: comp.target,
+        importedCompensationTarget: c.target,
         currentCytofCofactor: sample.arcsinhCofactor,
         importedCytofCofactor: res.cytof_cofactor,
       });
-      let compensationNote: string | null = null;
-      if (comp.target !== null) {
-        if (comp.source === "embedded") {
-          if (comp.target) {
-            compensationNote = sample.compensationEnabled
-              ? "The embedded spillover matrix exactly matches the loaded FCS; compensation is already enabled."
-              : "This strategy was gated with FCS compensation enabled. Its exact matrix matches the loaded FCS, so importing will enable compensation.";
-          } else {
-            compensationNote = sample.compensationEnabled
-              ? "This strategy was gated without compensation, so importing will disable the current compensation setting."
-              : "This strategy was gated without compensation; the current data are already uncompensated.";
+      const mergeBlockedReason = mergeBlockedFor(comp);
+      const missing = sample.instrument === "flow" ? res.missing_compensation : null;
+      const noteFor = (comp: GatingMLCompensationResolution): string | null => {
+        // Said in the interface's language (the dialog showed these in English in Japanese), each
+        // sentence a template with its values, the English as before.
+        let compensationNote: string | null = null;
+        const source = t(matrixSource);
+        if (missing) {
+          // Never the FCS file's matrix unasked: the gates name a different one.
+          const gates = missing.gates.map((n) => `"${n}"`).join(", ");
+          compensationNote = t(missing.gates.length === 1
+            ? "The gate ({gates}) was drawn under Cytobank compensation {id}, which this file names but does not carry. To import them as drawn, load that matrix below. Evaluating them with this FCS file's own matrix instead places them on differently compensated data; choose it only knowing that."
+            : "{count} gates ({gates}) were drawn under Cytobank compensation {id}, which this file names but does not carry. To import them as drawn, load that matrix below. Evaluating them with this FCS file's own matrix instead places them on differently compensated data; choose it only knowing that.",
+          { count: missing.gates.length, gates, id: missing.id });
+        } else if (comp.target !== null) {
+          if (comp.source === "embedded" && comp.target && fileMatrix && externalSpillover) {
+            // A GateLab file recording that its gates were drawn under a matrix other than the
+            // FCS file's own, and carrying that matrix.
+            const values = {
+              label: externalSpillover.label,
+              count: externalSpillover.matrix.channels.length - externalSpillover.dropped.length,
+              delta: externalSpillover.differsFromEmbedded ? externalSpillover.maxDelta!.toFixed(4) : "",
+            };
+            compensationNote = externalSpillover.differsFromEmbedded
+              ? t("This strategy was gated with the spillover matrix \"{label}\", which the file carries. Importing will apply it to {count} channel(s) and enable compensation; this FCS carries a different matrix of its own (coefficients differ by up to {delta}), which changes where every fluorescence gate falls.", values)
+              : t("This strategy was gated with the spillover matrix \"{label}\", which the file carries. Importing will apply it to {count} channel(s) and enable compensation.", values);
+          } else if (comp.source === "embedded") {
+            if (comp.target) {
+              compensationNote = sample.compensationEnabled
+                ? t("The embedded spillover matrix exactly matches the loaded FCS; compensation is already enabled.")
+                : t("This strategy was gated with FCS compensation enabled. Its exact matrix matches the loaded FCS, so importing will enable compensation.");
+            } else {
+              compensationNote = sample.compensationEnabled
+                ? t("This strategy was gated without compensation, so importing will disable the current compensation setting.")
+                : t("This strategy was gated without compensation; the current data are already uncompensated.");
+            }
+          } else if (comp.target && externalSpillover?.differsFromEmbedded) {
+            // The most dangerous case, and the reason any of this exists: both matrices are real
+            // and they disagree, so compensating with the file's would move every fluorescence
+            // gate while looking completely healthy.
+            compensationNote = t(
+              "This FCS and {source} each carry a spillover matrix, and they are not the same: coefficients differ by up to {delta}. " +
+              "The FCS's is typically the matrix recorded at acquisition; the one in {source} is the compensation in force when these gates were drawn. " +
+              "Compensation will be enabled either way, and which matrix is used changes where every fluorescence gate falls.",
+              { source, delta: externalSpillover.maxDelta!.toFixed(4) },
+            );
+          } else if (comp.target && externalSpillover?.replacesEmbedded) {
+            // Both carry a matrix and they agree -- the differing case is handled above -- so this
+            // is the file's own compensation under the workspace's name. This branch used to be
+            // reached here too, and told the user a file that carries a matrix "carries none".
+            compensationNote = t(
+              "The spillover matrix \"{label}\" from {source} matches the one in this FCS; importing will enable compensation with it.",
+              { label: externalSpillover.label, source },
+            );
+          } else if (comp.target && externalSpillover) {
+            // The loaded FCS has no matrix of its own, so this is the only thing that can place the
+            // gates. It changes every fluorescence value, so it is stated plainly rather than
+            // applied as a detail of the gate import.
+            compensationNote = t(
+              "These gates were drawn on compensated data, and this FCS carries no spillover matrix. Importing will apply the matrix \"{label}\" from {source} to {count} channel(s) and enable compensation.",
+              { label: externalSpillover.label, source, count: externalSpillover.matrix.channels.length - externalSpillover.dropped.length },
+            ) +
+              (externalSpillover.dropped.length
+                ? " " + t(
+                  "{count} of its parameter(s) are not in this file ({names}) and were left out, which changes the result for the channels they spill into.",
+                  { count: externalSpillover.dropped.length, names: externalSpillover.dropped.join(", ") },
+                )
+                : "");
+          } else if (comp.note) {
+            compensationNote = comp.note +
+              (comp.target === false && sample.compensationEnabled ? " " + t("Importing will disable the current compensation setting.") : "");
+          } else if (comp.target) {
+            compensationNote = t(
+              "This file declares FCS compensation but does not contain GateLab's exact matrix record. " +
+              "Import will use the spillover matrix embedded in the loaded FCS. Continue only if compensation was enabled when these gates were drawn.",
+            );
+          } else if (sample.compensationEnabled) {
+            compensationNote = t("This file declares uncompensated dimensions, so importing will disable the current compensation setting.");
           }
-        } else if (comp.target && externalSpillover?.differsFromEmbedded) {
-          // The most dangerous case, and the reason any of this exists: both matrices are real
-          // and they disagree, so compensating with the file's would move every fluorescence
-          // gate while looking completely healthy.
-          compensationNote =
-            `This FCS and the FlowJo workspace each carry a spillover matrix, and they are not ` +
-            `the same: coefficients differ by up to ${externalSpillover.maxDelta!.toFixed(4)}. ` +
-            `The file's is typically the matrix recorded at acquisition; the workspace's is the ` +
-            `compensation in force when these gates were drawn. Compensation will be enabled ` +
-            `either way, and which matrix is used changes where every fluorescence gate falls.`;
-        } else if (comp.target && externalSpillover?.replacesEmbedded) {
-          // Both carry a matrix and they agree -- the differing case is handled above -- so this
-          // is the file's own compensation under the workspace's name. This branch used to be
-          // reached here too, and told the user a file that carries a matrix "carries none".
-          compensationNote =
-            `The workspace's spillover matrix "${externalSpillover.label}" matches the one in this ` +
-            `FCS; importing will enable compensation with it.`;
-        } else if (comp.target && externalSpillover) {
-          // The loaded FCS has no matrix of its own, so this is the only thing that can place the
-          // gates. It changes every fluorescence value, so it is stated plainly rather than
-          // applied as a detail of the gate import.
-          compensationNote =
-            `These gates were drawn on compensated data, and this FCS carries no spillover ` +
-            `matrix. Importing will apply the matrix "${externalSpillover.label}" from the ` +
-            `FlowJo workspace to ${externalSpillover.matrix.channels.length - externalSpillover.dropped.length} ` +
-            `channel(s) and enable compensation.` +
-            (externalSpillover.dropped.length
-              ? ` ${externalSpillover.dropped.length} of its parameter(s) are not in this file ` +
-                `(${externalSpillover.dropped.join(", ")}) and were left out, which changes the ` +
-                `result for the channels they spill into.`
-              : "");
-        } else if (comp.target) {
-          compensationNote =
-            "This file declares FCS compensation but does not contain GateLab's exact matrix record. " +
-            "Import will use the spillover matrix embedded in the loaded FCS. Continue only if compensation was enabled when these gates were drawn.";
-        } else if (sample.compensationEnabled) {
-          compensationNote = "This file declares uncompensated dimensions, so importing will disable the current compensation setting.";
         }
-      }
+        return compensationNote;
+      };
+      const compensationNote = noteFor(comp);
+      // While the dialog still asks which matrix, the import is prepared with the file's own too,
+      // and choosing it there swaps that in: installed instead of the workspace's, it compensates
+      // other detectors, and a gate drawn uncompensated on one of them is left out, by name.
+      // Under a per-file import the dialog asks for other files' matrices too (matrixChoice below), and
+      // one answer applies to every file, so the file's-own preparation covers them as well.
+      const asksMatrix = !answeredMatrixChoice && (
+        (workspaceMatrix !== null && externalSpillover?.differsFromEmbedded === true) ||
+        siblings.some((tree) => tree.externalSpillover?.differsFromEmbedded));
+      const fileChoice = asksMatrix ? parseFor("file") : null;
+      const fileCompensation = fileChoice ? compensationFor(fileChoice) : null;
+      const byMatrixChoice: PendingGatingMLImport["byMatrixChoice"] = fileChoice && fileCompensation
+        ? {
+            workspace: { result: res, siblingTrees: siblings, compensation: comp, mergeBlockedReason, compensationNote },
+            file: {
+              result: fileChoice,
+              siblingTrees: siblingsFor("file", false),
+              compensation: fileCompensation,
+              mergeBlockedReason: mergeBlockedFor(fileCompensation),
+              compensationNote: noteFor(fileCompensation),
+            },
+          }
+        : undefined;
       setPendingGatingMlImport({
         result: res,
         sourceKind,
@@ -3523,20 +5020,35 @@ export default function App() {
         sampleId: activeSampleId,
         siblingTrees: siblings,
         ...(primaryFileName ? { primaryFileName } : {}),
+        ...(primaryEntryId ? { primaryEntryId } : {}),
         ...(primaryOrigin ? { primaryOrigin } : {}),
         mergeBlockedReason,
         compensationNote,
-        sourceNote: wspNote,
+        sourceNote: withMoreNotes(wspNote, laterNotes) + gainNote,
         externalSpillover,
         // Defaulting to the workspace's, because that is the compensation the gates were drawn
         // under -- but it is offered as a choice, not asserted as the correct answer.
         matrixChoice: answeredMatrixChoice ?? "workspace",
         ...(answeredMatrixChoice ? { matrixAnswered: true } : {}),
         ...(openedSampleIds.length ? { openedSampleIds } : {}),
+        ...(missing ? { missingMatrix: { supplied: null, useFcs: false, error: null } } : {}),
+        ...(allNotes.length ? { notes: allNotes } : {}),
+        ...(unreadFiles.length ? { unreadFiles } : {}),
+        ...(followFiles.length ? { followFiles } : {}),
+        ...(cytobank.length ? { cytobankTailoring: cytobank } : {}),
+        ...more,
+        ...(byMatrixChoice ? { byMatrixChoice } : {}),
       });
-      setError(null);
+      // Populations the import leaves out are named before anything is applied, never dropped
+      // quietly: a tree that silently loses a branch looks like a successful import. The
+      // converter's and the further files' notes are said with them.
+      const said = [...res.warnings, ...allNotes];
+      setError(said.length ? said.join("\n") : null);
+      return null;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const why = e instanceof Error ? e.message : String(e);
+      setError(why);
+      return why;
     }
   }
 
@@ -3560,6 +5072,10 @@ export default function App() {
       setError("The active sample changed before Gating-ML import could be applied. Please import the file again.");
       return;
     }
+    // A compensation the file names and does not carry is supplied, or the FCS file's own is
+    // chosen for it, before anything is applied; the dialog holds Import until then.
+    const missingMatrix = pendingImport.missingMatrix;
+    if (missingMatrix && missingMatrix.supplied === null && !missingMatrix.useFcs) return;
     // A tree lands on a group's template, never on a file's copy: the reducer drops a structural
     // change to a locked copy without a word, and a plain click on a file makes its copy the live
     // tree. So the live tree's template becomes live first, and everything below lands there.
@@ -3626,6 +5142,47 @@ export default function App() {
           }
         }
       }
+      // A loaded file that is the viewed file's own acquisition under another name (its identity
+      // keywords confirmed, its events as many) and has no tree of its own in this import follows
+      // the viewed file's tree, and takes its compensation too: the matrix it is installed with
+      // and the layer. It stayed on its original layer, its fluorescence gates evaluated on
+      // uncompensated values, while the result said "applied to all 2 files · FCS compensation
+      // enabled" (#343's round-4 verifier, FR-FCM-Z2V4 F_022 and a copy: 863 against 770 and
+      // FlowJo's 771), on every route that imports one tree: onto a loaded file with only its copy
+      // beside it, the open dialog with a file and its copy, and "One hierarchy per file" cleared.
+      const ownTree = new Set<string>([
+        ...(activeSampleId ? [activeSampleId] : []),
+        ...(pendingImport.siblingTrees ?? []).flatMap((tree) => [tree.sampleId, tree.entryId]).filter((id): id is string => !!id),
+      ]);
+      const viewedIdentity = identityKeywords(sample.fcs.keywords);
+      const copiesOfViewed = samples.filter((entry) =>
+        !ownTree.has(entry.id) &&
+        entry.sample.instrument === sample.instrument &&
+        entry.sample.fcs.nEvents === sample.fcs.nEvents &&
+        compareIdentity(viewedIdentity, identityKeywords(entry.sample.fcs.keywords)).verdict === "confirmed");
+      for (const entry of copiesOfViewed) {
+        const target = entry.sample;
+        touched.push({ sample: target, snapshot: target.spilloverSnapshot() });
+        if (
+          comp.target === true &&
+          pendingImport.externalSpillover &&
+          !(pendingImport.externalSpillover.differsFromEmbedded && pendingImport.matrixChoice === "file")
+        ) {
+          target.installExternalSpillover(
+            pendingImport.externalSpillover.matrix,
+            pendingImport.externalSpillover.label,
+            { replaceEmbedded: target.spillover !== null },
+          );
+        }
+        if (comp.target !== null) {
+          target.setCompensation(comp.target);
+          if (target.compensationEnabled !== comp.target) {
+            throw new Error(
+              `The spillover matrix could not be applied to ${calledLoaded(entry.name, entry.id)}, a copy of the viewed file, so the gating strategy was not imported.`,
+            );
+          }
+        }
+      }
       // Installed only now that the import is going ahead. It rewrites every fluorescence value,
       // so it must not happen while the confirmation dialog can still be dismissed.
       touched.push({ sample, snapshot: sample.spilloverSnapshot() });
@@ -3675,8 +5232,10 @@ export default function App() {
       // Which hierarchy each FCS belongs to, when the workspace was imported one hierarchy per
       // file. Collected as the hierarchies are created, because the id is only known here.
       const assignments: Record<string, string> = {};
-      const entryIdFor = (fileName: string): string | null =>
-        samples.find((entry) => entry.name.toLowerCase() === fileName.toLowerCase())?.id ?? null;
+      // Each tree goes on the loaded entry the open paired it with, by id; a file name can be
+      // carried by two loaded files, and the first of them was not necessarily the one.
+      const loadedId = (id: string | null | undefined): string | null =>
+        id && samples.some((entry) => entry.id === id) ? id : null;
       // Per-file import, the way FlowJo means it: files whose strategies share a STRUCTURE
       // (populations and gate identities, geometry aside) share one template hierarchy, and
       // every file gets a file-owned, structure-locked copy of it carrying its own tailored
@@ -3684,25 +5243,68 @@ export default function App() {
       // differs starts a template of its own. Each sample as its own unlinked hierarchy plus a
       // copy on top doubled the hierarchies and lost the fact that they were one tree.
       const perFileFiles: TailoredFile[] = [];
-      const primaryId = pendingImport.primaryFileName ? entryIdFor(pendingImport.primaryFileName) : null;
+      const primaryId = pendingImport.primaryFileName ? loadedId(pendingImport.primaryEntryId) : null;
+      // Each file's channels by the detector ($PnN) they read, so its gates are matched with the
+      // tree's by detector: two samples of one workspace can label a detector differently, and a
+      // file whose labels differed from the tree's file lost its own gates on them.
+      const detectorsOf = (id: string): Record<string, string> | undefined => {
+        const entry = samples.find((e) => e.id === id);
+        return entry ? Object.fromEntries(entry.sample.channels.map((c) => [c.key, c.pnn])) : undefined;
+      };
       if (pendingImport.primaryFileName && primaryId) {
-        perFileFiles.push({ fileId: primaryId, fileName: pendingImport.primaryFileName, tree: res, origin: pendingImport.primaryOrigin ?? null });
+        perFileFiles.push({ fileId: primaryId, fileName: pendingImport.primaryFileName, tree: res, origin: pendingImport.primaryOrigin ?? null, detectors: detectorsOf(primaryId) });
       }
       if (pendingImport.primaryFileName) {
         for (const tree of siblings) {
-          const id = tree.fileName ? entryIdFor(tree.fileName) : null;
-          if (id && tree.fileName) perFileFiles.push({ fileId: id, fileName: tree.fileName, tree: tree.result, origin: tree.origin ?? null });
+          const id = tree.fileName ? loadedId(tree.entryId) : null;
+          if (id && tree.fileName) perFileFiles.push({ fileId: id, fileName: tree.fileName, tree: tree.result, origin: tree.origin ?? null, detectors: detectorsOf(id) });
         }
       }
+      // Found files whose own strategy could not be read, and files no sample is: they follow
+      // the tree, and are counted.
+      const unreadIds = (pendingImport.unreadFiles ?? []).flatMap(({ name, entryId, reason }) => {
+        const id = loadedId(entryId);
+        return id && !perFileFiles.some((f) => f.fileId === id) ? [{ id, name, reason: reason ?? "unreadable" }] : [];
+      });
+      const followIds = (pendingImport.followFiles ?? []).flatMap(({ name, entryId }) => {
+        const id = loadedId(entryId);
+        return id && !perFileFiles.some((f) => f.fileId === id) && !unreadIds.some((u) => u.id === id) ? [{ id, name }] : [];
+      });
       let perFileSummary: string | null = null;
       let tailoredCount: number | null = null;
-      const notImported = siblings.filter((tree) => !tree.fileName || !entryIdFor(tree.fileName)).map((tree) => tree.name);
-      if (perFileFiles.length > 1 && mode === "replace") {
+      /** Files a merge left on their own tailored copy of the tree. */
+      let tailoringKept = 0;
+      let cytobankSummary = "";
+      const notImported = siblings.filter((tree) => !tree.fileName || !loadedId(tree.entryId)).map((tree) => tree.name);
+      // A per-file import is laid out as one: also when one file is left to give the tree, the
+      // others' strategies unreadable -- they are then named as following it, not lost under
+      // "applied to all N files".
+      if (pendingImport.primaryFileName && perFileFiles.length > 0 && (perFileFiles.length > 1 || unreadIds.length > 0) && mode === "replace") {
         // One tree, tailored per file: the primary's strategy is the tree, and every other file
         // gets it with its own coordinates on the gates they share. Files whose strategy differs
         // in structure are reported by name with what was dropped and what follows the tree.
-        const plan = planOneTreeImport(perFileFiles, { templateId: activeId, name: "", leadFileId: primaryId, existing: state.hierarchies });
-        const name = templateNameFromOrigin({ key: "", lead: plan.lead, files: perFileFiles }, "Imported strategy");
+        const plan = planOneTreeImport(perFileFiles, {
+          templateId: activeId, leadFileId: primaryId, existing: state.hierarchies,
+          name: (lead) => templateNameFromOrigin({ key: "", lead, files: perFileFiles }, "Imported strategy"),
+        });
+        const name = plan.template.name;
+        // Files whose own gates stay on channels the tree's file labels otherwise, or are drawn as
+        // another kind: matched with the tree by detector, they keep their own, and so their copy
+        // is out of step with the tree -- edits to it do not reach them -- which is said, not left
+        // to be found.
+        const ownLabels = plan.copies.filter((copy) => Object.entries(copy.source_gate_ids ?? {}).some(([own, source]) => {
+          const a = copy.gates[own], b = plan.template.tree.gates[source];
+          return !!a && !!b && (a.x_channel !== b.x_channel || a.y_channel !== b.y_channel || a.gate_type !== b.gate_type);
+        })).map((copy) => {
+          const f = perFileFiles.find((x) => x.fileId === copy.owner_sample_id);
+          return f ? calledLoaded(f.fileName, f.fileId) : "";
+        }).filter(Boolean);
+        // Other files whose own matrix differs from their sample's: settled by the dialog's answer.
+        const matrixFiles = siblings.filter((tree) => tree.sampleId && tree.externalSpillover?.differsFromEmbedded && tree.compensation?.target === true)
+          .map((tree) => calledLoaded(tree.fileName ?? tree.name, tree.entryId));
+        // Files named as the other messages name them: told from another loaded file of their name.
+        const leadName = calledLoaded(plan.lead.fileName, plan.lead.fileId);
+        const differing = plan.differing.map((d) => ({ ...d, fileName: calledLoaded(d.fileName, d.fileId) }));
         dispatch({
           type: "importGating",
           gates: plan.template.tree.gates,
@@ -3713,13 +5315,44 @@ export default function App() {
           clearHistory: compensationChanged || restoredScales.transformsChanged,
         });
         dispatch({ type: "renameHierarchy", id: activeId, name });
-        if (plan.copies.length) dispatch({ type: "addHierarchyCopies", copies: plan.copies, activeHierarchyId: activeId, assignments: plan.assignments });
-        else dispatch({ type: "assignFileHierarchies", assignments: plan.assignments });
+        // A file whose strategy could not be read follows the tree, whatever it followed before,
+        // and is counted with the files that follow it: the line used to count only the files
+        // it could read, and disagreed with the tree's own summary.
+        // So does a file the open loaded that no sample in the workspace is: it has no strategy of
+        // its own to tailor, and the result names it (the source note says why).
+        const assignments = {
+          ...plan.assignments,
+          ...Object.fromEntries([...unreadIds, ...followIds].map((u) => [u.id, activeId])),
+        };
+        if (plan.copies.length) dispatch({ type: "addHierarchyCopies", copies: plan.copies, activeHierarchyId: activeId, assignments });
+        else dispatch({ type: "assignFileHierarchies", assignments });
+        const unread = unreadIds.length;
+        const follow = followIds.length;
+        // A FACSDiva or FACSChorus experiment is not a workspace.
+        const asInSource = pendingImport.sourceKind === "flowjo" ? " as in the workspace"
+          : pendingImport.sourceKind === "diva" || pendingImport.sourceKind === "chorus" ? " as in the experiment" : "";
+        const unreadOf = (reason: "unreadable" | "unapplied") => unreadIds.filter((u) => u.reason === reason);
+        const said = (list: readonly { id: string; name: string }[], why: (one: boolean) => string) => list.length
+          ? ` ${list.map((u) => calledLoaded(u.name, u.id)).join(", ")} ${list.length === 1 ? "follows" : "follow"} it without tailoring: ${why(list.length === 1)}.`
+          : "";
+        // The files that follow with no tree of their own are counted here and named once, with
+        // why, in the source note: named here too, with another reason, they read as two claims.
         perFileSummary =
-          `Imported one tree, "${name}", from ${plan.lead.fileName} for ${perFileFiles.length} files: ` +
-          `${plan.following} follow it as in the workspace, ${plan.copies.length} tailored.` +
-          (plan.differing.length
-            ? ` ${plan.differing.length} file${plan.differing.length === 1 ? "" : "s"} carried a different tree: ${describeDiffering(plan.differing)}.`
+          `Imported one tree, "${name}", from ${leadName} for ${perFileFiles.length + unread + follow} files: ` +
+          `${plan.following + unread + follow} ${plan.following + unread + follow === 1 ? "follows" : "follow"} it${unread || follow ? "" : asInSource}, ${plan.copies.length} tailored.` +
+          said(unreadOf("unreadable"), (one) => `${one ? "its strategy" : "their strategies"} could not be read`) +
+          said(unreadOf("unapplied"), (one) => `${one ? "its tree" : "their trees"} could not be applied to ${one ? "it" : "them"}`) +
+          (differing.length
+            ? ` ${differing.length} file${differing.length === 1 ? "" : "s"} carried a different tree: ${describeDiffering(differing)}.`
+            : "") +
+          (ownLabels.length
+            ? ` ${ownLabels.join(", ")} ${ownLabels.length === 1 ? "labels" : "label"} a detector differently from ${leadName}, ` +
+              `or ${ownLabels.length === 1 ? "draws" : "draw"} a gate as another kind, and ${ownLabels.length === 1 ? "keeps its own" : "keep their own"} there; ` +
+              `edits to the tree do not reach ${ownLabels.length === 1 ? "that file" : "those files"}.`
+            : "") +
+          (matrixFiles.length
+            ? ` ${matrixFiles.join(", ")} ${matrixFiles.length === 1 ? "carries" : "carry"} a matrix that differs from ${matrixFiles.length === 1 ? "its" : "their"} sample's in the workspace; ` +
+              `${pendingImport.matrixChoice === "file" ? "the file's own" : "the workspace's"} was used, as chosen.`
             : "");
       } else if (target !== "all" && samples.length > 1 && state.root_population_id) {
         // The selected files, or the viewed file, take the imported coordinates as tailoring of
@@ -3750,14 +5383,69 @@ export default function App() {
           mode,
           clearHistory: compensationChanged || restoredScales.transformsChanged,
         });
-        // Every file follows the tree; a copy a file had is dropped with the move, as the dialog said.
-        for (const entry of samples) assignments[entry.id] = activeId;
-        if (Object.keys(assignments).length) {
+        // Every file follows the tree; a copy a file had is dropped with the move, as the dialog
+        // said -- when the tree is replaced. A merge keeps the tree, so a file already tailored to
+        // it keeps its copy, which the merge's new gates reach like any edit to the tree: moving
+        // it back onto the tree threw away the per-file geometry an earlier import had given it,
+        // and it drifted to another sample's.
+        const followsTree = (fileId: string): boolean => {
+          let id: string | undefined = hierarchyOfFile(fileId);
+          const seen = new Set<string>();
+          while (id && !seen.has(id)) {
+            if (id === activeId) return true;
+            seen.add(id);
+            id = state.hierarchies.find((h) => h.id === id)?.source_hierarchy_id ?? undefined;
+          }
+          return false;
+        };
+        for (const entry of samples) {
+          if (mode === "merge" && followsTree(entry.id)) {
+            if (hierarchyOfFile(entry.id) !== activeId) tailoringKept += 1;
+            continue;
+          }
+          assignments[entry.id] = activeId;
+        }
+        // ...except that a file Cytobank tailored gates for takes them, as its own tailoring of the
+        // tree, and no other file does.
+        const cytobankFiles: TailoredFile[] = mode === "replace"
+          ? (pendingImport.cytobankTailoring ?? []).flatMap((c) => loadedId(c.entryId) ? [{ fileId: c.entryId, fileName: c.fileName, tree: c.result }] : [])
+          : [];
+        const cytobankPlan = cytobankFiles.length
+          ? tailorFilesToTree(
+              { id: activeId, name: activeHierarchy?.name ?? "", tree: { gates: res.gates, gate_order: res.gate_order, populations: res.populations, root_population_id: res.root_population_id } },
+              cytobankFiles, state.hierarchies, new Set(cytobankFiles.filter((f) => sameStructure(f.tree, res)).map((f) => f.fileId)))
+          : null;
+        if (cytobankPlan) {
+          Object.assign(assignments, cytobankPlan.assignments);
+          const tailoredNames = cytobankPlan.copies.map((c) => samples.find((e) => e.id === c.owner_sample_id)?.name ?? "").filter(Boolean);
+          cytobankSummary = tailoredNames.length
+            ? ` · Cytobank's tailored gates applied to ${tailoredNames.length === 1 ? "the file" : `the ${tailoredNames.length} files`} they were tailored for: ${tailoredNames.join(", ")}`
+            : "";
+        } else if ((pendingImport.cytobankTailoring ?? []).length && mode !== "replace") {
+          cytobankSummary = " · Cytobank's per-file tailoring was not applied: it applies when the tree is replaced, not merged";
+        }
+        if (cytobankPlan?.copies.length) {
+          dispatch({ type: "addHierarchyCopies", copies: cytobankPlan.copies, activeHierarchyId: activeId, assignments });
+        } else if (Object.keys(assignments).length) {
           dispatch({ type: "assignFileHierarchies", assignments });
         }
       }
       setPendingGatingMlImport(null);
-      setError(null);
+      const said = [...res.warnings, ...(pendingImport.notes ?? [])];
+      setError(said.length ? said.join("\n") : null);
+      // Where one tree is applied to every file, the files it is applied to whose compensation is
+      // not what the import set on the viewed file: another sample following by choice, or a file
+      // no sample is, keeps its own layer, and is named rather than covered by "FCS compensation
+      // enabled" said once for them all.
+      const layerDiffers = perFileSummary || tailoredCount !== null || samples.length < 2 || comp.target === null
+        ? []
+        : samples.filter((entry) => entry.sample.instrument === "flow" && entry.sample.compensationEnabled !== comp.target)
+          .map((entry) => calledLoaded(entry.name, entry.id));
+      const layerNote = layerDiffers.length
+        ? (comp.target === true
+            ? ` on ${samples.length - layerDiffers.length} of ${samples.length} files; ${layerDiffers.join(", ")} ${layerDiffers.length === 1 ? "is" : "are"} not compensated`
+            : `; ${layerDiffers.join(", ")} ${layerDiffers.length === 1 ? "is" : "are"} still compensated`)
+        : "";
       setImportMsg(perFileSummary
         ? perFileSummary +
           (comp.target === true ? " FCS compensation enabled." : "") +
@@ -3769,19 +5457,35 @@ export default function App() {
             ? (target === "viewed"
                 ? ` · as ${fileName}'s tailoring${tailoredCount ? "" : " (same coordinates as the tree, so nothing is tailored)"}`
                 : ` · as tailoring for the ${checkedSamples.length} selected file${checkedSamples.length === 1 ? "" : "s"} (${tailoredCount} tailored)`)
-            : samples.length > 1 ? ` · applied to all ${samples.length} files` : "") +
+            : samples.length > 1
+              ? mode === "merge"
+                ? ` · merged into the tree all ${samples.length} files follow` +
+                  (tailoringKept ? `; ${tailoringKept === 1 ? "the file" : `the ${tailoringKept} files`} tailored to it keep${tailoringKept === 1 ? "s its" : " their"} tailoring` : "")
+                : ` · applied to all ${samples.length} files`
+              : "") +
           (tailoredCount !== null ? "" : mode === "merge" ? " · existing strategy retained" : " · current strategy replaced") +
-          (comp.target === true ? " · FCS compensation enabled" : "") +
-          (comp.target === false ? " · compensation disabled" : "") +
+          (comp.target === true
+            ? (pendingImport.externalSpillover?.source === "supplied"
+                ? ` · compensation enabled with the matrix from ${pendingImport.externalSpillover.label}`
+                : pendingImport.missingMatrix?.useFcs
+                  ? " · compensation enabled with this FCS file's own matrix, chosen in place of the one the gates were drawn under"
+                  : " · FCS compensation enabled") + layerNote
+            : "") +
+          (comp.target === false ? ` · compensation disabled${layerNote}` : "") +
           (siblings.filter((tree) => tree.sampleId && tree.compensation?.target === true).length
             ? ` · compensation applied to ${siblings.filter((tree) => tree.sampleId && tree.compensation?.target === true).length} further file(s)`
             : "") +
-          (notImported.length || (siblings.length && mode === "merge")
-            ? ` · not imported, one tree per workspace: ${(mode === "merge" ? siblings.map((tree) => tree.name) : notImported).join(", ")}`
-            : "") +
+          // Files, named as files: this sat under a tree heading, as though they were trees.
+          (siblings.length && mode === "merge"
+            ? ` · only ${pendingImport.primaryFileName ?? fileName}'s tree was merged; the trees of ${siblings.map((tree) => tree.fileName ?? tree.name).join(", ")} were not imported`
+            : notImported.length
+              ? ` · the trees of ${notImported.join(", ")} were not imported: ${notImported.length === 1 ? "that file is" : "those files are"} not loaded`
+              : "") +
           (res.skipped_channels.length
             ? ` · skipped channels: ${res.skipped_channels.join(", ")}`
             : "") +
+          (res.warnings.length ? ` · ${res.warnings.length} population${res.warnings.length === 1 ? "" : "s"} not imported, each named in the warning` : "") +
+          cytobankSummary +
           pendingImport.sourceNote,
       );
     } catch (e) {
@@ -3844,20 +5548,118 @@ export default function App() {
     return out;
   }
 
-  function exportFlowJo(scope: FlowJoExportScope) {
+  /** The name a FlowJo export of these files is written under, without ".wsp". */
+  function flowJoExportStem(fileNames: readonly string[]): string {
+    const base = sanitizeFilePart((fileNames.length === 1 ? fileNames[0] : (fileName || "gates")).replace(/\.[^.]+$/, ""));
+    return fileNames.length === 1 ? base : `${base}_and_${fileNames.length - 1}_more`;
+  }
+
+  /**
+   * Where each file of a FlowJo export goes when it is written as a folder, in the order
+   * flowJoExportSamples lists them. The folder and the .wsp take the export's name as Chrome
+   * writes it (writableName), as the files do.
+   */
+  function flowJoFolderPlan(scope: FlowJoExportScope) {
+    const entries = scope === "checked" ? checkedSamples : samples;
+    const stem = writableName(flowJoExportStem(entries.map((entry) => entry.name)));
+    return { stem, plan: planFlowJoFolder(entries.map((entry) => ({ name: entry.name, bytes: entry.bytes })), `${stem}.wsp`) };
+  }
+
+  /** GateLab's groups, as the FlowJo export writes them: each names its files by name. */
+  function flowJoExportGroups(): { name: string; fileNames: string[] }[] {
+    const nameOf = new Map(samples.map((entry) => [entry.id, entry.name]));
+    return state.groups.map((group) => ({
+      name: group.name,
+      fileNames: Object.entries(state.file_groups).filter(([, gid]) => gid === group.id).map(([fileId]) => nameOf.get(fileId) ?? "").filter(Boolean),
+    }));
+  }
+
+  async function exportFlowJo(scope: FlowJoExportScope, asFolder = false) {
     try {
       const wanted = flowJoExportSamples(scope);
-      const nameOf = new Map(samples.map((entry) => [entry.id, entry.name]));
-      const groups = state.groups.map((group) => ({
-        name: group.name,
-        fileNames: Object.entries(state.file_groups).filter(([, gid]) => gid === group.id).map(([fileId]) => nameOf.get(fileId) ?? "").filter(Boolean),
-      }));
-      const { xml } = exportFlowJoWorkspace({ samples: wanted, producer: "GateLab", groups });
-      const base = sanitizeFilePart((wanted.length === 1 ? wanted[0].fileName : (fileName || "gates")).replace(/\.[^.]+$/, ""));
-      downloadText(wanted.length === 1 ? `${base}.wsp` : `${base}_and_${wanted.length - 1}_more.wsp`, xml, "application/xml");
-      setError(null);
+      const groups = flowJoExportGroups();
+      if (!asFolder) {
+        const { xml } = exportFlowJoWorkspace({ samples: wanted, producer: "GateLab", groups });
+        downloadText(`${flowJoExportStem(wanted.map((w) => w.fileName))}.wsp`, xml, "application/xml");
+        setError(null);
+        return;
+      }
+      await exportFlowJoFolder(scope, wanted, groups);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /**
+   * The workspace and the FCS files it names, as a self-contained folder: every file the bytes
+   * GateLab loaded, under its own name beside the .wsp (or, where Chrome will not write that name,
+   * the one the dialog listed), which names it by its path there (flowjoExportFolder.ts). Written
+   * into a new folder where the browser can write one, one file at a time and the .wsp last;
+   * otherwise downloaded as one stored .zip.
+   */
+  async function exportFlowJoFolder(
+    scope: FlowJoExportScope,
+    wanted: FlowJoExportSample[],
+    groups: { name: string; fileNames: string[] }[],
+  ): Promise<void> {
+    const { stem, plan } = flowJoFolderPlan(scope);
+    if (plan.files.length !== wanted.length) throw new Error("The files to export changed while the export was being prepared; export again.");
+    // Asked for first, while the click still counts as the user's: evaluating every population
+    // of every file below can outlast the time a browser allows a picker to open after a click.
+    const directory = supportsDirectoryAccess();
+    const parent = directory ? await pickWritableDirectory() : null;
+    if (directory && !parent) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setImportMsg(`Writing ${stem} · evaluating the workspace`);
+      // Let the message paint before the evaluation holds the thread.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      const { xml } = exportFlowJoWorkspace({
+        samples: wanted.map((sample, i) => ({ ...sample, folderPath: plan.files[i].path })),
+        producer: "GateLab",
+        groups,
+      });
+      const missing = plan.files.filter((f) => !f.bytes).map((f) => f.name);
+      const written = plan.files.length - missing.length;
+      const renamed = plan.files.filter((f) => f.bytes && f.renamed.length).length;
+      const notes =
+        (renamed ? ` · ${renamed} written under another name, as the dialog listed` : "") +
+        (missing.length ? ` · not in it, GateLab holding no bytes for ${missing.length === 1 ? "it" : "them"}: ${missing.join(", ")}` : "");
+      if (parent) {
+        const { folder } = await writeFlowJoFolder(parent, stem, plan, xml, {
+          onProgress: (n, total, path) => setImportMsg(`Writing ${stem} · FCS file ${n} of ${total} · ${path}`),
+        });
+        // The next picker starts in the new folder, where the user last saved, as every picker
+        // does. The folder the user granted for their data is left as it was: GateLab reads it
+        // again without asking to find the FCS a .wsp from there names (lastGrantedDirectory).
+        rememberPickerLocation(folder);
+        setImportMsg(
+          `Wrote ${folder.name} in ${parent.name}: ${plan.workspaceName} and ${written} FCS file${written === 1 ? "" : "s"}, ` +
+            `${formatByteSize(plan.fcsBytes)}${notes}`,
+        );
+      } else {
+        // Views of the bytes GateLab holds and fflate's headers: the Blob is the archive's one copy.
+        const parts: Uint8Array[] = [];
+        let size = 0;
+        await writeFlowJoZip(stem, plan, xml, (chunk) => {
+          parts.push(chunk);
+          size += chunk.byteLength;
+        }, ({ writtenPayloadBytes, totalPayloadBytes }) => {
+          setImportMsg(`Writing ${stem}.zip · ${totalPayloadBytes === 0 ? 100 : Math.round(writtenPayloadBytes / totalPayloadBytes * 100)}%`);
+        });
+        downloadBlob(`${stem}.zip`, new Blob(parts as BlobPart[], { type: "application/zip" }));
+        setImportMsg(
+          `Saved ${stem}.zip, stored uncompressed: ${plan.workspaceName} and ${written} FCS file${written === 1 ? "" : "s"}, ` +
+            `${formatByteSize(size)}${notes}`,
+        );
+      }
+    } catch (e) {
+      // The error says where it stopped; the progress line would say it was still writing.
+      setImportMsg(null);
+      throw e;
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -3930,8 +5732,13 @@ export default function App() {
         } else if (scope === "split") {
           for (const e of scopedEntries) {
             if (!passesPopulationFcsExportThreshold(popCountFor(e, popId), splitThreshold)) continue;
-            out[sanitizeFcsName(null, e.name, popName, null)] =
-              exportPopulationFcs(e.sample, popMaskFor(e, popId), assay);
+            // Two checked files can share a name, or sanitise to the same one ("a b.fcs" and
+            // "a_b.fcs"); assigned into the object, the later file silently replaced the earlier.
+            // Named as the active file's export is: the file's name without its extension.
+            mergeExportFiles(out, {
+              [sanitizeFcsName(null, e.name.replace(/\.[^.]+$/, ""), popName, null)]:
+                exportPopulationFcs(e.sample, popMaskFor(e, popId), assay),
+            });
           }
         } else {
           const base = sanitizeFilePart((activeEntry.name || "sample").replace(/\.[^.]+$/, ""));
@@ -5138,6 +6945,8 @@ export default function App() {
     handle: FileSystemFileHandle | null,
     sourcePath?: string,
     persistedId?: string,
+    /** For a file holding several data sets: which one this sample is. */
+    dataSet?: number,
   ): SampleEntry {
     // Workspace/FCS readers normally return an exact-owned ArrayBuffer. parseFcs is read-only, so
     // reuse it instead of briefly duplicating a potentially multi-GB source file during import.
@@ -5148,7 +6957,7 @@ export default function App() {
     return {
       id: persistedId ?? crypto.randomUUID(),
       name,
-      sample: new Sample(parseFcs(ab)),
+      sample: new Sample(dataSet === undefined ? parseFcs(ab) : parseFcs(ab, { dataSet })),
       bytes,
       handle,
       ...(sourcePath ? { sourcePath } : {}),
@@ -5699,21 +7508,49 @@ export default function App() {
     setImportMsg(`Removed ${ids.length} sample${ids.length === 1 ? "" : "s"} from the workspace.`);
   }
 
-  async function importFcsCandidates(candidates: readonly FcsImportCandidate[]): Promise<SampleEntry[]> {
+  async function importFcsCandidates(
+    candidates: readonly FcsImportCandidate[],
+    /** Filled with the entry each candidate became, by the candidate's id; one that failed has none. */
+    byCandidate?: Map<string, SampleEntry>,
+    /** Filled with why each candidate that failed could not be loaded, by the candidate's id. */
+    failedCandidates?: Map<string, string>,
+  ): Promise<SampleEntry[]> {
     if (candidates.length === 0) return [];
     setBusy(true);
     setError(null);
     const entries: SampleEntry[] = [];
     const failures: string[] = [];
+    const dataSetNotes: string[] = [];
     try {
       for (let index = 0; index < candidates.length; index++) {
         const candidate = candidates[index];
         setSampleImportProgress({ current: index + 1, total: candidates.length, name: candidate.name });
         try {
           const bytes = new Uint8Array((await candidate.file.arrayBuffer()).slice(0));
-          entries.push(createEntry(bytes, candidate.name, candidate.handle, candidate.sourcePath));
+          try {
+            const entry = createEntry(bytes, candidate.name, candidate.handle, candidate.sourcePath);
+            entries.push(entry);
+            byCandidate?.set(candidate.id, entry);
+          } catch (cause) {
+            if (!(cause instanceof FcsMultipleDataSetsError)) throw cause;
+            // A file holding several data sets (a Guava plate writes one per well) opens as one
+            // sample per data set, each carried as an FCS file of its own and named after the
+            // file and its position, so none is dropped and each can be found again by name.
+            // No one entry is the candidate, so `byCandidate` has none for it: a caller that
+            // pairs such a file resolves it again against the data sets it opened as.
+            const sets = cause.dataSets;
+            entries.push(...sets.map((set) => createEntry(
+              extractFcsDataSet(bytes.buffer, set.index),
+              fcsDataSetFileName(candidate.name, set.index, sets.length, set.label),
+              null,
+              candidate.sourcePath,
+            )));
+            if (candidate.handle) void rememberHandle("fcs:" + candidate.name, candidate.handle);
+            dataSetNotes.push(`${candidate.name} holds ${sets.length} data sets and opened as ${sets.length} samples`);
+          }
         } catch (cause) {
           failures.push(`${candidate.name}: ${cause instanceof Error ? cause.message : String(cause)}`);
+          failedCandidates?.set(candidate.id, cause instanceof Error ? cause.message : String(cause));
         }
         // Let progress paint and keep the browser responsive between synchronous FCS parses.
         if (index < candidates.length - 1) {
@@ -5722,7 +7559,10 @@ export default function App() {
       }
       addSampleEntries(entries);
       if (entries.length > 0) {
-        setImportMsg(`Added ${entries.length} FCS file${entries.length === 1 ? "" : "s"} to the workspace.`);
+        setImportMsg(
+          `Added ${entries.length} FCS ${dataSetNotes.length ? "sample" : "file"}${entries.length === 1 ? "" : "s"} to the workspace.` +
+            (dataSetNotes.length ? ` ${dataSetNotes.join("; ")}.` : ""),
+        );
       }
       if (failures.length > 0) {
         setError(`${failures.length} FCS file${failures.length === 1 ? "" : "s"} could not be loaded: ${failures.join("; ")}`);
@@ -5813,13 +7653,22 @@ export default function App() {
         scatterLinear: e.sample.scatterLinearKeys(),
         fluorArcsinh: e.sample.fluorArcsinhKeys(),
         cytofCofactor: e.sample.arcsinhCofactor,
-        compensationOn: e.sample.compensationEnabled,
+        compensationOn: e.sample.compensationEnabled ||
+          (e.sample.spillover === null && compensationPendingRef.current.has(e.id)),
         instrumentMode: e.sample.instrumentMode,
         labels: e.sample.labelOverrides(),
         metadata: { ...metadata[e.id], [SAMPLE_ID_FIELD]: sampleDisplayId(e.name, metadata[e.id]) },
         division: divisionProfiles[e.id],
         ...(fileHierarchies[e.id] ? { hierarchyId: fileHierarchies[e.id] } : {}),
         ...(state.file_groups[e.id] ? { groupId: state.file_groups[e.id] } : {}),
+        // What the file recorded about its acquisition, so relinking finds this file and not
+        // another experiment's file of the same name.
+        ...(Object.keys(identityKeywords(e.sample.fcs.keywords)).length
+          ? { identity: identityKeywords(e.sample.fcs.keywords) }
+          : {}),
+        // A matrix that is not the file's own (a FlowJo workspace's) goes with the file, so the
+        // reopened file is compensated with the matrix its gates were drawn under.
+        ...(e.sample.externalSpillover ? { externalSpillover: e.sample.externalSpillover } : {}),
       })),
       activeSample: Math.max(0, samples.findIndex((e) => e.id === activeSampleId)),
       gating: {
@@ -5932,9 +7781,10 @@ export default function App() {
   buildWsRef.current = buildWorkspaceFile; // keep the autosave builder fresh each render
 
   /**
-   * Every SCE sample, gated under any hierarchy on demand. The active hierarchy reuses the gating
-   * already computed for the plot and the background cache; a parked hierarchy is evaluated here
-   * with its own tree and gate table.
+   * Every SCE sample, with the tree it is gated under, gated under any hierarchy on demand. The
+   * active hierarchy reuses the gating already computed for the plot and the background cache; a
+   * parked hierarchy is evaluated here with its own tree and gate table. Which tree a sample's
+   * membership is read from is hostedMembershipReader's decision, not this one's.
    */
   function hostedMembershipSamples(datasetId: string): HostedMembershipSample[] {
     return samples.map((entry): HostedMembershipSample => {
@@ -5945,15 +7795,11 @@ export default function App() {
       return {
         sampleId: source.sampleId,
         eventCount: source.eventIndex.length,
+        name: entry.name,
+        hierarchyId: hierarchyOfFile(entry.id),
         gatingFor: (tree: HierarchyTree) => {
-          if (!tree.active) {
-            return recomputeGating(entry.sample, {
-              ...gatingState,
-              populations: tree.populations,
-              root_population_id: tree.root_population_id,
-            });
-          }
-          if (entry.id === activeSampleId) return gatingDerived;
+          if (!tree.active) return recomputeGating(entry.sample, gatingStateForTree(gatingState, tree));
+          if (entry.id === activeSampleId) return liveTreeGatingOfViewed();
           const cached = inactiveGatingCacheRef.current.get(entry.id);
           return cached &&
             cached.sample === entry.sample &&
@@ -5969,7 +7815,7 @@ export default function App() {
   function saveHostedWorkspace(
     reason: "autosave" | "explicit",
     clientRevision = workspaceEditRevisionRef.current,
-  ): Promise<GateLabHostWorkspaceWriteResult> {
+  ): Promise<GateLabHostWorkspaceWriteResult & { notEvaluated?: string[] }> {
     const run = hostSaveChainRef.current
       .catch(() => undefined)
       .then(async () => {
@@ -5989,7 +7835,10 @@ export default function App() {
           throw new Error("The hosted SCE workspace is not ready to save.");
         }
         setHostWorkspaceStatus("saving");
-        const workspaceJson = JSON.stringify(ws);
+        // Stamped with what it needs of the GateLab that opens it, as a file is (workspaceFeatures.ts):
+        // the SCE's copy is opened by whichever GateLab build the opening GateLabR embeds, and one
+        // that predates a feature must refuse it rather than misread it.
+        const workspaceJson = JSON.stringify(stampHostedWorkspace(ws));
         // An explicit save also hands R every population's membership, for every hierarchy and
         // sample, so the whole tree can be read back there. Autosaves carry geometry only.
         const memberships = reason === "explicit"
@@ -6036,7 +7885,9 @@ export default function App() {
         } else {
           setHostWorkspaceStatus("unsaved");
         }
-        return result;
+        return memberships
+          ? { ...result, notEvaluated: notEvaluatedNotes(memberships.populations.flatMap(({ sampleMasks }) => sampleMasks)) }
+          : result;
       })
       .catch((cause) => {
         setHostWorkspaceStatus("error");
@@ -6207,6 +8058,9 @@ export default function App() {
     const base = sanitizeFilePart((fileName || "workspace").replace(/\.[^.]+$/, ""));
     setBusy(true);
     try {
+      // The name the file was saved under: the one chosen in the save dialog, which need not be
+      // the one suggested, or the suggested one for a download.
+      let savedName = `${base}-bundle.${WORKSPACE_EXT}`;
       if (ws.version === WORKSPACE_VERSION_3) {
         const plan = await preparePortableBundle(ws);
         const progress = ({ writtenPayloadBytes, totalPayloadBytes }: {
@@ -6226,6 +8080,7 @@ export default function App() {
             async (write) => writePortableWorkspaceV3Archive(plan, write, { onProgress: progress }),
           );
           if (!handle) return;
+          savedName = handle.name;
         } else {
           const parts: BlobPart[] = [];
           await writePortableWorkspaceV3Archive(plan, async (chunk) => {
@@ -6246,12 +8101,13 @@ export default function App() {
             zip as BlobPart,
           );
           if (!handle) return;
+          savedName = handle.name;
         } else {
           downloadBlob(`${base}-bundle.${WORKSPACE_EXT}`, new Blob([zip as BlobPart], { type: "application/zip" }));
         }
       }
       setImportMsg(
-        `Saved portable bundle · ${base}-bundle.${WORKSPACE_EXT}` +
+        `Saved portable bundle · ${savedName}` +
           (ws.version === WORKSPACE_VERSION_3 && ws.samples.some(({ assay }) => assay.compensatedLayer !== null)
             ? " · compensated assays embedded"
             : ""),
@@ -6282,24 +8138,52 @@ export default function App() {
   }
 
   // Resolve a reference-workspace sample without prompting: an already-open sample of the
-  // same name → a remembered handle. All unresolved names are handled together below.
-  async function resolveKnownReferenceFcs(fileName: string): Promise<ResolvedReferenceFcs | null> {
-    const existing = samples.find((e) => e.name === fileName);
+  // same name → a remembered handle. All unresolved names are handled together below. Either is
+  // taken only when it is the acquisition the workspace was saved with: the handle is remembered
+  // by file name, so it is the last file of that name opened anywhere, and an open sample of the
+  // same name can be another experiment's.
+  async function resolveKnownReferenceFcs(
+    requirement: WorkspaceFcsRequirement,
+    /** The workspace declares another file of this name: only a confirmed acquisition will do. */
+    duplicate = false,
+    /** Open samples already taken for another declaration. */
+    taken: ReadonlySet<string> = new Set(),
+  ): Promise<ResolvedReferenceFcs | null> {
+    const { fileName } = requirement;
+    const isIt = (keywords: Record<string, string> | null) => {
+      if (duplicate) {
+        return !!requirement.identity && !!keywords &&
+          compareIdentity(requirement.identity, identityKeywords(keywords)).verdict === "confirmed";
+      }
+      return !requirement.identity || !keywords ||
+        compareIdentity(requirement.identity, identityKeywords(keywords)).verdict !== "contradicted";
+    };
+    const existing = samples.find((e) => e.name === fileName && !taken.has(e.id) && isIt(e.sample.fcs.keywords));
     if (existing?.bytes) {
       return {
         bytes: existing.bytes,
         handle: existing.handle,
         ...(existing.sourcePath ? { sourcePath: existing.sourcePath } : {}),
+        openId: existing.id,
       };
     }
-    const h = await recallHandle("fcs:" + fileName);
+    // One data set of a multi-data-set file is found through the file it came from.
+    const dataSet = parseFcsDataSetFileName(fileName);
+    const onDisk = dataSet?.fileName ?? fileName;
+    const h = await recallHandle("fcs:" + onDisk);
     const read = h ? await readFromHandleIfPermitted(h) : null;
     if (
       read &&
       read.name.normalize("NFC").toLocaleLowerCase() ===
-        fileName.normalize("NFC").toLocaleLowerCase()
+        onDisk.normalize("NFC").toLocaleLowerCase()
     ) {
-      return { bytes: read.bytes, handle: h };
+      // The acquisition the workspace was saved with is the data set's own, so a data set is
+      // compared once it is taken out of the file: the file's first HEADER is its first data set.
+      const bytes = dataSet
+        ? extractNamedFcsDataSet(read.bytes.slice().buffer, dataSet.index, dataSet.count)
+        : read.bytes;
+      if (!isIt(readFcsKeywords(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer))) return null;
+      return dataSet ? { bytes, handle: null } : { bytes, handle: h };
     }
     return null;
   }
@@ -6342,11 +8226,54 @@ export default function App() {
       );
     }
 
-    const plan = planWorkspaceFcsRelink(requirements, sources);
-    if (plan.missing.length > 0 || plan.ambiguous.length > 0) {
+    // The files named like a required one are read for their acquisition keywords, so a
+    // same-named file of another experiment is never relinked in its place.
+    const identities = new Map<PickedFileSource, ReturnType<typeof identityKeywords>>();
+    const named = (name: string) => requirements.some((r) =>
+      r.identity && r.fileName.normalize("NFC").toLocaleLowerCase() === name.normalize("NFC").toLocaleLowerCase());
+    for (const source of sources) {
+      if (!named(source.name)) continue;
+      const keywords = await readFcsFileKeywords(source.file);
+      if (keywords) identities.set(source, identityKeywords(keywords));
+    }
+    const plan = planWorkspaceFcsRelink(requirements, sources, (source) => identities.get(source) ?? null);
+    setWorkspaceRelinkOverride(null);
+    const pathOf = (source: PickedFileSource) =>
+      sourceName === "selected files" ? source.relativePath : `${sourceName}/${source.relativePath}`;
+    relinkedUnconfirmedRef.current = plan.unconfirmed.map((u) => ({
+      fileName: describeRequirement(u.requirement, requirements), path: pathOf(u.candidate),
+      agree: u.agree, setAside: u.setAside.map(pathOf),
+    }));
+    // Only same-named files of another acquisition stand in the way, one for each: offered, by
+    // name, as an explicit choice. Nothing else is ever relinked to them.
+    if (!plan.missing.length && !plan.ambiguous.length && plan.mismatched.length &&
+        plan.mismatched.every((m) => m.candidates.length === 1)) {
+      setWorkspaceRelinkOverride({
+        sourceName,
+        take: [
+          ...requirements.flatMap((requirement) => {
+            const source = plan.matches.get(requirement.dataPath);
+            return source ? [{ requirement, source }] : [];
+          }),
+          ...plan.mismatched.map((m) => ({ requirement: m.requirement, source: m.candidates[0].candidate })),
+        ],
+        // Named so two declarations of one file name read apart: they read identically.
+        byChoice: plan.mismatched.map((m) => ({ fileName: describeRequirement(m.requirement, requirements), path: pathOf(m.candidates[0].candidate) })),
+      });
+    }
+    if (plan.missing.length > 0 || plan.ambiguous.length > 0 || plan.mismatched.length > 0) {
       const details: string[] = [];
       if (plan.missing.length > 0) {
         details.push(`Missing: ${plan.missing.map(({ fileName }) => fileName).join(", ")}`);
+      }
+      if (plan.mismatched.length > 0) {
+        details.push(
+          "Another acquisition: " +
+            plan.mismatched.map(({ requirement, candidates }) =>
+              candidates.map(({ candidate, differ }) =>
+                describeContradiction(`the workspace's ${describeRequirement(requirement, requirements)}`, differ, candidate.relativePath)).join("; "),
+            ).join("; "),
+        );
       }
       if (plan.ambiguous.length > 0) {
         details.push(
@@ -6364,23 +8291,52 @@ export default function App() {
       );
     }
 
+    return readRelinkedFcs(sourceName, requirements.map((requirement) => ({ requirement, source: plan.matches.get(requirement.dataPath)! })));
+  }
+
+  async function readRelinkedFcs(
+    sourceName: string,
+    take: readonly { requirement: WorkspaceFcsRequirement; source: PickedFileSource }[],
+  ): Promise<ReadonlyMap<string, ResolvedReferenceFcs>> {
     const resolved = new Map<string, ResolvedReferenceFcs>();
-    for (let index = 0; index < requirements.length; index++) {
-      const requirement = requirements[index];
-      const source = plan.matches.get(requirement.dataPath)!;
+    for (let index = 0; index < take.length; index++) {
+      const { requirement, source } = take[index];
       setImportMsg(
-        `Relinking from ${sourceName} · ${index + 1} / ${requirements.length} · ${requirement.fileName}`,
+        `Relinking from ${sourceName} · ${index + 1} / ${take.length} · ${requirement.fileName}`,
       );
-      const bytes = new Uint8Array(await source.file.arrayBuffer());
+      const whole = new Uint8Array(await source.file.arrayBuffer());
+      const dataSet = parseFcsDataSetFileName(requirement.fileName);
+      const bytes = dataSet ? extractNamedFcsDataSet(whole.buffer, dataSet.index, dataSet.count) : whole;
       resolved.set(requirement.dataPath, {
         bytes,
-        handle: source.handle,
+        handle: dataSet ? null : source.handle,
         sourcePath: sourceName === "selected files"
           ? source.relativePath
           : `${sourceName}/${source.relativePath}`,
       });
     }
     return resolved;
+  }
+
+  /** Relink the files that record another acquisition, because the user chose them by name. */
+  async function useWorkspaceRelinkOverride(): Promise<void> {
+    const override = workspaceRelinkOverride;
+    if (!override || workspaceRelinkScanning) return;
+    setWorkspaceRelinkScanning(true);
+    try {
+      const resolved = await readRelinkedFcs(override.sourceName, override.take);
+      relinkedByChoiceRef.current = override.byChoice;
+      const resolve = workspaceRelinkResolverRef.current;
+      workspaceRelinkResolverRef.current = null;
+      setPendingWorkspaceRelink(null);
+      setWorkspaceRelinkOverride(null);
+      setWorkspaceRelinkError(null);
+      resolve?.(resolved);
+    } catch (cause) {
+      setWorkspaceRelinkError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setWorkspaceRelinkScanning(false);
+    }
   }
 
   function requestReferenceFcsFolder(
@@ -6409,6 +8365,7 @@ export default function App() {
     const resolve = workspaceRelinkResolverRef.current;
     workspaceRelinkResolverRef.current = null;
     setPendingWorkspaceRelink(null);
+    setWorkspaceRelinkOverride(null);
     setWorkspaceRelinkError(null);
     setWorkspaceRelinkScanning(false);
     resolve?.(null);
@@ -6673,7 +8630,11 @@ export default function App() {
   ) {
     setBusy(true);
     setError(null);
-    setImportMsg(`Opening ${wsFileName} · reading workspace`);
+    // The progress line is cleared on the way out unless something has replaced it: a workspace
+    // refused here (a FlowJo 7 workspace, a file that is none) left "reading workspace" standing
+    // beside its error.
+    const reading = `Opening ${wsFileName} · reading workspace`;
+    setImportMsg(reading);
     try {
       // "Workspace" includes a .gatelab bundle and gate-only FlowJo/FACSChorus files. Point at
       // the right control rather than failing on the zip header.
@@ -6683,14 +8644,11 @@ export default function App() {
         const experiment = readChorusExperiment(new Uint8Array(await file.arrayBuffer()));
         const trees = listChorusTrees(experiment).filter((tree) => tree.gateCount > 0);
         if (!trees.length) throw new Error("This FACSChorus experiment contains no gates GateLab can read.");
-        if (sample && activeSampleId && trees.length === 1 && !loadedChorusRecordings.length) {
-          await importChorusTree(experiment, trees[0].index);
-        } else {
-          // Even one tree needs a button when no FCS is loaded: browsers only allow the second
-          // file picker to open directly from a user gesture.
-          setChorusPicker({ experiment, trees });
-          setImportMsg(null);
-        }
+        // Always the timeline. Even one tree needs a button when no FCS is loaded: browsers only
+        // allow the second file picker to open directly from a user gesture. With a file loaded,
+        // nothing in the .cef says the file is its data, so the tree is applied only when chosen.
+        setChorusPicker({ experiment, trees });
+        setImportMsg(null);
         return;
       }
       // A .wsp holds gates and the names of the files they were drawn on, but no data. Opening
@@ -6701,7 +8659,7 @@ export default function App() {
         if (!isFlowJoWorkspace(text)) {
           throw new Error(`"${wsFileName}" is not a FlowJo workspace GateLab can read.`);
         }
-        const allSamples = listFlowJoWorkspaceSamples(text);
+        const allSamples = listFlowJoWorkspaceSamples(text, t);
         const wsSamples = allSamples.filter((x) => x.gateCount > 0);
         if (!wsSamples.length) throw new Error("This workspace contains no gates GateLab can read.");
         setFlowJoOpen({
@@ -6713,10 +8671,15 @@ export default function App() {
           // files report "1/1 found" and load one, with twelve compensation controls left behind.
           dataSamples: allSamples.filter((x) => x.gateCount === 0),
           pending: [],
-          // Pre-select the sample carrying the most gates: with one sample it is the only
-          // answer, and with several it is the likeliest strategy of record.
-          strategySample: wsSamples.reduce((best, x) => (x.gateCount > best.gateCount ? x : best)).index,
+          // Nothing chosen yet: until the user chooses a row, the selection is the sample the
+          // viewed file IS, else the one the first file chosen for the open is (flowjoOpen.ts,
+          // defaultStrategySample). The sample with the most gates, the old default, was often
+          // not the loaded file's, and the dialog listed its trees for a file they would not go on.
+          strategySample: null,
+          strategyTouched: false,
           strategyTree: null,
+          fileChoices: {},
+          crossFile: null,
           // On by default when the workspace has several samples: a workspace that gates more
           // than one file is describing more than one file, and importing a single sample's
           // strategy silently discards the rest. Where the samples share a strategy this costs
@@ -6725,6 +8688,10 @@ export default function App() {
           // The workspace's, because that is the compensation the gates were drawn under. Only
           // offered when the two matrices actually differ -- see wspMatrixConflict.
           matrixChoice: "workspace",
+          // FlowJo's own rule, at every open: turning it off is a choice made for one import,
+          // and is not carried to the next, which would then read FlowJo's gates another way
+          // without a word.
+          flowJoGrid: true,
         });
         setImportMsg(null);
         return;
@@ -6734,6 +8701,7 @@ export default function App() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      setImportMsg((msg) => (msg === reading ? null : msg));
       setBusy(false);
     }
   }
@@ -6775,35 +8743,41 @@ export default function App() {
           referenceRequirements.push({
             dataPath: wss.dataPath,
             fileName: wss.fileName,
+            ...(wss.identity ? { identity: wss.identity } : {}),
           });
         }
       }
 
-      const duplicateReferenceNames = new Set<string>();
-      const seenReferenceNames = new Set<string>();
-      for (const { fileName } of referenceRequirements) {
-        const normalized = fileName.normalize("NFC").toLocaleLowerCase();
-        if (seenReferenceNames.has(normalized)) duplicateReferenceNames.add(fileName);
-        seenReferenceNames.add(normalized);
-      }
-      if (duplicateReferenceNames.size > 0) {
+      // A name declared twice is two files the keywords can tell apart when each declaration was
+      // saved with its own acquisition identity; it is refused only where they cannot. It used to
+      // be refused whatever the declarations recorded.
+      const duplicateReferenceNames = indistinguishableDuplicateNames(referenceRequirements);
+      if (duplicateReferenceNames.length > 0) {
         throw new Error(
           "This linked workspace contains multiple FCS files with the same filename " +
-            `(${[...duplicateReferenceNames].join(", ")}), so GateLab cannot safely distinguish them by folder matching. ` +
+            `(${duplicateReferenceNames.join(", ")}), and nothing saved with them tells them apart, so GateLab cannot safely distinguish them by folder matching. ` +
             "Open the original files and save a portable workspace instead.",
         );
       }
+      const declaredTwice = new Set(referenceRequirements
+        .map((r) => r.fileName.normalize("NFC").toLocaleLowerCase())
+        .filter((name, i, all) => all.indexOf(name) !== i));
 
       const resolvedReferenceFcs = new Map<string, ResolvedReferenceFcs>();
       const unresolvedRequirements: WorkspaceFcsRequirement[] = [];
+      const takenOpen = new Set<string>();
       for (const requirement of referenceRequirements) {
-        const known = await resolveKnownReferenceFcs(requirement.fileName);
+        const known = await resolveKnownReferenceFcs(
+          requirement, declaredTwice.has(requirement.fileName.normalize("NFC").toLocaleLowerCase()), takenOpen);
         if (known) {
           resolvedReferenceFcs.set(requirement.dataPath, known);
+          if (known.openId) takenOpen.add(known.openId);
         } else {
           unresolvedRequirements.push(requirement);
         }
       }
+      relinkedByChoiceRef.current = [];
+      relinkedUnconfirmedRef.current = [];
       if (unresolvedRequirements.length > 0) {
         const recovered = await requestReferenceFcsFolder(unresolvedRequirements, wsH);
         if (!recovered) {
@@ -6817,6 +8791,7 @@ export default function App() {
 
       // Build an entry for every sample only after all linked files have been resolved.
       const entries: SampleEntry[] = [];
+      const dataSetNotes: string[] = [];
       const nextMetadata: Record<string, Record<string, string>> = {};
       const nextDivision: Record<string, DivisionProfile> = {};
       const nextFileHierarchies: Record<string, string> = {};
@@ -6838,7 +8813,18 @@ export default function App() {
         }
         let entry: SampleEntry;
         try {
-          entry = createEntry(fcsB, wss.fileName, fcsH, sourcePath, wss.sampleId);
+          try {
+            entry = createEntry(fcsB, wss.fileName, fcsH, sourcePath, wss.sampleId);
+          } catch (cause) {
+            if (!(cause instanceof FcsMultipleDataSetsError)) throw cause;
+            // A workspace saved before GateLab read every data set holds such a file as one
+            // sample, which was its first data set. It reopens as it was saved, and says so.
+            entry = createEntry(fcsB, wss.fileName, fcsH, sourcePath, wss.sampleId, 0);
+            dataSetNotes.push(
+              `${wss.fileName} holds ${cause.dataSets.length} data sets and this workspace uses the first, ` +
+                "as it was saved; open the file again to add the others",
+            );
+          }
         } catch (cause) {
           throw new Error(
             `Could not read ${wss.fileName}: ${cause instanceof Error ? cause.message : String(cause)}. ` +
@@ -6869,24 +8855,59 @@ export default function App() {
         ws = await validateWorkspaceV3(raw, contexts);
       }
 
+      // A channel key the workspace was saved with that no file has now -- because the file is
+      // read differently, as the MACSQuant FCS 3.1 export and UTF-8 labels are since 2026-09 -- is
+      // restated as the key the same FCS parameter has now (workspaceChannelKeys.ts), in the
+      // gates, the display channels and each file's channel settings. Axis ranges, divisions and
+      // figure settings saved under an old key are not restated and fall back to their defaults.
+      const savedChannelKeys = new Set<string>([
+        ...gateChannelKeys(ws.gating.gates),
+        ...(ws.gating.stored_hierarchies ?? []).flatMap((h) => [...gateChannelKeys(h.gates ?? {})]),
+        ws.display?.xChannel ?? "",
+        ws.display?.yChannel ?? "",
+        ...ws.samples.flatMap((wss) => [
+          ...Object.keys(wss.logicleW ?? {}),
+          ...Object.keys(wss.scatterCofactor ?? {}),
+          ...(wss.scatterLinear ?? []),
+          ...(wss.fluorArcsinh ?? []),
+          ...Object.keys(wss.labels ?? {}),
+        ]),
+      ]);
+      const channelKeyRemap = planChannelKeyRemap(savedChannelKeys, entries.map((entry) => entry.sample.channels));
+      const currentKey = (key: string): string => channelKeyRemap.get(key) ?? key;
+      const currentKeys = <T,>(record: Record<string, T>): Record<string, T> =>
+        Object.fromEntries(Object.entries(record).map(([key, value]) => [currentKey(key), value]));
+      if (channelKeyRemap.size > 0) {
+        ws = {
+          ...ws,
+          gating: {
+            ...ws.gating,
+            gates: remapGateChannels(ws.gating.gates, channelKeyRemap),
+            stored_hierarchies: ws.gating.stored_hierarchies?.map((h) =>
+              h.gates ? { ...h, gates: remapGateChannels(h.gates, channelKeyRemap) } : h),
+          },
+        } as LiveWorkspaceFile;
+      }
+
+      const pendingCompensation: (typeof entries)[number][] = [];
       for (let index = 0; index < ws.samples.length; index++) {
         const wss = ws.samples[index];
         const entry = entries[index];
-        for (const [key, w] of Object.entries(wss.logicleW ?? {})) {
+        for (const [key, w] of Object.entries(currentKeys(wss.logicleW ?? {}))) {
           const idx = entry.sample.index(key);
           if (idx !== undefined && Number.isFinite(w)) entry.sample.setLogicleW(idx, w);
         }
-        for (const [key, cofactor] of Object.entries(wss.scatterCofactor ?? {})) {
+        for (const [key, cofactor] of Object.entries(currentKeys(wss.scatterCofactor ?? {}))) {
           const idx = entry.sample.index(key);
           if (idx !== undefined && Number.isFinite(cofactor) && cofactor > 0) {
             entry.sample.setScatterCofactor(idx, cofactor);
           }
         }
-        entry.sample.applyScatterLinearKeys(wss.scatterLinear ?? []);
+        entry.sample.applyScatterLinearKeys((wss.scatterLinear ?? []).map(currentKey));
         // After the W overrides above, so a channel restored to arcsinh still carries the W the
         // user set for its logicle and switching back gives them the axis they saved.
-        entry.sample.applyFluorArcsinhKeys(wss.fluorArcsinh ?? []);
-        entry.sample.applyLabelOverrides(wss.labels ?? {});
+        entry.sample.applyFluorArcsinhKeys((wss.fluorArcsinh ?? []).map(currentKey));
+        entry.sample.applyLabelOverrides(currentKeys(wss.labels ?? {}));
         if (wss.metadata && Object.keys(wss.metadata).length) nextMetadata[entry.id] = wss.metadata;
         if (wss.hierarchyId) nextFileHierarchies[entry.id] = wss.hierarchyId;
         if (wss.groupId) nextFileGroups[entry.id] = wss.groupId;
@@ -6900,10 +8921,28 @@ export default function App() {
             coordinateBindingKey: restoredCoordinateBinding,
           };
         }
+        // The matrix the gates were drawn under, when it is not the file's own, before
+        // compensation is turned on: the file's own would evaluate every fluorescence gate on
+        // other values. One that no longer applies stops the open rather than falling back,
+        // and so does one that would leave out other parameters of the file than it did.
+        if (wss.externalSpillover) {
+          const { label, channels, matrix, leftOut } = wss.externalSpillover;
+          try {
+            entry.sample.installExternalSpillover({ channels, matrix }, label, { replaceEmbedded: true, leftOut: leftOut ?? [] });
+          } catch (cause) {
+            throw new Error(
+              `${wss.fileName} was compensated with the spillover matrix "${label}", saved with the workspace, ` +
+                `which cannot be applied to it: ${cause instanceof Error ? cause.message : String(cause)} ` +
+                "The current workspace was not changed.",
+            );
+          }
+        }
         if (ws.version === 2 && "compensationOn" in wss && wss.compensationOn) {
           entry.sample.setCompensation(true);
+          if (!entry.sample.compensationEnabled && entry.sample.spillover === null) pendingCompensation.push(entry);
         }
       }
+      compensationPendingRef.current = new Set(pendingCompensation.map((entry) => entry.id));
 
       await checkpointCurrentWorkspace("before-workspace-open");
       const nextWorkspaceId = ws.workspaceId ?? makeWorkspaceId();
@@ -7037,8 +9076,8 @@ export default function App() {
       if (panes?.left && Number.isFinite(panes.left)) setLeftWidth(Math.max(200, Math.min(900, panes.left)));
       if (panes?.right && Number.isFinite(panes.right)) { setSideWidth(Math.max(320, Math.min(900, panes.right))); setAutoSizePopulations(false); }
       const [dx, dy] = active.defaultChannelIndices();
-      setXIdx(active.index(ws.display?.xChannel ?? "") ?? dx);
-      setYIdx(active.index(ws.display?.yChannel ?? "") ?? dy);
+      setXIdx(active.index(currentKey(ws.display?.xChannel ?? "")) ?? dx);
+      setYIdx(active.index(currentKey(ws.display?.yChannel ?? "")) ?? dy);
       setXRange(null);
       setYRange(null);
       setWsHandle(wsH);
@@ -7064,11 +9103,71 @@ export default function App() {
         file_groups: nextFileGroups,
       });
       const nS = entries.length;
+      const restated = [...channelKeyRemap].map(([from, to]) => `"${from}" is now "${to}"`);
+      // A linked file declared without the acquisition keywords it was saved with -- a workspace
+      // saved before GateLab recorded them -- was relinked by its name alone, and nothing confirms
+      // it is that file: a same-named file of another experiment opened with only "Opened …".
+      const unconfirmed = referenceRequirements
+        .filter((r) => !r.identity || !Object.values(r.identity).some((v) => v?.trim()))
+        .map((r) => r.fileName);
       setImportMsg(
         `Opened ${wsFileName || "workspace"} · ${nS} sample${nS > 1 ? "s" : ""}` +
           ` · ${storage === "bundle" ? "self-contained bundle" : "linked FCS"}` +
-          ` · saved ${new Date(ws.savedAt).toLocaleString()}`,
+          ` · saved ${new Date(ws.savedAt).toLocaleString()}` +
+          dataSetNotes.map((note) => ` · ${note}`).join("") +
+          (restated.length
+            ? ` · ${restated.length === 1 ? "a channel GateLab now names differently keeps its" : `${restated.length} channels GateLab now names differently keep their`}` +
+              ` gates and settings, each the same FCS parameter: ${restated.join(", ")}`
+            : "") +
+          // Relinked to a file that records another acquisition only because the user chose so.
+          (relinkedByChoiceRef.current.length
+            ? ` · relinked by choice to files that record another acquisition: ${relinkedByChoiceRef.current
+                .map((r) => `${r.path} as ${r.fileName}`).join(", ")}`
+            : "") +
+          (unconfirmed.length
+            ? ` · relinked by name alone, unconfirmed: the workspace was saved without the acquisition keywords of ` +
+              `${unconfirmed.length === 1 ? "this file" : `these ${unconfirmed.length} files`}, so nothing confirms ` +
+              `${unconfirmed.length === 1 ? "it is the file" : "they are the files"} it was saved with: ${namesInBrief(unconfirmed)}`
+            : "") +
+          // Taken over another file of its name, which it fits better, but not confirmed by what it
+          // was saved with.
+          (relinkedUnconfirmedRef.current.length
+            ? ` · relinked without confirmation: ${relinkedUnconfirmedRef.current.map((r) =>
+                `${r.path} as ${r.fileName}, chosen over ${r.setAside.join(", ")}: ` +
+                (r.agree.length
+                  ? `it agrees with what it was saved with on ${r.agree.join(", ")} only, which does not confirm it`
+                  : "its keywords could not be compared with what it was saved with")).join("; ")}`
+            : ""),
       );
+      relinkedByChoiceRef.current = [];
+      relinkedUnconfirmedRef.current = [];
+      // As when a file is added to the workspace (addSampleEntries): a gate on a channel a file
+      // lacks matches no event in it, which would otherwise be a silent zero.
+      const missing = ws.samples.flatMap((wss, index) => {
+        const names = gatesMissingChannels(
+          savedFileTreeGates(ws.gating, wss.hierarchyId),
+          new Set(entries[index].sample.channelNames()),
+        );
+        return names.length > 0 ? [`${entries[index].name}: ${names.join(", ")}`] : [];
+      });
+      const problems: string[] = [];
+      if (missing.length > 0) {
+        problems.push(
+          `${missing.length} sample${missing.length === 1 ? " is" : "s are"} missing channels used by existing gates: ` +
+            `${missing.join("; ")}. Those gates match no events in the affected samples.`,
+        );
+      }
+      if (pendingCompensation.length > 0) {
+        const n = pendingCompensation.length;
+        problems.push(
+          `Compensation was on for ${n} sample${n === 1 ? "" : "s"} when the workspace was saved, but no spillover matrix ` +
+            `is available for ${n === 1 ? "it" : "them"} now: ${pendingCompensation.map((entry) => entry.name).join(", ")}. ` +
+            "The matrix came from a FlowJo workspace or a Gating-ML file, and workspaces saved by GateLab 0.8.3 and earlier did not keep it. " +
+            "The counts are uncompensated until the matrix is supplied again (import the gating file's matrix, or apply one in " +
+            "the Compensation tab); saving keeps compensation on for these files meanwhile.",
+        );
+      }
+      if (problems.length > 0) setError(problems.join(" "));
       return true;
     } catch (e) {
       if (compensationWorkspaceReset) compensationManagerRef.current!.resetWorkspace(workspaceId);
@@ -7121,15 +9220,55 @@ export default function App() {
     }
   }
 
+  /**
+   * The tree the viewed file is gated under, when it is not the live one but of its family: the
+   * file's own copy (or its group's) while edits go to the tree or the group. A pooled view edits
+   * the tree by construction and is left to it. The stored tree itself, so it changes only when
+   * that tree does, not with every edit to the live one.
+   */
+  const viewedOwnTreeId = useMemo((): string | null => {
+    if (!activeSampleId || plotPool) return null;
+    const hid = hierarchyOfFile(activeSampleId);
+    if (hid === state.active_hierarchy_id) return null;
+    if (templateOf(hid, state.hierarchies)?.id !== templateOf(state.active_hierarchy_id, state.hierarchies)?.id) return null;
+    return state.stored_hierarchies[hid]?.root_population_id ? hid : null;
+  }, [activeSampleId, plotPool, hierarchyOfFile, state.active_hierarchy_id, state.hierarchies, state.stored_hierarchies]);
+  const viewedOwnTree = viewedOwnTreeId ? state.stored_hierarchies[viewedOwnTreeId] ?? null : null;
+
   // Gate geometry and population membership are expensive over large FCS files, but neither
   // depends on which population is currently selected. Keep that stable work cached across
-  // population clicks; only invalidate when the sample/gating inputs themselves change.
+  // population clicks; only invalidate when the sample/gating inputs themselves change. While the
+  // viewed file is shown under its own tree the live tree's gating of it is not drawn, and is
+  // computed only where something asks for it (the R host's memberships, the colData export).
   const gatingDerived = useMemo(
-    () => recomputeGating(sample, gatingState),
+    () => (viewedOwnTree ? null : recomputeGating(sample, gatingState)),
     // Sample is mutable by design, so its explicit revision must invalidate gate geometry.
     // instrumentMode remains separate because transform-only changes do not always revise data.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sample, gatingState, activeDataRevision, instrumentMode],
+    [sample, gatingState, activeDataRevision, instrumentMode, viewedOwnTree === null],
+  );
+  /** The live tree's gating of the viewed file, computed now when it was not. */
+  const liveTreeGatingOfViewed = (): GatingDerived => gatingDerived ?? recomputeGating(sample, gatingState);
+
+  // The viewed file's own tree's gating, kept while only the live tree changes: an edit to the tree
+  // regates the file's own tree only when that tree follows it.
+  const ownTreeGating = useMemo(
+    () => (viewedOwnTree ? recomputeOwnTreeGating(sample, viewedOwnTree) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sample, viewedOwnTree, activeDataRevision, instrumentMode],
+  );
+
+  // The viewed file under its own gates, keyed by the live tree's populations: the plot, the
+  // population tree and the gate counts show what the file's own tree selects while the tree's
+  // gates are drawn and edited. With the live tree's gates instead, a tailored file viewed with
+  // "the tree · all files" showed the tree's gating, and none on a channel it labels differently.
+  const viewGating = useMemo(
+    () => ownTreeGating && viewedOwnTree?.root_population_id && activeSampleId
+      ? gatingKeyedByLiveTree(sample, gatingState, ownTreeGating, viewedOwnTree.root_population_id, (popId) => populationIdInFileTree(activeSampleId, popId))
+      : gatingDerived ?? recomputeGating(sample, gatingState),
+    // populationIdInFileTree reads the store; the trees it reads are listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [gatingDerived, ownTreeGating, viewedOwnTree, sample, gatingState, activeSampleId, activeDataRevision, instrumentMode],
   );
 
   const checkedDisplayNeedsGating = useMemo(() => {
@@ -7161,7 +9300,9 @@ export default function App() {
     : includedSamples, [fcsExportOpen, includedSamples, analysisSamples]);
 
   useEffect(() => {
-    if (!activeEntry || !sample) return;
+    // Not computed while the viewed file is shown under its own tree; the background gates it
+    // again once it is no longer the viewed file.
+    if (!activeEntry || !sample || !gatingDerived) return;
     inactiveGatingCacheRef.current.set(activeEntry.id, {
       sample,
       dataRevision: sample.dataRevision,
@@ -7255,18 +9396,18 @@ export default function App() {
   ]);
 
   const derived = useMemo(
-    () => derivePopulationView(sample, state, gatingDerived),
-    // `gatingDerived` changes whenever gates/populations change; active/checked ids only select
+    () => derivePopulationView(sample, state, viewGating),
+    // `viewGating` changes whenever gates/populations change; active/checked ids only select
     // among its cached masks and never need to rerun gate geometry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sample, gatingDerived, state.active_population_id, state.selected_pop_ids],
+    [sample, viewGating, state.active_population_id, state.selected_pop_ids],
   );
 
   const includedGatingResults = useMemo<readonly GatingDerived[] | null>(() => {
     const results: GatingDerived[] = [];
     for (const entry of includedSamples) {
       if (entry.id === activeSampleId) {
-        results.push(gatingDerived);
+        results.push(viewGating);
         continue;
       }
       const cached = inactiveGatingCacheRef.current.get(entry.id);
@@ -7282,7 +9423,7 @@ export default function App() {
   }, [
     includedSamples,
     activeSampleId,
-    gatingDerived,
+    viewGating,
     inactiveGatingCacheVersion,
     state.gate_version,
   ]);
@@ -7291,7 +9432,8 @@ export default function App() {
     const counts = new Map<string, Readonly<Record<string, number | null>>>();
     for (const entry of samples) {
       if (entry.id === activeSampleId) {
-        counts.set(entry.id, gatingDerived.stats.event_count);
+        // Under its own tree, as every other file is below.
+        counts.set(entry.id, viewGating.stats.event_count);
         continue;
       }
       // A file that follows a tailored or group copy is counted under that copy, keyed by the
@@ -7322,7 +9464,7 @@ export default function App() {
   }, [
     samples,
     activeSampleId,
-    gatingDerived,
+    viewGating,
     inactiveGatingCacheVersion,
     state.gate_version,
     fcsExportOpen,
@@ -7363,41 +9505,18 @@ export default function App() {
         "autosave",
         workspaceEditRevisionRef.current,
       );
-      const columns: GateLabHostPopulationColumn[] = specs.map((spec) => {
-        const sampleMasks = samples.map((entry) => {
-          const source = entry.hostSource;
-          if (!source || source.datasetId !== datasetId) {
-            throw new Error(`Sample '${entry.name}' is not mapped to this SCE.`);
-          }
-          let gating: GatingDerived;
-          if (entry.id === activeSampleId) {
-            gating = gatingDerived;
-          } else {
-            const cached = inactiveGatingCacheRef.current.get(entry.id);
-            gating = cached &&
-              cached.sample === entry.sample &&
-              cached.dataRevision === entry.sample.dataRevision &&
-              cached.gateVersion === state.gate_version
-              ? cached.gating
-              : recomputeGating(entry.sample, gatingState);
-          }
-          const mask = gating.masks[spec.populationId];
-          if (!mask || mask.length !== source.eventIndex.length) {
-            throw new Error(
-              `Population '${spec.populationName}' could not be evaluated for sample '${entry.name}'.`,
-            );
-          }
-          return {
-            sampleId: source.sampleId,
-            eventCount: mask.length,
-            membershipBitsBase64: encodeUint8Base64(packMembershipBits(mask)),
-          };
-        });
-        return {
-          ...spec,
-          sampleMasks,
-        };
-      });
+      // The dialog lists the live tree's populations. Each sample is read under the tree it is
+      // gated under: a tailored file from its own copy, the others from the tree.
+      const hostedSamples = hostedMembershipSamples(datasetId);
+      const reader = hostedMembershipReader(state, hostedSamples);
+      const live = reader.trees.find((tree) => tree.active);
+      if (!live) throw new Error("The live hierarchy is missing.");
+      const columns: GateLabHostPopulationColumn[] = specs.map((spec) => ({
+        ...spec,
+        sampleMasks: hostedSamples.map((_, index) =>
+          hostedSampleMask(reader, hostedSamples, index, live, spec.populationId)),
+      }));
+      const notEvaluated = notEvaluatedNotes(columns.flatMap(({ sampleMasks }) => sampleMasks));
       const result = await host.colData.writeColumns({
         contractVersion: GATELAB_HOST_COLDATA_CONTRACT_VERSION,
         datasetId,
@@ -7416,7 +9535,8 @@ export default function App() {
             .map(({ columnName, memberCount }) =>
               `${columnName}: ${memberCount.toLocaleString()}`,
             )
-            .join(" · "),
+            .join(" · ") +
+          notEvaluatedSummary(notEvaluated),
       );
       setCrud(null);
     } catch (cause) {
@@ -7452,7 +9572,7 @@ export default function App() {
     if (!checkedDisplayNeedsGating) {
       return [{
         entry,
-        gating: entry.id === activeSampleId ? gatingDerived : null,
+        gating: entry.id === activeSampleId ? viewGating : null,
         selection: {
           activeMask: null,
           displayMask: null,
@@ -7461,7 +9581,7 @@ export default function App() {
       }];
     }
     const gating = entry.id === activeSampleId
-      ? gatingDerived
+      ? viewGating
       : inactiveGatingCacheRef.current.get(entry.id)?.gating;
     const cached = entry.id === activeSampleId
       ? null
@@ -7483,7 +9603,7 @@ export default function App() {
     [
       includedSamples,
       activeSampleId,
-      gatingDerived,
+      viewGating,
       checkedDisplayNeedsGating,
       inactiveGatingCacheVersion,
       state.active_population_id,
@@ -7882,7 +10002,7 @@ export default function App() {
     for (const entry of contributors) {
       let gating: GatingDerived | undefined;
       if (entry.id === activeSampleId) {
-        gating = gatingDerived;
+        gating = gatingDerived ?? undefined;
       } else {
         const cached = inactiveGatingCacheRef.current.get(entry.id);
         if (
@@ -8369,9 +10489,13 @@ export default function App() {
               : (gate.vertices as [number, number][]);
           for (const point of points) {
             if (!point) continue;
+            const value = axis === "x" ? point[0] : point[1];
+            // A rectangle side with no bound is drawn past every event; fitting to it would
+            // press the data into a corner.
+            if (isUnbounded(sample.gateToRaw(gate, key, value))) continue;
             // The gate's own transform, so raw-space and display-space gates on the same
             // channel both land where they are actually drawn.
-            coords.push(sample.gateToDisplay(gate, key, axis === "x" ? point[0] : point[1]));
+            coords.push(sample.gateToDisplay(gate, key, value));
           }
         }
       }
@@ -8723,7 +10847,16 @@ export default function App() {
             </select>
           </label>
         )}
-        {error && <span className="gl-error">⚠ {t(error)}</span>}
+        {error && (
+          // One line per note, in a box that scrolls: a per-file import says every file's notes,
+          // each group under its file's name, and joined into one run of text they read as a
+          // single paragraph while the header grew with every file.
+          <span className="gl-error">
+            {error.split("\n").map((line, i) => (
+              <span key={i} className="gl-error-line">{i === 0 ? "⚠ " : "\n"}{t(line)}</span>
+            ))}
+          </span>
+        )}
         <span
           className="gl-header-meta"
           style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap" }}
@@ -8964,9 +11097,9 @@ export default function App() {
                 void loadFcsForChorus(pendingChorusImport, picked);
                 return;
               }
-              // Held rather than loaded: the dialog resolves them by name first, so the user can
-              // see what matched before anything is added to the workspace.
-              holdFlowJoFiles(picked.map((f) => ({ name: f.name, file: f })));
+              // Held rather than loaded: the dialog pairs them with their samples first, so the
+              // user can see what matched before anything is added to the workspace.
+              void holdFlowJoFiles(picked.map((f) => ({ name: f.name, file: f })));
             }}
           />
 
@@ -10202,6 +12335,8 @@ export default function App() {
           folderSelectionAvailable={supportsDirectoryAccess()}
           scanning={workspaceRelinkScanning}
           error={workspaceRelinkError}
+          override={workspaceRelinkOverride?.byChoice ?? null}
+          onOverride={() => void useWorkspaceRelinkOverride()}
           onChoose={() => void choosePendingWorkspaceRelinkFolder()}
           onCancel={cancelPendingWorkspaceRelink}
         />
@@ -10365,8 +12500,31 @@ export default function App() {
           }}
         />
       )}
-      {treePicker && (
-        <div className="gl-modal-backdrop" onClick={() => setTreePicker(null)}>
+      {treePicker && (() => {
+        // Cancelling the picker after a workspace open cancels the open, as cancelling its import
+        // does: the files it loaded go too, rather than staying with no gates.
+        const cancelTreePicker = () => {
+          const opened = treePicker.openedSampleIds ?? [];
+          setTreePicker(null);
+          // The error that asked for another tree is answered by cancelling; left standing, it sat
+          // beside "Workspace open cancelled" asking for a choice that was no longer on offer.
+          if (treePicker.failed?.length) setError(null);
+          if (opened.length) {
+            void removeSamples(opened).then(() => setImportMsg(
+              `Workspace open cancelled; the ${opened.length === 1 ? "file it loaded was" : `${opened.length} files it loaded were`} ` +
+              "removed again and the current strategy was not changed.",
+            ));
+          }
+        };
+        const failed = treePicker.failed ?? [];
+        const latest = failed.length ? failed[failed.length - 1] : undefined;
+        const latestTree = latest ? treePicker.sample.trees.find((tree) => tree.index === latest.index) : undefined;
+        const hasFailed = (index: number) => failed.some((f) => f.index === index);
+        // A tree with no gate this importer can read is shown, and not offered: choosing it could
+        // only fail, and it had to fail once before it was disabled.
+        const unreadable = (tree: FlowJoTreeSummary) => tree.gateCount === 0;
+        return (
+        <div className="gl-modal-backdrop" onClick={cancelTreePicker}>
           <div
             className="gl-modal gl-wsp-picker"
             role="dialog"
@@ -10374,22 +12532,84 @@ export default function App() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="gl-modal-title">{t("Choose a gating strategy")}</div>
-            <div className="gl-modal-note">
-              {t("This sample holds several independent strategies. GateLab holds one at a time, so importing them together would merge trees FlowJo kept apart.")}
-            </div>
+            {latest ? (
+              // Repeated in full -- a Gating-ML refusal lists every gate on a missing channel,
+              // thousands of characters -- the reason pushed the trees and Cancel off screen, so the
+              // picker says it briefly and offers the rest folded, bounded and scrolled. It pointed
+              // to the header, which cannot be read while the picker is open, and clicking past
+              // the picker cancels it and clears the header.
+              <>
+                <div className="gl-modal-note gl-modal-reason" title={latest.why}>
+                  {t("The tree \"{name}\" could not be imported: {why}", { name: latestTree?.name ?? "", why: briefReason(latest.why) })}{" "}
+                  {treePicker.sample.trees.some((tree) => !hasFailed(tree.index) && !unreadable(tree))
+                    ? t("Choose another of this sample's trees.")
+                    : t("None of this sample's trees can be imported alone; every tree, each file its own sample's, still can.")}
+                </div>
+                {reasonWasCut(latest.why) && (
+                  <details className="gl-modal-reason-full">
+                    <summary>{t("The full reason")}</summary>
+                    <div className="gl-modal-reason-text">{latest.why}</div>
+                  </details>
+                )}
+              </>
+            ) : (
+              <div className="gl-modal-note">
+                {t("This sample holds several independent strategies. GateLab holds one at a time, so importing them together would merge trees FlowJo kept apart.")}
+              </div>
+            )}
+            {treePicker.crossTo && (
+              <div className="gl-modal-note">
+                {t("Import {sample}'s tree onto {file}", { sample: treePicker.sample.name, file: treePicker.crossTo })}
+              </div>
+            )}
+            {treePicker.perFileOption && treePicker.perFileOption.length > 1 && (
+              <div className="gl-modal-note">
+                {t("Other loaded files are samples of this workspace too: {files}. Import every tree, each file getting its own sample's, or one tree, which they then follow by this choice.",
+                  { files: treePicker.perFileOption.slice(1).map((p0) => calledLoaded(p0.fileName, p0.entryId)).join(", ") })}
+              </div>
+            )}
             <div className="gl-wsp-list">
-              {treePicker.sample.trees.map((tree) => (
+              {treePicker.perFileOption && treePicker.perFileOption.length > 1 && (
                 <button
-                  key={tree.index}
                   className="gl-wsp-row"
                   onClick={() => {
                     const picked = treePicker;
                     setTreePicker(null);
-                    void importFlowJoSample(picked.text, picked.sample, picked.matchedOn, tree.index);
+                    void importFlowJoSample(picked.text, picked.sample, picked.matchedOn, null, picked.perFileOption!,
+                      picked.matrixChoice ?? null, picked.openedSampleIds ?? [], [],
+                      { crossTo: picked.crossTo ?? null, unpaired: picked.unpaired ?? [], pairingNote: picked.pairingNote ?? null, loadNotes: picked.loadNotes ?? [], mergedTreesAdvice: MERGED_TREES_ADVICE_LOADED, flowJoGrid: picked.flowJoGrid, flowJoGridInDialog: picked.flowJoGridInDialog });
+                  }}
+                >
+                  <span className="gl-wsp-name">{t("Every tree, each file its own sample's")}</span>
+                  <span className="gl-wsp-meta">
+                    {t("One hierarchy per file: {files}", { files: treePicker.perFileOption.map((p0) => calledLoaded(p0.fileName, p0.entryId)).join(", ") })}
+                  </span>
+                </button>
+              )}
+              {treePicker.sample.trees.map((tree) => (
+                <button
+                  key={tree.index}
+                  className="gl-wsp-row"
+                  disabled={hasFailed(tree.index) || unreadable(tree)}
+                  onClick={() => {
+                    const picked = treePicker;
+                    setTreePicker(null);
+                    // One tree alone: the other loaded files that are samples of their own follow it,
+                    // by this choice, and the result names each with the sample it is.
+                    const byChoice = picked.perFileOption
+                      ? picked.perFileOption.slice(1).map((p0) => ({ name: p0.fileName, sample: `sample ${p0.sample.index + 1} "${p0.sample.name}"` }))
+                      : picked.byChoice ?? [];
+                    // What the open dialog answered, and the files it loaded, go with the tree
+                    // chosen instead, as they would have with the first.
+                    void importFlowJoSample(picked.text, picked.sample, picked.matchedOn, tree.index, [],
+                      picked.matrixChoice ?? null, picked.openedSampleIds ?? [], picked.failed ?? [],
+                      { crossTo: picked.crossTo ?? null, unpaired: picked.unpaired ?? [], byChoice, pairingNote: picked.pairingNote ?? null, loadNotes: picked.loadNotes ?? [], flowJoGrid: picked.flowJoGrid, flowJoGridInDialog: picked.flowJoGridInDialog,
+                        ...(picked.perFileOption ? { perFileOption: picked.perFileOption } : {}) });
                   }}
                 >
                   <span className="gl-wsp-name">{tree.name || `(unnamed tree ${tree.index + 1})`}</span>
                   <span className="gl-wsp-meta">
+                    {hasFailed(tree.index) ? `${t("could not be imported")} · ` : unreadable(tree) ? `${t("no gate GateLab can read")} · ` : ""}
                     {tree.gateCount} {t("gates")}
                     {tree.rootCount !== null ? ` · ${tree.rootCount.toLocaleString()} ${t("events")}` : ""}
                     {tree.unsupportedCount > 0 ? ` · ${tree.unsupportedCount} ${t("skipped")}` : ""}
@@ -10399,11 +12619,12 @@ export default function App() {
               ))}
             </div>
             <div className="gl-modal-actions">
-              <button onClick={() => setTreePicker(null)}>{t("Cancel")}</button>
+              <button onClick={cancelTreePicker}>{t("Cancel")}</button>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {chorusStats && (
         <ChorusStatisticsModal
@@ -10419,6 +12640,13 @@ export default function App() {
           experimentName={chorusPicker.experiment?.name ?? null}
           timeline={chorusTimeline}
           hasSample={!!sample}
+          target={sample && chorusPicker.experiment
+            ? {
+                name: fileName,
+                same: isRecordingOfExperiment(chorusPicker.experiment, sample.fcs.keywords),
+                own: chorusTreesOfViewedFile(chorusPicker.experiment),
+              }
+            : null}
           onImportTree={(treeIndex) => {
             const picked = chorusPicker;
             if (picked.experiment) void chooseChorusTree(picked.experiment, treeIndex);
@@ -10429,25 +12657,117 @@ export default function App() {
       )}
 
       {flowJoOpen && (() => {
-        // Resolve against everything available right now: the samples already open plus the
-        // files chosen in this dialog. Recomputed on render so adding files updates the list.
-        // Gated and ungated together, so one file cannot be claimed twice and the count is of every
-        // file the workspace names -- not only the ones it gates.
-        const resolutions = resolveFlowJoWorkspaceFiles(
-          [...flowJoOpen.samples, ...flowJoOpen.dataSamples],
-          [...samples.map((s0) => s0.name), ...flowJoOpen.pending.map((f) => f.name)],
-        );
-        const found = resolutions.filter((r) => r.fileName !== null).length;
-        const total = flowJoOpen.samples.length + flowJoOpen.dataSamples.length;
-        const chosen = flowJoOpen.samples.find((x) => x.index === flowJoOpen.strategySample);
-        const chosenResolved = resolutions.find((r) => r.sampleIndex === flowJoOpen.strategySample)?.fileName;
-        // Per file, any found gated sample can be the primary; otherwise the chosen one must be.
-        const canImport = flowJoOpen.perFileTrees
-          ? perFilePrimary(flowJoOpen.samples, resolutions, flowJoOpen.strategySample) !== undefined
-          : !!chosenResolved;
-        const loadedLower = new Set(samples.map((s0) => s0.name.toLowerCase()));
-        const foundLabel = (name: string) =>
-          `${loadedLower.has(name.toLowerCase()) ? t("already open") : t("found")}: ${name}`;
+        // Every sample paired with the file that IS it -- the files already open plus the ones
+        // chosen in this dialog, gated and ungated together -- and what Import will do with that.
+        // Recomputed on render, so adding files updates the list. The list, the tree choice, the
+        // compensation note and the import all read this one plan.
+        const { files: openFiles, pairing, plan } = flowJoOpenPlanOf(flowJoOpen);
+        const resolutions = pairing.resolutions;
+        const everySample = [...flowJoOpen.samples, ...flowJoOpen.dataSamples];
+        // Which files several samples could be, and which samples several files could be, before
+        // any choice: a row among the first answers it, and a choice of file the second.
+        const unchosen = pairFlowJoWorkspaceFiles(
+          [...everySample].sort((a, b) => a.index - b.index), openFiles, {}, flowJoOpenPairingOptions());
+        const undecided = unchosen.ambiguous;
+        const contested = unchosen.contested;
+        // The file a row's choice answers, and the file its text names: one still undecided after
+        // the choices made -- else one chosen as another sample, which choosing the row moves here.
+        // Taken from before any choice, it was the file already chosen: with a file and its copy
+        // each able to be either of two samples, the second row named the copy and moved the file.
+        const answeredBy = (index: number) => {
+          // A row already chosen for a file answers that file again.
+          const r = resolutions.find((q) => q.sampleIndex === index);
+          const kept = isPaired(r) && r.status === "chosen" ? undecided.find((a) => a.fileKey === r.fileKey) : undefined;
+          return kept ?? pairing.ambiguous.find((a) => a.candidates.includes(index)) ?? undecided.find((a) => a.candidates.includes(index));
+        };
+        const found = resolutions.filter(isPaired).length;
+        const total = everySample.length;
+        const chosen = plan.sample;
+        // A chosen sample that could be several open data sets can be imported too: the open then
+        // asks which sample the first of them is.
+        const canImport = !!plan.target || !!plan.resolution?.tiedWith?.length;
+        // Data sets already open that only a shared event count could pair with a gated sample.
+        const gatedIndex = new Set(flowJoOpen.samples.map((x) => x.index));
+        const tiedNote = tiedDataSetsNote(resolutions.filter((r) => gatedIndex.has(r.sampleIndex)), flowJoOpenPairingOptions().events, t);
+        // Two samples of one name are told apart by position, as their rows are.
+        const nameOf = (index: number) => {
+          const x = everySample.find((y) => y.index === index);
+          if (!x) return `sample ${index + 1}`;
+          return x.duplicateName ? `${x.name} (${t("position")} ${index + 1})` : x.name;
+        };
+        // A file as the dialog names it: a name another file shares carries where each is, its
+        // event count and when it was recorded. "D1.fcs and D1.fcs could each be this sample",
+        // and a choice between "D1.fcs (file 1)" and "D1.fcs (file 2)", said nothing about which.
+        const fileNames = distinctFileNames(openFiles, {
+          events: t("events"), recorded: (when) => t("recorded {when}", { when }), file: (n) => `${t("file")} ${n}`,
+        });
+        const called = (key: string, name: string) => fileNames.get(key) ?? name;
+        // A file that could be a sample, with the copies of it that go with it: one acquisition.
+        const withCopies = (f: { fileKey: string; fileName: string; copies?: readonly { fileKey: string; fileName: string }[] }) => f.copies?.length
+          ? `${called(f.fileKey, f.fileName)} (${t("and {files}, the same acquisition", { files: f.copies.map((c) => called(c.fileKey, c.fileName)).join(", ") })})`
+          : called(f.fileKey, f.fileName);
+        const status = (x: FlowJoSampleSummary): string => {
+          const r = resolutions.find((q) => q.sampleIndex === x.index);
+          if (isPaired(r)) {
+            const where = r.fileKey.startsWith("loaded:") ? t("already open") : t("found");
+            const how = r.status === "chosen"
+              ? ` · ${t("chosen as this sample")}`
+              : r.comparison && (r.comparison.verdict === "confirmed" || r.comparison.verdict === "weak")
+                ? ` · ${describeAgreement(r.comparison, t)}`
+                : "";
+            // Copies of the file (one acquisition twice) are this sample too, and get its tree.
+            const copies = r.copies?.length
+              ? ` · ${t("and {files}, the same acquisition", { files: r.copies.map((c) => called(c.fileKey, c.fileName)).join(", ") })}`
+              : "";
+            return `${where}: ${called(r.fileKey, r.fileName)}${how}${copies}`;
+          }
+          if (r?.near && r.status === "contradicted") {
+            return t("{file} is named like it but is another acquisition ({why}), so it is not paired",
+              { file: called(r.near.fileKey, r.near.fileName), why: describeContradiction("the sample", r.near.differ, "the file") });
+          }
+          if (r?.near?.rivals && r.status === "ambiguous") {
+            return t("{files} could each be this sample, and the keywords cannot tell which: say which below",
+              { files: r.near.rivals.map(withCopies).join(" and ") });
+          }
+          // Several files could each be this sample or another: each is named, and the row says
+          // which of them choosing it answers. It named only the last file read.
+          if (r?.near?.files && r.status === "ambiguous" && r.near.others.length) {
+            const answers = answeredBy(x.index);
+            return t("{files} could each be this sample or {others}, and the keywords cannot tell: choosing this row says {file} is this one",
+              { files: r.near.files.map((f) => called(f.fileKey, f.fileName)).join(" and "), others: r.near.others.map(nameOf).join(", "),
+                file: answers ? called(answers.fileKey, answers.fileName) : called(r.near.files[0].fileKey, r.near.files[0].fileName) });
+          }
+          if (r?.near && r.status === "ambiguous" && r.near.others.length) {
+            const answers = answeredBy(x.index) ?? r.near;
+            return t("{file} could be this sample or {others}, and the keywords cannot tell: choose this row if it is this one",
+              { file: called(answers.fileKey, answers.fileName), others: r.near.others.map(nameOf).join(", ") });
+          }
+          if (r?.near?.chosenElsewhere !== undefined) {
+            return t("not found — {file} was chosen as {other}", { file: called(r.near.fileKey, r.near.fileName), other: nameOf(r.near.chosenElsewhere) });
+          }
+          if (r?.tiedWith?.length) return `${t("could be")}: ${r.tiedWith.join(" / ")}`;
+          if (r?.near?.outrankedBy !== undefined) {
+            return t("not found — {file} is named like it, but records nothing confirming it is this sample; its $FIL and keywords are {other}'s",
+              { file: called(r.near.fileKey, r.near.fileName), other: nameOf(r.near.outrankedBy) });
+          }
+          return `${t("not found")} — ${x.candidateFileNames.join(" / ")}`;
+        };
+        // Choosing a row chooses whose tree is imported. A row among several a file could be also
+        // answers which of them that file is.
+        const choose = (x: FlowJoSampleSummary) => {
+          const undecidedFile = answeredBy(x.index);
+          setFlowJoOpen({
+            ...flowJoOpen,
+            strategySample: x.index,
+            strategyTouched: true,
+            crossFile: null,
+            fileChoices: undecidedFile ? { ...flowJoOpen.fileChoices, [undecidedFile.fileKey]: x.index } : flowJoOpen.fileChoices,
+          });
+        };
+        // Data sets tied on a shared count are named in the note above.
+        const unpairedShown = pairing.unpaired.filter((u) => !u.tied && (u.fileKey.startsWith("pending:") || u.why !== "none"));
+        const rivalsOf = (u: (typeof unpairedShown)[number]) =>
+          (u.rivals ?? []).map((name, i) => called(u.rivalKeys?.[i] ?? "", name)).join(", ");
         return (
           <div className="gl-modal-backdrop" onClick={() => setFlowJoOpen(null)}>
             <div
@@ -10462,6 +12782,7 @@ export default function App() {
                 {" "}
                 <strong>{found}/{total}</strong> {t("found")}
               </div>
+              {tiedNote && <div className="gl-modal-note">{tiedNote}</div>}
               {/* The selected row was marked only by a blue outline, which said nothing about
                   what it meant. In shared-hierarchy mode GateLab imports one sample's strategy,
                   and this is where that sample is chosen. Say so, and use a radio, so the choice
@@ -10472,18 +12793,19 @@ export default function App() {
                   : flowJoOpen.samples.length > 1
                     ? t("One shared hierarchy will be imported, so choose the sample whose strategy it should use.")
                     : t("The strategy below will be imported.")}
+                {" "}
+                {t("A file is paired with its sample by name, and the acquisition keywords FlowJo recorded for that sample ($TOT, $DATE, $BTIM, $ETIM, GUID) must agree with the file's.")}
               </div>
 
               <div className="gl-wsp-list">
                 {flowJoOpen.samples.map((x) => {
-                  const r = resolutions.find((q) => q.sampleIndex === x.index);
-                  const isStrategy = x.index === flowJoOpen.strategySample;
+                  const isStrategy = x.index === chosen?.index;
                   return (
                     <button
                       key={x.index}
                       className={"gl-wsp-row" + (isStrategy ? " is-strategy" : "")}
                       aria-pressed={isStrategy}
-                      onClick={() => setFlowJoOpen({ ...flowJoOpen, strategySample: x.index, strategyTree: null })}
+                      onClick={() => choose(x)}
                     >
                       <span className="gl-wsp-name">
                         <input
@@ -10499,34 +12821,165 @@ export default function App() {
                         {x.duplicateName && <span className="gl-wsp-dupe">{t("position")} {x.index + 1}</span>}
                       </span>
                       <span className="gl-wsp-meta">
-                        {r?.fileName
-                          ? foundLabel(r.fileName)
-                          : `${t("not found")} — ${x.candidateFileNames.join(" / ")}`}
+                        {status(x)}
                         {` · ${x.gateCount} ${t("gates")}`}
                         {x.rootCount > 1 ? ` · ${x.rootCount} ${t("trees")}` : ""}
-
+                        {x.owningGroup && x.duplicateName ? ` · ${x.owningGroup}` : ""}
                       </span>
                     </button>
                   );
                 })}
               </div>
+              {/* A workspace holds one tree. A sample holding several imports the one chosen
+                  here, next to the sample list (below the grid option's notes it went unseen), and
+                  the result names the rest; the list used to offer "every strategy, one
+                  hierarchy each" by default, and then imported only the first. Shown whenever the
+                  chosen sample's tree is imported alone, which includes "One hierarchy per file"
+                  with only one file found. The list is the trees of the sample that will be
+                  imported, and a choice made here stays with that sample. */}
+              {chosen && chosen.trees.length > 1 && !plan.perFile && (
+                <div className="gl-modal-note">
+                  {t("This sample holds {count} trees, and a workspace holds one. Import:", { count: String(chosen.trees.length) })}{" "}
+                  <select
+                    aria-label={t("Tree to import")}
+                    value={plan.treeIndex ?? ""}
+                    onChange={(e) => setFlowJoOpen({
+                      ...flowJoOpen,
+                      strategySample: chosen.index,
+                      strategyTouched: true,
+                      strategyTree: { sampleIndex: chosen.index, treeIndex: Number(e.target.value) },
+                    })}
+                  >
+                    {/* A tree with no readable gate is shown and not offered, as in the retry picker:
+                        it could only fail, and it was offered, and could be the default. */}
+                    {chosen.trees.map((tree) => (
+                      <option key={tree.index} value={tree.index} disabled={tree.gateCount === 0}>
+                        {tree.name || `(unnamed tree ${tree.index + 1})`} — {tree.gateCount === 0 ? t("no gate GateLab can read") : `${tree.gateCount} ${t("gates")}`}
+                      </option>
+                    ))}
+                  </select>
+                  <br />
+                  {t("The others are not imported; the result names them.")}
+                </div>
+              )}
+              {chosen && chosen.trees.length > 1 && plan.perFile && (
+                <div className="gl-modal-note">
+                  {t("This sample holds {count} trees. With one hierarchy per file, each file's trees are imported together, as one tree; clear that option to import one tree alone.", { count: String(chosen.trees.length) })}
+                </div>
+              )}
 
               {flowJoOpen.dataSamples.length > 0 && (
                 <div className="gl-wsp-list">
                   <div className="gl-modal-note">{t("Also in the workspace, with no gates: loaded unselected for actions. Pooling is an explicit action above the plot.")}</div>
-                  {flowJoOpen.dataSamples.map((x) => {
-                    const r = resolutions.find((q) => q.sampleIndex === x.index);
-                    return (
-                      <div key={x.index} className="gl-wsp-row">
-                        <span className="gl-wsp-name">{x.name || `(unnamed sample ${x.index + 1})`}</span>
-                        <span className="gl-wsp-meta">
-                          {r?.fileName
-                            ? foundLabel(r.fileName)
-                            : `${t("not found")} — ${x.candidateFileNames.join(" / ")}`}
-                        </span>
-                      </div>
-                    );
-                  })}
+                  {flowJoOpen.dataSamples.map((x) => (
+                    <div key={x.index} className="gl-wsp-row">
+                      <span className="gl-wsp-name">{x.name || `(unnamed sample ${x.index + 1})`}</span>
+                      <span className="gl-wsp-meta">{status(x)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Several files could be one sample, and neither the keywords nor a copy's identity
+                  tells which: asked once per sample, here, by file. */}
+              {contested.map((c) => {
+                const sampleName = nameOf(c.sampleIndex);
+                const current = c.files.find((f) => flowJoOpen.fileChoices[f.fileKey] === c.sampleIndex)?.fileKey ?? "";
+                return (
+                  <div key={c.sampleIndex} className="gl-modal-note" data-role="flowjo-contested-sample">
+                    <label>
+                      {t("{files} could each be \"{sample}\", and the keywords cannot tell which. Which is it?",
+                        { files: c.files.map(withCopies).join(" and "), sample: sampleName })}{" "}
+                      <select
+                        aria-label={t("Which file is this sample")}
+                        value={current}
+                        onChange={(e) => {
+                          const next = Object.fromEntries(Object.entries(flowJoOpen.fileChoices)
+                            .filter(([key, index]) => !(index === c.sampleIndex && c.files.some((f) => f.fileKey === key))));
+                          if (e.target.value) next[e.target.value] = c.sampleIndex;
+                          setFlowJoOpen({ ...flowJoOpen, fileChoices: next });
+                        }}
+                      >
+                        <option value="">{t("not chosen")}</option>
+                        {c.files.map((f) => <option key={f.fileKey} value={f.fileKey}>{withCopies(f)}</option>)}
+                      </select>
+                    </label>
+                  </div>
+                );
+              })}
+
+              {unpairedShown.length > 0 && (
+                <div className="gl-modal-note" data-role="flowjo-unpaired-files">
+                  {t("Paired with no sample, so they follow the imported tree without a tree of their own:")}{" "}
+                  {unpairedShown.map((u) => `${called(u.fileKey, u.fileName)} (${
+                    u.why === "contradicted"
+                      ? (u.candidates.length === 1 && u.differ.length
+                          ? describeContradiction(`sample ${u.candidates[0] + 1} "${nameOf(u.candidates[0])}"`, u.differ, "the file")
+                          : t("every sample named like it records another acquisition"))
+                      : u.why === "ambiguous"
+                        ? (u.candidates.length > 1
+                            ? t("{n} samples could be it; choose one above", { n: String(u.candidates.length) })
+                            : u.pairedWith
+                              ? t("{file} is \"{sample}\"", { file: called(u.pairedWithKey ?? "", u.pairedWith), sample: nameOf(u.candidates[0]) })
+                              : u.copyOf
+                                ? t("a copy of {file}, which it goes with; {file} and {files} could each be \"{sample}\"; say which above",
+                                    { file: called(u.copyOfKey ?? "", u.copyOf), files: rivalsOf(u), sample: nameOf(u.candidates[0]) })
+                                : t("it and {files} could each be \"{sample}\"; say which above",
+                                    { files: rivalsOf(u), sample: nameOf(u.candidates[0]) }))
+                        : t("no sample is named like it")
+                  })`).join("; ")}
+                </div>
+              )}
+
+              {/* A file chosen as a file already open or chosen is not held twice; it is named. */}
+              {(flowJoOpen.notHeld ?? []).length > 0 && (
+                <div className="gl-modal-note" data-role="flowjo-not-held">
+                  {t("Not held, each having the name of a file already open or chosen:")}{" "}
+                  {(flowJoOpen.notHeld ?? []).map((k) => `${k.path ?? k.name} (${
+                    t(k.open ? "as {file}, already open; {why}" : "as {file}, also chosen; {why}", {
+                      file: k.sameAs,
+                      why: k.confirmed ? t("its keywords say it is the same acquisition") : t("nothing says it is another acquisition"),
+                    })})`).join("; ")}
+                </div>
+              )}
+
+              {/* Another sample's tree goes onto a file only when the user says so, here, and the
+                  control says whose tree onto which file. */}
+              {chosen && !isPaired(plan.resolution) && plan.resolution?.near?.rivals && (
+                <div className="gl-modal-note" data-role="flowjo-cross-sample">
+                  {t("Several files could be \"{sample}\": say which above, and its tree goes on that file.", { sample: chosen.name })}
+                </div>
+              )}
+              {chosen && !isPaired(plan.resolution) && !plan.resolution?.near?.rivals && (
+                <div className="gl-modal-note" data-role="flowjo-cross-sample">
+                  {t("The FCS of \"{sample}\" is not among the files, so its tree has no file of its own to go on.", { sample: chosen.name })}
+                  {openFiles.length > 0 && (
+                    <>
+                      {" "}
+                      <label>
+                        {t("Apply \"{sample}\"'s tree to:", { sample: chosen.name })}{" "}
+                        <select
+                          aria-label={t("Apply this sample's tree to another file")}
+                          value={flowJoOpen.crossFile?.sampleIndex === chosen.index ? flowJoOpen.crossFile.fileKey : ""}
+                          onChange={(e) => setFlowJoOpen({
+                            ...flowJoOpen,
+                            strategySample: chosen.index,
+                            strategyTouched: true,
+                            crossFile: e.target.value ? { sampleIndex: chosen.index, fileKey: e.target.value } : null,
+                          })}
+                        >
+                          <option value="">{t("no file")}</option>
+                          {openFiles.map((f) => <option key={f.key} value={f.key}>{called(f.key, f.name)}</option>)}
+                        </select>
+                      </label>
+                    </>
+                  )}
+                  {plan.target?.cross && (
+                    <>
+                      <br />
+                      {t("\"{sample}\"'s tree will be imported onto {file}, which is not that sample.", { sample: chosen.name, file: called(plan.target.fileKey, plan.target.fileName) })}
+                    </>
+                  )}
                 </div>
               )}
 
@@ -10567,6 +13020,11 @@ export default function App() {
                 </div>
               )}
 
+              <FlowJoGridOption
+                checked={flowJoOpen.flowJoGrid}
+                onChange={(value) => setFlowJoOpen({ ...flowJoOpen, flowJoGrid: value })}
+              />
+
               {flowJoOpen.samples.length > 1 && (
                 <div className="gl-modal-note">
                   <label style={{ display: "flex", alignItems: "flex-start", gap: 7 }}>
@@ -10578,34 +13036,10 @@ export default function App() {
                     <span>
                       <strong>{t("One hierarchy per file")}</strong><br />
                       <span className="gl-modal-note">
-                        {t("Import every found file's own strategy into its own hierarchy, and assign the file to it. Files sharing a strategy converge on the same gates.")}
+                        {t("Give every found file its own sample's gates. The workspace keeps one tree: each file keeps its own gate coordinates, and a file whose tree differs in structure follows the tree where it differs, which the result names.")}
                       </span>
                     </span>
                   </label>
-                </div>
-              )}
-
-              {chosen && chosen.trees.length > 1 && !flowJoOpen.perFileTrees && (
-                <div className="gl-modal-note">
-                  {t("This sample holds several strategies")}:{" "}
-                  <select
-                    value={flowJoOpen.strategyTree ?? "all"}
-                    onChange={(e) => setFlowJoOpen({
-                      ...flowJoOpen,
-                      strategyTree: e.target.value === ""
-                        ? null
-                        : e.target.value === "all" ? "all" : Number(e.target.value),
-                    })}
-                  >
-                    <option value="all">
-                      {t("Every strategy, one hierarchy each")} — {chosen.trees.length}
-                    </option>
-                    {chosen.trees.map((tree) => (
-                      <option key={tree.index} value={tree.index}>
-                        {tree.name} — {tree.gateCount} {t("gates")}
-                      </option>
-                    ))}
-                  </select>
                 </div>
               )}
 
@@ -10617,8 +13051,8 @@ export default function App() {
                   disabled={!canImport || wspMatrixPending}
                   title={
                     !canImport
-                      ? (flowJoOpen.perFileTrees
-                          ? t("None of the workspace's FCS files has been found yet")
+                      ? (!chosen
+                          ? t("Choose the sample whose strategy to import")
                           : t("The FCS for the selected strategy has not been found yet"))
                       : wspMatrixPending
                         ? t("Checking the workspace's compensation…")
@@ -10635,7 +13069,7 @@ export default function App() {
       })()}
 
       {wspPicker && (
-        <div className="gl-modal-backdrop" onClick={() => setWspPicker(null)}>
+        <div className="gl-modal-backdrop" onClick={cancelWspPicker}>
           <div
             className="gl-modal gl-wsp-picker"
             role="dialog"
@@ -10645,14 +13079,41 @@ export default function App() {
             <div className="gl-modal-title">{t("Choose a sample from the workspace")}</div>
             <div className="gl-modal-note">{wspPicker.reason}</div>
             <div className="gl-wsp-list">
-              {wspPicker.samples.map((s) => (
+              {wspPicker.samples.map((s) => {
+                // What this sample records against the loaded file, so a row that is the file can
+                // be told from one that is not; and every row says whose tree goes onto which file.
+                const identity = compareIdentity(s.recorded ?? {}, identityKeywords(wspPicker.keywords));
+                // A sample the file could be is the file's own once chosen: its tree is not
+                // "applied by choice" to another sample's file. Every other row is that.
+                const isIt = wspPicker.couldBe.includes(s.index);
+                const rowLabel = isIt
+                  ? t("{file} is {sample}: import its tree", { sample: s.name || `sample ${s.index + 1}`, file: wspPicker.fileName })
+                  : t("Import {sample}'s tree onto {file}", { sample: s.name || `sample ${s.index + 1}`, file: wspPicker.fileName });
+                return (
                 <button
                   key={s.index}
                   className="gl-wsp-row"
+                  aria-label={rowLabel}
                   onClick={() => {
-                    const chosen = s;
+                    const picked = wspPicker;
                     setWspPicker(null);
-                    void importFlowJoSample(wspPicker.text, chosen);
+                    if (picked.fromOpen) {
+                      // Asked by a workspace open that could not tell which sample a data set is:
+                      // the chosen sample's tree, with the open's answers, as the tree every file
+                      // follows.
+                      const open = picked.fromOpen;
+                      void importFlowJoSample(
+                        picked.text, s, null,
+                        s.index === open.strategyIndex ? open.treeIndex : openTreeIndex(s, null, false),
+                        [], open.matrixChoice, open.openedSampleIds, [],
+                        { pairingNote: `${picked.fileName} chosen as sample ${s.index + 1} "${s.name}"`, flowJoGrid: open.flowJoGrid });
+                      return;
+                    }
+                    // Several trees are a choice, as they are for a sample matched by name: taken
+                    // together they were merged into one strategy, with a warning to choose one
+                    // that offered no way to.
+                    void importOntoLoadedFiles(picked.text, picked.wsSamples, s, null, isIt ? null : picked.fileName,
+                      isIt ? `${picked.fileName} chosen as sample ${s.index + 1} "${s.name}"` : null);
                   }}
                 >
                   <span className="gl-wsp-name">
@@ -10672,11 +13133,218 @@ export default function App() {
                       ? ` · ${s.unsupportedCount} ${t("unreadable")}`
                       : ""}
                   </span>
+                  <span className="gl-wsp-meta">
+                    {identity.verdict === "contradicted"
+                      ? describeContradiction(t("It"), identity.differ, wspPicker.fileName)
+                      : identity.verdict === "unconfirmed"
+                        ? t("records nothing to compare with {file}", { file: wspPicker.fileName })
+                        : identity.verdict === "weak"
+                          ? t("agrees with {file} on {keys} only, which does not confirm it", { file: wspPicker.fileName, keys: identity.agree.join(", ") })
+                          : t("{how} against {file}", { how: describeAgreement(identity, t), file: wspPicker.fileName })}
+                    {" · "}
+                    {rowLabel}
+                  </span>
                 </button>
-              ))}
+                );
+              })}
             </div>
             <div className="gl-modal-actions">
-              <button className="gl-tool" onClick={() => setWspPicker(null)}>{t("Cancel")}</button>
+              <button className="gl-tool" onClick={cancelWspPicker}>{t("Cancel")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {loadedContest && (() => {
+        const ask = loadedContest;
+        // Files named as the result will name them: a name two loaded files share says which.
+        const called = loadedFileNames();
+        const nameOfFile = (key: string, name: string) => called.get(key) ?? name;
+        const sampleName = (index: number) => {
+          const x = ask.wsSamples.find((y) => y.index === index);
+          if (!x) return `sample ${index + 1}`;
+          return x.duplicateName ? `${x.name} (${t("position")} ${index + 1})` : x.name;
+        };
+        const withCopies = (f: { fileKey: string; fileName: string; copies?: readonly { fileKey: string; fileName: string }[] }) => f.copies?.length
+          ? `${nameOfFile(f.fileKey, f.fileName)} (${t("and {files}, the same acquisition", { files: f.copies.map((c) => nameOfFile(c.fileKey, c.fileName)).join(", ") })})`
+          : nameOfFile(f.fileKey, f.fileName);
+        const go = () => {
+          setLoadedContest(null);
+          const choices = Object.fromEntries([
+            ...Object.entries(ask.answers).filter(([, key]) => key).map(([index, key]) => [key, Number(index)] as const),
+            ...Object.entries(ask.fileAnswers).filter(([, index]) => index !== "").map(([key, index]) => [key, Number(index)] as const),
+          ]);
+          void importOntoLoadedFiles(ask.text, ask.wsSamples, ask.choice, ask.matchedOn, ask.crossTo, ask.pairingNote, choices);
+        };
+        return (
+          <div className="gl-modal-backdrop" onClick={() => setLoadedContest(null)}>
+            <div className="gl-modal gl-wsp-picker" role="dialog" aria-label="Which loaded file is each sample" onClick={(e) => e.stopPropagation()}>
+              <div className="gl-modal-title">{t("Which loaded file is each sample?")}</div>
+              {ask.contested.length > 0 && (
+                <div className="gl-modal-note">
+                  {t("Several loaded files could each be one sample of this workspace, and the keywords it records cannot tell which. The file chosen gets that sample's tree; the others follow the imported tree.")}
+                </div>
+              )}
+              {ask.undecided.length > 0 && (
+                <div className="gl-modal-note">
+                  {t("A loaded file could be any of several samples of this workspace, which record one acquisition, and nothing tells which. It gets the tree of the sample chosen; left unchosen, it follows the imported tree.")}
+                </div>
+              )}
+              {ask.contested.map((c) => (
+                <label key={c.sampleIndex} className="gl-modal-field" data-role="flowjo-loaded-contested-sample">
+                  <span>
+                    {t("{files} could each be \"{sample}\", and the keywords cannot tell which. Which is it?",
+                      { files: c.files.map(withCopies).join(" and "), sample: sampleName(c.sampleIndex) })}
+                  </span>
+                  <select
+                    aria-label={t("Which file is this sample")}
+                    value={ask.answers[c.sampleIndex] ?? ""}
+                    onChange={(e) => {
+                      const value = e.currentTarget.value;
+                      setLoadedContest((cur) => cur && { ...cur, answers: { ...cur.answers, [c.sampleIndex]: value } });
+                    }}
+                  >
+                    <option value="">{t("None of them: they follow the tree")}</option>
+                    {c.files.map((f) => <option key={f.fileKey} value={f.fileKey}>{withCopies(f)}</option>)}
+                  </select>
+                </label>
+              ))}
+              {ask.undecided.map((a) => (
+                <label key={a.fileKey} className="gl-modal-field" data-role="flowjo-loaded-undecided-file">
+                  <span>
+                    {t("{file} could be {samples}, and the keywords cannot tell which. Which is it?",
+                      { file: nameOfFile(a.fileKey, a.fileName), samples: a.candidates.map((i) => `"${sampleName(i)}"`).join(` ${t("or")} `) })}
+                  </span>
+                  <select
+                    aria-label={t("Which sample is this file")}
+                    value={ask.fileAnswers[a.fileKey] ?? ""}
+                    onChange={(e) => {
+                      const value = e.currentTarget.value;
+                      setLoadedContest((cur) => cur && { ...cur, fileAnswers: { ...cur.fileAnswers, [a.fileKey]: value } });
+                    }}
+                  >
+                    <option value="">{t("None of them: it follows the tree")}</option>
+                    {a.candidates.map((i) => <option key={i} value={String(i)}>{sampleName(i)}</option>)}
+                  </select>
+                </label>
+              ))}
+              <div className="gl-modal-actions">
+                <button className="gl-tool" onClick={() => setLoadedContest(null)}>{t("Cancel")}</button>
+                <button className="gl-tool" onClick={go}>{t("Continue")}</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+      {cytobankAsk && (() => {
+        const ask = cytobankAsk;
+        const describe = (id: string): string => {
+          const entry = samples.find((e) => e.id === id);
+          if (!entry) return id;
+          const kw = entry.sample.fcs.keywords;
+          const when = [kw["$DATE"], kw["$BTIM"]].filter((v) => v && v.trim()).join(" ");
+          return `${entry.sourcePath ?? entry.name} · ${entry.sample.fcs.nEvents.toLocaleString()} ${t("events")}` +
+            (when ? ` · ${t("recorded {when}", { when })}` : "");
+        };
+        const finish = () => {
+          setCytobankAsk(null);
+          const pairs = [...ask.pairs];
+          const notes = [...ask.notes];
+          for (const a of ask.ambiguous) {
+            const id = ask.answers[a.fileName];
+            // The loaded files' own spelling: Cytobank's ("c2.FCS") named files called C2.fcs.
+            const loadedName = samples.find((e) => e.id === a.entryIds[0])?.name ?? a.fileName;
+            const named = `${a.entryIds.length} loaded files are named "${loadedName}"` +
+              (loadedName !== a.fileName ? ` (Cytobank's "${a.fileName}")` : "");
+            if (id) {
+              pairs.push({ fileName: a.fileName, entryId: id, gatingMl: cytobankDocumentForFile(ask.text, a.fileName) });
+              notes.push(`${named}; Cytobank's ${a.gates} gate(s) tailored for it were applied to ${describe(id)}, as chosen.`);
+            } else {
+              notes.push(`${named}; Cytobank's ${a.gates} gate(s) tailored for it were applied to none of them, as chosen: they follow the tree.`);
+            }
+          }
+          void prepareGatingImportFromGatingML(cytobankDocumentForFile(ask.text, null), "", null, [], null, null, [], null, notes, null, [], pairs);
+        };
+        return (
+          <div className="gl-modal-backdrop" onClick={() => setCytobankAsk(null)}>
+            <div className="gl-modal gl-wsp-picker" role="dialog" aria-label="Which file Cytobank tailored gates for" onClick={(e) => e.stopPropagation()}>
+              <div className="gl-modal-title">{t("Which file are these gates tailored for?")}</div>
+              <div className="gl-modal-note">
+                {t("Cytobank records the file it tailored gates for by name alone, and several loaded files carry that name. Choose the one they were tailored for, or none: then they follow the tree.")}
+              </div>
+              {ask.ambiguous.map((a) => (
+                <label key={a.fileName} className="gl-modal-field">
+                  <span>{t("{count} gate(s) tailored for \"{file}\"", { count: a.gates, file: a.fileName })}</span>
+                  <select
+                    aria-label={t("File the gates tailored for \"{file}\" go onto", { file: a.fileName })}
+                    value={ask.answers[a.fileName] ?? ""}
+                    onChange={(e) => {
+                      const value = e.currentTarget.value;
+                      setCytobankAsk((cur) => cur && { ...cur, answers: { ...cur.answers, [a.fileName]: value || null } });
+                    }}
+                  >
+                    <option value="">{t("None of them: they follow the tree")}</option>
+                    {a.entryIds.map((id) => <option key={id} value={id}>{describe(id)}</option>)}
+                  </select>
+                </label>
+              ))}
+              <div className="gl-modal-actions">
+                <button className="gl-btn-ghost" onClick={() => setCytobankAsk(null)}>{t("Cancel")}</button>
+                <button className="gl-btn" onClick={finish}>{t("Continue")}</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+      {divaPicker && (
+        <div className="gl-modal-backdrop" onClick={() => setDivaPicker(null)}>
+          <div
+            className="gl-modal gl-wsp-picker"
+            role="dialog"
+            aria-label="Choose a FACSDiva gate tree"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="gl-modal-title">{t("Choose a gate tree from the experiment")}</div>
+            <div className="gl-modal-note">{divaPicker.reason}</div>
+            <div className="gl-wsp-list">
+              {divaPicker.trees.map((tree) => {
+                const tube = tree.tubeIndex !== null ? divaPicker.tubes[tree.tubeIndex] : undefined;
+                const identity = tube ? compareIdentity(tube.recorded, identityKeywords(divaPicker.keywords)) : null;
+                // Diva names tubes Tube_001 in every specimen; rows of one name read identically.
+                const label = tree.specimen && divaPicker.trees.filter((o) => o.label === tree.label).length > 1
+                  ? `${tree.specimen} / ${tree.label}` : tree.label;
+                const onto = t("Import {tree}'s gates onto {file}", { tree: label, file: divaPicker.fileName });
+                return (
+                  <button
+                    key={tree.index}
+                    className="gl-wsp-row"
+                    aria-label={onto}
+                    onClick={() => {
+                      const picked = divaPicker;
+                      setDivaPicker(null);
+                      const own = tree.tubeIndex !== null && tree.tubeIndex === picked.tubeHint;
+                      void importDivaTree(picked.text, tree, tree.tubeIndex ?? picked.tubeHint, [], own ? null : picked.fileName);
+                    }}
+                  >
+                    <span className="gl-wsp-name">
+                      {label}
+                      <span className="gl-wsp-dupe">{tree.kind === "worksheet" ? t("worksheet") : t("tube")}</span>
+                    </span>
+                    <span className="gl-wsp-meta">
+                      {tree.gateCount} {t("gates")}
+                      {tree.dataFilename ? ` · ${tree.dataFilename}` : ""}
+                      {identity?.verdict === "contradicted"
+                        ? ` · ${describeContradiction(t("the tube"), identity.differ, divaPicker.fileName)}`
+                        : identity?.verdict === "confirmed"
+                          ? ` · ${t("{how} against {file}", { how: describeAgreement(identity, t), file: divaPicker.fileName })}`
+                          : ""}
+                    </span>
+                    <span className="gl-wsp-meta">{onto}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="gl-modal-actions">
+              <button className="gl-tool" onClick={() => setDivaPicker(null)}>{t("Cancel")}</button>
             </div>
           </div>
         </div>
@@ -10818,19 +13486,78 @@ export default function App() {
             )
           }
           compensationNote={pendingGatingMlImport.compensationNote}
-          matrixChoice={
-            pendingGatingMlImport.externalSpillover?.differsFromEmbedded
-              ? {
-                  workspaceLabel: pendingGatingMlImport.externalSpillover.label,
-                  maxDelta: pendingGatingMlImport.externalSpillover.maxDelta ?? 0,
-                  value: pendingGatingMlImport.matrixChoice,
-                }
-              : null
+          missingMatrix={pendingGatingMlImport.missingMatrix ?? null}
+          onSupplyMatrix={(file) => { void supplyMissingMatrix(file); }}
+          onUseFcsMatrix={(useFcs) =>
+            setPendingGatingMlImport((cur) => cur && cur.missingMatrix
+              ? { ...cur, missingMatrix: { ...cur.missingMatrix, useFcs } }
+              : cur)
           }
-          onMatrixChoice={(value) =>
-            setPendingGatingMlImport((cur) => cur && { ...cur, matrixChoice: value })
-          }
+          matrixChoice={(() => {
+            // Every file whose own matrix differs from its sample's in the workspace: the primary,
+            // and under a per-file import each other file. One answer applies to all of them. A
+            // matrix the user supplied is the choice already made.
+            const pending = pendingGatingMlImport;
+            const primaryDiffers = !!pending.externalSpillover?.differsFromEmbedded
+              && pending.externalSpillover.source !== "supplied";
+            const others = (pending.siblingTrees ?? []).filter((tree) => tree.externalSpillover?.differsFromEmbedded);
+            if (!primaryDiffers && !others.length) return null;
+            const deltas = [
+              ...(primaryDiffers ? [pending.externalSpillover!.maxDelta ?? 0] : []),
+              ...others.map((tree) => tree.externalSpillover!.maxDelta ?? 0),
+            ];
+            return {
+              workspaceLabel: (primaryDiffers ? pending.externalSpillover!.label : others[0].externalSpillover!.label),
+              maxDelta: Math.max(...deltas),
+              value: pending.matrixChoice,
+              ...(primaryDiffers ? { source: pending.externalSpillover!.source === "gatingml" ? "gatingml" as const : "workspace" as const } : {}),
+              ...(others.length
+                ? {
+                    files: [
+                      ...(primaryDiffers ? [calledLoaded(pending.primaryFileName ?? fileName, pending.primaryEntryId ?? pending.sampleId)] : []),
+                      ...others.map((tree) => calledLoaded(tree.fileName ?? tree.name, tree.entryId)),
+                    ],
+                  }
+                : {}),
+            };
+          })()}
+          onMatrixChoice={(value) => {
+            // What the chosen matrix leaves out is named, as when the import was prepared.
+            const prepared = pendingGatingMlImport.byMatrixChoice?.[value];
+            if (prepared) {
+              const said = [...prepared.result.warnings, ...(pendingGatingMlImport.notes ?? [])];
+              setError(said.length ? said.join("\n") : null);
+            }
+            setPendingGatingMlImport((cur) => cur && { ...cur, matrixChoice: value, ...(cur.byMatrixChoice?.[value] ?? {}) });
+          }}
           compensationNeedsConfirmation={pendingGatingMlImport.compensation.requiresConfirmation}
+          perFileNames={(() => {
+            const pending = pendingGatingMlImport;
+            if (!pending.primaryFileName || !pending.siblingTrees?.length) return null;
+            const listed = [
+              { name: pending.primaryFileName, sample: pending.primarySampleLabel, entryId: pending.primaryEntryId ?? null },
+              ...pending.siblingTrees.flatMap((tree) => (tree.fileName ? [{ name: tree.fileName, sample: tree.sampleLabel, entryId: tree.entryId ?? null }] : [])),
+            ];
+            // Two files of one name are told apart by the sample each is, else by where each is,
+            // its event count and when it was recorded -- here and among the files that follow
+            // the tree, where the same name was listed under both.
+            const twice = stagedNameListedTwice(pending);
+            const called = loadedFileNames();
+            return listed.map((f) => (twice(f.name)
+              ? (f.sample ? `${f.name} (${f.sample})` : (f.entryId ? called.get(f.entryId) : undefined) ?? f.name)
+              : f.name));
+          })()}
+          primaryByChoice={pendingGatingMlImport.primaryByChoice ?? null}
+          followNames={(() => {
+            const pending = pendingGatingMlImport;
+            if (!pending.primaryFileName) return null;
+            const twice = stagedNameListedTwice(pending);
+            const called = loadedFileNames();
+            return [...(pending.unreadFiles ?? []), ...(pending.followFiles ?? [])].map((f) => {
+              const own = f.entryId ? samples.find((entry) => entry.id === f.entryId)?.name : undefined;
+              return own && twice(own) ? called.get(f.entryId!) ?? f.name : f.name;
+            });
+          })()}
           files={samples.length > 1
             ? {
                 total: samples.length,
@@ -10855,6 +13582,20 @@ export default function App() {
           }}
           onImport={applyGatingImport}
           busy={gatingImportBusy}
+          flowJoGrid={pendingGatingMlImport.flowJoGridChoice
+            ? { value: pendingGatingMlImport.flowJoGridChoice.value, busy: flowJoGridRedoing }
+            : null}
+          onFlowJoGrid={(value) => {
+            const staged = pendingGatingMlImport;
+            if (!staged.flowJoGridChoice) return;
+            setFlowJoGridRedoing(true);
+            // The workspace is read again with the other answer and the import staged afresh; the
+            // matrix answered in this dialog stays answered.
+            void staged.flowJoGridChoice.redo(value).finally(() => {
+              setFlowJoGridRedoing(false);
+              setPendingGatingMlImport((cur) => (cur && cur !== staged ? { ...cur, matrixChoice: staged.matrixChoice } : cur));
+            });
+          }}
         />
       )}
       {crud?.kind === "exportSceColData" && isSceHost && (
@@ -10936,9 +13677,27 @@ export default function App() {
               return { error: e instanceof Error ? e.message : String(e) };
             }
           }}
+          folder={{
+            writes: supportsDirectoryAccess() ? "directory" : "zip",
+            preview: (scope) => {
+              try {
+                const { stem, plan } = flowJoFolderPlan(scope);
+                const wanted = flowJoExportSamples(scope);
+                // The .wsp as the export will write it, at the most its counts could make it.
+                const workspaceBytes = flowJoWorkspaceBytesAtMost({
+                  samples: wanted.map((sample, i) => ({ ...sample, folderPath: plan.files[i].path })),
+                  producer: "GateLab",
+                  groups: flowJoExportGroups(),
+                });
+                return previewFlowJoFolder(plan, stem, workspaceBytes);
+              } catch (e) {
+                return { error: e instanceof Error ? e.message : String(e) };
+              }
+            },
+          }}
           onCancel={() => setFlowJoExportOpen(false)}
-          onExport={(scope) => {
-            exportFlowJo(scope);
+          onExport={(scope, asFolder) => {
+            void exportFlowJo(scope, asFolder);
             setFlowJoExportOpen(false);
           }}
         />

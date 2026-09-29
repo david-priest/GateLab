@@ -10,13 +10,64 @@ export interface ScePopulationColumnSpec {
   outLabel: string;
 }
 
-function defaultColumnName(name: string): string {
-  const normalized = name
-    .trim()
-    .replace(/[^A-Za-z0-9_]+/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "");
-  return normalized || "population";
+/** Joins a population's name to the ancestor names that tell it apart: "CD4 T cells / Activated". */
+const PATH_SEPARATOR = " / ";
+
+function sameNames(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((name, index) => name === b[index]);
+}
+
+/**
+ * Each population's default colData column name: its own name, verbatim. R accepts any string as a
+ * column name (colData(sce)[["CD4-CD8+ T cells"]]), so no character is rewritten and no sign is
+ * read into or out of a name. Populations that share a name are told apart by prefixing their
+ * nearest ancestors' names up to the first that differs, joined with " / " ("CD4 T cells /
+ * Activated", "CD8 T cells / Activated"). Populations whose ancestors carry the same names all the
+ * way up, and any default that would repeat another population's, are numbered: "Activated (2)".
+ *
+ * `path` is the population's own name, then its parent's, up to but not including the root.
+ */
+function defaultColumnNames(
+  populations: readonly { popId: string; path: readonly string[] }[],
+): Record<string, string> {
+  const byName = new Map<string, { popId: string; path: readonly string[] }[]>();
+  for (const population of populations) {
+    const group = byName.get(population.path[0]);
+    if (group) group.push(population);
+    else byName.set(population.path[0], [population]);
+  }
+  const labels = new Map<string, string>();
+  for (const group of byName.values()) {
+    if (group.length === 1) continue;
+    const longest = Math.max(...group.map(({ path }) => path.length));
+    for (const { popId, path } of group) {
+      const others = group.filter((other) => !sameNames(other.path, path));
+      let depth = 0;
+      while (
+        depth < longest &&
+        others.some((other) => sameNames(other.path.slice(0, depth + 1), path.slice(0, depth + 1)))
+      ) depth += 1;
+      labels.set(popId, path.slice(0, depth + 1).reverse().join(PATH_SEPARATOR));
+    }
+  }
+  // A name no other population shares is its default, so it is taken first and a prefixed or
+  // numbered default can never displace it.
+  const names = new Map<string, string>();
+  const taken = new Set<string>();
+  for (const { popId, path } of populations) {
+    if (labels.has(popId)) continue;
+    names.set(popId, path[0]);
+    taken.add(path[0]);
+  }
+  for (const { popId } of populations) {
+    const label = labels.get(popId);
+    if (label === undefined) continue;
+    let name = label;
+    for (let n = 2; taken.has(name); n += 1) name = `${label} (${n})`;
+    names.set(popId, name);
+    taken.add(name);
+  }
+  return Object.fromEntries(names);
 }
 
 export function SceColDataExportModal({
@@ -38,23 +89,23 @@ export function SceColDataExportModal({
   ) => void;
 }) {
   const rootId = state.root_population_id;
-  const populations = useMemo(
-    () => populationTreeOrder(state.populations, rootId)
-      .filter(({ popId }) => popId !== rootId)
-      .map(({ popId, depth }) => ({
-        popId,
-        depth,
-        name: state.populations[popId]?.name ?? popId,
-      })),
-    [rootId, state.populations],
-  );
+  const populations = useMemo(() => {
+    // The tree order is depth first, so a population's ancestors are the populations last listed
+    // at each shallower depth.
+    const namesAtDepth: string[] = [];
+    return populationTreeOrder(state.populations, rootId).flatMap(({ popId, depth }) => {
+      const name = state.populations[popId]?.name ?? popId;
+      namesAtDepth.length = depth;
+      namesAtDepth.push(name);
+      if (popId === rootId) return [];
+      return [{ popId, depth, name, path: namesAtDepth.slice(1).reverse() }];
+    });
+  }, [rootId, state.populations]);
   const [selected, setSelected] = useState(
     () => new Set(initialPopulationIds.filter((id) => id !== rootId)),
   );
   const [columnNames, setColumnNames] = useState<Record<string, string>>(
-    () => Object.fromEntries(
-      populations.map(({ popId, name }) => [popId, defaultColumnName(name)]),
-    ),
+    () => defaultColumnNames(populations),
   );
   const [inLabel, setInLabel] = useState("TRUE");
   const [outLabel, setOutLabel] = useState("FALSE");
@@ -64,7 +115,7 @@ export function SceColDataExportModal({
     .map(({ popId, name }) => ({
       populationId: popId,
       populationName: name,
-      columnName: (columnNames[popId] ?? "").trim(),
+      columnName: columnNames[popId] ?? "",
       inLabel: inLabel.trim(),
       outLabel: outLabel.trim(),
     }));
@@ -78,7 +129,7 @@ export function SceColDataExportModal({
   );
   const valid =
     specs.length > 0 &&
-    specs.every(({ columnName }) => columnName.length > 0) &&
+    specs.every(({ columnName }) => columnName.trim().length > 0) &&
     duplicateNames.size === 0 &&
     inLabel.trim().length > 0 &&
     outLabel.trim().length > 0 &&
@@ -136,8 +187,8 @@ export function SceColDataExportModal({
         <div className="gl-sce-coldata-list">
           {populations.map(({ popId, depth, name }) => {
             const columnName = columnNames[popId] ?? "";
-            const collides = existingColumns.includes(columnName.trim());
-            const duplicate = duplicateNames.has(columnName.trim());
+            const collides = existingColumns.includes(columnName);
+            const duplicate = duplicateNames.has(columnName);
             return (
               <div className="gl-sce-coldata-row" key={popId}>
                 <label

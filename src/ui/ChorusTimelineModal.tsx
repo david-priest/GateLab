@@ -13,6 +13,21 @@ interface Props {
   timeline: ChorusTimeline;
   /** Whether an FCS is loaded; without one a sort's snapshot needs its FCS chosen next. */
   hasSample: boolean;
+  /**
+   * The loaded file a snapshot or the current gates would go onto, and whether it is a recording
+   * of this experiment (null: it carries no FACSChorus record). When it is not, the buttons say
+   * whose gates go onto which file, and nothing is applied until one is pressed.
+   */
+  target?: {
+    name: string;
+    same: boolean | null;
+    /**
+     * For a recording of this experiment, the trees it was recorded under (indices into
+     * listChorusTrees) and the sort then running. Any other tree is not its own, and its button
+     * says so.
+     */
+    own?: { treeIndices: number[]; labels: string[]; duringSort: string | null } | null;
+  } | null;
   /** Import the experiment's tree at this index (a sort's snapshot, or the current gates). */
   onImportTree: (treeIndex: number) => void;
   /** Import the tree each of these files carries, one hierarchy per distinct tree. */
@@ -30,8 +45,12 @@ function clock(iso: string | null, withDate: boolean): string {
 }
 const num = (n: number | null) => (n === null ? "–" : n.toLocaleString("en-US"));
 
-export function ChorusTimelineModal({ experimentName, timeline, hasSample, onImportTree, onImportRecordings, onCancel }: Props) {
+export function ChorusTimelineModal({ experimentName, timeline, hasSample, target = null, onImportTree, onImportRecordings, onCancel }: Props) {
   const { t } = useI18n();
+  const foreign = !!experimentName && !!target && target.same !== true;
+  const recordedUnder = !!experimentName && target?.same === true ? target.own ?? null : null;
+  /** A tree of the experiment that is not the one the viewed recording was made under. */
+  const notOwn = (treeIndex: number) => !!recordedUnder && !recordedUnder.treeIndices.includes(treeIndex);
   const recordings = timeline.items.filter((i): i is Extract<ChorusTimelineItem, { kind: "recording" }> => i.kind === "recording");
   const sorts = timeline.items.filter((i): i is Extract<ChorusTimelineItem, { kind: "sort" }> => i.kind === "sort");
   const span = timeline.span ? { start: chorusTime(timeline.span.start)!, end: chorusTime(timeline.span.end)! } : null;
@@ -46,6 +65,28 @@ export function ChorusTimelineModal({ experimentName, timeline, hasSample, onImp
         <div className="gl-modal-note">
           {t("Every FCS the S8 exports carries the gates it was recorded under; a .cef carries the gates as they are now and a snapshot at the start of every sort, but no recordings. Sorts and recordings are laid out on one clock, in local time.")}
           {experimentName && !hasSample && ` ${t("Choose a gate tree, then choose the FCS file containing its event data.")}`}
+          {foreign && (
+            <>
+              {" "}
+              <strong>
+                {target!.same === false
+                  ? t("{file} was recorded in another FACSChorus experiment, so these gates are not its own.", { file: target!.name })
+                  : t("{file} carries no FACSChorus record, so nothing shows these gates are its own.", { file: target!.name })}
+              </strong>{" "}
+              {t("They are applied to it only if you choose a tree below.")}
+            </>
+          )}
+          {recordedUnder && (
+            <>
+              {" "}
+              <strong>
+                {recordedUnder.labels.length
+                  ? t("{file} was recorded under the same tree as {trees}.", { file: target!.name, trees: recordedUnder.labels.join(", ") })
+                  : t("{file} was recorded under a tree that is neither the current gates nor a sort's snapshot; \"Import this file's tree\" imports its own.", { file: target!.name })}
+                {recordedUnder.duringSort ? ` ${t("It was recorded during {sort}.", { sort: recordedUnder.duringSort })}` : ""}
+              </strong>
+            </>
+          )}
           <br />
           {sorts.length > 0 && `${sorts.length} ${t("sorts")} · `}
           {`${recordings.length} ${t("recordings")} ${t("loaded")}`}
@@ -74,7 +115,13 @@ export function ChorusTimelineModal({ experimentName, timeline, hasSample, onImp
                     {item.recordedWith.length ? ` · ${t("same tree as")} ${item.recordedWith.join(", ")}` : ""}
                   </span>
                 </span>
-                <button className="gl-btn-ghost" onClick={() => onImportTree(item.treeIndex)}>{t("Import snapshot…")}</button>
+                <button className="gl-btn-ghost" onClick={() => onImportTree(item.treeIndex)}>
+                  {foreign
+                    ? t("Apply this snapshot to {file}…", { file: target!.name })
+                    : notOwn(item.treeIndex)
+                      ? t("Apply this snapshot to {file}, recorded under another tree…", { file: target!.name })
+                      : t("Import snapshot…")}
+                </button>
               </div>
             ) : (
               <div key={`r-${item.fileId}`} className={`gl-chorus-timeline-row${item.sameExperiment === false ? " is-foreign" : ""}`}>
@@ -106,7 +153,13 @@ export function ChorusTimelineModal({ experimentName, timeline, hasSample, onImp
                 <span className="gl-wsp-name">{t("Current gates")}</span>
                 <span className="gl-wsp-meta">{`${timeline.current.gateCount} ${t("gates")}`}</span>
               </span>
-              <button className="gl-btn-ghost" onClick={() => onImportTree(timeline.current!.treeIndex)}>{t("Import current gates…")}</button>
+              <button className="gl-btn-ghost" onClick={() => onImportTree(timeline.current!.treeIndex)}>
+                {foreign
+                  ? t("Apply the current gates to {file}…", { file: target!.name })
+                  : notOwn(timeline.current.treeIndex)
+                    ? t("Apply the current gates to {file}, recorded under another tree…", { file: target!.name })
+                    : t("Import current gates…")}
+              </button>
             </div>
           )}
           {timeline.items.length === 0 && !timeline.current && (

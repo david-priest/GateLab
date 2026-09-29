@@ -648,6 +648,16 @@ describe("uncompensated v3 validation", () => {
     expect(error.message).toContain("arcsinh-fluorescence");
   });
 
+  it("accepts and preserves a file's acquisition identity, which relinking checks", async () => {
+    const identity = { $TOT: "3", $BTIM: "10:00:00", GUID: "aaaa-1" };
+    const source = workspaceV2([fullSample({ identity })]);
+    const validated = await validateWorkspaceV3(migrateWorkspaceV2ToV3(source));
+    expect(validated.samples[0].identity).toEqual(identity);
+    // Anything but an object of the identity keywords' strings is refused.
+    const bad = workspaceV2([fullSample({ identity: { $TOT: 3 } as unknown as Record<string, string> })]);
+    expect(() => migrateWorkspaceV2ToV3(bad)).toThrow(/malformed identity/);
+  });
+
   it("accepts and preserves a file's group, which the saver writes beside its hierarchy", async () => {
     const source = workspaceV2([fullSample({ hierarchyId: "main", groupId: "group-1" })]);
     const validated = await validateWorkspaceV3(migrateWorkspaceV2ToV3(source));
@@ -672,6 +682,26 @@ describe("uncompensated v3 validation", () => {
     candidate.plotting = { "prop.groupSel": "batch", "prop.files": ["s1"] };
     const validated = await validateWorkspaceV3(JSON.parse(JSON.stringify(candidate)));
     expect(validated.plotting).toEqual({ "prop.groupSel": "batch", "prop.files": ["s1"] });
+  });
+
+  // A workspace holding a gate on FlowJo's grid names it (workspaceFeatures.ts): an older GateLab
+  // refuses the key, as the test below has it refuse any key it does not know, instead of reading
+  // the gate on another axis. This build reads it back, and refuses a feature it does not have.
+  it("names FlowJo's grid when it holds a gate on it, reads that back, and refuses an unknown feature", async () => {
+    const source = workspaceV2();
+    const grid = { kind: "flowjoChannels", channels: 256, axis: { kind: "linear", minRange: 0, maxRange: 262144 } } as const;
+    source.gating.gates.g1 = { ...source.gating.gates.g1, space: "display", transforms: { A: grid, B: grid } } as typeof source.gating.gates.g1;
+    const migrated = migrateWorkspaceV2ToV3(source);
+    const file = JSON.parse(new TextDecoder().decode(packWorkspaceV3Reference(migrated))) as Record<string, unknown>;
+    expect(file.version).toBe(3);
+    expect(file.requiredFeatures).toEqual(["flowjo-grid"]);
+    const validated = await validateWorkspaceV3(file);
+    expect(validated.gating.gates.g1).toEqual(source.gating.gates.g1);
+    expect("requiredFeatures" in validated).toBe(false);
+    await expectV3Error(validateWorkspaceV3({ ...file, requiredFeatures: ["something-later"] }), "unsupported-workspace-version");
+    // Without such a gate the key is not written.
+    const plain = JSON.parse(new TextDecoder().decode(packWorkspaceV3Reference(migrateWorkspaceV2ToV3(workspaceV2())))) as Record<string, unknown>;
+    expect("requiredFeatures" in plain).toBe(false);
   });
 
   it("rejects unknown top-level fields", async () => {

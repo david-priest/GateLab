@@ -4,6 +4,7 @@ import {
   type GateLabHostDatasetPort,
 } from "./datasetContract";
 import { loadHostedDataset } from "./hostedSample";
+import { pairFile } from "../engine/fileIdentity";
 
 function bufferOf(values: Float32Array | Uint32Array): ArrayBuffer {
   return values.buffer.slice(
@@ -86,6 +87,23 @@ describe("loadHostedDataset", () => {
     expect(Array.from(loaded.sample.originalColumnData(0))).toEqual([5, 10, 15]);
     expect(Array.from(loaded.eventIndex)).toEqual([4, 7, 9]);
     expect(loaded.metadata).toEqual({ batch: "one", stimulated: false });
+  });
+
+  // A hosted sample's cell count is not an acquisition's $TOT. Written as one, it contradicted a
+  // FlowJo sample of the same name recording the acquisition's count, and the .wsp import onto
+  // it said "No sample in this workspace is ...".
+  it("claims no acquisition identity it does not have", async () => {
+    const port: GateLabHostDatasetPort = {
+      async listDatasets() { return [dataset]; },
+      async readAssay() { return bufferOf(new Float32Array([5, 10, 15, 20, 25, 30])); },
+      async readEventIndex() { return bufferOf(new Uint32Array([4, 7, 9])); },
+    };
+    const [loaded] = await loadHostedDataset(port, dataset);
+    expect(loaded.sample.fcs.nEvents).toBe(3);
+    expect(loaded.sample.fcs.keywords["$TOT"]).toBeUndefined();
+    const workspaceSample = { names: ["Donor A"], recorded: { $TOT: "9387", $BTIM: "10:48:03" } };
+    const paired = pairFile({ name: "Donor A", keywords: loaded.sample.fcs.keywords }, [workspaceSample], (s) => s.names, (s) => s.recorded);
+    expect(paired.kind).toBe("own");
   });
 
   it("rejects transformed-only data rather than applying GateLab transforms twice", async () => {

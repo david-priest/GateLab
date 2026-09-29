@@ -1,6 +1,6 @@
 {
   "name": "gatelab",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -11,7 +11,8 @@
     "build:embed": "tsc -b --noEmit && vite build --config vite.embed.config.ts",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:interop": "node tools/interop/run.mjs"
   },
   "dependencies": {
     "fflate": "^0.8.3",

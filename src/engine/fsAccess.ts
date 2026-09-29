@@ -227,6 +227,16 @@ export async function pickDirectoryFiles(
   }
 }
 
+/** Choose a folder to write into; the browser asks for permission to edit it. Null if cancelled. */
+export async function pickWritableDirectory(options: PickFileOptions = {}): Promise<FileSystemDirectoryHandle | null> {
+  try {
+    return await directoryPickerWindow().showDirectoryPicker!({ mode: "readwrite", ...pickerPlacement(options) });
+  } catch (e) {
+    if ((e as DOMException)?.name === "AbortError") return null;
+    throw e;
+  }
+}
+
 /** Write to an existing handle (in-place Save). */
 export async function writeHandle(handle: FileSystemFileHandle, data: BlobPart): Promise<void> {
   if (!(await ensurePermission(handle, "readwrite"))) throw new Error("Write permission was denied.");

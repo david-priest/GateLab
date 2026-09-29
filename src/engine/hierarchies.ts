@@ -227,6 +227,66 @@ export function correspondingHierarchyId(
   return matches.length === 1 ? matches[0] : null;
 }
 
+/**
+ * correspondingHierarchyId for populations, for many lookups over one fixed set of trees: the
+ * same answers, with each population's lineage walked once and each target tree indexed by
+ * lineage once. correspondingHierarchyId walks the lineage of every population of the target on
+ * every call, so asking for every population of every tree for every file's tree costs the
+ * square of the number of tailored files (11.8 s for 100 of them); this costs one walk each.
+ */
+export function populationCorrespondence(
+  trees: Readonly<Record<string, StoredHierarchy>>,
+): (sourceId: string, populationId: string, targetId: string) => string | null {
+  const lineages = new Map<string, Map<string, string[]>>();
+  const lineage = (tree: StoredHierarchy, populationId: string): string[] => {
+    let ofTree = lineages.get(tree.id);
+    if (!ofTree) lineages.set(tree.id, ofTree = new Map());
+    let keys = ofTree.get(populationId);
+    if (keys) return keys;
+    // The walk correspondingHierarchyId makes, up through each copy's source.
+    const seen = new Set<string>();
+    let current: StoredHierarchy | undefined = tree;
+    let entityId = populationId;
+    while (current) {
+      const key = JSON.stringify([current.id, entityId]);
+      if (seen.has(key)) break;
+      seen.add(key);
+      const parentId: string | undefined = current.source_population_ids?.[entityId];
+      if (!parentId || !current.source_hierarchy_id) break;
+      entityId = parentId;
+      current = trees[current.source_hierarchy_id];
+    }
+    keys = [...seen];
+    ofTree.set(populationId, keys);
+    return keys;
+  };
+  const indexes = new Map<string, Map<string, string[]>>();
+  const indexOf = (tree: StoredHierarchy): Map<string, string[]> => {
+    let index = indexes.get(tree.id);
+    if (index) return index;
+    index = new Map();
+    for (const candidate of Object.keys(tree.populations)) {
+      for (const key of lineage(tree, candidate)) {
+        const holders = index.get(key);
+        if (holders) holders.push(candidate);
+        else index.set(key, [candidate]);
+      }
+    }
+    indexes.set(tree.id, index);
+    return index;
+  };
+  return (sourceId, populationId, targetId) => {
+    const source = trees[sourceId];
+    const target = trees[targetId];
+    if (!source || !target || !source.populations[populationId]) return null;
+    if (source.id === target.id && target.populations[populationId]) return populationId;
+    const index = indexOf(target);
+    const matches = new Set<string>();
+    for (const key of lineage(source, populationId)) for (const match of index.get(key) ?? []) matches.add(match);
+    return matches.size === 1 ? matches.values().next().value! : null;
+  };
+}
+
 /** The same browsing position across files; a missing branch falls back to its nearest ancestor. */
 export function selectionAcrossHierarchies(
   source: StoredHierarchy,

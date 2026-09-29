@@ -7,7 +7,7 @@ import {
 } from "./flowCompensationEngine";
 import { parseFcs, type NumericColumn } from "./fcs";
 import { Sample } from "./sample";
-import { ARIA_III_DIR } from "../testFixtures";
+import { ARIA_III_DIR, FIXTURES_ROOT } from "../testFixtures";
 
 const FIXTURE_ROOT = process.env.GATELAB_COMP_FIXTURES ?? ARIA_III_DIR;
 
@@ -150,5 +150,49 @@ describe.runIf(hasFixtures)("flowCore Aria III compensation oracle", () => {
       expect(sample.originalColumnData(index)).toBe(originalReferences[index]);
       expect(Array.from(sample.originalColumnData(index))).toEqual(originalValues[index]);
     }
+  });
+});
+
+/**
+ * Cytek SpectroFlo writes "APPLY COMPENSATION: TRUE" beside a non-identity $SPILLOVER. FCS 3.1
+ * says stored data are always uncompensated, and the data agree: in the FMO control that lacks the
+ * CD14 dye (Super Bright 645), the events brightest in BUV661 sit in Super Bright 645 at about
+ * S[BUV661→SB645] times their BUV661 value as stored, and near zero once the file's matrix is
+ * applied. Had SpectroFlo stored them compensated, applying the matrix would push them to minus
+ * that amount instead. So GateLab's compensation is the first and only application.
+ */
+const PBMC_FMO_CD14_PATH =
+  `${FIXTURES_ROOT}/PUBLIC - Screenshot Safe/Human PBMC 17-color spectral flow demo/controls/FMO_CD14_Unmixed.fcs`;
+
+describe.runIf(existsSync(PBMC_FMO_CD14_PATH))("Cytek 'APPLY COMPENSATION: TRUE' data are stored uncompensated", () => {
+  it("brings an absent dye's channel to zero with ONE application of the file's matrix", () => {
+    const fcs = loadFcs(PBMC_FMO_CD14_PATH);
+    expect(fcs.keywords["APPLY COMPENSATION"]?.trim()).toBe("TRUE");
+    const sample = new Sample(fcs);
+    const src = sample.spillover!;
+    const from = src.channels.findIndex((c) => c.startsWith("CD11c"));
+    const into = src.channels.findIndex((c) => c.startsWith("CD14"));
+    expect(from).toBeGreaterThanOrEqual(0);
+    expect(into).toBeGreaterThanOrEqual(0);
+    const coefficient = src.matrix[from][into];
+    expect(coefficient).toBeLessThan(-0.05);
+    const x = sample.index(src.channels[from])!;
+    const y = sample.index(src.channels[into])!;
+    const median = (v: number[]) => { const s = [...v].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+    const bright = (col: ArrayLike<number>) => {
+      const sorted = Array.from(col).sort((a, b) => a - b);
+      const cut = sorted[Math.floor(sorted.length * 0.98)];
+      return Array.from(col, (v, i) => (v >= cut ? i : -1)).filter((i) => i >= 0);
+    };
+    const xs = sample.originalColumnData(x);
+    const idx = bright(xs);
+    const expectedStored = coefficient * median(idx.map((i) => xs[i]));
+    const stored = median(idx.map((i) => sample.originalColumnData(y)[i]));
+    sample.setCompensation(true);
+    expect(sample.compensationEnabled).toBe(true);
+    const compensated = median(idx.map((i) => sample.compensatedColumnData(y)[i]));
+    // Stored: within 15% of the spill the matrix predicts; compensated: within a tenth of it of 0.
+    expect(Math.abs(stored - expectedStored)).toBeLessThan(0.15 * Math.abs(expectedStored));
+    expect(Math.abs(compensated)).toBeLessThan(0.1 * Math.abs(expectedStored));
   });
 });

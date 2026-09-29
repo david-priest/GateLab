@@ -128,6 +128,7 @@ describe("importing a tree with several files loaded", () => {
     await importXml();
     expect(host.textContent).toContain("Which files should be gated with it?");
     const target = (value: string) => host.querySelector<HTMLInputElement>(`input[name="gatingml-import-target"][value="${value}"]`)!;
+    const mode = (value: string) => host.querySelector<HTMLInputElement>(`input[name="gatingml-import-mode"][value="${value}"]`)!;
     expect(target("all").checked).toBe(true);
     // No tree yet: only the tree for everyone is on offer.
     expect(target("viewed").disabled).toBe(true);
@@ -145,6 +146,9 @@ describe("importing a tree with several files loaded", () => {
     await importXml(GATING_ML_SHIFTED);
     expect(host.textContent).toContain("Which files should be gated with it?");
     expect(target("viewed").disabled).toBe(false);
+    // Merging stays the default, and the recommendation, for a tree of the workspace's structure.
+    expect(mode("merge").checked).toBe(true);
+    expect(host.textContent).toContain("Merge with current strategy (recommended)");
     act(() => target("viewed").click());
     act(() => button("Import").click());
     await settle();
@@ -160,12 +164,22 @@ describe("importing a tree with several files loaded", () => {
     expect(target("viewed").disabled).toBe(true);
     expect(target("selected").disabled).toBe(true);
     expect(host.textContent).toContain("Its structure differs from this workspace's tree");
+    // Replacing is then the default, and the recommendation (David, 2026-09-29); it was Merge.
+    expect(mode("replace").checked).toBe(true);
+    expect(mode("merge").checked).toBe(false);
+    expect(host.textContent).toContain("Replace current strategy (recommended)");
+    expect(host.textContent).not.toContain("Merge with current strategy (recommended)");
+    expect(host.textContent).toContain("It becomes the tree every file follows; the one with tailored gates of its own loses them.");
+    // Merged into the one tree, chosen. A merge keeps the tree, so D2's tailoring stays: it used to
+    // go with the move, and a file an earlier per-file import had given its own sample's geometry
+    // took another sample's.
+    act(() => mode("merge").click());
+    expect(host.textContent).toContain("It is merged into the tree every file follows; the one with tailored gates of its own keeps them.");
     act(() => button("Import").click());
     await settle();
     await settle();
-    // Merged into the one tree (the default with a tree present), and D2's tailoring went with the move.
-    expect(host.textContent).toContain("applied to all 2 files");
-    expect(summary()).toBe("2 files · all following");
+    expect(host.textContent).toContain("merged into the tree all 2 files follow; the file tailored to it keeps its tailoring");
+    expect(summary()).toBe("2 files · 1 tailored");
     expect(popRows()).toHaveLength(4);
     expect(host.querySelector('select[aria-label="Hierarchy"]')).toBeNull();
   });

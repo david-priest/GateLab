@@ -68,7 +68,10 @@ describe("groups", () => {
     const input = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')].find((i) => !i.hasAttribute("webkitdirectory"))!;
     Object.defineProperty(input, "files", { configurable: true, value: [fcsFile("D1.fcs", 1), fcsFile("D2.fcs", 2), fcsFile("D3.fcs", 2)] });
     await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
-    await settle();
+    // The files load one at a time, yielding between them: one settle was not always enough under
+    // load, and the gate was then drawn before every file was in.
+    for (let i = 0; i < 100 && host.querySelectorAll(".gl-sample-row").length < 3; i++) await settle();
+    expect(host.querySelectorAll(".gl-sample-row")).toHaveLength(3);
     act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [1.05, 1.05]], x_channel: "FSC-A", y_channel: "SSC-A" }));
     act(() => button("Create").click());
     await settle();
@@ -104,7 +107,7 @@ describe("groups", () => {
     await view("D3.fcs"); expect(pressed()).toBe("tree"); expect(gate().vertices).toEqual(treeGate);
     expect(host.querySelector(".population-tree-edit-group")).toBeNull();
     await edit("tree");
-    expect(host.querySelector(".gate-tailored-in")?.textContent).toBe("tailored in 1 files");
+    expect(host.querySelector(".gate-tailored-in")?.textContent).toBe("tailored in 1 file");
     expect(host.querySelector(".gate-tailored-in")?.getAttribute("title")).toBe("Treated");
     // Nothing is tailored per file: the group carries it.
     expect(summary()).toBe("3 files · all following");

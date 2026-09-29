@@ -274,19 +274,20 @@ describe("Sample — singular spillover disables compensation", () => {
     columns: [mk([100, 200, 300, 400]), mk([10, 20, 30, 40]), mk([5, 15, 25, 35])],
   });
 
-  it("extracts the non-identity spillover but leaves compensation off (singular)", () => {
+  it("extracts the non-identity spillover but leaves compensation off (singular), and says so", () => {
     const s = new Sample(singular());
     expect(s.hasCompensation).toBe(true); // non-identity → spillover present
     expect(s.compensationEnabled).toBe(false);
-    s.setCompensation(true);
-    expect(s.compensationEnabled).toBe(false); // invertMatrix returned null → disabled
+    // Reported rather than returning quietly: a caller that did not check went on uncompensated.
+    expect(() => s.setCompensation(true)).toThrow(/spillover matrix could not be applied/);
+    expect(s.compensationEnabled).toBe(false); // the matrix cannot be solved → disabled
   });
 
   it("gating values are unchanged after the failed compensation toggle", () => {
     const s = new Sample(singular());
     const peIdx = s.index("PE-A")!;
     const before = Array.from(s.gatingColumn(peIdx));
-    s.setCompensation(true);
+    expect(() => s.setCompensation(true)).toThrow(/could not be applied/);
     expect(Array.from(s.gatingColumn(peIdx))).toEqual(before); // raw, uncompensated
   });
 
@@ -303,7 +304,7 @@ describe("Sample — singular spillover disables compensation", () => {
     const snapshot = s.spilloverSnapshot();
 
     s.installExternalSpillover({ channels: ["PE-A", "APC-A"], matrix: [[1, 1], [1, 1]] }, "the workspace", { replaceEmbedded: true });
-    s.setCompensation(true);
+    expect(() => s.setCompensation(true)).toThrow(/could not be applied/);
     expect(s.compensationEnabled).toBe(false);
     expect(s.spilloverOrigin.kind).toBe("external");
 

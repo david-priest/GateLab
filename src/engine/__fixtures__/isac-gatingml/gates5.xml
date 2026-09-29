@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gating:Gating-ML xmlns:gating="http://www.isac-net.org/std/Gating-ML/v2.0/gating"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns:transforms="http://www.isac-net.org/std/Gating-ML/v2.0/transformations"
+    xmlns:data-type="http://www.isac-net.org/std/Gating-ML/v2.0/datatypes"
+    xsi:schemaLocation="http://www.isac-net.org/std/Gating-ML/v2.0/gating http://flowcyt.sourceforge.net/gating/2.0/xsd/Gating-ML.v2.0.xsd http://www.isac-net.org/std/Gating-ML/v2.0/transformations http://flowcyt.sourceforge.net/gating/2.0/xsd/Transformations.v2.0.xsd http://www.isac-net.org/std/Gating-ML/v2.0/datatypes http://flowcyt.sourceforge.net/gating/2.0/xsd/DataTypes.v2.0.xsd">
+
+    <gating:PolygonGate gating:id="myPolygon1">
+        <gating:dimension gating:compensation-ref="FCS" gating:transformation-ref="myLogicle1">
+            <data-type:fcs-dimension data-type:name="PE-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS" gating:transformation-ref="myLogicle1">
+            <data-type:fcs-dimension data-type:name="PerCP-Cy5-5-A"/>
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.1"/>
+            <gating:coordinate data-type:value="0.1"/>
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.8"/>
+            <gating:coordinate data-type:value="0.2"/>
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.7"/>
+            <gating:coordinate data-type:value="0.9"/>
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.2"/>
+            <gating:coordinate data-type:value="0.85"/>
+        </gating:vertex>
+    </gating:PolygonGate>
+
+    <gating:PolygonGate gating:id="myPolygon2">
+        <gating:dimension gating:compensation-ref="FCS" gating:transformation-ref="myLogicle1">
+            <data-type:fcs-dimension data-type:name="APC-A"/>
+        </gating:dimension>
+        <gating:dimension gating:compensation-ref="FCS" gating:transformation-ref="myLogicle1">
+            <data-type:fcs-dimension data-type:name="APC-Cy7-A"/>
+        </gating:dimension>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.1"/>
+            <gating:coordinate data-type:value="0.1"/>
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.8"/>
+            <gating:coordinate data-type:value="0.2"/>
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.7"/>
+            <gating:coordinate data-type:value="0.9"/>
+        </gating:vertex>
+        <gating:vertex>
+            <gating:coordinate data-type:value="0.2"/>
+            <gating:coordinate data-type:value="0.85"/>
+        </gating:vertex>
+    </gating:PolygonGate>
+
+    <transforms:transformation transforms:id="myLogicle1">
+        <transforms:logicle transforms:T="262144" transforms:M="5" transforms:W="0.5"
+            transforms:A="0"/>
+    </transforms:transformation>
+    
+    <gating:BooleanGate gating:id="myAnd1">
+        <gating:and>
+            <gating:gateReference gating:ref="myPolygon1"/>
+            <gating:gateReference gating:ref="myPolygon2"/>
+        </gating:and>
+    </gating:BooleanGate>
+    
+    <gating:BooleanGate gating:id="myAnd2">
+        <gating:and>
+            <gating:gateReference gating:ref="myPolygon1" gating:use-as-complement="true"/>
+            <gating:gateReference gating:ref="myPolygon2"/>
+        </gating:and>
+    </gating:BooleanGate>
+    
+    <gating:BooleanGate gating:id="myAnd3">
+        <gating:and>
+            <gating:gateReference gating:ref="myPolygon1" />
+            <gating:gateReference gating:ref="myPolygon2" gating:use-as-complement="true" />
+        </gating:and>
+    </gating:BooleanGate>
+    
+    <gating:BooleanGate gating:id="myAnd4">
+        <gating:and>
+            <gating:gateReference gating:ref="myPolygon1" gating:use-as-complement="true" />
+            <gating:gateReference gating:ref="myPolygon2" gating:use-as-complement="true" />
+        </gating:and>
+    </gating:BooleanGate>
+
+    <gating:BooleanGate gating:id="myOr1">
+        <gating:or>
+            <gating:gateReference gating:ref="myPolygon1"/>
+            <gating:gateReference gating:ref="myPolygon2"/>
+        </gating:or>
+    </gating:BooleanGate>
+    
+    <gating:BooleanGate gating:id="myOr2">
+        <gating:or>
+            <gating:gateReference gating:ref="myPolygon1" gating:use-as-complement="true"/>
+            <gating:gateReference gating:ref="myPolygon2"/>
+        </gating:or>
+    </gating:BooleanGate>
+    
+    <gating:BooleanGate gating:id="myOr3">
+        <gating:or>
+            <gating:gateReference gating:ref="myPolygon1" />
+            <gating:gateReference gating:ref="myPolygon2" gating:use-as-complement="true" />
+        </gating:or>
+    </gating:BooleanGate>
+    
+    <gating:BooleanGate gating:id="myOr4">
+        <gating:or>
+            <gating:gateReference gating:ref="myPolygon1" gating:use-as-complement="true" />
+            <gating:gateReference gating:ref="myPolygon2" gating:use-as-complement="true" />
+        </gating:or>
+    </gating:BooleanGate>
+    
+    <gating:BooleanGate gating:id="myNotNot">
+        <gating:not>
+            <gating:gateReference gating:ref="myPolygon1" gating:use-as-complement="true" />
+        </gating:not>
+    </gating:BooleanGate>
+    
+
+</gating:Gating-ML>

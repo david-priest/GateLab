@@ -163,3 +163,33 @@ describe("a label moved into the plotted range beyond the data", () => {
   });
 });
 
+
+// A Gating-ML import holds a rectangle side with no bound as UNBOUNDED (Number.MAX_VALUE), where
+// it held ±1e9 until 2026-09. Drawn as it stands that is not a coordinate a plot can hold on a
+// linear axis, and a fit that reached for it would squash the data into a corner.
+describe("a rectangle with an unbounded side", () => {
+  const U = Number.MAX_VALUE;
+  const gateOn = (): Gate => ({
+    gate_id: "g", name: "Open top", gate_type: "rectangle", x_channel: "FSC-A", y_channel: "SSC-A",
+    vertices: [[30000, 20000], [90000, 20000], [90000, U], [30000, U]], color: "#888888", label_offset: null, space: "raw",
+  } as unknown as Gate);
+
+  it("is drawn with finite coordinates past the data, and the fit and the label leave that side out", () => {
+    const s = load();
+    const gate = gateOn();
+    const plotted = build(s, gate);
+    const ys = plotted.vertices!.map((v) => v[1]);
+    expect(ys.every(Number.isFinite)).toBe(true);
+    const frame = s.displayRange(s.index("SSC-A")!);
+    expect(Math.max(...ys)).toBeGreaterThan(frame[1]);
+    expect(plotted.unbounded).toEqual({ x: [false, false], y: [false, true] });
+    // The fit keeps the data's own frame on y rather than reaching for the drawn edge.
+    const fitted = includePlotGatesInAxisRange(frame, [plotted], "y");
+    expect(fitted[1]).toBeLessThanOrEqual(frame[1] * 1.1 + 1);
+    // The label, anchored by the renderer at the mean of the vertices, lands inside the frame.
+    const meanY = ys.reduce((a, b) => a + b, 0) / ys.length;
+    const labelY = meanY + plotted.label_offset![1];
+    expect(labelY).toBeGreaterThanOrEqual(frame[0]);
+    expect(labelY).toBeLessThanOrEqual(frame[1] * 1.1 + 1);
+  });
+});

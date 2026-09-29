@@ -4,7 +4,7 @@ import { describe, it, expect } from "vitest";
 import type { Gate, PopulationMap } from "./models";
 import { newRootPopulation } from "./models";
 import { cloneHierarchyTree, type StoredHierarchy } from "./hierarchies";
-import { copyInStep, gateGeometryEquals, syncLockedCopy, tailoredGateIds, type TemplateTree } from "./templateSync";
+import { copyInStep, gateGeometryEquals, syncLockedCopy, tailoredGateIds, withGeometryOf, type TemplateTree } from "./templateSync";
 
 function poly(id: string, name: string, x: string, y: string, shift: number): Gate {
   return {
@@ -152,5 +152,22 @@ describe("a locked copy follows its template", () => {
     expect(tailoredGateIds(copy, null).size).toBe(0);
     const shrunk: TemplateTree = { ...before, gates: { cells: before.gates.cells }, gate_order: ["cells"] };
     expect([...tailoredGateIds(copy, shrunk)]).toEqual([singletsId]);
+  });
+});
+
+// A file whose $PnS labels a detector differently from the tree's file keeps its gate on its own
+// channel for that detector. Moving coordinates between the tree and its copy -- reverting the
+// copy, promoting it, applying one gate to the group -- took the other side's channel as well,
+// and put the gate on a channel the file does not have.
+describe("moving a gate's coordinates between a tree and a copy", () => {
+  it("keeps the receiving gate's own axes", () => {
+    const own = poly("c1", "live cells", "Aqua", "SSC-A", 7);
+    const tree = poly("t1", "live cells", "aqua", "SSC-A", 0);
+    const reverted = withGeometryOf(own, tree);
+    expect(reverted).toMatchObject({ gate_id: "c1", x_channel: "Aqua", y_channel: "SSC-A" });
+    expect((reverted as unknown as { vertices: number[][] }).vertices).toEqual((tree as unknown as { vertices: number[][] }).vertices);
+    const promoted = withGeometryOf(tree, own);
+    expect(promoted).toMatchObject({ gate_id: "t1", x_channel: "aqua" });
+    expect((promoted as unknown as { vertices: number[][] }).vertices).toEqual((own as unknown as { vertices: number[][] }).vertices);
   });
 });

@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { coreReducer, initialCoreState } from "../store";
 import { FcsExportModal } from "./CrudModals";
+import { FCS_EXPORT_VERSION, writeFcs } from "../engine/fcsExport";
 
 let root: Root;
 let host: HTMLDivElement;
@@ -93,5 +94,31 @@ describe("FCS export source scope", () => {
       .find((button) => button.textContent?.trim() === "Export 1 FCS")!;
     act(() => confirm.click());
     expect(onExport).toHaveBeenCalledWith([rootPopulationId], "original", "split", 2);
+  });
+
+  it("says the file is written in the version and precision the writer writes", () => {
+    // The dialog said "FCS 3.0 with 32-bit floating-point values" after the writer had moved to
+    // FCS 3.1 in the source's own precision (fix/fcs-read-write).
+    const state = coreReducer(initialCoreState(), { type: "loadSample", nEvents: 5 });
+    const rootPopulationId = state.root_population_id!;
+    act(() => root.render(
+      <FcsExportModal
+        state={state}
+        samples={[{ id: "a", name: "donor-a.fcs", eventCount: 2, active: true, checked: true, populationEventCounts: { [rootPopulationId]: 2 } }]}
+        combinedCompatibility={{ compatible: true, reason: null }}
+        initialPopIds={[rootPopulationId]}
+        initialAssay="original"
+        initialScope="active"
+        initialMinimumEvents={0}
+        onCancel={vi.fn()}
+        onExport={vi.fn()}
+      />,
+    ));
+    const written = new TextDecoder().decode(writeFcs([new Float32Array([1])], [{ name: "FSC-A", desc: "" }]).slice(0, 6));
+    expect(written).toBe(`FCS${FCS_EXPORT_VERSION}`);
+    expect(host.textContent).toContain(`The output file is FCS ${FCS_EXPORT_VERSION}`);
+    expect(host.textContent).toContain("the source file's precision");
+    expect(host.textContent).not.toContain("FCS 3.0");
+    expect(host.textContent).not.toContain("with 32-bit floating-point values");
   });
 });

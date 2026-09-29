@@ -74,6 +74,22 @@ function solve(b: number, w: number): number {
   return -1;
 }
 
+/**
+ * How far past one of logicle's parameter bounds, W <= M/2 and A <= M - 2W (Gating-ML 2.0 §6.4;
+ * Parks et al. 2006), a value may lie and still be taken as on it, as a fraction of M. A logicle
+ * written in decimal with A at M - 2W is on the bound, but the double the bound computes to can be
+ * a unit in the last place below the double A reads to: M = 4.42, W = 0.87 and A = 2.68 give
+ * M - 2W = 2.6799999999999997, and such a logicle was refused. With M from 3 to 5.5 and W and A
+ * written to two decimals, 14,915 of the logicles with A = M - 2W were refused, the largest excess
+ * 2.2e-16 of M; 1e-12 of M is thousands of times that and far below any difference a writer means.
+ */
+export const LOGICLE_BOUND_TOLERANCE = 1e-12;
+
+/** Whether `value` is within the logicle bound `bound` (at most it, allowing LOGICLE_BOUND_TOLERANCE of M). */
+export function withinLogicleBound(value: number, bound: number, M: number): boolean {
+  return value <= bound || value - bound <= LOGICLE_BOUND_TOLERANCE * Math.abs(M);
+}
+
 export class Logicle {
   readonly a: number;
   readonly b: number;

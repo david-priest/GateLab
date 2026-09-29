@@ -18,9 +18,11 @@
 // workspace that already holds a debarcoding strategy, in which case the exact QC chain above
 // the sample populations and the per-plane shapes are kept.
 
-import type { Gate, PolyRectGate, Population, PopulationMap, TransformSpec, Vertex } from "./models";
-import { isDnaChannel, massLabel } from "./barcodeMass";
+import type { Gate, PolyRectGate, Population, PopulationMap, RectangleBounds, TransformSpec, Vertex } from "./models";
+import { rectangleRule } from "./models";
+import { isDnaChannel, planeLabel } from "./barcodeMass";
 import { gateCorners, resolveGateSpace, toAsinhUnits, type GateSpaceContext } from "./gateSpace";
+import { transformPhrase } from "./gateSpaceBadge";
 
 /** x state then y state: "+-" is x positive, y negative. */
 export type BarcodeStateKey = "--" | "+-" | "-+" | "++";
@@ -55,6 +57,8 @@ export interface QcGateTemplate {
    * drawn against Time, whose span differs from file to file while the y limits do not.
    */
   xFull?: boolean;
+  /** A rectangle's edge rule; absent = closed, as every template rectangle was (models.ts). */
+  bounds?: RectangleBounds;
 }
 
 export interface QcPopulationTemplate {
@@ -273,7 +277,7 @@ function qcGateFromGate(gate: PolyRectGate, cofactor: number, context: GateSpace
   const axis = (spec: TransformSpec, channel: string): { kind: QcAxisTransform; cofactor?: number; convert: (v: number) => number } => {
     if (spec.kind === "identity") return { kind: "identity", convert: (v) => v };
     if (spec.kind === "asinh") return { kind: "asinh", cofactor: spec.cofactor, convert: (v) => v };
-    notes.push(`${gate.name}: its ${channel} axis is ${spec.kind}, which the file cannot name; written in arcsinh units at cofactor ${cofactor}, exact for a rectangle and approximate along a polygon's edges.`);
+    notes.push(`${gate.name}: its ${channel} axis is ${transformPhrase(spec)}, which the file cannot name; written in arcsinh units at cofactor ${cofactor}, exact for a rectangle and approximate along a polygon's edges.`);
     return { kind: "asinh", cofactor, convert: (v) => toAsinhUnits(spec, v, cofactor) };
   };
   const ax = axis(resolved.x, gate.x_channel);
@@ -289,6 +293,7 @@ function qcGateFromGate(gate: PolyRectGate, cofactor: number, context: GateSpace
     ...(display ? { transforms: { x: ax.kind, y: ay.kind } } : {}),
     ...(display && Object.keys(cofactors).length ? { cofactors } : {}),
     ...(gate.gate_type === "rectangle" && /^time$/i.test(gate.x_channel) ? { xFull: true } : {}),
+    ...(gate.gate_type === "rectangle" ? { bounds: rectangleRule(gate) } : {}),
     vertices,
   };
 }
@@ -341,7 +346,7 @@ export function learnBarcodeTemplate(
     const boxSize = (Math.max(...box.map((v) => v[0])) - Math.min(...box.map((v) => v[0]))) *
       (Math.max(...box.map((v) => v[1])) - Math.min(...box.map((v) => v[1])));
     learned.push({
-      plane: { x, y, xLabel: massLabel(x) ?? x, yLabel: massLabel(y) ?? y, gateNames: names, gateIds: ids as Record<BarcodeStateKey, string> },
+      plane: { x, y, xLabel: planeLabel(x), yLabel: planeLabel(y), gateNames: names, gateIds: ids as Record<BarcodeStateKey, string> },
       shapes: { states: states as Record<BarcodeStateKey, Vertex[]> },
       boxSize,
       gateIds: planeGates.map((g) => g.gate_id),

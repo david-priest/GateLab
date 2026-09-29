@@ -312,7 +312,10 @@ describe("Gating-ML self round-trip", () => {
 // FlowJo pins every sub-offset event to the floor of its log axis (y = 0), so a gate whose lower
 // edge sits on the floor holds those events. Declared as flog, the floor is y' = 1, and a reader
 // whose own floor lies below it drops them: on this fixture a corner at raw (0, 0) lost 424 of
-// 1,074 events on re-import. A rectangle edge at the floor is therefore written unbounded.
+// 1,074 events on re-import. Left unbounded but still declared as flog, the events at or below
+// zero, where flog is undefined, were still dropped by a standard reader (FlowKit: 36,480 of
+// 67,751 on the public PBMC file). A rectangle edge at the floor is therefore written in raw
+// space, unbounded, where every reader keeps them.
 describe("a wsplog rectangle at FlowJo's floor", () => {
   const sample = load();
   const fluor = sample.channels.filter((_, i) => sample.isLogicleChannel(i)).map((c) => c.key);
@@ -321,7 +324,7 @@ describe("a wsplog rectangle at FlowJo's floor", () => {
   // Raw corners at 0, which wsplog clamps to its floor.
   const floorRect: Vertex[] = [[0, 0], [25, 0], [25, 61], [0, 61]];
 
-  it("is written with no lower bound on the floored axes, and keeps every event through the trip", () => {
+  it("is written in raw space with no lower bound on the floored axes, and keeps every event through the trip", () => {
     const g = gateIn(sample, "floor rect", "rectangle", fx, fy, floorRect, { x: wsplogSpec, y: wsplogSpec });
     const stored = (g as unknown as { vertices: Vertex[] }).vertices;
     expect(Math.min(...stored.map((v) => v[0]))).toBe(0);
@@ -334,11 +337,17 @@ describe("a wsplog rectangle at FlowJo's floor", () => {
     const xml = exportGatingML({ ...ws, sample, format: "standard", timestamp: "t" });
     const dims = [...xml.matchAll(/<gating:dimension([^>]*)>/g)].map((m) => m[1]);
     expect(dims.length).toBe(2);
+    const maxes: number[] = [];
     for (const attrs of dims) {
       expect(attrs).not.toMatch(/gating:min=/);
-      expect(attrs).toMatch(/gating:max=/);
-      expect(attrs).toMatch(/gating:transformation-ref="Tr_Log_/);
+      expect(attrs).not.toMatch(/gating:transformation-ref=/);
+      maxes.push(Number(attrs.match(/gating:max="([^"]+)"/)![1]));
     }
+    // The raw corners the gate was drawn at: FlowJo's log is monotonic, so a raw bound is exact. It
+    // is the last raw value GateLab holds inside, which it decides on the log value in single
+    // precision, so it lies within that precision of the corner (exactBound).
+    expect(maxes[0]).toBeCloseTo(25, 4);
+    expect(maxes[1]).toBeCloseTo(61, 4);
 
     const back = roundTrip(sample, [g]).get(g.name)!;
     expect(moved(before, maskOf(sample, back))).toBe(0);

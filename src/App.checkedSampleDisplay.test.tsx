@@ -174,12 +174,28 @@ async function undo(): Promise<void> {
 }
 
 describe("App file selection and plot scope", () => {
+  // "1 files · all following".
+  it("says one file follows the tree in the singular", async () => {
+    act(() => root.render(<App />));
+    const input = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')].find(i => !i.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(input, "files", { configurable: true, value: [testFile("D1.fcs", 1)] });
+    await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
+    for (let i = 0; i < 100 && host.querySelectorAll(".gl-sample-row").length < 1; i++) await settle();
+    act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [1.05, 1.05]], x_channel: "FSC-A", y_channel: "SSC-A" }));
+    act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Create")!.click());
+    await settle();
+    expect(summary()).toBe("1 file · following");
+  });
+
   it("makes one file's gates the tree's: every file follows it, nothing is tailored, one Undo", async () => {
     act(() => root.render(<App />));
     const input = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')].find(i => !i.hasAttribute("webkitdirectory"))!;
     Object.defineProperty(input, "files", { configurable: true, value: [testFile("D1.fcs", 1), testFile("D2.fcs", 2), testFile("D3.fcs", 2)] });
     await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
-    await settle();
+    // The files load one at a time, yielding between them: one settle was not always enough under
+    // load, and the gate was then drawn before every file was in.
+    for (let i = 0; i < 100 && host.querySelectorAll(".gl-sample-row").length < 3; i++) await settle();
+    expect(host.querySelectorAll(".gl-sample-row")).toHaveLength(3);
     act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [1.05, 1.05]], x_channel: "FSC-A", y_channel: "SSC-A" }));
     act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Create")!.click());
     await settle();
@@ -199,7 +215,7 @@ describe("App file selection and plot scope", () => {
     expect(tailoredBadge("D1.fcs")).toBeNull();
     // The tree's gate list says which file tailored the gate.
     await editTree();
-    expect(host.querySelector(".gate-tailored-in")?.textContent).toBe("tailored in 1 files");
+    expect(host.querySelector(".gate-tailored-in")?.textContent).toBe("tailored in 1 file");
     expect(host.querySelector(".gate-tailored-in")?.getAttribute("title")).toBe("D2.fcs");
     await editFile();
 
@@ -232,7 +248,10 @@ describe("App file selection and plot scope", () => {
     const input = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')].find(i => !i.hasAttribute("webkitdirectory"))!;
     Object.defineProperty(input, "files", { configurable: true, value: [testFile("D1.fcs", 1), testFile("D2.fcs", 2), testFile("D3.fcs", 2)] });
     await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
-    await settle();
+    // The files load one at a time, yielding between them: one settle was not always enough under
+    // load, and the gate was then drawn before every file was in.
+    for (let i = 0; i < 100 && host.querySelectorAll(".gl-sample-row").length < 3; i++) await settle();
+    expect(host.querySelectorAll(".gl-sample-row")).toHaveLength(3);
     act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [1.05, 1.05]], x_channel: "FSC-A", y_channel: "SSC-A" }));
     act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Create")!.click());
     await settle();
@@ -298,7 +317,10 @@ describe("App file selection and plot scope", () => {
     const input = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')].find(i => !i.hasAttribute("webkitdirectory"))!;
     Object.defineProperty(input, "files", { configurable: true, value: [testFile("D1.fcs", 1), testFile("D2.fcs", 2), testFile("D3.fcs", 2)] });
     await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
-    await settle();
+    // The files load one at a time, yielding between them: one settle was not always enough under
+    // load, and the gate was then drawn before every file was in.
+    for (let i = 0; i < 100 && host.querySelectorAll(".gl-sample-row").length < 3; i++) await settle();
+    expect(host.querySelectorAll(".gl-sample-row")).toHaveLength(3);
     act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [1.05, 1.05]], x_channel: "FSC-A", y_channel: "SSC-A" }));
     const createPop = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find(i => i.parentElement?.textContent?.includes("Also create a population"))!;
     if (!createPop.checked) act(() => createPop.click());

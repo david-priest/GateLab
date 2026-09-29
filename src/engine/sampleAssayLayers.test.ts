@@ -1231,7 +1231,9 @@ describe("legacy embedded-$SPILLOVER bridge", () => {
     const gatingBefore = sample.gatingColumn(cd3);
     const spy = invalidationSpy(sample);
 
-    sample.setCompensation(true);
+    // An absent matrix has nothing to apply; a singular one is reported, and nothing changes.
+    if (spillover) expect(() => sample.setCompensation(true)).toThrow(/could not be applied/);
+    else sample.setCompensation(true);
 
     expect(sample.activeLayer).toBe("original");
     expect(sample.compensationEnabled).toBe(false);

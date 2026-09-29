@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { coreReducer, initialCoreState, type CoreState } from "./store";
+import { coreReducer, gatingKeyedByLiveTree, initialCoreState, recomputeGating, recomputeGatingUnder, recomputeOwnTreeGating, type CoreState } from "./store";
+import { Sample } from "./engine/sample";
+import type { FcsFile } from "./engine/fcs";
 import { cloneHierarchyTree, storeHierarchy, selectionAcrossHierarchies, type StoredHierarchy } from "./engine/hierarchies";
 import { copyTailoring } from "./engine/copyTailoring";
 import { gateGeometryEquals, tailoredGateIds } from "./engine/templateSync";
@@ -62,6 +64,17 @@ describe("gate-level revert", () => {
       : coreReducer(state, { type: "editGate", gateId: sourceId, vertices: [[30, 40], [100, 100]] });
     expect(gateGeometryEquals(state.stored_hierarchies[a.id].gates[id], state.gates[sourceId])).toBe(true);
     expect(state.stored_hierarchies[a.id].gates[a.gate_order[1]]).toEqual(before.gates[a.gate_order[1]]);
+  });
+
+  // A file whose $PnS labels a detector differently from the tree's file keeps its gate on its
+  // own channel for that detector. Reverting took the tree's channel too: one the file lacks.
+  it("keeps the copy's own axes, which name its own file's channels", () => {
+    let { state, a } = fixture();
+    const id = a.gate_order[0];
+    state = { ...state, gates: { ...state.gates, [id]: { ...moved(state.gates[id], 20), x_channel: "fsc-a" } as Gate } };
+    state = coreReducer(state, { type: "revertGateToGroup", gateId: id });
+    expect(state.gates[id].x_channel).toBe("fsc-a");
+    expect((state.gates[id] as unknown as { vertices: number[][] }).vertices).toEqual([[0, 0], [100, 100]]);
   });
 
   it("does nothing without a valid linked source", () => {
@@ -200,5 +213,54 @@ describe("one browsing position across files", () => {
     expect(undone.selected_gate_id).toBe(a.gate_order[0]);
     expect(undone.gates[undone.selected_gate_id!]).toBeDefined();
     expect(coreReducer(undone, { type: "redo" }).selected_gate_id).toBe(b.gate_order[0]);
+  });
+});
+
+// The viewed file under its own tree while the tree is live (App's Gating tab): each population of
+// the tree takes its counterpart's events and counts in the file's copy, the tree's gates are
+// counted within them, and a population the copy has no counterpart for holds nothing.
+describe("a file's gating under its own tree, keyed by the live tree", () => {
+  it("takes each population from its counterpart, and none where there is no counterpart", () => {
+    const { state: withCopyLive, a, template } = fixture();
+    const state = coreReducer(withCopyLive, { type: "switchHierarchy", id: template.id });
+    const n = 200;
+    const fsc = Float32Array.from({ length: n }, (_, i) => i);
+    const ssc = Float32Array.from({ length: n }, () => 50);
+    const sample = new Sample({
+      version: "FCS3.1", nEvents: n, instrument: "flow", keywords: {},
+      channels: [
+        { index: 0, name: "FSC-A", marker: null, bits: 32, range: 262144 },
+        { index: 1, name: "SSC-A", marker: null, bits: 32, range: 262144 },
+      ],
+      columns: [fsc, ssc], spillover: null,
+    } as unknown as FcsFile);
+    // The copy tailors Cells to FSC 0..150; the tree's Cells is 0..100.
+    const cellsCopy = a.gate_order[0];
+    const tailored = { ...a, gates: { ...a.gates, [cellsCopy]: { ...a.gates[cellsCopy], vertices: [[0, 0], [150, 100]] } as Gate } };
+    const own: CoreState = { ...state, gates: tailored.gates, gate_order: tailored.gate_order, populations: tailored.populations, root_population_id: tailored.root_population_id };
+    const toCopy = Object.fromEntries(Object.entries(a.source_population_ids!).map(([copyId, liveId]) => [liveId, copyId]));
+    const cellsLive = popId(storeHierarchy(state.hierarchies[0], state), "Cells");
+    const cd4Live = popId(storeHierarchy(state.hierarchies[0], state), "CD4_positive");
+    const under = recomputeGatingUnder(sample, state, own, (pid) => toCopy[pid] ?? null);
+    const tree = recomputeGating(sample, state);
+    // Rectangles drawn in GateLab are half-open: FSC 0 to 99 in the tree's, 0 to 149 in the copy's.
+    expect(tree.stats.event_count[cellsLive]).toBe(100);
+    expect(under.stats.event_count[cellsLive]).toBe(150);
+    expect(under.stats.event_count[cd4Live]).toBe(100);
+    expect(under.masks[cellsLive].reduce((s, v) => s + v, 0)).toBe(150);
+    // The tree's gates, which the plot draws, are counted within the file's own populations.
+    expect(Object.keys(under.gateMasks).sort()).toEqual(Object.keys(tree.gateMasks).sort());
+    // No counterpart: no event and no count.
+    const orphan = recomputeGatingUnder(sample, state, own, (pid) => (pid === cd4Live ? null : toCopy[pid] ?? null));
+    expect(orphan.stats.event_count[cd4Live]).toBeNull();
+    expect(orphan.masks[cd4Live].reduce((s, v) => s + v, 0)).toBe(0);
+    // An edit to the tree's gate moves the gate counted on the plot, and not the file's own
+    // populations, whose gating is kept (the App keeps it while only the tree changes).
+    const ownGating = recomputeOwnTreeGating(sample, own);
+    const cellsTree = state.gate_order[0];
+    const edited = coreReducer(state, { type: "editGate", gateId: cellsTree, vertices: [[0, 0], [20, 100]] });
+    const keyed = gatingKeyedByLiveTree(sample, edited, ownGating, own.root_population_id!, (pid) => toCopy[pid] ?? null);
+    expect(keyed.stats.event_count[cellsLive]).toBe(150);
+    expect(keyed.gateMasks[cellsTree].reduce((s, v) => s + v, 0)).toBe(20);
   });
 });
