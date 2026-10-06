@@ -8,6 +8,8 @@ import { figureBlockFrame } from "./ui/LayoutFigure";
 import { proportionsBlockFrame } from "./ui/LayoutProportions";
 import { buildProportionsModel, defaultProportionsSettings, type ProportionsSettings } from "./engine/proportionsModel";
 import pkg from "../package.json";
+import brandMark from "./assets/brand/gatelab-mark.png";
+import brandWordmark from "./assets/brand/gatelab-wordmark.png";
 import { clearPersistedTabState, readPersistedTabValues, readProportionsSettings, restorePlottingState, savedPlottingState, writeProportionsSettings } from "./ui/tabState";
 import { historyShortcutAction } from "./ui/historyShortcuts";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type GatingPlotActions, type NewGate } from "./plots/GatingPlot";
@@ -11068,7 +11070,10 @@ export default function App() {
             stating where someone comparing two tools will actually find it. Focusable so it is
             reachable from the keyboard, not only on hover. */}
         <span className="gl-brand" tabIndex={0}>
-          <strong>{isSceHost ? "GateLabR" : "GateLab"}</strong>
+          {/* The logo: the three plots as the mark, then the wordmark, both cut from the artwork.
+              GateLabR keeps its name in text, since the wordmark says GateLab. */}
+          <img className="gl-brand-mark" src={brandMark} alt="" />
+          {isSceHost ? <strong>GateLabR</strong> : <img className="gl-brand-wordmark" src={brandWordmark} alt="GateLab" />}
           <span className="gl-brand-card" role="tooltip">
             <span className="gl-brand-card-head">
               {isSceHost ? "GateLabR" : "GateLab"} v{pkg.version}

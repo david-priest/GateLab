@@ -2,15 +2,27 @@
 
 An MCP server that lets an agent (a Claude Code session, or anything that speaks MCP) read the gating in an open GateLab tab and propose gates, which appear in the tab at once. The tab does all the gating: the relay only carries requests to it and answers back. Works with GateLab in the browser and with GateLabR's tab alike.
 
-## Setup
+## Setup, step by step
 
-The server needs Node (22 or later) and the repo's dev dependencies (`npm install`). Register it once for every project:
+1. **Get the source on the computer the agent runs on.** The server is part of GateLab's repository; a hosted copy of the app (GitHub Pages) cannot start it for you. Node.js 22 or later is needed.
 
-```bash
-claude mcp add --scope user gatelab -- node /path/to/GateLab/tools/agent-mcp/server.mjs
-```
+   ```bash
+   git clone https://github.com/david-priest/GateLab && cd GateLab && npm install
+   ```
 
-or keep it to this repo with the `.mcp.json` at the root. Options: `--port N` (default 48123), `--writer NAME` (the name on the gates the agent makes, default "agent"), `--token T` (otherwise a token is made once and kept in `~/.gatelab/agent-relay.json`, so the address stays the same from one session to the next).
+2. **Register the server with the agent**, once. For Claude Code:
+
+   ```bash
+   claude mcp add --scope user gatelab -- node "$PWD/tools/agent-mcp/server.mjs"
+   ```
+
+   For a session that runs inside this folder, the `.mcp.json` at the repository root does the same. Any other MCP client registers `node tools/agent-mcp/server.mjs` the way it registers a stdio server. Options: `--port N` (default 48123), `--writer NAME` (the name on the gates the agent makes, default "agent"), `--token T` (otherwise a token is made once and kept in `~/.gatelab/agent-relay.json`, so the address stays the same from one session to the next).
+
+3. **Start the agent's session.** The server starts with it, listens for a tab, and prints its address on stderr: `ws://127.0.0.1:48123/?token=…`. The same address is in `~/.gatelab/agent-relay.json`, and the agent can tell you it (`gatelab_status`).
+
+4. **Connect the tab** (next section). The agent's first tool call then reaches your gating.
+
+What the agent reads (counts, histograms, medians, pictures of the plot) goes to the agent's model provider; the FCS files stay on the computer. The relay accepts connections from this computer only, and only with its token.
 
 ## Connecting a tab
 

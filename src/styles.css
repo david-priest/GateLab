@@ -85,7 +85,11 @@ input[type="number"]::-webkit-outer-spin-button {
    CSS-only: no state, and it cannot get stuck open. `position: relative` on the wrapper anchors
    the card; the header itself must not clip it, so the card is fixed-width and left-aligned to
    the wrapper rather than centred (the name sits hard against the left edge of the window). */
-.gl-brand { position: relative; display: inline-block; cursor: help; }
+.gl-brand { position: relative; display: inline-flex; align-items: center; gap: 10px; flex: none; cursor: help; }
+/* The logo's mark (the three plots) and wordmark are PNGs cut from the artwork at four times these
+   sizes, with the paper knocked out, so they sit on the header's own colour at any pixel density. */
+.gl-brand-mark { display: block; height: 26px; width: auto; }
+.gl-brand-wordmark { display: block; height: 22px; width: auto; }
 .gl-brand:focus-visible { outline: 2px solid var(--accent, #3b82f6); outline-offset: 2px; border-radius: 3px; }
 .gl-brand-card {
   position: absolute;
@@ -3378,8 +3382,14 @@ input[type="number"]::-webkit-outer-spin-button {
 .pop-tree-gate-badge.is-tailored { box-shadow: 0 0 0 1.5px #fff, 0 0 0 3px #7b3fa0; }
 /* A gate an agent proposed: the same badge in the agent's own colour, the rationale in its tooltip. */
 .gate-tailored-badge.gate-agent-badge { color: #b4541a; background: color-mix(in srgb, #b4541a 12%, transparent); border-color: color-mix(in srgb, #b4541a 40%, transparent); }
-.gl-agent-dialog { max-width: 460px; }
+/* Taller than most dialogs, so it scrolls in a short window rather than losing its title. */
+.gl-agent-dialog { width: 560px; max-width: calc(100vw - 24px); max-height: calc(100vh - 24px); overflow-y: auto; box-sizing: border-box; }
 .gl-agent-dialog p { font-size: 12.5px; color: var(--muted); margin: 0 0 10px; }
+.gl-agent-dialog .gl-agent-setup-head { color: var(--ink, #1f2937); font-weight: 600; margin-bottom: 4px; }
+.gl-agent-setup { font-size: 12.5px; color: var(--muted); margin: 0 0 10px; padding-left: 20px; }
+.gl-agent-setup li { margin: 0 0 6px; }
+.gl-agent-setup code { display: block; margin: 4px 0 2px; padding: 4px 6px; font-size: 11.5px; background: var(--panel); border: 1px solid var(--line); border-radius: 3px; white-space: pre-wrap; word-break: break-all; color: var(--ink, #1f2937); }
+.gl-agent-copy { font-size: 11px; padding: 1px 8px; margin-top: 2px; }
 .gl-agent-dialog .gl-agent-problem { color: #b42318; }
 
 /* Header menus: Workspace, Import and Export. The sidebar used to stack their actions as

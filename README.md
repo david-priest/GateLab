@@ -60,23 +60,41 @@ cites the data. The demo file ships beside the app as `demo/gatelab-demo.gatelab
 
 ### Agents: letting an AI assistant draw gates
 
-An agent can read the gating in an open GateLab tab and propose gates, which appear in your
-tab at once as ordinary gates with a badge saying who made them and why; you move, rename or
-undo them like any other, and saving stays yours. The agent reaches the tab through a small
-relay that runs on your computer as an [MCP](https://modelcontextprotocol.io) server:
+An agent (Claude Code, or anything that speaks MCP) can read the gating in an open GateLab
+tab and propose gates, which appear in your tab at once as ordinary gates with a badge
+saying who made them and why; you move, rename or undo them like any other, and saving stays
+yours. The agent reaches the tab through a small relay that runs on your computer as an
+[MCP](https://modelcontextprotocol.io) server. Setting it up, once:
 
-```sh
-npm install
-claude mcp add --scope user gatelab -- node "$PWD/tools/agent-mcp/server.mjs"
-```
+1. Get GateLab's source on the computer the agent runs on and install its dependencies
+   (Node.js 22 or later). The server is in `tools/agent-mcp`; the hosted app cannot start it
+   for you.
 
-(or the `.mcp.json` at the repository root, for Claude Code sessions in this folder). Then
-in GateLab open **Agent ▸ Connect to an agent…** and paste the address the session prints;
-`gatelab_status` returns it. The relay listens only on this computer and admits one tab at a
-time. [tools/agent-mcp/README.md](tools/agent-mcp/README.md) covers setup and
+   ```sh
+   git clone https://github.com/david-priest/GateLab && cd GateLab && npm install
+   ```
+
+2. Register the server with the agent. For Claude Code:
+
+   ```sh
+   claude mcp add --scope user gatelab -- node "$PWD/tools/agent-mcp/server.mjs"
+   ```
+
+   (a session run inside this folder picks it up from the `.mcp.json` at the root instead).
+
+3. Start the agent's session. The server starts with it and prints its address,
+   `ws://127.0.0.1:48123/?token=…`; the same address is written to
+   `~/.gatelab/agent-relay.json`, and the agent can tell you it (`gatelab_status`).
+
+4. In GateLab open **Agent ▸ Connect to an agent…** and paste the address; the dialog repeats
+   these steps. GateLabR connects its tab itself with `launchGatingApp(sce, agent = TRUE)`.
+
+What the agent reads (counts, histograms, medians, pictures of the plot) goes to the agent's
+model provider; the FCS files stay on your computer. The relay accepts connections from this
+computer only, and only with its token.
+[tools/agent-mcp/README.md](tools/agent-mcp/README.md) covers the options and
 [tools/agent-mcp/AGENT_SPEC.md](tools/agent-mcp/AGENT_SPEC.md) is the specification the
 agent itself reads: the data it sees, the commands it can send, and the rules it gates by.
-GateLabR connects its tab the same way with `launchGatingApp(sce, agent = TRUE)`.
 
 ## Features
 
