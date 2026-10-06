@@ -6,6 +6,10 @@
 // gate's channels, with the gate overlay + pct_pass. Masks are computed in GATING space (raw
 // for flow) so counts match GateLab's population tree; the plotted values are display-space.
 // When both forward+back are shown, the final population's events overlay in orange.
+//
+// The pieces are exported one by one (the path's masks, the even thinning, a step from a mask,
+// the payload from several files' parts) so pooledStrategy.ts can draw the same steps from
+// several files' events together.
 
 import type { Sample } from "./sample";
 import { ellipseBoundary } from "./ellipse";
@@ -14,6 +18,7 @@ import type { Gate, GateRef, PopulationMap } from "./models";
 import { columnsForGate, getGateMask, type GateAssayData } from "./gates";
 import type { AxisTicks } from "./ticks";
 import { displayLabelOffset, polygonOutline } from "../plots/gatePayload";
+import { allocateCombinedSampleCaps } from "./multiSamplePlot";
 
 const round1 = (x: number): number => Math.round(x * 10) / 10;
 
@@ -104,22 +109,36 @@ export interface StrategyOptions {
   maxEvents: number; // 0/Infinity = all
 }
 
-export function computeGatingStrategy(
+/** One gate of a population's path, with the events before and after it, before any thinning. */
+export interface StrategyStepMask {
+  gate: Gate;
+  ref: GateRef;
+  popName: string;
+  /** The running population before this gate: 1 for an event still in it. */
+  before: Uint8Array;
+  nBefore: number;
+  nAfter: number;
+}
+
+/**
+ * The gates of a population's path (root→pop when `fullPath`, else the population's own), each
+ * applied in turn on a running mask in gating space. Every gate of the path is returned, one
+ * whose running population is empty with zero counts, so two files' paths line up step by step.
+ */
+export function strategyStepMasks(
   sample: Sample,
   gates: Record<string, Gate>,
   populations: PopulationMap,
   rootId: string,
   populationId: string,
-  opts: StrategyOptions,
-): StrategyStep[] {
-  const useAll = !Number.isFinite(opts.maxEvents) || opts.maxEvents <= 0;
-  const cap = opts.maxEvents;
+  fullPath: boolean,
+): StrategyStepMask[] {
   const pop = populations[populationId];
   if (!pop) return [];
 
   // Ordered gate refs (root→pop if fullPath, else this pop's).
   const allRefs: { ref: GateRef; popName: string }[] = [];
-  if (opts.fullPath) {
+  if (fullPath) {
     const ancestry: string[] = [];
     let cur: string | null = populationId;
     while (cur && cur !== rootId) {
@@ -138,7 +157,7 @@ export function computeGatingStrategy(
   const data: GateAssayData = sample.gateAssayData();
   const n = sample.fcs.nEvents;
   let running = new Uint8Array(n).fill(1);
-  const steps: StrategyStep[] = [];
+  const steps: StrategyStepMask[] = [];
 
   for (const { ref, popName } of allRefs) {
     const gate = gates[ref.gate_id];
@@ -146,7 +165,6 @@ export function computeGatingStrategy(
 
     let nBefore = 0;
     for (let i = 0; i < n; i++) if (running[i]) nBefore++;
-    if (nBefore === 0) break;
 
     const gm = getGateMask(gate, columnsForGate(data, gate), ref.quadrant);
     const newMask = new Uint8Array(n);
@@ -157,51 +175,96 @@ export function computeGatingStrategy(
       newMask[i] = v;
       if (v) nAfter++;
     }
-    const pctPass = nBefore > 0 ? round1((nAfter / nBefore) * 100) : 0;
-
-    // Parent events (running BEFORE this gate), downsampled evenly (round(seq(1,N,len=cap))).
-    const parentIdx: number[] = [];
-    for (let i = 0; i < n; i++) if (running[i]) parentIdx.push(i);
-    let sampleIdx = parentIdx;
-    if (!useAll && parentIdx.length > cap) {
-      sampleIdx = new Array(cap);
-      const denom = cap > 1 ? cap - 1 : 1;
-      for (let k = 0; k < cap; k++) sampleIdx[k] = parentIdx[Math.round((k * (parentIdx.length - 1)) / denom)];
-    }
-
-    const xIdx = sample.index(gate.x_channel);
-    const yIdx = sample.index(gate.y_channel);
-    const xCol = xIdx !== undefined ? sample.displayColumn(xIdx) : null;
-    const yCol = yIdx !== undefined ? sample.displayColumn(yIdx) : null;
-    const x = sampleIdx.map((i) => (xCol ? xCol[i] : NaN));
-    const y = sampleIdx.map((i) => (yCol ? yCol[i] : NaN));
-
-    const displayVerts = displayVerticesOf(sample, gate);
-
-    steps.push({
-      gate_id: gate.gate_id,
-      gate_name: gate.name,
-      x_channel: gate.x_channel,
-      y_channel: gate.y_channel,
-      gate_type: gate.gate_type,
-      color: gate.color,
-      label_offset: gate.label_offset,
-      include: ref.include,
-      x,
-      y,
-      displayVertices: displayVerts,
-      outline: outlineOf(sample, gate, displayVerts),
-      n_before: nBefore,
-      n_after: nAfter,
-      n_total: n,
-      pct_pass: pctPass,
-      pct_total: n > 0 ? round1((nAfter / n) * 100) : 0,
-      pop_name: popName,
-    });
-
+    steps.push({ gate, ref, popName, before: running, nBefore, nAfter });
     running = newMask;
   }
 
+  return steps;
+}
+
+/** The values thinned evenly to `cap` when there are more (0 or Infinity: all), as R's round(seq(1, N, length.out = cap)). */
+export function thinEvenly<T>(values: T[], cap: number): T[] {
+  if (!Number.isFinite(cap) || cap <= 0 || values.length <= cap) return values;
+  const out = new Array<T>(cap);
+  const denom = cap > 1 ? cap - 1 : 1;
+  for (let k = 0; k < cap; k++) out[k] = values[Math.round((k * (values.length - 1)) / denom)];
+  return out;
+}
+
+/** The indices of the set events, thinned evenly to `cap` (0 or Infinity: all). */
+export function evenIndices(mask: Uint8Array, cap: number): number[] {
+  const all: number[] = [];
+  for (let i = 0; i < mask.length; i++) if (mask[i]) all.push(i);
+  return thinEvenly(all, cap);
+}
+
+/** The events' values on a channel in display space; NaN when the file lacks the channel. */
+export function displayValues(sample: Sample, channel: string, indices: readonly number[]): number[] {
+  const idx = sample.index(channel);
+  const col = idx !== undefined ? sample.displayColumn(idx) : null;
+  return indices.map((i) => (col ? col[i] : NaN));
+}
+
+/**
+ * A step as drawn: the mask's gate on `sample`'s display space with the points and counts
+ * given. `drawn` false leaves the gate's boundary off the plot (its percentage stays in the
+ * title), which is how a pooled step shows a gate the files do not hold alike.
+ */
+export function strategyStepOf(
+  sample: Sample,
+  mask: StrategyStepMask,
+  x: number[],
+  y: number[],
+  counts: { nBefore: number; nAfter: number; nTotal: number },
+  drawn = true,
+): StrategyStep {
+  const gate = mask.gate;
+  const displayVerts = drawn ? displayVerticesOf(sample, gate) : [];
+  return {
+    gate_id: gate.gate_id,
+    gate_name: gate.name,
+    x_channel: gate.x_channel,
+    y_channel: gate.y_channel,
+    gate_type: gate.gate_type,
+    color: gate.color,
+    label_offset: gate.label_offset,
+    include: mask.ref.include,
+    x,
+    y,
+    displayVertices: displayVerts,
+    outline: drawn ? outlineOf(sample, gate, displayVerts) : undefined,
+    n_before: counts.nBefore,
+    n_after: counts.nAfter,
+    n_total: counts.nTotal,
+    pct_pass: counts.nBefore > 0 ? round1((counts.nAfter / counts.nBefore) * 100) : 0,
+    pct_total: counts.nTotal > 0 ? round1((counts.nAfter / counts.nTotal) * 100) : 0,
+    pop_name: mask.popName,
+  };
+}
+
+export function computeGatingStrategy(
+  sample: Sample,
+  gates: Record<string, Gate>,
+  populations: PopulationMap,
+  rootId: string,
+  populationId: string,
+  opts: StrategyOptions,
+): StrategyStep[] {
+  const n = sample.fcs.nEvents;
+  const steps: StrategyStep[] = [];
+  for (const mask of strategyStepMasks(sample, gates, populations, rootId, populationId, opts.fullPath)) {
+    // The path ends where its population runs out.
+    if (mask.nBefore === 0) break;
+    // Parent events (running BEFORE this gate), downsampled evenly (round(seq(1,N,len=cap))).
+    const indices = evenIndices(mask.before, opts.maxEvents);
+    steps.push(strategyStepOf(
+      sample,
+      mask,
+      displayValues(sample, mask.gate.x_channel, indices),
+      displayValues(sample, mask.gate.y_channel, indices),
+      { nBefore: mask.nBefore, nAfter: mask.nAfter, nTotal: n },
+    ));
+  }
   return steps;
 }
 
@@ -233,6 +296,12 @@ export interface StrategyPayloadOptions {
   contextTitle?: string;
 }
 
+/** One file on a strategy plot: its sample and, for back-gating, the final population's events. */
+export interface StrategyPart {
+  sample: Sample;
+  finalMask: Uint8Array | null;
+}
+
 /** Assemble the object passed to CytofMiniPlot.renderStrategyGrid. */
 export function buildStrategyPayload(
   sample: Sample,
@@ -241,6 +310,30 @@ export function buildStrategyPayload(
   globalScales: Record<string, [number, number]>,
   opts: StrategyPayloadOptions,
 ): Record<string, unknown> {
+  return strategyPayload([{ sample, finalMask }], steps, globalScales, opts);
+}
+
+/**
+ * The payload for steps pooled over several files: the first file's axes, ticks and labels, a
+ * channel's range over every file when no global scale sets it, and the back-gated events of
+ * every file with the cap shared out by population size.
+ */
+export function buildPooledStrategyPayload(
+  parts: readonly StrategyPart[],
+  steps: StrategyStep[],
+  globalScales: Record<string, [number, number]>,
+  opts: StrategyPayloadOptions,
+): Record<string, unknown> {
+  return strategyPayload(parts, steps, globalScales, opts);
+}
+
+function strategyPayload(
+  parts: readonly StrategyPart[],
+  steps: StrategyStep[],
+  globalScales: Record<string, [number, number]>,
+  opts: StrategyPayloadOptions,
+): Record<string, unknown> {
+  const sample = parts[0].sample;
   const showForward = opts.gateView.includes("forward");
   const showBack = opts.gateView.includes("back");
   const useAll = !Number.isFinite(opts.maxEvents) || opts.maxEvents <= 0;
@@ -254,27 +347,43 @@ export function buildStrategyPayload(
   }
   // GLOBAL scale per channel: the global-scale override, else the channel's full display
   // range — identical to the main Gating plot and every other panel (no per-plot fitting).
+  // Pooled, the range covers every file's values.
   const stableRange = new Map<string, [number, number]>();
   for (const ch of channels) {
-    const idx = sample.index(ch);
-    if (idx === undefined) continue;
-    stableRange.set(ch, globalScales[ch] ?? computeRangeFromValues(sample.displayColumn(idx)));
+    if (sample.index(ch) === undefined) continue;
+    if (globalScales[ch]) {
+      stableRange.set(ch, globalScales[ch]);
+      continue;
+    }
+    let range: [number, number] | null = null;
+    for (const part of parts) {
+      const idx = part.sample.index(ch);
+      if (idx === undefined) continue;
+      const own = computeRangeFromValues(part.sample.displayColumn(idx));
+      range = range ? [Math.min(range[0], own[0]), Math.max(range[1], own[1])] : own;
+    }
+    if (range) stableRange.set(ch, range);
   }
 
-  // Back-gated (final population) display values on each step's channels, downsampled.
+  // Back-gated (final population) display values on each step's channels, each file's thinned
+  // to its share of the cap.
+  const finalCounts = parts.map((part) => {
+    let count = 0;
+    if (part.finalMask) for (let i = 0; i < part.finalMask.length; i++) if (part.finalMask[i]) count++;
+    return count;
+  });
+  const backCaps = useAll ? finalCounts : allocateCombinedSampleCaps(finalCounts, cap);
   const backValues = (ch: string): number[] => {
-    const idx = sample.index(ch);
-    if (!finalMask || idx === undefined) return [];
-    const col = sample.displayColumn(idx);
-    const vals: number[] = [];
-    for (let i = 0; i < finalMask.length; i++) if (finalMask[i]) vals.push(col[i]);
-    if (!useAll && vals.length > cap) {
-      const out = new Array<number>(cap);
-      const denom = cap > 1 ? cap - 1 : 1;
-      for (let k = 0; k < cap; k++) out[k] = vals[Math.round((k * (vals.length - 1)) / denom)];
-      return out;
-    }
-    return vals;
+    const out: number[][] = [];
+    parts.forEach((part, index) => {
+      const idx = part.sample.index(ch);
+      if (!part.finalMask || idx === undefined) return;
+      const col = part.sample.displayColumn(idx);
+      const vals: number[] = [];
+      for (let i = 0; i < part.finalMask.length; i++) if (part.finalMask[i]) vals.push(col[i]);
+      out.push(thinEvenly(vals, useAll ? 0 : Math.max(1, backCaps[index])));
+    });
+    return out.flat();
   };
 
   const stepsJson = steps.map((s) => {

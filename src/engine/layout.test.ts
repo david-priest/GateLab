@@ -71,6 +71,43 @@ describe("layout workspace persistence", () => {
     });
   });
 
+  it("keeps a plot's pool of files through a save and a load, each file once, and drops an empty one", () => {
+    const sheet = (pool: unknown) => normalizeLayoutWorkspace({
+      version: 2,
+      activeSheetId: "s",
+      sheets: [{
+        id: "s", name: "Pooled", width: 900, height: 700,
+        items: [{
+          id: "p", x: 0, y: 0, width: 200, height: 200, z: 1,
+          recipe: { kind: "biplot", sampleId: "D1", populationId: "root", xChannel: "FSC-A", yChannel: "SSC-A", displayMode: "pseudocolor", pool },
+        }],
+      }],
+    }).sheets[0].items[0].recipe;
+    expect(sheet({ sampleIds: ["D1", "D2", "D1", "", "D3"] })).toMatchObject({ pool: { sampleIds: ["D1", "D2", "D3"] } });
+    expect(sheet({ sampleIds: [] })).not.toHaveProperty("pool");
+    expect(sheet("D1,D2")).not.toHaveProperty("pool");
+    expect(sheet(undefined)).not.toHaveProperty("pool");
+    // A clone's list is its own: the undo snapshot does not change when the pool is edited.
+    const workspace = createDefaultLayoutWorkspace();
+    workspace.sheets[0].items.push({
+      id: "p", x: 0, y: 0, width: 200, height: 200, z: 1,
+      recipe: { kind: "biplot", sampleId: "D1", populationId: "root", xChannel: "FSC-A", yChannel: "SSC-A", displayMode: "pseudocolor", pool: { sampleIds: ["D1", "D2"] } },
+    });
+    const cloned = cloneLayoutWorkspace(workspace);
+    const recipe = cloned.sheets[0].items[0].recipe;
+    if (recipe.kind !== "biplot") throw new Error("a biplot");
+    recipe.pool!.sampleIds.push("D3");
+    expect((workspace.sheets[0].items[0].recipe as { pool: { sampleIds: string[] } }).pool.sampleIds).toEqual(["D1", "D2"]);
+  });
+
+  it("lets a plot draw every event of a pooled SCE: the event cap goes up to five million, and 0 is every event", () => {
+    expect(normalizeLayoutStyle({ maxEvents: 1_000_000 }).maxEvents).toBe(1_000_000);
+    expect(normalizeLayoutStyle({ maxEvents: 9_000_000 }).maxEvents).toBe(5_000_000);
+    expect(normalizeLayoutStyle({ maxEvents: 0 }).maxEvents).toBe(0);
+    expect(normalizeLayoutStyle({ maxEvents: 100 }).maxEvents).toBe(500);
+    expect(DEFAULT_LAYOUT_STYLE.maxEvents).toBe(50000);
+  });
+
   it("recovers malformed presentation state without touching scientific workspace data", () => {
     const normalized = normalizeLayoutWorkspace({ version: 99, sheets: "broken" });
     expect(normalized.version).toBe(2);

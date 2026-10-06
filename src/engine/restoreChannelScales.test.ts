@@ -86,9 +86,11 @@ describe("workspace transform restoration", () => {
     expect(s.currentScatterCofactor(0)).toBe(150);
     expect(s.currentFluorCofactor(2)).toBe(150);
     expect(s.currentLogicleW(2)).toBe(s.ownAutoLogicleW(2));
+    // Saved and opened again, into a registry of its own that the reopened file reads from.
     const reopened = sample();
+    const reopenedScales = new ChannelScales();
     restoreChannelScales(
-      new ChannelScales(),
+      reopenedScales,
       [reopened],
       [
         {
@@ -100,6 +102,8 @@ describe("workspace transform restoration", () => {
       ],
       0,
     );
+    reopened.attachChannelScales(reopenedScales);
     expect(reopened.transformSpec("FSC-A")).toEqual(s.transformSpec("FSC-A"));
+    expect(reopened.transformSpec("SSC-A")).toEqual(s.transformSpec("SSC-A"));
   });
 });

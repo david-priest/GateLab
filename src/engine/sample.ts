@@ -277,6 +277,15 @@ export interface SampleOpts {
   /** CyTOF arcsinh cofactor (default 5). */
   cytofCofactor?: number;
   /**
+   * The SCE assay a hosted sample was built from. A linear assay goes through the instrument
+   * transforms as a file does. A display-space assay (an SCE's `exprs`) is drawn as stored: its
+   * values are put back to nominal linear ones on load and drawn through the arcsinh they are in
+   * (hostedSample.ts), so a gate drawn on it and one drawn on counts share a space, and its
+   * cofactor is the assay's, not a setting. The id keeps one assay's axis ranges and display
+   * caches apart from another's, whose values are not interchangeable.
+   */
+  hostedAssay?: { id: string; space: "linear" | "display" };
+  /**
    * Workspace-wide owner of display scales. When supplied, logicle W and the scatter scale are
    * read from and written to it, so every file drawn together shares one transform per channel
    * — including files loaded after the setting was made. Omitted in unit tests and any
@@ -514,10 +523,21 @@ export class Sample {
     return this.instrument === "flow" ? "raw" : "display";
   }
 
+  /** The SCE assay this sample draws, for a hosted sample; null for a file. */
+  get hostedAssayId(): string | null {
+    return this.hostedAssay?.id ?? null;
+  }
+
+  /** The drawn assay's space: "display" for one drawn as stored; null for a file. */
+  get hostedAssaySpace(): "linear" | "display" | null {
+    return this.hostedAssay?.space ?? null;
+  }
+
   // Transforms are built lazily per channel: a logicle transform sorts the full
   // column, so eagerly building all of them is O(nChannels · n·log n) — pathological
   // for wide spectral panels (100s of channels). Only displayed channels get built.
   private cytofCofactor: number;
+  private readonly hostedAssay: { id: string; space: "linear" | "display" } | null;
   /** User-set flow-scatter cofactors, keyed by resolved channel index. */
   private readonly scatterCofactorOverride = new Map<number, number>();
   private readonly transformCache = new Map<number, ChannelTransform>();
@@ -575,6 +595,7 @@ export class Sample {
     this.fcs = fcs;
     this.detectedInstrument = fcs.instrument;
     this.cytofCofactor = opts.cytofCofactor ?? 5;
+    this.hostedAssay = opts.hostedAssay ?? null;
     this.channels = resolveChannels(fcs);
     this.channels.forEach((c, i) => this.byName.set(c.key, i));
     const pnnToKey = new Map<string, string>();
@@ -640,6 +661,7 @@ export class Sample {
         .sort(([left], [right]) => left.localeCompare(right));
     return JSON.stringify([
       this.activeAssayBindingKey,
+      this.hostedAssay?.id ?? null,
       this.instrument,
       this.instrument === "cytof" ? this.cytofCofactor : null,
       this.instrument === "flow" ? orderedOverrides(this.wOverride) : [],
@@ -662,7 +684,7 @@ export class Sample {
       // coordinates computed under arcsinh while the gate outline, which is transformed
       // live from raw space, moved to the new scale — the gate appeared to jump off its
       // own events while the event count stayed correct.
-      this.instrument === "flow" ? [...this.scatterLinear].map((i) => this.channels[i]?.key ?? `#${i}`).sort() : [],
+      this.instrument === "flow" ? [...this.scatterArcsinh].map((i) => this.channels[i]?.key ?? `#${i}`).sort() : [],
       // Same reasoning for the fluorescence arcsinh choice: it swaps logicle for asinh, so
       // display coordinates computed under the old transform must not be reused.
       this.instrument === "flow" ? [...this.fluorArcsinh].map((i) => this.channels[i]?.key ?? `#${i}`).sort() : [],
@@ -678,10 +700,11 @@ export class Sample {
    * are not interchangeable.
    */
   get workspaceScaleContextKey(): string {
-    return JSON.stringify([
-      this.activeLayer,
-      this.instrument,
-    ]);
+    // A hosted sample's key carries the assay it draws: one assay's frame is not another's. A
+    // file's key is as it always was, which hand-built keys elsewhere rely on.
+    return JSON.stringify(this.hostedAssay
+      ? [this.activeLayer, this.instrument, this.hostedAssay.id]
+      : [this.activeLayer, this.instrument]);
   }
 
   /**
@@ -690,7 +713,7 @@ export class Sample {
    * active layer is left out on purpose.
    */
   get lockedScaleContextKey(): string {
-    return JSON.stringify([this.instrument]);
+    return JSON.stringify(this.hostedAssay ? [this.instrument, this.hostedAssay.id] : [this.instrument]);
   }
 
   /** Exact active assay + display-transform identity for one channel's annotations. */
@@ -713,6 +736,9 @@ export class Sample {
     }
     return JSON.stringify([
       this.activeAssayBindingKey,
+      // One assay's coordinates are not another's: a division fitted on counts is not valid on
+      // a corrected exprs, though both are drawn through arcsinh 5.
+      ...(this.hostedAssay ? [this.hostedAssay.id] : []),
       this.instrument,
       channel.pnn,
       channel.columnIndex,
@@ -1952,6 +1978,9 @@ export class Sample {
   /** Restore the global CyTOF arcsinh cofactor carried by a workspace/Gating-ML file. */
   setCytofCofactor(cofactor: number): void {
     if (!Number.isFinite(cofactor) || cofactor <= 0 || cofactor === this.cytofCofactor) return;
+    // An assay drawn as stored is in its own arcsinh: the cofactor is the assay's, and a Gating-ML
+    // file or a saved setting at another cofactor would draw other values than the stored ones.
+    if (this.hostedAssay?.space === "display") return;
     const previousActiveLayer = this._activeLayer;
     const previousLayerStatus = this.compensatedLayerStatusKey();
     this.cytofCofactor = cofactor;
@@ -1968,9 +1997,13 @@ export class Sample {
     if (activeDataChanged) this.invalidateAll();
     this.publishRevisions(activeDataChanged, layerStateChanged);
   }
-  /** Flow-scatter channels the user has switched to a linear display, by column index. */
-  private readonly scatterLinear = new Set<number>();
-  /** Fallback for a Sample with no ChannelScales owner; mirrors scatterLinear. */
+  /**
+   * Flow-scatter channels switched to an arcsinh display, by column index: scatter is linear
+   * unless switched (since 2026-10-06; before, arcsinh unless switched). Only the fallback for
+   * a Sample with no ChannelScales owner, which otherwise holds the choice.
+   */
+  private readonly scatterArcsinh = new Set<number>();
+  /** Fallback for a Sample with no ChannelScales owner; mirrors scatterArcsinh. */
   private readonly fluorArcsinh = new Set<number>();
 
   /**
@@ -2011,8 +2044,8 @@ export class Sample {
   /**
    * True for an imaging GEOMETRY feature of a flow file: a shape or position the instrument
    * derived from the cell's image (Size, Eccentricity, the moments, Centre of Mass, Delta CoM,
-   * Correlation). Linear by default, arcsinh on request: the reverse of scatter's default, on
-   * the same control and the same cofactor store. The two intensity features (Max and Total
+   * Correlation). Linear by default, arcsinh on request, as scatter is, on the same control and
+   * the same cofactor store. The two intensity features (Max and Total
    * Intensity) are fluorescence channels. See isImagingGeometryChannel().
    */
   isImagingFeatureAxis(idx: number): boolean {
@@ -2149,9 +2182,9 @@ export class Sample {
     return this.fluorArcsinh.has(idx);
   }
 
-  /** Display scale for a flow scatter channel. */
+  /** Display scale for a flow scatter channel; "arcsinh" for a channel that is no scatter axis, as before. */
   scatterScale(idx: number): "arcsinh" | "linear" {
-    return this.scatterIsLinear(idx) ? "linear" : "arcsinh";
+    return this.isScatterAxis(idx) && this.scatterIsLinear(idx) ? "linear" : "arcsinh";
   }
 
   /**
@@ -2165,29 +2198,34 @@ export class Sample {
       this.channelScales.setScatterLinear(this.workspaceScaleContextKey, key, scale === "linear");
       return;
     }
-    if (scale === "linear") this.scatterLinear.add(idx);
-    else this.scatterLinear.delete(idx);
+    if (scale === "arcsinh") this.scatterArcsinh.add(idx);
+    else this.scatterArcsinh.delete(idx);
     this.invalidateChannel(idx);
   }
 
-  /** Channel keys displayed linearly, for workspace save. */
+  /** Scatter channel keys displayed linearly, for workspace save. */
   scatterLinearKeys(): string[] {
-    return this.channels.filter((_, idx) => this.scatterIsLinear(idx)).map(channel => channel.key);
+    return this.channels.filter((_, idx) => this.isScatterAxis(idx) && this.scatterIsLinear(idx)).map(channel => channel.key);
   }
 
-  /** Restore linear scatter channels from a saved workspace. */
+  /**
+   * Restore the scatter display from a saved workspace: the listed channels linear, every other
+   * scatter channel arcsinh. Both are set, so a workspace saved when arcsinh was the default
+   * (which lists no channel, or none) opens as it was saved.
+   */
   applyScatterLinearKeys(keys: readonly string[]): void {
-    this.scatterLinear.clear();
-    for (const key of keys) {
-      const idx = this.byName.get(key);
-      if (idx !== undefined && this.isScatterAxis(idx)) {
-        if (this.channelScales) {
-          this.channelScales.setScatterLinear(this.workspaceScaleContextKey, key, true);
-          continue;
-        }
-        this.scatterLinear.add(idx);
-        this.invalidateChannel(idx);
+    const linear = new Set(keys);
+    for (const [idx, channel] of this.channels.entries()) {
+      if (!this.isScatterAxis(idx)) continue;
+      const isLinear = linear.has(channel.key);
+      if (this.channelScales) {
+        this.channelScales.setScatterLinear(this.workspaceScaleContextKey, channel.key, isLinear);
+        continue;
       }
+      if (this.scatterArcsinh.has(idx) === !isLinear) continue;
+      if (isLinear) this.scatterArcsinh.delete(idx);
+      else this.scatterArcsinh.add(idx);
+      this.invalidateChannel(idx);
     }
   }
 
@@ -2269,7 +2307,7 @@ export class Sample {
     const shared = this.channelScales;
     const key = this.channels[idx]?.key;
     if (shared && key) return shared.isScatterLinear(this.workspaceScaleContextKey, key);
-    return this.scatterLinear.has(idx);
+    return !this.scatterArcsinh.has(idx);
   }
   /** Override the logicle W for a channel; invalidates its cached display column. */
   setLogicleW(idx: number, w: number): void {

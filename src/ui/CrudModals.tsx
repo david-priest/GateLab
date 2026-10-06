@@ -641,11 +641,17 @@ export function FcsExportModal({
   initialScope,
   initialMinimumEvents,
   hierarchy,
+  nominalLinearFrom = null,
   onCancel,
   onExport,
 }: {
   state: CoreState;
   samples: readonly FcsExportSampleOption[];
+  /**
+   * The SCE assay drawn as stored, when one is: the samples' linear values are then nominal,
+   * reconstructed from it, not the object's counts, so only display values are offered.
+   */
+  nominalLinearFrom?: string | null;
   /** The active hierarchy (1-based position and total); exports read the active one. */
   hierarchy?: { name: string; index: number; count: number };
   combinedCompatibility: { compatible: boolean; reason: string | null };
@@ -665,7 +671,7 @@ export function FcsExportModal({
   const order = populationTreeOrder(state.populations, state.root_population_id ?? null);
   const allIds = order.map((o) => o.popId);
   const [checked, setChecked] = useState<Set<string>>(() => new Set(initialPopIds));
-  const [assay, setAssay] = useState(initialAssay);
+  const [assay, setAssay] = useState<FcsExportAssay>(nominalLinearFrom ? "display" : initialAssay);
   const activeSample = samples.find((sample) => sample.active) ?? samples[0] ?? null;
   const checkedSamples = samples.filter((sample) => sample.checked);
   const [scope, setScope] = useState<"active" | "combined" | "split">(() => {
@@ -786,12 +792,13 @@ export function FcsExportModal({
       <label className="gl-modal-field">
         <span>{t("Values")}</span>
         <select value={assay} onChange={(e) => setAssay(e.target.value as FcsExportAssay)}>
-          <option value="original">{t("Original measurements (uncompensated)")}</option>
-          <option value="compensated">{t("Compensated linear measurements")}</option>
+          <option value="original" disabled={nominalLinearFrom !== null}>{t("Original measurements (uncompensated)")}</option>
+          <option value="compensated" disabled={nominalLinearFrom !== null}>{t("Compensated linear measurements")}</option>
           <option value="display">{t("Transformed display values")}</option>
         </select>
       </label>
       <div className="gl-modal-note">
+        {nominalLinearFrom !== null && <>{t("{assay} is drawn as stored: its linear values are nominal, reconstructed from it, not the object's counts. Draw counts to export them.", { assay: nominalLinearFrom })}{" "}</>}
         {assay === "original" && "Exports the measurements stored in the source FCS before spillover compensation or display transforms. This matches GateLabR's counts export."}
         {assay === "compensated" && "Applies each sample's current spillover-compensation setting, but does not apply logicle or arcsinh display transforms."}
         {assay === "display" && "Exports the values currently used for display after compensation (when enabled) and logicle/arcsinh transformation."}

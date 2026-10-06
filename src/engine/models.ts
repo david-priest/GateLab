@@ -161,6 +161,19 @@ export function withExplicitRectangleBounds<T extends Record<string, Gate>>(gate
   return out ?? gates;
 }
 
+/**
+ * Who made a gate and why, when it was not drawn by hand: a connected agent's proposal, with the
+ * reason it gave. Shown on the gate card so an agent's gates are told from the user's, and kept
+ * with the gate wherever the workspace goes. Evaluation never reads it.
+ */
+export interface GateProvenance {
+  /** The writer's name, as the agent introduced itself. */
+  by: string;
+  rationale: string;
+  /** When it was made, ISO 8601. */
+  at: string;
+}
+
 export interface PolyRectGate {
   gate_id: string;
   name: string;
@@ -211,6 +224,8 @@ export interface PolyRectGate {
   flowjo_polygon?: { quadId: number; gateResolution: number | null };
   color: string;
   label_offset: [number, number] | null;
+  /** Present on a gate an agent made (GateProvenance); absent on one drawn by hand. */
+  provenance?: GateProvenance;
 }
 
 /**
@@ -272,6 +287,8 @@ export interface QuadrantGate {
   transforms?: GateTransforms;
   color: string;
   label_offset: [number, number] | null;
+  /** Present on a gate an agent made (GateProvenance); absent on one drawn by hand. */
+  provenance?: GateProvenance;
   /**
    * Where each quadrant's label sits, Q1 to Q4, as a dragged delta in display units from the
    * screen quadrant's midpoint; null or absent means the midpoint. Cosmetic, like label_offset.
@@ -308,6 +325,8 @@ export interface EllipseGate {
   transforms?: GateTransforms;
   color: string;
   label_offset: [number, number] | null;
+  /** Present on a gate an agent made (GateProvenance); absent on one drawn by hand. */
+  provenance?: GateProvenance;
 }
 
 export type Gate = PolyRectGate | QuadrantGate | EllipseGate;

@@ -8,6 +8,7 @@ import {
 } from "react";
 import { TIED_DATA_SET_NOTE, TIED_DATA_SETS_NOTE } from "../engine/flowjoOpen";
 import { FLOWJO_OLDER_REFUSAL, FLOWJO_OLDER_REFUSAL_UNSTATED } from "../engine/flowjoWorkspace";
+import { platformKeys } from "./platformKeys";
 
 export type UiLanguage = "en" | "ja";
 
@@ -30,11 +31,40 @@ const JA: Readonly<Record<string, string>> = {
   "↑↓: view · Shift: range · Cmd/Ctrl: add or remove · Enter: inspect": "↑↓: 表示 · Shift: 範囲選択 · Cmd/Ctrl: 追加・解除 · Enter: 表示",
   "Plot file scope": "プロットの対象ファイル",
   "Pooled view · {count} files": "プール表示 · {count}ファイル",
-  "Change files…": "ファイルを変更…",
+  "{assay} · as stored": "{assay} · 保存値のまま",
+  "Compensated · this session": "補正済み · このセッション",
+  "Drawing {assay}…": "{assay}を描画中…",
+  "Drawing {assay} as stored": "{assay}を保存値のまま描画",
+  "Drawing {assay}": "{assay}を描画",
+  "{assay} is drawn as stored, already transformed. Compensation applies to {linear}: choose it in the header first.": "{assay}は変換済みの保存値のまま描画されています。補正は{linear}に適用されます。先にヘッダーでそれを選んでください。",
+  "the linear assay": "線形アッセイ",
+  "{assay} · needs its arcsinh cofactor": "{assay} · arcsinhの係数が必要",
+  "arcsinh cofactor {cofactor} assumed: the object records none": "arcsinh係数{cofactor}を仮定（オブジェクトに記録なし）",
+  "the saved workspace was drawn from {assay}, which the SCE no longer has or cannot be drawn; drawing {drawn}": "保存されたワークスペースは{assay}から描画されましたが、このSCEにはもうないか描画できません。{drawn}を描画します",
+  "Choose {linear} in the header to use a compensated layer: {assay} is drawn as stored.": "補正層を使うにはヘッダーで{linear}を選んでください。{assay}は保存値のまま描画されています。",
+  "{assay} cannot be drawn: it is in display space and the object states no arcsinh cofactor for it.": "{assay}は描画できません。表示空間にありますが、オブジェクトにarcsinh係数の記録がありません。",
+  "The drawn assay changed.": "描画するアッセイが変わりました。",
+  "{assay} is drawn as stored: its linear values are nominal, reconstructed from it, not the object's counts. Draw counts to export them.": "{assay}は保存値のまま描画されています。その線形値は{assay}から再構成した名目値で、オブジェクトのcountsではありません。countsを書き出すにはcountsを描画してください。",
+  "Raw values are nominal, reconstructed from {assay}; draw counts for the object's counts.": "Rawの値は{assay}から再構成した名目値です。オブジェクトのcountsを見るにはcountsを描画してください。",
+  "drawing {assay} as stored": "{assay}を保存値のまま描画",
+  "drawing {assay}": "{assay}を描画",
+  "The SCE has no assay '{assay}'.": "このSCEにアッセイ'{assay}'はありません。",
+  "Pooled view · 1 file": "プール表示 · 1ファイル",
+  "Pooled view · {count} samples": "プール表示 · {count}サンプル",
+  "Pooled view · {count} of {selected} files": "プール表示 · 選択{selected}ファイル中{count}",
+  "Pooled view · {count} of {selected} samples": "プール表示 · 選択{selected}サンプル中{count}",
+  "The plot shows the viewed file, or the selected files when pooled.": "プロットは表示中のファイルを、プール時は選択したファイルを示します。",
+  "The viewed file supplies the axes. Pooled, the plot follows the selection; Enter shows a file alone.": "表示中のファイルが軸を決めます。プール時はプロットが選択に追従し、Enterでそのファイルだけを表示します。",
+  "Pooled view · 1 sample": "プール表示 · 1サンプル",
   "Return to single file": "単一ファイル表示に戻る",
-  "Use current selection ({count})": "現在の選択を使用（{count}）",
+  "Return to single sample": "単一サンプル表示に戻る",
   "Pool selected files ({count})": "選択したファイルをプール（{count}）",
-  "Missing file": "ファイルがありません",
+  "Pool selected samples ({count})": "選択したサンプルをプール（{count}）",
+  "Not pooled, under another tree: {files}": "別のツリーのためプールされていません: {files}",
+  "Not pooled, different panel: {files}": "パネルが異なるためプールされていません: {files}",
+  "Not pooled, different assay layer: {files}": "アッセイ層が異なるためプールされていません: {files}",
+  "{count} checked file(s) not pooled — different assay layer": "{count}件の選択ファイルはプールされていません — アッセイ層が異なります",
+  "Files on another assay layer than {name} are not pooled with it: their values are in another space. Put them on the same layer, or select them alone.": "{name}と異なるアッセイ層のファイルはプールされません。値が別の空間にあるためです。同じ層に切り替えるか、それらだけを選択してください。",
   "Selected for actions": "操作対象に選択",
   "Select {name} for actions": "{name}を操作対象に選択",
   "Copy to {count} selected…": "選択した{count}件にコピー…",
@@ -42,7 +72,6 @@ const JA: Readonly<Record<string, string>> = {
   "click to deselect all {total}": "クリックして{total}件すべてを解除",
   "click to select all {total}": "クリックして{total}件すべてを選択",
   "{count} plotted files": "表示対象: {count}ファイル",
-  "Read-only template preview · Select populations to inspect; enable template editing above the plot to change gates": "読み取り専用のテンプレート表示 · 集団を選んで表示できます。ゲートの変更はプロット上部でテンプレート編集を有効にしてください",
   "Language": "言語",
   "Questions or bugs?": "ご質問・不具合の報告は",
   "please leave an issue at the repo": "リポジトリの Issue へお寄せください",
@@ -721,7 +750,6 @@ const JA: Readonly<Record<string, string>> = {
   "Drop the selected files' tailoring, after confirmation. Unselected files and the tree stay unchanged.": "確認のうえ、選択ファイルの調整を破棄します。未選択のファイルとツリーは変わりません。",
   "Revert all files…": "全ファイルを戻す…",
   "Drop every file's tailoring, after confirmation: every file follows the tree.": "確認のうえ、すべてのファイルの調整を破棄し、すべてのファイルがツリーに従います。",
-  "Read-only tree preview · Select populations to inspect; enable tree editing above the plot to change gates": "ツリーの読み取り専用プレビュー · 集団を選んで確認できます。ゲートを変更するにはプロット上でツリー編集を有効にしてください",
   "Editing this file only · Gate boundaries and labels move on the plot for this file alone · Click a gate to select it": "このファイルのみ編集中 · プロット上のゲート境界とラベルはこのファイルだけで動きます · ゲートをクリックで選択",
   "Tailored for this file: its coordinates differ from the tree's and no longer follow it": "このファイル用に調整済み：座標がツリーと異なり、ツリーに追従しません",
   "This gate takes the tree's coordinates again; other tailored gates stay unchanged. Undo is available.": "このゲートをツリーの座標に戻します。他の調整済みゲートは変わりません。取り消し可能です。",
@@ -739,9 +767,6 @@ const JA: Readonly<Record<string, string>> = {
   "There is no tree yet, so it becomes the tree for every file.": "まだツリーがないため、全ファイルのツリーになります。",
   "One tree for the workspace, the viewed file's recording, tailored per file where the recordings differ; a file recorded under a different tree is reported.": "表示中ファイルの記録をワークスペースの唯一のツリーとし、記録が異なるファイルはファイルごとに調整します。異なるツリーで記録されたファイルは報告されます。",
   "{count} files · all identical, none following the tree": "{count} ファイル · すべて同一、ツリーには追従せず",
-  "Stop editing the tree": "ツリーの編集を終了",
-  "Edit the tree": "ツリーを編集",
-  "Read-only tree preview": "ツリーの読み取り専用プレビュー",
   "Editing the tree · every file follows, tailored gates excepted": "ツリーを編集中 · 調整済みゲートを除きすべてのファイルが追従",
   "The tree's gates apply to every pooled file; these are not per-file tailored counts.": "ツリーのゲートはプールされた全ファイルに適用されます。ファイルごとの調整済みカウントではありません。",
   "Editing {name} only · its tailored gates": "{name} のみ編集中 · 調整済みゲート",
@@ -828,7 +853,7 @@ const JA: Readonly<Record<string, string>> = {
   "Axis and picker names throughout the app. The detector comes from $PnN, which is kept even when the channel's identity is just the marker. Renaming a channel here always overrides this.": "アプリ全体の軸名と選択欄の名前。検出器は$PnNから取得され、チャンネルの識別名がマーカーのみの場合でも保持されます。ここでの名前変更が常に優先されます。",
   "A browser-based gating tool for flow and mass cytometry. Files never leave the machine. Every FCS is parsed, transformed and gated locally.": "フローサイトメトリーとマスサイトメトリーのためのブラウザ内ゲーティングツール。ファイルは端末外に出ません。FCSの読み込み・変換・ゲーティングはすべてローカルで行われます。",
   "Channels are shown with arcsinh at cofactor 5, which is the field convention, and gates are stored in that same space. There is no per-channel choice here because there is no competing convention to choose between.": "チャンネルは分野の慣例であるコファクター5のarcsinhで表示され、ゲートも同じ空間に保存されます。対抗する慣例が存在しないため、ここではチャンネルごとの選択肢を設けていません。",
-  "You pick a display scale per channel: arcsinh or linear for scatter, logicle or arcsinh for fluorescence. Gates are stored and evaluated in raw channel values regardless, so nothing you do to an axis can move an event in or out of a gate.": "表示スケールはチャンネルごとに選べます。散乱光はarcsinhか線形、蛍光はlogicleかarcsinhです。いずれの場合もゲートは生のチャンネル値で保存・評価されるため、軸に何をしてもイベントがゲートの内外に移動することはありません。",
+  "You pick a display scale per channel: linear or arcsinh for scatter, logicle or arcsinh for fluorescence. Gates are stored and evaluated in raw channel values regardless, so nothing you do to an axis can move an event in or out of a gate.": "表示スケールはチャンネルごとに選べます。散乱光は線形かarcsinh、蛍光はlogicleかarcsinhです。いずれの場合もゲートは生のチャンネル値で保存・評価されるため、軸に何をしてもイベントがゲートの内外に移動することはありません。",
   "{tree}, this file's own copy": "{tree}（このファイル専用のコピー）",
   "Straight edges can look curved here \u2014 gates are stored in raw values, so the curve is where the gate really falls. Gating is unchanged.": "ここでは直線の辺が曲がって見えることがあります。ゲートは生データ値で保存されているため、この曲線がゲートの実際の位置です。ゲーティングは変わりません。",
   "This differs from FlowJo and from Gating-ML 2.0, which both treat a polygon as straight lines in the space the axis is showing. Under that model the gate changes when the view changes. The cost of doing it the other way is that a gate drawn straight in raw values looks bowed on a transformed axis, which the gate-edge control shows you rather than hides.": "これはFlowJoやGating-ML 2.0とは異なります。どちらもポリゴンを軸が表示している空間上の直線として扱うため、表示を変えるとゲート自体が変わります。逆の方式を採る代償として、生データ上で直線のゲートは変換軸上では湾曲して見えます。これはゲート境界の表示設定で隠さずに示しています。",
@@ -1407,6 +1432,7 @@ const JA: Readonly<Record<string, string>> = {
   "CyTOF compensation was cancelled; the previous assay was left unchanged.": "CyTOF補正をキャンセルしました。以前のアッセイは変更されていません。",
   "Confirm that existing gate memberships will be recomputed in compensated coordinates before enabling matrix editing.": "マトリクス編集を有効にする前に、既存ゲートの所属を補正済み座標で再計算することを確認してください。",
   "Flow matrix editing is ready. The exact embedded matrix is retained as the baseline, and Original measurements remain available.": "フローマトリクスを編集できます。正確な内蔵マトリクスはベースラインとして保持され、元の測定値も引き続き使用できます。",
+  "Enabling also returns {count} other files to Original: {files}. A workspace keeps one kind of compensation, and these draw from their own embedded matrix.": "有効にすると、他の{count}ファイルも元データに戻ります：{files}。ワークスペースが保持する補正は一種類であり、これらのファイルは各自の内蔵マトリクスから描画されています。",
   "CyTOF NNLS spill coefficients cannot be negative.": "CyTOF NNLSのスピル係数に負の値は指定できません。",
   "Staged {source} → {receiver} at {value}%. Apply the revised matrix to recompute the assay.": "{source} → {receiver}を{value}%に仮設定しました。修正マトリクスを適用してアッセイを再計算してください。",
   "The fast bounds preview could not be built for this pair.": "このペアの高速範囲プレビューを作成できませんでした。",
@@ -1666,6 +1692,26 @@ const JA: Readonly<Record<string, string>> = {
   "a copy of {file}, which it goes with; {file} and {files} could each be \"{sample}\"; say which above": "{file}のコピーで、{file}と同じ扱いになります。{file}と{files}はいずれも「{sample}」であり得ます。上でどれかを指定してください",
   "None of this sample's trees can be imported alone; every tree, each file its own sample's, still can.": "このサンプルのツリーはどれも単独では取り込めません。すべてのツリー（各ファイルに自身のサンプルのもの）なら取り込めます。",
   "These {count} files get one tree for the workspace, tailored per file where they differ: {files}. {file} gets \"{sample}\"'s tree by choice; each of the others gets its own sample's.": "これら{count}個のファイルにワークスペースのツリーを1つ適用し、異なる部分はファイルごとに調整します：{files}。{file}には選択により「{sample}」のツリーを、その他の各ファイルには自身のサンプルのツリーを適用します。",
+  // The Agent menu: a relay an agent reads the gating through, and the badge on its gates.
+  "Agent": "エージェント",
+  "Agent · connected": "エージェント · 接続中",
+  "Agent · connecting…": "エージェント · 接続しています…",
+  "Agent · not connected": "エージェント · 未接続",
+  "{writer}: {count} requests": "{writer}：{count}件のリクエスト",
+  "{count} requests": "{count}件のリクエスト",
+  "Disconnect": "切断",
+  "Connecting to {url}": "{url}に接続しています",
+  "Last connection: {reason}": "前回の接続：{reason}",
+  "Reconnect": "再接続",
+  "Connect to an agent…": "エージェントに接続…",
+  "Let an agent on this computer read the gating and propose gates, which appear here as you work": "このコンピュータ上のエージェントにゲーティングを読ませ、ゲートを提案させます。提案は作業中のこの画面に表示されます",
+  "Connect to an agent": "エージェントに接続",
+  "An agent's session on this computer prints an address when it starts. Paste it here. The agent then reads the gating as you see it and proposes gates, which appear in the plot and the tree with a badge; you adjust or undo them as any other. Saving stays yours.": "このコンピュータ上のエージェントのセッションは、起動時にアドレスを表示します。それをここに貼り付けてください。エージェントは表示どおりのゲーティングを読み取り、ゲートを提案します。提案はバッジ付きでプロットとツリーに表示され、他のゲートと同様に調整や取り消しができます。保存はあなたが行います。",
+  "Address": "アドレス",
+  "That is not a ws:// address. Copy the one the agent's session printed.": "ws:// のアドレスではありません。エージェントのセッションが表示したものをコピーしてください。",
+  "Connect": "接続",
+  "Proposed by {by}: {rationale}": "{by}による提案：{rationale}",
+  "agent": "エージェント",
 };
 
 export type TranslationValues = Readonly<Record<string, string | number>>;
@@ -1676,8 +1722,10 @@ export function translateUi(
   values: TranslationValues = {},
 ): string {
   const template = language === "ja" ? JA[source] ?? source : source;
-  return template.replace(/\{([A-Za-z0-9_]+)\}/g, (match, key: string) =>
-    Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : match);
+  // The text names keys as a Mac does (Cmd-D, Option-drag); elsewhere it is shown with the
+  // names on the user's keyboard. The handlers take Ctrl for Cmd and Alt for Option already.
+  return platformKeys(template.replace(/\{([A-Za-z0-9_]+)\}/g, (match, key: string) =>
+    Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : match));
 }
 
 /** Used by localization coverage tests to distinguish a deliberate translation from fallback. */

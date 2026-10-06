@@ -17,6 +17,7 @@ import {
   removePopulationReparentChildren,
   wouldCreateCycle,
   type Gate,
+  type GateProvenance,
   type GateRef,
   type PopulationMap,
   type Vertex,
@@ -231,6 +232,8 @@ export type Action =
       transforms?: GateTransforms;
       /** A rectangle's edge rule; omitted = half-open, Gating-ML's rule for a drawn rectangle. */
       bounds?: RectangleBounds;
+      /** Set when an agent made the gate; a drawn gate has none. */
+      provenance?: GateProvenance;
     }
   | {
       type: "addEllipse";
@@ -244,6 +247,7 @@ export type Action =
       createPop?: { name: string; parentId: string };
       space?: GateSpace;
       transforms?: GateTransforms;
+      provenance?: GateProvenance;
     }
   | {
       type: "addQuadrant";
@@ -262,6 +266,7 @@ export type Action =
       yLabel?: string;
       /** The four population names in quadrant order, Q1 to Q4; built from the labels when absent. */
       names?: [string, string, string, string];
+      provenance?: GateProvenance;
     }
   | { type: "setQuadrantCurl"; gateId: string; curl: QuadrantCurl | null } // bend or straighten the arms
   | { type: "addPopulation"; name: string; parentId: string; gateRefs: GateRef[] }
@@ -819,6 +824,7 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       // So is a rectangle's edge rule. A drawn rectangle follows Gating-ML 2.0 (models.ts,
       // RectangleBounds), stated on the gate so that every file it is written to says so.
       if (gate.gate_type === "rectangle") gate.bounds = action.bounds ?? "half-open";
+      if (action.provenance) gate.provenance = action.provenance;
       const gates = { ...state.gates, [gate.gate_id]: gate };
       const gate_order = [...state.gate_order, gate.gate_id];
       const base = { ...pushUndo(state), gates, gate_order, selected_gate_id: gate.gate_id };
@@ -861,6 +867,7 @@ function reduceCore(state: CoreState, action: Action): CoreState {
         label_offset: action.labelOffset ?? null,
         ...(action.space ? { space: action.space } : {}),
         ...(action.transforms ? { transforms: action.transforms } : {}),
+        ...(action.provenance ? { provenance: action.provenance } : {}),
       };
       const gates = { ...state.gates, [gateId]: gate };
       const gate_order = [...state.gate_order, gateId];
@@ -893,6 +900,7 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       if (action.space) qgate.space = action.space;
       if (action.transforms) qgate.transforms = action.transforms;
       if (action.curl) qgate.curl = { ...action.curl };
+      if (action.provenance) qgate.provenance = action.provenance;
       const gates = { ...state.gates, [qgate.gate_id]: qgate };
       const gate_order = [...state.gate_order, qgate.gate_id];
       const populations: PopulationMap = clonePops(state.populations);

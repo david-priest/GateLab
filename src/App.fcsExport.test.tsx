@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+// Gate coordinates reach the app in display units, and scatter opens linear (since 2026-10-06), so
+// these are raw values: each is 150·sinh of the arcsinh coordinate the test was written with.
 // FCS export follows each file's own tree: a file tailored against the tree is written under its
 // tailored gate, whichever tree is being viewed. Synthetic FCS files D1 and D2; nothing here is
 // a real experiment.
@@ -165,7 +167,7 @@ describe("FCS export under tailored trees", () => {
     // asinh(202/150) = 1.1068); D1 keeps following the tree.
     await view("D2.fcs");
     await edit("file");
-    act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[0, 0], [1.1046, 300]] }));
+    act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[0, 0], [201.5, 300]] }));
     await settle();
     expect(summary()).toBe("2 files · 1 tailored");
     expect(gate().vertices).not.toEqual(treeGate);

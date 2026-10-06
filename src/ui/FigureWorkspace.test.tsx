@@ -430,6 +430,47 @@ describe("FigureWorkspace", () => {
     expect(onOpenInGating).toHaveBeenCalledTimes(1);
   });
 
+  it("opens a new figure pooled when told to, and a saved selection as it was", async () => {
+    const props = fixture();
+    const composition = () => [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.startsWith("Composition"))!.querySelector("select")!.value;
+    props.configRef.current = null;
+    act(() => root.render(<FigureWorkspace {...props} defaultComposition="pool" />));
+    await flush();
+    expect(composition()).toBe("pool");
+    expect(host.querySelectorAll("td[data-figure-panel]")).toHaveLength(1);
+    act(() => root.unmount());
+    root = createRoot(host);
+    const saved = fixture();
+    act(() => root.render(<FigureWorkspace {...saved} defaultComposition="pool" />));
+    await flush();
+    expect(composition()).toBe("separate");
+  });
+
+  it("puts a pooled panel on the Layout tab as one pooled plot, and opens it in Gating", async () => {
+    const props = fixture();
+    props.configRef.current!.combineSamples = true;
+    const onAddToLayout = vi.fn();
+    const onOpenInGating = vi.fn();
+    act(() => root.render(<FigureWorkspace {...props} onAddToLayout={onAddToLayout} onOpenInGating={onOpenInGating} />));
+    await flush();
+    const panels = host.querySelectorAll<HTMLElement>("td[data-figure-panel]");
+    expect(panels).toHaveLength(1);
+    const panel = panels[0];
+    const menuItem = (label: string) => [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent === label)!;
+    act(() => { panel.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 90 })); });
+    act(() => menuItem("Add this panel to the Layout tab").click());
+    expect(onAddToLayout).toHaveBeenCalledTimes(1);
+    const [recipes] = onAddToLayout.mock.calls[0];
+    // One plot of every pooled file, the first its reference.
+    expect(recipes).toHaveLength(1);
+    expect(recipes[0]).toMatchObject({ kind: "biplot", sampleId: "D1", pool: { sampleIds: props.samples.map((s) => s.id) } });
+    act(() => { panel.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 90 })); });
+    expect(menuItem("Open in Gating").disabled).toBe(false);
+    act(() => menuItem("Open in Gating").click());
+    expect(onOpenInGating).toHaveBeenCalledTimes(1);
+    expect(onOpenInGating.mock.calls[0][0]).toMatchObject({ pool: { sampleIds: props.samples.map((s) => s.id) } });
+  });
+
   it("selects every listed population, none, the leaves or the Gating tab's ticked ones, and finds one by name", async () => {
     const props = fixture();
     props.state.selected_pop_ids = [props.state.root_population_id!];
@@ -528,5 +569,22 @@ describe("FigureWorkspace", () => {
     await flush();
     expect(draws.calls).toHaveLength(0);
     expect(host.textContent).toBe("Another tab");
+  });
+});
+
+describe("preview all events", () => {
+  it("switches the preview to every event within the page budget, and back", async () => {
+    const props = fixture();
+    act(() => root.render(<FigureWorkspace {...props} />));
+    await flush();
+    const all = () => host.querySelector<HTMLInputElement>('[aria-label="Preview all events"]')!;
+    expect(all().checked).toBe(false);
+    act(() => all().click());
+    await flush();
+    expect(props.configRef.current!.allEvents).toBe(true);
+    expect(all().checked).toBe(true);
+    act(() => all().click());
+    await flush();
+    expect(props.configRef.current!.allEvents).toBe(false);
   });
 });

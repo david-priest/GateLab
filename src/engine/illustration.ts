@@ -28,6 +28,8 @@ export interface GateOverlay {
   gate_id: string;
   name: string;
   percent_of_parent: number | null;
+  /** The events inside the gate within the population drawn, so a pooled plot can sum them over its files. */
+  event_count?: number | null;
   gate_type: string;
   vertices?: [number, number][];
   /** Quadrant crosshair and optional FlowJo-style bent positive arms, in cell-axis display space. */
@@ -191,6 +193,7 @@ function buildGatesForChannels(
       gate_id: gid,
       name: gate.name,
       percent_of_parent: c?.percent_of_parent ?? null,
+      event_count: c?.event_count ?? null,
       gate_type: gate.gate_type,
       vertices: verts,
       outline,

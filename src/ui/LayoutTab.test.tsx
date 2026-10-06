@@ -7,9 +7,9 @@
 import { act, useImperativeHandle, useState, forwardRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDefaultLayoutWorkspace, type LayoutWorkspace } from "../engine/layout";
+import { createDefaultLayoutWorkspace, normalizeLayoutStyle, type LayoutWorkspace } from "../engine/layout";
 import { DEFAULT_HIERARCHY_ID } from "../engine/hierarchies";
-import { newPopulation, newRootPopulation } from "../engine/models";
+import { newGate, newPopulation, newRootPopulation } from "../engine/models";
 import { Sample } from "../engine/sample";
 import type { FcsFile } from "../engine/fcs";
 import type { FigureSample } from "../engine/figure";
@@ -157,6 +157,20 @@ function fixture() {
     { id: "D2", name: "D2.fcs", hierarchyId: DEFAULT_HIERARCHY_ID, sample: new Sample(fcs), metadata: { donor: "D2", day: "0" } },
   ];
   return { state, samples, rootId: rootPop.population_id, childId: child.population_id };
+}
+
+/**
+ * The fixture with a rectangle under Lymphocytes: FSC-A 0..15 × SSC-A 0..35 holds (10,30), one of
+ * each file's three events. With `third`, a D3 of the same events on day 7.
+ */
+function gatedFixture(third = false) {
+  const fx = fixture();
+  const gate = newGate("Lymph_gate", "rectangle", "FSC-A", "SSC-A", [[0, 0], [15, 35]]);
+  fx.state.gates = { [gate.gate_id]: gate };
+  fx.state.gate_order = [gate.gate_id];
+  fx.state.populations[fx.childId].gate_refs = [{ gate_id: gate.gate_id, include: true }];
+  if (third) fx.samples.push({ id: "D3", name: "D3.fcs", hierarchyId: DEFAULT_HIERARCHY_ID, sample: new Sample(fx.samples[0].sample.fcs), metadata: { donor: "D3", day: "7" } });
+  return fx;
 }
 
 function mount(fx: ReturnType<typeof fixture>, globalScales: Record<string, [number, number]> = {}, illustrationConfig: IllustrationConfig | null = null, extra: Record<string, unknown> = {}) {
@@ -1151,6 +1165,140 @@ describe("LayoutTab iteration", () => {
     act(() => button("Page").click());
     await act(async () => { button("Export sheet").click(); await vi.runAllTimersAsync(); });
     expect(draws.exports.at(-1)).toEqual({ name: "Layout 1", format: "pdf", pages: 2 });
+  });
+});
+
+describe("pooled Layout plots", () => {
+  const poolBox = () => [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.includes("Pool files"))!.querySelector("input")!;
+  const chip = (value: string) => [...host.querySelectorAll<HTMLButtonElement>(".gl-layout-pool .gl-sample-facet-chip")].find((b) => b.querySelector(".gl-sample-facet-label")?.textContent === value)!;
+  type Drawn = { name: string; event_count: number; percent_of_parent: number };
+
+  it("pools the checked files on one plot, draws the gate with its pooled percentage, and names the pool", async () => {
+    const changes = mount(gatedFixture(), { "FSC-A": [0, 40], "SSC-A": [0, 40] });
+    await flush();
+    act(() => button("+ Biplot").click());
+    await flush();
+    const [plot] = items(changes);
+    // One file: its three events, the gate holding one of them.
+    expect(draws.plots.at(-1)?.config.x).toHaveLength(3);
+    expect((draws.plots.at(-1)?.config.gates as Drawn[]).map((g) => [g.name, g.percent_of_parent])).toEqual([["Lymph_gate", 33.33]]);
+    select(plot.id);
+    act(() => button("Items").click());
+    act(() => poolBox().click());
+    expect(items(changes)[0].recipe).toMatchObject({ sampleId: "D1", pool: { sampleIds: ["D1", "D2"] } });
+    await flush();
+    const config = draws.plots.at(-1)!.config;
+    // Both files' events on one plot; the gate holds two of the six, pooled.
+    expect(config.x).toHaveLength(6);
+    expect(config.n_events).toBe(6);
+    expect((config.gates as Drawn[]).map((g) => [g.name, g.event_count, g.percent_of_parent])).toEqual([["Lymph_gate", 2, 33.33]]);
+    expect(config.title).toBe("All Events · 2 files");
+    expect(host.textContent).toContain("2 of 2 files pooled");
+    // Unticked, the plot is its reference file's again.
+    act(() => poolBox().click());
+    expect(items(changes)[0].recipe).not.toHaveProperty("pool");
+    await flush();
+    expect(draws.plots.at(-1)!.config.x).toHaveLength(3);
+  });
+
+  it("picks the pool with the metadata chips, in file order", async () => {
+    const changes = mount(gatedFixture(true), { "FSC-A": [0, 40], "SSC-A": [0, 40] }, null, { checkedSampleIds: ["D1", "D2", "D3"] });
+    await flush();
+    act(() => button("+ Biplot").click());
+    await flush();
+    const [plot] = items(changes);
+    select(plot.id);
+    act(() => button("Items").click());
+    act(() => poolBox().click());
+    expect(items(changes)[0].recipe).toMatchObject({ pool: { sampleIds: ["D1", "D2", "D3"] } });
+    // The day chips: "0" is D2 alone, pooled in full, so a click drops it; "7" is D1 and D3.
+    expect(chip("0").textContent).toBe("01/1");
+    expect(chip("7").textContent).toBe("72/2");
+    act(() => chip("0").click());
+    expect(items(changes)[0].recipe).toMatchObject({ sampleId: "D1", pool: { sampleIds: ["D1", "D3"] } });
+    await flush();
+    const config = draws.plots.at(-1)!.config;
+    expect(config.x).toHaveLength(6);
+    expect((config.gates as Drawn[]).map((g) => [g.event_count, g.percent_of_parent])).toEqual([[2, 33.33]]);
+    expect(host.textContent).toContain("2 of 2 files pooled");
+    // Dropping the reference file hands the pool to the next file in file order.
+    act(() => [...host.querySelectorAll<HTMLInputElement>(".gl-layout-pool-list input")][0].click());
+    expect(items(changes)[0].recipe).toMatchObject({ sampleId: "D3", pool: { sampleIds: ["D3"] } });
+  });
+
+  it("draws the sheet once per value of a metadata column, pooling each value's files, as pages or tiles", async () => {
+    const selectField = (label: string) => [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.startsWith(label))?.querySelector("select")!;
+    const change = (el: HTMLSelectElement, value: string) => act(() => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(el, value);
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const changes = mount(gatedFixture(true), { "FSC-A": [0, 40], "SSC-A": [0, 40] }, null, { checkedSampleIds: ["D1", "D2", "D3"] });
+    await flush();
+    act(() => button("+ Biplot").click());
+    act(() => button("+ Text").click());
+    await flush();
+    const [plot, note] = items(changes);
+    const editor = openEditor(note.id);
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(editor, "Day {sample}: {file}");
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => editor.blur());
+    act(() => button("Iterate").click());
+    change(selectField("Draw the sheet"), "metadata");
+    expect(changes.at(-1)?.sheets[0].iteration).toMatchObject({ mode: "metadata", column: "donor", source: { kind: "checked" } });
+    change(selectField("Column"), "day");
+    expect(items(changes)[0].recipe).toMatchObject({ iterated: true });
+    // Two values in natural order: day 0 (D2 alone) then day 7 (D1 and D3 pooled).
+    expect(host.textContent).toContain("2 values of day over 3 files → 2 pages");
+    expect(host.textContent).toContain("Page 1 of 2");
+    expect(element(note.id).querySelector(".gl-layout-text-surface")?.textContent).toBe("Day 0: 1 files");
+    await flush();
+    expect(draws.plots.at(-1)?.config).toMatchObject({ n_events: 3, title: "0" });
+    draws.plots = [];
+    act(() => host.querySelector<HTMLButtonElement>('button[aria-label="Next page"]')!.click());
+    expect(host.textContent).toContain("Page 2 of 2");
+    expect(element(note.id).querySelector(".gl-layout-text-surface")?.textContent).toBe("Day 7: 2 files");
+    await flush();
+    const pooled = draws.plots.at(-1)!.config;
+    expect(pooled.x).toHaveLength(6);
+    expect(pooled.n_events).toBe(6);
+    expect((pooled.gates as Drawn[]).map((g) => [g.event_count, g.percent_of_parent])).toEqual([[2, 33.33]]);
+    expect(pooled.title).toBe("7");
+    // Tiles: both values on one page, side by side.
+    change(selectField("Arrangement"), "tiles");
+    expect(host.textContent).toContain("Page 1 of 1");
+    expect(host.querySelectorAll(".gl-layout-item")).toHaveLength(4);
+    // Export writes one page per value.
+    change(selectField("Arrangement"), "page-per-unit");
+    act(() => button("Page").click());
+    await act(async () => { button("Export sheet").click(); await vi.runAllTimersAsync(); });
+    expect(draws.exports.at(-1)).toEqual({ name: "Layout 1", format: "pdf", pages: 2 });
+    void plot;
+  });
+});
+
+describe("all events", () => {
+  it("draws every event of the sheet's plots when switched on, keeps the switch through a reload, and goes back to the default when switched off", async () => {
+    const changes = mount(gatedFixture(), { "FSC-A": [0, 40], "SSC-A": [0, 40] });
+    await flush();
+    act(() => button("+ Biplot").click());
+    await flush();
+    act(() => button("Style").click());
+    const every = () => [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.includes("All events"))!.querySelector("input")!;
+    const drawn = () => [...host.querySelectorAll<HTMLInputElement>('input[aria-label="Events drawn"]')][0];
+    expect(every().checked).toBe(false);
+    act(() => every().click());
+    expect(changes.at(-1)?.sheets[0].style).toMatchObject({ maxEvents: 0 });
+    expect(every().checked).toBe(true);
+    expect(drawn().disabled).toBe(true);
+    // The sheet reloads with the switch on: 0 is kept, not raised to the field's floor.
+    expect(normalizeLayoutStyle(changes.at(-1)!.sheets[0].style)).toMatchObject({ maxEvents: 0 });
+    await flush();
+    expect(draws.plots.at(-1)?.config.x).toHaveLength(3);
+    act(() => every().click());
+    expect(changes.at(-1)?.sheets[0].style).toMatchObject({ maxEvents: 50000 });
+    expect(drawn().disabled).toBe(false);
   });
 });
 

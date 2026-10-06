@@ -114,6 +114,11 @@ interface Props {
    * leaves the workspace. Absent under the R host, whose assays this tab cannot drop.
    */
   onRemoveProfile?: () => Promise<void>;
+  /**
+   * The other files that draw from their own embedded matrix. Installing a matrix returns them
+   * to Original (a workspace keeps one kind of compensation), so the tab says so beforehand.
+   */
+  otherEmbeddedLayerFiles?: readonly string[];
   existingHostAssays?: readonly ExistingHostCompensatedAssay[];
   onAdoptExistingAssay?: (
     profile: CompensationProfileRecord,
@@ -546,6 +551,7 @@ function CompensationTabImpl({
   hostedCompensationMatrix = null,
   compensationOn,
   onApplyProfile,
+  otherEmbeddedLayerFiles = [],
   onRemoveProfile,
   existingHostAssays = [],
   onAdoptExistingAssay,
@@ -2868,6 +2874,14 @@ function CompensationTabImpl({
                   />
                   <span>{t("Recompute existing gate memberships in compensated coordinates.")}</span>
                 </label>
+              )}
+              {otherEmbeddedLayerFiles.length > 0 && !embeddedFlowProfileMatrix?.error && (
+                <p className="gl-hint gl-comp-embedded-others">
+                  {t("Enabling also returns {count} other files to Original: {files}. A workspace keeps one kind of compensation, and these draw from their own embedded matrix.", {
+                    count: otherEmbeddedLayerFiles.length,
+                    files: otherEmbeddedLayerFiles.join(", "),
+                  })}
+                </p>
               )}
               {embeddedFlowProfileMatrix?.error ? (
                 <div className="gl-comp-error" role="alert">{embeddedFlowProfileMatrix.error}</div>

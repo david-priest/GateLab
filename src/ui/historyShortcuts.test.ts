@@ -20,6 +20,16 @@ describe("historyShortcutAction", () => {
     expect(historyShortcutAction(shortcut({ ctrlKey: true, shiftKey: true }))).toBe("redo");
   });
 
+  it("takes Control-Y for redo, as Windows and Linux do, and leaves Command-Y to the browser", () => {
+    expect(historyShortcutAction(shortcut({ key: "y", ctrlKey: true }))).toBe("redo");
+    expect(historyShortcutAction(shortcut({ key: "Y", ctrlKey: true }))).toBe("redo");
+    expect(historyShortcutAction(shortcut({ key: "y", metaKey: true }))).toBeNull();
+    expect(historyShortcutAction(shortcut({ key: "y", ctrlKey: true, shiftKey: true }))).toBeNull();
+    expect(historyShortcutAction(shortcut({ key: "y" }))).toBeNull();
+    // Not in a field, where Control-Y is the field's own redo.
+    expect(historyShortcutAction(shortcut({ key: "y", ctrlKey: true }, document.createElement("input")))).toBeNull();
+  });
+
   it("does not hijack native undo in text-editing controls", () => {
     const input = document.createElement("input");
     const textarea = document.createElement("textarea");

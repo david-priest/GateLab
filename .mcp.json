@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "gatelab": {
+      "command": "node",
+      "args": ["tools/agent-mcp/server.mjs", "--writer", "claude"]
+    }
+  }
+}

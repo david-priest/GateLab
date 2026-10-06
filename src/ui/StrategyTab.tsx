@@ -1,15 +1,20 @@
 // StrategyTab.tsx — the Strategy tab, mirroring GateLabR's Strategy tab. Traces a population's
 // gating path (root→pop) and renders one back-gated biplot per gate step through the reused
 // mini_plot.js grid (CytofMiniPlot.renderStrategyGrid), so the output matches GateLabR.
+// Pooled, it draws the Gating tab's pool: every step from the pooled files' events together,
+// by the rules the Illustration and Layout tabs pool by (pooledStrategy.ts).
 
-import { useEffect, useRef, useState, type MutableRefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import type { CoreState, Derived } from "../store";
 import type { Sample } from "../engine/sample";
 import { loadMiniPlots } from "../plots/loadPlots";
 import { GATE_EDGE_MODES, type GateEdgeMode } from "./gateEdgeModes";
 import { exportGridPNG, exportGridSVG, exportGridPDF } from "../plots/gridExport";
-import { computeGatingStrategy, buildStrategyPayload } from "../engine/strategy";
+import { computeGatingStrategy, buildStrategyPayload, buildPooledStrategyPayload, type StrategyPart } from "../engine/strategy";
 import { computeMultiPopStrategy, buildMultiStrategyPayload } from "../engine/multiStrategy";
+import { computePooledGatingStrategy, computePooledMultiPopStrategy, type StrategyLeftOut, type StrategyMember } from "../engine/pooledStrategy";
+import { figureHierarchies, resolvePopulationInTree, type FigureSample } from "../engine/figure";
+import { useFigureSources } from "./useFigureSources";
 import { populationTreeOrder } from "../engine/populations";
 import { sanitizeFilePart } from "../engine/fcsExport";
 import { MultiColumnChecklist } from "./MultiColumnChecklist";
@@ -30,6 +35,17 @@ interface Props {
   onDensityColorPowerChange: (value: number) => void;
   /** Fit these channels to their data plus the gates drawn on them. */
   onFitChannels: (keys: readonly string[]) => void;
+  /** Every file of the workspace as the Illustration tab sees it, for a pooled strategy. */
+  files: readonly FigureSample[];
+  /** The Gating tab's pool, in file order; null while the Gating tab draws one file. */
+  poolIds: readonly string[] | null;
+  /** Checked files the Gating tab left out of its pool, and why. */
+  poolNote?: string;
+  /** Whether a pool can be started: two or more files are checked. */
+  poolable: boolean;
+  /** An SCE host's files are samples. */
+  isSceHost?: boolean;
+  onPoolChange: (pooled: boolean) => void;
 }
 
 type GateView = "forward" | "back";
@@ -71,6 +87,12 @@ export function StrategyTab({
   dataRevision,
   densityColorPower,
   onDensityColorPowerChange,
+  files,
+  poolIds,
+  poolNote,
+  poolable,
+  isSceHost = false,
+  onPoolChange,
 }: Props) {
   /** Channels of the plots most recently rendered, for Fit. */
   const shownChannels = useRef<readonly string[]>([]);
@@ -102,6 +124,29 @@ export function StrategyTab({
   const [fontAxis, setFontAxis] = useState(c0?.fontAxis ?? 12);
   const [fontTitle, setFontTitle] = useState(c0?.fontTitle ?? 12);
   const [fontGate, setFontGate] = useState(c0?.fontGate ?? 12);
+
+  // Pooled, the strategy draws the Gating tab's pool: each member prepared as the Illustration
+  // tab prepares a file (cached across the tabs), the traced population followed into each
+  // member's tree by lineage, so a tailored copy traces its own gates.
+  const pooled = poolIds !== null;
+  const poolKey = (poolIds ?? []).join("|");
+  const poolList = useMemo(() => (poolKey ? poolKey.split("|") : []), [poolKey]);
+  const sources = useFigureSources(files, poolList, state, dataRevision);
+  const trees = useMemo(() => figureHierarchies(state), [state]);
+  const poolReady = !pooled || (sources.current && sources.pending === 0);
+  const members = useMemo((): StrategyMember[] | null => {
+    if (!poolReady || !pooled) return null;
+    return poolList.flatMap((id) => {
+      const source = sources.sources.find((entry) => entry.id === id);
+      if (!source) return [];
+      const resolved = resolvePopulationInTree(popId, source.tree, trees, state.active_hierarchy_id);
+      return [{ id: source.id, name: source.name, sample: source.sample, tree: source.tree, gating: source.gating, populationId: resolved.missing ? "" : resolved.id }];
+    });
+    // The sources change identity as each file is prepared; poolReady says when they are all there.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [poolReady, pooled, poolList, sources.sources, popId, trees, state.active_hierarchy_id]);
+  /** What the last pooled draw left out: gates the files do not hold alike, and files left out. */
+  const [poolReport, setPoolReport] = useState<{ drawn: number; omittedGates: string[]; leftOut: StrategyLeftOut[] } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [renderPending, setRenderPending] = useState(true);
   const [renderError, setRenderError] = useState("");
@@ -146,12 +191,17 @@ export function StrategyTab({
     setRenderPending(true); setRenderError("");
     const id = setTimeout(() => {
       try {
-      if (mode === "single" && !state.populations[popId]) { containerRef.current?.replaceChildren(); setPanelCount(0); return; }
+      if (mode === "single" && !state.populations[popId]) { containerRef.current?.replaceChildren(); setPanelCount(0); setPoolReport(null); return; }
+      // Pooled and still preparing the files: nothing to draw yet; the status says so.
+      if (pooled && !members) { containerRef.current?.replaceChildren(); setPanelCount(0); setPoolReport(null); return; }
       const fontSizes = { tick: fontTick, axis_label: fontAxis, gate_label: fontGate, title: fontTitle };
       const cap = allEvents ? Infinity : maxEvents;
 
       if (mode === "multi") {
-        const nodes = computeMultiPopStrategy(sample, state.gates, state.populations, rootId, derived.masks, multiPops, {
+        const pool = members
+          ? computePooledMultiPopStrategy(members, multiPops, state.active_hierarchy_id, trees, { maxEvents: cap, globalScales })
+          : null;
+        const nodes = pool ? pool.nodes : computeMultiPopStrategy(sample, state.gates, state.populations, rootId, derived.masks, multiPops, {
           maxEvents: cap,
           globalScales,
         });
@@ -167,24 +217,33 @@ export function StrategyTab({
           gateLineWidth,
           gateEdgeMode,
           fontSizes,
-          contextTitle: `${multiPops.length} population${multiPops.length === 1 ? "" : "s"}`,
+          // The grid's title names what it draws, so an export says which file or pool it was.
+          contextTitle: pool
+            ? `${multiPops.length} population${multiPops.length === 1 ? "" : "s"} · ${pool.drawn.length} ${isSceHost ? "samples" : "files"} pooled`
+            : `${multiPops.length} population${multiPops.length === 1 ? "" : "s"}${sampleName ? ` · ${sampleName}` : ""}`,
         });
         loadMiniPlots().renderMultiStrategyGrid("strategy-grid-container", payload);
-        shownChannels.current = nodes.flatMap(node => node.gates.flatMap(g => {
+        shownChannels.current = pool ? pool.channels : nodes.flatMap(node => node.gates.flatMap(g => {
           const gate = state.gates[g.gate_id]; return gate ? [gate.x_channel, gate.y_channel] : [];
         }));
         setPanelCount(nodes.length);
+        setPoolReport(pool ? { drawn: pool.drawn.length, omittedGates: pool.omittedGates, leftOut: pool.leftOut } : null);
         return;
       }
 
       let effMode = displayMode;
       if (gateView.includes("forward") && gateView.includes("back") && effMode === "pseudocolor") effMode = "scatter";
-      const steps = computeGatingStrategy(sample, state.gates, state.populations, rootId, popId, { fullPath, maxEvents: cap });
+      const pool = members ? computePooledGatingStrategy(members, trees, { fullPath, maxEvents: cap }) : null;
+      const steps = pool ? pool.steps : computeGatingStrategy(sample, state.gates, state.populations, rootId, popId, { fullPath, maxEvents: cap });
       // Remembered so Fit can act on exactly the plots on screen, rather than every channel a
       // gate happens to use.
       shownChannels.current = steps.flatMap((s) => [s.x_channel, s.y_channel]);
-      const finalMask = gateView.includes("back") ? derived.masks[popId] ?? null : null;
-      const payload = buildStrategyPayload(sample, steps, finalMask, globalScales, {
+      const back = gateView.includes("back");
+      const finalMask = back ? derived.masks[popId] ?? null : null;
+      const parts: StrategyPart[] = pool
+        ? pool.drawn.map((member) => ({ sample: member.sample, finalMask: back ? member.gating.masks[member.populationId] ?? null : null }))
+        : [];
+      const payloadOptions = {
         gateView,
         displayMode: effMode,
         maxEvents: cap,
@@ -200,10 +259,18 @@ export function StrategyTab({
         gateLineWidth,
         gateEdgeMode,
         fontSizes,
-        contextTitle: state.populations[popId]?.name,
-      });
+        // The grid's title names what it draws, so an export says which file or pool it was.
+        contextTitle: pool
+          ? `${state.populations[popId]?.name ?? ""} · ${pool.drawn.length} ${isSceHost ? "samples" : "files"} pooled`
+          : [state.populations[popId]?.name, sampleName].filter((part) => !!part).join(" · "),
+      };
+      if (pool && !parts.length) { containerRef.current?.replaceChildren(); setPanelCount(0); setPoolReport({ drawn: 0, omittedGates: [], leftOut: pool.leftOut }); return; }
+      const payload = pool
+        ? buildPooledStrategyPayload(parts, steps, globalScales, payloadOptions)
+        : buildStrategyPayload(sample, steps, finalMask, globalScales, payloadOptions);
       loadMiniPlots().renderStrategyGrid("strategy-grid-container", payload);
       setPanelCount(steps.length);
+      setPoolReport(pool ? { drawn: pool.drawn.length, omittedGates: pool.omittedGates, leftOut: pool.leftOut } : null);
       } catch (error) { setRenderError(error instanceof Error ? error.message : String(error)); setPanelCount(0); containerRef.current?.replaceChildren(); }
       finally { setRenderPending(false); }
     }, 200);
@@ -211,7 +278,7 @@ export function StrategyTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, multiPops, sample, popId, fullPath, gateView, displayMode, maxEvents, allEvents, plotSize, nColumns, fitToColumns,
       pointSize, pointAlpha, densityColorPower, contourThreshold, kdeBandwidth, pubStyle, gateLineWidth, gateEdgeMode, fontTick, fontAxis, fontTitle, fontGate,
-      state.gates, state.gate_version, globalScales, derived, dataRevision, availableWidth]);
+      state.gates, state.gate_version, globalScales, derived, dataRevision, availableWidth, pooled, members, trees]);
 
   const toggleGateView = (v: GateView) =>
     setGateView((prev) => {
@@ -226,6 +293,29 @@ export function StrategyTab({
 
   const popName = sanitizeFilePart(state.populations[popId]?.name ?? "strategy");
   const isContour = displayMode === "contour";
+  const unit = isSceHost ? t("samples") : t("files");
+  const poolNotes = poolReport
+    ? [
+        poolReport.omittedGates.length
+          ? t("Gates not drawn: {names} (they differ between the pooled files)", { names: poolReport.omittedGates.join(", ") })
+          : null,
+        poolReport.leftOut.length
+          ? t("Not pooled: {files}", { files: poolReport.leftOut.map((entry) => `${entry.name} (${entry.reason})`).join(", ") })
+          : null,
+        poolNote || null,
+      ].filter((note): note is string => !!note)
+    : [];
+  const statusText = renderPending
+    ? "Preparing strategy…"
+    : !poolReady
+      ? t("Preparing {count} {unit}…", { count: poolList.length, unit })
+      : !panelCount
+        ? pooled && !poolList.length
+          ? t("Nothing is pooled: check the {unit} to pool in the file list.", { unit })
+          : "Select a gated population to show its strategy."
+        : pooled
+          ? [t("{steps} strategy steps · {count} {unit} pooled", { steps: panelCount, count: poolReport?.drawn ?? poolList.length, unit }), ...poolNotes].join(" · ")
+          : `${panelCount} strategy steps · current file and hierarchy`;
   const num = (setter: (n: number) => void, fallback: number) => (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = parseFloat(e.target.value);
     setter(Number.isFinite(v) ? v : fallback);
@@ -233,7 +323,7 @@ export function StrategyTab({
 
   return (
     <div className="gl-tab-panel gl-tab-fill">
-      <div className="gl-strategy-controls"><strong>Gating strategy</strong><span>{sampleName} · {state.hierarchies.find(h => h.id === state.active_hierarchy_id)?.name}</span><span>Trace a gating path or back-gate selected populations.</span></div>
+      <div className="gl-strategy-controls"><strong>Gating strategy</strong><span>{pooled ? t("{count} {unit} pooled", { count: poolList.length, unit }) : sampleName} · {state.hierarchies.find(h => h.id === state.active_hierarchy_id)?.name}</span><span>Trace a gating path or back-gate selected populations.</span></div>
       <div className="gl-strategy-controls">
         <span className="gl-stats-opt-label">{t("Mode")}</span>
         {(["single", "multi"] as const).map((m) => (
@@ -242,6 +332,15 @@ export function StrategyTab({
             {m === "single" ? t("Single") : t("Multiple pops")}
           </label>
         ))}
+        <span className="gl-ctl-sep" />
+        {/* The Gating tab's own pool switch, here too: the strategy draws whatever the Gating tab pools. */}
+        <label
+          className="gl-check"
+          title={t("Draw every step from the checked files' events together, as the Gating tab pools them: the point cap is shared out by population size, the counts are summed, and a gate is drawn where every pooled file has it alike")}
+        >
+          <input type="checkbox" checked={pooled} disabled={!pooled && !poolable} onChange={(e) => onPoolChange(e.target.checked)} />
+          {isSceHost ? t("Pool checked samples") : t("Pool checked files")}
+        </label>
         {mode === "single" && (<>
         <span className="gl-ctl-sep" />
         <label className="gl-field-inline">
@@ -432,7 +531,7 @@ export function StrategyTab({
         </CollapsiblePicker>
       )}
       {renderError && <p role="alert">{renderError}</p>}
-      <p role="status">{renderPending ? "Preparing strategy…" : !panelCount ? "Select a gated population to show its strategy." : `${panelCount} strategy steps · current file and hierarchy`}</p>
+      <p role="status">{statusText}</p>
       <div id="strategy-grid-container" ref={containerRef} aria-busy={renderPending} style={{ opacity: renderPending ? .5 : 1 }} className="gl-mini-grid-container" />
     </div>
   );

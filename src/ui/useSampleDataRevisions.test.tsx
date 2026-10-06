@@ -3,11 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  sampleDataRevisionKey,
-  useSampleDataRevisionKey,
-  type SampleRevisionEntry,
-} from "./useSampleDataRevisions";
+import { sampleDataRevisionKey, type SampleRevisionEntry, useSampleDataRevisionKey } from "./useSampleDataRevisions";
 
 class RevisionStore {
   dataRevision = 0;
@@ -121,5 +117,17 @@ describe("useSampleDataRevisionKey", () => {
     expect(store.dataRevision).toBe(1);
     expect(store.listenerCount).toBe(1);
     expect(host.textContent).toBe('[["sample",1]]');
+  });
+});
+
+// A sample rebuilt from another SCE assay starts at revision 0 again: the key tells the assays
+// apart, or the Illustration and Layout tabs kept the previous assay's figures after a switch.
+describe("sampleDataRevisionKey", () => {
+  it("changes with the hosted assay a sample draws", () => {
+    const source = (hostedAssayId: string | null) => ({ dataRevision: 0, hostedAssayId, subscribeDataRevision: () => () => {} });
+    expect(sampleDataRevisionKey([{ id: "D1", sample: source("counts") }]))
+      .not.toBe(sampleDataRevisionKey([{ id: "D1", sample: source("exprs") }]));
+    expect(sampleDataRevisionKey([{ id: "D1", sample: source(null) }]))
+      .toBe(sampleDataRevisionKey([{ id: "D1", sample: { dataRevision: 0, subscribeDataRevision: () => () => {} } }]));
   });
 });

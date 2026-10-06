@@ -174,22 +174,32 @@ describe("a rectangle with an unbounded side", () => {
     vertices: [[30000, 20000], [90000, 20000], [90000, U], [30000, U]], color: "#888888", label_offset: null, space: "raw",
   } as unknown as Gate);
 
-  it("is drawn with finite coordinates past the data, and the fit and the label leave that side out", () => {
-    const s = load();
-    const gate = gateOn();
-    const plotted = build(s, gate);
-    const ys = plotted.vertices!.map((v) => v[1]);
-    expect(ys.every(Number.isFinite)).toBe(true);
-    const frame = s.displayRange(s.index("SSC-A")!);
-    expect(Math.max(...ys)).toBeGreaterThan(frame[1]);
-    expect(plotted.unbounded).toEqual({ x: [false, false], y: [false, true] });
-    // The fit keeps the data's own frame on y rather than reaching for the drawn edge.
-    const fitted = includePlotGatesInAxisRange(frame, [plotted], "y");
-    expect(fitted[1]).toBeLessThanOrEqual(frame[1] * 1.1 + 1);
-    // The label, anchored by the renderer at the mean of the vertices, lands inside the frame.
-    const meanY = ys.reduce((a, b) => a + b, 0) / ys.length;
-    const labelY = meanY + plotted.label_offset![1];
-    expect(labelY).toBeGreaterThanOrEqual(frame[0]);
-    expect(labelY).toBeLessThanOrEqual(frame[1] * 1.1 + 1);
-  });
+  // On the linear axes scatter opens with, and on arcsinh: the open side is drawn far past the
+  // data either way (at 1e12 on linear), and the fit must not follow it there.
+  for (const scale of ["linear", "arcsinh"] as const) {
+    it(`is drawn with finite coordinates past the data on ${scale} axes, and the fit and the label leave that side out`, () => {
+      const s = load();
+      s.setScatterScale(s.index("FSC-A")!, scale);
+      s.setScatterScale(s.index("SSC-A")!, scale);
+      const gate = gateOn();
+      const plotted = build(s, gate);
+      const ys = plotted.vertices!.map((v) => v[1]);
+      expect(ys.every(Number.isFinite)).toBe(true);
+      const frame = s.displayRange(s.index("SSC-A")!);
+      expect(Math.max(...ys)).toBeGreaterThan(frame[1]);
+      expect(plotted.unbounded).toEqual({ x: [false, false], y: [false, true] });
+      // The fit keeps the data's own frame on y rather than reaching for the drawn edge: at most
+      // the quarter of the span a label may add, never the drawn edge itself.
+      const fitted = includePlotGatesInAxisRange(frame, [plotted], "y");
+      const span = frame[1] - frame[0];
+      expect(fitted[1]).toBeLessThanOrEqual(frame[1] + span * 0.25 + 1);
+      // The label, anchored by the renderer at the mean of the vertices, lands by the frame's top
+      // edge, inside the fitted range, and nowhere near the drawn edge.
+      const meanY = ys.reduce((a, b) => a + b, 0) / ys.length;
+      const labelY = meanY + plotted.label_offset![1];
+      expect(labelY).toBeGreaterThanOrEqual(frame[0]);
+      expect(labelY).toBeLessThanOrEqual(frame[1] + span * 0.1);
+      expect(labelY).toBeLessThanOrEqual(fitted[1]);
+    });
+  }
 });

@@ -539,11 +539,6 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-pool-toolbar button:hover { background: var(--hover); }
 .gl-pool-toolbar button:disabled { opacity: .45; cursor: default; }
 .gl-pool-toolbar button[aria-pressed="true"] { background: var(--active); border-color: var(--accent); }
-.gl-pool-members { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; padding-top: 6px; }
-.gl-pool-members span { background: var(--hover); padding: 3px 6px; border-radius: 3px; }
-.gl-pool-readonly .gate-layer, .gl-pool-readonly .gate-layer * { pointer-events: none !important; }
-.gl-pool-readonly .gate-layer .vh, .gl-pool-readonly .gate-layer .ellipse-handle { display: none; }
-.gl-readonly-tools { border: 0; padding: 0; margin: 0; min-width: 0; }
 .gl-sample-include { width: 14px; height: 14px; margin: 0; }
 .gl-sample-active-dot { width: 6px; height: 6px; border-radius: 50%; background: transparent; }
 .gl-sample-row.active .gl-sample-active-dot { background: var(--accent); }
@@ -3381,6 +3376,11 @@ input[type="number"]::-webkit-outer-spin-button {
 /* Tailored marks: a copy's gate whose coordinates differ from the template's (templateSync). */
 .gate-tailored-badge { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 8px; font-size: 9.5px; line-height: 14px; letter-spacing: 0.02em; color: #7b3fa0; background: color-mix(in srgb, #7b3fa0 12%, transparent); border: 1px solid color-mix(in srgb, #7b3fa0 40%, transparent); vertical-align: 1px; }
 .pop-tree-gate-badge.is-tailored { box-shadow: 0 0 0 1.5px #fff, 0 0 0 3px #7b3fa0; }
+/* A gate an agent proposed: the same badge in the agent's own colour, the rationale in its tooltip. */
+.gate-tailored-badge.gate-agent-badge { color: #b4541a; background: color-mix(in srgb, #b4541a 12%, transparent); border-color: color-mix(in srgb, #b4541a 40%, transparent); }
+.gl-agent-dialog { max-width: 460px; }
+.gl-agent-dialog p { font-size: 12.5px; color: var(--muted); margin: 0 0 10px; }
+.gl-agent-dialog .gl-agent-problem { color: #b42318; }
 
 /* Header menus: Workspace, Import and Export. The sidebar used to stack their actions as
    full-width buttons above the file list, which left the list a few rows once metadata chips
@@ -3557,6 +3557,18 @@ input[type="number"]::-webkit-outer-spin-button {
   justify-content: center;
 }
 
+/* Layout tab: the files a plot pools, under Items: quick picks, a checklist and the metadata chips. */
+.gl-layout-pool {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+.gl-layout-pool .gl-layout-pool-list {
+  max-height: 180px;
+  overflow: auto;
+}
+
 /* Layout tab: an Illustration figure block, its grid zoomed to fit the frame. */
 .gl-layout-figure-host {
   overflow: hidden;
@@ -3600,3 +3612,88 @@ input[type="number"]::-webkit-outer-spin-button {
   min-width: 210px;
 }
 
+
+/* ── Tutorial ─────────────────────────────────────────────────────────────────────────────── */
+/* The shade and ring take no clicks: the user works the app through them. The card does. */
+/* The tutorial. Nothing is dimmed: the element a step is about is marked with a band in the
+   tutorial's own colour, which the card's progress bar shares. Orange, because the app marks
+   its own selections in blue, and with a white hairline either side so the band reads on a
+   plot, a coloured matrix cell or a white panel alike. */
+.gl-tour { position: fixed; inset: 0; z-index: 400; pointer-events: none; --tour: #e8590c; --tour-rgb: 232, 89, 12; --tour-ink: #9a3b05; }
+.gl-tour-ring { position: absolute; box-sizing: border-box; }
+.gl-tour-band {
+  position: absolute; inset: 0; box-sizing: border-box; border-radius: 10px;
+  border: 2.5px solid var(--tour);
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.95), inset 0 0 0 1.5px rgba(255, 255, 255, 0.9), 0 0 14px 3px rgba(var(--tour-rgb), 0.34);
+  /* It lands from a little outside, once, then its glow breathes slowly. */
+  animation: gl-tour-land 380ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards, gl-tour-breathe 3.6s ease-in-out 1.6s infinite;
+}
+.gl-tour-ripple {
+  position: absolute; inset: -3px; box-sizing: border-box; border-radius: 13px;
+  border: 2px solid var(--tour); opacity: 0;
+  animation: gl-tour-ripple 1.15s ease-out 2;
+}
+/* After the dot that runs to it from the card has arrived. */
+.gl-tour-ring.is-late .gl-tour-band { animation-delay: 560ms, 2.2s; }
+.gl-tour-ring.is-late .gl-tour-ripple { animation-delay: 560ms; }
+.gl-tour-ring.is-reached .gl-tour-band {
+  border-color: #15803d; animation: none;
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.95), inset 0 0 0 1.5px rgba(255, 255, 255, 0.9), 0 0 14px 3px rgba(21, 128, 61, 0.34);
+}
+@keyframes gl-tour-land {
+  from { opacity: 0; inset: -14px; }
+  to { opacity: 1; inset: 0; }
+}
+@keyframes gl-tour-breathe {
+  0%, 100% { box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.95), inset 0 0 0 1.5px rgba(255, 255, 255, 0.9), 0 0 14px 3px rgba(var(--tour-rgb), 0.34); }
+  50% { box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.95), inset 0 0 0 1.5px rgba(255, 255, 255, 0.9), 0 0 8px 1px rgba(var(--tour-rgb), 0.14); }
+}
+@keyframes gl-tour-ripple {
+  0% { opacity: 0.75; inset: -3px; }
+  100% { opacity: 0; inset: -24px; }
+}
+.gl-tour-runner {
+  position: absolute; left: 0; top: 0; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%;
+  background: var(--tour); box-shadow: 0 0 0 2px #ffffff, 0 0 10px 2px rgba(var(--tour-rgb), 0.5); opacity: 0;
+  animation: gl-tour-run 620ms cubic-bezier(0.4, 0, 0.2, 1) 1 both;
+}
+@keyframes gl-tour-run {
+  0% { transform: translate(var(--fx), var(--fy)) scale(0.6); opacity: 0; }
+  18% { opacity: 1; }
+  82% { opacity: 1; }
+  100% { transform: translate(var(--tx), var(--ty)) scale(1); opacity: 0; }
+}
+.gl-tour-cursor { position: absolute; left: 0; top: 0; width: 22px; height: 26px; opacity: 0; will-change: transform; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35)); }
+.gl-tour-ghost { position: absolute; border: 2px dashed var(--tour); background: rgba(var(--tour-rgb), 0.12); opacity: 0; box-sizing: border-box; }
+.gl-tour-card {
+  position: absolute; right: 16px; bottom: 16px; width: 340px; max-width: calc(100vw - 32px);
+  pointer-events: auto; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  border-radius: 10px; box-shadow: 0 12px 32px rgba(15, 23, 42, 0.22), 0 0 0 1px rgba(var(--tour-rgb), 0.25); padding: 12px 14px 12px;
+  font-size: 13px; line-height: 1.45; overflow: hidden;
+}
+.gl-tour-card.is-left { right: auto; left: 16px; }
+/* How far through the tutorial, in the marker's colour. */
+.gl-tour-progress { height: 4px; margin: -12px -14px 9px; background: var(--line); }
+.gl-tour-progress > span { display: block; height: 100%; background: var(--tour); transition: width 240ms ease; }
+.gl-tour-card-head { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; cursor: grab; user-select: none; touch-action: none; }
+.gl-tour-card-head:active { cursor: grabbing; }
+.gl-tour-card h4 { margin: 6px 0 4px; font-size: 15px; }
+.gl-tour-card p { margin: 0 0 6px; }
+/* The step happens somewhere else: where, and a button that goes there. */
+.gl-tour-card p.gl-tour-place {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 12px;
+  background: rgba(var(--tour-rgb), 0.08); border: 1px solid rgba(var(--tour-rgb), 0.35); border-radius: 6px;
+}
+.gl-tour-place .gl-mini-btn { margin-left: auto; white-space: nowrap; border-color: var(--tour); color: var(--tour-ink); font-weight: 600; }
+.gl-tour-status { min-height: 1.3em; color: var(--muted); font-size: 12px; }
+.gl-tour-status.is-reached { color: #15803d; font-weight: 600; }
+.gl-tour-card-actions { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
+.gl-tour-card-spacer { flex: 1; }
+.gl-tour-end { color: var(--muted); }
+.gl-tour-about-modal { max-width: 520px; font-size: 13px; line-height: 1.5; }
+.gl-tour-about-modal p { margin: 0 0 8px; }
+.gl-tour-citation { padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+@media (prefers-reduced-motion: reduce) {
+  .gl-tour-band, .gl-tour-ripple, .gl-tour-runner { animation: none; }
+  .gl-tour-progress > span { transition: none; }
+}

@@ -86,13 +86,21 @@ describe("Sample — flow (Aria III), raw gating space", () => {
     }
   });
 
-  it("scatter gatingToDisplay is arcsinh(x/150)", () => {
-    expect(s.gatingToDisplay("FSC-A", 150)).toBeCloseTo(Math.asinh(1), 6);
+  it("scatter is drawn linear unless switched, and then gatingToDisplay is arcsinh(x/150)", () => {
+    const local = new Sample(fcs);
+    const idx = local.index("FSC-A")!;
+    expect(local.scatterScale(idx)).toBe("linear");
+    expect(local.gatingToDisplay("FSC-A", 150)).toBeCloseTo(150, 6);
+    local.setScatterScale(idx, "arcsinh");
+    expect(local.gatingToDisplay("FSC-A", 150)).toBeCloseTo(Math.asinh(1), 6);
+    local.setScatterScale(idx, "linear");
+    expect(local.gatingToDisplay("FSC-A", 150)).toBeCloseTo(150, 6);
   });
 
   it("restores a per-channel scatter cofactor and keeps raw/display conversion invertible", () => {
     const local = new Sample(fcs);
     const idx = local.index("FSC-A")!;
+    local.setScatterScale(idx, "arcsinh");
     local.setScatterCofactor(idx, 300);
     expect(local.currentScatterCofactor(idx)).toBe(300);
     expect(local.rawToDisplay("FSC-A", 300)).toBeCloseTo(Math.asinh(1), 6);

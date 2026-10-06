@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -50,6 +51,7 @@ import {
   pageSizeMm,
   pageSizePx,
   LAYOUT_STYLE_RANGES,
+  DEFAULT_LAYOUT_STYLE,
   effectiveLayoutStyle,
   normalizeLayoutStyle,
   type LayoutDisplayMode,
@@ -71,7 +73,10 @@ import {
   type LayoutWorkspace,
 } from "../engine/layout";
 import type { IllustrationConfig } from "../engine/workspace";
-import { buildIllustrationPayload } from "../engine/illustration";
+import { buildIllustrationPayload, type IllustrationOptions } from "../engine/illustration";
+import { buildPooledPlotPayload, poolCompatibility, pooledGateAgreement, type PooledMember } from "../engine/pooledPlot";
+import { facetColumns, groupCheckedCount, toggleGroupChecked } from "../engine/sampleFacets";
+import type { CSSProperties } from "react";
 import {
   computeGatingStrategy,
   buildStrategyPayload,
@@ -79,7 +84,7 @@ import {
 import { populationTreeOrder } from "../engine/populations";
 import { loadMiniPlots } from "../plots/loadPlots";
 import { composeSheetPages, writeComposedPages, type ComposedPage, type LayoutExportFormat } from "../plots/layoutExport";
-import { DEFAULT_ITERATION, expandLayoutSheet, followsIteration, iterationUnits, populationUnits, templateFrame, type DescribeBoundPlot, type LayoutIteration, type LayoutPage as ExpandedPage, type LayoutPageItem } from "../engine/layoutBatch";
+import { DEFAULT_ITERATION, expandLayoutSheet, followsIteration, iterationUnits, metadataUnits, populationUnits, sharedMetadataFields, templateFrame, type DescribeBoundPlot, type LayoutIteration, type LayoutPage as ExpandedPage, type LayoutPageItem } from "../engine/layoutBatch";
 import { automaticTitleTemplate, fieldsFromTemplate, plotTitle, plotTitleContext, templateFromFields, titleFields, TITLE_PLACEHOLDERS, TITLE_PRESETS, TITLE_SEPARATORS } from "../engine/layoutTitle";
 import { alignItems, arrangeUnits, distributeItems, fitContentToPage, fitPageToContent, groupItems, ungroupItems, type AlignHow, type DistributeHow } from "../engine/layoutArrange";
 import { useI18n } from "./i18n";
@@ -110,6 +115,8 @@ interface Props {
   groups?: readonly { id: string; name: string }[];
   fileGroups?: Readonly<Record<string, string>>;
   metadataColumns?: readonly string[];
+  /** The level order of the metadata columns that have one, by column: the order a metadata iteration draws the values in. */
+  metadataLevels?: Readonly<Record<string, readonly string[]>>;
   /** The Metadata tab's population table, by population id: what {popmeta:field} reads in titles and text. */
   populationMetadata?: Readonly<Record<string, Readonly<Record<string, string>>>>;
   activeSampleId: string | null;
@@ -129,6 +136,8 @@ interface Props {
   dataRevision: string | number;
   densityColorPower: number;
   onOpenInGating: (recipe: LayoutPlotRecipe | LayoutStrategyRecipe) => void;
+  /** Called when a sheet has been written out, for whoever counts that (the tutorial). */
+  onExported?: () => void;
 }
 
 /** The renderer's font sizes from a style. */
@@ -204,7 +213,173 @@ function itemTitle(
   if (recipe.kind === "strategy") {
     return `${population?.name ?? "Population"} strategy`;
   }
+  const pool = poolOf(recipe);
+  if (pool) return `${population?.name ?? "Population"} · ${pool.length} files`;
   return `${population?.name ?? "Population"} · ${sample?.name ?? "FCS"}`;
+}
+
+/** The files a plot pools, when it pools more than one; null for a plot of one file. */
+function poolOf(recipe: LayoutRecipe): string[] | null {
+  return (recipe.kind === "biplot" || recipe.kind === "histogram") && recipe.pool && recipe.pool.sampleIds.length > 1
+    ? recipe.pool.sampleIds
+    : null;
+}
+
+/**
+ * The pooled files that can join a plot, the reference file first: each with the plot's
+ * population followed into its own tree and its channels compatible with the reference's. The
+ * others are named with why, so a pool never narrows in silence.
+ */
+function resolvePoolMembers(
+  recipe: LayoutPlotRecipe,
+  samples: readonly LayoutSampleView[],
+  trees: Record<string, StoredHierarchy>,
+  templateTreeId?: string,
+): { members: PooledMember[]; leftOut: { name: string; reason: string }[] } {
+  const ids = recipe.pool?.sampleIds ?? [recipe.sampleId];
+  const reference = samples.find(({ id }) => id === recipe.sampleId) ?? samples.find(({ id }) => ids.includes(id)) ?? null;
+  const members: PooledMember[] = [];
+  const leftOut: { name: string; reason: string }[] = [];
+  if (!reference) return { members, leftOut };
+  const y = recipe.kind === "histogram" ? null : recipe.yChannel;
+  for (const id of [reference.id, ...ids.filter((candidate) => candidate !== reference.id)]) {
+    const view = samples.find((candidate) => candidate.id === id);
+    if (!view) {
+      leftOut.push({ name: id, reason: "not loaded" });
+      continue;
+    }
+    const resolved = resolvePopulationInTree(recipe.populationId, view.tree, trees, templateTreeId ?? reference.tree.id);
+    if (resolved.missing) {
+      leftOut.push({ name: view.name, reason: "no corresponding population" });
+      continue;
+    }
+    const reason = view === reference ? null : poolCompatibility(reference.sample, view.sample, recipe.xChannel, y);
+    if (reason) {
+      leftOut.push({ name: view.name, reason });
+      continue;
+    }
+    members.push({ id: view.id, name: view.name, sample: view.sample, tree: view.tree, gating: view.derived, populationId: resolved.id });
+  }
+  return { members, leftOut };
+}
+
+/** What a pooled plot's inspector says of its pool: how many files joined, which did not and why, and the gates left out. */
+interface PoolReport {
+  pooled: number;
+  total: number;
+  leftOut: { name: string; reason: string }[];
+  omittedGates: string[];
+}
+
+/**
+ * The files a plot pools: a checklist with a search, the quick picks the iteration offers
+ * (the checked files, every file, a group) and the metadata chips of the file list, each a
+ * bulk checkbox for its value.
+ */
+function LayoutPoolPicker({
+  files,
+  pool,
+  checkedSampleIds,
+  groups,
+  fileGroups,
+  report,
+  onChange,
+}: Readonly<{
+  files: readonly FigureSample[];
+  pool: readonly string[];
+  checkedSampleIds: readonly string[];
+  groups: readonly { id: string; name: string }[];
+  fileGroups: Readonly<Record<string, string>>;
+  report: PoolReport | null;
+  onChange: (sampleIds: string[]) => void;
+}>) {
+  const { t } = useI18n();
+  const [search, setSearch] = useState("");
+  const metadata = useMemo(
+    () => Object.fromEntries(files.filter((file) => file.metadata).map((file) => [file.id, file.metadata!])),
+    [files],
+  );
+  const facets = useMemo(
+    () => facetColumns(metadata, [...new Set(Object.values(metadata).flatMap((row) => Object.keys(row)))].map((name) => ({ name }))),
+    [metadata],
+  );
+  const excluded = useMemo(() => new Set(files.filter((file) => !pool.includes(file.id)).map((file) => file.id)), [files, pool]);
+  const inFileOrder = (ids: ReadonlySet<string> | readonly string[]) =>
+    files.filter((file) => (ids instanceof Set ? ids.has(file.id) : (ids as readonly string[]).includes(file.id))).map((file) => file.id);
+  const query = search.trim().toLowerCase();
+  return (
+    <div className="gl-layout-pool">
+      <div className="gl-figure-actions gl-figure-list-actions">
+        <button type="button" onClick={() => onChange(inFileOrder(checkedSampleIds))}>{t("Checked files")}</button>
+        <button type="button" onClick={() => onChange(files.map((file) => file.id))}>{t("All files")}</button>
+        {groups.map((group) => (
+          <button key={group.id} type="button" onClick={() => onChange(files.filter((file) => fileGroups[file.id] === group.id).map((file) => file.id))}>
+            {t("Group {name}", { name: group.name })}
+          </button>
+        ))}
+      </div>
+      <input
+        type="search"
+        aria-label={t("Find files to pool")}
+        placeholder={t("Find file / sample…")}
+        value={search}
+        onChange={(event) => setSearch(event.target.value)}
+      />
+      <div className="gl-figure-list gl-layout-pool-list">
+        {files
+          .filter((file) => !query || `${file.name} ${file.fileName ?? ""}`.toLowerCase().includes(query))
+          .map((file) => (
+            <label key={file.id} className="gl-figure-row" title={file.fileName && file.fileName !== file.name ? `${file.name} · ${file.fileName}` : file.name}>
+              <input
+                type="checkbox"
+                checked={pool.includes(file.id)}
+                onChange={() => onChange(pool.includes(file.id) ? pool.filter((id) => id !== file.id) : inFileOrder([...pool, file.id]))}
+              />
+              <span className="gl-figure-row-name">{file.name}</span>
+            </label>
+          ))}
+      </div>
+      {facets.length > 0 && (
+        <div className="gl-sample-facets gl-figure-facets" aria-label={t("Select pooled files by metadata")}>
+          {facets.map((column) => (
+            <div key={column.name} className="gl-sample-facet-row">
+              <span className="gl-sample-facet-lock" aria-hidden="true" />
+              <span className="gl-sample-facet-name" title={column.name}>{column.name}</span>
+              <div className="gl-sample-facet-values">
+                {column.values.map((entry) => {
+                  const on = groupCheckedCount(entry.sampleIds, excluded);
+                  const total = entry.sampleIds.length;
+                  const chipState = on === total ? "all" : on === 0 ? "none" : "some";
+                  const fill = total > 0 ? Math.round((on / total) * 100) : 0;
+                  return (
+                    <button
+                      key={entry.value}
+                      type="button"
+                      className={`gl-sample-facet-chip is-${chipState}`}
+                      style={chipState === "some" ? { "--gl-facet-fill": `${fill}%` } as CSSProperties : undefined}
+                      aria-pressed={on === total}
+                      title={`${entry.value}: ${on} of ${total} pooled — ${on === total ? `click to drop all ${total}` : `click to pool all ${total}`}`}
+                      onClick={() => onChange(inFileOrder(new Set(files.filter((file) => !toggleGroupChecked(entry.sampleIds, excluded).has(file.id)).map((file) => file.id))))}
+                    >
+                      <span className="gl-sample-facet-label">{entry.value}</span>
+                      <span className="gl-sample-facet-count">{on}/{total}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {report && (
+        <p className="gl-hint">
+          {t("{n} of {m} files pooled", { n: report.pooled, m: report.total })}
+          {report.leftOut.length > 0 && ` · ${t("Not pooled: {files}", { files: report.leftOut.map((entry) => `${entry.name} (${entry.reason})`).join(", ") })}`}
+          {report.omittedGates.length > 0 && ` · ${t("Gates not shown: {names} — they differ between the pooled files", { names: report.omittedGates.join(", ") })}`}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function LayoutPlotSurface({
@@ -237,10 +412,19 @@ function LayoutPlotSurface({
   // A chart, a figure and a Plotting chart have surfaces of their own; this one takes plots and strategies.
   const recipe = item.recipe as Exclude<LayoutRecipe, LayoutChartRecipe | LayoutFigureRecipe | LayoutProportionsRecipe>;
   const styleKey = JSON.stringify(style);
+  const trees = useMemo(() => figureHierarchies(activeState), [activeState]);
   const source =
     recipe.kind === "text"
       ? null
       : (samples.find(({ id }) => id === recipe.sampleId) ?? null);
+  // A pooled plot is drawn from every pooled file's view; it is drawn again when any of them is
+  // prepared again, as a plot of one file is when its view is.
+  const pool = poolOf(recipe);
+  const poolKey = pool?.join("|") ?? "";
+  const memberViews = useMemo(
+    () => (poolKey ? poolKey.split("|").map((id) => samples.find((view) => view.id === id) ?? null) : null),
+    [samples, poolKey],
+  );
   const state = source ? { ...activeState, ...source.tree } : activeState;
   // An item drawn for another file than its template's: the population is the template's,
   // followed through provenance into this file's tree, so a tailored or group copy shows its
@@ -253,7 +437,7 @@ function LayoutPlotSurface({
   // was added from), so a plot never says its population is unavailable while the file has it.
   const resolvedPopulation = (() => {
     if (recipe.kind === "text" || !source) return { id: recipe.kind === "text" ? "" : recipe.populationId, missing: false };
-    return resolvePopulationInTree(recipe.populationId, source.tree, figureHierarchies(activeState), templateSource?.tree.id);
+    return resolvePopulationInTree(recipe.populationId, source.tree, trees, templateSource?.tree.id);
   })();
   const populationId = resolvedPopulation.id;
   const missingPopulationName = resolvedPopulation.missing
@@ -263,7 +447,7 @@ function LayoutPlotSurface({
   // The title as drawn, resolved here so the effect below keys on the words and not on the
   // describe callback's identity: the plot is drawn again when its template, file or population
   // changes, and not when the tab renders for a selection.
-  const boundContext = recipe.kind === "text" ? null : describe({ ...recipe, populationId });
+  const boundContext = recipe.kind === "text" ? null : describe({ ...recipe, populationId }, undefined, item.unitId);
   const fillTitle = (template: string) => (boundContext ? plotTitle(template, boundContext) : template);
   const drawnTitle = recipe.kind === "strategy" ? fillTitle(recipe.title?.trim() || "{population}") : fillTitle(titleTemplate);
   const recipeKey = JSON.stringify(recipe);
@@ -346,6 +530,72 @@ function LayoutPlotSurface({
 
       const plotSize = Math.max(120, Math.min(availableWidth, availableHeight));
       const yChannel = recipe.kind === "histogram" ? null : recipe.yChannel;
+      const options: IllustrationOptions = {
+        displayMode: recipe.displayMode,
+        maxEvents: style.maxEvents,
+        nColumns: 1,
+        plotSize,
+        fitToColumns: false,
+        contourThreshold: style.contourThreshold,
+        pointAlpha: style.pointAlpha,
+        densityColorPower,
+        pointSize: style.pointSize,
+        kdeBandwidth: style.kdeBandwidth,
+        colorByPop: false,
+        overlayPops: false,
+        populationColors: {},
+        histLineWidth: style.histLineWidth,
+        histFill: style.histFill,
+        histFillAlpha: style.histFillAlpha,
+        histOverlayMode: "front_opaque",
+        histLayout: "grid",
+        ridgeOverlap: 0.7,
+        ridgeColGap: 8,
+        ridgeGradient: false,
+        pubStyle: style.pubStyle,
+        gateLineWidth: style.gateLineWidth,
+        gateLabelFormat: style.gateLabels,
+        fontSizes: fontSizesOf(style),
+        scaleFontsWithPlot: true,
+      };
+      const draw = (plot: Record<string, unknown>, gates: unknown[]) =>
+        loadMiniPlots().renderMiniPlot(host, {
+          ...plot,
+          display_mode: recipe.displayMode,
+          plot_size: plotSize,
+          canvas_scale: canvasScale,
+          contour_threshold: style.contourThreshold,
+          point_alpha: style.pointAlpha,
+          density_color_power: densityColorPower,
+          point_size: style.pointSize,
+          kde_bandwidth: style.kdeBandwidth,
+          hist_line_width: style.histLineWidth,
+          hist_fill: style.histFill,
+          hist_fill_alpha: style.histFillAlpha,
+          hist_overlay_mode: "front_opaque",
+          title: drawnTitle,
+          contour_levels: style.contourLevels,
+          font_sizes: fontSizesOf(style),
+          gate_style: { pub_style: style.pubStyle, line_width: style.gateLineWidth, label_format: style.gateLabels },
+          pop_color: "#334155",
+          gates,
+        });
+      if (memberViews) {
+        // The pooled files' events on one plot, by the rules the Illustration tab pools by: the
+        // reference file's axes, the cap shared out, the counts summed, the gates the files hold
+        // alike labelled with the pooled percentage.
+        const { members } = resolvePoolMembers(recipe, samples, trees, templateSource?.tree.id);
+        const pooled = members.length
+          ? buildPooledPlotPayload(members, recipe.xChannel, yChannel, globalScales, options, trees)
+          : null;
+        if (!pooled) {
+          host.textContent = "No events are available for this FCS/population combination.";
+          host.className = "gl-layout-plot-host is-missing";
+          return;
+        }
+        draw(pooled.config, pooled.gates);
+        return;
+      }
       const payload = buildIllustrationPayload(
         source.sample,
         state.gates,
@@ -357,38 +607,11 @@ function LayoutPlotSurface({
         [recipe.xChannel],
         yChannel,
         globalScales,
-        {
-          displayMode: recipe.displayMode,
-          maxEvents: style.maxEvents,
-          nColumns: 1,
-          plotSize,
-          fitToColumns: false,
-          contourThreshold: style.contourThreshold,
-          pointAlpha: style.pointAlpha,
-          densityColorPower,
-          pointSize: style.pointSize,
-          kdeBandwidth: style.kdeBandwidth,
-          colorByPop: false,
-          overlayPops: false,
-          populationColors: {},
-          histLineWidth: style.histLineWidth,
-          histFill: style.histFill,
-          histFillAlpha: style.histFillAlpha,
-          histOverlayMode: "front_opaque",
-          histLayout: "grid",
-          ridgeOverlap: 0.7,
-          ridgeColGap: 8,
-          ridgeGradient: false,
-          pubStyle: style.pubStyle,
-          gateLineWidth: style.gateLineWidth,
-          gateLabelFormat: style.gateLabels,
-          fontSizes: fontSizesOf(style),
-          scaleFontsWithPlot: true,
-        },
+        options,
         source.derived.gateMasks,
       ) as {
         plots?: Record<string, Record<string, unknown>>;
-        gate_overlays?: Record<string, unknown>;
+        gate_overlays?: Record<string, unknown[]>;
       };
       const key = `${populationId}|${recipe.xChannel}`;
       const plot = payload.plots?.[key];
@@ -398,27 +621,7 @@ function LayoutPlotSurface({
         host.className = "gl-layout-plot-host is-missing";
         return;
       }
-      loadMiniPlots().renderMiniPlot(host, {
-        ...plot,
-        display_mode: recipe.displayMode,
-        plot_size: plotSize,
-        canvas_scale: canvasScale,
-        contour_threshold: style.contourThreshold,
-        point_alpha: style.pointAlpha,
-        density_color_power: densityColorPower,
-        point_size: style.pointSize,
-        kde_bandwidth: style.kdeBandwidth,
-        hist_line_width: style.histLineWidth,
-        hist_fill: style.histFill,
-        hist_fill_alpha: style.histFillAlpha,
-        hist_overlay_mode: "front_opaque",
-        title: drawnTitle,
-        contour_levels: style.contourLevels,
-        font_sizes: fontSizesOf(style),
-        gate_style: { pub_style: style.pubStyle, line_width: style.gateLineWidth, label_format: style.gateLabels },
-        pop_color: "#334155",
-        gates: payload.gate_overlays?.[key] ?? [],
-      });
+      draw(plot, payload.gate_overlays?.[key] ?? []);
     }, 80);
     return () => window.clearTimeout(timer);
   }, [
@@ -441,6 +644,8 @@ function LayoutPlotSurface({
     missingPopulationName,
     canvasScale,
     drawnTitle,
+    memberViews,
+    trees,
   ]);
 
   if (recipe.kind === "text") {
@@ -634,18 +839,33 @@ function LayoutStyleFields({
   return (
     <div className="gl-layout-style-fields">
       {LAYOUT_STYLE_NUMBERS.map(({ key, label, step, integer }) => (
-        <label key={key} className={"gl-field-inline" + (key in own ? " is-own" : "")}>
-          {t(label)}
-          <NumberField
-            aria-label={t(label)}
-            value={effective[key]}
-            min={LAYOUT_STYLE_RANGES[key][0]}
-            max={LAYOUT_STYLE_RANGES[key][1]}
-            step={step}
-            integer={integer}
-            onCommit={(value) => onChange({ [key]: value })}
-          />
-        </label>
+        <Fragment key={key}>
+          <label className={"gl-field-inline" + (key in own ? " is-own" : "")}>
+            {t(label)}
+            <NumberField
+              aria-label={t(label)}
+              value={key === "maxEvents" && effective.maxEvents === 0 ? DEFAULT_LAYOUT_STYLE.maxEvents : effective[key]}
+              min={LAYOUT_STYLE_RANGES[key][0]}
+              max={LAYOUT_STYLE_RANGES[key][1]}
+              step={step}
+              integer={integer}
+              disabled={key === "maxEvents" && effective.maxEvents === 0}
+              onCommit={(value) => onChange({ [key]: value })}
+            />
+          </label>
+          {key === "maxEvents" && (
+            // An event cap of 0 is every event, as on the Gating tab: a pooled plot of a whole SCE
+            // can then be drawn as the Gating tab's pooled view draws it.
+            <label className={"gl-check" + ("maxEvents" in own ? " is-own" : "")} title={t("Draw every event of the plot's files rather than a sample of them; a plot of a million points repaints slowly. Counts and percentages always use every event.")}>
+              <input
+                type="checkbox"
+                checked={effective.maxEvents === 0}
+                onChange={(event) => onChange({ maxEvents: event.target.checked ? 0 : DEFAULT_LAYOUT_STYLE.maxEvents })}
+              />
+              {t("All events")}
+            </label>
+          )}
+        </Fragment>
       ))}
       <label className={"gl-field-inline" + ("gateLabels" in own ? " is-own" : "")}>
         {t("Gate labels")}
@@ -768,6 +988,7 @@ export function LayoutTab({
   groups = [],
   fileGroups = {},
   metadataColumns = [],
+  metadataLevels,
   populationMetadata,
   activeSampleId,
   activePopulationId,
@@ -783,6 +1004,7 @@ export function LayoutTab({
   dataRevision,
   densityColorPower,
   onOpenInGating,
+  onExported,
 }: Readonly<Props>) {
   const { t } = useI18n();
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -859,6 +1081,7 @@ export function LayoutTab({
     () => Object.fromEntries(files.map((file) => [file.id, file.metadata])) as Record<string, Readonly<Record<string, string>> | undefined>,
     [files],
   );
+  const trees = useMemo(() => figureHierarchies(state), [state]);
   /** The per-file sources are prepared off the render path; until then nothing can be placed. */
   const ready = files.length === 0 || (sourceResult.current && sourceResult.pending === 0);
   const undoRef = useRef<LayoutWorkspace[]>([]);
@@ -880,11 +1103,13 @@ export function LayoutTab({
         ? iterationSource
           ? populationUnits(iteration, iterationSource.tree, files.find(({ id }) => id === iterationSource.id) ?? iterationSource)
           : []
-        : iterationUnits(iteration, files, checkedSampleIds, groups, fileGroups),
-    [iteration, files, checkedSampleIds, groups, fileGroups, iterationSource],
+        : iteration.mode === "metadata"
+          ? metadataUnits(iteration, files, checkedSampleIds, groups, fileGroups, metadataLevels?.[iteration.column ?? ""])
+          : iterationUnits(iteration, files, checkedSampleIds, groups, fileGroups),
+    [iteration, files, checkedSampleIds, groups, fileGroups, iterationSource, metadataLevels],
   );
   /** What a plot's placeholders read: its file (display id, name, metadata), its population (followed into the file's tree when drawn for another) and its count. */
-  const describePlot: DescribeBoundPlot = useCallback((recipe, templateSampleId) => {
+  const describePlot: DescribeBoundPlot = useCallback((recipe, templateSampleId, unitId) => {
     const file = files.find(({ id }) => id === recipe.sampleId) ?? null;
     const view = samples.find(({ id }) => id === recipe.sampleId) ?? null;
     let populationId = recipe.populationId;
@@ -896,6 +1121,22 @@ export function LayoutTab({
       }
     }
     const population = view?.tree.populations[populationId];
+    const pool = poolOf(recipe);
+    if (pool && recipe.kind !== "strategy") {
+      // A pool reads as its files: how many, the metadata they share, and the population's
+      // events over all of them.
+      const { members } = resolvePoolMembers(recipe, samples, trees, templateSampleId ? samples.find(({ id }) => id === templateSampleId)?.tree.id : undefined);
+      const pooledCount = members.reduce((total, member) => total + (member.gating.stats.event_count[member.populationId] ?? 0), 0);
+      // A pool drawn for a metadata value is named by the value; a hand-picked one by its size.
+      const unit = unitId ? units.find((candidate) => candidate.id === unitId) : undefined;
+      return plotTitleContext(
+        recipe,
+        { name: unit?.sampleIds ? unit.name : `${pool.length} files`, fileName: `${pool.length} files`, metadata: sharedMetadataFields(pool.map((id) => metadataById[id])) },
+        population ? { id: populationId, name: population.name } : null,
+        members.length ? pooledCount : undefined,
+        populationMetadata,
+      );
+    }
     const count = view?.derived.stats.event_count[populationId];
     return plotTitleContext(
       recipe.kind === "strategy" ? {} : recipe,
@@ -904,7 +1145,7 @@ export function LayoutTab({
       typeof count === "number" ? count : undefined,
       populationMetadata,
     );
-  }, [files, samples, state, populationMetadata]);
+  }, [files, samples, state, populationMetadata, trees, metadataById, units]);
   const pages: ExpandedPage[] = useMemo(
     () => (activeSheet ? expandLayoutSheet(activeSheet, units, describePlot) : []),
     [activeSheet, units, describePlot],
@@ -924,8 +1165,10 @@ export function LayoutTab({
   // What the page's plots are titled: the sheet's template, else what differs across the page.
   const sheetTitleTemplate = activeSheet?.titleTemplate?.trim() || automaticTitleTemplate(
     currentPage.items.flatMap((item) => isPlotLikeRecipe(item.recipe)
-      ? [{ sampleId: item.recipe.sampleId, populationId: item.recipe.populationId, label: item.recipe.kind === "strategy" ? undefined : item.recipe.label }]
+      // A pool counts as a file of its own, so two pools of one reference file still differ by file.
+      ? [{ sampleId: poolOf(item.recipe)?.join(",") ?? item.recipe.sampleId, populationId: item.recipe.populationId, label: item.recipe.kind === "strategy" ? undefined : item.recipe.label }]
       : []),
+    iteration.mode === "metadata" ? { metadataColumn: iteration.column } : undefined,
   );
   useEffect(() => {
     if (pageIndex !== currentPageIndex) setPageIndex(currentPageIndex);
@@ -961,7 +1204,7 @@ export function LayoutTab({
     return context && isBakedTitle(title, context.population, [context.file, context.sample]) ? "" : title;
   };
   const selectedTitlePreview = selectedPageItem && isPlotLikeRecipe(selectedPageItem.recipe)
-    ? plotTitle(sheetTitleTemplate, describePlot(selectedPageItem.recipe, selectedPageItem.templateSampleId) ?? { population: "", file: "", sample: "", x: "", y: "" })
+    ? plotTitle(sheetTitleTemplate, describePlot(selectedPageItem.recipe, selectedPageItem.templateSampleId, selectedPageItem.unitId) ?? { population: "", file: "", sample: "", x: "", y: "" })
     : "";
   const selectionLocked = selectedItems.some((item) => item.locked);
   const lockedTemplateIds = new Set((activeSheet?.items ?? []).filter((item) => item.locked).map((item) => item.id));
@@ -1372,6 +1615,42 @@ export function LayoutTab({
       if (item) item.recipe = change(item.recipe);
     });
   };
+  /**
+   * The selected plot's pool: the files given, in file order, or none. The reference file stays
+   * while it is in the pool; otherwise the first pooled file takes over, with the population
+   * carried into its tree as the FCS select carries it.
+   */
+  const setSelectedPool = (sampleIds: readonly string[] | null) =>
+    updateSelectedRecipe((recipe) => {
+      if (recipe.kind !== "biplot" && recipe.kind !== "histogram") return recipe;
+      const ordered = sampleIds ? files.filter((file) => sampleIds.includes(file.id)).map((file) => file.id) : [];
+      if (!ordered.length) {
+        const { pool: _pool, ...rest } = recipe;
+        return rest;
+      }
+      const referenceId = ordered.includes(recipe.sampleId) ? recipe.sampleId : ordered[0];
+      let populationId = recipe.populationId;
+      if (referenceId !== recipe.sampleId) {
+        const from = samples.find(({ id }) => id === recipe.sampleId);
+        const target = samples.find(({ id }) => id === referenceId);
+        if (from && target) {
+          const mapped = resolveFigurePopulation({ hierarchyId: from.tree.id, populationId, label: "" }, target.tree, trees);
+          populationId = mapped.id ?? target.tree.root_population_id ?? populationId;
+        }
+      }
+      return { ...recipe, sampleId: referenceId, populationId, pool: { sampleIds: ordered } };
+    });
+  /** What the selected plot's pool holds and leaves out, for the inspector. */
+  const selectedPoolReport = useMemo<PoolReport | null>(() => {
+    const recipe = selectedItem?.recipe;
+    if (!recipe || !isPlotLikeRecipe(recipe) || recipe.kind === "strategy" || !recipe.pool) return null;
+    const templateTreeId = selectedPageItem?.templateSampleId ? samples.find(({ id }) => id === selectedPageItem.templateSampleId)?.tree.id : undefined;
+    const { members, leftOut } = resolvePoolMembers(recipe, samples, trees, templateTreeId);
+    const omittedGates = recipe.kind === "biplot" && recipe.yChannel && members.length > 1
+      ? pooledGateAgreement(trees, members.map((member) => member.tree.id), recipe.xChannel, recipe.yChannel).omitted.map((gate) => gate.name)
+      : [];
+    return { pooled: members.length, total: recipe.pool.sampleIds.length, leftOut, omittedGates };
+  }, [selectedItem, selectedPageItem, samples, trees]);
 
   const removeItems = (ids: readonly string[]) => {
     mutateActiveSheet((sheet) => {
@@ -1735,6 +2014,7 @@ export function LayoutTab({
         composed.push(...composeSheetPages(canvas, activeSheet, { zoom }));
       }
       await writeComposedPages(composed, activeSheet, exportFormat);
+      onExported?.();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2511,6 +2791,7 @@ export function LayoutTab({
                     </>
                   ) : (
                     <>
+                      {!poolOf(selectedItem.recipe) && (
                       <label className="gl-field-inline">
                         {t("FCS")}
                         <select
@@ -2551,6 +2832,36 @@ export function LayoutTab({
                           ))}
                         </select>
                       </label>
+                      )}
+                      {(selectedItem.recipe.kind === "biplot" || selectedItem.recipe.kind === "histogram") && (
+                        <label className="gl-check" title={t("Draw the events of several files on this plot, as the Gating tab pools the checked files; a gate is drawn where every pooled file has it alike, with the pooled percentage")}>
+                          <input
+                            type="checkbox"
+                            checked={!!selectedItem.recipe.pool}
+                            onChange={(event) => {
+                              if (!event.target.checked) {
+                                setSelectedPool(null);
+                                return;
+                              }
+                              // The pool starts as the checked files when they include this plot's file, else the file alone.
+                              const own = selectedItem.recipe.kind === "biplot" || selectedItem.recipe.kind === "histogram" ? selectedItem.recipe.sampleId : "";
+                              setSelectedPool(checkedSampleIds.includes(own) ? checkedSampleIds : [own]);
+                            }}
+                          />
+                          {t("Pool files")}
+                        </label>
+                      )}
+                      {(selectedItem.recipe.kind === "biplot" || selectedItem.recipe.kind === "histogram") && selectedItem.recipe.pool && (
+                        <LayoutPoolPicker
+                          files={files}
+                          pool={selectedItem.recipe.pool.sampleIds}
+                          checkedSampleIds={checkedSampleIds}
+                          groups={groups}
+                          fileGroups={fileGroups}
+                          report={selectedPoolReport}
+                          onChange={setSelectedPool}
+                        />
+                      )}
                       <label className="gl-field-inline">
                         {t("Population")}
                         <select
@@ -2650,7 +2961,7 @@ export function LayoutTab({
                         </select>
                       </label>
                       {iteration.mode !== "off" && (
-                        <label className="gl-check" title={iteration.mode === "populations" ? t("Drawn once per population of the iteration, for that population; unticked, it shows its own population on every page") : t("Drawn once per file of the iteration, for that file; unticked, it shows this file on every page")}>
+                        <label className="gl-check" title={iteration.mode === "populations" ? t("Drawn once per population of the iteration, for that population; unticked, it shows its own population on every page") : iteration.mode === "metadata" ? t("Drawn once per value of {column}, pooling that value's files; unticked, it shows its own files on every page", { column: iteration.column ?? "" }) : t("Drawn once per file of the iteration, for that file; unticked, it shows this file on every page")}>
                           <input
                             type="checkbox"
                             checked={selectedItem.recipe.iterated === true}
@@ -2836,15 +3147,33 @@ export function LayoutTab({
                 {t("Draw the sheet")}
                 <select
                   value={iteration.mode}
-                  onChange={(event) =>
-                    setIteration({ ...iteration, mode: event.target.value === "files" ? "files" : event.target.value === "populations" ? "populations" : "off" })
-                  }
+                  onChange={(event) => {
+                    const mode = event.target.value;
+                    if (mode === "metadata") {
+                      // The source of a file iteration names one value; here every value is a unit, so it falls back to the checked files.
+                      const column = iteration.column && metadataColumns.includes(iteration.column) ? iteration.column : metadataColumns[0] ?? "";
+                      setIteration({ ...iteration, mode: "metadata", column, source: iteration.source.kind === "metadata" ? { kind: "checked" } : iteration.source });
+                      return;
+                    }
+                    setIteration({ ...iteration, mode: mode === "files" ? "files" : mode === "populations" ? "populations" : "off" });
+                  }}
                 >
                   <option value="off">{t("Once")}</option>
                   <option value="files">{t("Once per file")}</option>
                   <option value="populations">{t("Once per population")}</option>
+                  <option value="metadata" disabled={!metadataColumns.length}>{t("Once per value of a metadata column")}</option>
                 </select>
               </label>
+              {iteration.mode === "metadata" && (
+                <label className="gl-field-inline">
+                  {t("Column")}
+                  <select value={iteration.column ?? ""} onChange={(event) => setIteration({ ...iteration, column: event.target.value })}>
+                    {metadataColumns.map((column) => (
+                      <option key={column} value={column}>{column}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
               {iteration.mode !== "off" && (
                 <>
                   {iteration.mode === "populations" && (
@@ -2871,7 +3200,7 @@ export function LayoutTab({
                       </select>
                     </label>
                   )}
-                  {iteration.mode === "files" && (
+                  {(iteration.mode === "files" || iteration.mode === "metadata") && (
                   <label className="gl-field-inline">
                     {t("Files")}
                     <select value={sourceKey} onChange={(event) => setIteration({ ...iteration, source: sourceFromKey(event.target.value) })}>
@@ -2880,7 +3209,7 @@ export function LayoutTab({
                       {groups.map((group) => (
                         <option key={group.id} value={`group:${group.id}`}>{t("Group {name}", { name: group.name })}</option>
                       ))}
-                      {metadataColumns.flatMap((column) =>
+                      {iteration.mode === "files" && metadataColumns.flatMap((column) =>
                         metadataValues(column).map((value) => (
                           <option key={`${column}=${value}`} value={`meta:${column}=${value}`}>{column} = {value}</option>
                         )),
@@ -2901,7 +3230,7 @@ export function LayoutTab({
                         })
                       }
                     >
-                      <option value="page-per-unit">{iteration.mode === "populations" ? t("One page per population") : t("One page per file")}</option>
+                      <option value="page-per-unit">{iteration.mode === "populations" ? t("One page per population") : iteration.mode === "metadata" ? t("One page per value") : t("One page per file")}</option>
                       <option value="tiles">{t("Tiles on each page")}</option>
                     </select>
                   </label>
@@ -2954,7 +3283,9 @@ export function LayoutTab({
                   <p className="gl-hint">
                     {iteration.mode === "populations"
                       ? t("{units} populations of {of} → {pages} pages. Items marked “Follows the iteration” are drawn for each population; the others repeat. Text and titles may use {population}, {sample}, {file}, {n} and {N}.", { units: units.length, of: iterationSource?.name ?? "the file", pages: Math.max(1, pages.length) })
-                      : t("{files} files → {pages} pages. Items marked “Follows the iteration” are drawn for each file; the others repeat. Text and titles may use {sample}, {file}, {group}, {n}, {N} and {meta:column}; a plot title may also use {population} and {count}.", { files: units.length, pages: Math.max(1, pages.length) })}
+                      : iteration.mode === "metadata"
+                        ? t("{values} values of {column} over {files} files → {pages} pages. Items marked “Follows the iteration” pool the files of each value; the others repeat. Text and titles may use {sample} (the value), {meta:column}, {file} (how many files), {n} and {N}; a plot title may also use {population} and {count}.", { values: units.length, column: iteration.column ?? "", files: units.reduce((total, unit) => total + (unit.sampleIds?.length ?? 0), 0), pages: Math.max(1, pages.length) })
+                        : t("{files} files → {pages} pages. Items marked “Follows the iteration” are drawn for each file; the others repeat. Text and titles may use {sample}, {file}, {group}, {n}, {N} and {meta:column}; a plot title may also use {population} and {count}.", { files: units.length, pages: Math.max(1, pages.length) })}
                   </p>
                 </>
               )}

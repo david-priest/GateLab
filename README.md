@@ -48,6 +48,36 @@ GateLab runs entirely in a modern web browser, either from the hosted app or fro
 installation. Chrome or Microsoft Edge are recommended for the best file open and save
 experience.
 
+### Tutorial and demo workspace
+
+The **Tutorial** menu in the header opens a demo workspace and walks through every tab with
+it: a published gating strategy with its two FCS records and compensation, the strategy used
+to sort B cells for an in vitro assay in Priest et al., *Nat Commun* 15:6811 (2024),
+Supplementary Figure 10A. The tutorial watches what you do rather than asking you to press
+Next: each step moves on when its action is done, a button takes you to where a step happens,
+and you can pause and resume where you left off. "About the demo workspace" in the same menu
+cites the data. The demo file ships beside the app as `demo/gatelab-demo.gatelab`.
+
+### Agents: letting an AI assistant draw gates
+
+An agent can read the gating in an open GateLab tab and propose gates, which appear in your
+tab at once as ordinary gates with a badge saying who made them and why; you move, rename or
+undo them like any other, and saving stays yours. The agent reaches the tab through a small
+relay that runs on your computer as an [MCP](https://modelcontextprotocol.io) server:
+
+```sh
+npm install
+claude mcp add --scope user gatelab -- node "$PWD/tools/agent-mcp/server.mjs"
+```
+
+(or the `.mcp.json` at the repository root, for Claude Code sessions in this folder). Then
+in GateLab open **Agent ▸ Connect to an agent…** and paste the address the session prints;
+`gatelab_status` returns it. The relay listens only on this computer and admits one tab at a
+time. [tools/agent-mcp/README.md](tools/agent-mcp/README.md) covers setup and
+[tools/agent-mcp/AGENT_SPEC.md](tools/agent-mcp/AGENT_SPEC.md) is the specification the
+agent itself reads: the data it sees, the commands it can send, and the rules it gates by.
+GateLabR connects its tab the same way with `launchGatingApp(sce, agent = TRUE)`.
+
 ## Features
 
 - Multi-sample workspace with one population tree that every file follows, with overlay /

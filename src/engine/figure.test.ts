@@ -27,6 +27,7 @@ import {
   type FigureSpec,
 } from "./figure";
 import { defaultIllustrationConfig, figureStyle } from "./figureDefaults";
+import type { IllustrationOptions } from "./illustration";
 
 export function figureFixture() {
   const state = initialCoreState();
@@ -516,5 +517,61 @@ describe("independent figures", () => {
     expect(pooled.config?.overlay_traces).toEqual([]);
     expect(pooled.config?.x).toHaveLength(3);
     expect(pooled.config?.n_events).toBe(3);
+  });
+});
+
+describe("a figure made from nothing", () => {
+  it("starts with the composition it is given, while a legacy selection keeps its own", () => {
+    const f = figureFixture();
+    expect(migrateFigure(null, f.samples, f.trees, "main", "FSC-A", "SSC-A", { composition: "pool" }).composition).toBe("pool");
+    expect(migrateFigure(null, f.samples, f.trees, "main", "FSC-A", "SSC-A").composition).toBe("separate");
+    const legacy = { ...defaultIllustrationConfig(), popIds: [f.root.population_id], xChannels: ["FSC-A"], yChannel: "SSC-A", combineSamples: false };
+    expect(migrateFigure(legacy, f.samples, f.trees, "main", "FSC-A", "SSC-A", { composition: "pool" }).composition).toBe("separate");
+  });
+});
+
+describe("pooled panels", () => {
+  /** All Events of both files pooled on FSC-A × SSC-A, where the CD4_positive rectangle [0,0]–[150,150] sits. */
+  function pooledPanel(f: ReturnType<typeof figureFixture>, options: Partial<IllustrationOptions> = {}) {
+    const figure: FigureSpec = {
+      ...f.figure,
+      composition: "pool",
+      populations: [{ hierarchyId: "main", populationId: f.root.population_id, label: "All Events" }],
+    };
+    const sources = f.samples.map((s) => prepareFigureSource(s, f.trees[s.hierarchyId], f.state));
+    const panel = layoutFigure(figure, f.samples)[0].panels[0];
+    return buildFigurePanel(panel, figure, sources, f.trees, { ...figureStyle(defaultIllustrationConfig()), ...options }, {});
+  }
+
+  it("draws a gate both files hold alike, labelled with the percentage pooled over them", () => {
+    const f = figureFixture();
+    const data = pooledPanel(f);
+    // D1 holds (10,10) and (100,100) inside the rectangle, D2 holds (20,10): 3 of the 6 events.
+    expect(data.config?.x).toHaveLength(6);
+    expect(data.config?.n_events).toBe(6);
+    const gates = data.config?.gates as { name: string; percent_of_parent: number; event_count: number }[];
+    expect(gates.map((gate) => [gate.name, gate.event_count, gate.percent_of_parent])).toEqual([["CD4_positive", 3, 50]]);
+    expect(data.note).toBeUndefined();
+  });
+
+  it("leaves out a gate the copy tailored, and says so", () => {
+    const f = figureFixture();
+    const leafGateId = f.copy.gateIdMap[f.gate.gate_id];
+    const leaf = f.trees.leaf;
+    const original = leaf.gates[leafGateId];
+    if (original.gate_type !== "rectangle") throw new Error("the fixture's gate is a rectangle");
+    leaf.gates = { ...leaf.gates, [leafGateId]: { ...original, vertices: [[0, 0], [500, 500]] } };
+    const data = pooledPanel(f);
+    expect(data.config?.n_events).toBe(6);
+    expect(data.config?.gates).toEqual([]);
+    expect(data.note).toBe("Gates not shown: CD4_positive — they differ between the pooled files");
+  });
+
+  it("shares the point cap out by largest remainders while counting every event", () => {
+    const f = figureFixture();
+    const data = pooledPanel(f, { maxEvents: 3 });
+    expect(data.config?.x).toHaveLength(3);
+    expect(data.config?.n_events).toBe(6);
+    expect((data.config?.gates as { percent_of_parent: number }[])[0].percent_of_parent).toBe(50);
   });
 });

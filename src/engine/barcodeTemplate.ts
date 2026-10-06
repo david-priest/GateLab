@@ -12,7 +12,7 @@
 //    arcsinh display units. Every barcode gate is a polygon of seven or eight vertices, so it
 //    can be bent into shape rather than only resized.
 //
-// The built-in default is taken from the nPhos4 debarcoding workspace (2026-08-28, CyTOF XT,
+// The built-in default is taken from a lab debarcoding workspace (2026-08-28, CyTOF XT,
 // arcsinh cofactor 5): its QC chain, with the B-cell-specific live gate generalised to a live
 // gate on DNA, and its three barcode planes averaged. A template can also be learned from a
 // workspace that already holds a debarcoding strategy, in which case the exact QC chain above
@@ -98,7 +98,7 @@ export interface BarcodeTemplate {
 
 const RAW_RECT = (yLo: number, yHi: number): Vertex[] => [[0, yLo], [1, yLo], [1, yHi], [0, yHi]];
 
-/** nPhos4's QC chain. Time-axis rectangles are stretched to the sample's Time range on import. */
+/** The source run's QC chain. Time-axis rectangles are stretched to the sample's Time range on import. */
 export const DEFAULT_QC_CHAIN: QcPopulationTemplate[] = [
   {
     name: "Cells",
@@ -124,7 +124,7 @@ export const DEFAULT_QC_CHAIN: QcPopulationTemplate[] = [
     name: "Live",
     gates: [
       {
-        // nPhos4 gates CD19+ and 198Pt- in one polygon; the generic form keeps the 198Pt extent
+        // The source run gates CD19+ and 198Pt- in one polygon; the generic form keeps the 198Pt extent
         // and spans the DNA-positive band instead of a lineage marker.
         name: "Live", x: "DNA", y: "Live", gate_type: "polygon", space: "display",
         transforms: { x: "asinh", y: "asinh" },
@@ -134,7 +134,7 @@ export const DEFAULT_QC_CHAIN: QcPopulationTemplate[] = [
   },
 ];
 
-/** Mean of the nPhos4 planes, rounded to 0.1 arcsinh units; every polygon has 7 vertices. */
+/** Mean of the source run's planes, rounded to 0.1 arcsinh units; every polygon has 7 vertices. */
 export const DEFAULT_BARCODE_TEMPLATE: BarcodeTemplate = {
   format: "gatelab-barcode-template",
   version: 1,
@@ -152,7 +152,7 @@ export const DEFAULT_BARCODE_TEMPLATE: BarcodeTemplate = {
   },
   planes: {},
   qc: DEFAULT_QC_CHAIN,
-  source: "GateLab default (nPhos4 2026-08-28: its QC chain, three planes averaged)",
+  source: "GateLab default (a lab CyTOF barcoding run, 2026-08: its QC chain, three planes averaged)",
 };
 
 export function isBarcodeTemplate(value: unknown): value is BarcodeTemplate {

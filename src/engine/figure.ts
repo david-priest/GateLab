@@ -7,8 +7,11 @@ import { linearScatterTicks, logicleTicks, scatterTicks } from "./ticks";
 import { populationTreeOrder } from "./populations";
 import {
   buildIllustrationPayload,
+  type GateOverlay,
   type IllustrationOptions,
 } from "./illustration";
+import { allocateCombinedSampleCaps } from "./multiSamplePlot";
+import { gateGeometryKey, pooledGateAgreement, pooledGateOverlays } from "./pooledPlot";
 import { computeRangeFromValues } from "./strategy";
 import type { IllustrationConfig } from "./workspace";
 import { exactMedian } from "./heatmap";
@@ -207,12 +210,6 @@ export function resolveFigurePopulation(
   if (!candidates.length) return { status: "missing" };
   if (candidates.length > 1) return { status: "ambiguous" };
   const id = candidates[0];
-  const geometry = (gate: unknown) =>
-    JSON.stringify(gate, (key, value) =>
-      ["gate_id", "name", "color", "label_offset"].includes(key)
-        ? undefined
-        : value,
-    );
   const seen = new Set<string>();
   function drift(
     current: StoredHierarchy,
@@ -252,7 +249,7 @@ export function resolveFigurePopulation(
         own.y_channel !== original.y_channel
       )
         return "changed";
-      tailored ||= geometry(own) !== geometry(original);
+      tailored ||= gateGeometryKey(own) !== gateGeometryKey(original);
     }
     // Parent gates determine this population's membership too, including across copy generations.
     const inherited = [
@@ -297,6 +294,8 @@ export function migrateFigure(
   activeHierarchyId: string,
   x: string,
   y: string,
+  /** What a figure made from nothing starts as; a saved figure or a legacy selection keeps its own. */
+  defaults?: { composition?: FigureSpec["composition"] },
 ): FigureSpec {
   if (config?.figure) {
     if (!isFigureSpec(config.figure))
@@ -347,7 +346,7 @@ export function migrateFigure(
     rows: ["populations", "plots"],
     columns: ["samples"],
     pages: [],
-    composition: config?.combineSamples ? "pool" : "separate",
+    composition: config ? (config.combineSamples ? "pool" : "separate") : (defaults?.composition ?? "separate"),
     // A new figure shows each channel on the range the Gating tab shows it, where the Gating
     // tab has one; a channel it has not fitted spans the files' data as "shared" does.
     scalePolicy: "gating",
@@ -701,6 +700,8 @@ export interface FigurePanelData {
   config: Record<string, unknown> | null;
   problem?: string;
   omitted?: boolean;
+  /** Said under a drawn panel: the gates a pooled panel leaves out because the pooled files' gates differ. */
+  note?: string;
   mappings: { sample: string; status: PopulationResolution["status"] }[];
 }
 
@@ -886,6 +887,8 @@ export function buildFigurePanel(
     config: Record<string, unknown>;
     gates: unknown[];
     source: FigureSource;
+    /** The population's events in this file, for the pooled gate percentages. */
+    count: number;
   }[] = [];
   const summaryValues: number[] = [];
   let totalCount = 0;
@@ -909,15 +912,19 @@ export function buildFigurePanel(
       trees,
     );
   };
-  const panelCount = panel.samples.reduce((n, id) => {
+  // A pooled panel shares its point cap out in proportion to each file's population, by largest
+  // remainders, as the Gating tab shares the pooled cloud's: the panel never exceeds the cap and
+  // a file's share is its share of the events.
+  const memberCounts = panel.samples.map((id) => {
     const source = sources.find((s) => s.id === id);
-    if (!source) return n;
+    if (!source) return 0;
     const resolved = resolve(source);
-    return (
-      n +
-      (resolved.id ? (source.gating.stats.event_count[resolved.id] ?? 0) : 0)
-    );
-  }, 0);
+    return resolved.id ? (source.gating.stats.event_count[resolved.id] ?? 0) : 0;
+  });
+  const pooledCaps =
+    figure.composition === "pool" && !fullData && Number.isFinite(options.maxEvents) && options.maxEvents > 0
+      ? allocateCombinedSampleCaps(memberCounts, options.maxEvents)
+      : null;
   for (const id of panel.samples) {
     const source = sources.find((s) => s.id === id);
     if (!source)
@@ -991,18 +998,14 @@ export function buildFigurePanel(
           summaryValues.push(column[i]);
       continue;
     }
-    // A pooled preview samples proportionally to the full membership, not equally per file.
-    const cap =
-      figure.composition === "pool" &&
-      !fullData &&
-      Number.isFinite(options.maxEvents)
-        ? Math.max(
-            1,
-            Math.floor((options.maxEvents * count) / Math.max(1, panelCount)),
-          )
-        : figure.composition === "overlay" && !fullData
-          ? Math.max(1, Math.floor(options.maxEvents / panel.samples.length))
-          : options.maxEvents;
+    // A pooled preview samples proportionally to the full membership, not equally per file. A
+    // cap of zero would mean every event to the sampler, so a file whose share rounds to
+    // nothing contributes one point.
+    const cap = pooledCaps
+      ? Math.max(1, pooledCaps[panel.samples.indexOf(id)] ?? 0)
+      : figure.composition === "overlay" && !fullData
+        ? Math.max(1, Math.floor(options.maxEvents / panel.samples.length))
+        : options.maxEvents;
     const result = buildIllustrationPayload(
       source.sample,
       source.tree.gates,
@@ -1041,6 +1044,7 @@ export function buildFigurePanel(
         trees,
       ),
       source,
+      count,
     });
   }
   if (panel.plot.type === "heatmap")
@@ -1079,8 +1083,24 @@ export function buildFigurePanel(
   const y = pooled
     ? results.flatMap((r) => r.config.y as number[])
     : first.config.y;
+  // A pooled panel draws the gates every pooled file holds alike, labelled with the percentage
+  // pooled over the files; a gate that differs between them is left out and named.
+  const agreement =
+    pooled && results.length > 1 && panel.plot.type === "biplot"
+      ? pooledGateAgreement(trees, results.map((r) => r.source.tree.id), panel.plot.x, panel.plot.y)
+      : null;
+  const pooledGates = agreement
+    ? pooledGateOverlays(
+        results.map((r) => ({ tree: r.source.tree, gates: r.gates as GateOverlay[], populationCount: r.count })),
+        trees,
+        new Set(agreement.agreed),
+      )
+    : [];
   return {
     mappings,
+    ...(agreement?.omitted.length
+      ? { note: `Gates not shown: ${agreement.omitted.map((gate) => gate.name).join(", ")} — they differ between the pooled files` }
+      : {}),
     config: {
       ...first.config,
       x,
@@ -1105,7 +1125,7 @@ export function buildFigurePanel(
         line_width: options.gateLineWidth,
         gate_edge_mode: options.gateEdgeMode,
       },
-      gates: figure.showGates && results.length === 1 ? first.gates : [],
+      gates: !figure.showGates ? [] : results.length === 1 ? first.gates : pooledGates,
       pop_color: results.length > 1 && !pooled ? colors[0] : "#444444",
       overlay_traces: pooled
         ? []

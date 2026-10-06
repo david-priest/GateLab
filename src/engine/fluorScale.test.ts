@@ -237,7 +237,7 @@ describe("fluorescence display scale", () => {
     const fsc = s.index("FSC-A")!;
     s.setFluorScale(fsc, "arcsinh");
     expect(s.fluorScale(fsc)).toBe("logicle"); // the accessor's "not arcsinh" answer
-    expect(s.transformKind(fsc)).toBe("asinh"); // still scatter arcsinh, at ITS cofactor
+    expect(s.transformKind(fsc)).toBe("identity"); // still scatter, linear until its own control switches it
     expect(s.currentScatterCofactor(fsc)).toBe(150);
     expect(s.fluorArcsinhKeys()).toEqual([]);
   });

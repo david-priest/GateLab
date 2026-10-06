@@ -144,14 +144,22 @@ export function plotTitle(template: string, context: PlotTitleContext): string {
  */
 export function automaticTitleTemplate(
   plots: readonly { sampleId: string; populationId: string; label?: string }[],
+  options?: {
+    /** The column a metadata iteration draws the sheet once per value of: the value is what differs. */
+    metadataColumn?: string;
+  },
 ): string {
   const files = new Set(plots.map((plot) => plot.sampleId));
   const populations = new Set(plots.map((plot) => plot.populationId));
   const named = plots.some((plot) => plot.label);
-  const base = files.size <= 1 && populations.size > 1
-    ? "{population}"
-    : populations.size <= 1 && files.size > 1
-      ? "{file}"
-      : "{population} · {file}";
+  const base = options?.metadataColumn
+    ? populations.size > 1
+      ? `{meta:${options.metadataColumn}} · {population}`
+      : `{meta:${options.metadataColumn}}`
+    : files.size <= 1 && populations.size > 1
+      ? "{population}"
+      : populations.size <= 1 && files.size > 1
+        ? "{file}"
+        : "{population} · {file}";
   return named ? `${base} · {plot}` : base;
 }

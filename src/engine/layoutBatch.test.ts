@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createLayoutSheet, type LayoutItem } from "./layout";
-import { expandLayoutSheet, fillPlaceholders, iterationUnits, normalizeIteration, populationUnits, templateFrame, type LayoutUnit } from "./layoutBatch";
+import { expandLayoutSheet, fillPlaceholders, iterationUnits, metadataUnits, normalizeIteration, populationUnits, templateFrame, type LayoutIteration, type LayoutUnit } from "./layoutBatch";
 
 const units: LayoutUnit[] = [
   { id: "f1", name: "D1", fileName: "D1.fcs", groupName: "treated", metadata: { donor: "D1", day: "7" } },
@@ -140,5 +140,64 @@ describe("normalizeIteration", () => {
     expect(normalizeIteration({ mode: "files", source: { kind: "metadata" } }).source).toEqual({ kind: "checked" });
     expect(normalizeIteration({ mode: "populations", populations: { kind: "branch", populationId: "a" } })).toMatchObject({ mode: "populations", populations: { kind: "branch", populationId: "a" } });
     expect(normalizeIteration({ mode: "populations", populations: { kind: "odd" } }).populations).toEqual({ kind: "all" });
+  });
+});
+
+describe("metadataUnits", () => {
+  const files = [...units.map((u) => ({ id: u.id, name: u.name, fileName: u.fileName, metadata: u.metadata })), { id: "f4", name: "D4", fileName: "D4.fcs", metadata: { donor: "D4" } }];
+  const groups = [{ id: "g1", name: "treated" }];
+  const fileGroups = { f1: "g1", f2: "g1" };
+  const iteration = (column: string, source: LayoutIteration["source"] = { kind: "all" }): LayoutIteration =>
+    ({ mode: "metadata", column, source, arrangement: { kind: "page-per-unit" } });
+
+  it("makes one unit per value in natural order, the files carrying it pooled, and the files without a value last", () => {
+    const byDay = metadataUnits(iteration("day"), files, [], groups, fileGroups);
+    expect(byDay.map((u) => [u.id, u.name, u.fileName, u.sampleIds, u.groupName])).toEqual([
+      ["meta:day=0", "0", "1 files", ["f3"], undefined],
+      ["meta:day=7", "7", "2 files", ["f1", "f2"], "treated"],
+      ["meta:day=Unassigned", "Unassigned", "1 files", ["f4"], undefined],
+    ]);
+    // A unit's metadata is what its files share, so {meta:day} reads the value and {meta:donor} nothing.
+    expect(byDay[1].metadata).toEqual({ day: "7" });
+    expect(fillPlaceholders("{sample} day {meta:day} donor {meta:donor} {file} {group} {n}/{N}", byDay[1], 2, 3)).toBe("7 day 7 donor  2 files treated 2/3");
+    // The column's levels order the values; the source narrows the files first.
+    expect(metadataUnits(iteration("day"), files, [], groups, fileGroups, ["7", "0"]).map((u) => u.id)).toEqual(["meta:day=7", "meta:day=0", "meta:day=Unassigned"]);
+    expect(metadataUnits(iteration("day", { kind: "checked" }), files, ["f1", "f3"], groups, fileGroups).map((u) => u.sampleIds)).toEqual([["f3"], ["f1"]]);
+    expect(metadataUnits(iteration("day", { kind: "group", groupId: "g1" }), files, [], groups, fileGroups).map((u) => u.sampleIds)).toEqual([["f1", "f2"]]);
+    expect(metadataUnits(iteration(""), files, [], groups, fileGroups)).toEqual([]);
+  });
+
+  it("expands a sheet once per value, pooling the value's files on the plots that follow and naming the value", () => {
+    const sheet = createLayoutSheet("S");
+    sheet.iteration = iteration("day");
+    const heading = text("h", 57, 20, "{sample}: {file}");
+    heading.recipe = { ...heading.recipe, readsFrom: "a" } as typeof heading.recipe;
+    sheet.items = [plot("a", 57, 57, true), plot("control", 300, 57, false), heading];
+    const seen: (string | undefined)[] = [];
+    const describe_ = (_recipe: { sampleId: string; populationId: string }, _template?: string, unitId?: string) => {
+      seen.push(unitId);
+      return { population: "CD4_positive", file: "2 files", sample: unitId === "meta:day=7" ? "7" : "0", x: "FSC-A", y: "SSC-A" };
+    };
+    const pages = expandLayoutSheet(sheet, metadataUnits(sheet.iteration, files.slice(0, 3), [], groups, fileGroups), describe_);
+    expect(pages).toHaveLength(2);
+    // Day 0 is one file, so the plot is drawn for it alone, the template file remembered.
+    expect(pages[0].items[0].recipe).toMatchObject({ sampleId: "f3", title: "0 · 1/2" });
+    expect(pages[0].items[0].recipe).not.toHaveProperty("pool");
+    expect(pages[0].items[0].templateSampleId).toBe("f1");
+    // Day 7 pools its two files; the template file is among them and stays the reference.
+    expect(pages[1].items[0].recipe).toMatchObject({ sampleId: "f1", pool: { sampleIds: ["f1", "f2"] }, title: "7 · 2/2" });
+    expect(pages[1].items[0].templateSampleId).toBeUndefined();
+    expect(pages[1].items[0].unitId).toBe("meta:day=7");
+    // The fixed plot repeats unchanged; the heading reads its plot's unit.
+    expect(pages[1].items[1].recipe).toMatchObject({ sampleId: "f1" });
+    expect(pages[1].items[1].recipe).not.toHaveProperty("pool");
+    expect(pages[1].items[2].recipe).toMatchObject({ text: "7: 2 files" });
+    expect(seen).toContain("meta:day=7");
+  });
+
+  it("keeps the mode with a column and drops it without", () => {
+    expect(normalizeIteration({ mode: "metadata", column: "day", source: { kind: "all" } })).toMatchObject({ mode: "metadata", column: "day", source: { kind: "all" } });
+    expect(normalizeIteration({ mode: "metadata", source: { kind: "all" } })).toMatchObject({ mode: "off" });
+    expect(normalizeIteration({ mode: "files", column: "day" })).not.toHaveProperty("column");
   });
 });
