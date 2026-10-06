@@ -2,6 +2,8 @@ import { useMemo, useSyncExternalStore } from "react";
 
 interface RevisionSource {
   readonly dataRevision: number;
+  /** The SCE assay a hosted sample draws; a sample rebuilt from another assay is other data. */
+  readonly hostedAssayId?: string | null;
   subscribeDataRevision(listener: () => void): () => void;
 }
 
@@ -12,7 +14,8 @@ export interface SampleRevisionEntry {
 
 /** Primitive snapshot: stable by value, but sensitive to sample identity, order, and revision. */
 export function sampleDataRevisionKey(samples: readonly SampleRevisionEntry[]): string {
-  return JSON.stringify(samples.map(({ id, sample }) => [id, sample.dataRevision]));
+  return JSON.stringify(samples.map(({ id, sample }) =>
+    sample.hostedAssayId ? [id, sample.dataRevision, sample.hostedAssayId] : [id, sample.dataRevision]));
 }
 
 /**

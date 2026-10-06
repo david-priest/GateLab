@@ -10,5 +10,8 @@ coverage/
 # TS build cache
 *.tsbuildinfo
 
-# local dev sample data (not committed)
-public/
+# local dev sample data (not committed), except the demo workspace the tutorial opens
+public/*
+!public/demo/
+public/demo/*
+!public/demo/gatelab-demo.gatelab

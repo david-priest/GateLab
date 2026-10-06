@@ -632,6 +632,16 @@ describe("uncompensated v3 validation", () => {
     },
   );
 
+  // A hosted workspace with a compensation lineage is saved as version 3 with the SCE assay it
+  // was drawn from (workspace.ts hostedAssayId). Left off the key list, every such workspace
+  // was refused on reopening and then overwritten by the next autosave.
+  it("accepts and preserves the hosted assay the app saves", async () => {
+    const candidate = clone(migrateWorkspaceV2ToV3(workspaceV2())) as unknown as Record<string, unknown>;
+    candidate.hostedAssayId = "exprs";
+    const validated = await validateWorkspaceV3(candidate);
+    expect((validated as unknown as { hostedAssayId?: string }).hostedAssayId).toBe("exprs");
+  });
+
   // Regression for a workspace saved by 0.7.0 or later: the saver writes per-sample display
   // scale lists that this validator did not list, so every such file refused to reopen.
   it("accepts and preserves the per-sample scale lists the app saves", async () => {

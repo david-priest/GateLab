@@ -20,6 +20,9 @@ describe("polygon outlines follow the transformed boundary", () => {
   const sample = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
   const x = sample.channels.find((c) => /^SSC-W/.test(c.key)) ?? sample.channels[0];
   const y = sample.channels.find((c) => /^SSC-A/.test(c.key)) ?? sample.channels[1];
+  // Scatter opens linear, where a straight edge stays straight; the bend is on arcsinh.
+  sample.setScatterScale(sample.index(x.key)!, "arcsinh");
+  sample.setScatterScale(sample.index(y.key)!, "arcsinh");
 
   const polygon = (verts: [number, number][]): Record<string, Gate> => ({
     g1: {

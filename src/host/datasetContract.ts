@@ -37,6 +37,14 @@ export interface GateLabHostAssayDescriptor {
    */
   revision: number;
   encoding: "channel-major-float32-le";
+  /**
+   * For a display assay: the cofactor of the arcsinh its values are in (asinh(linear /
+   * cofactor)), so GateLab can put them back to nominal linear values and draw them as stored
+   * through its own arcsinh. A display assay without one cannot be drawn.
+   */
+  displayCofactor?: number;
+  /** False when the host assumed the cofactor (the object records none); the app says so. */
+  displayCofactorStated?: boolean;
 }
 
 export interface GateLabHostCompensationMatrixDescriptor {

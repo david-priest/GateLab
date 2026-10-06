@@ -10,6 +10,13 @@ export interface MetadataColumn {
   levels?: string[];
 }
 
+const VALUE_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+/** Metadata values in the order a reader expects: day 0, 7, 14 rather than 0, 14, 7, and case set aside. */
+export function compareMetadataValues(a: string, b: string): number {
+  return VALUE_COLLATOR.compare(a, b);
+}
+
 /** A human label, never the immutable UUID used for data, gates and figure references. */
 export const SAMPLE_ID_FIELD = "sample_id";
 export function sampleDisplayId(fileName: string, fields?: Record<string, string>): string {

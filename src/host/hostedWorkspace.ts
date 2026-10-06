@@ -615,3 +615,17 @@ export function convertHostedGateSpace<
   if (converted.version === 2) validateWorkspace(converted);
   return converted;
 }
+
+/**
+ * The assay a saved hosted workspace was drawn from, read before the samples are built so they
+ * can be drawn from it again; undefined for a workspace saved before assays could be chosen,
+ * for the legacy GateLabR format, and for unreadable JSON, which readHostedWorkspace reports.
+ */
+export function hostedAssayIdOf(workspaceJson: string): string | undefined {
+  try {
+    const raw = JSON.parse(workspaceJson) as { hostedAssayId?: unknown };
+    return typeof raw?.hostedAssayId === "string" && raw.hostedAssayId ? raw.hostedAssayId : undefined;
+  } catch {
+    return undefined;
+  }
+}

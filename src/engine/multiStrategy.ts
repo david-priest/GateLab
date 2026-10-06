@@ -13,6 +13,10 @@
 // Coordinate handling mirrors buildStrategyPayload / gatePayload exactly: masks/percentages
 // run in each GATE's own space (sample.gateAssayData()); plotted values + gate vertices + axis ranges
 // are DISPLAY space; axis labels are the Panel display labels (sample.labelForKey).
+//
+// The layout (multiStrategyLayout: nodes, counts, parent event indices) and the drawing of a
+// node (finishMultiStrategyNode) are exported apart, so pooledStrategy.ts can draw one grid
+// from several files' events.
 
 import type { Sample } from "./sample";
 import { ellipseBoundary } from "./ellipse";
@@ -20,7 +24,7 @@ import type { GateEdgeMode } from "../ui/gateEdgeModes";
 import type { Gate, GateRef, Population, PopulationMap } from "./models";
 import { columnsForGate, getGateMask } from "./gates";
 import type { AxisTicks } from "./ticks";
-import { computeRangeFromValues, type StrategyFontSizes } from "./strategy";
+import { computeRangeFromValues, thinEvenly, type StrategyFontSizes } from "./strategy";
 import { displayLabelOffset } from "../plots/gatePayload";
 
 const round1 = (x: number): number => Math.round(x * 10) / 10;
@@ -58,9 +62,9 @@ export interface MultiStrategyNode {
 }
 
 // ── Internal accumulation (gating-space vertices, channel keys) ──
-interface RawEntry {
+export interface RawEntry {
   gate_id: string;
-  name: string;
+  name: string; // the child population's name (drawn as the gate label)
   gate_type: string;
   vertices: [number, number][]; // GATING space
   color: string;
@@ -72,6 +76,29 @@ interface RawNode {
   x_channel: string; // key
   y_channel: string; // key
   gate_entries: RawEntry[];
+}
+
+/** A gate of a laid-out node: its entry, its definition when the tree still has it, and its count within the parent. */
+export interface MultiStrategyLayoutGate {
+  entry: RawEntry;
+  gateDef: Gate | undefined;
+  /** Events of the parent inside the gate (outside, for an excluding ref); null without a definition. */
+  nChild: number | null;
+}
+
+/** A node laid out and counted, before its parent events are thinned and drawn. */
+export interface MultiStrategyLayoutNode {
+  node_id: string; // "parent_id|x_ch|y_ch"
+  parent_id: string;
+  parent_name: string;
+  x_channel: string; // key
+  y_channel: string; // key
+  row: number;
+  col: number;
+  /** The parent population's event indices, every one. */
+  parentIdx: number[];
+  n_total: number;
+  gates: MultiStrategyLayoutGate[];
 }
 
 export interface MultiStrategyComputeOptions {
@@ -121,22 +148,21 @@ function expandRange(r: [number, number], coords: number[]): [number, number] {
 }
 
 /**
- * Lay out gate-step plots for several selected populations in a shared 2D grid.
+ * Lay out gate-step plots for several selected populations in a shared 2D grid, counted but
+ * not yet drawn: one node per (parent population, channel pair) with the parent's event
+ * indices, the gates its relevant children draw there and each gate's count within the parent.
  * Ported faithfully from compute_multi_pop_strategy; parent masks come from `masks`.
  */
-export function computeMultiPopStrategy(
+export function multiStrategyLayout(
   sample: Sample,
   gates: Record<string, Gate>,
   populations: PopulationMap,
   rootId: string,
   masks: Record<string, Uint8Array>,
-  selectedPopIds: string[],
-  opts: MultiStrategyComputeOptions,
-): MultiStrategyNode[] {
+  selectedPopIds: readonly string[],
+): MultiStrategyLayoutNode[] {
   const n = sample.fcs.nEvents;
   if (selectedPopIds.length === 0 || n === 0) return [];
-  const useAll = !Number.isFinite(opts.maxEvents) || opts.maxEvents <= 0;
-  const cap = opts.maxEvents;
 
   // ── Relevant pops = selected + all their ancestors up to (and including) root ──
   const relevant = new Set<string>();
@@ -240,8 +266,8 @@ export function computeMultiPopStrategy(
 
   const data = sample.gateAssayData();
 
-  // ── Build result nodes with event data + ranges + ticks ──
-  const result: MultiStrategyNode[] = [];
+  // ── Build the nodes with their parent indices and gate counts ──
+  const result: MultiStrategyLayoutNode[] = [];
   for (const [nodeKey, nr] of nodesRaw) {
     const parentId = nr.parent_id;
     const parentPop = populations[parentId];
@@ -259,44 +285,23 @@ export function computeMultiPopStrategy(
 
     const xCh = nr.x_channel;
     const yCh = nr.y_channel;
-    const xIdx = sample.index(xCh);
-    const yIdx = sample.index(yCh);
-    if (xIdx === undefined || yIdx === undefined) continue;
+    if (sample.index(xCh) === undefined || sample.index(yCh) === undefined) continue;
 
-    // Parent event indices, evenly downsampled (round(seq(1, N, length.out = cap))).
     const parentIdx: number[] = [];
     if (parentId === rootId) {
       for (let i = 0; i < n; i++) parentIdx.push(i);
     } else {
       for (let i = 0; i < parentMask!.length; i++) if (parentMask![i]) parentIdx.push(i);
     }
-    let sampleIdx = parentIdx;
-    if (!useAll && parentIdx.length > cap) {
-      sampleIdx = new Array(cap);
-      const denom = cap > 1 ? cap - 1 : 1;
-      for (let k = 0; k < cap; k++) sampleIdx[k] = parentIdx[Math.round((k * (parentIdx.length - 1)) / denom)];
-    }
 
-    const xCol = sample.displayColumn(xIdx);
-    const yCol = sample.displayColumn(yIdx);
-    const xVals = sampleIdx.map((i) => xCol[i]);
-    const yVals = sampleIdx.map((i) => yCol[i]);
-
-    // Base range: global-scale override, else R's per-node data-driven zoom — computed from THIS
-    // node's downsampled parent values (app.R:6817), not the channel's full display range — then
-    // expanded for gate geometry. (Behavioural change: multi-pop panels now frame each node's own
-    // data rather than sharing one global axis.)
-    let xRange: [number, number] = opts.globalScales[xCh] ?? computeRangeFromValues(xVals);
-    let yRange: [number, number] = opts.globalScales[yCh] ?? computeRangeFromValues(yVals);
-
-    const gatesOut: MultiStrategyGate[] = [];
+    const gatesOut: MultiStrategyLayoutGate[] = [];
     for (const ge of nr.gate_entries) {
       const gateDef = gates[ge.gate_id];
-      // percent_of_parent: gate mask ∩ parent mask (include vs exclude), like the R.
-      let pct: number | null = null;
+      // nChild: gate mask ∩ parent mask (include vs exclude), like the R.
+      let nChild: number | null = null;
       if (gateDef && nTotal > 0) {
         const gm = getGateMask(gateDef, columnsForGate(data, gateDef));
-        let nChild = 0;
+        nChild = 0;
         if (parentId === rootId) {
           for (let i = 0; i < gm.length; i++) {
             const pass = ge.include ? gm[i] : gm[i] ? 0 : 1;
@@ -309,69 +314,24 @@ export function computeMultiPopStrategy(
             if (pass) nChild++;
           }
         }
-        pct = round1((nChild / nTotal) * 100);
       }
-
-      const displayVerts = gateDef
-        ? displayVerticesOf(sample, xCh, yCh, gateDef)
-        : ge.vertices.map(([vx, vy]): [number, number] => [
-            sample.gatingToDisplay(xCh, vx),
-            sample.gatingToDisplay(yCh, vy),
-          ]);
-
-      // Expand axis ranges to keep gate boundaries (and an explicit label) visible.
-      if (displayVerts.length > 0) {
-        xRange = expandRange(xRange, displayVerts.map((v) => v[0]));
-        yRange = expandRange(yRange, displayVerts.map((v) => v[1]));
-        const lo = ge.label_offset; // only expand for a user-set offset (matches R)
-        if (lo) {
-          const cx = displayVerts.reduce((s, v) => s + v[0], 0) / displayVerts.length;
-          const cy = displayVerts.reduce((s, v) => s + v[1], 0) / displayVerts.length;
-          const ox = Number(lo[0]);
-          const oy = Number(lo[1]);
-          if (Number.isFinite(ox) && Number.isFinite(cx)) xRange = expandRange(xRange, [cx + ox]);
-          if (Number.isFinite(oy) && Number.isFinite(cy)) yRange = expandRange(yRange, [cy + oy]);
-        }
-      }
-
-      gatesOut.push({
-        gate_id: ge.gate_id,
-        name: ge.name,
-        gate_type: ge.gate_type,
-        vertices: displayVerts,
-        color: ge.color,
-        // Same label position as the main plot: user offset, else auto "above the gate".
-        label_offset: ge.label_offset ?? displayLabelOffset(displayVerts),
-        percent_of_parent: pct,
-        include: ge.include,
-      });
+      gatesOut.push({ entry: ge, gateDef, nChild });
     }
 
     const rawRow = getPopRow(parentId);
     const compactRow = rowMap.get(rawRow) ?? rawRow;
 
-    // Ticks depend on the (expanded) visible range — same as buildStrategyPayload.
-    const xTicks = sample.channelTicks(xIdx, xRange);
-    const yTicks = sample.channelTicks(yIdx, yRange);
-
     result.push({
       node_id: nodeKey,
-      parent_pop_id: parentId,
-      parent_pop_name: parentPop?.name ?? parentId,
-      x_channel: sample.labelForKey(xCh),
-      y_channel: sample.labelForKey(yCh),
+      parent_id: parentId,
+      parent_name: parentPop?.name ?? parentId,
+      x_channel: xCh,
+      y_channel: yCh,
       row: compactRow,
       col: getGateDepth(parentId),
-      n_events: nTotal,
-      x_range: xRange,
-      y_range: yRange,
-      x: xVals,
-      y: yVals,
+      parentIdx,
+      n_total: nTotal,
       gates: gatesOut,
-      x_is_logicle: xTicks !== null,
-      x_logicle_ticks: xTicks,
-      y_is_logicle: yTicks !== null,
-      y_logicle_ticks: yTicks,
     });
   }
 
@@ -380,7 +340,7 @@ export function computeMultiPopStrategy(
   // share a (row, col) (both depend only on parent_id). Walk each row in col order
   // and bump duplicate cols to the next free slot (tie-break by node_id → stable).
   if (result.length > 1) {
-    const byRow = new Map<number, MultiStrategyNode[]>();
+    const byRow = new Map<number, MultiStrategyLayoutNode[]>();
     for (const nd of result) {
       const arr = byRow.get(nd.row);
       if (arr) arr.push(nd);
@@ -399,6 +359,128 @@ export function computeMultiPopStrategy(
   }
 
   return result;
+}
+
+/**
+ * A node as drawn on `sample`'s display space: the parent events given, the ranges from the
+ * global scale or those events, widened to keep each gate and an explicit label in view, and
+ * the gates given with their percentages (a gate left out of `gates` is not drawn).
+ */
+export function finishMultiStrategyNode(
+  sample: Sample,
+  node: MultiStrategyLayoutNode,
+  xVals: number[],
+  yVals: number[],
+  nEvents: number,
+  gates: readonly { entry: RawEntry; gateDef: Gate | undefined; pct: number | null }[],
+  globalScales: Record<string, [number, number]>,
+): MultiStrategyNode {
+  const xCh = node.x_channel;
+  const yCh = node.y_channel;
+  const xIdx = sample.index(xCh)!;
+  const yIdx = sample.index(yCh)!;
+
+  // Base range: global-scale override, else R's per-node data-driven zoom — computed from THIS
+  // node's downsampled parent values (app.R:6817), not the channel's full display range — then
+  // expanded for gate geometry. (Behavioural change: multi-pop panels now frame each node's own
+  // data rather than sharing one global axis.)
+  let xRange: [number, number] = globalScales[xCh] ?? computeRangeFromValues(xVals);
+  let yRange: [number, number] = globalScales[yCh] ?? computeRangeFromValues(yVals);
+
+  const gatesOut: MultiStrategyGate[] = [];
+  for (const { entry: ge, gateDef, pct } of gates) {
+    const displayVerts = gateDef
+      ? displayVerticesOf(sample, xCh, yCh, gateDef)
+      : ge.vertices.map(([vx, vy]): [number, number] => [
+          sample.gatingToDisplay(xCh, vx),
+          sample.gatingToDisplay(yCh, vy),
+        ]);
+
+    // Expand axis ranges to keep gate boundaries (and an explicit label) visible.
+    if (displayVerts.length > 0) {
+      xRange = expandRange(xRange, displayVerts.map((v) => v[0]));
+      yRange = expandRange(yRange, displayVerts.map((v) => v[1]));
+      const lo = ge.label_offset; // only expand for a user-set offset (matches R)
+      if (lo) {
+        const cx = displayVerts.reduce((s, v) => s + v[0], 0) / displayVerts.length;
+        const cy = displayVerts.reduce((s, v) => s + v[1], 0) / displayVerts.length;
+        const ox = Number(lo[0]);
+        const oy = Number(lo[1]);
+        if (Number.isFinite(ox) && Number.isFinite(cx)) xRange = expandRange(xRange, [cx + ox]);
+        if (Number.isFinite(oy) && Number.isFinite(cy)) yRange = expandRange(yRange, [cy + oy]);
+      }
+    }
+
+    gatesOut.push({
+      gate_id: ge.gate_id,
+      name: ge.name,
+      gate_type: ge.gate_type,
+      vertices: displayVerts,
+      color: ge.color,
+      // Same label position as the main plot: user offset, else auto "above the gate".
+      label_offset: ge.label_offset ?? displayLabelOffset(displayVerts),
+      percent_of_parent: pct,
+      include: ge.include,
+    });
+  }
+
+  // Ticks depend on the (expanded) visible range — same as buildStrategyPayload.
+  const xTicks = sample.channelTicks(xIdx, xRange);
+  const yTicks = sample.channelTicks(yIdx, yRange);
+
+  return {
+    node_id: node.node_id,
+    parent_pop_id: node.parent_id,
+    parent_pop_name: node.parent_name,
+    x_channel: sample.labelForKey(xCh),
+    y_channel: sample.labelForKey(yCh),
+    row: node.row,
+    col: node.col,
+    n_events: nEvents,
+    x_range: xRange,
+    y_range: yRange,
+    x: xVals,
+    y: yVals,
+    gates: gatesOut,
+    x_is_logicle: xTicks !== null,
+    x_logicle_ticks: xTicks,
+    y_is_logicle: yTicks !== null,
+    y_logicle_ticks: yTicks,
+  };
+}
+
+/**
+ * Lay out gate-step plots for several selected populations in a shared 2D grid, drawn from
+ * one file: each node's parent events evenly downsampled to the cap (round(seq(1, N,
+ * length.out = cap))), and each gate labelled with its share of the parent.
+ */
+export function computeMultiPopStrategy(
+  sample: Sample,
+  gates: Record<string, Gate>,
+  populations: PopulationMap,
+  rootId: string,
+  masks: Record<string, Uint8Array>,
+  selectedPopIds: string[],
+  opts: MultiStrategyComputeOptions,
+): MultiStrategyNode[] {
+  return multiStrategyLayout(sample, gates, populations, rootId, masks, selectedPopIds).map((node) => {
+    const sampleIdx = thinEvenly(node.parentIdx, opts.maxEvents);
+    const xCol = sample.displayColumn(sample.index(node.x_channel)!);
+    const yCol = sample.displayColumn(sample.index(node.y_channel)!);
+    return finishMultiStrategyNode(
+      sample,
+      node,
+      sampleIdx.map((i) => xCol[i]),
+      sampleIdx.map((i) => yCol[i]),
+      node.n_total,
+      node.gates.map(({ entry, gateDef, nChild }) => ({
+        entry,
+        gateDef,
+        pct: nChild === null ? null : round1((nChild / node.n_total) * 100),
+      })),
+      opts.globalScales,
+    );
+  });
 }
 
 // ── renderMultiStrategyGrid payload assembly ────────────────────────────────

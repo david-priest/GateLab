@@ -150,6 +150,9 @@ const WORKSPACE_V3_ALLOWED_KEYS = [
   // What the workspace needs of the GateLab that opens it (workspaceFeatures.ts). GateLab 0.8.3
   // does not list it, and so refuses a workspace it would otherwise misread.
   "requiredFeatures",
+  // The SCE assay a hosted workspace was drawn from (workspace.ts). Left off this list, a hosted
+  // workspace with a compensation lineage was refused on reopening and then overwritten.
+  "hostedAssayId",
 ] as const;
 
 const SAMPLE_V3_REQUIRED_KEYS = ["fileName", "dataPath", "logicleW", "assay"] as const;

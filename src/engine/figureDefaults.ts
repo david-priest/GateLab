@@ -45,7 +45,9 @@ export function figureStyle(
 ): IllustrationOptions {
   return {
     ...config,
-    maxEvents: exportAll
+    // All events in the preview is every event within the page budget (useFigurePanels
+    // shares the budget out); the export's own switch lifts the budget as well.
+    maxEvents: exportAll || config.allEvents
       ? Infinity
       : Math.max(1, Math.min(config.maxEvents || 10000, 1_000_000)),
     populationColors: config.popColors,

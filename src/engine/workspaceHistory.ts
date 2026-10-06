@@ -37,6 +37,7 @@ export type WorkspaceCheckpointReason =
   | "before-compensation-remove"
   | "after-compensation-apply"
   | "before-active-layer-change"
+  | "before-hosted-assay-change"
   | "compensation-profile-import"
   | "before-revert";
 
@@ -58,6 +59,7 @@ export const CHECKPOINT_REASON_LABELS: Readonly<Record<WorkspaceCheckpointReason
   "before-compensation-remove": "Before compensation was removed",
   "after-compensation-apply": "After compensation was applied",
   "before-active-layer-change": "Before the data view was changed",
+  "before-hosted-assay-change": "Before the drawn assay was changed",
   "compensation-profile-import": "After a compensation profile import",
   "before-revert": "Before a revert",
 };

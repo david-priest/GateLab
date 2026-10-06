@@ -1,6 +1,7 @@
 import type { FcsChannel, FcsFile, SpilloverMatrix } from "../engine/fcs";
 import { validateAndCanonicalizeCompensationMatrix } from "../engine/compensationProfile";
 import { Sample } from "../engine/sample";
+import { isScatterChannel } from "../engine/transforms";
 import { detectInstrumentType } from "../engine/transforms";
 import {
   GATELAB_DATASET_CONTRACT_VERSION,
@@ -44,6 +45,73 @@ function chooseLinearAssay(
     );
   }
   return assay;
+}
+
+/** The dataset's linear assay: the role-counts one, else the default when linear, else any. */
+export function linearHostedAssay(
+  dataset: GateLabHostDatasetDescriptor,
+): GateLabHostAssayDescriptor {
+  return chooseLinearAssay(dataset);
+}
+
+/** Whether the dataset has a linear assay at all. */
+export function hasLinearHostedAssay(dataset: GateLabHostDatasetDescriptor): boolean {
+  return dataset.assays.some(({ coordinateSpace }) => coordinateSpace === "linear");
+}
+
+/**
+ * Whether an assay can be drawn: a linear one always; a display one only when the host states
+ * the arcsinh its values are in, since drawing it as stored means putting them back to linear
+ * values through that arcsinh.
+ */
+export function drawableHostedAssay(assay: GateLabHostAssayDescriptor): boolean {
+  return assay.coordinateSpace === "linear" ||
+    (typeof assay.displayCofactor === "number" && Number.isFinite(assay.displayCofactor) && assay.displayCofactor > 0);
+}
+
+/** A display assay that holds values no arcsinh gives: it was declared display-space by its name. */
+export class HostedAssayNotArcsinhError extends Error {}
+
+/**
+ * The assay the samples are drawn from: the one named, else the host's default when it can be
+ * drawn (an SCE's `exprs` is drawn as stored), else the linear assay.
+ */
+export function chooseHostedAssay(
+  dataset: GateLabHostDatasetDescriptor,
+  assayId?: string | null,
+): GateLabHostAssayDescriptor {
+  if (assayId) {
+    const named = dataset.assays.find(({ id }) => id === assayId);
+    if (!named) {
+      throw new Error(`Dataset '${dataset.label}' has no assay '${assayId}'.`);
+    }
+    if (!drawableHostedAssay(named)) {
+      throw new Error(
+        `'${assayId}' cannot be drawn: it is in display space and the host states no arcsinh cofactor for it.`,
+      );
+    }
+    return named;
+  }
+  const preferred = dataset.assays.find(({ id }) => id === dataset.defaultAssayId);
+  return preferred && drawableHostedAssay(preferred) ? preferred : chooseLinearAssay(dataset);
+}
+
+/**
+ * A sample built from a display assay, drawn as stored: under mass cytometry the instrument
+ * arcsinh at the cofactor does it; under flow every fluorescence channel is put on arcsinh at
+ * the cofactor, scatter and QC channels keeping their own scales.
+ */
+function asStoredSample(sample: Sample, nominal: { cofactor: number } | null): Sample {
+  if (!nominal || sample.instrument === "cytof") return sample;
+  const keys = sample.channels
+    .filter((channel) => !isScatterChannel(channel.key) && !isScatterChannel(channel.pnn))
+    .map((channel) => channel.key);
+  sample.applyFluorArcsinhKeys(keys);
+  for (const key of keys) {
+    const index = sample.index(key);
+    if (index !== undefined) sample.setFluorCofactor(index, nominal.cofactor);
+  }
+  return sample;
 }
 
 function finiteRange(values: Float32Array): number {
@@ -145,6 +213,7 @@ export async function loadHostedDataset(
   port: GateLabHostDatasetPort,
   dataset: GateLabHostDatasetDescriptor,
   signal?: AbortSignal,
+  assayId?: string | null,
 ): Promise<GateLabHostedSample[]> {
   if (dataset.contractVersion !== GATELAB_DATASET_CONTRACT_VERSION) {
     throw new Error(
@@ -154,18 +223,44 @@ export async function loadHostedDataset(
   if (dataset.channels.length === 0) {
     throw new Error(`Dataset '${dataset.label}' has no channels.`);
   }
-  const assay = chooseLinearAssay(dataset);
+  const assay = chooseHostedAssay(dataset, assayId);
 
   return Promise.all(dataset.samples.map(async (sampleDescriptor) => {
     const [assayPayload, eventIndexPayload] = await Promise.all([
       port.readAssay(dataset.id, sampleDescriptor.id, assay.id, signal),
       port.readEventIndex(dataset.id, sampleDescriptor.id, signal),
     ]);
-    const columns = decodeChannelMajorFloat32(
+    const stored = decodeChannelMajorFloat32(
       assayPayload,
       dataset.channels.length,
       sampleDescriptor.eventCount,
     );
+    // A display assay holds asinh(linear / cofactor). It is put back to nominal linear values
+    // here and drawn through an arcsinh at that cofactor, which shows the stored values exactly
+    // and puts a gate drawn on it in the same space as one drawn on counts (a gate records the
+    // transform its vertices are in, and is evaluated through it). Under mass cytometry that is
+    // the instrument transform; under flow every fluorescence channel is set to arcsinh at the
+    // cofactor below. The cofactor is the host's: chooseHostedAssay admits no display assay
+    // without one.
+    const nominal = assay.coordinateSpace === "display"
+      ? { cofactor: assay.displayCofactor as number }
+      : null;
+    if (nominal) {
+      // asinh of any count a cytometer records is below 20; a larger value says the assay is
+      // not an arcsinh at all (counts under another name, a log, a score), and sinh of it
+      // overflows to Infinity, which no gate holds.
+      const largest = stored.reduce((max, column) => Math.max(max, finiteRange(column)), 0);
+      if (largest > 30) {
+        throw new HostedAssayNotArcsinhError(
+          `'${assay.id}' is in display space by its name but holds values up to ${Math.round(largest).toLocaleString()}, ` +
+          "which an arcsinh assay cannot. Declare its space in R: " +
+          `metadata(sce)$gatelabr_assay_coordinate_spaces <- list(${assay.id} = "linear").`,
+        );
+      }
+    }
+    const columns = nominal
+      ? stored.map((column) => Float32Array.from(column, (value) => nominal.cofactor * Math.sinh(value)))
+      : stored;
     const eventIndex = decodeEventIndexUint32(
       eventIndexPayload,
       sampleDescriptor.eventCount,
@@ -176,7 +271,13 @@ export async function loadHostedDataset(
       name: sampleDescriptor.label,
       assayId: assay.id,
       assayRevision: assay.revision,
-      sample: new Sample(hostedFcs(dataset, sampleDescriptor, columns)),
+      sample: asStoredSample(
+        new Sample(hostedFcs(dataset, sampleDescriptor, columns), {
+          ...(nominal ? { cytofCofactor: nominal.cofactor } : {}),
+          hostedAssay: { id: assay.id, space: assay.coordinateSpace },
+        }),
+        nominal,
+      ),
       eventIndex,
       metadata: sampleDescriptor.metadata,
     };

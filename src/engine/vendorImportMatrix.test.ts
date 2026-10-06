@@ -39,7 +39,9 @@ interface VendorCase {
   cyt: string | null;
   /** Channels in the embedded $SPILLOVER, 0 when there is none. */
   spilloverChannels: number;
-  /** Channels routed to arcsinh (flow scatter, or every CyTOF channel). */
+  /** Flow scatter axes: drawn linear unless switched (0 for CyTOF). */
+  scatter: number;
+  /** Channels routed to arcsinh: every CyTOF channel; none of a flow file's until switched. */
   asinh: number;
   /** Channels routed to logicle (flow fluorescence). */
   logicle: number;
@@ -51,7 +53,7 @@ const MATRIX: VendorCase[] = [
     instrument: "FACSDiscover S8", vendor: "BD",
     path: join(VENDOR_DIR, "bd_facsdiscover_s8__19221995__Zam36_YFP.fcs"),
     version: "FCS3.2", mode: "flow", events: 10000, channels: 440,
-    cyt: "FACSDiscover S8", spilloverChannels: 78, asinh: 20, logicle: 368,
+    cyt: "FACSDiscover S8", spilloverChannels: 78, scatter: 20, asinh: 0, logicle: 368,
     note: "The format stress case: FCS 3.2, 440 parameters, a 78-channel spillover. Its 51 "
       + "imaging geometry features (Size, moments, Eccentricity, Diffusivity, Centre of Mass, "
       + "Delta CoM, Correlation) are linear, so neither arcsinh nor logicle; the 10 intensity "
@@ -61,7 +63,7 @@ const MATRIX: VendorCase[] = [
     instrument: "ID7000", vendor: "Sony",
     path: join(VENDOR_DIR, "sony_id7000__7867212__G01_E12.5_WLSM.fcs"),
     version: "FCS3.1", mode: "flow", events: 50000, channels: 23,
-    cyt: "ID7000", spilloverChannels: 0, asinh: 6, logicle: 16,
+    cyt: "ID7000", spilloverChannels: 0, scatter: 6, asinh: 0, logicle: 16,
     note: "Names scatter 'FSC - Area', not 'FSC-A'. The six asinh channels are the "
       + "proof that spaced naming is still classified as scatter. Its $PnS for the "
       + "clock is 'Time Stamp', which is not a QC name — only its $PnN ('TIME') is, "
@@ -71,25 +73,25 @@ const MATRIX: VendorCase[] = [
     instrument: "Aurora", vendor: "Cytek",
     path: join(VENDOR_DIR, "cytek_aurora__15723074__TEMRA_CD4+_T_cells_donor6.fcs"),
     version: "FCS3.1", mode: "flow", events: 518, channels: 33,
-    cyt: "Aurora", spilloverChannels: 26, asinh: 6, logicle: 26,
+    cyt: "Aurora", spilloverChannels: 26, scatter: 6, asinh: 0, logicle: 26,
   },
   {
     instrument: "Aurora-Evo", vendor: "Cytek",
     path: join(VENDOR_DIR, "cytek_aurora_evo__21643327__Negative_1_(Beads).fcs"),
     version: "FCS3.1", mode: "flow", events: 5000, channels: 40,
-    cyt: "Aurora-Evo", spilloverChannels: 33, asinh: 6, logicle: 33,
+    cyt: "Aurora-Evo", spilloverChannels: 33, scatter: 6, asinh: 0, logicle: 33,
   },
   {
     instrument: "xP5", vendor: "Cytek",
     path: join(VENDOR_DIR, "curated-from-fcsparser", "Cytek_xP5.fcs"),
     version: "FCS3.0", mode: "flow", events: 23126, channels: 8,
-    cyt: "Cytek xP5: NCSU CORE  xP5 Facscan", spilloverChannels: 0, asinh: 2, logicle: 5,
+    cyt: "Cytek xP5: NCSU CORE  xP5 Facscan", spilloverChannels: 0, scatter: 2, asinh: 0, logicle: 5,
   },
   {
     instrument: "FACSDiva export", vendor: "BD",
     path: join(VENDOR_DIR, "curated-from-fcsparser", "BD_FACSDiva.fcs"),
     version: "FCS3.0", mode: "flow", events: 83411, channels: 12,
-    cyt: null, spilloverChannels: 8, asinh: 3, logicle: 8,
+    cyt: null, spilloverChannels: 8, scatter: 3, asinh: 0, logicle: 8,
     note: "Carries no $CYT at all and still imports — instrument detection does not "
       + "depend on the keyword.",
   },
@@ -97,19 +99,19 @@ const MATRIX: VendorCase[] = [
     instrument: "LSRFortessa", vendor: "BD",
     path: join(VENDOR_DIR, "curated-from-fcsparser", "BD_Fortessa.fcs"),
     version: "FCS3.0", mode: "flow", events: 11585, channels: 11,
-    cyt: "LSRII", spilloverChannels: 4, asinh: 6, logicle: 4,
+    cyt: "LSRII", spilloverChannels: 4, scatter: 6, asinh: 0, logicle: 4,
   },
   {
     instrument: "LSR II", vendor: "BD",
     path: join(VENDOR_DIR, "curated-from-fcsparser", "BD_LSR-II.fcs"),
     version: "FCS3.0", mode: "flow", events: 14945, channels: 11,
-    cyt: "LSRII", spilloverChannels: 4, asinh: 6, logicle: 4,
+    cyt: "LSRII", spilloverChannels: 4, scatter: 6, asinh: 0, logicle: 4,
   },
   {
     instrument: "MACSQuant", vendor: "Miltenyi",
     path: join(VENDOR_DIR, "curated-from-fcsparser", "Miltenyi_MACSQuant.fcs"),
     version: "FCS3.1", mode: "flow", events: 10000, channels: 19,
-    cyt: "MACSQuant", spilloverChannels: 0, asinh: 6, logicle: 12,
+    cyt: "MACSQuant", spilloverChannels: 0, scatter: 6, asinh: 0, logicle: 12,
     note: "Its three instrument parameters HDR-CE, HDR-SE and HDR-V carry $PnS equal to $PnN, "
       + "and three $PnS end '-A' (V2-A over FL2-A), which together made it look spectral: "
       + "until 2026-09 nine of its 19 parameters (every fluorescence height and width, and the "
@@ -119,13 +121,13 @@ const MATRIX: VendorCase[] = [
     instrument: "CyFlow Cube 15", vendor: "Sysmex Partec",
     path: join(VENDOR_DIR, "curated-from-fcsparser", "Sysmex_Partec_CyFlow.fcs"),
     version: "FCS3.0", mode: "flow", events: 725, channels: 10,
-    cyt: "Cube_15", spilloverChannels: 0, asinh: 2, logicle: 7,
+    cyt: "Cube_15", spilloverChannels: 0, scatter: 2, asinh: 0, logicle: 7,
   },
   {
     instrument: "Muse", vendor: "Guava / Luminex",
     path: join(VENDOR_DIR, "curated-from-fcsparser", "Guava_Muse.fcs"),
     version: "FCS3.0", mode: "flow", events: [108, 50081, 111496, 50037], channels: 10,
-    cyt: "Guava Muse, Viacount 1.8", spilloverChannels: 0, asinh: 3, logicle: 6,
+    cyt: "Guava Muse, Viacount 1.8", spilloverChannels: 0, scatter: 3, asinh: 0, logicle: 6,
     note: "Its $PnS is prose — 'Forward Scatter (FSC-HLin)' — while $PnN is the "
       + "recognisable 'FSC-HLin'. This is the file that forced classification on $PnN "
       + "as well as the display key; before that its scatter got a logicle. It is also a "
@@ -136,7 +138,7 @@ const MATRIX: VendorCase[] = [
     instrument: "FACSCalibur", vendor: "BD",
     path: join(VENDOR_DIR, "curated-from-fcsparser", "BD_FACSCalibur_FCS2.0.fcs"),
     version: "FCS2.0", mode: "flow", events: 37395, channels: 8,
-    cyt: "FACSCalibur", spilloverChannels: 0, asinh: 2, logicle: 5,
+    cyt: "FACSCalibur", spilloverChannels: 0, scatter: 2, asinh: 0, logicle: 5,
     note: "The FCS 2.0 floor. Together with the S8's FCS 3.2 this brackets the range "
       + "of the standard that the parser claims to read.",
   },
@@ -144,7 +146,7 @@ const MATRIX: VendorCase[] = [
     instrument: "MACSQuant (FCS 2.0 export)", vendor: "Miltenyi",
     path: join(VENDOR_DIR, "curated-from-fcsparser", "Miltenyi_MACSQuant_FCS2.0.fcs"),
     version: "FCS2.0", mode: "flow", events: 10000, channels: 16,
-    cyt: "MACSQuant", spilloverChannels: 0, asinh: 6, logicle: 10,
+    cyt: "MACSQuant", spilloverChannels: 0, scatter: 6, asinh: 0, logicle: 10,
     note: "Same instrument as the FCS 3.1 row above, exported at FCS 2.0 — isolates "
       + "the format version from the instrument.",
   },
@@ -152,7 +154,7 @@ const MATRIX: VendorCase[] = [
     instrument: "CytoFLEX", vendor: "Beckman Coulter",
     path: join(VENDOR_DIR, "beckman_cytoflex__14018551__PI_wt_Rho+_25.fcs"),
     version: "FCS3.0", mode: "flow", events: 100000, channels: 14,
-    cyt: "CytoFLEX", spilloverChannels: 0, asinh: 5, logicle: 8,
+    cyt: "CytoFLEX", spilloverChannels: 0, scatter: 5, asinh: 0, logicle: 8,
     note: "Zenodo 14018551, CC-BY-4.0. Its $PnS carries the fluorochrome ('FITC-A') "
       + "over a positional $PnN ('FL1-A'), so every conjugate name ends '-A'. That used "
       + "to trip the spectral-unmixed test in channels.ts and silently drop 5 of the 14 "
@@ -165,7 +167,7 @@ const MATRIX: VendorCase[] = [
     instrument: "CyTOF (Helios/CyTOF2)", vendor: "DVS / Fluidigm",
     path: join(CYTOF_DIR, "PBMC8_30min_patient1_BCR-XL.fcs"),
     version: "FCS3.0", mode: "cytof", events: 2838, channels: 35,
-    cyt: "DVSSCIENCES-CYTOF-5.1.559", spilloverChannels: 0, asinh: 33, logicle: 0,
+    cyt: "DVSSCIENCES-CYTOF-5.1.559", spilloverChannels: 0, scatter: 0, asinh: 33, logicle: 0,
     note: "The only CyTOF row, and the one that proves instrument auto-detection "
       + "switches the whole transform regime: every signal channel is arcsinh, none "
       + "logicle. Bodenmiller BCR-XL benchmark.",
@@ -211,6 +213,11 @@ describe.skipIf(!corpusPresent)("vendor FCS import matrix", () => {
           // while the Sample exposed 10 of its 19.
           expect(sample.channels).toHaveLength(c.channels);
           const kinds = sample.channels.map((_, i) => sample.transformKind(i));
+          // Scatter is recognised by name ($PnN as well as the display key) and drawn linear
+          // until switched: the identity transform, never a logicle.
+          const scatter = sample.channels.map((_, i) => sample.isScatterAxis(i));
+          expect(scatter.filter(Boolean)).toHaveLength(c.scatter);
+          expect(kinds.filter((k, i) => scatter[i] && k === "identity")).toHaveLength(c.scatter);
           expect(kinds.filter((k) => k === "asinh")).toHaveLength(c.asinh);
           expect(kinds.filter((k) => k === "logicle")).toHaveLength(c.logicle);
         }

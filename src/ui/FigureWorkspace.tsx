@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject, type CSSProperties, type MouseEvent as ReactMouseEvent } from "react";
+import { platformKeys } from "./platformKeys";
 import { ContextMenu, type ContextMenuState } from "./ContextMenu";
 import type { MenuEntry } from "./MenuButton";
 import { SearchableSelect } from "./SearchableSelect";
@@ -71,6 +72,8 @@ interface Props {
   state: CoreState;
   defaultX: string;
   defaultY: string;
+  /** How a figure made from nothing composes its files: pooled when the Gating tab is pooled. A saved figure keeps its own. */
+  defaultComposition?: FigureSpec["composition"];
   configRef: MutableRefObject<IllustrationConfig | null>;
   presets: IllustrationPreset[];
   onSavePreset: (name: string) => void;
@@ -121,6 +124,7 @@ export function FigureWorkspace({
   populationMetadata,
   defaultX,
   defaultY,
+  defaultComposition,
   configRef,
   presets,
   onSavePreset,
@@ -161,6 +165,7 @@ export function FigureWorkspace({
         state.active_hierarchy_id,
         defaultX,
         defaultY,
+        { composition: defaultComposition },
       ),
       scaleFontsWithPlot: legacy?.scaleFontsWithPlot ?? false,
     };
@@ -307,7 +312,8 @@ export function FigureWorkspace({
     prepared.sources,
     trees,
     prepared.pending > 0 || !prepared.current,
-    config.maxEvents,
+    // All events: every event within the page budget, which useFigurePanels shares out.
+    config.allEvents ? Infinity : config.maxEvents,
     config.heatmapStat,
     globalScales ?? {},
     refreshTick,
@@ -478,6 +484,7 @@ export function FigureWorkspace({
     const recipes: LayoutPlotRecipe[] = [];
     for (const panel of targets) {
       if (panel.plot.type === "heatmap") continue;
+      const perFile: { sampleId: string; populationId: string }[] = [];
       for (const sampleId of panel.samples) {
         const source = prepared.sources.find((entry) => entry.id === sampleId);
         const entry = samples.find((s) => s.id === sampleId);
@@ -485,16 +492,24 @@ export function FigureWorkspace({
         const resolved = resolveFigurePopulation(panel.population, source.tree, trees);
         const populationId = resolved.id ?? source.tree.root_population_id;
         if (!populationId) continue;
-        recipes.push({
-          kind: panel.plot.type,
-          sampleId,
-          populationId,
-          xChannel: panel.plot.x,
-          yChannel: panel.plot.type === "histogram" ? null : panel.plot.y,
-          displayMode: (figure.composition === "overlay" ? "scatter" : config.displayMode) as LayoutDisplayMode,
-          // Titled by the sheet's template there; a plot named by the user carries its name for {plot}.
-          ...(panel.plot.name && panel.plot.name !== panel.plot.x ? { label: panel.plot.name } : {}),
-        });
+        perFile.push({ sampleId, populationId });
+      }
+      const recipe = (file: { sampleId: string; populationId: string }): LayoutPlotRecipe => ({
+        kind: panel.plot.type as "biplot" | "histogram",
+        sampleId: file.sampleId,
+        populationId: file.populationId,
+        xChannel: panel.plot.x,
+        yChannel: panel.plot.type === "histogram" ? null : panel.plot.y,
+        displayMode: (figure.composition === "overlay" ? "scatter" : config.displayMode) as LayoutDisplayMode,
+        // Titled by the sheet's template there; a plot named by the user carries its name for {plot}.
+        ...(panel.plot.name && panel.plot.name !== panel.plot.x ? { label: panel.plot.name } : {}),
+      });
+      // A pooled panel is one pooled plot there, its first file the reference; otherwise one
+      // plot per file.
+      if (figure.composition === "pool" && perFile.length > 1) {
+        recipes.push({ ...recipe(perFile[0]), pool: { sampleIds: perFile.map((file) => file.sampleId) } });
+      } else {
+        for (const file of perFile) recipes.push(recipe(file));
       }
     }
     return recipes;
@@ -533,7 +548,11 @@ export function FigureWorkspace({
       "separator",
       {
         label: "Open in Gating",
-        title: own.length > 1 ? "A pooled panel has no single file to open" : "This file, population and channels on the Gating tab",
+        title: own.length > 1
+          ? "An overlaid panel has no single file to open"
+          : own[0]?.pool
+            ? "These files pooled, this population and these channels on the Gating tab"
+            : "This file, population and channels on the Gating tab",
         disabled: !onOpenInGating || own.length !== 1,
         onClick: () => { if (own.length === 1) onOpenInGating?.(own[0]); },
       },
@@ -1485,7 +1504,7 @@ export function FigureWorkspace({
                   </optgroup>
                 </select>
               </label>
-              <h3 title="Click to choose rows (Cmd or Ctrl adds, Shift takes a range), drag them to where they should go, or sort them all at once.">Order populations</h3>
+              <h3 title={platformKeys("Click to choose rows (Cmd or Ctrl adds, Shift takes a range), drag them to where they should go, or sort them all at once.")}>Order populations</h3>
               <OrderList
                 label="Population order"
                 items={figure.populations}
@@ -1501,7 +1520,7 @@ export function FigureWorkspace({
                   { label: "A→Z", title: "By name", apply: (items) => [...items].sort((a, b) => a.label.localeCompare(b.label)) },
                 ]}
               />
-              <h3 title="Click to choose rows (Cmd or Ctrl adds, Shift takes a range), drag them to where they should go, or sort them all at once.">Order files / samples</h3>
+              <h3 title={platformKeys("Click to choose rows (Cmd or Ctrl adds, Shift takes a range), drag them to where they should go, or sort them all at once.")}>Order files / samples</h3>
               <OrderList
                 label="File order"
                 items={selectedSamples}
@@ -1751,12 +1770,23 @@ export function FigureWorkspace({
                   step={1000}
                   integer
                   value={config.maxEvents}
+                  disabled={!!config.allEvents}
                   onCommit={(maxEvents) => style({ maxEvents })}
                 />
               </label>
+              <label>
+                <input
+                  type="checkbox"
+                  aria-label="Preview all events"
+                  checked={!!config.allEvents}
+                  onChange={(e) => style({ allEvents: e.target.checked })}
+                />
+                All events, within the page budget
+              </label>
               <p>
-                Preview has a 1,000,000-point page budget, shared by the panels on the page.
-                Counts use every event. Export can draw all events.
+                Preview has a 1,000,000-point page budget, shared by the panels on the page;
+                All events draws every event within it. Counts use every event. Export can
+                draw all events.
               </p>
               <label>
                 Point size
@@ -2129,7 +2159,7 @@ export function FigureWorkspace({
                 {onAddToLayout && (
                   <button
                     type="button"
-                    title="As arranged here: rows stay rows and columns stay columns, however wide the page. Click a panel to select it, or drag across panels; Cmd-click adds or removes one, Shift-click takes the block from the last clicked panel to it; Cmd-A selects all; Escape clears."
+                    title={platformKeys("As arranged here: rows stay rows and columns stay columns, however wide the page. Click a panel to select it, or drag across panels; Cmd-click adds or removes one, Shift-click takes the block from the last clicked panel to it; Cmd-A selects all; Escape clears.")}
                     onClick={() => addPanelsToLayout(selectedPanels)}
                   >
                     Add selected panels to the Layout tab
@@ -2179,7 +2209,7 @@ export function FigureWorkspace({
           {figure.composition !== "separate" && (
             <div className="gl-figure-note">
               {figure.composition === "pool"
-                ? "Events pooled · event-count weighting · no reference-file gate percentages"
+                ? "Events pooled · event-count weighting · gates and percentages pooled where the files' gates agree"
                 : "Separate coloured file traces · shared axes · gate outlines hidden"}
             </div>
           )}

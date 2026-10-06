@@ -101,7 +101,7 @@ export function LayoutFigureSurface({
     sources as FigureSource[],
     trees,
     false,
-    config.maxEvents,
+    config.allEvents ? Infinity : config.maxEvents,
     config.heatmapStat,
     globalScales,
   );

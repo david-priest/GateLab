@@ -34,10 +34,13 @@ export function historyShortcutAction(event: KeyboardEvent): HistoryShortcutActi
     event.defaultPrevented ||
     event.altKey ||
     (!event.metaKey && !event.ctrlKey) ||
-    event.key.toLocaleLowerCase() !== "z" ||
     isNativeTextEditingTarget(event.target)
   ) {
     return null;
   }
-  return event.shiftKey ? "redo" : "undo";
+  const key = event.key.toLocaleLowerCase();
+  if (key === "z") return event.shiftKey ? "redo" : "undo";
+  // Ctrl-Y is redo on Windows and Linux. Cmd-Y is left alone: on a Mac it is the browser's history.
+  if (key === "y" && event.ctrlKey && !event.metaKey && !event.shiftKey) return "redo";
+  return null;
 }

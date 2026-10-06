@@ -12,7 +12,8 @@ const renderer = vi.hoisted(() => ({
   renderMultiStrategyGrid: vi.fn(),
 }));
 vi.mock("../plots/loadPlots", () => ({ loadMiniPlots: () => renderer }));
-vi.mock("../engine/strategy", () => ({
+vi.mock("../engine/strategy", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../engine/strategy")>()),
   computeGatingStrategy: () => [{ x_channel: "FSC-A", y_channel: "SSC-A" }],
   buildStrategyPayload: () => ({}),
 }));
@@ -46,6 +47,10 @@ describe("Strategy preview lifecycle", () => {
       densityColorPower: 1,
       onDensityColorPowerChange: vi.fn(),
       onFitChannels: vi.fn(),
+      files: [],
+      poolIds: null,
+      poolable: false,
+      onPoolChange: vi.fn(),
     };
     const svg = () =>
       [...host.querySelectorAll("button")].find(

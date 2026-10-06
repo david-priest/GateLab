@@ -2070,10 +2070,20 @@ export function restoreGatingMLScaleState(
         transformsChanged = true;
       }
     }
-    if (sample.instrument === "flow" && isScatterChannel(key) && state.cofactor !== undefined &&
-        sample.currentScatterCofactor(idx) !== state.cofactor) {
-      sample.setScatterCofactor(idx, state.cofactor);
-      transformsChanged = true;
+    // A scatter entry carries a cofactor only when the axis was shown with arcsinh (buildScalesJson
+    // writes one for any arcsinh flow axis), so the cofactor is both the choice and its parameter;
+    // an entry without one is a linear axis, which scatter opens on. Files written before linear
+    // was the default carried a cofactor on every scatter entry, and open as they were drawn.
+    if (sample.instrument === "flow" && sample.isScatterAxis(idx)) {
+      const cofactor = state.w === undefined ? state.cofactor : undefined;
+      if ((sample.scatterScale(idx) === "arcsinh") !== (cofactor !== undefined)) {
+        sample.setScatterScale(idx, cofactor !== undefined ? "arcsinh" : "linear");
+        transformsChanged = true;
+      }
+      if (cofactor !== undefined && sample.currentScatterCofactor(idx) !== cofactor) {
+        sample.setScatterCofactor(idx, cofactor);
+        transformsChanged = true;
+      }
     }
     // An imaging geometry feature is linear by default and writes a cofactor only when shown
     // with arcsinh, so a cofactor is both the choice and its parameter.

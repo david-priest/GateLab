@@ -183,6 +183,11 @@ const FigurePlot = memo(function FigurePlot({
           Tailored boundary
         </div>
       )}
+      {data.note && (
+        <div className="illustration-row-header gl-figure-tailored">
+          {data.note}
+        </div>
+      )}
     </div>
   );
 });

@@ -39,6 +39,10 @@ interface Props {
   defaultChannels: string[];
   /** Aggregate Sample revision snapshot; includes inactive samples used by compare/view modes. */
   dataRevisionKey: string;
+  /** The SCE assay drawn as stored, when one is: "Raw" values are then nominal, reconstructed from it. */
+  nominalLinearFrom?: string | null;
+  /** Called when the CSV was written, for whoever counts that (the tutorial). */
+  onDownload?: () => void;
 }
 
 const BASE_STATS: { key: StatType; label: string }[] = [
@@ -69,7 +73,7 @@ function csvText(records: readonly (readonly (string | number)[])[]): string {
   return records.map((record) => record.map(field).join(",") + "\r\n").join("");
 }
 
-export function StatsTab({ samples, activeSampleId, state, derived, defaultChannels, dataRevisionKey }: Props) {
+export function StatsTab({ samples, activeSampleId, state, derived, defaultChannels, dataRevisionKey, nominalLinearFrom = null, onDownload }: Props) {
   const { t } = useI18n();
   const [viewSampleId, setViewSampleId] = useState<string>(() => activeSampleId ?? samples[0]?.id ?? "");
   const [statTypes, setStatTypes] = usePersistedTabState<Set<StatType>>(
@@ -247,6 +251,7 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    onDownload?.();
   };
 
   const empty = samples.length === 0 || (!isCompare && (!table || table.rows.length === 0));
@@ -305,6 +310,9 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
                   {v === "raw" ? t("Raw") : t("Transformed")}
                 </label>
               ))}
+              {nominalLinearFrom !== null && (
+                <p className="gl-hint">{t("Raw values are nominal, reconstructed from {assay}; draw counts for the object's counts.", { assay: nominalLinearFrom })}</p>
+              )}
             </section>
             {anyMfi && (
               <section className="gl-stats-opt-group gl-stats-channel-picker">

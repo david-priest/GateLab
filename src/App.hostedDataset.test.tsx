@@ -14,6 +14,7 @@ import {
   type GateLabHostAdapter,
 } from "./host/contracts";
 import { GateLabWorkspaceConflictError } from "./host/workspaceContract";
+import { decodeFloat32Base64 } from "./engine/encode";
 
 const plotHarness = vi.hoisted(() => ({
   eventCount: null as number | null,
@@ -190,15 +191,12 @@ describe("App SCE host loading", () => {
     expect(container.textContent).toContain("Save to SCE");
     expect(container.textContent).not.toContain("+ Files…");
     expect(container.textContent).not.toContain("Open Workspace…");
-    await act(async () => {
-      [...container.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.startsWith("Pool selected files"))!.click();
-      await new Promise(resolve => setTimeout(resolve, 30));
-    });
+    // Mass cytometry is gated pooled: the SCE opens with every sample selected and pooled, and the
+    // pool is the tree, open to drawing.
+    expect(container.querySelector(".gl-pool-toolbar")?.textContent).toContain("Pooled view · 2 samples");
+    expect(container.textContent).toContain("Return to single sample");
     expect(plotHarness.eventCount).toBe(3);
 
-    await act(async () => {
-      [...container.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Edit the tree")!.click();
-    });
     await act(async () => {
       plotHarness.onNewGate?.({
         gate_type: "polygon",
@@ -229,6 +227,60 @@ describe("App SCE host loading", () => {
   // A cluster label lives in colData, and the question "which clusters fall inside this gate"
   // needs it on the plot while the gate is being drawn. Only names travel with the dataset; the
   // values are fetched when the column is chosen, once, as one code per event.
+  it("opens a flow SCE on one sample, with the selection ready to pool", async () => {
+    const flowDataset: GateLabHostDatasetDescriptor = { ...dataset, instrument: "flow" };
+    const host: GateLabHostAdapter = {
+      contractVersion: GATELAB_HOST_CONTRACT_VERSION,
+      id: "test-r-host",
+      kind: "r-sce",
+      label: "Test R host",
+      capabilities: {
+        dataSources: { fcsFiles: false, singleCellExperiment: true },
+        dataModel: { multipleAssays: true, sampleMetadata: true, writeBackColumns: true },
+        persistence: {
+          workspaceFiles: false,
+          hostObject: true,
+          fileSystemAccess: false,
+          directoryAccess: false,
+        },
+        compute: { location: "host" },
+      },
+      datasets: {
+        async listDatasets() {
+          return [flowDataset];
+        },
+        async readAssay(_datasetId, sampleId) {
+          return sampleId === "sample-0"
+            ? bufferOf(new Float32Array([5, 10, 20, 25]))
+            : bufferOf(new Float32Array([15, 30]));
+        },
+        async readEventIndex(_datasetId, sampleId) {
+          return sampleId === "sample-0"
+            ? bufferOf(new Uint32Array([0, 2]))
+            : bufferOf(new Uint32Array([1]));
+        },
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        <GateLabHostProvider host={host}>
+          <App />
+        </GateLabHostProvider>,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+
+    expect(container.querySelector(".gl-pool-toolbar")?.textContent).toContain("Viewing: Donor B");
+    expect(plotHarness.eventCount).toBe(1);
+    await act(async () => {
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.startsWith("Pool selected samples (2)"))!.click();
+      await new Promise(resolve => setTimeout(resolve, 30));
+    });
+    expect(container.querySelector(".gl-pool-toolbar")?.textContent).toContain("Pooled view · 2 samples");
+    expect(plotHarness.eventCount).toBe(3);
+  });
+
   it("colours the plot by a categorical colData column fetched on demand", async () => {
     const readCategoricalColumn = vi.fn(async (request: { columnName: string }) => ({
       columnName: request.columnName,
@@ -288,10 +340,6 @@ describe("App SCE host loading", () => {
         </GateLabHostProvider>,
       );
       await new Promise((resolve) => setTimeout(resolve, 30));
-    });
-    await act(async () => {
-      [...container.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.startsWith("Pool selected files"))!.click();
-      await new Promise(resolve => setTimeout(resolve, 30));
     });
     expect(plotHarness.eventCount).toBe(3);
 
@@ -760,5 +808,243 @@ describe("workspace revision conflicts", () => {
     // No retry: someone else's work is not silently replaced, and the user is told.
     expect(writeWorkspace).toHaveBeenCalledTimes(1);
     expect(container.textContent).toContain("Another session wrote to this SCE");
+  });
+});
+
+// The SCE's assays by name. An object usually holds compensated counts and a transformed exprs,
+// corrected or not: the app opens on exprs drawn as stored, offers counts through its own
+// arcsinh, and a workspace saved from the object records which assay it was drawn from.
+describe("hosted assay choice", () => {
+  const twoAssays: GateLabHostDatasetDescriptor = {
+    ...dataset,
+    assays: [
+      { id: "exprs", label: "exprs", role: "transformed", coordinateSpace: "display", revision: 1, encoding: "channel-major-float32-le", displayCofactor: 5, displayCofactorStated: true },
+      { id: "counts", label: "counts", role: "counts", coordinateSpace: "linear", revision: 2, encoding: "channel-major-float32-le" },
+    ],
+    defaultAssayId: "exprs",
+  };
+  const asinh5 = (value: number) => Math.asinh(value / 5);
+  // exprs as an analysis leaves it: asinh(counts / 5) with a correction, here a shift of 0.1.
+  const exprsOf = (counts: readonly number[]) => counts.map((value) => asinh5(value) + 0.1);
+  const values = {
+    counts: { "sample-0": [5, 10, 20, 25], "sample-1": [15, 30] },
+    exprs: { "sample-0": exprsOf([5, 10, 20, 25]), "sample-1": exprsOf([15, 30]) },
+  } as const;
+  // The payload is Float32, so values agree with a double computation to four decimals, not six.
+  const sorted = (xs: readonly number[]) => [...xs].sort((a, b) => a - b).map((x) => Math.round(x * 1e4) / 1e4);
+  const plotted = () => {
+    const payload = plotHarness.payload as unknown as { x_b64: string; y_b64: string };
+    return { x: sorted([...decodeFloat32Base64(payload.x_b64)]), y: sorted([...decodeFloat32Base64(payload.y_b64)]) };
+  };
+  const workspaceJson = (extra: Record<string, unknown>) => JSON.stringify({
+    format: "gatelab-workspace", version: 2, workspaceId: "sce-workspace", savedAt: "2026-07-25T00:00:00Z", app: "GateLab",
+    ...extra,
+    samples: [
+      { sampleId: "sce:sample-0", fileName: "Donor A", dataPath: "data/sce-1.fcs", logicleW: {}, scatterCofactor: {}, cytofCofactor: 5, compensationOn: false, instrumentMode: "cytof", labels: {}, metadata: {} },
+      { sampleId: "sce:sample-1", fileName: "Donor B", dataPath: "data/sce-2.fcs", logicleW: {}, scatterCofactor: {}, cytofCofactor: 5, compensationOn: false, instrumentMode: "cytof", labels: {}, metadata: {} },
+    ],
+    activeSample: 0,
+    gating: { gates: {}, gate_order: [], populations: { root: { population_id: "root", name: "All Events", gate_refs: [], gate_logic: "and", parent_id: null, children: [], event_count: 3, percent_of_parent: 100 } }, root_population_id: "root", active_population_id: "root", selected_gate_id: null },
+    scales: { globalScales: {} },
+    display: { xChannel: "CD3", yChannel: "CD19", mode: "pseudocolor", maxEvents: 50000, contourThreshold: 5 },
+  });
+  const assaySelect = () => container.querySelector<HTMLSelectElement>('select[aria-label="Active assay layer for all tabs"]')!;
+  /** The files off the plot are gated between paints; the pooled counts land when they are done. */
+  const pooledCountsReady = async () => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const text = container.textContent ?? "";
+      if (!text.includes("pooling…") && !text.includes("Pooling ")) return;
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    }
+    throw new Error("pooled counts never landed");
+  };
+  const instrumentSelect = () => [...container.querySelectorAll<HTMLSelectElement>("select")].find((s) => [...s.options].some((o) => o.value === "cytof"))!;
+  const mountHost = async (saved: string | null, writeWorkspace = vi.fn(async (request: { expectedRevision: number; clientRevision: number; workspaceJson: string }) => ({
+    revision: request.expectedRevision + 1, clientRevision: request.clientRevision, savedAt: "2026-07-25T00:00:00Z",
+  })), hosted: GateLabHostDatasetDescriptor = twoAssays) => {
+    const readAssay = vi.fn(async (_datasetId: string, sampleId: string, assayId: string) =>
+      bufferOf(new Float32Array(values[assayId as "exprs" | "counts"][sampleId as "sample-0" | "sample-1"])));
+    const host: GateLabHostAdapter = {
+      contractVersion: GATELAB_HOST_CONTRACT_VERSION,
+      id: "test-r-host", kind: "r-sce", label: "Test R host",
+      capabilities: {
+        dataSources: { fcsFiles: false, singleCellExperiment: true },
+        dataModel: { multipleAssays: true, sampleMetadata: true, writeBackColumns: true },
+        persistence: { workspaceFiles: false, hostObject: true, fileSystemAccess: false, directoryAccess: false },
+        compute: { location: "host" },
+      },
+      datasets: {
+        async listDatasets() { return [hosted]; },
+        readAssay,
+        async readEventIndex(_datasetId, sampleId) {
+          return sampleId === "sample-0" ? bufferOf(new Uint32Array([0, 2])) : bufferOf(new Uint32Array([1]));
+        },
+      },
+      workspaces: {
+        async readWorkspace() {
+          return saved === null ? null : { contractVersion: 1, datasetId: "sce", sourceFormat: "gatelab-workspace", revision: 1, workspaceJson: saved };
+        },
+        writeWorkspace,
+      },
+    };
+    await act(async () => {
+      root.render(<GateLabHostProvider host={host}><App /></GateLabHostProvider>);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    return { readAssay, writeWorkspace };
+  };
+
+  it("opens on exprs drawn as stored, draws counts through arcsinh when chosen, and saves the choice", async () => {
+    const { readAssay, writeWorkspace } = await mountHost(null);
+    expect(readAssay.mock.calls.map((call) => call[2])).toEqual(["exprs", "exprs"]);
+    expect(assaySelect().value).toBe("assay:exprs");
+    expect([...assaySelect().options].map((o) => o.textContent)).toEqual(["exprs · as stored", "counts"]);
+    expect(instrumentSelect().disabled).toBe(false);
+    expect(container.textContent).toContain("drawing exprs as stored");
+    // The values as stored, on the arcsinh 5 axis they are in.
+    expect(plotted()).toEqual({ x: sorted(exprsOf([5, 10, 15])), y: sorted(exprsOf([20, 25, 30])) });
+
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(assaySelect(), "assay:counts");
+      assaySelect().dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(readAssay.mock.calls.slice(2).map((call) => call[2])).toEqual(["counts", "counts"]);
+    expect(assaySelect().value).toBe("assay:counts");
+    expect(instrumentSelect().disabled).toBe(false);
+    expect(container.textContent).toContain("Drawing counts");
+    expect(plotted()).toEqual({ x: sorted([5, 10, 15].map(asinh5)), y: sorted([20, 25, 30].map(asinh5)) });
+
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.startsWith("Save to SCE"))!;
+    await act(async () => {
+      save.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(writeWorkspace).toHaveBeenCalled();
+    const savedWorkspace = JSON.parse(writeWorkspace.mock.calls.at(-1)![0].workspaceJson);
+    expect(savedWorkspace.hostedAssayId).toBe("counts");
+  });
+
+  // A gate drawn on counts records arcsinh 5, and exprs is in that space: the gate keeps its
+  // events when exprs is drawn. Drawn through the identity instead, its vertices were mapped
+  // back through sinh to about 18 on an axis that ends near 3, it held no event, and clicking
+  // it in the tree brought nothing onto the plot.
+  it("keeps a gate drawn on counts when exprs is drawn, and brings a gate up from the tree", async () => {
+    await mountHost(null);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(assaySelect(), "assay:counts");
+      assaySelect().dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    // In arcsinh-5 space: holds sample-0's two events and not sample-1's, under counts and under
+    // exprs alike.
+    await act(async () => {
+      plotHarness.onNewGate?.({
+        gate_type: "rectangle",
+        vertices: [[0.5, 2.0], [1.7, 2.45]],
+        x_channel: "CD3",
+        y_channel: "CD19",
+      });
+    });
+    const createPop = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+      .find((input) => input.parentElement?.textContent?.includes("Also create a population"))!;
+    if (!createPop.checked) await act(async () => createPop.click());
+    await act(async () => {
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Create")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    await pooledCountsReady();
+    expect(container.textContent).toContain("2 (66.67%) · pooled · 2 FCS");
+
+    const chip = container.querySelector<HTMLElement>(".pop-tree-gate-badge")!;
+    await act(async () => {
+      chip.click();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(container.querySelector(".pop-tree-gate-badge.selected-gate")).not.toBeNull();
+    const plotGates = () => (plotHarness.payload as unknown as { gates: { percent_of_parent?: number | null }[] }).gates;
+    expect(plotGates()[0].percent_of_parent).toBe(66.67);
+
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(assaySelect(), "assay:exprs");
+      assaySelect().dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    });
+    await pooledCountsReady();
+    expect(plotted().x).toEqual(sorted(exprsOf([5, 10, 15])));
+    expect(container.textContent).toContain("2 (66.67%) · pooled · 2 FCS");
+    expect(plotGates()[0].percent_of_parent).toBe(66.67);
+  });
+
+  it("reopens on the assay the saved workspace was drawn from", async () => {
+    const { readAssay } = await mountHost(workspaceJson({ hostedAssayId: "counts" }));
+    expect(readAssay.mock.calls.map((call) => call[2])).toEqual(["counts", "counts"]);
+    expect(assaySelect().value).toBe("assay:counts");
+    expect(plotted().x).toEqual(sorted([5, 10, 15].map(asinh5)));
+  });
+
+  it("reopens a workspace saved before the choice existed on the linear assay it was drawn from", async () => {
+    const { readAssay } = await mountHost(workspaceJson({}));
+    expect(readAssay.mock.calls.map((call) => call[2])).toEqual(["counts", "counts"]);
+    expect(assaySelect().value).toBe("assay:counts");
+  });
+
+  it("opens a transformed-only object with a saved workspace on its exprs, there being no linear assay", async () => {
+    const { readAssay } = await mountHost(workspaceJson({}), undefined, { ...twoAssays, assays: [twoAssays.assays[0]] });
+    expect(readAssay.mock.calls.map((call) => call[2])).toEqual(["exprs", "exprs"]);
+    expect(assaySelect().value).toBe("assay:exprs");
+  });
+
+  it("lists a display assay whose cofactor the object does not state as not drawable, and opens on counts", async () => {
+    const { readAssay } = await mountHost(null, undefined, {
+      ...twoAssays,
+      assays: [{ ...twoAssays.assays[0], displayCofactor: undefined, displayCofactorStated: undefined }, twoAssays.assays[1]],
+    });
+    expect(readAssay.mock.calls.map((call) => call[2])).toEqual(["counts", "counts"]);
+    expect(assaySelect().value).toBe("assay:counts");
+    const exprsOption = [...assaySelect().options].find((o) => o.value === "assay:exprs")!;
+    expect(exprsOption.textContent).toBe("exprs · needs its arcsinh cofactor");
+    expect(exprsOption.disabled).toBe(true);
+  });
+
+  it("carries the instrument mode across a switch", async () => {
+    await mountHost(null);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(instrumentSelect(), "flow");
+      instrumentSelect().dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(instrumentSelect().value).toBe("flow");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(assaySelect(), "assay:counts");
+      assaySelect().dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(assaySelect().value).toBe("assay:counts");
+    expect(instrumentSelect().value).toBe("flow");
+  });
+
+  // A compensated layer is linear values beside counts. On a flow object with a spillover matrix
+  // the header offered it while exprs was drawn, and choosing it compensated transformed values.
+  it("offers no compensated layer while a display assay is drawn, and offers it again on counts", async () => {
+    await mountHost(null, undefined, {
+      ...twoAssays,
+      instrument: "flow",
+      compensationMatrix: {
+        kind: "flow-spillover",
+        name: "metadata(sce)$spillover_matrix",
+        sourceChannels: ["Nd142Di", "Eu151Di"],
+        receiverChannels: ["Nd142Di", "Eu151Di"],
+        matrix: [[1, 0.1], [0.05, 1]],
+      },
+    });
+    expect(assaySelect().value).toBe("assay:exprs");
+    expect([...assaySelect().options].map((o) => o.value)).toEqual(["assay:exprs", "assay:counts"]);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(assaySelect(), "assay:counts");
+      assaySelect().dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect([...assaySelect().options].map((o) => o.value)).toEqual(["assay:exprs", "assay:counts", "compensated"]);
   });
 });

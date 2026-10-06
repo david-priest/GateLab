@@ -65,7 +65,12 @@ export function DivisionTab({
   const [yMarker, setYMarker] = usePersistedTabState<string>("div.yMarker", ""); // "" = none
   const [n, setN] = useState(6);
   const [bins, setBins] = usePersistedTabState("div.bins", 120);
-  const [subsample, setSubsample] = usePersistedTabState("div.subsample", 50000);
+  const [subsample, setSubsample] = usePersistedTabState("div.subsample", 50000); // 0 = every event
+  /** The subsample "All events" goes back to when switched off: the last one set above zero. */
+  const lastSubsample = useRef(50000);
+  useEffect(() => {
+    if (subsample > 0) lastSubsample.current = subsample;
+  }, [subsample]);
   const [pointAlpha, setPointAlpha] = usePersistedTabState("div.pointAlpha", 0.4);
   const [colName, setColName] = usePersistedTabState("div.colName", "div");
   const [xmin, setXmin] = useState<number | "">("");
@@ -205,7 +210,11 @@ export function DivisionTab({
 
       <div className="gl-strategy-controls">
         <label className="gl-field-inline">{t("Bins")}<input type="number" min={10} max={1000} value={bins} onChange={(e) => setBins(e.target.value === "" ? 0 : +e.target.value)} onBlur={(e) => setBins(Math.max(10, Math.min(1000, +e.target.value || 120)))} /></label>
-        <label className="gl-field-inline">{t("Subsample")}<input type="number" min={1000} step={1000} value={subsample} onChange={(e) => setSubsample(Math.max(1000, +e.target.value || 50000))} /></label>
+        <label className="gl-field-inline">{t("Subsample")}<input type="number" min={1000} step={1000} value={subsample || ""} placeholder={t("all")} disabled={subsample === 0} onChange={(e) => setSubsample(Math.max(1000, +e.target.value || 50000))} /></label>
+        <label className="gl-check" title={t("Draw every event of the population in the histogram and the biplot rather than a sample of them; the boundaries and counts always use every event")}>
+          <input type="checkbox" aria-label={t("All events in the division plots")} checked={subsample === 0} onChange={(e) => setSubsample(e.target.checked ? 0 : lastSubsample.current)} />
+          {t("All events")}
+        </label>
         <label className="gl-field-inline">{t("X min")}<input type="number" step={0.2} value={xmin} placeholder="auto" onChange={(e) => setXmin(e.target.value === "" ? "" : +e.target.value)} /></label>
         <label className="gl-field-inline">{t("X max")}<input type="number" step={0.2} value={xmax} placeholder="auto" onChange={(e) => setXmax(e.target.value === "" ? "" : +e.target.value)} /></label>
         <span className="gl-ctl-sep" />

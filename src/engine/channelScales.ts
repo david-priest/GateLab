@@ -71,7 +71,10 @@ const settingsSlot = (contextKey: string, channelKey: string) => slot(settingsSc
 export class ChannelScales {
   private readonly explicitW = new Map<string, number>();
   private readonly explicitCofactor = new Map<string, number>();
-  private readonly linear = new Set<string>();
+  // Flow scatter is drawn linear unless a channel was switched to arcsinh (2026-10-06; the
+  // default was arcsinh before). Explicit choices are kept, so a saved workspace that lists its
+  // linear channels restores the others as arcsinh, as they were.
+  private readonly scatterArcsinh = new Set<string>();
   private readonly fluorArcsinh = new Set<string>();
   private readonly sharedAutoW = new Map<string, number>();
   private readonly sharedAutoT = new Map<string, number>();
@@ -163,7 +166,7 @@ export class ChannelScales {
   }
 
   isScatterLinear(contextKey: string, channelKey: string): boolean {
-    return this.linear.has(settingsSlot(contextKey, channelKey));
+    return !this.scatterArcsinh.has(settingsSlot(contextKey, channelKey));
   }
 
   /** True when this fluorescence channel is displayed with arcsinh instead of its logicle. */
@@ -178,10 +181,10 @@ export class ChannelScales {
       const key = settingsSlot(contextKey, channelKey);
       const w = this.explicitW.get(key);
       const cofactor = this.explicitCofactor.get(key);
-      const isLinear = this.linear.has(key);
+      const scatterArcsinh = this.scatterArcsinh.has(key);
       const isArcsinh = this.fluorArcsinh.has(key);
-      if (w === undefined && cofactor === undefined && !isLinear && !isArcsinh) continue;
-      out.push([channelKey, w ?? null, cofactor ?? null, isLinear, isArcsinh]);
+      if (w === undefined && cofactor === undefined && !scatterArcsinh && !isArcsinh) continue;
+      out.push([channelKey, w ?? null, cofactor ?? null, scatterArcsinh, isArcsinh]);
     }
     out.sort((a, b) => String((a as unknown[])[0]).localeCompare(String((b as unknown[])[0])));
     return out;
@@ -240,19 +243,19 @@ export class ChannelScales {
 
   setScatterLinear(contextKey: string, channelKey: string, isLinear: boolean): void {
     const key = settingsSlot(contextKey, channelKey);
-    if (this.linear.has(key) === isLinear) return;
-    if (isLinear) this.linear.add(key);
-    else this.linear.delete(key);
+    if (this.scatterArcsinh.has(key) === !isLinear) return;
+    if (isLinear) this.scatterArcsinh.delete(key);
+    else this.scatterArcsinh.add(key);
     this.invalidate(contextKey, channelKey);
   }
 
   /** Drop every setting, e.g. when a new workspace replaces this one. */
   clear(): void {
     const had =
-      this.explicitW.size || this.explicitCofactor.size || this.linear.size || this.fluorArcsinh.size;
+      this.explicitW.size || this.explicitCofactor.size || this.scatterArcsinh.size || this.fluorArcsinh.size;
     this.explicitW.clear();
     this.explicitCofactor.clear();
-    this.linear.clear();
+    this.scatterArcsinh.clear();
     this.fluorArcsinh.clear();
     this.sharedAutoW.clear();
     this.sharedAutoT.clear();

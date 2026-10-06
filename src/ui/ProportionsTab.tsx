@@ -34,6 +34,11 @@ import {
 } from "../engine/proportionsModel";
 import { BASE_PROPORTIONS_SETTINGS, PROPORTIONS_NO_FACTOR, PROPORTIONS_SAMPLE_FACTOR } from "../engine/proportionsSettings";
 
+// Sample names and group levels are ordered as people read them: "2" before "10", "exp2" before
+// "exp10". A plain sort put a 224-sample SCE's samples as 1, 10, 100, 101, …, 11, 110, ….
+const LABEL_COLLATOR = new Intl.Collator(undefined, { numeric: true });
+const compareLabels = (a: string, b: string): number => LABEL_COLLATOR.compare(a, b);
+
 interface SampleRef {
   id: string;
   name: string;
@@ -763,11 +768,11 @@ export function ProportionsChart({
   const highlightedLegend = hoveredLegend ?? pinnedLegend;
   const nCat = catLevels.length;
   const facets = hasFacet
-    ? [...new Set(perSample.map((s) => s.facet ?? ""))].sort()
+    ? [...new Set(perSample.map((s) => s.facet ?? ""))].sort(compareLabels)
     : [null];
 
   // Legend entities: categories for stacked, groups for box.
-  const groups = [...new Set(perSample.map((s) => s.group))].sort();
+  const groups = [...new Set(perSample.map((s) => s.group))].sort(compareLabels);
   const groupColors = paletteColors(palette, Math.max(1, groups.length));
   const legend =
     plotType === "stacked"
@@ -790,7 +795,7 @@ export function ProportionsChart({
             averagePerUnit,
             hasUnit: true,
             hasFacet: false,
-          }).sort((a, b) => (a.group < b.group ? -1 : 1))
+          }).sort((a, b) => compareLabels(a.group, b.group))
         : null;
     const xLabels = stackedBars
       ? stackedBars.map((bar) => bar.group)
@@ -907,7 +912,7 @@ export function ProportionsChart({
         xTicks.push({ x: cxCat, label: catLevels[ci] });
         const catBoxes = boxes.filter((b) => b.cat === ci);
         const ng = groups.length || 1;
-        catBoxes.sort((a, b) => (a.group < b.group ? -1 : 1));
+        catBoxes.sort((a, b) => compareLabels(a.group, b.group));
         catBoxes.forEach((box) => {
           const gi = groups.indexOf(box.group);
           const dodge = (gi - (ng - 1) / 2) * (bw + 3);

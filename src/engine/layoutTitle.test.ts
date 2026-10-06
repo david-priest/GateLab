@@ -37,6 +37,9 @@ describe("plotTitle", () => {
 
 describe("automaticTitleTemplate", () => {
   it("names what differs: populations of one file, files of one population, both otherwise", () => {
+    // Under a metadata iteration the value is what differs, and the population too when there are several.
+    expect(automaticTitleTemplate([{ sampleId: "D1,D2", populationId: "p1" }], { metadataColumn: "day" })).toBe("{meta:day}");
+    expect(automaticTitleTemplate([{ sampleId: "D1,D2", populationId: "p1" }, { sampleId: "D1,D2", populationId: "p2", label: "CD3 vs CD20" }], { metadataColumn: "day" })).toBe("{meta:day} · {population} · {plot}");
     expect(automaticTitleTemplate([{ sampleId: "D1", populationId: "p1" }, { sampleId: "D1", populationId: "p2" }])).toBe("{population}");
     expect(automaticTitleTemplate([{ sampleId: "D1", populationId: "p1" }, { sampleId: "D2", populationId: "p1" }])).toBe("{file}");
     expect(automaticTitleTemplate([{ sampleId: "D1", populationId: "p1" }, { sampleId: "D2", populationId: "p2" }])).toBe("{population} · {file}");

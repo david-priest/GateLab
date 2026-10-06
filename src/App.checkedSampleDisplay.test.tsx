@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+// Gate coordinates reach the app in display units, and scatter opens linear (since 2026-10-06), so
+// these are raw values: each is 150·sinh of the arcsinh coordinate the test was written with.
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -149,11 +151,11 @@ function clickButton(text: string): void {
   if (!button) throw new Error(`Missing button: ${text}`);
   act(() => button.click());
 }
-async function poolFiles(edit = false): Promise<void> {
+/** Pools the selected files; the pool then follows the selection and edits the tree. */
+async function poolFiles(): Promise<void> {
   const button = [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.startsWith('Pool selected files'))!;
   act(() => button.click());
   await settle();
-  if (edit) { clickButton('Edit the tree'); await settle(); }
 }
 function toggleFile(name: string): void {
   act(() => fileRow(name).dispatchEvent(new MouseEvent('click', { bubbles: true, metaKey: true })));
@@ -181,7 +183,7 @@ describe("App file selection and plot scope", () => {
     Object.defineProperty(input, "files", { configurable: true, value: [testFile("D1.fcs", 1)] });
     await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
     for (let i = 0; i < 100 && host.querySelectorAll(".gl-sample-row").length < 1; i++) await settle();
-    act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [1.05, 1.05]], x_channel: "FSC-A", y_channel: "SSC-A" }));
+    act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [188.08, 188.08]], x_channel: "FSC-A", y_channel: "SSC-A" }));
     act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Create")!.click());
     await settle();
     expect(summary()).toBe("1 file · following");
@@ -196,7 +198,7 @@ describe("App file selection and plot scope", () => {
     // load, and the gate was then drawn before every file was in.
     for (let i = 0; i < 100 && host.querySelectorAll(".gl-sample-row").length < 3; i++) await settle();
     expect(host.querySelectorAll(".gl-sample-row")).toHaveLength(3);
-    act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [1.05, 1.05]], x_channel: "FSC-A", y_channel: "SSC-A" }));
+    act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [188.08, 188.08]], x_channel: "FSC-A", y_channel: "SSC-A" }));
     act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Create")!.click());
     await settle();
     const gate = () => plotHarness.props!.payload.gates[0];
@@ -207,7 +209,7 @@ describe("App file selection and plot scope", () => {
     expect(host.textContent).toContain("Editing the tree");
     await editFile();
     expect(host.textContent).toContain("Editing D2.fcs only");
-    act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[0.3, 0.3], [0.8, 0.8]] }));
+    act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[45.68, 45.68], [133.22, 133.22]] }));
     await settle();
     const tailored = structuredClone(gate().vertices);
     expect(summary()).toBe("3 files · 1 tailored");
@@ -252,7 +254,7 @@ describe("App file selection and plot scope", () => {
     // load, and the gate was then drawn before every file was in.
     for (let i = 0; i < 100 && host.querySelectorAll(".gl-sample-row").length < 3; i++) await settle();
     expect(host.querySelectorAll(".gl-sample-row")).toHaveLength(3);
-    act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [1.05, 1.05]], x_channel: "FSC-A", y_channel: "SSC-A" }));
+    act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [188.08, 188.08]], x_channel: "FSC-A", y_channel: "SSC-A" }));
     act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Create")!.click());
     await settle();
     const gate = () => plotHarness.props!.payload.gates[0];
@@ -264,7 +266,7 @@ describe("App file selection and plot scope", () => {
       await view(name);
       expect(editTarget()).toBe("file");
       ids.push(gate().gate_id);
-      act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[0.3 + i * 0.05, 0.3], [0.8, 0.8]] }));
+      act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[45.68 + i * 7.9, 45.68], [133.22, 133.22]] }));
       await settle();
       tailoredOf[name] = structuredClone(gate().vertices);
     }
@@ -321,7 +323,7 @@ describe("App file selection and plot scope", () => {
     // load, and the gate was then drawn before every file was in.
     for (let i = 0; i < 100 && host.querySelectorAll(".gl-sample-row").length < 3; i++) await settle();
     expect(host.querySelectorAll(".gl-sample-row")).toHaveLength(3);
-    act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [1.05, 1.05]], x_channel: "FSC-A", y_channel: "SSC-A" }));
+    act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [188.08, 188.08]], x_channel: "FSC-A", y_channel: "SSC-A" }));
     const createPop = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find(i => i.parentElement?.textContent?.includes("Also create a population"))!;
     if (!createPop.checked) act(() => createPop.click());
     act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Create")!.click());
@@ -330,7 +332,7 @@ describe("App file selection and plot scope", () => {
     const original = structuredClone(gate().vertices);
     await view("D1.fcs");
     await editFile();
-    act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[0.3, 0.3], [0.8, 0.8]] }));
+    act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[45.68, 45.68], [133.22, 133.22]] }));
     await settle();
     const first = structuredClone(gate().vertices);
     expect(summary()).toBe("3 files · 1 tailored");
@@ -343,7 +345,7 @@ describe("App file selection and plot scope", () => {
     await view("D3.fcs"); expect(gate().vertices).toEqual(first);
     // Tailor again and revert the one gate: back on the tree's coordinates, nothing tailored.
     await view("D1.fcs");
-    act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[0.4, 0.4], [0.9, 0.9]] }));
+    act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[61.61, 61.61], [153.98, 153.98]] }));
     await settle();
     expect(gate().vertices).not.toEqual(first);
     expect(summary()).toBe("3 files · 1 tailored");
@@ -459,13 +461,18 @@ describe("App file selection and plot scope", () => {
     expect(host.textContent).toContain("2 of 2 selected");
     expect(plottedCount()).toBe(4);
     expect(host.textContent).toContain("different panel");
+    // Left out of the pool, not only of the cloud: the counts above the plot and in the tree
+    // describe the one file drawn.
+    expect(host.textContent).toContain("Pooled view · 1 of 2 files");
+    expect(host.textContent).toMatch(/All Events4(?!\d)/);
 
-    // Unchecking the primary leaves the mismatched file alone, which is fine — it simply becomes
-    // the primary itself, and there is nothing left to refuse.
+    // Selecting the mismatched file alone leaves nothing to refuse: the pool follows the selection,
+    // and the file becomes the viewed one, drawn on its own.
     act(() => fileRow("panel-1.fcs").click());
     await settle();
     expect(plottedCount()).toBe(3);
-    expect(host.querySelector(".gl-pool-toolbar")?.textContent).toContain("Viewing: panel-1.fcs");
+    expect(host.querySelector(".gl-pool-toolbar")?.textContent).toContain("Pooled view · 1 file");
+    expect(host.textContent).not.toContain("different panel");
   });
 
 
@@ -485,12 +492,12 @@ describe("App file selection and plot scope", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
     await settle();
-    await poolFiles(true);
+    await poolFiles();
     expect(plottedCount()).toBe(7);
 
     act(() => plotHarness.props!.onNewGate({
       gate_type: "rectangle",
-      vertices: [[0, 0], [1.05, 1.05]],
+      vertices: [[0, 0], [188.08, 188.08]],
       x_channel: "FSC-A",
       y_channel: "SSC-A",
     }));
@@ -530,7 +537,7 @@ describe("App file selection and plot scope", () => {
 
     act(() => plotHarness.props!.onNewGate({
       gate_type: "rectangle",
-      vertices: [[0, 0], [1.05, 1.05]],
+      vertices: [[0, 0], [188.08, 188.08]],
       x_channel: "FSC-A",
       y_channel: "SSC-A",
     }));
@@ -542,7 +549,7 @@ describe("App file selection and plot scope", () => {
     // One tree, both files following, nothing copied.
     expect(summary()).toBe("2 files · all following");
     expect(host.querySelector(".population-tree-promote")).toBeNull();
-    await poolFiles(true);
+    await poolFiles();
     expect(plottedCount()).toBe(7);
 
     // Viewing D2 shows it on the tree: no copy, tools open, nothing tailored.
@@ -565,7 +572,7 @@ describe("App file selection and plot scope", () => {
     const copiedGate = plotHarness.props!.payload.gates[0];
     act(() => plotHarness.props!.onGateEdit({
       gate_id: copiedGate.gate_id,
-      vertices: [[1.2, 1.2], [1.4, 1.4]],
+      vertices: [[226.42, 226.42], [285.65, 285.65]],
     }));
     await settle();
     const movedVertices = plotHarness.props!.payload.gates[0].vertices;
@@ -574,13 +581,13 @@ describe("App file selection and plot scope", () => {
     expect(tailoredBadge("D2.fcs")).toBe("1");
 
     await editTree();
-    await poolFiles(true);
+    await poolFiles();
     expect(plottedCount()).toBe(7);
     expect(plotHarness.props!.payload.gates[0].vertices).not.toEqual(movedVertices);
 
     // An edit to the tree reaches D1 (no copy: it simply follows) and not D2's tailored gate.
     const templateGate = plotHarness.props!.payload.gates[0];
-    act(() => plotHarness.props!.onGateEdit({ gate_id: templateGate.gate_id, vertices: [[0.1, 0.1], [1.0, 1.0]] }));
+    act(() => plotHarness.props!.onGateEdit({ gate_id: templateGate.gate_id, vertices: [[15.03, 15.03], [176.28, 176.28]] }));
     await settle();
     const treeEdited = structuredClone(plotHarness.props!.payload.gates[0].vertices);
     // On the tree, the tailored file still shows the tree's gate; file mode shows its own.
@@ -611,7 +618,7 @@ describe("App file selection and plot scope", () => {
 
     // Tailor once more and revert the file: it follows the tree again, and pooling still works.
     await editFile();
-    act(() => plotHarness.props!.onGateEdit({ gate_id: plotHarness.props!.payload.gates[0].gate_id, vertices: [[1.2, 1.2], [1.4, 1.4]] }));
+    act(() => plotHarness.props!.onGateEdit({ gate_id: plotHarness.props!.payload.gates[0].gate_id, vertices: [[226.42, 226.42], [285.65, 285.65]] }));
     await settle();
     expect(summary()).toBe("2 files · 1 tailored");
     act(() => host.querySelector<HTMLButtonElement>(".population-tree-revert-group")!.click());
@@ -620,12 +627,12 @@ describe("App file selection and plot scope", () => {
     expect(editTarget()).toBe("file");
     await editTree();
     expect(host.textContent).toContain("D2.fcs follows the tree again");
-    await poolFiles(true);
+    await poolFiles();
     expect(plottedCount()).toBe(7);
     expect(host.textContent).not.toContain("Cannot pool");
   });
 
-  it("keeps a captured pool through file import and closes it explicitly if a member is removed", async () => {
+  it("takes files added while pooled into the pool, and carries on when a pooled file is removed", async () => {
     act(() => root.render(<App />));
     const input = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')].find(i => !i.hasAttribute("webkitdirectory"))!;
     const load = async (files: File[]) => {
@@ -635,70 +642,80 @@ describe("App file selection and plot scope", () => {
     };
     await load([testFile("D1.fcs", 1), testFile("D2.fcs", 2)]);
     await poolFiles();
-    const frame = structuredClone(plotHarness.props!.payload.x_range);
-    await load([testFile("D3.fcs", 2)]);
     expect(plottedCount()).toBe(7);
-    expect(plotHarness.props!.payload.x_range).toEqual(frame);
-    expect(host.textContent).toContain("Pooled view · 2 files");
+    // A file added is selected, so it joins the pool; the viewed file stays the one it was.
+    await load([testFile("D3.fcs", 2)]);
+    expect(plottedCount()).toBe(11);
+    expect(host.textContent).toContain("Pooled view · 3 files");
     expect(host.textContent).toContain("3 of 3 selected");
     clickButton("Manage…");
     act(() => host.querySelector<HTMLInputElement>('input[aria-label="Select D1.fcs for management"]')!.click());
     clickButton("Remove selected…");
     clickButton("Remove");
     await settle();
-    expect(host.querySelector('.gl-pool-toolbar')?.textContent).not.toContain("Pooled view");
-    expect(host.textContent).toContain("The pool was closed because a referenced file or hierarchy changed");
+    // The pool carries on over the files still selected.
+    expect(host.querySelector(".gl-pool-toolbar")?.textContent).toContain("Pooled view · 2 files");
+    expect(host.textContent).not.toContain("The pool was closed");
+    expect(plottedCount()).toBe(8);
+    // With the last file removed the mode ends, so the next file added is viewed, not pooled.
+    clickButton("Manage…");
+    act(() => host.querySelector<HTMLInputElement>('input[aria-label="Select D2.fcs for management"]')!.click());
+    act(() => host.querySelector<HTMLInputElement>('input[aria-label="Select D3.fcs for management"]')!.click());
+    clickButton("Remove selected…");
+    clickButton("Remove");
+    await settle();
+    expect(host.querySelectorAll(".gl-sample-row")).toHaveLength(0);
+    await load([testFile("D4.fcs", 2)]);
+    expect(host.querySelector(".gl-pool-toolbar")?.textContent).toContain("Viewing: D4.fcs");
     expect(plottedCount()).toBe(4);
   });
 
-  it("keeps action selection, inspection and captured pool independent, with guarded template editing", async () => {
+  it("keeps the viewed file apart from the selection until it is pooled, then pools the selection as it changes and edits the tree", async () => {
     act(() => root.render(<App />));
     const input = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')].find(i => !i.hasAttribute("webkitdirectory"))!;
     Object.defineProperty(input, "files", { configurable: true, value: [testFile("D1.fcs", 1), testFile("D2.fcs", 2), testFile("D3.fcs", 2)] });
     await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
     await settle();
+    // The browser app opens on one file, every file selected for actions.
     expect(plottedCount()).toBe(4);
     expect(host.textContent).toContain("3 of 3 selected");
+    expect(host.querySelector(".gl-pool-toolbar")?.textContent).toContain("Viewing: D3.fcs");
     expect(host.querySelector('.gl-sample-row input')).toBeNull();
-    // Removing the viewed row from the action selection does not move the plot or its counts.
+    // Outside a pool, removing the viewed row from the selection does not move the plot or its counts.
     const unchangedPayload = plotHarness.props!.payload;
     toggleFile("D3.fcs"); await settle();
     expect(plotHarness.props!.payload).toBe(unchangedPayload);
     expect(plottedCount()).toBe(4);
     expect(fileRow("D3.fcs").getAttribute("aria-current")).toBe("true");
     expect(fileRow("D3.fcs").getAttribute("aria-selected")).toBe("false");
-    // Create a template gate before entering the read-only preview.
-    act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [1.05, 1.05]], x_channel: "FSC-A", y_channel: "SSC-A" }));
+    act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[0, 0], [188.08, 188.08]], x_channel: "FSC-A", y_channel: "SSC-A" }));
     clickButton("Create"); await settle();
     const original = structuredClone(plotHarness.props!.payload.gates[0].vertices);
+    // Pooled, the plot draws the selected files, and the pool is the tree, open to editing.
     await poolFiles();
     expect(plottedCount()).toBe(7);
     expect(host.textContent).toContain("Pooled view · 2 files");
-    expect(host.textContent).toContain("Read-only tree preview");
+    expect(host.textContent).not.toContain("Read-only");
     expect(plotHarness.props!.payload.gates[0].percent_of_parent).toBe(42.86);
-    act(() => plotHarness.props!.onGateEdit({ gate_id: plotHarness.props!.payload.gates[0].gate_id, vertices: [[2, 2], [3, 3]] }));
-    act(() => plotHarness.props!.onNewGate({ gate_type: "rectangle", vertices: [[2, 2], [3, 3]], x_channel: "FSC-A", y_channel: "SSC-A" }));
+    act(() => plotHarness.props!.onGateEdit({ gate_id: plotHarness.props!.payload.gates[0].gate_id, vertices: [[30.2, 30.2], [153.98, 153.98]] }));
     await settle();
-    expect(plotHarness.props!.payload.gates[0].vertices).toEqual(original);
-    expect(host.querySelector('[role="dialog"]')).toBeNull();
-    // A plain row click now changes only the action selection, not this explicit pool.
+    const edited = structuredClone(plotHarness.props!.payload.gates[0].vertices);
+    expect(edited).not.toEqual(original);
+    expect(summary()).toBe("3 files · all following");
+    // The pool follows the selection: one file, then two.
     act(() => fileRow("D3.fcs").click()); await settle();
-    expect(plottedCount()).toBe(7);
+    expect(plottedCount()).toBe(4);
     expect(host.textContent).toContain("1 of 3 selected");
-    toggleFile("D2.fcs");
-    clickButton("Change files…");
-    expect(host.querySelector(".gl-pool-members")?.textContent).toContain("D1.fcs");
-    clickButton("Use current selection (2)"); await settle();
+    expect(host.textContent).toContain("Pooled view · 1 file");
+    toggleFile("D2.fcs"); await settle();
     expect(plottedCount()).toBe(8);
-    clickButton("Edit the tree"); await settle();
-    act(() => plotHarness.props!.onGateEdit({ gate_id: plotHarness.props!.payload.gates[0].gate_id, vertices: [[0.2, 0.2], [0.9, 0.9]] }));
-    await settle();
-    expect(plotHarness.props!.payload.gates[0].vertices).not.toEqual(original);
-    clickButton("Stop editing the tree"); await settle();
-    // Enter is an explicit inspection, so it exits the pool without changing the selected set.
+    expect(host.textContent).toContain("Pooled view · 2 files");
+    expect(plotHarness.props!.payload.gates[0].vertices).toEqual(edited);
+    // Enter inspects a file: it leaves the pool and shows that file alone, selection untouched.
     act(() => fileRow("D1.fcs").dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" })));
     await settle();
     expect(plottedCount()).toBe(3);
+    expect(host.querySelector(".gl-pool-toolbar")?.textContent).toContain("Viewing: D1.fcs");
     expect(host.textContent).toContain("2 of 3 selected");
     expect(fileRow("D1.fcs").getAttribute("aria-selected")).toBe("false");
     expect(fileRow("D1.fcs").getAttribute("aria-current")).toBe("true");
@@ -707,6 +724,36 @@ describe("App file selection and plot scope", () => {
     await settle();
     expect(plottedCount()).toBe(3);
     expect(host.textContent).toContain("0 of 3 selected");
+    // Pooled with nothing selected, the plot stays on screen and shows no events.
+    act(() => [...selection.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "All")!.click());
+    await settle();
+    await poolFiles();
+    expect(plottedCount()).toBe(11);
+    act(() => [...selection.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "None")!.click());
+    await settle();
+    expect(plottedCount()).toBe(0);
+    expect(host.textContent).toContain("Pooled view · 0 files");
+    // The gate list pools over no files, as the plot and the tree do.
+    expect(host.textContent).toContain("pooled · 0 FCS");
+    // Choosing to edit one file alone leaves the pool for the viewed file.
+    act(() => [...selection.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "All")!.click());
+    await settle();
+    await editFile();
+    expect(host.querySelector(".gl-pool-toolbar")?.textContent).toContain("Viewing:");
+    expect(editTarget()).toBe("file");
+    // Pooled again with the file mode held underneath, the pool edits the tree, with nothing
+    // selected too: no copy is put live or made for the viewed file.
+    await poolFiles();
+    expect(editTarget()).toBe("tree");
+    act(() => [...selection.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "None")!.click());
+    await settle();
+    expect(editTarget()).toBe("tree");
+    expect(summary()).toBe("3 files · all following");
+    act(() => [...selection.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "All")!.click());
+    await settle();
+    expect(summary()).toBe("3 files · all following");
+    clickButton("Return to single file"); await settle();
+    expect(editTarget()).toBe("file"); // the mode is the user's, back with the single file
   });
 
   it("holds a locked frame across the original and compensated views of a file", async () => {

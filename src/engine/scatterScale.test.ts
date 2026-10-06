@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 //
 // The scatter scale is a DISPLAY control. Flow gates are stored and evaluated in raw
-// space, so switching a scatter axis between arcsinh and linear must not move a gate or
+// space, so switching a scatter axis between linear and arcsinh must not move a gate or
 // change a single event's membership. These tests pin that, and pin that CyTOF is
 // excluded from the control entirely — arcsinh cofactor 5 is the field convention there.
+// Scatter is linear unless switched (since 2026-10-06; arcsinh unless switched before).
 
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -38,15 +39,22 @@ describe("flow scatter scale", () => {
     expect(sample.isScatterAxis(fluor)).toBe(false);
   });
 
-  it("defaults to arcsinh at cofactor 150", () => {
-    expect(sample.scatterScale(fscIdx)).toBe("arcsinh");
+  it("defaults to linear, as FlowJo and Cytobank draw scatter", () => {
+    expect(sample.scatterScale(fscIdx)).toBe("linear");
+    expect(sample.scatterScale(sscIdx)).toBe("linear");
+    expect(sample.transformKind(fscIdx)).toBe("identity");
+    expect(sample.rawToDisplay("FSC-A", 12345)).toBeCloseTo(12345, 6);
+    // The cofactor waits for the switch.
     expect(sample.currentScatterCofactor(fscIdx)).toBe(150);
-    expect(sample.transformKind(fscIdx)).toBe("asinh");
   });
 
-  it("makes display equal raw when switched to linear", () => {
+  it("draws arcsinh at cofactor 150 when switched, and raw again when switched back", () => {
     const s = load(ARIA_SMALL);
     const idx = s.index("FSC-A")!;
+    s.setScatterScale(idx, "arcsinh");
+    expect(s.scatterScale(idx)).toBe("arcsinh");
+    expect(s.transformKind(idx)).toBe("asinh");
+    expect(s.rawToDisplay("FSC-A", 150)).toBeCloseTo(Math.asinh(1), 6);
     s.setScatterScale(idx, "linear");
     expect(s.scatterScale(idx)).toBe("linear");
     expect(s.transformKind(idx)).toBe("identity");
@@ -69,35 +77,45 @@ describe("flow scatter scale", () => {
     expect(nIn).toBeGreaterThan(0);
     expect(nIn).toBeLessThan(before.length); // not a vacuous all-in gate
 
-    s.setScatterScale(s.index("FSC-A")!, "linear");
-    s.setScatterScale(s.index("SSC-A")!, "linear");
+    s.setScatterScale(s.index("FSC-A")!, "arcsinh");
+    s.setScatterScale(s.index("SSC-A")!, "arcsinh");
     expect(Array.from(getGateMask(gate, s.gatingData()))).toEqual(before);
 
     s.setScatterCofactor(s.index("FSC-A")!, 1500);
     expect(Array.from(getGateMask(gate, s.gatingData()))).toEqual(before);
+
+    s.setScatterScale(s.index("FSC-A")!, "linear");
+    expect(Array.from(getGateMask(gate, s.gatingData()))).toEqual(before);
   });
 
-  it("round-trips the linear setting through the workspace keys", () => {
+  it("round-trips the scatter choice through the workspace keys, which list the linear channels", () => {
     const s = load(ARIA_SMALL);
-    s.setScatterScale(s.index("FSC-A")!, "linear");
+    const scatter = s.channels.filter((_, i) => s.isScatterAxis(i)).map((c) => c.key);
+    expect(s.scatterLinearKeys()).toEqual(scatter);
+    s.setScatterScale(s.index("SSC-A")!, "arcsinh");
     const saved = s.scatterLinearKeys();
-    expect(saved).toEqual(["FSC-A"]);
+    expect(saved).toEqual(scatter.filter((key) => key !== "SSC-A"));
 
     const reopened = load(ARIA_SMALL);
     reopened.applyScatterLinearKeys(saved);
     expect(reopened.scatterScale(reopened.index("FSC-A")!)).toBe("linear");
     expect(reopened.scatterScale(reopened.index("SSC-A")!)).toBe("arcsinh");
+    // A workspace saved when arcsinh was the default lists nothing: every axis opens arcsinh.
+    reopened.applyScatterLinearKeys([]);
+    expect(reopened.scatterScale(reopened.index("FSC-A")!)).toBe("arcsinh");
+    expect(reopened.scatterLinearKeys()).toEqual([]);
   });
 
-  it("resets to the arcsinh default", () => {
+  it("resets the cofactor to 150 without touching the scale", () => {
     const s = load(ARIA_SMALL);
     const idx = s.index("FSC-A")!;
-    s.setScatterScale(idx, "linear");
-    s.setScatterCofactor(idx, 900);
     s.setScatterScale(idx, "arcsinh");
+    s.setScatterCofactor(idx, 900);
     s.resetScatterCofactor(idx);
     expect(s.scatterScale(idx)).toBe("arcsinh");
     expect(s.currentScatterCofactor(idx)).toBe(150);
+    s.setScatterScale(idx, "linear");
+    expect(s.scatterScale(idx)).toBe("linear");
   });
 });
 
@@ -123,10 +141,10 @@ describe("the display-transform context key", () => {
   // Omitting the linear-scatter set from it let the plot keep arcsinh coordinates while
   // the gate outline — transformed live out of raw space — moved to the linear scale, so
   // a gate visibly jumped off its own events while its event count stayed correct.
-  it("changes when a scatter axis switches to linear", () => {
+  it("changes when a scatter axis switches to arcsinh", () => {
     const s = load(ARIA_SMALL);
     const before = s.displayTransformContextKey;
-    s.setScatterScale(s.index("FSC-A")!, "linear");
+    s.setScatterScale(s.index("FSC-A")!, "arcsinh");
     expect(s.displayTransformContextKey).not.toBe(before);
   });
 
@@ -141,8 +159,8 @@ describe("the display-transform context key", () => {
     const s = load(ARIA_SMALL);
     const before = s.displayTransformContextKey;
     const idx = s.index("FSC-A")!;
-    s.setScatterScale(idx, "linear");
     s.setScatterScale(idx, "arcsinh");
+    s.setScatterScale(idx, "linear");
     expect(s.displayTransformContextKey).toBe(before);
   });
 
@@ -170,23 +188,27 @@ describe("gate display coordinates follow the transform", () => {
   const displayX = (s: Sample, g: Gate) =>
     (g.gate_type === "polygon" || g.gate_type === "rectangle" ? g.vertices : []).map(([vx]) => s.gatingToDisplay("FSC-A", vx));
 
-  it("moves the gate outline when the scatter cofactor changes", () => {
+  it("moves the gate outline when the scatter cofactor changes on an arcsinh axis", () => {
     const s = load(ARIA_SMALL);
     const g = rectOnScatter();
+    s.setScatterScale(s.index("FSC-A")!, "arcsinh");
     const before = displayX(s, g);
     s.setScatterCofactor(s.index("FSC-A")!, 900);
     expect(displayX(s, g)).not.toEqual(before);
   });
 
-  it("moves the gate outline when the axis switches to linear", () => {
+  it("moves the gate outline when the axis switches to arcsinh, and back to raw units on linear", () => {
     const s = load(ARIA_SMALL);
     const g = rectOnScatter();
     const before = displayX(s, g);
+    // Linear is the identity, so the outline starts in raw units.
+    expect(before[0]).toBeCloseTo(20000, 6);
+    s.setScatterScale(s.index("FSC-A")!, "arcsinh");
+    const bowed = displayX(s, g);
+    expect(bowed).not.toEqual(before);
+    expect(bowed[0]).toBeCloseTo(Math.asinh(20000 / 150), 6);
     s.setScatterScale(s.index("FSC-A")!, "linear");
-    const after = displayX(s, g);
-    expect(after).not.toEqual(before);
-    // Linear is the identity, so the outline is back in raw units.
-    expect(after[0]).toBeCloseTo(20000, 6);
+    expect(displayX(s, g)).toEqual(before);
   });
 });
 
@@ -194,6 +216,7 @@ describe("scatter axis ticks follow the scale", () => {
   it("uses raw-unit decade ticks on an arcsinh scatter axis", () => {
     const s = load(ARIA_SMALL);
     const idx = s.index("FSC-A")!;
+    s.setScatterScale(idx, "arcsinh");
     expect(s.channelTicks(idx, s.displayRange(idx))).not.toBeNull();
   });
 
@@ -212,9 +235,10 @@ describe("scatter axis ticks follow the scale", () => {
     for (const g of gaps) expect(g).toBeCloseTo(gaps[0], 6);
   });
 
-  it("restores decade ticks when the axis goes back to arcsinh", () => {
+  it("restores decade ticks when the axis goes to arcsinh after linear", () => {
     const s = load(ARIA_SMALL);
     const idx = s.index("FSC-A")!;
+    s.setScatterScale(idx, "arcsinh");
     s.setScatterScale(idx, "linear");
     s.setScatterScale(idx, "arcsinh");
     expect(s.channelTicks(idx, s.displayRange(idx))).not.toBeNull();
@@ -228,7 +252,7 @@ describe("scatter axis ticks follow the scale", () => {
 // which collapsed the view to a single tick at 0, and Fit data + gates could not recover it
 // because the stale range came back every time.
 describe("a shared ChannelScales still invalidates the channel's caches", () => {
-  it("changes the display coordinate and the auto range when scatter goes linear", () => {
+  it("changes the display coordinate and the auto range when scatter goes arcsinh, and back", () => {
     const s = load(ARIA_SMALL);
     const scales = new ChannelScales();
     s.attachChannelScales(scales);
@@ -237,17 +261,23 @@ describe("a shared ChannelScales still invalidates the channel's caches", () => 
     // Warm every cache the way the app does before the user touches the control.
     const beforeDisplay = s.rawToDisplay("FSC-A", 12345);
     const beforeRange = s.displayRange(idx);
-    expect(s.transformKind(idx)).toBe("asinh");
-
-    s.setScatterScale(idx, "linear");
-
-    expect(s.scatterScale(idx)).toBe("linear");
     expect(s.transformKind(idx)).toBe("identity");
-    expect(s.rawToDisplay("FSC-A", 12345)).toBeCloseTo(12345, 6);
+    expect(beforeRange[1]).toBeGreaterThan(1000);
+
+    s.setScatterScale(idx, "arcsinh");
+
+    expect(s.scatterScale(idx)).toBe("arcsinh");
+    expect(s.transformKind(idx)).toBe("asinh");
+    expect(s.rawToDisplay("FSC-A", 12345)).toBeCloseTo(Math.asinh(12345 / 150), 6);
     expect(s.rawToDisplay("FSC-A", 12345)).not.toBeCloseTo(beforeDisplay, 6);
     // The auto range must move with it, or the axis is fitted to coordinates nothing is drawn at.
     expect(s.displayRange(idx)[1]).not.toBeCloseTo(beforeRange[1], 6);
-    expect(s.displayRange(idx)[1]).toBeGreaterThan(1000);
+    expect(s.displayRange(idx)[1]).toBeLessThan(20);
+
+    s.setScatterScale(idx, "linear");
+    expect(s.transformKind(idx)).toBe("identity");
+    expect(s.rawToDisplay("FSC-A", 12345)).toBeCloseTo(12345, 6);
+    expect(s.displayRange(idx)[1]).toBeCloseTo(beforeRange[1], 6);
   });
 
   it("changes the display coordinate when the logicle W moves", () => {

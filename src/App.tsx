@@ -8,7 +8,7 @@ import { figureBlockFrame } from "./ui/LayoutFigure";
 import { proportionsBlockFrame } from "./ui/LayoutProportions";
 import { buildProportionsModel, defaultProportionsSettings, type ProportionsSettings } from "./engine/proportionsModel";
 import pkg from "../package.json";
-import { clearPersistedTabState, readProportionsSettings, restorePlottingState, savedPlottingState, writeProportionsSettings } from "./ui/tabState";
+import { clearPersistedTabState, readPersistedTabValues, readProportionsSettings, restorePlottingState, savedPlottingState, writeProportionsSettings } from "./ui/tabState";
 import { historyShortcutAction } from "./ui/historyShortcuts";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type GatingPlotActions, type NewGate } from "./plots/GatingPlot";
 import { startPanSession } from "./plots/panGesture";
@@ -246,6 +246,7 @@ import { resolveFlowJoTarget } from "./engine/flowjoWorkspace";
 import { isUnbounded, type GateSpace, type Gate } from "./engine/models";
 import type { ChannelLabelMode } from "./engine/sample";
 import { gateSpaceBadge } from "./engine/gateSpaceBadge";
+import { isFlowJoGridGate } from "./engine/flowjoGrid";
 import { HierarchyControls, PopulationTree, type EditTarget, type TreeControlsProps } from "./ui/PopulationTree";
 import { GateModals } from "./ui/GateModals";
 import { GateToolbar, PopToolbar } from "./ui/Toolbars";
@@ -301,9 +302,19 @@ import { MarkerColourControl } from "./ui/MarkerColourControl";
 import { SearchableSelect, type SearchableOption } from "./ui/SearchableSelect";
 import type { GatingImportSourceKind } from "./ui/CrudModals";
 import { UI_LANGUAGE_OPTIONS, useI18n, type UiLanguage } from "./ui/i18n";
+import { useTour } from "./tour/useTour";
+import { resolveTourTarget, TourOverlay } from "./tour/TourOverlay";
+import { TourMenu } from "./tour/TourMenu";
+import { DEMO_WORKSPACE_CITATION, DEMO_WORKSPACE_FILE, DEMO_WORKSPACE_PATH } from "./tour/tourScript";
+import type { TourContext, TourNeeds } from "./tour/tourTypes";
 import { useOptionalGateLabHost } from "./host/HostContext";
 import { createBrowserHost } from "./host/browserHost";
 import {
+  HostedAssayNotArcsinhError,
+  chooseHostedAssay,
+  drawableHostedAssay,
+  hasLinearHostedAssay,
+  linearHostedAssay,
   loadHostedDataset,
   type GateLabHostedSample,
 } from "./host/hostedSample";
@@ -320,6 +331,7 @@ import {
 import {
   convertHostedGateSpace,
   readHostedWorkspace,
+  hostedAssayIdOf,
 } from "./host/hostedWorkspace";
 import {
   buildHostedMemberships,
@@ -327,9 +339,15 @@ import {
   hostedMembershipReader,
   hostedSampleMask,
   notEvaluatedNotes,
+  workspaceHierarchyTrees,
   type HierarchyTree,
   type HostedMembershipSample,
 } from "./host/hostedMemberships";
+import { AgentLink, parseAgentUrl, type AgentLinkStatus } from "./agent/agentLink";
+import { createAgentHandler, type AgentAdapter, type AgentSampleView } from "./agent/handler";
+import { AgentMenu } from "./agent/AgentMenu";
+import { renderPlotPng } from "./agent/renderPlot";
+import type { AgentView as AgentViewState, AgentViewParams } from "./agent/protocol";
 import {
   GATELAB_HOST_COLDATA_CONTRACT_VERSION,
   type GateLabHostCategoricalColumn,
@@ -382,6 +400,11 @@ const fmtCofactor = (cofactor: number): string =>
   : `${Math.round(cofactor)}`;
 const INITIAL_LEFT_PANE_WIDTH = 330;
 const INITIAL_RIGHT_PANE_WIDTH = 672;
+/**
+ * How long the background gating of the files not on the plot runs before it yields for a
+ * paint. Below one 60 Hz frame, so gate editing stays responsive while it runs.
+ */
+const INACTIVE_GATING_SLICE_MS = 12;
 
 type CrudModal =
   | { kind: "createPop" }
@@ -737,6 +760,9 @@ function findCompensationProfile(
   return null;
 }
 
+/** The workspace cannot be written as it stands; the message says what has to change first. */
+class WorkspaceUnwritableError extends Error {}
+
 const DRAW_TOOLS: { id: DrawMode; Icon: () => React.ReactElement; title: string }[] = [
   { id: "navigate", Icon: NavigateIcon, title: "Navigate (pan / zoom)" },
   { id: "draw-rect", Icon: RectIcon, title: "Rectangle gate — drag a box" },
@@ -791,9 +817,14 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "statistics", label: "Statistics" },
   { id: "metadata", label: "Metadata" },
   { id: "panel", label: "Panel" },
-  { id: "compensation", label: "Compensation" },
+  // Scales before Compensation: how a channel is shown comes before how it is corrected, and
+  // Compensation, the tab used least often once a matrix is settled, sits at the end.
   { id: "scales", label: "Scales" },
+  { id: "compensation", label: "Compensation" },
 ];
+
+/** The tabs' names for the tutorial's "This step is on the … tab". */
+const TOUR_TAB_LABELS: Readonly<Record<string, string>> = Object.fromEntries(TABS.map((tab) => [tab.id, tab.label]));
 
 interface SampleEntry {
   id: string;
@@ -1059,10 +1090,10 @@ export default function App() {
   // Global sample filter (R's rv$sample_mask): samples excluded from the multi-sample analysis
   // tabs (Statistics / Proportions). New samples are included by default; default = all included.
   const [excludedSampleIds, setExcludedSampleIds] = useState<Set<string>>(new Set());
-  // Row selection is for actions. A pool captures its membership explicitly and never follows it.
-  const [plotPool, setPlotPool] = useState<{ ids: string[]; hierarchyId: string; editTemplate: boolean } | null>(null);
-  const [poolMembersOpen, setPoolMembersOpen] = useState(false);
-  const poolReadOnly = plotPool !== null && !plotPool.editTemplate;
+  // The plot shows one file, or, pooled, the selected files. A pool follows the selection as it
+  // changes and edits the tree; the samples of a mass cytometry SCE open pooled. Row selection is
+  // otherwise for actions, and the viewed file is chosen with Enter or a plain click.
+  const [poolSelection, setPoolSelection] = useState(false);
   // Groups: each file is gated under the tree it is assigned to, its own copy or a group's
   // template (an unassigned file, or one whose tree was deleted, under the first). A template
   // draws its whole group, a copy its file. `includedSamples` and the sample list are derived
@@ -1111,7 +1142,8 @@ export default function App() {
       activeCompensationProfile.baselineProfileId,
     );
   }, [activeCompensationProfile, workspaceCompensation]);
-  const canUseCompensatedAssay = sample !== null && (
+  // Not while an assay is drawn as stored: a compensated layer is linear values beside counts.
+  const canUseCompensatedAssay = sample !== null && sample.hostedAssaySpace !== "display" && (
     activeCompensatedStatus?.state === "ready" ||
     (activeCompensatedStatus?.state === "missing" && sample.instrument === "flow" && sample.spillover !== null)
   );
@@ -1190,13 +1222,26 @@ export default function App() {
   const [overlayColDataColumn, setOverlayColDataColumn] = useState<string | null>(null);
   const [hostDatasetDescriptor, setHostDatasetDescriptor] =
     useState<GateLabHostDatasetDescriptor | null>(null);
+  /** The SCE assay the samples are drawn from (the header's choice); null until the SCE is loaded. */
+  const [hostDrawnAssayId, setHostDrawnAssayId] = useState<string | null>(null);
+  /**
+   * Saved compensation bindings of samples drawn from a display assay: a compensated layer holds
+   * linear values, so it is not installed while that assay is drawn, and the binding is carried
+   * in every save until a linear assay is drawn again and the layer installed.
+   */
+  const hostedCompensationBindingsRef = useRef<Map<string, SampleAssayBinding>>(new Map());
+  // Linear assays other than the counts the samples compensate from: candidates to adopt as a
+  // compensated layer. The drawn assay is left out as before; counts too, since it is the source
+  // whichever assay is drawn.
   const hostExistingCompensatedAssays = useMemo(
     () => (hostDatasetDescriptor?.assays ?? []).filter(
       (assay): assay is GateLabHostAssayDescriptor =>
         assay.coordinateSpace === "linear" &&
+        assay.role !== "counts" &&
+        assay.id !== hostDrawnAssayId &&
         !samples.some(({ hostSource }) => hostSource?.assayId === assay.id),
     ),
-    [hostDatasetDescriptor, samples],
+    [hostDatasetDescriptor, hostDrawnAssayId, samples],
   );
   const hostSaveChainRef = useRef<Promise<unknown>>(Promise.resolve());
   const lastHostSavedEditRevisionRef = useRef(-1);
@@ -1247,7 +1292,19 @@ export default function App() {
   const [xRange, setXRange] = useState<[number, number] | null>(null);
   const [yRange, setYRange] = useState<[number, number] | null>(null);
   const [maxEvents, setMaxEvents] = useState(50000); // 0 = all (no downsampling)
+  /** The cap "All events" goes back to when switched off: the last one set above zero. */
+  const lastMaxEvents = useRef(50000);
+  useEffect(() => {
+    if (maxEvents > 0) lastMaxEvents.current = maxEvents;
+  }, [maxEvents]);
   const [activeTab, setActiveTab] = useState<TabId>("gating");
+  // The walkthrough tutorial: it reads the app through readTourContext (declared below, called
+  // only after a render) and moves on when a step's check says the user has done it.
+  const tour = useTour(readTourContext, arriveForTour);
+  /** Things done that leave no other trace the tutorial could read: exports and saves, counted. */
+  const tourSignals = useRef({ layoutExports: 0, statsDownloads: 0, workspaceSaves: 0 });
+  // The tutorial opens the demo for a step that needs a workspace.
+  const tourOpeningDemo = useRef<"idle" | "opening" | "failed">("idle");
   const compensationTabStateKey = `${workspaceId}:${activeSampleId ?? "none"}`;
   const [mountedCompensationStateKey, setMountedCompensationStateKey] = useState<string | null>(null);
   useEffect(() => {
@@ -1896,13 +1953,13 @@ export default function App() {
     sample, xIdx, yIdx, xRange, yRange, drawMode, mode, globalScales,
     effectiveXRange: null as [number, number] | null,
     effectiveYRange: null as [number, number] | null,
-    gates: {} as Record<string, Gate>, snapToGates, poolReadOnly,
+    gates: {} as Record<string, Gate>, snapToGates,
   });
   pzRef.current = {
     sample, xIdx, yIdx, xRange, yRange, drawMode, mode, globalScales,
     effectiveXRange: null,
     effectiveYRange: null,
-    gates: pzRef.current.gates, snapToGates, poolReadOnly,
+    gates: pzRef.current.gates, snapToGates,
   };
 
   const activeXChannelKey = sample?.channels[xIdx]?.key ?? null;
@@ -2010,7 +2067,7 @@ export default function App() {
         // With "Snap to other gates" on, a gate side the drag left within the snap distance of a
         // plot border lands on it: one edit for every such gate, one Undo step. Snap, not glue: a
         // side further away stays where the view put it.
-        if (p.snapToGates && !p.poolReadOnly) {
+        if (p.snapToGates) {
           const r = rect();
           const edits = snapGatesToBorders(p.gates, p.sample, {
             xKey: p.sample.channels[p.xIdx].key, yKey: p.sample.channels[p.yIdx].key,
@@ -2131,14 +2188,65 @@ export default function App() {
     () => samples.filter((s) => !excludedSampleIds.has(s.id)),
     [samples, excludedSampleIds, sampleDataRevisionKey],
   );
-  // Only the viewed file or the explicitly captured pool feeds the Gating plot and its counts.
+  /**
+   * Panel identity: the ordered channel keys with their markers.
+   *
+   * Ordered, because two panels that use the same channels in a different order are different
+   * acquisitions; and keyed on the marker as well as the detector, because the same detector
+   * carries a different stain between panels — which is exactly the case that must not pool.
+   */
+  const panelKeyOf = useCallback((s: Sample): string =>
+    JSON.stringify(s.channels.map((c) => [c.key, c.pnn])), []);
+  // Pooled, the plot draws the selected files under the tree of the viewed one, which supplies the
+  // axes and the editable gates, on its panel and its assay layer. A selected file under another
+  // tree, on another panel or on another layer is left out of the pool, and so of the cloud, the
+  // counts and the background gating, and is named above the plot. The pool exists whenever the
+  // mode is on, with nothing selected too, so the guards that keep its tree live hold. When the
+  // viewed file is not selected, the next viewed file is one under the pool's tree, so the pool
+  // does not change tree because of the order of the list.
+  const plotPool = useMemo(() => {
+    if (!poolSelection) return null;
+    const liveTemplate = templateOf(state.active_hierarchy_id, state.hierarchies);
+    const viewed = checkedSamples.find(entry => entry.id === activeSampleId)
+      ?? checkedSamples.find(entry => templateOf(hierarchyOfFile(entry.id), state.hierarchies)?.id === liveTemplate?.id)
+      ?? checkedSamples[0]
+      ?? samples.find(entry => entry.id === activeSampleId);
+    const template = viewed ? templateOf(hierarchyOfFile(viewed.id), state.hierarchies) : liveTemplate;
+    const pool = {
+      ids: [] as string[],
+      hierarchyId: template?.id ?? state.active_hierarchy_id,
+      otherTree: [] as string[],
+      otherPanel: [] as string[],
+      otherLayer: [] as string[],
+    };
+    if (!viewed || !template) return pool;
+    const panel = panelKeyOf(viewed.sample);
+    const layer = viewed.sample.workspaceScaleContextKey;
+    for (const entry of checkedSamples) {
+      if (templateOf(hierarchyOfFile(entry.id), state.hierarchies)?.id !== template.id) pool.otherTree.push(entry.name);
+      else if (panelKeyOf(entry.sample) !== panel) pool.otherPanel.push(entry.name);
+      else if (entry.sample.workspaceScaleContextKey !== layer) pool.otherLayer.push(entry.name);
+      else pool.ids.push(entry.id);
+    }
+    return pool;
+    // panelVersion and scalesVersion say when a sample's channels or assay layer changed in place.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [poolSelection, checkedSamples, samples, activeSampleId, hierarchyOfFile, state.hierarchies, state.active_hierarchy_id, panelKeyOf, panelVersion, scalesVersion]);
   const includedSamples = useMemo(() => {
-    if (plotPool) {
-      const ids = new Set(plotPool.ids);
+    if (poolSelection) {
+      const ids = new Set(plotPool?.ids ?? []);
       return samples.filter(entry => ids.has(entry.id));
     }
     return samples.filter(entry => entry.id === activeSampleId);
-  }, [samples, plotPool, activeSampleId, sampleDataRevisionKey]);
+  }, [samples, poolSelection, plotPool, activeSampleId, sampleDataRevisionKey]);
+  /** Why selected files are not in the pool, for the tooltip on the count above the plot. */
+  const poolLeftOutNote = plotPool
+    ? [
+        plotPool.otherTree.length ? t("Not pooled, under another tree: {files}", { files: plotPool.otherTree.join(", ") }) : null,
+        plotPool.otherPanel.length ? t("Not pooled, different panel: {files}", { files: plotPool.otherPanel.join(", ") }) : null,
+        plotPool.otherLayer.length ? t("Not pooled, different assay layer: {files}", { files: plotPool.otherLayer.join(", ") }) : null,
+      ].filter((note): note is string => note !== null).join(" · ")
+    : "";
   /**
    * Whether a file's tree is the active tree or descends from it: every file under the
    * workspace tree; a group's files under the group's copy; one file under its own copy. The
@@ -2285,6 +2393,11 @@ export default function App() {
     [metadata, metadataColumns, facetColumnChoice],
   );
   const metadataColumnNames = useMemo(() => metadataColumns.map((column) => column.name), [metadataColumns]);
+  /** The level order of the columns that have one, for the Layout tab's metadata iteration. */
+  const metadataLevels = useMemo(
+    () => Object.fromEntries(metadataColumns.filter((column) => column.levels?.length).map((column) => [column.name, column.levels!])),
+    [metadataColumns],
+  );
   // Marked rather than hidden: a column with holes is usually a gate saved into colData, which is
   // per-event and so describes only the samples that happened to be uniform. Pinning one is still
   // allowed -- the mark is there so its counts are not read as a property of the samples.
@@ -2402,10 +2515,26 @@ export default function App() {
   const queueCheckpoint = (reason: WorkspaceCheckpointReason) => setCheckpointRequest({ reason, token: ++checkpointTokenRef.current });
 
   const checkpointCurrentWorkspace = (reason: WorkspaceCheckpointReason): Promise<void> => {
-    const ws = buildWsRef.current();
+    // A workspace that cannot be written as it stands (buildWorkspaceFile says why) has no
+    // checkpoint to take. That is a rejection, never a throw: this is called from effects and a
+    // timer, where a throw is uncaught and React takes the whole app down (it did, when matrix
+    // editing was enabled for one file while others drew from their embedded matrices).
+    let ws: ReturnType<typeof buildWsRef.current>;
+    try {
+      ws = buildWsRef.current();
+    } catch (error) {
+      return Promise.reject(new WorkspaceUnwritableError(error instanceof Error ? error.message : String(error)));
+    }
     const id = workspaceIdRef.current;
     if (!ws || !id) return Promise.resolve();
     return saveWorkspaceCheckpoint(id, ws, reason).then(() => undefined);
+  };
+  /**
+   * For a checkpoint nobody awaits: a workspace that could not be written says why in the
+   * header, where the user can act on it; a storage failure stays as quiet as it was.
+   */
+  const reportCheckpointRefusal = (error: unknown) => {
+    if (error instanceof WorkspaceUnwritableError) setError(error.message);
   };
 
   async function startNewWorkspace(): Promise<void> {
@@ -2432,8 +2561,7 @@ export default function App() {
     setSamples([]);
     setActiveSampleId(null);
     setExcludedSampleIds(new Set());
-    setPlotPool(null);
-    setPoolMembersOpen(false);
+    setPoolSelection(false);
     setEditMode("tree");
     setSampleManagerOpen(false);
     setSampleManagerSelection([]);
@@ -2503,7 +2631,7 @@ export default function App() {
   useEffect(() => {
     void requestPersistentWorkspaceHistory();
     const timer = window.setInterval(() => {
-      void checkpointCurrentWorkspace("automatic");
+      void checkpointCurrentWorkspace("automatic").catch(reportCheckpointRefusal);
     }, AUTO_CHECKPOINT_INTERVAL_MS);
     return () => window.clearInterval(timer);
     // This function reads only refs, which are refreshed on every render.
@@ -2513,7 +2641,7 @@ export default function App() {
   // Major imports queue their post-change checkpoint; it is taken on the render that carries it.
   useEffect(() => {
     if (!checkpointRequest) return;
-    void checkpointCurrentWorkspace(checkpointRequest.reason);
+    void checkpointCurrentWorkspace(checkpointRequest.reason).catch(reportCheckpointRefusal);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [checkpointRequest]);
 
@@ -2545,7 +2673,7 @@ export default function App() {
   // A locked copy that follows a template takes additions: a gate drawn on it goes into the
   // template for every file (store.ts routeAdditionToTemplate), so the draw tools stay on.
   const additionsRouted = activeStructureLocked && !!activeHierarchy?.source_hierarchy_id;
-  const drawingBlocked = poolReadOnly || (activeStructureLocked && !additionsRouted);
+  const drawingBlocked = activeStructureLocked && !additionsRouted;
   /** Where a routed addition went, for the message after it: the group or file that was being edited. */
   const routedAdditionMessage = (what: string): string => {
     const target = activeHierarchy?.owner_group_id
@@ -2581,7 +2709,8 @@ export default function App() {
 
   const treeControls: TreeControlsProps = {
     fileName: fileName || null,
-    editMode: viewedGroup ? editMode : editMode === "group" ? "tree" : editMode,
+    // A pool edits the tree it draws; the mode held for one file returns with it.
+    editMode: plotPool ? "tree" : viewedGroup ? editMode : editMode === "group" ? "tree" : editMode,
     groupName: viewedGroup?.name ?? null,
     groupColour: viewedGroup ? hierarchyColour(state.groups.findIndex((g) => g.id === viewedGroup.id)) : null,
     groupFiles: viewedGroup ? Object.values(state.file_groups).filter((gid) => gid === viewedGroup.id).length : 0,
@@ -2610,7 +2739,7 @@ export default function App() {
 
   /** The hierarchy menu selects which owned gate table and population tree are being edited. */
   function switchHierarchyForFile(id: string) {
-    setPlotPool(null);
+    setPoolSelection(false);
     const member = samples.find(entry => hierarchyOfFile(entry.id) === id)
       ?? samples.find(entry => templateOf(hierarchyOfFile(entry.id), state.hierarchies)?.id === id);
     if (member) selectSample(member.id, { keepTree: true });
@@ -2619,52 +2748,29 @@ export default function App() {
 
   function poolSelectedFiles() {
     if (checkedSamples.length < 2) return;
-    const first = checkedSamples.find(entry => entry.id === activeSampleId) ?? checkedSamples[0];
-    const template = templateOf(hierarchyOfFile(first.id), state.hierarchies);
-    if (!template || checkedSamples.some(entry => templateOf(hierarchyOfFile(entry.id), state.hierarchies)?.id !== template.id)) {
-      setError("Cannot pool files from different hierarchy groups. Select files from one group, or compare their corresponding populations in Illustration. No files were omitted.");
-      return;
-    }
-    const incompatible = checkedSamples.filter(entry => panelKeyOf(entry.sample) !== panelKeyOf(first.sample)
-      || entry.sample.workspaceScaleContextKey !== first.sample.workspaceScaleContextKey);
-    if (incompatible.length) {
-      setError(`Cannot pool: different panel or assay/scale context in ${incompatible.map(entry => entry.name).join(", ")}. No files were omitted.`);
-      return;
-    }
-    selectSample(first.id, { keepTree: true });
-    dispatch({ type: "switchHierarchy", id: template.id });
-    setPlotPool({ ids: checkedSamples.map(entry => entry.id), hierarchyId: template.id, editTemplate: false });
-    setPoolMembersOpen(false);
+    setPoolSelection(true);
     setError(null);
   }
 
   function inspectSample(id: string) {
-    setPlotPool(null);
-    setPoolMembersOpen(false);
+    setPoolSelection(false);
     selectSample(id);
     // The live tree follows: the effect below puts the right one live for the edit mode.
   }
 
+  // A pool draws and edits its tree, so that tree is live while the selection is pooled, and the
+  // viewed file, which supplies the axes, is one of the pooled files.
   useEffect(() => {
     if (!plotPool) return;
-    if (plotPool.ids.some(id => !samples.some(entry => entry.id === id)) || plotPool.hierarchyId !== state.active_hierarchy_id) {
-      setPlotPool(null);
-      setPoolMembersOpen(false);
-      setError("The pool was closed because a referenced file or hierarchy changed. Select files and pool again; no partial pool was shown.");
-      return;
+    if (plotPool.hierarchyId !== state.active_hierarchy_id) {
+      dispatch({ type: "switchHierarchy", id: plotPool.hierarchyId, silent: true });
     }
-    const first = includedSamples[0];
-    if (!first) return;
-    if (includedSamples.some(entry => panelKeyOf(entry.sample) !== panelKeyOf(first.sample)
-      || entry.sample.workspaceScaleContextKey !== first.sample.workspaceScaleContextKey)) {
-      setPlotPool(null);
-      setError("The pool was closed because its files now have different panels or assay/scale contexts. No files were omitted.");
-      return;
+    if (plotPool.ids.length > 0 && !plotPool.ids.includes(activeSampleId ?? "")) {
+      selectSample(plotPool.ids[0], { keepTree: true });
     }
-    if (!plotPool.ids.includes(activeSampleId ?? "")) selectSample(first.id, { keepTree: true });
-    // The captured pool owns its primary; action-selection changes never enter this effect.
+    // selectSample is recreated every render; the guards above are what stop this re-running.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plotPool, samples, sampleDataRevisionKey, state.active_hierarchy_id, activeSampleId, panelVersion, scalesVersion]);
+  }, [plotPool, state.active_hierarchy_id, activeSampleId]);
 
   /** Save gates, populations, scales and display settings into the R SingleCellExperiment. */
   function saveToSce() {
@@ -2695,8 +2801,6 @@ export default function App() {
   function clearGating() {
     setClearGatingConfirmOpen(false);
     if (!sample) return;
-    setPlotPool(null);
-    setPoolMembersOpen(false);
     dispatch({ type: "clearGating", nEvents: sample.fcs.nEvents });
     setPopulationMetadata({});
     setHierarchyActionMessage(null);
@@ -2802,7 +2906,8 @@ export default function App() {
 
   /** Where edits go: the tree, for every file, or the viewed file alone. Held until chosen again. */
   function setEditTarget(target: EditTarget) {
-    setPlotPool(null);
+    // A file or a group is edited on its own, so choosing either leaves a pool for the viewed file.
+    if (target !== "tree") setPoolSelection(false);
     setEditMode(target);
   }
 
@@ -5790,13 +5895,106 @@ export default function App() {
     [checkedSamples, sampleDataRevisionKey, panelVersion],
   );
 
+  /**
+   * Draw every hosted sample from another of the SCE's assays. The samples are rebuilt from that
+   * assay's values and keep their ids, settings and instrument mode, so the tree, the gates and
+   * the selection stay and the gates are evaluated on the new values; the axis ranges are fitted
+   * again, since one assay's are not another's. Compensated layers are linear values beside
+   * counts: drawing a display assay sets them aside with their bindings, and drawing a linear
+   * assay again installs them from the object.
+   */
+  async function switchHostedAssay(assayId: string): Promise<void> {
+    if (!isSceHost || !host.datasets || !hostDatasetDescriptor || assayId === hostDrawnAssayId) return;
+    const assay = hostDatasetDescriptor.assays.find((candidate) => candidate.id === assayId);
+    if (!assay) {
+      setError(t("The SCE has no assay '{assay}'.", { assay: assayId }));
+      return;
+    }
+    if (!drawableHostedAssay(assay)) {
+      setError(t("{assay} cannot be drawn: it is in display space and the object states no arcsinh cofactor for it.", { assay: assay.id }));
+      return;
+    }
+    setBusy(true);
+    setImportMsg(t("Drawing {assay}…", { assay: assay.id }));
+    try {
+      await checkpointCurrentWorkspace("before-hosted-assay-change");
+      const hostedSamples = await loadHostedDataset(host.datasets, hostDatasetDescriptor, undefined, assay.id);
+      const byId = new Map(hostedSamples.map((hosted) => [`${hosted.datasetId}:${hosted.sampleId}`, hosted]));
+      cancelCompensationSweepManagers(t("The drawn assay changed."));
+      cancelCompensationCandidatePreview(t("The drawn assay changed."));
+      const manager = compensationManagerRef.current!;
+      const carried = hostedCompensationBindingsRef.current;
+      const next = samples.map((entry) => {
+        const hosted = byId.get(entry.id);
+        if (!hosted || !entry.hostSource) return entry;
+        const from = entry.sample;
+        const to = hosted.sample;
+        // The settings a sample holds, carried over: the instrument mode, the panel's labels,
+        // the scatter and fluorescence scales; the cofactor too, where it is a setting and not
+        // the drawn assay's own.
+        to.setInstrumentMode(from.instrumentMode);
+        to.applyLabelOverrides(from.labelOverrides());
+        to.applyScatterLinearKeys(from.scatterLinearKeys());
+        for (const [key, cofactor] of Object.entries(from.scatterCofactorOverrides())) {
+          const index = to.index(key);
+          if (index !== undefined) to.setScatterCofactor(index, cofactor);
+        }
+        if (to.hostedAssaySpace !== "display") {
+          to.applyFluorArcsinhKeys(from.fluorArcsinhKeys());
+          to.setCytofCofactor(from.arcsinhCofactor);
+        }
+        const status = from.compensatedLayerStatus();
+        if (status.state !== "missing" && status.metadata.runtimeIdentity === "profile") {
+          const { runtimeIdentity: _runtimeIdentity, ...persisted } = status.metadata;
+          carried.set(entry.id, { schema: SAMPLE_ASSAY_BINDING_SCHEMA, activeLayer: from.activeLayer, compensatedLayer: persisted });
+        }
+        manager.invalidateSample(from);
+        return {
+          ...entry,
+          sample: to,
+          hostSource: { ...entry.hostSource, assayId: hosted.assayId, assayRevision: hosted.assayRevision },
+        };
+      });
+      setSamples(next);
+      setHostDrawnAssayId(assay.id);
+      const viewed = next.find((entry) => entry.id === activeSampleId)?.sample;
+      if (viewed) setInstrumentMode(viewed.instrumentMode);
+      setXRange(null);
+      setYRange(null);
+      markWorkspaceDirty();
+      setImportMsg(assay.coordinateSpace === "display"
+        ? t("Drawing {assay} as stored", { assay: assay.id })
+        : t("Drawing {assay}", { assay: assay.id }));
+      if (assay.coordinateSpace !== "display" && carried.size > 0) {
+        await restoreCompensationBindings(
+          workspaceCompensation.lineages,
+          next.map((entry) => carried.get(entry.id) ?? null),
+          next,
+        );
+        hostedCompensationBindingsRef.current = new Map();
+      }
+    } catch (cause) {
+      setImportMsg(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function toggleCompensation(on: boolean): boolean {
     if (!sample) return false;
+    if (on && sample.hostedAssaySpace === "display") {
+      setError(t("Choose {linear} in the header to use a compensated layer: {assay} is drawn as stored.", {
+        linear: hostDatasetDescriptor && hasLinearHostedAssay(hostDatasetDescriptor) ? linearHostedAssay(hostDatasetDescriptor).id : t("the linear assay"),
+        assay: sample.hostedAssayId ?? "",
+      }));
+      return false;
+    }
     const previousLayer = sample.activeLayer;
     try {
       // saveWorkspaceCheckpoint clones the workspace synchronously, so this captures the
       // pre-switch assay binding even though IndexedDB persistence finishes asynchronously.
-      void checkpointCurrentWorkspace("before-active-layer-change");
+      void checkpointCurrentWorkspace("before-active-layer-change").catch(reportCheckpointRefusal);
       const installed = sample.compensatedLayerStatus();
       if (installed.state !== "missing" && installed.metadata.runtimeIdentity === "profile") {
         sample.setActiveLayer(on ? "compensated" : "original");
@@ -5873,6 +6071,14 @@ export default function App() {
     }>,
   ): Promise<void> {
     if (!sample) throw new Error(t("No active sample is available for compensation."));
+    // The solver reads the linear counts, and a compensated layer belongs beside them: the linear
+    // assay has to be drawn to compensate.
+    if (isSceHost && sample.hostedAssaySpace === "display") {
+      throw new Error(t("{assay} is drawn as stored, already transformed. Compensation applies to {linear}: choose it in the header first.", {
+        assay: sample.hostedAssayId ?? "",
+        linear: hostDatasetDescriptor ? linearHostedAssay(hostDatasetDescriptor).id : t("the linear assay"),
+      }));
+    }
     const manager = compensationManagerRef.current!;
     if (compensationApplyGuardRef.current || manager.applyInProgress) {
       const message = t("Compensation is already running. Follow or cancel the current job in the status bar before starting another Apply.");
@@ -6185,6 +6391,17 @@ export default function App() {
             name: appliedProfile.name,
             count: appliedChannelCount,
           }));
+      // A workspace keeps one kind of compensation: beside this profile, a file still drawing
+      // from its FCS's embedded matrix cannot be written (buildWorkspaceFile refuses the mix).
+      // Those files go back to Original here, by name, so installing a matrix never leaves a
+      // workspace that cannot be saved or checkpointed.
+      const returned = returnEmbeddedLayersToOriginal();
+      if (returned.length > 0) {
+        setError(t(
+          "{files} drew from their own embedded matrix and returned to Original: a workspace keeps one kind of compensation. Their gates now read uncompensated values; to compensate one again, view it and enable matrix editing there.",
+          { files: returned.join(", ") },
+        ));
+      }
       queueCheckpoint("after-compensation-apply");
     } catch (cause) {
       if (cause instanceof CompensationCancelledError) {
@@ -6200,6 +6417,22 @@ export default function App() {
       compensationApplyGuardRef.current = false;
       setCompensationApplyStatus(null);
     }
+  }
+
+  /** The files that draw from their FCS's embedded matrix rather than from an installed profile. */
+  function embeddedLayerEntries() {
+    return samples.filter((entry) => {
+      const layer = entry.sample.compensatedLayerStatus();
+      return layer.state !== "missing" && layer.metadata.runtimeIdentity !== "profile";
+    });
+  }
+
+  /** Every such file goes back to Original; their names are returned, for the message. */
+  function returnEmbeddedLayersToOriginal(): string[] {
+    const entries = embeddedLayerEntries();
+    for (const entry of entries) entry.sample.setCompensation(false);
+    if (entries.length > 0) markWorkspaceDirty();
+    return entries.map((entry) => entry.name);
   }
 
   async function adoptExistingCompensationAssay(
@@ -6986,7 +7219,7 @@ export default function App() {
     const activeEntry = entries[entries.length - 1];
     const [nx, ny] = channelsFor(activeEntry.sample);
     setSamples((prev) => [...prev, ...entries]);
-    if (!plotPool) {
+    if (!poolSelection) {
       setActiveSampleId(activeEntry.id);
       setXIdx(nx);
       setYIdx(ny);
@@ -7038,12 +7271,34 @@ export default function App() {
         }
         const dataset = datasets[0];
         setHostDatasetDescriptor(dataset);
-        const hostedSamples = await loadHostedDataset(
-          host.datasets!,
-          dataset,
-          controller.signal,
-        );
+        // The assay to draw: the one the saved workspace was drawn from, so its gates and ranges
+        // meet the values they were made on; a hosted workspace saved before an assay could be
+        // chosen was drawn from the linear assay; with no workspace, the host's default.
+        const workspaceEnvelope = await host.workspaces?.readWorkspace(dataset.id) ?? null;
+        const savedAssayId = workspaceEnvelope ? hostedAssayIdOf(workspaceEnvelope.workspaceJson) : undefined;
+        const savedAssay = savedAssayId ? dataset.assays.find(({ id }) => id === savedAssayId) : undefined;
+        const linear = hasLinearHostedAssay(dataset) ? linearHostedAssay(dataset) : null;
+        // A GateLab workspace saved before an assay could be chosen was drawn from the linear
+        // assay; a workspace of the legacy GateLabR format was gated in R, on exprs.
+        const fromLinear = workspaceEnvelope !== null && workspaceEnvelope.sourceFormat !== "gatelabr-legacy" && linear !== null;
+        let drawnAssay = (savedAssay && drawableHostedAssay(savedAssay) ? savedAssay : undefined)
+          ?? (fromLinear ? linear! : chooseHostedAssay(dataset));
+        let drawnAssayNote = savedAssayId && drawnAssay.id !== savedAssayId
+          ? ` · ${t("the saved workspace was drawn from {assay}, which the SCE no longer has or cannot be drawn; drawing {drawn}", { assay: savedAssayId, drawn: drawnAssay.id })}`
+          : "";
+        let hostedSamples: GateLabHostedSample[];
+        try {
+          hostedSamples = await loadHostedDataset(host.datasets!, dataset, controller.signal, drawnAssay.id);
+        } catch (cause) {
+          // Declared display-space by its name but holding no arcsinh: drawn from the linear
+          // assay instead, and the message says what to declare.
+          if (!(cause instanceof HostedAssayNotArcsinhError) || !linear || linear.id === drawnAssay.id) throw cause;
+          drawnAssayNote += ` · ${cause.message}`;
+          drawnAssay = linear;
+          hostedSamples = await loadHostedDataset(host.datasets!, dataset, controller.signal, linear.id);
+        }
         if (controller.signal.aborted) return;
+        setHostDrawnAssayId(drawnAssay.id);
         if (hostedSamples.length === 0) {
           throw new Error(`SingleCellExperiment '${dataset.label}' has no samples.`);
         }
@@ -7070,6 +7325,8 @@ export default function App() {
           },
         }));
         addSampleEntries(entries);
+        // Mass cytometry is gated on the pooled samples, so an SCE of it opens pooled.
+        setPoolSelection(dataset.instrument === "cytof");
 
         const hostedMetadata = Object.fromEntries(hostedSamples.map(
           (hosted: GateLabHostedSample, index) => [
@@ -7089,9 +7346,15 @@ export default function App() {
         let hostedStatus =
           `Loaded ${dataset.label} · ${hostedSamples.length} sample` +
           `${hostedSamples.length === 1 ? "" : "s"} · ` +
-          `${dataset.eventCount.toLocaleString()} events from R`;
+          `${dataset.eventCount.toLocaleString()} events from R` +
+          ` · ${drawnAssay.coordinateSpace === "display"
+            ? t("drawing {assay} as stored", { assay: drawnAssay.id })
+            : t("drawing {assay}", { assay: drawnAssay.id })}` +
+          (drawnAssay.coordinateSpace === "display" && drawnAssay.displayCofactorStated === false
+            ? ` (${t("arcsinh cofactor {cofactor} assumed: the object records none", { cofactor: drawnAssay.displayCofactor ?? 5 })})`
+            : "") +
+          drawnAssayNote;
 
-        const workspaceEnvelope = await host.workspaces?.readWorkspace(dataset.id) ?? null;
         const initialHostRevision = workspaceEnvelope?.revision ?? 0;
         setHostWorkspaceRevision(initialHostRevision);
         hostWorkspaceRevisionRef.current = initialHostRevision;
@@ -7139,7 +7402,18 @@ export default function App() {
             queueCheckpoint("after-workspace-open");
             skipDirtyRef.current = true;
             if (workspace.version === WORKSPACE_VERSION_3) {
-              await restoreSavedWorkspaceCompensation(workspace, entries);
+              // A compensated layer holds linear values beside counts: while an assay is drawn
+              // as stored the layers are not installed, and their bindings are carried in every
+              // save until a linear assay is drawn again.
+              if (drawnAssay.coordinateSpace === "display") {
+                hostedCompensationBindingsRef.current = new Map(workspace.samples.flatMap((workspaceSample, index) =>
+                  workspaceSample.assay.compensatedLayer && entries[index]
+                    ? [[entries[index].id, workspaceSample.assay] as const]
+                    : []));
+              } else {
+                hostedCompensationBindingsRef.current = new Map();
+                await restoreSavedWorkspaceCompensation(workspace, entries);
+              }
               setWorkspaceCompensation(workspace.compensation);
             } else {
               setWorkspaceCompensation(newEmptyWorkspaceCompensationState());
@@ -7239,18 +7513,20 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host]);
 
-  /** A plain click replaces the action selection; while pooling it leaves the captured view alone. */
+  /** A plain click replaces the selection; a pool follows it, and otherwise the file is viewed. */
   function selectOnlySample(id: string): void {
     if (!samples.some((s) => s.id === id)) return;
     setExcludedSampleIds(new Set(samples.filter((e) => e.id !== id).map((e) => e.id)));
-    if (!plotPool) inspectSample(id);
+    if (!poolSelection) inspectSample(id);
   }
 
   function selectSample(id: string, options?: { keepTree?: boolean }) {
     const entry = samples.find((s) => s.id === id);
     if (!entry || id === activeSampleId) return;
-    skipDirtyRef.current = true;
     const [nx, ny] = channelsFor(entry.sample);
+    // The dirty-tracking effect consumes this flag when the axes or the instrument mode change.
+    // Set when they would not, it lingered until the next real edit, which then went unmarked.
+    if (nx !== xIdx || ny !== yIdx || entry.sample.instrumentMode !== instrumentMode) skipDirtyRef.current = true;
     setActiveSampleId(id);
     // The live tree follows the file according to the edit mode, in the effect beside
     // setEditTarget; keepTree is honoured there too, since a pooled view is left alone.
@@ -7260,15 +7536,21 @@ export default function App() {
     setInstrumentMode(entry.sample.instrumentMode);
   }
 
-  // Removing a viewed file is the only selection-independent reason to choose another primary.
+  // Removing a viewed file is the only selection-independent reason to choose another primary. A
+  // pool carries on, viewed through one of its files where it has any (the effect beside
+  // poolSelectedFiles).
   useEffect(() => {
     if (activeSampleId !== null && samples.some((e) => e.id === activeSampleId)) return;
     const first = samples[0]?.id ?? null;
     if (first === null) return;
+    if (poolSelection) {
+      if (!plotPool?.ids.length) selectSample(first, { keepTree: true });
+      return;
+    }
     inspectSample(first);
     // selectSample is recreated every render; the guard above is what stops this re-running.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [samples, activeSampleId]);
+  }, [samples, activeSampleId, poolSelection, plotPool]);
 
   /** Plots from the Illustration tab, one Layout item each, on the current sheet. */
   /** The Gating plot as a Layout item: this file, this population, these channels, this display. */
@@ -7278,7 +7560,8 @@ export default function App() {
     // already hold become the plot's own.
     const sheetStyle = effectiveLayoutStyle(layoutWorkspace.sheets.find((s0) => s0.id === layoutWorkspace.activeSheetId) ?? layoutWorkspace.sheets[0]);
     const own: Partial<LayoutPlotStyle> = {};
-    if (maxEvents > 0 && maxEvents !== sheetStyle.maxEvents) own.maxEvents = maxEvents;
+    // 0 is every event here and there alike.
+    if (maxEvents !== sheetStyle.maxEvents) own.maxEvents = maxEvents;
     if (contourThreshold !== sheetStyle.contourThreshold) own.contourThreshold = contourThreshold;
     if (contourLevels !== sheetStyle.contourLevels) own.contourLevels = contourLevels;
     addPlotsToLayout([{
@@ -7289,6 +7572,8 @@ export default function App() {
       yChannel: sample.channels[yIdx].key,
       displayMode: mode === "dots" ? "scatter" : mode,
       ...(Object.keys(own).length ? { style: own } : {}),
+      // A pooled view goes as a pooled plot of the same files.
+      ...(poolSelection && plotPool && plotPool.ids.length > 1 ? { pool: { sampleIds: [...plotPool.ids] } } : {}),
     }]);
     setActiveTab("layout");
   }
@@ -7386,14 +7671,19 @@ export default function App() {
   }
 
   function openLayoutRecipeInGating(recipe: LayoutPlotRecipe | LayoutStrategyRecipe): void {
-    setPlotPool(null);
     const entry = samples.find(({ id }) => id === recipe.sampleId);
     if (!entry) {
+      setPoolSelection(false);
       setError(t("The FCS file referenced by this layout item is not currently loaded."));
       return;
     }
     skipDirtyRef.current = true;
+    // A pooled plot opens as the pooled view of its files: they are the checked files, and the
+    // pool follows the selection, naming any under another tree or panel.
+    const pool = recipe.kind !== "strategy" && recipe.pool && recipe.pool.sampleIds.length > 1 ? new Set(recipe.pool.sampleIds) : null;
+    setPoolSelection(!!pool);
     setExcludedSampleIds((previous) => {
+      if (pool) return new Set(samples.filter(({ id }) => !pool.has(id)).map(({ id }) => id));
       const next = new Set(previous);
       next.delete(entry.id);
       return next;
@@ -7492,9 +7782,11 @@ export default function App() {
     setDivisionProfiles((previous) => Object.fromEntries(Object.entries(previous).filter(([id]) => !removed.has(id))));
     // Bookkeeping, not an edit: no undo entry, and a removed file's copy stays as a record.
     dispatch({ type: "assignFileHierarchies", assignments: Object.fromEntries([...removed].map((id) => [id, null])), silent: true });
+    if (next.length === 0) setPoolSelection(false);
     if (activeSampleId !== null && removed.has(activeSampleId)) {
       skipDirtyRef.current = true;
-      const na = next[0] ?? null;
+      // While pooled, the next viewed file is one still in the pool, so the pool keeps its tree.
+      const na = (plotPool ? next.find((entry) => plotPool.ids.includes(entry.id)) : undefined) ?? next[0] ?? null;
       setActiveSampleId(na?.id ?? null);
       setInstrumentMode(na?.sample.instrumentMode ?? "auto");
       if (na) {
@@ -7644,6 +7936,7 @@ export default function App() {
       workspaceId,
       savedAt: new Date().toISOString(),
       app: "GateLab",
+      ...(isSceHost && hostDrawnAssayId ? { hostedAssayId: hostDrawnAssayId } : {}),
       samples: samples.map((e, i) => ({
         sampleId: e.id,
         fileName: e.name,
@@ -7730,7 +8023,7 @@ export default function App() {
       populationMetadata,
       populationMetaColumns,
     };
-    const needsV3 = workspaceCompensation.lineages.length > 0 || samples.some(({ sample: candidate }) => {
+    const needsV3 = workspaceCompensation.lineages.length > 0 || hostedCompensationBindingsRef.current.size > 0 || samples.some(({ sample: candidate }) => {
       const status = candidate.compensatedLayerStatus();
       return status.state !== "missing" && status.metadata.runtimeIdentity === "profile";
     });
@@ -7744,14 +8037,22 @@ export default function App() {
       const status = runtimeSample.compensatedLayerStatus();
       let assay: SampleAssayBinding;
       if (status.state === "missing") {
-        assay = {
+        // A binding set aside while a display assay is drawn is saved as it was.
+        assay = hostedCompensationBindingsRef.current.get(samples[index].id) ?? {
           schema: SAMPLE_ASSAY_BINDING_SCHEMA,
           activeLayer: "original",
           compensatedLayer: null,
         };
       } else if (status.metadata.runtimeIdentity !== "profile") {
+        // Every file still on its FCS's own matrix is named, so the one message is enough to act on.
+        const embedded = samples
+          .filter((entry) => {
+            const layer = entry.sample.compensatedLayerStatus();
+            return layer.state !== "missing" && layer.metadata.runtimeIdentity !== "profile";
+          })
+          .map((entry) => entry.name);
         throw new Error(
-          "This workspace mixes an imported compensation profile with legacy embedded-FCS compensation. Switch the embedded layer to Original before saving.",
+          `This workspace mixes an imported compensation profile with legacy embedded-FCS compensation. Switch the embedded layer to Original before saving: ${embedded.join(", ")} (view each file and set Assay, in the header, to Original).`,
         );
       } else {
         if (status.state !== "ready") {
@@ -8011,6 +8312,7 @@ export default function App() {
         await rememberAllHandles();
         setDirty(false);
         setImportMsg(`Saved ${wsStorage === "bundle" ? "bundle" : "workspace"} · ${wsName}`);
+        tourSignals.current.workspaceSaves++;
       } else {
         await saveWorkspaceAs();
       }
@@ -8042,9 +8344,11 @@ export default function App() {
           await rememberAllHandles();
           setDirty(false);
           setImportMsg(`Saved · ${f.name}`);
+          tourSignals.current.workspaceSaves++;
         }
       } else {
         downloadBlob(`${base}.${WORKSPACE_EXT}`, new Blob([data as BlobPart], { type: "application/json" }));
+        tourSignals.current.workspaceSaves++;
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -8106,6 +8410,7 @@ export default function App() {
           downloadBlob(`${base}-bundle.${WORKSPACE_EXT}`, new Blob([zip as BlobPart], { type: "application/zip" }));
         }
       }
+      tourSignals.current.workspaceSaves++;
       setImportMsg(
         `Saved portable bundle · ${savedName}` +
           (ws.version === WORKSPACE_VERSION_3 && ws.samples.some(({ assay }) => assay.compensatedLayer !== null)
@@ -8116,6 +8421,27 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  // The demo workspace a copy of GateLab ships beside its page (demo/gatelab-demo.gatelab), for
+  // the tutorial and for a first look. It is opened as a picked file would be; a copy without
+  // it says so (a dev server answers an unknown path with the page itself).
+  /** Opens the demo workspace kept beside the page; false when this copy has none or it does not open. */
+  async function openDemoWorkspace(): Promise<boolean> {
+    setError(null);
+    try {
+      const url = new URL(DEMO_WORKSPACE_PATH, document.baseURI).toString();
+      const response = await fetch(url, { cache: "no-store" });
+      const type = response.headers.get("content-type") ?? "";
+      if (!response.ok || type.includes("text/html"))
+        throw new Error(`This copy of GateLab has no demo workspace (none at ${DEMO_WORKSPACE_PATH} beside the page). Open any .gatelab workspace instead.`);
+      const blob = await response.blob();
+      await openWorkspaceFromFile(new File([blob], DEMO_WORKSPACE_FILE, { type: "application/octet-stream" }), null, DEMO_WORKSPACE_FILE);
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return false;
     }
   }
 
@@ -8400,20 +8726,33 @@ export default function App() {
     ws: WorkspaceFileV3,
     entries: readonly SampleEntry[],
   ): Promise<void> {
+    await restoreCompensationBindings(
+      ws.compensation.lineages,
+      ws.samples.map((workspaceSample) => workspaceSample.assay),
+      entries,
+    );
+  }
+
+  /** Install on `entries[i]` the compensated layer `bindings[i]` names, from the host or the local cache. */
+  async function restoreCompensationBindings(
+    lineages: WorkspaceCompensationState["lineages"],
+    bindings: readonly (SampleAssayBinding | null)[],
+    entries: readonly SampleEntry[],
+  ): Promise<void> {
     const manager = compensationManagerRef.current!;
     if (compensationApplyGuardRef.current || manager.applyInProgress) {
       throw new Error(t("Another compensation job is already running."));
     }
-    const profiles = ws.compensation.lineages.flatMap(({ records }) => records);
+    const profiles = lineages.flatMap(({ records }) => records);
     const profileById = new Map(profiles.map((profile) => [profile.profileId, profile]));
-    const tasks = ws.samples.flatMap((workspaceSample, index) => {
-      const binding = workspaceSample.assay.compensatedLayer;
-      if (binding === null) return [];
+    const tasks = bindings.flatMap((assayBinding, index) => {
+      const binding = assayBinding?.compensatedLayer ?? null;
+      if (!assayBinding || binding === null) return [];
       const profile = profileById.get(binding.profileId);
       if (!profile) {
         throw new Error(t("Workspace compensation profile '{profile}' is missing.", { profile: binding.profileId }));
       }
-      return [{ entry: entries[index], assay: workspaceSample.assay, binding, profile }];
+      return [{ entry: entries[index], assay: assayBinding, binding, profile }];
     });
     if (tasks.length === 0) return;
 
@@ -9037,8 +9376,7 @@ export default function App() {
       }
       replaceScalesForNextNamespace(restoredScaleMaps);
       setSamples(entries);
-      setPlotPool(null);
-      setPoolMembersOpen(false);
+      setPoolSelection(false);
       setWorkspaceCompensation(
         ws.version === WORKSPACE_VERSION_3
           ? ws.compensation
@@ -9311,6 +9649,111 @@ export default function App() {
     });
   }, [activeEntry, sample, activeDataRevision, state.gate_version, gatingDerived]);
 
+  // ── A connected agent ──────────────────────────────────────────────────────────────────────
+  // An agent on this computer reads the gating through a relay the user connected to (Agent
+  // menu, or ?agent= on the URL) and proposes gates through the same reducer the user draws
+  // with. The adapter below is what it reads and does; it closes over this render's values and is
+  // re-made each render, so a request always sees the app as it is.
+  const [agentStatus, setAgentStatus] = useState<AgentLinkStatus>({ state: "idle" });
+  const agentSettledRef = useRef<(() => void)[]>([]);
+  useEffect(() => {
+    // After every commit: whoever dispatched and waits for the state to be readable can go on.
+    const waiting = agentSettledRef.current;
+    agentSettledRef.current = [];
+    for (const resolve of waiting) resolve();
+  });
+  const agentAdapterRef = useRef<AgentAdapter>(null!);
+  agentAdapterRef.current = {
+    info: () => ({ app: isSceHost ? "GateLabR" : "GateLab", version: pkg.version, host: isSceHost ? "sce" : "browser", workspaceName: wsName || null }),
+    state: () => state,
+    samples: (): AgentSampleView[] => {
+      const trees = workspaceHierarchyTrees(state);
+      return samples.map((entry) => {
+        const hierarchyId = hierarchyOfFile(entry.id);
+        return {
+          id: entry.id, name: entry.name, sample: entry.sample,
+          viewed: entry.id === activeSampleId, checked: !excludedSampleIds.has(entry.id), hierarchyId,
+          metadata: metadata[entry.id] ?? {},
+          gating: () => {
+            const tree = trees.find((candidate) => candidate.id === hierarchyId);
+            if (tree && !tree.active) return recomputeGating(entry.sample, gatingStateForTree(gatingState, tree));
+            if (entry.id === activeSampleId) return liveTreeGatingOfViewed();
+            const cached = inactiveGatingCacheRef.current.get(entry.id);
+            return cached && cached.sample === entry.sample && cached.dataRevision === entry.sample.dataRevision && cached.gateVersion === state.gate_version
+              ? cached.gating
+              : recomputeGating(entry.sample, gatingState);
+          },
+        };
+      });
+    },
+    dispatch,
+    settled: () => new Promise<void>((resolve) => { agentSettledRef.current.push(resolve); }),
+    view: (): AgentViewState => {
+      const xKey = sample?.channels[xIdx]?.key ?? null, yKey = sample?.channels[yIdx]?.key ?? null;
+      // The ranges as the plot takes them: the pan, else the held scale, else the automatic one.
+      const shown = (own: [number, number] | null, key: string | null, auto: [number, number] | undefined): [number, number] | null =>
+        own ?? (key ? globalScales[key] ?? null : null) ?? auto ?? null;
+      return {
+        populationId: state.active_population_id, sampleId: activeSampleId, x: xKey, y: yKey, tab: activeTab,
+        ranges: { x: shown(xRange, xKey, workspaceAutomaticRanges?.xRange), y: shown(yRange, yKey, workspaceAutomaticRanges?.yRange) },
+      };
+    },
+    setView: async (params: AgentViewParams) => {
+      if (params.sampleId !== undefined) setActiveSampleId(params.sampleId);
+      if (params.populationId !== undefined) dispatch({ type: "setActivePopulation", popId: params.populationId });
+      const target = (params.sampleId !== undefined ? samples.find((entry) => entry.id === params.sampleId)?.sample : null) ?? sample;
+      if (target) {
+        const xi = params.x === undefined ? undefined : target.index(params.x);
+        const yi = params.y === undefined ? undefined : target.index(params.y);
+        if (xi !== undefined) setXIdx(xi);
+        if (yi !== undefined) setYIdx(yi);
+      }
+      setActiveTab("gating");
+      await new Promise<void>((resolve) => { agentSettledRef.current.push(resolve); });
+    },
+    fit: () => fitDataAndGates(),
+    setAxisRange: (channel, range) => setGlobalScale(channel, range),
+    clearPan: () => { setXRange(null); setYRange(null); },
+    reload: () => window.location.reload(),
+    render: async (params) => {
+      const area = plotAreaRef.current;
+      if (!area) throw new Error("The Gating tab's plot is not on screen.");
+      return renderPlotPng(area, params);
+    },
+    workspaceJson: () => {
+      const ws = buildWorkspaceFile();
+      return ws ? JSON.stringify(ws) : null;
+    },
+  };
+  const agentLinkRef = useRef<AgentLink | null>(null);
+  if (!agentLinkRef.current) {
+    const handler = createAgentHandler({
+      info: () => agentAdapterRef.current.info(),
+      state: () => agentAdapterRef.current.state(),
+      samples: () => agentAdapterRef.current.samples(),
+      dispatch: (action) => agentAdapterRef.current.dispatch(action),
+      settled: () => agentAdapterRef.current.settled(),
+      view: () => agentAdapterRef.current.view(),
+      setView: (params) => agentAdapterRef.current.setView(params),
+      render: (params) => agentAdapterRef.current.render(params),
+      workspaceJson: () => agentAdapterRef.current.workspaceJson(),
+      fit: () => agentAdapterRef.current.fit(),
+      setAxisRange: (channel, range) => agentAdapterRef.current.setAxisRange(channel, range),
+      clearPan: () => agentAdapterRef.current.clearPan(),
+      reload: () => agentAdapterRef.current.reload(),
+    });
+    agentLinkRef.current = new AgentLink({ handler, info: () => agentAdapterRef.current.info(), onStatus: setAgentStatus });
+  }
+  useEffect(() => {
+    agentLinkRef.current?.notifyChanged();
+  }, [state]);
+  useEffect(() => {
+    // A launcher can name the relay on the URL, so GateLabR opens connected.
+    const fromUrl = new URLSearchParams(window.location.search).get("agent");
+    if (fromUrl && parseAgentUrl(fromUrl)) agentLinkRef.current?.connect(parseAgentUrl(fromUrl)!.toString());
+    return () => agentLinkRef.current?.disconnect("closed");
+  }, []);
+
   useEffect(() => {
     const generation = ++inactiveGatingGenerationRef.current;
     let timer: number | null = null;
@@ -9343,6 +9786,9 @@ export default function App() {
     });
     setPendingIncludedGatingIds(new Set(targets.map((entry) => entry.id)));
 
+    // Files are gated in batches of up to INACTIVE_GATING_SLICE_MS between paints, with one state
+    // update per batch. One file per timer tick re-rendered the whole app once per file, so an edit
+    // over an SCE of 224 samples waited on 224 renders while the gating itself took milliseconds.
     let targetIndex = 0;
     const processNext = () => {
       if (generation !== inactiveGatingGenerationRef.current) return;
@@ -9350,27 +9796,34 @@ export default function App() {
         setPendingIncludedGatingIds(new Set());
         return;
       }
-      const entry = targets[targetIndex++];
       timer = window.setTimeout(() => {
         timer = null;
         if (generation !== inactiveGatingGenerationRef.current) return;
-        try {
-          const gating = recomputeGating(entry.sample, gatingState);
-          if (generation !== inactiveGatingGenerationRef.current) return;
-          inactiveGatingCacheRef.current.set(entry.id, {
-            sample: entry.sample,
-            dataRevision: entry.sample.dataRevision,
-            gateVersion: state.gate_version,
-            gating,
-          });
+        const done: string[] = [];
+        const started = performance.now();
+        do {
+          const entry = targets[targetIndex++];
+          try {
+            const gating = recomputeGating(entry.sample, gatingState);
+            if (generation !== inactiveGatingGenerationRef.current) return;
+            inactiveGatingCacheRef.current.set(entry.id, {
+              sample: entry.sample,
+              dataRevision: entry.sample.dataRevision,
+              gateVersion: state.gate_version,
+              gating,
+            });
+            done.push(entry.id);
+          } catch (cause) {
+            setError(cause instanceof Error ? cause.message : String(cause));
+          }
+        } while (targetIndex < targets.length && performance.now() - started < INACTIVE_GATING_SLICE_MS);
+        if (done.length > 0) {
           setInactiveGatingCacheVersion((version) => version + 1);
           setPendingIncludedGatingIds((previous) => {
             const next = new Set(previous);
-            next.delete(entry.id);
+            for (const id of done) next.delete(id);
             return next;
           });
-        } catch (cause) {
-          setError(cause instanceof Error ? cause.message : String(cause));
         }
         processNext();
       }, 0);
@@ -9646,7 +10099,6 @@ export default function App() {
 
   // gate_list_click also switches the plot axes to the gate's channels (app.R:5030).
   const uiDispatch = (a: Action) => {
-    if (poolReadOnly && !["selectGate", "toggleGateSelect", "clearGateSelection", "setActivePopulation", "togglePopSelect", "setPopSelection", "clearPopSelection"].includes(a.type)) return;
     if (a.type === "selectGate" && a.gateId && sample) {
       const g = state.gates[a.gateId];
       if (g) {
@@ -9959,28 +10411,14 @@ export default function App() {
     instrumentMode,
   ]);
 
-  /**
-   * Panel identity: the ordered channel keys with their markers.
-   *
-   * Ordered, because two panels that use the same channels in a different order are different
-   * acquisitions; and keyed on the marker as well as the detector, because the same detector
-   * carries a different stain between panels — which is exactly the case that must not pool.
-   */
-  const panelKeyOf = useCallback((s: Sample): string =>
-    JSON.stringify(s.channels.map((c) => [c.key, c.pnn])), []);
-
   const primaryPanelKey = useMemo(
     () => (sample ? panelKeyOf(sample) : null),
     [sample, panelKeyOf],
   );
 
-  /** Checked files that cannot be pooled with the primary because their panel differs. */
-  const panelMismatchNames = useMemo(
-    () => (primaryPanelKey === null ? [] : includedSamples
-      .filter((e) => panelKeyOf(e.sample) !== primaryPanelKey)
-      .map((e) => e.name)),
-    [includedSamples, primaryPanelKey, panelKeyOf],
-  );
+  /** Selected files left out of the pool because their panel, or their assay layer, differs from the viewed file's. */
+  const panelMismatchNames = plotPool?.otherPanel ?? [];
+  const layerMismatchNames = plotPool?.otherLayer ?? [];
 
   // The plot pools every compatible checked file, so the counts on its gate labels pool the
   // same files. A per-file count under the pooled cloud misleads: a blue file with no events in
@@ -9988,7 +10426,9 @@ export default function App() {
   // cloud's (scale context, panel, both axes present). Null keeps the blue file's own counts,
   // which are exact whenever that file is the only one drawn.
   const pooledGateCounts = useMemo(() => {
-    if (!sample || includedSamples.length < 2) return null;
+    // Pooled, the counts pool even over one file or none, so the labels, the gate list and the
+    // tree agree with the plot; alone, the viewed file's own counts are exact.
+    if (!sample || (!poolSelection && includedSamples.length < 2)) return null;
     const xName = sample.channels[xIdx].key;
     const yName = sample.channels[yIdx].key;
     const contributors = includedSamples.filter((entry) =>
@@ -9996,7 +10436,7 @@ export default function App() {
       panelKeyOf(entry.sample) === primaryPanelKey &&
       entry.sample.index(xName) !== undefined &&
       entry.sample.index(yName) !== undefined);
-    if (contributors.length === 0) return null;
+    if (contributors.length === 0) return poolSelection ? { counts: aggregateGateCounts(state.gates, []), fileCount: 0 } : null;
     if (contributors.length === 1 && contributors[0].id === activeSampleId) return null;
     const inputs: PooledGateCountInput[] = [];
     for (const entry of contributors) {
@@ -10024,7 +10464,7 @@ export default function App() {
     // The inactive-file masks live in a ref; inactiveGatingCacheVersion is their change signal.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    sample, includedSamples, xIdx, yIdx, activeWorkspaceScaleContextKey, panelKeyOf,
+    sample, poolSelection, includedSamples, xIdx, yIdx, activeWorkspaceScaleContextKey, panelKeyOf,
     primaryPanelKey, activeSampleId, gatingDerived, inactiveGatingCacheVersion,
     state.gate_version, state.gates, state.active_population_id, state.selected_pop_ids,
     state.root_population_id,
@@ -10333,7 +10773,7 @@ export default function App() {
     sample, xIdx, yIdx, xRange, yRange, drawMode, mode, globalScales,
     effectiveXRange: payload?.x_range ?? null,
     effectiveYRange: payload?.y_range ?? null,
-    gates: state.gates, snapToGates, poolReadOnly,
+    gates: state.gates, snapToGates,
   };
 
   // Swap channel identity keys → Panel display labels for what cytof_plot.js SHOWS (axis labels,
@@ -10643,7 +11083,7 @@ export default function App() {
             </p>
             <p>
               <b>{t("Flow cytometry.")}</b>{" "}
-              {t("You pick a display scale per channel: arcsinh or linear for scatter, logicle or arcsinh for fluorescence. Gates are stored and evaluated in raw channel values regardless, so nothing you do to an axis can move an event in or out of a gate.")}
+              {t("You pick a display scale per channel: linear or arcsinh for scatter, logicle or arcsinh for fluorescence. Gates are stored and evaluated in raw channel values regardless, so nothing you do to an axis can move an event in or out of a gate.")}
             </p>
             <p>
               {t("This differs from FlowJo and from Gating-ML 2.0, which both treat a polygon as straight lines in the space the axis is showing. Under that model the gate changes when the view changes. The cost of doing it the other way is that a gate drawn straight in raw values looks bowed on a transformed axis, which the gate-edge control shows you rather than hides.")}
@@ -10682,6 +11122,7 @@ export default function App() {
           ) : (
             <MenuButton
               label={t("Workspace")}
+              className="gl-tour-workspace-menu"
               items={[
                 {
                   label: t("New Workspace…"),
@@ -10694,6 +11135,13 @@ export default function App() {
                   title: "Open a saved .gatelab workspace, a FlowJo .wsp, or a FACSChorus .cef. FlowJo and FACSChorus files hold gates rather than event data, so GateLab will ask for the corresponding FCS.",
                   disabled: busy || compensationApplyStatus !== null,
                   onClick: openWorkspace,
+                },
+                {
+                  label: t("Open the demo workspace"),
+                  className: "gl-open-demo",
+                  title: `Open the demo workspace this copy of GateLab ships with, the one the tutorial walks through. ${DEMO_WORKSPACE_CITATION.short}`,
+                  disabled: busy || compensationApplyStatus !== null,
+                  onClick: () => void openDemoWorkspace(),
                 },
                 {
                   label: wsHandle ? `${t("Save")}${dirty ? " ●" : ""}` : t("Save Workspace…"),
@@ -10800,7 +11248,7 @@ export default function App() {
             {/* With several files checked the plot is pooled, so naming one of them and its own
                 event count describes something that is not on screen. Say what is pooled, and
                 name the active file as what it actually still decides: the axes and the gates. */}
-            {includedSamples.length > 1
+            {poolSelection && includedSamples.length !== 1
               ? <>
                   {t("{count} files pooled", { count: includedSamples.length })} —{" "}
                   {t("{count} events", {
@@ -10834,17 +11282,49 @@ export default function App() {
             title={t("Active assay layer for every GateLab tab. Switching layers keeps gates but recomputes their memberships in the selected coordinate system.")}
           >
             <span>{t("Assay")}</span>
-            <select
-              aria-label={t("Active assay layer for all tabs")}
-              value={compensationOn ? "compensated" : "original"}
-              disabled={compensationApplyStatus !== null}
-              onChange={(event) => toggleCompensation(event.currentTarget.value === "compensated")}
-            >
-              <option value="original">{t("Original")}</option>
-              <option value="compensated" disabled={!canUseCompensatedAssay}>
-                {activeCompensatedStatus?.state === "stale" ? t("Compensated (unavailable)") : t("Compensated")}
-              </option>
-            </select>
+            {isSceHost && hostDatasetDescriptor ? (
+              // The SCE's assays by name: the samples are drawn from the chosen one. A compensated
+              // layer this session installed is a further choice, as in the browser app.
+              <select
+                aria-label={t("Active assay layer for all tabs")}
+                value={compensationOn ? "compensated" : `assay:${hostDrawnAssayId ?? ""}`}
+                disabled={compensationApplyStatus !== null || busy}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  if (value === "compensated") {
+                    toggleCompensation(true);
+                    return;
+                  }
+                  if (compensationOn) toggleCompensation(false);
+                  void switchHostedAssay(value.slice("assay:".length));
+                }}
+              >
+                {hostDatasetDescriptor.assays.map((assay) => (
+                  <option key={assay.id} value={`assay:${assay.id}`} disabled={!drawableHostedAssay(assay)}>
+                    {assay.coordinateSpace !== "display"
+                      ? assay.id
+                      : drawableHostedAssay(assay)
+                        ? t("{assay} · as stored", { assay: assay.id })
+                        : t("{assay} · needs its arcsinh cofactor", { assay: assay.id })}
+                  </option>
+                ))}
+                {canUseCompensatedAssay && (
+                  <option value="compensated">{t("Compensated · this session")}</option>
+                )}
+              </select>
+            ) : (
+              <select
+                aria-label={t("Active assay layer for all tabs")}
+                value={compensationOn ? "compensated" : "original"}
+                disabled={compensationApplyStatus !== null}
+                onChange={(event) => toggleCompensation(event.currentTarget.value === "compensated")}
+              >
+                <option value="original">{t("Original")}</option>
+                <option value="compensated" disabled={!canUseCompensatedAssay}>
+                  {activeCompensatedStatus?.state === "stale" ? t("Compensated (unavailable)") : t("Compensated")}
+                </option>
+              </select>
+            )}
           </label>
         )}
         {error && (
@@ -10877,10 +11357,13 @@ export default function App() {
             target="_blank"
             rel="noopener noreferrer"
             style={{ color: "inherit", textDecoration: "underline" }}
+            data-tour="issues-link"
           >
             {t("please leave an issue at the repo")}
           </a>
         </span>
+        <AgentMenu status={agentStatus} onConnect={(url) => agentLinkRef.current?.connect(url)} onDisconnect={() => agentLinkRef.current?.disconnect()} />
+        {!isSceHost && <TourMenu progress={tour.progress} onStart={tour.start} onResume={tour.resume} />}
         <label className="gl-header-language">
           <span>{t("Language")}</span>
           <select
@@ -10965,6 +11448,7 @@ export default function App() {
             <button
               key={tab.id}
               role="tab"
+              data-tour={`tab-${tab.id}`}
               aria-selected={activeTab === tab.id}
               className={"gl-tab" + (activeTab === tab.id ? " active" : "")}
               onClick={() => setActiveTab(tab.id)}
@@ -11196,20 +11680,32 @@ export default function App() {
               style={{ display: activeTab === "gating" ? "flex" : "none" }}
             >
             <div className="gl-pool-toolbar" aria-label={t("Plot file scope")}>
-              <strong>{plotPool ? t("Pooled view · {count} files", { count: plotPool.ids.length }) : t("Viewing: {name}", { name: fileName })}</strong>
-              {plotPool ? <>
-                <button type="button" aria-expanded={poolMembersOpen} onClick={() => setPoolMembersOpen(open => !open)}>{t("Change files…")}</button>
-                <button type="button" onClick={() => activeSampleId && inspectSample(activeSampleId)}>{t("Return to single file")}</button>
-                <button type="button" aria-pressed={plotPool.editTemplate} onClick={() => setPlotPool(pool => pool && ({ ...pool, editTemplate: !pool.editTemplate }))}>
-                  {plotPool.editTemplate ? t("Stop editing the tree") : t("Edit the tree")}
+              {/* The toolbar is one row that trims its text (styles.css, stable chrome), so a file
+                  left out of the pool shows in the count, and the tooltip names it. */}
+              <strong title={poolLeftOutNote || undefined}>{!poolSelection
+                ? t("Viewing: {name}", { name: fileName })
+                : poolLeftOutNote
+                  ? isSceHost
+                    ? t("Pooled view · {count} of {selected} samples", { count: includedSamples.length, selected: checkedSamples.length })
+                    : t("Pooled view · {count} of {selected} files", { count: includedSamples.length, selected: checkedSamples.length })
+                  : isSceHost
+                    ? includedSamples.length === 1
+                      ? t("Pooled view · 1 sample")
+                      : t("Pooled view · {count} samples", { count: includedSamples.length })
+                    : includedSamples.length === 1
+                      ? t("Pooled view · 1 file")
+                      : t("Pooled view · {count} files", { count: includedSamples.length })}</strong>
+              {poolSelection ? <>
+                <button type="button" onClick={() => activeSampleId && inspectSample(activeSampleId)}>
+                  {isSceHost ? t("Return to single sample") : t("Return to single file")}
                 </button>
-                <small>{poolReadOnly ? t("Read-only tree preview") : t("Editing the tree · every file follows, tailored gates excepted")}. {t("The tree's gates apply to every pooled file; these are not per-file tailored counts.")}</small>
-                {poolMembersOpen && <div className="gl-pool-members">
-                  {plotPool.ids.map(id => <span key={id}>{samples.find(entry => entry.id === id)?.name ?? t("Missing file")}</span>)}
-                  <button type="button" disabled={checkedSamples.length < 2} onClick={poolSelectedFiles}>{t("Use current selection ({count})", { count: checkedSamples.length })}</button>
-                </div>}
+                <small>{t("Editing the tree · every file follows, tailored gates excepted")}. {t("The tree's gates apply to every pooled file; these are not per-file tailored counts.")}</small>
               </> : <>
-                <button type="button" disabled={checkedSamples.length < 2} onClick={poolSelectedFiles}>{t("Pool selected files ({count})", { count: checkedSamples.length })}</button>
+                <button type="button" disabled={checkedSamples.length < 2} onClick={poolSelectedFiles}>
+                  {isSceHost
+                    ? t("Pool selected samples ({count})", { count: checkedSamples.length })
+                    : t("Pool selected files ({count})", { count: checkedSamples.length })}
+                </button>
                 <small>{activeHierarchy?.owner_sample_id
                   ? t("Editing {name} only · its tailored gates", { name: fileName })
                   : activeHierarchy?.owner_group_id
@@ -11330,7 +11826,7 @@ export default function App() {
                 />
               </label>
               <DensityColourControl value={densityColorPower} onChange={changeDensityColorPower} disabled={mode !== "pseudocolor"} />
-                <label className="gl-field-inline" title="Downsample the points drawn on the plot. Empty or 0 = plot all events (no downsampling). Counts/percentages always use every event.">
+                <label className="gl-field-inline" title="Downsample the points drawn on the plot. Empty, 0 or All events = plot every event (no downsampling). Counts/percentages always use every event.">
                   {t("Max events")}
                   <input
                     type="text"
@@ -11344,6 +11840,16 @@ export default function App() {
                       setMaxEvents(digits === "" ? 0 : parseInt(digits, 10));
                     }}
                   />
+                </label>
+                {/* The same switch the Strategy, Layout and Division tabs have; the field above is its number. */}
+                <label className="gl-check" title={t("Draw every event rather than a sample of them; a plot of a million points repaints slowly. Counts and percentages always use every event.")}>
+                  <input
+                    type="checkbox"
+                    aria-label={t("All events on the plot")}
+                    checked={maxEvents === 0}
+                    onChange={(e) => setMaxEvents(e.target.checked ? 0 : lastMaxEvents.current)}
+                  />
+                  {t("All events")}
                 </label>
                 <label className="gl-field-inline">Contours<select disabled={mode !== "contour"} value={contourLevels} onChange={event => setContourLevels(+event.target.value)}>{[4, 6, 8, 10, 12, 18, 24, 30].map(value => <option key={value} value={value}>{value}</option>)}</select></label>
                   <label className="gl-contour-outer" title="Outer contour = this % of the peak density">
@@ -11524,7 +12030,7 @@ export default function App() {
                 <span
                   className={`gl-sample-scope-badge${pendingIncludedGatingIds.size > 0 ? " is-pending" : ""}`}
                   title={[
-                    t("The plot follows its explicit file scope, independently of the row selection."),
+                    t("The plot shows the viewed file, or the selected files when pooled."),
                     ...(activeHierarchy?.owner_sample_id ? [t("Editing {name} only", { name: fileName })] : []),
                     ...includedSamples.map((entry) => entry.name),
                     ...(pendingIncludedGatingIds.size === 0
@@ -11567,13 +12073,19 @@ export default function App() {
                   className="gl-active-sample-key"
                   title={panelMismatchNames.length > 0
                     ? t("Files whose panel differs from {name} are not pooled with it: the same channel name can carry a different marker between panels, so a shared name is not a shared measurement. Uncheck them, or check them alone.", { name: fileName })
-                    : t("The viewed file supplies axes. Selection changes do not change a captured pool; Enter inspects a file.")}
+                    : layerMismatchNames.length > 0
+                      ? t("Files on another assay layer than {name} are not pooled with it: their values are in another space. Put them on the same layer, or select them alone.", { name: fileName })
+                      : t("The viewed file supplies the axes. Pooled, the plot follows the selection; Enter shows a file alone.")}
                 >
                   {panelMismatchNames.length > 0
                     ? `⚠ ${t("{count} checked file(s) not pooled — different panel", {
                         count: panelMismatchNames.length,
                       })}`
-                    : t("Axes from: {name}", { name: fileName })}
+                    : layerMismatchNames.length > 0
+                      ? `⚠ ${t("{count} checked file(s) not pooled — different assay layer", {
+                          count: layerMismatchNames.length,
+                        })}`
+                      : t("Axes from: {name}", { name: fileName })}
                 </span>
               </div>
             </div>
@@ -11612,8 +12124,8 @@ export default function App() {
                                                   bumpScales();
                                                 }}
                                               >
-                                                <option value="arcsinh">{t("Arcsinh")}</option>
                                                 <option value="linear">{t("Linear")}</option>
+                                                <option value="arcsinh">{t("Arcsinh")}</option>
                                               </select>
                       ) : kind === "imaging" ? (
                         <select
@@ -11729,7 +12241,7 @@ export default function App() {
                 field convention and is not offered as a choice. Gates live in raw space for
                 flow, so nothing there moves a gate; it only changes what the axis looks like. */}
             <div
-              className={`gl-plot-area${poolReadOnly ? " gl-pool-readonly" : ""}`}
+              className="gl-plot-area"
               ref={plotAreaRef}
               style={{ cursor: drawMode === "navigate" ? "grab" : "crosshair" }}
             >
@@ -11740,7 +12252,15 @@ export default function App() {
             {!gateEdgeNoteHidden && gateEdgeMode !== "straight"
               && mainPlotGates.some((g) => g.outline) && (
               <div className="gl-hint gl-plot-note">
-                <span>{t("Straight edges can look curved here \u2014 gates are stored in raw values, so the curve is where the gate really falls. Gating is unchanged.")}</span>
+                <span>
+                  {t("Straight edges can look curved here \u2014 gates are stored in raw values, so the curve is where the gate really falls. Gating is unchanged.")}
+                  {/* A gate on FlowJo's grid takes its events by channel, not by the curve: said here,
+                      where the curve is first read as the selection. */}
+                  {mainPlotGates.some((plotted) => {
+                    const gate = state.gates[plotted.gate_id];
+                    return !!gate && isFlowJoGridGate(gate);
+                  }) && ` ${t("A gate on FlowJo's grid (F on its badge) is tested on that grid's channels, as FlowJo tests it, so the events it takes step along the curve by up to one channel.")}`}
+                </span>
                 <button
                   className="gl-chip"
                   style={{ padding: "0 5px", lineHeight: 1.3 }}
@@ -11760,7 +12280,6 @@ export default function App() {
                 interactionToken={plotInteractionToken ?? undefined}
                 fontSizes={gatingFontSizes}
                 onNewGate={(g) => {
-                  if (poolReadOnly) return;
                   if (!plotInteractionIsCurrent()) return;
                   // cytof reports the drawn gate's channels as DISPLAY labels — translate back to
                   // identity keys so the gate stores/masks in identity space.
@@ -11780,7 +12299,6 @@ export default function App() {
                   setDrawMode("navigate"); // drawing done → back to navigate (like GateLabR)
                 }}
                 onGateEdit={(e) => {
-                  if (poolReadOnly) return;
                   if (!plotInteractionIsCurrent()) return;
                   // Dragged poly/rect vertices come back in DISPLAY space on the current axes;
                   // convert to gating space via the gate's stored channel keys, then persist.
@@ -11808,7 +12326,6 @@ export default function App() {
                   dispatch({ type: "editGate", gateId: e.gate_id, vertices: verts });
                 }}
                 onEllipseEdit={(e) => {
-                  if (poolReadOnly) return;
                   if (!plotInteractionIsCurrent()) return;
                   const g = state.gates[e.gate_id];
                   if (!g || g.gate_type !== "ellipse") return;
@@ -11839,7 +12356,6 @@ export default function App() {
                   });
                 }}
                 onQuadrantMove={(e) => {
-                  if (poolReadOnly) return;
                   if (!plotInteractionIsCurrent()) return;
                   const g = state.gates[e.gate_id];
                   if (!g || g.gate_type !== "quadrant") return;
@@ -11850,7 +12366,6 @@ export default function App() {
                   });
                 }}
                 onQuadrantCurl={(e) => {
-                  if (poolReadOnly) return;
                   if (!plotInteractionIsCurrent()) return;
                   const g = state.gates[e.gate_id];
                   if (!g || g.gate_type !== "quadrant" || !g.curl) return;
@@ -11909,12 +12424,10 @@ export default function App() {
                   setYRange(null);
                 }}
                 onGateLabelMove={(e) => {
-                  if (poolReadOnly) return;
                   if (!plotInteractionIsCurrent()) return;
                   dispatch({ type: "moveGateLabel", gateId: e.gate_id, labelOffset: e.label_offset, ...(e.quadrant !== undefined ? { quadrant: e.quadrant } : {}) });
                 }}
                 onVertexMenu={(e) => {
-                  if (poolReadOnly) return;
                   if (!plotInteractionIsCurrent()) return;
                   const g = state.gates[e.gate_id];
                   if (!g || g.gate_type !== "polygon") return;
@@ -11990,9 +12503,11 @@ export default function App() {
                 samples={statsSamples}
                 activeSampleId={activeSampleId}
                 state={state}
+                onDownload={() => { tourSignals.current.statsDownloads++; }}
                 derived={derived}
                 defaultChannels={[sample.channels[xIdx].key, sample.channels[yIdx].key]}
                 dataRevisionKey={sampleDataRevisionKey}
+                nominalLinearFrom={sample.hostedAssaySpace === "display" ? sample.hostedAssayId : null}
               />
             )}
             {activeTab === "proportions" && (
@@ -12081,6 +12596,12 @@ export default function App() {
                 dataRevision={activeDataRevision}
                 densityColorPower={densityColorPower}
                 onDensityColorPowerChange={changeDensityColorPower}
+                files={samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id), metadata: metadata[entry.id] }))}
+                poolIds={poolSelection ? (plotPool?.ids ?? []) : null}
+                poolNote={poolLeftOutNote || undefined}
+                poolable={checkedSamples.length >= 2}
+                isSceHost={isSceHost}
+                onPoolChange={(pooled) => { if (pooled) poolSelectedFiles(); else if (activeSampleId) inspectSample(activeSampleId); }}
               />
             )}
             {activeTab === "illustration" && (
@@ -12092,6 +12613,7 @@ export default function App() {
                 state={state}
                 defaultX={sample.channels[xIdx].key}
                 defaultY={sample.channels[yIdx].key}
+                defaultComposition={poolSelection ? "pool" : "separate"}
                 configRef={illustConfigRef}
                 presets={illustrationPresets}
                 onSavePreset={saveIllustrationPreset}
@@ -12119,6 +12641,7 @@ export default function App() {
                   groups={state.groups}
                   fileGroups={state.file_groups}
                   metadataColumns={metadataColumnNames}
+                  metadataLevels={metadataLevels}
                   populationMetadata={populationMetadata}
                   activeSampleId={activeSampleId}
                   activePopulationId={state.active_population_id}
@@ -12141,6 +12664,7 @@ export default function App() {
                     setActiveTab("illustration");
                   }}
                   dataRevision={sampleDataRevisionKey}
+                  onExported={() => { tourSignals.current.layoutExports++; }}
                   densityColorPower={densityColorPower}
                   onOpenInGating={openLayoutRecipeInGating}
                 />
@@ -12158,6 +12682,7 @@ export default function App() {
                   hostedCompensationMatrix={hostDatasetDescriptor?.compensationMatrix}
                   compensationOn={compensationOn}
                   onApplyProfile={applyCompensationProfile}
+                  otherEmbeddedLayerFiles={embeddedLayerEntries().filter((entry) => entry.id !== activeSampleId).map((entry) => entry.name)}
                   onRemoveProfile={isSceHost ? undefined : removeCompensationProfile}
                   existingHostAssays={hostExistingCompensatedAssays}
                   onAdoptExistingAssay={
@@ -12219,7 +12744,7 @@ export default function App() {
                 <span className="gl-side-disclosure-mark" aria-hidden="true">{gatesCollapsed ? "▸" : "▾"}</span>
                 <span className="gl-side-title">{t("Gates")}{gatesCollapsed ? ` · ${Object.keys(state.gates).length}` : ""}</span>
               </button>
-              <fieldset className="gl-readonly-tools" disabled={poolReadOnly}><GateToolbar
+              <GateToolbar
                 state={state}
                 dispatch={dispatch}
                 onRename={() => {
@@ -12227,7 +12752,7 @@ export default function App() {
                   if (g) setCrud({ kind: "renameGate", id: g.gate_id, initial: g.name });
                 }}
                 onDelete={(ids) => ids.length && setCrud({ kind: "confirmDelete", what: "gates", ids })}
-              /></fieldset>
+              />
             </div>
             {!gatesCollapsed && (
               <GateList state={state} derived={gateListDerived} dispatch={uiDispatch}
@@ -12275,7 +12800,7 @@ export default function App() {
                 />
                 {t("Align gates")}
               </label>
-              <fieldset className="gl-readonly-tools" disabled={poolReadOnly}><PopToolbar
+              <PopToolbar
                 state={state}
                 dispatch={dispatch}
                 onAdd={() => setCrud({ kind: "createPop" })}
@@ -12286,7 +12811,7 @@ export default function App() {
                 onDelete={(ids) => ids.length && setCrud({ kind: "confirmDelete", what: "pops", ids })}
                 onDuplicate={(ids) => ids.length && dispatch({ type: "duplicateSelectedPopulations", popIds: ids })}
                 onBulkRename={() => setCrud({ kind: "bulkRename" })}
-              /></fieldset>
+              />
             </div>
             <div
               id="population_tree_container"
@@ -12307,7 +12832,6 @@ export default function App() {
               }}
             >
               <PopulationTree
-                readOnly={poolReadOnly}
                 state={state}
                 derived={populationTreeDerived}
                 dispatch={uiDispatch}
@@ -13630,6 +14154,7 @@ export default function App() {
             populationEventCounts: exportPopulationCountsBySample.get(entry.id) ?? null,
           }))}
           combinedCompatibility={combinedFcsCompatibility}
+          nominalLinearFrom={sample?.hostedAssaySpace === "display" ? sample.hostedAssayId : null}
           hierarchy={{ name: activeHierarchy?.name ?? "", index: activeHierarchyIndex, count: state.hierarchies.length }}
           initialPopIds={
             state.selected_pop_ids.length > 0
@@ -13702,6 +14227,132 @@ export default function App() {
           }}
         />
       )}
+      {tour.step && !isSceHost && (
+        <TourOverlay
+          step={tour.step}
+          index={tour.index}
+          total={tour.total}
+          reached={tour.reached}
+          held={tour.held}
+          arriving={tour.arriving}
+          ctx={readTourContext()}
+          tabLabels={TOUR_TAB_LABELS}
+          onNext={tour.next}
+          onBack={tour.back}
+          onEnd={tour.end}
+          onArrive={tour.arrive}
+        />
+      )}
     </div>
   );
+
+  /** The app as the tutorial sees it. Read on demand, so the tabs' own state is current. */
+  /**
+   * Takes the app to where a tutorial step happens, one thing at a time: a workspace first (the
+   * demo, when none is open), then the tab, then the Compensation tab's view. The tutorial calls
+   * again until nothing is unmet, so each call does only what can be done now.
+   */
+  function arriveForTour(unmet: TourNeeds): void {
+    if (unmet.workspace) {
+      // One opening at a time, and none after one has failed: a copy without a demo says so
+      // once, and the tutorial then waits for the user to open a workspace.
+      if (tourOpeningDemo.current === "opening" || tourOpeningDemo.current === "failed") return;
+      tourOpeningDemo.current = "opening";
+      void openDemoWorkspace().then((opened) => { tourOpeningDemo.current = opened ? "idle" : "failed"; });
+      return;
+    }
+    if (unmet.tab) {
+      if (TABS.some((tab) => tab.id === unmet.tab)) setActiveTab(unmet.tab as TabId);
+      return;
+    }
+    if (unmet.compensationView) {
+      // The view is the tab's own state, so it is changed as the user changes it: by its switch.
+      const view = resolveTourTarget({ selector: '[role="tab"]', text: unmet.compensationView === "global" ? "Global inspector" : "Matrix", exact: true });
+      if (view instanceof HTMLElement) view.click();
+    }
+  }
+
+  function readTourContext(): TourContext {
+    const populations: TourContext["populations"] = {};
+    for (const [id, pop] of Object.entries(state.populations)) {
+      populations[id] = { id, name: pop.name, parentId: pop.parent_id, children: [...pop.children], gateCount: pop.gate_refs?.length ?? 0, gateIds: (pop.gate_refs ?? []).map((ref) => ref.gate_id) };
+    }
+    const gates: TourContext["gates"] = {};
+    for (const id of state.gate_order.length ? state.gate_order : Object.keys(state.gates)) {
+      const gate = state.gates[id];
+      if (gate) gates[id] = { id, name: gate.name, type: gate.gate_type, x: gate.x_channel, y: gate.y_channel, shape: JSON.stringify("vertices" in gate ? gate.vertices : gate), onFlowJoGrid: gate.space === "display" && gate.transforms?.[gate.x_channel]?.kind === "flowjoChannels" && gate.transforms?.[gate.y_channel]?.kind === "flowjoChannels" };
+    }
+    const strategy = strategyConfigRef.current;
+    const figure = illustConfigRef.current?.figure ?? null;
+    const activeSheet = layoutWorkspace.sheets.find((sheet) => sheet.id === layoutWorkspace.activeSheetId) ?? layoutWorkspace.sheets[0];
+    return {
+      host: isSceHost ? "sce" : "browser",
+      activeTab,
+      workspaceName: wsName,
+      files: samples.map((entry) => ({ id: entry.id, name: entry.name, checked: !excludedSampleIds.has(entry.id), viewed: entry.id === activeSampleId })),
+      pooled: poolSelection,
+      rootId: state.root_population_id,
+      populations,
+      gates,
+      activePopulationId: state.active_population_id,
+      selectedGateId: state.selected_gate_id,
+      axes: (() => {
+        const xKey = sample?.channels[xIdx]?.key ?? null;
+        const yKey = sample?.channels[yIdx]?.key ?? null;
+        const scaleOf = (idx: number) => !sample || !sample.channels[idx]
+          ? null
+          : sample.isScatterAxis(idx)
+            ? sample.scatterScale(idx)
+            : sample.isFluorChannel(idx)
+              ? sample.fluorScale(idx)
+              : sample.isImagingFeatureAxis(idx)
+                ? sample.featureScale(idx)
+                : "fixed";
+        return {
+          x: xKey,
+          y: yKey,
+          xScale: scaleOf(xIdx),
+          yScale: scaleOf(yIdx),
+          xLinearOffered: !!sample && (sample.isScatterAxis(xIdx) || sample.isImagingFeatureAxis(xIdx)),
+          yLinearOffered: !!sample && (sample.isScatterAxis(yIdx) || sample.isImagingFeatureAxis(yIdx)),
+          rangeKey: JSON.stringify([xRange, yRange, xKey ? globalScales[xKey] ?? null : null, yKey ? globalScales[yKey] ?? null : null]),
+        };
+      })(),
+      displayMode: mode,
+      maxEvents,
+      strategy: strategy ? { fullPath: strategy.fullPath, back: strategy.gateView.includes("back"), mode: strategy.mode } : null,
+      illustration: figure ? { composition: figure.composition, populations: figure.populations.length } : null,
+      layout: {
+        items: layoutWorkspace.sheets.reduce((total, sheet) => total + sheet.items.length, 0),
+        sheets: layoutWorkspace.sheets.length,
+        allEvents: activeSheet?.style?.maxEvents === 0,
+      },
+      proportions: { populations: readProportionsSettings(defaultProportionsSettings(samples, state, metadataColumns)).selectedPops.length },
+      metadataColumns: metadataColumnNames,
+      divisionProfiles: Object.keys(divisionProfiles).length,
+      assayLayer: sample?.activeLayer ?? null,
+      compensation: (() => {
+        const held = Object.entries(readPersistedTabValues("compensation."));
+        return {
+          pairSelected: held.some(([key, value]) => key.endsWith(".selectedPair") && value !== null),
+          view: String(held.find(([key]) => key.endsWith(".workspaceView"))?.[1] ?? "matrix"),
+          galleryLayer: String(held.find(([key]) => key.endsWith(".globalInspectorLayer"))?.[1] ?? "compensated"),
+          matrixKey: JSON.stringify(workspaceCompensation.lineages),
+        };
+      })(),
+      scales: (() => {
+        // The Scales tab draws every channel with a held range in blue. A range GateLab fitted
+        // itself when a plot was first shown is still marked as such; any other was set by the user.
+        const adjusted: string[] = [];
+        const fitted: string[] = [];
+        sample?.channels.forEach((channel, index) => {
+          if (!globalScales[channel.key]) return;
+          const byGateLab = !!activeAxisScaleContextKey && autoFittedScales.current.has(autoFittedScaleKey(activeAxisScaleContextKey, channel.key));
+          (byGateLab ? fitted : adjusted).push(sample.channelLabel(index));
+        });
+        return { adjusted, fitted, locked: lockScalesBetweenFiles };
+      })(),
+      signals: { ...tourSignals.current },
+    };
+  }
 }

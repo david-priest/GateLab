@@ -164,6 +164,14 @@ export interface WorkspaceFile {
   /** Illustration-tab settings + named presets (capture_illust_settings / illust_presets). */
   illustration?: IllustrationConfig;
   illustrationPresets?: IllustrationPreset[];
+  /**
+   * The SCE assay the samples were drawn from, for a workspace saved into a SingleCellExperiment
+   * through GateLabR: reopened, the samples are drawn from it again, so the gates and the axis
+   * ranges meet the values they were made on. Absent in a hosted workspace saved before an assay
+   * could be chosen, which was drawn from the linear assay. A GateLab without this field draws
+   * the linear assay, whose gate space is the same under CyTOF, so it raises no feature flag.
+   */
+  hostedAssayId?: string;
   /** Renameable freeform plot sheets. Optional for every workspace saved before Layout existed. */
   layout?: LayoutWorkspace;
   plotting?: Record<string, unknown>;
@@ -518,6 +526,7 @@ export function validateWorkspace(ws: WorkspaceFile): true {
   }
   if (ws.illustration?.figure !== undefined && !isFigureSpec(ws.illustration.figure)) invalidWorkspace("illustration figure settings are malformed.");
   if (ws.illustrationPresets !== undefined && (!Array.isArray(ws.illustrationPresets) || ws.illustrationPresets.some(p => !isRecord(p) || !isRecord(p.config) || (p.config.figure !== undefined && !isFigureSpec(p.config.figure))))) invalidWorkspace("illustration preset settings are malformed.");
+  if (ws.hostedAssayId !== undefined && (typeof ws.hostedAssayId !== "string" || !ws.hostedAssayId)) invalidWorkspace("hostedAssayId must be a non-empty string.");
 
   if (!isRecord(ws.scales) || !isRecord(ws.scales.globalScales)) {
     invalidWorkspace("shared scale settings are missing or invalid.");

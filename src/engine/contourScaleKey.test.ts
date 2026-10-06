@@ -54,10 +54,14 @@ describe("a scale change is visible in the plot payload", () => {
     const scatter = sample.channels.findIndex((c) => /^FSC/.test(c.key));
     if (scatter < 0) return;
     const p = () => sample.plotPayload(scatter, other, "contour");
+    // The cofactor is read on an arcsinh axis; scatter opens linear.
+    sample.setScatterScale(scatter, "arcsinh");
     const before = p().x_binding;
     sample.setScatterCofactor(scatter, 500);
     expect(p().x_binding).not.toBe(before);
     sample.resetScatterCofactor(scatter);
     expect(p().x_binding).toBe(before);
+    sample.setScatterScale(scatter, "linear");
+    expect(p().x_binding).not.toBe(before);
   });
 });

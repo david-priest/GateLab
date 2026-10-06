@@ -315,7 +315,8 @@ describe("the space badge", () => {
 
   it("reads one letter per axis for a display gate", () => {
     const s = load(ARIA_SMALL);
-    const scatter = s.channels.findIndex((_c, i) => s.transformKind(i) === "asinh");
+    const scatter = s.channels.findIndex((_c, i) => s.isScatterAxis(i));
+    s.setScatterScale(scatter, "arcsinh");
     const x = s.channels[scatter].key;   // arcsinh scatter
     const y = fluor[0].key;              // logicle fluorescence
     const g = mk(x, y, { space: "display", transforms: s.gateTransformSnapshot(x, y) });
@@ -325,10 +326,10 @@ describe("the space badge", () => {
     expect(b?.hint).toContain("logicle");
   });
 
-  it("reads N for an axis the user set to linear", () => {
+  it("reads N for a linear axis, which scatter opens on", () => {
     const s = load(ARIA_SMALL);
-    const scatter = s.channels.findIndex((_c, i) => s.transformKind(i) === "asinh");
-    s.setScatterScale(scatter, "linear");
+    const scatter = s.channels.findIndex((_c, i) => s.isScatterAxis(i));
+    expect(s.scatterScale(scatter)).toBe("linear");
     const x = s.channels[scatter].key;
     const y = fluor[0].key;
     const g = mk(x, y, { space: "display", transforms: s.gateTransformSnapshot(x, y) });
@@ -349,14 +350,18 @@ describe("the space badge", () => {
 
   it("stars a raw polygon only while an axis is actually transformed", () => {
     const s = load(ARIA_SMALL);
-    const scatter = s.channels.findIndex((_c, i) => s.transformKind(i) === "asinh");
-    const other = s.channels.findIndex((_c, i) => s.transformKind(i) === "asinh" && i !== scatter);
+    const scatter = s.channels.findIndex((_c, i) => s.isScatterAxis(i));
+    const other = s.channels.findIndex((_c, i) => s.isScatterAxis(i) && i !== scatter);
     const g = mk(s.channels[scatter].key, s.channels[other].key, { space: "raw" });
+    expect(gateSpaceBadge(s, g)?.text).toBe("RR"); // linear axes ARE raw — nothing to warn about
+
+    s.setScatterScale(scatter, "arcsinh");
+    s.setScatterScale(other, "arcsinh");
     expect(gateSpaceBadge(s, g)?.text).toBe("RR*"); // raw gate seen through arcsinh axes
 
     s.setScatterScale(scatter, "linear");
     s.setScatterScale(other, "linear");
-    expect(gateSpaceBadge(s, g)?.text).toBe("RR"); // linear axes ARE raw — nothing to warn about
+    expect(gateSpaceBadge(s, g)?.text).toBe("RR");
   });
 
   it("never stars a rectangle, which cannot be reshaped by a drag", () => {

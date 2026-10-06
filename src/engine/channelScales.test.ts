@@ -89,23 +89,24 @@ describe("workspace-wide channel scales", () => {
   });
 
   it("rebuilds a late file's cached display coordinates under the shared scale", () => {
+    // Scatter is linear by default; the shared scale here holds the other choice, arcsinh.
     const scales = new ChannelScales();
     const first = new Sample(flowFile(50));
     first.attachChannelScales(scales);
-    first.setScatterScale(first.index("FSC-A")!, "linear");
+    first.setScatterScale(first.index("FSC-A")!, "arcsinh");
 
     const late = new Sample(flowFile(4000));
     const idx = late.index("FSC-A")!;
     const raw = 2_345;
-    const cachedArcsinh = late.rawToDisplay("FSC-A", raw);
+    const cachedLinear = late.rawToDisplay("FSC-A", raw);
     const cachedRange = late.displayRange(idx);
-    expect(cachedArcsinh).not.toBeCloseTo(raw, 6);
+    expect(cachedLinear).toBeCloseTo(raw, 6);
 
     late.attachChannelScales(scales);
 
-    expect(late.scatterScale(idx)).toBe("linear");
-    expect(late.transformKind(idx)).toBe("identity");
-    expect(late.rawToDisplay("FSC-A", raw)).toBeCloseTo(raw, 6);
+    expect(late.scatterScale(idx)).toBe("arcsinh");
+    expect(late.transformKind(idx)).not.toBe("identity");
+    expect(late.rawToDisplay("FSC-A", raw)).toBeCloseTo(Math.asinh(raw / 150), 6);
     expect(late.displayRange(idx)).not.toEqual(cachedRange);
   });
 
@@ -203,9 +204,32 @@ describe("explicit choices carry across assay layers", () => {
 
   it("a key that is not a layered context is its own scope", () => {
     const scales = new ChannelScales();
-    scales.setScatterLinear("ctx-a", "FSC-A", true);
-    expect(scales.isScatterLinear("ctx-a", "FSC-A")).toBe(true);
-    expect(scales.isScatterLinear("ctx-b", "FSC-A")).toBe(false);
+    // Linear is the default, so the choice that is kept is arcsinh.
+    scales.setScatterLinear("ctx-a", "FSC-A", false);
+    expect(scales.isScatterLinear("ctx-a", "FSC-A")).toBe(false);
+    expect(scales.isScatterLinear("ctx-b", "FSC-A")).toBe(true);
+  });
+
+  it("draws scatter linear unless a channel was switched, and restores a saved list both ways", () => {
+    const scales = new ChannelScales();
+    expect(scales.isScatterLinear("ctx", "FSC-A")).toBe(true);
+    scales.setScatterLinear("ctx", "FSC-A", false);
+    expect(scales.isScatterLinear("ctx", "FSC-A")).toBe(false);
+    scales.setScatterLinear("ctx", "FSC-A", true);
+    expect(scales.isScatterLinear("ctx", "FSC-A")).toBe(true);
+    // A file opened fresh is linear on every scatter axis, and saves them all as linear.
+    const fresh = new Sample(flowFile(50));
+    fresh.attachChannelScales(scales);
+    for (const key of ["FSC-A", "SSC-A"]) expect(fresh.scatterScale(fresh.index(key)!)).toBe("linear");
+    expect(fresh.scatterLinearKeys()).toEqual(["FSC-A", "SSC-A"]);
+    // A workspace saved when arcsinh was the default listed no linear channel: it opens as saved.
+    fresh.applyScatterLinearKeys([]);
+    for (const key of ["FSC-A", "SSC-A"]) expect(fresh.scatterScale(fresh.index(key)!)).toBe("arcsinh");
+    expect(fresh.scatterLinearKeys()).toEqual([]);
+    fresh.applyScatterLinearKeys(["SSC-A"]);
+    expect(fresh.scatterScale(fresh.index("FSC-A")!)).toBe("arcsinh");
+    expect(fresh.scatterScale(fresh.index("SSC-A")!)).toBe("linear");
+    expect(fresh.scatterLinearKeys()).toEqual(["SSC-A"]);
   });
 });
 

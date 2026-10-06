@@ -30,11 +30,12 @@ const uuid = () => crypto.randomUUID();
 /** Build a small workspace: a scatter rectangle and a fluorophore polygon, with a
  *  positive-AND parent→child population tree. Returns raw-space gates. */
 function buildWorkspace(sample: Sample) {
-  // scatter x scatter (FSC-A x SSC-A → fasinh) and fluor x fluor (→ logicle)
-  const scatterIdx = sample.channels.findIndex((_, i) => sample.transformKind(i) === "asinh");
-  const scatter2 = sample.channels.findIndex(
-    (_, i) => sample.transformKind(i) === "asinh" && i !== scatterIdx,
-  );
+  // scatter x scatter (FSC-A x SSC-A, switched to arcsinh → fasinh) and fluor x fluor (→ logicle).
+  // Scatter opens linear since 2026-10-06; these tests cover the arcsinh export as before.
+  const scatterIdx = sample.channels.findIndex((_, i) => sample.isScatterAxis(i));
+  const scatter2 = sample.channels.findIndex((_, i) => sample.isScatterAxis(i) && i !== scatterIdx);
+  sample.setScatterScale(scatterIdx, "arcsinh");
+  sample.setScatterScale(scatter2, "arcsinh");
   const logicleIdxs = sample.channels
     .map((_, i) => i)
     .filter((i) => sample.transformKind(i) === "logicle");
@@ -456,11 +457,36 @@ describe("GatingML export → import round-trip (Aria III flow)", () => {
         expect(back2.scales?.[chKey]?.raw_lo).toBeCloseTo(300 * Math.sinh(displayRange[0]), 6);
         expect(back2.scales?.[chKey]?.raw_hi).toBeCloseTo(300 * Math.sinh(displayRange[1]), 3);
 
+        // A fresh file opens its scatter linear; the entry's cofactor says the axis was arcsinh.
         const destination = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+        expect(destination.scatterScale(destination.index(chKey)!)).toBe("linear");
         const restored = restoreGatingMLScaleState(destination, back2.scales, back2.cytof_cofactor);
+        expect(destination.scatterScale(destination.index(chKey)!)).toBe("arcsinh");
         expect(destination.currentScatterCofactor(destination.index(chKey)!)).toBe(300);
         expect(restored.ranges[chKey][0]).toBeCloseTo(displayRange[0], 6);
         expect(restored.ranges[chKey][1]).toBeCloseTo(displayRange[1], 6);
+      });
+
+      it("round-trips a linear scatter axis, which writes no cofactor, into a file that had it arcsinh", () => {
+        const scatterIdx = sample.index("SSC-A")!;
+        const chKey = sample.channels[scatterIdx].key;
+        sample.setScatterScale(scatterIdx, "linear");
+        const rawRange: [number, number] = [-500, 120000];
+        const xml2 = exportGatingML({
+          ...ws, sample, format, timestamp: "2026-01-01T00:00:00",
+          globalScales: { [chKey]: rawRange },
+        });
+        sample.setScatterScale(scatterIdx, "arcsinh");
+        const back2 = importGatingML(xml2, sessionChannels, pnnMap);
+        expect(back2.scales?.[chKey]?.cofactor).toBeUndefined();
+        expect(back2.scales?.[chKey]?.raw_lo).toBeCloseTo(rawRange[0], 6);
+        const destination = new Sample(parseFcs(loadArrayBuffer(ARIA_SMALL)));
+        destination.setScatterScale(destination.index(chKey)!, "arcsinh");
+        const restored = restoreGatingMLScaleState(destination, back2.scales, back2.cytof_cofactor);
+        expect(restored.transformsChanged).toBe(true);
+        expect(destination.scatterScale(destination.index(chKey)!)).toBe("linear");
+        expect(restored.ranges[chKey][0]).toBeCloseTo(rawRange[0], 6);
+        expect(restored.ranges[chKey][1]).toBeCloseTo(rawRange[1], 6);
       });
     });
   }

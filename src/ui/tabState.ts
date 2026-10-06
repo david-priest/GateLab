@@ -34,6 +34,11 @@ export function usePersistedTabState<T>(
   return [value, setValue];
 }
 
+/** The session-held values whose keys start with `prefix`, for a reader outside the tab (the tutorial). */
+export function readPersistedTabValues(prefix: string): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(store).filter(([key]) => key.startsWith(prefix)));
+}
+
 /** Drop persisted tab state (e.g. when a fresh workspace is opened, so stale selections don't leak). */
 export function clearPersistedTabState(): void {
   for (const k of Object.keys(store)) delete store[k];

@@ -123,3 +123,36 @@ describe("Proportions legend interaction", () => {
     expect(groups.map((group) => group.getAttribute("opacity"))).toEqual(["0.16", "1", "0.16", "1"]);
   });
 });
+
+// A 224-sample SCE's samples are named 1 to 224, and the composition chart ordered them as text:
+// 1, 10, 100, 101, …, 11, 110, …. Groups and facets are ordered as people read them.
+describe("Proportions chart ordering", () => {
+  it("orders sample groups numerically where their names carry numbers", () => {
+    const names = ["1", "10", "2", "D10", "D2", "100"];
+    const chartHost = document.createElement("div");
+    document.body.appendChild(chartHost);
+    const chartRoot = createRoot(chartHost);
+    act(() => chartRoot.render(
+      <ProportionsChart
+        plotType="stacked"
+        model={{
+          catLevels: ["B cells", "T cells"],
+          perSample: names.map((name) => ({ unit: name, group: name, facet: null, catCounts: [60, 40] })),
+          hasFacet: false,
+        }}
+        catColors={["#2f80ed", "#e15759"]}
+        palette="paired"
+        averagePerUnit
+        populations={{}}
+        fonts={{ tick: 9, axis: 10, legend: 11 }}
+      />,
+    ));
+    // A tick's text node only: the <title> inside it repeats the label.
+    const ticks = [...chartHost.querySelectorAll("svg text")]
+      .map((text) => [...text.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join(""))
+      .filter((text) => names.includes(text));
+    expect(ticks).toEqual(["1", "2", "10", "100", "D2", "D10"]);
+    act(() => chartRoot.unmount());
+    chartHost.remove();
+  });
+});

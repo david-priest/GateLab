@@ -57,7 +57,10 @@ export type LayoutStyleNumber = Exclude<keyof LayoutPlotStyle, "pubStyle" | "his
 export const LAYOUT_STYLE_RANGES: Readonly<Record<LayoutStyleNumber, readonly [number, number]>> = {
   pointSize: [0.25, 6],
   pointAlpha: [0.05, 1],
-  maxEvents: [500, 500000],
+  // High enough to draw every event of a pooled SCE (the HSCT object pools 951,880); the default
+  // stays 50,000, and a plot drawn with millions of points repaints slowly. 0 means every event
+  // (normalizeLayoutStyle keeps it), which the "All events" switch sets.
+  maxEvents: [500, 5000000],
   contourThreshold: [0.5, 50],
   contourLevels: [2, 30],
   kdeBandwidth: [0, 10],
@@ -78,6 +81,12 @@ export function normalizeLayoutStyle(value: unknown): Partial<LayoutPlotStyle> {
   for (const key of Object.keys(LAYOUT_STYLE_RANGES) as LayoutStyleNumber[]) {
     const raw = candidate[key];
     if (typeof raw !== "number" || !Number.isFinite(raw)) continue;
+    // An event cap of 0 is every event, as it is on the Gating tab; it is kept as 0, not raised
+    // to the field's floor.
+    if (key === "maxEvents" && raw === 0) {
+      out[key] = 0;
+      continue;
+    }
     const [lo, hi] = LAYOUT_STYLE_RANGES[key];
     const whole = key === "maxEvents" || key === "contourLevels";
     out[key] = Math.min(hi, Math.max(lo, whole ? Math.round(raw) : raw));
@@ -134,6 +143,13 @@ export interface LayoutPlotRecipe {
   style?: Partial<LayoutPlotStyle>;
   /** Drawn once per unit when the sheet iterates; sampleId is then the template file. */
   iterated?: boolean;
+  /**
+   * The files whose events this plot pools, in file order, as a list: a plot records what was
+   * drawn, so a file added later never joins it unasked. `sampleId` is one of them, the reference
+   * file, whose tree, channels and population the plot is drawn with; a gate is drawn only where
+   * every pooled file holds it alike, with the percentage pooled over them (engine/pooledPlot.ts).
+   */
+  pool?: { sampleIds: string[] };
 }
 
 export interface LayoutStrategyRecipe {
@@ -331,8 +347,14 @@ export function defaultLayoutPage(): LayoutPage {
 
 /** How a sheet iterates over files: which files, and how their pages or tiles are laid out. */
 export interface LayoutIteration {
-  /** Once; once per file of `source`; or once per population of the iterated items' file. */
-  mode: "off" | "files" | "populations";
+  /**
+   * Once; once per file of `source`; once per population of the iterated items' file; or once
+   * per value of a metadata column over the files of `source`, each value's files pooled on
+   * the plots that follow.
+   */
+  mode: "off" | "files" | "populations" | "metadata";
+  /** For "metadata": the column whose values are the units. */
+  column?: string;
   source:
     | { kind: "checked" }
     | { kind: "all" }
@@ -356,7 +378,14 @@ const MAX_TILE_GRID = 12;
 export function normalizeIteration(value: unknown): LayoutIteration {
   if (!value || typeof value !== "object" || Array.isArray(value)) return { ...DEFAULT_ITERATION };
   const c = value as Record<string, unknown>;
-  const mode: LayoutIteration["mode"] = c.mode === "files" ? "files" : c.mode === "populations" ? "populations" : "off";
+  const column = typeof c.column === "string" && c.column.trim() ? c.column.trim() : undefined;
+  const mode: LayoutIteration["mode"] = c.mode === "files"
+    ? "files"
+    : c.mode === "populations"
+      ? "populations"
+      : c.mode === "metadata" && column
+        ? "metadata"
+        : "off";
   const p = (c.populations && typeof c.populations === "object" ? c.populations : null) as Record<string, unknown> | null;
   const populations: LayoutIteration["populations"] | undefined = !p
     ? undefined
@@ -380,7 +409,7 @@ export function normalizeIteration(value: unknown): LayoutIteration {
         gap: typeof a.gap === "number" && Number.isFinite(a.gap) ? Math.max(0, Math.round(a.gap)) : 24,
       }
     : { kind: "page-per-unit" };
-  return { mode, source, ...(populations ? { populations } : {}), arrangement };
+  return { mode, ...(mode === "metadata" ? { column } : {}), source, ...(populations ? { populations } : {}), arrangement };
 }
 
 export interface LayoutSheet {
@@ -517,9 +546,19 @@ function normalizeRecipe(value: unknown): LayoutRecipe | null {
       ...(typeof candidate.label === "string" && candidate.label.trim() ? { label: candidate.label.trim() } : {}),
       ...(candidate.iterated === true ? { iterated: true } : {}),
       ...styleField(candidate.style),
+      ...poolField(candidate.pool),
     };
   }
   return null;
+}
+
+/** A plot's pool as saved: its file ids, each once and non-blank; absent when there are none. */
+function poolField(value: unknown): { pool?: { sampleIds: string[] } } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const ids = (value as { sampleIds?: unknown }).sampleIds;
+  if (!Array.isArray(ids)) return {};
+  const sampleIds = [...new Set(ids.filter((id): id is string => typeof id === "string" && id.trim() !== ""))];
+  return sampleIds.length ? { pool: { sampleIds } } : {};
 }
 
 /** An item's zoom, 1 when it has none. */
@@ -775,7 +814,10 @@ export function cloneLayoutWorkspace(workspace: LayoutWorkspace): LayoutWorkspac
       ...(sheet.iteration ? { iteration: { ...sheet.iteration, source: { ...sheet.iteration.source }, arrangement: { ...sheet.iteration.arrangement } } } : {}),
       items: sheet.items.map((item) => ({
         ...item,
-        recipe: { ...item.recipe },
+        recipe: {
+          ...item.recipe,
+          ...("pool" in item.recipe && item.recipe.pool ? { pool: { sampleIds: [...item.recipe.pool.sampleIds] } } : {}),
+        },
       })),
     })),
   };

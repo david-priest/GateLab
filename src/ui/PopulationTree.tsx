@@ -74,7 +74,6 @@ interface Props {
   displayContributorNames?: readonly string[];
   /** Gates of this copy whose geometry differs from the tree's: FlowJo's tailored marks. */
   tailoredGateIds?: ReadonlySet<string>;
-  readOnly?: boolean;
   /** Line the gate badges up in one column after the longest name; off, each row's follow its own name. */
   alignGates?: boolean;
 }
@@ -335,11 +334,10 @@ export function PopulationTree({
   displayContributorCount,
   displayContributorNames,
   perFile,
-  readOnly = false,
   showHierarchyControls = true, tailoredGateIds, alignGates = true }: Props) {
   const { t } = useI18n();
   const { populations, root_population_id, active_population_id, selected_gate_id, selected_pop_ids, gates } = state;
-  const structureLocked = readOnly || state.hierarchies.some(
+  const structureLocked = state.hierarchies.some(
     (hierarchy) => hierarchy.id === state.active_hierarchy_id && hierarchy.structure_locked === true,
   );
   const stats = derived.stats;
@@ -856,7 +854,7 @@ export function PopulationTree({
       )}
       <div className="population-tree-hint">
         <span>
-          {readOnly ? t("Read-only tree preview · Select populations to inspect; enable tree editing above the plot to change gates") : structureLocked
+          {structureLocked
             ? t("Editing this file only · Gate boundaries and labels move on the plot for this file alone · Click a gate to select it")
             : t("Double-click a name to rename · Drag to move rows, Option-drag to copy them · Shift-click to highlight a range, Cmd/Ctrl-click to add or remove a row · Shift-click a gate to change/remove · + adds a gate")}
         </span>

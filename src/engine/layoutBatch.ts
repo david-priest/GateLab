@@ -7,15 +7,19 @@
 import { DEFAULT_ITERATION, isPlotLikeRecipe, type LayoutItem, type LayoutIteration, type LayoutPlotRecipe, type LayoutSheet, type LayoutStrategyRecipe } from "./layout";
 import { contentBounds } from "./layoutArrange";
 import { plotTitle, type PlotTitleContext } from "./layoutTitle";
+import { compareMetadataValues } from "./metadata";
 import type { PopulationMap } from "./models";
 import { populationTreeOrder } from "./populations";
 
 export { DEFAULT_ITERATION, normalizeIteration, type LayoutIteration } from "./layout";
 
-/** One thing the template is drawn for: a file, or a population of one file, with what its placeholders read. */
+/** The files with no value in the column, drawn last under a metadata iteration, named as the Illustration tab names them. */
+export const UNASSIGNED_METADATA_VALUE = "Unassigned";
+
+/** One thing the template is drawn for: a file, a population of one file, or a metadata value's files, with what its placeholders read. */
 export interface LayoutUnit {
   id: string;
-  /** The display name: the file's (the metadata sample id, else the file name), or the population's. */
+  /** The display name: the file's (the metadata sample id, else the file name), the population's, or the metadata value. */
   name: string;
   fileName: string;
   groupName?: string;
@@ -23,6 +27,17 @@ export interface LayoutUnit {
   /** Set for a population unit: the population the iterated items are drawn for, on `sampleName`'s file. */
   populationId?: string;
   sampleName?: string;
+  /** Set for a metadata unit: the files carrying the value, pooled on the plots that follow. */
+  sampleIds?: string[];
+}
+
+/** The metadata fields some files agree on, with their one value: what {meta:column} reads for a pool. */
+export function sharedMetadataFields(rows: readonly (Readonly<Record<string, string>> | undefined)[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(rows[0] ?? {})) {
+    if (rows.every((row) => row?.[key] === value)) out[key] = value;
+  }
+  return out;
 }
 
 /** A concrete item on an expanded page: the template item bound to a unit and placed. */
@@ -80,6 +95,15 @@ function bindItem(item: LayoutItem, unit: LayoutUnit | null, n: number, total: n
     if (follows && unit && unit.populationId) {
       // A population unit: the same file, drawn for this population.
       if ("populationId" in recipe) recipe.populationId = unit.populationId;
+    } else if (follows && unit && unit.sampleIds) {
+      // A metadata unit: its files pooled on a plot; a strategy, which cannot pool, is drawn
+      // for the first of them. The template file stays the reference while it is among them.
+      if ((recipe.kind === "biplot" || recipe.kind === "histogram") && unit.sampleIds.length > 1) recipe.pool = { sampleIds: [...unit.sampleIds] };
+      else if ("pool" in recipe) delete recipe.pool;
+      if ("sampleId" in recipe && !unit.sampleIds.includes(recipe.sampleId) && unit.sampleIds.length) {
+        templateSampleId = recipe.sampleId;
+        recipe.sampleId = unit.sampleIds[0];
+      }
     } else if (follows && unit && "sampleId" in recipe && recipe.sampleId !== unit.id) {
       templateSampleId = recipe.sampleId;
       recipe.sampleId = unit.id;
@@ -99,8 +123,8 @@ function bindItem(item: LayoutItem, unit: LayoutUnit | null, n: number, total: n
   };
 }
 
-/** What a plot's placeholders read, from the app: the plot as bound, and the file it was designed on when drawn for another. */
-export type DescribeBoundPlot = (recipe: LayoutPlotRecipe | LayoutStrategyRecipe, templateSampleId?: string) => PlotTitleContext | null;
+/** What a plot's placeholders read, from the app: the plot as bound, the file it was designed on when drawn for another, and the unit it is drawn for. */
+export type DescribeBoundPlot = (recipe: LayoutPlotRecipe | LayoutStrategyRecipe, templateSampleId?: string, unitId?: string) => PlotTitleContext | null;
 
 /**
  * A text block that reads from a plot takes its placeholders from that plot as bound on the
@@ -114,7 +138,7 @@ function fillBoundText(items: LayoutPageItem[], describe: DescribeBoundPlot | un
     const source = items.find((candidate) =>
       candidate.templateId === readsFrom && candidate.offset.x === item.offset.x && candidate.offset.y === item.offset.y);
     if (!source || !isPlotLikeRecipe(source.recipe)) continue;
-    const context = describe(source.recipe, source.templateSampleId);
+    const context = describe(source.recipe, source.templateSampleId, source.unitId);
     if (context) item.recipe = { ...item.recipe, text: plotTitle(item.recipe.text, context) };
   }
 }
@@ -168,30 +192,86 @@ function expandPages(sheet: LayoutSheet, units: readonly LayoutUnit[]): LayoutPa
   return pages;
 }
 
+type IterationFile = { id: string; name: string; fileName?: string; metadata?: Readonly<Record<string, string>> };
+
+/** The files an iteration's source names, in the Samples pane's order. */
+function sourceFiles(
+  source: LayoutIteration["source"],
+  files: readonly IterationFile[],
+  checkedIds: readonly string[],
+  fileGroups: Readonly<Record<string, string>>,
+): IterationFile[] {
+  return files.filter((file) => {
+    if (source.kind === "all") return true;
+    if (source.kind === "checked") return checkedIds.includes(file.id);
+    if (source.kind === "group") return fileGroups[file.id] === source.groupId;
+    return (file.metadata?.[source.column] ?? "") === source.value;
+  });
+}
+
 /** The units an iteration draws, from the files the app knows, in the Samples pane's order. */
 export function iterationUnits(
   iteration: LayoutIteration,
-  files: readonly { id: string; name: string; fileName?: string; metadata?: Readonly<Record<string, string>> }[],
+  files: readonly IterationFile[],
   checkedIds: readonly string[],
   groups: readonly { id: string; name: string }[],
   fileGroups: Readonly<Record<string, string>>,
 ): LayoutUnit[] {
-  const unitOf = (file: (typeof files)[number]): LayoutUnit => ({
+  const unitOf = (file: IterationFile): LayoutUnit => ({
     id: file.id,
     name: file.name,
     fileName: file.fileName ?? file.name,
     groupName: groups.find((group) => group.id === fileGroups[file.id])?.name,
     metadata: file.metadata,
   });
-  const source = iteration.source;
-  return files
-    .filter((file) => {
-      if (source.kind === "all") return true;
-      if (source.kind === "checked") return checkedIds.includes(file.id);
-      if (source.kind === "group") return fileGroups[file.id] === source.groupId;
-      return (file.metadata?.[source.column] ?? "") === source.value;
-    })
-    .map(unitOf);
+  return sourceFiles(iteration.source, files, checkedIds, fileGroups).map(unitOf);
+}
+
+/**
+ * The units of a metadata iteration: one per value of the column over the source's files, each
+ * holding the files that carry the value, in file order. Values follow the column's levels when
+ * it has them, else a natural order (day 0, 7, 14); the files with no value come last as
+ * "Unassigned", and only when there are any. A unit's metadata is what its files share.
+ */
+export function metadataUnits(
+  iteration: LayoutIteration,
+  files: readonly IterationFile[],
+  checkedIds: readonly string[],
+  groups: readonly { id: string; name: string }[],
+  fileGroups: Readonly<Record<string, string>>,
+  levels?: readonly string[],
+): LayoutUnit[] {
+  const column = iteration.column ?? "";
+  if (!column) return [];
+  const byValue = new Map<string, IterationFile[]>();
+  const unassigned: IterationFile[] = [];
+  for (const file of sourceFiles(iteration.source, files, checkedIds, fileGroups)) {
+    const value = file.metadata?.[column] ?? "";
+    if (!value) {
+      unassigned.push(file);
+      continue;
+    }
+    byValue.set(value, [...(byValue.get(value) ?? []), file]);
+  }
+  const present = [...byValue.keys()];
+  const ordered = levels
+    ? [...levels.filter((level) => byValue.has(level)), ...present.filter((value) => !levels.includes(value)).sort(compareMetadataValues)]
+    : present.sort(compareMetadataValues);
+  const unitOf = (value: string, members: IterationFile[]): LayoutUnit => {
+    const groupNames = new Set(members.map((file) => groups.find((group) => group.id === fileGroups[file.id])?.name));
+    return {
+      id: `meta:${column}=${value}`,
+      name: value,
+      fileName: `${members.length} files`,
+      ...(groupNames.size === 1 && [...groupNames][0] ? { groupName: [...groupNames][0] } : {}),
+      metadata: sharedMetadataFields(members.map((file) => file.metadata)),
+      sampleIds: members.map((file) => file.id),
+    };
+  };
+  return [
+    ...ordered.map((value) => unitOf(value, byValue.get(value)!)),
+    ...(unassigned.length ? [unitOf(UNASSIGNED_METADATA_VALUE, unassigned)] : []),
+  ];
 }
 
 /**

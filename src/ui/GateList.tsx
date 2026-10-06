@@ -91,6 +91,12 @@ export function GateList({ state, derived, dispatch, labelForKey = (k) => k, bad
                   {t("tailored")}
                 </span>
               )}
+              {gate.provenance && (
+                // An agent's gate, told from the user's by its badge; the reason it gave is the tooltip.
+                <span className="gate-tailored-badge gate-agent-badge" title={t("Proposed by {by}: {rationale}", { by: gate.provenance.by, rationale: gate.provenance.rationale })}>
+                  {t("agent")}
+                </span>
+              )}
               {(() => {
                 // Which space this gate lives in, beside its name — a raw and a display gate are
                 // otherwise indistinguishable in this list.
