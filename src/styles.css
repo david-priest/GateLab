@@ -88,8 +88,8 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-brand { position: relative; display: inline-flex; align-items: center; gap: 10px; flex: none; cursor: help; }
 /* The logo's mark (the three plots) and wordmark are PNGs cut from the artwork at four times these
    sizes, with the paper knocked out, so they sit on the header's own colour at any pixel density. */
-.gl-brand-mark { display: block; height: 34px; width: auto; }
-.gl-brand-wordmark { display: block; height: 18px; width: auto; }
+.gl-brand-mark { display: block; height: 26px; width: auto; }
+.gl-brand-wordmark { display: block; height: 22px; width: auto; }
 .gl-brand:focus-visible { outline: 2px solid var(--accent, #3b82f6); outline-offset: 2px; border-radius: 3px; }
 .gl-brand-card {
   position: absolute;
