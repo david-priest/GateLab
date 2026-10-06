@@ -11070,8 +11070,8 @@ export default function App() {
             stating where someone comparing two tools will actually find it. Focusable so it is
             reachable from the keyboard, not only on hover. */}
         <span className="gl-brand" tabIndex={0}>
-          {/* The logo: the mark, then the wordmark cut from the same artwork. GateLabR keeps its
-              name in text, since the wordmark says GateLab. */}
+          {/* The logo: the three plots as the mark, then the wordmark, both cut from the artwork.
+              GateLabR keeps its name in text, since the wordmark says GateLab. */}
           <img className="gl-brand-mark" src={brandMark} alt="" />
           {isSceHost ? <strong>GateLabR</strong> : <img className="gl-brand-wordmark" src={brandWordmark} alt="GateLab" />}
           <span className="gl-brand-card" role="tooltip">

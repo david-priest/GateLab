@@ -85,11 +85,11 @@ input[type="number"]::-webkit-outer-spin-button {
    CSS-only: no state, and it cannot get stuck open. `position: relative` on the wrapper anchors
    the card; the header itself must not clip it, so the card is fixed-width and left-aligned to
    the wrapper rather than centred (the name sits hard against the left edge of the window). */
-.gl-brand { position: relative; display: inline-flex; align-items: center; gap: 8px; flex: none; cursor: help; }
-/* The logo's mark and wordmark are PNGs cut from the artwork at four times these sizes, with the
-   paper knocked out, so they sit on the header's own colour at any pixel density. */
-.gl-brand-mark { display: block; height: 32px; width: auto; }
-.gl-brand-wordmark { display: block; height: 15px; width: auto; }
+.gl-brand { position: relative; display: inline-flex; align-items: center; gap: 10px; flex: none; cursor: help; }
+/* The logo's mark (the three plots) and wordmark are PNGs cut from the artwork at four times these
+   sizes, with the paper knocked out, so they sit on the header's own colour at any pixel density. */
+.gl-brand-mark { display: block; height: 34px; width: auto; }
+.gl-brand-wordmark { display: block; height: 18px; width: auto; }
 .gl-brand:focus-visible { outline: 2px solid var(--accent, #3b82f6); outline-offset: 2px; border-radius: 3px; }
 .gl-brand-card {
   position: absolute;
