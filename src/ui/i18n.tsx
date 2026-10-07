@@ -9,6 +9,7 @@ import {
 import { TIED_DATA_SET_NOTE, TIED_DATA_SETS_NOTE } from "../engine/flowjoOpen";
 import { FLOWJO_OLDER_REFUSAL, FLOWJO_OLDER_REFUSAL_UNSTATED } from "../engine/flowjoWorkspace";
 import { platformKeys } from "./platformKeys";
+import { TOUR_JA } from "../tour/tourJa";
 
 export type UiLanguage = "en" | "ja";
 
@@ -23,6 +24,8 @@ export const UI_LANGUAGE_OPTIONS: readonly Readonly<{
 const STORAGE_KEY = "gatelab.uiLanguage";
 
 const JA: Readonly<Record<string, string>> = {
+  // The walkthrough tutorial's words live beside the tutorial.
+  ...TOUR_JA,
   "Files / samples": "ファイル／サンプル",
   "File selection": "ファイルの選択",
   "{count} of {total} selected": "{total}件中{count}件を選択",
@@ -462,7 +465,7 @@ const JA: Readonly<Record<string, string>> = {
   "FCS file": "FCSファイル",
   "Result": "結果",
   "Write": "書き出す",
-  "Skip": "除外",
+  "Skip": "スキップ",
   "Back": "戻る",
   "Export {count} FCS": "FCS {count}件を書き出す",
   "Display": "表示",

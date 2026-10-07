@@ -30,6 +30,8 @@ export interface TourGate {
 /** What the app looks like right now, read fresh each time a step is checked. */
 export interface TourContext {
   host: TourHost;
+  /** The language the interface is shown in, which the tutorial speaks too; English when unset. */
+  language?: "en" | "ja";
   activeTab: string;
   workspaceName: string;
   files: { id: string; name: string; checked: boolean; viewed: boolean }[];

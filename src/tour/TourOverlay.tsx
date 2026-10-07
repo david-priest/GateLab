@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useI18n } from "../ui/i18n";
 import { platformKeys } from "../ui/platformKeys";
-import { chapterOf, stepBody, stepTarget, unmetNeeds } from "./tourScript";
+import { chapterOf, stepBody, stepTarget, stepTitle, unmetNeeds } from "./tourScript";
 import type { TourContext, TourStep, TourTarget, TourTargetSpec } from "./tourTypes";
 
 interface Rect { x: number; y: number; width: number; height: number; }
@@ -204,7 +204,7 @@ export function TourOverlay({ step, index, total, reached, held = false, arrivin
   const pointerRect = useTrackedRect(step.pointerTarget ?? null, step.id) ?? rect;
   const chapter = chapterOf(step);
   // The script names keys as a Mac does; the card names them for the keyboard in front of the reader.
-  const title = platformKeys(step.title);
+  const title = platformKeys(stepTitle(step, ctx));
   const body = platformKeys(stepBody(step, ctx));
   // The card sits bottom right unless the target is there, then bottom left.
   const viewportWidth = typeof window === "undefined" ? 1200 : window.innerWidth;

@@ -56,7 +56,8 @@ to sort B cells for an in vitro assay in Priest et al., *Nat Commun* 15:6811 (20
 Supplementary Figure 10A. The tutorial watches what you do rather than asking you to press
 Next: each step moves on when its action is done, a button takes you to where a step happens,
 and you can pause and resume where you left off. "About the demo workspace" in the same menu
-cites the data. The demo file ships beside the app as `demo/gatelab-demo.gatelab`.
+cites the data. The demo file ships beside the app as `demo/gatelab-demo.gatelab`. With the
+interface in Japanese (the Language menu at the top right), the tutorial is in Japanese too.
 
 ### Agents: letting an AI assistant draw gates
 

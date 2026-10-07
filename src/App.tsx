@@ -11867,6 +11867,7 @@ export default function App() {
                     className={"gl-icon-chip" + (drawMode === tool.id ? " active" : "")}
                     title={title}
                     aria-label={title}
+                    data-tool={tool.id}
                     disabled={disabled}
                     onClick={() => setDrawMode(tool.id)}
                   >
@@ -11882,6 +11883,7 @@ export default function App() {
                   className="gl-icon-chip"
                   title={t("Undo the last gating change (⌘Z)")}
                   aria-label={t("Undo")}
+                  data-tour="undo"
                   disabled={state.undo.length === 0}
                   onClick={() => dispatch({ type: "undo" })}
                 >
@@ -14378,7 +14380,7 @@ export default function App() {
     }
     if (unmet.compensationView) {
       // The view is the tab's own state, so it is changed as the user changes it: by its switch.
-      const view = resolveTourTarget({ selector: '[role="tab"]', text: unmet.compensationView === "global" ? "Global inspector" : "Matrix", exact: true });
+      const view = resolveTourTarget({ selector: '[role="tab"]', text: t(unmet.compensationView === "global" ? "Global inspector" : "Matrix"), exact: true });
       if (view instanceof HTMLElement) view.click();
     }
   }
@@ -14398,6 +14400,7 @@ export default function App() {
     const activeSheet = layoutWorkspace.sheets.find((sheet) => sheet.id === layoutWorkspace.activeSheetId) ?? layoutWorkspace.sheets[0];
     return {
       host: isSceHost ? "sce" : "browser",
+      language,
       activeTab,
       workspaceName: wsName,
       files: samples.map((entry) => ({ id: entry.id, name: entry.name, checked: !excludedSampleIds.has(entry.id), viewed: entry.id === activeSampleId })),

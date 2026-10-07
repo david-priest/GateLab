@@ -19,7 +19,7 @@ export function TourMenu({ progress, onStart, onResume }: {
   const items: MenuEntry[] = paused >= 0
     ? [
         {
-          label: t("Resume at step {index} of {total}: {title}", { index: paused + 1, total: TOUR_STEPS.length, title: TOUR_STEPS[paused].title }),
+          label: t("Resume at step {index} of {total}: {title}", { index: paused + 1, total: TOUR_STEPS.length, title: t(TOUR_STEPS[paused].title) }),
           className: "gl-tour-resume",
           onClick: onResume,
         },
