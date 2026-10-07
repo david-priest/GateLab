@@ -3,7 +3,8 @@
 // the user (the demo's own files, populations and gates), never from names written here, so the
 // tutorial also runs on another workspace.
 
-import type { TourChapter, TourContext, TourGate, TourNeeds, TourPopulation, TourStep, TourTargetSpec } from "./tourTypes";
+import { translateUi, type TranslationValues } from "../ui/i18n";
+import type { TourChapter, TourContext, TourGate, TourNeeds, TourPopulation, TourStep, TourTarget, TourTargetSpec } from "./tourTypes";
 
 export const DEMO_WORKSPACE_FILE = "gatelab-demo.gatelab";
 /** Where a copy of GateLab keeps its demo workspace, relative to the page. */
@@ -177,7 +178,23 @@ const scaleSelect = (ctx: TourContext, scale: "linear" | "arcsinh"): TourTargetS
 
 const isDemo = (ctx: TourContext) => ctx.workspaceName === DEMO_WORKSPACE_FILE;
 
-const name = (entity: { name: string } | null | undefined, fallback: string) => (entity ? `“${entity.name}”` : fallback);
+/**
+ * The tutorial speaks the interface's language: a step's words are source strings looked up as
+ * the rest of the interface's are, with the names they mention filled in. English when the
+ * context names no language, which is what the tests and the smoke driver read.
+ */
+const tr = (ctx: TourContext) => (source: string, values?: TranslationValues) => translateUi(ctx.language ?? "en", source, values);
+
+/** A name quoted as the language quotes. */
+const quote = (ctx: TourContext, text: string) => (ctx.language === "ja" ? `「${text}」` : `“${text}”`);
+
+/** The entity's name, quoted; the fallback, translated, when there is none. */
+const name = (ctx: TourContext, entity: { name: string } | null | undefined, fallback: string) =>
+  entity ? quote(ctx, entity.name) : tr(ctx)(fallback);
+
+/** A target by the text the interface shows for it, in its language. */
+const labelled = (ctx: TourContext, selector: string, text: string, exact = false): TourTarget =>
+  ({ selector, text: tr(ctx)(text), exact });
 
 const tab = (id: string): TourTargetSpec => `[data-tour="tab-${id}"]`;
 
@@ -187,8 +204,10 @@ const popRow = (pop: TourPopulation | null | undefined): TourTargetSpec =>
   pop ? { selector: ".pop-row-name", text: pop.name, exact: true } : ".pop-row-name";
 
 /** "A", "A and B", "A, B and C"; past four names, the first three and how many more. */
-function listOf(names: readonly string[]): string {
-  const shown = names.length > 4 ? [...names.slice(0, 3), `${names.length - 3} more`] : [...names];
+function listOf(ctx: TourContext, names: readonly string[]): string {
+  const t = tr(ctx);
+  const shown = names.length > 4 ? [...names.slice(0, 3), t("{count} more", { count: names.length - 3 })] : [...names];
+  if (ctx.language === "ja") return shown.join("、");
   return shown.length < 2 ? shown.join("") : `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}`;
 }
 
@@ -208,8 +227,8 @@ export const TOUR_STEPS: readonly TourStep[] = [
     title: "Open the demo workspace",
     body: (ctx) =>
       loaded(ctx)
-        ? `A workspace is open (${ctx.workspaceName || ctx.files.map((file) => file.name).join(", ")}); the tutorial goes on with it.`
-        : "Open the Workspace menu and choose “Open the demo workspace”. The demo is the FCS records, their compensation and the gating tree, bundled as one .gatelab file.",
+        ? tr(ctx)("A workspace is open ({name}); the tutorial goes on with it.", { name: ctx.workspaceName || ctx.files.map((file) => file.name).join(", ") })
+        : tr(ctx)("Open the Workspace menu and choose “Open the demo workspace”. The demo is the FCS records, their compensation and the gating tree, bundled as one .gatelab file."),
     target: ['[role="menuitem"].gl-open-demo', ".gl-tour-workspace-menu > button"],
     pointer: "click",
     done: loaded,
@@ -223,8 +242,8 @@ export const TOUR_STEPS: readonly TourStep[] = [
       const c = DEMO_WORKSPACE_CITATION;
       const reference = `${c.authors} ${c.title} ${c.journal} doi:${c.doi}`;
       return isDemo(ctx)
-        ? `The demo is the gating strategy of ${c.figure} of ${reference} (“${c.figureLegend}”), on its presort record and companion records. The Tutorial menu keeps this reference under “About the demo workspace”.`
-        : `The tutorial goes on with the workspace you opened. It was written for the demo: the gating strategy of ${c.figure} of ${reference}`;
+        ? tr(ctx)("The demo is the gating strategy of {figure} of {reference} (“{legend}”), on its presort record and companion records. The Tutorial menu keeps this reference under “About the demo workspace”.", { figure: c.figure, reference, legend: c.figureLegend })
+        : tr(ctx)("The tutorial goes on with the workspace you opened. It was written for the demo: the gating strategy of {figure} of {reference}", { figure: c.figure, reference });
     },
   },
 
@@ -233,8 +252,12 @@ export const TOUR_STEPS: readonly TourStep[] = [
     id: "select-gate",
     chapter: "gating",
     title: "The plot and its gate",
-    body: (ctx) =>
-      `The plot shows the active population on two channels, with the gates drawn on them. Click the gate ${name(plottedGate(ctx), "")} on the plot, or its card in the gate list on the right, to select it: its round handles appear.`.replace("  ", " "),
+    body: (ctx) => {
+      const gate = plottedGate(ctx);
+      return gate
+        ? tr(ctx)("The plot shows the active population on two channels, with the gates drawn on them. Click the gate {name} on the plot, or its card in the gate list on the right, to select it: its round handles appear.", { name: quote(ctx, gate.name) })
+        : tr(ctx)("The plot shows the active population on two channels, with the gates drawn on them. Click the gate on the plot, or its card in the gate list on the right, to select it: its round handles appear.");
+    },
     target: (ctx) => {
       const gate = plottedGate(ctx);
       return [".gl-plot-area svg .saved-gate .gate-hit", ".gl-plot-area svg .saved-gate", gate ? { selector: ".gate-card", text: gate.name } : ".gate-card"];
@@ -247,9 +270,9 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "gating",
     title: "The same gate on arcsinh",
     body: (ctx) =>
-      ctx.axes.xLinearOffered || ctx.axes.yLinearOffered
+      tr(ctx)(ctx.axes.xLinearOffered || ctx.axes.yLinearOffered
         ? "Scatter opens on linear axes, and this gate was drawn on them. Under Transforms, set X and Y to Arcsinh: the gate is redrawn on the new scale, and a thin grey line appears beside its red sides."
-        : "Where an axis offers a choice of scale (scatter does), Transforms sets it, and a gate shown on another scale than it was drawn on bows along its sides. These axes offer none, so the tutorial goes on.",
+        : "Where an axis offers a choice of scale (scatter does), Transforms sets it, and a gate shown on another scale than it was drawn on bows along its sides. These axes offer none, so the tutorial goes on."),
     // The axis still to change: X first, then Y once X is arcsinh.
     target: (ctx) => scaleSelect(ctx, "arcsinh"),
     pointer: "click",
@@ -262,16 +285,17 @@ export const TOUR_STEPS: readonly TourStep[] = [
     body: (ctx) => {
       const gate = (ctx.selectedGateId ? ctx.gates[ctx.selectedGateId] : null) ?? plottedGate(ctx);
       const bowed = !axesLinear(ctx);
+      const t = tr(ctx);
       return [
-        "The red polygon joins the gate's vertices with straight sides, to work with. The thin grey line is the gate's own edge on these axes.",
-        bowed
+        t("The red polygon joins the gate's vertices with straight sides, to work with. The thin grey line is the gate's own edge on these axes."),
+        t(bowed
           ? "They differ because the gate was drawn on linear axes and the plot is on arcsinh: a side that is straight on one scale bows on another."
-          : "Here the two coincide: these are the axes the gate was drawn on. Shown on another scale, a straight side bows.",
-        "GateLab keeps a gate in the space it was drawn in, so changing a scale redraws the gate and never moves an event in or out of it.",
+          : "Here the two coincide: these are the axes the gate was drawn on. Shown on another scale, a straight side bows."),
+        t("GateLab keeps a gate in the space it was drawn in, so changing a scale redraws the gate and never moves an event in or out of it."),
         gate?.onFlowJoGrid
-          ? "The F on this gate's badge says it came from FlowJo and is tested on FlowJo's 256-channel grid, as FlowJo tests it, so GateLab takes the events FlowJo takes."
+          ? t("The F on this gate's badge says it came from FlowJo and is tested on FlowJo's 256-channel grid, as FlowJo tests it, so GateLab takes the events FlowJo takes.")
           : "",
-      ].filter(Boolean).join(" ");
+      ].filter(Boolean).join(sentenceGap(ctx));
     },
     target: [".gl-plot-area svg .saved-gate", ".gl-plot-area svg .plot-bg"],
     pointer: "none",
@@ -280,8 +304,15 @@ export const TOUR_STEPS: readonly TourStep[] = [
     id: "move-vertex",
     chapter: "gating",
     title: "Move a vertex",
-    body: (ctx) =>
-      `${ctx.selectedGateId ? "Drag one of the gate's round handles a little way." : "Click the gate on the plot to show its round handles, then drag one a little way."} The red side follows the handle; when you let go, ${axesLinear(ctx) ? "" : "the grey edge is drawn again through the new vertex and "}the count on the label changes as events cross.`,
+    body: (ctx) => {
+      const t = tr(ctx);
+      return [
+        t(ctx.selectedGateId ? "Drag one of the gate's round handles a little way." : "Click the gate on the plot to show its round handles, then drag one a little way."),
+        t(axesLinear(ctx)
+          ? "The red side follows the handle; when you let go, the count on the label changes as events cross."
+          : "The red side follows the handle; when you let go, the grey edge is drawn again through the new vertex and the count on the label changes as events cross."),
+      ].join(sentenceGap(ctx));
+    },
     target: [".gl-plot-area svg circle.vh", ".gl-plot-area svg .saved-gate"],
     pointer: "click",
     enter: (ctx) => gateShapes(ctx),
@@ -294,12 +325,13 @@ export const TOUR_STEPS: readonly TourStep[] = [
     body: (ctx) => {
       const gate = plottedGate(ctx);
       const pop = gatePopulation(ctx, gate);
+      const t = tr(ctx);
       return [
-        `In the tree on the right, click ${name(pop, "the population this gate defines")}: the plot keeps these axes and shows only the events inside the gate, with the gate drawn around them.`,
-        gate?.onFlowJoGrid
+        t("In the tree on the right, click {name}: the plot keeps these axes and shows only the events inside the gate, with the gate drawn around them.", { name: name(ctx, pop, "the population this gate defines") }),
+        t(gate?.onFlowJoGrid
           ? "Along the grey edge the events end in steps: a gate from FlowJo is tested on FlowJo's 256-channel grid, so events are taken a channel at a time, and a few lie across the line."
-          : "The events end at the grey edge: that line, not the red one, is where the gate falls.",
-      ].join(" ");
+          : "The events end at the grey edge: that line, not the red one, is where the gate falls."),
+      ].join(sentenceGap(ctx));
     },
     target: (ctx) => popRow(gatePopulation(ctx, plottedGate(ctx))),
     pointer: "click",
@@ -312,8 +344,14 @@ export const TOUR_STEPS: readonly TourStep[] = [
     id: "pan-stretch",
     chapter: "gating",
     title: "Move and stretch the data",
-    body: (ctx) =>
-      `With the arrow tool, drag the plot's background to move the data. Hold Shift while dragging to stretch it: the axes' lower ends stay where they are and the point you hold follows the pointer.${plottedGate(ctx)?.onFlowJoGrid ? " Stretch the view along the gate's edge and the steps of the grid come into view." : ""} “Fit data + gates” above the plot brings the view back.`,
+    body: (ctx) => {
+      const t = tr(ctx);
+      return [
+        t("With the arrow tool, drag the plot's background to move the data. Hold Shift while dragging to stretch it: the axes' lower ends stay where they are and the point you hold follows the pointer."),
+        plottedGate(ctx)?.onFlowJoGrid ? t("Stretch the view along the gate's edge and the steps of the grid come into view.") : "",
+        t("“Fit data + gates” above the plot brings the view back."),
+      ].filter(Boolean).join(sentenceGap(ctx));
+    },
     target: ".gl-plot-area svg .plot-bg",
     pointer: "move",
     enter: (ctx) => ctx.axes.rangeKey,
@@ -324,7 +362,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "gating",
     title: "Undo",
     body: "Press Undo (⌘Z, or the arrow above the plot) to put the vertex back. Every change to the gates and the tree can be undone, and redone.",
-    target: '.gl-history-tools button[aria-label="Undo"]',
+    target: '.gl-history-tools button[data-tour="undo"]',
     pointer: "click",
     enter: (ctx) => gateShapes(ctx),
     done: (ctx, memo) => gateShapes(ctx) !== memo,
@@ -334,9 +372,9 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "gating",
     title: "The gate on its own axes",
     body: (ctx) =>
-      ctx.axes.xLinearOffered || ctx.axes.yLinearOffered
+      tr(ctx)(ctx.axes.xLinearOffered || ctx.axes.yLinearOffered
         ? "Under Transforms, set X and Y back to Linear. The grey edge straightens onto the red sides: these are the axes the gate was drawn on, and scatter opens on them. Nothing was regated; only the picture changed. That is how GateLab holds every gate: in the space it was drawn in, shown through whichever scale you choose."
-        : "Where an axis offers a linear scale (scatter does), Transforms sets it, and a gate drawn on linear axes then shows its sides straight. These axes offer none, so the tutorial goes on.",
+        : "Where an axis offers a linear scale (scatter does), Transforms sets it, and a gate drawn on linear axes then shows its sides straight. These axes offer none, so the tutorial goes on."),
     // The axis still to change: X first, then Y once X is linear.
     target: (ctx) => scaleSelect(ctx, "linear"),
     pointer: "click",
@@ -347,7 +385,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "gating",
     title: "The file list",
     body: (ctx) =>
-      `The left panel lists the files. The blue one is viewed on the plot; the checkboxes choose files for pooling and for the other tabs. Click ${name(otherFile(ctx), "another file")} to view it.`,
+      tr(ctx)("The left panel lists the files. The blue one is viewed on the plot; the checkboxes choose files for pooling and for the other tabs. Click {name} to view it.", { name: name(ctx, otherFile(ctx), "another file") }),
     target: (ctx) => {
       const other = otherFile(ctx);
       return other ? { selector: '.gl-sample-list [role="option"]', text: other.name } : '.gl-sample-list [role="option"]';
@@ -364,7 +402,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "gating",
     title: "Back to the first file",
     body: (ctx) =>
-      `Each file is gated by the same tree, so its counts and plots are its own. Click ${name(otherFile(ctx), "the first file")} to view it again; the tutorial goes on with it.`,
+      tr(ctx)("Each file is gated by the same tree, so its counts and plots are its own. Click {name} to view it again; the tutorial goes on with it.", { name: name(ctx, otherFile(ctx), "the first file") }),
     target: (ctx) => {
       const other = otherFile(ctx);
       return other ? { selector: '.gl-sample-list [role="option"]', text: other.name } : '.gl-sample-list [role="option"]';
@@ -382,7 +420,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "gating",
     title: "The population tree",
     body: (ctx) =>
-      `The tree holds the populations, each defined by its gates, and the active one is highlighted. Clicking another makes it active: the plot shows its events, on the axes of the gates drawn on it. Click ${name(otherPopulation(ctx), "another population")}.`,
+      tr(ctx)("The tree holds the populations, each defined by its gates, and the active one is highlighted. Clicking another makes it active: the plot shows its events, on the axes of the gates drawn on it. Click {name}.", { name: name(ctx, otherPopulation(ctx), "another population") }),
     target: (ctx) => popRow(otherPopulation(ctx)),
     pointer: "click",
     enter: (ctx) => otherPopulation(ctx)?.id ?? null,
@@ -395,7 +433,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "tree",
     title: "Rename a population",
     body: (ctx) =>
-      `Double-click the name of ${name(firstPopulation(ctx), "a population")}, type a new name and press Enter. The name is the tree's; its gates and counts stay as they are.`,
+      tr(ctx)("Double-click the name of {name}, type a new name and press Enter. The name is the tree's; its gates and counts stay as they are.", { name: name(ctx, firstPopulation(ctx), "a population") }),
     target: (ctx) => popRow(firstPopulation(ctx)),
     pointer: "click",
     enter: (ctx) => {
@@ -414,8 +452,8 @@ export const TOUR_STEPS: readonly TourStep[] = [
     body: (ctx) => {
       const move = moveCandidates(ctx);
       return move
-        ? `Rows can be dragged. Dropped onto another population, a population becomes its child and its gates apply to that parent's events: drag ${name(move.leaf, "a leaf")} onto ${name(move.target, "another population")}; the counts follow. Dropped between rows, it only changes its place among its siblings; Option-drag copies it.`
-        : "Rows can be dragged. Dropped onto another population, a population becomes its child and its gates apply to that parent's events; dropped between rows, it only changes its place among its siblings. Nothing here to move, so Skip.";
+        ? tr(ctx)("Rows can be dragged. Dropped onto another population, a population becomes its child and its gates apply to that parent's events: drag {leaf} onto {target}; the counts follow. Dropped between rows, it only changes its place among its siblings; Option-drag copies it.", { leaf: name(ctx, move.leaf, "a leaf"), target: name(ctx, move.target, "another population") })
+        : tr(ctx)("Rows can be dragged. Dropped onto another population, a population becomes its child and its gates apply to that parent's events; dropped between rows, it only changes its place among its siblings. Nothing here to move, so Skip.");
     },
     target: (ctx) => popRow(moveCandidates(ctx)?.leaf),
     pointer: "click",
@@ -433,7 +471,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "tree",
     title: "Undo",
     body: "Every change to the gates and the tree can be undone: press Undo (⌘Z, or the arrow above the plot) to put the population back where it was.",
-    target: '.gl-history-tools button[aria-label="Undo"]',
+    target: '.gl-history-tools button[data-tour="undo"]',
     pointer: "click",
     // The tree's shape as entered; the undo is seen as any population changing parent.
     enter: (ctx) => treeShape(ctx),
@@ -446,7 +484,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "gates",
     title: "The gate list",
     body: (ctx) =>
-      `Above the tree, the gates: each card names its gate, its channels, its badge and its count in the active population. Click ${name(listGate(ctx), "another gate")} to select it; the plot switches to that gate's channels and shows it.`,
+      tr(ctx)("Above the tree, the gates: each card names its gate, its channels, its badge and its count in the active population. Click {name} to select it; the plot switches to that gate's channels and shows it.", { name: name(ctx, listGate(ctx), "another gate") }),
     target: (ctx) => {
       const gate = listGate(ctx);
       return gate ? { selector: ".gate-card", text: gate.name } : ".gate-card";
@@ -472,7 +510,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     title: "Draw a gate",
     body:
       "Choose the Rectangle tool, then drag a box on the plot. In the dialog that opens, name the gate, keep “Create population” ticked and press Create: the gate joins the list and its population the tree, under the active population.",
-    target: '.gl-draw-tools button[title^="Rectangle"]',
+    target: '.gl-draw-tools button[data-tool="draw-rect"]',
     pointer: "drag",
     pointerTarget: ".gl-plot-area svg .plot-bg",
     enter: (ctx) => Object.keys(ctx.gates).length,
@@ -483,7 +521,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "gates",
     title: "Check every file",
     body: "Several files can be drawn as one cloud. First tick every file: press All above the file list, or tick the boxes one by one.",
-    target: [{ selector: ".gl-left button", text: "All", exact: true }, ".gl-sample-list"],
+    target: (ctx) => [labelled(ctx, ".gl-left button", "All", true), ".gl-sample-list"],
     pointer: "click",
     done: (ctx) => ctx.files.length > 0 && ctx.files.every((file) => file.checked),
   },
@@ -493,7 +531,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     title: "Pool the files",
     body:
       "Press “Pool selected files”: the plot pools the checked files' events, and the counts on the gates and in the tree pool with it. A file whose channels differ from the viewed file's is named above the plot and left out.",
-    target: [{ selector: ".gl-pool-toolbar button", text: "Pool selected" }, ".gl-pool-toolbar"],
+    target: (ctx) => [labelled(ctx, ".gl-pool-toolbar button", "Pool selected"), ".gl-pool-toolbar"],
     pointer: "click",
     done: (ctx) => ctx.pooled,
   },
@@ -512,7 +550,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "gates",
     title: "Back to one file",
     body: "Press “Return to single file” to view one file again; the checked files stay checked for the other tabs.",
-    target: [{ selector: ".gl-pool-toolbar button", text: "Return to single" }, ".gl-pool-toolbar"],
+    target: (ctx) => [labelled(ctx, ".gl-pool-toolbar button", "Return to single"), ".gl-pool-toolbar"],
     pointer: "click",
     done: (ctx) => !ctx.pooled,
   },
@@ -533,8 +571,8 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "strategy",
     title: "The whole path",
     body: (ctx) =>
-      `Choose ${name(leafPopulation(ctx), "a population at the end of a path")} in the Population list, then tick “Full path from root” to see every gate from All Events down to it.`,
-    target: { selector: "label.gl-check", text: "Full path from root" },
+      tr(ctx)("Choose {name} in the Population list, then tick “Full path from root” to see every gate from All Events down to it.", { name: name(ctx, leafPopulation(ctx), "a population at the end of a path") }),
+    target: (ctx) => labelled(ctx, "label.gl-check", "Full path from root"),
     pointer: "click",
     done: (ctx) => !!ctx.strategy?.fullPath,
   },
@@ -543,7 +581,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "strategy",
     title: "Back-gating",
     body: "Tick “Back-gated” to overlay the final population's events on every step in orange, which shows where they sat before each gate. Pool checked files draws the steps from the pooled files; the PNG, SVG and PDF buttons export the grid.",
-    target: { selector: "label.gl-check", text: "Back-gated" },
+    target: (ctx) => labelled(ctx, "label.gl-check", "Back-gated"),
     pointer: "click",
     done: (ctx) => !!ctx.strategy?.back,
   },
@@ -564,7 +602,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "illustration",
     title: "Choose what to show",
     body: "Under Data, the Populations list sets which populations the figure shows. Tick or untick one in the list (None clears them, Leaves takes every population at the end of a path); the grid follows.",
-    target: [{ selector: "button", text: "Leaves", exact: true }, { selector: "button", text: "Use checked populations" }],
+    target: (ctx) => [labelled(ctx, "button", "Leaves", true), labelled(ctx, "button", "Use checked populations")],
     pointer: "click",
     enter: (ctx) => ctx.illustration?.populations ?? 0,
     done: (ctx, memo) => (ctx.illustration?.populations ?? 0) !== (memo as number),
@@ -574,7 +612,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "illustration",
     title: "Pooled panels",
     body: "In the Style section, set Composition to Pool: each panel draws the checked files' events together, and a gate is drawn where every file holds it alike, with the pooled percentage.",
-    target: { selector: "label", text: "Composition" },
+    target: (ctx) => labelled(ctx, "label", "Composition"),
     pointer: "click",
     done: (ctx) => ctx.illustration?.composition === "pool",
   },
@@ -583,9 +621,9 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "illustration",
     title: "Send a panel to Layout",
     body: "Right-click a panel and choose “Add this panel to the Layout tab”: the Layout tab gets a plot it keeps drawing from the live gates. The same menu sends a row, a column or the selected panels, and opens a panel on the Gating tab.",
-    target: [
-      { selector: '[role="menuitem"]', text: "Add this panel to the Layout tab" },
-      { selector: '[role="menuitem"]', text: "Add the figure to the Layout tab" },
+    target: (ctx) => [
+      labelled(ctx, '[role="menuitem"]', "Add this panel to the Layout tab"),
+      labelled(ctx, '[role="menuitem"]', "Add the figure to the Layout tab"),
       "td[data-figure-panel]",
     ],
     pointer: "click",
@@ -609,7 +647,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "layout",
     title: "Add a plot",
     body: "Press “+ Biplot” to add a plot of the active population on the Gating tab's axes. The inspector on the left sets its file, population, channels and whether it pools files.",
-    target: { selector: "button", text: "+ Biplot", exact: true },
+    target: (ctx) => labelled(ctx, "button", "+ Biplot", true),
     pointer: "click",
     enter: (ctx) => ctx.layout.items,
     done: (ctx, memo) => ctx.layout.items > (memo as number),
@@ -619,7 +657,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "layout",
     title: "The sheet's style",
     body: "Open Style and tick “All events”: every plot on the sheet draws every event rather than a sample of them. Iterate draws the sheet once per file, population or metadata value.",
-    target: [{ selector: "label.gl-check", text: "All events" }, { selector: "button", text: "Style", exact: true }],
+    target: (ctx) => [labelled(ctx, "label.gl-check", "All events"), labelled(ctx, "button", "Style", true)],
     pointer: "click",
     done: (ctx) => ctx.layout.allEvents,
   },
@@ -628,7 +666,8 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "layout",
     title: "Export the page",
     body: "Press “Export PDF” to write the sheet as a PDF; the format under Page can be SVG with editable text, or PNG. The file goes to your downloads.",
-    target: [{ selector: "button", text: "Export PDF", exact: true }, { selector: "button", text: "Export", exact: true }],
+    // The toolbar's button is worded from the format chosen under Page.
+    target: (ctx) => [{ selector: "button", text: tr(ctx)("Export {format}", { format: "PDF" }), exact: true }, labelled(ctx, "button", "Export", true)],
     pointer: "click",
     enter: (ctx) => ctx.signals.layoutExports,
     done: (ctx, memo) => ctx.signals.layoutExports > (memo as number),
@@ -672,7 +711,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "statistics",
     title: "The table",
     body: "The table covers the checked files. Press “Download CSV” to write it out, or Skip.",
-    target: { selector: "button", text: "Download CSV", exact: true },
+    target: (ctx) => labelled(ctx, "button", "Download CSV", true),
     pointer: "click",
     enter: (ctx) => ctx.signals.statsDownloads,
     done: (ctx, memo) => ctx.signals.statsDownloads > (memo as number),
@@ -694,7 +733,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "metadata",
     title: "Add a column",
     body: "Press “+ Field” to add a column, then give each file a value. The file list then offers the values as chips that check the files carrying them.",
-    target: [{ selector: "button", text: "+ Field", exact: true }, ".gl-center"],
+    target: (ctx) => [labelled(ctx, "button", "+ Field", true), ".gl-center"],
     pointer: "click",
     enter: (ctx) => ctx.metadataColumns.length,
     done: (ctx, memo) => ctx.metadataColumns.length > (memo as number),
@@ -726,7 +765,9 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "scales",
     title: "The Scales tab",
     body: (ctx) =>
-      `Open the Scales tab: the range each channel's axis is drawn on, ${ctx.scales.locked ? "shared by every file while the scale lock is on" : "for the file you are viewing"}.`,
+      tr(ctx)(ctx.scales.locked
+        ? "Open the Scales tab: the range each channel's axis is drawn on, shared by every file while the scale lock is on."
+        : "Open the Scales tab: the range each channel's axis is drawn on, for the file you are viewing."),
     target: tab("scales"),
     pointer: "click",
     needs: ANY_TAB,
@@ -739,18 +780,25 @@ export const TOUR_STEPS: readonly TourStep[] = [
     body: (ctx) => {
       const { adjusted, fitted } = ctx.scales;
       const one = (names: readonly string[]) => names.length === 1;
+      const t = tr(ctx);
       return [
-        "A row in blue holds a range that was adjusted after the file was read. The other rows are automatic, and their grey numbers are the range GateLab draws.",
+        t("A row in blue holds a range that was adjusted after the file was read. The other rows are automatic, and their grey numbers are the range GateLab draws."),
         // The mechanism, not a claim that the reader did it: a workspace saved with its scales
         // locked, as the demo is, opens with the ranges it was saved with.
         adjusted.length
-          ? `${listOf(adjusted)} ${one(adjusted) ? "is" : "are"} blue: moving, stretching or rescaling a plot on the Gating tab writes its range here, as the earlier steps of this tutorial do, and a Min or Max typed here does the same.`
-          : `You have adjusted none${ctx.scales.locked ? "" : " on this file"} yet: move or stretch a plot on the Gating tab, or type a Min or Max here, and its row turns blue.`,
+          ? t(one(adjusted)
+              ? "{names} is blue: moving, stretching or rescaling a plot on the Gating tab writes its range here, as the earlier steps of this tutorial do, and a Min or Max typed here does the same."
+              : "{names} are blue: moving, stretching or rescaling a plot on the Gating tab writes its range here, as the earlier steps of this tutorial do, and a Min or Max typed here does the same.", { names: listOf(ctx, adjusted) })
+          : t(ctx.scales.locked
+              ? "You have adjusted none yet: move or stretch a plot on the Gating tab, or type a Min or Max here, and its row turns blue."
+              : "You have adjusted none on this file yet: move or stretch a plot on the Gating tab, or type a Min or Max here, and its row turns blue."),
         fitted.length
-          ? `GateLab adjusted ${listOf(fitted)} itself, to keep the gates in view the first time ${one(fitted) ? "its" : "their"} plot was shown.`
+          ? t(one(fitted)
+              ? "GateLab adjusted {names} itself, to keep the gates in view the first time its plot was shown."
+              : "GateLab adjusted {names} itself, to keep the gates in view the first time their plot was shown.", { names: listOf(ctx, fitted) })
           : "",
-        "A range changes the view only: gates live in raw space, so no event moves in or out of one. Next to go on.",
-      ].filter(Boolean).join(" ");
+        t("A range changes the view only: gates live in raw space, so no event moves in or out of one. Next to go on."),
+      ].filter(Boolean).join(sentenceGap(ctx));
     },
     target: [".gl-scales-table", ".gl-tab-panel"],
     pointer: "none",
@@ -783,7 +831,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "compensation",
     title: "Every pair at once",
     body: "Open “Global inspector” above the matrix: every pair as a small biplot, ranked by how much attention it needs, with Flagged keeping the ones you mark for follow-up. Where a matrix can be edited, the Selected coefficient panel also carries an editor: stage a value, then Apply revised matrix recomputes the compensated assay.",
-    target: { selector: '[role="tab"]', text: "Global inspector", exact: true },
+    target: (ctx) => labelled(ctx, '[role="tab"]', "Global inspector", true),
     pointer: "click",
     done: (ctx) => ctx.compensation.view === "global",
   },
@@ -815,7 +863,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "finish",
     title: "Saving your work",
     body: "The Workspace menu saves: “Save Portable Copy” writes one .gatelab file with the FCS data, the compensation and the gating inside, which opens anywhere. Save a copy, or Skip. Import brings in FlowJo and FACSChorus gates and Gating-ML; Export writes them back out.",
-    target: ['[role="menuitem"]', ".gl-tour-workspace-menu > button"].map((selector, index) => (index === 0 ? { selector, text: "Save Portable Copy" } : selector)),
+    target: (ctx) => [labelled(ctx, '[role="menuitem"]', "Save Portable Copy"), ".gl-tour-workspace-menu > button"],
     pointer: "click",
     enter: (ctx) => ctx.signals.workspaceSaves,
     done: (ctx, memo) => ctx.signals.workspaceSaves > (memo as number),
@@ -836,8 +884,17 @@ export function chapterOf(step: TourStep): TourChapter {
   return TOUR_CHAPTERS.find((chapter) => chapter.id === step.chapter) ?? { id: step.chapter, title: step.chapter };
 }
 
+/** The sentences of a step's body, joined as the language joins sentences. */
+const sentenceGap = (ctx: TourContext) => (ctx.language === "ja" ? "" : " ");
+
+/** The step's title in the interface's language. */
+export function stepTitle(step: TourStep, ctx: TourContext): string {
+  return tr(ctx)(step.title);
+}
+
+/** The step's body in the interface's language, built from the context where it names the demo's own gates and files. */
 export function stepBody(step: TourStep, ctx: TourContext): string {
-  return typeof step.body === "function" ? step.body(ctx) : step.body;
+  return typeof step.body === "function" ? step.body(ctx) : tr(ctx)(step.body);
 }
 
 export function stepTarget(step: TourStep, ctx: TourContext): TourTargetSpec | null {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { chapterOf, needsOf, stepBody, stepTarget, TOUR_CHAPTERS, TOUR_STEPS, unmetNeeds } from "./tourScript";
+import { chapterOf, needsOf, stepBody, stepTarget, stepTitle, TOUR_CHAPTERS, TOUR_STEPS, unmetNeeds } from "./tourScript";
 import type { TourContext } from "./tourTypes";
+import { hasUiTranslation } from "../ui/i18n";
 
 /** An empty app, then the demo as the tutorial sees it: two files, All Events › Cells › Singlets. */
 function emptyContext(): TourContext {
@@ -84,6 +85,42 @@ describe("the tutorial script", () => {
     expect(stepBody(step("finish"), demoContext())).toContain("Bug reports and suggestions are welcome");
     expect(stepTarget(step("finish"), demoContext())).toBe('[data-tour="issues-link"]');
     expect(TOUR_STEPS.filter((candidate) => candidate.done).length).toBeGreaterThan(20);
+  });
+
+  it("speaks Japanese when the interface does: every title, body and chapter, with the demo's names quoted its way and the labels it points at as shown", () => {
+    const japanese = /[\u3040-\u30ff\u4e00-\u9fff]/;
+    const contexts = [emptyContext(), demoContext(), arcsinhContext(), { ...demoContext(), scales: { adjusted: ["FSC-A", "SSC-A"], fitted: ["CD4"], locked: true } }];
+    // A chapter is named as its tab is; the Plotting tab keeps its English name in Japanese.
+    for (const chapter of TOUR_CHAPTERS) expect(hasUiTranslation("ja", chapter.title) || chapter.title === "Plotting", chapter.title).toBe(true);
+    for (const step of TOUR_STEPS) {
+      expect(hasUiTranslation("ja", step.title), step.title).toBe(true);
+      if (typeof step.body === "string") expect(hasUiTranslation("ja", step.body), step.id).toBe(true);
+      for (const ctx of contexts) {
+        const ja = { ...ctx, language: "ja" as const };
+        expect(stepTitle(step, ja), step.id).toMatch(japanese);
+        const body = stepBody(step, ja);
+        expect(body, step.id).toMatch(japanese);
+        expect(body, step.id).not.toBe(stepBody(step, ctx));
+        // Nothing left in English: a sentence of the source would carry its spaces between words.
+        // A control is named as the interface shows it, quoted, and the demo's citation is its own.
+        if (step.id !== "about-demo") expect(body.replace(/「[^」]*」/g, ""), `${step.id}: ${body}`).not.toMatch(/[a-z]{3,} [a-z]{3,} [a-z]{3,}/);
+      }
+    }
+    const ja = { ...demoContext(), language: "ja" as const };
+    expect(stepBody(step("view-file"), ja)).toContain("「D2.fcs」");
+    expect(stepBody(step("move-population"), ja)).toContain("「B cells」を「Cells」の上に");
+    expect(stepBody(step("scales-info"), { ...ja, scales: { adjusted: ["FSC-A", "SSC-A"], fitted: [], locked: true } })).toContain("FSC-A、SSC-Aが青い");
+    expect(stepBody(step("scales-info"), { ...ja, scales: { adjusted: ["A", "B", "C", "D", "E"], fitted: [], locked: true } })).toContain("A、B、C、他2件が青い");
+    // The step points at the label the Japanese interface shows, not the English one.
+    expect(stepTarget(step("pool-files"), ja)).toEqual([{ selector: ".gl-pool-toolbar button", text: "選択したファイルをプール", exact: false }, ".gl-pool-toolbar"]);
+    expect(stepTarget(step("strategy-full-path"), ja)).toEqual({ selector: "label.gl-check", text: "ルートからの全パス", exact: false });
+    expect(stepTarget(step("layout-export"), ja)).toEqual([{ selector: "button", text: "PDF を書き出す", exact: true }, { selector: "button", text: "書き出し", exact: true }]);
+    expect(stepTarget(step("layout-export"), demoContext())).toEqual([{ selector: "button", text: "Export PDF", exact: true }, { selector: "button", text: "Export", exact: true }]);
+    // The data's own names are matched as they are.
+    expect(stepTarget(step("view-file"), ja)).toEqual({ selector: '.gl-sample-list [role="option"]', text: "D2.fcs" });
+    // English is untouched.
+    expect(stepTitle(step("welcome"), demoContext())).toBe("A walk through GateLab");
+    expect(stepTarget(step("pool-files"), demoContext())).toEqual([{ selector: ".gl-pool-toolbar button", text: "Pool selected", exact: false }, ".gl-pool-toolbar"]);
   });
 
   it("names the demo's own files, populations and gates", () => {
