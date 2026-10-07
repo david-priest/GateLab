@@ -6,7 +6,7 @@
 import { zipSync, strToU8 } from "fflate";
 import { cellDataUrlAtDpi, rasterizeSvg } from "./gridExport";
 import type { LayoutSheet } from "../engine/layout";
-import { pageOrigins, pageSizeMm, pageSizePx } from "../engine/layout";
+import { pageOrigins, pageSizeMm, pageSizePx, SCREEN_PX_PER_MM } from "../engine/layout";
 import { sanitizeFilePart } from "../engine/fcsExport";
 import { composeProportionsChartSvg } from "../ui/ProportionsTab";
 import { EXPORT_FONT, exportId, finishExportSvg, nameCell, nextTurn, pdfVectorPage, pngBlob } from "./exportSvg";
@@ -135,19 +135,53 @@ function addCell(root: SVGSVGElement, cell: HTMLElement, origin: DOMRect, zoom: 
   root.appendChild(g);
 }
 
+/** The items of the canvas in stacking order, each with its frame relative to `offset` in page pixels. */
+function pageItems(canvas: HTMLElement, origin: DOMRect, zoom: number, offset: { x: number; y: number }) {
+  return [...canvas.querySelectorAll<HTMLElement>(".gl-layout-item")]
+    .sort((a, b) => (Number(a.style.zIndex) || 0) - (Number(b.style.zIndex) || 0))
+    .map((item) => ({ item, frame: pageRect(item, origin, zoom, offset) }));
+}
+
+/**
+ * The part of the page an export cropped to its content covers: the items on the page, with
+ * `paddingMm` of white around them, and never beyond the page itself. Null when nothing is on
+ * the page, and the page is written whole.
+ */
+function cropBox(items: readonly { frame: { left: number; top: number; width: number; height: number } }[], width: number, height: number, paddingMm: number) {
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const { frame } of items) {
+    if (frame.left >= width || frame.top >= height || frame.left + frame.width <= 0 || frame.top + frame.height <= 0) continue;
+    left = Math.min(left, frame.left);
+    top = Math.min(top, frame.top);
+    right = Math.max(right, frame.left + frame.width);
+    bottom = Math.max(bottom, frame.top + frame.height);
+  }
+  if (!Number.isFinite(left)) return null;
+  const pad = Math.max(0, paddingMm) * SCREEN_PX_PER_MM;
+  const x = Math.max(0, Math.floor(left - pad));
+  const y = Math.max(0, Math.floor(top - pad));
+  return { x, y, width: Math.min(width, Math.ceil(right + pad)) - x, height: Math.min(height, Math.ceil(bottom + pad)) - y };
+}
+
 /**
  * Compose one page of the sheet's canvas element into an SVG the size of the page. Items are
  * taken in stacking order from the live DOM; `zoom` is the on-screen scale, so the composition
  * is the same at any zoom; `pageIndex` picks a page of the sheet's grid (row-major). Anything
- * beyond the page is clipped by the page.
+ * beyond the page is clipped by the page. With `crop`, the page is cut down to its items plus
+ * the padding, so a figure comes out without the blank paper around it.
  */
 export function composeLayoutSVG(
   canvas: HTMLElement,
   sheet: LayoutSheet,
-  options: { dpi: number; zoom: number; pageIndex?: number },
-): { root: SVGSVGElement; width: number; height: number } {
-  const { width, height } = pageSizePx(sheet.page);
-  const offset = pageOrigins(sheet.page)[options.pageIndex ?? 0] ?? { x: 0, y: 0 };
+  options: { dpi: number; zoom: number; pageIndex?: number; crop?: { paddingMm: number } },
+): ComposedPage {
+  const page = pageSizePx(sheet.page);
+  const pageOrigin = pageOrigins(sheet.page)[options.pageIndex ?? 0] ?? { x: 0, y: 0 };
+  const origin = canvas.getBoundingClientRect();
+  const crop = options.crop ? cropBox(pageItems(canvas, origin, options.zoom, pageOrigin), page.width, page.height, options.crop.paddingMm) : null;
+  const offset = crop ? { x: pageOrigin.x + crop.x, y: pageOrigin.y + crop.y } : pageOrigin;
+  const width = crop ? crop.width : page.width;
+  const height = crop ? crop.height : page.height;
   const root = document.createElementNS(SVG_NS, "svg");
   root.setAttribute("xmlns", SVG_NS);
   root.setAttribute("width", String(width));
@@ -159,14 +193,10 @@ export function composeLayoutSVG(
   bg.setAttribute("fill", "#ffffff");
   root.appendChild(bg);
 
-  const origin = canvas.getBoundingClientRect();
-  const items = [...canvas.querySelectorAll<HTMLElement>(".gl-layout-item")]
-    .sort((a, b) => (Number(a.style.zIndex) || 0) - (Number(b.style.zIndex) || 0));
   // Items are numbered in stacking order and named by their heading, so an editor's layers
   // panel reads plot-3-Lymphocytes rather than a row of anonymous groups.
   let index = 0;
-  for (const item of items) {
-    const frame = pageRect(item, origin, options.zoom, offset);
+  for (const { item, frame } of pageItems(canvas, origin, options.zoom, offset)) {
     // An item wholly outside this page is left to the page it is on.
     if (frame.left >= width || frame.top >= height || frame.left + frame.width <= 0 || frame.top + frame.height <= 0) continue;
     index += 1;
@@ -236,8 +266,12 @@ export function composeLayoutSVG(
     const block = exportId(host.querySelector(".gl-figure-grid") ? "figure" : "strategy", index, heading);
     host.querySelectorAll<HTMLElement>(".mini-plot-cell").forEach((cell, k) => addCell(root, cell, origin, options.zoom, options.dpi, offset, `${block}-panel-${k + 1}`));
   }
-  finishExportSvg(root, { widthPx: width, heightPx: height, ...pageSizeMm(sheet.page) });
-  return { root, width, height };
+  // The physical size: the sheet's page, or the cropped part of it at the page's pixels per mm.
+  const size = crop
+    ? { widthMm: width / SCREEN_PX_PER_MM, heightMm: height / SCREEN_PX_PER_MM }
+    : pageSizeMm(sheet.page);
+  finishExportSvg(root, { widthPx: width, heightPx: height, ...size });
+  return { root, width, height, ...size };
 }
 
 function serialize(root: SVGSVGElement): string {
@@ -246,14 +280,26 @@ function serialize(root: SVGSVGElement): string {
 
 export interface ComposedPage {
   root: SVGSVGElement;
+  /** The drawing's size in page pixels, what its coordinates are in. */
   width: number;
   height: number;
+  /** Its physical size. */
+  widthMm: number;
+  heightMm: number;
+}
+
+export interface ComposeOptions {
+  zoom: number;
+  /** Cut each page down to the items on it plus this much white around them. */
+  crop?: { paddingMm: number };
 }
 
 /** Every page of the sheet's grid, composed from the canvas as it is now. */
-export function composeSheetPages(canvas: HTMLElement, sheet: LayoutSheet, options: { zoom: number }): ComposedPage[] {
-  return pageOrigins(sheet.page).map((_, pageIndex) => composeLayoutSVG(canvas, sheet, { dpi: sheet.page.dpi, zoom: options.zoom, pageIndex }));
+export function composeSheetPages(canvas: HTMLElement, sheet: LayoutSheet, options: ComposeOptions): ComposedPage[] {
+  return pageOrigins(sheet.page).map((_, pageIndex) => composeLayoutSVG(canvas, sheet, { dpi: sheet.page.dpi, zoom: options.zoom, pageIndex, crop: options.crop }));
 }
+
+const PT_PER_MM = 72 / 25.4;
 
 /**
  * Write composed pages as the chosen format; the file is named after the sheet. One page is one
@@ -289,20 +335,26 @@ export async function writeComposedPages(composed: readonly ComposedPage[], shee
     downloadBlob(new Blob([zipSync(files) as BlobPart], { type: "application/zip" }), `${filename}.zip`);
     return;
   }
-  // The PDF page is the physical page. It is written as vector art, axes, gates and text as
-  // such and the events image embedded at the sheet's dpi; a page the writer cannot take is
-  // drawn as one raster instead, deflated, since jsPDF stores an image uncompressed unless told
-  // otherwise, at fifty times the size.
-  const { widthMm, heightMm } = pageSizeMm(sheet.page);
-  const orientation = widthMm >= heightMm ? "landscape" : "portrait";
+  // The PDF page is the physical page, each page at its own size once cropped. It is written as
+  // vector art, axes, gates and text as such and the events image embedded at the sheet's dpi;
+  // a page the writer cannot take is drawn as one raster instead, deflated, since jsPDF stores
+  // an image uncompressed unless told otherwise, at fifty times the size. The document is in
+  // points, the unit the writer measures text in: in any other unit it scales an em offset such
+  // as the one under every tick label by the unit's factor, and the labels drop off the axis.
+  const pageSize = (page: ComposedPage) => {
+    const width = page.widthMm * PT_PER_MM, height = page.heightMm * PT_PER_MM;
+    return { width, height, orientation: width >= height ? "landscape" as const : "portrait" as const };
+  };
   const { jsPDF } = await import("jspdf");
+  const first = pageSize(composed[0]);
   // With the document compressed, jsPDF deflates the images the writer embeds as well.
-  const pdf = new jsPDF({ orientation, unit: "mm", format: [widthMm, heightMm], compress: true });
+  const pdf = new jsPDF({ orientation: first.orientation, unit: "pt", format: [first.width, first.height], compress: true });
   for (const [index, page] of composed.entries()) {
-    if (index > 0) pdf.addPage([widthMm, heightMm], orientation);
-    if (!(await pdfVectorPage(pdf, page.root, { width: widthMm, height: heightMm }))) {
+    const { width, height, orientation } = pageSize(page);
+    if (index > 0) pdf.addPage([width, height], orientation);
+    if (!(await pdfVectorPage(pdf, page.root, { width, height }))) {
       const raster = await rasterizeSvg(page, dpi);
-      pdf.addImage(raster, "PNG", 0, 0, widthMm, heightMm, undefined, "FAST");
+      pdf.addImage(raster, "PNG", 0, 0, width, height, undefined, "FAST");
     }
     await nextTurn();
   }
@@ -314,7 +366,7 @@ export async function exportLayoutSheet(
   canvas: HTMLElement,
   sheet: LayoutSheet,
   format: LayoutExportFormat,
-  options: { zoom: number },
+  options: ComposeOptions,
 ): Promise<void> {
   await writeComposedPages(composeSheetPages(canvas, sheet, options), sheet, format);
 }

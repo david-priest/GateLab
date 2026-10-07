@@ -10,6 +10,7 @@ import { buildProportionsModel, defaultProportionsSettings, type ProportionsSett
 import pkg from "../package.json";
 import brandMark from "./assets/brand/gatelab-mark.png";
 import brandWordmark from "./assets/brand/gatelab-wordmark.png";
+import brandLogo from "./assets/brand/gatelab-logo.jpg";
 import { clearPersistedTabState, readPersistedTabValues, readProportionsSettings, restorePlottingState, savedPlottingState, writeProportionsSettings } from "./ui/tabState";
 import { historyShortcutAction } from "./ui/historyShortcuts";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type GatingPlotActions, type NewGate } from "./plots/GatingPlot";
@@ -37,7 +38,7 @@ import { buildChorusTimeline, isRecordingOfExperiment, treesRecordedUnder, type 
 import { ChorusTimelineModal } from "./ui/ChorusTimelineModal";
 import { compareChorusStatistics, parseChorusStatistics, type ChorusImportRecord, type ChorusStatistics, type FileCounts } from "./engine/chorusStatistics";
 import { ChorusStatisticsModal } from "./ui/ChorusStatisticsModal";
-import { MenuButton } from "./ui/MenuButton";
+import { MenuButton, type MenuEntry } from "./ui/MenuButton";
 import { ContextMenu, type ContextMenuState } from "./ui/ContextMenu";
 import { snapGatesToBorders } from "./engine/borderSnap";
 import { quadrantPopulationNames, shortChannelLabel, type QuadrantNaming } from "./engine/quadrantNames";
@@ -10926,6 +10927,56 @@ export default function App() {
   ]);
 
   /** Fit both axes to the robust event distribution plus every gate drawn on them. */
+  /** Both axes back to their automatic range in the current scale mode. */
+  const resetAxisRanges = useCallback(() => {
+    if (!sample) return;
+    setXRange(null);
+    setYRange(null);
+    setGlobalScale(sample.channels[xIdx].key, null);
+    setGlobalScale(sample.channels[yIdx].key, null);
+  }, [sample, xIdx, yIdx, setGlobalScale]);
+  /**
+   * The menu a right-click on the plot opens, away from a vertex or an edge, which the renderer
+   * answers with its own: the plot's actions, otherwise spread over the toolbars above and
+   * below it, at the pointer.
+   */
+  const plotContextItems = (): MenuEntry[] => [
+    ...(LAYOUT_TAB_AVAILABLE
+      ? [
+          {
+            label: t("Add to Layout"),
+            title: t("Put this plot, of this file and population, on the Layout tab, where it can be drawn once per file or once per population"),
+            disabled: !activeSampleId || !state.active_population_id,
+            onClick: addCurrentPlotToLayout,
+          },
+          "separator" as const,
+        ]
+      : []),
+    {
+      label: t("Fit data + gates"),
+      title: t("Fit the current view to the robust event distribution and every gate on these axes"),
+      onClick: fitDataAndGates,
+    },
+    {
+      label: t("Reset axis ranges"),
+      title: t("Reset X/Y to auto range in the current scale mode"),
+      onClick: resetAxisRanges,
+    },
+    {
+      label: t("Swap X and Y"),
+      title: t("Show the Y channel on X and the X channel on Y; the gates stay as they are"),
+      disabled: xIdx === yIdx,
+      onClick: () => { setXIdx(yIdx); setYIdx(xIdx); },
+    },
+    "separator",
+    ...DRAW_TOOLS.filter((tool) => tool.id !== "navigate").map((tool) => ({
+      label: t(tool.title.split(" — ")[0]),
+      title: drawingBlocked ? t("This tree follows its group's template — add gates there, or unlink it from its group") : t(tool.title),
+      disabled: drawingBlocked,
+      className: drawMode === tool.id ? "is-active" : undefined,
+      onClick: () => setDrawMode(tool.id),
+    })),
+  ];
   const fitDataAndGates = useCallback(() => {
     if (!sample) return;
     const xKey = sample.channels[xIdx]?.key;
@@ -11118,31 +11169,35 @@ export default function App() {
           <img className="gl-brand-mark" src={brandMark} alt="" />
           {isSceHost ? <strong>GateLabR</strong> : <img className="gl-brand-wordmark" src={brandWordmark} alt="GateLab" />}
           <span className="gl-brand-card" role="tooltip">
+            <img className="gl-brand-card-logo" src={brandLogo} alt="" />
             <span className="gl-brand-card-head">
               {isSceHost ? "GateLabR" : "GateLab"} v{pkg.version}
               <span className="gl-brand-card-by">{t("Developed by David Priest")}</span>
             </span>
             <p>
-              {t("A browser-based gating tool for flow and mass cytometry. Files never leave the machine. Every FCS is parsed, transformed and gated locally.")}
+              {isSceHost
+                ? t("Manual gating for a SingleCellExperiment, in the browser from an R session. The object's samples are the files; gates, populations and scales are saved back into it, and memberships can be written to colData.")
+                : t("A browser-based gating tool for flow and mass cytometry. Files never leave the machine: every FCS is parsed, transformed and gated locally, and a workspace is saved as one self-contained .gatelab bundle.")}
             </p>
             <p>
-              <b>{t("Mass cytometry (CyTOF).")}</b>{" "}
-              {t("Channels are shown with arcsinh at cofactor 5, which is the field convention, and gates are stored in that same space. There is no per-channel choice here because there is no competing convention to choose between.")}
-            </p>
-            <p>
-              <b>{t("Flow cytometry.")}</b>{" "}
-              {t("You pick a display scale per channel: linear or arcsinh for scatter, logicle or arcsinh for fluorescence. Gates are stored and evaluated in raw channel values regardless, so nothing you do to an axis can move an event in or out of a gate.")}
-            </p>
-            <p>
-              {t("This differs from FlowJo and from Gating-ML 2.0, which both treat a polygon as straight lines in the space the axis is showing. Under that model the gate changes when the view changes. The cost of doing it the other way is that a gate drawn straight in raw values looks bowed on a transformed axis, which the gate-edge control shows you rather than hides.")}
+              <b>{t("Gates live in raw channel values.")}</b>{" "}
+              {t("A display scale is chosen per channel: linear or arcsinh for scatter, logicle or arcsinh for fluorescence, arcsinh at cofactor 5 for mass cytometry. Gates are stored and evaluated in raw values regardless, so nothing done to an axis can move an event in or out of a gate; a gate drawn straight in raw values looks bowed on a transformed axis, which the gate-edge control shows rather than hides. FlowJo and Gating-ML 2.0 take the other view, a polygon straight in the space the axis shows, and the exports write the gate as each of them expects it.")}
             </p>
             <p>
               <b>{t("One tree, tailored per file.")}</b>{" "}
-              {t("A workspace holds one tree: its populations and gates apply to every file. Edits change the tree for every file, or, with \"this file only\" chosen, tailor a gate's coordinates for the viewed file alone; a tailored gate stops following the tree's until it is reverted. Revert gate restores one gate, Revert this file restores every gate of a file, and Apply to tree or Use for the tree pushes a file's coordinates back into the tree. The tree's structure is the same for every file; a different tree belongs in a different workspace.")}
+              {t("A workspace holds one tree: its populations and gates apply to every file. An edit changes the tree for every file, or, with \"this file only\", tailors a gate's coordinates for the viewed file alone until it is reverted or applied back to the tree. The tree's structure is the same for every file; a different tree belongs in a different workspace.")}
             </p>
             <p>
-              <b>{t("Gating-ML interchange is still being worked on.")}</b>{" "}
-              {t("Import and export of Gating-ML 2.0 and FlowJo workspaces are measured against FlowJo, Cytobank and CytoML on real files. Cytobank is the least settled of the three, because it supports only linear, log and arcsinh scales, so a logicle gate has to be re-expressed on the way out and that path is not yet exact. Check an exported file rather than trusting it, and please report anything that does not survive a round trip.")}
+              <b>{t("Beyond the Gating tab.")}</b>{" "}
+              {t("Strategy draws the back-gated path to a population; Illustration composes figures over files, populations and channels, pooled or overlaid, with their gates; Layout places plots and text on a page and exports it; Plotting charts composition by file or metadata; Compensation takes an embedded or imported matrix; Metadata, Panel, Scales and Statistics hold the rest.")}
+            </p>
+            <p>
+              <b>{t("Interchange.")}</b>{" "}
+              {t("FlowJo workspaces (.wsp) and Gating-ML 2.0 import and export, checked against FlowJo, Cytobank and CytoML on real files; a FACSDiva or FACSChorus experiment imports, and a FACSChorus .cef exports with the tree written back for the sorter. Cytobank reads only linear, log and arcsinh scales, so a logicle gate is traced for it and the export dialog says what was traced. Check an exported file rather than trusting it, and please report anything that does not survive a round trip.")}
+            </p>
+            <p>
+              <b>{t("Getting started.")}</b>{" "}
+              {t("Tutorial in the header walks through a demo workspace, and an AI agent can draw gates through the MCP server (Agent in the header).")}
             </p>
           </span>
         </span>
@@ -11782,12 +11837,7 @@ export default function App() {
 
                 <button className="gl-tool" title={t("Reset X/Y to auto range in the current scale mode")}
                   aria-label={t("Reset X and Y ranges to auto")}
-                  onClick={() => {
-                    setXRange(null);
-                    setYRange(null);
-                    setGlobalScale(sample.channels[xIdx].key, null);
-                    setGlobalScale(sample.channels[yIdx].key, null);
-                  }}>⟲</button>
+                  onClick={resetAxisRanges}>⟲</button>
                 <button
                   type="button"
                   className={`gl-scale-lock-button${lockScalesBetweenFiles ? " active" : ""}`}
@@ -12298,6 +12348,12 @@ export default function App() {
               className="gl-plot-area"
               ref={plotAreaRef}
               style={{ cursor: drawMode === "navigate" ? "grab" : "crosshair" }}
+              onContextMenu={(event) => {
+                // A vertex or an edge stops the event before it gets here, with its own menu.
+                if (!sample) return;
+                event.preventDefault();
+                setPlotMenu({ x: event.clientX, y: event.clientY, label: t("Plot"), items: plotContextItems() });
+              }}
             >
             {/* An overlay on the plot, so it never moves the plot. Shown only when a gate on this plot actually curves, and only in the modes where that
                 is visible — and dismissible, because it answers a question once. The full explanation

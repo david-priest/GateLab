@@ -16,9 +16,12 @@ interface CapturedPlotProps {
     snap_to_gates?: boolean;
     x_b64: string;
     y_b64: string;
+    x_label: string;
+    y_label: string;
   };
   onNewGate: (gate: NewGate) => void;
   onGateEdit: (edit: { gate_id: string; vertices: [number, number][] }) => void;
+  onRangeChange: (event: { x_range: [number, number]; y_range: [number, number] }) => void;
   onQuadrantMove: (edit: { gate_id: string; center: [number, number] }) => void;
   onGateSelect: (gateId: string) => void;
   onGateLabelMove: (edit: { gate_id: string; label_offset: [number, number] }) => void;
@@ -328,5 +331,44 @@ describe("App gating viewport invariant", () => {
     expect(after[2]).toEqual(before[1]);
     expect(after[1][0]).toBeGreaterThan(before[0][0]);
     expect(after[1][0]).toBeLessThan(before[1][0]);
+  });
+
+  it("opens the plot's own menu on a right-click away from a gate: Layout, fit, reset, swap and the draw tools", async () => {
+    act(() => root.render(<App />));
+    const fcsInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(fcsInput, "files", { configurable: true, value: [testFile()] });
+    await act(async () => {
+      fcsInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const menuItems = () => [...host.querySelectorAll<HTMLButtonElement>('[role="menu"][aria-label="Plot"] [role="menuitem"]')];
+    const menuItem = (label: string) => menuItems().find((b) => b.textContent === label);
+    const area = host.querySelector<HTMLElement>(".gl-plot-area")!;
+    const open = () => act(() => { area.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 40 })); });
+    open();
+    expect(menuItems().map((b) => b.textContent)).toEqual([
+      "Add to Layout", "Fit data + gates", "Reset axis ranges", "Swap X and Y",
+      "Rectangle gate", "Polygon gate", "Ellipse gate", "Quadrant gate",
+    ]);
+    // Swap: the axes change places and the menu closes.
+    expect([plotHarness.props!.payload.x_label, plotHarness.props!.payload.y_label]).toEqual(["FSC-A", "SSC-A"]);
+    act(() => menuItem("Swap X and Y")!.click());
+    expect(menuItems()).toHaveLength(0);
+    expect([plotHarness.props!.payload.x_label, plotHarness.props!.payload.y_label]).toEqual(["SSC-A", "FSC-A"]);
+    // A draw tool chosen from the menu is the active tool, ticked next time.
+    open();
+    act(() => menuItem("Polygon gate")!.click());
+    expect(host.querySelector('.gl-draw-tools button[aria-label^="Polygon gate"]')!.classList.contains("active")).toBe(true);
+    open();
+    expect(menuItem("Polygon gate")!.classList.contains("is-active")).toBe(true);
+    act(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
+    // Fit and reset act on the ranges as the toolbar buttons do.
+    const auto = ranges();
+    act(() => plotHarness.props!.onRangeChange({ x_range: [0, 1000], y_range: [0, 1000] }));
+    expect(ranges().x).toEqual([0, 1000]);
+    open();
+    act(() => menuItem("Reset axis ranges")!.click());
+    expect(ranges()).toEqual(auto);
   });
 });

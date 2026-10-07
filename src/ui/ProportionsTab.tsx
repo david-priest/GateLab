@@ -763,6 +763,7 @@ export function ProportionsChart({
   containerId = "gl-prop-svg",
 }: ChartProps) {
   const { catLevels, perSample, hasFacet, levels } = model;
+  const { t } = useI18n();
   const [hoveredLegend, setHoveredLegend] = useState<number | null>(null);
   const [pinnedLegend, setPinnedLegend] = useState<number | null>(null);
   const highlightedLegend = hoveredLegend ?? pinnedLegend;
@@ -784,6 +785,17 @@ export function ProportionsChart({
   const legendColumns = Math.min(4, Math.max(1, Math.ceil(legend.length / 10)));
   const markOpacity = (legendIndex: number) =>
     highlightedLegend === null || highlightedLegend === legendIndex ? 1 : 0.16;
+  // A highlight dims every other mark, and a pinned one stays until it is cleared, which read as
+  // the chart stuck faint: the pin says so under the legend, a click on the chart or Escape
+  // clears it, and a highlight is dropped when the legend it was made on changes.
+  const clearHighlight = () => {
+    setHoveredLegend(null);
+    setPinnedLegend(null);
+  };
+  useEffect(() => {
+    setHoveredLegend(null);
+    setPinnedLegend(null);
+  }, [plotType, legend.length]);
 
   const renderPanel = (facet: string | null, key: string) => {
     const sub = hasFacet
@@ -1066,12 +1078,29 @@ export function ProportionsChart({
       id={containerId}
       className="gl-prop-chart"
       style={{ minWidth: Math.max(360, legendColumns * 145) }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && (hoveredLegend !== null || pinnedLegend !== null)) {
+          event.stopPropagation();
+          clearHighlight();
+        }
+      }}
     >
-      <div className="gl-prop-panels">
+      <div
+        className="gl-prop-panels"
+        onClick={pinnedLegend === null ? undefined : clearHighlight}
+        title={pinnedLegend === null ? undefined : t("Click to show every category again")}
+      >
         {facets.map((f, i) => renderPanel(f, `p${i}`))}
       </div>
+      {pinnedLegend !== null && legend[pinnedLegend] && (
+        <p className="gl-prop-highlight-note" role="status">
+          {t("Highlighting {label}; the rest is faded. Click it again, the chart or Show all to clear.", { label: legend[pinnedLegend].label })}
+          <button type="button" className="gl-mini-btn" onClick={clearHighlight}>{t("Show all")}</button>
+        </p>
+      )}
       <div
         className="gl-prop-legend"
+        onPointerLeave={() => setHoveredLegend(null)}
         hidden={appearance?.showLegend === false}
         aria-label={plotType === "stacked" ? "Categories" : "Groups"}
         style={{
@@ -1087,7 +1116,7 @@ export function ProportionsChart({
               "gl-prop-legend-item" +
               (highlightedLegend === i ? " highlighted" : "")
             }
-            title={`${l.label} — hover to highlight; click to pin`}
+            title={t("{label} — hover to highlight; click to keep it highlighted, click again to clear", { label: l.label })}
             aria-pressed={pinnedLegend === i}
             onMouseEnter={() => setHoveredLegend(i)}
             onMouseLeave={() => setHoveredLegend(null)}
