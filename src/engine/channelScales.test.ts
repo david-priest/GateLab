@@ -150,8 +150,13 @@ describe("workspace-wide channel scales", () => {
     const samples = files.map(loadReal);
     const key = "CD19-A (BV421-A)";
 
+    // These are S8 files, which record Chorus's own logicle per parameter (sample.ts,
+    // recordedLogicle), so each opens on the display the sorter showed, and the four agree before
+    // any unification: W = (7 − log10(2^31 / R)) / 2 with the R each file wrote. The per-file
+    // estimates they opened on before that (0.500 vs 1.143) are what unification was for.
     const before = samples.map((s) => s.currentLogicleW(s.index(key)!));
-    expect(Math.max(...before) - Math.min(...before)).toBeGreaterThan(0.5); // 0.500 vs 1.143
+    for (const s of samples) expect(s.logicleM(s.index(key)!)).toBe(7);
+    expect(Math.max(...before) - Math.min(...before)).toBeLessThan(0.05);
 
     const scales = new ChannelScales();
     for (const s of samples) s.attachChannelScales(scales);

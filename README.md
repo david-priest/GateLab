@@ -122,12 +122,22 @@ agent itself reads: the data it sees, the commands it can send, and the rules it
   **FCS**; SVG / PDF figure export.
 - Import gates from a **BD FACSChorus experiment file** (`.cef`, the FACSDiscover S8's): the
   gates as they are now, or the snapshot every sort record keeps of the gates it was sorted
-  under, with the colours Chorus drew them in. Gates on linear axes import exactly; gates on
-  Chorus's biexponential or log axes import straight in raw space and say so (within 2.4% of
-  Chorus's own counts in the experiment checked), because Chorus's automatic display width is
-  computed from the data and not written to the file. **Compare with FACSChorus statistics…**
-  reads the `_Statistics.csv` Chorus exports and sets its population counts per recording
-  beside GateLab's on the file of the same name, with the reason for every difference.
+  under, with the colours Chorus drew them in. Gates on linear axes import exactly. Gates on
+  Chorus's biexponential axes are evaluated as Chorus evaluates them, in the display the S8's
+  FCS file records for each parameter (`$PnR`, `PnM` and `PnMS`: the logicle's T, M and R):
+  on the two recordings checked against Chorus's own statistics export, 58 of 62 population
+  counts were exact and the rest within 0.12%. An S8 file also opens on that display, so its
+  axes are the ones the sorter showed. A file from an older Chorus that records none still
+  imports its gates straight in raw space, and says so. **Compare with FACSChorus
+  statistics…** reads the `_Statistics.csv` Chorus exports and sets its population counts per
+  recording beside GateLab's on the file of the same name, with the reason for every
+  difference.
+- **Export a FACSChorus experiment** (`.cef`): the viewed file's tree written back into the
+  experiment file it came from, its live gates replaced and everything else — panels,
+  reagents, carriers, worksheets, sort template and sort records — kept as Chorus wrote it, as
+  a new `.cef` for Chorus to import. A gate imported from Chorus goes back to the vertices
+  Chorus wrote; an unchanged tree gives back the file byte for byte. A population Chorus has no
+  form for (several gates, an excluded gate) is left out and named.
 - Every FCS the S8 exports carries the gates it was recorded under (a `BDCHORUSDATARECORD`
   keyword). **Import gates recorded in the loaded files…** reads them from the files
   themselves: one tree tailored per file where the recordings differ, no experiment file

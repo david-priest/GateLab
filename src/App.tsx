@@ -32,6 +32,7 @@ import {
 } from "./engine/flowjoWorkspace";
 import { isDivaWorkspace, listDivaGateTrees, listDivaTubes, pairDivaTube, divaToGatingML, type DivaGateTreeSummary, type DivaTubeSummary } from "./engine/divaWorkspace";
 import { isChorusExperimentFile, readChorusExperiment, listChorusTrees, chorusToGatingML, chorusRecordingToGatingML, hasChorusRecording, readChorusRecording, treeSignature, type ChorusExperiment, type ChorusTreeSummary } from "./engine/chorusExperiment";
+import { exportChorusExperiment } from "./engine/chorusExport";
 import { buildChorusTimeline, isRecordingOfExperiment, treesRecordedUnder, type LoadedChorusRecording } from "./engine/chorusTimeline";
 import { ChorusTimelineModal } from "./ui/ChorusTimelineModal";
 import { compareChorusStatistics, parseChorusStatistics, type ChorusImportRecord, type ChorusStatistics, type FileCounts } from "./engine/chorusStatistics";
@@ -1496,6 +1497,8 @@ export default function App() {
   // The last FACSChorus tree converted for import: which gates it held and what was done with
   // each, so a Chorus statistics export can be set beside GateLab's counts with reasons.
   const [chorusImport, setChorusImport] = useState<ChorusImportRecord | null>(null);
+  /** The .cef last opened, kept so the tree can be written back into it (Export FACSChorus experiment). */
+  const [chorusSource, setChorusSource] = useState<{ name: string; bytes: Uint8Array } | null>(null);
   const [chorusStats, setChorusStats] = useState<ChorusStatistics | null>(null);
   const chorusStatsRef = useRef<HTMLInputElement | null>(null);
   /**
@@ -3382,7 +3385,7 @@ export default function App() {
    */
   async function importChorusTree(experiment: ChorusExperiment, index: number, cross: { file: string; why: string } | null = null) {
     try {
-      const conv = chorusToGatingML(experiment, index);
+      const conv = chorusToGatingML(experiment, index, { keywords: sample?.fcs.keywords ?? null });
       setChorusImport(conv.record);
       // Every other loaded file that is a recording of this experiment gets the tree it was
       // recorded under -- its own, read from the file -- as a FlowJo workspace's files get their
@@ -3406,7 +3409,7 @@ export default function App() {
         }
         try {
           const recording = readChorusRecording(entry.sample.fcs.keywords)!;
-          const own = chorusRecordingToGatingML(recording, { currentGates });
+          const own = chorusRecordingToGatingML(recording, { currentGates, keywords: entry.sample.fcs.keywords });
           const under = treesRecordedUnder(experiment, recording);
           siblings.push({
             name: entry.name, gatingMl: own.gatingMl, fileName: entry.name, entryId: entry.id,
@@ -3544,7 +3547,7 @@ export default function App() {
       for (const r of chosen) {
         const entry = samples.find((e) => e.id === r.fileId);
         if (!entry) continue;
-        const conv = chorusRecordingToGatingML(r.recording, { currentGates });
+        const conv = chorusRecordingToGatingML(r.recording, { currentGates, keywords: entry.sample.fcs.keywords });
         for (const w of conv.warnings) if (!warnings.includes(w)) warnings.push(w);
         const pnn: Record<string, string> = {};
         for (const c of entry.sample.channels) pnn[c.pnn] = c.key;
@@ -3767,9 +3770,11 @@ export default function App() {
       // now and a snapshot of them at the start of every sort — the gating a sorted sample was
       // sorted under — so the user chooses which, unless there is only one.
       if (isChorusExperimentFile(file.name)) {
-        const experiment = readChorusExperiment(new Uint8Array(await file.arrayBuffer()));
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const experiment = readChorusExperiment(bytes);
         const trees = listChorusTrees(experiment).filter((t) => t.gateCount > 0);
         if (!trees.length) throw new Error("This FACSChorus experiment contains no gates GateLab can read.");
+        setChorusSource({ name: file.name, bytes });
         // The timeline, which also offers each loaded recording's own tree. The .cef holds no
         // recordings, so nothing in it says the loaded file is its data: applying its one tree
         // straight away put one experiment's gates on any file that happened to be viewed. The
@@ -5694,6 +5699,42 @@ export default function App() {
       await exportFlowJoFolder(scope, wanted, groups);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /**
+   * The viewed file's tree written back into the FACSChorus experiment it came from (or one the
+   * user picks), as a new .cef for Chorus to import as an experiment. The source is replaced only
+   * in its live gates; the digest is copied, Chorus being the judge of it.
+   */
+  async function exportChorusFile(): Promise<void> {
+    if (!sample || state.root_population_id === null) return;
+    let source = chorusSource;
+    if (!source) {
+      const picked = await pickFiles({ "application/zip": [".cef"] }, "FACSChorus experiment");
+      const file = picked?.[0];
+      if (!file) return;
+      source = { name: file.name, bytes: new Uint8Array(await file.file.arrayBuffer()) };
+      setChorusSource(source);
+    }
+    setError(null);
+    try {
+      const result = exportChorusExperiment({
+        source: source.bytes,
+        channels: sample.channels.map((c) => ({ key: c.key, pnn: c.pnn })),
+        keywords: sample.fcs.keywords,
+        gates: state.gates,
+        populations: state.populations,
+        root_population_id: state.root_population_id,
+      });
+      const stem = source.name.replace(/\.cef$/i, "");
+      const name = `${stem} (GateLab).cef`;
+      downloadBlob(name, new Blob([result.bytes as BlobPart], { type: "application/zip" }));
+      const left = result.skipped.length ? ` · ${result.skipped.length} population${result.skipped.length === 1 ? "" : "s"} left out` : "";
+      setImportMsg(`Saved ${name}: ${result.written} gate${result.written === 1 ? "" : "s"} written into the experiment${left}. Import it in FACSChorus as an experiment.`);
+      if (result.warnings.length) setError(result.warnings.join("\n"));
+    } catch (cause) {
+      setError(`FACSChorus export failed: ${cause instanceof Error ? cause.message : String(cause)}`);
     }
   }
 
@@ -8982,9 +9023,11 @@ export default function App() {
       // A .cef holds the gates as they are now plus a snapshot per sort, but no event data.
       // Choose its tree first, then request the FCS it belongs to just as a .wsp requests data.
       if (isChorusExperimentFile(wsFileName)) {
-        const experiment = readChorusExperiment(new Uint8Array(await file.arrayBuffer()));
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const experiment = readChorusExperiment(bytes);
         const trees = listChorusTrees(experiment).filter((tree) => tree.gateCount > 0);
         if (!trees.length) throw new Error("This FACSChorus experiment contains no gates GateLab can read.");
+        setChorusSource({ name: wsFileName, bytes });
         // Always the timeline. Even one tree needs a button when no FCS is loaded: browsers only
         // allow the second file picker to open directly from a user gesture. With a file loaded,
         // nothing in the .cef says the file is its data, so the tree is applied only when chosen.
@@ -11234,6 +11277,12 @@ export default function App() {
                 onClick: () => setFlowJoExportOpen(true),
               },
               {
+                label: t("Export FACSChorus experiment…"),
+                title: "Write the viewed file's gating tree back into the FACSChorus experiment file (.cef) it was imported from, as a new .cef that FACSChorus imports as an experiment: its live gates replaced, everything else kept. Asks for the .cef when none was opened in this session.",
+                disabled: Object.keys(state.gates).length === 0 || !sample,
+                onClick: () => void exportChorusFile(),
+              },
+              {
                 label: t("Save hierarchy CSV…"),
                 title: "Write this workspace's gates and populations as a CSV the import reads back: for a debarcoding strategy, the sample table plus every gate and the QC populations, and a gate template (JSON); for any other workspace, every polygon and rectangle gate and every population.",
                 disabled: Object.keys(state.gates).length === 0,
@@ -13181,6 +13230,7 @@ export default function App() {
             if (picked.experiment) void chooseChorusTree(picked.experiment, treeIndex);
           }}
           onImportRecordings={(fileIds) => importChorusRecordings(fileIds)}
+          onAddFiles={() => void openFcs()}
           onCancel={() => setChorusPicker(null)}
         />
       )}
