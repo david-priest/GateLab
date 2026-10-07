@@ -19,16 +19,19 @@
  * Chorus's gate model is FlowJo's: raw vertices, straight in the space each parameter is
  * DISPLAYED in, which is `scale` Linear, Biexponential or Log. A Linear axis is raw, so a gate
  * on two Linear axes (scatter, most QC) imports exactly. A Biexponential axis is BD's
- * biexponential, the Logicle whose width comes from the parameter's "R value" (the most
- * negative displayed value), the model GateLab already uses for FACSDiva (divaWorkspace.ts).
- * The R value is in the file only when someone set it by hand
- * (`visualizationSettings.analysisRValueMap`); Chorus's default is automatic (−1), computed
- * from the data by a rule the file does not record, and the S8's T and M are not Diva's 18-bit
- * constants either. So those gates import straight in raw space and say so. Checked against
- * Chorus's own statistics export for one experiment (three recordings, 93 population counts):
- * Linear-axis gates match event for event, biexponential-axis gates land within 2.4%, and no
- * single global R reproduces the counts. `chorusBiexSpec` holds the model for a file whose R
- * values are set; `CHORUS_DISPLAY_MODEL` is null.
+ * biexponential, the Logicle whose width comes from the parameter's "R value",
+ * W = (M − log10(T / R)) / 2, the model GateLab already uses for FACSDiva (divaWorkspace.ts).
+ * The S8's FCS files record that display for every parameter: `$PnR` is T (2^31), `PnM` is M
+ * (7) and `PnMS` is R, beside `$PnD` (the decades drawn) and `PnMDMin` / `PnMDMax` (the axis
+ * window shown); a `.cef` carries the same R values in `visualizationSettings.analysisRValueMap`.
+ * Read from the target file's keywords (`chorusDisplayFromKeywords`), the model reproduces
+ * Chorus's own statistics export: on two recordings of one experiment (FACSChorus 6.3.0, 31
+ * population counts each, 28 gates on biexponential axes) 28 of 31 and 30 of 31 counts are
+ * exact and the rest are within 0.12%, where raw-space import was within 2.4% (2026-10-07; the
+ * search over T ∈ {2^27 − 1 … 2^31} × M ∈ {4 … 8.13} singled out T = $PnR, M = PnM). So a gate
+ * on a biexponential axis is carried into that display when the file records it, and imports
+ * straight in raw space, saying so, only when it does not (`CHORUS_DISPLAY_MODEL` is null:
+ * without the keywords there is no model to apply).
  *
  * Like the FlowJo and Diva importers, this one rewrites the gates as a Gating-ML 2.0 document
  * with names and parents and hands it to importGatingML, so channel resolution, validation,
@@ -377,8 +380,43 @@ export function chorusBiexSpec(rValue: number, model: ChorusDisplayModel): Trans
   return { kind: "logicle", T: model.T, W, M: model.M, A: 0 };
 }
 
-/** Null: the S8's T and M are unpinned and Chorus's default R is automatic (see chorusBiexSpec). */
+/** Null: without a file's keywords there is no model to apply (see chorusDisplayFromKeywords). */
 export const CHORUS_DISPLAY_MODEL: ChorusDisplayModel | null = null;
+
+/** One parameter's biexponential as the S8 records it: T from `$PnR`, M from `PnM`, R from `PnMS`. */
+export interface ChorusAxisDisplay {
+  T: number;
+  M: number;
+  R: number;
+}
+
+/**
+ * The biexponential display an S8 FCS file records per parameter, keyed by `$PnN`: `$PnR` (T),
+ * `PnM` (M) and `PnMS` (R). Parameters missing any of the three, or with values that give no
+ * logicle (R ≤ 0, M ≤ 0, T ≤ 0), are left out; null when no parameter carries them, which is
+ * what a file from before FACSChorus 6.3 looks like.
+ */
+export function chorusDisplayFromKeywords(keywords: Record<string, string> | null | undefined): Map<string, ChorusAxisDisplay> | null {
+  if (!keywords) return null;
+  const n = Number(keywords["$PAR"]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const out = new Map<string, ChorusAxisDisplay>();
+  for (let i = 1; i <= n; i++) {
+    const name = keywords[`$P${i}N`];
+    if (!name) continue;
+    const T = Number(keywords[`$P${i}R`]);
+    const M = Number(keywords[`P${i}M`]);
+    const R = Number(keywords[`P${i}MS`]);
+    if (!(T > 0) || !(M > 0) || !(R > 0)) continue;
+    out.set(name, { T, M, R });
+  }
+  return out.size ? out : null;
+}
+
+/** The logicle an axis display gives: W from R, as chorusBiexSpec. */
+export function chorusAxisSpec(axis: ChorusAxisDisplay): TransformSpec | null {
+  return chorusBiexSpec(axis.R, { T: axis.T, M: axis.M });
+}
 
 // ── Trees ───────────────────────────────────────────────────────────────────────────────────
 
@@ -531,7 +569,7 @@ function qualifiedNames(items: Array<{ id: string; path: string[] }>): Map<strin
 export function chorusToGatingML(
   exp: ChorusExperiment,
   treeIndex: number,
-  opts: { displayModel?: ChorusDisplayModel | null } = {},
+  opts: { displayModel?: ChorusDisplayModel | null; keywords?: Record<string, string> | null } = {},
 ): ChorusConversion {
   const all = trees(exp);
   const tree = all[treeIndex];
@@ -540,7 +578,7 @@ export function chorusToGatingML(
   }
   const model = opts.displayModel === undefined ? CHORUS_DISPLAY_MODEL : opts.displayModel;
   // A snapshot is compared with the live gates, so a gate moved after the sort can be named.
-  return convertTree(exp.name, tree, model, tree.kind === "sort" ? exp.panels[0]?.gates ?? null : null);
+  return convertTree(exp.name, tree, model, tree.kind === "sort" ? exp.panels[0]?.gates ?? null : null, chorusDisplayFromKeywords(opts.keywords));
 }
 
 /** One gate's geometry, for telling a snapshot's gate from the current one of the same name. */
@@ -556,14 +594,19 @@ function gateGeometryKey(g: ChorusGate): string {
  */
 export function chorusRecordingToGatingML(
   rec: ChorusRecording,
-  opts: { displayModel?: ChorusDisplayModel | null; currentGates?: readonly ChorusGate[] | null } = {},
+  opts: { displayModel?: ChorusDisplayModel | null; currentGates?: readonly ChorusGate[] | null; keywords?: Record<string, string> | null } = {},
 ): ChorusConversion {
   const model = opts.displayModel === undefined ? CHORUS_DISPLAY_MODEL : opts.displayModel;
   const tree: Tree = { kind: "recording", label: rec.name, panel: rec.panel, gates: rec.panel.gates, sortedAt: rec.startedAt, sort: null };
-  return convertTree(rec.experimentName ?? "FACSChorus recording", tree, model, opts.currentGates ?? null);
+  return convertTree(rec.experimentName ?? "FACSChorus recording", tree, model, opts.currentGates ?? null, chorusDisplayFromKeywords(opts.keywords));
 }
 
-function convertTree(expName: string, tree: Tree, model: ChorusDisplayModel | null, currentGates: readonly ChorusGate[] | null): ChorusConversion {
+/**
+ * `display`: the biexponential the target FCS file records per `$PnN` (chorusDisplayFromKeywords);
+ * a gate on such an axis is carried into it. `model`: the global fallback for a file that records
+ * none, applied with the panel's R values when given, which it is not by default.
+ */
+function convertTree(expName: string, tree: Tree, model: ChorusDisplayModel | null, currentGates: readonly ChorusGate[] | null, display: Map<string, ChorusAxisDisplay> | null = null): ChorusConversion {
   // The current gates by the population they define: a gate of a snapshot that has no
   // geometrically identical current gate under that name has moved since.
   const current = currentGates ? new Map<string, string[]>() : null;
@@ -613,6 +656,7 @@ function convertTree(expName: string, tree: Tree, model: ChorusDisplayModel | nu
   let emitted = 0;
   let approximated = 0;
   const approximatedNames: string[] = [];
+  let carriedCount = 0;
   const unsupported: string[] = [];
   const reports: ChorusGateReport[] = [];
 
@@ -641,17 +685,24 @@ function convertTree(expName: string, tree: Tree, model: ChorusDisplayModel | nu
       note(`"${displayName}" is drawn on a detector whose FCS name could not be reconstructed (${g.parameters.map((p) => p.measurementId).join(" × ")}); it and anything below it were skipped.`);
       return;
     }
-    // The space each axis is straight in. Linear IS raw. Biexponential is carried only under a
-    // calibrated model; without one the gate imports straight in raw and is named below.
-    const specs: Array<TransformSpec | null> = g.parameters.slice(0, 2).map((p) => {
+    // The space each axis is straight in. Linear IS raw. Biexponential is carried into the
+    // display the target file records for that parameter (T = $PnR, M = PnM, R = PnMS), or
+    // under a calibrated global model with the panel's R value; without either the gate imports
+    // straight in raw and is named below.
+    const specs: Array<TransformSpec | null> = g.parameters.slice(0, 2).map((p, i) => {
       if (p.scale === "Linear" || !p.scale) return { kind: "identity" as const };
-      if (p.scale === "Biexponential" && model) {
-        const r = tree.panel.rValues.get(parameterKey(p));
-        return r !== undefined ? chorusBiexSpec(r, model) : null;
+      if (p.scale === "Biexponential") {
+        const axis = display?.get(axisNames[i]!);
+        if (axis) return chorusAxisSpec(axis);
+        if (model) {
+          const r = tree.panel.rValues.get(parameterKey(p));
+          return r !== undefined ? chorusBiexSpec(r, model) : null;
+        }
       }
       return null;
     });
     const carried = specs.every((s) => s !== null) && specs.some((s) => s!.kind !== "identity");
+    if (carried) carriedCount++;
     if (specs.some((s) => s === null)) {
       approximated++;
       approximatedNames.push(`"${displayName}"`);
@@ -738,8 +789,16 @@ function convertTree(expName: string, tree: Tree, model: ChorusDisplayModel | nu
       `${approximated} gate(s) are drawn on axes Chorus displays with its biexponential or log scale and were imported straight in RAW space: ` +
       `${approximatedNames.slice(0, 6).join(", ")}${approximated > 6 ? ", …" : ""}. Chorus evaluates them straight in its display, ` +
       "so their counts will differ from Chorus's near the axes (within 2.4% of every population count in the one experiment " +
-      "checked against Chorus's own statistics export). Chorus's automatic R values are computed from the data and not stored, " +
-      "so the display cannot be rebuilt from the file; a Linear axis is exact.",
+      "checked against Chorus's own statistics export). The file this tree was applied to records no display for these axes " +
+      "(the PnM and PnMS keywords an S8 running FACSChorus 6.3 or later writes), so the display cannot be rebuilt from it; " +
+      "a Linear axis is exact.",
+    );
+  }
+  if (carriedCount) {
+    note(
+      `${carriedCount} gate(s) on biexponential axes are evaluated as Chorus evaluates them, in the display the file records ` +
+      "for each parameter (T from $PnR, M from PnM, R from PnMS): on the two recordings checked against Chorus's own statistics " +
+      "export, 58 of 62 population counts were exact and the rest within 0.12%.",
     );
   }
   if (!emitted) {

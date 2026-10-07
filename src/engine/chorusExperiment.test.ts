@@ -10,7 +10,7 @@ import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { strToU8, zipSync } from "fflate";
 import {
-  CHORUS_RECORD_KEYWORD, chorusBiexSpec, chorusRecordingToGatingML, chorusToGatingML, hasChorusRecording,
+  CHORUS_RECORD_KEYWORD, chorusBiexSpec, chorusDisplayFromKeywords, chorusRecordingToGatingML, chorusToGatingML, hasChorusRecording,
   isChorusExperimentFile, listChorusTrees, parameterName, readChorusExperiment, readChorusRecording,
   type ChorusPanel,
 } from "./chorusExperiment";
@@ -188,8 +188,9 @@ describe("FACSChorus experiment files", () => {
     // Colour survives the import.
     const scatterGate = Object.values(res.gates).find((g) => g.name === "Scatter")!;
     expect(scatterGate.color).toBe("#ceda4a");
-    // Biexponential axes are straight in raw, and the note says which gates and why.
-    expect(conv.warnings.some((w) => /straight in RAW space/.test(w) && /"CD19\+CD3-"/.test(w) && /not stored/.test(w))).toBe(true);
+    // Without the target file's keywords, biexponential axes are straight in raw, and the note
+    // says which gates and what the file lacks.
+    expect(conv.warnings.some((w) => /straight in RAW space/.test(w) && /"CD19\+CD3-"/.test(w) && /records no display/.test(w))).toBe(true);
     for (const g of Object.values(res.gates)) expect(g.space ?? "raw").toBe("raw");
   });
 
@@ -222,6 +223,47 @@ describe("FACSChorus experiment files", () => {
       const v = (carried as { vertices: [number, number][] }).vertices;
       expect(Math.max(...v.map((p) => p[0]))).toBeCloseTo(transformFromSpec(spec).forward(50000), 9);
     }
+  });
+
+  it("reads the display an S8 file records per parameter, and leaves out what it does not", () => {
+    expect(chorusDisplayFromKeywords(null)).toBeNull();
+    expect(chorusDisplayFromKeywords({ $PAR: "2", $P1N: "FSC-A", $P1R: "2147483648", $P2N: "PE-A", $P2R: "2147483648" })).toBeNull();
+    const display = chorusDisplayFromKeywords({
+      $PAR: "3",
+      $P1N: "FSC-A", $P1R: "2147483648", P1M: "7", P1MS: "462662",
+      $P2N: "PE-A", $P2R: "2147483648", P2M: "7", P2MS: "42898",
+      $P3N: "BV421-A", $P3R: "2147483648", P3M: "7", P3MS: "-1",
+    })!;
+    expect([...display.keys()]).toEqual(["FSC-A", "PE-A"]);
+    expect(display.get("PE-A")).toEqual({ T: 2147483648, M: 7, R: 42898 });
+  });
+
+  it("carries a biexponential axis into the display the target file records, over the panel's own R value", () => {
+    // The S8's keywords: T = $PnR, M = PnM, R = PnMS. PE's R is automatic (-1) in the panel, so
+    // without the keywords P1 imports in raw space; with them it is carried like the rest.
+    const exp = readChorusExperiment(cefBytes());
+    const keywords: Record<string, string> = { $PAR: "4" };
+    [["BUV805-A", "462662"], ["BV421-A", "54006"], ["PE-A", "42898"], ["BV711-A", "21475"]].forEach(([name, r], i) => {
+      Object.assign(keywords, { [`$P${i + 1}N`]: name, [`$P${i + 1}R`]: "2147483648", [`P${i + 1}M`]: "7", [`P${i + 1}MS`]: r });
+    });
+    const conv = chorusToGatingML(exp, 0, { keywords });
+    // The gates on biexponential axes are carried; only the Log-axis image-feature gate stays raw.
+    expect(conv.warnings.some((w) => /straight in RAW space/.test(w) && (/"P1"/.test(w) || /"CD19\+CD3-"/.test(w)))).toBe(false);
+    expect(conv.warnings.some((w) => /evaluated as Chorus evaluates them/.test(w))).toBe(true);
+    const res = importGatingML(conv.gatingMl, CHANNELS, {}, "flow");
+    // The two P1 populations are qualified by their parents on import; the one under CD19+CD3-.
+    const p1 = Object.values(res.gates).find((g) => g.name === "CD19+CD3-/P1")!;
+    expect(p1.space).toBe("display");
+    const spec = p1.transforms!["PE-A"];
+    expect(spec.kind).toBe("logicle");
+    if (spec.kind === "logicle") {
+      expect(spec.T).toBe(2147483648);
+      expect(spec.M).toBe(7);
+      expect(spec.W).toBeCloseTo((7 - Math.log10(2147483648 / 42898)) / 2, 9);
+    }
+    // A file that records no display: the same tree imports in raw space and says what is missing.
+    const raw = chorusToGatingML(exp, 0, { keywords: { $PAR: "1", $P1N: "PE-A", $P1R: "2147483648" } });
+    expect(raw.warnings.some((w) => /straight in RAW space/.test(w) && /records no display/.test(w))).toBe(true);
   });
 
   it("chorusBiexSpec is Diva's model: W from the R value, zero at R = T / 10^M", () => {

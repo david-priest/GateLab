@@ -32,6 +32,8 @@ interface Props {
   onImportTree: (treeIndex: number) => void;
   /** Import the tree each of these files carries, one hierarchy per distinct tree. */
   onImportRecordings: (fileIds: string[]) => void;
+  /** Opens the FCS file picker; the recordings appear here as the files load. */
+  onAddFiles?: () => void;
   onCancel: () => void;
 }
 
@@ -45,7 +47,7 @@ function clock(iso: string | null, withDate: boolean): string {
 }
 const num = (n: number | null) => (n === null ? "–" : n.toLocaleString("en-US"));
 
-export function ChorusTimelineModal({ experimentName, timeline, hasSample, target = null, onImportTree, onImportRecordings, onCancel }: Props) {
+export function ChorusTimelineModal({ experimentName, timeline, hasSample, target = null, onImportTree, onImportRecordings, onAddFiles, onCancel }: Props) {
   const { t } = useI18n();
   const foreign = !!experimentName && !!target && target.same !== true;
   const recordedUnder = !!experimentName && target?.same === true ? target.own ?? null : null;
@@ -94,6 +96,20 @@ export function ChorusTimelineModal({ experimentName, timeline, hasSample, targe
           {recordings.length > 0 && ` · ${timeline.treeGroups} ${t("distinct trees")}`}
           {span && ` · ${new Date(span.start).toLocaleDateString()}`}
         </div>
+
+        {experimentName && recordings.length === 0 && (
+          <div className="gl-modal-note gl-chorus-empty">
+            {timeline.recordingCount
+              ? t("None of this experiment's {count} recordings is loaded, so only the current gates can be imported. Load the recordings' FCS files first (the Tubes folder of the export) and they appear here with the gates each was recorded under.", { count: timeline.recordingCount })
+              : t("No recording of this experiment is loaded, so only the current gates can be imported. Load the recordings' FCS files first (the Tubes folder of the export) and they appear here with the gates each was recorded under.")}
+            {onAddFiles && (
+              <>
+                {" "}
+                <button type="button" className="gl-btn-ghost gl-chorus-add-files" onClick={onAddFiles}>{t("Files…")}</button>
+              </>
+            )}
+          </div>
+        )}
 
         {span && <TimelineStrip timeline={timeline} start={span.start} end={span.end} multiDay={multiDay} />}
 

@@ -1849,7 +1849,7 @@ export class Sample {
   }
 
   /** Auto-estimated {T, W} per channel (single sort), cached. */
-  private readonly logicleParamsCache = new Map<number, { t: number; w: number }>();
+  private readonly logicleParamsCache = new Map<number, { t: number; w: number; m: number }>();
   /** User-set logicle W per channel (overrides the auto estimate). */
   private readonly wOverride = new Map<number, number>();
   /** Workspace-wide owner of display scales; absent in single-sample and unit-test use. */
@@ -1883,13 +1883,44 @@ export class Sample {
     };
   }
 
-  private logicleParams(idx: number): { t: number; w: number } {
+  private logicleParams(idx: number): { t: number; w: number; m: number } {
     let p = this.logicleParamsCache.get(idx);
     if (!p) {
-      p = estimateLogicleParams(this.activeLinearColumn(idx));
+      // The file's own display first: a FACSDiscover S8 records Chorus's biexponential for every
+      // parameter as $PnR (T), PnM (M) and PnMS (R), the logicle with W = (M − log10(T / R)) / 2,
+      // which reproduces Chorus's own population counts (chorusExperiment.ts). Shown as recorded,
+      // the axis is the one the sorter showed; the estimate below is for files that record none.
+      const recorded = this.recordedLogicle(idx);
+      p = recorded ?? { ...estimateLogicleParams(this.activeLinearColumn(idx)), m: 4.5 };
       this.logicleParamsCache.set(idx, p);
     }
     return p;
+  }
+
+  /** The logicle an S8 file records for a channel ($PnR, PnM, PnMS), or null. */
+  private recordedLogicle(idx: number): { t: number; w: number; m: number } | null {
+    const ch = this.channels[idx];
+    if (!ch) return null;
+    // The FCS parameter number of this channel: its column, or the one whose $PnN is its name.
+    const kw = this.fcs.keywords;
+    let n = ch.columnIndex + 1;
+    if (kw[`$P${n}N`] !== ch.pnn) {
+      const count = Number(kw["$PAR"]) || 0;
+      n = 0;
+      for (let i = 1; i <= count; i++) if (kw[`$P${i}N`] === ch.pnn) { n = i; break; }
+      if (!n) return null;
+    }
+    const t = Number(kw[`$P${n}R`]);
+    const m = Number(kw[`P${n}M`]);
+    const r = Number(kw[`P${n}MS`]);
+    if (!(t > 0) || !(m > 0) || !(r > 0)) return null;
+    const w = Math.max(0, Math.min((m - Math.log10(t / r)) / 2, m / 2 - 1e-6));
+    return { t, w, m };
+  }
+
+  /** The logicle's M (decades) for a channel: the file's own where it records one, else 4.5. */
+  logicleM(idx: number): number {
+    return this.logicleParams(idx).m;
   }
 
   /** Lazily build + cache the raw→display transform for one channel. */
@@ -1924,7 +1955,7 @@ export class Sample {
     } else {
       const tv = this.logicleT(idx);
       const w = this.currentLogicleW(idx);
-      const lg = new Logicle(tv, w, 4.5, 0);
+      const lg = new Logicle(tv, w, this.logicleM(idx), 0);
       // GateLabR (fcs_import.R:862) falls back to asinh(x/150) when the logicle can't be built /
       // doesn't converge (Logicle.scale returns -1). Health-check at representative values; an
       // unhealthy channel uses asinh outright, a healthy one still guards rare per-value failures
@@ -2543,7 +2574,7 @@ export class Sample {
     const t = this.transform(idx);
     if (t.kind === "identity") return { kind: "identity" };
     if (t.kind === "logicle") {
-      return { kind: "logicle", T: this.logicleT(idx), W: this.currentLogicleW(idx), M: 4.5, A: 0 };
+      return { kind: "logicle", T: this.logicleT(idx), W: this.currentLogicleW(idx), M: this.logicleM(idx), A: 0 };
     }
     if (this.instrument === "cytof") return { kind: "asinh", cofactor: this.cytofCofactor };
     const { key, pnn } = this.channels[idx];

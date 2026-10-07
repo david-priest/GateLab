@@ -3366,6 +3366,8 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-chorus-timeline-strip .sort-bar.is-current { fill: #5b6abf; }
 .gl-chorus-timeline-strip .rec-mark { stroke-width: 2; }
 .gl-chorus-timeline-strip .saved-mark { stroke: #5b6abf; stroke-width: 1.5; stroke-dasharray: 3 2; }
+.gl-chorus-empty { margin: 8px 0 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.gl-chorus-add-files { margin-left: 4px; }
 .gl-chorus-timeline-list { overflow: auto; flex: 1 1 auto; min-height: 0; border: 1px solid var(--line); border-radius: 6px; }
 .gl-chorus-timeline-row { display: grid; grid-template-columns: 110px 74px 1fr auto; gap: 10px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--line); font-size: 12px; }
 .gl-chorus-timeline-row:last-child { border-bottom: 0; }
