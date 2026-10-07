@@ -93,6 +93,54 @@ describe("Proportions legend interaction", () => {
     expect(marks.map((mark) => mark.getAttribute("opacity"))).toEqual(["1", "1"]);
   });
 
+  it("says when a legend entry is pinned, and a click on the chart, Show all or Escape clears it", () => {
+    const legend = [...host.querySelectorAll<HTMLButtonElement>(".gl-prop-legend-item")];
+    const marks = () => [...host.querySelectorAll<SVGRectElement>(".gl-prop-mark")].map((mark) => mark.getAttribute("opacity"));
+    expect(host.querySelector(".gl-prop-highlight-note")).toBeNull();
+
+    act(() => legend[1].click());
+    act(() => legend[1].dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body })));
+    expect(marks()).toEqual(["0.16", "1"]);
+    const note = host.querySelector<HTMLElement>(".gl-prop-highlight-note")!;
+    expect(note.textContent).toContain("Highlighting T cells");
+
+    act(() => host.querySelector<HTMLElement>(".gl-prop-panels")!.click());
+    expect(marks()).toEqual(["1", "1"]);
+    expect(host.querySelector(".gl-prop-highlight-note")).toBeNull();
+
+    act(() => legend[1].click());
+    act(() => host.querySelector<HTMLElement>(".gl-prop-highlight-note button")!.click());
+    expect(marks()).toEqual(["1", "1"]);
+
+    act(() => legend[0].click());
+    act(() => host.querySelector<HTMLElement>(".gl-prop-chart")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(marks()).toEqual(["1", "1"]);
+    expect(legend[0].getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("drops a stale highlight when the legend changes under it", () => {
+    const legend = [...host.querySelectorAll<HTMLButtonElement>(".gl-prop-legend-item")];
+    act(() => legend[1].click());
+    expect(host.querySelector(".gl-prop-highlight-note")).not.toBeNull();
+    act(() => root.render(
+      <ProportionsChart
+        plotType="stacked"
+        model={{
+          catLevels: ["B cells", "T cells", "NK cells"],
+          perSample: [{ unit: "s1", group: "s1", facet: null, catCounts: [1, 2, 3] }],
+          hasFacet: false,
+        }}
+        catColors={["#2f80ed", "#e15759", "#59a14f"]}
+        palette="paired"
+        averagePerUnit
+        populations={{}}
+        fonts={{ tick: 9, axis: 10, legend: 11 }}
+      />,
+    ));
+    expect(host.querySelector(".gl-prop-highlight-note")).toBeNull();
+    expect([...host.querySelectorAll<SVGRectElement>(".gl-prop-mark")].map((mark) => mark.getAttribute("opacity"))).toEqual(["1", "1", "1"]);
+  });
+
   it("links boxplot group legends to every box in the matching group", () => {
     act(() => root.render(
       <ProportionsChart

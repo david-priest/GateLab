@@ -116,6 +116,8 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-brand:hover .gl-brand-card,
 .gl-brand:focus-visible .gl-brand-card,
 .gl-brand:focus-within .gl-brand-card { display: block; }
+/* The artwork's white ground multiplies into the card's, so it sits on the card rather than in a box. */
+.gl-brand-card-logo { display: block; width: 180px; height: auto; margin: 0 auto 8px; mix-blend-mode: multiply; }
 .gl-brand-card-head {
   display: flex;
   align-items: baseline;
@@ -2168,6 +2170,11 @@ input[type="number"]::-webkit-outer-spin-button {
   padding: 2px 3px; text-align: left; cursor: pointer;
 }
 .gl-prop-legend-item:hover, .gl-prop-legend-item.highlighted { background: var(--hover); border-color: #b9d4fb; }
+.gl-prop-legend-item[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.gl-prop-highlight-note {
+  display: flex; align-items: center; gap: 8px; margin: 0 0 8px; padding: 4px 8px; font-size: 11px;
+  color: #1e3a5f; background: #eaf2fd; border: 1px solid #b9d4fb; border-radius: 4px;
+}
 .gl-prop-legend-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gl-prop-swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.2); flex: none; }
 .gl-prop-mark, .gl-prop-mark-group { transition: filter 80ms ease, opacity 120ms ease, stroke-width 80ms ease; }
@@ -3358,14 +3365,18 @@ input[type="number"]::-webkit-outer-spin-button {
 
 /* FACSChorus timeline: sorts as bars, recordings as marks, in one clock (ChorusTimelineModal). */
 .gl-chorus-timeline { width: min(920px, calc(100vw - 32px)); max-height: calc(100vh - 48px); display: flex; flex-direction: column; }
-.gl-chorus-timeline-strip { width: 100%; height: 96px; display: block; margin: 4px 0 10px; }
+.gl-chorus-timeline-strip { width: 100%; height: 132px; display: block; margin: 4px 0 10px; }
 .gl-chorus-timeline-strip .axis { stroke: var(--line); stroke-width: 1; }
 .gl-chorus-timeline-strip .tick { stroke: var(--muted); stroke-width: 1; }
-.gl-chorus-timeline-strip .tick-label, .gl-chorus-timeline-strip .bar-label { font-size: 9px; fill: var(--muted); }
-.gl-chorus-timeline-strip .sort-bar { fill: #c2185b; opacity: 0.55; }
+.gl-chorus-timeline-strip .tick-label { font-size: 10px; fill: var(--muted); }
+.gl-chorus-timeline-strip .bar-label { font-size: 10px; fill: var(--ink, #1f2937); }
+.gl-chorus-timeline-strip .bar-inner { font-size: 9px; fill: #fff; }
+.gl-chorus-timeline-strip .sort-bar { fill: #c2185b; opacity: 0.7; }
 .gl-chorus-timeline-strip .sort-bar.is-current { fill: #5b6abf; }
 .gl-chorus-timeline-strip .rec-mark { stroke-width: 2; }
+.gl-chorus-timeline-strip .rec-label { font-size: 10px; }
 .gl-chorus-timeline-strip .saved-mark { stroke: #5b6abf; stroke-width: 1.5; stroke-dasharray: 3 2; }
+.gl-chorus-timeline-strip .saved-label { font-size: 10px; fill: #5b6abf; }
 .gl-chorus-empty { margin: 8px 0 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 .gl-chorus-add-files { margin-left: 4px; }
 .gl-chorus-timeline-list { overflow: auto; flex: 1 1 auto; min-height: 0; border: 1px solid var(--line); border-radius: 6px; }
@@ -3439,6 +3450,8 @@ input[type="number"]::-webkit-outer-spin-button {
 }
 .gl-menu-item:hover:not(:disabled), .gl-menu-item:focus-visible { background: var(--hover); outline: none; }
 .gl-menu-item:disabled { opacity: 0.45; cursor: default; }
+/* The tool in use, in the plot's menu: a tick in front of its name. */
+.gl-menu-item.is-active::before { content: "✓ "; color: var(--accent); }
 .gl-menu-separator { height: 1px; margin: 4px 6px; background: var(--line); }
 /* What the sidebar keeps below the file list: the workspace's name and the last status line. */
 .gl-side-status { display: flex; flex-direction: column; gap: 2px; padding-top: 4px; border-top: 1px solid var(--line); }

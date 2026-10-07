@@ -1056,6 +1056,9 @@ export function LayoutTab({
   }, [zoom]);
   const canvasScale = Math.min(4, Math.max(1, (typeof window === "undefined" ? 1 : window.devicePixelRatio || 1) * settledZoom));
   const [exportFormat, setExportFormat] = useState<LayoutExportFormat>("pdf");
+  // Cropped, the export is each page's items plus this much white around them, not the paper.
+  const [exportCrop, setExportCrop] = useState(false);
+  const [exportPaddingMm, setExportPaddingMm] = useState(3);
   const [exporting, setExporting] = useState(false);
   const canvasRef = useRef<HTMLDivElement>(null);
   const pageRef = useRef<HTMLElement>(null);
@@ -2011,7 +2014,7 @@ export function LayoutTab({
           setPageIndex(index);
           await settleRender();
         }
-        composed.push(...composeSheetPages(canvas, activeSheet, { zoom }));
+        composed.push(...composeSheetPages(canvas, activeSheet, { zoom, crop: exportCrop ? { paddingMm: exportPaddingMm } : undefined }));
       }
       await writeComposedPages(composed, activeSheet, exportFormat);
       onExported?.();
@@ -3132,11 +3135,23 @@ export function LayoutTab({
                   onCommit={(dpi) => setPage({ ...activeSheet.page, dpi })}
                 />
               </label>
+              <label className="gl-field-inline">
+                <input type="checkbox" checked={exportCrop} onChange={(event) => setExportCrop(event.target.checked)} />
+                {t("Crop to content")}
+              </label>
+              {exportCrop && (
+                <label className="gl-field-inline">
+                  {t("Padding (mm)")}
+                  <NumberField min={0} max={50} step={0.5} aria-label={t("Padding (mm)")} value={exportPaddingMm} onCommit={setExportPaddingMm} />
+                </label>
+              )}
               <button className="gl-mini-btn" type="button" onClick={() => void exportSheet()} disabled={exporting || !activeSheet.items.length}>
                 {exporting ? t("Exporting…") : t("Export sheet")}
               </button>
               <p className="gl-hint">
-                {t("The export is the page at its physical size; a grid of pages is written as one PDF page each, or one SVG or PNG file each in a zip. The data layer is drawn at the resolution above and anything beyond the pages is cut off.")}
+                {exportCrop
+                  ? t("The export is cut down to the items on each page plus the padding, so a figure comes out without the paper around it; a grid of pages is written as one PDF page each, or one SVG or PNG file each in a zip. The data layer is drawn at the resolution above.")
+                  : t("The export is the page at its physical size; a grid of pages is written as one PDF page each, or one SVG or PNG file each in a zip. The data layer is drawn at the resolution above and anything beyond the pages is cut off.")}
               </p>
             </>
           )}

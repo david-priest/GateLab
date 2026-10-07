@@ -384,8 +384,10 @@
   vertical-align: top;
   padding-top: 20px;
 }
-/* A chosen panel: the selection is what "Add selected panels to the Layout tab" takes. */
-.gl-figure-grid td.is-selected { outline: 2px solid #2f80ed; outline-offset: -2px; border-radius: 3px; }
+/* A chosen panel: the selection is what "Add selected panels to the Layout tab" takes. The
+   outline sits outside the cell, in the grid's spacing: inside it, the plot's own canvas and
+   overlay cover its left and right sides. */
+.gl-figure-grid td.is-selected { outline: 2px solid #2f80ed; outline-offset: 3px; border-radius: 3px; }
 .gl-figure-grid td {
   padding: 0;
   vertical-align: top;

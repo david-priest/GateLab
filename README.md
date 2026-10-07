@@ -107,13 +107,17 @@ agent itself reads: the data it sees, the commands it can send, and the rules it
   can be curly, as in FlowJo: beyond the crosshair its arms bend toward the upper right, and a
   handle at the end of each arm sets the bend. FlowJo's own curly quads import as curly
   quadrants with the bend fitted against FlowJo's counts (FlowJo writes the bend nowhere).
-- Tabs: Gating, Strategy (single + multi-population back-gating), Illustration, Plotting
+- Tabs: Gating, Strategy (single + multi-population back-gating), Illustration, Layout, Plotting
   (proportions and composition by file or metadata), Division profiler, Statistics, Metadata,
   Panel, Compensation, Scales.
 - Illustration figures: a figure workspace with nested rows, columns and pages of files,
   populations and channels, grouping by sample metadata, overlays or pooling, biplots with
   gates and draggable labels, histograms, ridgelines and population-by-channel heatmaps, axes
   that follow the Gating tab, and PNG, PDF and SVG export.
+- Layout: a page editor for figures. Plots from the Gating tab (right-click the plot, or Add to
+  Layout), strategies, Illustration panels, Plotting charts and text are placed on a sheet of a
+  chosen paper size, drawn once per file, population or metadata value as pages or tiles, and
+  exported as PDF, SVG or PNG at the page's size or cropped to the content.
 - Compensation: an embedded or imported spillover matrix for conventional flow (matrix
   inverse), NNLS spillover correction for mass cytometry, or a matrix started empty and set
   by hand, with a per-coefficient preview and a Remove that returns to the original values.

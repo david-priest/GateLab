@@ -7,6 +7,7 @@ import { composeLayoutSVG, writeComposedPages } from "./layoutExport";
 import { createLayoutSheet, pageForPreset } from "../engine/layout";
 
 const pdfSpy = vi.hoisted(() => ({
+  documents: [] as unknown[],
   pages: [] as unknown[][],
   images: [] as unknown[][],
   saved: [] as string[],
@@ -19,6 +20,7 @@ vi.mock("./gridExport", () => ({
 }));
 vi.mock("jspdf", () => ({
   jsPDF: class {
+    constructor(options: unknown) { pdfSpy.documents.push(options); }
     addPage(...args: unknown[]) { pdfSpy.pages.push(args); }
     addImage(...args: unknown[]) { pdfSpy.images.push(args); }
     save(name: string) { pdfSpy.saved.push(name); }
@@ -111,34 +113,81 @@ describe("composeLayoutSVG", () => {
 
   it("sizes the page from the sheet, not from the DOM", () => {
     const sheet = createLayoutSheet("Panel", pageForPreset("journal-1", "portrait"));
-    const { width, height } = composeLayoutSVG(page(1), sheet, { dpi: 300, zoom: 1 });
+    const { width, height, widthMm, heightMm } = composeLayoutSVG(page(1), sheet, { dpi: 300, zoom: 1 });
     expect([width, height]).toEqual([321, 416]);
+    expect([widthMm, heightMm]).toEqual([85, 110]);
+  });
+
+  it.each([1, 0.5])("cropped, is the items plus the padding, with every coordinate moved up by the crop, at zoom %s", (zoom) => {
+    const sheet = createLayoutSheet("Figure 1");
+    // The plot frame spans 24..284 × 24..304 and the text 400..600 × 30..90: the union is
+    // 24..600 × 24..304, and 3 mm of padding is 11.34 px on each side, to whole pixels outward.
+    const { root, width, height, widthMm, heightMm } = composeLayoutSVG(page(zoom), sheet, { dpi: 300, zoom, crop: { paddingMm: 3 } });
+    expect([width, height]).toEqual([600, 304]);
+    expect(root.getAttribute("viewBox")).toBe("0 0 600 304");
+    expect(widthMm).toBeCloseTo(600 / (96 / 25.4), 6);
+    expect(heightMm).toBeCloseTo(304 / (96 / 25.4), 6);
+    expect(root.getAttribute("width")).toBe("158.75mm");
+    const frame = root.querySelector("rect#frame-1-Lymphocytes-D1")!;
+    expect([frame.getAttribute("x"), frame.getAttribute("y")]).toEqual(["12.5", "12.5"]);
+    expect(root.querySelector("g#plot-1-Lymphocytes-D1")!.getAttribute("transform")).toBe("translate(16,16)");
+    const texts = [...root.querySelectorAll("text")].map((t) => [t.textContent, t.getAttribute("x"), t.getAttribute("y")]);
+    expect(texts[0]).toEqual(["Donor D1", "390", String(20 + 20 * 0.82)]);
+  });
+
+  it("cropped, stops at the page's edge and writes the page whole when nothing is on it", () => {
+    const sheet = createLayoutSheet("Figure 1");
+    const canvas = page(1);
+    // An item in the top-left corner: the padding cannot go beyond the page.
+    const plot = canvas.querySelector<HTMLElement>(".gl-layout-item.has-frame")!;
+    rect(plot, 100 + 2, 50 + 2, 260, 280);
+    const cropped = composeLayoutSVG(canvas, sheet, { dpi: 300, zoom: 1, crop: { paddingMm: 10 } });
+    expect(cropped.root.querySelector("rect#frame-1-Lymphocytes-D1")!.getAttribute("x")).toBe("2.5");
+    expect(cropped.width).toBe(600 + Math.ceil(10 * 96 / 25.4));
+    sheet.page = { ...sheet.page, columns: 1, rows: 2 };
+    const empty = composeLayoutSVG(canvas, sheet, { dpi: 300, zoom: 1, pageIndex: 1, crop: { paddingMm: 3 } });
+    expect([empty.width, empty.height]).toEqual([1123, 794]);
+    expect(empty.root.querySelectorAll("g, text")).toHaveLength(0);
   });
 });
 
 describe("writeComposedPages as PDF", () => {
   const svgNs = "http://www.w3.org/2000/svg";
-  const composed = () => [1, 2].map(() => ({ root: document.createElementNS(svgNs, "svg") as SVGSVGElement, width: 1123, height: 794 }));
+  const composed = () => [1, 2].map(() => ({ root: document.createElementNS(svgNs, "svg") as SVGSVGElement, width: 1123, height: 794, widthMm: 297, heightMm: 210 }));
+  const a4 = { width: 297 * (72 / 25.4), height: 210 * (72 / 25.4) };
   beforeEach(() => {
-    pdfSpy.pages = []; pdfSpy.images = []; pdfSpy.saved = []; pdfSpy.rasters = [];
+    pdfSpy.documents = []; pdfSpy.pages = []; pdfSpy.images = []; pdfSpy.saved = []; pdfSpy.rasters = [];
     pdfSpy.svg.mockReset();
   });
 
-  it("writes every page as vector art at the sheet's physical size, one PDF page each", async () => {
+  it("writes every page as vector art at the sheet's physical size in points, one PDF page each", async () => {
     pdfSpy.svg.mockResolvedValue(undefined);
     const sheet = createLayoutSheet("Figure 1");
     const pages = composed();
     await writeComposedPages(pages, sheet, "pdf");
     expect(pdfSpy.svg).toHaveBeenCalledTimes(2);
     expect(pdfSpy.svg.mock.calls.map((call) => [call[0], call[2]])).toEqual([
-      [pages[0].root, { x: 0, y: 0, width: 297, height: 210 }],
-      [pages[1].root, { x: 0, y: 0, width: 297, height: 210 }],
+      [pages[0].root, { x: 0, y: 0, ...a4 }],
+      [pages[1].root, { x: 0, y: 0, ...a4 }],
     ]);
-    expect(pdfSpy.pages).toEqual([[[297, 210], "landscape"]]);
+    // The document is in points: in millimetres the writer scales an em offset by the unit's
+    // factor, and D3's tick labels, 0.71 em under the axis, land on the axis title.
+    expect(pdfSpy.documents).toEqual([{ orientation: "landscape", unit: "pt", format: [a4.width, a4.height], compress: true }]);
+    expect(pdfSpy.pages).toEqual([[[a4.width, a4.height], "landscape"]]);
     expect(pdfSpy.images).toEqual([]);
     expect(pdfSpy.saved).toEqual(["Figure_1.pdf"]);
     // The writer measures the page attached to the document, and leaves nothing behind.
     expect(document.body.querySelector("svg")).toBeNull();
+  });
+
+  it("gives each cropped page its own size", async () => {
+    pdfSpy.svg.mockResolvedValue(undefined);
+    const pages = composed();
+    pages[1] = { ...pages[1], width: 400, height: 500, widthMm: 100, heightMm: 125 };
+    await writeComposedPages(pages, createLayoutSheet("Figure 1"), "pdf");
+    const second = { width: 100 * (72 / 25.4), height: 125 * (72 / 25.4) };
+    expect(pdfSpy.pages).toEqual([[[second.width, second.height], "portrait"]]);
+    expect(pdfSpy.svg.mock.calls[1][2]).toEqual({ x: 0, y: 0, ...second });
   });
 
   it("draws a page the writer cannot take as one deflated raster instead", async () => {
@@ -149,7 +198,7 @@ describe("writeComposedPages as PDF", () => {
     } finally {
       warn.mockRestore();
     }
-    expect(pdfSpy.images).toEqual([[pdfSpy.rasters[0], "PNG", 0, 0, 297, 210, undefined, "FAST"]]);
+    expect(pdfSpy.images).toEqual([[pdfSpy.rasters[0], "PNG", 0, 0, a4.width, a4.height, undefined, "FAST"]]);
     expect(pdfSpy.rasters).toHaveLength(1);
   });
 });

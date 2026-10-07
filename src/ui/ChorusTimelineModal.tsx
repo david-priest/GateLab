@@ -2,6 +2,7 @@
 // clock, each with the tree it carries, and a way to import any of them. The layout comes from
 // engine/chorusTimeline.ts; this file only draws it.
 
+import { useEffect, useRef, useState } from "react";
 import type { ChorusTimeline, ChorusTimelineItem } from "../engine/chorusTimeline";
 import { chorusTime } from "../engine/chorusTimeline";
 import { hierarchyColour } from "../engine/hierarchies";
@@ -202,23 +203,46 @@ export function ChorusTimelineModal({ experimentName, timeline, hasSample, targe
 
 /** Sorts as bars, recordings as marks coloured by the tree they carry, the save as a dashed line. */
 function TimelineStrip({ timeline, start, end, multiDay }: { timeline: ChorusTimeline; start: number; end: number; multiDay: boolean }) {
-  const W = 1000, H = 96, L = 8, R = 992;
-  const padMs = Math.max(60_000, (end - start) * 0.03);
+  const { t } = useI18n();
+  // Drawn at the strip's own pixel width, so labels are not stretched with the shapes.
+  const ref = useRef<SVGSVGElement>(null);
+  const [W, setW] = useState(1000);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver((entries) => { const w = entries[0]?.contentRect.width; if (w) setW(Math.max(300, Math.round(w))); });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const H = 132, L = 8, R = W - 8;
+  const AXIS = 108, SORT_Y = 34, SORT_H = 16, REC_TOP = 60, REC_BOTTOM = AXIS;
+  const padMs = Math.max(60_000, (end - start) * 0.06);
   const t0 = start - padMs, t1 = end + padMs;
   const x = (ms: number) => L + ((ms - t0) / (t1 - t0)) * (R - L);
-  // Tick every whole hour when the span allows about four to eight ticks, else every quarter day.
-  const spanH = (t1 - t0) / 3_600_000;
-  const stepMs = spanH <= 8 ? 3_600_000 : spanH <= 24 ? 3 * 3_600_000 : 6 * 3_600_000;
+  // Ticks at a round step giving four to eight of them: quarter hours on a short afternoon, hours, then parts of a day.
+  const spanMin = (t1 - t0) / 60_000;
+  const stepMs = (spanMin <= 90 ? 15 : spanMin <= 180 ? 30 : spanMin <= 480 ? 60 : spanMin <= 1440 ? 180 : 360) * 60_000;
   const ticks: number[] = [];
   for (let ms = Math.ceil(t0 / stepMs) * stepMs; ms <= t1; ms += stepMs) ticks.push(ms);
   const savedT = chorusTime(timeline.current?.savedAt ?? null);
+  const short = (name: string) => (name.length > 26 ? `${name.slice(0, 24)}…` : name);
+  // Recording labels alternate above and below their mark where two marks sit close.
+  const recordings = timeline.items.filter((it) => it.kind === "recording").map((it) => ({ it, at: chorusTime(it.startedAt) })).filter((r) => r.at !== null).sort((a, b) => a.at! - b.at!);
+  const labelRow = new Map<string, number>();
+  let lastX = -Infinity, row = 0;
+  for (const r of recordings) {
+    const px = x(r.at!);
+    row = px - lastX < 150 ? (row + 1) % 2 : 0;
+    labelRow.set(r.it.kind === "recording" ? r.it.fileId : "", row);
+    lastX = px;
+  }
   return (
-    <svg className="gl-chorus-timeline-strip" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true">
-      <line className="axis" x1={L} y1={72} x2={R} y2={72} />
+    <svg ref={ref} className="gl-chorus-timeline-strip" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={t("Sorts, recordings and the current gates on one clock")}>
+      <line className="axis" x1={L} y1={AXIS} x2={R} y2={AXIS} />
       {ticks.map((ms) => (
         <g key={ms}>
-          <line className="tick" x1={x(ms)} y1={72} x2={x(ms)} y2={77} />
-          <text className="tick-label" x={x(ms)} y={88} textAnchor="middle">{clock(new Date(ms).toISOString(), multiDay)}</text>
+          <line className="tick" x1={x(ms)} y1={AXIS} x2={x(ms)} y2={AXIS + 5} />
+          <text className="tick-label" x={x(ms)} y={AXIS + 16} textAnchor="middle">{clock(new Date(ms).toISOString(), multiDay)}</text>
         </g>
       ))}
       {timeline.items.map((item, i) => {
@@ -227,22 +251,37 @@ function TimelineStrip({ timeline, start, end, multiDay }: { timeline: ChorusTim
         if (item.kind === "sort") {
           const b = chorusTime(item.stoppedAt) ?? a;
           const x0 = x(a), x1 = Math.max(x(b), x0 + 2);
+          const span = `${clock(item.startedAt, false)}${item.stoppedAt ? `–${clock(item.stoppedAt, false)}` : ""}`;
           return (
             <g key={`s-${i}`}>
-              <rect className={`sort-bar${item.sameAsCurrent ? " is-current" : ""}`} x={x0} y={14} width={x1 - x0} height={18} rx={2}>
-                <title>{`${item.name}: ${clock(item.startedAt, true)}${item.stoppedAt ? `–${clock(item.stoppedAt, false)}` : ""}`}</title>
+              <rect className={`sort-bar${item.sameAsCurrent ? " is-current" : ""}`} x={x0} y={SORT_Y} width={x1 - x0} height={SORT_H} rx={2}>
+                <title>{`${t("sort")} ${item.name}: ${span}${item.sameAsCurrent ? ` · ${t("same as the current gates")}` : ""}`}</title>
               </rect>
-              {x1 - x0 > 60 && <text className="bar-label" x={x0 + 3} y={11}>{item.name}</text>}
+              <text className="bar-label" x={x0 > R - 260 ? x1 : x0} y={SORT_Y - 5} textAnchor={x0 > R - 260 ? "end" : "start"}>{`${t("sort")} · ${short(item.name)} · ${span}`}</text>
+              {x1 - x0 > 120 && <text className="bar-inner" x={x0 + 4} y={SORT_Y + 12}>{`${t("sorted")} ${item.sorted.map((d) => d.population).join(", ")}`.slice(0, Math.floor((x1 - x0) / 6))}</text>}
             </g>
           );
         }
+        const rowAt = labelRow.get(item.fileId) ?? 0;
+        const colour = hierarchyColour(item.treeGroup);
+        const labelY = rowAt === 0 ? REC_TOP - 6 : REC_BOTTOM - 18;
+        // A label reads away from the nearer edge, so none runs off the strip.
+        const left = x(a) > R - 200;
         return (
-          <line key={`r-${item.fileId}`} className="rec-mark" x1={x(a)} y1={40} x2={x(a)} y2={62} stroke={hierarchyColour(item.treeGroup)}>
-            <title>{`${item.fileName}: ${clock(item.startedAt, true)}`}</title>
-          </line>
+          <g key={`r-${item.fileId}`}>
+            <line className="rec-mark" x1={x(a)} y1={REC_TOP} x2={x(a)} y2={REC_BOTTOM} stroke={colour}>
+              <title>{`${t("recording")} ${item.fileName}: ${clock(item.startedAt, true)}`}</title>
+            </line>
+            <text className="rec-label" x={x(a) + (left ? -4 : 4)} y={labelY} fill={colour} textAnchor={left ? "end" : "start"}>{`${clock(item.startedAt, false)} ${short(item.fileName)}`}</text>
+          </g>
         );
       })}
-      {savedT !== null && <line className="saved-mark" x1={x(savedT)} y1={8} x2={x(savedT)} y2={72} />}
+      {savedT !== null && (
+        <g>
+          <line className="saved-mark" x1={x(savedT)} y1={8} x2={x(savedT)} y2={AXIS} />
+          <text className="saved-label" x={x(savedT) + (x(savedT) > R - 200 ? -4 : 4)} y={14} textAnchor={x(savedT) > R - 200 ? "end" : "start"}>{`${t("current gates saved")} ${clock(timeline.current?.savedAt ?? null, false)}`}</text>
+        </g>
+      )}
     </svg>
   );
 }
