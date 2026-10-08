@@ -1856,6 +1856,16 @@ export function patchMiniPlot(src: string): string {
   } else if (!out.includes("mini-quadrant-gate")) {
     console.warn("[GateLab] mini_plot quadrant-overlay patch did not match.");
   }
+  // Both grids measure the room they have from the container's bounding box, which takes in its
+  // padding and border (10 px and 1 px each side in GateLab) and the vertical scrollbar; a row
+  // fitted to that width ran past the right edge by that much. The room is the content box.
+  const availWidthNeedle = "var availWidth = container.getBoundingClientRect().width || (plotSize * nColumns);";
+  const availWidthPatch = "var availWidth = (function () { var cs = window.getComputedStyle(container); var w = container.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0); return w > 0 ? w : 0; })() || (plotSize * nColumns);";
+  if (out.includes(availWidthNeedle)) {
+    out = out.split(availWidthNeedle).join(availWidthPatch);
+  } else if (!out.includes("container.clientWidth - (parseFloat(cs.paddingLeft)")) {
+    console.warn("[GateLab] mini_plot fit-to-columns width patch did not match — a fitted grid may run past the container's edge.");
+  }
   const illustrationFitNeedle = `                // Expand to fit if possible, but never shrink below requested size.
                 effectivePlotSize = Math.max(plotSize, fitSize);`;
   const illustrationFitPatch = `                // Fit is a ceiling: preserve the requested size when it fits and shrink only
@@ -1866,6 +1876,20 @@ export function patchMiniPlot(src: string): string {
     out = out.replace(illustrationFitNeedle, illustrationFitPatch);
   } else if (!out.includes("Fit is a ceiling")) {
     console.warn("[GateLab] mini_plot illustration fit-to-columns patch did not match.");
+  }
+  // The strategy grid had the opposite rule: with Fit to columns on it inflated every plot to
+  // fill the row, so the Plot size control did nothing. The same ceiling applies: the plot is the
+  // size asked for, and Fit shrinks it only when the chosen columns would not otherwise fit.
+  const strategyFitNeedle = `            if (isFinite(fitSize) && fitSize > 60) {
+                effectivePlotSize = Math.max(plotSize, fitSize);
+            }`;
+  const strategyFitPatch = `            if (isFinite(fitSize) && fitSize > 60) {
+                effectivePlotSize = Math.max(120, Math.min(plotSize, fitSize));
+            }`;
+  if (out.includes(strategyFitNeedle)) {
+    out = out.replace(strategyFitNeedle, strategyFitPatch);
+  } else if (!out.includes("Math.max(120, Math.min(plotSize, fitSize))")) {
+    console.warn("[GateLab] mini_plot strategy fit-to-columns patch did not match — Plot size has no effect while Fit to columns is on.");
   }
   // A gate is straight only in the space it was drawn in, so it bows once an axis is shown on a
   // different scale. The main gating plot has offered straight / straight+grey bow / bowed since

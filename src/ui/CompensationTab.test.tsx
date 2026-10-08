@@ -1386,6 +1386,26 @@ describe("CompensationTab CyTOF import path", () => {
     expect(host.querySelector(".gl-comp-global-tile")).toBe(tilesBefore[0]);
 
     const layout = host.querySelector<HTMLSelectElement>('select[aria-label="Global compensation plot layout"]')!;
+    // A matrix this size opens arranged as the matrix: sources down, receivers across, every
+    // visible pair at its coefficient's cell, the diagonal and the filtered-out cells blank.
+    expect(layout.value).toBe("matrix");
+    const matrix = host.querySelector<HTMLElement>(".gl-comp-global-matrix")!;
+    expect(matrix).not.toBeNull();
+    const columnHeads = [...matrix.querySelectorAll(".gl-comp-global-matrix-col strong")].map((el) => el.textContent);
+    const rowHeads = [...matrix.querySelectorAll(".gl-comp-global-matrix-row strong")].map((el) => el.textContent);
+    expect(columnHeads.length).toBeGreaterThan(1);
+    expect(rowHeads).toEqual(columnHeads);
+    expect(matrix.querySelectorAll(".gl-comp-global-matrix-blank.is-diagonal")).toHaveLength(columnHeads.length);
+    expect(matrix.querySelectorAll(".gl-comp-global-tile")).toHaveLength(2);
+    // The cells of a row follow the receivers' order, and the tiles sit in the matrix's cells:
+    // one tile's heading names its row's source and its column's receiver.
+    const cells = [...matrix.children].slice(1 + columnHeads.length);
+    const perRow = 1 + columnHeads.length;
+    const firstTile = matrix.querySelector<HTMLElement>(".gl-comp-global-tile")!;
+    const at = cells.indexOf(firstTile);
+    const rowOf = rowHeads[Math.floor(at / perRow)];
+    const columnOf = columnHeads[(at % perRow) - 1];
+    expect(firstTile.querySelector(".gl-comp-global-tile-head")?.textContent).toContain(`${rowOf} → ${columnOf}`);
     act(() => {
       layout.value = "source";
       layout.dispatchEvent(new Event("change", { bubbles: true }));
@@ -1402,6 +1422,8 @@ describe("CompensationTab CyTOF import path", () => {
       layout.value = "compact";
       layout.dispatchEvent(new Event("change", { bubbles: true }));
     });
+    expect(host.querySelector(".gl-comp-global-gallery")).not.toBeNull();
+    expect(host.querySelector(".gl-comp-global-matrix")).toBeNull();
 
     const galleryFollowup = host.querySelector<HTMLInputElement>('.gl-comp-global-tile input[type="checkbox"]')!;
     act(() => galleryFollowup.click());

@@ -17,6 +17,9 @@ import { figureHierarchies, resolvePopulationInTree, type FigureSample } from ".
 import { useFigureSources } from "./useFigureSources";
 import { populationTreeOrder } from "../engine/populations";
 import { sanitizeFilePart } from "../engine/fcsExport";
+import type { LayoutPlotRecipe, LayoutStrategyRecipe } from "../engine/layout";
+import { ContextMenu, type ContextMenuState } from "./ContextMenu";
+import type { MenuEntry } from "./MenuButton";
 import { MultiColumnChecklist } from "./MultiColumnChecklist";
 import { CollapsiblePicker } from "./CollapsiblePicker";
 import { DensityColourControl } from "./DensityColourControl";
@@ -46,6 +49,12 @@ interface Props {
   /** An SCE host's files are samples. */
   isSceHost?: boolean;
   onPoolChange: (pooled: boolean) => void;
+  /** The file viewed on the Gating tab, which a strategy or plot sent to the Layout tab is of. */
+  activeSampleId?: string | null;
+  /** Put the strategy, or one of its plots, on the Layout tab. */
+  onAddToLayout?: (recipe: LayoutStrategyRecipe | LayoutPlotRecipe) => void;
+  /** Show a step's population on its gate's channels on the Gating tab. */
+  onOpenStep?: (populationId: string, xChannel: string, yChannel: string) => void;
 }
 
 type GateView = "forward" | "back";
@@ -93,6 +102,9 @@ export function StrategyTab({
   poolable,
   isSceHost = false,
   onPoolChange,
+  activeSampleId,
+  onAddToLayout,
+  onOpenStep,
 }: Props) {
   /** Channels of the plots most recently rendered, for Fit. */
   const shownChannels = useRef<readonly string[]>([]);
@@ -151,6 +163,7 @@ export function StrategyTab({
   const [renderPending, setRenderPending] = useState(true);
   const [renderError, setRenderError] = useState("");
   const [panelCount, setPanelCount] = useState(0);
+  const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const [availableWidth, setAvailableWidth] = useState(0);
   useEffect(() => {
     if (!containerRef.current || typeof ResizeObserver === "undefined") return;
@@ -292,6 +305,77 @@ export function StrategyTab({
     : [{ v: "scatter", l: "Scatter" }, { v: "pseudocolor", l: "Pseudo" }, { v: "contour", l: "Contour" }];
 
   const popName = sanitizeFilePart(state.populations[popId]?.name ?? "strategy");
+  /** Each gate of the single-population path with the population it belongs to, as the grid draws them. */
+  const stepOwners = useMemo(() => {
+    const owners: { gateId: string; populationId: string; parentId: string | null }[] = [];
+    const pop = state.populations[popId];
+    if (!pop) return owners;
+    const path: string[] = [];
+    if (fullPath) {
+      for (let cur: string | null = popId; cur && cur !== rootId; cur = state.populations[cur]?.parent_id ?? null) path.unshift(cur);
+    } else path.push(popId);
+    for (const id of path) {
+      const owner = state.populations[id];
+      for (const ref of owner?.gate_refs ?? []) owners.push({ gateId: ref.gate_id, populationId: id, parentId: owner?.parent_id ?? null });
+    }
+    return owners;
+  }, [state.populations, popId, fullPath, rootId]);
+  const layoutDisplayMode = displayMode === "contour" ? "contour" : displayMode === "scatter" ? "scatter" : "pseudocolor";
+  /** The strategy as a Layout block: this file's path to the population, drawn as it is here. */
+  const strategyRecipe = (): LayoutStrategyRecipe | null =>
+    mode === "single" && activeSampleId && state.populations[popId] && popId !== rootId
+      ? { kind: "strategy", sampleId: activeSampleId, populationId: popId, fullPath, displayMode: layoutDisplayMode }
+      : null;
+  const addStrategyToLayout = () => { const recipe = strategyRecipe(); if (recipe && onAddToLayout) onAddToLayout(recipe); };
+  const strategyToLayoutTitle = mode === "multi"
+    ? t("A strategy of several populations has no Layout block; choose Single")
+    : t("The path to {population} on this file, as a strip of plots the Layout tab keeps drawing from the live gates", { population: state.populations[popId]?.name ?? "" });
+  /**
+   * The menu a right-click on the grid opens: the strategy to the Layout tab; for the step under
+   * the pointer, that plot (the events it shows on its gate's channels) to the Layout tab or to
+   * the Gating tab; then Fit and the exports.
+   */
+  const openGridMenu = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!panelCount) return;
+    const cell = (event.target as HTMLElement).closest<HTMLElement>(".mini-plot-cell");
+    const owner = cell ? stepOwners.find((entry) => entry.gateId === cell.dataset.plotKey) : undefined;
+    const gate = owner ? state.gates[owner.gateId] : undefined;
+    const shown = owner ? owner.parentId ?? rootId : null;
+    const stepItems: MenuEntry[] = owner && gate && shown && state.populations[shown]
+      ? [
+          {
+            label: t("Add this plot to the Layout tab"),
+            title: t("The events this step shows, {population}, on {x} against {y}, as a plot the Layout tab keeps drawing from the live gates", { population: state.populations[shown]?.name ?? "", x: gate.x_channel, y: gate.y_channel }),
+            disabled: !activeSampleId || !onAddToLayout,
+            onClick: () => {
+              if (activeSampleId && onAddToLayout) onAddToLayout({ kind: "biplot", sampleId: activeSampleId, populationId: shown, xChannel: gate.x_channel, yChannel: gate.y_channel, displayMode: layoutDisplayMode });
+            },
+          },
+          {
+            label: t("Show this step on the Gating tab"),
+            title: t("Open {population} on {x} against {y} on the Gating tab, where the gate can be edited", { population: state.populations[shown]?.name ?? "", x: gate.x_channel, y: gate.y_channel }),
+            disabled: !onOpenStep,
+            onClick: () => onOpenStep?.(shown, gate.x_channel, gate.y_channel),
+          },
+          "separator",
+        ]
+      : [];
+    event.preventDefault();
+    setMenu({
+      x: event.clientX,
+      y: event.clientY,
+      label: t("Gating strategy"),
+      items: [
+        { label: t("Add the strategy to the Layout tab"), title: strategyToLayoutTitle, disabled: !strategyRecipe() || !onAddToLayout, onClick: addStrategyToLayout },
+        ...stepItems,
+        { label: t("Fit data + gates"), title: t("Fit every plot shown here to its data and the gates on it"), onClick: () => onFitChannels(shownChannels.current) },
+        "separator",
+        { label: t("Export PNG"), onClick: () => void exportGridPNG("strategy-grid-container-grid", popName + "_strategy", exportDpi).catch(e => setRenderError(String(e))) },
+        { label: t("Export SVG"), onClick: () => exportGridSVG("strategy-grid-container-grid", popName + "_strategy", exportDpi) },
+        { label: t("Export PDF"), onClick: () => void exportGridPDF("strategy-grid-container-grid", popName + "_strategy", exportDpi).catch(e => setRenderError(String(e))) },
+      ],
+    });
+  };
   const isContour = displayMode === "contour";
   const unit = isSceHost ? t("samples") : t("files");
   const poolNotes = poolReport
@@ -422,6 +506,11 @@ export function StrategyTab({
         <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => void exportGridPNG("strategy-grid-container-grid", popName + "_strategy", exportDpi).catch(e => setRenderError(String(e)))}>PNG</button>
         <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => exportGridSVG("strategy-grid-container-grid", popName + "_strategy", exportDpi)}>SVG</button>
         <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => void exportGridPDF("strategy-grid-container-grid", popName + "_strategy", exportDpi).catch(e => setRenderError(String(e)))}>PDF</button>
+        {onAddToLayout && (
+          <button type="button" className="gl-mini-btn" disabled={renderPending || !panelCount || !strategyRecipe()} title={strategyToLayoutTitle} onClick={addStrategyToLayout}>
+            {t("Add to Layout")}
+          </button>
+        )}
       </div>
 
       <details><summary style={{ cursor: "pointer", padding: "8px 12px" }}>Appearance</summary><div className="gl-strategy-controls">
@@ -532,7 +621,8 @@ export function StrategyTab({
       )}
       {renderError && <p role="alert">{renderError}</p>}
       <p role="status">{statusText}</p>
-      <div id="strategy-grid-container" ref={containerRef} aria-busy={renderPending} style={{ opacity: renderPending ? .5 : 1 }} className="gl-mini-grid-container" />
+      <div id="strategy-grid-container" ref={containerRef} aria-busy={renderPending} style={{ opacity: renderPending ? .5 : 1 }} className="gl-mini-grid-container" onContextMenu={openGridMenu} />
+      <ContextMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
   );
 }
