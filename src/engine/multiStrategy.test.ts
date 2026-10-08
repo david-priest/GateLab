@@ -241,3 +241,77 @@ describe("tidyLayout — a column per depth, a row per leaf, a second channel pa
     expect(tidyLayout([], pops)).toEqual([]);
   });
 });
+
+describe("tidyLayout — branches that each lead on", () => {
+  // The layout reads a panel's population and its gates, nothing else.
+  const panel = (pop: string, gateIds: string[]) =>
+    ({ node_id: `${pop}|x|y`, parent_pop_id: pop, gates: gateIds.map((gate_id) => ({ gate_id })), row: 0, col: 0 }) as unknown as Parameters<typeof tidyLayout>[0][number];
+  const child = (parent: string, gate: string) => ({ parent_id: parent, gate_refs: [{ gate_id: gate }] });
+  const places = (laid: ReturnType<typeof tidyLayout>) => Object.fromEntries(laid.map((n) => [n.parent_pop_id, [n.row, n.col]]));
+
+  // Reported with T and B cell populations traced together: every subtree was counted as one
+  // row tall, so the second branch was put in the rows the first branch's children already held.
+  it("puts a second branch below everything the first holds in the columns they share", () => {
+    const pops = {
+      root: { parent_id: null, gate_refs: [] },
+      t: child("root", "gT"), b: child("root", "gB"),
+      t1: child("t", "gT1"), t2: child("t", "gT2"), b1: child("b", "gB1"),
+      t1x: child("t1", "gT1x"), t2x: child("t2", "gT2x"), b1x: child("b1", "gB1x"),
+    };
+    const laid = tidyLayout([
+      panel("root", ["gT", "gB"]), panel("t", ["gT1", "gT2"]), panel("b", ["gB1"]),
+      panel("t1", ["gT1x"]), panel("t2", ["gT2x"]), panel("b1", ["gB1x"]),
+    ], pops);
+    expect(places(laid)).toEqual({
+      root: [0, 0],
+      t: [0, 1], t1: [0, 2], t2: [1, 2],
+      // Not row 1, where t2 already is in the next column.
+      b: [2, 1], b1: [2, 2],
+    });
+    expect(new Set(laid.map((n) => `${n.row}|${n.col}`)).size).toBe(laid.length);
+  });
+
+  it("tucks a later child that leads nowhere under its sibling, beside that sibling's children", () => {
+    const pops = {
+      root: { parent_id: null, gate_refs: [] },
+      t: child("root", "gT"), leaf: child("root", "gLeaf"),
+      t1: child("t", "gT1"), t2: child("t", "gT2"), t3: child("t", "gT3"),
+      t1x: child("t1", "g1"), t2x: child("t2", "g2"), t3x: child("t3", "g3"), leafx: child("leaf", "g4"),
+    };
+    const laid = tidyLayout([
+      panel("root", ["gT", "gLeaf"]), panel("t", ["gT1", "gT2", "gT3"]), panel("leaf", ["g4"]),
+      panel("t1", ["g1"]), panel("t2", ["g2"]), panel("t3", ["g3"]),
+    ], pops);
+    expect(places(laid)).toEqual({
+      root: [0, 0],
+      t: [0, 1], t1: [0, 2], t2: [1, 2], t3: [2, 2],
+      // Row 1 of its own column is free: three rows in all, not four.
+      leaf: [1, 1],
+    });
+  });
+
+  it("gives a panel that two panels lead to to the first of them, and each panel a cell of its own", () => {
+    const pops = {
+      root: { parent_id: null, gate_refs: [] },
+      p: child("root", "gP"),
+      // Made by a gate on each of p's two panels: two ways in.
+      c: { parent_id: "p", gate_refs: [{ gate_id: "g1" }, { gate_id: "g2" }] },
+      cx: child("c", "gC"),
+    };
+    const second = { ...panel("p", ["g2"]), node_id: "p|u|v" };
+    const laid = tidyLayout([panel("root", ["gP"]), panel("p", ["g1"]), second, panel("c", ["gC"])], pops);
+    expect(Object.fromEntries(laid.map((n) => [n.node_id, [n.row, n.col]]))).toEqual({
+      "root|x|y": [0, 0], "p|x|y": [0, 1], "c|x|y": [0, 2], "p|u|v": [1, 1],
+    });
+  });
+
+  it("starts a second root below the first root's own column", () => {
+    const pops = {
+      r1: { parent_id: null, gate_refs: [] }, r2: { parent_id: null, gate_refs: [] },
+      a: child("r1", "gA"), b: child("r1", "gB"), c: child("r2", "gC"),
+      ax: child("a", "g1"), bx: child("b", "g2"), cx: child("c", "g3"),
+    };
+    const laid = tidyLayout([panel("r1", ["gA", "gB"]), panel("r2", ["gC"]), panel("a", ["g1"]), panel("b", ["g2"]), panel("c", ["g3"])], pops);
+    expect(places(laid)).toEqual({ r1: [0, 0], a: [0, 1], b: [1, 1], r2: [2, 0], c: [2, 1] });
+  });
+});

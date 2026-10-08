@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it } from "vitest";
-import type { MultiStrategyNode } from "../engine/multiStrategy";
+import { tidyLayout, type MultiStrategyNode } from "../engine/multiStrategy";
 import {
   arrowPathFromPoints,
   arrowRouteKind,
@@ -9,6 +9,7 @@ import {
   polygonCentroid,
   routeArrow,
   strategyArrowGap,
+  strategyArrowRowGap,
   strategyArrows,
   type GridPlaces,
   type StrategyArrow,
@@ -86,6 +87,54 @@ describe("strategyArrows", () => {
     expect(strategyArrowGap(arrows)).toBe(6 + 7 * 2 + 16);
     expect(strategyArrowGap(arrows.slice(0, 2))).toBe(28);
     expect(strategyArrowGap([])).toBe(28);
+    // None of these lines runs between two rows, so the rows keep the plain gap.
+    expect(strategyArrowRowGap(arrows)).toBe(8);
+    expect(strategyArrowRowGap([])).toBe(8);
+  });
+
+  it("keeps room between the rows only where a line runs there", () => {
+    const pops = {
+      root: { parent_id: null, gate_refs: [] },
+      a: { parent_id: "root", gate_refs: [{ gate_id: "gA" }] },
+      b: { parent_id: "root", gate_refs: [{ gate_id: "gB" }] },
+    };
+    // A wrapped grid: one child straight below its parent, the other two columns along its row.
+    const nodes = [
+      node("root|x|y", "root", [{ gate_id: "gA", color: "#111" }, { gate_id: "gB", color: "#222" }], 0, 0),
+      node("a|x|y", "a", [], 1, 0),
+      node("b|x|y", "b", [], 0, 2),
+    ];
+    const arrows = strategyArrows(nodes, pops);
+    expect(arrows.map((a) => a.route)).toEqual(["down", "under"]);
+    expect(strategyArrowRowGap(arrows)).toBe(28);
+    expect(strategyArrowRowGap(arrows.slice(0, 1))).toBe(28);
+  });
+
+  // Reported on a strategy to T and B cell populations: two branches were given the same cells,
+  // the renderer moved one of them along its row, and the arrows, routed for the places the
+  // layout had named, ran across the panels.
+  it("routes a tree layout's arrows across a gutter or down one, never between two rows", () => {
+    const pops = {
+      root: { parent_id: null, gate_refs: [] },
+      t: { parent_id: "root", gate_refs: [{ gate_id: "gT" }] },
+      b: { parent_id: "root", gate_refs: [{ gate_id: "gB" }] },
+      t1: { parent_id: "t", gate_refs: [{ gate_id: "gT1" }] },
+      t2: { parent_id: "t", gate_refs: [{ gate_id: "gT2" }] },
+      b1: { parent_id: "b", gate_refs: [{ gate_id: "gB1" }] },
+    };
+    const laid = tidyLayout([
+      node("root|x|y", "root", [{ gate_id: "gT", color: "#111" }, { gate_id: "gB", color: "#222" }]),
+      node("t|x|y", "t", [{ gate_id: "gT1", color: "#111" }, { gate_id: "gT2", color: "#111" }]),
+      node("b|x|y", "b", [{ gate_id: "gB1", color: "#222" }]),
+      node("t1|x|y", "t1", []),
+      node("t2|x|y", "t2", []),
+      node("b1|x|y", "b1", []),
+    ], pops);
+    const arrows = strategyArrows(laid, pops);
+    expect(arrows).toHaveLength(5);
+    expect(arrows.every((a) => a.route === "across" || a.route === "side")).toBe(true);
+    expect(arrows.every((a) => a.to.col === a.from.col + 1)).toBe(true);
+    expect(strategyArrowRowGap(arrows)).toBe(8);
   });
 });
 

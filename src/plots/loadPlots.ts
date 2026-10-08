@@ -1825,13 +1825,18 @@ export function patchMiniPlot(src: string): string {
     "            var label = g.append('g').attr('transform', 'translate(' + lx + ',' + ly + ')');\n";
   // Only a label the user has placed (gate.label_placed: its gate holds a label offset) may sit
   // past the axes. One at its automatic place is kept inside them, as it always was: let out, a
-  // label above a gate at the top of a plot sat on the panel's title.
+  // label above a gate at the top of a plot sat on the panel's title. Its whole box is kept
+  // inside, not its anchor alone: a two-line label reaches 1.46 em above its anchor (the first
+  // line's baseline is 0.55 em up, under the font's ascent) and 0.96 em below, so held by its
+  // anchor 10 px from the top it still stood several pixels over the axis, on the title.
   const labelClampPatch =
     "            var _placed = !!gate.label_placed;\n" +
     "            var _mL = _placed && margins ? Number(margins.left) || 0 : 0, _mR = _placed && margins ? Number(margins.right) || 0 : 0;\n" +
     "            var _mT = _placed && margins ? Number(margins.top) || 0 : 0, _mB = _placed && margins ? Number(margins.bottom) || 0 : 0;\n" +
     "            var lx = Math.max(estHalfW - _mL, Math.min(W + _mR - estHalfW, cx + ox));\n" +
-    "            var ly = Math.max(10 - _mT, Math.min(H + _mB - 5, cy + oy));\n" +
+    "            var _inT = (!_placed && pctLine) ? Math.max(10, Math.ceil(fsNum * 1.46 + 2)) : 10;\n" +
+    "            var _inB = (!_placed && pctLine) ? Math.max(5, Math.ceil(fsNum * 0.96 + 1)) : 5;\n" +
+    "            var ly = Math.max(_inT - _mT, Math.min(H + _mB - _inB, cy + oy));\n" +
     "\n" +
     "            var label = (labelLayer || g).append('g').attr('transform', 'translate(' + lx + ',' + ly + ')');\n";
   const labelBackingNeedle =
@@ -1857,6 +1862,18 @@ export function patchMiniPlot(src: string): string {
     out = out.split(gridGapNeedle).join(gridGapPatch);
   } else {
     console.warn("[GateLab] mini_plot grid-gap patch did not match -- the Strategy tab's arrows will have 8 px to run in.");
+  }
+  // The multi-population grid's rows may sit closer than its columns (grid_row_gap): a tree's
+  // arrows run down the gutters between the columns, so the rows need no room for them.
+  const gridRowGapNeedle =
+    "        gridDiv.style.gridTemplateRows    = 'repeat(' + nRows + ', ' + plotSize + 'px)';\n" +
+    "        gridDiv.style.gap     = gapPx + 'px';\n";
+  const gridRowGapPatch = gridRowGapNeedle +
+    "        if (Number(data.grid_row_gap) > 0) gridDiv.style.rowGap = Number(data.grid_row_gap) + 'px';\n";
+  if (out.includes(gridRowGapNeedle)) {
+    out = out.replace(gridRowGapNeedle, gridRowGapPatch);
+  } else {
+    console.warn("[GateLab] mini_plot grid-row-gap patch did not match -- the strategy grid's rows stay as far apart as its columns.");
   }
   // A gate's shape carries its gate's id, as its label does, so the Strategy tab's arrows can
   // start level with the gate itself.

@@ -508,6 +508,8 @@ export interface MultiStrategyPayloadOptions {
   labelBackground?: number;
   /** The gap between the grid's cells, px; the renderer's 8 when absent. */
   gridGap?: number;
+  /** The gap between the grid's rows where it differs from the gap between its columns, px. */
+  gridRowGap?: number;
   /** Canvas pixels per CSS pixel for every panel; the display's ratio when absent. */
   canvasScale?: number;
   /**
@@ -536,6 +538,7 @@ export function buildMultiStrategyPayload(
     contour_threshold: opts.contourThreshold,
     contour_levels: opts.contourLevels,
     grid_gap: opts.gridGap,
+    grid_row_gap: opts.gridRowGap,
     canvas_scale: opts.canvasScale,
     point_alpha: opts.pointAlpha,
     density_color_power: opts.densityColorPower,
@@ -580,11 +583,13 @@ function childPanelsOf(
 
 /**
  * The nodes laid out as a tidy tree: a column per depth; a panel's first child shares its row and
- * each later child's subtree starts below the previous one's, so a subtree is a block of rows and
- * the grid has one row per leaf; a population drawn on a second channel pair stacks under its
- * first rather than taking a column of its own. Compact in both directions where the layout of
- * a column per depth and a row per traced population left most cells empty. Returns new node
- * objects with their row and col set; the input is left alone.
+ * each later child's subtree goes below the earlier ones, as high as it can sit without entering
+ * a column above anything already there. So no two panels share a cell, a later child that leads
+ * nowhere tucks in under its sibling rather than waiting for the whole of that sibling's subtree,
+ * and the line from a panel down to its later children passes no panel that has children of its
+ * own in the same column: the arrows neither cross a panel nor each other. A population drawn on
+ * a second channel pair stacks under its first rather than taking a column of its own. Returns
+ * new node objects with their row and col set; the input is left alone.
  */
 export function tidyLayout(
   nodes: readonly MultiStrategyNode[],
@@ -593,36 +598,74 @@ export function tidyLayout(
   const childPanels = childPanelsOf(nodes, populations);
   const isChild = new Set<MultiStrategyNode>();
   for (const node of nodes) for (const child of childPanels(node)) isChild.add(child);
-  const placed = new Map<MultiStrategyNode, { row: number; col: number }>();
-  const heights = new Map<MultiStrategyNode, number>();
-  const height = (node: MultiStrategyNode, trail: Set<MultiStrategyNode>): number => {
-    const known = heights.get(node);
-    if (known !== undefined) return known;
-    if (trail.has(node)) return 1;
-    trail.add(node);
-    let total = 0;
-    for (const child of childPanels(node)) if (!placed.has(child)) total += height(child, trail);
-    trail.delete(node);
-    const h = Math.max(1, total);
-    heights.set(node, h);
-    return h;
-  };
-  const place = (node: MultiStrategyNode, row: number, col: number) => {
-    if (placed.has(node)) return;
-    placed.set(node, { row, col });
-    let r = row;
+  // A panel belongs to the first panel that leads to it, walking depth first, so the panels make
+  // a tree whatever the gates say (a population made by gates on two panels has two ways in).
+  const claimed = new Set<MultiStrategyNode>();
+  const own = new Map<MultiStrategyNode, MultiStrategyNode[]>();
+  const claim = (node: MultiStrategyNode) => {
+    const mine: MultiStrategyNode[] = [];
+    own.set(node, mine);
     for (const child of childPanels(node)) {
-      if (placed.has(child)) continue;
-      place(child, r, col + 1);
-      r += height(child, new Set());
+      if (claimed.has(child)) continue;
+      claimed.add(child);
+      mine.push(child);
+      claim(child);
     }
   };
-  let cursor = 0;
-  const roots = nodes.filter((node) => !isChild.has(node));
-  for (const root of [...roots, ...nodes]) {
-    if (placed.has(root)) continue;
-    place(root, cursor, 0);
-    cursor += height(root, new Set());
+  const roots: MultiStrategyNode[] = [];
+  for (const node of [...nodes.filter((candidate) => !isChild.has(candidate)), ...nodes]) {
+    if (claimed.has(node)) continue;
+    claimed.add(node);
+    roots.push(node);
+    claim(node);
+  }
+  /** A subtree's extent in each column it reaches, counted from its own panel: [top, bottom] rows. */
+  type Extent = Map<number, [number, number]>;
+  /**
+   * How far down `sub` (its columns moved right by `shift`) must go to sit below everything
+   * `under` holds in the columns they share, and no higher than `from`.
+   */
+  const dropBelow = (under: Extent, sub: Extent, shift: number, from: number): number => {
+    let dr = from;
+    for (const [col, [top]] of sub) {
+      const held = under.get(col + shift);
+      if (held) dr = Math.max(dr, held[1] + 1 - top);
+    }
+    return dr;
+  };
+  const merge = (into: Extent, sub: Extent, shift: number, dr: number) => {
+    for (const [col, [top, bottom]] of sub) {
+      const held = into.get(col + shift);
+      into.set(col + shift, held ? [Math.min(held[0], top + dr), Math.max(held[1], bottom + dr)] : [top + dr, bottom + dr]);
+    }
+  };
+  /** Each claimed child's row below its parent's. */
+  const drop = new Map<MultiStrategyNode, number>();
+  const extentOf = (node: MultiStrategyNode): Extent => {
+    const extent: Extent = new Map([[0, [0, 0]]]);
+    let from = 0;
+    for (const child of own.get(node) ?? []) {
+      const sub = extentOf(child);
+      const dr = dropBelow(extent, sub, 1, from);
+      drop.set(child, dr);
+      merge(extent, sub, 1, dr);
+      from = dr + 1;
+    }
+    return extent;
+  };
+  const placed = new Map<MultiStrategyNode, { row: number; col: number }>();
+  const settle = (node: MultiStrategyNode, row: number, col: number) => {
+    placed.set(node, { row, col });
+    for (const child of own.get(node) ?? []) settle(child, row + (drop.get(child) ?? 0), col + 1);
+  };
+  const all: Extent = new Map();
+  let from = 0;
+  for (const root of roots) {
+    const sub = extentOf(root);
+    const row = dropBelow(all, sub, 0, from);
+    merge(all, sub, 0, row);
+    settle(root, row, 0);
+    from = row + 1;
   }
   return nodes.map((node) => ({ ...node, ...placed.get(node)! }));
 }
