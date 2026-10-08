@@ -158,6 +158,32 @@ export interface LayoutStrategyRecipe {
   populationId: string;
   fullPath: boolean;
   displayMode: LayoutDisplayMode;
+  /**
+   * Several populations: the Strategy tab's multi-population grid (every step to each of them,
+   * drawn once), rather than the strip to `populationId`. The ids are the tree's; a file on
+   * another tree follows them by lineage. Absent: the strip.
+   */
+  populationIds?: string[];
+  /** The grid's arrangement, as on the Strategy tab: a column per depth, or wrapped into rows of `columns`. */
+  layout?: "tree" | "flow";
+  columns?: number;
+  /** Arrows from each gate to the panel of the population it makes, through the gutters; absent reads as on. */
+  showArrows?: boolean;
+  /** The arrows' colour; absent, each takes its gate's (dark under publication style). */
+  arrowColor?: string;
+  /** The arrows' line width, px; absent, 1.5. */
+  arrowWidth?: number;
+  /** Where an arrow leaves its panel: level with the gate's label (absent), or with the gate's centroid. */
+  arrowAnchor?: "label" | "gate";
+  /**
+   * The size each panel was drawn at on the Strategy tab, px. The block is drawn at this size
+   * and scaled as a whole to its frame, so it arrives as it was made and a resized frame keeps
+   * its fonts, gates and gutters in proportion. Absent: 200.
+   */
+  plotSize?: number;
+  /** Gate labels in bold, and the white backing behind a plain label (0 … 1), as on the Strategy tab. */
+  gateLabelBold?: boolean;
+  labelBackground?: number;
   title?: string;
   /** This item's own settings; anything unset follows the sheet. */
   style?: Partial<LayoutPlotStyle>;
@@ -521,12 +547,29 @@ function normalizeRecipe(value: unknown): LayoutRecipe | null {
     };
   }
   if (candidate.kind === "strategy") {
+    const populationIds = Array.isArray(candidate.populationIds)
+      ? [...new Set((candidate.populationIds as unknown[]).filter((id): id is string => typeof id === "string" && id.trim() !== ""))]
+      : [];
+    const columns = Number(candidate.columns);
+    const arrowWidth = Number(candidate.arrowWidth);
+    const plotSize = Number(candidate.plotSize);
+    const labelBackground = Number(candidate.labelBackground);
     return {
       kind: "strategy",
       sampleId: nonBlank(candidate.sampleId, ""),
       populationId: nonBlank(candidate.populationId, ""),
       fullPath: candidate.fullPath !== false,
       displayMode: validDisplayMode(candidate.displayMode),
+      ...(populationIds.length ? { populationIds } : {}),
+      ...(candidate.layout === "flow" ? { layout: "flow" as const } : candidate.layout === "tree" ? { layout: "tree" as const } : {}),
+      ...(Number.isFinite(columns) && columns >= 1 ? { columns: Math.min(24, Math.round(columns)) } : {}),
+      ...(candidate.showArrows === false ? { showArrows: false } : {}),
+      ...(typeof candidate.arrowColor === "string" && candidate.arrowColor.trim() ? { arrowColor: candidate.arrowColor.trim() } : {}),
+      ...(Number.isFinite(arrowWidth) && arrowWidth > 0 ? { arrowWidth: Math.min(6, arrowWidth) } : {}),
+      ...(candidate.arrowAnchor === "gate" ? { arrowAnchor: "gate" as const } : {}),
+      ...(Number.isFinite(plotSize) && plotSize > 0 ? { plotSize: Math.max(120, Math.min(800, Math.round(plotSize))) } : {}),
+      ...(candidate.gateLabelBold === true ? { gateLabelBold: true } : {}),
+      ...(candidate.labelBackground !== undefined && Number.isFinite(labelBackground) ? { labelBackground: Math.max(0, Math.min(1, labelBackground)) } : {}),
       title: typeof candidate.title === "string" ? candidate.title : undefined,
       ...(candidate.iterated === true ? { iterated: true } : {}),
       ...styleField(candidate.style),
@@ -817,6 +860,7 @@ export function cloneLayoutWorkspace(workspace: LayoutWorkspace): LayoutWorkspac
         recipe: {
           ...item.recipe,
           ...("pool" in item.recipe && item.recipe.pool ? { pool: { sampleIds: [...item.recipe.pool.sampleIds] } } : {}),
+          ...(item.recipe.kind === "strategy" && item.recipe.populationIds ? { populationIds: [...item.recipe.populationIds] } : {}),
         },
       })),
     })),

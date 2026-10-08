@@ -81,6 +81,8 @@ import {
   computeGatingStrategy,
   buildStrategyPayload,
 } from "../engine/strategy";
+import { buildMultiStrategyPayload, computeMultiPopStrategy, flowLayout, tidyLayout } from "../engine/multiStrategy";
+import { drawStrategyArrows, reserveArrowGutters, strategyArrowGap, strategyArrows } from "./strategyArrows";
 import { populationTreeOrder } from "../engine/populations";
 import { loadMiniPlots } from "../plots/loadPlots";
 import { composeSheetPages, writeComposedPages, type ComposedPage, type LayoutExportFormat } from "../plots/layoutExport";
@@ -474,6 +476,75 @@ function LayoutPlotSurface({
       host.className = "gl-layout-plot-host";
       const availableWidth = Math.max(120, item.width - 8);
       const availableHeight = Math.max(120, item.height - 8);
+
+      if (recipe.kind === "strategy" && recipe.populationIds?.length) {
+        // The Strategy tab's multi-population grid, as a block: every step to each population,
+        // on this file's tree (the ids followed into it by lineage), laid out as asked and sized
+        // so the whole grid fits the frame; the arrows run through the gutters as on the tab.
+        const tree = source.tree;
+        const rootId = tree.root_population_id ?? "";
+        const ids = recipe.populationIds
+          .map((id) => resolvePopulationInTree(id, tree, trees, templateSource?.tree.id))
+          .filter((resolved) => !resolved.missing)
+          .map((resolved) => resolved.id);
+        const computed = computeMultiPopStrategy(source.sample, tree.gates, tree.populations, rootId, source.derived.masks, ids, { maxEvents: style.maxEvents, globalScales });
+        const columnsAsked = Math.max(1, recipe.columns ?? 4);
+        const nodes = recipe.layout === "flow" ? flowLayout(computed, columnsAsked, tree.populations) : tidyLayout(computed, tree.populations);
+        if (!nodes.length) {
+          host.textContent = `${source.name} has none of the strategy's populations.`;
+          host.className = "gl-layout-plot-host is-missing";
+          return;
+        }
+        // Drawn at the size it was made at on the Strategy tab and scaled as a whole to the frame:
+        // the block arrives as it was, and a resized frame keeps the fonts, gates and gutters in
+        // proportion (drawing the panels smaller instead ran into the renderer's smallest panel,
+        // and the grid spilled out of its frame).
+        const showArrows = recipe.showArrows !== false;
+        const arrows = showArrows ? strategyArrows(nodes, tree.populations) : [];
+        const gap = showArrows ? strategyArrowGap(arrows) : 8;
+        const plotSize = Math.max(120, Math.min(800, recipe.plotSize ?? 200));
+        host.removeAttribute("id");
+        const inner = document.createElement("div");
+        inner.id = `layout-strategy-${item.id}`;
+        inner.style.width = "max-content";
+        host.appendChild(inner);
+        const draw = (scale: number) => {
+          const payload = buildMultiStrategyPayload(nodes, {
+            displayMode: recipe.displayMode,
+            plotSize,
+            contourThreshold: style.contourThreshold,
+            contourLevels: style.contourLevels,
+            pointAlpha: style.pointAlpha,
+            densityColorPower,
+            pointSize: style.pointSize,
+            kdeBandwidth: style.kdeBandwidth,
+            pubStyle: style.pubStyle,
+            gateLineWidth: style.gateLineWidth,
+            gateLabelFormat: style.gateLabels,
+            gateLabelBold: recipe.gateLabelBold,
+            labelBackground: recipe.labelBackground,
+            gridGap: gap,
+            canvasScale: canvasScale * scale,
+            fontSizes: fontSizesOf(style),
+            contextTitle: drawnTitle,
+          });
+          loadMiniPlots().renderMultiStrategyGrid(inner.id, payload);
+        };
+        draw(1);
+        // Measured with the right and bottom gutters the arrows run in, so the frame holds them.
+        if (showArrows) reserveArrowGutters(inner);
+        const naturalWidth = inner.scrollWidth, naturalHeight = inner.scrollHeight;
+        const fit = naturalWidth > 0 && naturalHeight > 0
+          ? Math.max(0.1, Math.min(4, availableWidth / naturalWidth, availableHeight / naturalHeight))
+          : 1;
+        if (Math.abs(fit - 1) > 0.01) {
+          inner.style.zoom = String(fit);
+          // Redrawn at the zoomed resolution, so the points stay sharp.
+          draw(fit);
+        }
+        drawStrategyArrows(inner, arrows, { color: recipe.arrowColor ?? (style.pubStyle ? "#444444" : null), width: recipe.arrowWidth ?? 1.5, anchor: recipe.arrowAnchor ?? "label" });
+        return;
+      }
 
       if (recipe.kind === "strategy") {
         const steps = computeGatingStrategy(
@@ -2921,7 +2992,71 @@ export function LayoutTab({
                           )}
                         </>
                       )}
-                      {selectedItem.recipe.kind === "strategy" && (
+                      {selectedItem.recipe.kind === "strategy" && selectedItem.recipe.populationIds?.length && (
+                        <>
+                          <p className="gl-hint">
+                            {t("{count} populations; the grid follows the live gates", { count: selectedItem.recipe.populationIds.length })}
+                          </p>
+                          <label className="gl-field-inline" title={t("Tree: a column per depth and a row per leaf. Wrapped: the tree walked depth first and wrapped into rows of the columns beside.")}>
+                            {t("Layout")}
+                            <select
+                              value={selectedItem.recipe.layout ?? "tree"}
+                              onChange={(event) => updateSelectedRecipe((recipe) => recipe.kind === "strategy" ? { ...recipe, layout: event.target.value === "flow" ? "flow" : "tree" } : recipe)}
+                            >
+                              <option value="tree">{t("Tree")}</option>
+                              <option value="flow">{t("Wrapped")}</option>
+                            </select>
+                          </label>
+                          {(selectedItem.recipe.layout ?? "tree") === "flow" && (
+                            <label className="gl-field-inline">
+                              {t("Columns")}
+                              <NumberField min={1} max={24} integer value={selectedItem.recipe.columns ?? 4} onCommit={(columns) => updateSelectedRecipe((recipe) => recipe.kind === "strategy" ? { ...recipe, columns } : recipe)} />
+                            </label>
+                          )}
+                          <label className="gl-check" title={t("An arrow from each gate to the panel of the population it makes, through the gutters")}>
+                            <input
+                              type="checkbox"
+                              checked={selectedItem.recipe.showArrows !== false}
+                              onChange={(event) => updateSelectedRecipe((recipe) => recipe.kind === "strategy" ? { ...recipe, showArrows: event.target.checked } : recipe)}
+                            />
+                            {t("Arrows")}
+                          </label>
+                          {selectedItem.recipe.showArrows !== false && (
+                            <>
+                              <label className="gl-field-inline" title={t("The arrows' colour; unticked, each takes its gate's")}>
+                                <input
+                                  type="checkbox"
+                                  checked={!!selectedItem.recipe.arrowColor}
+                                  onChange={(event) => updateSelectedRecipe((recipe) => recipe.kind === "strategy" ? { ...recipe, arrowColor: event.target.checked ? "#444444" : undefined } : recipe)}
+                                />
+                                {t("One colour")}
+                                {selectedItem.recipe.arrowColor && (
+                                  <input
+                                    type="color"
+                                    value={selectedItem.recipe.arrowColor}
+                                    onChange={(event) => updateSelectedRecipe((recipe) => recipe.kind === "strategy" ? { ...recipe, arrowColor: event.target.value } : recipe)}
+                                  />
+                                )}
+                              </label>
+                              <label className="gl-field-inline" title={t("Where an arrow leaves its panel: level with the gate's label, or with the centre of the gate itself")}>
+                                {t("Arrows from")}
+                                <select
+                                  value={selectedItem.recipe.arrowAnchor ?? "label"}
+                                  onChange={(event) => updateSelectedRecipe((recipe) => recipe.kind === "strategy" ? { ...recipe, arrowAnchor: event.target.value === "gate" ? "gate" : undefined } : recipe)}
+                                >
+                                  <option value="label">{t("Gate label")}</option>
+                                  <option value="gate">{t("Gate centre")}</option>
+                                </select>
+                              </label>
+                              <label className="gl-field-inline">
+                                {t("Arrow width")}
+                                <NumberField min={0.5} max={6} step={0.25} value={selectedItem.recipe.arrowWidth ?? 1.5} onCommit={(arrowWidth) => updateSelectedRecipe((recipe) => recipe.kind === "strategy" ? { ...recipe, arrowWidth } : recipe)} />
+                              </label>
+                            </>
+                          )}
+                        </>
+                      )}
+                      {selectedItem.recipe.kind === "strategy" && !selectedItem.recipe.populationIds?.length && (
                         <label className="gl-check">
                           <input
                             type="checkbox"

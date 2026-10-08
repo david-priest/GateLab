@@ -11,17 +11,19 @@ import { loadMiniPlots } from "../plots/loadPlots";
 import { GATE_EDGE_MODES, type GateEdgeMode } from "./gateEdgeModes";
 import { exportGridPNG, exportGridSVG, exportGridPDF } from "../plots/gridExport";
 import { computeGatingStrategy, buildStrategyPayload, buildPooledStrategyPayload, type StrategyPart } from "../engine/strategy";
-import { computeMultiPopStrategy, buildMultiStrategyPayload } from "../engine/multiStrategy";
+import { computeMultiPopStrategy, buildMultiStrategyPayload, flowLayout, tidyLayout } from "../engine/multiStrategy";
 import { computePooledGatingStrategy, computePooledMultiPopStrategy, type StrategyLeftOut, type StrategyMember } from "../engine/pooledStrategy";
 import { figureHierarchies, resolvePopulationInTree, type FigureSample } from "../engine/figure";
 import { useFigureSources } from "./useFigureSources";
 import { populationTreeOrder } from "../engine/populations";
 import { sanitizeFilePart } from "../engine/fcsExport";
 import type { LayoutPlotRecipe, LayoutStrategyRecipe } from "../engine/layout";
+import type { StrategyConfig } from "../engine/workspace";
 import { ContextMenu, type ContextMenuState } from "./ContextMenu";
 import type { MenuEntry } from "./MenuButton";
-import { MultiColumnChecklist } from "./MultiColumnChecklist";
-import { CollapsiblePicker } from "./CollapsiblePicker";
+import { StrategyPopulationPicker } from "./StrategyPopulationPicker";
+import { drawStrategyArrows, strategyArrowGap, strategyArrows } from "./strategyArrows";
+import { attachGridPan, type PannablePanel } from "./gridPan";
 import { DensityColourControl } from "./DensityColourControl";
 import { useI18n } from "./i18n";
 
@@ -52,38 +54,19 @@ interface Props {
   /** The file viewed on the Gating tab, which a strategy or plot sent to the Layout tab is of. */
   activeSampleId?: string | null;
   /** Put the strategy, or one of its plots, on the Layout tab. */
-  onAddToLayout?: (recipe: LayoutStrategyRecipe | LayoutPlotRecipe) => void;
+  /** The strategy to the Layout tab; for a multi-population grid, with the frame its shape calls for. */
+  onAddToLayout?: (recipe: LayoutStrategyRecipe | LayoutPlotRecipe, size?: { width: number; height: number }) => void;
   /** Show a step's population on its gate's channels on the Gating tab. */
   onOpenStep?: (populationId: string, xChannel: string, yChannel: string) => void;
+  /** A gate label dragged on a panel: the new offset goes to the gate in the given tree, as on the Illustration tab. */
+  onGateLabelMove?: (hierarchyId: string, gateId: string, offset: [number, number], quadrant?: number) => void;
+  /** A panel panned or stretched: the channel's new range for the workspace's scales, as the Gating tab's drag sets it. */
+  onScaleChange?: (channelKey: string, range: [number, number]) => void;
 }
 
-type GateView = "forward" | "back";
+type GateView = StrategyConfig["gateView"][number];
 
-export interface StrategyConfig {
-  mode: "single" | "multi";
-  exportDpi: number;
-  multiPops: string[];
-  popId: string;
-  fullPath: boolean;
-  gateView: GateView[];
-  displayMode: string;
-  maxEvents: number;
-  allEvents: boolean;
-  plotSize: number;
-  nColumns: number;
-  fitToColumns: boolean;
-  pointSize: number;
-  pointAlpha: number;
-  contourThreshold: number;
-  kdeBandwidth: number;
-  pubStyle: boolean;
-  gateLineWidth: number;
-  gateEdgeMode?: GateEdgeMode;
-  fontTick: number;
-  fontAxis: number;
-  fontTitle: number;
-  fontGate: number;
-}
+export type { StrategyConfig };
 
 export function StrategyTab({
   onFitChannels,
@@ -105,6 +88,8 @@ export function StrategyTab({
   activeSampleId,
   onAddToLayout,
   onOpenStep,
+  onGateLabelMove,
+  onScaleChange,
 }: Props) {
   /** Channels of the plots most recently rendered, for Fit. */
   const shownChannels = useRef<readonly string[]>([]);
@@ -127,9 +112,16 @@ export function StrategyTab({
   const [pointSize, setPointSize] = useState(c0?.pointSize ?? 1.2);
   const [pointAlpha, setPointAlpha] = useState(c0?.pointAlpha ?? 0.35);
   const [contourThreshold, setContourThreshold] = useState(c0?.contourThreshold ?? 5);
+  const [contourLevels, setContourLevels] = useState(c0?.contourLevels ?? 10);
+  const [showArrows, setShowArrows] = useState(c0?.showArrows ?? true);
+  const [arrowWidth, setArrowWidth] = useState(c0?.arrowWidth ?? 1.5);
+  const [arrowAnchor, setArrowAnchor] = useState<"label" | "gate">(c0?.arrowAnchor ?? "label");
   const [kdeBandwidth, setKdeBandwidth] = useState(c0?.kdeBandwidth ?? 0);
   const manualKdeBandwidth = useRef(c0?.kdeBandwidth && c0.kdeBandwidth > 0 ? c0.kdeBandwidth : 4);
   const [pubStyle, setPubStyle] = useState(c0?.pubStyle ?? false);
+  const [gateLabelBold, setGateLabelBold] = useState(c0?.gateLabelBold ?? false);
+  const [labelBackground, setLabelBackground] = useState(c0?.labelBackground ?? 0.6);
+  const [layout, setLayout] = useState<"tree" | "flow">(c0?.layout ?? "tree");
   const [gateLineWidth, setGateLineWidth] = useState(c0?.gateLineWidth ?? 1.5);
   const [gateEdgeMode, setGateEdgeMode] = useState<GateEdgeMode>(c0?.gateEdgeMode ?? "straight-bow");
   const [fontTick, setFontTick] = useState(c0?.fontTick ?? 12);
@@ -160,6 +152,26 @@ export function StrategyTab({
   /** What the last pooled draw left out: gates the files do not hold alike, and files left out. */
   const [poolReport, setPoolReport] = useState<{ drawn: number; omittedGates: string[]; leftOut: StrategyLeftOut[] } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  /** The channels and ranges of each drawn panel, by its cell key, for the navigate drag. */
+  const panelsRef = useRef<Map<string, PannablePanel>>(new Map());
+  /** The multi-population grid's shape and panel size as last drawn, for the Layout block. */
+  const gridShapeRef = useRef<{ rows: number; cols: number; plotSize: number; gap: number; fonts: { tick: number; axis_label: number; gate_label: number; title: number } } | null>(null);
+  /** The panel size the multi-population grid was last drawn at, shown beside Plot size when Fit made it smaller. */
+  const [drawnSize, setDrawnSize] = useState<number | null>(null);
+  const onScaleChangeRef = useRef(onScaleChange);
+  onScaleChangeRef.current = onScaleChange;
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    return attachGridPan(
+      container,
+      (cell) => panelsRef.current.get(cell.getAttribute("data-plot-key") ?? "") ?? null,
+      (panel, xr, yr) => {
+        onScaleChangeRef.current?.(panel.xKey, xr);
+        if (panel.yKey !== panel.xKey) onScaleChangeRef.current?.(panel.yKey, yr);
+      },
+    );
+  }, []);
   const [renderPending, setRenderPending] = useState(true);
   const [renderError, setRenderError] = useState("");
   const [panelCount, setPanelCount] = useState(0);
@@ -182,8 +194,8 @@ export function StrategyTab({
   // Mirror the controls into the App-held ref after each render so they persist across tab switches.
   const currentConfig: StrategyConfig = {
     mode, exportDpi, multiPops, popId, fullPath, gateView, displayMode, maxEvents, allEvents,
-    plotSize, nColumns, fitToColumns, pointSize, pointAlpha, contourThreshold, kdeBandwidth,
-    pubStyle, gateLineWidth, gateEdgeMode, fontTick, fontAxis, fontTitle, fontGate,
+    plotSize, nColumns, fitToColumns, pointSize, pointAlpha, contourThreshold, contourLevels, kdeBandwidth,
+    pubStyle, gateLineWidth, gateEdgeMode, gateLabelBold, labelBackground, showArrows, arrowWidth, arrowAnchor, layout, fontTick, fontAxis, fontTitle, fontGate,
   };
   useEffect(() => {
     configRef.current = currentConfig;
@@ -209,19 +221,53 @@ export function StrategyTab({
       if (pooled && !members) { containerRef.current?.replaceChildren(); setPanelCount(0); setPoolReport(null); return; }
       const fontSizes = { tick: fontTick, axis_label: fontAxis, gate_label: fontGate, title: fontTitle };
       const cap = allEvents ? Infinity : maxEvents;
+      // A dragged label goes to the gate itself, as on the Illustration tab: the offset is in
+      // the gate's own orientation, since a strategy panel draws a gate on its own channels.
+      const onLabelMove = onGateLabelMove
+        ? (gateId: string, offset: [number, number], quadrant?: number) => onGateLabelMove(state.active_hierarchy_id, gateId, offset, quadrant)
+        : undefined;
 
       if (mode === "multi") {
         const pool = members
           ? computePooledMultiPopStrategy(members, multiPops, state.active_hierarchy_id, trees, { maxEvents: cap, globalScales })
           : null;
-        const nodes = pool ? pool.nodes : computeMultiPopStrategy(sample, state.gates, state.populations, rootId, derived.masks, multiPops, {
+        const computed = pool ? pool.nodes : computeMultiPopStrategy(sample, state.gates, state.populations, rootId, derived.masks, multiPops, {
           maxEvents: cap,
           globalScales,
         });
+        const nodes = layout === "flow" ? flowLayout(computed, nColumns, state.populations) : tidyLayout(computed, state.populations);
+        // Fit ticked: the panels are drawn at Plot size, or smaller when the grid's columns would
+        // not otherwise fit the width (never larger; the renderer's smallest panel is 120 px), and
+        // the text is drawn smaller by the same ratio, so a fitted strategy is the strategy at
+        // Plot size seen smaller rather than small panels under full-size labels. Unticked: the
+        // panels are Plot size, and a strategy wider than the pane scrolls.
+        // The gutters are as wide as the busiest one's lines need, so lines that run side by side
+        // stay apart.
+        const arrows = showArrows ? strategyArrows(nodes, state.populations) : [];
+        const gridGap = showArrows ? strategyArrowGap(arrows) : 8;
+        const gridCols = nodes.length ? Math.max(...nodes.map((node) => node.col)) + 1 : 1;
+        const fitted = fitToColumns && availableWidth > 0
+          ? Math.max(120, Math.min(plotSize, Math.floor((availableWidth - 8 - gridGap * (gridCols - 1)) / gridCols)))
+          : plotSize;
+        const fontScale = fitted < plotSize ? fitted / plotSize : 1;
+        const scaled = (size: number) => Math.max(5, Math.round(size * fontScale * 10) / 10);
+        const gridFonts = fontScale < 1
+          ? { tick: scaled(fontSizes.tick), axis_label: scaled(fontSizes.axis_label), gate_label: scaled(fontSizes.gate_label), title: scaled(fontSizes.title) }
+          : fontSizes;
+        gridShapeRef.current = nodes.length
+          ? { rows: Math.max(...nodes.map((node) => node.row)) + 1, cols: gridCols, plotSize: fitted, fonts: gridFonts, gap: gridGap }
+          : null;
+        setDrawnSize(fitted);
         const payload = buildMultiStrategyPayload(nodes, {
           displayMode,
-          plotSize,
+          plotSize: fitted,
           contourThreshold,
+          contourLevels,
+          onLabelMove,
+          gateLabelBold,
+          labelBackground,
+          // Room for the arrows to run between the panels.
+          gridGap: showArrows ? gridGap : undefined,
           pointAlpha,
           densityColorPower,
           pointSize,
@@ -229,13 +275,19 @@ export function StrategyTab({
           pubStyle,
           gateLineWidth,
           gateEdgeMode,
-          fontSizes,
+          fontSizes: gridFonts,
           // The grid's title names what it draws, so an export says which file or pool it was.
           contextTitle: pool
             ? `${multiPops.length} population${multiPops.length === 1 ? "" : "s"} · ${pool.drawn.length} ${isSceHost ? "samples" : "files"} pooled`
             : `${multiPops.length} population${multiPops.length === 1 ? "" : "s"}${sampleName ? ` · ${sampleName}` : ""}`,
         });
         loadMiniPlots().renderMultiStrategyGrid("strategy-grid-container", payload);
+        panelsRef.current = new Map(nodes.map((node) => [node.node_id, {
+          xKey: sample.keyForLabel(node.x_channel), yKey: sample.keyForLabel(node.y_channel), xr: node.x_range, yr: node.y_range,
+        }]));
+        if (containerRef.current) {
+          drawStrategyArrows(containerRef.current, arrows, { color: pubStyle ? "#444444" : null, width: arrowWidth, anchor: arrowAnchor });
+        }
         shownChannels.current = pool ? pool.channels : nodes.flatMap(node => node.gates.flatMap(g => {
           const gate = state.gates[g.gate_id]; return gate ? [gate.x_channel, gate.y_channel] : [];
         }));
@@ -264,6 +316,10 @@ export function StrategyTab({
         plotSize,
         fitToColumns,
         contourThreshold,
+        contourLevels,
+        onLabelMove,
+        gateLabelBold,
+        labelBackground,
         pointAlpha,
         densityColorPower,
         pointSize,
@@ -282,6 +338,12 @@ export function StrategyTab({
         ? buildPooledStrategyPayload(parts, steps, globalScales, payloadOptions)
         : buildStrategyPayload(sample, steps, finalMask, globalScales, payloadOptions);
       loadMiniPlots().renderStrategyGrid("strategy-grid-container", payload);
+      panelsRef.current = new Map(
+        ((payload as { steps?: { gate_id: string; x_range: [number, number]; y_range: [number, number] }[] }).steps ?? []).map((drawn, index) => [
+          String(drawn.gate_id || index),
+          { xKey: steps[index].x_channel, yKey: steps[index].y_channel, xr: drawn.x_range, yr: drawn.y_range },
+        ]),
+      );
       setPanelCount(steps.length);
       setPoolReport(pool ? { drawn: pool.drawn.length, omittedGates: pool.omittedGates, leftOut: pool.leftOut } : null);
       } catch (error) { setRenderError(error instanceof Error ? error.message : String(error)); setPanelCount(0); containerRef.current?.replaceChildren(); }
@@ -290,8 +352,8 @@ export function StrategyTab({
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, multiPops, sample, popId, fullPath, gateView, displayMode, maxEvents, allEvents, plotSize, nColumns, fitToColumns,
-      pointSize, pointAlpha, densityColorPower, contourThreshold, kdeBandwidth, pubStyle, gateLineWidth, gateEdgeMode, fontTick, fontAxis, fontTitle, fontGate,
-      state.gates, state.gate_version, globalScales, derived, dataRevision, availableWidth, pooled, members, trees]);
+      pointSize, pointAlpha, densityColorPower, contourThreshold, contourLevels, kdeBandwidth, pubStyle, gateLineWidth, gateEdgeMode, gateLabelBold, labelBackground, showArrows, arrowWidth, arrowAnchor, layout, fontTick, fontAxis, fontTitle, fontGate,
+      state.gates, state.gate_version, globalScales, derived, dataRevision, availableWidth, pooled, members, trees, onGateLabelMove]);
 
   const toggleGateView = (v: GateView) =>
     setGateView((prev) => {
@@ -322,13 +384,53 @@ export function StrategyTab({
   }, [state.populations, popId, fullPath, rootId]);
   const layoutDisplayMode = displayMode === "contour" ? "contour" : displayMode === "scatter" ? "scatter" : "pseudocolor";
   /** The strategy as a Layout block: this file's path to the population, drawn as it is here. */
-  const strategyRecipe = (): LayoutStrategyRecipe | null =>
-    mode === "single" && activeSampleId && state.populations[popId] && popId !== rootId
+  const strategyRecipe = (): LayoutStrategyRecipe | null => {
+    if (!activeSampleId) return null;
+    if (mode === "multi") {
+      const ids = multiPops.filter((id) => !!state.populations[id] && id !== rootId);
+      // As drawn here: the panel size, the layout, the arrows and the appearance, which the block
+      // keeps as its own settings over the sheet's.
+      return ids.length
+        ? {
+            kind: "strategy", sampleId: activeSampleId, populationId: ids[0], fullPath: true, displayMode: layoutDisplayMode,
+            populationIds: ids, layout, columns: nColumns, showArrows, arrowWidth, ...(arrowAnchor === "gate" ? { arrowAnchor } : {}), title: "{sample}",
+            plotSize: gridShapeRef.current?.plotSize ?? plotSize,
+            ...(gateLabelBold ? { gateLabelBold: true } : {}),
+            labelBackground,
+            style: {
+              pointSize, pointAlpha, maxEvents: allEvents ? 0 : maxEvents, contourThreshold, contourLevels, kdeBandwidth,
+              gateLineWidth, pubStyle,
+              fontTick: gridShapeRef.current?.fonts.tick ?? fontTick,
+              fontAxis: gridShapeRef.current?.fonts.axis_label ?? fontAxis,
+              fontTitle: gridShapeRef.current?.fonts.title ?? fontTitle,
+              fontGate: gridShapeRef.current?.fonts.gate_label ?? fontGate,
+            },
+          }
+        : null;
+    }
+    return state.populations[popId] && popId !== rootId
       ? { kind: "strategy", sampleId: activeSampleId, populationId: popId, fullPath, displayMode: layoutDisplayMode }
       : null;
-  const addStrategyToLayout = () => { const recipe = strategyRecipe(); if (recipe && onAddToLayout) onAddToLayout(recipe); };
+  };
+  const addStrategyToLayout = () => {
+    const recipe = strategyRecipe();
+    if (!recipe || !onAddToLayout) return;
+    // A multi-population block is framed at the size it is drawn here: the grid as measured,
+    // with its title, else as its shape and panel size make it.
+    const shape = recipe.populationIds?.length ? gridShapeRef.current : null;
+    if (!shape) { onAddToLayout(recipe); return; }
+    // As measured, the grid holds its own right and bottom gutters, where the arrows run.
+    const gap = shape.gap, trailing = showArrows ? gap : 4;
+    const grid = containerRef.current?.querySelector<HTMLElement>(".multi-strategy-grid");
+    const title = containerRef.current?.querySelector<HTMLElement>(".strategy-context-title");
+    const width = grid && grid.offsetWidth > 0 ? grid.offsetWidth : shape.cols * shape.plotSize + (shape.cols - 1) * gap + 4 + trailing;
+    const height = (grid && grid.offsetHeight > 0 ? grid.offsetHeight : shape.rows * shape.plotSize + (shape.rows - 1) * gap + 4 + trailing) + (title && title.offsetHeight > 0 ? title.offsetHeight + 6 : 26);
+    onAddToLayout(recipe, { width: width + 12, height: height + 12 });
+  };
   const strategyToLayoutTitle = mode === "multi"
-    ? t("A strategy of several populations has no Layout block; choose Single")
+    ? (multiPops.length
+      ? t("The strategy to these {count} populations on this file, as a block the Layout tab keeps drawing from the live gates, arrows included", { count: multiPops.length })
+      : t("Choose populations first"))
     : t("The path to {population} on this file, as a strip of plots the Layout tab keeps drawing from the live gates", { population: state.populations[popId]?.name ?? "" });
   /**
    * The menu a right-click on the grid opens: the strategy to the Layout tab; for the step under
@@ -453,14 +555,6 @@ export function StrategyTab({
           </label>
         ))}
 
-        <span className="gl-ctl-sep" />
-        <span className="gl-stats-opt-label">{t("Display")}</span>
-        {modeOpts.map((m) => (
-          <label key={m.v} className="gl-check">
-            <input type="radio" name="strat-mode" checked={displayMode === m.v} onChange={() => setDisplayMode(m.v)} />
-            {t(m.l)}
-          </label>
-        ))}
       </div>
 
       <div className="gl-strategy-controls">
@@ -488,10 +582,24 @@ export function StrategyTab({
           {t("Columns")}
           <input type="number" min={1} max={12} value={nColumns} onChange={(e) => setNColumns(Math.max(1, +e.target.value || 4))} />
         </label>
-        <label className="gl-check">
+        <label className="gl-check" title={t("Ticked: the plots, and their text in proportion, are drawn smaller than Plot size when the columns would not otherwise fit the width. Unticked: the plots are Plot size, and a wide strategy scrolls.")}>
           <input type="checkbox" checked={fitToColumns} onChange={(e) => setFitToColumns(e.target.checked)} />
           {t("Fit to columns")}
         </label>
+        {mode === "multi" && fitToColumns && drawnSize !== null && drawnSize < plotSize && (
+          <span className="gl-num-badge" title={t("Fit to columns drew the plots smaller than Plot size so the strategy fits the width; untick it to draw them at Plot size and scroll")}>
+            {t("drawn at {size} px", { size: drawnSize })}
+          </span>
+        )}
+        {mode === "multi" && (
+          <label className="gl-field-inline" title={t("Tree: a column per depth and a row per traced population. Wrapped: the tree walked depth first and wrapped into rows of the columns above; the arrows say what leads to what.")}>
+            {t("Layout")}
+            <select value={layout} onChange={(e) => setLayout(e.target.value as "tree" | "flow")}>
+              <option value="tree">{t("Tree")}</option>
+              <option value="flow">{t("Wrapped")}</option>
+            </select>
+          </label>
+        )}
         <span className="gl-ctl-sep" />
         <label className="gl-field-inline" title="Export resolution for SVG/PDF (72–1200 DPI)">
           DPI
@@ -513,10 +621,19 @@ export function StrategyTab({
         )}
       </div>
 
-      <details><summary style={{ cursor: "pointer", padding: "8px 12px" }}>Appearance</summary><div className="gl-strategy-controls">
-        <label className="gl-field-inline">
+      <details><summary style={{ cursor: "pointer", padding: "8px 12px" }}>{t("Appearance")}</summary><div className="gl-strategy-controls">
+        <span className="gl-stats-opt-label">{t("Display")}</span>
+        {modeOpts.map((m) => (
+          <label key={m.v} className="gl-check">
+            <input type="radio" name="strat-mode" checked={displayMode === m.v} onChange={() => setDisplayMode(m.v)} />
+            {t(m.l)}
+          </label>
+        ))}
+        <span className="gl-ctl-sep" />
+        <label className="gl-field-inline" title={t("The size of each drawn event, px")}>
           {t("Point size")}
-          <input type="number" min={0.1} max={5} step={0.1} value={pointSize} onChange={num(setPointSize, 1.2)} />
+          <input type="range" min={0.2} max={4} step={0.1} value={pointSize} onChange={num(setPointSize, 1.2)} />
+          <span className="gl-num-badge">{pointSize.toFixed(1)}</span>
         </label>
         <label className="gl-field-inline">
           {t("Opacity")}
@@ -526,7 +643,13 @@ export function StrategyTab({
         {displayMode === "pseudocolor" && (
           <DensityColourControl value={densityColorPower} onChange={onDensityColorPowerChange} />
         )}
-        {isContour && <label className="gl-field-inline">
+        {isContour && <label className="gl-field-inline" title={t("How many contour lines each panel draws")}>
+          {t("Contours")}
+          <select value={contourLevels} onChange={(e) => setContourLevels(+e.target.value)}>
+            {[4, 6, 8, 10, 12, 18, 24, 30].map((value) => <option key={value} value={value}>{value}</option>)}
+          </select>
+        </label>}
+        {isContour && <label className="gl-field-inline" title={t("The outer contour, as a percentage of the peak density")}>
           {t("Contour %")}
           <input type="number" min={0} max={50} step={1} value={contourThreshold} onChange={num(setContourThreshold, 5)} />
         </label>}
@@ -572,6 +695,38 @@ export function StrategyTab({
           <input type="checkbox" checked={pubStyle} onChange={(e) => setPubStyle(e.target.checked)} />
           {t("Publication style")}
         </label>
+        <label className="gl-check" title={t("Gate labels in a bold face")}>
+          <input type="checkbox" checked={gateLabelBold} onChange={(e) => setGateLabelBold(e.target.checked)} />
+          {t("Bold gate labels")}
+        </label>
+        {pubStyle && (
+          <label className="gl-field-inline" title={t("A white backing behind each plain gate label, so it reads on a dense pile of points; 0 for none")}>
+            {t("Label backing")}
+            <input type="range" min={0} max={1} step={0.05} value={labelBackground} onChange={(e) => setLabelBackground(Number(e.target.value))} />
+            <span className="gl-num-badge">{Math.round(labelBackground * 100)}%</span>
+          </label>
+        )}
+        {mode === "multi" && (
+          <label className="gl-check" title={t("An arrow from each gate to the panel of the population it makes, routed between the panels; in the exports too")}>
+            <input type="checkbox" checked={showArrows} onChange={(e) => setShowArrows(e.target.checked)} />
+            {t("Arrows")}
+          </label>
+        )}
+        {mode === "multi" && showArrows && (
+          <label className="gl-field-inline" title={t("The arrows' line width, px; the heads grow with it")}>
+            {t("Arrow width")}
+            <input type="number" min={0.5} max={6} step={0.25} value={arrowWidth} onChange={num(setArrowWidth, 1.5)} />
+          </label>
+        )}
+        {mode === "multi" && showArrows && (
+          <label className="gl-field-inline" title={t("Where an arrow leaves its panel: level with the gate's label, or with the centre of the gate itself")}>
+            {t("Arrows from")}
+            <select value={arrowAnchor} onChange={(e) => setArrowAnchor(e.target.value === "gate" ? "gate" : "label")}>
+              <option value="label">{t("Gate label")}</option>
+              <option value="gate">{t("Gate centre")}</option>
+            </select>
+          </label>
+        )}
         <label className="gl-field-inline">
           {t("Gate line")}
           <input type="number" min={0.5} max={5} step={0.25} value={gateLineWidth} onChange={num(setGateLineWidth, 1.5)} />
@@ -593,31 +748,15 @@ export function StrategyTab({
       </div></details>
 
       {mode === "multi" && (
-        <CollapsiblePicker
-          className="gl-strategy-pop-picker"
-          label={t("Populations")}
-          summary={t("{selected} of {total} selected", { selected: multiPops.length, total: selectablePops.length })}
-          actions={(
-            <>
-              <button className="gl-mini-btn" onClick={() => setMultiPops(selectablePops.map(({ popId: id }) => id))}>{t("All")}</button>
-              <button className="gl-mini-btn" onClick={() => setMultiPops([])}>{t("None")}</button>
-            </>
-          )}
-        >
-          <MultiColumnChecklist
-            items={selectablePops}
-            ariaLabel="Strategy populations"
-            selected={({ popId: id }) => multiPops.includes(id)}
-            onToggle={({ popId: id }) => setMultiPops((previous) => (
-              previous.includes(id) ? previous.filter((candidate) => candidate !== id) : [...previous, id]
-            ))}
-            getKey={({ popId: id }) => id}
-            getLabel={({ popId: id }) => state.populations[id]?.name ?? id}
-            getDepth={({ depth }) => depth}
-            distribution="fill-first"
-            visibleRows={6}
-          />
-        </CollapsiblePicker>
+        <StrategyPopulationPicker
+          rows={selectablePops}
+          populations={state.populations}
+          gates={state.gates}
+          counts={derived.stats?.event_count ?? {}}
+          selected={multiPops}
+          onChange={setMultiPops}
+          checkedIds={state.selected_pop_ids}
+        />
       )}
       {renderError && <p role="alert">{renderError}</p>}
       <p role="status">{statusText}</p>

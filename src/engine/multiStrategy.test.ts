@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeMultiPopStrategy, buildMultiStrategyPayload } from "./multiStrategy";
+import { computeMultiPopStrategy, buildMultiStrategyPayload, flowLayout, tidyLayout } from "./multiStrategy";
 import { Sample } from "./sample";
 import type { FcsFile } from "./fcs";
 import type { Gate, Population, PopulationMap, GateRef } from "./models";
@@ -197,5 +197,47 @@ describe("buildMultiStrategyPayload", () => {
     expect(payload.gate_style).toEqual({
       pub_style: false, line_width: 1.5, gate_edge_mode: "straight-bow", label_format: "name-percent",
     });
+  });
+});
+
+describe("flowLayout — the tree walked depth first and wrapped into rows", () => {
+  const sample = makeSample();
+  const { pops, gates } = makeTree();
+  const nodes = computeMultiPopStrategy(sample, gates, pops, "root", MASKS, ["C1", "C2"], OPTS);
+
+  it("puts the root's panel first, then the panels its gate leads to, in rows of the given width", () => {
+    const laid = flowLayout(nodes, 2, pops);
+    expect(laid.map((n) => n.node_id)).toEqual(["root|Center|Offset", "P|Center|Offset", "P|Residual|Width"]);
+    expect(laid.map((n) => [n.row, n.col])).toEqual([[0, 0], [0, 1], [1, 0]]);
+    // The input is left as it was.
+    expect(Object.fromEntries(nodes.map((n) => [n.node_id, n.col]))).toEqual({ "root|Center|Offset": 0, "P|Center|Offset": 1, "P|Residual|Width": 2 });
+  });
+
+  it("holds a width of at least one, and keeps every panel", () => {
+    expect(flowLayout(nodes, 0, pops).map((n) => [n.row, n.col])).toEqual([[0, 0], [1, 0], [2, 0]]);
+    expect(flowLayout([], 3, pops)).toEqual([]);
+  });
+});
+
+describe("tidyLayout — a column per depth, a row per leaf, a second channel pair stacked", () => {
+  const sample = makeSample();
+  const { pops, gates } = makeTree();
+  const nodes = computeMultiPopStrategy(sample, gates, pops, "root", MASKS, ["C1", "C2"], OPTS);
+
+  it("stacks the two panels of P under one column, below the root's row", () => {
+    const laid = tidyLayout(nodes, pops);
+    const at = Object.fromEntries(laid.map((n) => [n.node_id, [n.row, n.col]]));
+    expect(at["root|Center|Offset"]).toEqual([0, 0]);
+    // Both P panels are the root's gate's children: the first shares the root's row, the
+    // second goes below it in the same column — not bumped to a column of its own.
+    expect(at["P|Center|Offset"]).toEqual([0, 1]);
+    expect(at["P|Residual|Width"]).toEqual([1, 1]);
+    expect(nodes.find((n) => n.node_id === "P|Residual|Width")!.col).toBe(2); // the input is left alone
+  });
+
+  it("gives every panel a cell of its own", () => {
+    const laid = tidyLayout(nodes, pops);
+    expect(new Set(laid.map((n) => `${n.row}|${n.col}`)).size).toBe(laid.length);
+    expect(tidyLayout([], pops)).toEqual([]);
   });
 });

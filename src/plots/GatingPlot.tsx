@@ -77,6 +77,10 @@ export interface GateVertexMenuEvent {
   edge?: number;
   /** The clicked point on that edge, in display units in the gate's own axis order. */
   point?: [number, number];
+  /** True for a right-click on the gate itself: a polygon's body, or a rectangle or an ellipse anywhere. */
+  body?: boolean;
+  /** With `body`: the gate's box on screen, [left, top, right, bottom] in client pixels. */
+  box?: [number, number, number, number];
   /** Where the menu opens, in client pixels. */
   client: [number, number];
 }

@@ -100,6 +100,8 @@ interface Props {
    * Gating and Layout tabs show the same placement. Without this the figure keeps the placement.
    */
   onGateLabelMove?: (hierarchyId: string, gateId: string, offset: [number, number], quadrant?: number) => void;
+  /** A panel panned or stretched: the channel's new range for the workspace's scales; the figure must follow the Gating tab's axes for it to show. */
+  onScaleChange?: (channelKey: string, range: [number, number]) => void;
 }
 const refKey = (ref: FigurePopulation) =>
   JSON.stringify([ref.hierarchyId, ref.populationId]);
@@ -138,6 +140,7 @@ export function FigureWorkspace({
   onAddFigureToLayout,
   onOpenInGating,
   onGateLabelMove,
+  onScaleChange,
 }: Props) {
   const trees = figureHierarchies(state);
   // The inspector's width is the user's: dragged, kept for the session.
@@ -1922,6 +1925,28 @@ export function FigureWorkspace({
                 />
               </label>
               <label>
+                <input
+                  type="checkbox"
+                  checked={!!config.gateLabelBold}
+                  onChange={(e) => style({ gateLabelBold: e.target.checked })}
+                />
+                Bold gate labels
+              </label>
+              {config.pubStyle && (
+                <label title="A white backing behind each plain gate label, so it reads on a dense pile of points; 0 for none">
+                  Label backing
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={Math.round((config.labelBackground ?? 0.6) * 100)}
+                    onChange={(e) => style({ labelBackground: Number(e.target.value) / 100 })}
+                  />
+                  {Math.round((config.labelBackground ?? 0.6) * 100)}%
+                </label>
+              )}
+              <label>
                 Gate labels
                 <select
                   value={config.gateLabelFormat ?? "name-percent"}
@@ -2302,6 +2327,7 @@ export function FigureWorkspace({
                   onMatrixContextMenu={openMatrixMenu}
                   selectedPanels={selectedPanelKeys}
                   onPanelClick={onPanelClick}
+                  onPanelScaleChange={figure.scalePolicy === "gating" ? onScaleChange : undefined}
                   onLabelMove={(gateId, offset, quadrant, flipped) => {
                     // The gate id comes from whichever file's tree the panel drew. The placement
                     // is the gate's own: it goes to the store in the gate's orientation, which

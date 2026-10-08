@@ -151,7 +151,7 @@ describe("the Strategy tab and the Layout tab", () => {
     expect(menuItems().map((b) => b.textContent)).toEqual(["Add the strategy to the Layout tab", "Fit data + gates", "Export PNG", "Export SVG", "Export PDF"]);
   });
 
-  it("offers no Layout block for a strategy of several populations", async () => {
+  it("offers the strategy of several populations as one Layout block, arrows and layout included", async () => {
     const fx = fixture();
     const onAddToLayout = vi.fn();
     act(() => root.render(
@@ -180,7 +180,24 @@ describe("the Strategy tab and the Layout tab", () => {
     const multi = [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.includes("Multiple pops"))!.querySelector("input")!;
     act(() => multi.click());
     await flush();
+    // Nothing chosen yet: nothing to add.
     expect(button("Add to Layout")!.disabled).toBe(true);
-    expect(button("Add to Layout")!.title).toContain("choose Single");
+    expect(button("Add to Layout")!.title).toContain("Choose populations first");
+    act(() => [...host.querySelectorAll<HTMLButtonElement>(".gl-strategy-pops button")].find((b) => b.textContent === "Leaves")!.click());
+    await flush();
+    expect(button("Add to Layout")!.disabled).toBe(false);
+    act(() => button("Add to Layout")!.click());
+    // The block as drawn here: the panel size, the layout, the arrows and the appearance travel
+    // with it, and its frame is the grid's own size (one leaf: a 1 × 1 grid of 200 px, the
+    // gutter on its right and below it that the arrows run in, and its title).
+    expect(onAddToLayout).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        kind: "strategy", sampleId: "D1", populationId: fx.bcellsId, fullPath: true, displayMode: "pseudocolor",
+        populationIds: [fx.bcellsId], layout: "tree", columns: 4, showArrows: true, arrowWidth: 1.5, title: "{sample}",
+        plotSize: 200, labelBackground: 0.6,
+        style: expect.objectContaining({ pointSize: 1.2, pointAlpha: 0.35, contourLevels: 10, pubStyle: false, fontGate: 12 }),
+      }),
+      { width: 244, height: 270 },
+    );
   });
 });

@@ -3742,3 +3742,52 @@ input[type="number"]::-webkit-outer-spin-button {
   .gl-tour-band, .gl-tour-ripple, .gl-tour-runner { animation: none; }
   .gl-tour-progress > span { transition: none; }
 }
+
+/* The Strategy tab's population picker: the tree as the Gating tab draws it, in columns that
+   break only between top-level branches. */
+.gl-strategy-pops { margin: 0 0 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+.gl-strategy-pops-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.gl-strategy-pops-head.is-collapsed { border-bottom: 0; }
+.gl-strategy-pops-search { flex: 0 1 220px; min-width: 120px; padding: 3px 8px; font-size: 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--text); }
+.gl-strategy-pops-actions { display: inline-flex; gap: 4px; margin-left: auto; }
+.gl-strategy-pops-body { display: flex; align-items: flex-start; gap: 20px; overflow-x: auto; padding: 6px 10px; }
+.gl-strategy-pops-column { flex: 0 0 auto; min-width: 180px; max-width: 280px; }
+.gl-strategy-pop-row { display: flex; align-items: center; gap: 6px; height: 20px; padding: 0 6px; border-radius: 4px; font-size: 12px; color: var(--text); cursor: pointer; white-space: nowrap; }
+.gl-strategy-pop-row:hover { background: var(--hover); }
+.gl-strategy-pop-row.is-selected { background: rgba(47, 128, 237, 0.09); }
+.gl-strategy-pop-row input[type="checkbox"] { margin: 0; flex-shrink: 0; }
+.gl-strategy-pop-swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12); }
+.gl-strategy-pop-name { overflow: hidden; text-overflow: ellipsis; }
+.gl-strategy-pop-count { margin-left: auto; padding-left: 10px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.gl-strategy-pops-empty { padding: 8px; color: var(--muted); font-size: 12px; }
+
+/* The Strategy and Illustration panels take the Gating tab's navigate drag (pan; Shift to stretch). */
+#strategy-grid-container .mini-plot-cell canvas, .gl-figure-grid .mini-plot-cell canvas { cursor: grab; }
+/* A relink entry found by an earlier choice: ticked, with where it was found. */
+.gl-workspace-relink-files > div { display: flex; align-items: center; gap: 6px; }
+.gl-workspace-relink-mark { width: 12px; flex-shrink: 0; text-align: center; color: var(--muted); }
+.gl-workspace-relink-files > div.is-found .gl-workspace-relink-mark { color: #15803d; font-weight: 600; }
+.gl-workspace-relink-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-workspace-relink-where { margin-left: auto; padding-left: 10px; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 55%; }
+.gl-workspace-relink-progress { color: var(--text); }
+/* The fit-to-events panel: floats by the gate it is about, over the plot, which keeps drawing
+   the fitted gate as the sliders move. */
+.gl-fit-panel {
+  position: fixed;
+  z-index: 1100;
+  width: 300px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+  font-size: 12px;
+  color: var(--text);
+}
+.gl-fit-panel-title { font-weight: 600; margin-bottom: 8px; }
+.gl-fit-panel-row { display: grid; grid-template-columns: 56px 1fr 48px; align-items: center; gap: 8px; margin: 4px 0; color: var(--muted); }
+.gl-fit-panel-row input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent); }
+.gl-fit-panel-row output { text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
+.gl-fit-panel-readout { margin: 8px 0; color: var(--muted); line-height: 1.4; }
+.gl-fit-panel-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.gl-fit-panel-apply { border-color: var(--accent); color: var(--accent); }
