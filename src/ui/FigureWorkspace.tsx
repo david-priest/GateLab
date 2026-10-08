@@ -1959,6 +1959,54 @@ export function FigureWorkspace({
                 ))}
                 <label><input type="checkbox" checked={config.scaleFontsWithPlot} onChange={e => style({ scaleFontsWithPlot: e.target.checked })} />Scale fonts with panel size</label>
                 <p>{config.scaleFontsWithPlot ? "Font sizes are specified at a 280 px panel and scale proportionally." : "Font sizes stay fixed when you resize a panel."}</p>
+                {/* The distance of each axis title from its axis. Left alone, the renderer sets it
+                    from the widest tick label of that axis ("6" on a CyTOF axis, "100K" on a flow
+                    one); set by hand, both are in px at a 280 px panel and scale with the fonts. */}
+                <label
+                  title="Unticked, each axis title sits just past that axis's widest tick label. Ticked, the distances below are used, in px from the axis line."
+                >
+                  <input
+                    type="checkbox"
+                    checked={config.axisTitleOffsetX != null || config.axisTitleOffsetY != null}
+                    onChange={(e) =>
+                      style(
+                        e.target.checked
+                          ? {
+                              axisTitleOffsetX: Math.round(13 + 0.93 * config.fontTick + 0.75 * config.fontAxis),
+                              axisTitleOffsetY: Math.round(3 * 0.62 * config.fontTick + 14 + 0.25 * config.fontAxis),
+                            }
+                          : { axisTitleOffsetX: null, axisTitleOffsetY: null },
+                      )
+                    }
+                  />
+                  Set axis title distances
+                </label>
+                {(config.axisTitleOffsetX != null || config.axisTitleOffsetY != null) && (
+                  <>
+                    <label>
+                      X title distance
+                      <NumberField
+                        min={14}
+                        max={100}
+                        integer
+                        value={config.axisTitleOffsetX ?? Math.round(13 + 0.93 * config.fontTick + 0.75 * config.fontAxis)}
+                        onCommit={(axisTitleOffsetX) => style({ axisTitleOffsetX })}
+                        title="From the x axis line down to the title's baseline, px"
+                      />
+                    </label>
+                    <label>
+                      Y title distance
+                      <NumberField
+                        min={14}
+                        max={100}
+                        integer
+                        value={config.axisTitleOffsetY ?? Math.round(3 * 0.62 * config.fontTick + 14 + 0.25 * config.fontAxis)}
+                        onCommit={(axisTitleOffsetY) => style({ axisTitleOffsetY })}
+                        title="From the y axis line out to the title's baseline, px"
+                      />
+                    </label>
+                  </>
+                )}
               </details>
             </section>
             <section

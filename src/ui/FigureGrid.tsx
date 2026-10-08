@@ -44,6 +44,10 @@ export function styledFigurePlot(
       title: config.fontTitle * fontScale,
       gate_label: config.fontGate * fontScale,
     },
+    // A set axis-title distance scales with the fonts it sits among; unset, the renderer sizes
+    // it from the tick labels.
+    x_axis_label_offset: config.axisTitleOffsetX == null ? undefined : config.axisTitleOffsetX * fontScale,
+    y_axis_label_offset: config.axisTitleOffsetY == null ? undefined : config.axisTitleOffsetY * fontScale,
     gates: showGates ? data.gates : [],
     gate_style: {
       pub_style: config.pubStyle,
@@ -82,6 +86,7 @@ const FigurePlot = memo(function FigurePlot({
     config.contourLevels, config.kdeBandwidth, config.histLineWidth, config.histFill, config.histFillAlpha,
     config.histOverlayMode, config.fontTick, config.fontAxis, config.fontTitle, config.fontGate,
     config.scaleFontsWithPlot, config.pubStyle, config.gateLineWidth, config.gateEdgeMode, config.gateLabelFormat,
+    config.axisTitleOffsetX, config.axisTitleOffsetY,
   ]);
   useEffect(() => {
     if (!ref.current || !data.config) return;
