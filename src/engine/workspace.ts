@@ -265,6 +265,12 @@ export interface IllustrationConfig {
   fontGate: number;
   /** Scale the base font sizes with panel/cell size. Optional for older workspaces. */
   scaleFontsWithPlot?: boolean;
+  /**
+   * Distance of each axis title from its axis line, in px at a 280 px panel; absent or null,
+   * the renderer sizes it from the tick labels (loadPlots.ts, the margin patch).
+   */
+  axisTitleOffsetX?: number | null;
+  axisTitleOffsetY?: number | null;
 }
 
 export interface IllustrationPreset {

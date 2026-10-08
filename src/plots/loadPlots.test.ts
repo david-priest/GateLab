@@ -494,10 +494,17 @@ describe("GateLab mini-plot density patches", () => {
     // The room a fitted row has is the container's content box, not its bounding box.
     expect(patched).not.toContain("container.getBoundingClientRect().width || (plotSize * nColumns)");
     expect(patched.match(/container\.clientWidth - \(parseFloat\(cs\.paddingLeft\)/g) ?? []).toHaveLength(2);
-    expect(patched).toContain("cfg.y_logicle_ticks && cfg.y_logicle_ticks.major_labels");
-    expect(patched).toContain("_estimatedYTickWidth + 15");
-    expect(patched).toContain("cfg.y_axis_label_offset");
+    // The y title's distance follows the widest tick label of THAT axis: listed for a flow axis,
+    // read off D3's own linear ticks for a CyTOF or linear one, never assumed five characters
+    // wide (which had put a CyTOF title half an inch from its "0 2 4 6").
+    expect(patched).toContain("_widestLabel(cfg.y_logicle_ticks, cfg.y_range)");
+    expect(patched).toContain("d3.scaleLinear().domain(range).ticks(4).map(_formatLinearVal)");
+    expect(patched).not.toContain(": 5;\n        var _estimatedYTickWidth");
+    expect(patched).toContain("cfg.y_axis_label_offset = Math.ceil(_estimatedYTickWidth + 14 + 0.25 * _axisFsForMargin);");
+    expect(patched).toContain("cfg.x_axis_label_offset = Math.ceil(13 + 0.93 * _tickFsForMargin + 0.75 * _axisFsForMargin);");
     expect(patched).toContain("Math.min(140, _neededLeft)");
+    // A distance set on a grid's payload reaches every cell of the three grids.
+    expect(patched.match(/x_axis_label_offset: data\.x_axis_label_offset, y_axis_label_offset: data\.y_axis_label_offset/g) ?? []).toHaveLength(3);
 
     warning.mockRestore();
   });

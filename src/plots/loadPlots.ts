@@ -1710,21 +1710,34 @@ export function patchMiniPlot(src: string): string {
         // Size the title offsets from the ACTUAL tick-label vocabulary. A fixed 32px offset put a
         // rotated y title through labels such as "100K"; a wider outer margin alone only moved the
         // overlap. Explicit compensation-inspector margins and offsets still win.
+        // The y title sits past the widest tick label by a pad; the x title below the tick labels'
+        // descent. A flow axis (logicle or arcsinh) lists its labels, "100K" wide; a CyTOF or
+        // linear axis has none listed and takes D3's linear ticks, so its labels are read off the
+        // same ticks D3 will draw ("0", "2", "4", "6" on an arcsinh CyTOF axis), not assumed as
+        // wide as a flow axis's, which had put the title half an inch out.
         var _baseFs = cfg.font_sizes || {};
         var _tickFsForMargin = Number(_baseFs.tick);
         if (!isFinite(_tickFsForMargin)) _tickFsForMargin = 9;
         var _axisFsForMargin = Number(_baseFs.axis_label);
         if (!isFinite(_axisFsForMargin)) _axisFsForMargin = 11;
-        var _yTickLabels = cfg.y_logicle_ticks && cfg.y_logicle_ticks.major_labels;
-        var _maxYChars = Array.isArray(_yTickLabels) && _yTickLabels.length
-            ? Math.max.apply(null, _yTickLabels.map(function (label) { return String(label).length; }))
-            : 5;
-        var _estimatedYTickWidth = _maxYChars * _tickFsForMargin * 0.62;
+        function _widestLabel(ticks, range) {
+            var labels = ticks && Array.isArray(ticks.major_labels) ? ticks.major_labels : null;
+            if ((!labels || !labels.length) && range && isFinite(range[0]) && isFinite(range[1]) && range[1] > range[0]) {
+                labels = d3.scaleLinear().domain(range).ticks(4).map(_formatLinearVal);
+            }
+            if (!labels || !labels.length) return 3;
+            return Math.max.apply(null, labels.map(function (label) { return String(label).length; }));
+        }
+        var _estimatedYTickWidth = _widestLabel(cfg.y_logicle_ticks, cfg.y_range) * _tickFsForMargin * 0.62;
         if (!isFinite(Number(cfg.y_axis_label_offset))) {
-            cfg.y_axis_label_offset = Math.ceil(Math.max(32, _estimatedYTickWidth + 15));
+            // Tick (6) + text inset (2) + the label + a pad (6) + the title's descent, which the
+            // rotated title puts on the axis side of its baseline.
+            cfg.y_axis_label_offset = Math.ceil(_estimatedYTickWidth + 14 + 0.25 * _axisFsForMargin);
         }
         if (!isFinite(Number(cfg.x_axis_label_offset))) {
-            cfg.x_axis_label_offset = Math.ceil(Math.max(34, _tickFsForMargin + 24));
+            // Tick (6) + text inset (2) + the labels' baseline (0.71 em) and descent (0.22 em) + a
+            // pad (5) + the title's ascent above its own baseline.
+            cfg.x_axis_label_offset = Math.ceil(13 + 0.93 * _tickFsForMargin + 0.75 * _axisFsForMargin);
         }
         if (!isFinite(Number(requestedMargins.left)) && cfg.y_label) {
             var _neededLeft = Math.ceil(Number(cfg.y_axis_label_offset) + _axisFsForMargin + 4);
@@ -1759,6 +1772,17 @@ export function patchMiniPlot(src: string): string {
     out = out.replace(marginNeedle, marginPatch);
   } else if (!out.includes("var requestedMargins = cfg.plot_margins || {};")) {
     console.warn("[GateLab] mini_plot configurable-margin patch did not match.");
+  }
+  // GateLab: a grid (Illustration, Strategy, the multi-sample grid) builds each cell's config
+  // from a fixed list of the grid's fields, so an axis-title distance set on the grid payload
+  // (x_axis_label_offset / y_axis_label_offset, read by the margin patch above) has to be
+  // carried into each cell here or it never reaches a cell.
+  const cellOffsetNeedle = "gate_style:      gateStyle,";
+  const cellOffsetPatch = "gate_style:      gateStyle, x_axis_label_offset: data.x_axis_label_offset, y_axis_label_offset: data.y_axis_label_offset,";
+  if (out.includes(cellOffsetNeedle)) {
+    out = out.split(cellOffsetNeedle).join(cellOffsetPatch);
+  } else {
+    console.warn("[GateLab] mini_plot cell axis-title-offset patch did not match -- a set axis title distance will not reach grid cells.");
   }
 
   // The Illustration payload has always dropped quadrant gates because mini_plot only understood
