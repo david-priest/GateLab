@@ -189,7 +189,8 @@ describe("the Strategy tab and the Layout tab", () => {
     act(() => button("Add to Layout")!.click());
     // The block as drawn here: the panel size, the layout, the arrows and the appearance travel
     // with it, and its frame is the grid's own size (one leaf: a 1 × 1 grid of 200 px, the
-    // gutter on its right and below it that the arrows run in, and its title).
+    // gutter on its right that the arrows run in, the plain 8 px below it, where no line of a
+    // tree runs, and its title).
     expect(onAddToLayout).toHaveBeenLastCalledWith(
       expect.objectContaining({
         kind: "strategy", sampleId: "D1", populationId: fx.bcellsId, fullPath: true, displayMode: "pseudocolor",
@@ -197,7 +198,7 @@ describe("the Strategy tab and the Layout tab", () => {
         plotSize: 200, labelBackground: 0.6,
         style: expect.objectContaining({ pointSize: 1.2, pointAlpha: 0.35, contourLevels: 10, pubStyle: false, fontGate: 12 }),
       }),
-      { width: 244, height: 270 },
+      { width: 244, height: 250 },
     );
   });
 });

@@ -214,6 +214,8 @@ describe("GateLab cytof interaction patches", () => {
     expect(patched).toContain("_drawGateOverlay(gateLayer, gate, xScale, yScale, W, H, gateFs, gateStyle, gateLabelLayer, M);");
     // A gate's shape is named by its gate, for the Strategy tab's arrows.
     expect(patched).toContain(".attr('data-gate-shape', gate.gate_id || null)");
+    // The multi-population grid's rows may sit closer than its columns.
+    expect(patched.split("if (Number(data.grid_row_gap) > 0) gridDiv.style.rowGap = Number(data.grid_row_gap) + 'px';").length - 1).toBe(1);
     // The labels are drawn above the clipped shapes, unclipped, bounded by the panel's margins.
     expect(patched).toContain("var gateLabelLayer = g.append('g').attr('class', 'gate-overlay-labels');");
     expect(patched).toContain("var lx = Math.max(estHalfW - _mL, Math.min(W + _mR - estHalfW, cx + ox));");

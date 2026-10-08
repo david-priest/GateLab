@@ -22,7 +22,7 @@ import type { StrategyConfig } from "../engine/workspace";
 import { ContextMenu, type ContextMenuState } from "./ContextMenu";
 import type { MenuEntry } from "./MenuButton";
 import { StrategyPopulationPicker } from "./StrategyPopulationPicker";
-import { drawStrategyArrows, strategyArrowGap, strategyArrows } from "./strategyArrows";
+import { drawStrategyArrows, strategyArrowGap, strategyArrowRowGap, strategyArrows } from "./strategyArrows";
 import { attachGridPan, type PannablePanel } from "./gridPan";
 import { DensityColourControl } from "./DensityColourControl";
 import { useI18n } from "./i18n";
@@ -155,7 +155,7 @@ export function StrategyTab({
   /** The channels and ranges of each drawn panel, by its cell key, for the navigate drag. */
   const panelsRef = useRef<Map<string, PannablePanel>>(new Map());
   /** The multi-population grid's shape and panel size as last drawn, for the Layout block. */
-  const gridShapeRef = useRef<{ rows: number; cols: number; plotSize: number; gap: number; fonts: { tick: number; axis_label: number; gate_label: number; title: number } } | null>(null);
+  const gridShapeRef = useRef<{ rows: number; cols: number; plotSize: number; gap: number; rowGap: number; fonts: { tick: number; axis_label: number; gate_label: number; title: number } } | null>(null);
   /** The panel size the multi-population grid was last drawn at, shown beside Plot size when Fit made it smaller. */
   const [drawnSize, setDrawnSize] = useState<number | null>(null);
   const onScaleChangeRef = useRef(onScaleChange);
@@ -245,6 +245,8 @@ export function StrategyTab({
         // stay apart.
         const arrows = showArrows ? strategyArrows(nodes, state.populations) : [];
         const gridGap = showArrows ? strategyArrowGap(arrows) : 8;
+        // The rows sit close unless a line runs between them, which a tree's never do.
+        const gridRowGap = showArrows ? strategyArrowRowGap(arrows) : 8;
         const gridCols = nodes.length ? Math.max(...nodes.map((node) => node.col)) + 1 : 1;
         const fitted = fitToColumns && availableWidth > 0
           ? Math.max(120, Math.min(plotSize, Math.floor((availableWidth - 8 - gridGap * (gridCols - 1)) / gridCols)))
@@ -255,7 +257,7 @@ export function StrategyTab({
           ? { tick: scaled(fontSizes.tick), axis_label: scaled(fontSizes.axis_label), gate_label: scaled(fontSizes.gate_label), title: scaled(fontSizes.title) }
           : fontSizes;
         gridShapeRef.current = nodes.length
-          ? { rows: Math.max(...nodes.map((node) => node.row)) + 1, cols: gridCols, plotSize: fitted, fonts: gridFonts, gap: gridGap }
+          ? { rows: Math.max(...nodes.map((node) => node.row)) + 1, cols: gridCols, plotSize: fitted, fonts: gridFonts, gap: gridGap, rowGap: gridRowGap }
           : null;
         setDrawnSize(fitted);
         const payload = buildMultiStrategyPayload(nodes, {
@@ -268,6 +270,7 @@ export function StrategyTab({
           labelBackground,
           // Room for the arrows to run between the panels.
           gridGap: showArrows ? gridGap : undefined,
+          gridRowGap: showArrows ? gridRowGap : undefined,
           pointAlpha,
           densityColorPower,
           pointSize,
@@ -421,10 +424,11 @@ export function StrategyTab({
     if (!shape) { onAddToLayout(recipe); return; }
     // As measured, the grid holds its own right and bottom gutters, where the arrows run.
     const gap = shape.gap, trailing = showArrows ? gap : 4;
+    const rowGap = shape.rowGap, trailingBelow = showArrows ? rowGap : 4;
     const grid = containerRef.current?.querySelector<HTMLElement>(".multi-strategy-grid");
     const title = containerRef.current?.querySelector<HTMLElement>(".strategy-context-title");
     const width = grid && grid.offsetWidth > 0 ? grid.offsetWidth : shape.cols * shape.plotSize + (shape.cols - 1) * gap + 4 + trailing;
-    const height = (grid && grid.offsetHeight > 0 ? grid.offsetHeight : shape.rows * shape.plotSize + (shape.rows - 1) * gap + 4 + trailing) + (title && title.offsetHeight > 0 ? title.offsetHeight + 6 : 26);
+    const height = (grid && grid.offsetHeight > 0 ? grid.offsetHeight : shape.rows * shape.plotSize + (shape.rows - 1) * rowGap + 4 + trailingBelow) + (title && title.offsetHeight > 0 ? title.offsetHeight + 6 : 26);
     onAddToLayout(recipe, { width: width + 12, height: height + 12 });
   };
   const strategyToLayoutTitle = mode === "multi"
@@ -576,7 +580,9 @@ export function StrategyTab({
         <span className="gl-ctl-sep" />
         <label className="gl-field-inline">
           {t("Plot size")}
-          <input type="number" min={150} max={500} step={25} value={plotSize} onChange={(e) => setPlotSize(+e.target.value || 200)} />
+          {/* A size typed here is the size wanted: Fit to columns, which would draw the plots
+              smaller to fit the width whatever is typed, is switched off with it. */}
+          <input type="number" min={150} max={500} step={25} value={plotSize} onChange={(e) => { setPlotSize(+e.target.value || 200); setFitToColumns(false); }} />
         </label>
         <label className="gl-field-inline">
           {t("Columns")}

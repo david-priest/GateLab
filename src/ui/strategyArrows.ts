@@ -123,13 +123,30 @@ export function strategyArrows(
 }
 
 /**
- * The gap the grid needs between its cells for these arrows: room for the busiest gutter's lanes
- * and for a head on the last run into a panel; 28 px at the least.
+ * The gap the grid needs between its columns for these arrows: room for the busiest gutter's
+ * lanes and for a head on the last run into a panel; 28 px at the least.
  */
 export function strategyArrowGap(arrows: readonly StrategyArrow[]): number {
   let most = 0;
-  for (const arrow of arrows) most = Math.max(most, arrow.lanes.v, arrow.lanes.h, arrow.lanes.v2);
+  for (const arrow of arrows) most = Math.max(most, arrow.lanes.v, arrow.lanes.v2);
   return Math.max(28, ARROW_LANE_START + ARROW_LANE_STEP * most + ARROW_HEAD_ROOM);
+}
+
+/** The gap between the grid's rows where no line runs between them, px. */
+export const PLAIN_ROW_GAP = 8;
+
+/**
+ * The gap the grid needs between its rows: the same room as between columns where a line runs
+ * along a row gutter or straight down one (routes "down", "over" and "under"), and the plain gap
+ * where none does. A tree layout's lines all run down the gutters between the columns, so its
+ * rows sit close.
+ */
+export function strategyArrowRowGap(arrows: readonly StrategyArrow[]): number {
+  let most = -1;
+  for (const arrow of arrows) {
+    if (arrow.route === "down" || arrow.route === "over" || arrow.route === "under") most = Math.max(most, arrow.lanes.h);
+  }
+  return most < 0 ? PLAIN_ROW_GAP : Math.max(28, ARROW_LANE_START + ARROW_LANE_STEP * most + ARROW_HEAD_ROOM);
 }
 
 export interface Box { left: number; top: number; right: number; bottom: number }
@@ -140,8 +157,10 @@ export interface GridPlaces {
   cols: ReadonlyMap<number, { left: number; right: number }>;
   /** The y extent of each row that has a cell, by row index. */
   rows: ReadonlyMap<number, { top: number; bottom: number }>;
-  /** The gap between cells, px. */
+  /** The gap between columns, px. */
   gap: number;
+  /** The gap between rows, px; the column gap when absent. */
+  rowGap?: number;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
@@ -159,6 +178,7 @@ export function routeArrow(
   labelY: number,
 ): [number, number][] | null {
   const { gap } = places;
+  const rowGap = places.rowGap ?? gap;
   const pr = arrow.from.row, pc = arrow.from.col, cr = arrow.to.row, cc = arrow.to.col;
   if (pr === cr && pc === cc) return null;
   const y0 = clamp(labelY, from.top + 10, from.bottom - 10);
@@ -169,7 +189,7 @@ export function routeArrow(
     (places.cols.get(k)?.right ?? fallback) + ARROW_LANE_START + ARROW_LANE_STEP * index;
   /** A lane's y in the gutter above row r. */
   const hy = (r: number, index: number, fallback: number) =>
-    (places.rows.get(r - 1)?.bottom ?? ((places.rows.get(r)?.top ?? fallback) - gap)) + ARROW_LANE_START + ARROW_LANE_STEP * index;
+    (places.rows.get(r - 1)?.bottom ?? ((places.rows.get(r)?.top ?? fallback) - rowGap)) + ARROW_LANE_START + ARROW_LANE_STEP * index;
   switch (arrow.route) {
     case "across":
       return [[from.right, y0], [to.left, y0]];
@@ -188,7 +208,7 @@ export function routeArrow(
     }
     case "under": {
       const gx = vx(pc, arrow.lanes.v, from.right);
-      const gy = hy(pr + 1, arrow.lanes.h, from.bottom + gap);
+      const gy = hy(pr + 1, arrow.lanes.h, from.bottom + rowGap);
       const lx = vx(cc - 1, arrow.lanes.v2, to.left - gap);
       return [[from.right, y0], [gx, y0], [gx, gy], [lx, gy], [lx, entryY], [to.left, entryY]];
     }
@@ -268,17 +288,19 @@ function pathPoints(d: string): [number, number][] {
 }
 
 /**
- * A gutter on the grid's right and below it, as wide as the gap between its cells: a line that
- * leaves the last column, or runs under the last row, has somewhere to go inside the grid's own
- * box (outside it, the grid's scrolling container cut it off). Applied before the grid is
- * measured for a frame, and again whenever the arrows are drawn.
+ * A gutter on the grid's right and below it, as wide as the gap between its columns and its rows:
+ * a line that leaves the last column, or runs under the last row, has somewhere to go inside the
+ * grid's own box (outside it, the grid's scrolling container cut it off). Applied before the grid
+ * is measured for a frame, and again whenever the arrows are drawn.
  */
 export function reserveArrowGutters(container: HTMLElement): void {
   const grid = container.querySelector<HTMLElement>(".multi-strategy-grid");
   if (!grid) return;
-  const gap = parseFloat(getComputedStyle(grid).columnGap) || parseFloat(grid.style.gap) || 8;
+  const style = getComputedStyle(grid);
+  const gap = parseFloat(style.columnGap) || parseFloat(grid.style.gap) || 8;
+  const rowGap = parseFloat(style.rowGap) || parseFloat(grid.style.rowGap) || gap;
   grid.style.paddingRight = `${gap}px`;
-  grid.style.paddingBottom = `${gap}px`;
+  grid.style.paddingBottom = `${rowGap}px`;
 }
 
 /**
@@ -331,7 +353,15 @@ export function drawStrategyArrows(
     }
     return 8;
   };
-  const places: GridPlaces = { cols, rows, gap: gapOf() };
+  const rowGapOf = (fallback: number) => {
+    const numbered = [...rows.entries()].sort((a, b) => a[0] - b[0]);
+    for (let i = 1; i < numbered.length; i++) {
+      if (numbered[i][0] === numbered[i - 1][0] + 1) return Math.max(2, numbered[i][1].top - numbered[i - 1][1].bottom);
+    }
+    return fallback;
+  };
+  const columnGap = gapOf();
+  const places: GridPlaces = { cols, rows, gap: columnGap, rowGap: rowGapOf(columnGap) };
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("class", "gl-strategy-arrows");
   svg.setAttribute("width", String(Math.ceil(gridRect.width / scale)));

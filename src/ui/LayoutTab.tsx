@@ -82,7 +82,7 @@ import {
   buildStrategyPayload,
 } from "../engine/strategy";
 import { buildMultiStrategyPayload, computeMultiPopStrategy, flowLayout, tidyLayout } from "../engine/multiStrategy";
-import { drawStrategyArrows, reserveArrowGutters, strategyArrowGap, strategyArrows } from "./strategyArrows";
+import { drawStrategyArrows, reserveArrowGutters, strategyArrowGap, strategyArrowRowGap, strategyArrows } from "./strategyArrows";
 import { populationTreeOrder } from "../engine/populations";
 import { loadMiniPlots } from "../plots/loadPlots";
 import { composeSheetPages, writeComposedPages, type ComposedPage, type LayoutExportFormat } from "../plots/layoutExport";
@@ -502,6 +502,7 @@ function LayoutPlotSurface({
         const showArrows = recipe.showArrows !== false;
         const arrows = showArrows ? strategyArrows(nodes, tree.populations) : [];
         const gap = showArrows ? strategyArrowGap(arrows) : 8;
+        const rowGap = showArrows ? strategyArrowRowGap(arrows) : 8;
         const plotSize = Math.max(120, Math.min(800, recipe.plotSize ?? 200));
         host.removeAttribute("id");
         const inner = document.createElement("div");
@@ -524,6 +525,7 @@ function LayoutPlotSurface({
             gateLabelBold: recipe.gateLabelBold,
             labelBackground: recipe.labelBackground,
             gridGap: gap,
+            gridRowGap: rowGap,
             canvasScale: canvasScale * scale,
             fontSizes: fontSizesOf(style),
             contextTitle: drawnTitle,

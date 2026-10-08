@@ -46,7 +46,11 @@ describe("where a gate's label may sit on a mini plot", () => {
   // be dragged out.
   it("keeps a label at its automatic place inside the axes, under the title", () => {
     const { y } = labelY({ label_offset: [0, 2] }); // two units above a gate already at the top
-    expect(y).toBe(10);
+    // The whole label, not its anchor: the name's line reaches 1.46 em above the anchor, so a
+    // 10 px label's anchor is held 17 px down (14.6 + 2) and its box ends inside the top axis.
+    expect(y).toBe(17);
+    // A label of the name alone sits on its anchor and keeps the 10 px it had.
+    expect(labelY({ label_offset: [0, 2], percent_of_parent: null }).y).toBe(10);
   });
 
   it("lets a label the user placed sit above the top axis or below the bottom one", () => {
@@ -56,6 +60,8 @@ describe("where a gate's label may sit on a mini plot", () => {
     expect(below.y).toBeGreaterThan(below.height);
     // The same offset, not placed: held at the bottom edge.
     const held = labelY({ label_offset: [0, -9] });
-    expect(held.y).toBeLessThanOrEqual(held.height);
+    // Its second line reaches 0.96 em below the anchor, so the anchor stops 11 px short.
+    // (The axis line is drawn half a pixel past the plot's height.)
+    expect(held.y).toBe(Math.floor(held.height) - 11);
   });
 });
