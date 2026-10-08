@@ -1385,6 +1385,26 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-comp-global-groups {
   flex: 1; min-height: 0; overflow: auto; scrollbar-gutter: stable; padding: 3px 5px 6px;
 }
+/* The matrix arrangement: one cell per coefficient, sources down the side and receivers along
+   the top, both headings held in view while the table scrolls. */
+.gl-comp-global-matrix {
+  display: grid; flex: 1; min-height: 0; align-content: start; gap: 0; overflow: auto;
+  scrollbar-gutter: stable; padding: 0 5px 6px;
+}
+.gl-comp-global-matrix-corner, .gl-comp-global-matrix-col, .gl-comp-global-matrix-row {
+  position: sticky; z-index: 2; display: flex; min-width: 0; flex-direction: column; gap: 1px;
+  background: rgba(255,255,255,0.96); font-size: var(--gl-comp-font-xs);
+}
+.gl-comp-global-matrix-corner { top: 0; left: 0; z-index: 3; justify-content: flex-end; padding: 3px 5px; color: var(--muted); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.gl-comp-global-matrix-col { top: 0; justify-content: flex-end; padding: 3px 4px; text-align: center; border-bottom: 1px solid #edf0f4; }
+.gl-comp-global-matrix-row { left: 0; justify-content: center; padding: 3px 5px; border-right: 1px solid #edf0f4; }
+.gl-comp-global-matrix-col strong, .gl-comp-global-matrix-row strong,
+.gl-comp-global-matrix-col small, .gl-comp-global-matrix-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-comp-global-matrix-col strong, .gl-comp-global-matrix-row strong { font-size: var(--gl-comp-font-sm); }
+.gl-comp-global-matrix-col small, .gl-comp-global-matrix-row small { color: var(--muted); }
+.gl-comp-global-matrix-blank { display: grid; place-items: center; min-height: 40px; background: #fafbfc; box-shadow: inset 0 0 0 1px #f1f3f6; }
+.gl-comp-global-matrix-blank.is-diagonal { background: #f1f3f6; color: #8090a3; font-size: var(--gl-comp-font-xs); }
+.gl-comp-global-matrix-blank.is-diagonal > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; padding: 0 4px; }
 .gl-comp-global-group {
   display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 5px;
   padding: 5px 0; border-bottom: 1px solid #edf0f4;

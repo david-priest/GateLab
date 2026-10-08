@@ -487,10 +487,13 @@ describe("GateLab mini-plot density patches", () => {
     const patched = patchMiniPlot(miniSrc);
 
     expect(warning).not.toHaveBeenCalled();
-    expect(patched).toContain("Math.max(120, Math.min(plotSize, fitSize))");
-    // The one remaining expanding fit belongs to Strategy; Illustration's separately-labelled
-    // block is the only one this change owns.
-    expect(patched.match(/Math\.max\(plotSize, fitSize\)/g) ?? []).toHaveLength(1);
+    // Both grids: the plot is the size asked for, and Fit shrinks it only when the columns would
+    // not otherwise fit; no grid inflates a plot to fill the row.
+    expect(patched.match(/Math\.max\(120, Math\.min\(plotSize, fitSize\)\)/g) ?? []).toHaveLength(2);
+    expect(patched).not.toContain("Math.max(plotSize, fitSize)");
+    // The room a fitted row has is the container's content box, not its bounding box.
+    expect(patched).not.toContain("container.getBoundingClientRect().width || (plotSize * nColumns)");
+    expect(patched.match(/container\.clientWidth - \(parseFloat\(cs\.paddingLeft\)/g) ?? []).toHaveLength(2);
     expect(patched).toContain("cfg.y_logicle_ticks && cfg.y_logicle_ticks.major_labels");
     expect(patched).toContain("_estimatedYTickWidth + 15");
     expect(patched).toContain("cfg.y_axis_label_offset");

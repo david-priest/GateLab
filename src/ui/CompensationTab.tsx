@@ -1,4 +1,5 @@
 import {
+  Fragment,
   memo,
   useEffect,
   useMemo,
@@ -260,7 +261,13 @@ type FlowCandidatePreviewState =
 
 type CompensationWorkspaceView = "matrix" | "global" | "attention";
 type CompensationGlobalPairFilter = "relevant" | "nonzero" | "physical" | "flagged" | "all";
-type CompensationGlobalLayout = "compact" | "source" | "receiver";
+type CompensationGlobalLayout = "compact" | "source" | "receiver" | "matrix";
+/**
+ * The matrix arrangement is the default up to this many channels: a row of 16 tiles at the
+ * smallest size is 1,920 px, which still reads as one table; a mass cytometry matrix of 40
+ * channels does not, and opens as the compact gallery.
+ */
+const MATRIX_LAYOUT_DEFAULT_MAX_CHANNELS = 16;
 
 const GLOBAL_PAIR_FILTER_LABELS: Readonly<Record<CompensationGlobalPairFilter, string>> = {
   relevant: "Matrix-linked / relevant",
@@ -615,9 +622,11 @@ function CompensationTabImpl({
     `compensation.${stateKey}.globalPairFilter`,
     "relevant",
   );
-  const [globalLayout, setGlobalLayout] = usePersistedTabState<CompensationGlobalLayout>(
+  // Null until the user chooses: the arrangement then follows the matrix, as the matrix itself
+  // for a manageable one and the compact gallery for a large one.
+  const [chosenGlobalLayout, setGlobalLayout] = usePersistedTabState<CompensationGlobalLayout | null>(
     `compensation.${stateKey}.globalLayout`,
-    "compact",
+    null,
   );
   const [globalPlotSize, setGlobalPlotSize] = usePersistedTabState<number>(
     "compensation.globalPlotSize.v5",
@@ -913,6 +922,8 @@ function CompensationTabImpl({
         : "This is the exact installed matrix. Original measurements remain stored separately.",
     };
   }, [hostedFlowMatrix, profileMetadata, profileRecord, sample, spill, t, channelLabelMode]);
+  const globalLayout: CompensationGlobalLayout = chosenGlobalLayout
+    ?? (matrixView && matrixView.sourceAxisKeys.length <= MATRIX_LAYOUT_DEFAULT_MAX_CHANNELS ? "matrix" : "compact");
   const sourceChannels = matrixView?.sourceChannels ?? [];
   const receiverChannels = matrixView?.receiverChannels ?? [];
   useEffect(() => {
@@ -1138,7 +1149,7 @@ function CompensationTabImpl({
     setPendingGlobalScrollPairKey(null);
   }, [globalInspectorDetailsOpen, globalLayout, pendingGlobalScrollPairKey, visibleGlobalInspectorCandidates, workspaceView]);
   const globalInspectorGroups = useMemo(() => {
-    if (globalLayout === "compact") return [];
+    if (globalLayout === "compact" || globalLayout === "matrix") return [];
     const groups = new Map<string, {
       channel: ReturnType<typeof channelDisplay>;
       pairs: CompensationGlobalPairCandidate[];
@@ -1151,16 +1162,42 @@ function CompensationTabImpl({
     }
     return [...groups.values()];
   }, [globalLayout, visibleGlobalInspectorCandidates]);
+  // The matrix arrangement: every visible pair at its row (source) and column (receiver) of the
+  // matrix, the other cells blank, so the plots sit where their coefficients do.
+  const globalMatrixCells = useMemo(() => {
+    const cells = new Map<string, CompensationGlobalPairCandidate>();
+    if (globalLayout !== "matrix") return cells;
+    for (const pair of visibleGlobalInspectorCandidates) cells.set(`${pair.sourceIndex}:${pair.receiverIndex}`, pair);
+    return cells;
+  }, [globalLayout, visibleGlobalInspectorCandidates]);
   const orderedGlobalExportCandidates = useMemo(
     () => globalLayout === "compact"
       ? visibleGlobalInspectorCandidates
-      : globalInspectorGroups.flatMap((group) => group.pairs),
+      : globalLayout === "matrix"
+        ? [...visibleGlobalInspectorCandidates].sort((a, b) => a.sourceIndex - b.sourceIndex || a.receiverIndex - b.receiverIndex)
+        : globalInspectorGroups.flatMap((group) => group.pairs),
     [globalInspectorGroups, globalLayout, visibleGlobalInspectorCandidates],
   );
   const globalExportFilterLabel = `${t(GLOBAL_PAIR_FILTER_LABELS[globalPairFilter])}${
     globalPairSearch.trim() ? t(" · search “{query}”", { query: globalPairSearch.trim() }) : ""
   }`;
   const resolvedGlobalPlotSize = Math.max(120, Math.min(220, Math.round(globalPlotSize) || 120));
+  // The matrix arrangement shows every column at once where it can: its tiles shrink from the
+  // slider's size to fit the pane's width, down to the tile minimum, past which the table scrolls.
+  const matrixPaneRef = useRef<HTMLDivElement>(null);
+  const [matrixPaneWidth, setMatrixPaneWidth] = useState(0);
+  useEffect(() => {
+    const pane = matrixPaneRef.current;
+    if (!pane || globalLayout !== "matrix" || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => setMatrixPaneWidth(pane.clientWidth));
+    observer.observe(pane);
+    setMatrixPaneWidth(pane.clientWidth);
+    return () => observer.disconnect();
+  }, [globalLayout, workspaceView, globalInspectorDataset?.ready]);
+  const matrixColumnCount = matrixView?.receiverChannels.length ?? 0;
+  const matrixTileSize = matrixColumnCount > 0 && matrixPaneWidth > 0
+    ? Math.max(120, Math.min(resolvedGlobalPlotSize, Math.floor((matrixPaneWidth - 92 - 12) / matrixColumnCount)))
+    : resolvedGlobalPlotSize;
   const resolvedDensitySmoothing = Math.max(1, Math.min(10, Math.round(densitySmoothing) || 6));
   const resolvedPointAlpha = Math.max(0.1, Math.min(1, Number(pointAlpha) || 0.85));
   const resolvedPointSize = Math.max(0.3, Math.min(3, Number(pointSize) || 1));
@@ -2694,12 +2731,13 @@ function CompensationTabImpl({
   const renderGlobalPlotTile = (
     pair: CompensationGlobalPairCandidate,
     dataset: CompensationGlobalInspectorDataset,
+    plotSize: number = resolvedGlobalPlotSize,
   ) => (
     <GlobalCompensationPlotTile
       key={pair.pairKey}
       dataset={dataset}
       pair={pair}
-      plotSize={resolvedGlobalPlotSize}
+      plotSize={plotSize}
       densitySmoothing={resolvedDensitySmoothing}
       flagged={flaggedPairSet.has(pair.pairKey)}
       selected={selectedPairKey === pair.pairKey}
@@ -3730,6 +3768,7 @@ function CompensationTabImpl({
                 value={globalLayout}
                 onChange={(event) => setGlobalLayout(event.currentTarget.value as CompensationGlobalLayout)}
               >
+                <option value="matrix">{t("Matrix: sources down, receivers across")}</option>
                 <option value="compact">{t("Compact gallery")}</option>
                 <option value="source">{t("Rows by source")}</option>
                 <option value="receiver">{t("Rows by receiver")}</option>
@@ -3793,6 +3832,46 @@ function CompensationTabImpl({
               >
                 {visibleGlobalInspectorCandidates.map((pair) =>
                   renderGlobalPlotTile(pair, globalInspectorDataset.dataset))}
+              </div>
+            ) : globalLayout === "matrix" && matrixView ? (
+              <div
+                ref={matrixPaneRef}
+                className="gl-comp-global-matrix"
+                data-event-signature={globalInspectorDataset.dataset.eventSignature}
+                data-tile-size={matrixTileSize}
+                role="grid"
+                aria-label={t("Compensation pairs arranged as the matrix")}
+                style={{ gridTemplateColumns: `92px repeat(${matrixView.receiverChannels.length}, ${matrixTileSize}px)` }}
+              >
+                <div className="gl-comp-global-matrix-corner"><span>{t("Source ↓")}</span><span>{t("Receiver →")}</span></div>
+                {matrixView.receiverChannels.map((channel, receiverIndex) => (
+                  <div className="gl-comp-global-matrix-col" key={`col-${receiverIndex}`} title={channel.combined}>
+                    <strong>{channel.label}</strong>
+                    <small>{channel.pnn}</small>
+                  </div>
+                ))}
+                {matrixView.sourceChannels.map((source, sourceIndex) => (
+                  <Fragment key={`row-${sourceIndex}`}>
+                    <div className="gl-comp-global-matrix-row" title={source.combined}>
+                      <strong>{source.label}</strong>
+                      <small>{source.pnn}</small>
+                    </div>
+                    {matrixView.receiverChannels.map((receiver, receiverIndex) => {
+                      const pair = globalMatrixCells.get(`${sourceIndex}:${receiverIndex}`);
+                      if (pair) return renderGlobalPlotTile(pair, globalInspectorDataset.dataset, matrixTileSize);
+                      const diagonal = matrixView.sourceAxisKeys[sourceIndex] === matrixView.receiverAxisKeys[receiverIndex];
+                      return (
+                        <div
+                          key={`${sourceIndex}:${receiverIndex}`}
+                          className={`gl-comp-global-matrix-blank${diagonal ? " is-diagonal" : ""}`}
+                          title={diagonal ? t("{channel} into itself", { channel: source.label }) : t("{source} into {receiver}: not shown under the current filter", { source: source.label, receiver: receiver.label })}
+                        >
+                          {diagonal ? <span>{source.label}</span> : null}
+                        </div>
+                      );
+                    })}
+                  </Fragment>
+                ))}
               </div>
             ) : (
               <div

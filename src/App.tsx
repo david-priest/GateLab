@@ -7622,6 +7622,39 @@ export default function App() {
     setActiveTab("layout");
   }
 
+  /** A strategy strip, or one of its plots, from the Strategy tab as a Layout block, and the Layout tab shown. */
+  function addStrategyToLayout(recipe: LayoutStrategyRecipe | LayoutPlotRecipe): void {
+    if (recipe.kind !== "strategy") {
+      addPlotsToLayout([recipe]);
+      setActiveTab("layout");
+      return;
+    }
+    setLayoutWorkspace((current) => {
+      const next = cloneLayoutWorkspace(current);
+      const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
+      if (!sheet) return current;
+      const frame = nextLayoutItemPosition(sheet, 600, 320);
+      sheet.items.push({ id: crypto.randomUUID(), ...frame, recipe });
+      sheet.width = Math.max(sheet.width, frame.x + frame.width + 48);
+      sheet.height = Math.max(sheet.height, frame.y + frame.height + 48);
+      return next;
+    });
+    markWorkspaceDirty();
+    setActiveTab("layout");
+  }
+
+  /** A strategy step on the Gating tab: its population on its gate's channels. */
+  function openStrategyStepInGating(populationId: string, xChannel: string, yChannel: string): void {
+    if (!sample) return;
+    if (state.populations[populationId]) dispatch({ type: "setActivePopulation", popId: populationId });
+    const [fallbackX, fallbackY] = channelsFor(sample);
+    setXIdx(sample.index(xChannel) ?? fallbackX);
+    setYIdx(sample.index(yChannel) ?? fallbackY);
+    setXRange(null);
+    setYRange(null);
+    setActiveTab("gating");
+  }
+
   /** The Illustration tab's figure as one Layout block, and the Layout tab shown. */
   function addFigureToLayout(config: IllustrationConfig): void {
     setLayoutWorkspace((current) => {
@@ -12714,6 +12747,9 @@ export default function App() {
                 poolable={checkedSamples.length >= 2}
                 isSceHost={isSceHost}
                 onPoolChange={(pooled) => { if (pooled) poolSelectedFiles(); else if (activeSampleId) inspectSample(activeSampleId); }}
+                activeSampleId={activeSampleId}
+                onAddToLayout={LAYOUT_TAB_AVAILABLE ? addStrategyToLayout : undefined}
+                onOpenStep={openStrategyStepInGating}
               />
             )}
             {activeTab === "illustration" && (
