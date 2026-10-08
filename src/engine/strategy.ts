@@ -426,6 +426,8 @@ function strategyPayload(
       color: s.color,
       // Same label position as the main plot: user-set offset, else the auto "above the gate".
       label_offset: s.label_offset ?? displayLabelOffset(s.displayVertices),
+      // Placed by the user, as against where a label goes by itself: only a placed one may sit past the axes.
+      label_placed: s.label_offset != null,
       include: s.include,
       x: xMain,
       y: yMain,

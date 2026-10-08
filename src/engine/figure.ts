@@ -741,7 +741,7 @@ export function withFigureLabelOffsets<T extends { gate_id: string; label_offset
       ? quadrants.map((q, i) => q ?? stored?.[i] ?? null)
       : undefined;
     return own || quadrant_label_offsets
-      ? { ...gate, ...(own ? { label_offset: own } : {}), ...(quadrant_label_offsets ? { quadrant_label_offsets } : {}) }
+      ? { ...gate, ...(own ? { label_offset: own, label_placed: true } : {}), ...(quadrant_label_offsets ? { quadrant_label_offsets } : {}) }
       : gate;
   });
 }

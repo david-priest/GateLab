@@ -217,6 +217,10 @@ describe("GateLab cytof interaction patches", () => {
     // The labels are drawn above the clipped shapes, unclipped, bounded by the panel's margins.
     expect(patched).toContain("var gateLabelLayer = g.append('g').attr('class', 'gate-overlay-labels');");
     expect(patched).toContain("var lx = Math.max(estHalfW - _mL, Math.min(W + _mR - estHalfW, cx + ox));");
+    // Only a label the user placed is let past the axes; an automatic one has no margin to use.
+    expect(patched).toContain("var _placed = !!gate.label_placed;");
+    expect(patched).toContain("var _mT = _placed && margins ? Number(margins.top) || 0 : 0, _mB = _placed && margins ? Number(margins.bottom) || 0 : 0;");
+    expect(patched).toContain("label_placed: step.label_placed");
     expect(patched).toContain(".attr('fill', pubStyle ? '#ffffff' : gate.color).attr('fill-opacity', pubStyle ? _backing : 0.85);");
     warning.mockRestore();
   });
