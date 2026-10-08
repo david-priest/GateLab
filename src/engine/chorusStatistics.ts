@@ -157,6 +157,8 @@ export interface FilePopulationCount {
 }
 
 export interface FileCounts {
+  /** The loaded file's id, where the caller has one: two loaded files may share a name. */
+  entryId?: string;
   fileName: string;
   /** The hierarchy the file is counted under, for the report. */
   hierarchyName: string;

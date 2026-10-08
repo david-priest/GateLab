@@ -3791,3 +3791,8 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-fit-panel-readout { margin: 8px 0; color: var(--muted); line-height: 1.4; }
 .gl-fit-panel-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .gl-fit-panel-apply { border-color: var(--accent); color: var(--accent); }
+
+/* Counts against FlowJo: the reason column keeps a readable width beside long qualified names. */
+.gl-flowjo-check .gl-chorus-stats-table td.gl-chorus-stats-why { min-width: 150px; }
+.gl-flowjo-check .gl-chorus-stats-table td.gl-stats-name { white-space: normal; overflow-wrap: anywhere; max-width: 420px; }
+.gl-flowjo-check-line .gl-mini-btn { flex: 0 0 auto; white-space: nowrap; }

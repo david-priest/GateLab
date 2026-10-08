@@ -40,6 +40,8 @@ import { buildChorusTimeline, isRecordingOfExperiment, treesRecordedUnder, type 
 import { ChorusTimelineModal } from "./ui/ChorusTimelineModal";
 import { compareChorusStatistics, parseChorusStatistics, type ChorusImportRecord, type ChorusStatistics, type FileCounts } from "./engine/chorusStatistics";
 import { ChorusStatisticsModal } from "./ui/ChorusStatisticsModal";
+import { checkAgainstFlowJo, flowJoCountCheckCsv, type FlowJoCountCheck, type FlowJoReference } from "./engine/flowjoCountCheck";
+import { FlowJoCountCheckModal } from "./ui/FlowJoCountCheckModal";
 import { MenuButton, type MenuEntry } from "./ui/MenuButton";
 import { ContextMenu, type ContextMenuState } from "./ui/ContextMenu";
 import { snapGatesToBorders } from "./engine/borderSnap";
@@ -710,6 +712,11 @@ interface PendingGatingMLImport {
    * that opened the workspace asked it.
    */
   flowJoGridChoice?: { value: boolean; redo: (value: boolean) => Promise<void> };
+  /**
+   * FlowJo's recorded count of every population of each sample whose strategy this import brings,
+   * kept so the applied result can be checked against them (engine/flowjoCountCheck.ts).
+   */
+  flowJoReferences?: readonly FlowJoReference[];
 }
 
 interface PendingNewGate {
@@ -1544,6 +1551,19 @@ export default function App() {
   /** The .cef last opened, kept so the tree can be written back into it (Export FACSChorus experiment). */
   const [chorusSource, setChorusSource] = useState<{ name: string; bytes: Uint8Array } | null>(null);
   const [chorusStats, setChorusStats] = useState<ChorusStatistics | null>(null);
+  /** FlowJo's recorded counts for the files of the last FlowJo import, for the check against them. */
+  const [flowJoReferences, setFlowJoReferences] = useState<readonly FlowJoReference[]>([]);
+  /** That check as it stood once the import was applied; the dialog counts again when opened. */
+  const [flowJoCheckAtImport, setFlowJoCheckAtImport] = useState<FlowJoCountCheck | null>(null);
+  const [flowJoCheckOpen, setFlowJoCheckOpen] = useState(false);
+  /** This render's per-file counts, for the check made just after an import is applied. */
+  const fileCountsRef = useRef<() => FileCounts[]>(() => []);
+  useEffect(() => {
+    if (!flowJoReferences.length) { setFlowJoCheckAtImport(null); return; }
+    // After the render that holds the imported tree, so the counts are that tree's.
+    const timer = window.setTimeout(() => setFlowJoCheckAtImport(checkAgainstFlowJo(flowJoReferences, fileCountsRef.current())), 60);
+    return () => window.clearTimeout(timer);
+  }, [flowJoReferences]);
   const chorusStatsRef = useRef<HTMLInputElement | null>(null);
   /**
    * Opening a .wsp directly. The workspace names the files it expects, so the FCS can be
@@ -3710,6 +3730,7 @@ export default function App() {
           })
         : [];
       out.push({
+        entryId: entry.id,
         fileName: entry.name,
         hierarchyName: state.hierarchies.find((h) => h.id === hierarchyOfFile(entry.id))?.name ?? "",
         events: entry.sample.fcs.nEvents,
@@ -3718,6 +3739,7 @@ export default function App() {
     }
     return out;
   }
+  fileCountsRef.current = chorusFileCounts;
 
   /**
    * One tree of a FACSDiva experiment, rewritten as Gating-ML and taken through the ordinary path.
@@ -4692,6 +4714,7 @@ export default function App() {
       let noteCount = loadNotes.length + converted.warnings.length;
       let siblingGridPolygons = 0;
       let siblingGateLabPolygons = 0;
+      const siblingReferences: FlowJoReference[] = [];
       const siblings: { name: string; gatingMl: string; fileName?: string; entryId?: string | null; spillover?: FlowJoSpillover | null; origin?: string; sampleLabel?: string; warnings?: readonly string[]; unreadable?: string }[] = [];
       // Every other file's strategy, one hierarchy each, named after the file so the tree panel
       // and the sample badges read the same way. A file whose strategy cannot be read is named
@@ -4716,6 +4739,7 @@ export default function App() {
         noteCount += own.warnings.length;
         siblingGridPolygons += own.gridPolygons;
         siblingGateLabPolygons += own.gateLabPolygons;
+        siblingReferences.push({ entryId: other.entryId ?? null, fileName: other.fileName, sampleName: own.sampleName, events: other.sample.eventCount, counts: own.flowJoCounts });
         siblings.push({
           name: other.fileName,
           gatingMl: own.gatingMl,
@@ -4729,6 +4753,19 @@ export default function App() {
           ...(own.warnings.length ? { warnings: own.warnings } : {}),
         });
       }
+      // FlowJo's own count of every population, kept beside the import so its result can be
+      // checked against them. A tree put by choice onto a file that is not its sample has no
+      // counts to answer to, so that file gets none.
+      const flowJoReferences: FlowJoReference[] = [
+        ...(extra.crossTo ? [] : [{
+          entryId: primaryPair?.entryId ?? (perFile.length ? null : activeSampleId),
+          fileName: primaryFileName ?? fileName,
+          sampleName: converted.sampleName,
+          events: choice.eventCount,
+          counts: converted.flowJoCounts,
+        }]),
+        ...siblingReferences,
+      ];
       const otherTrees = primaryTree ? choice.trees.filter((tree) => tree.index !== primaryTree.index) : [];
       const failedOtherTrees = otherTrees.filter((tree) => failedTrees.some((f) => f.index === tree.index));
       const notChosenTrees = otherTrees.filter((tree) => !failedTrees.some((f) => f.index === tree.index));
@@ -4788,6 +4825,7 @@ export default function App() {
         unpaired.flatMap((u) => (u.entryId ? [{ name: u.name, entryId: u.entryId }] : [])),
         [],
         {
+          flowJoReferences,
           ...(primaryPair
             ? { primarySampleLabel: `sample ${choice.index + 1}`, ...(extra.crossTo ? { primaryByChoice: choice.name } : {}) }
             : {}),
@@ -4886,7 +4924,7 @@ export default function App() {
     /** A Cytobank file's tree as tailored for each loaded file it names, by that file's id. */
     cytobankTailoring: readonly Readonly<{ fileName: string; entryId: string; gatingMl: string }>[] = [],
     /** Further fields of the staged import, set as given. */
-    more: Readonly<Pick<PendingGatingMLImport, "primarySampleLabel" | "primaryByChoice" | "flowJoGridChoice">> = {},
+    more: Readonly<Pick<PendingGatingMLImport, "primarySampleLabel" | "primaryByChoice" | "flowJoGridChoice" | "flowJoReferences">> = {},
   ): Promise<string | null> {
     // Resolves to why the import could not be staged, or null; the error is shown either way.
     if (!sample || !activeSampleId) return null;
@@ -5647,6 +5685,9 @@ export default function App() {
           cytobankSummary +
           pendingImport.sourceNote,
       );
+      // What FlowJo counted, where this import came from a FlowJo workspace; none otherwise, so a
+      // later import of another kind does not leave an earlier one's counts to be compared.
+      setFlowJoReferences(pendingImport.flowJoReferences ?? []);
     } catch (e) {
       if (!committed) {
         for (const t0 of touched.reverse()) t0.sample.restoreSpillover(t0.snapshot);
@@ -9580,6 +9621,8 @@ export default function App() {
       setPopulationMetaColumns(ws.populationMetaColumns ?? []);
       illustConfigRef.current = ws.illustration ?? null;
       strategyConfigRef.current = ws.strategy ?? null;
+      // An opened workspace's tree is not the one an earlier FlowJo import's counts describe.
+      setFlowJoReferences([]);
       setIllustrationPresets(ws.illustrationPresets ?? []);
       setIllustVersion((v) => v + 1); // remount the Illustration and Strategy tabs so they re-read the restored configs
       setLayoutWorkspace(normalizeLayoutWorkspace(ws.layout));
@@ -11544,6 +11587,12 @@ export default function App() {
                 title: "Open the statistics FACSChorus exports beside an experiment (<experiment>_Statistics.csv): its event count for every population of every recording, set beside GateLab's count on the loaded file of the same name, with the reason for each difference.",
                 onClick: () => void pickFilesOrInput(chorusStatsRef.current, TABLE_FILE_ACCEPT, "FACSChorus statistics export").then((files) => { if (files?.[0]) void openChorusStatistics(files[0]); }),
               },
+              {
+                label: t("Compare with FlowJo's counts…"),
+                title: "After a FlowJo workspace has been imported: the event count FlowJo recorded for every population, set beside GateLab's count of the same population on the same file, with each difference classed as arising at its own gate or inherited from a population above it.",
+                disabled: !flowJoReferences.length,
+                onClick: () => setFlowJoCheckOpen(true),
+              },
             ]}
           />
           <MenuButton
@@ -12006,6 +12055,18 @@ export default function App() {
               </div>
             )}
             {importMsg && <div className="gl-hint" title={t(importMsg)}>{t(importMsg)}</div>}
+            {flowJoCheckAtImport && flowJoCheckAtImport.compared > 0 && (() => {
+              const said = flowJoCheckAtImport.exact === flowJoCheckAtImport.compared
+                ? t("At import, all {compared} populations compared counted exactly as FlowJo recorded.", { compared: flowJoCheckAtImport.compared })
+                : t("At import, {exact} of {compared} populations compared counted exactly as FlowJo recorded.", { exact: flowJoCheckAtImport.exact, compared: flowJoCheckAtImport.compared });
+              // The line is cut to the panel's width, as the import's own is; the button is not.
+              return (
+                <div className="gl-side-status-row gl-flowjo-check-line">
+                  <div className="gl-hint" title={said}>{said}</div>
+                  <button className="gl-mini-btn" title={t("The count FlowJo recorded for every population, beside GateLab's")} onClick={() => setFlowJoCheckOpen(true)}>{t("FlowJo counts…")}</button>
+                </div>
+              );
+            })()}
           </div>
         </aside>
 
@@ -13551,6 +13612,17 @@ export default function App() {
           onClose={() => setChorusStats(null)}
         />
       )}
+
+      {flowJoCheckOpen && (() => {
+        const check = checkAgainstFlowJo(flowJoReferences, chorusFileCounts());
+        return (
+          <FlowJoCountCheckModal
+            check={check}
+            onExport={() => downloadText("flowjo_count_check.csv", flowJoCountCheckCsv(check), "text/csv;charset=utf-8")}
+            onClose={() => setFlowJoCheckOpen(false)}
+          />
+        );
+      })()}
 
       {chorusPicker && chorusTimeline && (
         <ChorusTimelineModal
