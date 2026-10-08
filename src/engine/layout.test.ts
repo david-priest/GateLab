@@ -100,6 +100,38 @@ describe("layout workspace persistence", () => {
     expect((workspace.sheets[0].items[0].recipe as { pool: { sampleIds: string[] } }).pool.sampleIds).toEqual(["D1", "D2"]);
   });
 
+  it("keeps a multi-population strategy block's populations, layout and arrows through a save and a load", () => {
+    const recipe = (extra: Record<string, unknown>) => normalizeLayoutWorkspace({
+      version: 2,
+      activeSheetId: "s",
+      sheets: [{
+        id: "s", name: "Strategy", width: 900, height: 700,
+        items: [{
+          id: "g", x: 0, y: 0, width: 600, height: 400, z: 1,
+          recipe: { kind: "strategy", sampleId: "D1", populationId: "b", fullPath: true, displayMode: "contour", ...extra },
+        }],
+      }],
+    }).sheets[0].items[0].recipe;
+    expect(recipe({ populationIds: ["b", "t", "b", ""], layout: "flow", columns: 3.6, showArrows: false, arrowColor: "#123456", arrowWidth: 2, plotSize: 275.4, gateLabelBold: true, labelBackground: 1.4 }))
+      .toMatchObject({ populationIds: ["b", "t"], layout: "flow", columns: 4, showArrows: false, arrowColor: "#123456", arrowWidth: 2, plotSize: 275, gateLabelBold: true, labelBackground: 1 });
+    // The strip as before: none of the fields, and nothing invented.
+    const strip = recipe({ populationIds: [], layout: "sideways", columns: 0, arrowWidth: -1 });
+    expect(strip).not.toHaveProperty("populationIds");
+    expect(strip).not.toHaveProperty("layout");
+    expect(strip).not.toHaveProperty("columns");
+    expect(strip).not.toHaveProperty("arrowWidth");
+    // A clone's list is its own.
+    const workspace = createDefaultLayoutWorkspace();
+    workspace.sheets[0].items.push({
+      id: "g", x: 0, y: 0, width: 600, height: 400, z: 1,
+      recipe: { kind: "strategy", sampleId: "D1", populationId: "b", fullPath: true, displayMode: "contour", populationIds: ["b", "t"] },
+    });
+    const cloned = cloneLayoutWorkspace(workspace).sheets[0].items[0].recipe;
+    if (cloned.kind !== "strategy") throw new Error("a strategy");
+    cloned.populationIds!.push("n");
+    expect((workspace.sheets[0].items[0].recipe as { populationIds: string[] }).populationIds).toEqual(["b", "t"]);
+  });
+
   it("lets a plot draw every event of a pooled SCE: the event cap goes up to five million, and 0 is every event", () => {
     expect(normalizeLayoutStyle({ maxEvents: 1_000_000 }).maxEvents).toBe(1_000_000);
     expect(normalizeLayoutStyle({ maxEvents: 9_000_000 }).maxEvents).toBe(5_000_000);

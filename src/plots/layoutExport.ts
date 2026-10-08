@@ -265,6 +265,18 @@ export function composeLayoutSVG(
     });
     const block = exportId(host.querySelector(".gl-figure-grid") ? "figure" : "strategy", index, heading);
     host.querySelectorAll<HTMLElement>(".mini-plot-cell").forEach((cell, k) => addCell(root, cell, origin, options.zoom, options.dpi, offset, `${block}-panel-${k + 1}`));
+    // A strategy block's arrows, drawn over its grid in an SVG of their own: copied over the
+    // panels at the same place, scaled as the grid is.
+    host.querySelectorAll<SVGSVGElement>("svg.gl-strategy-arrows").forEach((overlay) => {
+      const rect = pageRect(overlay, origin, options.zoom, offset);
+      const natural = Number(overlay.getAttribute("width")) || overlay.clientWidth || rect.width;
+      const scale = natural > 0 ? rect.width / natural : 1;
+      const g = document.createElementNS(SVG_NS, "g");
+      g.setAttribute("transform", `translate(${Math.round(rect.left)},${Math.round(rect.top)}) scale(${scale})`);
+      Array.from(overlay.childNodes).forEach((node) => g.appendChild(node.cloneNode(true)));
+      nameCell(g, `${block}-arrows`);
+      root.appendChild(g);
+    });
   }
   // The physical size: the sheet's page, or the cropped part of it at the page's pixels per mm.
   const size = crop

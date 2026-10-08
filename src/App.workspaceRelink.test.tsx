@@ -391,6 +391,55 @@ describe("App reference workspace relinking", () => {
     expect(host.textContent).toContain("relinked by choice to files that record another acquisition: flow-data/donor-b.fcs as donor-b.fcs");
   });
 
+  // The files of a workspace spread over two folders: the first choice keeps what it found, the
+  // dialog says what is still to find, and the second folder completes the open. The old dialog
+  // refused the first folder outright and forgot it.
+  it("opens a workspace whose files are in two folders, chosen one after the other", async () => {
+    const workspace = referenceWorkspace();
+    vi.mocked(readWorkspaceEnvelopeFromFile).mockResolvedValue({
+      raw: workspace,
+      fcsByPath: null,
+      storage: "reference",
+      portableAssays: null,
+    });
+    const { showDirectoryPicker } = installPickers([fileHandle("donor-a.fcs")]);
+    const secondFolder = {
+      kind: "directory",
+      name: "flow-data-2",
+      async *values() { yield fileHandle("donor-b.fcs"); },
+    } as unknown as FileSystemDirectoryHandle;
+    showDirectoryPicker.mockResolvedValueOnce({
+      kind: "directory",
+      name: "flow-data",
+      async *values() { yield fileHandle("donor-a.fcs"); },
+    } as unknown as FileSystemDirectoryHandle).mockResolvedValueOnce(secondFolder);
+
+    act(() => root.render(<App />));
+    await clickOpenWorkspace();
+    await clickChooseFcsFolder();
+
+    // Kept, and said: one found, one to find; nothing opened yet.
+    expect(host.querySelectorAll<HTMLElement>('[role="option"]')).toHaveLength(0);
+    expect(host.textContent).toContain("1 of 2 FCS files found · 1 to find");
+    expect(host.textContent).toContain("1 of 2 found in \"flow-data\"; 1 still to find: donor-b.fcs");
+    expect(host.textContent).not.toContain("No workspace data were changed");
+    const rows = [...host.querySelectorAll<HTMLElement>(".gl-workspace-relink-files > div")];
+    expect(rows.map((row) => row.classList.contains("is-found"))).toEqual([true, false]);
+
+    const another = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((candidate) => candidate.textContent === "Choose another folder…")!;
+    await act(async () => {
+      another.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(showDirectoryPicker).toHaveBeenCalledTimes(2);
+    const sampleRows = host.querySelectorAll<HTMLElement>('[role="option"]');
+    expect(sampleRows).toHaveLength(2);
+    expect(sampleRows[0].textContent).toContain("donor-a.fcs");
+    expect(sampleRows[1].textContent).toContain("donor-b.fcs");
+    expect(host.textContent).toContain("Opened analysis.gatelab · 2 samples · linked FCS");
+  });
+
   it("reports all unmatched files together without partially opening the workspace", async () => {
     const workspace = referenceWorkspace();
     vi.mocked(readWorkspaceEnvelopeFromFile).mockResolvedValue({
@@ -408,8 +457,8 @@ describe("App reference workspace relinking", () => {
 
     expect(showDirectoryPicker).toHaveBeenCalledTimes(1);
     expect(host.querySelectorAll<HTMLElement>('[role="option"]')).toHaveLength(0);
-    expect(host.textContent).toContain("Missing: donor-b.fcs");
-    expect(host.textContent).toContain("No workspace data were changed");
+    expect(host.textContent).toContain("1 still to find: donor-b.fcs");
+    expect(host.textContent).toContain("Choose another folder");
     await act(async () => {
       [...host.querySelectorAll<HTMLButtonElement>("button")]
         .find((button) => button.textContent === "Cancel workspace open")!.click();

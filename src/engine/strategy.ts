@@ -292,6 +292,18 @@ export interface StrategyPayloadOptions {
   gateEdgeMode?: GateEdgeMode;
   /** What a gate's label says; the renderer reads it as gate_style.label_format. */
   gateLabelFormat?: string;
+  /** Contour lines per panel; the renderer's default when absent. */
+  contourLevels?: number;
+  /** Gate labels in bold. */
+  gateLabelBold?: boolean;
+  /** Under publication style, a white backing behind each label at this opacity (0 none … 1). */
+  labelBackground?: number;
+  /**
+   * Called when a gate's label is dragged on a panel, with the label's new offset from the
+   * gate in the panel's display units (and the quadrant for a quadrant gate); offering it is
+   * what makes the labels draggable. Carried to the renderer as gate_style.on_label_move.
+   */
+  onLabelMove?: (gateId: string, offset: [number, number], quadrant?: number) => void;
   fontSizes: StrategyFontSizes;
   contextTitle?: string;
 }
@@ -442,6 +454,7 @@ function strategyPayload(
     n_columns: opts.nColumns,
     fit_to_columns: opts.fitToColumns,
     contour_threshold: opts.contourThreshold,
+    contour_levels: opts.contourLevels,
     point_alpha: opts.pointAlpha,
     density_color_power: opts.densityColorPower,
     point_size: opts.pointSize,
@@ -452,6 +465,9 @@ function strategyPayload(
       line_width: opts.gateLineWidth,
       gate_edge_mode: opts.gateEdgeMode ?? "straight-bow",
       label_format: opts.gateLabelFormat ?? "name-percent",
+      ...(opts.onLabelMove ? { on_label_move: opts.onLabelMove } : {}),
+      ...(opts.gateLabelBold ? { label_weight: "bold" } : {}),
+      ...(opts.labelBackground !== undefined ? { label_background: opts.labelBackground } : {}),
     },
   };
 }

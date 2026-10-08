@@ -9,6 +9,7 @@ import type { IllustrationConfig } from "../engine/workspace";
 import { drawFigurePlot } from "../plots/figurePlot";
 import { buildHeatmapMatrix, splitHeatmapPage } from "../engine/figureHeatmap";
 import { FigureHeatmap } from "./FigureHeatmap";
+import { attachGridPan } from "./gridPan";
 
 export function styledFigurePlot(
   data: Record<string, unknown>,
@@ -54,6 +55,8 @@ export function styledFigurePlot(
       line_width: config.gateLineWidth,
       gate_edge_mode: config.gateEdgeMode,
       label_format: config.gateLabelFormat ?? "name-percent",
+      ...(config.gateLabelBold ? { label_weight: "bold" } : {}),
+      label_background: config.labelBackground ?? 0.6,
     },
   };
 }
@@ -86,7 +89,7 @@ const FigurePlot = memo(function FigurePlot({
     config.contourLevels, config.kdeBandwidth, config.histLineWidth, config.histFill, config.histFillAlpha,
     config.histOverlayMode, config.fontTick, config.fontAxis, config.fontTitle, config.fontGate,
     config.scaleFontsWithPlot, config.pubStyle, config.gateLineWidth, config.gateEdgeMode, config.gateLabelFormat,
-    config.axisTitleOffsetX, config.axisTitleOffsetY,
+    config.axisTitleOffsetX, config.axisTitleOffsetY, config.gateLabelBold, config.labelBackground,
   ]);
   useEffect(() => {
     if (!ref.current || !data.config) return;
@@ -292,6 +295,7 @@ export function FigureGrid({
   onMatrixContextMenu,
   selectedPanels,
   onPanelClick,
+  onPanelScaleChange,
 }: {
   page: FigurePage;
   panels: Record<string, FigurePanelData>;
@@ -299,6 +303,12 @@ export function FigureGrid({
   size: number;
   showGates: boolean;
   id?: string;
+  /**
+   * A panel panned or stretched by the Gating tab's navigate drag: the channel's new range, for
+   * the workspace's scales. Offered only while the figure follows the Gating tab's axes, which is
+   * where the range then shows.
+   */
+  onPanelScaleChange?: (channelKey: string, range: [number, number]) => void;
   /** A gate label was dragged in a panel: the gate's id (in that panel's tree), its new offset, the quadrant for a quadrant gate's label, and whether the panel showed the gate with its axes swapped. */
   onLabelMove?: (gateId: string, offset: [number, number], quadrant?: number, flipped?: boolean) => void;
   /** A right-click on a panel, for a menu about it. */
@@ -311,6 +321,34 @@ export function FigureGrid({
 }) {
   // A press that moved, as when a gate label is dragged, is not a click on the panel.
   const pressed = useRef<[number, number] | null>(null);
+  // The navigate drag on a panel: the panel's channels and ranges read from the latest page and
+  // data, the ranges handed on as the Gating tab's own drag hands them on.
+  const tableRef = useRef<HTMLTableElement>(null);
+  const latest = useRef({ page, panels, onPanelScaleChange });
+  latest.current = { page, panels, onPanelScaleChange };
+  useEffect(() => {
+    const table = tableRef.current;
+    if (!table) return;
+    return attachGridPan(
+      table,
+      (cell) => {
+        const { page: current, panels: data, onPanelScaleChange: handler } = latest.current;
+        if (!handler) return null;
+        const key = cell.closest<HTMLElement>("[data-figure-panel]")?.getAttribute("data-figure-panel");
+        const panel = key ? current.panels.find((candidate) => candidate.key === key) : undefined;
+        const cfg = key ? data[key]?.config : null;
+        if (!panel || !cfg || panel.plot.type !== "biplot") return null;
+        const xr = cfg.x_range as [number, number] | undefined, yr = cfg.y_range as [number, number] | undefined;
+        if (!xr || !yr) return null;
+        return { xKey: panel.plot.x, yKey: panel.plot.y, xr, yr };
+      },
+      (panel, xr, yr) => {
+        const handler = latest.current.onPanelScaleChange;
+        handler?.(panel.xKey, xr);
+        if (panel.yKey !== panel.xKey) handler?.(panel.yKey, yr);
+      },
+    );
+  }, []);
   const clickPanel = (panel: FigurePanel, event: React.MouseEvent<HTMLElement>) => {
     const from = pressed.current;
     pressed.current = null;
@@ -326,6 +364,7 @@ export function FigureGrid({
   const colDepth = Math.max(1, grid.columns[0]?.length ?? 0);
   return (
     <table
+      ref={tableRef}
       id={id}
       className="gl-figure-grid"
       aria-label={page.label}

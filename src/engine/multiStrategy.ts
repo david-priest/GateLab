@@ -497,6 +497,22 @@ export interface MultiStrategyPayloadOptions {
   gateEdgeMode?: GateEdgeMode;
   /** What a gate's label says; the renderer reads it as gate_style.label_format. */
   gateLabelFormat?: string;
+  /** Contour lines per panel; the renderer's default when absent. */
+  contourLevels?: number;
+  /** Gate labels in bold. */
+  gateLabelBold?: boolean;
+  /** Under publication style, a white backing behind each label at this opacity (0 none … 1). */
+  labelBackground?: number;
+  /** The gap between the grid's cells, px; the renderer's 8 when absent. */
+  gridGap?: number;
+  /** Canvas pixels per CSS pixel for every panel; the display's ratio when absent. */
+  canvasScale?: number;
+  /**
+   * Called when a gate's label is dragged on a panel, with the label's new offset from the
+   * gate in the panel's display units (and the quadrant for a quadrant gate); offering it is
+   * what makes the labels draggable. Carried to the renderer as gate_style.on_label_move.
+   */
+  onLabelMove?: (gateId: string, offset: [number, number], quadrant?: number) => void;
   fontSizes: StrategyFontSizes;
   contextTitle?: string;
 }
@@ -515,6 +531,9 @@ export function buildMultiStrategyPayload(
     display_mode: opts.displayMode,
     plot_size: opts.plotSize,
     contour_threshold: opts.contourThreshold,
+    contour_levels: opts.contourLevels,
+    grid_gap: opts.gridGap,
+    canvas_scale: opts.canvasScale,
     point_alpha: opts.pointAlpha,
     density_color_power: opts.densityColorPower,
     point_size: opts.pointSize,
@@ -525,6 +544,111 @@ export function buildMultiStrategyPayload(
       line_width: opts.gateLineWidth,
       gate_edge_mode: opts.gateEdgeMode ?? "straight-bow",
       label_format: opts.gateLabelFormat ?? "name-percent",
+      ...(opts.onLabelMove ? { on_label_move: opts.onLabelMove } : {}),
+      ...(opts.gateLabelBold ? { label_weight: "bold" } : {}),
+      ...(opts.labelBackground !== undefined ? { label_background: opts.labelBackground } : {}),
     },
   };
+}
+
+/** The panels a panel's gates lead to, in gate order; shared by the two layouts. */
+function childPanelsOf(
+  nodes: readonly MultiStrategyNode[],
+  populations: Record<string, { parent_id: string | null; gate_refs: { gate_id: string }[] }>,
+): (node: MultiStrategyNode) => MultiStrategyNode[] {
+  const panelsOf = new Map<string, MultiStrategyNode[]>();
+  for (const node of nodes) panelsOf.set(node.parent_pop_id, [...(panelsOf.get(node.parent_pop_id) ?? []), node]);
+  const childrenOf = new Map<string, { popId: string; gateIds: Set<string> }[]>();
+  for (const [popId, pop] of Object.entries(populations)) {
+    if (!pop.parent_id) continue;
+    childrenOf.set(pop.parent_id, [...(childrenOf.get(pop.parent_id) ?? []), { popId, gateIds: new Set(pop.gate_refs.map((ref) => ref.gate_id)) }]);
+  }
+  return (node) => {
+    const out: MultiStrategyNode[] = [];
+    for (const gate of node.gates) {
+      for (const child of childrenOf.get(node.parent_pop_id) ?? []) {
+        if (!child.gateIds.has(gate.gate_id)) continue;
+        for (const panel of panelsOf.get(child.popId) ?? []) if (panel !== node && !out.includes(panel)) out.push(panel);
+      }
+    }
+    return out;
+  };
+}
+
+/**
+ * The nodes laid out as a tidy tree: a column per depth; a panel's first child shares its row and
+ * each later child's subtree starts below the previous one's, so a subtree is a block of rows and
+ * the grid has one row per leaf; a population drawn on a second channel pair stacks under its
+ * first rather than taking a column of its own. Compact in both directions where the layout of
+ * a column per depth and a row per traced population left most cells empty. Returns new node
+ * objects with their row and col set; the input is left alone.
+ */
+export function tidyLayout(
+  nodes: readonly MultiStrategyNode[],
+  populations: Record<string, { parent_id: string | null; gate_refs: { gate_id: string }[] }>,
+): MultiStrategyNode[] {
+  const childPanels = childPanelsOf(nodes, populations);
+  const isChild = new Set<MultiStrategyNode>();
+  for (const node of nodes) for (const child of childPanels(node)) isChild.add(child);
+  const placed = new Map<MultiStrategyNode, { row: number; col: number }>();
+  const heights = new Map<MultiStrategyNode, number>();
+  const height = (node: MultiStrategyNode, trail: Set<MultiStrategyNode>): number => {
+    const known = heights.get(node);
+    if (known !== undefined) return known;
+    if (trail.has(node)) return 1;
+    trail.add(node);
+    let total = 0;
+    for (const child of childPanels(node)) if (!placed.has(child)) total += height(child, trail);
+    trail.delete(node);
+    const h = Math.max(1, total);
+    heights.set(node, h);
+    return h;
+  };
+  const place = (node: MultiStrategyNode, row: number, col: number) => {
+    if (placed.has(node)) return;
+    placed.set(node, { row, col });
+    let r = row;
+    for (const child of childPanels(node)) {
+      if (placed.has(child)) continue;
+      place(child, r, col + 1);
+      r += height(child, new Set());
+    }
+  };
+  let cursor = 0;
+  const roots = nodes.filter((node) => !isChild.has(node));
+  for (const root of [...roots, ...nodes]) {
+    if (placed.has(root)) continue;
+    place(root, cursor, 0);
+    cursor += height(root, new Set());
+  }
+  return nodes.map((node) => ({ ...node, ...placed.get(node)! }));
+}
+
+/**
+ * The nodes laid out as a wrapped sequence: the tree walked depth first (a panel, then the panels
+ * of the populations its gates make, in gate order), the walk filled into rows of `columns`
+ * panels, left to right and top to bottom. Compact where the tree layout (a column per depth, a
+ * row per traced population) leaves most of the grid empty; the arrows say what leads to what.
+ * Returns new node objects with their row and col set; the input is left alone.
+ */
+export function flowLayout(
+  nodes: readonly MultiStrategyNode[],
+  columns: number,
+  populations: Record<string, { parent_id: string | null; gate_refs: { gate_id: string }[] }>,
+): MultiStrategyNode[] {
+  const perRow = Math.max(1, Math.floor(columns) || 1);
+  const childPanels = childPanelsOf(nodes, populations);
+  const isChild = new Set<MultiStrategyNode>();
+  for (const node of nodes) for (const child of childPanels(node)) isChild.add(child);
+  const order: MultiStrategyNode[] = [];
+  const seen = new Set<MultiStrategyNode>();
+  const visit = (node: MultiStrategyNode) => {
+    if (seen.has(node)) return;
+    seen.add(node);
+    order.push(node);
+    for (const child of childPanels(node)) visit(child);
+  };
+  for (const node of nodes) if (!isChild.has(node)) visit(node);
+  for (const node of nodes) visit(node); // anything left (a cycle, or a panel whose parent is not drawn)
+  return order.map((node, index) => ({ ...node, row: Math.floor(index / perRow), col: index % perRow }));
 }

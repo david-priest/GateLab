@@ -105,6 +105,17 @@ export function composeGridSVG(gridId: string, dpi: number): { root: SVGSVGEleme
     root.appendChild(g);
   });
 
+  // The Strategy tab's parent–child arrows, drawn over the grid in their own SVG; copied over
+  // the panels at the same place.
+  grid.querySelectorAll<SVGSVGElement>("svg.gl-strategy-arrows").forEach((overlay) => {
+    const r = overlay.getBoundingClientRect();
+    const g = document.createElementNS(SVG_NS, "g");
+    g.setAttribute("transform", `translate(${Math.round(r.left - gridRect.left)},${Math.round(r.top - gridRect.top)})`);
+    Array.from(overlay.childNodes).forEach((node) => g.appendChild(node.cloneNode(true)));
+    nameCell(g, "strategy-arrows");
+    root.appendChild(g);
+  });
+
   const width = Math.ceil(gridRect.width), height = Math.ceil(gridRect.height);
   finishExportSvg(root, { widthPx: width, heightPx: height });
   return { root, width, height };

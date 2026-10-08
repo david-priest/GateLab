@@ -16,6 +16,8 @@ import { historyShortcutAction } from "./ui/historyShortcuts";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type GatingPlotActions, type NewGate } from "./plots/GatingPlot";
 import { startPanSession } from "./plots/panGesture";
 import { buildPlotGates, type PlotGate } from "./plots/gatePayload";
+import { FIT_GATE_DEFAULTS, clampFitSettings, fitGateToEvents, type FitGateResult, type FitGateSettings } from "./engine/fitGate";
+import { FitGatePanel } from "./ui/FitGatePanel";
 import { branchScopedGateOrder } from "./engine/branchGates";
 import {
   isFlowJoWorkspace,
@@ -206,6 +208,7 @@ import {
   writeHandleStream,
   saveAsHandle,
   saveAsHandleStream,
+  ensurePermission,
   readFromHandleIfPermitted,
   rememberHandle,
   recallHandle,
@@ -291,6 +294,7 @@ import {
   type SampleListItem,
 } from "./ui/SampleManager";
 import { WorkspaceRelinkModal } from "./ui/WorkspaceRelinkModal";
+import { forgetRecentWorkspace, listRecentWorkspaces, rememberRecentWorkspace, type RecentWorkspace } from "./engine/recentWorkspaces";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
 import { NavigateIcon, RectIcon, PolyIcon, EllipseIcon, QuadIcon } from "./ui/icons";
 import { useSampleDataRevisionKey } from "./ui/useSampleDataRevisions";
@@ -997,6 +1001,17 @@ interface PendingFolderImport {
 interface PendingWorkspaceRelink {
   requirements: readonly WorkspaceFcsRequirement[];
   workspaceHandle: FileSystemFileHandle | null;
+  /**
+   * Files matched by the folders or files chosen so far, by the requirement's data path: the
+   * files of a workspace can sit in several folders, chosen one after another.
+   */
+  found: ReadonlyMap<string, RelinkedSource>;
+}
+
+/** A file chosen for a workspace entry, with where it was chosen from, for the path it is reported at. */
+interface RelinkedSource {
+  source: PickedFileSource;
+  sourceName: string;
 }
 
 function plotInteractionTokenFor(
@@ -1069,10 +1084,11 @@ export default function App() {
    * the files it would take, if the user explicitly chooses them anyway. Never taken unasked.
    */
   const [workspaceRelinkOverride, setWorkspaceRelinkOverride] = useState<{
-    sourceName: string;
-    take: readonly { requirement: WorkspaceFcsRequirement; source: PickedFileSource }[];
+    take: readonly { requirement: WorkspaceFcsRequirement; source: PickedFileSource; sourceName: string }[];
     byChoice: readonly { fileName: string; path: string }[];
   } | null>(null);
+  /** What the last choice of folder or files found, and what is still to find; shown in the dialog. */
+  const [workspaceRelinkNote, setWorkspaceRelinkNote] = useState<string | null>(null);
   /** Files relinked by that choice, named in the open's result. */
   /**
    * Samples a workspace was saved with compensation on for, whose matrix is not available now (a
@@ -1122,6 +1138,17 @@ export default function App() {
   const compensationOn = sample?.compensationEnabled ?? false;
   const fileName = activeEntry?.name ?? "";
   const [wsHandle, setWsHandle] = useState<FileSystemFileHandle | null>(null);
+  /** The workspaces opened or saved lately, for the Workspace menu; read from the browser's store on load and after each open or save. */
+  const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspace[]>([]);
+  const refreshRecentWorkspaces = useCallback(() => {
+    if (!supportsFileSystemAccess()) return;
+    void listRecentWorkspaces().then(setRecentWorkspaces).catch(() => undefined);
+  }, []);
+  useEffect(() => { refreshRecentWorkspaces(); }, [refreshRecentWorkspaces]);
+  const noteRecentWorkspace = useCallback((handle: FileSystemFileHandle | null, name: string) => {
+    if (!handle || !supportsFileSystemAccess()) return;
+    void rememberRecentWorkspace(handle, name).then(refreshRecentWorkspaces).catch(() => undefined);
+  }, [refreshRecentWorkspaces]);
   const [wsName, setWsName] = useState("");
   const [wsStorage, setWsStorage] = useState<WorkspaceStorage>("reference");
   const [workspaceId, setWorkspaceId] = useState(makeWorkspaceId);
@@ -1286,6 +1313,22 @@ export default function App() {
   const [importMsg, setImportMsg] = useState<string | null>(null);
   /** The menu a right-click on a polygon's vertex or edge opens: remove that vertex, or add one there. */
   const [plotMenu, setPlotMenu] = useState<ContextMenuState | null>(null);
+  /**
+   * A gate being fitted to its events from its menu: the settings, where the panel opens, and the
+   * fit at those settings, which the plot draws in the gate's place until Apply or Cancel. The
+   * fit reads the active file's events of the plotted population, so the file and the population
+   * are pinned: a change to either, or any other edit of the gates, closes the panel.
+   */
+  const [fitGate, setFitGate] = useState<{
+    gateId: string;
+    at: [number, number];
+    box?: [number, number, number, number];
+    settings: FitGateSettings;
+    result: FitGateResult | null;
+    sampleId: string;
+    populationId: string | null;
+    gateVersion: number;
+  } | null>(null);
   const [leftWidth, setLeftWidth] = useState(INITIAL_LEFT_PANE_WIDTH);
   const [sideWidth, setSideWidth] = useState(INITIAL_RIGHT_PANE_WIDTH);
   usePopoverDismissal();
@@ -2095,6 +2138,9 @@ export default function App() {
       // the label moves, and on mouseup the pan commits a range through setGlobalScale, which is
       // the scale snapping back after nothing more than moving a label.
       if (t.closest?.(CYTOF_OWNED_TARGETS)) return;
+      // The plot's own floating controls (the fit panel, a menu) sit inside the plot area: a
+      // press on a slider there is not a pan, and preventDefault here would stop the slider.
+      if (t.closest?.(".gl-fit-panel, .gl-menu-popover")) return;
       const rr = ranges();
       if (!rr) return;
       const r = rect();
@@ -7467,6 +7513,7 @@ export default function App() {
             setPopulationMetadata(workspace.populationMetadata ?? {});
             setPopulationMetaColumns(workspace.populationMetaColumns ?? []);
             illustConfigRef.current = workspace.illustration ?? null;
+            strategyConfigRef.current = workspace.strategy ?? null;
             setIllustrationPresets(workspace.illustrationPresets ?? []);
             setIllustVersion((version) => version + 1);
             clearPersistedTabState();
@@ -7623,7 +7670,7 @@ export default function App() {
   }
 
   /** A strategy strip, or one of its plots, from the Strategy tab as a Layout block, and the Layout tab shown. */
-  function addStrategyToLayout(recipe: LayoutStrategyRecipe | LayoutPlotRecipe): void {
+  function addStrategyToLayout(recipe: LayoutStrategyRecipe | LayoutPlotRecipe, size?: { width: number; height: number }): void {
     if (recipe.kind !== "strategy") {
       addPlotsToLayout([recipe]);
       setActiveTab("layout");
@@ -7633,7 +7680,10 @@ export default function App() {
       const next = cloneLayoutWorkspace(current);
       const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
       if (!sheet) return current;
-      const frame = nextLayoutItemPosition(sheet, 600, 320);
+      // A multi-population grid is framed at the size it was drawn on the Strategy tab, so it
+      // arrives as it was made; the sheet grows to show it, and its frame can be dragged smaller,
+      // which scales the block as a whole.
+      const frame = nextLayoutItemPosition(sheet, size?.width ?? 600, size?.height ?? 320);
       sheet.items.push({ id: crypto.randomUUID(), ...frame, recipe });
       sheet.width = Math.max(sheet.width, frame.x + frame.width + 48);
       sheet.height = Math.max(sheet.height, frame.y + frame.height + 48);
@@ -8094,6 +8144,7 @@ export default function App() {
       },
       illustration: illustConfigRef.current ?? undefined,
       illustrationPresets,
+      strategy: strategyConfigRef.current ?? undefined,
       layout: layoutWorkspace,
       plotting: savedPlottingState(),
       metadataColumns: [{ name: SAMPLE_ID_FIELD }, ...metadataColumns.filter(column => column.name !== SAMPLE_ID_FIELD)],
@@ -8420,6 +8471,7 @@ export default function App() {
           setWsStorage("reference");
           await rememberAllHandles();
           setDirty(false);
+          noteRecentWorkspace(h, f.name);
           setImportMsg(`Saved · ${f.name}`);
           tourSignals.current.workspaceSaves++;
         }
@@ -8523,6 +8575,23 @@ export default function App() {
   }
 
   // Open workspace — FS picker (keeps a handle for in-place Save), or the input fallback.
+  /** Reopen a workspace from the menu's recent list: the browser asks once for the file again. */
+  async function openRecentWorkspace(recent: RecentWorkspace) {
+    try {
+      if (!(await ensurePermission(recent.handle, "read"))) {
+        setImportMsg(`${recent.name} · access not granted`);
+        return;
+      }
+      const file = await recent.handle.getFile();
+      await openWorkspaceFromFile(file, recent.handle, file.name);
+    } catch (e) {
+      // The file is gone or moved: out of the list, and said.
+      await forgetRecentWorkspace(recent.name).catch(() => undefined);
+      refreshRecentWorkspaces();
+      setError(`${recent.name} could not be opened: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   async function openWorkspace() {
     if (!supportsFileSystemAccess()) {
       wsRef.current?.click();
@@ -8591,20 +8660,35 @@ export default function App() {
     return null;
   }
 
+  /**
+   * One choice of a folder (searched with its subfolders) or of files, matched against the
+   * entries not yet found. Complete when every entry has its file; otherwise what was found is
+   * kept, so the next choice need only bring the rest -- the files of a workspace can be spread
+   * over several folders.
+   */
   async function resolveReferenceFcsFolder(
     requirements: readonly WorkspaceFcsRequirement[],
     workspaceHandle: FileSystemFileHandle | null,
-  ): Promise<ReadonlyMap<string, ResolvedReferenceFcs> | null> {
-    if (requirements.length === 0) return new Map();
+    mode: "folder" | "files",
+    found: ReadonlyMap<string, RelinkedSource>,
+  ): Promise<
+    | { status: "complete"; resolved: ReadonlyMap<string, ResolvedReferenceFcs> }
+    | { status: "partial"; found: ReadonlyMap<string, RelinkedSource>; note: string; error: string | null }
+    | null
+  > {
+    const remaining = requirements.filter((requirement) => !found.has(requirement.dataPath));
+    if (remaining.length === 0) {
+      return { status: "complete", resolved: await readRelinkedFcs(requirements.map((requirement) => ({ requirement, ...found.get(requirement.dataPath)! }))) };
+    }
 
     setImportMsg(
-      `Linked FCS files unavailable · choose the folder containing all ${requirements.length} required file` +
-        `${requirements.length === 1 ? "" : "s"}`,
+      `Linked FCS files unavailable · choose the folder containing the ${remaining.length} required file` +
+        `${remaining.length === 1 ? "" : "s"}`,
     );
 
     let sourceName: string;
     let sources: PickedFileSource[];
-    if (supportsDirectoryAccess()) {
+    if (mode === "folder" && supportsDirectoryAccess()) {
       const picked = await pickDirectoryFiles([".fcs"], {
         ...(workspaceHandle ? { startIn: workspaceHandle } : {}),
       });
@@ -8613,7 +8697,7 @@ export default function App() {
       sources = picked.files;
     } else if (supportsFileSystemAccess()) {
       setImportMsg(
-        `Select all ${requirements.length} required FCS file${requirements.length === 1 ? "" : "s"} together`,
+        `Select the ${remaining.length} required FCS file${remaining.length === 1 ? "" : "s"}`,
       );
       const picked = await pickFiles(
         FCS_FILE_ACCEPT,
@@ -8632,33 +8716,41 @@ export default function App() {
     // The files named like a required one are read for their acquisition keywords, so a
     // same-named file of another experiment is never relinked in its place.
     const identities = new Map<PickedFileSource, ReturnType<typeof identityKeywords>>();
-    const named = (name: string) => requirements.some((r) =>
+    const named = (name: string) => remaining.some((r) =>
       r.identity && r.fileName.normalize("NFC").toLocaleLowerCase() === name.normalize("NFC").toLocaleLowerCase());
     for (const source of sources) {
       if (!named(source.name)) continue;
       const keywords = await readFcsFileKeywords(source.file);
       if (keywords) identities.set(source, identityKeywords(keywords));
     }
-    const plan = planWorkspaceFcsRelink(requirements, sources, (source) => identities.get(source) ?? null);
+    const plan = planWorkspaceFcsRelink(remaining, sources, (source) => identities.get(source) ?? null);
     setWorkspaceRelinkOverride(null);
     const pathOf = (source: PickedFileSource) =>
       sourceName === "selected files" ? source.relativePath : `${sourceName}/${source.relativePath}`;
-    relinkedUnconfirmedRef.current = plan.unconfirmed.map((u) => ({
-      fileName: describeRequirement(u.requirement, requirements), path: pathOf(u.candidate),
-      agree: u.agree, setAside: u.setAside.map(pathOf),
-    }));
+    relinkedUnconfirmedRef.current = [
+      ...relinkedUnconfirmedRef.current,
+      ...plan.unconfirmed.map((u) => ({
+        fileName: describeRequirement(u.requirement, requirements), path: pathOf(u.candidate),
+        agree: u.agree, setAside: u.setAside.map(pathOf),
+      })),
+    ];
+    const nextFound = new Map(found);
+    for (const requirement of remaining) {
+      const source = plan.matches.get(requirement.dataPath);
+      if (source) nextFound.set(requirement.dataPath, { source, sourceName });
+    }
+    const taken = [...requirements.flatMap((requirement) => {
+      const hit = nextFound.get(requirement.dataPath);
+      return hit ? [{ requirement, ...hit }] : [];
+    })];
     // Only same-named files of another acquisition stand in the way, one for each: offered, by
     // name, as an explicit choice. Nothing else is ever relinked to them.
     if (!plan.missing.length && !plan.ambiguous.length && plan.mismatched.length &&
         plan.mismatched.every((m) => m.candidates.length === 1)) {
       setWorkspaceRelinkOverride({
-        sourceName,
         take: [
-          ...requirements.flatMap((requirement) => {
-            const source = plan.matches.get(requirement.dataPath);
-            return source ? [{ requirement, source }] : [];
-          }),
-          ...plan.mismatched.map((m) => ({ requirement: m.requirement, source: m.candidates[0].candidate })),
+          ...taken,
+          ...plan.mismatched.map((m) => ({ requirement: m.requirement, source: m.candidates[0].candidate, sourceName })),
         ],
         // Named so two declarations of one file name read apart: they read identically.
         byChoice: plan.mismatched.map((m) => ({ fileName: describeRequirement(m.requirement, requirements), path: pathOf(m.candidates[0].candidate) })),
@@ -8666,9 +8758,6 @@ export default function App() {
     }
     if (plan.missing.length > 0 || plan.ambiguous.length > 0 || plan.mismatched.length > 0) {
       const details: string[] = [];
-      if (plan.missing.length > 0) {
-        details.push(`Missing: ${plan.missing.map(({ fileName }) => fileName).join(", ")}`);
-      }
       if (plan.mismatched.length > 0) {
         details.push(
           "Another acquisition: " +
@@ -8688,22 +8777,29 @@ export default function App() {
             ).join("; "),
         );
       }
-      throw new Error(
-        `The selected folder "${sourceName}" could not uniquely match every FCS file required by this workspace. ` +
-          `${details.join(". ")}. No workspace data were changed.`,
-      );
+      const stillMissing = requirements.filter((requirement) => !nextFound.has(requirement.dataPath));
+      const foundNow = plan.matches.size;
+      const where = sourceName === "selected files" ? "the selected files" : `"${sourceName}"`;
+      const note = foundNow > 0
+        ? `${foundNow} of ${remaining.length} found in ${where}; ${stillMissing.length} still to find: ${stillMissing.map(({ fileName }) => fileName).join(", ")}. Choose another folder, or the files themselves.`
+        : `Nothing required was found in ${where}. Still to find: ${stillMissing.map(({ fileName }) => fileName).join(", ")}.`;
+      return {
+        status: "partial",
+        found: nextFound,
+        note,
+        error: details.length ? `${details.join(". ")}. No workspace data were changed.` : null,
+      };
     }
 
-    return readRelinkedFcs(sourceName, requirements.map((requirement) => ({ requirement, source: plan.matches.get(requirement.dataPath)! })));
+    return { status: "complete", resolved: await readRelinkedFcs(taken) };
   }
 
   async function readRelinkedFcs(
-    sourceName: string,
-    take: readonly { requirement: WorkspaceFcsRequirement; source: PickedFileSource }[],
+    take: readonly { requirement: WorkspaceFcsRequirement; source: PickedFileSource; sourceName: string }[],
   ): Promise<ReadonlyMap<string, ResolvedReferenceFcs>> {
     const resolved = new Map<string, ResolvedReferenceFcs>();
     for (let index = 0; index < take.length; index++) {
-      const { requirement, source } = take[index];
+      const { requirement, source, sourceName } = take[index];
       setImportMsg(
         `Relinking from ${sourceName} · ${index + 1} / ${take.length} · ${requirement.fileName}`,
       );
@@ -8727,13 +8823,14 @@ export default function App() {
     if (!override || workspaceRelinkScanning) return;
     setWorkspaceRelinkScanning(true);
     try {
-      const resolved = await readRelinkedFcs(override.sourceName, override.take);
+      const resolved = await readRelinkedFcs(override.take);
       relinkedByChoiceRef.current = override.byChoice;
       const resolve = workspaceRelinkResolverRef.current;
       workspaceRelinkResolverRef.current = null;
       setPendingWorkspaceRelink(null);
       setWorkspaceRelinkOverride(null);
       setWorkspaceRelinkError(null);
+      setWorkspaceRelinkNote(null);
       resolve?.(resolved);
     } catch (cause) {
       setWorkspaceRelinkError(cause instanceof Error ? cause.message : String(cause));
@@ -8754,10 +8851,13 @@ export default function App() {
         `${requirements.length === 1 ? "" : "s"}`,
     );
     setWorkspaceRelinkError(null);
+    setWorkspaceRelinkNote(null);
     setWorkspaceRelinkScanning(false);
+    relinkedUnconfirmedRef.current = [];
     setPendingWorkspaceRelink({
       requirements: [...requirements],
       workspaceHandle,
+      found: new Map(),
     });
     return new Promise((resolve) => {
       workspaceRelinkResolverRef.current = resolve;
@@ -8770,11 +8870,12 @@ export default function App() {
     setPendingWorkspaceRelink(null);
     setWorkspaceRelinkOverride(null);
     setWorkspaceRelinkError(null);
+    setWorkspaceRelinkNote(null);
     setWorkspaceRelinkScanning(false);
     resolve?.(null);
   }
 
-  async function choosePendingWorkspaceRelinkFolder(): Promise<void> {
+  async function choosePendingWorkspaceRelinkFolder(mode: "folder" | "files" = "folder"): Promise<void> {
     const pendingRelink = pendingWorkspaceRelink;
     if (!pendingRelink || workspaceRelinkScanning) return;
     setWorkspaceRelinkScanning(true);
@@ -8782,15 +8883,26 @@ export default function App() {
     try {
       // This call must begin directly inside the button gesture. Browsers reject a picker
       // launched later from the asynchronous workspace parser.
-      const resolved = await resolveReferenceFcsFolder(
+      const outcome = await resolveReferenceFcsFolder(
         pendingRelink.requirements,
         pendingRelink.workspaceHandle,
+        mode,
+        pendingRelink.found,
       );
-      if (!resolved) return;
+      if (!outcome) return;
+      if (outcome.status === "partial") {
+        // What this choice found is kept; the dialog says what is still to find.
+        setPendingWorkspaceRelink({ ...pendingRelink, found: outcome.found });
+        setWorkspaceRelinkNote(outcome.note);
+        setWorkspaceRelinkError(outcome.error);
+        setImportMsg("Selected FCS location was incomplete · choose another folder");
+        return;
+      }
       const resolve = workspaceRelinkResolverRef.current;
       workspaceRelinkResolverRef.current = null;
       setPendingWorkspaceRelink(null);
-      resolve?.(resolved);
+      setWorkspaceRelinkNote(null);
+      resolve?.(outcome.resolved);
     } catch (cause) {
       setWorkspaceRelinkError(cause instanceof Error ? cause.message : String(cause));
       setImportMsg("Selected FCS location was incomplete · choose another folder");
@@ -9467,8 +9579,9 @@ export default function App() {
       setPopulationMetadata(ws.populationMetadata ?? {});
       setPopulationMetaColumns(ws.populationMetaColumns ?? []);
       illustConfigRef.current = ws.illustration ?? null;
+      strategyConfigRef.current = ws.strategy ?? null;
       setIllustrationPresets(ws.illustrationPresets ?? []);
-      setIllustVersion((v) => v + 1); // remount IllustrationTab so it re-reads the restored config
+      setIllustVersion((v) => v + 1); // remount the Illustration and Strategy tabs so they re-read the restored configs
       setLayoutWorkspace(normalizeLayoutWorkspace(ws.layout));
       clearPersistedTabState(); // drop old selections so a new workspace's tabs start clean
       restorePlottingState(ws.plotting);
@@ -9502,6 +9615,7 @@ export default function App() {
       setWsStorage(storage);
       setWorkspaceId(nextWorkspaceId);
       setDirty(false);
+      noteRecentWorkspace(wsH, wsFileName);
       dispatch({
         type: "loadWorkspace",
         gates: ws.gating.gates,
@@ -10564,6 +10678,20 @@ export default function App() {
         };
   }, [pooledGateCounts, t]);
   const labelGateCounts = pooledGateCounts?.counts ?? derived.gateCounts;
+  // While a gate is being fitted to its events, the plot draws the fit in its place, labelled
+  // with the fit's own count; the stored gate is untouched until Apply.
+  const plottedGates = useMemo(
+    () => (fitGate?.result ? { ...state.gates, [fitGate.gateId]: fitGate.result.gate } : state.gates),
+    [state.gates, fitGate],
+  );
+  const plottedGateCounts = useMemo(() => {
+    if (!fitGate?.result) return labelGateCounts;
+    const r = fitGate.result;
+    return {
+      ...labelGateCounts,
+      [fitGate.gateId]: { event_count: r.held, percent_of_parent: r.population > 0 ? Math.round((10000 * r.held) / r.population) / 100 : null },
+    };
+  }, [labelGateCounts, fitGate]);
   const gateListDerived = useMemo<Derived>(
     () => pooledGateCounts?.counts ? { ...derived, gateCounts: pooledGateCounts.counts } : derived,
     [derived, pooledGateCounts],
@@ -10575,9 +10703,9 @@ export default function App() {
     const yKey = sample.channels[yIdx].key;
     return buildPlotGates(
       sample,
-      state.gates,
+      plottedGates,
       branchGateOrder,
-      labelGateCounts,
+      plottedGateCounts,
       xKey,
       yKey,
       gateCountScope && { text: gateCountScope.text, hint: gateCountScope.hint },
@@ -10594,7 +10722,7 @@ export default function App() {
     // event cloud and the axis both move to the new one. The gate then appears to slide off
     // its own events even though membership, evaluated in raw space, never changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, state.gates, branchGateOrder, labelGateCounts, gateCountScope, xIdx, yIdx, activeDisplayContextKey, scalesVersion, xRange, yRange, globalScales, workspaceAutomaticRanges]);
+  }, [sample, plottedGates, branchGateOrder, plottedGateCounts, gateCountScope, xIdx, yIdx, activeDisplayContextKey, scalesVersion, xRange, yRange, globalScales, workspaceAutomaticRanges]);
 
   /**
    * The Gating tab's axis range for every channel of the viewed file: its explicit workspace
@@ -11010,6 +11138,67 @@ export default function App() {
       onClick: () => setDrawMode(tool.id),
     })),
   ];
+  /** The fit of a gate at the given settings, on the active file's events of the plotted population. */
+  const computeGateFit = useCallback((gateId: string, settings: FitGateSettings): FitGateResult | null => {
+    const gate = state.gates[gateId];
+    if (!sample || !gate) return null;
+    return fitGateToEvents(gate, sample, derived.activeMask, settings);
+  }, [sample, state.gates, derived.activeMask]);
+  const openFitGate = (gateId: string, at: [number, number], box?: [number, number, number, number]) => {
+    const gate = state.gates[gateId];
+    if (!sample || !activeSampleId || !gate) return;
+    // A polygon opens at its own vertex count, so the fit changes where the gate sits, not
+    // what kind of shape it is; the slider is there for more or fewer.
+    const settings = clampFitSettings({
+      ...FIT_GATE_DEFAULTS,
+      maxVertices: gate.gate_type === "polygon" ? gate.vertices.length : FIT_GATE_DEFAULTS.maxVertices,
+    });
+    setFitGate({
+      gateId,
+      at,
+      box,
+      settings,
+      result: computeGateFit(gateId, settings),
+      sampleId: activeSampleId,
+      populationId: state.active_population_id,
+      gateVersion: state.gate_version,
+    });
+  };
+  // The slider moves at once; the fit, which walks every event of the gate, is recomputed at
+  // most once per frame with the latest settings, so a drag redraws the gate as it goes
+  // without queueing a fit for every pixel.
+  const fitFrame = useRef<number | null>(null);
+  const fitLatest = useRef<FitGateSettings | null>(null);
+  const changeFitGate = (settings: FitGateSettings) => {
+    fitLatest.current = settings;
+    setFitGate((current) => (current ? { ...current, settings } : current));
+    if (fitFrame.current !== null) return;
+    fitFrame.current = requestAnimationFrame(() => {
+      fitFrame.current = null;
+      const latest = fitLatest.current;
+      if (!latest) return;
+      setFitGate((current) => (current ? { ...current, settings: latest, result: computeGateFit(current.gateId, latest) } : current));
+    });
+  };
+  const applyFitGate = () => {
+    const fitted = fitGate?.result?.gate;
+    setFitGate(null);
+    if (!fitted) return;
+    // Through the edits a drag makes: one Undo step, membership recomputed, the label updated.
+    if (fitted.gate_type === "ellipse") {
+      dispatch({ type: "reshapeEllipse", gateId: fitted.gate_id, mean: fitted.mean, covariance: fitted.covariance });
+    } else if (fitted.gate_type !== "quadrant") {
+      dispatch({ type: "editGate", gateId: fitted.gate_id, vertices: fitted.vertices });
+    }
+  };
+  // The fit is of one file's events within one population, at one state of the gates: a change
+  // to any of them closes the panel rather than showing a fit of something else.
+  useEffect(() => {
+    if (fitGate && (fitGate.sampleId !== activeSampleId || fitGate.populationId !== state.active_population_id || fitGate.gateVersion !== state.gate_version)) {
+      setFitGate(null);
+    }
+  }, [fitGate, activeSampleId, state.active_population_id, state.gate_version]);
+
   const fitDataAndGates = useCallback(() => {
     if (!sample) return;
     const xKey = sample.channels[xIdx]?.key;
@@ -11272,6 +11461,15 @@ export default function App() {
                   disabled: busy || compensationApplyStatus !== null,
                   onClick: openWorkspace,
                 },
+                // The workspaces opened or saved lately, from the browser's store of file handles;
+                // the browser asks for the file again on reopening.
+                ...recentWorkspaces.slice(0, 5).map((recent) => ({
+                  label: t("Recent: {name}", { name: recent.name }),
+                  title: t("Reopen {name}, last used {when}; the browser will ask to allow the file again", { name: recent.name, when: new Date(recent.at).toLocaleString() }),
+                  className: "gl-menu-recent",
+                  disabled: busy || compensationApplyStatus !== null,
+                  onClick: () => void openRecentWorkspace(recent),
+                })),
                 {
                   label: t("Open the demo workspace"),
                   className: "gl-open-demo",
@@ -12575,7 +12773,28 @@ export default function App() {
                 onVertexMenu={(e) => {
                   if (!plotInteractionIsCurrent()) return;
                   const g = state.gates[e.gate_id];
-                  if (!g || g.gate_type !== "polygon") return;
+                  if (!g || g.gate_type === "quadrant") return;
+                  if (e.body) {
+                    // The gate's own menu, with the plot's actions after it, since a large gate
+                    // covers much of the plot.
+                    setPlotMenu({
+                      x: e.client[0],
+                      y: e.client[1],
+                      label: g.name,
+                      items: [
+                        {
+                          label: t("Fit to its events\u2026"),
+                          title: t("Redraw the gate around the events it holds on this file, as tight as you choose; the plot shows the fit while you set it"),
+                          disabled: !activeSampleId,
+                          onClick: () => openFitGate(g.gate_id, e.client, e.box),
+                        },
+                        "separator",
+                        ...plotContextItems(),
+                      ],
+                    });
+                    return;
+                  }
+                  if (g.gate_type !== "polygon") return;
                   // Both go through the edit a dragged vertex makes: one Undo step, membership
                   // recomputed, the label's percentage updated. A polygon keeps three vertices.
                   if (e.vertex !== undefined) {
@@ -12612,6 +12831,20 @@ export default function App() {
                 }}
               />
               <ContextMenu menu={plotMenu} onClose={() => setPlotMenu(null)} />
+              {fitGate && sample && state.gates[fitGate.gateId] && state.gates[fitGate.gateId].gate_type !== "quadrant" && (
+                <FitGatePanel
+                  at={fitGate.at}
+                  avoid={fitGate.box}
+                  gateName={state.gates[fitGate.gateId].name}
+                  gateType={state.gates[fitGate.gateId].gate_type as "polygon" | "rectangle" | "ellipse"}
+                  fileName={fileName}
+                  settings={fitGate.settings}
+                  result={fitGate.result}
+                  onChange={changeFitGate}
+                  onApply={applyFitGate}
+                  onCancel={() => setFitGate(null)}
+                />
+              )}
             </div>
             {/* A slot of its own height, so a legend appearing or growing does not resize the plot. */}
             <div className="gl-plot-legend-slot">
@@ -12731,6 +12964,7 @@ export default function App() {
             )}
             {activeTab === "strategy" && (
               <StrategyTab
+                key={illustVersion}
                 sampleName={samples.find(entry => entry.id === activeSampleId)?.name}
                 onFitChannels={fitChannels}
                 sample={sample}
@@ -12750,6 +12984,10 @@ export default function App() {
                 activeSampleId={activeSampleId}
                 onAddToLayout={LAYOUT_TAB_AVAILABLE ? addStrategyToLayout : undefined}
                 onOpenStep={openStrategyStepInGating}
+                onGateLabelMove={(hierarchyId, gateId, offset, quadrant) => {
+                  dispatch({ type: "moveGateLabel", hierarchyId, gateId, labelOffset: offset, ...(quadrant !== undefined ? { quadrant } : {}) });
+                }}
+                onScaleChange={setGlobalScale}
               />
             )}
             {activeTab === "illustration" && (
@@ -12777,6 +13015,7 @@ export default function App() {
                 onGateLabelMove={(hierarchyId, gateId, offset, quadrant) => {
                   dispatch({ type: "moveGateLabel", hierarchyId, gateId, labelOffset: offset, ...(quadrant !== undefined ? { quadrant } : {}) });
                 }}
+                onScaleChange={setGlobalScale}
               />
             )}
             {activeTab === "layout" && (
@@ -13004,12 +13243,18 @@ export default function App() {
       {pendingWorkspaceRelink && (
         <WorkspaceRelinkModal
           requirements={pendingWorkspaceRelink.requirements}
+          found={new Map([...pendingWorkspaceRelink.found].map(([dataPath, hit]) => [
+            dataPath,
+            hit.sourceName === "selected files" ? hit.source.relativePath : `${hit.sourceName}/${hit.source.relativePath}`,
+          ]))}
           folderSelectionAvailable={supportsDirectoryAccess()}
+          fileSelectionAvailable={supportsFileSystemAccess()}
           scanning={workspaceRelinkScanning}
+          note={workspaceRelinkNote}
           error={workspaceRelinkError}
           override={workspaceRelinkOverride?.byChoice ?? null}
           onOverride={() => void useWorkspaceRelinkOverride()}
-          onChoose={() => void choosePendingWorkspaceRelinkFolder()}
+          onChoose={(mode) => void choosePendingWorkspaceRelinkFolder(mode)}
           onCancel={cancelPendingWorkspaceRelink}
         />
       )}

@@ -164,6 +164,8 @@ export interface WorkspaceFile {
   /** Illustration-tab settings + named presets (capture_illust_settings / illust_presets). */
   illustration?: IllustrationConfig;
   illustrationPresets?: IllustrationPreset[];
+  /** The Strategy tab's settings as the user left them; absent in workspaces saved before 2026-10-09. */
+  strategy?: StrategyConfig;
   /**
    * The SCE assay the samples were drawn from, for a workspace saved into a SingleCellExperiment
    * through GateLabR: reopened, the samples are drawn from it again, so the gates and the axis
@@ -271,6 +273,55 @@ export interface IllustrationConfig {
    */
   axisTitleOffsetX?: number | null;
   axisTitleOffsetY?: number | null;
+  /** Gate labels in bold; absent reads as off. */
+  gateLabelBold?: boolean;
+  /** Under publication style, a white backing behind each gate label at this opacity; absent reads as 0.6. */
+  labelBackground?: number;
+}
+
+/** The Strategy tab's controls, mirrored into the workspace so a saved strategy comes back as left. */
+export interface StrategyConfig {
+  mode: "single" | "multi";
+  exportDpi: number;
+  multiPops: string[];
+  popId: string;
+  fullPath: boolean;
+  gateView: ("forward" | "back")[];
+  displayMode: string;
+  maxEvents: number;
+  allEvents: boolean;
+  plotSize: number;
+  nColumns: number;
+  fitToColumns: boolean;
+  pointSize: number;
+  pointAlpha: number;
+  contourThreshold: number;
+  /** Contour lines per panel; absent on older configs (the renderer's default, 10). */
+  contourLevels?: number;
+  kdeBandwidth: number;
+  pubStyle: boolean;
+  gateLineWidth: number;
+  gateEdgeMode?: GateEdgeMode;
+  /** Gate labels in bold; absent reads as off. */
+  gateLabelBold?: boolean;
+  /** Under publication style, a white backing behind each gate label at this opacity; absent reads as 0.6. */
+  labelBackground?: number;
+  /** Arrows from each gate to the panel of the population it makes, on the multi-population grid; absent on older configs (on). */
+  showArrows?: boolean;
+  /** The arrows' line width, px; absent reads as 1.5. */
+  arrowWidth?: number;
+  /** Where an arrow leaves its panel: level with the gate's label (absent), or with the gate's centroid. */
+  arrowAnchor?: "label" | "gate";
+  /**
+   * How the multi-population grid is laid out: "tree", a column per depth and a row per traced
+   * population; "flow", the tree walked depth first and wrapped into rows of nColumns panels.
+   * Absent reads as "tree".
+   */
+  layout?: "tree" | "flow";
+  fontTick: number;
+  fontAxis: number;
+  fontTitle: number;
+  fontGate: number;
 }
 
 export interface IllustrationPreset {

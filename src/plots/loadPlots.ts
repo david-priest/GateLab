@@ -1504,11 +1504,14 @@ ${applyModeNeedle}`,
     "                .attr('stroke', 'none')\n" +
     "                .style('pointer-events', 'all')\n" +
     "                .style('cursor', 'move');\n";
+  // A right-click anywhere else on the gate (its body, or the boundary of a rectangle or an
+  // ellipse) asks for the gate's own menu (body: true), where the host offers to fit the gate to
+  // its events.
   const edgeMenuPatch = edgeMenuNeedle +
-    "            if (gate.gate_type === 'polygon') fillEl.on('contextmenu', _edgeMenu).call(function () { hitEl.on('contextmenu', _edgeMenu); });\n" +
+    "            fillEl.on('contextmenu', _edgeMenu).call(function () { hitEl.on('contextmenu', _edgeMenu); });\n" +
     "            function _edgeMenu(event) {\n" +
     "                var p = _ptr(event), verts = gate.vertices, best = null;\n" +
-    "                for (var vi = 0; vi < verts.length; vi++) {\n" +
+    "                if (gate.gate_type === 'polygon') for (var vi = 0; vi < verts.length; vi++) {\n" +
     "                    var a = verts[vi], b = verts[(vi + 1) % verts.length];\n" +
     "                    var ax = isFlipped ? zx(a[1]) : zx(a[0]), ay = isFlipped ? zy(a[0]) : zy(a[1]);\n" +
     "                    var bx = isFlipped ? zx(b[1]) : zx(b[0]), by = isFlipped ? zy(b[0]) : zy(b[1]);\n" +
@@ -1517,8 +1520,12 @@ ${applyModeNeedle}`,
     "                    var qx = ax + t * ex, qy = ay + t * ey, dist = Math.hypot(p[0] - qx, p[1] - qy);\n" +
     "                    if (!best || dist < best.dist) best = { edge: vi, dist: dist, qx: qx, qy: qy };\n" +
     "                }\n" +
-    "                if (!best || best.dist > 12) return;\n" +
     "                event.preventDefault(); event.stopPropagation();\n" +
+    "                if (!best || best.dist > 12) {\n" +
+    "                    var box = fillEl.node().getBoundingClientRect();\n" +
+    "                    _shinyInput('gate_vertex_menu', { gate_id: gate.gate_id, gate_type: gate.gate_type, body: true, box: [box.left, box.top, box.right, box.bottom], client: [event.clientX, event.clientY] });\n" +
+    "                    return;\n" +
+    "                }\n" +
     "                var dx = zx.invert(best.qx), dy = zy.invert(best.qy);\n" +
     "                _shinyInput('gate_vertex_menu', { gate_id: gate.gate_id, gate_type: gate.gate_type, edge: best.edge, point: isFlipped ? [dy, dx] : [dx, dy], client: [event.clientX, event.clientY] });\n" +
     "            }\n";
@@ -1777,8 +1784,93 @@ export function patchMiniPlot(src: string): string {
   // from a fixed list of the grid's fields, so an axis-title distance set on the grid payload
   // (x_axis_label_offset / y_axis_label_offset, read by the margin patch above) has to be
   // carried into each cell here or it never reaches a cell.
+  // The contour line count likewise: the Strategy grids build each cell from the grid's fields.
+  const cellLevelsNeedle = "contour_threshold: contourThreshold,";
+  const cellLevelsPatch = "contour_threshold: contourThreshold, contour_levels: data.contour_levels,";
+  if (out.includes(cellLevelsNeedle)) {
+    out = out.split(cellLevelsNeedle).join(cellLevelsPatch);
+  } else {
+    console.warn("[GateLab] mini_plot cell contour-levels patch did not match -- the Strategy tab's contour count will not apply.");
+  }
+  // Gate labels in bold when gate_style.label_weight asks (the Strategy and Illustration tabs'
+  // "Bold gate labels"); the label's box is widened a little for the heavier face.
+  const labelWeightNeedle =
+    "            var text = label.append('text')\n" +
+    "                .attr('text-anchor', 'middle')\n" +
+    "                .attr('fill', pubStyle ? '#000000' : '#fff')\n" +
+    "                .style('font-size', gateFs);\n";
+  const labelWeightPatch =
+    "            var text = label.append('text')\n" +
+    "                .attr('text-anchor', 'middle')\n" +
+    "                .attr('fill', pubStyle ? '#000000' : '#fff')\n" +
+    "                .style('font-size', gateFs)\n" +
+    "                .style('font-weight', (gateStyle && gateStyle.label_weight) || null);\n";
+  const labelBoxNeedle = "            var estHalfW = longerTxt.length * fsNum * 0.32 + 4;\n";
+  const labelBoxPatch = "            var estHalfW = longerTxt.length * fsNum * (gateStyle && gateStyle.label_weight === 'bold' ? 0.35 : 0.32) + 4;\n";
+  if (out.includes(labelWeightNeedle) && out.includes(labelBoxNeedle)) {
+    out = out.replace(labelWeightNeedle, labelWeightPatch).replace(labelBoxNeedle, labelBoxPatch);
+  } else {
+    console.warn("[GateLab] mini_plot label-weight patch did not match -- bold gate labels will not apply.");
+  }
+  // A gate label may be dragged past the axes, as far as the panel's margins go (the layer it is
+  // drawn in is not clipped, above), rather than held inside the axes; and in publication style
+  // it can take a white backing of the opacity asked for (gate_style.label_background), so it
+  // reads on a black pile of points.
+  const overlaySignatureNeedle = "    function _drawGateOverlay(g, gate, xScale, yScale, W, H, gateFs, gateStyle) {\n";
+  const overlaySignaturePatch = "    function _drawGateOverlay(g, gate, xScale, yScale, W, H, gateFs, gateStyle, labelLayer, margins) {\n";
+  const labelClampNeedle =
+    "            var lx = Math.max(estHalfW, Math.min(W - estHalfW, cx + ox));\n" +
+    "            var ly = Math.max(10, Math.min(H - 5, cy + oy));\n" +
+    "\n" +
+    "            var label = g.append('g').attr('transform', 'translate(' + lx + ',' + ly + ')');\n";
+  const labelClampPatch =
+    "            var _mL = margins ? Number(margins.left) || 0 : 0, _mR = margins ? Number(margins.right) || 0 : 0;\n" +
+    "            var _mT = margins ? Number(margins.top) || 0 : 0, _mB = margins ? Number(margins.bottom) || 0 : 0;\n" +
+    "            var lx = Math.max(estHalfW - _mL, Math.min(W + _mR - estHalfW, cx + ox));\n" +
+    "            var ly = Math.max(10 - _mT, Math.min(H + _mB - 5, cy + oy));\n" +
+    "\n" +
+    "            var label = (labelLayer || g).append('g').attr('transform', 'translate(' + lx + ',' + ly + ')');\n";
+  const labelBackingNeedle =
+    "            if (!pubStyle) {\n" +
+    "                // Background rect (guard getBBox for offscreen/non-rendered SVG contexts).\n";
+  const labelBackingPatch =
+    "            var _backing = pubStyle ? Math.max(0, Math.min(1, Number(gateStyle && gateStyle.label_background) || 0)) : 0;\n" +
+    "            if (!pubStyle || _backing > 0) {\n" +
+    "                // Background rect (guard getBBox for offscreen/non-rendered SVG contexts).\n";
+  const labelFillNeedle = "                    .attr('fill', gate.color).attr('fill-opacity', 0.85);\n";
+  const labelFillPatch = "                    .attr('fill', pubStyle ? '#ffffff' : gate.color).attr('fill-opacity', pubStyle ? _backing : 0.85);\n";
+  if (out.includes(overlaySignatureNeedle) && out.includes(labelClampNeedle) && out.includes(labelBackingNeedle) && out.includes(labelFillNeedle)) {
+    out = out.replace(overlaySignatureNeedle, overlaySignaturePatch).replace(labelClampNeedle, labelClampPatch)
+      .replace(labelBackingNeedle, labelBackingPatch).replace(labelFillNeedle, labelFillPatch);
+  } else {
+    console.warn("[GateLab] mini_plot label-placement patch did not match -- gate labels stay inside the axes and have no backing.");
+  }
+  // The gap between a grid's cells can be asked for (grid_gap): the Strategy tab widens it when
+  // its arrows run through the gutters.
+  const gridGapNeedle = "var gapPx = 8;";
+  const gridGapPatch = "var gapPx = (typeof data !== 'undefined' && Number(data.grid_gap) > 0) ? Number(data.grid_gap) : 8;";
+  if (out.includes(gridGapNeedle)) {
+    out = out.split(gridGapNeedle).join(gridGapPatch);
+  } else {
+    console.warn("[GateLab] mini_plot grid-gap patch did not match -- the Strategy tab's arrows will have 8 px to run in.");
+  }
+  // A gate's shape carries its gate's id, as its label does, so the Strategy tab's arrows can
+  // start level with the gate itself.
+  const gateShapeNeedle =
+    "        g.append('path')\n" +
+    "            .attr('d', pathStr)\n" +
+    "            .attr('fill', 'none')\n";
+  const gateShapePatch =
+    "        g.append('path')\n" +
+    "            .attr('d', pathStr)\n" +
+    "            .attr('data-gate-shape', gate.gate_id || null)\n" +
+    "            .attr('fill', 'none')\n";
+  if (out.includes(gateShapeNeedle)) out = out.replace(gateShapeNeedle, gateShapePatch);
+  else console.warn("[GateLab] mini_plot gate-shape patch did not match -- strategy arrows cannot start level with a gate's centre.");
   const cellOffsetNeedle = "gate_style:      gateStyle,";
-  const cellOffsetPatch = "gate_style:      gateStyle, x_axis_label_offset: data.x_axis_label_offset, y_axis_label_offset: data.y_axis_label_offset,";
+  // Likewise the canvas scale, so a grid drawn under a zoom (a strategy block on the Layout tab)
+  // keeps its points sharp.
+  const cellOffsetPatch = "gate_style:      gateStyle, x_axis_label_offset: data.x_axis_label_offset, y_axis_label_offset: data.y_axis_label_offset, canvas_scale: data.canvas_scale,";
   if (out.includes(cellOffsetNeedle)) {
     out = out.split(cellOffsetNeedle).join(cellOffsetPatch);
   } else {
@@ -2241,8 +2333,10 @@ export function patchMiniPlot(src: string): string {
   // units, on release. The handler travels in gate_style: the label code runs in
   // _drawGateOverlay, which sees the gate style and not the panel config. The host places the
   // reported offset in the store, where it is the gate's own on every tab.
-  const labelNeedle = "            var label = g.append('g').attr('transform', 'translate(' + lx + ',' + ly + ')');\n";
+  const labelNeedle = "            var label = (labelLayer || g).append('g').attr('transform', 'translate(' + lx + ',' + ly + ')');\n";
   const labelPatch = labelNeedle +
+    // Named, so the Strategy tab can draw an arrow from the gate's label to the panel it leads to.
+    "            if (gate.gate_id) label.attr('data-gate-id', gate.gate_id);\n" +
     "            if (gateStyle && typeof gateStyle.on_label_move === 'function' && gate.gate_id) {\n" +
     "                var _lx = lx, _ly = ly, _moved = false;\n" +
     "                label.style('cursor', 'move').style('pointer-events', 'all')\n" +
@@ -2344,7 +2438,7 @@ export function patchMiniPlot(src: string): string {
   // Gates drawn past a panel's axes (a file's tailored gate, or one extended to a wider range
   // than the panel shows) ran over the margins and into the neighbouring panel.
   const gateClipNeedle = "        if (cfg.gates && cfg.gates.length > 0) {\n            var gateStyle = cfg.gate_style || {};\n            cfg.gates.forEach(function (gate) {\n                _drawGateOverlay(g, gate, xScale, yScale, W, H, gateFs, gateStyle);\n            });\n        }";
-  const gateClipPatch = "        if (cfg.gates && cfg.gates.length > 0) {\n            var gateStyle = cfg.gate_style || {};\n            // GateLab: a panel's gates stay inside its axes. A gate tailored or extended beyond\n            // the range drawn here is cut at the frame instead of running over the margins.\n            var gateClipId = 'gl-gate-clip-' + Math.random().toString(36).slice(2);\n            svg.append('defs').append('clipPath').attr('id', gateClipId)\n                .append('rect').attr('width', W).attr('height', H);\n            var gateLayer = g.append('g').attr('class', 'gate-overlays').attr('clip-path', 'url(#' + gateClipId + ')');\n            cfg.gates.forEach(function (gate) {\n                _drawGateOverlay(gateLayer, gate, xScale, yScale, W, H, gateFs, gateStyle);\n            });\n        }";
+  const gateClipPatch = "        if (cfg.gates && cfg.gates.length > 0) {\n            var gateStyle = cfg.gate_style || {};\n            // GateLab: a panel's gates stay inside its axes. A gate tailored or extended beyond\n            // the range drawn here is cut at the frame instead of running over the margins.\n            // The labels sit in a layer of their own above, unclipped, so a label can be put\n            // past the axes, over the margins, where the data leave no room for it.\n            var gateClipId = 'gl-gate-clip-' + Math.random().toString(36).slice(2);\n            svg.append('defs').append('clipPath').attr('id', gateClipId)\n                .append('rect').attr('width', W).attr('height', H);\n            var gateLayer = g.append('g').attr('class', 'gate-overlays').attr('clip-path', 'url(#' + gateClipId + ')');\n            var gateLabelLayer = g.append('g').attr('class', 'gate-overlay-labels');\n            cfg.gates.forEach(function (gate) {\n                _drawGateOverlay(gateLayer, gate, xScale, yScale, W, H, gateFs, gateStyle, gateLabelLayer, M);\n            });\n        }";
   if (out.includes(gateClipNeedle)) out = out.replace(gateClipNeedle, gateClipPatch);
   else console.warn("[GateLab] mini_plot gate-clip patch did not match -- gates may draw outside a panel's axes.");
   return out;

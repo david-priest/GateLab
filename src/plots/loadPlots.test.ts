@@ -4,14 +4,20 @@ import miniSrc from "../../vendor/GateLabR/inst/app/www/mini_plot.js?raw";
 import { ELLIPSE_PIXEL_GEOMETRY_SRC, patchCytofForGateLab, patchMiniPlot } from "./loadPlots";
 
 describe("GateLab cytof interaction patches", () => {
-  it("asks the host for a menu on a right-click on a polygon's vertex handle or edge", () => {
+  it("asks the host for a menu on a right-click on a polygon's vertex handle or edge, or on any gate's body", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const patched = patchCytofForGateLab(cytofSrc);
     expect(warn).not.toHaveBeenCalled();
-    // One report from a handle (the vertex's index), one from an edge (its index and the point on it).
-    expect(patched.match(/_shinyInput\('gate_vertex_menu'/g) ?? []).toHaveLength(2);
+    // One report from a handle (the vertex's index), one from an edge (its index and the point on
+    // it), one from the body of a gate of any kind but a quadrant (body: true).
+    expect(patched.match(/_shinyInput\('gate_vertex_menu'/g) ?? []).toHaveLength(3);
     expect(patched).toContain("vertex: i, client: [event.clientX, event.clientY]");
     expect(patched).toContain("edge: best.edge, point: isFlipped ? [dy, dx] : [dx, dy]");
+    expect(patched).toContain("body: true, box: [box.left, box.top, box.right, box.bottom], client: [event.clientX, event.clientY]");
+    // Every gate's fill and hit stroke take the right-click; only a polygon looks for an edge.
+    expect(patched).toContain("fillEl.on('contextmenu', _edgeMenu).call(function () { hitEl.on('contextmenu', _edgeMenu); });");
+    expect(patched).not.toContain("if (gate.gate_type === 'polygon') fillEl.on('contextmenu'");
+    expect(patched).toContain("if (gate.gate_type === 'polygon') for (var vi = 0;");
     expect(() => new Function(patched)).not.toThrow();
     // Applied once: a second pass leaves the patched source alone.
     expect(patchCytofForGateLab(patched)).toBe(patched);
@@ -205,7 +211,13 @@ describe("GateLab cytof interaction patches", () => {
     expect(warning).not.toHaveBeenCalled();
     expect(miniSrc).not.toContain("gl-gate-clip-");
     expect(patched.split("attr('class', 'gate-overlays')").length - 1).toBe(1);
-    expect(patched).toContain("_drawGateOverlay(gateLayer, gate, xScale, yScale, W, H, gateFs, gateStyle);");
+    expect(patched).toContain("_drawGateOverlay(gateLayer, gate, xScale, yScale, W, H, gateFs, gateStyle, gateLabelLayer, M);");
+    // A gate's shape is named by its gate, for the Strategy tab's arrows.
+    expect(patched).toContain(".attr('data-gate-shape', gate.gate_id || null)");
+    // The labels are drawn above the clipped shapes, unclipped, bounded by the panel's margins.
+    expect(patched).toContain("var gateLabelLayer = g.append('g').attr('class', 'gate-overlay-labels');");
+    expect(patched).toContain("var lx = Math.max(estHalfW - _mL, Math.min(W + _mR - estHalfW, cx + ox));");
+    expect(patched).toContain(".attr('fill', pubStyle ? '#ffffff' : gate.color).attr('fill-opacity', pubStyle ? _backing : 0.85);");
     warning.mockRestore();
   });
 
@@ -504,7 +516,7 @@ describe("GateLab mini-plot density patches", () => {
     expect(patched).toContain("cfg.x_axis_label_offset = Math.ceil(13 + 0.93 * _tickFsForMargin + 0.75 * _axisFsForMargin);");
     expect(patched).toContain("Math.min(140, _neededLeft)");
     // A distance set on a grid's payload reaches every cell of the three grids.
-    expect(patched.match(/x_axis_label_offset: data\.x_axis_label_offset, y_axis_label_offset: data\.y_axis_label_offset/g) ?? []).toHaveLength(3);
+    expect(patched.match(/x_axis_label_offset: data\.x_axis_label_offset, y_axis_label_offset: data\.y_axis_label_offset, canvas_scale: data\.canvas_scale/g) ?? []).toHaveLength(3);
 
     warning.mockRestore();
   });
