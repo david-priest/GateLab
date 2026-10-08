@@ -39,6 +39,8 @@ export interface GateOverlay {
   quadrant_pcts?: number[];
   /** Per-quadrant label offsets in the cell's screen order, display units, swapped when flipped. */
   quadrant_label_offsets?: ([number, number] | null)[];
+  /** The gate holds a label offset the user set; only such a label may sit past the panel's axes. */
+  label_placed?: boolean;
   /** True display-space boundary, present only when the transform actually bends the edges. */
   outline?: [number, number][];
   color: string;
@@ -199,6 +201,7 @@ function buildGatesForChannels(
       outline,
       color: gate.color,
       label_offset: cellLabelOffsets(gate, flipped).label_offset ?? displayLabelOffset(verts),
+      label_placed: cellLabelOffsets(gate, flipped).label_offset != null,
       ...(flipped ? { flipped: true } : {}),
     });
   }

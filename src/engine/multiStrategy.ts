@@ -37,6 +37,8 @@ export interface MultiStrategyGate {
   vertices: [number, number][]; // DISPLAY space (empty for quadrant gates → not drawn)
   color: string;
   label_offset: [number, number] | null; // DISPLAY space
+  /** The gate holds a label offset the user set; only such a label may sit past the panel's axes. */
+  label_placed?: boolean;
   percent_of_parent: number | null;
   include: boolean;
 }
@@ -419,6 +421,7 @@ export function finishMultiStrategyNode(
       color: ge.color,
       // Same label position as the main plot: user offset, else auto "above the gate".
       label_offset: ge.label_offset ?? displayLabelOffset(displayVerts),
+      label_placed: ge.label_offset != null,
       percent_of_parent: pct,
       include: ge.include,
     });

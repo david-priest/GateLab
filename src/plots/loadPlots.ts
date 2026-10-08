@@ -1823,9 +1823,13 @@ export function patchMiniPlot(src: string): string {
     "            var ly = Math.max(10, Math.min(H - 5, cy + oy));\n" +
     "\n" +
     "            var label = g.append('g').attr('transform', 'translate(' + lx + ',' + ly + ')');\n";
+  // Only a label the user has placed (gate.label_placed: its gate holds a label offset) may sit
+  // past the axes. One at its automatic place is kept inside them, as it always was: let out, a
+  // label above a gate at the top of a plot sat on the panel's title.
   const labelClampPatch =
-    "            var _mL = margins ? Number(margins.left) || 0 : 0, _mR = margins ? Number(margins.right) || 0 : 0;\n" +
-    "            var _mT = margins ? Number(margins.top) || 0 : 0, _mB = margins ? Number(margins.bottom) || 0 : 0;\n" +
+    "            var _placed = !!gate.label_placed;\n" +
+    "            var _mL = _placed && margins ? Number(margins.left) || 0 : 0, _mR = _placed && margins ? Number(margins.right) || 0 : 0;\n" +
+    "            var _mT = _placed && margins ? Number(margins.top) || 0 : 0, _mB = _placed && margins ? Number(margins.bottom) || 0 : 0;\n" +
     "            var lx = Math.max(estHalfW - _mL, Math.min(W + _mR - estHalfW, cx + ox));\n" +
     "            var ly = Math.max(10 - _mT, Math.min(H + _mB - 5, cy + oy));\n" +
     "\n" +
@@ -1867,6 +1871,12 @@ export function patchMiniPlot(src: string): string {
     "            .attr('fill', 'none')\n";
   if (out.includes(gateShapeNeedle)) out = out.replace(gateShapeNeedle, gateShapePatch);
   else console.warn("[GateLab] mini_plot gate-shape patch did not match -- strategy arrows cannot start level with a gate's centre.");
+  // The single-population strip builds each step's gate from the step's fields: whether its label
+  // was placed goes with it.
+  const stepPlacedNeedle = "                    label_offset: step.label_offset\n";
+  const stepPlacedPatch = "                    label_offset: step.label_offset,\n                    label_placed: step.label_placed\n";
+  if (out.includes(stepPlacedNeedle)) out = out.replace(stepPlacedNeedle, stepPlacedPatch);
+  else console.warn("[GateLab] mini_plot step-label patch did not match -- a placed label on the strategy strip is held inside the axes.");
   const cellOffsetNeedle = "gate_style:      gateStyle,";
   // Likewise the canvas scale, so a grid drawn under a zoom (a strategy block on the Layout tab)
   // keeps its points sharp.
