@@ -275,6 +275,7 @@ requiring R or a commercial desktop/cloud platform.
 | Cost / license | Free, MIT, open source | Commercial | Commercial | Free, open source |
 | Workspace and data | Self-contained `.gatelab` bundle with FCS files and gates | `.wsp` workspace linked to local FCS; ACS can bundle both | Cloud experiment | `GatingSet` / R objects |
 | Gate exchange | Gating-ML 2.0 import and export; FlowJo `.wsp` import and export; FACSDiva and FACSChorus experiment import | `.wsp` / `.wspt` workspace formats | Gating-ML 2.0 import and export | `flowWorkspace` / `CytoML` ecosystem |
+| Access for AI agents | An MCP server: an agent reads the gating and proposes gates in the open tab ([Agents](#agents-letting-an-ai-assistant-draw-gates)) | No MCP server documented | No MCP server documented | Scripted in R |
 | R required | No | No | No | Yes |
 | Processing location | Local browser | Local desktop | Cloud | Local R session |
 | Best suited to | Open-source FCS gating with portable local workspaces | Established desktop cytometry workflows | Shared cloud-based experiments | Scriptable R / `flowWorkspace` pipelines |
@@ -283,6 +284,7 @@ See the official documentation for [FlowJo workspace and export
 formats](https://docs.flowjo.com/flowjo/getting-acquainted/fj-export/),
 [Cytobank Gating-ML exchange](https://support.cytobank.org/hc/en-us/articles/204765618-Exporting-and-Importing-Gates-within-Cytobank-and-with-Gating-ML),
 and the Bioconductor [`flowGate` package](https://bioconductor.org/packages/flowGate/).
+In October 2026 we found no MCP server documented for FlowJo or Cytobank.
 
 FlowJo is a trademark of Becton, Dickinson and Company. GateLab is an independent
 project and is not affiliated with or endorsed by BD or FlowJo.
