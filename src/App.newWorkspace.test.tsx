@@ -84,7 +84,7 @@ describe("App New Workspace", () => {
     });
 
     expect(host.textContent).toContain("No files loaded.");
-    expect(host.textContent).toContain("Open an FCS file to begin.");
+    expect(host.textContent).toContain("Open an FCS file or a workspace to begin.");
     expect(host.textContent).toContain("New workspace ready · add an FCS file to begin.");
     expect(host.textContent).not.toContain("test.fcs");
     expect(newWorkspaceButton().disabled).toBe(true);
