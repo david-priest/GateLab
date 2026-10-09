@@ -236,6 +236,7 @@ export function computePooledMultiPopStrategy(
       const shape = gate.gateDef ? gateGeometryKey(gate.gateDef) : null;
       let inside = 0;
       let alike = shape !== null;
+      const quadrantCounts = gate.quadrantCounts ? [0, 0, 0, 0] : null;
       counterparts.forEach((counterpart, index) => {
         if (!counterpart || !alike) return;
         const match: MultiStrategyLayoutGate | undefined =
@@ -249,12 +250,18 @@ export function computePooledMultiPopStrategy(
           return;
         }
         inside += match.nChild;
+        if (quadrantCounts) match.quadrantCounts?.forEach((count, q) => { quadrantCounts[q] += count; });
       });
       if (!alike) {
         omitted.add(gate.entry.name);
         return [];
       }
-      return [{ entry: gate.entry, gateDef: gate.gateDef, pct: nEvents > 0 ? round1((inside / nEvents) * 100) : null }];
+      return [{
+        entry: gate.entry,
+        gateDef: gate.gateDef,
+        pct: nEvents > 0 ? round1((inside / nEvents) * 100) : null,
+        ...(quadrantCounts ? { quadrantCounts } : {}),
+      }];
     });
     return finishMultiStrategyNode(reference.sample, node, xs.flat(), ys.flat(), nEvents, gates, opts.globalScales);
   });

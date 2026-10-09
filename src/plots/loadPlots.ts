@@ -1891,7 +1891,11 @@ export function patchMiniPlot(src: string): string {
   // The single-population strip builds each step's gate from the step's fields: whether its label
   // was placed goes with it.
   const stepPlacedNeedle = "                    label_offset: step.label_offset\n";
-  const stepPlacedPatch = "                    label_offset: step.label_offset,\n                    label_placed: step.label_placed\n";
+  // ...and a quadrant step's crosshair and labels, which the step carries and a quadrant gate,
+  // having no vertices, cannot be drawn without.
+  const stepPlacedPatch = "                    label_offset: step.label_offset,\n                    label_placed: step.label_placed,\n" +
+    "                    center: step.center, arms: step.arms,\n" +
+    "                    quadrant_pcts: step.quadrant_pcts, quadrant_label_offsets: step.quadrant_label_offsets\n";
   if (out.includes(stepPlacedNeedle)) out = out.replace(stepPlacedNeedle, stepPlacedPatch);
   else console.warn("[GateLab] mini_plot step-label patch did not match -- a placed label on the strategy strip is held inside the axes.");
   const cellOffsetNeedle = "gate_style:      gateStyle,";

@@ -10,7 +10,7 @@ import { computeGateCounts, type GateCount, type GateMaskCache } from "./populat
 import type { AxisTicks } from "./ticks";
 import { displayLabelOffset, polygonOutline } from "../plots/gatePayload";
 import { computeRangeFromValues } from "./strategy";
-import { quadrantArmPoints } from "./gates";
+import { quadrantOverlayShape } from "./quadrantOverlay";
 
 /** Even-spaced downsample of masked event indices (round(seq(1,N,len=cap))). */
 function sampledIndices(mask: Uint8Array, cap: number): number[] {
@@ -125,38 +125,7 @@ function buildGatesForChannels(
 
     const c = gateCounts[gid];
     if (gate.gate_type === "quadrant") {
-      let arms: GateOverlay["arms"];
-      if (gate.curl && yRange) {
-        const originalXDisplayEnd = flipped ? yRange[1] : xRange[1];
-        const originalYDisplayEnd = flipped ? xRange[1] : yRange[1];
-        const originalXEnd = sample.displayToGate(
-          gate,
-          gate.x_channel,
-          originalXDisplayEnd,
-        );
-        const originalYEnd = sample.displayToGate(
-          gate,
-          gate.y_channel,
-          originalYDisplayEnd,
-        );
-        const originalH = quadrantArmPoints(
-          gate.center,
-          gate.curl,
-          "h",
-          originalXEnd,
-        ).map(toCellDisplay);
-        const originalV = quadrantArmPoints(
-          gate.center,
-          gate.curl,
-          "v",
-          originalYEnd,
-        ).map(toCellDisplay);
-        if (originalH.length > 1 && originalV.length > 1) {
-          arms = flipped
-            ? { h: originalV, v: originalH }
-            : { h: originalH, v: originalV };
-        }
-      }
+      const { arms } = quadrantOverlayShape(sample, gate, xCh, yCh, xRange, yRange, flipped);
       const quadrants = c?.quadrants ?? [];
       // Cell quadrant order is Q1 top-left, Q2 top-right, Q3 bottom-right, Q4 bottom-left.
       // Swapping axes maps those screen positions back to original Q3,Q2,Q1,Q4 respectively.
