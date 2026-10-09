@@ -11,6 +11,8 @@ import pkg from "../package.json";
 import brandMark from "./assets/brand/gatelab-mark.png";
 import brandWordmark from "./assets/brand/gatelab-wordmark.png";
 import brandLogo from "./assets/brand/gatelab-logo.jpg";
+import brandWordmarkR from "./assets/brand/gatelabr-wordmark.png";
+import brandLogoR from "./assets/brand/gatelabr-logo.jpg";
 import { clearPersistedTabState, readPersistedTabValues, readProportionsSettings, restorePlottingState, savedPlottingState, writeProportionsSettings } from "./ui/tabState";
 import { historyShortcutAction } from "./ui/historyShortcuts";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type GatingPlotActions, type NewGate } from "./plots/GatingPlot";
@@ -11431,11 +11433,13 @@ export default function App() {
             reachable from the keyboard, not only on hover. */}
         <span className="gl-brand" tabIndex={0}>
           {/* The logo: the three plots as the mark, then the wordmark, both cut from the artwork.
-              GateLabR keeps its name in text, since the wordmark says GateLab. */}
+              GateLabR has its own wordmark and logo, the same plots with an orange R. */}
           <img className="gl-brand-mark" src={brandMark} alt="" />
-          {isSceHost ? <strong>GateLabR</strong> : <img className="gl-brand-wordmark" src={brandWordmark} alt="GateLab" />}
+          {isSceHost
+            ? <img className="gl-brand-wordmark" src={brandWordmarkR} alt="GateLabR" />
+            : <img className="gl-brand-wordmark" src={brandWordmark} alt="GateLab" />}
           <span className="gl-brand-card" role="tooltip">
-            <img className="gl-brand-card-logo" src={brandLogo} alt="" />
+            <img className="gl-brand-card-logo" src={isSceHost ? brandLogoR : brandLogo} alt="" />
             <span className="gl-brand-card-head">
               {isSceHost ? "GateLabR" : "GateLab"} v{pkg.version}
               <span className="gl-brand-card-by">{t("Developed by David Priest")}</span>
@@ -13167,7 +13171,7 @@ export default function App() {
             </ErrorBoundary>}
           </div>
         ) : (
-          <EmptyState logo={!isSceHost} tutorial={isSceHost ? null : { paused: tour.progress?.status === "paused", onStart: tour.start, onResume: tour.resume }} />
+          <EmptyState brand={isSceHost ? "GateLabR" : "GateLab"} tutorial={isSceHost ? null : { paused: tour.progress?.status === "paused", onStart: tour.start, onResume: tour.resume }} />
         )}
 
         <aside

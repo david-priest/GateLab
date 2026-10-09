@@ -21,7 +21,7 @@ afterEach(() => {
 describe("the opening page, before any file is loaded", () => {
   it("shows the logo, says a file or a workspace begins, and starts the tutorial from a link", () => {
     const onStart = vi.fn(), onResume = vi.fn();
-    act(() => root.render(<EmptyState logo tutorial={{ paused: false, onStart, onResume }} />));
+    act(() => root.render(<EmptyState brand="GateLab" tutorial={{ paused: false, onStart, onResume }} />));
     expect(host.querySelector<HTMLImageElement>("img.gl-splash-logo")!.alt).toBe("GateLab");
     expect(host.querySelector(".gl-splash-title")!.textContent).toBe("Open an FCS file or a workspace to begin.");
     expect(host.querySelector(".gl-splash-tutorial")!.textContent).toBe("New to GateLab? Start the tutorial");
@@ -34,7 +34,7 @@ describe("the opening page, before any file is loaded", () => {
 
   it("offers to resume a tutorial that was ended part way", () => {
     const onStart = vi.fn(), onResume = vi.fn();
-    act(() => root.render(<EmptyState logo tutorial={{ paused: true, onStart, onResume }} />));
+    act(() => root.render(<EmptyState brand="GateLab" tutorial={{ paused: true, onStart, onResume }} />));
     const link = host.querySelector<HTMLButtonElement>("button.gl-splash-link")!;
     expect(link.textContent).toBe("Resume the tutorial");
     act(() => link.click());
@@ -42,10 +42,12 @@ describe("the opening page, before any file is loaded", () => {
     expect(onStart).not.toHaveBeenCalled();
   });
 
-  it("leaves the logo and the tutorial out under a host that has neither", () => {
-    act(() => root.render(<EmptyState logo={false} tutorial={null} />));
+  it("shows GateLabR's own logo, and no tutorial, under the R host", () => {
+    act(() => root.render(<EmptyState brand="GateLabR" tutorial={null} />));
     expect(host.querySelector(".gl-splash-title")!.textContent).toBe("Open an FCS file or a workspace to begin.");
-    expect(host.querySelector("img")).toBeNull();
+    const logo = host.querySelector<HTMLImageElement>("img.gl-splash-logo")!;
+    expect(logo.alt).toBe("GateLabR");
+    expect(logo.src).not.toBe("");
     expect(host.querySelector("button")).toBeNull();
     expect(host.textContent).not.toContain("New to GateLab?");
   });
