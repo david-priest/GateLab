@@ -896,6 +896,7 @@ const JA: Readonly<Record<string, string>> = {
   "FlowJo workspaces (.wsp) and Gating-ML 2.0 import and export, checked against FlowJo, Cytobank and CytoML on real files; a FACSDiva or FACSChorus experiment imports, and a FACSChorus .cef exports with the tree written back for the sorter. Cytobank reads only linear, log and arcsinh scales, so a logicle gate is traced for it and the export dialog says what was traced. Check an exported file rather than trusting it, and please report anything that does not survive a round trip.": "FlowJo ワークスペース (.wsp) と Gating-ML 2.0 の読み込み・書き出しは、実データで FlowJo・Cytobank・CytoML と照合しています。FACSDiva や FACSChorus の実験は読み込め、FACSChorus の .cef はツリーをソーター向けに書き戻して書き出せます。Cytobank は線形・log・arcsinh のスケールしか読まないため、logicle のゲートはそれに合わせてなぞられ、書き出しダイアログが何をなぞったかを示します。書き出したファイルは信頼せずに確認し、往復で失われるものがあれば報告してください。",
   "Getting started.": "はじめに。",
   "Tutorial in the header walks through a demo workspace, and an AI agent can draw gates through the MCP server (Agent in the header).": "ヘッダーの Tutorial がデモワークスペースを案内し、AI エージェントは MCP サーバー（ヘッダーの Agent）を通じてゲートを描けます。",
+  "The Getting started guide on the documentation site (david-priest.github.io/GateLabR) covers a first session, and an AI agent can draw gates through the MCP server (Agent in the header, or launchGatingApp(agent = TRUE)).": "ドキュメントサイト（david-priest.github.io/GateLabR）の Getting started ガイドが最初のセッションを案内し、AI エージェントは MCP サーバー（ヘッダーの Agent、または launchGatingApp(agent = TRUE)）を通じてゲートを描けます。",
   "Revert": "戻す",
   "tailored in {count} files": "{count} ファイルで調整済み",
   "tailored in 1 file": "1 ファイルで調整済み",

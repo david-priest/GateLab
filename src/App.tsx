@@ -11441,7 +11441,9 @@ export default function App() {
           <span className="gl-brand-card" role="tooltip">
             <img className="gl-brand-card-logo" src={isSceHost ? brandLogoR : brandLogo} alt="" />
             <span className="gl-brand-card-head">
-              {isSceHost ? "GateLabR" : "GateLab"} v{pkg.version}
+              {/* The version is the app's. Under the R host it is the embedded core's, and is said
+                  to be: the package has a version of its own, which the host does not send. */}
+              {isSceHost ? `GateLabR · GateLab core v${pkg.version}` : `GateLab v${pkg.version}`}
               <span className="gl-brand-card-by">{t("Developed by David Priest")}</span>
             </span>
             <p>
@@ -11467,7 +11469,10 @@ export default function App() {
             </p>
             <p>
               <b>{t("Getting started.")}</b>{" "}
-              {t("Tutorial in the header walks through a demo workspace, and an AI agent can draw gates through the MCP server (Agent in the header).")}
+              {isSceHost
+                // The R host has no tutorial and no demo workspace; its guide is the package's.
+                ? t("The Getting started guide on the documentation site (david-priest.github.io/GateLabR) covers a first session, and an AI agent can draw gates through the MCP server (Agent in the header, or launchGatingApp(agent = TRUE)).")
+                : t("Tutorial in the header walks through a demo workspace, and an AI agent can draw gates through the MCP server (Agent in the header).")}
             </p>
           </span>
         </span>

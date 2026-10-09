@@ -197,6 +197,15 @@ describe("App SCE host loading", () => {
     expect(container.textContent).toContain("Return to single sample");
     expect(plotHarness.eventCount).toBe(3);
 
+    // The About card under the R host: the package's own name and artwork, the version said to be
+    // the embedded core's, and a first step that exists here (the tutorial does not).
+    const card = container.querySelector<HTMLElement>(".gl-brand-card")!;
+    expect(container.querySelector<HTMLImageElement>("img.gl-brand-wordmark")!.alt).toBe("GateLabR");
+    expect(card.querySelector(".gl-brand-card-head")!.textContent).toMatch(/^GateLabR · GateLab core v\d+\.\d+\.\d+/);
+    expect(card.textContent).toContain("The Getting started guide on the documentation site (david-priest.github.io/GateLabR) covers a first session");
+    expect(card.textContent).toContain("launchGatingApp(agent = TRUE)");
+    expect(card.textContent).not.toContain("Tutorial in the header");
+
     await act(async () => {
       plotHarness.onNewGate?.({
         gate_type: "polygon",
