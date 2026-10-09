@@ -295,7 +295,7 @@ export function migrateFigure(
   x: string,
   y: string,
   /** What a figure made from nothing starts as; a saved figure or a legacy selection keeps its own. */
-  defaults?: { composition?: FigureSpec["composition"] },
+  defaults?: { composition?: FigureSpec["composition"]; name?: string },
 ): FigureSpec {
   if (config?.figure) {
     if (!isFigureSpec(config.figure))
@@ -328,7 +328,7 @@ export function migrateFigure(
     : [tree.active_population_id ?? tree.root_population_id ?? ""];
   const figure: FigureSpec = {
     version: 1,
-    name: "File / sample comparison",
+    name: defaults?.name ?? "File / sample comparison",
     sampleIds: samples.map((s) => s.id),
     populations: populationIds.filter(Boolean).map(refFor),
     plots: (config?.xChannels ?? [x]).map((ch, i) => ({

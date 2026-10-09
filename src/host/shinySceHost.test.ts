@@ -266,6 +266,13 @@ describe("createShinySceHost", () => {
     window.Shiny = shiny;
 
     const host = createShinySceHost();
+    // Which build it is reaches the adapter only as R states it, and only in the form a version
+    // or a commit takes: the values are shown in the page.
+    expect(host.build).toBeUndefined();
+    expect(createShinySceHost({ build: { hostVersion: "1.6.0", hostCommit: "0123456789abcdef", coreCommit: "89abcdef01234567" } }).build)
+      .toEqual({ hostVersion: "1.6.0", hostCommit: "0123456789abcdef", coreCommit: "89abcdef01234567" });
+    expect(createShinySceHost({ build: { hostVersion: "<b>1</b>", hostCommit: "not a commit", coreCommit: "89abcde" } }).build)
+      .toEqual({ coreCommit: "89abcde" });
     host.lifecycle?.mounted?.();
     const setInputValue = vi.fn();
     shiny.setInputValue = setInputValue;

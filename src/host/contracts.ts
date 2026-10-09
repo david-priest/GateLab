@@ -40,6 +40,20 @@ export interface GateLabHostLifecycle {
 }
 
 /**
+ * Which build this is, as the host knows it, for the header and the About card. The app's
+ * version does not change between embeds, so an installed GateLabR is told from a newer one
+ * by the commit its core was built from.
+ */
+export interface GateLabHostBuild {
+  /** The host package's version, e.g. GateLabR's "1.6.0". */
+  readonly hostVersion?: string;
+  /** The commit the host package was installed from, where its installer recorded one. */
+  readonly hostCommit?: string;
+  /** The GateLab commit the embedded core was built from. */
+  readonly coreCommit?: string;
+}
+
+/**
  * The narrow shell contract implemented by the ordinary browser build and,
  * later, the GateLabR Shiny/SCE bridge.
  */
@@ -48,6 +62,7 @@ export interface GateLabHostAdapter {
   readonly id: string;
   readonly kind: GateLabHostKind;
   readonly label: string;
+  readonly build?: Readonly<GateLabHostBuild>;
   readonly capabilities: Readonly<GateLabHostCapabilities>;
   readonly datasets?: GateLabHostDatasetPort;
   readonly workspaces?: GateLabHostWorkspacePort;

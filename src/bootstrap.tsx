@@ -8,6 +8,7 @@ import {
 } from "./host/contracts";
 import { installNumberInputSteppers } from "./ui/numberInputSteppers";
 import { I18nProvider } from "./ui/i18n";
+import { setHostWording } from "./ui/hostWording";
 import "./styles.css";
 
 export interface GateLabMountOptions {
@@ -36,6 +37,8 @@ export function mountGateLab(
       `expected ${GATELAB_HOST_CONTRACT_VERSION}.`,
     );
   }
+  // An SCE's samples are not files, and the app's text says so there.
+  setHostWording(host.kind === "r-sce" ? "samples" : "files");
   host.lifecycle?.mounted?.();
   const root = ReactDOM.createRoot(container);
   const removeNumberInputSteppers = installNumberInputSteppers();

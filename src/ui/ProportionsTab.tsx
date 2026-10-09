@@ -264,7 +264,7 @@ export function ProportionsTab({
           ))}
         </nav>
         <section className="gl-plotting-files">
-          <h3>Files / samples</h3>
+          <h3>{t("Files / samples")}</h3>
           <div className="gl-plotting-actions">
             <button
               className="gl-mini-btn"

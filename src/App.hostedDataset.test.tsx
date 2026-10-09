@@ -145,6 +145,7 @@ describe("App SCE host loading", () => {
       id: "test-r-host",
       kind: "r-sce",
       label: "Test R host",
+      build: { hostVersion: "1.6.0", hostCommit: "0123456789abcdef0123456789abcdef01234567", coreCommit: "89abcdef0123456789abcdef0123456789abcdef" },
       capabilities: {
         dataSources: { fcsFiles: false, singleCellExperiment: true },
         dataModel: {
@@ -201,7 +202,10 @@ describe("App SCE host loading", () => {
     // the embedded core's, and a first step that exists here (the tutorial does not).
     const card = container.querySelector<HTMLElement>(".gl-brand-card")!;
     expect(container.querySelector<HTMLImageElement>("img.gl-brand-wordmark")!.alt).toBe("GateLabR");
-    expect(card.querySelector(".gl-brand-card-head")!.textContent).toMatch(/^GateLabR · GateLab core v\d+\.\d+\.\d+/);
+    // The package's version and the commits it and its core were built from, as the host states
+    // them: the app's version is the same from one embed to the next, the core's commit is not.
+    expect(card.querySelector(".gl-brand-card-head")!.textContent).toMatch(/^GateLabR 1\.6\.0 \(0123456\) · GateLab core v\d+\.\d+\.\d+ \(89abcde\)/);
+    expect(container.querySelector("header")!.textContent).toMatch(/GateLab core v\d+\.\d+\.\d+ · 89abcde ·/);
     expect(card.textContent).toContain("The Getting started guide on the documentation site (david-priest.github.io/GateLabR) covers a first session");
     expect(card.textContent).toContain("launchGatingApp(agent = TRUE)");
     expect(card.textContent).not.toContain("Tutorial in the header");

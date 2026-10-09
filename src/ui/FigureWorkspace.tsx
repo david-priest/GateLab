@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject, type CSSProperties, type MouseEvent as ReactMouseEvent } from "react";
 import { platformKeys } from "./platformKeys";
+import { useI18n } from "./i18n";
 import { ContextMenu, type ContextMenuState } from "./ContextMenu";
 import type { MenuEntry } from "./MenuButton";
 import { SearchableSelect } from "./SearchableSelect";
@@ -142,6 +143,9 @@ export function FigureWorkspace({
   onGateLabelMove,
   onScaleChange,
 }: Props) {
+  // The tab's text is English only; it goes through t() so that a host whose samples are not
+  // files (GateLabR) is shown its own words for them.
+  const { t } = useI18n();
   const trees = figureHierarchies(state);
   // The inspector's width is the user's: dragged, kept for the session.
   const [inspectorWidth, setInspectorWidthState] = useState(() => {
@@ -168,7 +172,8 @@ export function FigureWorkspace({
         state.active_hierarchy_id,
         defaultX,
         defaultY,
-        { composition: defaultComposition },
+        // Named in this host's words: "Sample comparison" where the samples are not files.
+        { composition: defaultComposition, name: t("File / sample comparison") },
       ),
       scaleFontsWithPlot: legacy?.scaleFontsWithPlot ?? false,
     };
@@ -293,7 +298,7 @@ export function FigureWorkspace({
       const pages = layoutFigure(figure, samples, trees, populationMetadata);
       if (pages.some((page) => page.panels.length > 256))
         throw new Error(
-          "This page has more than 256 panels. Move Files / samples or Populations to Pages in Arrange, or select fewer items.",
+          t("This page has more than 256 panels. Move Files / samples or Populations to Pages in Arrange, or select fewer items."),
         );
       return {
         pages,
@@ -542,7 +547,7 @@ export function FigureWorkspace({
         : []),
       {
         label: heatmap ? "Add the figure to the Layout tab" : "Add this panel to the Layout tab",
-        title: heatmap ? "A heatmap goes to the Layout tab as the whole figure, drawn there as it is here" : "One Layout plot of this file, population and channels",
+        title: heatmap ? "A heatmap goes to the Layout tab as the whole figure, drawn there as it is here" : t("One Layout plot of this file, population and channels"),
         disabled: heatmap ? !onAddFigureToLayout : !onAddToLayout || !own.length,
         onClick: () => (heatmap ? onAddFigureToLayout?.(structuredClone(config)) : addPanelsToLayout([panel])),
       },
@@ -552,10 +557,10 @@ export function FigureWorkspace({
       {
         label: "Open in Gating",
         title: own.length > 1
-          ? "An overlaid panel has no single file to open"
+          ? t("An overlaid panel has no single file to open")
           : own[0]?.pool
-            ? "These files pooled, this population and these channels on the Gating tab"
-            : "This file, population and channels on the Gating tab",
+            ? t("These files pooled, this population and these channels on the Gating tab")
+            : t("This file, population and channels on the Gating tab"),
         disabled: !onOpenInGating || own.length !== 1,
         onClick: () => { if (own.length === 1) onOpenInGating?.(own[0]); },
       },
@@ -566,7 +571,7 @@ export function FigureWorkspace({
         onClick: () => editFigure({ populations: figure.populations.filter((p) => refKey(p) !== refKey(panel.population)) }),
       },
       {
-        label: panel.samples.length > 1 ? "Remove these files from the figure" : "Remove this file from the figure",
+        label: panel.samples.length > 1 ? t("Remove these files from the figure") : t("Remove this file from the figure"),
         disabled: figure.sampleIds.length <= panel.samples.length,
         onClick: () => editFigure({ sampleIds: figure.sampleIds.filter((id) => !panel.samples.includes(id)) }),
       },
@@ -897,8 +902,8 @@ export function FigureWorkspace({
               role="tabpanel"
               aria-labelledby="figure-tab-data"
             >
-              <h3 title="Each entry is an FCS file, not necessarily one biological sample. The figure's selection is independent of the Gating tab's.">
-                Files / samples <span>{figure.sampleIds.length} selected</span>
+              <h3 title={t("Each entry is an FCS file, not necessarily one biological sample. The figure's selection is independent of the Gating tab's.")}>
+                {t("Files / samples")} <span>{figure.sampleIds.length} selected</span>
               </h3>
               <div className="gl-figure-actions gl-figure-list-actions">
                 <button
@@ -906,7 +911,7 @@ export function FigureWorkspace({
                     editFigure({ sampleIds: [...checkedSampleIds] })
                   }
                 >
-                  Use checked files
+                  {t("Use checked files")}
                 </button>
                 <button
                   onClick={() =>
@@ -921,8 +926,8 @@ export function FigureWorkspace({
               </div>
               <input
                 type="search"
-                aria-label="Find figure files or samples"
-                placeholder="Find file / sample…"
+                aria-label={t("Find figure files or samples")}
+                placeholder={t("Find file / sample…")}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
@@ -951,7 +956,7 @@ export function FigureWorkspace({
               {figureFacets.length > 0 && (
                 <details className="gl-figure-facets-fold" open>
                   <summary>Select by metadata</summary>
-                <div className="gl-sample-facets gl-figure-facets" aria-label="Select figure files by metadata">
+                <div className="gl-sample-facets gl-figure-facets" aria-label={t("Select figure files by metadata")}>
                   {figureFacets.map((column) => (
                     <div key={column.name} className="gl-sample-facet-row">
                       <span className="gl-sample-facet-lock" aria-hidden="true" />
@@ -990,11 +995,10 @@ export function FigureWorkspace({
                 (id) => !samples.some((s) => s.id === id),
               ) && (
                 <p role="alert">
-                  A saved file is missing. Restore it or use the current checked
-                  files.
+                  {t("A saved file is missing. Restore it or use the current checked files.")}
                 </p>
               )}
-              <h3 title="A population applies to the files whose tree has it. Correspondence is by provenance, not by name.">
+              <h3 title={t("A population applies to the files whose tree has it. Correspondence is by provenance, not by name.")}>
                 Populations <span>{figure.populations.length} selected</span>
               </h3>
               <div className="gl-figure-actions gl-figure-list-actions">
@@ -1055,7 +1059,7 @@ export function FigureWorkspace({
                       {applicableFiles(ref).length < selectedSamples.length && (
                         <small
                           className="gl-figure-row-meta"
-                          title={`${applicableFiles(ref).length} of ${selectedSamples.length} selected files have this population`}
+                          title={t("{count} of {selected} selected files have this population", { count: applicableFiles(ref).length, selected: selectedSamples.length })}
                         >
                           {applicableFiles(ref).length}/{selectedSamples.length}
                         </small>
@@ -1070,8 +1074,7 @@ export function FigureWorkspace({
                       (ref) => `${ref.label} (${trees[ref.hierarchyId]?.name})`,
                     )
                     .join(", ")}
-                  : no selected files use this hierarchy. No panels are added
-                  for these selections.
+                  {t(": no selected files use this hierarchy. No panels are added for these selections.")}
                   <button
                     onClick={() =>
                       editFigure({
@@ -1108,11 +1111,11 @@ export function FigureWorkspace({
                 ))}
               {figure.samplePopulations && (
                 <div className="gl-figure-warning">
-                  This saved figure has per-file population selections.
+                  {t("This saved figure has per-file population selections.")}
                   <button
                     onClick={() => editFigure({ samplePopulations: undefined })}
                   >
-                    Use selected populations for every file
+                    {t("Use selected populations for every file")}
                   </button>
                 </div>
               )}
@@ -1250,7 +1253,7 @@ export function FigureWorkspace({
               role="tabpanel"
               aria-labelledby="figure-tab-plots"
             >
-              <h3 title="Each plot has its own axes; the plots repeat across the selected files and populations.">Plot definitions</h3>
+              <h3 title={t("Each plot has its own axes; the plots repeat across the selected files and populations.")}>Plot definitions</h3>
               {figure.plots.map((plot, index) => (
                 <div className="gl-figure-plot-editor" key={plot.id}>
                   <label>
@@ -1441,7 +1444,7 @@ export function FigureWorkspace({
                         e.dataTransfer.setData("text/gatelab-dimension", d)
                       }
                     >
-                      <span>{dimensionLabel(d)}</span>
+                      <span>{t(dimensionLabel(d))}</span>
                       <select
                         aria-label={`Place ${d}`}
                         value={location}
@@ -1491,7 +1494,7 @@ export function FigureWorkspace({
                   }}
                 >
                   <option value="">Choose field…</option>
-                  <optgroup label="Files / samples">
+                  <optgroup label={t("Files / samples")}>
                     {metadataFields
                       .filter((field) => !placedDimensions.includes(`metadata:${field}`))
                       .map((field) => (
@@ -1523,15 +1526,15 @@ export function FigureWorkspace({
                   { label: "A→Z", title: "By name", apply: (items) => [...items].sort((a, b) => a.label.localeCompare(b.label)) },
                 ]}
               />
-              <h3 title={platformKeys("Click to choose rows (Cmd or Ctrl adds, Shift takes a range), drag them to where they should go, or sort them all at once.")}>Order files / samples</h3>
+              <h3 title={platformKeys("Click to choose rows (Cmd or Ctrl adds, Shift takes a range), drag them to where they should go, or sort them all at once.")}>{t("Order files / samples")}</h3>
               <OrderList
-                label="File order"
+                label={t("File order")}
                 items={selectedSamples}
                 keyOf={(s) => s.id}
                 labelOf={(s) => s.name}
                 onReorder={(ordered) => editFigure({ sampleIds: ordered.map((s) => s.id) })}
                 sorts={[
-                  { label: "File list order", title: "As the files are listed on the Gating tab", apply: (items) => samples.filter((s) => items.some((item) => item.id === s.id)) },
+                  { label: t("File list order"), title: t("As the files are listed on the Gating tab"), apply: (items) => samples.filter((s) => items.some((item) => item.id === s.id)) },
                   { label: "A→Z", title: "By name", apply: (items) => [...items].sort((a, b) => a.name.localeCompare(b.name)) },
                 ]}
               />
@@ -1556,7 +1559,7 @@ export function FigureWorkspace({
                   }
                 >
                   <option value="shared">Shared by channel</option>
-                  <option value="individual">Fit each file</option>
+                  <option value="individual">{t("Fit each file")}</option>
                   <option value="gating">As on the Gating tab</option>
                 </select>
               </label>
@@ -1577,8 +1580,7 @@ export function FigureWorkspace({
               ) : (
                 <>
                   <p>
-                    Transforms belong to this figure; shared ranges span all selected files.
-                    Choose “As on the Gating tab” to match the Gating tab's axes.
+                    {t("Transforms belong to this figure; shared ranges span all selected files. Choose “As on the Gating tab” to match the Gating tab's axes.")}
                   </p>
                   <button onClick={() => editFigure({ transforms: {} })}>
                     Capture current channel transforms
@@ -1663,10 +1665,7 @@ export function FigureWorkspace({
                     </select>
                   </label>
                   <p>
-                    One matrix per page: a row per population and file, a column per
-                    heatmap plot. Statistics use all finite events; the percentile
-                    scaling pools the events of every row, so a channel's colours
-                    compare across the page. Numbers show the unscaled statistic.
+                    {t("One matrix per page: a row per population and file, a column per heatmap plot. Statistics use all finite events; the percentile scaling pools the events of every row, so a channel's colours compare across the page. Numbers show the unscaled statistic.")}
                   </p>
                 </details>
               )}
@@ -1734,9 +1733,7 @@ export function FigureWorkspace({
                   {config.histLayout === "ridgeline" && (
                     <>
                       <p>
-                        Overlay files or populations to stack their
-                        distributions within a panel. Each ridge is
-                        peak-normalised.
+                        {t("Overlay files or populations to stack their distributions within a panel. Each ridge is peak-normalised.")}
                       </p>
                       <label>
                         Ridge overlap
@@ -1885,11 +1882,10 @@ export function FigureWorkspace({
                   checked={figure.showGates}
                   onChange={(e) => editFigure({ showGates: e.target.checked })}
                 />
-                Show each file’s gates
+                {t("Show each file’s gates")}
               </label>
               <p>
-                Mixed-file panels omit gate outlines. Percentages in single-file
-                panels are relative to the displayed population.
+                {t("Mixed-file panels omit gate outlines. Percentages in single-file panels are relative to the displayed population.")}
               </p>
               <label>
                 Edges
@@ -2136,7 +2132,7 @@ export function FigureWorkspace({
         <section className="gl-figure-canvas" aria-label="Figure preview">
           <div className="gl-figure-arrangement">
             <button onClick={() => setSection("arrange")}>
-              Rows: {figure.rows.map(dimensionLabel).join(" / ") || "—"}
+              Rows: {figure.rows.map((d) => t(dimensionLabel(d))).join(" / ") || "—"}
             </button>
             <button
               aria-label="Swap rows and columns"
@@ -2148,7 +2144,7 @@ export function FigureWorkspace({
               Swap
             </button>
             <button onClick={() => setSection("arrange")}>
-              Columns: {figure.columns.map(dimensionLabel).join(" / ") || "—"}
+              Columns: {figure.columns.map((d) => t(dimensionLabel(d))).join(" / ") || "—"}
             </button>
             <label>
               Composition
@@ -2162,7 +2158,7 @@ export function FigureWorkspace({
                 }
               >
                 <option value="separate">Separate panels</option>
-                <option value="overlay">Overlay files</option>
+                <option value="overlay">{t("Overlay files")}</option>
                 <option value="pool">Pool events</option>
               </select>
             </label>
@@ -2170,7 +2166,7 @@ export function FigureWorkspace({
           <div className="gl-figure-viewbar">
             <button
               disabled={exporting}
-              title="Build every panel again from the current gates, files and the Gating tab's axes"
+              title={t("Build every panel again from the current gates, files and the Gating tab's axes")}
               onClick={() => setRefreshTick((n) => n + 1)}
             >
               Refresh
@@ -2186,7 +2182,7 @@ export function FigureWorkspace({
                 })
               }
             >
-              Files down rows
+              {t("Files down rows")}
             </button>
             <button
               disabled={exporting}
@@ -2199,7 +2195,7 @@ export function FigureWorkspace({
                 })
               }
             >
-              Files across columns
+              {t("Files across columns")}
             </button>
             {figure.plots.some((p) => p.type === "heatmap") && (
               <>
@@ -2223,8 +2219,8 @@ export function FigureWorkspace({
             )}
             <span role="status">
               {settling
-                ? `Preparing figure${prepared.pending ? ` · ${prepared.pending} files remaining` : ""}…`
-                : `${new Set(page?.panels.flatMap((p) => p.samples) ?? []).size} of ${selectedSamples.length} files on this page · ${validPanels} panels ready${problems.length ? ` · ${problems.length} need attention` : ""}`}
+                ? `Preparing figure${prepared.pending ? ` · ${t("{count} files remaining", { count: prepared.pending })}` : ""}…`
+                : `${t("{shown} of {selected} files on this page", { shown: new Set(page?.panels.flatMap((p) => p.samples) ?? []).size, selected: selectedSamples.length })} · ${validPanels} panels ready${problems.length ? ` · ${problems.length} need attention` : ""}`}
             </span>
             {selectedPanels.length > 0 && (
               <span className="gl-figure-selection" role="group" aria-label="Selected panels">
@@ -2282,15 +2278,14 @@ export function FigureWorkspace({
           {figure.composition !== "separate" && (
             <div className="gl-figure-note">
               {figure.composition === "pool"
-                ? "Events pooled · event-count weighting · gates and percentages pooled where the files' gates agree"
-                : "Separate coloured file traces · shared axes · gate outlines hidden"}
+                ? t("Events pooled · event-count weighting · gates and percentages pooled where the files' gates agree")
+                : t("Separate coloured file traces · shared axes · gate outlines hidden")}
             </div>
           )}
           {figure.scalePolicy === "individual" &&
             figure.composition === "separate" && (
               <div className="gl-figure-note">
-                Axes fit each file independently. Plot positions are not
-                directly comparable.
+                {t("Axes fit each file independently. Plot positions are not directly comparable.")}
               </div>
             )}
           <div
@@ -2301,8 +2296,8 @@ export function FigureWorkspace({
           >
             {!shown ? (
               <div className="gl-figure-empty">
-                <h3>Build a file / sample comparison</h3>
-                <p>Select files and populations, then add plots to repeat.</p>
+                <h3>{t("Build a file / sample comparison")}</h3>
+                <p>{t("Select files and populations, then add plots to repeat.")}</p>
                 <button
                   onClick={() =>
                     setSection(!figure.plots.length ? "plots" : "data")
@@ -2354,7 +2349,7 @@ export function FigureWorkspace({
           <ContextMenu menu={panelMenu} onClose={() => setPanelMenu(null)} />
           <footer className="gl-figure-footer">
             <span>
-              {selectedSamples.length} files · each uses its assigned hierarchy
+              {t("{count} files · each uses its assigned hierarchy", { count: selectedSamples.length })}
             </span>
             <span className="gl-figure-flex" />
             <button
