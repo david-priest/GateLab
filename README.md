@@ -2,12 +2,9 @@
   <img src="docs/assets/gatelab-logo.png" alt="GateLab" width="280">
 </h1>
 
-<p align="center"><b>Manual gating for flow and mass cytometry, in your browser.</b></p>
+<p align="center"><b>Gate flow and mass cytometry data in your browser.</b></p>
 
-<p align="center">
-  GateLab is a browser-based application for manually gating flow-cytometry and mass-cytometry (CyTOF) FCS files.<br>
-  It runs entirely in your web browser: no R installation or server-side analysis is required.
-</p>
+<p align="center">Open FCS files or a FlowJo workspace, draw gates on one population tree, and export counts, figures and gated events. The files stay on your computer.</p>
 
 <p align="center">
   <a href="https://doi.org/10.5281/zenodo.22787965"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.22787965.svg" alt="DOI"></a>
@@ -25,14 +22,19 @@
   <a href="https://david-priest.github.io/GateLab/"><b>GateLab in your browser</b></a> · <a href="#using-gatelab">Using GateLab</a> · <a href="https://github.com/david-priest/GateLabR">GateLabR for R</a>
 </p>
 
-GateLab is a standalone reimplementation of
-[GateLabR](https://github.com/david-priest/GateLabR) — it reuses GateLabR's vendored D3
-plotting modules and reimplements its R analysis engine in TypeScript, so gating runs
-entirely in the browser with no R backend.
+GateLab is a manual gating application for flow cytometry and mass cytometry (CyTOF) that runs in a web browser. It does four things.
 
-No installation is required for the hosted app. Your FCS files and workspaces are
-processed locally in your browser and are not uploaded for analysis. GateLab can also be
-installed and run locally using the instructions below.
+Files and gating strategies open from the formats they are already in. FCS files are read in the browser, with the compensation matrix they carry. A FlowJo workspace (`.wsp`), a Gating-ML 2.0 file or a BD FACSDiva or FACSChorus experiment imports with its gates and populations. After a FlowJo import, a report sets the event count FlowJo recorded for each population beside GateLab's own.
+
+Gates are drawn on one population tree that every file in the workspace follows. Rectangle, polygon, ellipse and quadrant gates go on any pair of channels, and populations are built from them. A file, or a named group of files, can keep its own coordinates for a gate while the structure of the tree stays the same for all. Compensation is applied in the app, by matrix inverse for fluorescence and by non-negative least squares for mass cytometry.
+
+Figures are drawn from the live gates. The Strategy tab traces the gating path to a population, Illustration arranges plots across files, populations and channels, Plotting charts population composition by file or by metadata, and Layout places any of these on a page. Figures export as SVG, PDF or PNG, and statistics as CSV.
+
+The gating exports in the formats other programs read: a FlowJo workspace, which FlowJo and BD FACSChorus open, or Gating-ML 2.0, which Cytobank reads. Gated populations export as FCS files. A workspace saves as a `.gatelab` file, by reference to its FCS files or as a portable copy that carries them.
+
+It exists so that a gating strategy does not depend on one program or one computer. The hosted app opens from a link, with nothing to install and no account, and FCS files and workspaces are processed in the browser tab and are not uploaded. A strategy drawn in FlowJo or Cytobank can be continued here, and one drawn here can be opened in either.
+
+To try it, open the [hosted app](https://david-priest.github.io/GateLab/) and choose **Tutorial ▸ Start the tutorial**, which loads a demo workspace and walks through every tab. GateLab can also be [run locally](#local-installation).
 
 
 ## GateLab in action
@@ -41,25 +43,17 @@ installed and run locally using the instructions below.
 
 ## GateLab or GateLabR?
 
-GateLab and [GateLabR](https://github.com/david-priest/GateLabR) share the same gating
-model and interactive plotting approach. Choose the version that best matches where your
-data already lives:
+[GateLabR](https://github.com/david-priest/GateLabR) is this same application served from an R session on a `SingleCellExperiment`: the interface and the gating engine are GateLab's, built into the R package, and R supplies the events and stores the result. Choose by where the data already are:
 
 | | GateLab | GateLabR |
 |---|---|---|
 | Runs in | A local web browser | R / Shiny |
-| Best starting point | FCS files | A `SingleCellExperiment` (or FCS files) |
+| Best starting point | FCS files | A `SingleCellExperiment` |
 | Workspace | Self-contained `.gatelab` bundle | Gating metadata stored inside the SCE |
 | Downstream hand-off | FCS, Gating-ML, FlowJo workspaces, statistics and figures | Populations in `colData`, plus FCS, Gating-ML, statistics and figures |
 | Install | Open the hosted app, or use Node.js + `npm` locally | R + Bioconductor dependencies |
 
-GateLab is a standalone TypeScript port for users who do not need an R environment. Its
-interactive plots reuse GateLabR's D3 modules, while its analysis engine independently
-implements FCS parsing, logicle/arcsinh transforms, compensation, gate membership,
-population evaluation, statistics, Gating-ML 2.0 import/export, FlowJo workspace import/export
-and FCS export. These
-low-level operations are covered by unit tests and cross-language fidelity fixtures
-derived from GateLabR.
+GateLab's engine is written in TypeScript: FCS parsing, logicle and arcsinh transforms, compensation, gate membership, population evaluation, statistics, Gating-ML 2.0 and FlowJo workspace import and export, and FCS export. These operations are covered by unit tests and by cross-language fixtures derived from GateLabR's earlier R implementation. The interactive plots use D3 modules shared with GateLabR.
 
 ## Using GateLab
 
@@ -329,13 +323,11 @@ Open the local URL printed in the terminal (normally <http://localhost:5173>) in
 
 ### Selecting files and pooling
 
-The left file list uses row highlighting: click to select one file, Shift-click for a range, and Cmd-click (Mac) or Ctrl-click to add or remove files. Arrow keys move keyboard focus, Space toggles a row, and Enter inspects a file without clearing the selection. The Viewing marker identifies the single file on the plot; bulk actions use the selected rows.
+The left file list uses row highlighting: click to select one file, Shift-click for a range, and Cmd-click (Mac) or Ctrl-click to add or remove files. Arrow keys move keyboard focus, Space toggles a row, and Enter views a file on its own. The Viewing marker identifies the file that supplies the plot's axes; bulk actions use the selected rows.
 
-Selecting several files does not pool them automatically. Use **Pool selected files** above the Gating plot to capture a pool. Its membership remains fixed while you select other files for actions; **Change files… → Use current selection** replaces it. Enter on a file, or **Return to single file**, leaves the pool. Removing a pooled file closes the pool with a notice rather than silently showing a smaller pool. Pools are temporary views and are not restored when opening a workspace.
+Selecting several files does not pool them. **Pool selected files** above the Gating plot draws the selected files' events together, and the pool then follows the selection: selecting or deselecting rows, or the metadata chips above the list, changes what is pooled. A gate drawn or moved on the pooled plot changes the tree for every file. Enter on a file, or **Return to single file**, leaves the pool.
 
-Pooling requires compatible panels and assay/scale contexts. It draws the tree's gates on
-every pooled file, not each file's tailored ones. The preview is read-only unless **Edit the
-tree** is enabled explicitly. Illustration and Plotting keep their own file selections.
+Files are pooled only when their panels and assay layer match the viewed file's; a file that differs, or that follows another tree, is named above the plot and left out. Pooling draws the tree's gates, not each file's tailored ones. Illustration and Plotting keep their own file selections.
 
 ## Development commands
 
