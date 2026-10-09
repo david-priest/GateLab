@@ -90,6 +90,7 @@ import { DEFAULT_ITERATION, expandLayoutSheet, followsIteration, iterationUnits,
 import { automaticTitleTemplate, fieldsFromTemplate, plotTitle, plotTitleContext, templateFromFields, titleFields, TITLE_PLACEHOLDERS, TITLE_PRESETS, TITLE_SEPARATORS } from "../engine/layoutTitle";
 import { alignItems, arrangeUnits, distributeItems, fitContentToPage, fitPageToContent, groupItems, ungroupItems, type AlignHow, type DistributeHow } from "../engine/layoutArrange";
 import { useI18n } from "./i18n";
+import { hostWords } from "./hostWording";
 import { historyShortcutAction } from "./historyShortcuts";
 import { NumberField } from "./NumberField";
 import { ContextMenu, type ContextMenuState } from "./ContextMenu";
@@ -216,7 +217,7 @@ function itemTitle(
     return `${population?.name ?? "Population"} strategy`;
   }
   const pool = poolOf(recipe);
-  if (pool) return `${population?.name ?? "Population"} · ${pool.length} files`;
+  if (pool) return `${population?.name ?? "Population"} · ${pool.length} ${hostWords("files")}`;
   return `${population?.name ?? "Population"} · ${sample?.name ?? "FCS"}`;
 }
 
@@ -461,7 +462,7 @@ function LayoutPlotSurface({
       host.innerHTML = "";
       if (!source) {
         host.textContent =
-          "The referenced file is unavailable or still loading.";
+          hostWords("The referenced file is unavailable or still loading.");
         host.className = "gl-layout-plot-host is-missing";
         return;
       }
@@ -2507,7 +2508,7 @@ export function LayoutTab({
           {section === "item" && (
             <>
               <label className="gl-field-inline">
-                File for new plots
+                {t("File for new plots")}
                 <select
                   value={insertFileId}
                   onChange={(event) => setInsertFileId(event.target.value)}
@@ -2520,8 +2521,7 @@ export function LayoutTab({
                 </select>
               </label>
               <p className="gl-hint">
-                Placed plots keep their own file and hierarchy, independently of
-                the Gating selection.
+                {t("Placed plots keep their own file and hierarchy, independently of the Gating selection.")}
               </p>
               {sourceResult.error && <p role="alert">{sourceResult.error}</p>}
               {selectedItems.length > 1 && (

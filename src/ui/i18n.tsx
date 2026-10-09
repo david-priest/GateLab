@@ -9,6 +9,7 @@ import {
 import { TIED_DATA_SET_NOTE, TIED_DATA_SETS_NOTE } from "../engine/flowjoOpen";
 import { FLOWJO_OLDER_REFUSAL, FLOWJO_OLDER_REFUSAL_UNSTATED } from "../engine/flowjoWorkspace";
 import { platformKeys } from "./platformKeys";
+import { hostWording, samplesJapanese, samplesSentence } from "./hostWording";
 import { TOUR_JA } from "../tour/tourJa";
 
 export type UiLanguage = "en" | "ja";
@@ -886,7 +887,7 @@ const JA: Readonly<Record<string, string>> = {
   "Revert listed files": "一覧のファイルを戻す",
   "One tree, tailored per file.": "ツリーは 1 本、ファイルごとに調整。",
   "A workspace holds one tree: its populations and gates apply to every file. An edit changes the tree for every file, or, with \"this file only\", tailors a gate's coordinates for the viewed file alone until it is reverted or applied back to the tree. The tree's structure is the same for every file; a different tree belongs in a different workspace.": "ワークスペースはツリーを 1 本持ち、そのポピュレーションとゲートはすべてのファイルに適用されます。編集はすべてのファイルのツリーを変えるか、「このファイルのみ」を選べば表示中のファイルだけのゲート座標を調整し、戻すかツリーに適用するまでそのままです。ツリーの構造はすべてのファイルで同じで、別のツリーは別のワークスペースに属します。",
-  "Manual gating for a SingleCellExperiment, in the browser from an R session. The object's samples are the files; gates, populations and scales are saved back into it, and memberships can be written to colData.": "R セッションからブラウザーで行う SingleCellExperiment の手動ゲーティング。オブジェクトのサンプルがファイルにあたり、ゲート・ポピュレーション・スケールはオブジェクトに保存され、所属は colData に書き出せます。",
+  "Manual gating for a SingleCellExperiment, in the browser from an R session. Gates, populations and scales are saved back into the object, and memberships can be written to colData.": "R セッションからブラウザーで行う SingleCellExperiment の手動ゲーティング。ゲート・ポピュレーション・スケールはオブジェクトに保存され、所属は colData に書き出せます。",
   "A browser-based gating tool for flow and mass cytometry. Files never leave the machine: every FCS is parsed, transformed and gated locally, and a workspace is saved as one self-contained .gatelab bundle.": "フローサイトメトリーとマスサイトメトリーのためのブラウザー型ゲーティングツール。ファイルはこのマシンから出ません。すべての FCS はローカルで解析・変換・ゲーティングされ、ワークスペースは自己完結した .gatelab バンドル 1 つとして保存されます。",
   "Gates live in raw channel values.": "ゲートは生のチャンネル値にあります。",
   "A display scale is chosen per channel: linear or arcsinh for scatter, logicle or arcsinh for fluorescence, arcsinh at cofactor 5 for mass cytometry. Gates are stored and evaluated in raw values regardless, so nothing done to an axis can move an event in or out of a gate; a gate drawn straight in raw values looks bowed on a transformed axis, which the gate-edge control shows rather than hides. FlowJo and Gating-ML 2.0 take the other view, a polygon straight in the space the axis shows, and the exports write the gate as each of them expects it.": "表示スケールはチャンネルごとに選びます。散乱光は線形または arcsinh、蛍光は logicle または arcsinh、マスサイトメトリーは cofactor 5 の arcsinh です。ゲートはそれに関わらず生の値で保存・評価されるため、軸に何をしてもイベントがゲートを出入りすることはありません。生の値で直線に描いたゲートは変換後の軸では湾曲して見え、ゲート縁の制御はそれを隠さず示します。FlowJo と Gating-ML 2.0 は逆の立場で、ポリゴンは軸が示す空間で直線とみなされ、書き出しではそれぞれが期待する形でゲートを書きます。",
@@ -1858,7 +1859,14 @@ export function translateUi(
   source: string,
   values: TranslationValues = {},
 ): string {
-  const template = language === "ja" ? JA[source] ?? source : source;
+  // In a host whose samples are not files (GateLabR), the sentence is shown with its words for
+  // samples; its Japanese by the same swap, unless it is given one of its own.
+  const reworded = hostWording() === "samples" ? samplesSentence(source) : null;
+  const template = reworded
+    ? language === "ja"
+      ? reworded.ja ?? (Object.prototype.hasOwnProperty.call(JA, source) ? samplesJapanese(JA[source]) : reworded.en)
+      : reworded.en
+    : language === "ja" ? JA[source] ?? source : source;
   // The text names keys as a Mac does (Cmd-D, Option-drag); elsewhere it is shown with the
   // names on the user's keyboard. The handlers take Ctrl for Cmd and Alt for Option already.
   return platformKeys(template.replace(/\{([A-Za-z0-9_]+)\}/g, (match, key: string) =>

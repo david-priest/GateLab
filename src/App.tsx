@@ -1079,6 +1079,9 @@ export default function App() {
   const fallbackBrowserHost = useMemo(() => createBrowserHost(), []);
   const host = providedHost ?? fallbackBrowserHost;
   const isSceHost = host.kind === "r-sce";
+  const hostBuild = host.build;
+  /** The commit the embedded core was built from, short, where the host states it. */
+  const coreBuild = hostBuild?.coreCommit ? hostBuild.coreCommit.slice(0, 7) : "";
   const { language, setLanguage, t } = useI18n();
   // Multiple samples share ONE gating tree (FlowJo-style): add/remove freely, one is active.
   const [samples, setSamples] = useState<SampleEntry[]>([]);
@@ -11442,13 +11445,16 @@ export default function App() {
             <img className="gl-brand-card-logo" src={isSceHost ? brandLogoR : brandLogo} alt="" />
             <span className="gl-brand-card-head">
               {/* The version is the app's. Under the R host it is the embedded core's, and is said
-                  to be: the package has a version of its own, which the host does not send. */}
-              {isSceHost ? `GateLabR · GateLab core v${pkg.version}` : `GateLab v${pkg.version}`}
+                  to be; the package's own version, and the commits it and the core were built
+                  from, are shown where the host states them. */}
+              {isSceHost
+                ? `GateLabR${hostBuild?.hostVersion ? ` ${hostBuild.hostVersion}` : ""}${hostBuild?.hostCommit ? ` (${hostBuild.hostCommit.slice(0, 7)})` : ""} · GateLab core v${pkg.version}${coreBuild ? ` (${coreBuild})` : ""}`
+                : `GateLab v${pkg.version}`}
               <span className="gl-brand-card-by">{t("Developed by David Priest")}</span>
             </span>
             <p>
               {isSceHost
-                ? t("Manual gating for a SingleCellExperiment, in the browser from an R session. The object's samples are the files; gates, populations and scales are saved back into it, and memberships can be written to colData.")
+                ? t("Manual gating for a SingleCellExperiment, in the browser from an R session. Gates, populations and scales are saved back into the object, and memberships can be written to colData.")
                 : t("A browser-based gating tool for flow and mass cytometry. Files never leave the machine: every FCS is parsed, transformed and gated locally, and a workspace is saved as one self-contained .gatelab bundle.")}
             </p>
             <p>
@@ -11664,7 +11670,7 @@ export default function App() {
                 })
               : t("{count} channels", { count: sample.channels.length })} ·{" "}
             <select
-              title="Instrument mode — Auto uses channel-name detection; override if a file is mis-detected. Switch before gating (the gating space flips with it)."
+              title={t("Instrument mode — Auto uses channel-name detection; override if a file is mis-detected. Switch before gating (the gating space flips with it).")}
               value={instrumentMode}
               onChange={(e) => changeInstrumentMode(e.target.value as "auto" | "flow" | "cytof")}
               style={{ fontSize: "inherit", padding: "0 2px", background: "transparent", border: "1px solid var(--gl-border, #ccc)", borderRadius: 3 }}
@@ -11745,7 +11751,8 @@ export default function App() {
               : "GateLab — MIT-licensed, © 2026 David G. Priest."
           }
         >
-          {isSceHost ? `GateLab core v${pkg.version}` : `GateLab v${pkg.version} · MIT`} ·{" "}
+          {/* The core's commit tells one embed from the next: the version is the same across them. */}
+          {isSceHost ? `GateLab core v${pkg.version}${coreBuild ? ` · ${coreBuild}` : ""}` : `GateLab v${pkg.version} · MIT`} ·{" "}
           {t("Questions or bugs?")}{" "}
           {/* Link straight to the issue tracker rather than the repo root: the
               point is to invite feedback, so land people where they can file it. */}

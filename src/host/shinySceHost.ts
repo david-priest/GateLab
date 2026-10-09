@@ -22,6 +22,7 @@ import {
 import {
   GATELAB_HOST_CONTRACT_VERSION,
   type GateLabHostAdapter,
+  type GateLabHostBuild,
 } from "./contracts";
 import { validateCompensationProfileRecord } from "../engine/compensationProfileRecord";
 import { CompensationCancelledError } from "../engine/compensationManager";
@@ -85,6 +86,8 @@ export interface ShinySceHostOptions {
   requestTimeoutMs?: number;
   compensationRequestTimeoutMs?: number;
   fetchImpl?: typeof fetch;
+  /** The package's version and the commits it and its core were built from, as R states them. */
+  build?: GateLabHostBuild;
 }
 
 export interface GateLabShinyCompensationApplication {
@@ -227,6 +230,15 @@ async function fetchBinary(
  * Create the thin GateLabR host adapter. Shiny sends only a compact manifest
  * over its websocket; large assays are fetched as session-scoped binary files.
  */
+/** Only what a version or a commit can be made of is kept: the values reach the page's text. */
+function hostBuild(build: GateLabHostBuild): GateLabHostBuild {
+  const clean = (value: unknown, pattern: RegExp) => (typeof value === "string" && pattern.test(value) ? value : undefined);
+  const hostVersion = clean(build.hostVersion, /^[0-9][0-9A-Za-z.\-]{0,30}$/);
+  const hostCommit = clean(build.hostCommit, /^[0-9a-f]{7,40}$/);
+  const coreCommit = clean(build.coreCommit, /^[0-9a-f]{7,40}$/);
+  return { ...(hostVersion ? { hostVersion } : {}), ...(hostCommit ? { hostCommit } : {}), ...(coreCommit ? { coreCommit } : {}) };
+}
+
 export function createShinySceHost(
   options: ShinySceHostOptions = {},
 ): GateLabHostAdapter {
@@ -621,6 +633,7 @@ export function createShinySceHost(
     id: "gatelabr-shiny-sce",
     kind: "r-sce",
     label: "GateLabR / SingleCellExperiment",
+    ...(options.build ? { build: hostBuild(options.build) } : {}),
     capabilities: {
       dataSources: {
         fcsFiles: false,
