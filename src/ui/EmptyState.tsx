@@ -2,18 +2,19 @@
 // begin, the tutorial for someone new, and a word on the window.
 
 import brandLogo from "../assets/brand/gatelab-logo.jpg";
+import brandLogoR from "../assets/brand/gatelabr-logo.jpg";
 import { useI18n } from "./i18n";
 
-export function EmptyState({ logo, tutorial }: {
-  /** Whether the GateLab logo is shown; the R host goes by another name, so it shows none. */
-  logo: boolean;
+export function EmptyState({ brand, tutorial }: {
+  /** Whose logo is shown: the browser app's, or the R package's. */
+  brand: "GateLab" | "GateLabR";
   /** The tutorial's entry points, where the host offers it; null where it does not. */
   tutorial: { paused: boolean; onStart: () => void; onResume: () => void } | null;
 }) {
   const { t } = useI18n();
   return (
     <div className="gl-center gl-empty gl-splash" role="main" aria-label={t("Plot and analysis tabs")}>
-      {logo && <img className="gl-splash-logo" src={brandLogo} alt="GateLab" />}
+      <img className="gl-splash-logo" src={brand === "GateLabR" ? brandLogoR : brandLogo} alt={brand} />
       <p className="gl-splash-title">{t("Open an FCS file or a workspace to begin.")}</p>
       {tutorial && (
         <p className="gl-splash-tutorial">
