@@ -1,15 +1,34 @@
-# GateLab
+<h1 align="center">
+  <img src="docs/assets/gatelab-logo.png" alt="GateLab" width="280">
+</h1>
 
-GateLab is a browser-based application for manually gating flow-cytometry and mass-cytometry (CyTOF) FCS files. It runs entirely in your web browser—no R installation or server-side analysis is required.
+<p align="center"><b>Manual gating for flow and mass cytometry, in your browser.</b></p>
+
+<p align="center">
+  GateLab is a browser-based application for manually gating flow-cytometry and mass-cytometry (CyTOF) FCS files.<br>
+  It runs entirely in your web browser: no R installation or server-side analysis is required.
+</p>
+
+<p align="center">
+  <a href="https://doi.org/10.5281/zenodo.22787965"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.22787965.svg" alt="DOI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1b2027" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/runs_in-your_browser-1b2027" alt="Runs in your browser">
+  <img src="https://img.shields.io/badge/exchanges-FlowJo_.wsp_%C2%B7_Gating--ML_2.0-1b2027" alt="Exchanges FlowJo .wsp and Gating-ML 2.0">
+  <img src="https://img.shields.io/badge/interface-English_%C2%B7_%E6%97%A5%E6%9C%AC%E8%AA%9E-1b2027" alt="Interface in English and Japanese">
+</p>
+
+<p align="center">
+  <a href="https://david-priest.github.io/GateLab/"><img src="https://img.shields.io/badge/Launch_GateLab-in_your_browser_%E2%86%92-ed4e19?style=for-the-badge&labelColor=ed4e19" alt="Launch GateLab in your browser"></a>
+</p>
+
+<p align="center">
+  <a href="https://david-priest.github.io/GateLab/"><b>GateLab in your browser</b></a> · <a href="#using-gatelab">Using GateLab</a> · <a href="https://github.com/david-priest/GateLabR">GateLabR for R</a>
+</p>
 
 GateLab is a standalone reimplementation of
 [GateLabR](https://github.com/david-priest/GateLabR) — it reuses GateLabR's vendored D3
 plotting modules and reimplements its R analysis engine in TypeScript, so gating runs
 entirely in the browser with no R backend.
-
-## [Launch GateLab in your browser →](https://david-priest.github.io/GateLab/)
-
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22787965.svg)](https://doi.org/10.5281/zenodo.22787965)
 
 No installation is required for the hosted app. Your FCS files and workspaces are
 processed locally in your browser and are not uploaded for analysis. GateLab can also be
