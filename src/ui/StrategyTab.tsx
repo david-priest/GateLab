@@ -160,6 +160,13 @@ export function StrategyTab({
   const [drawnSize, setDrawnSize] = useState<number | null>(null);
   const onScaleChangeRef = useRef(onScaleChange);
   onScaleChangeRef.current = onScaleChange;
+  // Held in a ref, as the range handler is: the caller hands a new function at every render of
+  // its own, and as a dependency of the draw below that redrew the whole grid whenever anything
+  // else in the app changed (a save's status, a panel folded), which under a moving mouse showed
+  // as the cursor flickering while the cells were replaced beneath it.
+  const onGateLabelMoveRef = useRef(onGateLabelMove);
+  onGateLabelMoveRef.current = onGateLabelMove;
+  const labelsMovable = !!onGateLabelMove;
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -223,8 +230,8 @@ export function StrategyTab({
       const cap = allEvents ? Infinity : maxEvents;
       // A dragged label goes to the gate itself, as on the Illustration tab: the offset is in
       // the gate's own orientation, since a strategy panel draws a gate on its own channels.
-      const onLabelMove = onGateLabelMove
-        ? (gateId: string, offset: [number, number], quadrant?: number) => onGateLabelMove(state.active_hierarchy_id, gateId, offset, quadrant)
+      const onLabelMove = labelsMovable
+        ? (gateId: string, offset: [number, number], quadrant?: number) => onGateLabelMoveRef.current?.(state.active_hierarchy_id, gateId, offset, quadrant)
         : undefined;
 
       if (mode === "multi") {
@@ -356,7 +363,8 @@ export function StrategyTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, multiPops, sample, popId, fullPath, gateView, displayMode, maxEvents, allEvents, plotSize, nColumns, fitToColumns,
       pointSize, pointAlpha, densityColorPower, contourThreshold, contourLevels, kdeBandwidth, pubStyle, gateLineWidth, gateEdgeMode, gateLabelBold, labelBackground, showArrows, arrowWidth, arrowAnchor, layout, fontTick, fontAxis, fontTitle, fontGate,
-      state.gates, state.gate_version, globalScales, derived, dataRevision, availableWidth, pooled, members, trees, onGateLabelMove]);
+      // The width matters only where the panels are fitted to it.
+      state.gates, state.gate_version, globalScales, derived, dataRevision, fitToColumns ? availableWidth : 0, pooled, members, trees, labelsMovable]);
 
   const toggleGateView = (v: GateView) =>
     setGateView((prev) => {

@@ -1981,7 +1981,11 @@ export function patchMiniPlot(src: string): string {
                 var textNode = label.append('text').attr('text-anchor', 'middle')
                     .attr('fill', qColor).style('font-size', gateFs).style('font-weight', 600)
                     .text(text);
-                if (!pubStyle) {
+                // The white backing: 78% ordinarily; under publication style the opacity asked
+                // for (gate_style.label_background), as a gate's own label takes it, where a
+                // quadrant's had none and read badly over a dark pile of points.
+                var qBacking = pubStyle ? Math.max(0, Math.min(1, Number(gateStyle && gateStyle.label_background) || 0)) : 0.78;
+                if (qBacking > 0) {
                     var box;
                     try { box = textNode.node().getBBox(); }
                     catch (_quadrantBoxError) {
@@ -1990,7 +1994,7 @@ export function patchMiniPlot(src: string): string {
                     }
                     label.insert('rect', 'text').attr('x', box.x - 3).attr('y', box.y - 1)
                         .attr('width', box.width + 6).attr('height', box.height + 2)
-                        .attr('rx', 2).attr('fill', 'rgba(255,255,255,0.78)');
+                        .attr('rx', 2).attr('fill', '#ffffff').attr('fill-opacity', qBacking);
                 }
             });
             return;

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // The Strategy tab sends its strip, or one of its plots, to the Layout tab, and opens a step on
 // the Gating tab, from a button and from the grid's right-click menu.
+import { readFileSync } from "node:fs";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -90,6 +91,66 @@ function fixture() {
 const menuItems = () => [...host.querySelectorAll<HTMLButtonElement>('[role="menu"] [role="menuitem"]')];
 const menuItem = (label: string) => menuItems().find((b) => b.textContent === label);
 const button = (label: string) => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label);
+
+describe("the Strategy tab's draw", () => {
+  // Reported from GateLabR as the cursor flickering over a strategy: the grid was drawn again
+  // whenever anything else in the app changed, because the label handler, which the caller
+  // makes anew at every render of its own, was a dependency of the draw.
+  it("is not repeated when the caller re-renders with nothing the strategy draws changed", async () => {
+    const fx = fixture();
+    // What the strategy is drawn from is held as the app holds it, the same from one render to
+    // the next; only the handler is new.
+    const derived = { masks: {} } as Derived;
+    const globalScales = {};
+    const configRef = { current: null };
+    const tab = (onGateLabelMove: () => void) => (
+      <I18nProvider>
+        <StrategyTab
+          state={fx.state as CoreState}
+          sample={fx.files[0].sample}
+          sampleName="D1.fcs"
+          derived={derived}
+          globalScales={globalScales}
+          configRef={configRef}
+          dataRevision={0}
+          densityColorPower={1}
+          onDensityColorPowerChange={vi.fn()}
+          onFitChannels={vi.fn()}
+          files={fx.files}
+          poolIds={null}
+          poolable={false}
+          onPoolChange={vi.fn()}
+          activeSampleId="D1"
+          onGateLabelMove={onGateLabelMove}
+        />
+      </I18nProvider>
+    );
+    const first = vi.fn(), second = vi.fn();
+    act(() => root.render(tab(first)));
+    await flush();
+    const drawn = renderer.renderStrategyGrid.mock.calls.length;
+    expect(drawn).toBeGreaterThan(0);
+    // The same props, but for a handler of a new identity, as an inline function is.
+    act(() => root.render(tab(second)));
+    await flush();
+    expect(renderer.renderStrategyGrid.mock.calls.length).toBe(drawn);
+    // The grid, drawn once, still reports a moved label to the handler of the latest render.
+    const payload = renderer.renderStrategyGrid.mock.calls[drawn - 1][1] as { gate_style: { on_label_move: (gateId: string, offset: [number, number]) => void } };
+    payload.gate_style.on_label_move(fx.bGateId, [1, 2]);
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledWith(fx.state.active_hierarchy_id, fx.bGateId, [1, 2], undefined);
+  });
+});
+
+describe("the box the strategy is drawn in", () => {
+  // The panels are fitted to this box's width, so a scrollbar that takes width as it appears
+  // would change the fit, the height, and with it whether the scrollbar is needed.
+  it("keeps the same width whether or not its scrollbar shows", () => {
+    const rule = /\.gl-mini-grid-container \{([^}]*)\}/.exec(readFileSync("src/styles.css", "utf8"))?.[1] ?? "";
+    expect(rule).toMatch(/overflow: auto;/);
+    expect(rule).toMatch(/scrollbar-gutter: stable;/);
+  });
+});
 
 describe("the Strategy tab and the Layout tab", () => {
   it("sends the strip from the button, and from the right-click menu the strip, a step's plot or the step to the Gating tab", async () => {
