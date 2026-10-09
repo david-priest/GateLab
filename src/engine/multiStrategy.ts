@@ -21,7 +21,8 @@
 import type { Sample } from "./sample";
 import { ellipseBoundary } from "./ellipse";
 import type { GateEdgeMode } from "../ui/gateEdgeModes";
-import type { Gate, GateRef, Population, PopulationMap } from "./models";
+import type { Gate, GateRef, Population, PopulationMap, QuadrantGate } from "./models";
+import { quadrantOverlayShape } from "./quadrantOverlay";
 import { columnsForGate, getGateMask } from "./gates";
 import type { AxisTicks } from "./ticks";
 import { computeRangeFromValues, thinEvenly, type StrategyFontSizes } from "./strategy";
@@ -41,6 +42,19 @@ export interface MultiStrategyGate {
   label_placed?: boolean;
   percent_of_parent: number | null;
   include: boolean;
+  /**
+   * A quadrant gate, which has no vertices: the crosshair's centre in DISPLAY space, the bent
+   * arms of a curly one, and the four quadrants' shares of the parent, in screen order
+   * (top-left, top-right, bottom-right, bottom-left), with any label the user moved. The
+   * renderer labels each quadrant with its share. The counts are kept as `quadrant_events`,
+   * a name the renderer does not read: with the count in every label ("8.9% (n = 53,516)")
+   * the four ran into one another and off a strategy panel's edges.
+   */
+  center?: [number, number];
+  arms?: { h: [number, number][]; v: [number, number][] };
+  quadrant_events?: number[];
+  quadrant_pcts?: number[];
+  quadrant_label_offsets?: ([number, number] | null)[];
 }
 
 export interface MultiStrategyNode {
@@ -86,6 +100,8 @@ export interface MultiStrategyLayoutGate {
   gateDef: Gate | undefined;
   /** Events of the parent inside the gate (outside, for an excluding ref); null without a definition. */
   nChild: number | null;
+  /** For a quadrant gate, the parent's events in each of its quadrants, 1 to 4. */
+  quadrantCounts?: [number, number, number, number];
 }
 
 /** A node laid out and counted, before its parent events are thinned and drawn. */
@@ -317,7 +333,19 @@ export function multiStrategyLayout(
           }
         }
       }
-      gatesOut.push({ entry: ge, gateDef, nChild });
+      // A quadrant gate makes four populations with one crosshair: the parent's events in each
+      // quadrant, so the panel can say all four where it draws the gate once.
+      let quadrantCounts: [number, number, number, number] | undefined;
+      if (gateDef?.gate_type === "quadrant" && nTotal > 0) {
+        quadrantCounts = [0, 0, 0, 0];
+        for (let q = 1; q <= 4; q++) {
+          const gm = getGateMask(gateDef, columnsForGate(data, gateDef), q);
+          let inside = 0;
+          for (let i = 0; i < gm.length; i++) if (gm[i] && (parentId === rootId || parentMask![i])) inside++;
+          quadrantCounts[q - 1] = inside;
+        }
+      }
+      gatesOut.push({ entry: ge, gateDef, nChild, ...(quadrantCounts ? { quadrantCounts } : {}) });
     }
 
     const rawRow = getPopRow(parentId);
@@ -374,7 +402,7 @@ export function finishMultiStrategyNode(
   xVals: number[],
   yVals: number[],
   nEvents: number,
-  gates: readonly { entry: RawEntry; gateDef: Gate | undefined; pct: number | null }[],
+  gates: readonly { entry: RawEntry; gateDef: Gate | undefined; pct: number | null; quadrantCounts?: readonly number[] }[],
   globalScales: Record<string, [number, number]>,
 ): MultiStrategyNode {
   const xCh = node.x_channel;
@@ -390,7 +418,26 @@ export function finishMultiStrategyNode(
   let yRange: [number, number] = globalScales[yCh] ?? computeRangeFromValues(yVals);
 
   const gatesOut: MultiStrategyGate[] = [];
-  for (const { entry: ge, gateDef, pct } of gates) {
+  /** Quadrant gates, finished once the ranges are settled: a curly one's arms run to their ends. */
+  const quadrants: { at: number; gate: QuadrantGate; counts: readonly number[] }[] = [];
+  for (const { entry: ge, gateDef, pct, quadrantCounts } of gates) {
+    if (gateDef?.gate_type === "quadrant") {
+      // Its crosshair is kept in view, as a polygon's corners are.
+      xRange = expandRange(xRange, [sample.gateToDisplay(gateDef, xCh, gateDef.center[0])]);
+      yRange = expandRange(yRange, [sample.gateToDisplay(gateDef, yCh, gateDef.center[1])]);
+      quadrants.push({ at: gatesOut.length, gate: gateDef, counts: quadrantCounts ?? [0, 0, 0, 0] });
+      gatesOut.push({
+        gate_id: ge.gate_id,
+        name: gateDef.name,
+        gate_type: "quadrant",
+        vertices: [],
+        color: ge.color,
+        label_offset: null,
+        percent_of_parent: null,
+        include: true,
+      });
+      continue;
+    }
     const displayVerts = gateDef
       ? displayVerticesOf(sample, xCh, yCh, gateDef)
       : ge.vertices.map(([vx, vy]): [number, number] => [
@@ -425,6 +472,18 @@ export function finishMultiStrategyNode(
       percent_of_parent: pct,
       include: ge.include,
     });
+  }
+
+  for (const { at, gate, counts } of quadrants) {
+    const shape = quadrantOverlayShape(sample, gate, xCh, yCh, xRange, yRange, false);
+    gatesOut[at] = {
+      ...gatesOut[at],
+      center: shape.center,
+      ...(shape.arms ? { arms: shape.arms } : {}),
+      quadrant_events: [...counts],
+      quadrant_pcts: counts.map((count) => (nEvents > 0 ? round1((count / nEvents) * 100) : 0)),
+      ...(gate.quadrant_label_offsets ? { quadrant_label_offsets: gate.quadrant_label_offsets } : {}),
+    };
   }
 
   // Ticks depend on the (expanded) visible range — same as buildStrategyPayload.
@@ -476,10 +535,11 @@ export function computeMultiPopStrategy(
       sampleIdx.map((i) => xCol[i]),
       sampleIdx.map((i) => yCol[i]),
       node.n_total,
-      node.gates.map(({ entry, gateDef, nChild }) => ({
+      node.gates.map(({ entry, gateDef, nChild, quadrantCounts }) => ({
         entry,
         gateDef,
         pct: nChild === null ? null : round1((nChild / node.n_total) * 100),
+        ...(quadrantCounts ? { quadrantCounts } : {}),
       })),
       opts.globalScales,
     );

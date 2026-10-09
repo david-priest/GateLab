@@ -14,7 +14,8 @@
 import type { Sample } from "./sample";
 import { ellipseBoundary } from "./ellipse";
 import type { GateEdgeMode } from "../ui/gateEdgeModes";
-import type { Gate, GateRef, PopulationMap } from "./models";
+import type { Gate, GateRef, PopulationMap, QuadrantGate } from "./models";
+import { quadrantOverlayShape } from "./quadrantOverlay";
 import { columnsForGate, getGateMask, type GateAssayData } from "./gates";
 import type { AxisTicks } from "./ticks";
 import { displayLabelOffset, polygonOutline } from "../plots/gatePayload";
@@ -63,6 +64,12 @@ export interface StrategyStep {
   pct_pass: number;
   pct_total: number;
   pop_name: string;
+  /**
+   * The step's gate is a quadrant gate, which has no vertices: the gate itself and which of its
+   * quadrants (1 to 4) the population is, so the strip can draw the crosshair and say that
+   * quadrant's share. Absent where the gate is not drawn.
+   */
+  quadrant?: { index: number; gate: QuadrantGate };
 }
 
 /**
@@ -239,6 +246,7 @@ export function strategyStepOf(
     pct_pass: counts.nBefore > 0 ? round1((counts.nAfter / counts.nBefore) * 100) : 0,
     pct_total: counts.nTotal > 0 ? round1((counts.nAfter / counts.nTotal) * 100) : 0,
     pop_name: mask.popName,
+    ...(drawn && gate.gate_type === "quadrant" ? { quadrant: { index: mask.ref.quadrant ?? 1, gate } } : {}),
   };
 }
 
@@ -414,12 +422,29 @@ function strategyPayload(
     const xTicks: AxisTicks | null = xIdx !== undefined ? sample.channelTicks(xIdx, xRange) : null;
     const yTicks: AxisTicks | null = yIdx !== undefined ? sample.channelTicks(yIdx, yRange) : null;
 
+    // A quadrant step: the crosshair, and the share of the one quadrant this population is. The
+    // other three are other populations' and are left unlabelled on a strip that follows one.
+    // The share alone, as on the multi-population panels: the step's title carries the counts.
+    const quadrant = s.quadrant
+      ? (() => {
+          const shape = quadrantOverlayShape(sample, s.quadrant.gate, s.x_channel, s.y_channel, xRange, yRange, false);
+          const only = <T,>(value: T): (T | null)[] => [1, 2, 3, 4].map((q) => (q === s.quadrant!.index ? value : null));
+          return {
+            center: shape.center,
+            ...(shape.arms ? { arms: shape.arms } : {}),
+            quadrant_pcts: only(s.pct_pass),
+            ...(s.quadrant.gate.quadrant_label_offsets ? { quadrant_label_offsets: s.quadrant.gate.quadrant_label_offsets } : {}),
+          };
+        })()
+      : null;
+
     return {
       gate_id: s.gate_id,
       gate_name: s.gate_name,
       // Axis labels only — use the Panel display name (identity keys drive the math above).
       x_channel: sample.labelForKey(s.x_channel),
       y_channel: sample.labelForKey(s.y_channel),
+      ...(quadrant ?? {}),
       vertices: s.displayVertices,
       outline: s.outline,
       gate_type: s.gate_type,
