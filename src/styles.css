@@ -3796,3 +3796,15 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-flowjo-check .gl-chorus-stats-table td.gl-chorus-stats-why { min-width: 150px; }
 .gl-flowjo-check .gl-chorus-stats-table td.gl-stats-name { white-space: normal; overflow-wrap: anywhere; max-width: 420px; }
 .gl-flowjo-check-line .gl-mini-btn { flex: 0 0 auto; white-space: nowrap; }
+
+/* The opening page: the logo over one line that says how to begin, the tutorial as a link under
+   it, and a small word on the window. One weight of emphasis each, top to bottom. */
+.gl-center.gl-splash { gap: 0; text-align: center; padding: 0 24px 6vh; }
+.gl-center.gl-splash p { margin: 0; }
+/* The artwork's ground is a level or two short of white; lifted, it leaves no box on the page. */
+.gl-splash-logo { display: block; width: 250px; height: auto; margin: 0 auto 22px; mix-blend-mode: multiply; filter: brightness(1.012); }
+.gl-splash-title { font-size: 18px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); }
+.gl-center.gl-splash p.gl-splash-tutorial { margin-top: 10px; font-size: 14px; color: var(--muted); }
+.gl-splash-link { padding: 0; border: 0; background: none; color: var(--accent); font-weight: 500; cursor: pointer; }
+.gl-splash-link:hover { text-decoration: underline; }
+.gl-center.gl-splash p.gl-splash-hint { margin-top: 26px; font-size: 12px; color: var(--muted); }

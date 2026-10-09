@@ -42,6 +42,7 @@ import { compareChorusStatistics, parseChorusStatistics, type ChorusImportRecord
 import { ChorusStatisticsModal } from "./ui/ChorusStatisticsModal";
 import { checkAgainstFlowJo, flowJoCountCheckCsv, type FlowJoCountCheck, type FlowJoReference } from "./engine/flowjoCountCheck";
 import { FlowJoCountCheckModal } from "./ui/FlowJoCountCheckModal";
+import { EmptyState } from "./ui/EmptyState";
 import { MenuButton, type MenuEntry } from "./ui/MenuButton";
 import { ContextMenu, type ContextMenuState } from "./ui/ContextMenu";
 import { snapGatesToBorders } from "./engine/borderSnap";
@@ -13166,9 +13167,7 @@ export default function App() {
             </ErrorBoundary>}
           </div>
         ) : (
-          <div className="gl-center gl-empty" role="main" aria-label={t("Plot and analysis tabs")}>
-            <p>{t("Open an FCS file to begin.")}</p>
-          </div>
+          <EmptyState logo={!isSceHost} tutorial={isSceHost ? null : { paused: tour.progress?.status === "paused", onStart: tour.start, onResume: tour.resume }} />
         )}
 
         <aside
