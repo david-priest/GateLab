@@ -188,7 +188,10 @@ input[type="number"]::-webkit-outer-spin-button {
   .gl-comp-apply-status-copy span, .gl-comp-apply-status-count { display: none; }
 }
 
-.gl-btn {
+/* .gl-btn-primary is the same button under its other name: four buttons carried that class
+   with no rule behind it and were drawn as the browser's own (grey, bevelled), among them the
+   R host's "Write sample metadata to SCE" and "Write panel to SCE". */
+.gl-btn, .gl-btn-primary {
   background: var(--accent);
   color: #fff;
   border: none;
@@ -197,8 +200,8 @@ input[type="number"]::-webkit-outer-spin-button {
   font-size: 12px;
   cursor: pointer;
 }
-.gl-btn:disabled { opacity: 0.5; cursor: default; }
-.gl-btn:hover:not(:disabled) { filter: brightness(0.94); }
+.gl-btn:disabled, .gl-btn-primary:disabled { opacity: 0.5; cursor: default; }
+.gl-btn:hover:not(:disabled), .gl-btn-primary:hover:not(:disabled) { filter: brightness(0.94); }
 .gl-btn-danger { background: #d64545; }
 .gl-btn-block { width: 100%; text-align: center; }
 
@@ -1010,7 +1013,11 @@ input[type="number"]::-webkit-outer-spin-button {
 }
 .gl-multi-picker-item input[type="checkbox"] { flex: none; margin: 0; }
 .gl-multi-picker-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gl-mini-grid-container { flex: 1; min-height: 0; overflow: auto; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
+/* The scrollbar's width is kept whether or not it shows. The Strategy tab sizes its panels to
+   this box's width: without the gutter, a strategy a few pixels taller than the box gained a
+   scrollbar, was redrawn narrower and so shorter, lost the scrollbar, was redrawn wider, and so
+   on without end (seen where scrollbars take width, as macOS draws them with a mouse attached). */
+.gl-mini-grid-container { flex: 1; min-height: 0; overflow: auto; scrollbar-gutter: stable; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
 .gl-mini-grid-container .mini-plot-cell { position: relative; }
 .gl-mini-grid-container .strategy-context-title { color: #334155; }
 .gl-mini-grid-container .illustration-row-header { font-weight: 600; color: #334155; margin: 8px 0 4px; }

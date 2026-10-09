@@ -125,6 +125,21 @@ describe("the small plot draws it", () => {
     expect(labels()).toEqual(["20.0%", "40.0%", "20.0%", "20.0%"]);
   });
 
+  // Under publication style a gate's label takes a white backing of the opacity asked for; a
+  // quadrant's labels had none, and sat unreadable over a dark pile of points.
+  it("with the white backing asked for under publication style", () => {
+    const { state, root, quadrants, D1 } = fixture();
+    const nodes = computeMultiPopStrategy(D1.sample, state.gates, state.populations, root.population_id, D1.gating.masks, quadrants.map((q) => q.population_id), { maxEvents: 0, globalScales: {} });
+    const backings = () => [...document.querySelectorAll(".mini-quadrant-gate .quadrant-label rect")].map((rect) => [rect.getAttribute("fill"), rect.getAttribute("fill-opacity")]);
+    loadMiniPlots().renderMultiStrategyGrid("strategy-grid-container", buildMultiStrategyPayload(nodes, { ...look, pubStyle: true, labelBackground: 0.6 }));
+    expect(backings()).toEqual([["#ffffff", "0.6"], ["#ffffff", "0.6"], ["#ffffff", "0.6"], ["#ffffff", "0.6"]]);
+    // Asked for none: no backing. Outside publication style: the ordinary 78%.
+    loadMiniPlots().renderMultiStrategyGrid("strategy-grid-container", buildMultiStrategyPayload(nodes, { ...look, pubStyle: true, labelBackground: 0 }));
+    expect(backings()).toEqual([]);
+    loadMiniPlots().renderMultiStrategyGrid("strategy-grid-container", buildMultiStrategyPayload(nodes, look));
+    expect(backings().map((backing) => backing[1])).toEqual(["0.78", "0.78", "0.78", "0.78"]);
+  });
+
   it("as a crosshair with the population's own quadrant labelled on the strip", () => {
     const { state, root, quadrants, D1 } = fixture();
     const steps = computeGatingStrategy(D1.sample, state.gates, state.populations, root.population_id, quadrants[1].population_id, { fullPath: true, maxEvents: 0 });
