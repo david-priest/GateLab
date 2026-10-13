@@ -93,6 +93,28 @@ describe("the words for a host whose samples are not files", () => {
     expect(samplesSentence("One page per file, titled {file}")?.en).toBe("One page per sample, titled {file}");
   });
 
+  it("names a GatingSet where the sentence says SCE, and says what the object has in place of colData and rowData", () => {
+    setHostWording("samples", "GatingSet");
+    expect(hostWords("Save to SCE")).toBe("Save to GatingSet");
+    expect(translateUi("en", "Another session wrote to this SCE")).toBe("Another session wrote to this GatingSet");
+    expect(translateUi("en", "Connecting to the SingleCellExperiment host…")).toBe("Connecting to the GatingSet host…");
+    expect(translateUi("ja", "Another session wrote to this SCE")).not.toMatch(/\bSCE\b/);
+    expect(hostWords("Persist division calls for compatible samples in SingleCellExperiment colData")).toBe("Write populations to the GatingSet's hierarchy as nodes");
+    expect(hostWords("Persist the current display names in SingleCellExperiment rowData")).toBe("Write the current display names to the GatingSet's marker names");
+    expect(hostWords("Wrote division calls to SCE colData '{column}'")).toBe("Wrote the population to the GatingSet's hierarchy as '{column}'");
+    // A sentence naming no SCE is untouched, and so is the samples wording of one.
+    expect(hostWords("Lock scales between files")).toBe("Lock scales between samples");
+    expect(hostWords("Export FCS…")).toBe("Export FCS…");
+  });
+
+  it("leaves SCE as written on a SingleCellExperiment host and in the browser", () => {
+    setHostWording("samples", "SingleCellExperiment");
+    expect(hostWords("Save to SCE")).toBe("Save to SCE");
+    setHostWording("files");
+    expect(hostWords("Save to SCE")).toBe("Save to SCE");
+    expect(translateUi("en", "Another session wrote to this SCE")).toBe("Another session wrote to this SCE");
+  });
+
   it("makes the same change in Japanese", () => {
     setHostWording("samples");
     expect(translateUi("ja", "Files / samples")).toBe("サンプル");

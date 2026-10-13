@@ -404,6 +404,11 @@ export function chorusDisplayFromKeywords(keywords: Record<string, string> | nul
   for (let i = 1; i <= n; i++) {
     const name = keywords[`$P${i}N`];
     if (!name) continue;
+    // $PnD is the display Chorus records for the parameter. FACSChorus 5.4 wrote the logicle
+    // keywords on its scatter parameters too, with $PnD "Linear,…": those axes are drawn linear,
+    // and a gate on them must not be treated as biexponential (6.3 writes them on colour only).
+    const shown = keywords[`$P${i}D`];
+    if (shown && /^\s*linear\b/i.test(shown)) continue;
     const T = Number(keywords[`$P${i}R`]);
     const M = Number(keywords[`P${i}M`]);
     const R = Number(keywords[`P${i}MS`]);

@@ -53,6 +53,15 @@ export interface BiexParams {
    * saved spec: the stored coordinates were placed on the old table.
    */
   tableChannels?: number;
+  /**
+   * Evaluate the table as cytolib does: R's natural cubic spline through its nodes
+   * (stats::splinefun, method "natural"), extrapolated linearly beyond the ends, rather than
+   * the linear interpolation clamped at the ends that GateLab's own tables use. With no
+   * `tableChannels` the nodes are cytolib's own, so this is flowWorkspace's function exactly;
+   * a GatingSet's channels and gates carry it (gatingset_host.R). Never defaulted to true: a
+   * gate saved without it was evaluated on the linear interpolation.
+   */
+  spline?: boolean;
 }
 
 /** The resolution FlowJo builds its biex table at, whatever `length` the workspace declares. */
@@ -267,6 +276,74 @@ export interface BiexTransform {
 }
 
 /**
+ * R's natural cubic spline through (x, y), as stats::splinefun(method = "natural") builds it
+ * (src/library/stats/src/splines.c, natural_spline and spline_eval): the coefficients b, c, d
+ * of y_i + dx (b_i + dx (c_i + dx d_i)) on each interval, second derivative zero at both ends,
+ * and linear extrapolation beyond them. cytolib evaluates a biexponential's table this way,
+ * so this is what makes a GatingSet's axis flowWorkspace's function to the last digit.
+ */
+export function naturalSpline(x: ArrayLike<number>, y: ArrayLike<number>): (u: number) => number {
+  const n = x.length;
+  if (n < 2) throw new Error("A spline needs two nodes.");
+  const b = new Float64Array(n);
+  const c = new Float64Array(n);
+  const d = new Float64Array(n);
+  if (n < 3) {
+    b[0] = (y[1] - y[0]) / (x[1] - x[0]);
+    b[1] = b[0];
+  } else {
+    const nm1 = n - 1;
+    // The tridiagonal system: b the diagonal, d the off-diagonal, c the right-hand side.
+    d[0] = x[1] - x[0];
+    c[1] = (y[1] - y[0]) / d[0];
+    for (let i = 1; i < nm1; i++) {
+      d[i] = x[i + 1] - x[i];
+      b[i] = 2 * (d[i - 1] + d[i]);
+      c[i + 1] = (y[i + 1] - y[i]) / d[i];
+      c[i] = c[i + 1] - c[i];
+    }
+    // Gaussian elimination, then back substitution.
+    for (let i = 2; i < nm1; i++) {
+      const t = d[i - 1] / b[i - 1];
+      b[i] -= t * d[i - 1];
+      c[i] -= t * c[i - 1];
+    }
+    c[nm1 - 1] /= b[nm1 - 1];
+    for (let i = n - 3; i > 0; i--) c[i] = (c[i] - d[i] * c[i + 1]) / b[i];
+    // End conditions, then the cubic coefficients.
+    c[0] = 0;
+    c[nm1] = 0;
+    b[0] = (y[1] - y[0]) / d[0] - d[0] * c[1];
+    d[0] = c[1] / d[0];
+    b[nm1] = (y[nm1] - y[nm1 - 1]) / d[nm1 - 1] + d[nm1 - 1] * c[nm1 - 1];
+    for (let i = 1; i < nm1; i++) {
+      b[i] = (y[i + 1] - y[i]) / d[i] - d[i] * (c[i + 1] + 2 * c[i]);
+      d[i] = (c[i + 1] - c[i]) / d[i];
+      c[i] = 3 * c[i];
+    }
+    c[nm1] = 0;
+    d[nm1] = 0;
+  }
+  return (u: number): number => {
+    if (!Number.isFinite(u)) return NaN;
+    let i = 0;
+    if (u >= x[n - 1]) i = n - 1;
+    else if (u >= x[0]) {
+      let j = n;
+      while (j > i + 1) {
+        const k = (i + j) >> 1;
+        if (u < x[k]) j = k;
+        else i = k;
+      }
+    }
+    const dx = u - x[i];
+    // R extrapolates a natural spline linearly to the left (d taken as 0 there).
+    const di = u < x[0] ? 0 : d[i];
+    return y[i] + dx * (b[i] + dx * (c[i] + dx * di));
+  };
+}
+
+/**
  * FlowJo's biex as a forward/inverse pair. Both ends pin: an event below the table sits on its
  * first channel and one above it on its last, as FlowJo draws them and as FlowKit evaluates a
  * biex gate. (FlowJo's own RECTANGLES do not pin at the top; flowjoWorkspace.ts imports them in
@@ -274,6 +351,13 @@ export interface BiexTransform {
  */
 export function biexTransform(p: BiexParams, strictStep = false): BiexTransform {
   const { x, y } = cachedLut(p, strictStep);
+  if (p.spline) {
+    // cytolib's inverse is its own natural spline over the swapped nodes, not the inverse of the
+    // forward spline; the two agree to within the round trip flowWorkspace itself shows.
+    const forward = naturalSpline(x, y);
+    const inverse = naturalSpline(y, x);
+    return { forward, inverse };
+  }
   return {
     forward: (v) => interp(x, y, v),
     inverse: (v) => interp(y, x, v),

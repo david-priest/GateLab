@@ -20,6 +20,10 @@ export interface CombinedSamplePlotInput {
 }
 
 export interface CombinedSamplePointCloud {
+  /** With `origins`: which input each point came from, as its position in `inputs`. */
+  sampleOf?: Uint16Array;
+  /** With `origins`: the event index of each point within its own file. */
+  eventIndex?: Int32Array;
   x: Float32Array;
   y: Float32Array;
   colors: Uint8Array | null;
@@ -195,6 +199,7 @@ function sampledMemberPositions(memberCount: number, sampleCount: number): Int32
 export function buildCombinedSamplePointCloud(
   inputs: readonly CombinedSamplePlotInput[],
   plotCap: number,
+  options: { origins?: boolean } = {},
 ): CombinedSamplePointCloud {
   const counts = inputs.map((input) =>
     countSelected(input.mask, Math.min(
@@ -211,6 +216,8 @@ export function buildCombinedSamplePointCloud(
     input.colorIndex !== undefined ||
     input.colorAt !== undefined);
   const colors = includeColors ? new Uint8Array(plottedCount) : null;
+  const sampleOf = options.origins ? new Uint16Array(plottedCount) : null;
+  const eventOf = options.origins ? new Int32Array(plottedCount) : null;
 
   let outputIndex = 0;
   inputs.forEach((input, inputIndex) => {
@@ -232,6 +239,10 @@ export function buildCombinedSamplePointCloud(
       if (take) {
         x[outputIndex] = xColumn[eventIndex];
         y[outputIndex] = yColumn[eventIndex];
+        if (sampleOf && eventOf) {
+          sampleOf[outputIndex] = inputIndex;
+          eventOf[outputIndex] = eventIndex;
+        }
         if (colors) {
           colors[outputIndex] =
             input.colors?.[eventIndex] ??
@@ -250,6 +261,7 @@ export function buildCombinedSamplePointCloud(
     x,
     y,
     colors,
+    ...(sampleOf && eventOf ? { sampleOf, eventIndex: eventOf } : {}),
     eventCount: counts.reduce((sum, count) => sum + count, 0),
     sampleEventCounts: inputs.map((input, index) => ({
       id: input.id,

@@ -1,4 +1,5 @@
 import type { FcsChannel, FcsFile, SpilloverMatrix } from "../engine/fcs";
+import type { TransformSpec } from "../engine/models";
 import { validateAndCanonicalizeCompensationMatrix } from "../engine/compensationProfile";
 import { Sample } from "../engine/sample";
 import { isScatterChannel } from "../engine/transforms";
@@ -146,6 +147,61 @@ function fcsChannels(
   });
 }
 
+/**
+ * A channel's logicle, as the host object holds it, written the way a FACSDiscover S8 file
+ * records its own: $PnR = T, PnM = M, PnMS = R with W = (M − log10(T / R)) / 2, which the sample
+ * shows in preference to its estimate (sample.ts, recordedLogicle). A GatingSet's transform is
+ * the sample's own display in the same sense, so a gate drawn on it is in the object's space.
+ * Only a logicle with A = 0 can be recorded this way; any other transform is applied at open
+ * (hostedChannelScales) or, for a kind the axis cannot show, left to the gates it carries.
+ */
+export function recordedLogicleKeywords(transform: TransformSpec | undefined, parameter: number): Record<string, string> {
+  if (!transform || transform.kind !== "logicle" || transform.A !== 0) return {};
+  const { T, W, M } = transform;
+  if (!(T > 0) || !(M > 0) || !(W >= 0) || W > M / 2) return {};
+  return {
+    [`$P${parameter}R`]: String(T),
+    [`P${parameter}M`]: String(M),
+    [`P${parameter}MS`]: String(T / Math.pow(10, M - 2 * W)),
+  };
+}
+
+/**
+ * The host object's transforms the sample's axes can show, applied at open: a fluorescence
+ * channel's arcsinh at the object's cofactor, or FlowJo's biexponential at the object's
+ * parameters. A logicle is recorded in the keywords above; a FlowJo log has no axis of its own
+ * in the app, so the channel keeps its default axis and the object's gates still evaluate
+ * through their own specs. A saved workspace's scales are restored after this and win.
+ */
+export function applyHostedChannelScales(sample: Sample, dataset: GateLabHostDatasetDescriptor): void {
+  if (sample.instrument === "cytof") return;
+  if (!dataset.channels.some((channel) => channel.transform)) return;
+  const fluor = dataset.channels.filter((channel) =>
+    channel.transform && !isScatterChannel(channel.id) && !isScatterChannel(channel.pnn ?? ""));
+  const arcsinh = fluor.flatMap((channel) =>
+    channel.transform?.kind === "asinh" && channel.transform.cofactor > 0
+      ? [[channel.id, channel.transform.cofactor] as const]
+      : []);
+  if (arcsinh.length > 0) {
+    sample.applyFluorArcsinhKeys(arcsinh.map(([key]) => key));
+    for (const [key, cofactor] of arcsinh) {
+      const index = sample.index(key);
+      if (index !== undefined) sample.setFluorCofactor(index, cofactor);
+    }
+  }
+  for (const channel of fluor) {
+    if (channel.transform?.kind !== "biex") continue;
+    const index = sample.index(channel.id);
+    if (index !== undefined) sample.setFluorScale(index, "biex");
+  }
+}
+
+/** A sample drawn as stored keeps the assay's arcsinh; one drawn from linear values takes the object's transforms. */
+function withHostedChannelScales(sample: Sample, dataset: GateLabHostDatasetDescriptor, nominal: { cofactor: number } | null): Sample {
+  if (!nominal) applyHostedChannelScales(sample, dataset);
+  return sample;
+}
+
 function hostedFcs(
   dataset: GateLabHostDatasetDescriptor,
   sampleDescriptor: GateLabHostSampleDescriptor,
@@ -173,6 +229,7 @@ function hostedFcs(
     if (channel.marker) keywords[`$P${index + 1}S`] = channel.marker;
     keywords[`$P${index + 1}B`] = "32";
     keywords[`$P${index + 1}R`] = String(channel.range);
+    Object.assign(keywords, recordedLogicleKeywords(dataset.channels[index].transform, index + 1));
   });
   const hostedMatrix = dataset.compensationMatrix;
   let spillover: SpilloverMatrix | null = null;
@@ -271,11 +328,17 @@ export async function loadHostedDataset(
       name: sampleDescriptor.label,
       assayId: assay.id,
       assayRevision: assay.revision,
-      sample: asStoredSample(
-        new Sample(hostedFcs(dataset, sampleDescriptor, columns), {
-          ...(nominal ? { cytofCofactor: nominal.cofactor } : {}),
-          hostedAssay: { id: assay.id, space: assay.coordinateSpace },
-        }),
+      sample: withHostedChannelScales(
+        asStoredSample(
+          new Sample(hostedFcs(dataset, sampleDescriptor, columns), {
+            ...(nominal ? { cytofCofactor: nominal.cofactor } : {}),
+            hostedAssay: { id: assay.id, space: assay.coordinateSpace },
+            channelTransforms: Object.fromEntries(dataset.channels.flatMap((channel) =>
+              channel.transform ? [[channel.id, channel.transform] as const] : [])),
+          }),
+          nominal,
+        ),
+        dataset,
         nominal,
       ),
       eventIndex,

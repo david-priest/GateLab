@@ -75,6 +75,8 @@ export type TransformSpec =
     kind: "biex"; maxValue: number; pos: number; neg: number; widthBasis: number; channelRange: number;
     /** 4096 on FlowJo's table; absent on a spec saved before it, which keeps the old table. */
     tableChannels?: number;
+    /** Evaluated as cytolib's natural cubic spline through the table (biex.ts); a GatingSet's. */
+    spline?: boolean;
   }
   | { kind: "wsplog"; offset: number; decades: number }
   | {

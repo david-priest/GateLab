@@ -3559,6 +3559,111 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-sample-row { grid-template-columns: minmax(0, 1fr) 44px auto 17px; }
 .gl-sample-scope-key { min-height: 22px; }
 .gl-sample-meta .gl-sample-tailored { margin-right: 4px; vertical-align: 0; }
+/* The cell inspector (Gating side pane) and the marker over the pinned cell. */
+.gl-cell-inspector { display: flex; flex-direction: column; gap: 6px; flex: 0 0 auto; max-height: 55%; overflow-y: auto; min-height: 0; }
+.gl-cell-inspector-head { display: flex; align-items: center; gap: 8px; }
+.gl-cell-inspector-head .gl-side-title { flex: 1 1 auto; }
+.gl-cell-status { font-size: 10px; color: #7b8491; white-space: nowrap; }
+.gl-cell-status-pinned { color: #2f6fe4; font-weight: 600; }
+.gl-cell-event { font-size: 11px; color: #4a5361; }
+/* A box of constant size: its height follows the pane's width, never the event's image. */
+.gl-cell-composite {
+  display: flex; justify-content: center; align-items: center; background: #000; border-radius: 4px; padding: 4px;
+  width: 100%; max-width: 320px; aspect-ratio: 5 / 4; box-sizing: border-box; overflow: hidden; margin: 0 auto;
+}
+.gl-cell-composite canvas { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; }
+.gl-cell-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.gl-cell-tile { display: flex; flex-direction: column; align-items: center; gap: 2px; background: #000; border-radius: 3px; padding: 3px; cursor: pointer; min-width: 0; }
+.gl-cell-tile-picture { display: flex; align-items: center; justify-content: center; width: 100%; height: 56px; }
+.gl-cell-tile canvas { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; }
+.gl-cell-tile-off canvas { opacity: 0.35; }
+.gl-cell-tile-name { display: flex; align-items: center; gap: 3px; color: #ddd; font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gl-cell-tile-name input { margin: 0; width: 10px; height: 10px; }
+.gl-cell-chip { display: inline-block; width: 8px; height: 8px; border-radius: 2px; flex: 0 0 auto; }
+.gl-cell-exposure { display: flex; align-items: center; gap: 6px; font-size: 10px; color: #4a5361; }
+.gl-cell-exposure input { flex: 1 1 auto; min-width: 0; }
+.gl-cell-exposure-value { min-width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
+.gl-cell-features summary { font-size: 10px; color: #4a5361; cursor: pointer; }
+.gl-cell-features dl { margin: 4px 0 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px 8px; font-size: 10px; }
+.gl-cell-features dl > div { display: contents; }
+.gl-cell-features dt { color: #7b8491; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gl-cell-features dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.gl-error-inline { font-size: 10px; color: #b3261e; }
+.gl-cell-marker { position: absolute; border-radius: 50%; pointer-events: none; z-index: 3; }
+/* The cell's own dot, drawn in front of whatever the plot buried it under. */
+.gl-cell-marker-dot { position: absolute; left: 50%; top: 50%; width: 5px; height: 5px; margin: -2.5px 0 0 -2.5px; border-radius: 50%; }
+.gl-cell-marker-pinned {
+  width: 14px; height: 14px; margin: -7px 0 0 -7px;
+  border: 2px solid #2f6fe4; box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(47, 111, 228, 0.35);
+}
+.gl-cell-marker-hover {
+  width: 12px; height: 12px; margin: -6px 0 0 -6px;
+  border: 1.5px solid #ff7f0e; box-shadow: 0 0 0 1px #fff;
+}
+/* Thumbnails laid over the plot at their events' positions. */
+.gl-plot-thumbs { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+.gl-plot-thumb {
+  position: absolute; pointer-events: auto; padding: 0; background: #000; overflow: hidden; cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.9); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); border-radius: 2px;
+}
+.gl-plot-thumb canvas { display: block; }
+.gl-plot-thumb:hover { z-index: 1; box-shadow: 0 0 0 2px #ff7f0e; }
+.gl-thumbs-field input[type="number"] { width: 54px; }
+.gl-thumbs-field input[type="range"] { width: 70px; }
+.gl-thumbs-seed { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; }
+.gl-thumbs-seed input[type="number"] { width: 64px; }
+.gl-thumbs-seed .gl-chip { padding: 0 6px; line-height: 1.3; }
+.gl-cell-objects { margin-left: 8px; color: #2f6fe4; font-weight: 600; }
+.gl-cell-class { margin-left: 8px; color: #555; }
+.gl-strictness-field input[type="number"] { width: 54px; }
+.gl-thumbs-class { max-width: 150px; margin-left: 4px; }
+.gl-sizeby-class { max-width: 150px; margin-left: 4px; }
+.gl-separating { display: inline-block; position: relative; }
+.gl-separating > summary { cursor: pointer; list-style: none; padding: 2px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+.gl-separating > summary::-webkit-details-marker { display: none; }
+.gl-separating-body {
+  position: absolute; left: 0; top: calc(100% + 4px); z-index: 30; min-width: 420px; padding: 8px 10px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.gl-separating-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gl-separating-row label { display: inline-flex; align-items: center; gap: 4px; }
+.gl-separating-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 3px; }
+.gl-separating-heading { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #666; margin-top: 4px; }
+/* The cell panel in a column of its own, beside the gates pane. */
+.gl-cell-column {
+  flex: 0 0 320px; display: flex; flex-direction: column; min-height: 0; overflow-y: auto;
+  border-left: 1px solid var(--line); background: var(--panel); padding: 10px;
+}
+.gl-cell-column-collapsed { flex-basis: auto; }
+.gl-cell-inspector-column { max-height: none; }
+.gl-cell-inspector-column .gl-cell-composite { max-width: none; }
+.gl-cell-inspector-collapsed { gap: 0; }
+.gl-cell-dock { margin-left: 4px; }
+/* The Images tab: the wall of thumbnails. */
+.gl-images-tab { display: flex; flex-direction: column; min-height: 0; }
+.gl-images-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 6px 8px; font-size: 11px; color: #4a5361; border-bottom: 1px solid var(--line); }
+.gl-images-count { font-weight: 600; }
+.gl-images-control { display: inline-flex; align-items: center; gap: 4px; }
+.gl-images-control select { font-size: 11px; max-width: 220px; }
+.gl-images-control input[type="range"] { width: 90px; }
+.gl-images-channels { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.gl-images-channel { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; cursor: pointer; }
+.gl-images-channel input { margin: 0; width: 11px; height: 11px; }
+.gl-images-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px; background: #111; }
+.gl-images-grid { display: grid; justify-content: start; }
+.gl-wall-tile { position: relative; display: flex; align-items: center; justify-content: center; padding: 0; background: #000; border: 2px solid transparent; border-radius: 3px; cursor: pointer; overflow: hidden; }
+.gl-wall-tile:focus-visible { outline: 2px solid #2f6fe4; outline-offset: 1px; }
+.gl-wall-tile-pinned { border-color: #2f6fe4; }
+.gl-wall-tile canvas { display: block; max-width: 100%; max-height: 100%; }
+.gl-wall-tile-empty { color: #555; font-size: 12px; }
+.gl-wall-tile-index { position: absolute; right: 2px; bottom: 1px; font-size: 8px; color: rgba(255, 255, 255, 0.55); font-variant-numeric: tabular-nums; pointer-events: none; }
+/* A file with cell images attached (a FACSDiscover S8 .cvw beside it). */
+.gl-sample-images {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  height: 14px; padding: 0 4px; margin-right: 4px; border-radius: 7px;
+  background: #3a8f5c; color: #fff; font-size: 9px; font-weight: 700; line-height: 1; vertical-align: 0;
+}
 
 /* Statistics tab: the Plotting tab's inspector layout, with the CSV actions in the head. */
 .gl-plotting-head-actions { margin-left: auto; display: inline-flex; gap: 6px; }

@@ -81,9 +81,139 @@ export const ELLIPSE_PIXEL_GEOMETRY_SRC =
   "    return { toPx: toPx, toPixelAxes: toPixelAxes, toDisplayAxes: toDisplayAxes, handlePx: handlePx, axesFromCov: axesFromCov, covFromAxes: covFromAxes };\n" +
   "})();\n";
 
+/**
+ * GateLab's per-point mark size: the payload may carry `size_b64`, one byte per plotted point with
+ * the mark's radius in tenths of a pixel (0 = the plot's own size), which the dots and overlay
+ * scatters honour. Sizing marks by a channel (a cell's image size, say) draws on it.
+ */
+export function patchPointSizes(src: string): string {
+  let out = src;
+  const decodeNeedle = `                decoded.color_indices = ci;
+            }`;
+  const decodePatch = `                decoded.color_indices = ci;
+            }
+            // GateLab: per-point mark radii in tenths of a pixel (0 = the plot's own size).
+            if (plotData.size_b64) {
+                var sbin = atob(plotData.size_b64);
+                var si = new Uint8Array(sbin.length);
+                for (var s = 0; s < sbin.length; s++) si[s] = sbin.charCodeAt(s);
+                decoded.size_indices = si;
+            }`;
+  const radiusNeedle = "    var POINT_RADIUS_DEFAULT = 1.5;";
+  const radiusPatch = `    // GateLab: the radius of one point, its own when the payload sizes points, else the plot's.
+    function _pointRadiusAt(i) {
+        var si = _plotData && _plotData.size_indices;
+        if (si && si[i]) return Math.max(0.2, Math.min(8, si[i] / 10));
+        return _pointRadius();
+    }
+    var POINT_RADIUS_DEFAULT = 1.5;`;
+  const scatterNeedle = `            var px = _clampPointX(zx, x[i]);
+            var py = _clampPointY(zy, y[i]);
+            if (px < M.left - 2 || px > M.left + W + 2 ||
+                py < M.top  - 2 || py > M.top  + H + 2) continue;
+            _ctx.beginPath();
+            _ctx.arc(px, py, _pointRadius(), 0, 6.2832);`;
+  const scatterPatch = scatterNeedle.replace("_pointRadius()", "_pointRadiusAt(i)");
+  const overlayNeedle = `                var idx = indices[j];
+                var px = _clampPointX(zx, x[idx]);
+                var py = _clampPointY(zy, y[idx]);
+                if (px < M.left - 2 || px > M.left + W + 2 ||
+                    py < M.top  - 2 || py > M.top  + H + 2) continue;
+                _ctx.beginPath();
+                _ctx.arc(px, py, _pointRadius(), 0, 6.2832);`;
+  const overlayPatch = overlayNeedle.replace("_pointRadius()", "_pointRadiusAt(idx)");
+  if (out.includes("function _pointRadiusAt(")) return out;
+  if (out.includes(decodeNeedle) && out.includes(radiusNeedle) && out.includes(scatterNeedle) && out.includes(overlayNeedle)) {
+    out = out.replace(decodeNeedle, decodePatch);
+    out = out.replace(radiusNeedle, radiusPatch);
+    out = out.split(scatterNeedle).join(scatterPatch);
+    out = out.replace(overlayNeedle, overlayPatch);
+  } else {
+    console.warn("[GateLab] cytof point-size patch did not match — points cannot be sized by a channel.");
+  }
+  return out;
+}
+
+/**
+ * GateLab's draw order for a coloured plot: the vendored overlay scatter batches points by colour,
+ * so the class painted last hides every class under it. Points are drawn instead in one fixed
+ * pseudo-random order, the brush switched when the colour changes, so no class masks another
+ * (David, 2026-10-13). Runs after patchPointSizes, so the loop keeps each point's own radius.
+ */
+export function patchOverlayDrawOrder(src: string): string {
+  let out = src;
+  if (out.includes("function _glDrawOrder(")) return out;
+  const bucketNeedle = (radius: string) => `        // Batch by color for fewer fillStyle switches
+        var buckets = {};
+        for (var i = 0; i < n; i++) {
+            var c = ci[i] || 0;
+            if (!buckets[c]) buckets[c] = [];
+            buckets[c].push(i);
+        }
+        for (var c in buckets) {
+            _ctx.fillStyle = palette[c] || palette[0];
+            var indices = buckets[c];
+            for (var j = 0; j < indices.length; j++) {
+                var idx = indices[j];
+                var px = _clampPointX(zx, x[idx]);
+                var py = _clampPointY(zy, y[idx]);
+                if (px < M.left - 2 || px > M.left + W + 2 ||
+                    py < M.top  - 2 || py > M.top  + H + 2) continue;
+                _ctx.beginPath();
+                _ctx.arc(px, py, ${radius}, 0, 6.2832);
+                _ctx.fill();
+            }
+        }`;
+  const orderedPass = (radius: string) => `        // GateLab: one pass in a fixed pseudo-random order, so no colour class hides behind another.
+        var order = _glDrawOrder(n);
+        var lastC = -1;
+        for (var j = 0; j < n; j++) {
+            var idx = order[j];
+            var c = ci[idx] || 0;
+            if (c !== lastC) { _ctx.fillStyle = palette[c] || palette[0]; lastC = c; }
+            var px = _clampPointX(zx, x[idx]);
+            var py = _clampPointY(zy, y[idx]);
+            if (px < M.left - 2 || px > M.left + W + 2 ||
+                py < M.top  - 2 || py > M.top  + H + 2) continue;
+            _ctx.beginPath();
+            _ctx.arc(px, py, ${radius}, 0, 6.2832);
+            _ctx.fill();
+        }`;
+  const helperAnchor = "    function _pointRadiusAt(i) {";
+  const helperFallbackAnchor = "    var POINT_RADIUS_DEFAULT = 1.5;";
+  const helper = `    // GateLab: a fixed pseudo-random draw order (xorshift Fisher-Yates), remade when the count changes.
+    var _glOrderN = -1, _glOrder = null;
+    function _glDrawOrder(n) {
+        if (_glOrderN === n && _glOrder) return _glOrder;
+        var order = new Uint32Array(n);
+        for (var i = 0; i < n; i++) order[i] = i;
+        var s = 2463534242;
+        for (var k = n - 1; k > 0; k--) {
+            s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0;
+            var j = s % (k + 1);
+            var t = order[k]; order[k] = order[j]; order[j] = t;
+        }
+        _glOrderN = n; _glOrder = order;
+        return order;
+    }
+`;
+  const radius = out.includes("function _pointRadiusAt(") ? "_pointRadiusAt(idx)" : "_pointRadius()";
+  const needle = bucketNeedle(radius);
+  const anchor = out.includes(helperAnchor) ? helperAnchor : helperFallbackAnchor;
+  if (out.includes(needle) && out.includes(anchor)) {
+    out = out.replace(needle, orderedPass(radius));
+    out = out.replace(anchor, helper + anchor);
+  } else {
+    console.warn("[GateLab] cytof draw-order patch did not match — a coloured plot may hide one class behind another.");
+  }
+  return out;
+}
+
 export function patchCytofForGateLab(src: string): string {
   let out = src;
   if (!out.includes("var _glEll = ")) out = ELLIPSE_PIXEL_GEOMETRY_SRC + out;
+  out = patchPointSizes(out);
+  out = patchOverlayDrawOrder(out);
 
   // In Shiny the plot bundle boots itself after a short delay, because the container may
   // appear after the script. GateLab's React wrapper instead calls render() as soon as the

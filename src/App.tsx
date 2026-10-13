@@ -315,6 +315,7 @@ import { MarkerColourControl } from "./ui/MarkerColourControl";
 import { SearchableSelect, type SearchableOption } from "./ui/SearchableSelect";
 import type { GatingImportSourceKind } from "./ui/CrudModals";
 import { UI_LANGUAGE_OPTIONS, useI18n, type UiLanguage } from "./ui/i18n";
+import { hostObjectName, hostWords } from "./ui/hostWording";
 import { useTour } from "./tour/useTour";
 import { resolveTourTarget, TourOverlay } from "./tour/TourOverlay";
 import { TourMenu } from "./tour/TourMenu";
@@ -376,6 +377,18 @@ import {
   SceColDataExportModal,
   type ScePopulationColumnSpec,
 } from "./ui/SceColDataExportModal";
+import type { CellImageSource } from "./imaging/imageSource";
+import type { CellRef, HoverHit } from "./imaging/cellTypes";
+import type { ImageService } from "./imaging/imageService";
+import type { CellImageView, CellInspectorEntry } from "./imaging/CellInspector";
+import type { Classification } from "./imaging/imageService";
+import type { PlottedPoints } from "./engine/sample";
+import { createCellHoverStore, type HoveredCell } from "./engine/cellHoverStore";
+import { imagedEventFlags } from "./engine/imagedEvents";
+import { CELL_CLASS_LABELS, cellReasonLabels, classifyCells, type CellClasses } from "./engine/cellClass";
+import { rankSeparatingPairs, type PairScore, type SeparationColumn } from "./engine/separation";
+import { imageHandleKey, isSidecarName, pairSidecars } from "./engine/sidecarNames";
+import { usePersistedTabState } from "./ui/tabState";
 
 const CompensationTab = lazy(lazyChunk("CompensationTab", async () => {
   const module = await import("./ui/CompensationTab");
@@ -385,8 +398,35 @@ const LayoutTab = lazy(lazyChunk("LayoutTab", async () => {
   const module = await import("./ui/LayoutTab");
   return { default: module.LayoutTab };
 }));
+// The cell-image panels load only when a file has images attached (see workspaceHasImages).
+const CellHoverProbe = lazy(lazyChunk("CellHoverProbe", async () => {
+  const module = await import("./imaging/CellHoverProbe");
+  return { default: module.CellHoverProbe };
+}));
+const CellInspector = lazy(lazyChunk("CellInspector", async () => {
+  const module = await import("./imaging/CellInspector");
+  return { default: module.CellInspector };
+}));
+const CellMarker = lazy(lazyChunk("CellMarker", async () => {
+  const module = await import("./imaging/CellMarker");
+  return { default: module.CellMarker };
+}));
+const ImagesTab = lazy(lazyChunk("ImagesTab", async () => {
+  const module = await import("./imaging/ImagesTab");
+  return { default: module.ImagesTab };
+}));
+const PlotThumbnails = lazy(lazyChunk("PlotThumbnails", async () => {
+  const module = await import("./imaging/PlotThumbnails");
+  return { default: module.PlotThumbnails };
+}));
+/** The classes an image's object count falls in, for the plot's legend. */
+const OBJECT_CLASS_LABELS = ["no object", "one object", "two objects", "three or more"] as const;
 
 const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
+/** FCS files and the waveform files a FACSDiscover S8 writes beside them, for pickers that pair the two. */
+const FCS_WITH_IMAGES_ACCEPT = { "application/octet-stream": [".fcs", ".cvw"] };
+/** A waveform file on its own, attached to the viewed sample. */
+const CVW_FILE_ACCEPT = { "application/octet-stream": [".cvw"] };
 /** Picker types for the tables and workspaces the sidebar imports through pickFilesOrInput. */
 const GATING_IMPORT_ACCEPT = { "application/xml": [".xml", ".wsp"], "application/zip": [".cef"] };
 const TABLE_FILE_ACCEPT = { "text/csv": [".csv", ".tsv", ".txt"] };
@@ -818,7 +858,7 @@ const MODES: { id: DisplayMode; label: string }[] = [
 // Center-column tabs, mirroring GateLabR's tabsetPanel. The left (samples/import/export)
 // and right (gates/populations) panels are
 // shared across tabs — only the center switches, exactly as in GateLabR.
-type TabId = "gating" | "strategy" | "illustration" | "layout" | "statistics" | "panel" | "compensation" | "scales" | "metadata" | "proportions" | "division";
+type TabId = "gating" | "images" | "strategy" | "illustration" | "layout" | "statistics" | "panel" | "compensation" | "scales" | "metadata" | "proportions" | "division";
 // The Layout tab needs more work before it is offered; its code stays and the flag brings it
 // back. While it is hidden nothing sends plots there.
 // The Layout tab is shown while it is being finished only when the page is opened with ?layout,
@@ -827,6 +867,8 @@ type TabId = "gating" | "strategy" | "illustration" | "layout" | "statistics" | 
 const LAYOUT_TAB_AVAILABLE = typeof location === "undefined" || !new URLSearchParams(location.search).has("nolayout");
 const TABS: { id: TabId; label: string }[] = [
   { id: "gating", label: "Gating" },
+  // Images is in the strip only when a file has cell images attached (workspaceHasImages).
+  { id: "images", label: "Images" },
   { id: "strategy", label: "Strategy" },
   { id: "illustration", label: "Illustration" },
   { id: "layout", label: "Layout" },
@@ -860,6 +902,12 @@ interface SampleEntry {
     /** Zero-based original SCE columns for exact host write-back. */
     eventIndex: Uint32Array;
   }>;
+  /**
+   * The cell images attached to this file: a FACSDiscover S8 waveform file beside the FCS,
+   * described, not read (the images are decoded on demand by src/imaging). Absent for every
+   * file without one, and then nothing imaging-related is loaded or shown.
+   */
+  images?: CellImageSource;
 }
 
 /**
@@ -987,6 +1035,8 @@ interface ResolvedReferenceFcs {
   sourcePath?: string;
   /** The open sample it was taken from, when it was. */
   openId?: string;
+  /** The waveform file found beside it, when the folder or files chosen held one. */
+  images?: PickedFileSource;
 }
 
 interface IncludedDisplaySelection {
@@ -1001,6 +1051,8 @@ interface FcsImportCandidate {
   file: File;
   handle: FileSystemFileHandle | null;
   sourcePath?: string;
+  /** The `.cvw` picked, dropped or found beside this FCS, to attach once the FCS has opened. */
+  images?: { file: File; handle: FileSystemFileHandle | null; sourcePath?: string };
 }
 
 interface PendingFolderImport {
@@ -1022,6 +1074,8 @@ interface PendingWorkspaceRelink {
 interface RelinkedSource {
   source: PickedFileSource;
   sourceName: string;
+  /** The waveform file beside it in the same choice, when there was one. */
+  images?: PickedFileSource;
 }
 
 function plotInteractionTokenFor(
@@ -1365,6 +1419,17 @@ export default function App() {
   const tourSignals = useRef({ layoutExports: 0, statsDownloads: 0, workspaceSaves: 0 });
   // The tutorial opens the demo for a step that needs a workspace.
   const tourOpeningDemo = useRef<"idle" | "opening" | "failed">("idle");
+  // The Images tab mounts on its first visit and stays mounted, dormant, like Compensation.
+  const imagesTabStateKey = `${workspaceId}:${activeSampleId ?? "none"}`;
+  const [mountedImagesStateKey, setMountedImagesStateKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (activeTab === "images") {
+      setMountedImagesStateKey(imagesTabStateKey);
+      return;
+    }
+    setMountedImagesStateKey((current) => current === imagesTabStateKey ? current : null);
+  }, [activeTab, imagesTabStateKey]);
+  const imagesTabMounted = activeTab === "images" || mountedImagesStateKey === imagesTabStateKey;
   const compensationTabStateKey = `${workspaceId}:${activeSampleId ?? "none"}`;
   const [mountedCompensationStateKey, setMountedCompensationStateKey] = useState<string | null>(null);
   useEffect(() => {
@@ -1929,7 +1994,7 @@ export default function App() {
   const [contourLevels, setContourLevels] = useState(10);
   const [instrumentMode, setInstrumentMode] = useState<"auto" | "flow" | "cytof">("auto"); // active sample's instrument override
   // Colour-by-factor overlay on the main plot (population partition / division level).
-  const [overlayBy, setOverlayBy] = useState<"none" | "population" | "division" | "sample" | "coldata" | "channel">("none");
+  const [overlayBy, setOverlayBy] = useState<"none" | "population" | "division" | "sample" | "coldata" | "channel" | "image" | "objects" | "cellclass">("none");
   /**
    * Which marker the "Colour by → Channel" overlay reads, held as the channel KEY rather than an
    * index. An index means a different marker in the next file, and the pooled display draws
@@ -2397,6 +2462,7 @@ export default function App() {
     eventCount: entry.sample.fcs.nEvents,
     channelCount: entry.sample.channels.length,
     ...(entry.sourcePath ? { sourcePath: entry.sourcePath } : {}),
+    ...(entry.images ? { images: entry.images.fileName } : {}),
     ...(tailoredGatesOfFile.has(entry.id) ? { tailored: tailoredGatesOfFile.get(entry.id) } : {}),
     ...(state.file_groups[entry.id] ? (() => {
       const index = state.groups.findIndex((g) => g.id === state.file_groups[entry.id]);
@@ -2404,6 +2470,179 @@ export default function App() {
     })() : {}),
     ...(metadata[entry.id] ? { metadata: metadata[entry.id] } : {}),
   })), [samples, sampleDataRevisionKey, tailoredGatesOfFile, metadata, state.file_groups, state.groups]);
+
+  // ── Cell images (a FACSDiscover S8 .cvw beside a file): the service that decodes them, the
+  // cell under the cursor or pinned, and the display settings per file. Nothing here runs,
+  // and no panel is shown, unless a file in the workspace has images attached.
+  const workspaceHasImages = useMemo(() => samples.some((entry) => entry.images), [samples]);
+  const [imageService, setImageService] = useState<ImageService | null>(null);
+  // The hovered cell lives in a store, not in state: a hover must not re-render this component.
+  const cellHoverStore = useRef(createCellHoverStore()).current;
+  const [pinnedCell, setPinnedCell] = useState<CellRef | null>(null);
+  const [imageView, setImageView] = useState<Record<string, CellImageView>>({});
+  const samplesRef = useRef(samples);
+  samplesRef.current = samples;
+  const activeSampleIdRef = useRef(activeSampleId);
+  activeSampleIdRef.current = activeSampleId;
+  useEffect(() => {
+    if (!workspaceHasImages || imageService) return;
+    let live = true;
+    void import("./imaging/imageService").then((module) => { if (live) setImageService(new module.ImageService()); });
+    return () => { live = false; };
+  }, [workspaceHasImages, imageService]);
+  const attachedImageIds = useRef(new Set<string>());
+  useEffect(() => {
+    if (!imageService) return;
+    const seen = new Set<string>();
+    for (const entry of samples) {
+      if (!entry.images) continue;
+      imageService.attach(entry.id, entry.images);
+      seen.add(entry.id);
+    }
+    for (const id of attachedImageIds.current) if (!seen.has(id)) imageService.detach(id);
+    attachedImageIds.current = seen;
+  }, [imageService, samples]);
+  useEffect(() => () => { imageService?.dispose(); }, [imageService]);
+  useEffect(() => {
+    if (pinnedCell && !samples.some((entry) => entry.id === pinnedCell.sampleId)) setPinnedCell(null);
+  }, [samples, pinnedCell]);
+  // The Images tab exists only while a file has images; detaching the last one leaves it.
+  useEffect(() => {
+    if (activeTab === "images" && !workspaceHasImages) setActiveTab("gating");
+  }, [activeTab, workspaceHasImages]);
+  const onCellHover = useCallback((hit: HoverHit | null) => {
+    cellHoverStore.set(hit ? { sampleId: hit.sampleId ?? activeSampleIdRef.current ?? "", eventIndex: hit.eventIndex } : null);
+  }, [cellHoverStore]);
+  const onCellPin = useCallback((hit: HoverHit | null) => {
+    setPinnedCell(hit ? { sampleId: hit.sampleId ?? activeSampleIdRef.current ?? "", eventIndex: hit.eventIndex } : null);
+  }, []);
+  const resolveCellEntry = useCallback((sampleId: string): CellInspectorEntry | null => {
+    const entry = samplesRef.current.find((e) => e.id === sampleId);
+    return entry ? { id: entry.id, name: entry.name, images: entry.images ?? null, sample: entry.sample } : null;
+    // samplesRef tracks `samples`; the callback changes identity when the list does so the panel re-resolves.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [samples]);
+  const onCellViewChange = useCallback((sampleId: string, view: CellImageView) => {
+    setImageView((prev) => ({ ...prev, [sampleId]: view }));
+  }, []);
+  /** A cell's place in the plotted display space, for the markers; null when it is not on this plot. */
+  const displayPointOf = useCallback((cell: HoveredCell): [number, number] | null => {
+    if (!sample) return null;
+    const entry = samplesRef.current.find((e) => e.id === cell.sampleId);
+    if (!entry) return null;
+    const xKey = sample.channels[xIdx]?.key;
+    const yKey = sample.channels[yIdx]?.key;
+    if (!xKey || !yKey) return null;
+    const xi = entry.sample.channels.findIndex((c) => c.key === xKey);
+    const yi = entry.sample.channels.findIndex((c) => c.key === yKey);
+    if (xi < 0 || yi < 0) return null;
+    const x = entry.sample.displayColumn(xi)[cell.eventIndex];
+    const y = entry.sample.displayColumn(yi)[cell.eventIndex];
+    return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
+    // samplesRef tracks `samples`; the revision and scale keys stand for the columns' contents.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sample, samples, xIdx, yIdx, sampleDataRevisionKey, scalesVersion]);
+  /** Which events of each file with images were imaged (the FCS's WaveformPresent column). */
+  const imagedFlagsBySample = useMemo(() => {
+    const out = new Map<string, Uint8Array | null>();
+    for (const entry of samples) if (entry.images) out.set(entry.id, imagedEventFlags(entry.sample.fcs));
+    return out;
+  }, [samples]);
+  /** True when the event has an image to show: the hover probe offers only these. */
+  const hasImageAt = useCallback((sampleId: string | null, eventIndex: number): boolean => {
+    const id = sampleId ?? activeSampleIdRef.current;
+    if (!id || !imagedFlagsBySample.has(id)) return false;
+    const flags = imagedFlagsBySample.get(id);
+    return flags ? flags[eventIndex] === 1 : true;
+  }, [imagedFlagsBySample]);
+  // Objects counted per file by the worker, and the count's progress while it runs.
+  const [imageObjects, setImageObjects] = useState<Record<string, Classification>>({});
+  const [objectsProgress, setObjectsProgress] = useState<Record<string, { done: number; total: number } | { error: string }>>({});
+  useEffect(() => {
+    if ((overlayBy !== "objects" && overlayBy !== "cellclass") || !imageService || !activeEntry?.images) return;
+    const id = activeEntry.id;
+    if (imageObjects[id]) return;
+    const known = imageService.classification(id);
+    if (known) {
+      setImageObjects((prev) => ({ ...prev, [id]: known }));
+      return;
+    }
+    const handle = imageService.classify(id, (done, total) => setObjectsProgress((prev) => ({ ...prev, [id]: { done, total } })));
+    handle.promise.then(
+      (result) => {
+        setImageObjects((prev) => ({ ...prev, [id]: result }));
+        setObjectsProgress((prev) => { const next = { ...prev }; delete next[id]; return next; });
+      },
+      (error: unknown) => {
+        if (error instanceof Error && error.name === "RenderCancelled") return;
+        setObjectsProgress((prev) => ({ ...prev, [id]: { error: error instanceof Error ? error.message : String(error) } }));
+      },
+    );
+    return () => handle.cancel();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overlayBy, imageService, activeEntry?.id, activeEntry?.images]);
+  useEffect(() => {
+    // A file's objects are its own; a new service (new workspace) starts over.
+    setImageObjects({});
+    setObjectsProgress({});
+  }, [imageService]);
+  const objectCountOf = useCallback((cell: HoveredCell): number | null => {
+    const count = imageObjects[cell.sampleId]?.objectCount[cell.eventIndex];
+    return count === undefined || count === 255 ? null : count;
+  }, [imageObjects]);
+  const [cellStrictness, setCellStrictness] = usePersistedTabState<number>("cell.strictness", 3);
+  /** The viewed file's single-cell classes, once its objects are counted. */
+  const cellClasses = useMemo<CellClasses | null>(() => {
+    if (!activeEntry?.images) return null;
+    const objects = imageObjects[activeEntry.id];
+    if (!objects) return null;
+    const maskSlot = activeEntry.images.mask?.slot;
+    const maskChannel = maskSlot !== undefined ? activeEntry.images.channelNames.get(maskSlot) : undefined;
+    return classifyCells(activeEntry.sample.fcs, objects.objectCount, imagedFlagsBySample.get(activeEntry.id) ?? null, {
+      strictness: cellStrictness,
+      ...(maskChannel ? { maskChannel } : {}),
+    });
+  }, [activeEntry, imageObjects, imagedFlagsBySample, cellStrictness]);
+  const cellClassOf = useCallback((cell: HoveredCell): { label: string; reasons: string[] } | null => {
+    if (!cellClasses || cell.sampleId !== activeSampleIdRef.current) return null;
+    const cls = cellClasses.classes[cell.eventIndex];
+    if (cls === undefined || cls === 4) return null;
+    return { label: CELL_CLASS_LABELS[cls], reasons: cellReasonLabels(cellClasses.reasons[cell.eventIndex]) };
+  }, [cellClasses]);
+  const [thumbnailsOn, setThumbnailsOn] = usePersistedTabState<boolean>("cell.thumbnails", false);
+  const [thumbnailCount, setThumbnailCount] = usePersistedTabState<number>("cell.thumbnailCount", 40);
+  const [thumbnailSize, setThumbnailSize] = usePersistedTabState<number>("cell.thumbnailSize", 44);
+  const [thumbnailSeed, setThumbnailSeed] = usePersistedTabState<number>("cell.thumbnailSeed", 1);
+  /** Which class of the current colouring the thumbnails show; "all" or a class index. */
+  const [thumbnailClass, setThumbnailClass] = usePersistedTabState<string>("cell.thumbnailClass", "all");
+  const thumbnailClassLabels = useMemo(
+    () => (overlayBy === "objects" ? OBJECT_CLASS_LABELS.map((l) => t(l)) : overlayBy === "cellclass" ? CELL_CLASS_LABELS.slice(0, 4).map((l) => t(l)) : []),
+    [overlayBy, t],
+  );
+  const thumbnailClassOf = useCallback((sampleId: string | null, eventIndex: number): number | null => {
+    const id = sampleId ?? activeSampleIdRef.current;
+    if (!id || id !== activeSampleIdRef.current) return null;
+    if (overlayBy === "objects") {
+      const count = imageObjects[id]?.objectCount[eventIndex];
+      return count === undefined || count === 255 ? null : count <= 0 ? 0 : count === 1 ? 1 : count === 2 ? 2 : 3;
+    }
+    if (overlayBy === "cellclass") {
+      const cls = cellClasses?.classes[eventIndex];
+      return cls === undefined || cls === 4 ? null : cls;
+    }
+    return null;
+  }, [overlayBy, imageObjects, cellClasses]);
+  /** The thumbnails' events: imaged, and of the chosen class when one is chosen. */
+  const thumbnailInclude = useCallback((sampleId: string | null, eventIndex: number): boolean => {
+    if (!hasImageAt(sampleId, eventIndex)) return false;
+    if (thumbnailClass === "all" || (overlayBy !== "objects" && overlayBy !== "cellclass")) return true;
+    return thumbnailClassOf(sampleId, eventIndex) === Number(thumbnailClass);
+  }, [hasImageAt, thumbnailClass, overlayBy, thumbnailClassOf]);
+  const [cellInspectorCollapsed, setCellInspectorCollapsed] = usePersistedTabState<boolean>("cell.collapsed", false);
+  const [cellInspectorDock, setCellInspectorDock] = usePersistedTabState<"pane" | "column">(
+    "cell.dock",
+    () => (typeof window !== "undefined" && window.innerWidth >= 1500 ? "column" : "pane"),
+  );
   /** The files under the tree, tailored ones marked, for the summary line. */
   const hierarchyGroups = useMemo(
     () => groupsOf(state.hierarchies, samples.map((s0) => ({ id: s0.id, name: s0.name })), fileHierarchies, (copy) => {
@@ -2637,6 +2876,13 @@ export default function App() {
     const nextWorkspaceId = makeWorkspaceId();
     compensationManagerRef.current!.resetWorkspace(nextWorkspaceId);
     setSamples([]);
+    cellHoverStore.set(null);
+    setPinnedCell(null);
+    setImageView({});
+    if (imageService) {
+      imageService.dispose();
+      setImageService(null);
+    }
     setActiveSampleId(null);
     setExcludedSampleIds(new Set());
     setPoolSelection(false);
@@ -2742,6 +2988,7 @@ export default function App() {
   const fileRef = useRef<HTMLInputElement>(null);
   const folderRef = useRef<HTMLInputElement | null>(null);
   const xmlRef = useRef<HTMLInputElement>(null);
+  const cvwRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<HTMLInputElement>(null);
 
   // ---- Hierarchies: each owns the gate table and population tree shown in the sidebar ----------
@@ -2858,7 +3105,7 @@ export default function App() {
                   )
                     .then(({ revision, memberships, notEvaluated }) => {
                       setImportMsg(
-                        `Saved GateLab workspace to SCE · revision ${revision}` +
+                        `${hostWords("Saved GateLab workspace to SCE")} · revision ${revision}` +
                           (memberships
                             ? ` · memberships for ${memberships.populations} population` +
                               `${memberships.populations === 1 ? "" : "s"} in ` +
@@ -6078,6 +6325,7 @@ export default function App() {
         }
         if (to.hostedAssaySpace !== "display") {
           to.applyFluorArcsinhKeys(from.fluorArcsinhKeys());
+          to.applyFluorBiex(from.fluorBiexEntries());
           to.setCytofCofactor(from.arcsinhCofactor);
         }
         const status = from.compensatedLayerStatus();
@@ -6978,7 +7226,7 @@ export default function App() {
 
   async function writeHostedPanel(): Promise<void> {
     if (!isSceHost || !host.rowData || !hostDatasetDescriptor || !sample) {
-      setError("This host cannot write panel labels into SCE rowData.");
+      setError(hostWords("This host cannot write panel labels into SCE rowData."));
       return;
     }
     setHostAdapterWriteBusy(true);
@@ -7010,7 +7258,7 @@ export default function App() {
         : current);
       setImportMsg(
         `Saved ${result.changedChannelIds.length} panel label` +
-          `${result.changedChannelIds.length === 1 ? "" : "s"} to SCE rowData.`,
+          `${result.changedChannelIds.length === 1 ? "" : "s"} ${hostWords("to SCE rowData.")}`,
       );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -7139,18 +7387,18 @@ export default function App() {
 
   async function writeHostedDivisions(profile: DivisionProfile): Promise<void> {
     if (!isSceHost || !host.colData || !activeSampleId) {
-      setError("This host cannot write division calls into SCE colData.");
+      setError(hostWords("This host cannot write division calls into SCE colData."));
       return;
     }
     const datasetId = samples[0]?.hostSource?.datasetId;
     if (!datasetId) {
-      setError("The SCE dataset identity is unavailable.");
+      setError(hostWords("The SCE dataset identity is unavailable."));
       return;
     }
     const columnName = profile.colName.trim() || "div";
     const collision = hostColDataColumns.includes(columnName);
     if (collision && !window.confirm(
-      `SCE colData already contains '${columnName}'. Replace that column with the current division calls?`,
+      hostWords("SCE colData already contains '{column}'. Replace that column with the current division calls?").replace("{column}", columnName),
     )) return;
 
     const profiles = { ...divisionProfiles, [activeSampleId]: profile };
@@ -7223,7 +7471,7 @@ export default function App() {
       noteHostCategoricalColumn(columnName, levels.length);
       const written = result.columns[0];
       setImportMsg(
-        `Wrote division calls to SCE colData '${columnName}'` +
+        hostWords("Wrote division calls to SCE colData '{column}'").replace("{column}", columnName) +
           (written?.missingCount
             ? ` · ${written.missingCount.toLocaleString()} events had no compatible profile`
             : ""),
@@ -7237,7 +7485,7 @@ export default function App() {
 
   async function writeHostedSampleMetadata(): Promise<void> {
     if (!isSceHost || !host.colData) {
-      setError("This host cannot write sample metadata into SCE colData.");
+      setError(hostWords("This host cannot write sample metadata into SCE colData."));
       return;
     }
     const datasetId = samples[0]?.hostSource?.datasetId;
@@ -7245,7 +7493,7 @@ export default function App() {
     const columnNames = metadataColumns.map(({ name }) => name);
     const collisions = columnNames.filter((name) => hostColDataColumns.includes(name));
     if (collisions.length > 0 && !window.confirm(
-      `Replace ${collisions.length} existing SCE colData column` +
+      `Replace ${collisions.length} existing ${hostWords("SCE colData column")}` +
         `${collisions.length === 1 ? "" : "s"}: ${collisions.join(", ")}?`,
     )) return;
 
@@ -7292,7 +7540,7 @@ export default function App() {
       }
       setImportMsg(
         `Wrote ${result.columns.length} sample metadata column` +
-          `${result.columns.length === 1 ? "" : "s"} to SCE colData.`,
+          `${result.columns.length === 1 ? "" : "s"} ${hostWords("to SCE colData.")}`,
       );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -7369,6 +7617,7 @@ export default function App() {
     }
     for (const entry of entries) {
       if (entry.handle) void rememberHandle("fcs:" + entry.name, entry.handle);
+      if (entry.images?.handle) void rememberHandle(imageHandleKey("cvw", entry.name), entry.images.handle);
     }
     // Warn if an existing gate references a channel this sample lacks: getGateMask returns
     // an all-false mask (zero events) for such a gate, which would otherwise be a silent
@@ -7398,13 +7647,13 @@ export default function App() {
     hostedDatasetLoadStartedRef.current = true;
     const controller = new AbortController();
     setBusy(true);
-    setImportMsg("Connecting to the SingleCellExperiment host…");
+    setImportMsg(hostWords("Connecting to the SingleCellExperiment host…"));
 
     void (async () => {
       try {
         const datasets = await host.datasets!.listDatasets();
         if (datasets.length === 0) {
-          throw new Error("GateLabR did not provide a SingleCellExperiment dataset.");
+          throw new Error(hostWords("GateLabR did not provide a SingleCellExperiment dataset."));
         }
         const dataset = datasets[0];
         setHostDatasetDescriptor(dataset);
@@ -7437,7 +7686,7 @@ export default function App() {
         if (controller.signal.aborted) return;
         setHostDrawnAssayId(drawnAssay.id);
         if (hostedSamples.length === 0) {
-          throw new Error(`SingleCellExperiment '${dataset.label}' has no samples.`);
+          throw new Error(`${hostObjectName()} '${dataset.label}' has no samples.`);
         }
         setHostColDataColumns(dataset.colDataColumns ?? []);
         setHostCategoricalColumns(dataset.colDataCategorical ?? []);
@@ -7622,15 +7871,24 @@ export default function App() {
               groups: workspace.gating.groups ?? [],
               file_groups: hostedFileGroups,
             });
+            // A GatingSet's own hierarchy counts its populations without the root the
+            // translation adds; a saved workspace's root is a population of its own.
+            const restoredPopulations = Object.keys(workspace.gating.populations).length
+              - (restored.sourceFormat === "gatingset-hierarchy" ? 1 : 0);
             hostedStatus =
               `Restored ${workspace.gating.gate_order.length} gate` +
               `${workspace.gating.gate_order.length === 1 ? "" : "s"} and ` +
-              `${Object.keys(workspace.gating.populations).length} population` +
-              `${Object.keys(workspace.gating.populations).length === 1 ? "" : "s"} ` +
-              `from ${restored.sourceFormat === "gatelabr-legacy" ? "GateLabR" : "GateLab"} SCE metadata`;
+              `${restoredPopulations} population` +
+              `${restoredPopulations === 1 ? "" : "s"} ` +
+              (restored.sourceFormat === "gatingset-hierarchy"
+                ? "from the GatingSet's hierarchy"
+                : `from ${restored.sourceFormat === "gatelabr-legacy" ? "GateLabR" : "GateLab"} ${hostWords("SCE metadata")}`) +
+              (restored.leftOut?.length
+                ? ` · not restored: ${restored.leftOut.join("; ")}`
+                : "");
           } catch (cause) {
             setError(
-              "The SingleCellExperiment data loaded, but its saved GateLab workspace " +
+              hostWords("The SingleCellExperiment data loaded, but its saved GateLab workspace ") +
                 `could not be restored: ${cause instanceof Error ? cause.message : String(cause)}`,
             );
           }
@@ -7987,6 +8245,9 @@ export default function App() {
     const entries: SampleEntry[] = [];
     const failures: string[] = [];
     const dataSetNotes: string[] = [];
+    const imageNotes: string[] = [];
+    let imagesAttached = 0;
+    const hadImages = samplesRef.current.some((e) => e.images);
     try {
       for (let index = 0; index < candidates.length; index++) {
         const candidate = candidates[index];
@@ -7997,6 +8258,18 @@ export default function App() {
             const entry = createEntry(bytes, candidate.name, candidate.handle, candidate.sourcePath);
             entries.push(entry);
             byCandidate?.set(candidate.id, entry);
+            // The waveform file beside it is attached after the FCS has opened, and a problem
+            // with it is a note, never a reason to lose the FCS.
+            if (candidate.images) {
+              try {
+                const { attachCellImages } = await import("./imaging/attach");
+                entry.images = await attachCellImages(
+                  candidate.images.file, candidate.images.handle, entry.sample.fcs, candidate.images.sourcePath);
+                imagesAttached++;
+              } catch (cause) {
+                imageNotes.push(cause instanceof Error ? cause.message : String(cause));
+              }
+            }
           } catch (cause) {
             if (!(cause instanceof FcsMultipleDataSetsError)) throw cause;
             // A file holding several data sets (a Guava plate writes one per well) opens as one
@@ -8027,17 +8300,47 @@ export default function App() {
       if (entries.length > 0) {
         setImportMsg(
           `Added ${entries.length} FCS ${dataSetNotes.length ? "sample" : "file"}${entries.length === 1 ? "" : "s"} to the workspace.` +
-            (dataSetNotes.length ? ` ${dataSetNotes.join("; ")}.` : ""),
+            (dataSetNotes.length ? ` ${dataSetNotes.join("; ")}.` : "") +
+            (imagesAttached ? ` Cell images attached to ${imagesAttached}.` : ""),
         );
+    if (imagesAttached > 0 && !hadImages) showImagesByDefault();
       }
-      if (failures.length > 0) {
-        setError(`${failures.length} FCS file${failures.length === 1 ? "" : "s"} could not be loaded: ${failures.join("; ")}`);
+      if (failures.length > 0 || imageNotes.length > 0) {
+        setError([
+          ...(failures.length ? [`${failures.length} FCS file${failures.length === 1 ? "" : "s"} could not be loaded: ${failures.join("; ")}`] : []),
+          ...(imageNotes.length ? [`Cell images not attached: ${imageNotes.join("; ")}`] : []),
+        ].join(". "));
       }
     } finally {
       setSampleImportProgress(null);
       setBusy(false);
     }
     return entries;
+  }
+
+  /**
+   * The FCS files among what was picked, dropped or listed, each carrying the waveform file of
+   * its name beside it, as import candidates. `sourcePathOf` gives the display path of a file
+   * below a chosen folder; a plain picker or a drop has none.
+   */
+  function candidatesWithSidecars<T extends { name: string; file: File; handle: FileSystemFileHandle | null; relativePath?: string }>(
+    sources: readonly T[],
+    sourcePathOf?: (source: T) => string,
+  ): FcsImportCandidate[] {
+    const paired = pairSidecars(sources);
+    return paired.fcs.map((source) => {
+      const sidecar = paired.sidecarOf.get(source);
+      return {
+        id: crypto.randomUUID(),
+        name: source.name,
+        file: source.file,
+        handle: source.handle,
+        ...(sourcePathOf ? { sourcePath: sourcePathOf(source) } : {}),
+        ...(sidecar
+          ? { images: { file: sidecar.file, handle: sidecar.handle, ...(sourcePathOf ? { sourcePath: sourcePathOf(sidecar) } : {}) } }
+          : {}),
+      };
+    });
   }
 
   // Open (add) one or more FCS files — native handles where supported, input fallback elsewhere.
@@ -8047,18 +8350,74 @@ export default function App() {
       return;
     }
     try {
-      const picked = await pickFiles(FCS_FILE_ACCEPT, "FCS files");
+      const picked = await pickFiles(FCS_WITH_IMAGES_ACCEPT, "FCS files");
       if (!picked || picked.length === 0) return;
-      await importFcsCandidates(picked.map((source) => ({
-        id: crypto.randomUUID(),
-        name: source.name,
-        file: source.file,
-        handle: source.handle,
-      })));
+      const candidates = candidatesWithSidecars(picked);
+      if (candidates.length === 0) {
+        setError("No .fcs file was chosen. A .cvw is read beside the FCS of the same name; choose both together.");
+        return;
+      }
+      await importFcsCandidates(candidates);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
     }
+  }
+
+  /** Attach a waveform file to the viewed sample (or replace the one it has). */
+  /**
+   * The first cell images in a workspace switch the plot to dots coloured by whether each event
+   * has one: the feature is otherwise two menus deep (David, 2026-10-13). A reopened workspace
+   * keeps the display it was saved with, so this is called only from the attach actions.
+   */
+  function showImagesByDefault(): void {
+    setMode("dots");
+    setOverlayBy("image");
+    // Opaque and a little finer than the usual dots, so the two colours read at a glance.
+    setPointAlpha(1);
+    setPointSize(1);
+  }
+
+  async function attachImagesToActive(): Promise<void> {
+    const entry = activeEntry;
+    if (!entry) return;
+    try {
+      if (!supportsFileSystemAccess()) {
+        cvwRef.current?.click();
+        return;
+      }
+      const picked = await pickFileSource(CVW_FILE_ACCEPT, "Cell images (.cvw)");
+      if (!picked) return;
+      await attachImageFile(entry.id, picked.file, picked.handle);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function attachImageFile(entryId: string, file: File, handle: FileSystemFileHandle | null): Promise<void> {
+    const entry = samples.find((e) => e.id === entryId);
+    if (!entry) return;
+    setError(null);
+    try {
+      const { attachCellImages } = await import("./imaging/attach");
+      const images = await attachCellImages(file, handle, entry.sample.fcs);
+      const first = !samplesRef.current.some((e) => e.images);
+      setSamples((prev) => prev.map((e) => (e.id === entryId ? { ...e, images } : e)));
+      if (first) showImagesByDefault();
+      if (handle) void rememberHandle(imageHandleKey("cvw", entry.name), handle);
+      setImportMsg(`Cell images attached to ${entry.name}: ${file.name}, ${images.eventCount.toLocaleString()} events.`);
+    } catch (cause) {
+      setError(`Cell images not attached: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+
+  function detachImagesFromActive(): void {
+    const entry = activeEntry;
+    if (!entry?.images) return;
+    const { images, ...rest } = entry;
+    void images;
+    setSamples((prev) => prev.map((e) => (e.id === entry.id ? rest : e)));
+    setImportMsg(`Cell images detached from ${entry.name}.`);
   }
 
   function stageFolderImport(folderName: string, candidates: FcsImportCandidate[]): void {
@@ -8076,15 +8435,9 @@ export default function App() {
     }
     setError(null);
     try {
-      const picked = await pickDirectoryFiles([".fcs"]);
+      const picked = await pickDirectoryFiles([".fcs", ".cvw"]);
       if (!picked) return;
-      stageFolderImport(picked.name, picked.files.map((source) => ({
-        id: crypto.randomUUID(),
-        name: source.name,
-        file: source.file,
-        handle: source.handle,
-        sourcePath: `${picked.name}/${source.relativePath}`,
-      })));
+      stageFolderImport(picked.name, candidatesWithSidecars(picked.files, (source) => `${picked.name}/${source.relativePath}`));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -8110,7 +8463,11 @@ export default function App() {
       workspaceId,
       savedAt: new Date().toISOString(),
       app: "GateLab",
-      ...(isSceHost && hostDrawnAssayId ? { hostedAssayId: hostDrawnAssayId } : {}),
+      ...(isSceHost && hostDrawnAssayId ? {
+        hostedAssayId: hostDrawnAssayId,
+        // The axes as drawn, for R to keep on the object (rowData(sce)$gatelab_transform).
+        hostedChannelTransforms: Object.fromEntries(sample.channels.map((channel) => [channel.key, sample.transformSpec(channel.key)])),
+      } : {}),
       samples: samples.map((e, i) => ({
         sampleId: e.id,
         fileName: e.name,
@@ -8119,6 +8476,7 @@ export default function App() {
         scatterCofactor: e.sample.scatterCofactorOverrides(),
         scatterLinear: e.sample.scatterLinearKeys(),
         fluorArcsinh: e.sample.fluorArcsinhKeys(),
+        fluorBiex: e.sample.fluorBiexEntries(),
         cytofCofactor: e.sample.arcsinhCofactor,
         compensationOn: e.sample.compensationEnabled ||
           (e.sample.spillover === null && compensationPendingRef.current.has(e.id)),
@@ -8136,6 +8494,11 @@ export default function App() {
         // A matrix that is not the file's own (a FlowJo workspace's) goes with the file, so the
         // reopened file is compensated with the matrix its gates were drawn under.
         ...(e.sample.externalSpillover ? { externalSpillover: e.sample.externalSpillover } : {}),
+        // Attached cell images are linked by name and identity, never copied: the file stays
+        // where the instrument exported it and is found again beside the FCS on reopening.
+        ...(e.images
+          ? { images: [{ kind: "cvw" as const, fileName: e.images.fileName, eventCount: e.images.eventCount, ...(e.images.recordingId ? { recordingId: e.images.recordingId } : {}) }] }
+          : {}),
       })),
       activeSample: Math.max(0, samples.findIndex((e) => e.id === activeSampleId)),
       gating: {
@@ -8650,10 +9013,30 @@ export default function App() {
       // Chromium's native filter intermittently disable valid files on first open.
       // Leave this picker unfiltered and let the streaming workspace parser validate it.
       const picked = await pickFileSource(null, "GateLab workspace");
-      if (picked) await openWorkspaceFromFile(picked.file, picked.handle, picked.name);
+      if (!picked) return;
+      if (isSidecarName(picked.name)) await attachCvwFromOpen(picked.file, picked.handle);
+      else await openWorkspaceFromFile(picked.file, picked.handle, picked.name);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
+  }
+
+  /**
+   * A waveform file chosen where a workspace was expected. It holds one file's cell images, so
+   * it goes to the loaded file of its name; without one, the user is told what it is and where
+   * it goes, rather than that it is not a workspace.
+   */
+  async function attachCvwFromOpen(file: File, handle: FileSystemFileHandle | null): Promise<void> {
+    const stem = (name: string) => name.replace(/\.[^.]*$/, "").normalize("NFC").toLocaleLowerCase();
+    const target = samples.find((entry) => stem(entry.name) === stem(file.name));
+    if (!target) {
+      setError(
+        `${file.name} holds a file's cell images, not a workspace. Open the FCS of the same name first ` +
+          "(or drop the two together), then attach the images from Import ▸ Attach cell images (.cvw)….",
+      );
+      return;
+    }
+    await attachImageFile(target.id, file, handle);
   }
 
   // Resolve a reference-workspace sample without prompting: an already-open sample of the
@@ -8736,7 +9119,7 @@ export default function App() {
     let sourceName: string;
     let sources: PickedFileSource[];
     if (mode === "folder" && supportsDirectoryAccess()) {
-      const picked = await pickDirectoryFiles([".fcs"], {
+      const picked = await pickDirectoryFiles([".fcs", ".cvw"], {
         ...(workspaceHandle ? { startIn: workspaceHandle } : {}),
       });
       if (!picked) return null;
@@ -8747,7 +9130,7 @@ export default function App() {
         `Select the ${remaining.length} required FCS file${remaining.length === 1 ? "" : "s"}`,
       );
       const picked = await pickFiles(
-        FCS_FILE_ACCEPT,
+        FCS_WITH_IMAGES_ACCEPT,
         "FCS files required by this workspace",
         {},
       );
@@ -8759,6 +9142,10 @@ export default function App() {
         "This browser cannot select a folder for linked FCS recovery. Open GateLab in a Chromium-based browser or use a portable workspace.",
       );
     }
+
+    // The waveform files beside the FCS files travel with them; only the FCS files are matched.
+    const paired = pairSidecars(sources);
+    sources = paired.fcs;
 
     // The files named like a required one are read for their acquisition keywords, so a
     // same-named file of another experiment is never relinked in its place.
@@ -8784,7 +9171,10 @@ export default function App() {
     const nextFound = new Map(found);
     for (const requirement of remaining) {
       const source = plan.matches.get(requirement.dataPath);
-      if (source) nextFound.set(requirement.dataPath, { source, sourceName });
+      if (source) {
+        const images = paired.sidecarOf.get(source);
+        nextFound.set(requirement.dataPath, { source, sourceName, ...(images ? { images } : {}) });
+      }
     }
     const taken = [...requirements.flatMap((requirement) => {
       const hit = nextFound.get(requirement.dataPath);
@@ -8797,7 +9187,10 @@ export default function App() {
       setWorkspaceRelinkOverride({
         take: [
           ...taken,
-          ...plan.mismatched.map((m) => ({ requirement: m.requirement, source: m.candidates[0].candidate, sourceName })),
+          ...plan.mismatched.map((m) => {
+            const images = paired.sidecarOf.get(m.candidates[0].candidate);
+            return { requirement: m.requirement, source: m.candidates[0].candidate, sourceName, ...(images ? { images } : {}) };
+          }),
         ],
         // Named so two declarations of one file name read apart: they read identically.
         byChoice: plan.mismatched.map((m) => ({ fileName: describeRequirement(m.requirement, requirements), path: pathOf(m.candidates[0].candidate) })),
@@ -8842,11 +9235,11 @@ export default function App() {
   }
 
   async function readRelinkedFcs(
-    take: readonly { requirement: WorkspaceFcsRequirement; source: PickedFileSource; sourceName: string }[],
+    take: readonly { requirement: WorkspaceFcsRequirement; source: PickedFileSource; sourceName: string; images?: PickedFileSource }[],
   ): Promise<ReadonlyMap<string, ResolvedReferenceFcs>> {
     const resolved = new Map<string, ResolvedReferenceFcs>();
     for (let index = 0; index < take.length; index++) {
-      const { requirement, source, sourceName } = take[index];
+      const { requirement, source, sourceName, images } = take[index];
       setImportMsg(
         `Relinking from ${sourceName} · ${index + 1} / ${take.length} · ${requirement.fileName}`,
       );
@@ -8859,6 +9252,7 @@ export default function App() {
         sourcePath: sourceName === "selected files"
           ? source.relativePath
           : `${sourceName}/${source.relativePath}`,
+        ...(images ? { images } : {}),
       });
     }
     return resolved;
@@ -9416,6 +9810,44 @@ export default function App() {
         }
         entry.handle = fcsH;
         if (fcsH) void rememberHandle("fcs:" + wss.fileName, fcsH);
+        // The cell images the workspace linked: from the folder just chosen when it held them,
+        // else through the handle remembered when they were attached. Not found is a note; a
+        // file of another recording, or of the wrong length, is refused with its reason.
+        const imageRecord = wss.images?.find((record) => record.kind === "cvw");
+        if (imageRecord) {
+          const beside = resolvedReferenceFcs.get(wss.dataPath)?.images ?? null;
+          let imageFile: File | null = beside?.file ?? null;
+          let imageHandle: FileSystemFileHandle | null = beside?.handle ?? null;
+          if (!imageFile) {
+            const remembered = await recallHandle(imageHandleKey("cvw", wss.fileName));
+            if (remembered && (await ensurePermission(remembered, "read"))) {
+              try {
+                const file = await remembered.getFile();
+                if (file.name.normalize("NFC").toLocaleLowerCase() === imageRecord.fileName.normalize("NFC").toLocaleLowerCase()) {
+                  imageFile = file;
+                  imageHandle = remembered;
+                }
+              } catch {
+                // The file is gone or unreadable: the note below says so.
+              }
+            }
+          }
+          if (imageFile) {
+            try {
+              const { attachCellImages } = await import("./imaging/attach");
+              const images = await attachCellImages(imageFile, imageHandle, entry.sample.fcs);
+              if (imageRecord.recordingId && images.recordingId && images.recordingId !== imageRecord.recordingId) {
+                throw new Error(`${imageFile.name} is another recording than the one this workspace linked`);
+              }
+              entry.images = images;
+              if (imageHandle) void rememberHandle(imageHandleKey("cvw", wss.fileName), imageHandle);
+            } catch (cause) {
+              dataSetNotes.push(`cell images not attached to ${wss.fileName}: ${cause instanceof Error ? cause.message : String(cause)}`);
+            }
+          } else {
+            dataSetNotes.push(`cell images for ${wss.fileName} (${imageRecord.fileName}) were not found; attach them again from Import`);
+          }
+        }
         entries.push(entry);
       }
 
@@ -9447,6 +9879,7 @@ export default function App() {
           ...Object.keys(wss.scatterCofactor ?? {}),
           ...(wss.scatterLinear ?? []),
           ...(wss.fluorArcsinh ?? []),
+          ...Object.keys(wss.fluorBiex ?? {}),
           ...Object.keys(wss.labels ?? {}),
         ]),
       ]);
@@ -9484,6 +9917,7 @@ export default function App() {
         // After the W overrides above, so a channel restored to arcsinh still carries the W the
         // user set for its logicle and switching back gives them the axis they saved.
         entry.sample.applyFluorArcsinhKeys((wss.fluorArcsinh ?? []).map(currentKey));
+        entry.sample.applyFluorBiex(currentKeys(wss.fluorBiex ?? {}));
         entry.sample.applyLabelOverrides(currentKeys(wss.labels ?? {}));
         if (wss.metadata && Object.keys(wss.metadata).length) nextMetadata[entry.id] = wss.metadata;
         if (wss.hierarchyId) nextFileHierarchies[entry.id] = wss.hierarchyId;
@@ -10190,7 +10624,7 @@ export default function App() {
     }
     const datasetId = samples[0]?.hostSource?.datasetId;
     if (!datasetId) {
-      setError("The SCE dataset identity is unavailable.");
+      setError(hostWords("The SCE dataset identity is unavailable."));
       return;
     }
     setHostColDataBusy(true);
@@ -10483,6 +10917,11 @@ export default function App() {
     if (activeSampleId && compatibleDivisionProfiles[activeSampleId]) {
       options.push({ value: "division", label: t("Division") });
     }
+    if (workspaceHasImages) {
+      options.push({ value: "image", label: t("Has an image") });
+      options.push({ value: "objects", label: t("Objects in image") });
+      options.push({ value: "cellclass", label: t("Single cells") });
+    }
     if (sample) {
       for (const [i, channel] of sample.channels.entries()) {
         options.push({
@@ -10504,7 +10943,13 @@ export default function App() {
     return options;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [t, samples.length, activeSampleId, compatibleDivisionProfiles, sample, panelVersion,
-      isSceHost, hostCategoricalColumns]);
+      isSceHost, hostCategoricalColumns, activeEntry?.images, workspaceHasImages]);
+  // The cell-image colourings go with the images: detach the last of them and the plot is plain
+  // again. A viewed file without images under either colouring simply plots plain, so the choice
+  // survives moving between the files of a workspace where only some have images.
+  useEffect(() => {
+    if ((overlayBy === "image" || overlayBy === "objects" || overlayBy === "cellclass") && !workspaceHasImages) setOverlayBy("none");
+  }, [overlayBy, workspaceHasImages]);
 
   /**
    * A channel the workspace no longer has is not a colouring, it is a stale pick. Clear it rather
@@ -10528,6 +10973,40 @@ export default function App() {
         colors: new Uint8Array(n),
         palette: paletteColors(overlayPalette, 1),
         labels: [fileName],
+      };
+    }
+    if (overlayBy === "image") {
+      // Which events the S8 imaged, from the WaveformPresent column it wrote into the FCS.
+      const flags = imagedEventFlags(sample.fcs);
+      if (!flags) return null;
+      const colors = new Uint8Array(n);
+      for (let e = 0; e < n; e++) colors[e] = flags[e] ? 0 : 1;
+      return { colors, palette: [...paletteColors(overlayPalette, 1), UNGATED_COLOR], labels: [t("has an image"), t("no image")] };
+    }
+    if (overlayBy === "objects") {
+      // The objects counted in each event's image (the worker's classification); grey until done.
+      const classes = activeEntry ? imageObjects[activeEntry.id] : undefined;
+      if (!classes) return null;
+      const colors = new Uint8Array(n);
+      const counts = [0, 0, 0, 0, 0];
+      for (let e = 0; e < n; e++) {
+        const count = classes.objectCount[e];
+        colors[e] = count === 255 ? 4 : count <= 0 ? 0 : count === 1 ? 1 : count === 2 ? 2 : 3;
+        counts[colors[e]]++;
+      }
+      return {
+        colors,
+        palette: [...paletteColors(overlayPalette, 4), UNGATED_COLOR],
+        labels: [...OBJECT_CLASS_LABELS.map((label) => t(label)), t("no image")].map((label, i) => `${label} (${counts[i].toLocaleString()})`),
+      };
+    }
+    if (overlayBy === "cellclass") {
+      // Single cells from the object count and the instrument's image features; grey until counted.
+      if (!cellClasses) return null;
+      return {
+        colors: cellClasses.classes,
+        palette: [...paletteColors(overlayPalette, 4), UNGATED_COLOR],
+        labels: CELL_CLASS_LABELS.map((label, i) => `${t(label)} (${cellClasses.counts[i].toLocaleString()})`),
       };
     }
     if (overlayBy === "population") {
@@ -10582,7 +11061,7 @@ export default function App() {
     for (let e = 0; e < n; e++) colors[e] = assignDivisionLevel(dye[e], prof.boundaries);
     return { colors, palette: divisionPalette(nLevels), labels: Array.from({ length: nLevels }, (_, i) => `Div${i}`) };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, activeDataRevision, overlayBy, overlayPalette, fileName, state.populations, state.root_population_id, state.gate_version, derived, activeSampleId, compatibleDivisionProfiles, activeEntry, overlayColDataValues, markerOverlay]);
+  }, [sample, activeDataRevision, overlayBy, overlayPalette, fileName, state.populations, state.root_population_id, state.gate_version, derived, activeSampleId, compatibleDivisionProfiles, activeEntry, overlayColDataValues, markerOverlay, imageObjects, cellClasses]);
 
   // Hierarchy-scoped gate visibility; see branchScopedGateOrder for the rule.
   //
@@ -10799,6 +11278,97 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sample, activeSampleId, fileName, sampleDataRevisionKey, globalScales, scalesVersion, instrumentMode, activeTab]);
 
+  // ── Size by: a channel's value as each point's radius, for every event or for one class of the colouring. ──
+  const [sizeByKey, setSizeByKey] = useState<string | null>(null);
+  const [sizeByClass, setSizeByClass] = useState<string>("all");
+  const sizeByOptions = useMemo<SearchableOption[]>(() => {
+    const options: SearchableOption[] = [{ value: "none", label: t("None") }];
+    if (sample) for (const [i, channel] of sample.channels.entries()) options.push({ value: `channel:${channel.key}`, label: sample.channelLabel(i), group: t("Channel") });
+    return options;
+  }, [sample, t, panelVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pointSizes = useMemo<Uint8Array | null>(() => {
+    if (!sizeByKey || !activeEntry) return null;
+    const s0 = activeEntry.sample;
+    const idx = s0.index(sizeByKey);
+    if (idx === undefined) return null;
+    const values = s0.displayColumn(idx);
+    const n = s0.fcs.nEvents;
+    const member = (e: number) => sizeByClass === "all" || thumbnailClassOf(null, e) === Number(sizeByClass);
+    // The 1st and 99th percentiles of the sized events set the range, so a few outliers do not flatten it.
+    const picked: number[] = [];
+    const stride = Math.max(1, Math.floor(n / 50000));
+    for (let e = 0; e < n; e += stride) if (member(e) && Number.isFinite(values[e])) picked.push(values[e]);
+    if (picked.length === 0) return null;
+    picked.sort((a, b) => a - b);
+    const lo = picked[Math.floor(0.01 * (picked.length - 1))];
+    const hi = picked[Math.ceil(0.99 * (picked.length - 1))];
+    const span = hi - lo;
+    const out = new Uint8Array(n);
+    for (let e = 0; e < n; e++) {
+      if (!member(e) || !Number.isFinite(values[e])) continue;
+      const frac = span > 0 ? Math.max(0, Math.min(1, (values[e] - lo) / span)) : 0.5;
+      out[e] = Math.round(10 * (0.6 + 3.4 * frac));
+    }
+    return out;
+    // Single-file display only: the pooled cloud is built elsewhere and keeps the plot's own size.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sizeByKey, sizeByClass, activeEntry, thumbnailClassOf, activeDataRevision, scalesVersion]);
+
+  // ── The channel pair whose biplot best separates two classes of the current colouring. ──
+  const [separation, setSeparation] = useState<{ a: string; b: string; results: { all: PairScore[]; detectors: PairScore[] } | null }>({ a: "0", b: "2", results: null });
+  const [separationBusy, setSeparationBusy] = useState(false);
+  useEffect(() => {
+    setSeparation((prev) => ({ ...prev, a: overlayBy === "objects" ? "1" : "0", b: "2", results: null }));
+  }, [overlayBy, activeSampleId]);
+  const rankSeparation = useCallback(() => {
+    if (!activeEntry) return;
+    const s0 = activeEntry.sample;
+    const a = Number(separation.a);
+    const b = Number(separation.b);
+    setSeparationBusy(true);
+    setTimeout(() => {
+      try {
+        const n = s0.fcs.nEvents;
+        const inA = new Uint8Array(n);
+        const inB = new Uint8Array(n);
+        for (let e = 0; e < n; e++) {
+          const c = thumbnailClassOf(null, e);
+          if (c === a) inA[e] = 1;
+          else if (c === b) inB[e] = 1;
+        }
+        const columns: SeparationColumn[] = [];
+        s0.channels.forEach((channel, i) => {
+          const names = [channel.pnn, channel.key, s0.channelLabel(i)];
+          // Time, the imaging flags and an object's position in its frame are not what a gate is drawn on.
+          if (names.some((name) => /^(Time|Event_length|Cell_length|WaveformPresent|PhaseOffset)$/i.test(name) || /^Center of Mass/i.test(name))) return;
+          const kind = s0.isImagingFeatureAxis(i) ? "feature" : s0.isFluorChannel(i) || s0.isScatterAxis(i) ? "detector" : "other";
+          columns.push({ label: s0.channelLabel(i), values: s0.displayColumn(i), kind, index: i });
+        });
+        // Both lists at once: the best pairs of any channels, and the best of the detectors alone,
+        // the channels a sorter gates on without images.
+        const all = rankSeparatingPairs(columns, inA, inB, { top: 5 });
+        const detectors = rankSeparatingPairs(columns, inA, inB, { top: 5, detectorsOnly: true });
+        setSeparation((prev) => ({ ...prev, results: { all, detectors } }));
+      } finally {
+        setSeparationBusy(false);
+      }
+    }, 0);
+  }, [activeEntry, separation.a, separation.b, thumbnailClassOf]);
+  const showBiplot = useCallback((i: number, j: number) => {
+    setXIdx(i);
+    setYIdx(j);
+    setXRange(null);
+    setYRange(null);
+  }, []);
+
+  /** The colour the plot draws a cell of the viewed file in: its class under a colouring, else the plain dot. */
+  const cellColourOf = useCallback((cell: HoveredCell): string | null => {
+    if (cell.sampleId !== activeSampleIdRef.current) return null;
+    if (!overlaySpec) return "#1f77b4";
+    const c = overlaySpec.colors[cell.eventIndex];
+    return c === undefined ? null : overlaySpec.palette[c] ?? null;
+  }, [overlaySpec]);
+
   const payload = useMemo(() => {
     if (!sample) return null;
     const xName = sample.channels[xIdx].key;
@@ -10819,6 +11389,7 @@ export default function App() {
       maxEvents <= 0 ? Infinity : maxEvents,
       contourThreshold,
       overlaySpec,
+      { plotted: true, sizes: pointSizes },
     );
 
     const activeOnly =
@@ -10973,10 +11544,18 @@ export default function App() {
     const cloud = buildCombinedSamplePointCloud(
       inputs,
       maxEvents <= 0 ? Infinity : maxEvents,
+      { origins: true },
     );
     const contributors = cloud.sampleEventCounts.filter(({ eventCount }) => eventCount > 0);
+    const plotted: PlottedPoints = {
+      indices: cloud.eventIndex ?? null,
+      xd: cloud.x,
+      yd: cloud.y,
+      ...(cloud.sampleOf ? { sampleOf: cloud.sampleOf, sampleIds: inputs.map((input) => input.id) } : {}),
+    };
     return {
       ...base,
+      plotted,
       x_b64: encodeFloat32Base64(cloud.x),
       y_b64: encodeFloat32Base64(cloud.y),
       n_events: cloud.eventCount,
@@ -11007,6 +11586,7 @@ export default function App() {
     globalScales,
     workspaceAutomaticRanges,
     overlaySpec,
+    pointSizes,
     overlayBy,
     overlayPalette,
     markerOverlay,
@@ -11488,8 +12068,8 @@ export default function App() {
               label="R host"
               items={[
                 {
-                  label: `Save to SCE${dirty ? " ●" : ""}`,
-                  title: "Save gates, populations, scales, and display settings into the R SingleCellExperiment",
+                  label: `${hostWords("Save to SCE")}${dirty ? " ●" : ""}`,
+                  title: hostWords("Save gates, populations, scales, and display settings into the R SingleCellExperiment"),
                   disabled: !sample || !host.workspaces || hostWorkspaceStatus === "saving",
                   onClick: saveToSce,
                 },
@@ -11597,6 +12177,20 @@ export default function App() {
                 title: "Import a hierarchy from a CSV: gate lines, population lines naming their parents, and, for a CyTOF debarcoding scheme, a table with one row per sample and one 0/1 column per barcode channel. Gates come from the file or from a template, so you tweak them rather than draw them.",
                 onClick: () => void pickFilesOrInput(barcodeRef.current, TABLE_FILE_ACCEPT, "Barcode scheme table").then((files) => { if (files?.[0]) void prepareBarcodeImport(files[0]); }),
               },
+              "separator",
+              {
+                label: activeEntry?.images ? t("Replace cell images (.cvw)…") : t("Attach cell images (.cvw)…"),
+                title: "Attach the waveform file (.cvw) a BD FACSDiscover S8 exports beside this FCS when images were recorded. Each event's image is decoded from it on demand. A folder opened with “+ Folder…”, or an FCS dropped or picked together with its .cvw, attaches it by itself.",
+                disabled: !activeEntry || isSceHost,
+                onClick: () => void attachImagesToActive(),
+              },
+              ...(activeEntry?.images
+                ? [{
+                    label: t("Detach cell images"),
+                    title: `Forget ${activeEntry.images.fileName}. The file itself is not touched.`,
+                    onClick: () => detachImagesFromActive(),
+                  }]
+                : []),
               "separator",
               {
                 label: t("Compare with FACSChorus statistics…"),
@@ -11850,7 +12444,7 @@ export default function App() {
           moves with them. Its position is the same on every tab. */}
       {sample && (
         <div className="gl-tabs" role="tablist">
-          {TABS.filter((tab) => tab.id !== "layout" || LAYOUT_TAB_AVAILABLE).map((tab) => (
+          {TABS.filter((tab) => (tab.id !== "layout" || LAYOUT_TAB_AVAILABLE) && (tab.id !== "images" || workspaceHasImages)).map((tab) => (
             <button
               key={tab.id}
               role="tab"
@@ -11909,20 +12503,16 @@ export default function App() {
             groups={state.groups}
             onGroupAction={runGroupAction}
             onDropFiles={isSceHost ? undefined : (dropped, directoryCount) => {
-              // Same ingestion as "+ Files…": the drop is only another way to pick the files.
-              const files = dropped.filter((file) => file.name.toLowerCase().endsWith(".fcs"));
-              if (files.length === 0) {
+              // Same ingestion as "+ Files…": the drop is only another way to pick the files,
+              // and a .cvw dropped with its FCS is attached as it would be from a folder.
+              const candidates = candidatesWithSidecars(dropped.map((file) => ({ name: file.name, file, handle: null })));
+              if (candidates.length === 0) {
                 setError(directoryCount > 0
                   ? "Folders are not read here — use “+ Folder…” to add a folder of FCS files."
-                  : "Only .fcs files can be dropped here.");
+                  : "Only .fcs files can be dropped here (a .cvw is read beside the FCS of the same name).");
                 return;
               }
-              void importFcsCandidates(files.map((file) => ({
-                id: crypto.randomUUID(),
-                name: file.name,
-                file,
-                handle: null,
-              })));
+              void importFcsCandidates(candidates);
             }}
           />
           <input
@@ -11945,6 +12535,17 @@ export default function App() {
             }}
           />
           <input
+            ref={cvwRef}
+            type="file"
+            accept=".cvw"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file && activeSampleId) void attachImageFile(activeSampleId, file, null);
+              e.target.value = "";
+            }}
+          />
+          <input
             ref={(node) => {
               folderRef.current = node;
               if (node) node.setAttribute("webkitdirectory", "");
@@ -11957,17 +12558,14 @@ export default function App() {
               const files = Array.from(event.target.files ?? []);
               if (files.length > 0) {
                 const rawRoot = files[0].webkitRelativePath.split("/")[0] || "Selected folder";
-                stageFolderImport(rawRoot, files.map((file) => {
+                // The input hands over every file in the folder; the pairing keeps the FCS files
+                // and the .cvw beside each.
+                const listed = files.map((file) => {
                   const pathParts = file.webkitRelativePath.split("/").filter(Boolean);
                   const relativePath = pathParts.length > 1 ? pathParts.slice(1).join("/") : file.name;
-                  return {
-                    id: crypto.randomUUID(),
-                    name: file.name,
-                    file,
-                    handle: null,
-                    sourcePath: `${rawRoot}/${relativePath}`,
-                  };
-                }));
+                  return { name: file.name, file, handle: null, relativePath };
+                });
+                stageFolderImport(rawRoot, candidatesWithSidecars(listed, (source) => `${rawRoot}/${source.relativePath}`));
               }
               event.target.value = "";
             }}
@@ -12003,7 +12601,9 @@ export default function App() {
             onChange={async (e) => {
               const f = e.target.files?.[0];
               e.target.value = "";
-              if (f) await openWorkspaceFromFile(f, null, f.name);
+              if (!f) return;
+              if (isSidecarName(f.name)) await attachCvwFromOpen(f, null);
+              else await openWorkspaceFromFile(f, null, f.name);
             }}
           />
               <input
@@ -12042,7 +12642,7 @@ export default function App() {
           <div className="gl-side-status">
             {isSceHost ? (
               <div className="gl-hint">
-                SingleCellExperiment · workspace revision {hostWorkspaceRevision}
+                {hostObjectName()} · workspace revision {hostWorkspaceRevision}
                 {hostWorkspaceStatus === "saving"
                   ? " · saving…"
                   : hostWorkspaceStatus === "saved"
@@ -12415,11 +13015,168 @@ export default function App() {
                       } else {
                         setOverlayBy(value as Exclude<typeof overlayBy, "coldata" | "channel">);
                       }
+                      // A colouring is not visible under pseudocolour, so choosing one shows dots (David, 2026-10-13).
+                      if (value !== "none" && mode === "pseudocolor") setMode("dots");
                     }}
                   />
                 </span>
                 {overlayBy === "coldata" && overlayColDataColumn && !overlayColDataValues && (
                   <span className="gl-muted">{t("loading {column}…", { column: overlayColDataColumn })}</span>
+                )}
+                {(overlayBy === "objects" || overlayBy === "cellclass") && activeEntry && objectsProgress[activeEntry.id] && (
+                  <span className="gl-muted">
+                    {"error" in objectsProgress[activeEntry.id]
+                      ? (objectsProgress[activeEntry.id] as { error: string }).error
+                      : t("Counting objects… {percent}%", {
+                          percent: Math.round((100 * (objectsProgress[activeEntry.id] as { done: number; total: number }).done) /
+                            Math.max(1, (objectsProgress[activeEntry.id] as { done: number; total: number }).total)),
+                        })}
+                  </span>
+                )}
+                {overlayBy === "cellclass" && (
+                  <label
+                    className="gl-field-inline gl-strictness-field"
+                    title={t("How far from the typical single cell, in robust standard deviations, a one-object event may sit and still count as single")}
+                  >
+                    {t("Strictness")}
+                    <input
+                      type="number"
+                      min={1}
+                      max={10}
+                      step={0.5}
+                      value={cellStrictness}
+                      aria-label={t("Strictness")}
+                      onChange={(e) => setCellStrictness(Math.max(1, Math.min(10, Number(e.target.value) || 3)))}
+                    />
+                  </label>
+                )}
+                {workspaceHasImages && activeEntry?.images && (
+                  <label className="gl-field-inline gl-thumbs-field" title={t("Lay a spread of cell images over the plot, at their events' positions")}>
+                    <input type="checkbox" checked={thumbnailsOn} onChange={(e) => setThumbnailsOn(e.target.checked)} />
+                    {t("Thumbnails")}
+                    <input
+                      type="number"
+                      min={1}
+                      max={400}
+                      value={thumbnailCount}
+                      disabled={!thumbnailsOn}
+                      aria-label={t("How many thumbnails")}
+                      onChange={(e) => setThumbnailCount(Math.max(1, Math.min(400, Math.round(Number(e.target.value) || 1))))}
+                    />
+                    <input
+                      type="range"
+                      min={24}
+                      max={96}
+                      step={4}
+                      value={thumbnailSize}
+                      disabled={!thumbnailsOn}
+                      aria-label={t("Thumbnail size")}
+                      onChange={(e) => setThumbnailSize(Number(e.target.value))}
+                    />
+                    <span className="gl-thumbs-seed" title={t("The seed that picks which cells are shown: the same seed shows the same cells")}>
+                      {t("Seed")}
+                      <input
+                        type="number"
+                        min={1}
+                        max={99999}
+                        value={thumbnailSeed}
+                        disabled={!thumbnailsOn}
+                        aria-label={t("Seed")}
+                        onChange={(e) => setThumbnailSeed(Math.max(1, Math.min(99999, Math.round(Number(e.target.value) || 1))))}
+                      />
+                      <button
+                        type="button"
+                        className="gl-chip"
+                        disabled={!thumbnailsOn}
+                        title={t("Pick a new seed")}
+                        aria-label={t("Pick a new seed")}
+                        onClick={() => setThumbnailSeed(1 + Math.floor(Math.random() * 99999))}
+                      >
+                        ⟳
+                      </button>
+                    </span>
+                    {thumbnailClassLabels.length > 0 && (
+                      <select
+                        className="gl-thumbs-class"
+                        value={thumbnailClass}
+                        disabled={!thumbnailsOn}
+                        aria-label={t("Thumbnails of")}
+                        title={t("Show thumbnails of one class only")}
+                        onChange={(e) => setThumbnailClass(e.target.value)}
+                      >
+                        <option value="all">{t("all cells")}</option>
+                        {thumbnailClassLabels.map((label, i) => <option key={label} value={String(i)}>{label}</option>)}
+                      </select>
+                    )}
+                  </label>
+                )}
+                {activeEntry?.images && (
+                  <label
+                    className="gl-field-inline gl-sizeby-field"
+                    title={t("Draw each point at a size that follows a channel's value, for every event or for one class of the colouring")}
+                  >
+                    {t("Size by")}
+                    <SearchableSelect
+                      label={t("Size by")}
+                      value={sizeByKey ? `channel:${sizeByKey}` : "none"}
+                      options={sizeByOptions}
+                      onChange={(value) => setSizeByKey(value.startsWith("channel:") ? value.slice("channel:".length) : null)}
+                    />
+                    {sizeByKey && thumbnailClassLabels.length > 0 && (
+                      <select className="gl-sizeby-class" value={sizeByClass} aria-label={t("Size the points of")} onChange={(e) => setSizeByClass(e.target.value)}>
+                        <option value="all">{t("all cells")}</option>
+                        {thumbnailClassLabels.map((label, i) => <option key={label} value={String(i)}>{label}</option>)}
+                      </select>
+                    )}
+                  </label>
+                )}
+                {activeEntry?.images && thumbnailClassLabels.length > 0 && (
+                  <details className="gl-separating">
+                    <summary title={t("The channel pair whose biplot best separates two classes of this colouring, ranked by the area under the curve of its best dividing line")}>
+                      {t("Separating plot")}
+                    </summary>
+                    <div className="gl-separating-body">
+                      <div className="gl-separating-row">
+                        <label>
+                          {t("Separate")}
+                          <select value={separation.a} aria-label={t("Separate")} onChange={(e) => setSeparation((p) => ({ ...p, a: e.target.value, results: null }))}>
+                            {thumbnailClassLabels.map((label, i) => <option key={label} value={String(i)}>{label}</option>)}
+                          </select>
+                        </label>
+                        <label>
+                          {t("from")}
+                          <select value={separation.b} aria-label={t("from")} onChange={(e) => setSeparation((p) => ({ ...p, b: e.target.value, results: null }))}>
+                            {thumbnailClassLabels.map((label, i) => <option key={label} value={String(i)}>{label}</option>)}
+                          </select>
+                        </label>
+                        <button type="button" className="gl-chip" onClick={rankSeparation} disabled={separationBusy || separation.a === separation.b}>
+                          {separationBusy ? t("Ranking…") : t("Rank channel pairs")}
+                        </button>
+                      </div>
+                      {separation.results && (separation.results.all.length === 0 ? (
+                        <div className="gl-muted">{t("Too few events in a class to rank")}</div>
+                      ) : (
+                        [
+                          { heading: t("Any channels"), pairs: separation.results.all },
+                          { heading: t("Detectors only"), pairs: separation.results.detectors },
+                        ].map(({ heading, pairs }) => (
+                          <div key={heading} className="gl-separating-group">
+                            <div className="gl-separating-heading">{heading}</div>
+                            <ol className="gl-separating-list">
+                              {pairs.map((p) => (
+                                <li key={`${p.i}-${p.j}`}>
+                                  <button type="button" className="gl-chip" title={t("Show this biplot")} onClick={() => showBiplot(p.i, p.j)}>
+                                    {activeEntry.sample.channelLabel(p.i)} × {activeEntry.sample.channelLabel(p.j)}
+                                  </button>
+                                  <span className="gl-muted"> {t("AUC {auc} · alone {a} / {b}", { auc: p.auc.toFixed(3), a: p.aucI.toFixed(2), b: p.aucJ.toFixed(2) })}</span>
+                                </li>
+                              ))}
+                            </ol>
+                          </div>
+                        ))
+                      ))}
+                    </div>
+                  </details>
                 )}
                   <label
                     className="gl-field-inline gl-palette-field"
@@ -12564,13 +13321,16 @@ export default function App() {
                                                 title={t("Logicle is estimated per channel and shaped by W. Arcsinh is shaped by its cofactor, which sets where the linear region around zero gives way to log. Gates live in raw space, so neither moves an event in or out of a gate.")}
                                                 value={sample.fluorScale(idx)}
                                                 onChange={(e) => {
-                                                  sample.setFluorScale(idx, e.target.value === "arcsinh" ? "arcsinh" : "logicle");
+                                                  sample.setFluorScale(idx, e.target.value === "arcsinh" ? "arcsinh" : e.target.value === "biex" ? "biex" : "logicle");
                                                   pendingScaleRefit.current = true;
                                                   bumpScales();
                                                 }}
                                               >
                                                 <option value="logicle">{t("Logicle")}</option>
                                                 <option value="arcsinh">{t("Arcsinh")}</option>
+                                                {sample.recordedBiex(idx) && (
+                                                  <option value="biex">{t("FlowJo biexponential")}</option>
+                                                )}
                                               </select>
                       ) : (
                         <select className="gl-scatter-scale" aria-label={`${axis} scale`} disabled value="fixed" title={t("This axis has one scale.")}>
@@ -12605,6 +13365,16 @@ export default function App() {
                             A
                           </button>
                         </>
+                      ) : sample.fluorScale(idx) === "biex" ? (
+                        <span
+                          className="gl-scale-val"
+                          title={t("FlowJo's biexponential at the parameters the object or file declares: positive decades, negative decades, width basis and the axis maximum. It has no slider.")}
+                        >
+                          {(() => {
+                            const biex = sample.fluorBiexParams(idx);
+                            return biex ? `pos ${biex.pos} · neg ${biex.neg} · width ${biex.widthBasis} · max ${biex.maxValue.toLocaleString()}` : "";
+                          })()}
+                        </span>
                       ) : (
                         <>
                           <input
@@ -12693,6 +13463,48 @@ export default function App() {
                 </button>
               </div>
             )}
+              {imageService && workspaceHasImages && activeTab === "gating" && (
+                <Suspense fallback={null}>
+                  <CellHoverProbe
+                    plotAreaRef={plotAreaRef}
+                    plotted={(displayed as { plotted?: PlottedPoints } | null)?.plotted ?? null}
+                    xRange={(displayed as { x_range?: [number, number] } | null)?.x_range ?? null}
+                    yRange={(displayed as { y_range?: [number, number] } | null)?.y_range ?? null}
+                    enabled={drawMode === "navigate"}
+                    hasImage={hasImageAt}
+                    onHover={onCellHover}
+                    onPin={onCellPin}
+                  />
+                  <CellMarker
+                    plotAreaRef={plotAreaRef}
+                    xRange={(displayed as { x_range?: [number, number] } | null)?.x_range ?? null}
+                    yRange={(displayed as { y_range?: [number, number] } | null)?.y_range ?? null}
+                    hoverStore={cellHoverStore}
+                    pinned={pinnedCell}
+                    displayPointOf={displayPointOf}
+                    colourOf={cellColourOf}
+                    layoutKey={displayed}
+                  />
+                  {thumbnailsOn && (
+                    <PlotThumbnails
+                      plotAreaRef={plotAreaRef}
+                      plotted={(displayed as { plotted?: PlottedPoints } | null)?.plotted ?? null}
+                      xRange={(displayed as { x_range?: [number, number] } | null)?.x_range ?? null}
+                      yRange={(displayed as { y_range?: [number, number] } | null)?.y_range ?? null}
+                      service={imageService}
+                      activeSampleId={activeSampleId}
+                      resolveEntry={resolveCellEntry}
+                      hasImage={thumbnailInclude}
+                      count={thumbnailCount}
+                      size={thumbnailSize}
+                      seed={thumbnailSeed}
+                      view={imageView}
+                      onPin={setPinnedCell}
+                      layoutKey={displayed}
+                    />
+                  )}
+                </Suspense>
+              )}
               <GatingPlot
                 payload={displayed}
                 actions={gatingPlotActions}
@@ -13136,6 +13948,28 @@ export default function App() {
               </Suspense>
             )}
             </ErrorBoundary>
+            {imagesTabMounted && imageService && workspaceHasImages && (
+              <ErrorBoundary label="images">
+                <Suspense fallback={<div className="gl-empty">{t("Loading the image wall…")}</div>}>
+                  <ImagesTab
+                    key={imagesTabStateKey}
+                    visible={activeTab === "images"}
+                    stateKey={imagesTabStateKey}
+                    service={imageService}
+                    entry={activeEntry ? { id: activeEntry.id, name: activeEntry.name, images: activeEntry.images ?? null, sample: activeEntry.sample } : null}
+                    mask={derived.displayMask ?? derived.activeMask}
+                    populationLabel={derived.displayPopCount > 0
+                      ? t("the checked populations")
+                      : (state.active_population_id && state.populations[state.active_population_id]?.name) || t("all events")}
+                    view={activeEntry ? imageView[activeEntry.id] : undefined}
+                    onViewChange={onCellViewChange}
+                    pinned={pinnedCell}
+                    onPin={setPinnedCell}
+                    onShowOnPlot={() => setActiveTab("gating")}
+                  />
+                </Suspense>
+              </ErrorBoundary>
+            )}
             {/* Mount on first visit, then retain only CompensationTab's lightweight state keeper
                 off-tab. The matrix/gallery/canvas subtree is removed while gating stays active. */}
             {compensationTabMounted && <ErrorBoundary label="compensation">
@@ -13186,6 +14020,27 @@ export default function App() {
           <EmptyState brand={isSceHost ? "GateLabR" : "GateLab"} tutorial={isSceHost ? null : { paused: tour.progress?.status === "paused", onStart: tour.start, onResume: tour.resume }} />
         )}
 
+        {imageService && workspaceHasImages && activeTab === "gating" && cellInspectorDock === "column" && (
+          <aside className={"gl-cell-column" + (cellInspectorCollapsed ? " gl-cell-column-collapsed" : "")} aria-label={t("Cell")}>
+            <Suspense fallback={null}>
+              <CellInspector
+                service={imageService}
+                hoverStore={cellHoverStore}
+                pinned={pinnedCell}
+                resolveEntry={resolveCellEntry}
+                view={imageView}
+                onViewChange={onCellViewChange}
+                onUnpin={() => setPinnedCell(null)}
+                objectCountOf={objectCountOf}
+                cellClassOf={cellClassOf}
+                collapsed={cellInspectorCollapsed}
+                onToggleCollapsed={() => setCellInspectorCollapsed((c) => !c)}
+                dock="column"
+                onToggleDock={() => setCellInspectorDock("pane")}
+              />
+            </Suspense>
+          </aside>
+        )}
         <aside
           className="gl-side"
           style={{ width: sideWidth, display: ["compensation", "illustration", "layout", "proportions", "statistics"].includes(activeTab) ? "none" : undefined }}
@@ -13313,6 +14168,25 @@ export default function App() {
               />
             </div>
           </div>
+          {imageService && workspaceHasImages && activeTab === "gating" && cellInspectorDock === "pane" && (
+            <Suspense fallback={null}>
+              <CellInspector
+                service={imageService}
+                hoverStore={cellHoverStore}
+                pinned={pinnedCell}
+                resolveEntry={resolveCellEntry}
+                view={imageView}
+                onViewChange={onCellViewChange}
+                onUnpin={() => setPinnedCell(null)}
+                objectCountOf={objectCountOf}
+                cellClassOf={cellClassOf}
+                collapsed={cellInspectorCollapsed}
+                onToggleCollapsed={() => setCellInspectorCollapsed((c) => !c)}
+                dock="pane"
+                onToggleDock={() => setCellInspectorDock("column")}
+              />
+            </Suspense>
+          )}
         </aside>
       </div>
 

@@ -30,6 +30,8 @@
  * cofactor — so it stays per-Sample.
  */
 
+import type { BiexParams } from "./biex";
+
 /** What this registry needs from a Sample. Kept minimal so tests can use a stub. */
 export interface ChannelScaleParticipant {
   readonly workspaceScaleContextKey: string;
@@ -40,6 +42,11 @@ export interface ChannelScaleParticipant {
   ownAutoLogicleT(idx: number): number;
   /** Drop cached display coordinates for one channel after a settings change. */
   invalidateChannelForScales(idx: number): void;
+}
+
+/** One string per set of biexponential parameters, for equality. */
+function biexIdentity(p: BiexParams): string {
+  return [p.maxValue, p.pos, p.neg, p.widthBasis, p.channelRange, p.tableChannels ?? null, p.spline ? 1 : 0].join("\u0001");
 }
 
 // The separator is written as an escape: a raw NUL byte made git treat this file as binary.
@@ -76,6 +83,10 @@ export class ChannelScales {
   // linear channels restores the others as arcsinh, as they were.
   private readonly scatterArcsinh = new Set<string>();
   private readonly fluorArcsinh = new Set<string>();
+  // A fluorescence channel shown on FlowJo's biexponential, with the parameters it is shown at:
+  // the axis a GatingSet parsed from a FlowJo workspace, or the workspace itself, declares for
+  // the channel. Workspace-wide as the arcsinh choice is, for the same reason.
+  private readonly fluorBiex = new Map<string, BiexParams>();
   private readonly sharedAutoW = new Map<string, number>();
   private readonly sharedAutoT = new Map<string, number>();
   private readonly participants = new Set<ChannelScaleParticipant>();
@@ -174,6 +185,21 @@ export class ChannelScales {
     return this.fluorArcsinh.has(settingsSlot(contextKey, channelKey));
   }
 
+  /** The biexponential a fluorescence channel is shown on, or undefined when it is not. */
+  fluorBiexParams(contextKey: string, channelKey: string): BiexParams | undefined {
+    return this.fluorBiex.get(settingsSlot(contextKey, channelKey));
+  }
+
+  /** Every channel shown on a biexponential in this scope, with its parameters, for a workspace save. */
+  fluorBiexEntries(contextKey: string): Record<string, BiexParams> {
+    const out: Record<string, BiexParams> = {};
+    const prefix = `${settingsScope(contextKey)}\u0000`;
+    for (const [key, params] of this.fluorBiex) {
+      if (key.startsWith(prefix)) out[key.slice(prefix.length)] = { ...params };
+    }
+    return out;
+  }
+
   /** Explicit settings touching one sample's channels, for its display-transform identity. */
   identityFor(contextKey: string, channelKeys: readonly string[]): unknown[] {
     const out: unknown[] = [];
@@ -183,8 +209,9 @@ export class ChannelScales {
       const cofactor = this.explicitCofactor.get(key);
       const scatterArcsinh = this.scatterArcsinh.has(key);
       const isArcsinh = this.fluorArcsinh.has(key);
-      if (w === undefined && cofactor === undefined && !scatterArcsinh && !isArcsinh) continue;
-      out.push([channelKey, w ?? null, cofactor ?? null, scatterArcsinh, isArcsinh]);
+      const biex = this.fluorBiex.get(key);
+      if (w === undefined && cofactor === undefined && !scatterArcsinh && !isArcsinh && !biex) continue;
+      out.push([channelKey, w ?? null, cofactor ?? null, scatterArcsinh, isArcsinh, biex ? biexIdentity(biex) : null]);
     }
     out.sort((a, b) => String((a as unknown[])[0]).localeCompare(String((b as unknown[])[0])));
     return out;
@@ -241,6 +268,23 @@ export class ChannelScales {
     this.invalidate(contextKey, channelKey);
   }
 
+  /**
+   * Show one fluorescence channel on FlowJo's biexponential at these parameters, or (null) stop.
+   * Workspace-wide, as the arcsinh choice is. The arcsinh choice is left as it was, so a channel
+   * switched to biex and back to logicle is not surprised by an arcsinh it had chosen earlier.
+   */
+  setFluorBiex(contextKey: string, channelKey: string, params: BiexParams | null): void {
+    const key = settingsSlot(contextKey, channelKey);
+    const current = this.fluorBiex.get(key);
+    if (params === null) {
+      if (!this.fluorBiex.delete(key)) return;
+    } else {
+      if (current && biexIdentity(current) === biexIdentity(params)) return;
+      this.fluorBiex.set(key, { ...params });
+    }
+    this.invalidate(contextKey, channelKey);
+  }
+
   setScatterLinear(contextKey: string, channelKey: string, isLinear: boolean): void {
     const key = settingsSlot(contextKey, channelKey);
     if (this.scatterArcsinh.has(key) === !isLinear) return;
@@ -252,11 +296,12 @@ export class ChannelScales {
   /** Drop every setting, e.g. when a new workspace replaces this one. */
   clear(): void {
     const had =
-      this.explicitW.size || this.explicitCofactor.size || this.scatterArcsinh.size || this.fluorArcsinh.size;
+      this.explicitW.size || this.explicitCofactor.size || this.scatterArcsinh.size || this.fluorArcsinh.size || this.fluorBiex.size;
     this.explicitW.clear();
     this.explicitCofactor.clear();
     this.scatterArcsinh.clear();
     this.fluorArcsinh.clear();
+    this.fluorBiex.clear();
     this.sharedAutoW.clear();
     this.sharedAutoT.clear();
     if (had) this.notify();

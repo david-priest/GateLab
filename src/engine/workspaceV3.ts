@@ -153,6 +153,7 @@ const WORKSPACE_V3_ALLOWED_KEYS = [
   // The SCE assay a hosted workspace was drawn from (workspace.ts). Left off this list, a hosted
   // workspace with a compensation lineage was refused on reopening and then overwritten.
   "hostedAssayId",
+  "hostedChannelTransforms",
 ] as const;
 
 const SAMPLE_V3_REQUIRED_KEYS = ["fileName", "dataPath", "logicleW", "assay"] as const;
@@ -167,6 +168,7 @@ const SAMPLE_V3_ALLOWED_KEYS = [
   "scatterCofactor",
   "scatterLinear",
   "fluorArcsinh",
+  "fluorBiex",
   "cytofCofactor",
   "instrumentMode",
   "labels",

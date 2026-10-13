@@ -229,10 +229,12 @@ describe("FACSChorus experiment files", () => {
     expect(chorusDisplayFromKeywords(null)).toBeNull();
     expect(chorusDisplayFromKeywords({ $PAR: "2", $P1N: "FSC-A", $P1R: "2147483648", $P2N: "PE-A", $P2R: "2147483648" })).toBeNull();
     const display = chorusDisplayFromKeywords({
-      $PAR: "3",
+      $PAR: "4",
       $P1N: "FSC-A", $P1R: "2147483648", P1M: "7", P1MS: "462662",
-      $P2N: "PE-A", $P2R: "2147483648", P2M: "7", P2MS: "42898",
+      $P2N: "PE-A", $P2R: "2147483648", P2M: "7", P2MS: "42898", $P2D: "Logarithmic,9,1",
       $P3N: "BV421-A", $P3R: "2147483648", P3M: "7", P3MS: "-1",
+      // FACSChorus 5.4 wrote the logicle keywords on scatter too; its $PnD says the axis is linear.
+      $P4N: "SSC (Imaging)-A", $P4R: "2147483648", P4M: "7", P4MS: "462662", $P4D: "Linear,0,134217727",
     })!;
     expect([...display.keys()]).toEqual(["FSC-A", "PE-A"]);
     expect(display.get("PE-A")).toEqual({ T: 2147483648, M: 7, R: 42898 });

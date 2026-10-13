@@ -26,6 +26,7 @@ import {
 } from "../engine/workspaceV3";
 import type { Sample } from "../engine/sample";
 import type { GateLabHostDatasetDescriptor } from "./datasetContract";
+import { translateGatingSetHierarchy } from "./hostedHierarchy";
 import type {
   GateLabHostWorkspaceEnvelope,
   GateLabHostWorkspaceSource,
@@ -37,6 +38,8 @@ export interface HostedWorkspaceRestore {
   workspace: WorkspaceFile | WorkspaceFileV3;
   sourceFormat: GateLabHostWorkspaceSource;
   sourceGateSpace: GateValueSpace | null;
+  /** From a GatingSet's hierarchy: the nodes not restored, each as "path: reason". */
+  leftOut?: readonly string[];
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -99,7 +102,7 @@ const TRANSFORM_PARAMETERS: Record<TransformSpec["kind"], readonly string[]> = {
   flowjoChannels: [],
 };
 
-function transformSpec(value: unknown, label: string): TransformSpec {
+export function transformSpec(value: unknown, label: string): TransformSpec {
   const source = record(value, label);
   const kind = stringValue(source.kind);
   if (!(kind in TRANSFORM_PARAMETERS)) {
@@ -127,6 +130,10 @@ function transformSpec(value: unknown, label: string): TransformSpec {
     spec[parameter] = number;
   }
   if (kind === "biex" && table !== undefined) spec.tableChannels = table;
+  if (kind === "biex" && source.spline !== undefined) {
+    if (typeof source.spline !== "boolean") throw new Error(`Saved GateLabR workspace has an invalid ${label}.`);
+    if (source.spline) spec.spline = true;
+  }
   // Gating-ML's own flog, and a transformation's bounds: dropping either re-reads the gate with
   // other events, so they are carried, and a malformed one throws like any other parameter.
   if (kind === "flog" && source.standard !== undefined) {
@@ -503,6 +510,16 @@ export async function readHostedWorkspace(
   }
   if (envelope.sourceFormat === "gatelabr-legacy") {
     return translateLegacyWorkspace(raw, dataset);
+  }
+  if (envelope.sourceFormat === "gatingset-hierarchy") {
+    // Every gate states its space and transforms, so there is no source space to convert from.
+    const translation = translateGatingSetHierarchy(raw, dataset, transformSpec);
+    return {
+      workspace: translation.workspace,
+      sourceFormat: "gatingset-hierarchy",
+      sourceGateSpace: null,
+      leftOut: translation.leftOut,
+    };
   }
   if (
     typeof raw === "object" &&

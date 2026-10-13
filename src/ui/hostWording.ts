@@ -10,16 +10,57 @@
 // import dialogs), where swapping the word would make the two the same.
 
 export type HostWording = "files" | "samples";
+/** The R object a samples host serves, where the text names it; "SCE" is written in the sources. */
+export type HostObjectName = "SingleCellExperiment" | "GatingSet";
 
 let wording: HostWording = "files";
+let objectName: HostObjectName = "SingleCellExperiment";
 
 /** Set once, where the app is mounted with its host. */
-export function setHostWording(next: HostWording): void {
+export function setHostWording(next: HostWording, object?: HostObjectName): void {
   wording = next;
+  objectName = object ?? "SingleCellExperiment";
 }
 
 export function hostWording(): HostWording {
   return wording;
+}
+
+export function hostObjectName(): HostObjectName {
+  return objectName;
+}
+
+/**
+ * The sources say SCE, SingleCellExperiment, colData and rowData. On a GatingSet the first two
+ * are the object's own name, and the two parts are what the object has in their place: a
+ * population written as a colData column goes to the hierarchy as a node, and the display names
+ * go to its marker names. Only the sentences that name those parts are listed; a sentence that
+ * says SCE is swapped by the rule below.
+ */
+const GATINGSET_SENTENCES: Readonly<Record<string, string>> = {
+  "Persist division calls for compatible samples in SingleCellExperiment colData": "Write populations to the GatingSet's hierarchy as nodes",
+  "Persist the current display names in SingleCellExperiment rowData": "Write the current display names to the GatingSet's marker names",
+  "This host cannot write division calls into SCE colData.": "This host cannot write populations into the GatingSet's hierarchy.",
+  "Save gates, populations, scales, and display settings into the R SingleCellExperiment": "Save gates, populations, scales and display settings into the R GatingSet, and write the populations to its hierarchy",
+  "SingleCellExperiment metadata": "the GatingSet's keywords",
+  "SCE memberships under per-file trees": "GatingSet memberships under per-sample trees",
+  "This host cannot write panel labels into SCE rowData.": "This host cannot write panel labels into the GatingSet's marker names.",
+  "to SCE rowData.": "to the GatingSet's marker names.",
+  "SCE colData already contains '{column}'. Replace that column with the current division calls?": "The GatingSet's hierarchy already has a node '{column}'. Replace it with the current population?",
+  "Wrote division calls to SCE colData '{column}'": "Wrote the population to the GatingSet's hierarchy as '{column}'",
+  "SCE colData column": "node of the GatingSet's hierarchy",
+  "to SCE colData.": "to the GatingSet's hierarchy as nodes.",
+  "This host cannot write sample metadata into SCE colData.": "This host cannot write sample metadata into the GatingSet's pData.",
+};
+const NAMES_SCE = /\bSingleCellExperiment\b|\bSCE\b/;
+
+/** The sentence with the object named, or null where it names no SCE or there is no other object. */
+export function objectSentence(source: string): string | null {
+  if (objectName !== "GatingSet") return null;
+  const listed = GATINGSET_SENTENCES[source];
+  if (listed) return listed;
+  if (!NAMES_SCE.test(source)) return null;
+  return source.replace(/\bSingleCellExperiment\b/g, "GatingSet").replace(/\bSCE\b/g, "GatingSet");
 }
 
 /** A sentence about real files, in any host: formats, exports, pickers, FCS keywords. */
@@ -113,7 +154,8 @@ export function samplesSentence(source: string): Readonly<{ en: string; ja?: str
 
 /** For text built outside the translation function: the sentence in this host's words. */
 export function hostWords(source: string): string {
-  return wording === "samples" ? samplesSentence(source)?.en ?? source : source;
+  const worded = wording === "samples" ? samplesSentence(source)?.en ?? source : source;
+  return objectSentence(worded) ?? worded;
 }
 
 /** The Japanese of a sentence samplesSentence() rewrote: the same swap, of the one word. */

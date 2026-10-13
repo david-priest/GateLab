@@ -9,6 +9,8 @@ export interface SampleListItem {
   eventCount: number;
   channelCount: number;
   sourcePath?: string;
+  /** The cell images attached to the file, when any: the waveform file's name, for the badge. */
+  images?: string;
   /** The file's tailored gates, when it has any: their names, for the badge and its tooltip. */
   tailored?: readonly string[];
   /** The group the file is in, when it is in one, and its colour. */
@@ -623,6 +625,11 @@ export function SampleNavigator({
                     title={t("{count} gates tailored for this file: {names}", { count: item.tailored.length, names: item.tailored.join(", ") })}
                   >
                     {item.tailored.length}
+                  </span>
+                )}
+                {item.images && (
+                  <span className="gl-sample-images" title={t("Cell images attached: {name}", { name: item.images })}>
+                    {t("img")}
                   </span>
                 )}
                 {localizedCompactNumber.format(item.eventCount)} · {item.channelCount}ch

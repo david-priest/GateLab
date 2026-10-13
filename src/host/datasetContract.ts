@@ -1,3 +1,5 @@
+import type { TransformSpec } from "../engine/models";
+
 export const GATELAB_DATASET_CONTRACT_VERSION = 1 as const;
 
 export type GateLabInstrument = "flow" | "cytof" | "unknown";
@@ -20,6 +22,14 @@ export interface GateLabHostChannelDescriptor {
   pnn?: string;
   /** Original FCS $PnS marker description when available. */
   pns?: string;
+  /**
+   * The host object's own display transform for this channel, where it holds one: a GatingSet
+   * keeps each channel's transform with its data (a logicle, an arcsinh, FlowJo's log or
+   * biexponential). It sets the channel's axis at the first open, so a gate drawn in the app is
+   * in the object's space and goes back to it as a gate; a saved workspace's scales win on later
+   * opens (hostedSample.ts). Absent for an SCE, whose transform is the assay's.
+   */
+  transform?: TransformSpec;
 }
 
 export interface GateLabHostAssayDescriptor {
