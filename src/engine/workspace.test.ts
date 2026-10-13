@@ -665,3 +665,22 @@ describe("per-file hierarchies in the workspace file", () => {
     expect(() => validateWorkspace(id)).toThrow(/hierarchyId/);
   });
 });
+
+describe("the drawn transforms a hosted save carries", () => {
+  // A workspace saved through GateLabR states each channel's display transform beside the
+  // drawn assay, which R keeps on the object's rows (rowData(sce)$gatelab_transform).
+  it("accepts transform specs by channel key, and refuses a kind it does not know", () => {
+    const ws = cloneWs(makeWs());
+    (ws as unknown as { hostedChannelTransforms: unknown }).hostedChannelTransforms = {
+      "FSC-A": { kind: "identity" },
+      "FL1-A": { kind: "logicle", T: 262144, W: 0.5, M: 4.5, A: 0 },
+      "FL2-A": { kind: "biex", maxValue: 262144, pos: 4.5, neg: 0, widthBasis: -10, channelRange: 256, spline: true },
+    };
+    expect(validateWorkspace(ws)).toBe(true);
+    const { ws: back } = readWorkspaceBytes(packWorkspaceReference(ws));
+    expect((back as unknown as { hostedChannelTransforms: Record<string, { kind: string }> }).hostedChannelTransforms["FL1-A"].kind).toBe("logicle");
+    const stray = cloneWs(makeWs());
+    (stray as unknown as { hostedChannelTransforms: unknown }).hostedChannelTransforms = { "FL1-A": { kind: "hyperlog" } };
+    expect(() => validateWorkspace(stray)).toThrow(/hostedChannelTransforms/);
+  });
+});

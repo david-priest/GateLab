@@ -5,6 +5,7 @@ import type { GateLabHostRowDataPort } from "./rowDataContract";
 import type { GateLabHostWorkspacePort } from "./workspaceContract";
 
 export type GateLabHostKind = "browser" | "r-sce";
+export type GateLabHostObjectName = "SingleCellExperiment" | "GatingSet";
 
 export const GATELAB_HOST_CONTRACT_VERSION = 1 as const;
 
@@ -62,6 +63,12 @@ export interface GateLabHostAdapter {
   readonly id: string;
   readonly kind: GateLabHostKind;
   readonly label: string;
+  /**
+   * The R object the host serves, as its class is written ("SingleCellExperiment" or
+   * "GatingSet"), for the app's text: the host's kind says what it can do, this says what it
+   * holds. Absent on the browser host.
+   */
+  readonly objectName?: GateLabHostObjectName;
   readonly build?: Readonly<GateLabHostBuild>;
   readonly capabilities: Readonly<GateLabHostCapabilities>;
   readonly datasets?: GateLabHostDatasetPort;

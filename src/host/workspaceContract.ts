@@ -2,9 +2,15 @@ import type { GateLabHostPopulationSampleMask } from "./colDataContract";
 
 export const GATELAB_HOST_WORKSPACE_CONTRACT_VERSION = 1 as const;
 
+/**
+ * What `workspaceJson` holds: a GateLab workspace file, the legacy GateLabR gating record, or a
+ * GatingSet's own hierarchy (hostedHierarchy.ts), which the host sends when the object holds no
+ * GateLab record yet and the app translates into gates and populations at open.
+ */
 export type GateLabHostWorkspaceSource =
   | "gatelab-workspace"
-  | "gatelabr-legacy";
+  | "gatelabr-legacy"
+  | "gatingset-hierarchy";
 
 /**
  * A workspace is small enough for Shiny's websocket, but it travels as an

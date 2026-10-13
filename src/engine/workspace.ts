@@ -8,6 +8,8 @@ import { zipSync, unzipSync, strToU8, strFromU8 } from "fflate";
 import type { GateEdgeMode } from "../ui/gateEdgeModes";
 import { isRectangleBounds, validCurl, type Gate, type PopulationMap } from "./models";
 import type { DisplayMode, ExternalSpillover } from "./sample";
+import type { BiexParams } from "./biex";
+import type { TransformSpec } from "./models";
 import { readZipFileEntries } from "./workspaceArchiveStream";
 import {
   PORTABLE_ASSAY_MANIFEST_PATH,
@@ -40,6 +42,30 @@ export interface GatingFontSizes {
   gate: number;
 }
 
+/**
+ * An image source attached to a sample, as the workspace records it: enough to find the file
+ * again beside the FCS and to refuse another file of the same name. The images themselves are
+ * never copied into a workspace; a FACSDiscover S8 waveform file is hundreds of megabytes to
+ * several gigabytes and stays where the instrument exported it.
+ */
+export interface CvwImageRecord {
+  kind: "cvw";
+  fileName: string;
+  eventCount: number;
+  recordingId?: string;
+}
+
+export type CellImageRecord = CvwImageRecord;
+
+export function isCellImageRecord(value: unknown): value is CellImageRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.kind === "cvw" &&
+    typeof record.fileName === "string" && record.fileName.length > 0 &&
+    typeof record.eventCount === "number" && Number.isInteger(record.eventCount) && record.eventCount >= 0 &&
+    (record.recordingId === undefined || typeof record.recordingId === "string");
+}
+
 export interface WorkspaceSample {
   /** Stable identity for saved Illustration/Layout bindings. Optional in older workspaces. */
   sampleId?: string;
@@ -51,6 +77,12 @@ export interface WorkspaceSample {
   scatterLinear?: string[];
   /** Flow fluorescence channel keys shown with arcsinh instead of their logicle. */
   fluorArcsinh?: string[];
+  /**
+   * Fluorescence channels shown on FlowJo's biexponential, each with the parameters it is shown
+   * at: the axis a GatingSet from a FlowJo workspace declares for the channel. Display only; a
+   * GateLab without the field shows the channel on its logicle, and no gate moves.
+   */
+  fluorBiex?: Record<string, BiexParams>;
   cytofCofactor?: number; // per-sample global CyTOF arcsinh cofactor
   compensationOn: boolean; // per-sample
   instrumentMode?: "auto" | "flow" | "cytof"; // per-sample instrument override ('auto' = detected)
@@ -80,6 +112,12 @@ export interface WorkspaceSample {
    * would compensate with the file's matrix and say nothing.
    */
   externalSpillover?: ExternalSpillover;
+  /**
+   * The cell images attached to this file (a FACSDiscover S8 `.cvw` beside it), linked by name
+   * and identity and never copied. Absent in workspaces saved before GateLab read images; an
+   * older GateLab ignores it, since nothing else depends on it.
+   */
+  images?: CellImageRecord[];
 }
 
 export interface WorkspaceFile {
@@ -174,6 +212,14 @@ export interface WorkspaceFile {
    * the linear assay, whose gate space is the same under CyTOF, so it raises no feature flag.
    */
   hostedAssayId?: string;
+  /**
+   * The display transform each channel was drawn on, by channel key, in a workspace saved
+   * through GateLabR: the active sample's `transformSpec()` at the save (the scales are
+   * workspace-wide). R writes it to `rowData(sce)$gatelab_transform`, so the object states
+   * its axes as a GatingSet does, for R-side plots and for an export to a GatingSet. Read by
+   * nothing in the app on reopen: the saved scales restore the axes themselves.
+   */
+  hostedChannelTransforms?: Record<string, TransformSpec>;
   /** Renameable freeform plot sheets. Optional for every workspace saved before Layout existed. */
   layout?: LayoutWorkspace;
   plotting?: Record<string, unknown>;
@@ -358,6 +404,27 @@ function positiveNumericRecord(value: unknown): value is Record<string, number> 
   return isRecord(value) && Object.entries(value).every(
     ([key, entry]) => key.length > 0 && typeof entry === "number" && Number.isFinite(entry) && entry > 0,
   );
+}
+
+/** Each entry a transform spec: a known kind, every other field a finite number, a boolean or a small record. */
+function transformRecord(value: unknown): value is Record<string, TransformSpec> {
+  const kinds = new Set(["identity", "asinh", "logicle", "biex", "wsplog", "flog", "flowjoChannels"]);
+  return isRecord(value) && Object.entries(value).every(([key, entry]) =>
+    key.length > 0 && isRecord(entry) && typeof entry.kind === "string" && kinds.has(entry.kind));
+}
+
+/** Each entry a biexponential's five numbers, with an optional integer table resolution. */
+function biexRecord(value: unknown): value is Record<string, BiexParams> {
+  return isRecord(value) && Object.entries(value).every(([key, entry]) => {
+    if (key.length === 0 || !isRecord(entry)) return false;
+    const numbers = ["maxValue", "pos", "neg", "widthBasis", "channelRange"].every(
+      (field) => typeof entry[field] === "number" && Number.isFinite(entry[field] as number),
+    );
+    const table = entry.tableChannels;
+    const spline = entry.spline;
+    return numbers && (table === undefined || (typeof table === "number" && Number.isInteger(table) && table > 1))
+      && (spline === undefined || typeof spline === "boolean");
+  });
 }
 
 const DIVISION_PROFILE_KEYS = new Set([
@@ -561,6 +628,9 @@ export function validateWorkspace(ws: WorkspaceFile): true {
     ) {
       invalidWorkspace(`sample ${i + 1} has an invalid arcsinh-fluorescence channel list.`);
     }
+    if (sample.fluorBiex !== undefined && !biexRecord(sample.fluorBiex)) {
+      invalidWorkspace(`sample ${i + 1} has an invalid biexponential channel list.`);
+    }
     if (sample.cytofCofactor !== undefined &&
         (typeof sample.cytofCofactor !== "number" || !Number.isFinite(sample.cytofCofactor) || sample.cytofCofactor <= 0)) {
       invalidWorkspace(`sample ${i + 1} has an invalid CyTOF cofactor.`);
@@ -584,6 +654,7 @@ export function validateWorkspace(ws: WorkspaceFile): true {
   if (ws.illustration?.figure !== undefined && !isFigureSpec(ws.illustration.figure)) invalidWorkspace("illustration figure settings are malformed.");
   if (ws.illustrationPresets !== undefined && (!Array.isArray(ws.illustrationPresets) || ws.illustrationPresets.some(p => !isRecord(p) || !isRecord(p.config) || (p.config.figure !== undefined && !isFigureSpec(p.config.figure))))) invalidWorkspace("illustration preset settings are malformed.");
   if (ws.hostedAssayId !== undefined && (typeof ws.hostedAssayId !== "string" || !ws.hostedAssayId)) invalidWorkspace("hostedAssayId must be a non-empty string.");
+  if (ws.hostedChannelTransforms !== undefined && !transformRecord(ws.hostedChannelTransforms)) invalidWorkspace("hostedChannelTransforms must map channel keys to transform specs.");
 
   if (!isRecord(ws.scales) || !isRecord(ws.scales.globalScales)) {
     invalidWorkspace("shared scale settings are missing or invalid.");
@@ -845,6 +916,10 @@ export function validateWorkspace(ws: WorkspaceFile): true {
       Object.entries(wss.identity).some(([k, v]) => !["$TOT", "$DATE", "$BTIM", "$ETIM", "GUID"].includes(k) || typeof v !== "string")
     )) {
       invalidWorkspace(`sample "${wss.fileName}" has a malformed identity.`);
+    }
+    // Attached images: a list of records naming the source file; nothing else is accepted.
+    if (wss.images !== undefined && (!Array.isArray(wss.images) || !wss.images.every(isCellImageRecord))) {
+      invalidWorkspace(`sample "${wss.fileName}" has a malformed images record.`);
     }
   }
   const selectedGate = ws.gating.selected_gate_id;

@@ -13,7 +13,7 @@ import type { FcsFile, NumericColumn } from "./fcs";
 import type { AssayData, GateAssayData } from "./gates";
 import { drawnRaw, isUnbounded, type Gate, type GateSpace, type GateTransforms, type TransformSpec } from "./models";
 import { resolveChannels, type ResolvedChannel, isImagingFeature } from "./channels";
-import { biexTransform, flogTransform, wspLogTransform } from "./biex";
+import { biexTransform, flogTransform, wspLogTransform, type BiexParams } from "./biex";
 import { flowJoGridScale } from "./flowjoGrid";
 import type { MatrixChannelBinding } from "./compensationCompatibility";
 import type {
@@ -155,9 +155,25 @@ export type DisplayMode = "pseudocolor" | "dots" | "contour";
 /** Max points drawn per plot; more are downsampled for speed (gating uses all events). */
 export const PLOT_CAP = 50000;
 
+/**
+ * The points a payload plots, kept as arrays beside their base64 form for code that needs to go
+ * from a plotted point back to an event (hover on a cell image). Only present when asked for.
+ */
+export interface PlottedPoints {
+  /** The event index of each plotted point; null when plotted point k is event k. */
+  indices: Int32Array | null;
+  /** Display-space coordinates of each plotted point. */
+  xd: Float32Array;
+  yd: Float32Array;
+  /** Pooled plots: which file each point came from, as a position in `sampleIds`. */
+  sampleOf?: Uint16Array;
+  sampleIds?: string[];
+}
+
 export interface ScatterPayload {
   x_b64: string;
   y_b64: string;
+  plotted?: PlottedPoints;
   x_label: string;
   y_label: string;
   x_range: [number, number];
@@ -186,6 +202,8 @@ export interface ScatterPayload {
   color_b64?: string;
   color_palette?: string[];
   color_labels?: string[];
+  /** Per plotted point, a mark radius in tenths of a pixel; 0 is the plot's own size. */
+  size_b64?: string;
 }
 
 /** Per-event palette index (length = nEvents) + the palette/labels it indexes, for the colour overlay. */
@@ -273,6 +291,9 @@ export function maxCoefficientDelta(a: DisplaySpillover, b: DisplaySpillover): n
   return worst;
 }
 
+/** The axes a flow fluorescence channel can be shown on. */
+export type FluorScale = "logicle" | "arcsinh" | "biex";
+
 export interface SampleOpts {
   /** CyTOF arcsinh cofactor (default 5). */
   cytofCofactor?: number;
@@ -285,6 +306,12 @@ export interface SampleOpts {
    * caches apart from another's, whose values are not interchangeable.
    */
   hostedAssay?: { id: string; space: "linear" | "display" };
+  /**
+   * The host object's own transform per channel key (a GatingSet's), so the sample can show a
+   * channel on the object's biexponential when asked (fluorScale "biex"); a logicle travels in
+   * the keywords instead (hostedSample.ts). Read only for the biexponential.
+   */
+  channelTransforms?: Readonly<Record<string, TransformSpec>>;
   /**
    * Workspace-wide owner of display scales. When supplied, logicle W and the scatter scale are
    * read from and written to it, so every file drawn together shares one transform per channel
@@ -598,6 +625,12 @@ export class Sample {
     this.hostedAssay = opts.hostedAssay ?? null;
     this.channels = resolveChannels(fcs);
     this.channels.forEach((c, i) => this.byName.set(c.key, i));
+    for (const [key, spec] of Object.entries(opts.channelTransforms ?? {})) {
+      if (spec.kind !== "biex") continue;
+      const { kind: _kind, ...params } = spec;
+      void _kind;
+      this.recordedBiexByKey.set(key, params);
+    }
     const pnnToKey = new Map<string, string>();
     for (const c of this.channels) pnnToKey.set(c.pnn, c.key);
     this._spillover = extractDisplaySpillover(
@@ -1872,6 +1905,22 @@ export class Sample {
    */
   attachChannelScales(scales: ChannelScales): () => void {
     this.channelScales = scales;
+    // What this sample chose for its axes before it joined the workspace -- a hosted object's
+    // arcsinh at its cofactor, or its biexponential, applied at open from the object's
+    // transforms -- goes into the shared scales where they hold no choice for the channel yet,
+    // because once attached the shared choice is the one every read returns. A saved
+    // workspace restores its own scales after this, and wins; a sample attached later does
+    // not overwrite a choice the workspace already holds.
+    const context = this.workspaceScaleContextKey;
+    this.channels.forEach((channel, idx) => {
+      const key = channel.key;
+      if (!key) return;
+      if (this.fluorArcsinh.has(idx) && !scales.isFluorArcsinh(context, key)) scales.setFluorArcsinh(context, key, true);
+      const biex = this.fluorBiexOverride.get(idx);
+      if (biex && scales.fluorBiexParams(context, key) === undefined) scales.setFluorBiex(context, key, biex);
+      const cofactor = this.scatterCofactorOverride.get(idx);
+      if (cofactor !== undefined && scales.scatterCofactor(context, key) === undefined) scales.setScatterCofactor(context, key, cofactor);
+    });
     // A newly added sample can be rendered once before React's attachment effect runs. Any
     // transforms, display columns or ranges warmed in that render used the sample's fallback
     // scales, so discard them before the shared settings become authoritative.
@@ -1946,6 +1995,12 @@ export class Sample {
       // Linear unless asked for arcsinh: a shape feature is bounded and mostly zero, and a
       // logicle collapsed it. FACSChorus shows these Linear too.
       t = this.fluorIsArcsinh(idx) ? asinhTransform(this.currentScatterCofactor(idx)) : IDENTITY;
+    } else if (this.fluorBiexParams(idx)) {
+      // FlowJo's biexponential at the parameters the object or file declares for the channel
+      // (biex.ts): the axis FlowJo, ggcyto and a GatingSet show. Chosen per channel; moves no
+      // gate, as every flow display choice.
+      const b = biexTransform(this.fluorBiexParams(idx)!);
+      t = { kind: "asinh", forward: (v) => b.forward(v), inverse: (v) => b.inverse(v) };
     } else if (this.fluorIsArcsinh(idx)) {
       // Arcsinh cofactor 150 for a fluorescence channel, chosen per channel. It is the same
       // transform the unhealthy-logicle path below falls back to, and the same one GateLabR uses
@@ -2036,6 +2091,10 @@ export class Sample {
   private readonly scatterArcsinh = new Set<number>();
   /** Fallback for a Sample with no ChannelScales owner; mirrors scatterArcsinh. */
   private readonly fluorArcsinh = new Set<number>();
+  /** Per-sample fallback for the biexponential choice, when no registry owns the scales. */
+  private readonly fluorBiexOverride = new Map<number, BiexParams>();
+  /** The host object's biexponential per channel key (SampleOpts.channelTransforms). */
+  private readonly recordedBiexByKey = new Map<string, BiexParams>();
 
   /**
    * True for a flow scatter axis — the only channels the scatter scale control applies to.
@@ -2123,26 +2182,77 @@ export class Sample {
   }
 
   /** Display scale for a flow fluorescence channel. */
-  fluorScale(idx: number): "logicle" | "arcsinh" {
+  fluorScale(idx: number): FluorScale {
+    if (this.fluorBiexParams(idx)) return "biex";
     return this.fluorIsArcsinh(idx) ? "arcsinh" : "logicle";
   }
 
   /**
-   * Switch a flow fluorescence channel between its logicle and arcsinh (cofactor 150).
+   * Switch a flow fluorescence channel between its logicle, arcsinh (cofactor 150) and FlowJo's
+   * biexponential at the parameters the channel records (recordedBiex), which is offered only
+   * where the object or file declared one.
    *
    * Gates are stored in raw space for flow, so this never moves a gate -- only what the axis
    * looks like. Any logicle W the user set is kept, so switching back restores their axis.
    */
-  setFluorScale(idx: number, scale: "logicle" | "arcsinh"): void {
+  setFluorScale(idx: number, scale: FluorScale): void {
     if (!this.isFluorChannel(idx)) return;
     const key = this.channels[idx]?.key;
+    const biex = scale === "biex" ? this.recordedBiex(idx) : null;
+    if (scale === "biex" && !biex) return;
     if (this.channelScales && key) {
+      this.channelScales.setFluorBiex(this.workspaceScaleContextKey, key, biex);
       this.channelScales.setFluorArcsinh(this.workspaceScaleContextKey, key, scale === "arcsinh");
       return;
     }
+    if (biex) this.fluorBiexOverride.set(idx, biex);
+    else this.fluorBiexOverride.delete(idx);
     if (scale === "arcsinh") this.fluorArcsinh.add(idx);
     else this.fluorArcsinh.delete(idx);
     this.invalidateChannel(idx);
+  }
+
+  /** The biexponential the object or file declares for a channel, which the axis can be switched to. */
+  recordedBiex(idx: number): BiexParams | null {
+    const key = this.channels[idx]?.key;
+    const params = key ? this.recordedBiexByKey.get(key) : undefined;
+    return params ? { ...params } : null;
+  }
+
+  /** The biexponential a fluorescence channel is shown on, or null when it is on its logicle or arcsinh. */
+  fluorBiexParams(idx: number): BiexParams | null {
+    if (this.instrument !== "flow") return null;
+    const key = this.channels[idx]?.key;
+    if (this.channelScales && key) return this.channelScales.fluorBiexParams(this.workspaceScaleContextKey, key) ?? null;
+    return this.fluorBiexOverride.get(idx) ?? null;
+  }
+
+  /** Channels shown on a biexponential, with their parameters, for workspace save. */
+  fluorBiexEntries(): Record<string, BiexParams> {
+    const out: Record<string, BiexParams> = {};
+    this.channels.forEach((channel, idx) => {
+      const params = this.fluorBiexParams(idx);
+      if (params) out[channel.key] = params;
+    });
+    return out;
+  }
+
+  /** Restore biexponential channels from a saved workspace; the parameters saved are the ones shown. */
+  applyFluorBiex(entries: Readonly<Record<string, BiexParams>>): void {
+    for (const [key, params] of Object.entries(entries)) {
+      const idx = this.byName.get(key);
+      if (idx === undefined || !this.isFluorChannel(idx)) continue;
+      // The saved parameters become the channel's recorded axis, so the Scales tab offers them.
+      this.recordedBiexByKey.set(key, { ...params });
+      if (this.channelScales) {
+        this.channelScales.setFluorBiex(this.workspaceScaleContextKey, key, params);
+        this.channelScales.setFluorArcsinh(this.workspaceScaleContextKey, key, false);
+        continue;
+      }
+      this.fluorBiexOverride.set(idx, { ...params });
+      this.fluorArcsinh.delete(idx);
+      this.invalidateChannel(idx);
+    }
   }
 
   /** Channel keys displayed with arcsinh instead of logicle, for workspace save. */
@@ -2581,6 +2691,8 @@ export class Sample {
     if (isScatterChannel(key) || isScatterChannel(pnn) || this.isImagingFeatureAxis(idx)) {
       return { kind: "asinh", cofactor: this.currentScatterCofactor(idx) };
     }
+    const biex = this.fluorBiexParams(idx);
+    if (biex) return { kind: "biex", ...biex };
     // A fluorescence channel on arcsinh (chosen), or the unhealthy-logicle fallback: both
     // display asinh at the channel's current fluor cofactor, and the spec says so.
     return { kind: "asinh", cofactor: this.currentFluorCofactor(idx) };
@@ -2774,6 +2886,10 @@ export class Sample {
     if (t.kind === "logicle") {
       return logicleTicks(fwd, inv, axisRange, this.logicleT(idx));
     }
+    // Flow signal on FlowJo's biexponential: decade labels as a logicle axis gets them, the
+    // object's maxValue bounding the decades as T does there.
+    const biex = this.instrument === "flow" ? this.fluorBiexParams(idx) : null;
+    if (biex) return logicleTicks(fwd, inv, axisRange, biex.maxValue);
     // Flow signal on arcsinh -- either chosen, or the unhealthy-logicle fallback. scatterTicks
     // is not scatter-specific: it lays out raw-unit decades over the visible range and is what
     // any asinh axis needs. Without it the axis fell through to D3's linear ticks and was
@@ -2802,6 +2918,7 @@ export class Sample {
     plotCap = PLOT_CAP,
     contourThreshold = 5,
     overlay?: OverlaySpec | null,
+    options?: { plotted?: boolean; sizes?: Uint8Array | null },
   ): ScatterPayload {
     const xdFull = this.displayColumn(xIdx);
     const ydFull = this.displayColumn(yIdx);
@@ -2896,6 +3013,19 @@ export class Sample {
         color_labels: overlay.labels,
       };
     }
+    // Point sizes: a per-event radius in tenths of a pixel (0 = the plot's own), subset like the colours.
+    let sizeFields: Partial<ScatterPayload> = {};
+    if (options?.sizes) {
+      const src = options.sizes;
+      let sd: Uint8Array;
+      if (indices) {
+        sd = new Uint8Array(indices.length);
+        for (let k = 0; k < indices.length; k++) sd[k] = src[indices[k]] ?? 0;
+      } else {
+        sd = src.length === xd.length ? src : src.slice(0, xd.length);
+      }
+      sizeFields = { size_b64: encodeUint8Base64(sd) };
+    }
 
     return {
       x_b64: encodeFloat32Base64(xd),
@@ -2926,6 +3056,8 @@ export class Sample {
       x_logicle_ticks: xTicks,
       y_logicle_ticks: yTicks,
       ...overlayFields,
+      ...sizeFields,
+      ...(options?.plotted ? { plotted: { indices, xd, yd } } : {}),
     };
   }
 

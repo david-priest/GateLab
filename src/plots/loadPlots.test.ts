@@ -1,7 +1,42 @@
 import { describe, expect, it, vi } from "vitest";
 import cytofSrc from "../../vendor/GateLabR/inst/app/www/cytof_plot.js?raw";
 import miniSrc from "../../vendor/GateLabR/inst/app/www/mini_plot.js?raw";
-import { ELLIPSE_PIXEL_GEOMETRY_SRC, patchCytofForGateLab, patchMiniPlot } from "./loadPlots";
+import { ELLIPSE_PIXEL_GEOMETRY_SRC, patchCytofForGateLab, patchMiniPlot, patchOverlayDrawOrder, patchPointSizes } from "./loadPlots";
+
+describe("GateLab cytof point sizes", () => {
+  it("decodes per-point radii from the payload and draws dots and overlay points at their own size", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const patched = patchPointSizes(cytofSrc);
+    expect(warn).not.toHaveBeenCalled();
+    expect(patched).toContain("decoded.size_indices = si;");
+    expect(patched).toContain("function _pointRadiusAt(i)");
+    expect(patched).toContain("_ctx.arc(px, py, _pointRadiusAt(i), 0, 6.2832);");
+    expect(patched).toContain("_ctx.arc(px, py, _pointRadiusAt(idx), 0, 6.2832);");
+    // Idempotent, and part of the full patch set.
+    expect(patchPointSizes(patched)).toBe(patched);
+    expect(patchCytofForGateLab(cytofSrc)).toContain("function _pointRadiusAt(i)");
+    warn.mockRestore();
+  });
+});
+
+describe("GateLab cytof draw order", () => {
+  it("draws a coloured plot in one fixed pseudo-random order instead of colour by colour", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sized = patchPointSizes(cytofSrc);
+    const patched = patchOverlayDrawOrder(sized);
+    expect(warn).not.toHaveBeenCalled();
+    expect(patched).toContain("function _glDrawOrder(n)");
+    expect(patched).toContain("var order = _glDrawOrder(n);");
+    expect(patched).not.toContain("// Batch by color for fewer fillStyle switches");
+    expect(patched).toContain("_ctx.arc(px, py, _pointRadiusAt(idx), 0, 6.2832);");
+    // Idempotent, applies to the unsized source too, and is part of the full patch set.
+    expect(patchOverlayDrawOrder(patched)).toBe(patched);
+    expect(patchOverlayDrawOrder(cytofSrc)).toContain("_ctx.arc(px, py, _pointRadius(), 0, 6.2832);\n            _ctx.fill();\n        }");
+    expect(patchCytofForGateLab(cytofSrc)).toContain("var order = _glDrawOrder(n);");
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
 
 describe("GateLab cytof interaction patches", () => {
   it("asks the host for a menu on a right-click on a polygon's vertex handle or edge, or on any gate's body", () => {

@@ -37,8 +37,9 @@ export function mountGateLab(
       `expected ${GATELAB_HOST_CONTRACT_VERSION}.`,
     );
   }
-  // An SCE's samples are not files, and the app's text says so there.
-  setHostWording(host.kind === "r-sce" ? "samples" : "files");
+  // An SCE's samples are not files, and the app's text says so there; a GatingSet is named as
+  // what it is where the text says SCE.
+  setHostWording(host.kind === "r-sce" ? "samples" : "files", host.objectName);
   host.lifecycle?.mounted?.();
   const root = ReactDOM.createRoot(container);
   const removeNumberInputSteppers = installNumberInputSteppers();

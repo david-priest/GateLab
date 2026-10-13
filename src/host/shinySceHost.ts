@@ -23,6 +23,7 @@ import {
   GATELAB_HOST_CONTRACT_VERSION,
   type GateLabHostAdapter,
   type GateLabHostBuild,
+  type GateLabHostObjectName,
 } from "./contracts";
 import { validateCompensationProfileRecord } from "../engine/compensationProfileRecord";
 import { CompensationCancelledError } from "../engine/compensationManager";
@@ -88,6 +89,8 @@ export interface ShinySceHostOptions {
   fetchImpl?: typeof fetch;
   /** The package's version and the commits it and its core were built from, as R states them. */
   build?: GateLabHostBuild;
+  /** The class of the object served, as R states it; a SingleCellExperiment unless R says GatingSet. */
+  objectKind?: unknown;
 }
 
 export interface GateLabShinyCompensationApplication {
@@ -628,11 +631,13 @@ export function createShinySceHost(
     },
   };
 
+  const objectName: GateLabHostObjectName = options.objectKind === "GatingSet" ? "GatingSet" : "SingleCellExperiment";
   return {
     contractVersion: GATELAB_HOST_CONTRACT_VERSION,
     id: "gatelabr-shiny-sce",
     kind: "r-sce",
-    label: "GateLabR / SingleCellExperiment",
+    label: `GateLabR / ${objectName}`,
+    objectName,
     ...(options.build ? { build: hostBuild(options.build) } : {}),
     capabilities: {
       dataSources: {

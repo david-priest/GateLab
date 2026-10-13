@@ -5,6 +5,7 @@ import {
 } from "./datasetContract";
 import { HostedAssayNotArcsinhError, chooseHostedAssay, drawableHostedAssay, loadHostedDataset } from "./hostedSample";
 import { pairFile } from "../engine/fileIdentity";
+import { ChannelScales } from "../engine/channelScales";
 
 function bufferOf(values: Float32Array | Uint32Array): ArrayBuffer {
   return values.buffer.slice(
@@ -230,5 +231,153 @@ describe("loadHostedDataset", () => {
     expect(Array.from(loaded.sample.originalColumnData(0))).toEqual([5, 10, 15]);
     expect(Array.from(loaded.sample.originalColumnData(1))).toEqual([20, 25, 30]);
     expect(loaded.sample.activeLayer).toBe("original");
+  });
+});
+
+describe("loadHostedDataset and the host object's channel transforms", () => {
+  // A GatingSet keeps each channel's transform with the data. A logicle is recorded in the
+  // sample's keywords as a FACSDiscover S8 records its own, so the axis shows it in preference
+  // to the estimate; an arcsinh is applied at open at the object's cofactor; a biexponential
+  // opens on FlowJo's biexponential at the object's parameters. Nothing is applied to a sample
+  // drawn as stored.
+  const gatingSet: GateLabHostDatasetDescriptor = {
+    ...dataset,
+    id: "gs",
+    instrument: "flow",
+    channels: [
+      { id: "FL1-A", label: "CD3", pnn: "FL1-A", pns: "CD3", transform: { kind: "logicle", T: 262144, W: 0.75, M: 4.5, A: 0 } },
+      { id: "FL2-A", label: "CD19", pnn: "FL2-A", pns: "CD19", transform: { kind: "asinh", cofactor: 150 } },
+      { id: "FL3-A", label: "CD4", pnn: "FL3-A", pns: "CD4", transform: { kind: "biex", maxValue: 262144, pos: 4.5, neg: 0, widthBasis: -10, channelRange: 4096, tableChannels: 4096 } },
+    ],
+    assays: [{ id: "compensated", label: "compensated", role: "compensated", coordinateSpace: "linear", revision: 0, encoding: "channel-major-float32-le" }],
+    defaultAssayId: "compensated",
+    samples: [{ ...dataset.samples[0], assayByteLength: 36 }],
+  };
+  const values = new Float32Array([100, 1000, 10000, 100, 1000, 10000, 100, 1000, 10000]);
+  const port: GateLabHostDatasetPort = {
+    async listDatasets() { return [gatingSet]; },
+    async readAssay() { return bufferOf(values); },
+    async readEventIndex() { return bufferOf(new Uint32Array([0, 1, 2])); },
+  };
+
+  it("shows a logicle channel on the object's own logicle, an arcsinh channel on arcsinh at its cofactor, and a biex channel on its biexponential", async () => {
+    const [loaded] = await loadHostedDataset(port, gatingSet);
+    const sample = loaded.sample;
+    expect(sample.fcs.keywords["$P1R"]).toBe("262144");
+    expect(sample.fcs.keywords.P1M).toBe("4.5");
+    expect(sample.fcs.keywords.P2M).toBeUndefined();
+    expect(sample.transformSpec("FL1-A")).toEqual({ kind: "logicle", T: 262144, W: 0.75, M: 4.5, A: 0 });
+    expect(sample.transformSpec("FL2-A")).toEqual({ kind: "asinh", cofactor: 150 });
+    expect(sample.transformSpec("FL3-A").kind).toBe("biex");
+  });
+
+  it("keeps the object's arcsinh and biexponential once the sample joins a workspace's shared scales", async () => {
+    // The scales are applied to the sample before the app attaches it to the workspace-wide
+    // ChannelScales, which every read then consults: the headless check on an SCE (2026-10-13)
+    // found the arcsinh and biex channels back on logicle after the join, while the logicle W,
+    // recorded as a keyword, held.
+    const [loaded] = await loadHostedDataset(port, gatingSet);
+    const sample = loaded.sample;
+    const fl2 = sample.index("FL2-A")!;
+    const fl3 = sample.index("FL3-A")!;
+    expect(sample.fluorScale(fl2)).toBe("arcsinh");
+    expect(sample.fluorScale(fl3)).toBe("biex");
+    const scales = new ChannelScales();
+    sample.attachChannelScales(scales);
+    expect(sample.fluorScale(fl2)).toBe("arcsinh");
+    expect(sample.currentFluorCofactor(fl2)).toBe(150);
+    expect(sample.fluorScale(fl3)).toBe("biex");
+    expect(gatingSet.channels[2].transform).toMatchObject(sample.fluorBiexParams(fl3)!);   // the params, without the spec's kind
+    expect(sample.transformSpec("FL2-A")).toEqual({ kind: "asinh", cofactor: 150 });
+    expect(sample.transformSpec("FL3-A").kind).toBe("biex");
+    // A choice the workspace already holds is kept over a later sample's own: a second sample of
+    // the same channels at another cofactor joins at the workspace's.
+    const other: GateLabHostDatasetDescriptor = {
+      ...gatingSet,
+      channels: [gatingSet.channels[0], { ...gatingSet.channels[1], transform: { kind: "asinh", cofactor: 50 } }, gatingSet.channels[2]],
+    };
+    const [second] = await loadHostedDataset({ ...port, async listDatasets() { return [other]; } }, other);
+    expect(second.sample.currentFluorCofactor(fl2)).toBe(50);
+    second.sample.attachChannelScales(scales);
+    expect(second.sample.currentFluorCofactor(fl2)).toBe(150);
+    expect(second.sample.fluorScale(fl2)).toBe("arcsinh");
+  });
+
+  it("recovers W from the recorded parameters exactly, whatever its value", async () => {
+    const wide: GateLabHostDatasetDescriptor = {
+      ...gatingSet,
+      channels: [{ ...gatingSet.channels[0], transform: { kind: "logicle", T: 1e5, W: 1.2, M: 4, A: 0 } }, gatingSet.channels[1], gatingSet.channels[2]],
+    };
+    const [loaded] = await loadHostedDataset({ ...port, async listDatasets() { return [wide]; } }, wide);
+    const spec = loaded.sample.transformSpec("FL1-A");
+    expect(spec.kind).toBe("logicle");
+    if (spec.kind === "logicle") {
+      expect(spec.T).toBe(1e5);
+      expect(spec.M).toBe(4);
+      expect(spec.W).toBeCloseTo(1.2, 12);
+    }
+  });
+
+  it("leaves a sample drawn as stored on the assay's arcsinh", async () => {
+    const stored: GateLabHostDatasetDescriptor = {
+      ...gatingSet,
+      assays: [{ id: "exprs", label: "exprs", role: "transformed", coordinateSpace: "display", revision: 0, encoding: "channel-major-float32-le", displayCofactor: 5, displayCofactorStated: true }],
+      defaultAssayId: "exprs",
+    };
+    const small = new Float32Array([1, 2, 3, 1, 2, 3, 1, 2, 3]);
+    const [loaded] = await loadHostedDataset({ ...port, async listDatasets() { return [stored]; }, async readAssay() { return bufferOf(small); } }, stored);
+    expect(loaded.sample.transformSpec("FL2-A")).toEqual({ kind: "asinh", cofactor: 5 });
+  });
+});
+
+describe("loadHostedDataset and a biexponential channel", () => {
+  // A GatingSet parsed from a FlowJo workspace carries FlowJo's biexponential on every
+  // fluorescence channel. The channel opens on that axis at the object's parameters, its ticks
+  // are the decade labels a logicle axis gets, and the choice travels through a workspace save.
+  // No tableChannels: cytolib's table, which is flowWorkspace's own function (flowworkspaceTransforms.test.ts).
+  const biex = { kind: "biex" as const, maxValue: 262144, pos: 4.41854, neg: 0, widthBasis: -6.309573, channelRange: 256 };
+  const flowjo: GateLabHostDatasetDescriptor = {
+    ...dataset,
+    id: "gs",
+    instrument: "flow",
+    channels: [
+      { id: "FSC-A", label: "FSC-A", pnn: "FSC-A" },
+      { id: "Comp-FITC-A", label: "CD4", pnn: "Comp-FITC-A", pns: "CD4", transform: biex },
+    ],
+    assays: [{ id: "compensated", label: "compensated", role: "compensated", coordinateSpace: "linear", revision: 0, encoding: "channel-major-float32-le" }],
+    defaultAssayId: "compensated",
+    samples: [{ ...dataset.samples[0], assayByteLength: 24 }],
+  };
+  const values = new Float32Array([50000, 80000, 120000, -100, 1000, 50000]);
+  const port: GateLabHostDatasetPort = {
+    async listDatasets() { return [flowjo]; },
+    async readAssay() { return bufferOf(values); },
+    async readEventIndex() { return bufferOf(new Uint32Array([0, 1, 2])); },
+  };
+
+  it("opens the channel on the object's biexponential, offers it as a recorded axis, and keeps it through a save", async () => {
+    const [loaded] = await loadHostedDataset(port, flowjo);
+    const sample = loaded.sample;
+    const idx = sample.index("Comp-FITC-A")!;
+    expect(sample.fluorScale(idx)).toBe("biex");
+    expect(sample.transformSpec("Comp-FITC-A")).toEqual(biex);
+    expect(sample.recordedBiex(idx)).toEqual({ maxValue: 262144, pos: 4.41854, neg: 0, widthBasis: -6.309573, channelRange: 256 });
+    // The display value of a linear 1000 is flowWorkspace's: 116.282 by its spline.
+    expect(sample.rawToDisplay("Comp-FITC-A", 1000)).toBeCloseTo(116.28, 1);
+    expect(sample.fluorBiexEntries()).toEqual({ "Comp-FITC-A": { maxValue: 262144, pos: 4.41854, neg: 0, widthBasis: -6.309573, channelRange: 256 } });
+    // Switched to its logicle and back: the recorded axis is still offered.
+    sample.setFluorScale(idx, "logicle");
+    expect(sample.fluorScale(idx)).toBe("logicle");
+    expect(sample.transformSpec("Comp-FITC-A").kind).toBe("logicle");
+    sample.setFluorScale(idx, "biex");
+    expect(sample.fluorScale(idx)).toBe("biex");
+    // Restored from a saved workspace onto a sample that recorded nothing: the saved parameters become the axis.
+    const [again] = await loadHostedDataset(port, { ...flowjo, channels: flowjo.channels.map((c) => ({ ...c, transform: undefined })) });
+    expect(again.sample.fluorScale(idx)).toBe("logicle");
+    again.sample.applyFluorBiex(sample.fluorBiexEntries());
+    expect(again.sample.fluorScale(idx)).toBe("biex");
+    expect(again.sample.transformSpec("Comp-FITC-A")).toEqual(biex);
+    // A scatter channel with no transform stays as it was.
+    expect(sample.transformSpec("FSC-A").kind).not.toBe("biex");
   });
 });

@@ -9,7 +9,7 @@ import {
 import { TIED_DATA_SET_NOTE, TIED_DATA_SETS_NOTE } from "../engine/flowjoOpen";
 import { FLOWJO_OLDER_REFUSAL, FLOWJO_OLDER_REFUSAL_UNSTATED } from "../engine/flowjoWorkspace";
 import { platformKeys } from "./platformKeys";
-import { hostWording, samplesJapanese, samplesSentence } from "./hostWording";
+import { hostWording, objectSentence, samplesJapanese, samplesSentence } from "./hostWording";
 import { TOUR_JA } from "../tour/tourJa";
 
 export type UiLanguage = "en" | "ja";
@@ -357,6 +357,82 @@ const JA: Readonly<Record<string, string>> = {
   "A FACSChorus experiment holds the gates as they are now and a snapshot of them at the start of every sort. A sort's snapshot is the gating a sorted sample was sorted under.": "FACSChorusの実験ファイルには、現在のゲートと、各ソート開始時点のゲートのスナップショットが保存されています。ソートのスナップショットは、そのサンプルがソートされたときのゲーティングです。",
   "sorted": "ソート済み",
   "Import gates recorded in the loaded files…": "読み込み済みファイルに記録されたゲートを読み込む…",
+  "Attach cell images (.cvw)…": "細胞画像（.cvw）を添付…",
+  "Replace cell images (.cvw)…": "細胞画像（.cvw）を置き換え…",
+  "Detach cell images": "細胞画像を外す",
+  "Cell images attached: {name}": "細胞画像を添付済み: {name}",
+  "Cell": "細胞",
+  "Pinned": "固定中",
+  "Unpin": "固定解除",
+  "Nearest imaged cell": "カーソルに最も近い撮像細胞",
+  "Hover a dot to see its cell; click to pin it, Escape to unpin.": "点にカーソルを合わせると細胞が表示されます。クリックで固定、Escapeで解除。",
+  "No cell images are attached to {name}": "{name} に細胞画像は添付されていません",
+  "Event {index} of {name}": "{name} のイベント {index}",
+  "No image for this event": "このイベントには画像がありません",
+  "Loading the image…": "画像を読み込み中…",
+  "Exposure": "露出",
+  "Image features": "画像特徴量",
+  "Has an image": "画像の有無",
+  "has an image": "画像あり",
+  "no image": "画像なし",
+  "Show the cell panel": "細胞パネルを表示",
+  "Hide the cell panel": "細胞パネルを隠す",
+  "Show at the bottom of the gates pane": "ゲートペインの下部に表示",
+  "Show in a column of its own": "独立した列に表示",
+  "Objects in image": "画像内の物体数",
+  "no object": "物体なし",
+  "one object": "物体1個",
+  "two objects": "物体2個",
+  "three or more": "3個以上",
+  "Counting objects… {percent}%": "物体を数えています… {percent}%",
+  "{count} objects": "物体 {count} 個",
+  "Thumbnails": "サムネイル",
+  "How many thumbnails": "サムネイルの数",
+  "Thumbnail size": "サムネイルの大きさ",
+  "Lay a spread of cell images over the plot, at their events' positions": "プロット上のイベント位置に細胞画像を散りばめて表示します",
+  "Seed": "シード",
+  "Single cells": "単一細胞",
+  "Size by": "大きさの基準",
+  "Size the points of": "大きさを変える対象",
+  "Draw each point at a size that follows a channel's value, for every event or for one class of the colouring": "各点をチャネル値に応じた大きさで描きます。全イベント、または色分けの1クラスに対して",
+  "Separating plot": "分離プロット",
+  "The channel pair whose biplot best separates two classes of this colouring, ranked by the area under the curve of its best dividing line": "この色分けの2クラスを最もよく分けるチャネルの組み合わせ。最良の分割線のAUCで順位付けします",
+  "Separate": "分離する",
+  "from": "と",
+  "Detectors only": "検出器のみ",
+  "Any channels": "すべてのチャネル",
+  "Rank channel pairs": "チャネルの組を順位付け",
+  "Ranking…": "順位付け中…",
+  "Too few events in a class to rank": "クラスのイベントが少なすぎて順位付けできません",
+  "Show this biplot": "この二変量プロットを表示",
+  "AUC {auc} · alone {a} / {b}": "AUC {auc} · 単独 {a} / {b}",
+  "single": "単一",
+  "single, irregular": "単一（不規則）",
+  "multiple objects": "複数の物体",
+  "Strictness": "厳しさ",
+  "How far from the typical single cell, in robust standard deviations, a one-object event may sit and still count as single": "一物体のイベントが典型的な単一細胞からロバスト標準偏差で何倍まで離れても単一とみなすか",
+  "Thumbnails of": "サムネイルの対象",
+  "all cells": "すべての細胞",
+  "Show thumbnails of one class only": "1つのクラスのサムネイルだけを表示します",
+  "smaller than usual": "通常より小さい",
+  "larger than usual": "通常より大きい",
+  "eccentric": "偏心している",
+  "elongated": "細長い",
+  "centres disagree between channels": "チャネル間で中心が一致しない",
+  "diffuse": "拡散している",
+  "Pick a new seed": "新しいシードを選ぶ",
+  "The seed that picks which cells are shown: the same seed shows the same cells": "表示する細胞を選ぶシード。同じシードなら同じ細胞が表示されます",
+  "Images": "画像",
+  "Loading the image wall…": "画像ウォールを読み込み中…",
+  "No cell images are attached to the viewed file. Attach a .cvw from the Import menu.": "表示中のファイルに細胞画像は添付されていません。インポートメニューから .cvw を添付してください。",
+  "{count} cells in {population} · {shown} with images": "{population} の細胞 {count} · 画像あり {shown}",
+  "Sort by": "並べ替え",
+  "Event order": "イベント順",
+  "Reverse the order": "順序を反転",
+  "Tile size": "タイルの大きさ",
+  "Show on plot": "プロットで表示",
+  "the checked populations": "チェックした集団",
+  "img": "画像",
   "sorts": "ソート",
   "files": "ファイル",
   "Current gates": "現在のゲート",
@@ -1862,11 +1938,14 @@ export function translateUi(
   // In a host whose samples are not files (GateLabR), the sentence is shown with its words for
   // samples; its Japanese by the same swap, unless it is given one of its own.
   const reworded = hostWording() === "samples" ? samplesSentence(source) : null;
-  const template = reworded
+  const worded = reworded
     ? language === "ja"
       ? reworded.ja ?? (Object.prototype.hasOwnProperty.call(JA, source) ? samplesJapanese(JA[source]) : reworded.en)
       : reworded.en
     : language === "ja" ? JA[source] ?? source : source;
+  // A GatingSet is named where the sentence says SCE, in either language: the Japanese keeps
+  // the class name in Latin letters, so the same swap serves it.
+  const template = objectSentence(worded) ?? worded;
   // The text names keys as a Mac does (Cmd-D, Option-drag); elsewhere it is shown with the
   // names on the user's keyboard. The handlers take Ctrl for Cmd and Alt for Option already.
   return platformKeys(template.replace(/\{([A-Za-z0-9_]+)\}/g, (match, key: string) =>
