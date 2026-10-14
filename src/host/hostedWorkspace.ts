@@ -40,6 +40,8 @@ export interface HostedWorkspaceRestore {
   sourceGateSpace: GateValueSpace | null;
   /** From a GatingSet's hierarchy: the nodes not restored, each as "path: reason". */
   leftOut?: readonly string[];
+  /** From a GatingSet's hierarchy: the samples opened with gates of their own, and how many. */
+  tailoring?: readonly Readonly<{ sample: string; gates: number }>[];
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -519,6 +521,7 @@ export async function readHostedWorkspace(
       sourceFormat: "gatingset-hierarchy",
       sourceGateSpace: null,
       leftOut: translation.leftOut,
+      tailoring: translation.tailoring,
     };
   }
   if (

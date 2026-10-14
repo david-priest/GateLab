@@ -106,6 +106,12 @@ export interface GateLabHostWorkspaceWriteResult {
   savedAt: string;
   /** Present when the write carried memberships and the host stored them. */
   memberships?: Readonly<{ hierarchies: number; populations: number }>;
+  /**
+   * What the host has to say about the save, as sentences: for a GatingSet, the nodes it kept
+   * although the app does not hold them (an OR, a node on a calibration table) and any it could
+   * not keep, each with the reason. Optional: a host that predates it says nothing.
+   */
+  notes?: readonly string[];
 }
 
 export interface GateLabHostWorkspacePort {

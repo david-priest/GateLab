@@ -3269,7 +3269,7 @@ export default function App() {
                     "explicit",
                     workspaceEditRevisionRef.current,
                   )
-                    .then(({ revision, memberships, notEvaluated }) => {
+                    .then(({ revision, memberships, notEvaluated, notes }) => {
                       setImportMsg(
                         `${hostWords("Saved GateLab workspace to SCE")} · revision ${revision}` +
                           (memberships
@@ -3277,7 +3277,8 @@ export default function App() {
                               `${memberships.populations === 1 ? "" : "s"} in ` +
                               `${memberships.hierarchies} hierarch` +
                               `${memberships.hierarchies === 1 ? "y" : "ies"}` +
-                              notEvaluatedSummary(notEvaluated)
+                              notEvaluatedSummary(notEvaluated) +
+                              (Array.isArray(notes) && notes.length ? ` · ${notes.join(" ")}` : "")
                             // The core sent them; an R side that predates them stores nothing and
                             // says nothing, so say it here rather than let the user find out later.
                             : " · no memberships stored: this GateLabR predates them, reload it"),
@@ -8050,6 +8051,11 @@ export default function App() {
               (restored.sourceFormat === "gatingset-hierarchy"
                 ? "from the GatingSet's hierarchy"
                 : `from ${restored.sourceFormat === "gatelabr-legacy" ? "GateLabR" : "GateLab"} ${hostWords("SCE metadata")}`) +
+              (restored.tailoring?.length
+                ? ` · with gates of their own on ${restored.tailoring.length} sample` +
+                  `${restored.tailoring.length === 1 ? "" : "s"}, each opened on its tailored copy: ` +
+                  restored.tailoring.map(({ sample, gates }) => `${sample} (${gates} gate${gates === 1 ? "" : "s"})`).join(", ")
+                : "") +
               (restored.leftOut?.length
                 ? ` · not restored: ${restored.leftOut.join("; ")}`
                 : "");

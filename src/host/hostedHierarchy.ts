@@ -16,13 +16,25 @@
 // which are the same functions up to an affine map, and maps the geometry with them, so the gate
 // arrives exact; a biexponential arrives by its parameters with no tableChannels, which selects
 // cytolib's own table, flowWorkspace's function (design note of 2026-10-13).
+//
+// A GatingSet keeps each sample's own gates, and a GatingSet parsed from a FlowJo workspace has
+// them tailored per sample. GateLabR sends each node's gate as the tree's (the one most samples
+// hold) and, for every sample whose gate differs, that sample's own as `tailored`; such a sample
+// opens with a tailored copy of the tree carrying its gates, as a FlowJo workspace's tailored
+// samples open (oneTreeImport.ts), so each sample is gated by its own gates and its counts are
+// flowWorkspace's. Contract 1 had no tailoring: every sample was gated by the first sample's
+// gates, and a node tailored in FlowJo counted other events than the object on every other sample.
 
 import type { Gate, GateRef, GateTransforms, Population, PopulationMap, TransformSpec, Vertex } from "../engine/models";
 import { nextGateColor, UNBOUNDED } from "../engine/models";
-import { validateWorkspace, WORKSPACE_FORMAT, type WorkspaceFile } from "../engine/workspace";
+import { DEFAULT_HIERARCHY_ID, DEFAULT_HIERARCHY_NAME, uniqueHierarchyName, type HierarchyRef } from "../engine/hierarchies";
+import { validateWorkspace, WORKSPACE_FORMAT, type WorkspaceFile, type WorkspaceStoredHierarchy } from "../engine/workspace";
 import type { GateLabHostDatasetDescriptor } from "./datasetContract";
 
-export const GATELAB_HOST_HIERARCHY_CONTRACT_VERSION = 1 as const;
+/** 2 adds per-sample gates (`tailored`); a reader of 1 would gate every sample by the tree's. */
+export const GATELAB_HOST_HIERARCHY_CONTRACT_VERSION = 2 as const;
+/** The contracts this GateLab reads: 1 is 2 with no node tailored. */
+const READABLE_CONTRACTS: readonly number[] = [1, 2];
 
 /** One axis of a gate: the channel, and the transform its coordinates are in; null is the linear value. */
 export interface HostedHierarchyAxis {
@@ -63,12 +75,18 @@ export interface HostedHierarchyNode {
   /** Added with `negated = TRUE`: the parent's events outside the gate. */
   negated?: boolean;
   gate?: HostedHierarchyGate;
+  /**
+   * The samples whose own gate for this node differs from `gate`, each with its gate, of the same
+   * form (a quadrant set stays a quadrant set with the same members). Absent when every sample
+   * holds `gate`. A sample is the dataset's sample id.
+   */
+  tailored?: readonly Readonly<{ sample: string; gate: HostedHierarchyGate }>[];
   /** A booleanFilter over other nodes, resolved by the host to paths. */
   boolean?: { operator: "and" | "or"; refs: readonly Readonly<{ path: string; include: boolean }>[] };
 }
 
 export interface HostedHierarchy {
-  contractVersion: typeof GATELAB_HOST_HIERARCHY_CONTRACT_VERSION;
+  contractVersion: 1 | typeof GATELAB_HOST_HIERARCHY_CONTRACT_VERSION;
   nodes: readonly HostedHierarchyNode[];
   /** Nodes the host could not describe (a calibration-table transform, for one), with the reason. */
   leftOut?: readonly Readonly<{ path: string; reason: string }>[];
@@ -78,6 +96,13 @@ export interface HostedHierarchyTranslation {
   workspace: WorkspaceFile;
   /** Every node not restored, as "path: reason", for the status line. */
   leftOut: readonly string[];
+  /** Each sample opened with gates of its own, in the dataset's order, with how many: for the status line. */
+  tailoring: readonly Readonly<{ sample: string; gates: number }>[];
+}
+
+/** The hierarchy a sample's tailored copy of the tree is: one per sample with a gate of its own. */
+export function tailoredHierarchyId(sampleId: string): string {
+  return `gatingset-tailoring:${sampleId}`;
 }
 
 export const ROOT_POPULATION_ID = "root";
@@ -148,12 +173,136 @@ function readAxes(value: unknown, label: string, readSpec: (value: unknown, labe
   return axes;
 }
 
+/** A quadrant set's members: the populations it makes, numbered as the app numbers quadrants. */
+type QuadrantMembers = readonly Readonly<{ path: string; name: string; quadrant: number }>[];
+
+/** A node's gate as a GateLab gate, or the reason the translation cannot hold it. */
+type BuiltGate = { gate: Gate; members?: QuadrantMembers } | { drop: string };
+
+/**
+ * One node's gate in GateLab's form, under `gateId`: a rectangle, polygon or ellipse, or a
+ * quadrant set's one gate with its members. A malformed gate throws; one the dataset cannot hold
+ * (a channel it lacks, a polygon of fewer than three vertices) is dropped with the reason.
+ */
+function buildGate(
+  raw: unknown,
+  gateId: string,
+  common: Readonly<{ name: string; color: string }>,
+  label: string,
+  channelIds: ReadonlySet<string>,
+  readSpec: (value: unknown, label: string) => TransformSpec,
+): BuiltGate {
+  const gate = record(raw, `gate of ${label}`);
+  const kind = gate.kind;
+  const axes = readAxes(gate.axes, label, readSpec);
+  const unknown = axes.find((axis) => !channelIds.has(axis.channel));
+  if (unknown) return { drop: `on channel '${unknown.channel}', which the dataset does not have` };
+  const transforms = gateTransforms(axes, readSpec, label);
+  const base = {
+    gate_id: gateId,
+    name: common.name,
+    x_channel: axes[0].channel,
+    y_channel: (axes[1] ?? axes[0]).channel,
+    space: "display" as const,
+    transforms,
+    color: common.color,
+    label_offset: null,
+  };
+
+  if (kind === "rectangle") {
+    // A one-axis gate's single null bound unboxes to null in R's JSON, which is no bound.
+    const bounds = (value: unknown, side: string): unknown[] =>
+      (value === null || value === undefined) && axes.length === 1 ? [null] : list(value, `${side} of ${label}`);
+    const min = bounds(gate.min, "min");
+    const max = bounds(gate.max, "max");
+    if (min.length !== axes.length || max.length !== axes.length) {
+      throw new Error(`The GatingSet hierarchy has a malformed ${label}: bounds and axes differ.`);
+    }
+    // A range gate repeats its channel on both axes with no bound on the second, as the
+    // Gating-ML importer does, which keeps the interval exactly.
+    const xlo = bound(min[0], `min of ${label}`);
+    const xhi = bound(max[0], `max of ${label}`);
+    const ylo = axes.length === 2 ? bound(min[1], `min of ${label}`) : null;
+    const yhi = axes.length === 2 ? bound(max[1], `max of ${label}`) : null;
+    return {
+      gate: {
+        ...base,
+        gate_type: "rectangle",
+        vertices: rectangleVertices(xlo, xhi, ylo, yhi),
+        // flowCore's rectangleGate holds an event on either edge (models.ts, RectangleBounds).
+        bounds: "closed",
+      },
+    };
+  }
+  if (kind === "polygon") {
+    if (axes.length !== 2) throw new Error(`The GatingSet hierarchy has a malformed ${label}: a polygon needs two axes.`);
+    const vertices = list(gate.vertices, `vertices of ${label}`).map((vertex, index): Vertex => {
+      if (!Array.isArray(vertex) || vertex.length !== 2) throw new Error(`The GatingSet hierarchy has a malformed vertex ${index + 1} of ${label}.`);
+      return [finite(vertex[0], `vertex ${index + 1} of ${label}`), finite(vertex[1], `vertex ${index + 1} of ${label}`)];
+    });
+    if (vertices.length < 3) return { drop: `a polygon of ${vertices.length} vertices` };
+    return { gate: { ...base, gate_type: "polygon", vertices } };
+  }
+  if (kind === "ellipse") {
+    if (axes.length !== 2) throw new Error(`The GatingSet hierarchy has a malformed ${label}: an ellipse needs two axes.`);
+    const mean = list(gate.mean, `mean of ${label}`);
+    const covariance = list(gate.covariance, `covariance of ${label}`);
+    if (mean.length !== 2 || covariance.length !== 2) throw new Error(`The GatingSet hierarchy has a malformed ${label}: mean or covariance.`);
+    const rows = covariance.map((row, index) => {
+      const entries = list(row, `covariance row ${index + 1} of ${label}`);
+      if (entries.length !== 2) throw new Error(`The GatingSet hierarchy has a malformed covariance row ${index + 1} of ${label}.`);
+      return [finite(entries[0], `covariance of ${label}`), finite(entries[1], `covariance of ${label}`)] as [number, number];
+    });
+    const distance = finite(gate.distance, `distance of ${label}`);
+    if (!(distance > 0)) throw new Error(`The GatingSet hierarchy has a malformed ${label}: distance ${distance}.`);
+    return {
+      gate: {
+        ...base,
+        gate_type: "ellipse",
+        mean: [finite(mean[0], `mean of ${label}`), finite(mean[1], `mean of ${label}`)],
+        covariance: [rows[0], rows[1]],
+        // flowCore tests the Mahalanobis distance against `distance`; the app holds its square.
+        distance_square: distance * distance,
+      },
+    };
+  }
+  if (kind === "quadrant") {
+    if (axes.length !== 2) throw new Error(`The GatingSet hierarchy has a malformed ${label}: a quadrant set needs two axes.`);
+    const center = list(gate.center, `centre of ${label}`);
+    if (center.length !== 2) throw new Error(`The GatingSet hierarchy has a malformed ${label}: centre.`);
+    const members = list(gate.members, `members of ${label}`).map((member) => {
+      const item = record(member, `member of ${label}`);
+      const quadrant = finite(item.quadrant, `quadrant number of ${label}`);
+      if (![1, 2, 3, 4].includes(quadrant)) throw new Error(`The GatingSet hierarchy has a malformed ${label}: quadrant ${quadrant}.`);
+      return { path: text(item.path, `member path of ${label}`), name: text(item.name, `member name of ${label}`), quadrant };
+    });
+    if (members.length === 0) throw new Error(`The GatingSet hierarchy has a malformed ${label}: no members.`);
+    return {
+      gate: {
+        ...base,
+        gate_type: "quadrant",
+        center: [finite(center[0], `centre of ${label}`), finite(center[1], `centre of ${label}`)],
+      },
+      members,
+    };
+  }
+  throw new Error(`The GatingSet hierarchy has a malformed ${label}: gate kind '${String(kind)}'.`);
+}
+
+/** Whether two quadrant sets have the same members in the same quadrants. */
+function sameMembers(a: QuadrantMembers | undefined, b: QuadrantMembers | undefined): boolean {
+  const key = (members: QuadrantMembers | undefined) =>
+    JSON.stringify([...(members ?? [])].map((m) => [m.path, m.quadrant]).sort());
+  return key(a) === key(b);
+}
+
 /**
  * The hierarchy as GateLab gates and populations: one population per node under the root, one
  * gate per geometric node (a quadrant set is one gate with four populations), a negated node
  * excluding its gate, a boolean node referencing the gates of the nodes it names. Nodes the
  * translation cannot hold are left out with the reason, and so are their descendants, since a
- * population needs its parent.
+ * population needs its parent. A sample whose gate differs on some node gets a tailored copy of
+ * the tree, owned by that sample, carrying its own gates.
  */
 export function translateGatingSetHierarchy(
   raw: unknown,
@@ -161,10 +310,11 @@ export function translateGatingSetHierarchy(
   readSpec: (value: unknown, label: string) => TransformSpec,
 ): HostedHierarchyTranslation {
   const source = record(raw, "payload");
-  if (source.contractVersion !== GATELAB_HOST_HIERARCHY_CONTRACT_VERSION) {
-    throw new Error(`The GatingSet hierarchy uses contract ${String(source.contractVersion)}; this GateLab reads ${GATELAB_HOST_HIERARCHY_CONTRACT_VERSION}.`);
+  if (typeof source.contractVersion !== "number" || !READABLE_CONTRACTS.includes(source.contractVersion)) {
+    throw new Error(`The GatingSet hierarchy uses contract ${String(source.contractVersion)}; this GateLab reads ${READABLE_CONTRACTS.join(" and ")}.`);
   }
   const channelIds = new Set(dataset.channels.map((channel) => channel.id));
+  const sampleIds = new Set(dataset.samples.map((sample) => sample.id));
   const nodes = list(source.nodes, "node list").map((node) => record(node, "node"));
   const leftOut: string[] = [];
   const dropped = new Set<string>();
@@ -192,6 +342,8 @@ export function translateGatingSetHierarchy(
   };
   /** What a node's population tests, for a boolean that names it: its gate and side. */
   const nodeRef = new Map<string, GateRef>();
+  /** Each sample's own gates, by the tree's gate id, where they differ from the tree's. */
+  const tailored = new Map<string, Map<string, Gate>>();
 
   const drop = (path: string, reason: string): void => {
     dropped.add(path);
@@ -258,6 +410,12 @@ export function translateGatingSetHierarchy(
         drop(path, "a boolean that names no node");
         continue;
       }
+      // NOT (A AND B) is NOT A OR NOT B. A population ANDs its references, so negating each one
+      // would hold NOT A AND NOT B, which is fewer events; such a node is not held.
+      if (negated && refs.length > 1) {
+        drop(path, "a NOT of an AND of several nodes, which a GateLab population cannot hold");
+        continue;
+      }
       addPopulation(path, name, parentPath, negated ? refs.map((ref) => ({ ...ref, include: !ref.include })) : refs);
       continue;
     }
@@ -266,99 +424,56 @@ export function translateGatingSetHierarchy(
       drop(path, "neither a gate nor a boolean");
       continue;
     }
-    const gate = record(node.gate, `gate of ${label}`);
-    const kind = gate.kind;
-    const axes = readAxes(gate.axes, label, readSpec);
-    const unknown = axes.find((axis) => !channelIds.has(axis.channel));
-    if (unknown) {
-      drop(path, `on channel '${unknown.channel}', which the dataset does not have`);
+    const common = { name, color: nextGateColor(gateOrder.length) };
+    const built = buildGate(node.gate, path, common, label, channelIds, readSpec);
+    const members = "members" in built ? built.members : undefined;
+    const dropAll = (reason: string): void => {
+      if (members) for (const member of members) drop(member.path, reason);
+      else drop(path, reason);
+    };
+    if ("drop" in built) {
+      if (record(node.gate, `gate of ${label}`).kind === "quadrant") {
+        // Its members are the populations; each is left out.
+        const raw = list(record(node.gate, `gate of ${label}`).members, `members of ${label}`);
+        for (const member of raw) drop(text(record(member, `member of ${label}`).path, `member path of ${label}`), built.drop);
+      } else {
+        drop(path, built.drop);
+      }
       continue;
     }
-    const transforms = gateTransforms(axes, readSpec, label);
-    const xChannel = axes[0].channel;
-    const yChannel = (axes[1] ?? axes[0]).channel;
-    const common = {
-      name,
-      x_channel: xChannel,
-      y_channel: yChannel,
-      space: "display" as const,
-      transforms,
-      color: nextGateColor(gateOrder.length),
-      label_offset: null,
-    };
-
-    if (kind === "rectangle") {
-      // A one-axis gate's single null bound unboxes to null in R's JSON, which is no bound.
-      const bounds = (value: unknown, side: string): unknown[] =>
-        (value === null || value === undefined) && axes.length === 1 ? [null] : list(value, `${side} of ${label}`);
-      const min = bounds(gate.min, "min");
-      const max = bounds(gate.max, "max");
-      if (min.length !== axes.length || max.length !== axes.length) {
-        throw new Error(`The GatingSet hierarchy has a malformed ${label}: bounds and axes differ.`);
+    // Each sample's own gate, where it differs from the tree's.
+    const own = new Map<string, Gate>();
+    let refused: string | null = null;
+    for (const entry of list(node.tailored, `tailoring of ${label}`)) {
+      const item = record(entry, `tailoring of ${label}`);
+      const sample = text(item.sample, `tailored sample of ${label}`);
+      if (!sampleIds.has(sample)) throw new Error(`The GatingSet hierarchy has a malformed ${label}: it tailors sample '${sample}', which the dataset does not have.`);
+      if (own.has(sample)) throw new Error(`The GatingSet hierarchy has a malformed ${label}: sample '${sample}' is tailored twice.`);
+      const theirs = buildGate(item.gate, path, common, `${label} on sample '${sample}'`, channelIds, readSpec);
+      if ("drop" in theirs) {
+        refused = `${theirs.drop} (on sample '${sample}')`;
+        break;
       }
-      // A range gate repeats its channel on both axes with no bound on the second, as the
-      // Gating-ML importer does, which keeps the interval exactly.
-      const xlo = bound(min[0], `min of ${label}`);
-      const xhi = bound(max[0], `max of ${label}`);
-      const ylo = axes.length === 2 ? bound(min[1], `min of ${label}`) : null;
-      const yhi = axes.length === 2 ? bound(max[1], `max of ${label}`) : null;
-      addGate({
-        ...common,
-        gate_id: path,
-        gate_type: "rectangle",
-        vertices: rectangleVertices(xlo, xhi, ylo, yhi),
-        // flowCore's rectangleGate holds an event on either edge (models.ts, RectangleBounds).
-        bounds: "closed",
-      });
-    } else if (kind === "polygon") {
-      if (axes.length !== 2) throw new Error(`The GatingSet hierarchy has a malformed ${label}: a polygon needs two axes.`);
-      const vertices = list(gate.vertices, `vertices of ${label}`).map((vertex, index): Vertex => {
-        if (!Array.isArray(vertex) || vertex.length !== 2) throw new Error(`The GatingSet hierarchy has a malformed vertex ${index + 1} of ${label}.`);
-        return [finite(vertex[0], `vertex ${index + 1} of ${label}`), finite(vertex[1], `vertex ${index + 1} of ${label}`)];
-      });
-      if (vertices.length < 3) {
-        drop(path, `a polygon of ${vertices.length} vertices`);
-        continue;
+      // A quadrant's populations name its quadrants, so a quadrant set is tailored only as the
+      // same set: the same members in the same quadrants, elsewhere.
+      if ((theirs.gate.gate_type === "quadrant") !== (built.gate.gate_type === "quadrant") ||
+          (members !== undefined && !sameMembers(members, "members" in theirs ? theirs.members : undefined))) {
+        refused = `a quadrant set on some samples and not on sample '${sample}'`;
+        break;
       }
-      addGate({ ...common, gate_id: path, gate_type: "polygon", vertices });
-    } else if (kind === "ellipse") {
-      if (axes.length !== 2) throw new Error(`The GatingSet hierarchy has a malformed ${label}: an ellipse needs two axes.`);
-      const mean = list(gate.mean, `mean of ${label}`);
-      const covariance = list(gate.covariance, `covariance of ${label}`);
-      if (mean.length !== 2 || covariance.length !== 2) throw new Error(`The GatingSet hierarchy has a malformed ${label}: mean or covariance.`);
-      const rows = covariance.map((row, index) => {
-        const entries = list(row, `covariance row ${index + 1} of ${label}`);
-        if (entries.length !== 2) throw new Error(`The GatingSet hierarchy has a malformed covariance row ${index + 1} of ${label}.`);
-        return [finite(entries[0], `covariance of ${label}`), finite(entries[1], `covariance of ${label}`)] as [number, number];
-      });
-      const distance = finite(gate.distance, `distance of ${label}`);
-      if (!(distance > 0)) throw new Error(`The GatingSet hierarchy has a malformed ${label}: distance ${distance}.`);
-      addGate({
-        ...common,
-        gate_id: path,
-        gate_type: "ellipse",
-        mean: [finite(mean[0], `mean of ${label}`), finite(mean[1], `mean of ${label}`)],
-        covariance: [rows[0], rows[1]],
-        // flowCore tests the Mahalanobis distance against `distance`; the app holds its square.
-        distance_square: distance * distance,
-      });
-    } else if (kind === "quadrant") {
-      if (axes.length !== 2) throw new Error(`The GatingSet hierarchy has a malformed ${label}: a quadrant set needs two axes.`);
-      const center = list(gate.center, `centre of ${label}`);
-      if (center.length !== 2) throw new Error(`The GatingSet hierarchy has a malformed ${label}: centre.`);
-      const members = list(gate.members, `members of ${label}`).map((member) => {
-        const item = record(member, `member of ${label}`);
-        const quadrant = finite(item.quadrant, `quadrant number of ${label}`);
-        if (![1, 2, 3, 4].includes(quadrant)) throw new Error(`The GatingSet hierarchy has a malformed ${label}: quadrant ${quadrant}.`);
-        return { path: text(item.path, `member path of ${label}`), name: text(item.name, `member name of ${label}`), quadrant };
-      });
-      if (members.length === 0) throw new Error(`The GatingSet hierarchy has a malformed ${label}: no members.`);
-      addGate({
-        ...common,
-        gate_id: path,
-        gate_type: "quadrant",
-        center: [finite(center[0], `centre of ${label}`), finite(center[1], `centre of ${label}`)],
-      });
+      own.set(sample, theirs.gate);
+    }
+    if (refused) {
+      dropAll(refused);
+      continue;
+    }
+    addGate(built.gate);
+    for (const [sample, gate] of own) {
+      const byGate = tailored.get(sample) ?? new Map<string, Gate>();
+      byGate.set(path, gate);
+      tailored.set(sample, byGate);
+    }
+    if (members) {
       // Each member is its own population under the parent; the quadrant node itself is none.
       // An event exactly on a divider is on its upper side here and in no quadrant in cytolib,
       // the one rule the two engines do not share.
@@ -368,13 +483,63 @@ export function translateGatingSetHierarchy(
         addPopulation(member.path, member.name, parentPath, [ref]);
       }
       continue;
-    } else {
-      throw new Error(`The GatingSet hierarchy has a malformed ${label}: gate kind '${String(kind)}'.`);
     }
-
     const ref: GateRef = { gate_id: path, include: !negated };
     nodeRef.set(path, ref);
     addPopulation(path, name, parentPath, [ref]);
+  }
+
+  // A tailored copy of the tree per sample with gates of its own (tailoredImport.ts): the tree's
+  // populations and gates under ids of the sample's, with provenance back to the tree's, and the
+  // sample's own geometry on its tailored gates, which keep the tree's name and colour.
+  const refs: HierarchyRef[] = [{ id: DEFAULT_HIERARCHY_ID, name: DEFAULT_HIERARCHY_NAME }];
+  const copies: WorkspaceStoredHierarchy[] = [];
+  const assignments = new Map<string, string>();
+  const tailoring: { sample: string; gates: number }[] = [];
+  for (const sample of dataset.samples) {
+    const own = tailored.get(sample.id);
+    if (!own?.size) continue;
+    const prefix = `${sample.id}:`;
+    const copyGates: Record<string, Gate> = {};
+    const sourceGates: Record<string, string> = {};
+    for (const gateId of gateOrder) {
+      const tree = gates[gateId];
+      const theirs = own.get(gateId);
+      copyGates[prefix + gateId] = { ...structuredClone(theirs ?? tree), gate_id: prefix + gateId, name: tree.name, color: tree.color };
+      sourceGates[prefix + gateId] = gateId;
+    }
+    const copyPopulations: PopulationMap = {};
+    const sourcePopulations: Record<string, string> = {};
+    for (const [id, population] of Object.entries(populations)) {
+      copyPopulations[prefix + id] = {
+        ...structuredClone(population),
+        population_id: prefix + id,
+        parent_id: population.parent_id === null ? null : prefix + population.parent_id,
+        children: population.children.map((child) => prefix + child),
+        gate_refs: population.gate_refs.map((ref) => ({ ...ref, gate_id: prefix + ref.gate_id })),
+      };
+      sourcePopulations[prefix + id] = id;
+    }
+    const ref: HierarchyRef = {
+      id: tailoredHierarchyId(sample.id),
+      name: uniqueHierarchyName(`${sample.label || sample.id} · ${DEFAULT_HIERARCHY_NAME}`, refs),
+      owner_sample_id: `${dataset.id}:${sample.id}`,
+      structure_locked: true,
+      source_hierarchy_id: DEFAULT_HIERARCHY_ID,
+      source_gate_ids: sourceGates,
+      source_population_ids: sourcePopulations,
+    };
+    refs.push(ref);
+    copies.push({
+      ...ref,
+      gates: copyGates,
+      gate_order: gateOrder.map((id) => prefix + id),
+      populations: copyPopulations,
+      root_population_id: prefix + ROOT_POPULATION_ID,
+      active_population_id: prefix + ROOT_POPULATION_ID,
+    });
+    assignments.set(sample.id, ref.id);
+    tailoring.push({ sample: sample.label || sample.id, gates: own.size });
   }
 
   // Open on the scatter pair, as a file opens, rather than on whichever channel the object
@@ -397,6 +562,7 @@ export function translateGatingSetHierarchy(
       ...(dataset.instrument === "flow" || dataset.instrument === "cytof"
         ? { instrumentMode: dataset.instrument }
         : {}),
+      ...(assignments.has(sample.id) ? { hierarchyId: assignments.get(sample.id) } : {}),
     })),
     activeSample: 0,
     gating: {
@@ -406,6 +572,16 @@ export function translateGatingSetHierarchy(
       root_population_id: ROOT_POPULATION_ID,
       active_population_id: ROOT_POPULATION_ID,
       selected_gate_id: null,
+      // Only where a sample is tailored: an object with one gate per node opens as before.
+      ...(copies.length
+        ? {
+            hierarchies: refs,
+            active_hierarchy_id: DEFAULT_HIERARCHY_ID,
+            stored_hierarchies: copies,
+            perFileHierarchies: true,
+            perFileHierarchyCopiesInitialized: true,
+          }
+        : {}),
     },
     scales: { globalScales: {} },
     display: {
@@ -417,7 +593,7 @@ export function translateGatingSetHierarchy(
     },
   };
   validateWorkspace(workspace);
-  return { workspace, leftOut };
+  return { workspace, leftOut, tailoring };
 }
 
 /** The populations of a translated hierarchy, for the status line. */
