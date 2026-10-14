@@ -4,7 +4,7 @@
 // gating-only update must not reach it (App.hiddenTabWork.test.tsx), so its memo comparator
 // ignores every prop while both the old and the new render are hidden.
 
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { HoveredCell } from "../engine/cellHoverStore";
 import { useI18n } from "../ui/i18n";
 import { usePersistedTabState } from "../ui/tabState";
@@ -60,6 +60,10 @@ export const CLASS_SORT = "__class__";
 
 const GAP = 4;
 const OVERSCAN_ROWS = 2;
+/** The scroll container's padding (styles.css .gl-images-scroll), where the first tile's edge sits. */
+const GRID_PADDING = 6;
+/** How a click changes the picks, as in Apple Photos: a click picks the cell alone, Cmd/Ctrl toggles it, Shift extends from the last click. */
+export type PickMode = "replace" | "toggle" | "range";
 const THUMBNAIL_HOP = NATIVE_HOP;
 
 interface WallTileProps {
@@ -75,12 +79,15 @@ interface WallTileProps {
   readonly label: string;
   /** The tile's class colour, drawn as its border. */
   readonly colour?: string | null;
-  /** Picked for an image set; a Cmd/Ctrl-click toggles it, a Shift-click picks the run from the last pick. */
+  /** Picked for an image set: a click picks this cell alone, Cmd/Ctrl-click toggles it, Shift-click extends from the last click. */
   readonly picked?: boolean;
-  readonly onPick?: (eventIndex: number, run: boolean) => void;
+  readonly onPick?: (eventIndex: number, mode: PickMode) => void;
 }
 
-function WallTile({ service, fileKey, sampleId, eventIndex, spec, size, pinned, onPin, onOpen, label, colour = null, picked = false, onPick }: WallTileProps) {
+// Memoised: a pick or a pin must re-render the tiles it touches, not the few hundred on the wall
+// (every handler the grid passes keeps its identity across renders, see the refs below).
+const WallTile = memo(function WallTile({ service, fileKey, sampleId, eventIndex, spec, size, pinned, onPin, onOpen, label, colour = null, picked = false, onPick }: WallTileProps) {
+  const { t } = useI18n();
   const image = useCellImage(service, fileKey, eventIndex, spec, "batch");
   const shown = image.result?.kind === "image" ? image.result.image : null;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -102,7 +109,11 @@ function WallTile({ service, fileKey, sampleId, eventIndex, spec, size, pinned, 
       aria-checked={onPick ? picked : undefined}
       data-event={eventIndex}
       onClick={(event) => {
-        if (onPick && (event.metaKey || event.ctrlKey || event.shiftKey)) { onPick(eventIndex, event.shiftKey); return; }
+        if (onPick) {
+          if (event.metaKey || event.ctrlKey) { onPick(eventIndex, "toggle"); return; }
+          if (event.shiftKey) { onPick(eventIndex, "range"); return; }
+          onPick(eventIndex, "replace");
+        }
         onPin({ sampleId, eventIndex });
       }}
       onDoubleClick={onOpen}
@@ -110,11 +121,23 @@ function WallTile({ service, fileKey, sampleId, eventIndex, spec, size, pinned, 
       {shown ? <canvas ref={canvasRef} /> : <span className="gl-wall-tile-empty">{image.status === "none" ? "·" : ""}</span>}
       {/* The class ring sits in front of the picture: an inset shadow on the tile itself is painted under the canvas, so it showed only in the letterbox bars (David, 2026-10-14). */}
       {colour && <span className="gl-wall-tile-ring" aria-hidden="true" style={{ boxShadow: `inset 0 0 0 2px ${colour}` }} />}
-      {picked && <span className="gl-wall-tile-pick" aria-hidden="true">✓</span>}
+      {/* The pick box in the corner: a plain click picks or unpicks this cell alone, no modifier. */}
+      {onPick && (
+        <span
+          className={"gl-wall-tile-pick" + (picked ? " is-picked" : "")}
+          role="checkbox"
+          aria-checked={picked}
+          aria-label={picked ? t("Unpick") : t("Pick")}
+          title={picked ? t("Unpick") : t("Pick")}
+          onClick={(event) => { event.stopPropagation(); onPick(eventIndex, event.shiftKey ? "range" : "toggle"); }}
+        >
+          {picked ? "✓" : ""}
+        </span>
+      )}
       <span className="gl-wall-tile-index">{eventIndex.toLocaleString()}</span>
     </button>
   );
-}
+});
 
 function ImagesTabImpl({
   visible, service, entry, mask, populationLabel, view, onViewChange, pinned, onPin, onShowOnPlot,
@@ -122,6 +145,13 @@ function ImagesTabImpl({
   classOf, classes, classTitle, onMakePopulation, onFindSimilar,
 }: ImagesTabProps) {
   const { t } = useI18n();
+  // The tiles are memoised, so the handlers they get keep one identity and read the latest through refs.
+  const onShowOnPlotRef = useRef(onShowOnPlot);
+  onShowOnPlotRef.current = onShowOnPlot;
+  const onOpenTile = useCallback(() => onShowOnPlotRef.current(), []);
+  const onPinRef = useRef(onPin);
+  onPinRef.current = onPin;
+  const onPinTile = useCallback((cell: HoveredCell) => onPinRef.current(cell), []);
   const [sortKey, setSortKey] = usePersistedTabState<string>("images.sortKey", "");
   const [sortDesc, setSortDesc] = usePersistedTabState<boolean>("images.sortDesc", false);
   const [tileSize, setTileSize] = usePersistedTabState<number>("images.tileSize", 72);
@@ -136,9 +166,16 @@ function ImagesTabImpl({
   const [wallRange, setWallRange] = usePersistedTabState<{ key: string; lo: number; hi: number } | null>("images.range", null);
   const sortIdx = entry && sortKey && sortKey !== CLASS_SORT ? entry.sample.channels.findIndex((c) => c.key === sortKey) : -1;
   const sortChannel = sortIdx >= 0 && entry ? entry.sample.channels[sortIdx] : null;
-  const sortLabel = sortChannel ? sortChannel.label ?? sortChannel.key : "";
   const sortColumn = useMemo(() => (entry && sortIdx >= 0 ? entry.sample.displayColumn(sortIdx) : null), [entry, sortIdx]);
-  const activeRange: [number, number] | null = sortColumn && wallRange && wallRange.key === sortKey ? [wallRange.lo, wallRange.hi] : null;
+  // The histogram is always there: of the sort channel when the wall is sorted by one, else of a
+  // channel chosen beside it (the first channel until one is chosen). A range dragged on it limits
+  // the wall by that channel, whatever the order (David, 2026-10-14).
+  const [histKey, setHistKey] = usePersistedTabState<string>("images.histKey", "");
+  const histIdx = !entry ? -1 : sortIdx >= 0 ? sortIdx : Math.max(0, entry.sample.channels.findIndex((c) => c.key === histKey));
+  const histChannel = histIdx >= 0 && entry ? entry.sample.channels[histIdx] : null;
+  const histLabel = histChannel ? histChannel.label ?? histChannel.key : "";
+  const histColumn = useMemo(() => (entry && histIdx >= 0 ? entry.sample.displayColumn(histIdx) : null), [entry, histIdx]);
+  const activeRange: [number, number] | null = histColumn && histChannel && wallRange && wallRange.key === histChannel.key ? [wallRange.lo, wallRange.hi] : null;
   // Cells picked for an image set: a Cmd/Ctrl-click toggles one, a Shift-click picks the run from the
   // last pick in wall order, Space toggles the focused tile. The picks belong to this wall: a new file
   // or population starts empty.
@@ -211,7 +248,7 @@ function ImagesTabImpl({
       out = out.filter((e) => classOf!(e) === want);
     }
     const all = out;
-    if (sortColumn && activeRange) out = eventsInRange(sortColumn, out, activeRange[0], activeRange[1]).slice();
+    if (histColumn && activeRange) out = eventsInRange(histColumn, out, activeRange[0], activeRange[1]).slice();
     const sign = sortDesc ? -1 : 1;
     if (sortKey === CLASS_SORT && classed) {
       out.sort((a, b) => sign * ((classOf!(a) ?? 99) - (classOf!(b) ?? 99)) || a - b);
@@ -223,25 +260,97 @@ function ImagesTabImpl({
     return { events: out, inPopulation: count, all };
     // activeRange is a fresh tuple per render; its two numbers are what matters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entry, sourceInfo, wallMask, sortKey, sortDesc, classed, classOf, wallClass, sortColumn, activeRange?.[0], activeRange?.[1]]);
-  const histogram = useMemo(() => (sortColumn ? wallHistogram(sortColumn, all) : null), [sortColumn, all]);
+  }, [entry, sourceInfo, wallMask, sortKey, sortDesc, classed, classOf, wallClass, sortColumn, histColumn, activeRange?.[0], activeRange?.[1]]);
+  const histogram = useMemo(() => (histColumn ? wallHistogram(histColumn, all) : null), [histColumn, all]);
 
-  const pick = (eventIndex: number, run: boolean) => {
-    // Read the last pick now: the updater runs later, after the ref has moved on to this pick.
+  const pick = (eventIndex: number, mode: PickMode) => {
+    // Read the last click now: the updater runs later, after the ref has moved on to this one.
     const last = lastPickRef.current;
     setPicked((prev) => {
+      if (mode === "replace") return new Set([eventIndex]);
       const next = new Set(prev);
-      if (run && last !== null) {
+      if (mode === "range" && last !== null) {
         const a = events.indexOf(last);
         const b = events.indexOf(eventIndex);
         if (a >= 0 && b >= 0) for (let k = Math.min(a, b); k <= Math.max(a, b); k++) next.add(events[k]);
         else next.add(eventIndex);
-      } else if (next.has(eventIndex)) next.delete(eventIndex);
+      } else if (mode === "range") next.add(eventIndex);
+      else if (next.has(eventIndex)) next.delete(eventIndex);
       else next.add(eventIndex);
       return next;
     });
     lastPickRef.current = eventIndex;
   };
+  // A rectangle dragged over the wall picks the tiles it touches; with Option (Alt) held it unpicks
+  // them. A press that does not move stays a click, so pinning and the tick are untouched.
+  const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number; mode: "replace" | "add" | "remove" } | null>(null);
+  const dragRef = useRef<{ x: number; y: number; mode: "replace" | "add" | "remove"; active: boolean } | null>(null);
+  const dragMode = (event: { altKey: boolean; metaKey: boolean; ctrlKey: boolean }): "replace" | "add" | "remove" =>
+    event.altKey ? "remove" : event.metaKey || event.ctrlKey ? "add" : "replace";
+  const suppressClickRef = useRef(false);
+  const contentPoint = (event: React.PointerEvent<HTMLDivElement>): { x: number; y: number } => {
+    const node = scrollRef.current!;
+    const rect = node.getBoundingClientRect();
+    return { x: event.clientX - rect.left + node.scrollLeft, y: event.clientY - rect.top + node.scrollTop };
+  };
+  const onGridPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!onMakePopulation || event.button !== 0 || !scrollRef.current) return;
+    const target = event.target as HTMLElement;
+    if (target.closest(".gl-wall-tile-pick")) return;
+    if (target.closest(".gl-wall-tile") && (event.metaKey || event.ctrlKey || event.shiftKey)) return;
+    const p = contentPoint(event);
+    dragRef.current = { x: p.x, y: p.y, mode: dragMode(event), active: false };
+  };
+  const onGridPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || !scrollRef.current) return;
+    const p = contentPoint(event);
+    if (!drag.active) {
+      if (Math.abs(p.x - drag.x) < 4 && Math.abs(p.y - drag.y) < 4) return;
+      drag.active = true;
+      const node = scrollRef.current;
+      if (typeof node.setPointerCapture === "function") { try { node.setPointerCapture(event.pointerId); } catch { /* jsdom */ } }
+    }
+    setMarquee({ x0: Math.min(drag.x, p.x), y0: Math.min(drag.y, p.y), x1: Math.max(drag.x, p.x), y1: Math.max(drag.y, p.y), mode: drag.mode });
+  };
+  const onGridPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    dragRef.current = null;
+    if (!drag || !drag.active) { setMarquee(null); return; }
+    const p = contentPoint(event);
+    const box = { x0: Math.min(drag.x, p.x), y0: Math.min(drag.y, p.y), x1: Math.max(drag.x, p.x), y1: Math.max(drag.y, p.y) };
+    const mode = drag.mode;
+    setMarquee(null);
+    suppressClickRef.current = true;
+    // Tiles sit on a grid from the container's padding: column c spans [pad + c·step, pad + c·step + tile].
+    const pad = GRID_PADDING;
+    const hits: number[] = [];
+    const c0 = Math.max(0, Math.floor((box.x0 - pad) / step));
+    const c1 = Math.min(columns - 1, Math.floor((box.x1 - pad) / step));
+    const r0 = Math.max(0, Math.floor((box.y0 - pad) / step));
+    const r1 = Math.min(rowCount - 1, Math.floor((box.y1 - pad) / step));
+    for (let r = r0; r <= r1; r++) {
+      const top = pad + r * step;
+      if (box.y1 < top || box.y0 > top + tileSize) continue;
+      for (let c = c0; c <= c1; c++) {
+        const left = pad + c * step;
+        if (box.x1 < left || box.x0 > left + tileSize) continue;
+        const k = r * columns + c;
+        if (k < events.length) hits.push(events[k]);
+      }
+    }
+    if (mode === "replace") { setPicked(new Set(hits)); lastPickRef.current = hits.length ? hits[hits.length - 1] : null; return; }
+    if (hits.length === 0) return;
+    setPicked((prev) => { const next = new Set(prev); for (const e of hits) { if (mode === "remove") next.delete(e); else next.add(e); } return next; });
+    lastPickRef.current = hits[hits.length - 1];
+  };
+  const onGridClickCapture = (event: React.MouseEvent<HTMLDivElement>) => {
+    // The click that ends a rectangle drag is not a pin.
+    if (suppressClickRef.current) { suppressClickRef.current = false; event.stopPropagation(); event.preventDefault(); }
+  };
+  const pickRef = useRef(pick);
+  pickRef.current = pick;
+  const onPickTile = useCallback((eventIndex: number, mode: PickMode) => pickRef.current(eventIndex, mode), []);
   const pickedOnWall = useMemo(() => {
     if (picked.size === 0) return [];
     const here: number[] = [];
@@ -274,7 +383,7 @@ function ImagesTabImpl({
   const lastTile = Math.min(events.length, lastRow * columns);
   // The tiles actually in view (no overscan), as a band on the histogram.
   const inView = ((): [number, number] | null => {
-    if (!sortColumn || events.length === 0 || viewport.height === 0) return null;
+    if (!sortColumn || sortColumn !== histColumn || events.length === 0 || viewport.height === 0) return null;
     const a = Math.min(events.length - 1, Math.max(0, Math.floor(viewport.scrollTop / step)) * columns);
     const b = Math.min(events.length - 1, Math.ceil((viewport.scrollTop + viewport.height) / step) * columns - 1);
     return [sortColumn[events[a]], sortColumn[events[b]]];
@@ -290,9 +399,15 @@ function ImagesTabImpl({
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
     if (!target.classList.contains("gl-wall-tile")) return;
-    if (event.key === " " && onMakePopulation) {
+    if (onMakePopulation && event.key === " ") {
       const at = Number(target.getAttribute("data-event"));
-      if (Number.isInteger(at)) { event.preventDefault(); pick(at, event.shiftKey); }
+      if (Number.isInteger(at)) { event.preventDefault(); pick(at, event.shiftKey ? "range" : "toggle"); }
+      return;
+    }
+    if (onMakePopulation && event.key === "Escape") { setPicked(new Set()); lastPickRef.current = null; return; }
+    if (onMakePopulation && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      setPicked(new Set(Array.from(events)));
       return;
     }
     const by = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : event.key === "ArrowDown" ? columns : event.key === "ArrowUp" ? -columns : null;
@@ -360,14 +475,27 @@ function ImagesTabImpl({
                 {sortDesc ? "↓" : "↑"}
               </button>
             </label>
-            {histogram && sortChannel && (
+            {histogram && histChannel && (
               <span className="gl-images-histogram">
+                {!sortChannel && (
+                  <select
+                    className="gl-images-hist-channel"
+                    value={histChannel.key}
+                    aria-label={t("Histogram of")}
+                    title={t("The channel the histogram shows while the wall is not sorted by one; a range dragged on it limits the wall by that channel")}
+                    onChange={(event) => { setHistKey(event.target.value); setWallRange(null); }}
+                  >
+                    {entry.sample.channels.map((channel) => (
+                      <option key={channel.key} value={channel.key}>{channel.label ?? channel.key}</option>
+                    ))}
+                  </select>
+                )}
                 <WallHistogram
                   histogram={histogram}
-                  label={sortLabel}
+                  label={histLabel}
                   inView={inView}
                   range={activeRange}
-                  onRange={(range) => setWallRange(range ? { key: sortKey, lo: range[0], hi: range[1] } : null)}
+                  onRange={(range) => setWallRange(range ? { key: histChannel.key, lo: range[0], hi: range[1] } : null)}
                 />
                 {activeRange && (
                   <span className="gl-images-range">
@@ -449,7 +577,7 @@ function ImagesTabImpl({
                       tile: Math.max(24, Math.min(96, Math.round(tileSize * 0.75))),
                       columns: take <= 12 ? 6 : take <= 48 ? 8 : 12,
                       ...(outlineSpec ? { outline: outlineSpec } : {}),
-                      ...(activeRange ? { rangeLabel: `${sortLabel} ${formatWallValue(activeRange[0])}–${formatWallValue(activeRange[1])}` } : {}),
+                      ...(activeRange ? { rangeLabel: `${histLabel} ${formatWallValue(activeRange[0])}–${formatWallValue(activeRange[1])}` } : {}),
                       ...(classed
                         ? {
                             tileColours: Array.from(events.subarray(0, take), (e) => colourOf(e) ?? ""),
@@ -466,7 +594,7 @@ function ImagesTabImpl({
             {onMakePopulation && (
               <span
                 className="gl-images-control gl-images-picked"
-                title={t("Pick cells for a population: Cmd/Ctrl-click a tile, Shift-click a run of tiles, Space on the focused tile")}
+                title={t("Pick cells as in Photos: click a cell, Cmd/Ctrl-click to add or remove one, Shift-click to extend from the last click, drag a rectangle over the wall (Cmd-drag adds, Option-drag removes), Escape clears, Cmd-A picks all shown")}
               >
                 <span>{t("{count} picked", { count: pickedOnWall.length.toLocaleString() })}</span>
                 <button
@@ -480,6 +608,14 @@ function ImagesTabImpl({
                 </button>
                 {pickedOnWall.length > 0 && (
                   <>
+                    <button
+                      type="button"
+                      className="gl-mini-btn"
+                      title={t("Drop every cell now on the wall from the picks")}
+                      onClick={() => { setPicked((prev) => { const next = new Set(prev); for (let k = 0; k < events.length; k++) next.delete(events[k]); return next; }); }}
+                    >
+                      {t("Unpick shown")}
+                    </button>
                     <input
                       type="text"
                       value={setName}
@@ -513,7 +649,9 @@ function ImagesTabImpl({
                         {t("Find similar")}
                       </button>
                     )}
-                    <button type="button" className="gl-mini-btn" onClick={() => { setPicked(new Set()); lastPickRef.current = null; }} title={t("Pick none")}>×</button>
+                    <button type="button" className="gl-mini-btn" onClick={() => { setPicked(new Set()); lastPickRef.current = null; }} title={t("Drop every pick")}>
+                      {t("Unpick all")}
+                    </button>
                   </>
                 )}
               </span>
@@ -530,7 +668,24 @@ function ImagesTabImpl({
             </div>
           )}
           {sourceError && <div className="gl-error-inline">{sourceError}</div>}
-          <div className="gl-images-scroll" ref={scrollRef} role="grid" aria-rowcount={rowCount} onKeyDown={onKeyDown}>
+          <div
+            className="gl-images-scroll"
+            ref={scrollRef}
+            role="grid"
+            aria-rowcount={rowCount}
+            onKeyDown={onKeyDown}
+            onPointerDown={onGridPointerDown}
+            onPointerMove={onGridPointerMove}
+            onPointerUp={onGridPointerUp}
+            onPointerCancel={() => { dragRef.current = null; setMarquee(null); }}
+            onClickCapture={onGridClickCapture}
+          >
+            {marquee && (
+              <div
+                className={"gl-images-marquee" + (marquee.mode === "remove" ? " gl-images-marquee-unpick" : "")}
+                style={{ left: marquee.x0, top: marquee.y0, width: Math.max(1, marquee.x1 - marquee.x0), height: Math.max(1, marquee.y1 - marquee.y0) }}
+              />
+            )}
             <div style={{ height: firstRow * step }} />
             <div className="gl-images-grid" style={{ gridTemplateColumns: `repeat(${columns}, ${tileSize}px)`, gap: GAP }}>
               {Array.from({ length: Math.max(0, lastTile - firstTile) }, (_, k) => {
@@ -545,12 +700,12 @@ function ImagesTabImpl({
                     spec={spec}
                     size={tileSize}
                     pinned={pinned?.sampleId === entry.id && pinned.eventIndex === eventIndex}
-                    onPin={onPin}
-                    onOpen={onShowOnPlot}
+                    onPin={onPinTile}
+                    onOpen={onOpenTile}
                     label={t("Event {index} of {name}", { index: eventIndex.toLocaleString(), name: entry.name })}
                     colour={colourOf(eventIndex)}
                     picked={picked.has(eventIndex)}
-                    onPick={onMakePopulation ? pick : undefined}
+                    onPick={onMakePopulation ? onPickTile : undefined}
                   />
                 );
               })}

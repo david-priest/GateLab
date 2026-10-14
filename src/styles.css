@@ -3665,6 +3665,7 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-images-control select { font-size: 11px; max-width: 220px; }
 .gl-images-control input[type="range"] { width: 90px; }
 .gl-images-histogram { display: inline-flex; align-items: center; gap: 6px; }
+.gl-images-hist-channel { font-size: 11px; max-width: 150px; }
 .gl-wall-histogram { display: block; border: 1px solid var(--line); border-radius: 3px; background: var(--bg); cursor: crosshair; touch-action: none; }
 .gl-images-range { display: inline-flex; align-items: center; gap: 4px; font-variant-numeric: tabular-nums; }
 .gl-images-check { cursor: pointer; }
@@ -3672,7 +3673,10 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-images-channels { display: inline-flex; flex-wrap: wrap; gap: 6px; }
 .gl-images-channel { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; cursor: pointer; }
 .gl-images-channel input { margin: 0; width: 11px; height: 11px; }
-.gl-images-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px; background: #111; }
+.gl-images-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px; background: #111; position: relative; user-select: none; -webkit-user-select: none; touch-action: pan-y; }
+/* The rectangle dragged over the wall to pick (amber) or, with Option, unpick (red) the tiles it touches. */
+.gl-images-marquee { position: absolute; z-index: 2; border: 1px dashed #ffbf00; background: rgba(255, 191, 0, 0.16); pointer-events: none; }
+.gl-images-marquee-unpick { border-color: #ff6b6b; background: rgba(255, 107, 107, 0.16); }
 .gl-images-grid { display: grid; justify-content: start; }
 .gl-wall-tile { position: relative; display: flex; align-items: center; justify-content: center; padding: 0; background: #000; border: 2px solid transparent; border-radius: 3px; cursor: pointer; overflow: hidden; }
 .gl-wall-tile:focus-visible { outline: 2px solid #2f6fe4; outline-offset: 1px; }
@@ -3680,8 +3684,17 @@ input[type="number"]::-webkit-outer-spin-button {
 .gl-wall-tile canvas { display: block; max-width: 100%; max-height: 100%; }
 .gl-wall-tile-empty { color: #555; font-size: 12px; }
 .gl-wall-tile-ring { position: absolute; inset: 0; pointer-events: none; border-radius: inherit; }
-.gl-wall-tile-picked { outline: 3px solid #ffbf00; outline-offset: -3px; }
-.gl-wall-tile-pick { position: absolute; left: 2px; top: 1px; font-size: 11px; line-height: 1; color: #111; background: #ffbf00; border-radius: 2px; padding: 1px 2px; pointer-events: none; }
+/* The pick box in every tile's corner: empty until picked, a tick when picked, a click toggles it. A
+   picked tile shows the tick alone: an outline clashed with the class ring (David, 2026-10-14). */
+.gl-wall-tile-pick {
+  position: absolute; left: 3px; top: 3px; width: 14px; height: 14px; box-sizing: border-box;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; line-height: 1; color: transparent; border-radius: 3px; cursor: pointer;
+  background: rgba(255, 255, 255, 0.28); border: 1px solid rgba(255, 255, 255, 0.75); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+.gl-wall-tile:hover .gl-wall-tile-pick { background: rgba(255, 255, 255, 0.6); }
+.gl-wall-tile-pick.is-picked { color: #111; background: #ffbf00; border-color: #ffbf00; }
+.gl-wall-tile-pick.is-picked:hover { background: #ffd24d; }
 .gl-images-picked input[type="text"] { width: 120px; font-size: 11px; padding: 1px 4px; }
 .gl-wall-tile-index { position: absolute; right: 2px; bottom: 1px; font-size: 8px; color: rgba(255, 255, 255, 0.55); font-variant-numeric: tabular-nums; pointer-events: none; }
 /* A file with cell images attached (a FACSDiscover S8 .cvw beside it). */
