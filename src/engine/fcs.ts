@@ -33,6 +33,9 @@ export interface FcsChannel {
    *  S8 says Area, Height or Width for a pulse and MaskSize, Eccentricity, TotalIntensity and
    *  the like for a feature it derived from the cell's image. Absent when the file has none. */
   feature?: string;
+  /** A column GateLab computed (engine/derivedChannels.ts), not one the file holds: left out of the
+   *  panel a pooled plot matches on, and saved in the workspace by value. */
+  derived?: true;
   /** Stable app identity supplied by a non-FCS host (for example an SCE row name). */
   appKey?: string;
   /** Cosmetic label supplied by a non-FCS host; never used for gate identity. */

@@ -5,6 +5,7 @@
 // SCE-with-metadata. Reopening re-parses the FCS (bit-identical) and reapplies the JSON state.
 
 import { zipSync, unzipSync, strToU8, strFromU8 } from "fflate";
+import { isDerivedChannelRecord, type DerivedChannelRecord } from "./derivedChannels";
 import type { GateEdgeMode } from "../ui/gateEdgeModes";
 import { isRectangleBounds, validCurl, type Gate, type PopulationMap } from "./models";
 import type { DisplayMode, ExternalSpillover } from "./sample";
@@ -55,15 +56,29 @@ export interface CvwImageRecord {
   recordingId?: string;
 }
 
-export type CellImageRecord = CvwImageRecord;
+/** A folder of extracted TIFFs, found again by the folder's name and the files' naming. */
+export interface TiffFolderImageRecord {
+  kind: "tiff-folder";
+  fileName: string;
+  eventCount: number;
+  naming: { prefix: string; digits: number; suffix: string; layout: "subfolders" | "flat" };
+}
+
+export type CellImageRecord = CvwImageRecord | TiffFolderImageRecord;
 
 export function isCellImageRecord(value: unknown): value is CellImageRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  return record.kind === "cvw" &&
-    typeof record.fileName === "string" && record.fileName.length > 0 &&
-    typeof record.eventCount === "number" && Number.isInteger(record.eventCount) && record.eventCount >= 0 &&
-    (record.recordingId === undefined || typeof record.recordingId === "string");
+  const common = typeof record.fileName === "string" && record.fileName.length > 0 &&
+    typeof record.eventCount === "number" && Number.isInteger(record.eventCount) && record.eventCount >= 0;
+  if (record.kind === "cvw") return common && (record.recordingId === undefined || typeof record.recordingId === "string");
+  if (record.kind === "tiff-folder") {
+    const naming = record.naming as Record<string, unknown> | undefined;
+    return common && !!naming && typeof naming === "object" &&
+      typeof naming.prefix === "string" && typeof naming.digits === "number" && typeof naming.suffix === "string" &&
+      (naming.layout === "subfolders" || naming.layout === "flat");
+  }
+  return false;
 }
 
 export interface WorkspaceSample {
@@ -89,6 +104,8 @@ export interface WorkspaceSample {
   labels?: Record<string, string>; // Panel-tab channel display names, keyed by identity key
   metadata?: Record<string, string>; // per-sample metadata fields (Metadata tab)
   division?: { channelKey: string; boundaries: number[]; n: number; colName: string; coordinateBindingKey?: string }; // Division profile
+  /** Channels GateLab computed for the file (engine/derivedChannels.ts), by value, so reopening needs no recount. */
+  derived?: DerivedChannelRecord[];
   /**
    * The hierarchy this file is gated under when `gating.perFileHierarchies` is on. Absent, or
    * naming a hierarchy that no longer exists, reads as the first hierarchy.
@@ -644,6 +661,9 @@ export function validateWorkspace(ws: WorkspaceFile): true {
       invalidWorkspace(`sample ${i + 1} has an invalid instrument mode.`);
     }
     if (sample.division !== undefined) validateDivisionProfile(sample.division, i);
+    if (sample.derived !== undefined && (!Array.isArray(sample.derived) || !sample.derived.every(isDerivedChannelRecord))) {
+      invalidWorkspace(`sample ${i + 1} has an invalid derived channel.`);
+    }
     if (sample.externalSpillover !== undefined && !isExternalSpillover(sample.externalSpillover)) {
       invalidWorkspace(`sample ${i + 1} has an invalid spillover matrix.`);
     }

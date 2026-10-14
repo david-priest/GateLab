@@ -118,6 +118,27 @@ export function compositeRgba(planes: ImagePlanes, spec: RenderSpec): Uint8Clamp
   return rgba;
 }
 
+/** The colour of a mask outline: magenta, which none of the default channel tints use. */
+export const OUTLINE_RGB: readonly [number, number, number] = [255, 60, 255];
+
+/** Paint the boundary of `mask` (its pixels with a 4-neighbour outside it, or on the picture's edge) into RGBA pixels. */
+export function paintOutline(rgba: Uint8ClampedArray, mask: Uint8Array, rows: number, cols: number, rgb: readonly [number, number, number] = OUTLINE_RGB): void {
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
+      if (!mask[i]) continue;
+      const edge =
+        r === 0 || c === 0 || r === rows - 1 || c === cols - 1 ||
+        !mask[i - cols] || !mask[i + cols] || !mask[i - 1] || !mask[i + 1];
+      if (!edge) continue;
+      rgba[i * 4] = rgb[0];
+      rgba[i * 4 + 1] = rgb[1];
+      rgba[i * 4 + 2] = rgb[2];
+      rgba[i * 4 + 3] = 255;
+    }
+  }
+}
+
 /** One channel on its own, tinted with its colour (or grey when `tint` is false). */
 export function channelRgba(planes: ImagePlanes, spec: RenderSpec, slot: number, tint = true): Uint8ClampedArray {
   const { rows, cols } = planes;

@@ -137,8 +137,7 @@ import {
   type GatingFontSizes,
   type IllustrationConfig,
   type IllustrationPreset,
-  type WorkspaceStoredHierarchy,
-} from "./engine/workspace";
+  type WorkspaceStoredHierarchy, type CvwImageRecord, type TiffFolderImageRecord } from "./engine/workspace";
 import {
   WORKSPACE_VERSION_3,
   createPortableWorkspaceV3ArchivePlan,
@@ -217,8 +216,7 @@ import {
   readFromHandleIfPermitted,
   rememberHandle,
   recallHandle,
-  type PickedFileSource,
-} from "./engine/fsAccess";
+  type PickedFileSource, rememberDirectoryHandle, recallDirectoryHandle } from "./engine/fsAccess";
 import {
   describeRequirement,
   indistinguishableDuplicateNames,
@@ -386,8 +384,28 @@ import type { PlottedPoints } from "./engine/sample";
 import { createCellHoverStore, type HoveredCell } from "./engine/cellHoverStore";
 import { imagedEventFlags } from "./engine/imagedEvents";
 import { CELL_CLASS_LABELS, cellReasonLabels, classifyCells, type CellClasses } from "./engine/cellClass";
+import { imageWallNaturalSize, type LayoutImageWallRecipe } from "./engine/imageWallBlock";
 import { rankSeparatingPairs, type PairScore, type SeparationColumn } from "./engine/separation";
-import { imageHandleKey, isSidecarName, pairSidecars } from "./engine/sidecarNames";
+import { imagingPlotPresets } from "./engine/imagingPresets";
+import {
+  DERIVED_CELL_CLASS, DERIVED_MASK_FEATURES, DERIVED_OBJECT_AREA, DERIVED_OBJECT_COUNT,
+  countFromDerivedChannels, decodeDerivedChannel, encodeDerivedChannel,
+} from "./engine/derivedChannels";
+
+/** One place the user has been in the app: the view, not the data (the Back button). */
+interface ViewStep {
+  readonly tab: TabId;
+  readonly sampleId: string | null;
+  readonly popId: string | null;
+  readonly gateId: string | null;
+  readonly x: string | null;
+  readonly y: string | null;
+}
+const sameViewStep = (a: ViewStep, b: ViewStep): boolean =>
+  a.tab === b.tab && a.sampleId === b.sampleId && a.popId === b.popId && a.gateId === b.gateId && a.x === b.x && a.y === b.y;
+import { similarityScores, type SimilarityColumn } from "./engine/similarity";
+
+import { imageFolderStem, imageHandleKey, isSidecarName, pairImageFolders, pairSidecars } from "./engine/sidecarNames";
 import { usePersistedTabState } from "./ui/tabState";
 
 const CompensationTab = lazy(lazyChunk("CompensationTab", async () => {
@@ -1053,6 +1071,8 @@ interface FcsImportCandidate {
   sourcePath?: string;
   /** The `.cvw` picked, dropped or found beside this FCS, to attach once the FCS has opened. */
   images?: { file: File; handle: FileSystemFileHandle | null; sourcePath?: string };
+  /** A folder of extracted TIFFs found beside this FCS; preferred over the `.cvw` when both are there. */
+  imageFolder?: { folderName: string; handle: FileSystemDirectoryHandle | null; files: File[] | null; sourcePath?: string };
 }
 
 interface PendingFolderImport {
@@ -2264,6 +2284,78 @@ export default function App() {
   }, [sample]);
 
   const [state, dispatch] = useReducer(coreReducer, undefined, initialCoreState);
+  const viewStep = useMemo<ViewStep>(() => ({
+    tab: activeTab,
+    sampleId: activeSampleId,
+    popId: state.active_population_id ?? null,
+    gateId: state.selected_gate_id ?? null,
+    x: sample?.channels[xIdx]?.key ?? null,
+    y: sample?.channels[yIdx]?.key ?? null,
+  }), [activeTab, activeSampleId, state.active_population_id, state.selected_gate_id, sample, xIdx, yIdx]);
+  useEffect(() => {
+    const prev = lastViewRef.current;
+    lastViewRef.current = viewStep;
+    if (!prev || prev.sampleId === null || sameViewStep(prev, viewStep)) return;
+    const target = goingBackRef.current;
+    if (target) {
+      // The change is the step back itself (or a change on the way to it): not a new place.
+      if (sameViewStep(target, viewStep)) goingBackRef.current = null;
+      return;
+    }
+    const history = viewHistoryRef.current;
+    if (history.length === 0 || !sameViewStep(history[history.length - 1], prev)) history.push(prev);
+    if (history.length > 100) history.shift();
+    setViewHistoryLength(history.length);
+    // A new move of the user's own ends the forward path, as in a browser.
+    if (viewForwardRef.current.length > 0) { viewForwardRef.current = []; setViewForwardLength(0); }
+  }, [viewStep]);
+  // A new or opened workspace starts with no history, from the view it opens on.
+  useEffect(() => {
+    viewHistoryRef.current = [];
+    viewForwardRef.current = [];
+    lastViewRef.current = viewStep;
+    goingBackRef.current = null;
+    setViewHistoryLength(0);
+    setViewForwardLength(0);
+    // Runs on a change of workspace only; the step it starts from is whatever the view is then.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
+  const applyViewStep = useCallback((step: ViewStep) => {
+    goingBackRef.current = step;
+    if (step.tab !== activeTab) setActiveTab(step.tab);
+    const entry = step.sampleId ? samples.find((e) => e.id === step.sampleId) : undefined;
+    if (entry && entry.id !== activeSampleId) inspectSample(entry.id);
+    const target = entry?.sample ?? sample;
+    if (target) {
+      const xi = step.x ? target.index(step.x) : undefined;
+      const yi = step.y ? target.index(step.y) : undefined;
+      if (xi !== undefined) setXIdx(xi);
+      if (yi !== undefined) setYIdx(yi);
+    }
+    if (step.popId && step.popId !== state.active_population_id && state.populations[step.popId]) dispatch({ type: "setActivePopulation", popId: step.popId });
+    const gateId = step.gateId && state.gates[step.gateId] ? step.gateId : null;
+    if (gateId !== (state.selected_gate_id ?? null)) dispatch({ type: "selectGate", gateId });
+    // Whatever settles after this tick is the user's again.
+    setTimeout(() => { goingBackRef.current = null; }, 0);
+    // inspectSample is a plain function of this render; the values it reads are the deps listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, activeSampleId, samples, sample, state.active_population_id, state.populations, state.gates, state.selected_gate_id, dispatch]);
+  const goBack = useCallback(() => {
+    const step = viewHistoryRef.current.pop();
+    if (!step) return;
+    if (lastViewRef.current) viewForwardRef.current.push(lastViewRef.current);
+    setViewHistoryLength(viewHistoryRef.current.length);
+    setViewForwardLength(viewForwardRef.current.length);
+    applyViewStep(step);
+  }, [applyViewStep]);
+  const goForward = useCallback(() => {
+    const step = viewForwardRef.current.pop();
+    if (!step) return;
+    if (lastViewRef.current) viewHistoryRef.current.push(lastViewRef.current);
+    setViewHistoryLength(viewHistoryRef.current.length);
+    setViewForwardLength(viewForwardRef.current.length);
+    applyViewStep(step);
+  }, [applyViewStep]);
   /** Which tree each file is gated under; in the store so Undo restores it with the copies. */
   const fileHierarchies = state.file_hierarchies;
   const startResize = (e: React.MouseEvent) => {
@@ -2338,8 +2430,10 @@ export default function App() {
    * acquisitions; and keyed on the marker as well as the detector, because the same detector
    * carries a different stain between panels — which is exactly the case that must not pool.
    */
+  // Channels GateLab computed for a file (an object count) are not part of its panel: two tubes of
+  // one panel pool whether or not one of them has been counted.
   const panelKeyOf = useCallback((s: Sample): string =>
-    JSON.stringify(s.channels.map((c) => [c.key, c.pnn])), []);
+    JSON.stringify(s.channels.filter((_, i) => !s.isDerivedChannel(i)).map((c) => [c.key, c.pnn])), []);
   // Pooled, the plot draws the selected files under the tree of the viewed one, which supplies the
   // axes and the editable gates, on its panel and its assay layer. A selected file under another
   // tree, on another panel or on another layer is left out of the pool, and so of the cloud, the
@@ -2609,6 +2703,66 @@ export default function App() {
     if (cls === undefined || cls === 4) return null;
     return { label: CELL_CLASS_LABELS[cls], reasons: cellReasonLabels(cellClasses.reasons[cell.eventIndex]) };
   }, [cellClasses]);
+  // Once a file's objects are counted, the count, the mask area and the single-cell class become
+  // channels of the file, so they can be plotted, gated, counted in Statistics and exported, and
+  // a saved workspace reopens with them (David, 2026-10-14). An event without an image counts 0
+  // objects and 0 area, as Chorus's own features read on it; its class is "no image" (4). The
+  // class follows the strictness, so changing it rewrites that channel.
+  const derivedDoneRef = useRef(new Map<string, { objects: Classification; strictness: number }>());
+  // A reopened workspace carries the count as channels: take it from there, so the colourings, the
+  // class and the wall's borders need no second count. The class channel is rewritten below at the
+  // current strictness, which may differ from the one it was saved at.
+  useEffect(() => {
+    const restored: Record<string, Classification> = {};
+    for (const entry of samplesRef.current) {
+      if (!entry.images || imageObjects[entry.id]) continue;
+      const count = countFromDerivedChannels(entry.sample, imagedFlagsBySample.get(entry.id) ?? null);
+      if (count) restored[entry.id] = count;
+    }
+    if (Object.keys(restored).length > 0) setImageObjects((prev) => ({ ...prev, ...restored }));
+  }, [samples, imageObjects, imagedFlagsBySample]);
+  useEffect(() => {
+    const touched = new Set<string>();
+    for (const entry of samplesRef.current) {
+      const objects = imageObjects[entry.id];
+      if (!objects || !entry.images) continue;
+      const done = derivedDoneRef.current.get(entry.id);
+      if (done && done.objects === objects && done.strictness === cellStrictness) continue;
+      const maskSlot = entry.images.mask?.slot;
+      const maskChannel = maskSlot !== undefined ? entry.images.channelNames.get(maskSlot) : undefined;
+      const classes = classifyCells(entry.sample.fcs, objects.objectCount, imagedFlagsBySample.get(entry.id) ?? null, {
+        strictness: cellStrictness,
+        ...(maskChannel ? { maskChannel } : {}),
+      });
+      const n = entry.sample.fcs.nEvents;
+      const count = new Uint8Array(n);
+      let areaMax = 0;
+      for (let e = 0; e < n; e++) {
+        const c = objects.objectCount[e];
+        count[e] = c === undefined || c === 255 ? 0 : c;
+        if (objects.objectArea[e] > areaMax) areaMax = objects.objectArea[e];
+      }
+      try {
+        entry.sample.addDerivedChannel({ name: DERIVED_OBJECT_COUNT, feature: "ObjectCount", range: 8, values: count });
+        entry.sample.addDerivedChannel({ name: DERIVED_OBJECT_AREA, feature: "ObjectArea", range: Math.max(1, areaMax + 1), values: objects.objectArea });
+        entry.sample.addDerivedChannel({ name: DERIVED_CELL_CLASS, feature: "CellClass", range: CELL_CLASS_LABELS.length, values: classes.classes });
+        // The shape and intensity of the mask, when the worker measured them (perimeter, circularity, the axes...).
+        for (const [key, name, feature] of DERIVED_MASK_FEATURES) {
+          const values = objects.features?.[key];
+          if (!values || values.length !== n) continue;
+          let top = 0;
+          for (let e = 0; e < n; e++) if (values[e] > top) top = values[e];
+          entry.sample.addDerivedChannel({ name, feature, range: Math.max(1, Math.ceil(top) + 1), values });
+        }
+      } catch (cause) {
+        console.warn(`${entry.name}: ${cause instanceof Error ? cause.message : String(cause)}`);
+        continue;
+      }
+      derivedDoneRef.current.set(entry.id, { objects, strictness: cellStrictness });
+      touched.add(entry.id);
+    }
+    if (touched.size > 0) setSamples((prev) => prev.map((e) => (touched.has(e.id) ? { ...e } : e)));
+  }, [imageObjects, cellStrictness, imagedFlagsBySample]);
   const [thumbnailsOn, setThumbnailsOn] = usePersistedTabState<boolean>("cell.thumbnails", false);
   const [thumbnailCount, setThumbnailCount] = usePersistedTabState<number>("cell.thumbnailCount", 40);
   const [thumbnailSize, setThumbnailSize] = usePersistedTabState<number>("cell.thumbnailSize", 44);
@@ -2822,6 +2976,16 @@ export default function App() {
   // edit would stall large bundled workspaces; bundles retain their format via manual Save.
   const buildWsRef = useRef<() => LiveWorkspaceFile | null>(() => null);
   const workspaceIdRef = useRef(workspaceId);
+  // ── Back: the view's history ────────────────────────────────────────────────
+  // Where the user has been: the tab, the viewed file, the active population, the selected gate
+  // and the axes (as channel keys, so a step survives a file switch). Undo is for the data; this
+  // is for the view, and a step back touches no gate or population (David, 2026-10-14).
+  const viewHistoryRef = useRef<ViewStep[]>([]);
+  const viewForwardRef = useRef<ViewStep[]>([]);
+  const lastViewRef = useRef<ViewStep | null>(null);
+  const goingBackRef = useRef<ViewStep | null>(null);
+  const [viewHistoryLength, setViewHistoryLength] = useState(0);
+  const [viewForwardLength, setViewForwardLength] = useState(0);
   workspaceIdRef.current = workspaceId;
   // A checkpoint a major change asks for once it has landed. Held as state, not a ref, so it is
   // taken on the render that carries the change: a sample mutation (compensation or a transform,
@@ -2987,6 +3151,7 @@ export default function App() {
   }, [dirty, wsHandle, wsName, wsStorage]);
   const fileRef = useRef<HTMLInputElement>(null);
   const folderRef = useRef<HTMLInputElement | null>(null);
+  const tiffFolderRef = useRef<HTMLInputElement | null>(null);
   const xmlRef = useRef<HTMLInputElement>(null);
   const cvwRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<HTMLInputElement>(null);
@@ -7617,7 +7782,8 @@ export default function App() {
     }
     for (const entry of entries) {
       if (entry.handle) void rememberHandle("fcs:" + entry.name, entry.handle);
-      if (entry.images?.handle) void rememberHandle(imageHandleKey("cvw", entry.name), entry.images.handle);
+      if (entry.images?.kind === "cvw" && entry.images.handle) void rememberHandle(imageHandleKey("cvw", entry.name), entry.images.handle);
+      if (entry.images?.kind === "tiff-folder" && entry.images.handle) void rememberDirectoryHandle(imageHandleKey("tiff", entry.name), entry.images.handle);
     }
     // Warn if an existing gate references a channel this sample lacks: getGateMask returns
     // an all-false mask (zero events) for such a gate, which would otherwise be a silent
@@ -8010,6 +8176,23 @@ export default function App() {
     setActiveTab("gating");
   }
 
+  /** An image wall from the Images tab as one Layout block, at its natural size, and the Layout tab shown. */
+  function addImageWallToLayout(recipe: LayoutImageWallRecipe): void {
+    setLayoutWorkspace((current) => {
+      const next = cloneLayoutWorkspace(current);
+      const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
+      if (!sheet) return current;
+      const size = imageWallNaturalSize(recipe);
+      const frame = nextLayoutItemPosition(sheet, size.width, size.height);
+      sheet.items.push({ id: crypto.randomUUID(), ...frame, recipe });
+      sheet.width = Math.max(sheet.width, frame.x + frame.width + 48);
+      sheet.height = Math.max(sheet.height, frame.y + frame.height + 48);
+      return next;
+    });
+    markWorkspaceDirty();
+    setActiveTab("layout");
+  }
+
   /** The Illustration tab's figure as one Layout block, and the Layout tab shown. */
   function addFigureToLayout(config: IllustrationConfig): void {
     setLayoutWorkspace((current) => {
@@ -8260,7 +8443,15 @@ export default function App() {
             byCandidate?.set(candidate.id, entry);
             // The waveform file beside it is attached after the FCS has opened, and a problem
             // with it is a note, never a reason to lose the FCS.
-            if (candidate.images) {
+            if (candidate.imageFolder) {
+              try {
+                const { attachTiffFolder } = await import("./imaging/attach");
+                entry.images = await attachTiffFolder(candidate.imageFolder, entry.sample.fcs);
+                imagesAttached++;
+              } catch (cause) {
+                imageNotes.push(cause instanceof Error ? cause.message : String(cause));
+              }
+            } else if (candidate.images) {
               try {
                 const { attachCellImages } = await import("./imaging/attach");
                 entry.images = await attachCellImages(
@@ -8411,6 +8602,40 @@ export default function App() {
     }
   }
 
+  /** Attach a folder of extracted TIFFs to the viewed file: the picker where the browser has one, else the hidden folder input. */
+  async function attachTiffFolderToActive(): Promise<void> {
+    const entry = activeEntry;
+    if (!entry) return;
+    if (!supportsDirectoryAccess()) {
+      tiffFolderRef.current?.click();
+      return;
+    }
+    setError(null);
+    try {
+      const picked = await pickDirectoryFiles([".tiff", ".tif"]);
+      if (!picked) return;
+      await attachTiffFolderTo(entry.id, { folderName: picked.name, handle: picked.handle, files: null });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function attachTiffFolderTo(entryId: string, input: { folderName: string; handle: FileSystemDirectoryHandle | null; files: File[] | null }): Promise<void> {
+    const entry = samplesRef.current.find((e) => e.id === entryId);
+    if (!entry) return;
+    try {
+      const { attachTiffFolder } = await import("./imaging/attach");
+      const images = await attachTiffFolder(input, entry.sample.fcs);
+      const first = !samplesRef.current.some((e) => e.images);
+      setSamples((prev) => prev.map((e) => (e.id === entryId ? { ...e, images } : e)));
+      if (first) showImagesByDefault();
+      if (input.handle) void rememberDirectoryHandle(imageHandleKey("tiff", entry.name), input.handle);
+      setImportMsg(`Cell images attached to ${entry.name}: ${input.folderName}, ${images.imageCount.toLocaleString()} imaged events.`);
+    } catch (cause) {
+      setError(`Cell images not attached: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+
   function detachImagesFromActive(): void {
     const entry = activeEntry;
     if (!entry?.images) return;
@@ -8437,7 +8662,18 @@ export default function App() {
     try {
       const picked = await pickDirectoryFiles([".fcs", ".cvw"]);
       if (!picked) return;
-      stageFolderImport(picked.name, candidatesWithSidecars(picked.files, (source) => `${picked.name}/${source.relativePath}`));
+      const candidates = candidatesWithSidecars(picked.files, (source) => `${picked.name}/${source.relativePath}`);
+      // Folders of extracted TIFFs beside the FCS files, named after their tubes, are attached with them.
+      const folders: { name: string; handle: FileSystemDirectoryHandle }[] = [];
+      for await (const entry of (picked.handle as FileSystemDirectoryHandle & { values(): AsyncIterable<FileSystemHandle> }).values()) {
+        if (entry.kind === "directory" && imageFolderStem(entry.name)) folders.push({ name: entry.name, handle: entry as FileSystemDirectoryHandle });
+      }
+      const pairedFolders = pairImageFolders(candidates.map((c) => c.name), folders);
+      for (const candidate of candidates) {
+        const folder = pairedFolders.get(candidate.name);
+        if (folder) candidate.imageFolder = { folderName: folder.name, handle: folder.handle, files: null, sourcePath: `${picked.name}/${folder.name}` };
+      }
+      stageFolderImport(picked.name, candidates);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -8484,6 +8720,8 @@ export default function App() {
         labels: e.sample.labelOverrides(),
         metadata: { ...metadata[e.id], [SAMPLE_ID_FIELD]: sampleDisplayId(e.name, metadata[e.id]) },
         division: divisionProfiles[e.id],
+        // Channels GateLab computed for the file, by value, so reopening needs no recount.
+        ...(e.sample.derivedChannels().length ? { derived: e.sample.derivedChannels().map(encodeDerivedChannel) } : {}),
         ...(fileHierarchies[e.id] ? { hierarchyId: fileHierarchies[e.id] } : {}),
         ...(state.file_groups[e.id] ? { groupId: state.file_groups[e.id] } : {}),
         // What the file recorded about its acquisition, so relinking finds this file and not
@@ -8497,7 +8735,13 @@ export default function App() {
         // Attached cell images are linked by name and identity, never copied: the file stays
         // where the instrument exported it and is found again beside the FCS on reopening.
         ...(e.images
-          ? { images: [{ kind: "cvw" as const, fileName: e.images.fileName, eventCount: e.images.eventCount, ...(e.images.recordingId ? { recordingId: e.images.recordingId } : {}) }] }
+          ? {
+              images: [
+                e.images.kind === "tiff-folder"
+                  ? { kind: "tiff-folder" as const, fileName: e.images.fileName, eventCount: e.images.eventCount, naming: { ...e.images.naming } }
+                  : { kind: "cvw" as const, fileName: e.images.fileName, eventCount: e.images.eventCount, ...(e.images.recordingId ? { recordingId: e.images.recordingId } : {}) },
+              ],
+            }
           : {}),
       })),
       activeSample: Math.max(0, samples.findIndex((e) => e.id === activeSampleId)),
@@ -9813,8 +10057,22 @@ export default function App() {
         // The cell images the workspace linked: from the folder just chosen when it held them,
         // else through the handle remembered when they were attached. Not found is a note; a
         // file of another recording, or of the wrong length, is refused with its reason.
-        const imageRecord = wss.images?.find((record) => record.kind === "cvw");
-        if (imageRecord) {
+        const tiffRecord = wss.images?.find((record): record is TiffFolderImageRecord => record.kind === "tiff-folder");
+        if (tiffRecord) {
+          const remembered = await recallDirectoryHandle(imageHandleKey("tiff", wss.fileName));
+          if (remembered && (await ensurePermission(remembered as unknown as FileSystemFileHandle, "read"))) {
+            try {
+              const { attachTiffFolder } = await import("./imaging/attach");
+              entry.images = await attachTiffFolder({ folderName: remembered.name, handle: remembered, files: null }, entry.sample.fcs);
+            } catch (cause) {
+              dataSetNotes.push(`cell images not attached to ${wss.fileName}: ${cause instanceof Error ? cause.message : String(cause)}`);
+            }
+          } else {
+            dataSetNotes.push(`cell images for ${wss.fileName} (${tiffRecord.fileName}) were not found; attach them again from Import`);
+          }
+        }
+        const imageRecord = wss.images?.find((record): record is CvwImageRecord => record.kind === "cvw");
+        if (imageRecord && !entry.images) {
           const beside = resolvedReferenceFcs.get(wss.dataPath)?.images ?? null;
           let imageFile: File | null = beside?.file ?? null;
           let imageHandle: FileSystemFileHandle | null = beside?.handle ?? null;
@@ -9931,6 +10189,15 @@ export default function App() {
             ...wss.division,
             coordinateBindingKey: restoredCoordinateBinding,
           };
+        }
+        // Channels GateLab computed for the file, saved by value: back before any gate on them is
+        // evaluated. One that does not fit the file (relinked to another file) is left out, not fatal.
+        for (const record of wss.derived ?? []) {
+          try {
+            entry.sample.addDerivedChannel(decodeDerivedChannel(record, entry.sample.fcs.nEvents));
+          } catch (cause) {
+            console.warn(`${wss.fileName}: ${cause instanceof Error ? cause.message : String(cause)}`);
+          }
         }
         // The matrix the gates were drawn under, when it is not the file's own, before
         // compensation is turned on: the file's own would evaluate every fluorescence gate on
@@ -11360,6 +11627,132 @@ export default function App() {
     setXRange(null);
     setYRange(null);
   }, []);
+  /** Biplots worth drawing on this file's image features (engine/imagingPresets.ts); none on a file without them. */
+  const imagingPresets = useMemo(
+    () => (activeEntry ? imagingPlotPresets(activeEntry.sample.channels.map((_, i) => activeEntry.sample.channelLabel(i))) : []),
+    [activeEntry],
+  );
+
+  // ── The Images tab's population picker and the cells a gate leaves out. ──
+  const imagesPopulationId = derived.displayPopCount > 0 ? null : state.active_population_id ?? null;
+  const imagesPopulations = useMemo(
+    () => populationTreeOrder(state.populations, state.root_population_id ?? "").map((o) => ({ id: o.popId, name: state.populations[o.popId]?.name ?? "", depth: o.depth })),
+    [state.populations, state.root_population_id],
+  );
+  const imagesExcluded = useMemo<{ mask: Uint8Array; parentName: string } | null>(() => {
+    if (!imagesPopulationId || !sample) return null;
+    const pop = state.populations[imagesPopulationId];
+    const parentId = pop?.parent_id ?? null;
+    if (!parentId) return null;
+    const own = derived.masks[imagesPopulationId];
+    if (!own) return null;
+    const parent = derived.masks[parentId] ?? null;
+    const n = sample.fcs.nEvents;
+    const mask = new Uint8Array(n);
+    for (let e = 0; e < n; e++) mask[e] = (!parent || parent[e]) && !own[e] ? 1 : 0;
+    return { mask, parentName: state.populations[parentId]?.name ?? t("its parent") };
+  }, [imagesPopulationId, sample, state.populations, derived, t]);
+  const chooseImagesPopulation = useCallback((popId: string) => {
+    if (state.populations[popId]) dispatch({ type: "setActivePopulation", popId });
+  }, [state.populations, dispatch]);
+  const imagesClasses = useMemo(
+    () => (overlayBy === "objects" || overlayBy === "cellclass"
+      ? thumbnailClassLabels.map((label, i) => ({ label, colour: paletteColors(overlayPalette, 4)[i] ?? "#888888" }))
+      : undefined),
+    [overlayBy, thumbnailClassLabels, overlayPalette],
+  );
+  const imagesClassOf = useCallback((eventIndex: number) => thumbnailClassOf(null, eventIndex), [thumbnailClassOf]);
+  const imagesClassTitle = overlayBy === "objects" ? t("Objects in image") : overlayBy === "cellclass" ? t("Single cells") : undefined;
+  /**
+   * A population of cells picked on the image wall (an image set): the picks become a 0/1 channel
+   * of the file, saved with the workspace by value, and the population is a rectangle on it under
+   * the wall's population, with the rest of that population beside it. So it is a gate like any
+   * other (counted, exported, undone), reproducible from the workspace, and a file without the
+   * channel is simply outside it.
+   */
+  const makeImageSetPopulation = useCallback((events: number[], name: string) => {
+    const entry = samplesRef.current.find((e) => e.id === activeSampleIdRef.current);
+    if (!entry || !name.trim()) return;
+    const n = entry.sample.fcs.nEvents;
+    const values = new Uint8Array(n);
+    for (const e of events) if (Number.isInteger(e) && e >= 0 && e < n) values[e] = 1;
+    let idx: number;
+    try {
+      idx = entry.sample.addDerivedChannel({ name: `Image set: ${name.trim()}`, feature: "ImageSet", range: 2, values });
+    } catch (cause) {
+      setImportMsg(cause instanceof Error ? cause.message : String(cause));
+      return;
+    }
+    const key = entry.sample.channels[idx].key;
+    const yIdx = entry.sample.channels.findIndex((_, i) => i !== idx && !entry.sample.isDerivedChannel(i));
+    const yKey = yIdx >= 0 ? entry.sample.channels[yIdx].key : key;
+    // The rectangle spans the file's own range of its second channel, a little past each end, so it
+    // draws as a box within the axes and not as two lines off the plot (an unbounded edge draws so).
+    let lo = Infinity;
+    let hi = -Infinity;
+    if (yIdx >= 0) {
+      const column = entry.sample.rawColumnData(yIdx);
+      for (let e = 0; e < column.length; e++) {
+        const v = column[e];
+        if (!Number.isFinite(v)) continue;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+    }
+    if (!(lo <= hi)) { lo = 0; hi = 1; }
+    const pad = (hi - lo) * 0.02 || 1;
+    setSamples((prev) => prev.map((e) => (e.id === entry.id ? { ...e } : e)));
+    dispatch({
+      type: "addGate",
+      gateType: "rectangle",
+      xChannel: key,
+      yChannel: yKey,
+      vertices: [[0.5, lo - pad], [1.5, hi + pad]],
+      name: name.trim(),
+      space: "raw",
+      gateId: crypto.randomUUID(),
+      createPop: { name: name.trim(), parentId: imagesPopulationId ?? state.root_population_id!, notName: t("Not {name}", { name: name.trim() }) },
+    });
+  }, [imagesPopulationId, state.root_population_id, dispatch, t]);
+  /**
+   * Likeness of every imaged cell of the wall's population to the picked ones, over the file's
+   * channels (not time, the imaging flags, an object's position, or a channel GateLab derived), as
+   * a channel of the file: 0 for a picked cell, larger the less alike (engine/similarity.ts). The
+   * wall then sorts by it. A cell outside the population reads one past the farthest, so it is
+   * never mistaken for alike.
+   */
+  const findSimilarCells = useCallback((events: number[], name: string): string | null => {
+    const entry = samplesRef.current.find((e) => e.id === activeSampleIdRef.current);
+    if (!entry || events.length === 0) return null;
+    const s0 = entry.sample;
+    const columns: SimilarityColumn[] = [];
+    s0.channels.forEach((channel, i) => {
+      const names = [channel.pnn, channel.key, s0.channelLabel(i)];
+      if (names.some((n) => /^(Time|Event_length|Cell_length|WaveformPresent|PhaseOffset)$/i.test(n) || /^Center of Mass/i.test(n))) return;
+      if (s0.isDerivedChannel(i)) return;
+      columns.push({ values: s0.displayColumn(i) });
+    });
+    const n = s0.fcs.nEvents;
+    const mask = derived.displayMask ?? derived.activeMask;
+    const flags = imagedFlagsBySample.get(entry.id) ?? null;
+    const candidates: number[] = [];
+    for (let e = 0; e < n; e++) if ((!mask || mask[e]) && (!flags || flags[e])) candidates.push(e);
+    const scores = similarityScores(columns, events, candidates, n);
+    let far = 0;
+    for (let e = 0; e < n; e++) if (Number.isFinite(scores[e]) && scores[e] > far) far = scores[e];
+    for (let e = 0; e < n; e++) if (!Number.isFinite(scores[e])) scores[e] = far + 1;
+    try {
+      const idx = s0.addDerivedChannel({ name: `Similar to ${name.trim()}`, feature: "Similarity", range: Math.ceil(far + 2), values: scores });
+      setSamples((prev) => prev.map((e) => (e.id === entry.id ? { ...e } : e)));
+      return s0.channels[idx].key;
+    } catch (cause) {
+      setImportMsg(cause instanceof Error ? cause.message : String(cause));
+      return null;
+    }
+  }, [derived.displayMask, derived.activeMask, imagedFlagsBySample]);
+  const addImageWallRef = useRef(addImageWallToLayout);
+  addImageWallRef.current = addImageWallToLayout;
+  const sendImageWallToLayout = useCallback((recipe: LayoutImageWallRecipe) => addImageWallRef.current(recipe), []);
 
   /** The colour the plot draws a cell of the viewed file in: its class under a colouring, else the plain dot. */
   const cellColourOf = useCallback((cell: HoveredCell): string | null => {
@@ -12062,6 +12455,29 @@ export default function App() {
             </p>
           </span>
         </span>
+        {/* Back and forward through the view (tab, file, population, gate, axes) from any tab; the data is untouched (David, 2026-10-14). */}
+        <span className="gl-view-nav" role="group" aria-label={t("Back and forward")}>
+          <button
+            type="button"
+            className="gl-icon-chip gl-view-back"
+            title={t("Back to the view before this one: the tab, file, population, gate or axes you had; no gate or population changes")}
+            aria-label={t("Back")}
+            disabled={viewHistoryLength === 0}
+            onClick={goBack}
+          >
+            ←
+          </button>
+          <button
+            type="button"
+            className="gl-icon-chip gl-view-forward"
+            title={t("Forward again, to the view you stepped back from")}
+            aria-label={t("Forward")}
+            disabled={viewForwardLength === 0}
+            onClick={goForward}
+          >
+            →
+          </button>
+        </span>
         <nav className="gl-header-menus" aria-label={t("Workspace, import and export")}>
           {isSceHost ? (
             <MenuButton
@@ -12183,6 +12599,11 @@ export default function App() {
                 title: "Attach the waveform file (.cvw) a BD FACSDiscover S8 exports beside this FCS when images were recorded. Each event's image is decoded from it on demand. A folder opened with “+ Folder…”, or an FCS dropped or picked together with its .cvw, attaches it by itself.",
                 disabled: !activeEntry || isSceHost,
                 onClick: () => void attachImagesToActive(),
+              },
+              {
+                label: activeEntry?.images?.kind === "tiff-folder" ? t("Replace cell images (folder of TIFFs)…") : t("Attach cell images (folder of TIFFs)…"),
+                title: "A folder written by the BD CellView Image Extractor or FlowJo: one TIFF per imaged event, named <tube>_<event number>.tiff, in folders of ten thousand.",
+                onClick: () => void attachTiffFolderToActive(),
               },
               ...(activeEntry?.images
                 ? [{
@@ -12565,9 +12986,42 @@ export default function App() {
                   const relativePath = pathParts.length > 1 ? pathParts.slice(1).join("/") : file.name;
                   return { name: file.name, file, handle: null, relativePath };
                 });
-                stageFolderImport(rawRoot, candidatesWithSidecars(listed, (source) => `${rawRoot}/${source.relativePath}`));
+                const candidates = candidatesWithSidecars(listed, (source) => `${rawRoot}/${source.relativePath}`);
+                // Folders of extracted TIFFs beside the FCS files come as files with their paths.
+                const tiffs = new Map<string, File[]>();
+                for (const file of files) {
+                  const pathParts = file.webkitRelativePath.split("/").filter(Boolean);
+                  if (pathParts.length >= 3 && /\.tiff?$/i.test(file.name) && imageFolderStem(pathParts[1])) {
+                    const list = tiffs.get(pathParts[1]) ?? [];
+                    list.push(file);
+                    tiffs.set(pathParts[1], list);
+                  }
+                }
+                const pairedFolders = pairImageFolders(candidates.map((c) => c.name), [...tiffs.keys()].map((name) => ({ name })));
+                for (const candidate of candidates) {
+                  const folder = pairedFolders.get(candidate.name);
+                  if (folder) candidate.imageFolder = { folderName: folder.name, handle: null, files: tiffs.get(folder.name) ?? [], sourcePath: `${rawRoot}/${folder.name}` };
+                }
+                stageFolderImport(rawRoot, candidates);
               }
               event.target.value = "";
+            }}
+          />
+          <input
+            ref={(node) => {
+              tiffFolderRef.current = node;
+              if (node) node.setAttribute("webkitdirectory", "");
+            }}
+            type="file"
+            data-role="tiff-folder"
+            multiple
+            style={{ display: "none" }}
+            onChange={(event) => {
+              const files = Array.from(event.target.files ?? []);
+              event.target.value = "";
+              if (files.length === 0 || !activeEntry) return;
+              const root = files[0].webkitRelativePath.split("/")[0] || "Selected folder";
+              void attachTiffFolderTo(activeEntry.id, { folderName: root, handle: null, files });
             }}
           />
           <input
@@ -12758,7 +13212,7 @@ export default function App() {
                 >
                   {t("Lock scales between files")}
                 </button>
-                <span className="gl-hint">{t("drag the margin to pan · shift-drag it to stretch · click an axis label to change its channel · shift while dragging a vertex holds 45°")}</span>
+                <span className="gl-hint-icon" role="img" aria-label={t("Plot hints")} title={t("drag the margin to pan · shift-drag it to stretch · click an axis label to change its channel · shift while dragging a vertex holds 45°")}>?</span>
               </span>
             </div>
             <div className="gl-controls">
@@ -12992,7 +13446,11 @@ export default function App() {
                 >
                   {t("Extend to edges")}
                 </button>
-                <span className="gl-ctl-sep" />
+              </div>
+            </div>
+            {/* What the points look like: colour, palette, size, the imaging plots and the thumbnails; the gating controls stay on the row above (David, 2026-10-14). */}
+            <div className="gl-controls gl-appearance">
+              <div className="gl-modes gl-appearance-modes">
                 <span className="gl-field-inline">
                   {t("Colour by")}
                   <SearchableSelect
@@ -13050,66 +13508,27 @@ export default function App() {
                     />
                   </label>
                 )}
-                {workspaceHasImages && activeEntry?.images && (
-                  <label className="gl-field-inline gl-thumbs-field" title={t("Lay a spread of cell images over the plot, at their events' positions")}>
-                    <input type="checkbox" checked={thumbnailsOn} onChange={(e) => setThumbnailsOn(e.target.checked)} />
-                    {t("Thumbnails")}
-                    <input
-                      type="number"
-                      min={1}
-                      max={400}
-                      value={thumbnailCount}
-                      disabled={!thumbnailsOn}
-                      aria-label={t("How many thumbnails")}
-                      onChange={(e) => setThumbnailCount(Math.max(1, Math.min(400, Math.round(Number(e.target.value) || 1))))}
-                    />
-                    <input
-                      type="range"
-                      min={24}
-                      max={96}
-                      step={4}
-                      value={thumbnailSize}
-                      disabled={!thumbnailsOn}
-                      aria-label={t("Thumbnail size")}
-                      onChange={(e) => setThumbnailSize(Number(e.target.value))}
-                    />
-                    <span className="gl-thumbs-seed" title={t("The seed that picks which cells are shown: the same seed shows the same cells")}>
-                      {t("Seed")}
-                      <input
-                        type="number"
-                        min={1}
-                        max={99999}
-                        value={thumbnailSeed}
-                        disabled={!thumbnailsOn}
-                        aria-label={t("Seed")}
-                        onChange={(e) => setThumbnailSeed(Math.max(1, Math.min(99999, Math.round(Number(e.target.value) || 1))))}
-                      />
-                      <button
-                        type="button"
-                        className="gl-chip"
-                        disabled={!thumbnailsOn}
-                        title={t("Pick a new seed")}
-                        aria-label={t("Pick a new seed")}
-                        onClick={() => setThumbnailSeed(1 + Math.floor(Math.random() * 99999))}
-                      >
-                        ⟳
-                      </button>
-                    </span>
-                    {thumbnailClassLabels.length > 0 && (
+                  <label
+                    className="gl-field-inline gl-palette-field"
+                    title={overlayColDataValues?.colors
+                      ? t("Colours for this column are fixed in metadata(sce)$gatelab_palettes, so the palette does not apply.")
+                      : undefined}
+                  >
+                    {t("Palette")}
+                    {overlayBy === "channel" ? (
                       <select
-                        className="gl-thumbs-class"
-                        value={thumbnailClass}
-                        disabled={!thumbnailsOn}
-                        aria-label={t("Thumbnails of")}
-                        title={t("Show thumbnails of one class only")}
-                        onChange={(e) => setThumbnailClass(e.target.value)}
+                        value={overlayMarkerPalette}
+                        onChange={(e) => setOverlayMarkerPalette(e.target.value as PaletteName)}
                       >
-                        <option value="all">{t("all cells")}</option>
-                        {thumbnailClassLabels.map((label, i) => <option key={label} value={String(i)}>{label}</option>)}
+                        {MARKER_PALETTES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+                      </select>
+                    ) : (
+                      <select value={overlayPalette} disabled={overlayBy === "none" || !!overlayColDataValues?.colors} onChange={(e) => setOverlayPalette(e.target.value as PaletteName)}>
+                        {OVERLAY_PALETTES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
                       </select>
                     )}
                   </label>
-                )}
+                <MarkerColourControl value={markerColorPower} onChange={setMarkerColorPower} disabled={overlayBy !== "channel"} />
                 {activeEntry?.images && (
                   <label
                     className="gl-field-inline gl-sizeby-field"
@@ -13130,12 +13549,30 @@ export default function App() {
                     )}
                   </label>
                 )}
-                {activeEntry?.images && thumbnailClassLabels.length > 0 && (
-                  <details className="gl-separating">
-                    <summary title={t("The channel pair whose biplot best separates two classes of this colouring, ranked by the area under the curve of its best dividing line")}>
-                      {t("Separating plot")}
+                {activeEntry && (imagingPresets.length > 0 || (activeEntry.images && thumbnailClassLabels.length > 0)) && (
+                  <details className="gl-separating gl-popover">
+                    <summary title={t("Biplots worth drawing on this file's image features, and the channel pair whose biplot best separates two classes of the colouring")}>
+                      {t("Imaging plots")}
                     </summary>
                     <div className="gl-separating-body">
+                      {imagingPresets.length > 0 && (
+                        <div className="gl-separating-group">
+                          <div className="gl-separating-heading">{t("Suggested plots")}</div>
+                          <ul className="gl-separating-list gl-separating-presets">
+                            {imagingPresets.map((p) => (
+                              <li key={p.id}>
+                                <button type="button" className="gl-chip" title={t(p.note, p.vars)} onClick={() => showBiplot(p.x, p.y)}>
+                                  {t(p.title, p.vars)}
+                                </button>
+                                <span className="gl-muted"> {activeEntry.sample.channelLabel(p.x)} × {activeEntry.sample.channelLabel(p.y)}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {activeEntry.images && thumbnailClassLabels.length > 0 && (
+                        <>
+                      <div className="gl-separating-heading" title={t("The channel pair whose biplot best separates two classes of this colouring, ranked by the area under the curve of its best dividing line")}>{t("Separating plot")}</div>
                       <div className="gl-separating-row">
                         <label>
                           {t("Separate")}
@@ -13175,30 +13612,80 @@ export default function App() {
                           </div>
                         ))
                       ))}
+                        </>
+                      )}
                     </div>
                   </details>
                 )}
-                  <label
-                    className="gl-field-inline gl-palette-field"
-                    title={overlayColDataValues?.colors
-                      ? t("Colours for this column are fixed in metadata(sce)$gatelab_palettes, so the palette does not apply.")
-                      : undefined}
-                  >
-                    {t("Palette")}
-                    {overlayBy === "channel" ? (
-                      <select
-                        value={overlayMarkerPalette}
-                        onChange={(e) => setOverlayMarkerPalette(e.target.value as PaletteName)}
-                      >
-                        {MARKER_PALETTES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-                      </select>
-                    ) : (
-                      <select value={overlayPalette} disabled={overlayBy === "none" || !!overlayColDataValues?.colors} onChange={(e) => setOverlayPalette(e.target.value as PaletteName)}>
-                        {OVERLAY_PALETTES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-                      </select>
-                    )}
-                  </label>
-                <MarkerColourControl value={markerColorPower} onChange={setMarkerColorPower} disabled={overlayBy !== "channel"} />
+                {workspaceHasImages && activeEntry?.images && (
+                  <details className="gl-thumbs-popover gl-popover">
+                    <summary title={t("Lay a spread of cell images over the plot, at their events' positions")}>
+                      {t("Thumbnails")} · {thumbnailsOn ? thumbnailCount.toLocaleString() : t("off")}
+                    </summary>
+                    <div className="gl-thumbs-popover-body">
+                      <label className="gl-field-inline gl-thumbs-field" title={t("Lay a spread of cell images over the plot, at their events' positions")}>
+                        <input type="checkbox" checked={thumbnailsOn} onChange={(e) => setThumbnailsOn(e.target.checked)} />
+                        {t("Thumbnails")}
+                        <input
+                          type="number"
+                          min={1}
+                          max={400}
+                          value={thumbnailCount}
+                          disabled={!thumbnailsOn}
+                          aria-label={t("How many thumbnails")}
+                          onChange={(e) => setThumbnailCount(Math.max(1, Math.min(400, Math.round(Number(e.target.value) || 1))))}
+                        />
+                        <input
+                          type="range"
+                          min={24}
+                          max={96}
+                          step={4}
+                          value={thumbnailSize}
+                          disabled={!thumbnailsOn}
+                          aria-label={t("Thumbnail size")}
+                          onChange={(e) => setThumbnailSize(Number(e.target.value))}
+                        />
+                        <span className="gl-thumbs-seed" title={t("The seed that picks which cells are shown: the same seed shows the same cells")}>
+                          {t("Seed")}
+                          <input
+                            type="number"
+                            min={1}
+                            max={99999}
+                            value={thumbnailSeed}
+                            disabled={!thumbnailsOn}
+                            aria-label={t("Seed")}
+                            onChange={(e) => setThumbnailSeed(Math.max(1, Math.min(99999, Math.round(Number(e.target.value) || 1))))}
+                          />
+                          <button
+                            type="button"
+                            className="gl-chip"
+                            disabled={!thumbnailsOn}
+                            title={t("Pick a new seed")}
+                            aria-label={t("Pick a new seed")}
+                            onClick={() => setThumbnailSeed(1 + Math.floor(Math.random() * 99999))}
+                          >
+                            ⟳
+                          </button>
+                        </span>
+                        {thumbnailClassLabels.length > 0 && (
+                          <select
+                            className="gl-thumbs-class"
+                            value={thumbnailClass}
+                            disabled={!thumbnailsOn}
+                            aria-label={t("Thumbnails of")}
+                            title={t("Show thumbnails of one class only")}
+                            onChange={(e) => setThumbnailClass(e.target.value)}
+                          >
+                            <option value="all">{t("all cells")}</option>
+                            {thumbnailClassLabels.map((label, i) => <option key={label} value={String(i)}>{label}</option>)}
+                          </select>
+                        )}
+                      </label>
+                
+                    </div>
+                  </details>
+                )}
+                <span className="gl-appearance-right">
                 <span
                   className={`gl-sample-scope-badge${pendingIncludedGatingIds.size > 0 ? " is-pending" : ""}`}
                   title={[
@@ -13258,6 +13745,7 @@ export default function App() {
                           count: layerMismatchNames.length,
                         })}`
                       : t("Axes from: {name}", { name: fileName })}
+                </span>
                 </span>
               </div>
             </div>
@@ -13913,6 +14401,7 @@ export default function App() {
                 <LayoutTab
                   workspace={layoutWorkspace}
                   onChange={setLayoutWorkspace}
+                  imageService={imageService}
                   samples={samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id), metadata: metadata[entry.id] }))}
                   checkedSampleIds={samples.filter((entry) => !excludedSampleIds.has(entry.id)).map((entry) => entry.id)}
                   groups={state.groups}
@@ -13966,6 +14455,17 @@ export default function App() {
                     pinned={pinnedCell}
                     onPin={setPinnedCell}
                     onShowOnPlot={() => setActiveTab("gating")}
+                    populationId={imagesPopulationId}
+                    populations={imagesPopulations}
+                    onChoosePopulation={chooseImagesPopulation}
+                    excludedMask={imagesExcluded?.mask ?? null}
+                    parentName={imagesExcluded?.parentName ?? null}
+                    onSendToLayout={LAYOUT_TAB_AVAILABLE ? sendImageWallToLayout : undefined}
+                    classOf={imagesClasses ? imagesClassOf : undefined}
+                    classes={imagesClasses}
+                    classTitle={imagesClassTitle}
+                    onMakePopulation={makeImageSetPopulation}
+                    onFindSimilar={findSimilarCells}
                   />
                 </Suspense>
               </ErrorBoundary>

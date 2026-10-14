@@ -10,7 +10,7 @@ import {
   type CvwWorkerResponse,
   type ImageResponse,
   type RenderLane,
-  type RenderSpecMessage,
+  type RenderSpecMessage, type ImageSourceSpec,
 } from "./cvwProtocol";
 import { renderKey } from "./render";
 
@@ -43,6 +43,8 @@ export interface Classification {
   /** Per event; OBJECT_CLASS_UNKNOWN (255) for an event without an image. */
   readonly objectCount: Uint8Array;
   readonly objectArea: Uint32Array;
+  /** What the mask measures per event (objectCount.ts MASK_FEATURE_KEYS); absent from an older worker's answer. */
+  readonly features?: Readonly<Record<string, Float32Array>>;
 }
 
 export interface ClassifyHandle {
@@ -372,7 +374,8 @@ export class ImageService {
   }
 
   private cacheKey(fileKey: string, eventIndex: number, spec: RenderSpecMessage): string {
-    const extras = `c${spec.composite ? 1 : 0}|s${[...spec.channels].sort((a, b) => a - b).join(",")}`;
+    const outline = spec.outline ? `|o${spec.outline.slot ?? ""}:${spec.outline.fraction ?? ""}` : "";
+    const extras = `c${spec.composite ? 1 : 0}|s${[...spec.channels].sort((a, b) => a - b).join(",")}${outline}`;
     return `${fileKey}:${eventIndex}:${renderKey(spec, spec.hop)}|${extras}`;
   }
 
@@ -399,8 +402,15 @@ export class ImageService {
     if (known) return known;
     const source = this.sources.get(fileKey);
     if (!source) return Promise.reject(new Error("no cell images are attached to this file"));
-    if (!source.file) return Promise.reject(new Error(`the cell images file ${source.fileName} has not been found`));
-    const file = source.file;
+    let spec: ImageSourceSpec;
+    if (source.kind === "tiff-folder") {
+      if (source.handle) spec = { kind: "tiff-folder", handle: source.handle, naming: source.naming };
+      else if (source.files) spec = { kind: "tiff-files", files: source.files };
+      else return Promise.reject(new Error(`the cell images folder ${source.fileName} has not been found`));
+    } else {
+      if (!source.file) return Promise.reject(new Error(`the cell images file ${source.fileName} has not been found`));
+      spec = { kind: "file", file: source.file };
+    }
     const promise = new Promise<SourceInfo>((resolve, reject) => {
       const listener = (response: CvwWorkerResponse) => {
         if (response.type === "source-ready" && response.fileKey === fileKey) {
@@ -421,7 +431,7 @@ export class ImageService {
         protocol: CVW_WORKER_PROTOCOL,
         type: "open-source",
         fileKey,
-        source: { kind: "file", file },
+        source: spec,
         eventCount: source.eventCount,
         ...(this.sourceInfo.has(fileKey) ? { scaleSample: 0 } : {}),
       } satisfies CvwWorkerRequest);
@@ -444,7 +454,7 @@ export class ImageService {
         for (const listener of [...run.listeners]) listener(response.done, response.total);
         return;
       }
-      const result: Classification = { objectCount: response.objectCount, objectArea: response.objectArea };
+      const result: Classification = { objectCount: response.objectCount, objectArea: response.objectArea, features: response.features };
       this.classifications.set(response.fileKey, result);
       this.classifying.delete(response.fileKey);
       run.resolve(result);

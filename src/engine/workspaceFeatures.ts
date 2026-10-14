@@ -47,6 +47,11 @@ export const WORKSPACE_FEATURES = {
    * GateLab without the rule evaluates it closed, and an event on a max is counted inside.
    */
   halfOpenRectangle: "half-open-rectangle",
+  /**
+   * A channel GateLab computed and saved by value (WorkspaceSample.derived): a GateLab without it
+   * opens the file without the channel, and a gate drawn on it has no axis.
+   */
+  derivedChannels: "derived-channels",
 } as const;
 
 export type WorkspaceFeature = (typeof WORKSPACE_FEATURES)[keyof typeof WORKSPACE_FEATURES];
@@ -66,6 +71,7 @@ export function requiredWorkspaceFeatures(value: unknown): WorkspaceFeature[] {
   let table = false;
   let spillover = false;
   let halfOpen = false;
+  let derived = false;
   const stack: unknown[] = [value];
   while (stack.length) {
     const v = stack.pop();
@@ -79,17 +85,19 @@ export function requiredWorkspaceFeatures(value: unknown): WorkspaceFeature[] {
     else if (o.kind === "biex" && o.tableChannels !== undefined) table = true;
     if (o.externalSpillover !== undefined) spillover = true;
     if (o.bounds === "half-open") halfOpen = true;
+    if (Array.isArray(o.derived) && o.derived.some((d) => d && typeof d === "object" && typeof (d as { dtype?: unknown }).dtype === "string")) derived = true;
     for (const key in o) {
       const child = o[key];
       if (child && typeof child === "object") stack.push(child);
     }
-    if (grid && table && spillover && halfOpen) break;
+    if (grid && table && spillover && halfOpen && derived) break;
   }
   return [
     ...(grid ? [WORKSPACE_FEATURES.flowjoGrid] : []),
     ...(table ? [WORKSPACE_FEATURES.flowjoBiexTable] : []),
     ...(spillover ? [WORKSPACE_FEATURES.externalSpillover] : []),
     ...(halfOpen ? [WORKSPACE_FEATURES.halfOpenRectangle] : []),
+    ...(derived ? [WORKSPACE_FEATURES.derivedChannels] : []),
   ];
 }
 

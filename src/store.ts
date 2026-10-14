@@ -225,7 +225,10 @@ export type Action =
       vertices: Vertex[];
       labelOffset?: [number, number];
       name: string;
-      createPop?: { name: string; parentId: string };
+      /** The gate's id, when the caller needs to know it before dispatching; a fresh one otherwise. */
+      gateId?: string;
+      /** `notName` also makes the population of the parent's events the gate leaves out, in the same step. */
+      createPop?: { name: string; parentId: string; notName?: string };
       /** Coordinate space the vertices are straight in; omitted = the sample's legacy default. */
       space?: GateSpace;
       /** Transform each axis was drawn under. Required when `space` is "display". */
@@ -818,6 +821,7 @@ function reduceCore(state: CoreState, action: Action): CoreState {
         color,
         null,
       );
+      if (action.gateId) gate.gate_id = action.gateId;
       // Recorded at creation and never rewritten: the gate's space is part of its identity.
       if (action.space) gate.space = action.space;
       if (action.transforms) gate.transforms = action.transforms;
@@ -837,6 +841,12 @@ function reduceCore(state: CoreState, action: Action): CoreState {
         pop.colorSlot = pickPopColorSlot(populations); // stable colour, before this pop is in the map
         populations[pop.population_id] = pop;
         linkChildToParent(populations, pop.population_id, parentId);
+        if (action.createPop.notName) {
+          const rest = newPopulation(action.createPop.notName, [newGateRef(gate.gate_id, false)], parentId);
+          rest.colorSlot = pickPopColorSlot(populations);
+          populations[rest.population_id] = rest;
+          linkChildToParent(populations, rest.population_id, parentId);
+        }
         sortPopulationTree(populations, state.root_population_id!);
         return {
           ...state,

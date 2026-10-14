@@ -13,6 +13,7 @@ import type { FcsFile, NumericColumn } from "./fcs";
 import type { AssayData, GateAssayData } from "./gates";
 import { drawnRaw, isUnbounded, type Gate, type GateSpace, type GateTransforms, type TransformSpec } from "./models";
 import { resolveChannels, type ResolvedChannel, isImagingFeature } from "./channels";
+import type { DerivedChannelSpec } from "./derivedChannels";
 import { biexTransform, flogTransform, wspLogTransform, type BiexParams } from "./biex";
 import { flowJoGridScale } from "./flowjoGrid";
 import type { MatrixChannelBinding } from "./compensationCompatibility";
@@ -1879,6 +1880,65 @@ export class Sample {
     if (status.state !== "ready") throw this.unavailableCompensatedLayerError(status);
     return this.compensatedLayer!.columnsByFcsIndex.get(channel.columnIndex) ??
       this.fcs.columns[channel.columnIndex];
+  }
+
+  // ── Derived channels ─────────────────────────────────────────────────────────
+  /**
+   * Add a per-event column GateLab computed (the objects counted in each cell image, the
+   * single-cell class, the mask area) as a channel like any other: plotted, gated, counted and
+   * exported, and saved with the workspace by value (engine/derivedChannels.ts). The file's own
+   * channels keep their indices and keys; the new one goes on the end. Adding a name that is
+   * already a derived channel replaces its values; a name the file itself has is refused.
+   * Returns the channel's index.
+   */
+  addDerivedChannel(spec: DerivedChannelSpec): number {
+    if (spec.values.length !== this.fcs.nEvents) {
+      throw new Error(`derived channel "${spec.name}" holds ${spec.values.length} values for a file of ${this.fcs.nEvents} events.`);
+    }
+    const existing = this.byName.get(spec.name);
+    if (existing !== undefined) {
+      const channel = this.channels[existing];
+      const own = this.fcs.channels[channel.columnIndex];
+      if (!own?.derived) throw new Error(`"${spec.name}" is a channel of the file, not one GateLab computed.`);
+      this.fcs.columns[channel.columnIndex] = spec.values;
+      own.range = spec.range;
+      own.feature = spec.feature;
+      channel.range = spec.range;
+      this.invalidateAll();
+      this.publishRevisions(true, false);
+      return existing;
+    }
+    const index = this.fcs.channels.length;
+    this.fcs.channels.push({ index, name: spec.name, marker: null, bits: 32, range: spec.range, feature: spec.feature, derived: true });
+    this.fcs.columns.push(spec.values);
+    // Resolution is deterministic in the channel list, so the file's keys and indices stay put.
+    const resolved = resolveChannels(this.fcs);
+    this.channels.length = 0;
+    this.channels.push(...resolved);
+    this.byName.clear();
+    this.channels.forEach((c, i) => this.byName.set(c.key, i));
+    const at = this.channels.findIndex((c) => c.columnIndex === index);
+    if (at < 0) throw new Error(`derived channel "${spec.name}" was left out by the channel filter.`);
+    this.invalidateAll();
+    this.publishRevisions(true, false);
+    return at;
+  }
+
+  /** True for a channel GateLab computed (addDerivedChannel), which a pooled plot's panel leaves out. */
+  isDerivedChannel(idx: number): boolean {
+    const channel = this.channels[idx];
+    return !!channel && this.fcs.channels[channel.columnIndex]?.derived === true;
+  }
+
+  /** The derived channels, in channel order, as specs a workspace can record. */
+  derivedChannels(): DerivedChannelSpec[] {
+    const out: DerivedChannelSpec[] = [];
+    this.channels.forEach((channel) => {
+      const own = this.fcs.channels[channel.columnIndex];
+      if (!own?.derived) return;
+      out.push({ name: own.name, feature: own.feature ?? "", range: own.range, values: this.fcs.columns[channel.columnIndex] });
+    });
+    return out;
   }
 
   /** Auto-estimated {T, W} per channel (single sort), cached. */

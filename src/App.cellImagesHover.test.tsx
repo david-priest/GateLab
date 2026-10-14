@@ -30,9 +30,14 @@ const syntheticFcs: FcsFile = {
     { index: 1, name: "SSC-A", marker: null, bits: 32, range: 262144 },
     { index: 2, name: "Size (FSC)", marker: null, bits: 32, range: 10000, feature: "MaskSize" },
     { index: 3, name: "WaveformPresent", marker: null, bits: 32, range: 2 },
+    { index: 4, name: "Eccentricity (FSC)", marker: null, bits: 32, range: 10, feature: "Eccentricity" },
+    { index: 5, name: "Radial Moment (FSC)", marker: null, bits: 32, range: 100, feature: "RadialMoment" },
   ],
   // Event 1 was not imaged: hover never lands on it.
-  columns: [Float32Array.from([100, 200, 300]), Float32Array.from([150, 250, 350]), Float32Array.from([1800, 2200, 2600]), Uint32Array.from([1, 0, 1])],
+  columns: [
+    Float32Array.from([100, 200, 300]), Float32Array.from([150, 250, 350]), Float32Array.from([1800, 2200, 2600]), Uint32Array.from([1, 0, 1]),
+    Float32Array.from([1.1, 1.9, 1.3]), Float32Array.from([12, 30, 15]),
+  ],
   spillover: null,
 };
 
@@ -51,7 +56,7 @@ const fake = vi.hoisted(() => ({
   renders: [] as { fileKey: string; eventIndex: number; lane: string }[],
   attached: [] as string[],
   classified: [] as string[],
-  classification: null as null | { objectCount: Uint8Array; objectArea: Uint32Array },
+  classification: null as null | { objectCount: Uint8Array; objectArea: Uint32Array; features?: Record<string, Float32Array> },
 }));
 vi.mock("./imaging/imageService", () => {
   class RenderCancelled extends Error {}
@@ -81,7 +86,10 @@ vi.mock("./imaging/imageService", () => {
       fake.classified.push(fileKey);
       onProgress?.(3, 3);
       // Event 1 was not imaged; the others hold one and two objects.
-      const result = { objectCount: Uint8Array.from([1, 255, 2]), objectArea: Uint32Array.from([120, 0, 300]) };
+      const result = {
+        objectCount: Uint8Array.from([1, 255, 2]), objectArea: Uint32Array.from([120, 0, 300]),
+        features: { perimeter: Float32Array.from([40, 0, 70]), circularity: Float32Array.from([0.9, 0, 0.5]) },
+      };
       fake.classification = result;
       return { promise: Promise.resolve(result), cancel: () => undefined };
     }
@@ -184,6 +192,8 @@ describe("hovering a cell", () => {
     await openFiles(true);
     expect(fake.constructed).toBe(1);
     expect(fake.attached).toHaveLength(1);
+    // The inspector is a lazy chunk; under a full parallel run it can land a few ticks later.
+    for (let i = 0; i < 20 && !host.querySelector(".gl-cell-inspector"); i++) await settle(25);
     expect(host.querySelector(".gl-cell-inspector")).toBeTruthy();
     expect(host.textContent).toContain("Nearest imaged cell");
     const [px, py] = pixelOfEvent(2);
@@ -257,6 +267,12 @@ describe("hovering a cell", () => {
     expect(host.textContent).toContain("one object");
     expect(host.textContent).toContain("two objects");
     expect(host.textContent).not.toContain("Counting objects");
+    // The count, the mask area and the class are now channels of the file, offered wherever channels are.
+    await act(async () => { host.querySelector<HTMLButtonElement>('button[aria-label="Size by"]')!.click(); });
+    const sizeOptions = [...host.querySelector<HTMLSelectElement>(".gl-searchable-select-panel select")!.options].map((o) => o.textContent);
+    expect(sizeOptions).toEqual(expect.arrayContaining(["Objects in image", "Object area (GateLab mask)", "Single cell class", "Perimeter (GateLab mask)", "Circularity (GateLab mask)"]));
+    expect(sizeOptions).not.toContain("Diameter (GateLab mask)");
+    await act(async () => { host.querySelector<HTMLButtonElement>('button[aria-label="Size by"]')!.click(); });
     // The inspector names the count of the cell under the cursor.
     const [px, py] = pixelOfEvent(2);
     await act(async () => { plotArea().dispatchEvent(pointer("pointermove", px, py)); });
@@ -344,7 +360,32 @@ describe("hovering a cell", () => {
     expect(sizes()).toEqual([23, 0, 0]);
     // The separating plot: with one event in a class there is nothing to rank, and it says so.
     const summary = host.querySelector<HTMLElement>(".gl-separating > summary")!;
-    expect(summary.textContent).toBe("Separating plot");
+    expect(summary.textContent).toBe("Imaging plots");
+    expect(host.querySelector(".gl-separating-heading")?.textContent).toBe("Suggested plots");
+    // The presets the file's features allow: BD's doublet plot and size against shape, both on the FSC image here.
+    const presets = [...host.querySelectorAll<HTMLButtonElement>(".gl-separating-presets button")].map((b) => b.textContent);
+    expect(presets).toEqual(["Doublets", "Size and shape"]);
+    expect(host.textContent).toContain("X · FSC-A");
+    await act(async () => { host.querySelector<HTMLButtonElement>(".gl-separating-presets button")!.click(); });
+    await settle();
+    expect(host.textContent).toContain("X · Radial Moment (FSC)");
+    expect(host.textContent).toContain("Y · Eccentricity (FSC)");
+    // Back restores the axes the plot had before the preset; it is a view step, not an undo.
+    const back = host.querySelector<HTMLButtonElement>("button.gl-view-back")!;
+    expect(back.disabled).toBe(false);
+    await act(async () => { back.click(); });
+    await settle();
+    expect(host.textContent).toContain("X · FSC-A");
+    expect(host.textContent).toContain("Y · SSC-A");
+    // Forward returns to the preset's axes; a Back after that is possible again.
+    const forward = host.querySelector<HTMLButtonElement>("button.gl-view-forward")!;
+    expect(forward.disabled).toBe(false);
+    await act(async () => { forward.click(); });
+    await settle();
+    expect(host.textContent).toContain("X · Radial Moment (FSC)");
+    expect(forward.disabled).toBe(true);
+    expect(back.disabled).toBe(false);
+    expect(host.textContent).toContain("Separating plot");
     expect(host.querySelector<HTMLSelectElement>('select[aria-label="Separate"]')!.value).toBe("0");
     expect(host.querySelector<HTMLSelectElement>('select[aria-label="from"]')!.value).toBe("2");
     const rank = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Rank channel pairs")!;

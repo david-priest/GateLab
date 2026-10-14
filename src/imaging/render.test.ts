@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ImagePlanes } from "./cvwDecode";
 import type { ChannelDisplay } from "./imageWallSettings";
-import { boxBlur, channelBrightness, channelRgba, compositeRgba, measureScale, renderKey } from "./render";
+import { OUTLINE_RGB, boxBlur, channelBrightness, channelRgba, compositeRgba, measureScale, paintOutline, renderKey } from "./render";
 
 const display = (slot: number, over: Partial<ChannelDisplay> = {}): ChannelDisplay => ({
   slot, name: `ch${slot}`, enabled: true, colour: "#ff0000", threshold: 0, saturation: 1, gamma: 1, smoothing: 1, ...over,
@@ -17,6 +17,30 @@ const planes = (rows: number, cols: number, fill: (slot: number, r: number, c: n
     for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) plane[r * cols + c] = fill(slot, r, c);
     return plane;
   }),
+});
+
+describe("paintOutline", () => {
+  it("paints the mask's boundary pixels and nothing else", () => {
+    const rows = 7;
+    const cols = 7;
+    const mask = new Uint8Array(rows * cols);
+    for (let r = 2; r <= 4; r++) for (let c = 2; c <= 4; c++) mask[r * cols + c] = 1;
+    const rgba = new Uint8ClampedArray(rows * cols * 4).fill(0);
+    for (let i = 3; i < rgba.length; i += 4) rgba[i] = 255;
+    paintOutline(rgba, mask, rows, cols);
+    const painted: number[] = [];
+    for (let i = 0; i < rows * cols; i++) if (rgba[i * 4] === OUTLINE_RGB[0] && rgba[i * 4 + 2] === OUTLINE_RGB[2]) painted.push(i);
+    const ring = [];
+    for (let r = 2; r <= 4; r++) for (let c = 2; c <= 4; c++) if (r !== 3 || c !== 3) ring.push(r * cols + c);
+    expect(painted).toEqual(ring);
+    expect(rgba[(3 * cols + 3) * 4]).toBe(0);
+  });
+  it("treats the picture's edge as outside", () => {
+    const mask = new Uint8Array(4).fill(1);
+    const rgba = new Uint8ClampedArray(16);
+    paintOutline(rgba, mask, 2, 2);
+    for (let i = 0; i < 4; i++) expect(rgba[i * 4 + 1]).toBe(OUTLINE_RGB[1]);
+  });
 });
 
 describe("channelBrightness", () => {

@@ -2,6 +2,7 @@
 // workers/compensationProtocol.ts: every message carries the protocol tag and a type, a request
 // names what it is for, and the worker answers with transferable buffers where it can.
 
+import type { TiffNaming } from "./tiffFolder";
 import type { ByteSource } from "./readRange";
 import type { ChannelDisplay } from "./imageWallSettings";
 
@@ -20,16 +21,25 @@ export interface RenderSpecMessage {
   readonly composite: boolean;
   /** Single-channel renders to return as well, by slot. */
   readonly channels: readonly number[];
+  /** Draw the outline of the counted objects (objectCount.ts) over every picture; the mask's slot and
+   *  threshold travel with it when the FCS records Chorus's, else the SSC plane at the default fraction. */
+  readonly outline?: { readonly slot?: number; readonly fraction?: number } | null;
 }
 
 interface Tagged {
   readonly protocol: typeof CVW_WORKER_PROTOCOL;
 }
 
+/** Where a sample's images come from: a `.cvw` to read ranges of, or extracted TIFFs by event. */
+export type ImageSourceSpec =
+  | ByteSource
+  | { readonly kind: "tiff-folder"; readonly handle: FileSystemDirectoryHandle; readonly naming: TiffNaming }
+  | { readonly kind: "tiff-files"; readonly files: Readonly<Record<number, Blob>> };
+
 export interface OpenSourceRequest extends Tagged {
   readonly type: "open-source";
   readonly fileKey: string;
-  readonly source: ByteSource;
+  readonly source: ImageSourceSpec;
   /** The FCS's event count, which the file's must equal. */
   readonly eventCount: number;
   /** How many events to decode for the full-scale measurement; 0 skips it. */
@@ -157,6 +167,8 @@ export interface ClassifiedResponse extends Tagged {
   readonly objectCount: Uint8Array;
   /** Pixels in all counted objects per event. */
   readonly objectArea: Uint32Array;
+  /** What the counted objects' mask measures, per event, keyed as objectCount.ts's MASK_FEATURE_KEYS. */
+  readonly features: Readonly<Record<string, Float32Array>>;
 }
 
 export type CvwWorkerResponse =
@@ -174,7 +186,9 @@ export type CvwWorkerEmit = (response: CvwWorkerResponse, transfer?: readonly Tr
 /** The buffers a response can hand over instead of copying. */
 export function responseTransferables(response: CvwWorkerResponse): Transferable[] {
   if (response.type === "source-ready") return [response.hasImage.buffer as ArrayBuffer];
-  if (response.type === "classified") return [response.objectCount.buffer as ArrayBuffer, response.objectArea.buffer as ArrayBuffer];
+  if (response.type === "classified") {
+    return [response.objectCount.buffer as ArrayBuffer, response.objectArea.buffer as ArrayBuffer, ...Object.values(response.features).map((f) => f.buffer as ArrayBuffer)];
+  }
   if (response.type === "image") {
     const out: Transferable[] = [];
     const take = (picture: RenderedPicture | null) => {

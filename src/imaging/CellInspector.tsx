@@ -25,6 +25,14 @@ export interface CellInspectorEntry {
 export interface CellImageView {
   readonly display: ChannelDisplay[];
   readonly exposure: number;
+  /** Draw the counted objects' outline over the pictures. */
+  readonly outline?: boolean;
+}
+
+/** What a render request carries for the outline: Chorus's mask when the FCS records it, else the worker's default. */
+export function outlineSpecOf(outline: boolean, images: { readonly mask: { readonly slot: number; readonly fraction: number } | null } | null): { slot?: number; fraction?: number } | undefined {
+  if (!outline) return undefined;
+  return images?.mask ? { slot: images.mask.slot, fraction: images.mask.fraction } : {};
 }
 
 export interface CellInspectorProps {
@@ -110,6 +118,7 @@ export function CellInspector({
   const own = entry ? view[entry.id] : undefined;
   const channels = own?.display ?? images?.display ?? null;
   const exposure = own?.exposure ?? 1;
+  const outline = own?.outline ?? false;
 
   // The file's measured full scale per channel, from the worker, once per file.
   const [info, setInfo] = useState<{ id: string; info: SourceInfo | null; error: string | null } | null>(null);
@@ -132,8 +141,9 @@ export function CellInspector({
 
   const spec = useMemo<RenderSpecMessage | null>(() => {
     if (!channels || !scale) return null;
-    return { display: channels, scale, exposure, hop: NATIVE_HOP, composite: true, channels: channels.map((c) => c.slot) };
-  }, [channels, scale, exposure]);
+    const outlineSpec = outlineSpecOf(outline, images);
+    return { display: channels, scale, exposure, hop: NATIVE_HOP, composite: true, channels: channels.map((c) => c.slot), ...(outlineSpec ? { outline: outlineSpec } : {}) };
+  }, [channels, scale, exposure, outline, images]);
 
   const image = useCellImage(service, images && entry && !collapsed ? entry.id : null, cell?.eventIndex ?? null, spec, "interactive");
   const shown = image.result?.kind === "image" ? image.result.image : null;
@@ -156,11 +166,15 @@ export function CellInspector({
 
   const toggleChannel = (slot: number) => {
     if (!entry || !channels) return;
-    onViewChange(entry.id, { display: channels.map((c) => (c.slot === slot ? { ...c, enabled: !c.enabled } : c)), exposure });
+    onViewChange(entry.id, { display: channels.map((c) => (c.slot === slot ? { ...c, enabled: !c.enabled } : c)), exposure, outline });
   };
   const setExposure = (next: number) => {
     if (!entry || !channels) return;
-    onViewChange(entry.id, { display: channels.slice(), exposure: next });
+    onViewChange(entry.id, { display: channels.slice(), exposure: next, outline });
+  };
+  const setOutline = (next: boolean) => {
+    if (!entry || !channels) return;
+    onViewChange(entry.id, { display: channels.slice(), exposure, outline: next });
   };
 
   return (
@@ -203,8 +217,10 @@ export function CellInspector({
         <div className="gl-hint">{t("No cell images are attached to {name}", { name: entry.name })}</div>
       ) : (
         <>
-          <div className="gl-cell-event">
-            {t("Event {index} of {name}", { index: cell.eventIndex.toLocaleString(), name: entry.name })}
+          {/* One line, never two: the panel's height must not move from cell to cell (David, 2026-10-14). The
+              class's reasons sit in its tooltip, and the note below keeps its row whether or not it has anything to say. */}
+          <div className="gl-cell-event" title={t("Event {index} of {name}", { index: cell.eventIndex.toLocaleString(), name: entry.name })}>
+            <span className="gl-cell-event-name">{t("Event {index} of {name}", { index: cell.eventIndex.toLocaleString(), name: entry.name })}</span>
             {(() => {
               const count = objectCountOf?.(cell) ?? null;
               return count === null ? null : <span className="gl-cell-objects">{t("{count} objects", { count })}</span>;
@@ -212,14 +228,21 @@ export function CellInspector({
             {(() => {
               const cls = cellClassOf?.(cell) ?? null;
               if (cls === null) return null;
-              const why = cls.reasons.length > 0 ? `: ${cls.reasons.map((reason) => t(reason)).join(", ")}` : "";
-              return <span className="gl-cell-class">{t(cls.label)}{why}</span>;
+              const why = cls.reasons.map((reason) => t(reason)).join(", ");
+              return <span className="gl-cell-class" title={why ? `${t(cls.label)}: ${why}` : t(cls.label)}>{t(cls.label)}</span>;
             })()}
           </div>
-          {sourceError && <div className="gl-error-inline">{sourceError}</div>}
-          {image.status === "none" && <div className="gl-hint">{t("No image for this event")}</div>}
-          {image.status === "error" && <div className="gl-error-inline">{image.error}</div>}
-          {image.status === "loading" && !shown && <div className="gl-hint">{t("Loading the image…")}</div>}
+          <div className={"gl-cell-note" + (sourceError || image.status === "error" ? " gl-cell-note-error" : "")}>
+            {sourceError
+              ? sourceError
+              : image.status === "none"
+                ? t("No image for this event")
+                : image.status === "error"
+                  ? image.error
+                  : image.status === "loading" && !shown
+                    ? t("Loading the image…")
+                    : ""}
+          </div>
           <div className="gl-cell-composite" style={{ visibility: shown ? "visible" : "hidden" }}>
             <canvas ref={compositeRef} />
           </div>
@@ -250,6 +273,10 @@ export function CellInspector({
               onChange={(event) => setExposure(Math.pow(2, Number(event.target.value)))}
             />
             <span className="gl-cell-exposure-value">{exposure.toFixed(2)}×</span>
+          </label>
+          <label className="gl-cell-outline" title={t("Outline the objects the count found on the mask image, in magenta")}>
+            <input type="checkbox" checked={outline} onChange={(event) => setOutline(event.target.checked)} />
+            <span>{t("Mask outline")}</span>
           </label>
           {features.length > 0 && (
             <details className="gl-cell-features">
