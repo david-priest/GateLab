@@ -77,6 +77,16 @@ import { buildIllustrationPayload, type IllustrationOptions } from "../engine/il
 import { buildPooledPlotPayload, poolCompatibility, pooledGateAgreement, type PooledMember } from "../engine/pooledPlot";
 import { facetColumns, groupCheckedCount, toggleGroupChecked } from "../engine/sampleFacets";
 import type { CSSProperties } from "react";
+import { lazy, Suspense } from "react";
+import { lazyChunk } from "./lazyChunk";
+import type { ImageService } from "../imaging/imageService";
+import type { LayoutImageWallRecipe } from "../engine/imageWallBlock";
+
+/** The image wall's surface, loaded only when a page holds one, so the imaging code stays out of this chunk. */
+const LayoutImageWallLazy = lazy(lazyChunk("LayoutImageWall", async () => {
+  const module = await import("../imaging/LayoutImageWall");
+  return { default: module.LayoutImageWall };
+}));
 import {
   computeGatingStrategy,
   buildStrategyPayload,
@@ -134,6 +144,8 @@ interface Props {
   /** The Plotting tab's chart as it is now, for a chart block; the files' division profiles, for a division chart. */
   plottingSettings?: () => ProportionsSettings;
   divisionProfiles?: Readonly<Record<string, DivisionProfileLike>>;
+  /** The workspace's cell images, for image-wall blocks; null or absent when none are attached. */
+  imageService?: ImageService | null;
   /** Load a chart block's settings into the Plotting tab, to edit them there. */
   onOpenInPlotting?: (settings: ProportionsSettings) => void;
   dataRevision: string | number;
@@ -210,6 +222,7 @@ function itemTitle(
   if (recipe.title?.trim()) return recipe.title.trim();
   if (recipe.kind === "figure") return recipe.illustration.figure?.name?.trim() || "Figure";
   if (recipe.kind === "proportions") return recipe.settings.plotType === "box" ? "Boxplot" : "Composition";
+  if (recipe.kind === "imagewall") return `${recipe.populationName || "Population"} · ${recipe.fileName || "images"}`;
   const sample = samples.find(({ id }) => id === recipe.sampleId);
   const population = sample?.tree.populations[recipe.populationId];
   if (recipe.kind === "chart") return `${population?.name ?? "Population"} · ${CHART_STATISTIC_LABELS[recipe.statistic]}`;
@@ -413,7 +426,7 @@ function LayoutPlotSurface({
 }>) {
   const hostRef = useRef<HTMLDivElement>(null);
   // A chart, a figure and a Plotting chart have surfaces of their own; this one takes plots and strategies.
-  const recipe = item.recipe as Exclude<LayoutRecipe, LayoutChartRecipe | LayoutFigureRecipe | LayoutProportionsRecipe>;
+  const recipe = item.recipe as Exclude<LayoutRecipe, LayoutChartRecipe | LayoutFigureRecipe | LayoutProportionsRecipe | LayoutImageWallRecipe>;
   const styleKey = JSON.stringify(style);
   const trees = useMemo(() => figureHierarchies(activeState), [activeState]);
   const source =
@@ -752,6 +765,7 @@ function LayoutItemFrame({
   files,
   sources,
   divisionProfiles,
+  imageService,
   canvasScale,
   onTextChange,
   onTextFocus,
@@ -782,6 +796,7 @@ function LayoutItemFrame({
   sources: readonly FigureSource[];
   /** The files' division profiles, for a chart block of division categories. */
   divisionProfiles: Readonly<Record<string, DivisionProfileLike>>;
+  imageService: ImageService | null;
   /** The text as committed, with the height its lines need, so the frame can grow to show them. */
   onTextChange: (text: string, contentHeight: number) => void;
   /** The text editor took focus: a click on a text block's words selects the block. */
@@ -849,6 +864,15 @@ function LayoutItemFrame({
           height={Math.max(80, inner.height - 8)}
           containerId={`layout-proportions-${item.id}`}
         />
+      ) : item.recipe.kind === "imagewall" ? (
+        <Suspense fallback={<div className="gl-layout-plot-host" />}>
+          <LayoutImageWallLazy
+            recipe={item.recipe}
+            service={imageService ?? null}
+            width={Math.max(120, inner.width - 8)}
+            height={Math.max(80, inner.height - 8)}
+          />
+        </Suspense>
       ) : item.recipe.kind === "chart" ? (
         <div className="gl-layout-plot-host gl-layout-chart-host">
           <LayoutChart
@@ -1074,6 +1098,7 @@ export function LayoutTab({
   onOpenInIllustration,
   plottingSettings,
   divisionProfiles = NO_DIVISION_PROFILES,
+  imageService = null,
   onOpenInPlotting,
   dataRevision,
   densityColorPower,
@@ -2723,6 +2748,40 @@ export function LayoutTab({
                         {t("Replace with the current Illustration figure")}
                       </button>
                     </>
+                  ) : selectedItem.recipe.kind === "imagewall" ? (
+                    <>
+                      <p className="gl-hint">
+                        {t("The cells as the Images tab showed them when the wall was added; their images are drawn from the file's waveform file.")}
+                      </p>
+                      <label className="gl-field-inline gl-layout-title-field">
+                        {t("Title")}
+                        <input
+                          placeholder={selectedItem.recipe.populationName}
+                          value={selectedItem.recipe.title ?? ""}
+                          onChange={(event) => updateSelectedRecipe((recipe) => (recipe.kind === "imagewall" ? { ...recipe, title: event.target.value } : recipe))}
+                        />
+                      </label>
+                      <label className="gl-field-inline">
+                        {t("Tile size")}
+                        <input
+                          type="number"
+                          min={16}
+                          max={200}
+                          value={selectedItem.recipe.tile}
+                          onChange={(event) => updateSelectedRecipe((recipe) => (recipe.kind === "imagewall" ? { ...recipe, tile: Math.max(16, Math.min(200, Math.round(Number(event.target.value) || 56))) } : recipe))}
+                        />
+                      </label>
+                      <label className="gl-field-inline">
+                        {t("Columns")}
+                        <input
+                          type="number"
+                          min={1}
+                          max={24}
+                          value={selectedItem.recipe.columns}
+                          onChange={(event) => updateSelectedRecipe((recipe) => (recipe.kind === "imagewall" ? { ...recipe, columns: Math.max(1, Math.min(24, Math.round(Number(event.target.value) || 8))) } : recipe))}
+                        />
+                      </label>
+                    </>
                   ) : selectedItem.recipe.kind === "proportions" ? (
                     <>
                       <p className="gl-hint">
@@ -2874,7 +2933,7 @@ export function LayoutTab({
                           value={selectedItem.recipe.sampleId}
                           onChange={(event) =>
                             updateSelectedRecipe((recipe) => {
-                              if (recipe.kind === "text" || recipe.kind === "figure" || recipe.kind === "proportions") return recipe;
+                              if (recipe.kind === "text" || recipe.kind === "figure" || recipe.kind === "proportions" || recipe.kind === "imagewall") return recipe;
                               const target = samples.find(
                                 (file) => file.id === event.target.value,
                               );
@@ -3658,6 +3717,7 @@ export function LayoutTab({
                 files={files}
                 sources={sourceResult.sources}
                 divisionProfiles={divisionProfiles}
+                imageService={imageService}
                 canvasScale={canvasScale}
                 onTextChange={(text, contentHeight) => {
                   // A block left with no words is removed, as the editors remove an empty text; undo brings it back.

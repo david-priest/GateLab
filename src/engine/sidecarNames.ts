@@ -37,8 +37,36 @@ const folderOf = (source: NamedSource): string => {
 };
 
 /** The IndexedDB key under which the handle of a sample's image source is remembered. */
-export function imageHandleKey(kind: "cvw", fcsName: string): string {
+export function imageHandleKey(kind: "cvw" | "tiff", fcsName: string): string {
   return `${kind}:${fcsName}`;
+}
+
+/**
+ * The tube an extracted-image folder belongs to: the BD CellView Image Extractor names the
+ * folder `<tube>_images_<yyyymmdd_hhmm_ss>` beside the tube's FCS, and FlowJo names it after
+ * the FCS file. Null for a folder named neither way.
+ */
+export function imageFolderStem(folderName: string): string | null {
+  const m = /^(.*?)_images(?:_[\d_]+)?$/i.exec(folderName.trim());
+  if (m && m[1]) return m[1];
+  return null;
+}
+
+const stemOf = (name: string): string => name.replace(/\.[^.]*$/, "").normalize("NFC").toLocaleLowerCase();
+
+/** Each FCS name's extracted-image folder, by the tube's name; an FCS without one is absent. */
+export function pairImageFolders<T extends { readonly name: string }>(fcsNames: readonly string[], folders: readonly T[]): Map<string, T> {
+  const byStem = new Map<string, T>();
+  for (const folder of folders) {
+    const stem = imageFolderStem(folder.name) ?? folder.name;
+    byStem.set(stem.normalize("NFC").toLocaleLowerCase(), folder);
+  }
+  const out = new Map<string, T>();
+  for (const name of fcsNames) {
+    const hit = byStem.get(stemOf(name));
+    if (hit) out.set(name, hit);
+  }
+  return out;
 }
 
 /** The name of the waveform file that would sit beside an FCS. */

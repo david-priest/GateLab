@@ -5,6 +5,7 @@
 
 import type { CellImageRecord } from "../engine/workspace";
 import type { ChannelDisplay, ImagingMask } from "./imageWallSettings";
+import type { TiffNaming } from "./tiffFolder";
 
 export type ImageSourceKind = "cvw" | "tiff-folder";
 
@@ -29,10 +30,33 @@ export interface CvwImageSource {
   readonly mask: ImagingMask | null;
 }
 
-export type CellImageSource = CvwImageSource;
+/** A folder of extracted TIFFs (BD CellView Image Extractor, FlowJo) attached to a sample. */
+export interface TiffFolderImageSource {
+  readonly kind: "tiff-folder";
+  /** The folder's name, shown where a `.cvw` shows its file name. */
+  readonly fileName: string;
+  /** The folder, for reading files on demand; null when it came as files or is not yet found. */
+  readonly handle: FileSystemDirectoryHandle | null;
+  /** The files by FCS event index, when the folder came as files (a drop, or a browser without directory handles). */
+  readonly files: Readonly<Record<number, File>> | null;
+  readonly sourcePath?: string;
+  /** The FCS's event count, which every file's index is below. */
+  readonly eventCount: number;
+  readonly imageCount: number;
+  readonly naming: TiffNaming;
+  readonly channelNames: ReadonlyMap<number, string>;
+  readonly pixelAspectRatio: number;
+  readonly display: readonly ChannelDisplay[];
+  readonly mask: ImagingMask | null;
+}
+
+export type CellImageSource = CvwImageSource | TiffFolderImageSource;
 
 /** What a workspace file records about an attached source: enough to find and check it again. */
 export function imageRecordOf(source: CellImageSource): CellImageRecord {
+  if (source.kind === "tiff-folder") {
+    return { kind: "tiff-folder", fileName: source.fileName, eventCount: source.eventCount, naming: { ...source.naming } };
+  }
   return {
     kind: "cvw",
     fileName: source.fileName,

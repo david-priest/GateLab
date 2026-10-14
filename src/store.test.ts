@@ -32,6 +32,30 @@ function makeSample(): Sample {
   return new Sample(fcs);
 }
 
+describe("addGate with a stated id and a NOT population", () => {
+  it("uses the caller's gate id and makes both populations under the parent in one step", () => {
+    const sample = makeSample();
+    let state = coreReducer(initialCoreState(), { type: "loadSample", nEvents: sample.fcs.nEvents });
+    state = coreReducer(state, {
+      type: "addGate", gateType: "rectangle", xChannel: "FSC-A", yChannel: "SSC-A", gateId: "gate-picked-1",
+      vertices: [[-1000, -1000], [1000, 100000]], name: "Picked",
+      createPop: { name: "Picked", parentId: state.root_population_id!, notName: "Not picked" },
+    });
+    expect(state.gates["gate-picked-1"]?.name).toBe("Picked");
+    const pops = Object.values(state.populations).filter((p) => p.parent_id === state.root_population_id);
+    expect(pops.map((p) => [p.name, p.gate_refs[0]?.gate_id, p.gate_refs[0]?.include])).toEqual([
+      ["Picked", "gate-picked-1", true],
+      ["Not picked", "gate-picked-1", false],
+    ]);
+    expect(state.populations[state.active_population_id!]?.name).toBe("Picked");
+    expect(new Set(pops.map((p) => p.colorSlot)).size).toBe(2);
+    // One undo step takes the gate and both populations away.
+    const undone = coreReducer(state, { type: "undo" });
+    expect(undone.gates["gate-picked-1"]).toBeUndefined();
+    expect(Object.keys(undone.populations)).toHaveLength(1);
+  });
+});
+
 function withGate(): { state: CoreState; sample: Sample } {
   const sample = makeSample();
   let state = coreReducer(initialCoreState(), { type: "loadSample", nEvents: sample.fcs.nEvents });

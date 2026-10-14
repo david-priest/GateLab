@@ -39,3 +39,16 @@ describe("sidecar names", () => {
     expect(pairSidecars([a, aCvw]).sidecarOf.get(a)).toBe(aCvw);
   });
 });
+
+describe("extracted-image folders beside FCS files", () => {
+  it("names the tube an image folder belongs to, and pairs folders to FCS files by it", async () => {
+    const { imageFolderStem, pairImageFolders } = await import("./sidecarNames");
+    expect(imageFolderStem("Tube A_images_20261009_1931_27")).toBe("Tube A");
+    expect(imageFolderStem("Tube A_images")).toBe("Tube A");
+    expect(imageFolderStem("Tube A")).toBeNull();
+    expect(imageFolderStem("notes")).toBeNull();
+    const paired = pairImageFolders(["Tube A.fcs", "tube b.fcs", "Tube C.fcs"], [{ name: "Tube A_images_20261009_1931_27" }, { name: "Tube B_images_20261009_1931_33" }, { name: "Other_images_1" }]);
+    expect([...paired.keys()]).toEqual(["Tube A.fcs", "tube b.fcs"]);
+    expect(paired.get("tube b.fcs")?.name).toBe("Tube B_images_20261009_1931_33");
+  });
+});

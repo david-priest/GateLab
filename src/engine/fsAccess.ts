@@ -369,6 +369,16 @@ export async function rememberHandle(key: string, handle: FileSystemFileHandle):
   }
 }
 
+/** A folder handle remembered under a key, in the same store as the file handles. */
+export async function rememberDirectoryHandle(key: string, handle: FileSystemDirectoryHandle): Promise<void> {
+  return rememberHandle(key, handle as unknown as FileSystemFileHandle);
+}
+
+export async function recallDirectoryHandle(key: string): Promise<FileSystemDirectoryHandle | null> {
+  const handle = (await recallHandle(key)) as unknown as FileSystemHandle | null;
+  return handle && handle.kind === "directory" ? (handle as FileSystemDirectoryHandle) : null;
+}
+
 export async function recallHandle(key: string): Promise<FileSystemFileHandle | null> {
   try {
     const db = await openDb();

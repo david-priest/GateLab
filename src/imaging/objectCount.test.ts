@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OBJECT_CLASSES, countObjects, objectClassOf, sscSlotOf } from "./objectCount";
+import { MASK_FEATURE_KEYS, OBJECT_CLASSES, countObjects, countObjectsWithMask, countedMask, maskFeatures, objectClassOf, sscSlotOf } from "./objectCount";
 
 /** An SSC picture: dark field at a noise level, with bright discs where the objects are. */
 function picture(
@@ -32,6 +32,61 @@ function picture(
 }
 
 const SCALE = 1;
+
+describe("countedMask", () => {
+  it("marks the pixels of the counted objects and leaves out specks", () => {
+    const plane = picture(60, 60, [{ r: 30, c: 30, radius: 8 }, { r: 10, c: 50, radius: 1.5 }]);
+    // The blur and closing grow a speck; the minimum area is what leaves it out.
+    const mask = countedMask(plane, 60, 60, SCALE, { minArea: 40 });
+    expect(mask.length).toBe(3600);
+    expect(mask[30 * 60 + 30]).toBe(1);
+    expect(mask[30 * 60 + 36]).toBe(1);
+    expect(mask[10 * 60 + 50]).toBe(0);
+    expect(mask[5 * 60 + 5]).toBe(0);
+    let area = 0;
+    for (const v of mask) area += v;
+    expect(area).toBe(countObjects(plane, 60, 60, SCALE, { minArea: 40 }).totalArea);
+  });
+  it("is empty when nothing is counted or the scale is unknown", () => {
+    expect(Array.from(countedMask(picture(20, 20, []), 20, 20, SCALE)).every((v) => v === 0)).toBe(true);
+    expect(countedMask(picture(20, 20, [{ r: 10, c: 10, radius: 6 }]), 20, 20, 0).length).toBe(400);
+  });
+});
+
+describe("maskFeatures", () => {
+  it("measures a disc as round and a bar as long, at true shape", () => {
+    const disc = picture(60, 60, [{ r: 30, c: 30, radius: 10 }]);
+    const { mask, count } = countObjectsWithMask(disc, 60, 60, SCALE);
+    expect(count).toBe(1);
+    const f = maskFeatures(mask, disc, 60, 60, 1, SCALE);
+    expect(f.axisRatio).toBeGreaterThan(0.9);
+    expect(f.circularity).toBeGreaterThan(0.7);
+    expect(f.diameter).toBeGreaterThan(18);
+    expect(f.diameter).toBeLessThan(26);
+    expect(f.majorAxis).toBeGreaterThan(18);
+    expect(f.perimeter).toBeGreaterThan(40);
+    // The mask carries a rim beyond the disc (the blur and closing), so the mean sits below the disc's level.
+    expect(f.meanIntensity).toBeGreaterThan(0.4);
+    expect(f.meanIntensity).toBeLessThanOrEqual(0.6);
+    expect(f.sdIntensity).toBeLessThan(0.3);
+    // A bar three times as long as wide.
+    const bar = new Float32Array(60 * 60);
+    for (let r = 25; r < 35; r++) for (let c = 15; c < 45; c++) bar[r * 60 + c] = 0.6;
+    const barMask = countObjectsWithMask(bar, 60, 60, SCALE).mask;
+    const g = maskFeatures(barMask, bar, 60, 60, 1, SCALE);
+    expect(g.axisRatio).toBeLessThan(0.45);
+    expect(g.majorAxis).toBeGreaterThan(g.minorAxis * 2);
+    expect(g.circularity).toBeLessThan(f.circularity);
+    // With columns a third as wide as rows, the same bar is nearly square.
+    const h = maskFeatures(barMask, bar, 60, 60, 1 / 3, SCALE);
+    expect(h.axisRatio).toBeGreaterThan(0.8);
+  });
+  it("is all zero without a mask, and lists its keys in order", () => {
+    const empty = maskFeatures(new Uint8Array(100), new Float32Array(100), 10, 10, 1, SCALE);
+    expect(Object.values(empty).every((v) => v === 0)).toBe(true);
+    expect(MASK_FEATURE_KEYS).toEqual(["perimeter", "circularity", "majorAxis", "minorAxis", "axisRatio", "diameter", "meanIntensity", "sdIntensity"]);
+  });
+});
 
 describe("countObjects", () => {
   it("counts one disc, two discs, and none", () => {

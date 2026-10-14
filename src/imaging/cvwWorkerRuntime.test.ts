@@ -104,6 +104,37 @@ describe("cvw worker runtime", () => {
     expect(log.find((r) => r.type === "no-image")).toMatchObject({ requestId: "r2", eventIndex: 1 });
   });
 
+  it("paints the counted objects' outline over the pictures when the spec asks for it", async () => {
+    const { runtime, log } = runtimeWithLog();
+    runtime.dispatch({ ...tag, type: "open-source", fileKey: "f1", source: { kind: "file", file: file() }, eventCount: 3, scaleSample: 3 });
+    await runtime.idle();
+    const ready = log.find((r) => r.type === "source-ready");
+    if (ready?.type !== "source-ready") throw new Error("not opened");
+    const plain = spec({ scale: ready.scale, hop: 64, channels: [4] });
+    runtime.dispatch({ ...tag, type: "render", requestId: "p", fileKey: "f1", eventIndex: 0, lane: "batch", spec: plain });
+    runtime.dispatch({ ...tag, type: "render", requestId: "o", fileKey: "f1", eventIndex: 0, lane: "batch", spec: { ...plain, outline: {} } });
+    await runtime.idle();
+    const magenta = (pixels: Uint8ClampedArray) => {
+      let n = 0;
+      for (let i = 0; i < pixels.length; i += 4) if (pixels[i] === 255 && pixels[i + 1] === 60 && pixels[i + 2] === 255) n++;
+      return n;
+    };
+    const images = log.filter((r) => r.type === "image");
+    const without = images.find((r) => r.type === "image" && r.requestId === "p");
+    const withOutline = images.find((r) => r.type === "image" && r.requestId === "o");
+    if (without?.type !== "image" || withOutline?.type !== "image") throw new Error("renders missing");
+    expect(magenta(without.composite!.pixels!)).toBe(0);
+    expect(magenta(withOutline.composite!.pixels!)).toBeGreaterThan(8);
+    expect(magenta(withOutline.channels[4].pixels!)).toBe(magenta(withOutline.composite!.pixels!));
+    // The outline rings the blob: rows around 50 carry it, the far corners do not.
+    const px = withOutline.composite!.pixels!;
+    const cols = withOutline.cols;
+    let nearBlob = 0;
+    for (let r = 44; r <= 56; r++) for (let c = 0; c < cols; c++) if (px[(r * cols + c) * 4] === 255 && px[(r * cols + c) * 4 + 2] === 255) nearBlob++;
+    expect(nearBlob).toBeGreaterThan(0);
+    expect(px[0]).not.toBe(255);
+  });
+
   it("drops an interactive request that is already behind the latest one", async () => {
     const { runtime, log } = runtimeWithLog();
     runtime.dispatch({ ...tag, type: "open-source", fileKey: "f1", source: { kind: "file", file: file() }, eventCount: 3, scaleSample: 0 });
@@ -181,6 +212,14 @@ describe("cvw worker runtime", () => {
     expect(Array.from(done.objectCount)).toEqual([1, 255, 0]);
     expect(done.objectArea[0]).toBeGreaterThan(20);
     expect(done.objectArea[2]).toBe(0);
+    // The mask's measurements ride along: the blob has a boundary and a shape, the empty event none.
+    expect(Object.keys(done.features)).toEqual(["perimeter", "circularity", "majorAxis", "minorAxis", "axisRatio", "diameter", "meanIntensity", "sdIntensity"]);
+    expect(done.features.perimeter[0]).toBeGreaterThan(8);
+    expect(done.features.axisRatio[0]).toBeGreaterThan(0.2);
+    expect(done.features.axisRatio[0]).toBeLessThanOrEqual(1);
+    expect(done.features.meanIntensity[0]).toBeGreaterThan(0);
+    expect(done.features.perimeter[2]).toBe(0);
+    expect(done.features.diameter[1]).toBe(0);
     expect(log.some((r) => r.type === "classify-progress" && r.done === 3 && r.total === 3)).toBe(true);
     // Cancelled before it starts: no result.
     runtime.dispatch({ ...tag, type: "classify", requestId: "c2", fileKey: "f1" });

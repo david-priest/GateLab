@@ -104,12 +104,45 @@ export function countObjects(
   scale: number,
   options: ObjectCountOptions = {},
 ): ObjectCountResult {
+  const { count, largestArea, totalArea } = analyseObjects(plane, rows, cols, scale, options);
+  return { count, largestArea, totalArea };
+}
+
+/** The count and the mask of the counted objects in one pass, for a caller that measures them too. */
+export function countObjectsWithMask(
+  plane: Float32Array,
+  rows: number,
+  cols: number,
+  scale: number,
+  options: ObjectCountOptions = {},
+): ObjectCountResult & { mask: Uint8Array } {
+  return analyseObjects(plane, rows, cols, scale, options);
+}
+
+/** The pixels of the counted objects (1) on the plane, for drawing their outline over the picture. */
+export function countedMask(
+  plane: Float32Array,
+  rows: number,
+  cols: number,
+  scale: number,
+  options: ObjectCountOptions = {},
+): Uint8Array {
+  return analyseObjects(plane, rows, cols, scale, options).mask;
+}
+
+function analyseObjects(
+  plane: Float32Array,
+  rows: number,
+  cols: number,
+  scale: number,
+  options: ObjectCountOptions,
+): ObjectCountResult & { mask: Uint8Array } {
   const fraction = options.fraction ?? 0.125;
   const minArea = options.minArea ?? 20;
   const smoothing = options.smoothing ?? 1;
   const bandWidth = options.bandWidth ?? 6;
   const streakHeight = options.streakHeight ?? 4;
-  if (rows === 0 || cols === 0 || !(scale > 0)) return { count: 0, largestArea: 0, totalArea: 0 };
+  if (rows === 0 || cols === 0 || !(scale > 0)) return { count: 0, largestArea: 0, totalArea: 0, mask: new Uint8Array(rows * cols) };
   const smoothed = smoothing > 0 ? boxBlur(plane, rows, cols, smoothing) : plane;
   let mask: Uint8Array = new Uint8Array(rows * cols);
   const cut = fraction * scale;
@@ -123,6 +156,7 @@ export function countObjects(
   let count = 0;
   let largest = 0;
   let total = 0;
+  const kept: number[] = [0];
   for (let start = 0; start < mask.length; start++) {
     if (!mask[start] || label[start]) continue;
     next++;
@@ -161,13 +195,104 @@ export function countObjects(
     const height = rMax - rMin + 1;
     const band = width <= bandWidth && height >= rows / 2;
     const streak = height <= streakHeight && width >= cols / 3;
-    if (area >= minArea && !band && !streak) {
+    const counted = area >= minArea && !band && !streak;
+    kept.push(counted ? 1 : 0);
+    if (counted) {
       count++;
       total += area;
       if (area > largest) largest = area;
     }
   }
-  return { count, largestArea: largest, totalArea: total };
+  const counted = new Uint8Array(rows * cols);
+  for (let i = 0; i < counted.length; i++) counted[i] = kept[label[i]];
+  return { count, largestArea: largest, totalArea: total, mask: counted };
+}
+
+/** What the counted objects' mask measures, in row-pixel units (a column is `aspect` of a row). */
+export interface MaskFeatures {
+  /** Boundary pixels of the mask. */
+  readonly perimeter: number;
+  /** 4πA / P², 1 for a disc, smaller the rougher or longer the shape; 0 for no mask. */
+  readonly circularity: number;
+  /** Lengths of the ellipse with the mask's second moments. */
+  readonly majorAxis: number;
+  readonly minorAxis: number;
+  /** minor / major, 1 for a round mask, small for a long one. */
+  readonly axisRatio: number;
+  /** The diameter of the disc of the mask's area. */
+  readonly diameter: number;
+  /** Mean and standard deviation of the plane over the mask, as a fraction of full scale. */
+  readonly meanIntensity: number;
+  readonly sdIntensity: number;
+}
+
+export const MASK_FEATURE_KEYS = ["perimeter", "circularity", "majorAxis", "minorAxis", "axisRatio", "diameter", "meanIntensity", "sdIntensity"] as const;
+
+const NO_MASK: MaskFeatures = { perimeter: 0, circularity: 0, majorAxis: 0, minorAxis: 0, axisRatio: 0, diameter: 0, meanIntensity: 0, sdIntensity: 0 };
+
+/**
+ * Shape and intensity of the counted objects together: their boundary, the ellipse of their
+ * second moments (columns scaled by `aspect` so the picture is measured at true shape), the disc of
+ * their area, and the plane's mean and spread over them (divided by `scale`, the full scale).
+ */
+export function maskFeatures(mask: Uint8Array, plane: Float32Array, rows: number, cols: number, aspect: number, scale: number): MaskFeatures {
+  let area = 0;
+  let sx = 0;
+  let sy = 0;
+  let sum = 0;
+  let sum2 = 0;
+  let perimeter = 0;
+  const norm = scale > 0 ? 1 / scale : 0;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
+      if (!mask[i]) continue;
+      area++;
+      const x = c * aspect;
+      sx += x;
+      sy += r;
+      const v = plane[i] * norm;
+      sum += v;
+      sum2 += v * v;
+      if (r === 0 || c === 0 || r === rows - 1 || c === cols - 1 || !mask[i - cols] || !mask[i + cols] || !mask[i - 1] || !mask[i + 1]) perimeter++;
+    }
+  }
+  if (area === 0) return NO_MASK;
+  const mx = sx / area;
+  const my = sy / area;
+  let cxx = 0;
+  let cyy = 0;
+  let cxy = 0;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (!mask[r * cols + c]) continue;
+      const dx = c * aspect - mx;
+      const dy = r - my;
+      cxx += dx * dx;
+      cyy += dy * dy;
+      cxy += dx * dy;
+    }
+  }
+  cxx /= area;
+  cyy /= area;
+  cxy /= area;
+  const half = (cxx + cyy) / 2;
+  const spread = Math.sqrt(Math.max(0, ((cxx - cyy) / 2) ** 2 + cxy * cxy));
+  const major = 4 * Math.sqrt(Math.max(0, half + spread));
+  const minor = 4 * Math.sqrt(Math.max(0, half - spread));
+  const isoArea = area * aspect;
+  const mean = sum / area;
+  const variance = Math.max(0, sum2 / area - mean * mean);
+  return {
+    perimeter,
+    circularity: perimeter > 0 ? Math.min(1.5, (4 * Math.PI * isoArea) / (perimeter * perimeter * aspect)) : 0,
+    majorAxis: major,
+    minorAxis: minor,
+    axisRatio: major > 0 ? minor / major : 0,
+    diameter: 2 * Math.sqrt(isoArea / Math.PI),
+    meanIntensity: mean,
+    sdIntensity: Math.sqrt(variance),
+  };
 }
 
 /** The plane of a decoded event for a slot, or null when that slot was not decoded. */

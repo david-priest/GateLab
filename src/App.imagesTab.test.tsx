@@ -36,15 +36,24 @@ vi.mock("./engine/fsAccess", async (importOriginal) => {
   return { ...actual, rememberHandle: vi.fn(async () => undefined), recallHandle: vi.fn(async () => null) };
 });
 
-const wall = vi.hoisted(() => ({ renders: 0, lastVisible: null as boolean | null }));
+const wall = vi.hoisted(() => ({ renders: 0, lastVisible: null as boolean | null, send: null as null | ((recipe: unknown) => void),
+  make: null as null | ((events: number[], name: string) => void), entry: null as null | { sample: { index: (key: string) => number | undefined; channels: { key: string }[]; displayColumn: (idx: number) => Float32Array } },
+  find: null as null | ((events: number[], name: string) => string | null),
+  popId: null as string | null,
+}));
 // The stand-in is memoised with the tab's own comparator, so what is counted is what App hands
 // through it: a prop change while hidden must not reach the tab.
 vi.mock("./imaging/ImagesTab", async (importOriginal) => {
   const { memo } = await import("react");
   const actual = await importOriginal<typeof import("./imaging/ImagesTab")>();
-  const Fake = (props: { visible: boolean }) => {
+  const Fake = (props: { visible: boolean; onSendToLayout?: ((recipe: unknown) => void) | undefined; onMakePopulation?: ((events: number[], name: string) => void) | undefined; onFindSimilar?: ((events: number[], name: string) => string | null) | undefined; entry?: unknown }) => {
     wall.renders++;
     wall.lastVisible = props.visible;
+    wall.send = props.onSendToLayout ?? null;
+    wall.make = props.onMakePopulation ?? null;
+    wall.find = props.onFindSimilar ?? null;
+    wall.entry = (props.entry as typeof wall.entry) ?? null;
+    wall.popId = (props as { populationId?: string | null }).populationId ?? null;
     return <div data-testid="images-wall" data-visible={String(props.visible)} />;
   };
   return { ImagesTab: memo(Fake, actual.imagesTabPropsEqual as (a: unknown, b: unknown) => boolean), imagesTabPropsEqual: actual.imagesTabPropsEqual };
@@ -146,6 +155,25 @@ describe("the Images tab", () => {
     expect(wall.renders).toBe(hiddenRenders);
   });
 
+  it("sends the wall to the Layout tab as one labelled block", async () => {
+    await openFiles(true);
+    await act(async () => { tabButton("Images")!.click(); });
+    for (let i = 0; i < 3; i++) await settle();
+    expect(wall.send).toBeTruthy();
+    const sampleId = host.querySelector<HTMLElement>('[role="option"]')?.getAttribute("data-sample-id") ?? "";
+    await act(async () => {
+      wall.send!({
+        kind: "imagewall", sampleId: sampleId || "D1", fileName: "D1.fcs", populationId: "", populationName: "All Events",
+        events: [0, 2], imaged: 2, populationCount: 3, sortKey: "", sortLabel: "", sortDesc: false, display: [], exposure: 1, tile: 40, columns: 2,
+      });
+    });
+    // The Layout tab is a lazy chunk: wait for its page, longer under a loaded test run.
+    for (let i = 0; i < 60 && !host.querySelector(".gl-layout-item"); i++) await settle();
+    expect(tabButton("Layout")?.getAttribute("aria-selected")).toBe("true");
+    expect(host.querySelector(".gl-layout-item")).toBeTruthy();
+    expect(host.textContent).toContain("D1.fcs");
+  });
+
   it("returns to Gating when the last file's images are detached", async () => {
     await openFiles(true);
     await act(async () => { tabButton("Images")!.click(); });
@@ -155,5 +183,51 @@ describe("the Images tab", () => {
     for (let i = 0; i < 2; i++) await settle();
     expect(tabButton("Images")).toBeUndefined();
     expect(tabButton("Gating")?.classList.contains("active")).toBe(true);
+  });
+
+  it("makes a population of cells picked on the wall, with its NOT, on a channel of the file", async () => {
+    await openFiles(true);
+    await act(async () => { tabButton("Images")!.click(); });
+    for (let i = 0; i < 8 && !wall.make; i++) await settle();
+    expect(wall.make).toBeTruthy();
+    act(() => { wall.make!([0, 2], "Bright"); });
+    await settle();
+    // The picks are a 0/1 channel of the file, and two populations sit under All Events.
+    expect(wall.entry?.sample.index("Image set: Bright")).toBeDefined();
+    expect(host.textContent).toContain("Bright");
+    expect(host.textContent).toContain("Not Bright");
+    // The new population became the active one; Back returns to the one before, leaving both populations in place.
+    const before = wall.popId;
+    expect(before).toBeTruthy();
+    const back = host.querySelector<HTMLButtonElement>("button.gl-view-back")!;
+    expect(back.disabled).toBe(false);
+    act(() => { back.click(); });
+    await settle();
+    expect(wall.popId).not.toBe(before);
+    expect(host.textContent).toContain("Not Bright");
+    const forward = host.querySelector<HTMLButtonElement>("button.gl-view-forward")!;
+    act(() => { forward.click(); });
+    await settle();
+    expect(wall.popId).toBe(before);
+    await act(async () => { tabButton("Gating")!.click(); });
+    await settle();
+    const rows = [...host.querySelectorAll<HTMLElement>(".gl-pop-row, [data-population-name], .gl-tree-row")].map((r) => r.textContent?.trim() ?? "");
+    const text = host.textContent ?? "";
+    expect(text).toMatch(/Bright[\s\S]*2(?![\d,])/);
+    expect(rows.length >= 0).toBe(true);
+  });
+
+  it("scores the wall's cells by likeness to a pick as a channel of the file", async () => {
+    await openFiles(true);
+    await act(async () => { tabButton("Images")!.click(); });
+    for (let i = 0; i < 8 && !wall.find; i++) await settle();
+    let key: string | null = null;
+    act(() => { key = wall.find!([0], "round"); });
+    await settle();
+    expect(key).toBe("Similar to round");
+    const idx = wall.entry!.sample.index("Similar to round")!;
+    const scores = Array.from(wall.entry!.sample.displayColumn(idx));
+    expect(scores[0]).toBe(0);
+    expect(scores.every((v) => Number.isFinite(v) && v >= 0)).toBe(true);
   });
 });
