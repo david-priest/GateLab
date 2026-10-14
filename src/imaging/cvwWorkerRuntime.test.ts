@@ -135,6 +135,28 @@ describe("cvw worker runtime", () => {
     expect(px[0]).not.toBe(255);
   });
 
+  it("returns the channels the spec names as grey untinted", async () => {
+    const { runtime, log } = runtimeWithLog();
+    runtime.dispatch({ ...tag, type: "open-source", fileKey: "f1", source: { kind: "file", file: file() }, eventCount: 3, scaleSample: 3 });
+    await runtime.idle();
+    const ready = log.find((r) => r.type === "source-ready");
+    if (ready?.type !== "source-ready") throw new Error("not opened");
+    runtime.dispatch({ ...tag, type: "render", requestId: "g", fileKey: "f1", eventIndex: 0, lane: "batch", spec: spec({ scale: ready.scale, channels: [4], grey: [4], composite: false }) });
+    await runtime.idle();
+    const image = log.find((r) => r.type === "image" && r.requestId === "g");
+    if (image?.type !== "image") throw new Error("no image");
+    const px = image.channels[4].pixels!;
+    let lit = 0;
+    for (let i = 0; i < px.length; i += 4) {
+      if (px[i] + px[i + 1] + px[i + 2] === 0) continue;
+      lit++;
+      expect(px[i]).toBe(px[i + 1]);
+      expect(px[i + 1]).toBe(px[i + 2]);
+    }
+    expect(lit).toBeGreaterThan(10);
+    expect(image.composite).toBeNull();
+  });
+
   it("drops an interactive request that is already behind the latest one", async () => {
     const { runtime, log } = runtimeWithLog();
     runtime.dispatch({ ...tag, type: "open-source", fileKey: "f1", source: { kind: "file", file: file() }, eventCount: 3, scaleSample: 0 });

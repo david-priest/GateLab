@@ -433,4 +433,21 @@ describe("ImagesTab", () => {
     expect(nodesAfter[2]).toBe(nodesBefore[2]);
     expect(nodesAfter[0].classList.contains("gl-wall-tile-picked")).toBe(true);
   });
+
+  it("sends the picked cells, in wall order and labelled with their class, as a cell panel", async () => {
+    const onSendCellPanel = vi.fn();
+    const classes = [{ label: "single", colour: "#1f77b4" }, { label: "multiple objects", colour: "#2ca02c" }];
+    const classIndex: Record<number, number> = { 0: 0, 2: 1, 3: 0, 4: 0, 5: 1 };
+    render({ mask: null, onMakePopulation: vi.fn(), onSendCellPanel, classOf: (e) => classIndex[e] ?? null, classes, classTitle: "Objects" });
+    await settle();
+    const tiles = () => [...host.querySelectorAll<HTMLButtonElement>(".gl-wall-tile")];
+    act(() => { tiles()[3].click(); });
+    act(() => { tiles()[1].dispatchEvent(new MouseEvent("click", { bubbles: true, metaKey: true })); });
+    const send = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Cell panel to Layout")!;
+    act(() => { send.click(); });
+    const recipe = onSendCellPanel.mock.calls[0][0];
+    expect(recipe).toMatchObject({ kind: "cellpanel", sampleId: "D1", fileName: "D1.fcs", exposure: 1 });
+    expect(recipe.cells).toEqual([{ event: 2, label: "Event 2 · multiple objects" }, { event: 4, label: "Event 4 · single" }]);
+    expect(recipe.columns[0]).toMatchObject({ kind: "channel", slot: 2, grey: true });
+  });
 });

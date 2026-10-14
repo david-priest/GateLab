@@ -19,7 +19,7 @@ export interface LayoutImageWallProps {
 }
 
 /** Draw a rendered picture into a square tile, contained and centred, on the tile's own dark ground. */
-function drawTile(ctx: CanvasRenderingContext2D, picture: RenderedPicture | null, cols: number, rows: number, aspect: number, x: number, y: number, size: number): void {
+export function drawTile(ctx: CanvasRenderingContext2D, picture: RenderedPicture | null, cols: number, rows: number, aspect: number, x: number, y: number, size: number): void {
   ctx.fillStyle = "#111";
   ctx.fillRect(x, y, size, size);
   if (!picture) return;

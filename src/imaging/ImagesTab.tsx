@@ -15,6 +15,7 @@ import type { RenderSpecMessage } from "./cvwProtocol";
 import type { ImageService, SourceInfo } from "./imageService";
 import { useCellImage } from "./useCellImage";
 import type { LayoutImageWallRecipe } from "../engine/imageWallBlock";
+import { defaultCellPanel, type LayoutCellPanelRecipe } from "../engine/cellPanelBlock";
 import { WallHistogram } from "./WallHistogram";
 import { eventsInRange, formatWallValue, wallHistogram } from "./wallBins";
 
@@ -46,6 +47,8 @@ export interface ImagesTabProps {
   readonly onSendToLayout?: (recipe: LayoutImageWallRecipe) => void;
   /** The class of an event under the plot's colouring, as an index into `classes`; null when unknown. */
   readonly classOf?: (eventIndex: number) => number | null;
+  /** Put the picked cells on the Layout tab as a cell panel (one row per cell, a column per channel). */
+  readonly onSendCellPanel?: (recipe: LayoutCellPanelRecipe) => void;
   /** Make a population of cells picked on the wall (an image set), under the wall's population. */
   readonly onMakePopulation?: (events: number[], name: string) => void;
   /** Score every cell of the wall by likeness to the picked ones, as a channel of the file; returns its key, or null. */
@@ -142,7 +145,7 @@ const WallTile = memo(function WallTile({ service, fileKey, sampleId, eventIndex
 function ImagesTabImpl({
   visible, service, entry, mask, populationLabel, view, onViewChange, pinned, onPin, onShowOnPlot,
   populationId = null, populations, onChoosePopulation, excludedMask = null, parentName = null, onSendToLayout,
-  classOf, classes, classTitle, onMakePopulation, onFindSimilar,
+  classOf, classes, classTitle, onMakePopulation, onFindSimilar, onSendCellPanel,
 }: ImagesTabProps) {
   const { t } = useI18n();
   // The tiles are memoised, so the handlers they get keep one identity and read the latest through refs.
@@ -633,6 +636,34 @@ function ImagesTabImpl({
                     >
                       {t("Make population")}
                     </button>
+                    {onSendCellPanel && (
+                      <button
+                        type="button"
+                        className="gl-mini-btn"
+                        title={t("Put the picked cells on the Layout tab side by side, one row per cell and a column per channel, to edit there")}
+                        onClick={() => {
+                          if (!channels || !entry) return;
+                          // In wall order, so the panel reads as the wall did.
+                          const inWall = new Set(pickedOnWall);
+                          const ordered = Array.from(events).filter((e) => inWall.has(e));
+                          onSendCellPanel(defaultCellPanel({
+                            sampleId: entry.id,
+                            fileName: entry.name,
+                            cells: ordered.map((e) => {
+                              const c = classed ? classOf!(e) : null;
+                              const cls = c !== null && classes ? classes[c]?.label : null;
+                              return { event: e, label: cls ? `${t("Event {index}", { index: e.toLocaleString() })} · ${cls}` : t("Event {index}", { index: e.toLocaleString() }) };
+                            }),
+                            display: channels,
+                            exposure,
+                            mask: images?.mask ? { slot: images.mask.slot, fraction: images.mask.fraction } : null,
+                            outline,
+                          }));
+                        }}
+                      >
+                        {t("Cell panel to Layout")}
+                      </button>
+                    )}
                     {onFindSimilar && (
                       <button
                         type="button"

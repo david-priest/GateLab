@@ -1,4 +1,5 @@
 import { normalizeImageWallRecipe, type LayoutImageWallRecipe } from "./imageWallBlock";
+import { normalizeCellPanelRecipe, type LayoutCellPanelRecipe } from "./cellPanelBlock";
 import { normalizeProportionsSettings, type ProportionsSettings } from "./proportionsSettings";
 
 export const LAYOUT_WORKSPACE_VERSION = 2 as const;
@@ -254,11 +255,11 @@ export interface LayoutProportionsRecipe {
   title?: string;
 }
 
-export type LayoutRecipe = LayoutPlotRecipe | LayoutStrategyRecipe | LayoutChartRecipe | LayoutFigureRecipe | LayoutProportionsRecipe | LayoutTextRecipe | LayoutImageWallRecipe;
+export type LayoutRecipe = LayoutPlotRecipe | LayoutStrategyRecipe | LayoutChartRecipe | LayoutFigureRecipe | LayoutProportionsRecipe | LayoutTextRecipe | LayoutImageWallRecipe | LayoutCellPanelRecipe;
 
 /** A plot or strategy block: the kinds bound to a file and a population, styled by the sheet, able to follow an iteration. */
 export function isPlotLikeRecipe(recipe: LayoutRecipe): recipe is LayoutPlotRecipe | LayoutStrategyRecipe {
-  return recipe.kind !== "text" && recipe.kind !== "chart" && recipe.kind !== "figure" && recipe.kind !== "proportions" && recipe.kind !== "imagewall";
+  return recipe.kind !== "text" && recipe.kind !== "chart" && recipe.kind !== "figure" && recipe.kind !== "proportions" && recipe.kind !== "imagewall" && recipe.kind !== "cellpanel";
 }
 
 export interface LayoutItem extends LayoutItemFrame {
@@ -465,7 +466,7 @@ export interface LayoutWorkspace {
 }
 
 export function layoutItemMinimum(kind: LayoutRecipe["kind"]) {
-  return kind === "text" ? { width: 24, height: 20 } : kind === "chart" ? { width: 160, height: 120 } : kind === "figure" || kind === "proportions" ? { width: 200, height: 150 } : kind === "imagewall" ? { width: 120, height: 100 } : { width: 140, height: 140 };
+  return kind === "text" ? { width: 24, height: 20 } : kind === "chart" ? { width: 160, height: 120 } : kind === "figure" || kind === "proportions" ? { width: 200, height: 150 } : kind === "imagewall" || kind === "cellpanel" ? { width: 120, height: 100 } : { width: 140, height: 140 };
 }
 
 /** Set a sheet's page and the pixel size that follows from it. */
@@ -511,6 +512,7 @@ function normalizeRecipe(value: unknown): LayoutRecipe | null {
     };
   }
   if (candidate.kind === "imagewall") return normalizeImageWallRecipe(candidate);
+  if (candidate.kind === "cellpanel") return normalizeCellPanelRecipe(candidate);
   if (candidate.kind === "figure") {
     const illustration = candidate.illustration;
     if (!illustration || typeof illustration !== "object" || Array.isArray(illustration)) return null;

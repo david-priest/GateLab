@@ -415,6 +415,35 @@ describe("hovering a cell", () => {
     expect(host.querySelector(".gl-cell-marker-pinned")).toBeNull();
   });
 
+  it("adds the cell shown in the inspector to a cell panel on the Layout tab, and the next one to the same panel", async () => {
+    await openFiles(true);
+    const pin = async (event: number) => {
+      const [px, py] = pixelOfEvent(event);
+      await act(async () => {
+        plotArea().dispatchEvent(pointer("pointerdown", px, py, 1));
+        plotArea().dispatchEvent(pointer("pointerup", px, py, 0));
+      });
+      for (let i = 0; i < 3; i++) await settle(40);
+    };
+    await pin(2);
+    const add = () => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Add to a cell panel");
+    expect(add()).toBeTruthy();
+    await act(async () => { add()!.click(); });
+    for (let i = 0; i < 60 && !host.querySelector(".gl-layout-cellpanel"); i++) await settle();
+    const panel = () => host.querySelectorAll<HTMLElement>(".gl-layout-cellpanel");
+    expect(panel()).toHaveLength(1);
+    expect(panel()[0].getAttribute("data-cells")).toBe("1");
+    // Back on Gating, another cell goes onto the same panel.
+    const gating = [...host.querySelectorAll<HTMLButtonElement>('button[role="tab"]')].find((b) => b.textContent === "Gating")!;
+    await act(async () => { gating.click(); });
+    for (let i = 0; i < 3; i++) await settle(40);
+    await pin(0);
+    await act(async () => { add()!.click(); });
+    for (let i = 0; i < 20 && panel()[0]?.getAttribute("data-cells") !== "2"; i++) await settle();
+    expect(panel()).toHaveLength(1);
+    expect(panel()[0].getAttribute("data-cells")).toBe("2");
+  });
+
   it("lays thumbnails over the plot when asked, for imaged events only", async () => {
     await openFiles(true);
     const toggle = host.querySelector<HTMLInputElement>(".gl-thumbs-field input[type=checkbox]")!;

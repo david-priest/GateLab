@@ -81,11 +81,17 @@ import { lazy, Suspense } from "react";
 import { lazyChunk } from "./lazyChunk";
 import type { ImageService } from "../imaging/imageService";
 import type { LayoutImageWallRecipe } from "../engine/imageWallBlock";
+import { cellPanelNaturalSize, type LayoutCellPanelRecipe } from "../engine/cellPanelBlock";
+import { LayoutCellPanelEditor } from "./LayoutCellPanelEditor";
 
 /** The image wall's surface, loaded only when a page holds one, so the imaging code stays out of this chunk. */
 const LayoutImageWallLazy = lazy(lazyChunk("LayoutImageWall", async () => {
   const module = await import("../imaging/LayoutImageWall");
   return { default: module.LayoutImageWall };
+}));
+const LayoutCellPanelLazy = lazy(lazyChunk("LayoutCellPanel", async () => {
+  const module = await import("../imaging/LayoutCellPanel");
+  return { default: module.LayoutCellPanel };
 }));
 import {
   computeGatingStrategy,
@@ -223,6 +229,7 @@ function itemTitle(
   if (recipe.kind === "figure") return recipe.illustration.figure?.name?.trim() || "Figure";
   if (recipe.kind === "proportions") return recipe.settings.plotType === "box" ? "Boxplot" : "Composition";
   if (recipe.kind === "imagewall") return `${recipe.populationName || "Population"} · ${recipe.fileName || "images"}`;
+  if (recipe.kind === "cellpanel") return `${recipe.cells.length} ${recipe.cells.length === 1 ? "cell" : "cells"} · ${recipe.fileName || "images"}`;
   const sample = samples.find(({ id }) => id === recipe.sampleId);
   const population = sample?.tree.populations[recipe.populationId];
   if (recipe.kind === "chart") return `${population?.name ?? "Population"} · ${CHART_STATISTIC_LABELS[recipe.statistic]}`;
@@ -426,7 +433,7 @@ function LayoutPlotSurface({
 }>) {
   const hostRef = useRef<HTMLDivElement>(null);
   // A chart, a figure and a Plotting chart have surfaces of their own; this one takes plots and strategies.
-  const recipe = item.recipe as Exclude<LayoutRecipe, LayoutChartRecipe | LayoutFigureRecipe | LayoutProportionsRecipe | LayoutImageWallRecipe>;
+  const recipe = item.recipe as Exclude<LayoutRecipe, LayoutChartRecipe | LayoutFigureRecipe | LayoutProportionsRecipe | LayoutImageWallRecipe | LayoutCellPanelRecipe>;
   const styleKey = JSON.stringify(style);
   const trees = useMemo(() => figureHierarchies(activeState), [activeState]);
   const source =
@@ -864,6 +871,15 @@ function LayoutItemFrame({
           height={Math.max(80, inner.height - 8)}
           containerId={`layout-proportions-${item.id}`}
         />
+      ) : item.recipe.kind === "cellpanel" ? (
+        <Suspense fallback={<div className="gl-layout-plot-host" />}>
+          <LayoutCellPanelLazy
+            recipe={item.recipe}
+            service={imageService ?? null}
+            width={Math.max(120, inner.width - 8)}
+            height={Math.max(80, inner.height - 8)}
+          />
+        </Suspense>
       ) : item.recipe.kind === "imagewall" ? (
         <Suspense fallback={<div className="gl-layout-plot-host" />}>
           <LayoutImageWallLazy
@@ -1714,7 +1730,18 @@ export function LayoutTab({
     if (!selectedItem) return;
     mutateActiveSheet((sheet) => {
       const item = sheet.items.find(({ id }) => id === selectedItem.id);
-      if (item) item.recipe = change(item.recipe);
+      if (!item) return;
+      const before = item.recipe;
+      item.recipe = change(item.recipe);
+      // A cell panel's frame follows its content at the scale it had: a channel switched off or a
+      // cell removed narrows the block instead of leaving it to float in empty space.
+      if (before.kind === "cellpanel" && item.recipe.kind === "cellpanel") {
+        const was = cellPanelNaturalSize(before);
+        const now = cellPanelNaturalSize(item.recipe);
+        const scale = Math.max(0.1, Math.min(item.width / Math.max(1, was.width), item.height / Math.max(1, was.height)));
+        item.width = Math.max(40, Math.round(now.width * scale));
+        item.height = Math.max(30, Math.round(now.height * scale));
+      }
     });
   };
   /**
@@ -2748,6 +2775,11 @@ export function LayoutTab({
                         {t("Replace with the current Illustration figure")}
                       </button>
                     </>
+                  ) : selectedItem.recipe.kind === "cellpanel" ? (
+                    <LayoutCellPanelEditor
+                      recipe={selectedItem.recipe}
+                      onChange={(next) => updateSelectedRecipe((recipe) => (recipe.kind === "cellpanel" ? next : recipe))}
+                    />
                   ) : selectedItem.recipe.kind === "imagewall" ? (
                     <>
                       <p className="gl-hint">
@@ -2933,7 +2965,7 @@ export function LayoutTab({
                           value={selectedItem.recipe.sampleId}
                           onChange={(event) =>
                             updateSelectedRecipe((recipe) => {
-                              if (recipe.kind === "text" || recipe.kind === "figure" || recipe.kind === "proportions" || recipe.kind === "imagewall") return recipe;
+                              if (recipe.kind === "text" || recipe.kind === "figure" || recipe.kind === "proportions" || recipe.kind === "imagewall" || recipe.kind === "cellpanel") return recipe;
                               const target = samples.find(
                                 (file) => file.id === event.target.value,
                               );

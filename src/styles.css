@@ -4010,3 +4010,15 @@ input[type="number"]::-webkit-outer-spin-button {
 /* The Back button in the header: the view's history, on every tab. */
 .gl-view-nav { display: inline-flex; gap: 2px; flex: none; }
 .gl-view-back, .gl-view-forward { flex: none; height: 26px; width: 28px; font-size: 15px; line-height: 1; }
+/* The Layout side panel for a cell panel. */
+.gl-cellpanel-editor { display: flex; flex-direction: column; gap: 6px; }
+.gl-cellpanel-section { margin-top: 6px; font-size: 11px; font-weight: 600; color: var(--muted); }
+.gl-cellpanel-list { margin: 0; padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.gl-cellpanel-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; font-size: 11px; }
+.gl-cellpanel-text { flex: 1 1 90px; min-width: 60px; font-size: 11px; padding: 1px 4px; }
+.gl-cellpanel-row input[type="range"] { width: 70px; }
+.gl-cellpanel-merge { display: inline-flex; gap: 2px; }
+.gl-cellpanel-merge-mark { display: inline-flex; width: 10px; justify-content: center; font-weight: 700; color: var(--muted); }
+.gl-cellpanel-add { font-size: 11px; max-width: 200px; }
+.gl-cellpanel-row.is-off > :not(input[type="checkbox"]:first-child) { opacity: 0.45; }
+.gl-cell-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
