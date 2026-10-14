@@ -385,6 +385,7 @@ import { createCellHoverStore, type HoveredCell } from "./engine/cellHoverStore"
 import { imagedEventFlags } from "./engine/imagedEvents";
 import { CELL_CLASS_LABELS, cellReasonLabels, classifyCells, type CellClasses } from "./engine/cellClass";
 import { imageWallNaturalSize, type LayoutImageWallRecipe } from "./engine/imageWallBlock";
+import { cellPanelNaturalSize, defaultCellPanel, type LayoutCellPanelRecipe } from "./engine/cellPanelBlock";
 import { rankSeparatingPairs, type PairScore, type SeparationColumn } from "./engine/separation";
 import { imagingPlotPresets } from "./engine/imagingPresets";
 import {
@@ -8193,6 +8194,73 @@ export default function App() {
     setActiveTab("layout");
   }
 
+  /** A cell panel as a Layout block, and the Layout tab shown; returns the block's id. */
+  const lastCellPanelRef = useRef<Map<string, string>>(new Map());
+  function addCellPanelToLayout(recipe: LayoutCellPanelRecipe): void {
+    const id = crypto.randomUUID();
+    setLayoutWorkspace((current) => {
+      const next = cloneLayoutWorkspace(current);
+      const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
+      if (!sheet) return current;
+      const size = cellPanelNaturalSize(recipe);
+      const frame = nextLayoutItemPosition(sheet, size.width, size.height);
+      sheet.items.push({ id, ...frame, recipe });
+      sheet.width = Math.max(sheet.width, frame.x + frame.width + 48);
+      sheet.height = Math.max(sheet.height, frame.y + frame.height + 48);
+      return next;
+    });
+    lastCellPanelRef.current.set(recipe.sampleId, id);
+    markWorkspaceDirty();
+    setActiveTab("layout");
+  }
+
+  /**
+   * The cell the inspector shows, added as a row of the last cell panel made for its file (which
+   * grows to hold it), or as the first row of a new one with the file's current view.
+   */
+  function addCellToCellPanel(cell: HoveredCell): void {
+    const entry = samples.find((e) => e.id === cell.sampleId);
+    if (!entry?.images) return;
+    const cls = cellClassOf(cell);
+    const label = cls ? `${t("Event {index}", { index: cell.eventIndex.toLocaleString() })} · ${t(cls.label)}` : t("Event {index}", { index: cell.eventIndex.toLocaleString() });
+    const lastId = lastCellPanelRef.current.get(entry.id);
+    // Read from this render's workspace: a state updater runs later, so it cannot say whether it found the panel.
+    const panelThere = !!lastId && layoutWorkspace.sheets.some((sheet) => sheet.items.some((it) => it.id === lastId && it.recipe.kind === "cellpanel"));
+    if (panelThere) {
+      setLayoutWorkspace((current) => {
+        const next = cloneLayoutWorkspace(current);
+        for (const sheet of next.sheets) {
+          const item = sheet.items.find((it) => it.id === lastId);
+          if (!item || item.recipe.kind !== "cellpanel") continue;
+          if (!item.recipe.cells.some((c) => c.event === cell.eventIndex)) {
+            const recipe = { ...item.recipe, cells: [...item.recipe.cells, { event: cell.eventIndex, label }] };
+            const size = cellPanelNaturalSize(recipe);
+            const grow = Math.min(4, Math.max(item.width / Math.max(1, cellPanelNaturalSize(item.recipe).width), 0.25));
+            item.recipe = recipe;
+            item.width = Math.round(size.width * grow);
+            item.height = Math.round(size.height * grow);
+            sheet.height = Math.max(sheet.height, item.y + item.height + 48);
+          }
+          return next;
+        }
+        return current;
+      });
+      markWorkspaceDirty();
+      setActiveTab("layout");
+      return;
+    }
+    const view = imageView[entry.id];
+    addCellPanelToLayout(defaultCellPanel({
+      sampleId: entry.id,
+      fileName: entry.name,
+      cells: [{ event: cell.eventIndex, label }],
+      display: view?.display ?? entry.images.display,
+      exposure: view?.exposure ?? 1,
+      mask: entry.images.mask ? { slot: entry.images.mask.slot, fraction: entry.images.mask.fraction } : null,
+      outline: view?.outline ?? false,
+    }));
+  }
+
   /** The Illustration tab's figure as one Layout block, and the Layout tab shown. */
   function addFigureToLayout(config: IllustrationConfig): void {
     setLayoutWorkspace((current) => {
@@ -11753,6 +11821,12 @@ export default function App() {
   const addImageWallRef = useRef(addImageWallToLayout);
   addImageWallRef.current = addImageWallToLayout;
   const sendImageWallToLayout = useCallback((recipe: LayoutImageWallRecipe) => addImageWallRef.current(recipe), []);
+  const addCellPanelRef = useRef(addCellPanelToLayout);
+  addCellPanelRef.current = addCellPanelToLayout;
+  const sendCellPanelToLayout = useCallback((recipe: LayoutCellPanelRecipe) => addCellPanelRef.current(recipe), []);
+  const addCellRef = useRef(addCellToCellPanel);
+  addCellRef.current = addCellToCellPanel;
+  const addCellToLayout = useCallback((cell: HoveredCell) => addCellRef.current(cell), []);
 
   /** The colour the plot draws a cell of the viewed file in: its class under a colouring, else the plain dot. */
   const cellColourOf = useCallback((cell: HoveredCell): string | null => {
@@ -14461,6 +14535,7 @@ export default function App() {
                     excludedMask={imagesExcluded?.mask ?? null}
                     parentName={imagesExcluded?.parentName ?? null}
                     onSendToLayout={LAYOUT_TAB_AVAILABLE ? sendImageWallToLayout : undefined}
+                    onSendCellPanel={LAYOUT_TAB_AVAILABLE ? sendCellPanelToLayout : undefined}
                     classOf={imagesClasses ? imagesClassOf : undefined}
                     classes={imagesClasses}
                     classTitle={imagesClassTitle}
@@ -14533,6 +14608,7 @@ export default function App() {
                 onUnpin={() => setPinnedCell(null)}
                 objectCountOf={objectCountOf}
                 cellClassOf={cellClassOf}
+                onAddToLayout={LAYOUT_TAB_AVAILABLE ? addCellToLayout : undefined}
                 collapsed={cellInspectorCollapsed}
                 onToggleCollapsed={() => setCellInspectorCollapsed((c) => !c)}
                 dock="column"
@@ -14680,6 +14756,7 @@ export default function App() {
                 onUnpin={() => setPinnedCell(null)}
                 objectCountOf={objectCountOf}
                 cellClassOf={cellClassOf}
+                onAddToLayout={LAYOUT_TAB_AVAILABLE ? addCellToLayout : undefined}
                 collapsed={cellInspectorCollapsed}
                 onToggleCollapsed={() => setCellInspectorCollapsed((c) => !c)}
                 dock="pane"

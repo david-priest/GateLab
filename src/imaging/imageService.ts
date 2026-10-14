@@ -374,7 +374,7 @@ export class ImageService {
   }
 
   private cacheKey(fileKey: string, eventIndex: number, spec: RenderSpecMessage): string {
-    const outline = spec.outline ? `|o${spec.outline.slot ?? ""}:${spec.outline.fraction ?? ""}` : "";
+    const outline = (spec.outline ? `|o${spec.outline.slot ?? ""}:${spec.outline.fraction ?? ""}` : "") + (spec.grey && spec.grey.length ? `|g${[...spec.grey].sort((a, b) => a - b).join(",")}` : "");
     const extras = `c${spec.composite ? 1 : 0}|s${[...spec.channels].sort((a, b) => a - b).join(",")}${outline}`;
     return `${fileKey}:${eventIndex}:${renderKey(spec, spec.hop)}|${extras}`;
   }

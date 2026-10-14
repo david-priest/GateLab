@@ -24,6 +24,8 @@ export interface RenderSpecMessage {
   /** Draw the outline of the counted objects (objectCount.ts) over every picture; the mask's slot and
    *  threshold travel with it when the FCS records Chorus's, else the SSC plane at the default fraction. */
   readonly outline?: { readonly slot?: number; readonly fraction?: number } | null;
+  /** Of `channels`, the slots to return in grey rather than tinted with their colour. */
+  readonly grey?: readonly number[];
 }
 
 interface Tagged {

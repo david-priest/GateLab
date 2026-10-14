@@ -46,6 +46,8 @@ export interface CellInspectorProps {
   readonly view: Readonly<Record<string, CellImageView>>;
   readonly onViewChange: (sampleId: string, view: CellImageView) => void;
   readonly onUnpin: () => void;
+  /** Put the cell shown on a cell panel on the Layout tab: the last one made for its file, or a new one. */
+  readonly onAddToLayout?: (cell: HoveredCell) => void;
   /** The objects counted in the cell's image, when the file has been classified. */
   readonly objectCountOf?: (cell: HoveredCell) => number | null;
   /** The cell's single-cell class and, when irregular, why. */
@@ -108,7 +110,7 @@ export function imagingFeaturesOf(sample: Sample, eventIndex: number): { name: s
 }
 
 export function CellInspector({
-  service, hoverStore, pinned, resolveEntry, view, onViewChange, onUnpin, objectCountOf, cellClassOf, collapsed, onToggleCollapsed, dock, onToggleDock,
+  service, hoverStore, pinned, resolveEntry, view, onViewChange, onUnpin, objectCountOf, cellClassOf, collapsed, onToggleCollapsed, dock, onToggleDock, onAddToLayout,
 }: CellInspectorProps) {
   const { t } = useI18n();
   const hovered = useSyncExternalStore(hoverStore.subscribe, hoverStore.get, hoverStore.get);
@@ -274,10 +276,22 @@ export function CellInspector({
             />
             <span className="gl-cell-exposure-value">{exposure.toFixed(2)}×</span>
           </label>
-          <label className="gl-cell-outline" title={t("Outline the objects the count found on the mask image, in magenta")}>
-            <input type="checkbox" checked={outline} onChange={(event) => setOutline(event.target.checked)} />
-            <span>{t("Mask outline")}</span>
-          </label>
+          <div className="gl-cell-actions">
+            <label className="gl-cell-outline" title={t("Outline the objects the count found on the mask image, in magenta")}>
+              <input type="checkbox" checked={outline} onChange={(event) => setOutline(event.target.checked)} />
+              <span>{t("Mask outline")}</span>
+            </label>
+            {onAddToLayout && (
+              <button
+                type="button"
+                className="gl-mini-btn gl-cell-add-layout"
+                title={t("Add this cell to a cell panel on the Layout tab: the last one made for this file, or a new one")}
+                onClick={() => onAddToLayout(cell)}
+              >
+                {t("Add to a cell panel")}
+              </button>
+            )}
+          </div>
           {features.length > 0 && (
             <details className="gl-cell-features">
               <summary>{t("Image features")}</summary>

@@ -337,8 +337,9 @@ export function createCvwWorkerRuntime(options: CvwWorkerRuntimeOptions): CvwWor
         ? await picture(outlined(compositeRgba(image, spec)), image.cols, image.rows)
         : null;
       const channels: Record<number, RenderedPicture> = {};
+      const grey = new Set(request.spec.grey ?? []);
       for (const slot of request.spec.channels) {
-        channels[slot] = await picture(outlined(channelRgba(image, spec, slot)), image.cols, image.rows);
+        channels[slot] = await picture(outlined(channelRgba(image, spec, slot, !grey.has(slot))), image.cols, image.rows);
       }
       emit({
         ...tag,

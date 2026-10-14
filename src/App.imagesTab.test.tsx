@@ -40,6 +40,7 @@ const wall = vi.hoisted(() => ({ renders: 0, lastVisible: null as boolean | null
   make: null as null | ((events: number[], name: string) => void), entry: null as null | { sample: { index: (key: string) => number | undefined; channels: { key: string }[]; displayColumn: (idx: number) => Float32Array } },
   find: null as null | ((events: number[], name: string) => string | null),
   popId: null as string | null,
+  cellPanel: null as null | ((recipe: unknown) => void),
 }));
 // The stand-in is memoised with the tab's own comparator, so what is counted is what App hands
 // through it: a prop change while hidden must not reach the tab.
@@ -54,6 +55,7 @@ vi.mock("./imaging/ImagesTab", async (importOriginal) => {
     wall.find = props.onFindSimilar ?? null;
     wall.entry = (props.entry as typeof wall.entry) ?? null;
     wall.popId = (props as { populationId?: string | null }).populationId ?? null;
+    wall.cellPanel = (props as { onSendCellPanel?: (recipe: unknown) => void }).onSendCellPanel ?? null;
     return <div data-testid="images-wall" data-visible={String(props.visible)} />;
   };
   return { ImagesTab: memo(Fake, actual.imagesTabPropsEqual as (a: unknown, b: unknown) => boolean), imagesTabPropsEqual: actual.imagesTabPropsEqual };
@@ -229,5 +231,24 @@ describe("the Images tab", () => {
     const scores = Array.from(wall.entry!.sample.displayColumn(idx));
     expect(scores[0]).toBe(0);
     expect(scores.every((v) => Number.isFinite(v) && v >= 0)).toBe(true);
+  });
+
+  it("puts the picked cells on the Layout tab as a cell panel", async () => {
+    await openFiles(true);
+    await act(async () => { tabButton("Images")!.click(); });
+    for (let i = 0; i < 8 && !wall.cellPanel; i++) await settle();
+    expect(wall.cellPanel).toBeTruthy();
+    const sampleId = (wall.entry as unknown as { id?: string } | null)?.id ?? "D1";
+    await act(async () => {
+      wall.cellPanel!({
+        kind: "cellpanel", sampleId, fileName: "D1.fcs", cells: [{ event: 0, label: "Event 0" }, { event: 2, label: "Event 2" }],
+        columns: [{ kind: "channel", slot: 2, header: "LightLoss (Imaging)", grey: true }],
+        display: [{ slot: 2, name: "LightLoss (Imaging)", enabled: true, colour: "#bdbdbd", threshold: 0, saturation: 0.8, gamma: 1, smoothing: 1 }],
+        exposure: 1, tile: 48, showHeaders: true, showLabels: true,
+      });
+    });
+    for (let i = 0; i < 60 && !host.querySelector(".gl-layout-cellpanel"); i++) await settle();
+    expect(tabButton("Layout")?.getAttribute("aria-selected")).toBe("true");
+    expect(host.querySelector(".gl-layout-cellpanel")?.getAttribute("data-cells")).toBe("2");
   });
 });
