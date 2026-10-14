@@ -11,6 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1b2027" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/runs_in-your_browser-1b2027" alt="Runs in your browser">
   <img src="https://img.shields.io/badge/exchanges-FlowJo_.wsp_%C2%B7_Gating--ML_2.0-1b2027" alt="Exchanges FlowJo .wsp and Gating-ML 2.0">
+  <img src="https://img.shields.io/badge/imaging-BD_FACSDiscover_S8_cell_images-1b2027" alt="Reads BD FACSDiscover S8 cell images">
   <img src="https://img.shields.io/badge/interface-English_%C2%B7_%E6%97%A5%E6%9C%AC%E8%AA%9E-1b2027" alt="Interface in English and Japanese">
 </p>
 
@@ -22,13 +23,15 @@
   <a href="https://david-priest.github.io/GateLab/"><b>GateLab in your browser</b></a> · <a href="#using-gatelab">Using GateLab</a> · <a href="https://github.com/david-priest/GateLabR">GateLabR for R</a>
 </p>
 
-GateLab is a manual gating application for flow cytometry and mass cytometry (CyTOF) that runs in a web browser. It does four things.
+GateLab is a manual gating application for flow cytometry, mass cytometry (CyTOF) and the imaging flow cytometry of the BD FACSDiscover S8, and it runs in a web browser. It does five things.
 
 Files and gating strategies open from the formats they are already in. FCS files are read in the browser, with the compensation matrix they carry. A FlowJo workspace (`.wsp`), a Gating-ML 2.0 file or a BD FACSDiva or FACSChorus experiment imports with its gates and populations. After a FlowJo import, a report sets the event count FlowJo recorded for each population beside GateLab's own.
 
 Gates are drawn on one population tree that every file in the workspace follows. Rectangle, polygon, ellipse and quadrant gates go on any pair of channels, and populations are built from them. A file, or a named group of files, can keep its own coordinates for a gate while the structure of the tree stays the same for all. Compensation is applied in the app, by matrix inverse for fluorescence and by non-negative least squares for mass cytometry.
 
-Figures are drawn from the live gates. The Strategy tab traces the gating path to a population, Illustration arranges plots across files, populations and channels, Plotting charts population composition by file or by metadata, and Layout places any of these on a page. Figures export as SVG, PDF or PNG, and statistics as CSV.
+Figures are drawn from the live gates. The Strategy tab traces the gating path to a population, Illustration arranges plots across files, populations and channels, Plotting charts population composition by file or by metadata, and Layout places any of these, and walls of cell images, on a page. Figures export as SVG, PDF or PNG, and statistics as CSV.
+
+Cell images from the BD FACSDiscover S8 are read in the browser. GateLab decodes the waveform file (`.cvw`) that BD FACSChorus exports beside each FCS file, or reads the folder of TIFFs written by BD's CellView Image Extractor, and shows the cell under the cursor on any plot. The Images tab sets out the cells of any population on an image wall, sorted by any channel, and cells picked on the wall become a population. Each image is masked and its objects counted; the count, a single-cell class and the mask's area, shape and intensity become channels of the file that can be plotted, gated and exported. In October 2026 we found no other published reader of the `.cvw` file.
 
 The gating exports in the formats other programs read: a FlowJo workspace, which FlowJo and BD FACSChorus open, or Gating-ML 2.0, which Cytobank reads. Gated populations export as FCS files. A workspace saves as a `.gatelab` file, by reference to its FCS files or as a portable copy that carries them.
 
@@ -51,6 +54,7 @@ To try it, open the [hosted app](https://david-priest.github.io/GateLab/) and ch
 | Best starting point | FCS files | A `SingleCellExperiment` |
 | Workspace | Self-contained `.gatelab` bundle | Gating metadata stored inside the SCE |
 | Downstream hand-off | FCS, Gating-ML, FlowJo workspaces, statistics and figures | Populations in `colData`, plus FCS, Gating-ML, statistics and figures |
+| BD FACSDiscover S8 cell images | Read from the `.cvw` waveform file or from BD's extracted TIFFs | Not yet |
 | Install | Open the hosted app, or use Node.js + `npm` locally | R + Bioconductor dependencies |
 
 GateLab's engine is written in TypeScript: FCS parsing, logicle and arcsinh transforms, compensation, gate membership, population evaluation, statistics, Gating-ML 2.0 and FlowJo workspace import and export, and FCS export. These operations are covered by unit tests and by cross-language fixtures derived from GateLabR's earlier R implementation. The interactive plots use D3 modules shared with GateLabR.
@@ -121,21 +125,23 @@ agent itself reads: the data it sees, the commands it can send, and the rules it
   can be curly, as in FlowJo: beyond the crosshair its arms bend toward the upper right, and a
   handle at the end of each arm sets the bend. FlowJo's own curly quads import as curly
   quadrants with the bend fitted against FlowJo's counts (FlowJo writes the bend nowhere).
-- Tabs: Gating, Strategy (single + multi-population back-gating), Illustration, Layout, Plotting
-  (proportions and composition by file or metadata), Division profiler, Statistics, Metadata,
-  Panel, Compensation, Scales.
+- Tabs: Gating, Images (present when cell images are attached), Strategy (single + multi-population back-gating), Illustration, Layout, Plotting (proportions and composition by file or metadata), Division profiler, Statistics, Metadata, Panel, Compensation, Scales.
 - Illustration figures: a figure workspace with nested rows, columns and pages of files,
   populations and channels, grouping by sample metadata, overlays or pooling, biplots with
   gates and draggable labels, histograms, ridgelines and population-by-channel heatmaps, axes
   that follow the Gating tab, and PNG, PDF and SVG export.
-- Layout: a page editor for figures. Plots from the Gating tab (right-click the plot, or Add to
-  Layout), strategies, Illustration panels, Plotting charts and text are placed on a sheet of a
-  chosen paper size, drawn once per file, population or metadata value as pages or tiles, and
-  exported as PDF, SVG or PNG at the page's size or cropped to the content.
+- Layout: a page editor for figures. Plots from the Gating tab (right-click the plot, or Add to Layout), strategies, Illustration panels, Plotting charts, image walls from the Images tab and text are placed on a sheet of a chosen paper size, drawn once per file, population or metadata value as pages or tiles, and exported as PDF, SVG or PNG at the page's size or cropped to the content.
 - Compensation: an embedded or imported spillover matrix for conventional flow (matrix
   inverse), NNLS spillover correction for mass cytometry, or a matrix started empty and set
   by hand, with a per-coefficient preview and a Remove that returns to the original values.
 - Colour the gating plot by a third marker, by population, by sample or by a metadata column.
+- **Cell images from the BD FACSDiscover S8.** GateLab reconstructs each event's images (LightLoss, FSC, SSC and the fluorescence imaging channels) from the waveform file (`.cvw`) FACSChorus exports beside the FCS file, in a worker in the browser, or reads the folder of TIFFs BD's CellView Image Extractor writes. Either is found beside the FCS file when a folder is opened, or attached from the Import menu, and is linked from the workspace rather than copied into it. A file without images loads nothing extra.
+  - Cell inspector: the cell under the cursor on any plot, each channel on its own, the exposure, the mask outline and the event's image features from the FCS file; a click pins the cell.
+  - Images tab: an image wall of any population, or of the events its gate leaves out, sorted by any channel. A histogram of a chosen channel marks the cells in view, and a range dragged on it limits the wall. Cells are picked as in Apple Photos (click, Cmd-click, Shift-click, a dragged rectangle) and become a population with its complement; Find similar orders the wall by likeness to the picked cells. A wall goes to the Layout tab as a labelled block.
+  - Thumbnails of cells laid over the gating plot at their events' positions, chosen by a seed so the same seed shows the same cells.
+  - Image-derived channels: each SSC image is masked at the threshold FACSChorus recorded and its objects are counted. The count, a single-cell class (one object, near the typical single cell on FACSChorus's size, eccentricity, long-axis moment, diffusivity and Delta CoM features) and the mask's area, perimeter, circularity, axes, diameter and intensity become channels of the file, saved with the workspace. On 400 events the mask area followed FACSChorus's own Size feature with a rank correlation of 0.9.
+  - Colour the plot by image presence, object count or single-cell class, and size its points by any channel. Suggested biplots on FACSChorus's image features (BD's doublet plot, size against shape, co-localisation), and a ranking of channel pairs by how well their biplot separates two classes.
+  - Gates on FACSChorus's own image features export to FACSChorus like any other; gates on the channels GateLab computes do not, and the sorter cannot sort on them.
 - Import / export **Gating-ML 2.0** (GateLabR / Cytobank dialects); export populations as
   **FCS**; SVG / PDF figure export.
 - Import gates from a **BD FACSChorus experiment file** (`.cef`, the FACSDiscover S8's): the
@@ -268,8 +274,9 @@ requiring R or a commercial desktop/cloud platform.
 | Interface | Local browser app | Desktop GUI | Cloud GUI | R with interactive gating helpers |
 | Cost / license | Free, MIT, open source | Commercial | Commercial | Free, open source |
 | Workspace and data | Self-contained `.gatelab` bundle with FCS files and gates | `.wsp` workspace linked to local FCS; ACS can bundle both | Cloud experiment | `GatingSet` / R objects |
-| Gate exchange | Gating-ML 2.0 import and export; FlowJo `.wsp` import and export; FACSDiva and FACSChorus experiment import | `.wsp` / `.wspt` workspace formats | Gating-ML 2.0 import and export | `flowWorkspace` / `CytoML` ecosystem |
+| Gate exchange | Gating-ML 2.0 import and export; FlowJo `.wsp` import and export; FACSChorus experiment import and export; FACSDiva experiment import | `.wsp` / `.wspt` workspace formats | Gating-ML 2.0 import and export | `flowWorkspace` / `CytoML` ecosystem |
 | Access for AI agents | An MCP server: an agent reads the gating and proposes gates in the open tab ([Agents](#agents-letting-an-ai-assistant-draw-gates)) | No MCP server documented | No MCP server documented | Scripted in R |
+| Imaging flow cytometry | BD FACSDiscover S8 cell images from the `.cvw` file or extracted TIFFs: image wall, cell inspector, image-derived channels for gating | BD CellView images from extracted TIFFs (CellView Lens plugin for FlowJo 10.10; Image Wall in FlowJo 11) | None documented | None documented |
 | R required | No | No | No | Yes |
 | Processing location | Local browser | Local desktop | Cloud | Local R session |
 | Best suited to | Open-source FCS gating with portable local workspaces | Established desktop cytometry workflows | Shared cloud-based experiments | Scriptable R / `flowWorkspace` pipelines |
@@ -278,7 +285,7 @@ See the official documentation for [FlowJo workspace and export
 formats](https://docs.flowjo.com/flowjo/getting-acquainted/fj-export/),
 [Cytobank Gating-ML exchange](https://support.cytobank.org/hc/en-us/articles/204765618-Exporting-and-Importing-Gates-within-Cytobank-and-with-Gating-ML),
 and the Bioconductor [`flowGate` package](https://bioconductor.org/packages/flowGate/).
-In October 2026 we found no MCP server documented for FlowJo or Cytobank.
+In October 2026 we found no MCP server documented for FlowJo or Cytobank, and no support for cell images documented for Cytobank, CytoExploreR or flowGate. FlowJo's image support is described in its documentation for the [Image Wall](https://flowjo.com/docs/flowjo11/graphs-and-gating/image-wall) and [BD CellView Lens](https://flowjo.com/docs/flowjo10/advanced-features/cellview-lens).
 
 FlowJo is a trademark of Becton, Dickinson and Company. GateLab is an independent
 project and is not affiliated with or endorsed by BD or FlowJo.
