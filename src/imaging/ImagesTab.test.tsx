@@ -272,43 +272,6 @@ describe("ImagesTab", () => {
     expect(host.querySelector(".gl-images-range")).toBeNull();
   });
 
-  it("picks cells with Cmd-click, Shift-click runs and Space, and makes a population of them by name", async () => {
-    const onMakePopulation = vi.fn();
-    const onPin = vi.fn();
-    render({ mask: null, onMakePopulation, onPin });
-    await settle();
-    // Wall order is event order: 0, 2, 3, 4, 5.
-    const tiles = () => [...host.querySelectorAll<HTMLButtonElement>(".gl-wall-tile")];
-    const pickedIndices = () => tiles().filter((t) => t.classList.contains("gl-wall-tile-picked")).map((t) => t.getAttribute("data-event"));
-    expect(host.querySelector(".gl-images-picked")?.textContent).toContain("0 picked");
-    act(() => { tiles()[1].dispatchEvent(new MouseEvent("click", { bubbles: true, metaKey: true })); });
-    expect(pickedIndices()).toEqual(["2"]);
-    expect(onPin).not.toHaveBeenCalled();
-    act(() => { tiles()[3].dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })); });
-    expect(pickedIndices()).toEqual(["2", "3", "4"]);
-    // Space on the focused tile toggles it; a plain click still pins.
-    act(() => { tiles()[0].focus(); tiles()[0].dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true })); });
-    expect(pickedIndices()).toEqual(["0", "2", "3", "4"]);
-    act(() => { tiles()[4].click(); });
-    expect(onPin).toHaveBeenCalledWith({ sampleId: "D1", eventIndex: 5 });
-    expect(host.querySelector(".gl-images-picked")?.textContent).toContain("4 picked");
-    act(() => { tiles()[0].dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true })); });
-    expect(pickedIndices()).toEqual(["2", "3", "4"]);
-    const make = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Make population")!;
-    expect(make.disabled).toBe(true);
-    const name = host.querySelector<HTMLInputElement>('input[aria-label="Population name"]')!;
-    act(() => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name, "Bright");
-      name.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await settle();
-    const makeNow = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Make population")!;
-    expect(makeNow.disabled).toBe(false);
-    act(() => { makeNow.click(); });
-    expect(onMakePopulation).toHaveBeenCalledWith([2, 3, 4], "Bright");
-    expect(pickedIndices()).toEqual([]);
-    expect(host.querySelector(".gl-images-picked")?.textContent).toContain("0 picked");
-  });
 
   it("finds similar cells by sorting the wall on the channel the app returns, and picks all shown", async () => {
     const onFindSimilar = vi.fn(() => "FSC-A");
@@ -328,5 +291,146 @@ describe("ImagesTab", () => {
     act(() => { all.click(); });
     await settle();
     expect(host.querySelector(".gl-images-picked")?.textContent).toContain("5 picked");
+  });
+
+  it("shows the histogram in event order too, of a chosen channel, and a drag on it limits the wall by that channel", async () => {
+    const onSendToLayout = vi.fn();
+    render({ mask: null, onSendToLayout });
+    await settle();
+    const canvas = host.querySelector<HTMLCanvasElement>(".gl-wall-histogram")!;
+    expect(canvas).toBeTruthy();
+    const choose = host.querySelector<HTMLSelectElement>('select[aria-label="Histogram of"]')!;
+    expect(choose.value).toBe("FSC-A");
+    expect(tileIndices()).toEqual(["0", "2", "3", "4", "5"]);
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 220, height: 40, right: 220, bottom: 40, x: 0, y: 0, toJSON: () => ({}) });
+    const pointer = (type: string, clientX: number) => act(() => { canvas.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX, clientY: 10, button: 0 })); });
+    // FSC-A runs 10..60 over the imaged events; the left half keeps 10..35: events 3, 4, 5, still in event order.
+    pointer("pointerdown", 0); pointer("pointermove", 110); pointer("pointerup", 110);
+    await settle();
+    expect(tileIndices()).toEqual(["3", "4", "5"]);
+    const send = [...host.querySelectorAll("button")].find((b) => /Send to Layout/.test(b.textContent ?? ""))!;
+    act(() => { send.click(); });
+    expect(onSendToLayout.mock.calls[0][0]).toMatchObject({ events: [3, 4, 5], sortKey: "", rangeLabel: "FSC-A 10–35" });
+    act(() => { choose.value = "SSC-A"; choose.dispatchEvent(new Event("change", { bubbles: true })); });
+    await settle();
+    expect(tileIndices()).toEqual(["0", "2", "3", "4", "5"]);
+    const sort = [...host.querySelectorAll<HTMLSelectElement>(".gl-images-toolbar select")].find((s) => s !== choose && [...s.options].some((o) => o.value === "FSC-A"))!;
+    act(() => { sort.value = "FSC-A"; sort.dispatchEvent(new Event("change", { bubbles: true })); });
+    await settle();
+    expect(host.querySelector('select[aria-label="Histogram of"]')).toBeNull();
+    expect(host.querySelector(".gl-wall-histogram")).toBeTruthy();
+  });
+
+
+  it("picks as Photos does: click one, Cmd-click toggles, Shift-click extends, Escape clears, Cmd-A takes all shown", async () => {
+    const onMakePopulation = vi.fn();
+    const onPin = vi.fn();
+    render({ mask: null, onMakePopulation, onPin });
+    await settle();
+    // Wall order is event order: 0, 2, 3, 4, 5.
+    const tiles = () => [...host.querySelectorAll<HTMLButtonElement>(".gl-wall-tile")];
+    const pickedIndices = () => tiles().filter((t) => t.classList.contains("gl-wall-tile-picked")).map((t) => t.getAttribute("data-event"));
+    expect(host.querySelector(".gl-images-picked")?.textContent).toContain("0 picked");
+    // A click picks that cell alone and shows it in the inspector.
+    act(() => { tiles()[1].click(); });
+    expect(pickedIndices()).toEqual(["2"]);
+    expect(onPin).toHaveBeenCalledWith({ sampleId: "D1", eventIndex: 2 });
+    act(() => { tiles()[3].click(); });
+    expect(pickedIndices()).toEqual(["4"]);
+    // Cmd-click adds one, and removes it again; Shift-click extends from the last click.
+    act(() => { tiles()[0].dispatchEvent(new MouseEvent("click", { bubbles: true, metaKey: true })); });
+    expect(pickedIndices()).toEqual(["0", "4"]);
+    act(() => { tiles()[0].dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true })); });
+    expect(pickedIndices()).toEqual(["4"]);
+    act(() => { tiles()[1].click(); });
+    act(() => { tiles()[3].dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })); });
+    expect(pickedIndices()).toEqual(["2", "3", "4"]);
+    // The corner box toggles one without changing the inspector; with Shift it extends.
+    onPin.mockClear();
+    const box = (k: number) => tiles()[k].querySelector<HTMLElement>(".gl-wall-tile-pick")!;
+    act(() => { box(1).click(); });
+    expect(pickedIndices()).toEqual(["3", "4"]);
+    expect(onPin).not.toHaveBeenCalled();
+    act(() => { box(1).click(); });
+    expect(pickedIndices()).toEqual(["2", "3", "4"]);
+    act(() => { box(4).dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })); });
+    expect(pickedIndices()).toEqual(["2", "3", "4", "5"]);
+    // Space toggles the focused tile; Escape clears; Cmd-A picks every cell on the wall.
+    act(() => { tiles()[0].focus(); tiles()[0].dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true })); });
+    expect(pickedIndices()).toEqual(["0", "2", "3", "4", "5"]);
+    act(() => { tiles()[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
+    expect(pickedIndices()).toEqual([]);
+    act(() => { tiles()[0].dispatchEvent(new KeyboardEvent("keydown", { key: "a", metaKey: true, bubbles: true })); });
+    expect(pickedIndices()).toEqual(["0", "2", "3", "4", "5"]);
+    expect(host.querySelector(".gl-images-picked")?.textContent).toContain("5 picked");
+    // Make population takes the picks, sorted, and clears them.
+    const name = host.querySelector<HTMLInputElement>('input[aria-label="Population name"]')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name, "Bright");
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await settle();
+    const make = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Make population")!;
+    act(() => { make.click(); });
+    expect(onMakePopulation).toHaveBeenCalledWith([0, 2, 3, 4, 5], "Bright");
+    expect(pickedIndices()).toEqual([]);
+  });
+
+  it("picks with a dragged rectangle: a drag replaces, Cmd-drag adds, Option-drag removes, and a press that does not move is a click", async () => {
+    const onPin = vi.fn();
+    render({ mask: null, onMakePopulation: vi.fn(), onPin });
+    await settle();
+    const tiles = () => [...host.querySelectorAll<HTMLButtonElement>(".gl-wall-tile")];
+    const pickedIndices = () => tiles().filter((t) => t.classList.contains("gl-wall-tile-picked")).map((t) => t.getAttribute("data-event"));
+    const grid = host.querySelector<HTMLDivElement>(".gl-images-scroll")!;
+    grid.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400, right: 400, bottom: 400, x: 0, y: 0, toJSON: () => ({}) });
+    const drag = (from: [number, number], to: [number, number], init: MouseEventInit = {}) => {
+      act(() => { grid.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: from[0], clientY: from[1], button: 0, ...init })); });
+      act(() => { grid.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: to[0], clientY: to[1], ...init })); });
+      expect(host.querySelector(".gl-images-marquee")).toBeTruthy();
+      act(() => { grid.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, clientX: to[0], clientY: to[1], button: 0, ...init })); });
+      act(() => { grid.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: to[0], clientY: to[1] })); });
+    };
+    // Tiles are 72 px on a 76 px step from a 6 px padding: the first three of row 0 lie under x 6..222.
+    act(() => { tiles()[4].click(); });
+    expect(pickedIndices()).toEqual(["5"]);
+    drag([10, 10], [170, 40]);
+    expect(pickedIndices()).toEqual(["0", "2", "3"]);
+    expect(host.querySelector(".gl-images-marquee")).toBeNull();
+    drag([250, 10], [300, 40], { metaKey: true });
+    expect(pickedIndices()).toEqual(["0", "2", "3", "4"]);
+    drag([10, 10], [100, 40], { altKey: true });
+    expect(pickedIndices()).toEqual(["3", "4"]);
+    // The press that ends a drag is not a click; a press that does not move is.
+    expect(onPin).toHaveBeenCalledTimes(1);
+    act(() => { tiles()[1].dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 90, clientY: 30, button: 0 })); });
+    act(() => { tiles()[1].dispatchEvent(new MouseEvent("pointerup", { bubbles: true, clientX: 90, clientY: 30, button: 0 })); });
+    act(() => { tiles()[1].click(); });
+    expect(onPin).toHaveBeenLastCalledWith({ sampleId: "D1", eventIndex: 2 });
+    expect(pickedIndices()).toEqual(["2"]);
+  });
+
+  it("unpicks the shown cells or all of them, and re-renders only the tiles a pick touches", async () => {
+    render({ mask: null, onMakePopulation: vi.fn() });
+    await settle();
+    const button = (text: string) => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === text)!;
+    const tiles = () => [...host.querySelectorAll<HTMLButtonElement>(".gl-wall-tile")];
+    act(() => { button("Pick all shown").click(); });
+    await settle();
+    expect(host.querySelector(".gl-images-picked")?.textContent).toContain("5 picked");
+    act(() => { button("Unpick shown").click(); });
+    await settle();
+    expect(host.querySelector(".gl-images-picked")?.textContent).toContain("0 picked");
+    act(() => { button("Pick all shown").click(); });
+    await settle();
+    act(() => { button("Unpick all").click(); });
+    await settle();
+    expect(host.querySelector(".gl-images-picked")?.textContent).toContain("0 picked");
+    const nodesBefore = tiles();
+    act(() => { nodesBefore[0].dispatchEvent(new MouseEvent("click", { bubbles: true, metaKey: true })); });
+    await settle();
+    const nodesAfter = tiles();
+    expect(nodesAfter[2]).toBe(nodesBefore[2]);
+    expect(nodesAfter[0].classList.contains("gl-wall-tile-picked")).toBe(true);
   });
 });
