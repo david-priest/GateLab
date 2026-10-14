@@ -18,10 +18,12 @@ identifiers:
     description: "GateLab 0.9.1."
 repository-code: "https://github.com/david-priest/GateLab"
 url: "https://david-priest.github.io/GateLab/"
-abstract: "Browser-based manual gating of flow and mass cytometry data. FCS files are parsed, transformed and gated locally; one population tree per workspace, tailored per file or per group; FlowJo workspace and FACSChorus import and export; Gating-ML 2.0; compensation; statistics and publication figures."
+abstract: "Browser-based manual gating of flow and mass cytometry data, with the cell images of the BD FACSDiscover S8 imaging sorter. FCS files are parsed, transformed and gated locally; one population tree per workspace, tailored per file or per group; FlowJo workspace and FACSChorus import and export; Gating-ML 2.0; compensation; statistics and publication figures. The S8's cell images are decoded from its waveform files in the browser, shown on the plot and on an image wall, and counted and measured into channels that can be gated."
 keywords:
   - flow cytometry
   - mass cytometry
+  - imaging flow cytometry
+  - BD FACSDiscover S8
   - CyTOF
   - manual gating
   - Gating-ML
