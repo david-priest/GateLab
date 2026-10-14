@@ -4,7 +4,7 @@
 
 <p align="center"><b>Gate flow and mass cytometry data in your browser.</b></p>
 
-<p align="center">Open FCS files or a FlowJo workspace, draw gates on one population tree, and export counts, figures and gated events. The files stay on your computer.</p>
+<p align="center">Open FCS files or a FlowJo workspace, draw gates on one population tree, and export counts, figures and gated events. Cell images from the BD FACSDiscover S8 are decoded in the browser too: hover a dot to see its cell, build an image wall, and gate on what the images measure. The files stay on your computer.</p>
 
 <p align="center">
   <a href="https://doi.org/10.5281/zenodo.22787965"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.22787965.svg" alt="DOI"></a>
