@@ -31,7 +31,12 @@ export interface AgentLinkOptions {
   openSocket?: (url: string) => LinkSocket;
 }
 
-/** The URL a relay prints: ws:// or wss://, on this computer. */
+/** Hosts that are this computer. The relay binds 127.0.0.1 (tools/agent-mcp/relay.mjs). */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/** The URL a relay prints: ws:// or wss://, on this computer. Any other host is refused, because
+ *  the page connects to an `?agent=` address on load, and a relay elsewhere could read the loaded
+ *  data and edit its gates through a link someone was sent. */
 export function parseAgentUrl(text: string): URL | null {
   let url: URL;
   try {
@@ -40,6 +45,7 @@ export function parseAgentUrl(text: string): URL | null {
     return null;
   }
   if (url.protocol !== "ws:" && url.protocol !== "wss:") return null;
+  if (!LOOPBACK_HOSTS.has(url.hostname)) return null;
   return url;
 }
 

@@ -41,6 +41,10 @@ describe("AgentMenu", () => {
     act(() => button("Connect")!.click());
     expect(host.querySelector("[role=alert]")!.textContent).toContain("not a ws:// address");
     expect(onConnect).not.toHaveBeenCalled();
+    act(() => input("wss://example.org/x"));
+    act(() => button("Connect")!.click());
+    expect(host.querySelector("[role=alert]")!.textContent).toContain("on this computer");
+    expect(onConnect).not.toHaveBeenCalled();
     act(() => input("ws://127.0.0.1:48123/?token=abc"));
     act(() => button("Connect")!.click());
     expect(onConnect).toHaveBeenCalledWith("ws://127.0.0.1:48123/?token=abc");

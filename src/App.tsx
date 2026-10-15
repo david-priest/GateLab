@@ -356,6 +356,11 @@ import {
   type HostedMembershipSample,
 } from "./host/hostedMemberships";
 import { AgentLink, parseAgentUrl, type AgentLinkStatus } from "./agent/agentLink";
+// The lab Drive workspace is loaded by dynamic import behind __GATELAB_DRIVE__; only its types here.
+import type * as DriveModule from "./drive";
+import type { DriveOpened, DriveOpenedFcs, DriveTarget, DriveWriter } from "./drive/types";
+import type { DriveSaveAsRequest } from "./drive/DriveSaveDialogs";
+import type { NewExperimentProgress } from "./drive/newExperiment";
 import { createAgentHandler, type AgentAdapter, type AgentSampleView } from "./agent/handler";
 import { AgentMenu } from "./agent/AgentMenu";
 import { renderPlotPng } from "./agent/renderPlot";
@@ -911,6 +916,11 @@ interface SampleEntry {
   sample: Sample;
   /** Original FCS bytes; null for an SCE sample owned by the R host. */
   bytes: Uint8Array | null;
+  /**
+   * For one data set of a multi-data-set file, in the lab build only: the whole file it was taken
+   * from, shared by its data sets, so Save as new experiment uploads the file as it was (src/drive).
+   */
+  dataSetFile?: Uint8Array;
   handle: FileSystemFileHandle | null; // File System Access handle (reference workspaces)
   sourcePath?: string; // display-only path below a folder selected during this session
   hostSource?: Readonly<{
@@ -1052,6 +1062,8 @@ interface ResolvedReferenceFcs {
   bytes: Uint8Array;
   handle: FileSystemFileHandle | null;
   sourcePath?: string;
+  /** For a data set of a multi-data-set file, in the lab build: the whole file it was taken from. */
+  dataSetFile?: Uint8Array;
   /** The open sample it was taken from, when it was. */
   openId?: string;
   /** The waveform file found beside it, when the folder or files chosen held one. */
@@ -1145,6 +1157,15 @@ interface HostCategoricalValues {
   bySample: Record<string, Uint8Array | number>;
 }
 
+/** A save to the lab Drive: in place, a copy beside the workspace, or a new experiment. */
+type DriveSaveRequest = { readonly kind: "save" } | DriveSaveAsRequest;
+
+/** Who saved a lab Drive workspace, and when, as a sentence names them. */
+function describeDriveWriter(writer: DriveWriter): string {
+  const who = writer.name ?? writer.email ?? "someone";
+  return writer.at ? `${who} (${new Date(writer.at).toLocaleString()})` : who;
+}
+
 function categoricalPalette(column: HostCategoricalValues, palette: PaletteName): string[] {
   return column.colors ?? paletteColors(palette, column.levels.length);
 }
@@ -1226,6 +1247,50 @@ export default function App() {
   const compensationOn = sample?.compensationEnabled ?? false;
   const fileName = activeEntry?.name ?? "";
   const [wsHandle, setWsHandle] = useState<FileSystemFileHandle | null>(null);
+  // The lab build's Drive workspace (src/drive): the workspace file in the lab Drive this workspace
+  // opened from or was saved to. While it is set the app is in Drive mode and keeps nothing of the
+  // workspace in this browser: no checkpoints, no compensated-assay cache, no agent link. The ref
+  // moves with the state, for the checks made from effects and timers.
+  const [driveTarget, setDriveTargetState] = useState<DriveTarget | null>(null);
+  const driveTargetRef = useRef<DriveTarget | null>(null);
+  const setDriveTarget = useCallback((next: DriveTarget | null) => {
+    driveTargetRef.current = next;
+    setDriveTargetState(next);
+  }, []);
+  /** Set while a Drive workspace is being opened, before it is the current workspace. */
+  const driveOpeningRef = useRef(false);
+  /** Nothing derived from the data goes into this browser's storage: a Drive workspace is open or opening. */
+  const keepsNothingLocal = () => driveTargetRef.current !== null || driveOpeningRef.current;
+  /** The workspace a Drive open of FCS alone becomes, taken by the first files added to the emptied workspace. */
+  const driveFcsTargetRef = useRef<DriveTarget | null>(null);
+  /** FCS opened from the lab Drive without a workspace, loaded once the workspace before them is closed. */
+  const [pendingDriveFcs, setPendingDriveFcs] = useState<DriveOpenedFcs | null>(null);
+  const driveSaveChainRef = useRef<Promise<unknown>>(Promise.resolve());
+  /** Who saved the Drive workspace since it was opened here, when a save was refused for it. */
+  const [driveConflict, setDriveConflict] = useState<DriveWriter | null>(null);
+  /** A save waiting for a folder to be picked (the experiment's, or the lab folder), so GateLab may create a file in it. */
+  const [driveFolderGrant, setDriveFolderGrant] = useState<{ request: DriveSaveRequest; folderId: string } | null>(null);
+  /** Save As to the lab Drive: the dialog asking for a copy beside the workspace or a new experiment, and its name. */
+  const [driveSaveAs, setDriveSaveAs] = useState<"copy" | "experiment" | null>(null);
+  /** A new experiment being uploaded to the lab Drive, with its progress and its Cancel. */
+  const [driveUpload, setDriveUpload] = useState<{
+    experiment: string;
+    progress: NewExperimentProgress | null;
+    controller: AbortController;
+    cancelling: boolean;
+  } | null>(null);
+  // The Drive module and this tab's session, in the lab build only: the public build compiles
+  // none of src/drive, and this import with it.
+  const [drive, setDrive] = useState<{ module: typeof DriveModule; session: DriveModule.DriveSession } | null>(null);
+  useEffect(() => {
+    if (!__GATELAB_DRIVE__ || isSceHost) return;
+    let live = true;
+    void import("./drive").then((module) => {
+      const config = module.readDriveConfig();
+      if (live && config) setDrive({ module, session: module.createDriveSession(config) });
+    }).catch(() => undefined);
+    return () => { live = false; };
+  }, [isSceHost]);
   /** The workspaces opened or saved lately, for the Workspace menu; read from the browser's store on load and after each open or save. */
   const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspace[]>([]);
   const refreshRecentWorkspaces = useCallback(() => {
@@ -2996,6 +3061,7 @@ export default function App() {
   const checkpointTokenRef = useRef(0);
   const queueCheckpoint = (reason: WorkspaceCheckpointReason) => setCheckpointRequest({ reason, token: ++checkpointTokenRef.current });
 
+  const persistentHistoryRequestedRef = useRef(false);
   const checkpointCurrentWorkspace = (reason: WorkspaceCheckpointReason): Promise<void> => {
     // A workspace that cannot be written as it stands (buildWorkspaceFile says why) has no
     // checkpoint to take. That is a rejection, never a throw: this is called from effects and a
@@ -3009,6 +3075,13 @@ export default function App() {
     }
     const id = workspaceIdRef.current;
     if (!ws || !id) return Promise.resolve();
+    // A Drive workspace keeps nothing in this browser: its history is Drive's revisions.
+    if (driveTargetRef.current) return Promise.resolve();
+    // The lab build asks to keep checkpoints only once it keeps one (the public build asks on load).
+    if (__GATELAB_DRIVE__ && !persistentHistoryRequestedRef.current) {
+      persistentHistoryRequestedRef.current = true;
+      void requestPersistentWorkspaceHistory();
+    }
     return saveWorkspaceCheckpoint(id, ws, reason).then(() => undefined);
   };
   /**
@@ -3061,6 +3134,7 @@ export default function App() {
     compensationApplyGuardRef.current = false;
     setCompensationApplyStatus(null);
     setWsHandle(null);
+    setDriveTarget(null);
     setWsName("");
     setWsStorage("reference");
 
@@ -3118,7 +3192,7 @@ export default function App() {
   // Check every two minutes. Automatic checkpoints de-duplicate unchanged workspace JSON, so
   // an idle app performs a small IndexedDB read but does not accumulate redundant snapshots.
   useEffect(() => {
-    void requestPersistentWorkspaceHistory();
+    if (!__GATELAB_DRIVE__) void requestPersistentWorkspaceHistory();
     const timer = window.setInterval(() => {
       void checkpointCurrentWorkspace("automatic").catch(reportCheckpointRefusal);
     }, AUTO_CHECKPOINT_INTERVAL_MS);
@@ -6877,7 +6951,8 @@ export default function App() {
       }
       // Best-effort local acceleration for every committed target. Cache sequentially so a
       // many-file Apply cannot create a burst of large digest/IndexedDB jobs after completion.
-      void (async () => {
+      // A Drive workspace's derived event data are not kept in this browser.
+      if (!keepsNothingLocal()) void (async () => {
         for (const applied of result.targets) {
           const targetEntry = targetEntries.find(({ sample: candidate }) => candidate === applied.sample);
           if (!targetEntry) continue;
@@ -7763,7 +7838,10 @@ export default function App() {
       autoFittedScales.current.clear();
       fittedAxisPairs.current.clear();
       setWsHandle(null);
-      setWsName("");
+      // FCS opened from the lab Drive without a workspace begin one saved into their folder.
+      setDriveTarget(driveFcsTargetRef.current);
+      setWsName(driveFcsTargetRef.current?.name ?? "");
+      driveFcsTargetRef.current = null;
       setWsStorage("reference");
     }
     queueCheckpoint("after-fcs-import");
@@ -8008,6 +8086,7 @@ export default function App() {
             setXRange(null);
             setYRange(null);
             setWsHandle(null);
+            setDriveTarget(null);
             setWsName(dataset.label);
             setWsStorage("reference");
             setWorkspaceId(nextWorkspaceId);
@@ -8543,12 +8622,17 @@ export default function App() {
             // No one entry is the candidate, so `byCandidate` has none for it: a caller that
             // pairs such a file resolves it again against the data sets it opened as.
             const sets = cause.dataSets;
-            entries.push(...sets.map((set) => createEntry(
-              extractFcsDataSet(bytes.buffer, set.index),
-              fcsDataSetFileName(candidate.name, set.index, sets.length, set.label),
-              null,
-              candidate.sourcePath,
-            )));
+            entries.push(...sets.map((set) => {
+              const entry = createEntry(
+                extractFcsDataSet(bytes.buffer, set.index),
+                fcsDataSetFileName(candidate.name, set.index, sets.length, set.label),
+                null,
+                candidate.sourcePath,
+              );
+              // The lab build keeps the whole file beside its data sets, to upload it as it was.
+              if (__GATELAB_DRIVE__) entry.dataSetFile = bytes;
+              return entry;
+            }));
             if (candidate.handle) void rememberHandle("fcs:" + candidate.name, candidate.handle);
             dataSetNotes.push(`${candidate.name} holds ${sets.length} data sets and opened as ${sets.length} samples`);
           }
@@ -9139,9 +9223,148 @@ export default function App() {
     );
   }
 
+  /**
+   * Save the Drive workspace back to the lab Drive as reference JSON, or as a copy beside it, or
+   * the workspace open (from the Drive or not) as a new experiment. Saves are queued one behind
+   * another, as the SCE host's are, so a second Save never checks Drive's revision against the
+   * one the first is still writing.
+   */
+  function saveToDrive(request: DriveSaveRequest = { kind: "save" }): Promise<void> {
+    if (request.kind === "experiment") return saveAsNewExperimentToDrive(request.name);
+    const mode = request.kind;
+    const run = driveSaveChainRef.current.then(async () => {
+      const target = driveTargetRef.current;
+      if (!drive || !target) return;
+      const ws = buildWorkspaceFile();
+      if (!ws) return;
+      const editRevision = workspaceEditRevisionRef.current;
+      setBusy(true);
+      setError(null);
+      setImportMsg(`Saving to the lab Drive · ${target.name}`);
+      try {
+        const bytes = packReferenceWorkspace(ws);
+        const sources = samples.map((entry) => ({ name: entry.name, sourcePath: entry.sourcePath ?? null }));
+        const result = request.kind === "copy"
+          ? await drive.session.saveCopy(target, bytes, sources, request.name)
+          : await drive.session.save(target, bytes, sources);
+        if (result.kind === "conflict") {
+          setDriveConflict(result.by);
+          setImportMsg(`Not saved · ${target.name} changed in the lab Drive since it was opened here`);
+          return;
+        }
+        // Closed, or replaced by another workspace, while saving: what was saved is not reinstated.
+        if (driveTargetRef.current?.folderId !== target.folderId || driveTargetRef.current.fileId !== target.fileId) return;
+        setDriveTarget(result.target);
+        setWsName(result.target.name);
+        if (workspaceEditRevisionRef.current === editRevision) setDirty(false);
+        setImportMsg(
+          `${mode === "copy" ? "Saved a copy to the lab Drive" : "Saved to the lab Drive"} · ${result.target.experiment}/${result.target.name}` +
+            (result.keepNote ? ` · ${result.keepNote}` : ""),
+        );
+        if (result.overtakenBy) {
+          setError(
+            `Saved, but ${describeDriveWriter(result.overtakenBy)} saved ${result.target.name} in the lab Drive right after, and theirs is ` +
+              "the version Drive now holds. Open the experiment again to see it; a Save here is refused until then, and Save offers a copy instead.",
+          );
+        }
+        tourSignals.current.workspaceSaves++;
+      } catch (cause) {
+        if (cause instanceof drive.module.DriveFolderAccessError) {
+          setDriveFolderGrant({ request, folderId: cause.folderId });
+          setImportMsg(null);
+          return;
+        }
+        setError(cause instanceof Error ? cause.message : String(cause));
+        setImportMsg(null);
+      } finally {
+        setBusy(false);
+      }
+    });
+    driveSaveChainRef.current = run.catch(() => undefined);
+    return run;
+  }
+
+  /** The samples as a new experiment uploads them: each FCS, and the whole file of a data set where it is held. */
+  const driveExperimentSamples = () => samples.map((entry) => ({
+    id: entry.id,
+    name: entry.name,
+    bytes: entry.bytes,
+    dataSetFile: entry.dataSetFile ?? null,
+  }));
+
+  /**
+   * Save the workspace open as a new experiment in the lab Drive: its folder, its FCS uploaded,
+   * then the workspace file. From then on it is that experiment's workspace, in Drive mode.
+   */
+  function saveAsNewExperimentToDrive(name: string): Promise<void> {
+    const run = driveSaveChainRef.current.then(async () => {
+      if (!drive) return;
+      const ws = buildWorkspaceFile();
+      if (!ws) return;
+      const editRevision = workspaceEditRevisionRef.current;
+      const workspaceId = workspaceIdRef.current;
+      const controller = new AbortController();
+      const experiment = drive.module.experimentName(name);
+      setDriveUpload({ experiment, progress: null, controller, cancelling: false });
+      setBusy(true);
+      setError(null);
+      setImportMsg(`Saving to the lab Drive as new experiment · ${experiment}`);
+      try {
+        const result = await drive.session.saveAsNewExperiment(
+          { name, samples: driveExperimentSamples(), workspace: packReferenceWorkspace(ws) },
+          {
+            signal: controller.signal,
+            onProgress: (progress) => setDriveUpload((current) => (current?.controller === controller ? { ...current, progress } : current)),
+          },
+        );
+        // Closed, or replaced by another workspace, while saving: what was saved is not reinstated.
+        if (workspaceIdRef.current !== workspaceId) return;
+        agentLinkRef.current?.disconnect("The workspace was saved to the lab Drive");
+        setWsHandle(null);
+        setWsStorage("reference");
+        setDriveTarget(result.target);
+        setWsName(result.target.name);
+        setSamples((previous) => previous.map((entry) => {
+          const sourcePath = result.sourcePaths.get(entry.id);
+          return sourcePath && sourcePath !== entry.sourcePath ? { ...entry, sourcePath } : entry;
+        }));
+        if (workspaceEditRevisionRef.current === editRevision) setDirty(false);
+        setImportMsg(
+          `Saved as new experiment · ${result.target.experiment}/${result.target.name} · ` +
+            `${result.uploaded} FCS file${result.uploaded === 1 ? "" : "s"} uploaded` +
+            (result.already ? `, ${result.already} already in the folder` : "") +
+            (result.keepNote ? ` · ${result.keepNote}` : "") +
+            (samples.some((entry) => entry.images) ? " · cell images are not uploaded to the lab Drive yet" : ""),
+        );
+        tourSignals.current.workspaceSaves++;
+      } catch (cause) {
+        if (cause instanceof drive.module.DriveFolderAccessError) {
+          setDriveFolderGrant({ request: { kind: "experiment", name }, folderId: cause.folderId });
+          setImportMsg(null);
+          return;
+        }
+        if (cause instanceof drive.module.DriveExperimentStoppedError && cause.cancelled) {
+          setImportMsg(cause.message);
+          return;
+        }
+        setError(cause instanceof Error ? cause.message : String(cause));
+        setImportMsg(null);
+      } finally {
+        setDriveUpload(null);
+        setBusy(false);
+      }
+    });
+    driveSaveChainRef.current = run.catch(() => undefined);
+    return run;
+  }
+
   // Save in place without changing the current workspace's bundle/reference storage mode.
   // If no writable workspace handle exists, fall back to Save As.
   async function saveWorkspace() {
+    if (driveTargetRef.current) {
+      await saveToDrive();
+      return;
+    }
     const ws = buildWorkspaceFile();
     if (!ws) return;
     setBusy(true);
@@ -9194,6 +9417,14 @@ export default function App() {
         );
         if (h) {
           const f = await h.getFile();
+          // A copy on this computer of a lab Drive workspace: the workspace open stays the Drive's,
+          // and nothing of it is remembered in this browser.
+          const open = driveTargetRef.current;
+          if (open) {
+            setImportMsg(`Saved a copy on this computer · ${f.name} · Save still writes to ${open.experiment}/${open.name} in the lab Drive`);
+            tourSignals.current.workspaceSaves++;
+            return;
+          }
           setWsHandle(h);
           setWsName(f.name);
           setWsStorage("reference");
@@ -9384,6 +9615,7 @@ export default function App() {
         bytes: existing.bytes,
         handle: existing.handle,
         ...(existing.sourcePath ? { sourcePath: existing.sourcePath } : {}),
+        ...(existing.dataSetFile ? { dataSetFile: existing.dataSetFile } : {}),
         openId: existing.id,
       };
     }
@@ -9403,7 +9635,9 @@ export default function App() {
         ? extractNamedFcsDataSet(read.bytes.slice().buffer, dataSet.index, dataSet.count)
         : read.bytes;
       if (!isIt(readFcsKeywords(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer))) return null;
-      return dataSet ? { bytes, handle: null } : { bytes, handle: h };
+      return dataSet
+        ? { bytes, handle: null, ...(__GATELAB_DRIVE__ ? { dataSetFile: read.bytes } : {}) }
+        : { bytes, handle: h };
     }
     return null;
   }
@@ -9571,6 +9805,7 @@ export default function App() {
           ? source.relativePath
           : `${sourceName}/${source.relativePath}`,
         ...(images ? { images } : {}),
+        ...(dataSet && __GATELAB_DRIVE__ ? { dataSetFile: whole } : {}),
       });
     }
     return resolved;
@@ -9895,7 +10130,7 @@ export default function App() {
 
         for (const restored of result.targets) {
           const miss = misses.find(({ task }) => task.entry.sample === restored.sample);
-          if (!miss?.fcsDigest) continue;
+          if (!miss?.fcsDigest || keepsNothingLocal()) continue;
           void writeCachedCompensatedAssay(
             miss.fcsDigest,
             restored.sample,
@@ -9999,10 +10234,19 @@ export default function App() {
     envelope: WorkspaceEnvelope,
     wsH: FileSystemFileHandle | null,
     wsFileName: string,
+    /**
+     * Every declared FCS, already read (a workspace opened from the lab Drive): taken in place of
+     * any open sample, remembered handle or folder relink, and a declaration not in it is refused.
+     */
+    preResolved?: ReadonlyMap<string, ResolvedReferenceFcs>,
+    /** The lab Drive file the workspace was opened from: it opens in Drive mode, saved back there. */
+    driveTarget?: DriveTarget,
   ) {
     setBusy(true);
     setError(null);
     let compensationWorkspaceReset = false;
+    // Nothing derived from a Drive workspace's data is cached in this browser, from the open on.
+    driveOpeningRef.current = driveTarget !== undefined;
     try {
       const raw = envelope.raw;
       const rawVersion = raw != null && typeof raw === "object"
@@ -10056,6 +10300,14 @@ export default function App() {
       const unresolvedRequirements: WorkspaceFcsRequirement[] = [];
       const takenOpen = new Set<string>();
       for (const requirement of referenceRequirements) {
+        if (preResolved) {
+          const given = preResolved.get(requirement.dataPath);
+          if (!given) {
+            throw new Error(`GateLab could not resolve ${requirement.fileName}. The current workspace was not changed.`);
+          }
+          resolvedReferenceFcs.set(requirement.dataPath, given);
+          continue;
+        }
         const known = await resolveKnownReferenceFcs(
           requirement, declaredTwice.has(requirement.fileName.normalize("NFC").toLocaleLowerCase()), takenOpen);
         if (known) {
@@ -10089,6 +10341,8 @@ export default function App() {
         let fcsB = fcsByPath?.[wss.dataPath] ?? null;
         let fcsH: FileSystemFileHandle | null = null;
         let sourcePath: string | undefined;
+        // A sample reopened from the bytes it already had here (Revert) keeps the whole file of its data set.
+        let dataSetFile = fcsB ? samples.find((open) => open.bytes === fcsB)?.dataSetFile : undefined;
         if (!fcsB) {
           const resolved = resolvedReferenceFcs.get(wss.dataPath);
           if (!resolved) {
@@ -10099,6 +10353,7 @@ export default function App() {
           fcsB = resolved.bytes;
           fcsH = resolved.handle;
           sourcePath = resolved.sourcePath;
+          dataSetFile = resolved.dataSetFile;
         }
         let entry: SampleEntry;
         try {
@@ -10127,12 +10382,16 @@ export default function App() {
           entry.sample.setCytofCofactor(wss.cytofCofactor!);
         }
         entry.handle = fcsH;
+        if (dataSetFile) entry.dataSetFile = dataSetFile;
         if (fcsH) void rememberHandle("fcs:" + wss.fileName, fcsH);
         // The cell images the workspace linked: from the folder just chosen when it held them,
         // else through the handle remembered when they were attached. Not found is a note; a
         // file of another recording, or of the wrong length, is refused with its reason.
         const tiffRecord = wss.images?.find((record): record is TiffFolderImageRecord => record.kind === "tiff-folder");
-        if (tiffRecord) {
+        // Cell images are not read from the lab Drive yet, and a Drive workspace takes none from this computer.
+        if ((tiffRecord || wss.images?.some((record) => record.kind === "cvw")) && driveTarget) {
+          dataSetNotes.push(`cell images for ${wss.fileName} are not opened from the lab Drive yet`);
+        } else if (tiffRecord) {
           const remembered = await recallDirectoryHandle(imageHandleKey("tiff", wss.fileName));
           if (remembered && (await ensurePermission(remembered as unknown as FileSystemFileHandle, "read"))) {
             try {
@@ -10146,7 +10405,7 @@ export default function App() {
           }
         }
         const imageRecord = wss.images?.find((record): record is CvwImageRecord => record.kind === "cvw");
-        if (imageRecord && !entry.images) {
+        if (imageRecord && !entry.images && !driveTarget) {
           const beside = resolvedReferenceFcs.get(wss.dataPath)?.images ?? null;
           let imageFile: File | null = beside?.file ?? null;
           let imageHandle: FileSystemFileHandle | null = beside?.handle ?? null;
@@ -10347,7 +10606,7 @@ export default function App() {
             for (let index = 0; index < ws.samples.length; index++) {
               const binding = ws.samples[index].assay.compensatedLayer;
               const fcsDigest = restored.sourceDigests[ws.samples[index].dataPath];
-              if (!binding || !fcsDigest) continue;
+              if (!binding || !fcsDigest || keepsNothingLocal()) continue;
               void writeCachedCompensatedAssay(
                 fcsDigest,
                 entries[index].sample,
@@ -10363,7 +10622,7 @@ export default function App() {
           await restoreSavedWorkspaceCompensation(ws, entries);
         }
       }
-      queueCheckpoint("after-workspace-open");
+      if (!driveTarget) queueCheckpoint("after-workspace-open");
       skipDirtyRef.current = true;
       const activeIdx = Math.min(Math.max(0, ws.activeSample), entries.length - 1);
       const active = entries[activeIdx].sample;
@@ -10435,6 +10694,7 @@ export default function App() {
       setXRange(null);
       setYRange(null);
       setWsHandle(wsH);
+      setDriveTarget(driveTarget ?? null);
       setWsName(wsFileName);
       setWsStorage(storage);
       setWorkspaceId(nextWorkspaceId);
@@ -10534,8 +10794,57 @@ export default function App() {
       }
       return false;
     } finally {
+      driveOpeningRef.current = false;
       setBusy(false);
     }
+  }
+
+  /**
+   * What the Lab Drive menu opened: a workspace with its FCS, read and matched, or FCS alone, which
+   * begin a new workspace saved into their folder. The agent link is cut first: a Drive workspace
+   * is never read through it.
+   */
+  async function openFromDrive(opened: DriveOpened): Promise<boolean> {
+    agentLinkRef.current?.disconnect("A lab Drive workspace was opened");
+    if (opened.kind === "workspace") {
+      return (await openWorkspaceFromEnvelope(opened.envelope, null, opened.target.name, opened.resolved, opened.target)) === true;
+    }
+    if (compensationApplyGuardRef.current || compensationManagerRef.current!.applyInProgress) {
+      setError(t("Wait for the current compensation Apply to finish, or cancel it, before starting a new workspace."));
+      return false;
+    }
+    // The workspace open now is closed as New Workspace closes it (a local one is checkpointed
+    // first); the files are loaded into the empty workspace by the effect below.
+    if (samples.length > 0) await startNewWorkspace();
+    setPendingDriveFcs(opened);
+    return true;
+  }
+  useEffect(() => {
+    if (!pendingDriveFcs || samples.length > 0) return;
+    const opened = pendingDriveFcs;
+    setPendingDriveFcs(null);
+    driveFcsTargetRef.current = opened.target;
+    void importFcsCandidates(opened.files.map((file) => ({
+      id: crypto.randomUUID(),
+      name: file.name,
+      file: new File([file.bytes as BlobPart], file.name, { type: "application/octet-stream" }),
+      handle: null,
+      sourcePath: file.sourcePath,
+    }))).finally(() => {
+      // None loaded: no workspace began, so no Drive workspace either.
+      driveFcsTargetRef.current = null;
+    });
+    // importFcsCandidates is this render's; it runs once the emptied workspace has rendered.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingDriveFcs, samples.length]);
+
+  /** Signing out of the lab Drive closes its workspace, whose data are in this page only. */
+  async function closeDriveWorkspaceOnSignOut(): Promise<void> {
+    const open = driveTargetRef.current;
+    if (open) await startNewWorkspace();
+    setImportMsg(open && !driveTargetRef.current
+      ? `Signed out of the lab Drive · ${open.name} was closed`
+      : "Signed out of the lab Drive");
   }
 
   /** Revert workspace…: list the checkpoints kept for this workspace, newest first, to choose from. */
@@ -10552,6 +10861,8 @@ export default function App() {
    */
   async function revertToCheckpoint(checkpoint: WorkspaceCheckpoint) {
     setHistoryPicker(null);
+    // A Drive workspace keeps no checkpoints here; its history is Drive's revisions.
+    if (driveTargetRef.current) return;
     await checkpointCurrentWorkspace("before-revert");
     const loadedByName = new Map(samples.map((entry) => [entry.name.normalize("NFC").toLocaleLowerCase(), entry] as const));
     const fcsByPath: Record<string, Uint8Array> = {};
@@ -12502,7 +12813,7 @@ export default function App() {
                   from, are shown where the host states them. */}
               {isSceHost
                 ? `GateLabR${hostBuild?.hostVersion ? ` ${hostBuild.hostVersion}` : ""}${hostBuild?.hostCommit ? ` (${hostBuild.hostCommit.slice(0, 7)})` : ""} · GateLab core v${pkg.version}${coreBuild ? ` (${coreBuild})` : ""}`
-                : `GateLab v${pkg.version}`}
+                : `GateLab v${pkg.version}${__GATELAB_LAB_BUILD__ ? ` · lab build ${__GATELAB_LAB_BUILD__}` : ""}`}
               <span className="gl-brand-card-by">{t("Developed by David Priest")}</span>
             </span>
             <p>
@@ -12613,8 +12924,10 @@ export default function App() {
                   onClick: () => void openDemoWorkspace(),
                 },
                 {
-                  label: wsHandle ? `${t("Save")}${dirty ? " ●" : ""}` : t("Save Workspace…"),
-                  title: wsHandle
+                  label: wsHandle || driveTarget ? `${t("Save")}${dirty ? " ●" : ""}` : t("Save Workspace…"),
+                  title: driveTarget
+                    ? t("Save the workspace back to the lab Drive, in place")
+                    : wsHandle
                     ? wsStorage === "bundle"
                       ? "Save changes in place while preserving the embedded FCS data"
                       : "Save gates/populations/scales/compensation back to the linked workspace file (in place)"
@@ -12624,10 +12937,21 @@ export default function App() {
                 },
                 {
                   label: t("Save As…"),
-                  title: "Save a lightweight reference workspace. Source FCS and compensated values are not embedded; use Save Portable Copy for a self-contained archive.",
+                  title: driveTarget
+                    ? t("Save a copy in the lab Drive: beside the workspace in its experiment folder under a new name, or as a new experiment")
+                    : "Save a lightweight reference workspace. Source FCS and compensated values are not embedded; use Save Portable Copy for a self-contained archive.",
+                  className: "gl-save-as",
+                  disabled: !sample,
+                  onClick: driveTarget ? () => setDriveSaveAs("copy") : saveWorkspaceAs,
+                },
+                // A lab Drive workspace saves to this computer only by this, labelled as what it is.
+                ...(driveTarget ? [{
+                  label: t("Save a copy on this computer…"),
+                  className: "gl-save-local-copy",
+                  title: t("Save a reference workspace file on this computer. The workspace open stays the lab Drive's, and Save still writes there; the FCS files are not included."),
                   disabled: !sample,
                   onClick: saveWorkspaceAs,
-                },
+                }] : []),
                 {
                   label: t("Save Portable Copy…"),
                   title: "Save a self-contained .gatelab with the exact source FCS and any computed compensated assay, so it can reopen without rerunning compensation.",
@@ -12639,7 +12963,7 @@ export default function App() {
                   label: t("Revert workspace…"),
                   className: "gl-revert-workspace",
                   title: "Go back to an earlier state of this workspace: as it was opened, or any checkpoint GateLab kept in this browser. The current state is kept as a checkpoint first.",
-                  disabled: !sample || busy || isSceHost,
+                  disabled: !sample || busy || isSceHost || driveTarget !== null,
                   onClick: () => void openRevertDialog(),
                 },
                 "separator",
@@ -12847,7 +13171,7 @@ export default function App() {
           }
         >
           {/* The core's commit tells one embed from the next: the version is the same across them. */}
-          {isSceHost ? `GateLab core v${pkg.version}${coreBuild ? ` · ${coreBuild}` : ""}` : `GateLab v${pkg.version} · MIT`} ·{" "}
+          {isSceHost ? `GateLab core v${pkg.version}${coreBuild ? ` · ${coreBuild}` : ""}` : `GateLab v${pkg.version}${__GATELAB_LAB_BUILD__ ? ` · lab build ${__GATELAB_LAB_BUILD__}` : ""} · MIT`} ·{" "}
           {t("Questions or bugs?")}{" "}
           {/* Link straight to the issue tracker rather than the repo root: the
               point is to invite feedback, so land people where they can file it. */}
@@ -12863,7 +13187,22 @@ export default function App() {
             {t("please leave an issue at the repo")}
           </a>
         </span>
-        <AgentMenu status={agentStatus} onConnect={(url) => agentLinkRef.current?.connect(url)} onDisconnect={() => agentLinkRef.current?.disconnect()} />
+        {drive && (
+          <drive.module.DriveMenu
+            session={drive.session}
+            target={driveTarget}
+            dirty={dirty}
+            disabled={busy || compensationApplyStatus !== null}
+            canSaveAs={samples.length > 0}
+            onSaveAsNewExperiment={() => setDriveSaveAs("experiment")}
+            onOpened={openFromDrive}
+            onSignedOut={closeDriveWorkspaceOnSignOut}
+            onStatus={setImportMsg}
+            onError={setError}
+          />
+        )}
+        {/* The agent link is off while a lab Drive workspace is open. */}
+        {!driveTarget && <AgentMenu status={agentStatus} onConnect={(url) => agentLinkRef.current?.connect(url)} onDisconnect={() => agentLinkRef.current?.disconnect()} />}
         {!isSceHost && <TourMenu progress={tour.progress} onStart={tour.start} onResume={tour.resume} />}
         <label className="gl-header-language">
           <span>{t("Language")}</span>
@@ -13198,10 +13537,10 @@ export default function App() {
                   type="button"
                   className="gl-mini-btn gl-side-save"
                   disabled={!sample}
-                  title={wsHandle ? t("Save the workspace in place") : t("Choose a location and save the workspace")}
+                  title={driveTarget ? t("Save the workspace back to the lab Drive, in place") : wsHandle ? t("Save the workspace in place") : t("Choose a location and save the workspace")}
                   onClick={saveWorkspace}
                 >
-                  {wsHandle ? `${t("Save")}${dirty ? " ●" : ""}` : t("Save…")}
+                  {wsHandle || driveTarget ? `${t("Save")}${dirty ? " ●" : ""}` : t("Save…")}
                 </button>
               </div>
             )}
@@ -14901,6 +15240,76 @@ export default function App() {
           onConfirm={clearGating}
         />
       )}
+      {driveConflict && driveTarget && (
+        <ConfirmModal
+          title="Not saved: the workspace changed in the lab Drive"
+          message={
+            `${describeDriveWriter(driveConflict)} saved ${driveTarget.name} in the lab Drive after it was opened here, and a Save would write over that. ` +
+            "Save this version as a copy beside it, or cancel and open the experiment again to see the other."
+          }
+          confirmLabel="Save as a copy…"
+          onCancel={() => setDriveConflict(null)}
+          onConfirm={() => {
+            setDriveConflict(null);
+            // The same Save As as the Workspace menu's, set to a copy beside the workspace.
+            setDriveSaveAs("copy");
+          }}
+        />
+      )}
+      {driveSaveAs && drive && (() => {
+        let uploads: { text: string; problem: string | null };
+        try {
+          uploads = { text: drive.module.describeUploads(drive.module.experimentUploads(driveExperimentSamples())), problem: null };
+        } catch (cause) {
+          uploads = { text: "", problem: cause instanceof Error ? cause.message : String(cause) };
+        }
+        return (
+          <drive.module.DriveSaveAsDialog
+            target={driveTarget}
+            initial={driveSaveAs}
+            suggestedExperiment={driveTarget ? `${driveTarget.experiment} copy` : wsName.replace(/\.gatelab$/i, "")}
+            uploads={uploads}
+            onCancel={() => setDriveSaveAs(null)}
+            onSave={(request) => {
+              setDriveSaveAs(null);
+              void saveToDrive(request);
+            }}
+          />
+        );
+      })()}
+      {driveUpload && drive && (
+        <drive.module.DriveUploadDialog
+          experiment={driveUpload.experiment}
+          progress={driveUpload.progress}
+          cancelling={driveUpload.cancelling}
+          onCancel={() => {
+            driveUpload.controller.abort();
+            setDriveUpload((current) => (current ? { ...current, cancelling: true } : current));
+          }}
+        />
+      )}
+      {driveFolderGrant && drive && (() => {
+        const lab = driveFolderGrant.folderId === drive.session.config.rootFolderId;
+        return (
+          <ConfirmModal
+            title={lab ? "Choose the lab folder" : "Choose the experiment folder"}
+            message={lab
+              ? "GateLab may make a new experiment folder in the lab folder only once the lab folder has been chosen in Google's file picker. " +
+                "Choose the lab folder, the one that holds the experiment folders; the save then goes ahead."
+              : "GateLab may create the workspace file in this experiment folder only once the folder has been chosen in Google's file picker. " +
+                "Choose the folder that holds the experiment's FCS files; the save then goes ahead."}
+            confirmLabel={lab ? "Choose the lab folder…" : "Choose the folder…"}
+            onCancel={() => setDriveFolderGrant(null)}
+            onConfirm={() => {
+              const { request, folderId } = driveFolderGrant;
+              setDriveFolderGrant(null);
+              void drive.session.grantFolder(folderId).then((granted) => {
+                if (granted) return saveToDrive(request);
+              }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+            }}
+          />
+        );
+      })()}
       {historyPicker && (
         <WorkspaceHistoryModal
           checkpoints={historyPicker.checkpoints}
@@ -14913,7 +15322,11 @@ export default function App() {
         <ConfirmModal
           title="Start a new workspace?"
           message={
-            dirty || !wsHandle
+            driveTarget
+              ? dirty
+                ? `This closes ${driveTarget.name}. Its changes are not saved to the lab Drive, and GateLab keeps no copy of a Drive workspace in this browser, so they are lost. Save first to keep them.`
+                : `Close ${driveTarget.name} and begin with an empty workspace? The file in the lab Drive will not be changed.`
+              : dirty || !wsHandle
               ? "This closes the current samples, gates, populations, and settings. Unsaved work will no longer be in the current view; GateLab will keep a local recovery checkpoint. Save first if you want a normal workspace file."
               : `Close ${wsName || "the current workspace"} and begin with an empty workspace? The saved file will not be changed.`
           }
