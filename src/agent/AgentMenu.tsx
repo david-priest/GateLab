@@ -84,7 +84,7 @@ export function AgentMenu({ status, onConnect, onDisconnect }: {
   const submit = () => {
     const parsed = parseAgentUrl(url);
     if (!parsed) {
-      setProblem(t("That is not a ws:// address. Copy the one the agent's session printed."));
+      setProblem(t("That is not a ws:// address on this computer. Copy the one the agent's session printed."));
       return;
     }
     rememberAgentUrl(parsed.toString());

@@ -2005,7 +2005,7 @@ const JA: Readonly<Record<string, string>> = {
   "Full setup, and the manual the agent itself reads": "設定の詳細と、エージェント自身が読むマニュアル",
   "An agent's session on this computer prints an address when it starts. Paste it here. The agent then reads the gating as you see it and proposes gates, which appear in the plot and the tree with a badge; you adjust or undo them as any other. Saving stays yours.": "このコンピュータ上のエージェントのセッションは、起動時にアドレスを表示します。それをここに貼り付けてください。エージェントは表示どおりのゲーティングを読み取り、ゲートを提案します。提案はバッジ付きでプロットとツリーに表示され、他のゲートと同様に調整や取り消しができます。保存はあなたが行います。",
   "Address": "アドレス",
-  "That is not a ws:// address. Copy the one the agent's session printed.": "ws:// のアドレスではありません。エージェントのセッションが表示したものをコピーしてください。",
+  "That is not a ws:// address on this computer. Copy the one the agent's session printed.": "このコンピューター上の ws:// のアドレスではありません。エージェントのセッションが表示したものをコピーしてください。",
   "Connect": "接続",
   "Proposed by {by}: {rationale}": "{by}による提案：{rationale}",
   "agent": "エージェント",

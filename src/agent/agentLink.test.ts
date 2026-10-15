@@ -54,6 +54,15 @@ describe("AgentLink", () => {
     expect(parseAgentUrl("not a url")).toBeNull();
   });
 
+  it("accepts only a relay on this computer", () => {
+    expect(parseAgentUrl("ws://localhost:48123/")?.hostname).toBe("localhost");
+    expect(parseAgentUrl("ws://[::1]:48123/")?.hostname).toBe("[::1]");
+    expect(parseAgentUrl("wss://example.org/x")).toBeNull();
+    expect(parseAgentUrl("ws://192.168.1.20:48123/")).toBeNull();
+    expect(parseAgentUrl("ws://127.0.0.1.example.org:48123/")).toBeNull();
+    expect(parseAgentUrl("ws://user@example.org:48123/")).toBeNull();
+  });
+
   it("says hello on open, answers requests, takes the relay's name, and reports changes", async () => {
     const { link, statuses, handled, socket, writer, bump } = harness();
     link.connect("ws://127.0.0.1:48123/?token=t");
