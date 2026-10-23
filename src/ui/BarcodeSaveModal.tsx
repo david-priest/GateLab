@@ -4,6 +4,7 @@
 
 import { useState } from "react";
 import { useI18n } from "./i18n";
+import { ModalEscape } from "./useModalEscape";
 
 export interface BarcodeSaveSummary {
   /** "scheme": a debarcoding strategy with its sample table; "hierarchy": any workspace's gates and populations. */
@@ -41,6 +42,7 @@ export function BarcodeSaveModal({
   const [template, setTemplate] = useState(summary.hasTemplate);
   return (
     <div className="gl-modal-backdrop">
+      <ModalEscape onClose={onCancel} />
       <div className="gl-modal" style={{ maxWidth: 560 }}>
         <div className="gl-modal-title">{t("Save hierarchy CSV")}</div>
         <div className="gl-modal-note">

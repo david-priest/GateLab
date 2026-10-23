@@ -71,6 +71,18 @@
 // crosshair's channels (25 of 45 sum above the parent, 7 below), so FlowJo decides a quadrant's
 // shared edges by another rule than a polygon's, not established here.
 //
+// FlowJo 11 (a .flowjo workbench; flowjo11Workbench.ts) tests its polygons on the same 256-channel
+// grid by another rule, `rule: "flowjo11"`. It saves a polygon's vertices in the display units of the
+// axis the gate was drawn on, between channels (36.696…, 64.655), and keeps them there; an event goes
+// to the channel its value falls in, rounded down, not to the nearest. Measured on 2026-10-22 against
+// the counts FlowJo 11.2.0 saved in its own workbenches (four S6 files, one S8 file): every polygon
+// on a linear axis and on a log × log pair matches with the event rounded down and the vertices as
+// saved (Cells 5,854, Singlets 5,663, a moved Cells 4,562 in one sample, Scatter 35,825, a pencil
+// gate 12,231), and FlowJo 10's rule above misses by 3 to 428 events on the same gates (Singlets
+// 13,217 where FlowJo 11 counts 13,645). On a biex axis an event's channel is the same under both
+// rules, the table entry at or below it divided down, and a vertex is placed on the table by
+// interpolation instead of on the entry below it.
+//
 // Two lattice points coincide when two of FlowJo's vertices round onto one channel pair; that
 // zero-length edge holds its one point (gates.ts), as the reference implementation's closed test
 // does, which decides only a polygon with every vertex on one channel pair: it holds that cell.
@@ -130,13 +142,13 @@ export function flowJoGridScale(spec: FlowJoGridSpec): FlowJoGridScale {
   const key = JSON.stringify(spec);
   const hit = scaleCache.get(key);
   if (hit) return hit;
-  const scale = buildScale(spec.axis, spec.channels);
+  const scale = buildScale(spec.axis, spec.channels, spec.rule === "flowjo11");
   if (scaleCache.size >= 256) scaleCache.delete(scaleCache.keys().next().value as string);
   scaleCache.set(key, scale);
   return scale;
 }
 
-function buildScale(axis: FlowJoGridAxis, N: number): FlowJoGridScale {
+function buildScale(axis: FlowJoGridAxis, N: number, flowJo11 = false): FlowJoGridScale {
   const top = N - 1;
   const clampCell = (c: number): number => (c < 0 ? 0 : c > top ? top : c);
   if (axis.kind === "linear") {
@@ -144,6 +156,15 @@ function buildScale(axis: FlowJoGridAxis, N: number): FlowJoGridScale {
     const span = maxRange - minRange;
     // The operation order is the reference implementation's: ((v − min) · N) / span.
     const channel = (v: number): number => ((v - minRange) * N) / span;
+    if (flowJo11) {
+      return {
+        cells: N,
+        channel,
+        vertexCell: channel,
+        eventCell: (v) => clampCell(Math.floor(channel(v))),
+        centre: (c) => minRange + (c * span) / N,
+      };
+    }
     const vertexCell = (v: number): number => Math.floor(channel(v) + 0.5);
     return {
       cells: N,
@@ -161,6 +182,15 @@ function buildScale(axis: FlowJoGridAxis, N: number): FlowJoGridScale {
     // FlowJo 10.6 and later put such a vertex on channel 0; the import decides that by the
     // workspace's version (logVertexAtZeroOnFloor).
     const channel = (v: number): number => ((Math.log10(Math.max(v, 1e-300)) - logOffset) / decades) * N;
+    if (flowJo11) {
+      return {
+        cells: N,
+        channel,
+        vertexCell: channel,
+        eventCell: (v) => clampCell(Math.floor(channel(v))),
+        centre: (c) => offset * Math.pow(10, (c * decades) / N),
+      };
+    }
     const vertexCell = (v: number): number => Math.floor(channel(v) + 0.5);
     return {
       cells: N,
@@ -202,6 +232,21 @@ function buildScale(axis: FlowJoGridAxis, N: number): FlowJoGridScale {
     const f = ch - j;
     return f === 0 ? x[j] : x[j] + f * (x[j + 1] - x[j]);
   };
+  if (flowJo11) {
+    /** Raw → the channel on the table, interpolated between its entries and kept within it. */
+    const between = (v: number): number => {
+      const j = tableChannel(v);
+      if (j >= last || !(v > x[j])) return j / perCell;
+      return (j + (v - x[j]) / (x[j + 1] - x[j])) / perCell;
+    };
+    return {
+      cells: N + 1,
+      channel,
+      vertexCell: between,
+      eventCell: cell,
+      centre: (c) => tableRaw(Math.min(Math.max(c, 0), N) * perCell),
+    };
+  }
   return {
     cells: N + 1,
     channel,
@@ -299,12 +344,14 @@ export function parseFlowJoGridSpec(value: unknown): FlowJoGridSpec | null {
   const channels = v.channels;
   if (typeof channels !== "number" || !Number.isInteger(channels) || channels < 2 || channels > 65536) return null;
   const axis = parseFlowJoGridAxis(v.axis);
-  return axis ? { kind: "flowjoChannels", channels, axis } : null;
+  if (!axis) return null;
+  if (v.rule === undefined) return { kind: "flowjoChannels", channels, axis };
+  return v.rule === "flowjo11" ? { kind: "flowjoChannels", channels, axis, rule: "flowjo11" } : null;
 }
 
 /** Whether two grid axes are the same one, field by field. */
 export function sameFlowJoGridSpec(a: FlowJoGridSpec, b: FlowJoGridSpec): boolean {
-  if (a.channels !== b.channels || a.axis.kind !== b.axis.kind) return false;
+  if (a.channels !== b.channels || a.axis.kind !== b.axis.kind || a.rule !== b.rule) return false;
   const x = a.axis as Record<string, unknown>;
   const y = b.axis as Record<string, unknown>;
   return Object.keys(x).every((k) => x[k] === y[k]) && Object.keys(y).every((k) => x[k] === y[k]);
@@ -317,8 +364,8 @@ export function describeFlowJoGridAxis(spec: FlowJoGridSpec): string {
     ? `linear ${a.minRange.toPrecision(4)} to ${a.maxRange.toPrecision(4)}`
     : a.kind === "wsplog"
       ? `log (offset ${a.offset.toPrecision(4)}, ${a.decades.toPrecision(4)} decades)`
-      : `biex (width ${a.widthBasis.toPrecision(4)}, neg ${a.neg}, pos ${a.pos}), on FlowJo's 4096-channel table`;
-  return `FlowJo's ${spec.channels}-channel grid, ${rule}`;
+      : `biex (width ${a.widthBasis.toPrecision(4)}, neg ${a.neg}, pos ${a.pos}), on the 4096-channel biex table`;
+  return `${spec.channels}-channel grid, ${rule}`;
 }
 
 // ── Exporting a grid polygon as the set of events it selects ─────────────────────────────────

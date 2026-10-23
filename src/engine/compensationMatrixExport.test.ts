@@ -51,14 +51,14 @@ describe("compensation matrix CSV export", () => {
   });
 
   it("builds a safe filename and a directly usable base-R import snippet", () => {
-    const fileName = compensationMatrixCsvFileName("WingLab QQ beads sm full.csv");
-    expect(fileName).toBe("WingLab_QQ_beads_sm_full_spill_matrix.csv");
-    expect(compensationMatrixCsvFileName("WingLab", "working")).toBe(
-      "WingLab_working_spill_matrix.csv",
+    const fileName = compensationMatrixCsvFileName("Reference QQ beads sm full.csv");
+    expect(fileName).toBe("Reference_QQ_beads_sm_full_spill_matrix.csv");
+    expect(compensationMatrixCsvFileName("Reference", "working")).toBe(
+      "Reference_working_spill_matrix.csv",
     );
     expect(compensationMatrixRImportSnippet(fileName)).toBe([
       "spill <- as.matrix(read.csv(",
-      '  "WingLab_QQ_beads_sm_full_spill_matrix.csv",',
+      '  "Reference_QQ_beads_sm_full_spill_matrix.csv",',
       "  row.names = 1,",
       "  check.names = FALSE,",
       '  fileEncoding = "UTF-8"',

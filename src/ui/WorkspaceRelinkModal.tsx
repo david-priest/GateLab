@@ -1,5 +1,6 @@
 import type { WorkspaceFcsRequirement } from "../engine/workspaceRelink";
 import { useI18n } from "./i18n";
+import { ModalEscape } from "./useModalEscape";
 
 export function WorkspaceRelinkModal({
   requirements,
@@ -37,6 +38,7 @@ export function WorkspaceRelinkModal({
   const remaining = requirements.filter((requirement) => !found.has(requirement.dataPath)).length;
   return (
     <div className="gl-modal-backdrop">
+      <ModalEscape onClose={scanning ? null : onCancel} />
       <div
         className="gl-modal gl-workspace-relink-modal"
         role="dialog"

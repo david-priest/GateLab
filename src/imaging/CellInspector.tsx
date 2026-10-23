@@ -5,6 +5,7 @@
 // the hovered cell from its store, so a hover re-renders this panel and nothing else.
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { ChevronIcon } from "../ui/icons";
 import type { CellHoverStore, HoveredCell } from "../engine/cellHoverStore";
 import type { Sample } from "../engine/sample";
 import { useI18n } from "../ui/i18n";
@@ -192,7 +193,7 @@ export function CellInspector({
           title={collapsed ? t("Show the cell panel") : t("Hide the cell panel")}
           onClick={onToggleCollapsed}
         >
-          <span className="gl-side-disclosure-mark" aria-hidden="true">{collapsed ? "▸" : "▾"}</span>
+          <span className="gl-side-disclosure-mark" aria-hidden="true"><ChevronIcon open={!collapsed} size={12} /></span>
           <span className="gl-side-title">{t("Cell")}</span>
         </button>
         {pinned ? (

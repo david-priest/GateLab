@@ -1,6 +1,6 @@
 {
   "name": "gatelab",
-  "version": "0.9.3",
+  "version": "0.10.0",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -12,7 +12,9 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:interop": "node tools/interop/run.mjs"
+    "test:interop": "node tools/interop/run.mjs",
+    "headless": "node tools/headless/gatelab-headless.mjs",
+    "test:standalone": "npm run build && node tools/validation/standalone-smoke.mjs"
   },
   "dependencies": {
     "fflate": "^0.8.3",

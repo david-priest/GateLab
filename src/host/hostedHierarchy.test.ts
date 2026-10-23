@@ -179,8 +179,9 @@ describe("translateGatingSetHierarchy", () => {
     const broken: HostedHierarchy = { contractVersion: 1, nodes: [{ path: "/x", name: "x", parent: "root", gate: { kind: "polygon", axes: [{ channel: "FSC-A", transform: null }, { channel: "SSC-A", transform: null }], vertices: [[0, 0], [1, "a" as unknown as number], [1, 1]] } }] };
     expect(() => translateGatingSetHierarchy(broken, dataset, transformSpec)).toThrow(/vertex 2 of node '\/x'/);
     expect(() => translateGatingSetHierarchy({ contractVersion: 3, nodes: [] }, dataset, transformSpec)).toThrow(/contract 3/);
-    const unsupported: HostedHierarchy = { contractVersion: 1, nodes: [{ path: "/x", name: "x", parent: "root", gate: { kind: "rectangle", axes: [{ channel: "FSC-A", transform: { kind: "hyperlog" } as never }], min: [0], max: [1] } }] };
-    expect(() => translateGatingSetHierarchy(unsupported, dataset, transformSpec)).toThrow(/unsupported/);
+    const withTransform = (transform: unknown): HostedHierarchy => ({ contractVersion: 1, nodes: [{ path: "/x", name: "x", parent: "root", gate: { kind: "rectangle", axes: [{ channel: "FSC-A", transform: transform as never }], min: [0], max: [1] } }] });
+    expect(() => translateGatingSetHierarchy(withTransform({ kind: "hyperlog" }), dataset, transformSpec)).toThrow(/invalid transform/);
+    expect(() => translateGatingSetHierarchy(withTransform({ kind: "future-transform" }), dataset, transformSpec)).toThrow(/unsupported/);
   });
 
   it("names a node on a channel the dataset lacks, and a boolean naming a node without a gate, as left out", () => {

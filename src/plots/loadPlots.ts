@@ -17,9 +17,13 @@ export interface CytofD3Api {
   clear(): void;
   clearPendingEdit(gateId: string, seq?: number): void;
   /** GateLab's addition: the selected polygon or rectangle grows until each side meets a facing gate edge or the plot's edge. */
-  extendSelectedGateToEdges?(): boolean;
+  extendSelectedGateToEdges?(gateId?: string): boolean;
   /** GateLab's addition: the facing edges of neighbouring gates move onto one shared line; the gates named, or every one drawn. */
-  closeGateGaps?(gateIds?: readonly string[]): boolean;
+  closeGateGaps?(gateIds?: readonly string[], focus?: string): boolean;
+  /** GateLab's addition: abandons a polygon being drawn; false when none is. */
+  cancelPolygonDraft?(): boolean;
+  /** GateLab's addition: takes back the last vertex of a polygon being drawn; false when none is. */
+  undoPolygonVertex?(): boolean;
 }
 
 /** mini_plot.js — the Strategy / Illustration grid renderer (window.CytofMiniPlot). */
@@ -209,11 +213,216 @@ export function patchOverlayDrawOrder(src: string): string {
   return out;
 }
 
+/**
+ * A polygon being drawn can be abandoned (Escape) or lose its last vertex (Backspace) without
+ * leaving the polygon tool. The renderer keeps the draft in its closure, so the two calls are
+ * added to its API here and the host decides which key does what.
+ */
+export function patchPolygonDraftKeys(src: string): string {
+  if (src.includes("function _glCancelPolygonDraft()")) return src;
+  const apiNeedle = "    window.CytofD3 = {\n        render: render,\n";
+  if (src.split(apiNeedle).length - 1 !== 1) {
+    console.warn("[GateLab] cytof polygon-draft patch found no API block; Escape and Backspace do not edit a polygon being drawn.");
+    return src;
+  }
+  const helpers =
+    "    function _glCancelPolygonDraft() {\n" +
+    "        if (_mode !== 'draw-poly' || _polyVerts.length === 0) return false;\n" +
+    "        _polyVerts = []; _mouseData = null;\n" +
+    "        if (_g) _g.select('.draw-layer').selectAll('*').remove();\n" +
+    "        return true;\n" +
+    "    }\n" +
+    "    function _glUndoPolygonVertex() {\n" +
+    "        if (_mode !== 'draw-poly' || _polyVerts.length === 0) return false;\n" +
+    "        _polyVerts.pop();\n" +
+    "        if (_polyVerts.length === 0) _mouseData = null;\n" +
+    "        if (_g) _drawPolyPreview();\n" +
+    "        return true;\n" +
+    "    }\n\n";
+  return src.replace(
+    apiNeedle,
+    helpers + apiNeedle + "        cancelPolygonDraft: _glCancelPolygonDraft,\n        undoPolygonVertex: _glUndoPolygonVertex,\n",
+  );
+}
+
+/**
+ * Tailored gates (tailoredGates.ts). A payload may carry `gate_references`, the versions of gates
+ * a file does not use -- on one file the tree's version of a gate the file tailors, pooled each
+ * pooled file's own version of a gate it tailors -- drawn as faint dashed outlines under the gates,
+ * never selected, dragged or labelled. And a gate may carry `tailored_tag`: a small branch mark
+ * inside its label box (beside the crosshair for a quadrant); a click on it reports
+ * gate_tailored_tag with the pointer's client position, where the app opens the gate's menu.
+ */
+export function patchTailoredGates(src: string): string {
+  let out = src;
+  const referenceNeedle =
+    "        orderedGates.forEach(function (gate) {\n" +
+    "            var isNormal  = gate.x_channel === xCh && gate.y_channel === yCh;\n";
+  const referencePatch =
+    "        // GateLab: the versions of gates the plotted file does not use, faint and dashed under\n" +
+    "        // the gates (tailoredGates.ts). Pointer events never reach them.\n" +
+    "        (_plotData.gate_references || []).forEach(function (ref) {\n" +
+    "            var refFlipped = ref.x_channel === yCh && ref.y_channel === xCh;\n" +
+    "            if (!(ref.x_channel === xCh && ref.y_channel === yCh) && !refFlipped) return;\n" +
+    "            var rpx = function (pts) { return pts.map(function (v) {\n" +
+    "                return refFlipped ? [zx(v[1]), zy(v[0])] : [zx(v[0]), zy(v[1])]; }); };\n" +
+    "            var rg = gl.append('g').attr('class', 'gate-reference').style('pointer-events', 'none');\n" +
+    "            var rstyle = function (el) {\n" +
+    "                return el.attr('fill', 'none').attr('stroke', ref.color || '#888888')\n" +
+    "                    .attr('stroke-width', 1.5).attr('stroke-dasharray', '5 4').attr('stroke-opacity', 0.6);\n" +
+    "            };\n" +
+    "            if (ref.gate_type === 'quadrant') {\n" +
+    "                var c = ref.center || [0, 0];\n" +
+    "                var rcx = refFlipped ? zx(c[1]) : zx(c[0]);\n" +
+    "                var rcy = refFlipped ? zy(c[0]) : zy(c[1]);\n" +
+    "                if (!isFinite(rcx) || !isFinite(rcy)) return;\n" +
+    "                var rarms = ref.arms && ref.arms.h && ref.arms.v ? ref.arms : null;\n" +
+    "                rstyle(rg.append('line').attr('x1', rcx).attr('y1', rarms ? rcy : 0).attr('x2', rcx).attr('y2', H));\n" +
+    "                rstyle(rg.append('line').attr('x1', 0).attr('y1', rcy).attr('x2', rarms ? rcx : W).attr('y2', rcy));\n" +
+    "                if (rarms) [rarms.h, rarms.v].forEach(function (arm) {\n" +
+    "                    if (arm.length > 1) rstyle(rg.append('path').datum(rpx(arm)).attr('d', d3.line()));\n" +
+    "                });\n" +
+    "                return;\n" +
+    "            }\n" +
+    "            var rverts = typeof _gateOutlinePts === 'function' ? _gateOutlinePts(ref) : ref.vertices;\n" +
+    "            if (!rverts || rverts.length < 2) return;\n" +
+    "            rstyle(rg.append('path').datum(rpx(rverts)).attr('d', _closedLine()));\n" +
+    "        });\n\n" +
+    referenceNeedle;
+  if (out.includes(referenceNeedle) && !out.includes("_plotData.gate_references")) {
+    out = out.replace(referenceNeedle, referencePatch);
+  } else if (!out.includes("_plotData.gate_references")) {
+    console.warn("[GateLab] cytof gate-reference patch did not match — the tree's version of a tailored gate is not drawn.");
+  }
+
+  // The mark of a tailored gate: a small branch icon inside the label box, after the name (beside
+  // the crosshair for a quadrant, on a small dark backing). A click on it reports it.
+  const tagNeedle =
+    "            bg.attr('x', bb.x - 3).attr('y', bb.y - 2)\n" +
+    "              .attr('width', bb.width + 6).attr('height', bb.height + 4);\n";
+  const tagHelper =
+    "    // GateLab: the branch mark of a tailored gate, 10 px, its left edge at x, centred on cy, in\n" +
+    "    // `parent`; `backed` puts it on a dark rounded backing where there is no label box.\n" +
+    "    function _tailoredMark(parent, gate, x, cy, backed) {\n" +
+    "        var s = 10, oy = cy - s / 2;\n" +
+    "        var tg = parent.append('g').attr('class', 'gate-tailored-tag')\n" +
+    "            .style('cursor', 'pointer').style('pointer-events', 'all');\n" +
+    "        if (backed) tg.append('rect').attr('x', x - 3).attr('y', oy - 2).attr('width', s + 6).attr('height', s + 4)\n" +
+    "            .attr('rx', 3).attr('fill', 'rgba(74,83,97,0.85)');\n" +
+    "        tg.append('rect').attr('x', x - 1).attr('y', oy - 1).attr('width', s + 2).attr('height', s + 2).attr('fill', 'rgba(0,0,0,0)');\n" +
+    "        var ic = tg.append('g').attr('transform', 'translate(' + x + ',' + oy + ') scale(' + (s / 16) + ')')\n" +
+    "            .attr('fill', 'none').attr('stroke', 'white').attr('stroke-width', 1.8).attr('stroke-linecap', 'round');\n" +
+    "        ic.append('circle').attr('cx', 4.5).attr('cy', 3.5).attr('r', 1.5);\n" +
+    "        ic.append('circle').attr('cx', 4.5).attr('cy', 12.5).attr('r', 1.5);\n" +
+    "        ic.append('circle').attr('cx', 11.5).attr('cy', 5.5).attr('r', 1.5);\n" +
+    "        ic.append('path').attr('d', 'M4.5 5v6M11.5 7c0 2.6-7 2.2-7 4');\n" +
+    "        if (gate.tailored_tag_hint) tg.append('title').text(gate.tailored_tag_hint);\n" +
+    "        // The label's own drag, and the plot's pan, never start from the mark.\n" +
+    "        tg.on('mousedown', function (event) { event.stopPropagation(); })\n" +
+    "          .on('touchstart', function (event) { event.stopPropagation(); })\n" +
+    "          .on('click', function (event) {\n" +
+    "              event.stopPropagation();\n" +
+    "              _shinyInput('gate_tailored_tag', { gate_id: gate.gate_id, client: [event.clientX, event.clientY] });\n" +
+    "          });\n" +
+    "        return tg;\n" +
+    "    }\n\n";
+  const tagPatch = tagNeedle +
+    "            if (gate.tailored_tag) {\n" +
+    "                bg.attr('width', bb.width + 6 + 13);\n" +
+    "                _tailoredMark(labelG, gate, bb.x + bb.width + 4, bb.y + bb.height / 2, false);\n" +
+    "            }\n";
+  const quadrantTagNeedle = "        // Draggable centre handle (selected gate only).\n";
+  const quadrantTagPatch =
+    "        if (gate.tailored_tag) _tailoredMark(gg, gate, Math.min(W - 20, cxp + 8), Math.max(10, cyp - 12), true);\n\n" +
+    quadrantTagNeedle;
+  // The helper goes beside _closedLine: the text before _drawGates is another patch's needle.
+  const helperNeedle = "    function _closedLine() {\n";
+  if (!out.includes("function _tailoredMark(")) {
+    if (out.includes(tagNeedle) && out.includes(quadrantTagNeedle) && out.includes(helperNeedle)) {
+      out = out.replace(helperNeedle, tagHelper + helperNeedle)
+        .replace(tagNeedle, tagPatch)
+        .replace(quadrantTagNeedle, quadrantTagPatch);
+    } else {
+      console.warn("[GateLab] cytof tailored-mark patch did not match — a tailored gate's label carries no mark.");
+    }
+  }
+  return out;
+}
+
+/**
+ * The gates' line width, from the payload's `gate_line_width` (the Gating tab's Display popover):
+ * every gate kind, quadrant arms included, and the tailoring view's dashed versions. A selected
+ * gate is drawn 1 px thicker, as the renderer's 2.5 against 1.5 was; a halo under it read as a
+ * shadow (David, 2026-10-23). The invisible hit strokes keep their own widths. Without a width the
+ * renderer's 1.5 stands.
+ */
+export function patchGateLineWidth(src: string): string {
+  if (src.includes("function _glGateLw(")) return src;
+  const helperNeedle = "    function _closedLine() {\n";
+  const edits = [
+    ["        var lw = isSel ? 2.5 : 1.5;\n", "        var lw = _glGateLw(isSel);\n"],
+    [".attr('stroke-width', isSel ? 2.5 : 1.5)", ".attr('stroke-width', _glGateLw(isSel))"],
+  ] as const;
+  if (!src.includes(helperNeedle) || edits.some(([needle]) => src.split(needle).length !== 2)) {
+    console.warn("[GateLab] cytof gate-width patch did not match — gates are drawn at the renderer's own width.");
+    return src;
+  }
+  let out = src.replace(helperNeedle,
+    "    // GateLab: the gates' line width from the payload, 1.5 without one; a selected gate 1 px more.\n" +
+    "    function _glGateLw(sel) {\n" +
+    "        var w = _plotData ? Number(_plotData.gate_line_width) : NaN;\n" +
+    "        return (isFinite(w) && w > 0 ? w : 1.5) + (sel ? 1 : 0);\n" +
+    "    }\n" + helperNeedle);
+  for (const [needle, replacement] of edits) out = out.replace(needle, replacement);
+  // The tailoring view's dashed versions of a gate (patchTailoredGates) at the same width.
+  out = out.split(".attr('stroke-width', 1.5).attr('stroke-dasharray', '5 4')")
+    .join(".attr('stroke-width', _glGateLw()).attr('stroke-dasharray', '5 4')");
+  return out;
+}
+
+/**
+ * Gates without colour (the Display popover's "Coloured gates" off, gateInk.ts): the payload's
+ * `gate_style` carries `pub_style` and `label_background`, as mini_plot's does, and the main plot
+ * draws a gate's label as black text on a white backing of that opacity, in place of white text
+ * on a chip of the gate's colour; a quadrant's labels take the same backing. The ink of the lines
+ * comes in the payload as each gate's colour. A tailored gate's mark keeps a dark backing of its
+ * own there, since it is drawn in white.
+ */
+export function patchGateInk(src: string): string {
+  if (src.includes("function _glPub(")) return src;
+  const helperNeedle = "    function _closedLine() {\n";
+  const edits = [
+    [".attr('rx', 3).attr('fill', color).attr('fill-opacity', 0.85);\n            var txt = labelG.append('text')\n" +
+      "                .attr('text-anchor', 'middle')\n                .attr('fill', 'white').style('font-size', '12px');\n",
+      ".attr('rx', 3).attr('fill', _glPub() ? '#ffffff' : color).attr('fill-opacity', _glPub() ? _glBacking() : 0.85);\n" +
+      "            var txt = labelG.append('text')\n                .attr('text-anchor', 'middle')\n" +
+      "                .attr('fill', _glPub() ? '#000000' : 'white').style('font-size', '12px');\n"],
+    ["_tailoredMark(labelG, gate, bb.x + bb.width + 4, bb.y + bb.height / 2, false);",
+      "_tailoredMark(labelG, gate, bb.x + bb.width + 4, bb.y + bb.height / 2, _glPub());"],
+    [".attr('rx', 2).attr('fill', 'rgba(255,255,255,0.78)');",
+      ".attr('rx', 2).attr('fill', '#ffffff').attr('fill-opacity', _glPub() ? _glBacking() : 0.78);"],
+  ] as const;
+  if (!src.includes(helperNeedle) || edits.some(([needle]) => src.split(needle).length !== 2)) {
+    console.warn("[GateLab] cytof gate-ink patch did not match — gate labels keep their coloured chips.");
+    return src;
+  }
+  let out = src.replace(helperNeedle,
+    "    // GateLab: gates without colour, and their labels' white backing (0 to 1, 0.85 without one).\n" +
+    "    function _glPub() { var gs = _plotData && _plotData.gate_style; return !!(gs && gs.pub_style); }\n" +
+    "    function _glBacking() {\n" +
+    "        var gs = _plotData && _plotData.gate_style, b = gs ? Number(gs.label_background) : NaN;\n" +
+    "        return isFinite(b) ? Math.max(0, Math.min(1, b)) : 0.85;\n" +
+    "    }\n" + helperNeedle);
+  for (const [needle, replacement] of edits) out = out.replace(needle, replacement);
+  return out;
+}
+
 export function patchCytofForGateLab(src: string): string {
   let out = src;
   if (!out.includes("var _glEll = ")) out = ELLIPSE_PIXEL_GEOMETRY_SRC + out;
   out = patchPointSizes(out);
   out = patchOverlayDrawOrder(out);
+  out = patchPolygonDraftKeys(out);
 
   // In Shiny the plot bundle boots itself after a short delay, because the container may
   // appear after the script. GateLab's React wrapper instead calls render() as soon as the
@@ -549,7 +758,7 @@ export function patchCytofForGateLab(src: string): string {
       "    // plot's edge when nothing is in the way. Both ways: a side short of its stop is pushed out, a\n" +
       "    // side past it is brought back, and no vertex ends beyond the axis range. A corner goes where\n" +
       "    // its two sides' lines meet. A rectangle stays a rectangle: its side stops where it touches.\n" +
-      "    function _extendSelectedGateToEdges() {\n" +
+      "    function _extendSelectedGateToEdges(gateId) {\n" +
       "        if (!_plotData || !_plotData.gates || !_plotData.x_range || !_plotData.y_range || !_xBase) return false;\n" +
       "        var zx = _zx(), zy = _zy();\n" +
       "        var xCh = _plotData.x_label, yCh = _plotData.y_label;\n" +
@@ -561,7 +770,8 @@ export function patchCytofForGateLab(src: string): string {
       "        };\n" +
       "        var toPx = function (g, v) { return orient(g) === 'flipped' ? [zx(v[1]), zy(v[0])] : [zx(v[0]), zy(v[1])]; };\n" +
       "        var gate = null;\n" +
-      "        _plotData.gates.forEach(function (g) { if (g && g.gate_id === _plotData.selected_gate_id) gate = g; });\n" +
+      "        var wanted = gateId || _plotData.selected_gate_id;\n" +
+      "        _plotData.gates.forEach(function (g) { if (g && g.gate_id === wanted) gate = g; });\n" +
       "        if (!gate || !orient(gate) || gate.vertices.length < 3 || (gate.gate_type !== 'polygon' && gate.gate_type !== 'rectangle')) return false;\n" +
       "        var pts = gate.vertices.map(function (v) { return toPx(gate, v); });\n" +
       "        var n = pts.length;\n" +
@@ -727,7 +937,7 @@ export function patchCytofForGateLab(src: string): string {
       "    // through every endpoint of a group, axis-aligned when a rectangle's edge is in it, and the\n" +
       "    // endpoints move onto it, so the gates touch along a shared segment with neither a gap nor a\n" +
       "    // sliver of overlap. Acts on the gates named, else on every polygon and rectangle drawn here.\n" +
-      "    function _closeGateGaps(gateIds) {\n" +
+      "    function _closeGateGaps(gateIds, focus) {\n" +
       "        if (!_plotData || !_plotData.gates || !_xBase) return false;\n" +
       "        var zx = _zx(), zy = _zy();\n" +
       "        var want = null;\n" +
@@ -767,6 +977,8 @@ export function patchCytofForGateLab(src: string): string {
       "        for (var i = 0; i < edges.length; i++) for (var j = i + 1; j < edges.length; j++) {\n" +
       "            var e1 = edges[i], e2 = edges[j];\n" +
       "            if (e1.g === e2.g) continue;\n" +
+      "            // With a focus gate, only the gaps between it and its neighbours close.\n" +
+      "            if (focus && entries[e1.g].gate.gate_id !== focus && entries[e2.g].gate.gate_id !== focus) continue;\n" +
       "            if (Math.abs(e1.ux * e2.ux + e1.uy * e2.uy) < PARALLEL) continue;\n" +
       "            if (e1.nx * e2.nx + e1.ny * e2.ny > 0) continue; // both face the same way: not a gap\n" +
       "            if ((apart(e2.a, e1) + apart(e2.b, e1)) / 2 > GAP_PX) continue;\n" +
@@ -1276,25 +1488,50 @@ ${badgeNeedle}`;
     "            .attr('x1', 0).attr('y1', cyp).attr('x2', W).attr('y2', cyp)\n" +
     "            .attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none');";
   const curlyLinesPatch =
-    "        // Visible crosshair (non-interactive); with bent arms, the straight halves only.\n" +
+    "        // Visible crosshair (non-interactive); with bent arms, the straight halves only, and\n" +
+    "        // for a spider quadrant none: its four arms are drawn as paths from the centre.\n" +
     "        var arms = gate.arms && gate.arms.h && gate.arms.v ? gate.arms : null;\n" +
+    "        var spiderArms = arms && arms.spider && arms.l && arms.d ? arms : null;\n" +
     "        var _armPx = function (pts) { return pts.map(function (p) {\n" +
     "            return isFlipped ? [zx(p[1]), zy(p[0])] : [zx(p[0]), zy(p[1])]; }); };\n" +
     "        var _armPath = function (pts) { return pts.map(function (p, i) {\n" +
     "            return (i ? 'L' : 'M') + p[0].toFixed(2) + ',' + p[1].toFixed(2); }).join(''); };\n" +
     "        var vline = gg.append('line').attr('class', 'q-vline')\n" +
     "            .attr('x1', cxp).attr('y1', arms ? cyp : 0).attr('x2', cxp).attr('y2', H)\n" +
-    "            .attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none');\n" +
+    "            .attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none')\n" +
+    "            .style('display', spiderArms ? 'none' : null);\n" +
     "        var hline = gg.append('line').attr('class', 'q-hline')\n" +
     "            .attr('x1', 0).attr('y1', cyp).attr('x2', arms ? cxp : W).attr('y2', cyp)\n" +
-    "            .attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none');\n" +
+    "            .attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none')\n" +
+    "            .style('display', spiderArms ? 'none' : null);\n" +
     "        var armH = null, armV = null, armHpx = null, armVpx = null, armHandleSel = [];\n" +
+    "        var armL = null, armD = null, armLpx = null, armDpx = null;\n" +
     "        if (arms) {\n" +
     "            armHpx = _armPx(arms.h); armVpx = _armPx(arms.v);\n" +
     "            armH = gg.append('path').attr('class', 'q-arm-h').attr('d', _armPath(armHpx))\n" +
     "                .attr('fill', 'none').attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none');\n" +
     "            armV = gg.append('path').attr('class', 'q-arm-v').attr('d', _armPath(armVpx))\n" +
     "                .attr('fill', 'none').attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none');\n" +
+    "        }\n" +
+    "        if (spiderArms) {\n" +
+    "            // A spider's arms and box can reach past the plotted range (the box covers every\n" +
+    "            // event); they are cut at the plot's frame, and their ends' handles pinned to it.\n" +
+    "            armH.attr('clip-path', 'url(#cytof-clip)'); armV.attr('clip-path', 'url(#cytof-clip)');\n" +
+    "            armLpx = _armPx(spiderArms.l); armDpx = _armPx(spiderArms.d);\n" +
+    "            armL = gg.append('path').attr('class', 'q-arm-l').attr('d', _armPath(armLpx))\n" +
+    "                .attr('fill', 'none').attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none');\n" +
+    "            armD = gg.append('path').attr('class', 'q-arm-d').attr('d', _armPath(armDpx))\n" +
+    "                .attr('fill', 'none').attr('stroke', color).attr('stroke-width', lw).style('pointer-events', 'none');\n" +
+    "            armL.attr('clip-path', 'url(#cytof-clip)'); armD.attr('clip-path', 'url(#cytof-clip)');\n" +
+    "            // The box the arms' ends span: an event outside it is in no quadrant.\n" +
+    "            var _ends = [armHpx, armVpx, armLpx, armDpx].map(function (pxs) { return pxs[pxs.length - 1]; });\n" +
+    "            var _bx = _ends.map(function (e) { return e[0]; }), _by = _ends.map(function (e) { return e[1]; });\n" +
+    "            gg.append('rect').attr('class', 'q-spider-box')\n" +
+    "                .attr('x', Math.min.apply(null, _bx)).attr('y', Math.min.apply(null, _by))\n" +
+    "                .attr('width', Math.max.apply(null, _bx) - Math.min.apply(null, _bx))\n" +
+    "                .attr('height', Math.max.apply(null, _by) - Math.min.apply(null, _by))\n" +
+    "                .attr('fill', 'none').attr('stroke', color).attr('stroke-width', 1).attr('stroke-opacity', 0.6)\n" +
+    "                .attr('stroke-dasharray', '4,3').attr('clip-path', 'url(#cytof-clip)').style('pointer-events', 'none');\n" +
     "        }";
   const curlyDragNeedle =
     "                    vline.attr('x1', ncxp).attr('x2', ncxp);\n" +
@@ -1304,7 +1541,20 @@ ${badgeNeedle}`;
     "                    vline.attr('x1', ncxp).attr('x2', ncxp);\n" +
     "                    hline.attr('y1', ncyp).attr('y2', ncyp);\n" +
     "                    handle.attr('cx', ncxp).attr('cy', ncyp);\n" +
-    "                    if (arms) {\n" +
+    "                    if (spiderArms) {\n" +
+    "                        // A spider's centre moves alone, held inside the box its arms' ends span (the\n" +
+    "                        // store refuses one outside it); each arm runs from it to its end, which stays.\n" +
+    "                        var _ce = [armHpx, armVpx, armLpx, armDpx].map(function (pxs) { return pxs[pxs.length - 1]; });\n" +
+    "                        var _cx = _ce.map(function (e) { return e[0]; }), _cy = _ce.map(function (e) { return e[1]; });\n" +
+    "                        ncxp = Math.max(Math.min.apply(null, _cx) + 1, Math.min(Math.max.apply(null, _cx) - 1, ncxp));\n" +
+    "                        ncyp = Math.max(Math.min.apply(null, _cy) + 1, Math.min(Math.max.apply(null, _cy) - 1, ncyp));\n" +
+    "                        gate.center = isFlipped ? [zy.invert(ncyp), zx.invert(ncxp)] : [zx.invert(ncxp), zy.invert(ncyp)];\n" +
+    "                        handle.attr('cx', ncxp).attr('cy', ncyp);\n" +
+    "                        [[armH, armHpx], [armV, armVpx], [armL, armLpx], [armD, armDpx]].forEach(function (a) {\n" +
+    "                            var e = a[1][a[1].length - 1];\n" +
+    "                            a[0].attr('d', _armPath([[ncxp, ncyp], e]));\n" +
+    "                        });\n" +
+    "                    } else if (arms) {\n" +
     "                        vline.attr('y1', ncyp); hline.attr('x2', ncxp);\n" +
     "                        var tr = 'translate(' + (ncxp - cxp) + ',' + (ncyp - cyp) + ')';\n" +
     "                        if (armH) armH.attr('transform', tr);\n" +
@@ -1319,7 +1569,7 @@ ${badgeNeedle}`;
     "    function _drawGates(zx, zy) {";
   const curlyHandlePatch =
     "            handle.call(drag);\n" +
-    "            if (arms && armHpx && armVpx && armHpx.length > 1 && armVpx.length > 1) {\n" +
+    "            if (arms && !spiderArms && armHpx && armVpx && armHpx.length > 1 && armVpx.length > 1) {\n" +
     "                var _armHandle = function (which, pathSel, pxs) {\n" +
     "                    // The arm runs to the plot's edge; its handle sits part-way along it,\n" +
     "                    // where it can be reached and where the bend is already visible.\n" +
@@ -1366,6 +1616,81 @@ ${badgeNeedle}`;
     "                _armHandle('h', armH, armHpx);\n" +
     "                _armHandle('v', armV, armVpx);\n" +
     "            }\n" +
+    "            if (spiderArms) {\n" +
+    "                // A spider quadrant: each arm's end has a handle, which slides along the end's own\n" +
+    "                // edge of the box, as in FlowJo; on drop the point goes to the host, which holds\n" +
+    "                // the end on its edge and within the box.\n" +
+    "                var _endsPx = [armHpx, armVpx, armLpx, armDpx].map(function (pxs) { return pxs[pxs.length - 1]; });\n" +
+    "                var _bxs = _endsPx.map(function (e) { return e[0]; }), _bys = _endsPx.map(function (e) { return e[1]; });\n" +
+    "                var _bx0 = Math.min.apply(null, _bxs), _bx1 = Math.max.apply(null, _bxs);\n" +
+    "                var _by0 = Math.min.apply(null, _bys), _by1 = Math.max.apply(null, _bys);\n" +
+    "                var _spiderHandle = function (arm, pathSel, pxs) {\n" +
+    "                    if (!pathSel || !pxs || pxs.length < 2) return;\n" +
+    "                    var end = pxs[pxs.length - 1], moved = false;\n" +
+    "                    var inFrame = function (q) { return q[0] >= 0 && q[0] <= W && q[1] >= 0 && q[1] <= H; };\n" +
+    "                    // An end past the plotted range has its handle pinned, dashed, where its arm\n" +
+    "                    // crosses the plot's frame; dragging it slides it along that side of the frame and\n" +
+    "                    // turns the arm about the centre, its end staying on the end's own edge.\n" +
+    "                    var hx = end[0], hy = end[1], pinned = !inFrame(end);\n" +
+    "                    if (pinned) {\n" +
+    "                        var crossed = null;\n" +
+    "                        for (var k = 1; k < pxs.length && !crossed; k++) {\n" +
+    "                            var a = pxs[k - 1], b = pxs[k];\n" +
+    "                            if (!inFrame(a) || inFrame(b)) continue;\n" +
+    "                            var tt = 1;\n" +
+    "                            if (b[0] < 0) tt = Math.min(tt, a[0] / (a[0] - b[0]));\n" +
+    "                            if (b[0] > W) tt = Math.min(tt, (W - a[0]) / (b[0] - a[0]));\n" +
+    "                            if (b[1] < 0) tt = Math.min(tt, a[1] / (a[1] - b[1]));\n" +
+    "                            if (b[1] > H) tt = Math.min(tt, (H - a[1]) / (b[1] - a[1]));\n" +
+    "                            crossed = [a[0] + (b[0] - a[0]) * tt, a[1] + (b[1] - a[1]) * tt];\n" +
+    "                        }\n" +
+    "                        if (!crossed) crossed = [Math.max(0, Math.min(W, end[0])), Math.max(0, Math.min(H, end[1]))];\n" +
+    "                        hx = Math.max(0, Math.min(W, crossed[0])); hy = Math.max(0, Math.min(H, crossed[1]));\n" +
+    "                    }\n" +
+    "                    // The down and up ends slide along x in the data, the left and right along y; a\n" +
+    "                    // pinned handle slides along the side of the frame it sits on.\n" +
+    "                    var alongX = (arm === 'down' || arm === 'up') !== isFlipped;\n" +
+    "                    var slideX = pinned ? (hy <= 0.5 || hy >= H - 0.5) : alongX;\n" +
+    "                    var h = gg.append('circle').attr('class', 'vh q-spider-handle').attr('data-arm', arm)\n" +
+    "                        .attr('data-pinned', pinned ? '1' : null)\n" +
+    "                        .attr('cx', hx).attr('cy', hy).attr('r', VRAD)\n" +
+    "                        .attr('fill', 'white').attr('stroke', color).attr('stroke-width', 2)\n" +
+    "                        .attr('stroke-dasharray', pinned ? '2,2' : null)\n" +
+    "                        .style('cursor', slideX ? 'ew-resize' : 'ns-resize').style('pointer-events', 'all');\n" +
+    "                    armHandleSel.push(h);\n" +
+    "                    // Where the arm through the handle meets the end's own edge: the end it sets.\n" +
+    "                    var reach = function () {\n" +
+    "                        var c0 = gate.center, cpx = isFlipped ? [zx(c0[1]), zy(c0[0])] : [zx(c0[0]), zy(c0[1])];\n" +
+    "                        var to = [hx, hy];\n" +
+    "                        if (alongX && hy !== cpx[1]) to = [cpx[0] + (hx - cpx[0]) * (end[1] - cpx[1]) / (hy - cpx[1]), end[1]];\n" +
+    "                        if (!alongX && hx !== cpx[0]) to = [end[0], cpx[1] + (hy - cpx[1]) * (end[0] - cpx[0]) / (hx - cpx[0])];\n" +
+    "                        return { from: cpx, to: to };\n" +
+    "                    };\n" +
+    "                    h.call(d3.drag()\n" +
+    "                        .on('start', function (event) { _dragging = true; event.sourceEvent.stopPropagation(); })\n" +
+    "                        .on('drag', function (event) {\n" +
+    "                            var p = _ptr(event); moved = true;\n" +
+    "                            if (slideX) hx = Math.max(Math.max(_bx0, 0), Math.min(Math.min(_bx1, W), p[0]));\n" +
+    "                            else hy = Math.max(Math.max(_by0, 0), Math.min(Math.min(_by1, H), p[1]));\n" +
+    "                            h.attr('cx', hx).attr('cy', hy);\n" +
+    "                            var r = reach();\n" +
+    "                            pathSel.attr('d', _armPath([r.from, r.to]));\n" +
+    "                        })\n" +
+    "                        .on('end', function () {\n" +
+    "                            _dragging = false;\n" +
+    "                            if (!moved) return;\n" +
+    "                            _editSeq++;\n" +
+    "                            var t2 = reach().to;\n" +
+    "                            var at = isFlipped ? [zy.invert(t2[1]), zx.invert(t2[0])] : [zx.invert(t2[0]), zy.invert(t2[1])];\n" +
+    "                            _shinyInput('gate_quadrant_arm', { gate_id: gate.gate_id, arm: arm, at: at, seq: _editSeq });\n" +
+    "                            _flushDeferredPlot();\n" +
+    "                        }));\n" +
+    "                };\n" +
+    "                _spiderHandle('right', armH, armHpx);\n" +
+    "                _spiderHandle('up', armV, armVpx);\n" +
+    "                _spiderHandle('left', armL, armLpx);\n" +
+    "                _spiderHandle('down', armD, armDpx);\n" +
+    "            }\n" +
     "        }\n" +
     "    }\n" +
     "\n" +
@@ -1376,6 +1701,58 @@ ${badgeNeedle}`;
       .replace(curlyHandleNeedle, curlyHandlePatch);
   } else if (!out.includes("gate_quadrant_curl")) {
     console.warn("[GateLab] cytof curly-quadrant patch did not match — bent arms will draw as a straight crosshair.");
+  }
+
+  // Spider quadrants: the gate is selected by a click on any of its four arms rather than on the
+  // crosshair it no longer draws (spiderArms comes from the curly-quadrant patch above), and each
+  // quadrant's label sits at the place the payload gives inside its sector (quadrant_anchors),
+  // where the midpoint of a screen quadrant can lie in another sector.
+  const spiderHitNeedle =
+    "        _hit(cxp, 0, cxp, H);\n" +
+    "        _hit(0, cyp, W, cyp);";
+  const spiderHitPatch =
+    "        if (spiderArms) {\n" +
+    "            // Along each arm as drawn, which a display other than the gate's own curves.\n" +
+    "            [armHpx, armVpx, armLpx, armDpx].forEach(function (pxs) {\n" +
+    "                if (!pxs) return;\n" +
+    "                for (var k = 1; k < pxs.length; k++) _hit(pxs[k - 1][0], pxs[k - 1][1], pxs[k][0], pxs[k][1]);\n" +
+    "            });\n" +
+    "        } else {\n" +
+    "            _hit(cxp, 0, cxp, H);\n" +
+    "            _hit(0, cyp, W, cyp);\n" +
+    "        }";
+  const spiderLabelNeedle =
+    "        mids.forEach(function (pt) {\n" +
+    "            var dataX = isFlipped ? zy.invert(pt[1]) : zx.invert(pt[0]);\n" +
+    "            var dataY = isFlipped ? zx.invert(pt[0]) : zy.invert(pt[1]);\n" +
+    "            var q = (dataX < cx) ? (dataY >= cy ? 1 : 4) : (dataY >= cy ? 2 : 3);\n";
+  const spiderLabelPatch =
+    "        var qAnchors = gate.quadrant_anchors && gate.quadrant_anchors.length === 4 ? gate.quadrant_anchors : null;\n" +
+    "        if (qAnchors) mids = qAnchors.map(function (a, i) { return { anchor: a, q: i + 1 }; });\n" +
+    "        mids.forEach(function (pt) {\n" +
+    "            var dataX = pt.anchor ? pt.anchor[0] : (isFlipped ? zy.invert(pt[1]) : zx.invert(pt[0]));\n" +
+    "            var dataY = pt.anchor ? pt.anchor[1] : (isFlipped ? zx.invert(pt[0]) : zy.invert(pt[1]));\n" +
+    "            var q = pt.anchor ? pt.q : (dataX < cx) ? (dataY >= cy ? 1 : 4) : (dataY >= cy ? 2 : 3);\n";
+  // A spider's label place can lie past the plotted range with its quadrant; it is held inside the frame.
+  const spiderLabelPosNeedle = "            var pos = qPos(off, zx, zy);\n";
+  const spiderLabelPosPatch =
+    "            var pos = qPos(off, zx, zy);\n" +
+    "            if (pt.anchor) pos = [Math.max(6, Math.min(W - 6, pos[0])), Math.max(12, Math.min(H - 6, pos[1]))];\n";
+  // ...wholly, once its text is measured.
+  const spiderLabelFitNeedle =
+    "                .style('font-size', '11px').style('font-weight', '600').text(txt);\n" +
+    "            var bb = t.node().getBBox();\n";
+  const spiderLabelFitPatch = spiderLabelFitNeedle +
+    "            if (pt.anchor) {\n" +
+    "                pos = [Math.max(-bb.x + 3, Math.min(W - bb.x - bb.width - 3, pos[0])), pos[1]];\n" +
+    "                lg.attr('transform', 'translate(' + pos[0] + ',' + pos[1] + ')');\n" +
+    "            }\n";
+  if (out.includes(spiderHitNeedle) && out.includes(spiderLabelNeedle) && out.includes(spiderLabelPosNeedle)
+    && out.split(spiderLabelFitNeedle).length === 2 && out.includes("spiderArms")) {
+    out = out.replace(spiderHitNeedle, spiderHitPatch).replace(spiderLabelNeedle, spiderLabelPatch)
+      .replace(spiderLabelPosNeedle, spiderLabelPosPatch).replace(spiderLabelFitNeedle, spiderLabelFitPatch);
+  } else if (!out.includes("quadrant_anchors")) {
+    console.warn("[GateLab] cytof spider-quadrant patch did not match — a spider quadrant is selected on its crosshair and labelled by screen quadrant.");
   }
 
   // Two fixes to axis-label crowding, both around zero.
@@ -1482,6 +1859,28 @@ ${applyModeNeedle}`,
         `[GateLab] cytof draw-mode pointer patch matched ${hits}/3 sites — saved gates will ` +
           "intercept clicks while a gate tool is active.",
       );
+    }
+  }
+
+  // A rectangle with an open side is drawn only within the plot.
+  //
+  // The gate layer is unclipped so a gate stays visible and editable past the plot edge, which is
+  // right for a gate whose every side is finite. An open side sits at the end of the axis's range,
+  // far past the plot, and its outline ran on through the margins, so a FlowJo quadrant imported
+  // as four open rectangles looked many times its size until zoomed out. Its label is lifted to
+  // the labels layer after this, so the clip does not reach it.
+  const openRectMarker = "// GateLab: an open-sided rectangle is clipped to the plot.";
+  const savedGateNeedle = "            var gg = gl.append('g').attr('class', 'saved-gate');";
+  if (!out.includes(openRectMarker)) {
+    if (out.includes(savedGateNeedle)) {
+      out = out.replace(
+        savedGateNeedle,
+        `${savedGateNeedle}
+            ${openRectMarker}
+            if (gate.unbounded) gg.attr('clip-path', 'url(#cytof-clip)');`,
+      );
+    } else {
+      console.warn("[GateLab] cytof open-rectangle clip patch: needle not found — open sides draw past the plot.");
     }
   }
 
@@ -1690,13 +2089,18 @@ ${applyModeNeedle}`,
     else console.warn("[GateLab] cytof vertex-hold patch did not match -- Shift during a vertex drag holds no angle.");
   }
 
+  // Before the off-scale block below, which returns early on a current renderer.
+  out = patchAxisLabelBoxes(out);
+
   // Robust auto ranges intentionally leave a small tail off-scale. Keep those events visible
   // as a pile-up on the corresponding plot edge (the FlowJo/Cytobank convention), while the
   // underlying scales remain unclamped so gates and pointer-coordinate inversion are untouched.
   // GateLabR now carries this behavior natively; keep the compatibility patch only for an older
   // pinned renderer so updating the submodule cannot apply the pile-up logic a second time.
   const nativeOffscaleNeedle = "function _offscalePts()";
-  if (out.includes(nativeOffscaleNeedle)) return out;
+  // patchTailoredGates goes last, on either return: it uses the gate-outline patch's
+  // _gateOutlinePts, and that patch takes the name's presence for its own.
+  if (out.includes(nativeOffscaleNeedle)) return patchTailoredGates(out);
   const canvasMarker = "    // ── Canvas rendering ──────────────────────────────────────────────────────";
   const clampHelperNeedle = "function _clampPointX(scale, value)";
   if (out.includes(canvasMarker) && !out.includes(clampHelperNeedle)) {
@@ -1802,7 +2206,45 @@ ${applyModeNeedle}`,
     console.warn("[GateLab] cytof off-scale density patch did not match.");
   }
 
-  return out;
+  return patchTailoredGates(out);
+}
+
+/**
+ * The scatter plot's axis titles drawn as the histogram view's channel field: the label inside a
+ * thin box (`.gl-axis-label-box`, styled in styles.css), so both views show a channel picker the
+ * same way. The titles are SVG text, which CSS cannot box, so each gets a rect sized to it after
+ * every render and after the plot is cleared; the rect passes clicks through to the title, which
+ * still opens the renderer's own channel picker.
+ */
+export function patchAxisLabelBoxes(src: string): string {
+  if (src.includes("function _glAxisLabelBoxes()")) return src;
+  const helper =
+    "    function _glAxisLabelBoxes() {\n" +
+    "        if (!_g) return;\n" +
+    "        ['x', 'y'].forEach(function (axis) {\n" +
+    "            var sel = axis === 'x' ? '.cytof-xlabel' : '.cytof-ylabel';\n" +
+    "            var text = _g.select(sel);\n" +
+    "            if (text.empty()) return;\n" +
+    "            var box = _g.select('.gl-axis-label-box-' + axis);\n" +
+    "            if (box.empty()) box = _g.insert('rect', sel).attr('class', 'gl-axis-label-box gl-axis-label-box-' + axis).style('pointer-events', 'none');\n" +
+    "            var bb = null;\n" +
+    "            try { bb = text.text() ? text.node().getBBox() : null; } catch (e) { bb = null; }\n" +
+    "            if (!bb || !(bb.width > 0)) { box.attr('width', 0).attr('height', 0); return; }\n" +
+    "            box.attr('x', bb.x - 5).attr('y', bb.y - 1).attr('width', bb.width + 10).attr('height', bb.height + 2)\n" +
+    "               .attr('rx', 3).attr('transform', text.attr('transform'));\n" +
+    "        });\n" +
+    "    }\n\n";
+  const helperAnchor = "    // ── Channel picker (clicking axis labels) ────────────────────────────────\n";
+  const renderNeedle = "        _g.select('.cytof-ylabel').text(plotData.y_label || '');\n";
+  const clearNeedle = "            _g.select('.cytof-ylabel').text('');\n";
+  if (!src.includes(helperAnchor) || !src.includes(renderNeedle) || !src.includes(clearNeedle)) {
+    console.warn("[GateLab] cytof axis-label box patch did not match; the axis titles are drawn unboxed.");
+    return src;
+  }
+  return src
+    .replace(helperAnchor, helper + helperAnchor)
+    .replace(renderNeedle, renderNeedle + "        _glAxisLabelBoxes();\n")
+    .replace(clearNeedle, clearNeedle + "            _glAxisLabelBoxes();\n");
 }
 
 // GateLab adaptation (kept OUT of the pristine vendored submodule): mini_plot's contour uses a
@@ -2024,7 +2466,7 @@ export function patchMiniPlot(src: string): string {
   // ...and a quadrant step's crosshair and labels, which the step carries and a quadrant gate,
   // having no vertices, cannot be drawn without.
   const stepPlacedPatch = "                    label_offset: step.label_offset,\n                    label_placed: step.label_placed,\n" +
-    "                    center: step.center, arms: step.arms,\n" +
+    "                    center: step.center, arms: step.arms, quadrant_anchors: step.quadrant_anchors,\n" +
     "                    quadrant_pcts: step.quadrant_pcts, quadrant_label_offsets: step.quadrant_label_offsets\n";
   if (out.includes(stepPlacedNeedle)) out = out.replace(stepPlacedNeedle, stepPlacedPatch);
   else console.warn("[GateLab] mini_plot step-label patch did not match -- a placed label on the strategy strip is held inside the axes.");
@@ -2055,23 +2497,41 @@ export function patchMiniPlot(src: string): string {
                     return (index ? 'L' : 'M') + xScale(point[0]) + ',' + yScale(point[1]);
                 }).join('');
             }
-            // Negative halves remain straight. Positive x/y arms may carry FlowJo's curl.
-            qg.append('line').attr('x1', 0).attr('y1', qcy)
-                .attr('x2', qArms ? qcx : W).attr('y2', qcy)
-                .attr('stroke', qColor).attr('stroke-width', lineWidth);
-            qg.append('line').attr('x1', qcx).attr('y1', H)
-                .attr('x2', qcx).attr('y2', qArms ? qcy : 0)
-                .attr('stroke', qColor).attr('stroke-width', lineWidth);
+            // Negative halves remain straight. Positive x/y arms may carry FlowJo's curl. A spider
+            // quadrant draws its four arms from the centre and no straight half at all.
+            var qSpider = qArms && qArms.spider && qArms.l && qArms.d ? qArms : null;
+            if (!qSpider) {
+                qg.append('line').attr('x1', 0).attr('y1', qcy)
+                    .attr('x2', qArms ? qcx : W).attr('y2', qcy)
+                    .attr('stroke', qColor).attr('stroke-width', lineWidth);
+                qg.append('line').attr('x1', qcx).attr('y1', H)
+                    .attr('x2', qcx).attr('y2', qArms ? qcy : 0)
+                    .attr('stroke', qColor).attr('stroke-width', lineWidth);
+            }
             if (qArms) {
-                qg.append('path').attr('d', qPath(qArms.h)).attr('fill', 'none')
-                    .attr('stroke', qColor).attr('stroke-width', lineWidth);
-                qg.append('path').attr('d', qPath(qArms.v)).attr('fill', 'none')
-                    .attr('stroke', qColor).attr('stroke-width', lineWidth);
+                (qSpider ? [qArms.h, qArms.v, qSpider.l, qSpider.d] : [qArms.h, qArms.v]).forEach(function (arm) {
+                    qg.append('path').attr('d', qPath(arm)).attr('fill', 'none')
+                        .attr('stroke', qColor).attr('stroke-width', lineWidth);
+                });
+            }
+            if (qSpider) {
+                // The box the arms' ends span: an event outside it is in no quadrant.
+                var qEnds = [qArms.h, qArms.v, qSpider.l, qSpider.d].map(function (arm) { return arm[arm.length - 1]; });
+                var qBx = qEnds.map(function (e) { return xScale(e[0]); }), qBy = qEnds.map(function (e) { return yScale(e[1]); });
+                qg.append('rect').attr('x', Math.min.apply(null, qBx)).attr('y', Math.min.apply(null, qBy))
+                    .attr('width', Math.max.apply(null, qBx) - Math.min.apply(null, qBx))
+                    .attr('height', Math.max.apply(null, qBy) - Math.min.apply(null, qBy))
+                    .attr('fill', 'none').attr('stroke', qColor).attr('stroke-width', Math.max(0.5, lineWidth / 2))
+                    .attr('stroke-opacity', 0.6).attr('stroke-dasharray', '4,3');
             }
             var qCounts = gate.quadrant_counts || [];
             var qPcts = gate.quadrant_pcts || [];
             var qMids = [[qcx / 2, qcy / 2], [(qcx + W) / 2, qcy / 2],
                          [(qcx + W) / 2, (qcy + H) / 2], [qcx / 2, (qcy + H) / 2]];
+            // A spider quadrant's labels sit inside their sectors (quadrant_anchors, screen order).
+            if (gate.quadrant_anchors && gate.quadrant_anchors.length === 4) {
+                qMids = gate.quadrant_anchors.map(function (a) { return [xScale(a[0]), yScale(a[1])]; });
+            }
             var qFs = parseFloat(gateFs);
             if (!isFinite(qFs) || qFs <= 0) qFs = 9;
             var qOffs = gate.quadrant_label_offsets || [];
@@ -2609,6 +3069,35 @@ export function patchMiniPlot(src: string): string {
   return out;
 }
 
+/**
+ * division_plot.js: the per-division labels sit at their band's centre on one row, so the labels
+ * of narrow bands overlapped. Each label now takes the highest of four rows where it clears the
+ * labels already placed, reads on a white halo over the bars, and carries its name as a tooltip.
+ */
+export function patchDivisionPlot(src: string): string {
+  let out = src;
+  const refreshNeedle = '              return (S.binLabels[lv] || ("Div" + lv));\n            });\n';
+  const refreshPatch = refreshNeedle +
+    '    // GateLab: stagger the labels of narrow bands rather than draw them over each other.\n' +
+    '    var placed = [];\n' +
+    '    S.labels.each(function () {\n' +
+    '      var el = d3.select(this), text = String(el.text()), x = +el.attr("x");\n' +
+    '      var w = (typeof this.getComputedTextLength === "function" && this.getComputedTextLength()) || text.length * 7;\n' +
+    '      var lo = x - w / 2 - 3, hi = x + w / 2 + 3, row = 0;\n' +
+    '      while (row < 3 && placed.some(function (p) { return p.row === row && lo < p.hi && hi > p.lo; })) row++;\n' +
+    '      placed.push({ row: row, lo: lo, hi: hi });\n' +
+    '      el.attr("y", 12 + row * 14);\n' +
+    '      el.append("title").text(text);\n' +
+    '    });\n';
+  if (out.includes(refreshNeedle)) out = out.replace(refreshNeedle, refreshPatch);
+  else console.warn("[GateLab] division label-stagger patch did not match -- narrow divisions' labels may overlap.");
+  const haloNeedle = '.attr("font-weight", "600").attr("fill", "#333");';
+  if (out.includes(haloNeedle)) {
+    out = out.replace(haloNeedle, '.attr("font-weight", "600").attr("fill", "#333")\n      .attr("stroke", "#fff").attr("stroke-width", 3).attr("paint-order", "stroke");');
+  }
+  return out;
+}
+
 export function loadPlots(): { CytofD3: CytofD3Api; bus: PlotBus } {
   if (cached) return cached;
   const bus = installShim();
@@ -2616,9 +3105,9 @@ export function loadPlots(): { CytofD3: CytofD3Api; bus: PlotBus } {
     // Indirect eval → runs in global scope so UMD/IIFE assignments land on window.
     const globalEval = eval;
     globalEval(d3Src); // → window.d3
-    globalEval(patchCytofForGateLab(cytofSrc)); // → window.CytofD3 (+ registers updatePlot/setMode/... on window.Shiny)
+    globalEval(patchGateInk(patchGateLineWidth(patchCytofForGateLab(cytofSrc)))); // → window.CytofD3 (+ registers updatePlot/setMode/... on window.Shiny)
     globalEval(patchMiniPlot(miniSrc)); // → window.CytofMiniPlot (Strategy / Illustration grids)
-    globalEval(divisionSrc); // → window.DivisionD3 (Division profiler)
+    globalEval(patchDivisionPlot(divisionSrc)); // → window.DivisionD3 (Division profiler)
     loaded = true;
   }
   const CytofD3 = (window as unknown as { CytofD3?: CytofD3Api }).CytofD3;

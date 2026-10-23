@@ -35,6 +35,9 @@ import App from "./App";
 import { readWorkspaceEnvelopeFromFile } from "./engine/workspace";
 import { saveWorkspaceCheckpoint } from "./engine/workspaceHistory";
 
+/** What the page says, the status line's whole text (its tooltip) included. */
+const shown = (root: ParentNode): string => `${root.textContent ?? ""} ${root.querySelector(".gl-status-line")?.getAttribute("title") ?? ""}`;
+
 let root: Root;
 let host: HTMLDivElement;
 let uuid = 0;
@@ -135,7 +138,7 @@ function savedAfterOpen(): WorkspaceFile {
 describe("a spillover matrix the FCS file does not carry, through a saved workspace", () => {
   it("is saved with the sample, installed again on opening, and compensates the counts", async () => {
     await openWorkspace(workspace({ externalSpillover: MATRIX }));
-    expect(host.textContent).toContain("Opened analysis.gatelab · 1 sample");
+    expect(shown(host)).toContain("Opened analysis.gatelab · 1 sample");
     expect(host.textContent).toMatch(/FL2_positive[\s\S]{0,60}?2 \(50%\)/);
     const saved = savedAfterOpen();
     expect(saved.samples[0].compensationOn).toBe(true);

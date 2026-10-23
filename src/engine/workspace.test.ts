@@ -220,6 +220,23 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     expect(back.scales).toEqual(ranged.scales);
   });
 
+  it("round-trips a spider quadrant's arms, and rejects arms that are not valid", () => {
+    const spider = cloneWs(ws);
+    spider.gating.gates.q1 = {
+      gate_id: "q1", name: "D1 spider", gate_type: "quadrant", x_channel: "PE-A", y_channel: "FSC-A",
+      center: [0.5, 0.4], arms: { down: [0.45, 0], right: [1, 0.42], up: [0.4, 1], left: [0, 0.35] },
+      space: "display", transforms: { "PE-A": { kind: "identity" }, "FSC-A": { kind: "identity" } },
+      color: "#377eb8", label_offset: null,
+    };
+    spider.gating.gate_order.push("q1");
+    expect(validateWorkspace(spider)).toBe(true);
+    const { ws: back } = readWorkspaceBytes(packWorkspace(spider, fcsByPath, "<xml/>"));
+    expect(back.gating.gates.q1).toEqual(spider.gating.gates.q1);
+    const crossed = cloneWs(spider);
+    (crossed.gating.gates.q1 as { arms: { down: [number, number] } }).arms.down = [0.45, 0.6];
+    expect(() => validateWorkspace(crossed)).toThrow(/invalid arms/);
+  });
+
   it("rejects malformed scale-mode settings", () => {
     const badLock = cloneWs(ws);
     (badLock.scales as unknown as Record<string, unknown>).lockBetweenFiles = "yes";
@@ -675,12 +692,15 @@ describe("the drawn transforms a hosted save carries", () => {
       "FSC-A": { kind: "identity" },
       "FL1-A": { kind: "logicle", T: 262144, W: 0.5, M: 4.5, A: 0 },
       "FL2-A": { kind: "biex", maxValue: 262144, pos: 4.5, neg: 0, widthBasis: -10, channelRange: 256, spline: true },
+      "FL3-A": { kind: "hyperlog", T: 1000, W: 1, M: 4, A: 0 },
     };
     expect(validateWorkspace(ws)).toBe(true);
     const { ws: back } = readWorkspaceBytes(packWorkspaceReference(ws));
     expect((back as unknown as { hostedChannelTransforms: Record<string, { kind: string }> }).hostedChannelTransforms["FL1-A"].kind).toBe("logicle");
     const stray = cloneWs(makeWs());
     (stray as unknown as { hostedChannelTransforms: unknown }).hostedChannelTransforms = { "FL1-A": { kind: "hyperlog" } };
+    expect(() => validateWorkspace(stray)).toThrow(/hostedChannelTransforms/);
+    (stray as unknown as { hostedChannelTransforms: unknown }).hostedChannelTransforms = { "FL1-A": { kind: "future-transform" } };
     expect(() => validateWorkspace(stray)).toThrow(/hostedChannelTransforms/);
   });
 });

@@ -190,12 +190,14 @@ describe("App SCE host loading", () => {
     expect(container.textContent).toContain("GateLabR");
     expect(container.textContent).toContain("SingleCellExperiment · workspace revision 0 · unsaved");
     expect(container.textContent).toContain("Save to SCE");
-    expect(container.textContent).not.toContain("+ Files…");
+    expect(container.textContent).not.toContain("Add files…");
     expect(container.textContent).not.toContain("Open Workspace…");
     // Mass cytometry is gated pooled: the SCE opens with every sample selected and pooled, and the
     // pool is the tree, open to drawing.
     expect(container.querySelector(".gl-pool-toolbar")?.textContent).toContain("Pooled view · 2 samples");
-    expect(container.textContent).toContain("Return to single sample");
+    // Pooled: the file list's Single | Pooled shows Pooled, and Single says what it does in the R host's words.
+    expect(container.querySelector(".gl-pool-toggle .gl-pool-pooled")!.getAttribute("aria-checked")).toBe("true");
+    expect(container.querySelector<HTMLButtonElement>(".gl-pool-toggle .gl-pool-single")!.title).toBe("View the one sample again");
     expect(plotHarness.eventCount).toBe(3);
 
     // The About card under the R host: the package's own name and artwork, the version said to be
@@ -287,7 +289,7 @@ describe("App SCE host loading", () => {
     expect(container.querySelector(".gl-pool-toolbar")?.textContent).toContain("Viewing: Donor B");
     expect(plotHarness.eventCount).toBe(1);
     await act(async () => {
-      [...container.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.startsWith("Pool selected samples (2)"))!.click();
+      container.querySelector<HTMLButtonElement>(".gl-pool-toggle [aria-checked=false]")!.click();
       await new Promise(resolve => setTimeout(resolve, 30));
     });
     expect(container.querySelector(".gl-pool-toolbar")?.textContent).toContain("Pooled view · 2 samples");
@@ -871,7 +873,9 @@ describe("hosted assay choice", () => {
     }
     throw new Error("pooled counts never landed");
   };
-  const instrumentSelect = () => [...container.querySelectorAll<HTMLSelectElement>("select")].find((s) => [...s.options].some((o) => o.value === "cytof"))!;
+  // The header's instrument menu (Flow (auto) ▾): its trigger, and the choice that is ticked.
+  const instrumentTrigger = () => container.querySelector<HTMLButtonElement>(".gl-instrument-menu .gl-menu-trigger")!;
+  const instrumentChoice = () => container.querySelector(".gl-instrument-menu [role='menuitemcheckbox'][aria-checked='true']")!.textContent;
   const mountHost = async (saved: string | null, writeWorkspace = vi.fn(async (request: { expectedRevision: number; clientRevision: number; workspaceJson: string }) => ({
     revision: request.expectedRevision + 1, clientRevision: request.clientRevision, savedAt: "2026-07-25T00:00:00Z",
   })), hosted: GateLabHostDatasetDescriptor = twoAssays) => {
@@ -912,7 +916,7 @@ describe("hosted assay choice", () => {
     expect(readAssay.mock.calls.map((call) => call[2])).toEqual(["exprs", "exprs"]);
     expect(assaySelect().value).toBe("assay:exprs");
     expect([...assaySelect().options].map((o) => o.textContent)).toEqual(["exprs · as stored", "counts"]);
-    expect(instrumentSelect().disabled).toBe(false);
+    expect(instrumentTrigger().disabled).toBe(false);
     expect(container.textContent).toContain("drawing exprs as stored");
     // The values as stored, on the arcsinh 5 axis they are in.
     expect(plotted()).toEqual({ x: sorted(exprsOf([5, 10, 15])), y: sorted(exprsOf([20, 25, 30])) });
@@ -924,7 +928,7 @@ describe("hosted assay choice", () => {
     });
     expect(readAssay.mock.calls.slice(2).map((call) => call[2])).toEqual(["counts", "counts"]);
     expect(assaySelect().value).toBe("assay:counts");
-    expect(instrumentSelect().disabled).toBe(false);
+    expect(instrumentTrigger().disabled).toBe(false);
     expect(container.textContent).toContain("Drawing counts");
     expect(plotted()).toEqual({ x: sorted([5, 10, 15].map(asinh5)), y: sorted([20, 25, 30].map(asinh5)) });
 
@@ -1023,18 +1027,17 @@ describe("hosted assay choice", () => {
   it("carries the instrument mode across a switch", async () => {
     await mountHost(null);
     await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(instrumentSelect(), "flow");
-      instrumentSelect().dispatchEvent(new Event("change", { bubbles: true }));
+      [...container.querySelectorAll<HTMLButtonElement>(".gl-instrument-menu [role='menuitemcheckbox']")].find((item) => item.textContent === "Flow")!.click();
       await new Promise((resolve) => setTimeout(resolve, 30));
     });
-    expect(instrumentSelect().value).toBe("flow");
+    expect(instrumentChoice()).toBe("Flow");
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(assaySelect(), "assay:counts");
       assaySelect().dispatchEvent(new Event("change", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 30));
     });
     expect(assaySelect().value).toBe("assay:counts");
-    expect(instrumentSelect().value).toBe("flow");
+    expect(instrumentChoice()).toBe("Flow");
   });
 
   // A compensated layer is linear values beside counts. On a flow object with a spillover matrix

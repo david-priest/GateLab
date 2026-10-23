@@ -92,7 +92,7 @@ function uploadedOrigin(
 ): Extract<CompensationProfileOrigin, { type: "uploaded" }> {
   return {
     type: "uploaded",
-    fileName: "Wing Lab QQ beads (2021-06-03), α β.csv",
+    fileName: "Reference QQ beads (2021-06-03), α β.csv",
     format: "csv",
     sourceColumnHeader: "",
     ...overrides,
@@ -128,7 +128,7 @@ describe("compensation profile baseline records", () => {
 
   it("creates a canonical immutable baseline with self-consistent hashes and provenance", async () => {
     const origin = uploadedOrigin({
-      fileName: "  Wing Lab QQ beads (2021-06-03), α β.CSV  ",
+      fileName: "  Reference QQ beads (2021-06-03), α β.CSV  ",
       fileDigest: DIGEST_A,
     });
     const provenance: CompensationProfileProvenance = {
@@ -142,7 +142,7 @@ describe("compensation profile baseline records", () => {
       applicabilityNote: "Preserve this whitespace.  ",
     };
     const record = await createCompensationBaselineProfile(flowScientific(), {
-      profileId: "baseline.portal-1",
+      profileId: "baseline.beads-1",
       name: "  Cafe\u0301 baseline  ",
       createdAt: "2026-07-17T20:00:00+09:00",
       note: "  multiline note\nkeeps whitespace  ",
@@ -153,13 +153,13 @@ describe("compensation profile baseline records", () => {
     expect(record).toMatchObject({
       schema: COMPENSATION_PROFILE_RECORD_SCHEMA,
       recordType: "baseline",
-      profileId: "baseline.portal-1",
+      profileId: "baseline.beads-1",
       name: "Café baseline",
       createdAt: CREATED,
       note: "  multiline note\nkeeps whitespace  ",
       parentProfileId: null,
       revisionReason: null,
-      baselineProfileId: "baseline.portal-1",
+      baselineProfileId: "baseline.beads-1",
     });
     expect(record.origin).toEqual(origin);
     expect(record.provenance).toEqual({

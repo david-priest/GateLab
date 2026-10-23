@@ -153,7 +153,7 @@ const errorText = () => host.querySelector(".gl-error")?.textContent ?? "";
 const page = () => host.textContent ?? "";
 async function openWorkspace(text: string, fcs: File[]): Promise<void> {
   act(() => root.render(<App />));
-  await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", text)]);
+  await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", text)]);
   expect(dialog()).not.toBeNull();
   if (fcs.length) await feed('input[data-role="flowjo-workspace-fcs"]', fcs);
 }
@@ -242,7 +242,7 @@ describe("the open dialog, two samples of one name", () => {
       sample("D1.fcs", "D1.fcs", { ...IDENTITY[1], $FIL: "D1.fcs" }, pop("D1_CD4_positive", "a2", 12), "Group 2"),
     );
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", W)]);
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", W)]);
     // Seed 12 is seed 1's acquisition with the $FIL the samples record.
     await feed('input[data-role="flowjo-workspace-fcs"]', [fileOf("D1.fcs", Uint8Array.from([12])), fileOf("copy.fcs", Uint8Array.from([12]))]);
     expect(rows()[0].textContent).toContain("choosing this row says D1.fcs is this one");
@@ -316,7 +316,7 @@ describe("a .wsp imported onto the viewed file, with other files of the workspac
     const row = [...host.querySelectorAll<HTMLElement>('[role="option"]')].find((r) => r.textContent?.includes(viewed))!;
     await act(async () => { row.click(); });
     await settle();
-    await feed('input[accept=".xml,.wsp,.cef"]', [fileOf("experiment.wsp", text)]);
+    await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', [fileOf("experiment.wsp", text)]);
     const said = [...host.querySelectorAll(".gl-modal")].map((m) => m.textContent ?? "").join(" | ");
     const confirm = [...host.querySelectorAll<HTMLButtonElement>(".gl-modal button")].find((b) => /^Import/.test(b.textContent ?? ""));
     if (confirm) { await act(async () => { confirm.click(); }); for (let i = 0; i < 4; i++) await settle(); }
@@ -362,7 +362,7 @@ describe("a .wsp imported onto the loaded FCS", () => {
   async function loadThenImport(text: string, seed: number, name = "Specimen_001_Tube_001.fcs"): Promise<void> {
     act(() => root.render(<App />));
     await feed('input[type=file][accept=".fcs"][multiple]', [fileOf(name, Uint8Array.from([seed]))]);
-    await feed('input[accept=".xml,.wsp,.cef"]', [fileOf("experiment.wsp", text)]);
+    await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', [fileOf("experiment.wsp", text)]);
   }
   const picker = () => host.querySelector<HTMLElement>('[aria-label="Choose a FlowJo sample"]');
 
@@ -457,7 +457,7 @@ describe("a FACSDiva experiment imported onto the loaded FCS", () => {
   async function loadThenImport(name: string, seed: number): Promise<void> {
     act(() => root.render(<App />));
     await feed('input[type=file][accept=".fcs"][multiple]', [fileOf(name, Uint8Array.from([seed]))]);
-    await feed('input[accept=".xml,.wsp,.cef"]', [fileOf("experiment.xml", XML)]);
+    await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', [fileOf("experiment.xml", XML)]);
     const confirm = [...host.querySelectorAll<HTMLButtonElement>(".gl-modal button")].find((b) => /^Import/.test(b.textContent ?? ""));
     if (confirm) { await act(async () => { confirm.click(); }); for (let i = 0; i < 4; i++) await settle(); }
   }
@@ -492,7 +492,7 @@ describe("a FACSDiva experiment imported onto the loaded FCS", () => {
     const two = XML.replace("</specimen>", `</specimen><specimen name="Specimen_002">${tube("Tube_001", "Specimen_002_Tube_001.fcs", "2024-05-05T09:00:00", "2024-05-05T09:01:00", gate("D5_lymphocytes"))}</specimen>`);
     act(() => root.render(<App />));
     await feed('input[type=file][accept=".fcs"][multiple]', [fileOf("Specimen_001_Tube_001.fcs", Uint8Array.from([2]))]);
-    await feed('input[accept=".xml,.wsp,.cef"]', [fileOf("experiment.xml", two)]);
+    await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', [fileOf("experiment.xml", two)]);
     const names = [...picker()!.querySelectorAll(".gl-wsp-name")].map((el) => el.textContent ?? "");
     expect(names).toEqual(["Specimen_001 / Tube_001tube", "Tube_002tube", "Specimen_002 / Tube_001tube"]);
   });
@@ -522,7 +522,7 @@ describe("a FACSChorus experiment imported onto the loaded FCS", () => {
     });
     act(() => root.render(<App />));
     await feed('input[type=file][accept=".fcs"][multiple]', [fileOf("D2.fcs", Uint8Array.from([2]))]);
-    await feed('input[accept=".xml,.wsp,.cef"]', [fileOf("strategy.cef", cef as Uint8Array<ArrayBuffer>)]);
+    await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', [fileOf("strategy.cef", cef as Uint8Array<ArrayBuffer>)]);
     // It used to be imported at once: "from FACSChorus experiment · experiment E1 · Current gates".
     expect(page()).not.toContain("Imported 1 gates");
     expect(page()).toContain("D2.fcs carries no FACSChorus record, so nothing shows these gates are its own.");
@@ -553,7 +553,7 @@ describe("a FACSChorus experiment imported onto one of its own recordings", () =
     });
     act(() => root.render(<App />));
     await feed('input[type=file][accept=".fcs"][multiple]', [fileOf("D1.fcs", Uint8Array.from([7]))]);
-    await feed('input[accept=".xml,.wsp,.cef"]', [fileOf("strategy.cef", cef as Uint8Array<ArrayBuffer>)]);
+    await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', [fileOf("strategy.cef", cef as Uint8Array<ArrayBuffer>)]);
     expect(page()).toContain("D1.fcs was recorded under the same tree as Sort 1. It was recorded during Sort 1.");
     const buttons = [...host.querySelectorAll<HTMLButtonElement>(".gl-chorus-timeline-row button")].map((b) => b.textContent);
     expect(buttons).toContain("Import snapshot…");
@@ -574,7 +574,7 @@ describe("a Cytobank file with gates tailored per FCS file", () => {
     const { CYTOBANK_TAILORED } = await import("./engine/cytobankTailoring.fixture");
     act(() => root.render(<App />));
     await feed('input[type=file][accept=".fcs"][multiple]', [fileOf("D1.fcs", Uint8Array.from([1])), fileOf("D2.fcs", Uint8Array.from([2]))]);
-    await feed('input[accept=".xml,.wsp,.cef"]', [fileOf("cytobank.xml", CYTOBANK_TAILORED)]);
+    await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', [fileOf("cytobank.xml", CYTOBANK_TAILORED)]);
     const confirm = [...host.querySelectorAll<HTMLButtonElement>(".gl-modal button")].find((b) => /^Import/.test(b.textContent ?? ""));
     if (confirm) { await act(async () => { confirm.click(); }); for (let i = 0; i < 4; i++) await settle(); }
     // One gate: D2's tailored copy used to come in as a second "CD4_positive".

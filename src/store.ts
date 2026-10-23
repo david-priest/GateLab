@@ -23,9 +23,13 @@ import {
   type Vertex,
   type GateSpace,
   type GateTransforms,
+  type QuadrantArms,
   type QuadrantCurl,
   type RectangleBounds,
   withExplicitRectangleBounds,
+  validArms,
+  cloneArms,
+  spiderBox,
 } from "./engine/models";
 import {
   applyGatingStrategy,
@@ -41,7 +45,7 @@ import {
 } from "./engine/populations";
 import { mergeGatingStrategies, type GatingImportMode } from "./engine/gatingMerge";
 import { populationTreeOrder } from "./engine/populations";
-import { DEFAULT_HIERARCHY_ID, DEFAULT_HIERARCHY_NAME, storeHierarchy, selectionAcrossHierarchies, correspondingHierarchyId, canonicalGateId, type HierarchyRef, type StoredHierarchy, isCopyRef, fileHierarchyId, cloneHierarchyTree, newHierarchyId } from "./engine/hierarchies";
+import { DEFAULT_HIERARCHY_ID, DEFAULT_HIERARCHY_NAME, storeHierarchy, selectionAcrossHierarchies, correspondingHierarchyId, canonicalGateId, type HierarchyRef, type StoredHierarchy, isCopyRef, fileHierarchyId, cloneHierarchyTree, newHierarchyId, hierarchyColour } from "./engine/hierarchies";
 import { syncLockedCopy, gateGeometryEquals, copyInStepOnTemplateChannels, copyOnOwnChannels, withGeometryOf, type TemplateTree } from "./engine/templateSync";
 import { onChannels } from "./engine/tailoredImport";
 import type { Sample } from "./engine/sample";
@@ -84,6 +88,14 @@ export interface CoreState {
 export interface WorkspaceGroup {
   id: string;
   name: string;
+  /** The group's colour, once chosen or once the groups are reordered; else it takes the palette's by position. */
+  colour?: string;
+}
+
+/** A group's colour: its own, else the palette's for its position. */
+export function groupColour(groups: readonly WorkspaceGroup[], index: number): string {
+  const own = groups[index]?.colour;
+  return own && /^#[0-9a-f]{6}$/i.test(own) ? own : hierarchyColour(index);
 }
 
 interface Snapshot {
@@ -138,6 +150,14 @@ function knownAssignments(assignments: Record<string, string>, hierarchies: read
   return Object.fromEntries(Object.entries(assignments).filter(([, id]) => known.has(id)));
 }
 
+/** Whether two states hold the same gates, trees and file assignments, whatever is selected. */
+export function sameGatingStructure(a: CoreState, b: CoreState): boolean {
+  return a.gates === b.gates && a.gate_order === b.gate_order && a.populations === b.populations
+    && a.root_population_id === b.root_population_id && a.hierarchies === b.hierarchies
+    && a.active_hierarchy_id === b.active_hierarchy_id && a.stored_hierarchies === b.stored_hierarchies
+    && a.file_hierarchies === b.file_hierarchies && a.groups === b.groups && a.file_groups === b.file_groups;
+}
+
 /** `after`, built from `before` through several steps, recorded as one undo entry. */
 function withOneUndoEntry(before: CoreState, after: CoreState): CoreState {
   return {
@@ -180,8 +200,39 @@ function unlinkedRef<T extends HierarchyRef>(hierarchy: T): T {
   return rest as T;
 }
 
+/**
+ * The gates a file switched on for tailoring, by the file's copy's own gate ids: tailored for the
+ * file from the moment the switch is on, before any drag has moved them, and kept where they are
+ * when the tree moves. Held on the copy's record, never on a gate, since every field of a gate
+ * counts as its geometry (templateSync.geometryOf). Saved with the workspace as part of the record.
+ */
+export function switchedOnGateIds(ref: HierarchyRef | StoredHierarchy | undefined): readonly string[] {
+  return (ref as { tailored_gate_ids?: readonly string[] } | undefined)?.tailored_gate_ids ?? [];
+}
+
+/** `ref` with its switched-on gates set to `ids`, the field left out when there are none. */
+function withSwitchedOn<T extends HierarchyRef | StoredHierarchy>(ref: T, ids: readonly string[]): T {
+  const { tailored_gate_ids: _old, ...rest } = ref as T & { tailored_gate_ids?: readonly string[] };
+  void _old;
+  return (ids.length ? { ...rest, tailored_gate_ids: [...new Set(ids)] } : rest) as T;
+}
+
+/**
+ * A copy brought in step with what it follows (syncLockedCopy), with each gate the file switched
+ * on kept as the copy had it: a switched-on gate is the file's own, and the tree moving does not
+ * move it, whether or not a drag has moved it yet.
+ */
+function keepSwitchedOn(before: StoredHierarchy, synced: StoredHierarchy): StoredHierarchy {
+  const ids = switchedOnGateIds(before).filter((id) => before.gates[id] && synced.gates[id]);
+  if (!ids.length) return synced;
+  const gates = { ...synced.gates };
+  for (const id of ids) gates[id] = before.gates[id];
+  return withSwitchedOn({ ...synced, gates }, switchedOnGateIds(before));
+}
+
 function hierarchyRefFromStored(hierarchy: StoredHierarchy): HierarchyRef {
   return {
+    ...(switchedOnGateIds(hierarchy).length ? { tailored_gate_ids: [...switchedOnGateIds(hierarchy)] } : {}),
     id: hierarchy.id,
     name: hierarchy.name,
     ...(hierarchy.owner_sample_id ? { owner_sample_id: hierarchy.owner_sample_id } : {}),
@@ -211,6 +262,11 @@ function pushUndo(s: CoreState, affectsGating = true): Pick<CoreState, "undo" | 
   return { undo: [snapshot(s, affectsGating), ...s.undo].slice(0, MAX_UNDO), redo: [] };
 }
 
+/** The edits of one gate's geometry that editGateIn carries to a tree that is not live. */
+export type GateEditAction = Extract<Action, {
+  type: "editGate" | "editGates" | "moveEllipse" | "reshapeEllipse" | "moveQuadrantCenter" | "setQuadrantCurl" | "revertGateToGroup" | "applyGateToGroup";
+}>;
+
 export type Action =
   | { type: "newWorkspace" }
   | { type: "loadSample"; nEvents: number }
@@ -238,6 +294,11 @@ export type Action =
       /** Set when an agent made the gate; a drawn gate has none. */
       provenance?: GateProvenance;
     }
+  /**
+   * Several new gates (and their populations) as one Undo step: a bisector's two ranges. Each is
+   * exactly an `addGate`, applied in order; only the undo history is shared.
+   */
+  | { type: "addGates"; gates: Extract<Action, { type: "addGate" }>[] }
   | {
       type: "addEllipse";
       xChannel: string;
@@ -264,6 +325,8 @@ export type Action =
       transforms?: GateTransforms;
       /** Bent arms beyond the crosshair; absent for a straight one. */
       curl?: QuadrantCurl;
+      /** Four leaning arms (a spider quadrant), in the gate's own space; never with `curl`. */
+      arms?: QuadrantArms;
       /** Short axis labels for the four population names, e.g. the marker rather than "Marker (Detector)". */
       xLabel?: string;
       yLabel?: string;
@@ -272,12 +335,19 @@ export type Action =
       provenance?: GateProvenance;
     }
   | { type: "setQuadrantCurl"; gateId: string; curl: QuadrantCurl | null } // bend or straighten the arms
+  /** Lean one arm of a spider quadrant: its end moves along its own edge to `end`'s place there, in the gate's own space. */
+  | { type: "setQuadrantArm"; gateId: string; arm: keyof QuadrantArms; end: [number, number] }
   | { type: "addPopulation"; name: string; parentId: string; gateRefs: GateRef[] }
   | { type: "setActivePopulation"; popId: string }
+  /** The lists' one selection: the active row (or selected gate) and the other highlighted rows with it. */
+  | { type: "selectPopulations"; activeId: string; popIds: readonly string[] }
+  | { type: "selectGates"; gateId: string | null; gateIds: readonly string[] }
   | { type: "selectGate"; gateId: string | null }
   | { type: "toggleGateSelect"; gateId: string; checked: boolean }
   | { type: "togglePopSelect"; popId: string; checked: boolean }
   | { type: "renameGate"; gateId: string; name: string }
+  /** A gate's colour, `#rrggbb`, on the tree and on every copy's version of it: display only, as one undo entry. */
+  | { type: "setGateColour"; gateId: string; colour: string }
   /** `quadrant` (0 to 3, Q1 to Q4) moves one of a quadrant gate's four labels instead of the gate label. */
   /**
    * Place a gate's label, or one quadrant label of a quadrant gate. The placement is the gate's
@@ -359,6 +429,20 @@ export type Action =
   /** The group's template takes this gate's geometry from the live copy; every other copy that
    *  followed the template's gate follows the new geometry. FlowJo's "apply to group", one gate. */
   | { type: "applyGateToGroup"; gateId: string }
+  /**
+   * A gate edit made on a tree that is not live: the viewed file's own copy, or its group's, while
+   * edits otherwise go to the tree. The edit runs on that tree as if it were live, so what follows
+   * it follows; the live tree, the selection and the edit target stay. One undo entry.
+   */
+  | { type: "editGateIn"; hierarchyId: string; edit: GateEditAction }
+  /**
+   * A gate's tailoring switch for one file. On: the gate is the file's own from now, in its copy
+   * (made beforehand), whether or not it has moved yet. Off: it takes the coordinates it follows
+   * again, or with `share` gives them to what it follows first (Use for); a copy left with nothing
+   * tailored and nothing switched on goes, and the file follows its source. One undo entry.
+   * `gateId` is the live tree's gate; the copy's own gate is found by provenance.
+   */
+  | { type: "setGateTailored"; fileId: string; gateId: string; on: boolean; share?: boolean }
   /** The template takes every gate's geometry from this copy, and every file of the group goes
    *  back on the template: one tree for everyone, nothing tailored. One undo entry. */
   | { type: "promoteCopyToTemplate"; copyId: string }
@@ -418,6 +502,9 @@ export type Action =
   /** A group with its working tree (a locked copy of the live template), and its first files. */
   | { type: "addGroup"; id: string; name: string; fileIds: string[] }
   | { type: "renameGroup"; id: string; name: string }
+  /** The groups in this order (ids not named keep their place at the end); each keeps the colour it had. */
+  | { type: "reorderGroups"; ids: string[] }
+  | { type: "setGroupColour"; id: string; colour: string }
   /** Files into a group, or out of every group (null). A tailored copy keeps its coordinates; a copy with nothing tailored goes. */
   | { type: "setFileGroup"; fileIds: string[]; groupId: string | null }
   /** The group goes; its files follow the tree, their own tailoring kept. */
@@ -432,6 +519,12 @@ export type Action =
    * held no event on that detector: the tree's gates name a channel it does not have.
    */
   | { type: "followSourceAgain"; assignments: Record<string, string> }
+  /**
+   * A strategy proposal the user accepted: `next`, built from `base` by the proposal's steps on
+   * reducer copies (proposals/strategyProposal.ts), installed as one undo entry, so the gates are
+   * the ones previewed. Nothing changes when the gating has moved since `base`.
+   */
+  | { type: "adoptStrategy"; base: CoreState; next: CoreState }
   | { type: "undo" }
   | { type: "redo" };
 
@@ -452,7 +545,7 @@ const LOCKED_STRUCTURE_ACTIONS = new Set<Action["type"]>([
 const PROPAGATED_ACTIONS = new Set<Action["type"]>([
   ...LOCKED_STRUCTURE_ACTIONS,
   "editGate", "editGates", "moveEllipse", "reshapeEllipse", "moveQuadrantCenter", "setQuadrantCurl",
-  "sortGatesAlpha", "sortPopulationsAlpha",
+  "setQuadrantArm", "sortGatesAlpha", "sortPopulationsAlpha",
 ]);
 
 export function coreReducer(state: CoreState, action: Action): CoreState {
@@ -481,8 +574,9 @@ function propagateToLockedCopies(before: CoreState, after: CoreState): CoreState
       if (ref.source_hierarchy_id !== sourceId || ref.structure_locked !== true || !isCopyRef(ref)) continue;
       const stored = stored_hierarchies[ref.id];
       if (!stored) continue;
-      const synced = syncLockedCopy(stored, sourceWas, sourceNow);
-      if (!synced) continue;
+      const syncedRaw = syncLockedCopy(stored, sourceWas, sourceNow);
+      if (!syncedRaw) continue;
+      const synced = keepSwitchedOn(stored, syncedRaw);
       stored_hierarchies[ref.id] = synced;
       touched = true;
       if (stored.root_population_id && synced.root_population_id) {
@@ -561,7 +655,7 @@ function resyncGroup(
     if (tree.source_hierarchy_id !== before.id || !tree.structure_locked || !isCopyRef(tree)) continue;
     const synced = syncLockedCopy(tree, was, now);
     // A group's tree that moved is a source in its own right: its files' copies follow it.
-    if (synced) next = resyncGroup(next, tree, synced);
+    if (synced) next = resyncGroup(next, tree, keepSwitchedOn(tree, synced));
   }
   return next;
 }
@@ -687,7 +781,7 @@ function moveFilesToGroup(state: CoreState, fileIds: readonly string[], groupId:
     const copy = treeOfId(state, currentId);
     const oldSource = current.source_hierarchy_id ? treeOfId(state, current.source_hierarchy_id) : null;
     if (!copy || !oldSource || current.source_hierarchy_id === newSource.id) continue;
-    if (copyFollows(copy, oldSource)) {
+    if (copyFollows(copy, oldSource) && !switchedOnGateIds(current).length) {
       // Nothing tailored: the copy goes with the move; the file follows its new source.
       assignments[fileId] = newSource.id;
       continue;
@@ -859,6 +953,13 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       return { ...state, ...base, gate_version: state.gate_version + 1 };
     }
 
+    case "addGates": {
+      if (action.gates.length === 0) return state;
+      let next = state;
+      for (const gate of action.gates) next = coreReducer(next, gate);
+      return { ...next, ...pushUndo(state) };
+    }
+
     case "addEllipse": {
       const gateId = crypto.randomUUID();
       // A drawn ellipse starts axis-aligned: covariance diag(rx², ry²) at distanceSquare 1, so
@@ -910,6 +1011,7 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       if (action.space) qgate.space = action.space;
       if (action.transforms) qgate.transforms = action.transforms;
       if (action.curl) qgate.curl = { ...action.curl };
+      else if (action.arms && validArms(action.center, action.arms)) qgate.arms = cloneArms(action.arms);
       if (action.provenance) qgate.provenance = action.provenance;
       const gates = { ...state.gates, [qgate.gate_id]: qgate };
       const gate_order = [...state.gate_order, qgate.gate_id];
@@ -959,11 +1061,38 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       };
     }
 
+    // The lists have one selection (David, 2026-10-23): the highlighted rows, the active population
+    // or the selected gate always among them. selected_pop_ids / selected_gate_ids hold the whole
+    // set when it is more than that one, and nothing otherwise; a new active row or selected gate
+    // outside the set starts a new one. (Until then a tick column was a second, lasting selection.)
     case "setActivePopulation":
-      return { ...state, active_population_id: action.popId };
+      return {
+        ...state,
+        active_population_id: action.popId,
+        ...(state.selected_pop_ids.length && !state.selected_pop_ids.includes(action.popId) ? { selected_pop_ids: [] } : {}),
+      };
 
     case "selectGate":
-      return { ...state, selected_gate_id: action.gateId };
+      return {
+        ...state,
+        selected_gate_id: action.gateId,
+        ...(state.selected_gate_ids.length && !(action.gateId && state.selected_gate_ids.includes(action.gateId)) ? { selected_gate_ids: [] } : {}),
+      };
+
+    case "selectPopulations": {
+      const set = [...new Set([action.activeId, ...action.popIds])]
+        .filter((id) => state.populations[id] && id !== state.root_population_id);
+      const next = set.length > 1 ? set : [];
+      if (state.active_population_id === action.activeId && sameStringArray(next, state.selected_pop_ids)) return state;
+      return { ...state, active_population_id: action.activeId, selected_pop_ids: next };
+    }
+
+    case "selectGates": {
+      const set = [...new Set([...(action.gateId ? [action.gateId] : []), ...action.gateIds])].filter((id) => state.gates[id]);
+      const next = set.length > 1 ? set : [];
+      if (state.selected_gate_id === action.gateId && sameStringArray(next, state.selected_gate_ids)) return state;
+      return { ...state, selected_gate_id: action.gateId, selected_gate_ids: next };
+    }
 
     case "toggleGateSelect": {
       const set = new Set(state.selected_gate_ids);
@@ -989,6 +1118,36 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       if (!state.gates[action.gateId]) return state;
       const gates = { ...state.gates, [action.gateId]: { ...state.gates[action.gateId], name: action.name } };
       return { ...state, ...pushUndo(state), gates, gate_version: state.gate_version + 1 };
+    }
+
+    case "setGateColour": {
+      const gate = state.gates[action.gateId];
+      if (!gate || !/^#[0-9a-f]{6}$/i.test(action.colour)) return state;
+      const colour = action.colour.toLowerCase();
+      if (gate.color.toLowerCase() === colour) return state;
+      // Every copy's own version of the gate, through copies of copies (a file under its group).
+      const ids = new Set([action.gateId]);
+      const stored = { ...state.stored_hierarchies };
+      for (let grew = true; grew;) {
+        grew = false;
+        for (const [hid, tree] of Object.entries(stored)) {
+          if (hid === state.active_hierarchy_id) continue;
+          let next = tree;
+          for (const [own, source] of Object.entries(tree.source_gate_ids ?? {})) {
+            if (!ids.has(source) || !next.gates[own]) continue;
+            if (!ids.has(own)) { ids.add(own); grew = true; }
+            if (next.gates[own].color !== colour) next = { ...next, gates: { ...next.gates, [own]: { ...next.gates[own], color: colour } } };
+          }
+          stored[hid] = next;
+        }
+      }
+      return {
+        ...state,
+        ...pushUndo(state, false),
+        gates: { ...state.gates, [action.gateId]: { ...gate, color: colour } },
+        stored_hierarchies: stored,
+        gate_version: state.gate_version + 1,
+      };
     }
 
     case "moveGateLabel": {
@@ -1069,7 +1228,27 @@ function reduceCore(state: CoreState, action: Action): CoreState {
     case "moveQuadrantCenter": {
       const g = state.gates[action.gateId];
       if (!g || g.gate_type !== "quadrant") return state;
+      // A spider quadrant's centre moves alone, its arm ends staying on their edges, as FlowJo
+      // moves it; a centre outside the box they span is refused.
+      if (g.arms && !validArms(action.center, g.arms)) return state;
       const gates = { ...state.gates, [action.gateId]: { ...g, center: action.center } };
+      return { ...state, ...pushUndo(state), gates, gate_version: state.gate_version + 1 };
+    }
+
+    case "setQuadrantArm": {
+      const g = state.gates[action.gateId];
+      if (!g || g.gate_type !== "quadrant" || !g.arms) return state;
+      // The end slides along its own edge of the box, held within it: the box does not move.
+      const [x0, x1, y0, y1] = spiderBox(g.arms);
+      const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+      const end: [number, number] =
+        action.arm === "down" ? [clamp(action.end[0], x0, x1), y0]
+          : action.arm === "up" ? [clamp(action.end[0], x0, x1), y1]
+            : action.arm === "left" ? [x0, clamp(action.end[1], y0, y1)]
+              : [x1, clamp(action.end[1], y0, y1)];
+      const arms = { ...cloneArms(g.arms), [action.arm]: end };
+      if (!validArms(g.center, arms)) return state;
+      const gates = { ...state.gates, [action.gateId]: { ...g, arms } };
       return { ...state, ...pushUndo(state), gates, gate_version: state.gate_version + 1 };
     }
 
@@ -1225,6 +1404,25 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       };
     }
 
+    case "reorderGroups": {
+      const named = action.ids.map((id) => state.groups.find((g) => g.id === id)).filter((g): g is WorkspaceGroup => !!g);
+      const order = [...new Set([...named, ...state.groups])];
+      if (order.every((g, i) => g === state.groups[i])) return state;
+      // Colours follow the group, not its position: each takes the one it showed before the move.
+      const groups = order.map((g) => ({ ...g, colour: groupColour(state.groups, state.groups.indexOf(g)) }));
+      return { ...state, ...pushUndo(state, false), groups };
+    }
+
+    case "setGroupColour": {
+      const index = state.groups.findIndex((g) => g.id === action.id);
+      if (index < 0 || !/^#[0-9a-f]{6}$/i.test(action.colour) || groupColour(state.groups, index).toLowerCase() === action.colour.toLowerCase()) return state;
+      return {
+        ...state,
+        ...pushUndo(state, false),
+        groups: state.groups.map((g, i) => (i === index ? { ...g, colour: action.colour.toLowerCase() } : g)),
+      };
+    }
+
     case "setFileGroup": {
       if (action.groupId !== null && !state.groups.some((g) => g.id === action.groupId)) return state;
       const next = moveFilesToGroup(state, action.fileIds, action.groupId);
@@ -1248,8 +1446,10 @@ function reduceCore(state: CoreState, action: Action): CoreState {
         gates[own] = withGeometryOf(a, b);
         changed = true;
       }
+      // Following again switches every gate's tailoring off.
+      if (switchedOnGateIds(ref).length) changed = true;
       if (!changed) return state;
-      const after: StoredHierarchy = { ...copy, gates };
+      const after: StoredHierarchy = withSwitchedOn({ ...copy, gates }, []);
       const next = withTrees(state, resyncGroup(all, copy, after), state.active_hierarchy_id);
       return { ...next, ...pushUndo(state), gate_version: state.gate_version + 1, tree_version: state.tree_version + 1 };
     }
@@ -1714,6 +1914,57 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       return { ...next, ...pushUndo(state), gate_version: state.gate_version + 1, tree_version: state.tree_version + 1 };
     }
 
+    case "editGateIn": {
+      if (action.hierarchyId === state.active_hierarchy_id) return coreReducer(state, action.edit);
+      if (!state.stored_hierarchies[action.hierarchyId]) return state;
+      const there = reduceCore(state, { type: "switchHierarchy", id: action.hierarchyId, silent: true });
+      const edited = coreReducer(there, action.edit);
+      if (edited === there) return state;
+      const back = reduceCore(edited, { type: "switchHierarchy", id: state.active_hierarchy_id, silent: true });
+      return {
+        ...back,
+        ...pushUndo(state),
+        active_population_id: state.active_population_id,
+        selected_pop_ids: state.selected_pop_ids,
+        selected_gate_id: state.selected_gate_id,
+        selected_gate_ids: state.selected_gate_ids,
+        gate_version: back.gate_version + 1,
+      };
+    }
+
+    case "setGateTailored": {
+      const treeId = fileHierarchyId(state.file_hierarchies[action.fileId], state.hierarchies);
+      const ref = state.hierarchies.find((h) => h.id === treeId);
+      if (!ref || ref.owner_sample_id !== action.fileId || !ref.source_hierarchy_id) return state;
+      const activeRef = state.hierarchies.find((h) => h.id === state.active_hierarchy_id);
+      const trees: Record<string, StoredHierarchy> = activeRef ? { ...state.stored_hierarchies, [activeRef.id]: storeHierarchy(activeRef, state) } : { ...state.stored_hierarchies };
+      const live = trees[state.active_hierarchy_id];
+      const gateId = live && trees[ref.id] ? correspondingHierarchyId(live, action.gateId, trees[ref.id], trees, "gate") : null;
+      if (!gateId) return state;
+      const on = switchedOnGateIds(ref);
+      const store = (next: CoreState, ids: readonly string[]): CoreState => {
+        const hierarchies = next.hierarchies.map((h) => (h.id === ref.id ? withSwitchedOn(h, ids) : h));
+        const stored = next.stored_hierarchies[ref.id];
+        return { ...next, hierarchies, ...(stored ? { stored_hierarchies: { ...next.stored_hierarchies, [ref.id]: withSwitchedOn(stored, ids) } } : {}) };
+      };
+      if (action.on) {
+        if (on.includes(gateId)) return state;
+        return { ...store(state, [...on, gateId]), ...pushUndo(state), gate_version: state.gate_version + 1 };
+      }
+      // Off: the version it follows again, or given to what it follows first.
+      let next = reduceCore(state, { type: "editGateIn", hierarchyId: ref.id, edit: { type: action.share ? "applyGateToGroup" : "revertGateToGroup", gateId } });
+      next = store(next, on.filter((id) => id !== gateId));
+      // A copy with nothing left of its own goes: the file follows its source again.
+      const copyRef = next.hierarchies.find((h) => h.id === ref.id);
+      const copy = treeOfId(next, ref.id);
+      const source = treeOfId(next, ref.source_hierarchy_id);
+      if (copyRef && copy && source && !switchedOnGateIds(copyRef).length && copyFollows(copy, source)) {
+        next = reduceCore(next, { type: "assignFileHierarchies", assignments: { [action.fileId]: ref.source_hierarchy_id }, silent: true });
+      }
+      if (next === state) return state;
+      return { ...next, ...pushUndo(state), gate_version: Math.max(next.gate_version, state.gate_version + 1) };
+    }
+
     case "promoteCopyToTemplate": {
       if (promoteRefusal(state, action.copyId)) return state;
       const copyRef = state.hierarchies.find((h) => h.id === action.copyId)!;
@@ -2006,14 +2257,16 @@ function reduceCore(state: CoreState, action: Action): CoreState {
         if (h.id === active_hierarchy_id || !hierarchies.some((ref) => ref.id === h.id)) continue;
         const pops = clonePops(h.populations);
         ensurePopColorSlots(pops, h.root_population_id);
+        // A gate's tailoring switch is on the record in the hierarchy list as well; either copy holds it.
+        const switched = switchedOnGateIds(h).length ? switchedOnGateIds(h) : switchedOnGateIds(hierarchies.find((ref) => ref.id === h.id));
         // A workspace saved before rectangles carried an edge rule evaluated them closed, which
         // is what a rectangle without one means; the rule is stated so the next save records it.
-        stored_hierarchies[h.id] = {
+        stored_hierarchies[h.id] = withSwitchedOn({
           ...h,
           ...(h.gates ? { gates: withExplicitRectangleBounds(h.gates) } : {}),
           populations: pops,
           selected_pop_ids: [],
-        };
+        }, switched);
       }
       return {
         ...state,
@@ -2089,6 +2342,9 @@ function reduceCore(state: CoreState, action: Action): CoreState {
         tree_version: state.tree_version + 1,
       };
     }
+
+    case "adoptStrategy":
+      return sameGatingStructure(state, action.base) ? withOneUndoEntry(state, action.next) : state;
 
     case "undo": {
       if (state.undo.length === 0) return state;

@@ -2,10 +2,13 @@
 // __GATELAB_DRIVE__, so that nothing here is in the public build.
 
 export { DriveMenu, type DriveMenuProps } from "./DriveMenu";
-export { DriveSaveAsDialog, DriveUploadDialog, type DriveSaveAsRequest } from "./DriveSaveDialogs";
+export { DriveSaveAsDialog, DriveUploadDialog, locationText, type DriveSaveAsRequest } from "./DriveSaveDialogs";
+export { DriveReconnectDialog } from "./DriveReconnectDialog";
+export { DriveAuthError, DriveNetworkError } from "./api";
+export { tokenLive } from "./auth";
 export { readDriveConfig, type DriveConfig } from "./config";
 export { createDriveSession, type DriveSession } from "./session";
-export { copyName, DriveFolderAccessError } from "./save";
+export { copyName, DRIVE_AUTOSAVE_MS, DriveFolderAccessError } from "./save";
 export {
   describeUploads,
   DriveExperimentStoppedError,

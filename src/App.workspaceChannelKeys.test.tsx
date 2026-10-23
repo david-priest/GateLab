@@ -31,6 +31,9 @@ vi.mock("./engine/workspaceHistory", async (importOriginal) => {
 import App from "./App";
 import { readWorkspaceEnvelopeFromFile } from "./engine/workspace";
 
+/** What the page says, the status line's whole text (its tooltip) included. */
+const shown = (root: ParentNode): string => `${root.textContent ?? ""} ${root.querySelector(".gl-status-line")?.getAttribute("title") ?? ""}`;
+
 let root: Root;
 let host: HTMLDivElement;
 let uuid = 0;
@@ -132,9 +135,9 @@ async function openWorkspace(): Promise<void> {
 describe("a workspace saved under channel keys the file no longer has", () => {
   it("restates each key as the same parameter's key now, and says so", async () => {
     await openWorkspace();
-    expect(host.textContent).toContain("Opened analysis.gatelab · 1 sample");
-    expect(host.textContent).toContain('"V2-A (FL2-A)" is now "V2-A"');
-    expect(host.textContent).toContain('"Time" is now "HDR-T"');
+    expect(shown(host)).toContain("Opened analysis.gatelab · 1 sample");
+    expect(shown(host)).toContain('"V2-A (FL2-A)" is now "V2-A"');
+    expect(shown(host)).toContain('"Time" is now "HDR-T"');
     // The gate follows the parameter and counts its events; the Panel-tab name "M1" follows too.
     expect(host.textContent).toMatch(/M1_positive\S*M1 \/ HDR-T\s*2 \(50%\)/);
   });

@@ -151,9 +151,15 @@ function clickButton(text: string): void {
   if (!button) throw new Error(`Missing button: ${text}`);
   act(() => button.click());
 }
+/** The file list's Select all box set to `on`: a click toggles all and none, and from some it selects all. */
+function selectAll(on: boolean): void {
+  const box = () => host.querySelector<HTMLInputElement>(".gl-sample-select-all input")!;
+  if (box().checked !== on || box().indeterminate) act(() => box().click());
+  if (!on && box().checked) act(() => box().click());
+}
 /** Pools the selected files; the pool then follows the selection and edits the tree. */
 async function poolFiles(): Promise<void> {
-  const button = [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.startsWith('Pool selected files'))!;
+  const button = host.querySelector<HTMLButtonElement>(".gl-pool-toggle [aria-checked=false]")!;
   act(() => button.click());
   await settle();
 }
@@ -165,11 +171,35 @@ async function view(name: string): Promise<void> {
   act(() => fileRow(name).dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" })));
   await settle();
 }
-async function editFile(): Promise<void> { act(() => host.querySelector<HTMLButtonElement>(".population-tree-edit-file")!.click()); await settle(); }
-async function editTree(): Promise<void> { act(() => host.querySelector<HTMLButtonElement>(".population-tree-edit-tree")!.click()); await settle(); }
-const editTarget = () => host.querySelector<HTMLButtonElement>(".population-tree-edit-file")!.getAttribute("aria-pressed") === "true" ? "file" : "tree";
-const summary = () => host.querySelector(".population-tree-hierarchy-count")?.textContent;
+/** The first gate's menu, opened by a right-click on its row in the gate list. */
+async function gateMenu(): Promise<void> {
+  act(() => host.querySelector<HTMLElement>(".gate-card")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })));
+  await settle();
+}
+/** The first gate's tailoring switch on, for the viewed file: a drag of it then changes that file alone. */
+async function tailorFirst(): Promise<void> {
+  const input = host.querySelector<HTMLInputElement>(".gate-card .gate-tailor-switch input")!;
+  if (!input.checked) act(() => input.click());
+  await settle();
+}
+/** The first gate's switch: whether it is on, and its label. */
+const firstSwitch = () => ({
+  on: host.querySelector<HTMLInputElement>(".gate-card .gate-tailor-switch input")?.checked ?? null,
+  label: host.querySelector(".gate-card .gate-tailor-switch-label")?.textContent ?? null,
+});
+/** The first gate's scope chip in the gate list, or null when it follows the tree everywhere. */
+const chip = () => host.querySelector(".gate-scope-chip")?.textContent ?? null;
+const summary = () => host.querySelector(".gl-sample-tree-summary")?.getAttribute("title") ?? undefined;
 const tailoredBadge = (name: string) => fileRow(name).querySelector(".gl-sample-tailored")?.textContent ?? null;
+/** The dashed outlines the plot draws beside the gates: the versions the viewed file does not use. */
+const references = () => (plotHarness.props!.payload as unknown as { gate_references?: { vertices?: [number, number][] }[] }).gate_references ?? [];
+/** Opens the first gate's scope menu from its row and chooses an item from it. */
+async function tailoredMenu(item: "revert" | "use"): Promise<void> {
+  await gateMenu();
+  await settle();
+  act(() => host.querySelector<HTMLButtonElement>(`.tailored-menu-${item}`)!.click());
+  await settle();
+}
 async function undo(): Promise<void> {
   act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true })); });
   await settle();
@@ -203,46 +233,41 @@ describe("App file selection and plot scope", () => {
     await settle();
     const gate = () => plotHarness.props!.payload.gates[0];
     expect(summary()).toBe("3 files · all following");
-    // Viewing a file leaves the tree live; tailoring is asked for.
+    // Viewing a file leaves the tree live; tailoring is asked for, gate by gate.
     await view("D2.fcs");
-    expect(editTarget()).toBe("tree");
-    expect(host.textContent).toContain("Editing the tree");
-    await editFile();
-    expect(host.textContent).toContain("Editing D2.fcs only");
+    expect(host.querySelector(".population-tree-edit-target")).toBeNull();
+    expect(host.querySelector(".population-tree-promote")).toBeNull();
+    await tailorFirst();
     act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[45.68, 45.68], [133.22, 133.22]] }));
     await settle();
     const tailored = structuredClone(gate().vertices);
     expect(summary()).toBe("3 files · 1 tailored");
     expect(tailoredBadge("D2.fcs")).toBe("1");
     expect(tailoredBadge("D1.fcs")).toBeNull();
-    // The tree's gate list says which file tailored the gate.
-    await editTree();
-    expect(host.querySelector(".gate-tailored-in")?.textContent).toBe("tailored in 1 file");
-    expect(host.querySelector(".gate-tailored-in")?.getAttribute("title")).toBe("D2.fcs");
-    await editFile();
+    // Seen from a file that follows the tree, the row carries no chip; the switch's tooltip says
+    // which file tailored the gate.
+    await view("D1.fcs");
+    expect(chip()).toBeNull();
+    expect(host.querySelector(".gate-card .gate-tailor-switch")?.getAttribute("title")).toContain("Tailored in D2.fcs.");
+    await view("D2.fcs");
 
+    // Use D2's gates for the tree, from the tree menu, after confirmation.
     act(() => host.querySelector<HTMLButtonElement>(".population-tree-promote")!.click());
     await settle();
     act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Use for the tree")!.click());
     await settle();
     expect(summary()).toBe("3 files · all following");
     expect(host.textContent).toContain("now has D2.fcs's gate coordinates");
-    // The mode holds: still D2 only, now on a copy with nothing tailored, carrying the tree's geometry.
-    expect(editTarget()).toBe("file");
     expect(gate().vertices).toEqual(tailored);
     expect(tailoredBadge("D2.fcs")).toBeNull();
-    await editTree();
-    expect(gate().vertices).toEqual(tailored); // the tree carries D2's geometry
-    expect(host.querySelector(".gate-tailored-in")).toBeNull();
-    // Every file follows: D1 shows the tree's geometry, and no copy is made to show it.
+    expect(chip()).toBeNull();
+    // Every file follows: D1 shows the tree's geometry, now D2's.
     await view("D1.fcs");
     expect(gate().vertices).toEqual(tailored);
-    expect(editTarget()).toBe("tree");
     expect(summary()).toBe("3 files · all following");
     await undo();
     expect(summary()).toBe("3 files · 1 tailored");
     expect(tailoredBadge("D2.fcs")).toBe("1");
-    expect(editTarget()).toBe("tree"); // the mode is the user's, not the undo's
   });
 
   it("offers bulk revert, confirms the checked files, leaves unchecked tailoring intact, and one Undo brings it back", async () => {
@@ -259,20 +284,16 @@ describe("App file selection and plot scope", () => {
     await settle();
     const gate = () => plotHarness.props!.payload.gates[0];
     const baseline = structuredClone(gate().vertices);
-    const ids: string[] = [];
     const tailoredOf: Record<string, unknown> = {};
-    await editFile(); // once: the mode holds from file to file
     for (const [i, name] of ["D1.fcs", "D2.fcs", "D3.fcs"].entries()) {
       await view(name);
-      expect(editTarget()).toBe("file");
-      ids.push(gate().gate_id);
+      await tailorFirst();
       act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[45.68 + i * 7.9, 45.68], [133.22, 133.22]] }));
       await settle();
       tailoredOf[name] = structuredClone(gate().vertices);
     }
     const tailored = tailoredOf["D3.fcs"];
     expect(summary()).toBe("3 files · 3 tailored");
-    await editTree();
     toggleFile("D3.fcs");
     await settle();
     const revert = () => host.querySelector<HTMLButtonElement>(".population-tree-revert-checked")!;
@@ -282,36 +303,31 @@ describe("App file selection and plot scope", () => {
     expect([...dialog().querySelectorAll("li")].map(li => li.textContent)).toEqual(["D1.fcs", "D2.fcs"]);
     act(() => [...dialog().querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Cancel")!.click());
     await settle();
-    // On the tree, a tailored file still shows the tree's gates; its own appear in file mode.
-    await view("D1.fcs"); expect(editTarget()).toBe("tree"); expect(gate().vertices).toEqual(baseline);
-    await editFile(); expect(gate().vertices).toEqual(tailoredOf["D1.fcs"]);
-    await editTree();
+    // A tailored file shows its own gate.
+    await view("D1.fcs"); expect(gate().vertices).toEqual(tailoredOf["D1.fcs"]);
     act(() => revert().click()); await settle();
     act(() => [...dialog().querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Revert listed files")!.click());
     await settle();
     expect(host.textContent).toContain("2 files follow the tree again");
-    expect(gate().vertices).toEqual(baseline); // the tree unchanged
+    expect(gate().vertices).toEqual(baseline); // D1 on the tree's gate, which did not move
     expect(summary()).toBe("3 files · 1 tailored");
     expect(tailoredBadge("D1.fcs")).toBeNull();
     expect(tailoredBadge("D3.fcs")).toBe("1");
-    // D1 and D2 follow the tree; D3 keeps its own, seen in file mode, where a following file
-    // gets a quiet copy that carries the tree's geometry.
-    await editFile();
-    await view("D1.fcs"); expect(editTarget()).toBe("file"); expect(gate().vertices).toEqual(baseline); expect(gate().gate_id).not.toBe(ids[0]);
-    await view("D2.fcs"); expect(editTarget()).toBe("file"); expect(gate().vertices).toEqual(baseline);
-    await view("D3.fcs"); expect(editTarget()).toBe("file"); expect(gate().gate_id).toBe(ids[2]); expect(gate().vertices).toEqual(tailored);
+    // D1 and D2 follow the tree; D3 keeps its own.
+    await view("D2.fcs"); expect(gate().vertices).toEqual(baseline);
+    await view("D3.fcs"); expect(gate().vertices).toEqual(tailored);
     expect(summary()).toBe("3 files · 1 tailored");
     // Viewing files recorded nothing, so one Undo is the revert itself.
     await undo();
     expect(summary()).toBe("3 files · 3 tailored");
-    await view("D1.fcs"); expect(gate().gate_id).toBe(ids[0]); expect(gate().vertices).toEqual(tailoredOf["D1.fcs"]);
+    await view("D1.fcs"); expect(gate().vertices).toEqual(tailoredOf["D1.fcs"]);
     // Revert all files: every tailored file, after confirmation.
     act(() => host.querySelector<HTMLButtonElement>(".population-tree-revert-all")!.click()); await settle();
     expect([...dialog().querySelectorAll("li")].map(li => li.textContent)).toEqual(["D1.fcs", "D2.fcs", "D3.fcs"]);
     act(() => [...dialog().querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Revert listed files")!.click());
     await settle();
     expect(summary()).toBe("3 files · all following");
-    expect(editTarget()).toBe("file"); // still the user's mode, on a copy with nothing tailored
+    expect(gate().vertices).toEqual(baseline);
   });
 
   it("applies one file's gate to the tree, and reverts one gate on a file", async () => {
@@ -331,37 +347,35 @@ describe("App file selection and plot scope", () => {
     const gate = () => plotHarness.props!.payload.gates[0];
     const original = structuredClone(gate().vertices);
     await view("D1.fcs");
-    await editFile();
+    await tailorFirst();
     act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[45.68, 45.68], [133.22, 133.22]] }));
     await settle();
     const first = structuredClone(gate().vertices);
     expect(summary()).toBe("3 files · 1 tailored");
-    // Apply to tree: the tree takes D1's gate, every file follows, D1 is no longer tailored.
-    act(() => host.querySelector<HTMLButtonElement>(".gate-apply-group")!.click());
+    // Use for the tree, from the gate's chip, after confirmation: the tree takes D1's gate, every
+    // file follows, D1 is no longer tailored.
+    expect(firstSwitch()).toEqual({ on: true, label: "this file" });
+    await tailoredMenu("use");
+    expect(summary()).toBe("3 files · 1 tailored");
+    clickButton("Use for the tree");
     await settle();
     expect(summary()).toBe("3 files · all following");
-    expect(host.querySelector(".gate-tailored-badge")).toBeNull();
-    await view("D2.fcs"); expect(gate().vertices).toEqual(first); expect(editTarget()).toBe("file");
+    expect(chip()).toBeNull();
+    await view("D2.fcs"); expect(gate().vertices).toEqual(first);
     await view("D3.fcs"); expect(gate().vertices).toEqual(first);
     // Tailor again and revert the one gate: back on the tree's coordinates, nothing tailored.
     await view("D1.fcs");
+    await tailorFirst();
     act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[61.61, 61.61], [153.98, 153.98]] }));
     await settle();
     expect(gate().vertices).not.toEqual(first);
     expect(summary()).toBe("3 files · 1 tailored");
-    act(() => host.querySelector<HTMLButtonElement>(".gate-revert-group")!.click());
-    await settle();
+    await tailoredMenu("revert");
     expect(gate().vertices).toEqual(first);
-    expect(host.querySelector(".gate-revert-group")).toBeNull();
+    expect(chip()).toBeNull();
     expect(summary()).toBe("3 files · all following");
-    // Still D1 only, on a copy with nothing tailored; the mode holds from file to file, and
-    // back on the tree D1 shows the tree's gate.
-    expect(editTarget()).toBe("file");
     await view("D2.fcs");
-    expect(editTarget()).toBe("file");
-    await editTree();
     await view("D1.fcs");
-    expect(editTarget()).toBe("tree");
     expect(gate().vertices).toEqual(first);
     expect(gate().vertices).not.toEqual(original);
     expect(summary()).toBe("3 files · all following");
@@ -501,7 +515,7 @@ describe("App file selection and plot scope", () => {
       x_channel: "FSC-A",
       y_channel: "SSC-A",
     }));
-    const create = [...host.querySelectorAll<HTMLButtonElement>("button")]
+    const create = [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")]
       .find((button) => button.textContent?.trim() === "Create")!;
     act(() => create.click());
     await settle();
@@ -512,7 +526,8 @@ describe("App file selection and plot scope", () => {
     expect(host.textContent).toContain("3 (42.86%) · pooled · 2 FCS");
 
     // Alone, the blue file's own count is exact and needs no qualifier.
-    clickButton("Return to single file");
+    // The pool toggle, pressed while pooled: pressing it again views the one file.
+    act(() => host.querySelector<HTMLButtonElement>(".gl-pool-toggle [aria-checked=false]")!.click());
     await settle();
     expect(plottedCount()).toBe(4);
     expect(plotHarness.props!.payload.gates[0].percent_scope).toBeUndefined();
@@ -541,7 +556,7 @@ describe("App file selection and plot scope", () => {
       x_channel: "FSC-A",
       y_channel: "SSC-A",
     }));
-    const create = [...host.querySelectorAll<HTMLButtonElement>("button")]
+    const create = [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")]
       .find((button) => button.textContent?.trim() === "Create")!;
     act(() => create.click());
     await settle();
@@ -554,19 +569,17 @@ describe("App file selection and plot scope", () => {
 
     // Viewing D2 shows it on the tree: no copy, tools open, nothing tailored.
     await view("D2.fcs");
-    expect(editTarget()).toBe("tree");
-    expect(host.textContent).toContain("Editing the tree");
-    expect(host.textContent).not.toContain("Editing D2.fcs only");
+    // No stale "Editing the tree" line: the switches and the selected gate's status say it.
+    expect(host.textContent).not.toContain("Editing the tree");
     expect(plottedCount()).toBe(4);
     expect([...host.querySelectorAll<HTMLButtonElement>(".gl-draw-tools button")].slice(1).some((button) => !button.disabled)).toBe(true);
-    // Editing this file only locks the structure; the tree's gates are still where they were. The
-    // draw tools stay on: a gate drawn here goes into the tree for every file.
-    await editFile();
-    expect(host.textContent).toContain("Editing D2.fcs only");
-    expect([...host.querySelectorAll<HTMLButtonElement>(".gl-draw-tools button")].slice(1).every((button) => !button.disabled)).toBe(true);
-    expect(host.querySelector<HTMLButtonElement>(".gl-draw-tools button:nth-child(2)")?.title).toContain("goes into the tree for every file");
-    expect(host.querySelector(".gate-tailored-badge")).toBeNull();
-    expect(summary()).toBe("2 files · all following");
+    // The gate's switch on, for this file: tailored from now, before any drag; the tree's gates are
+    // where they were, and the draw tools stay on, since a gate drawn goes into the tree for every file.
+    expect(firstSwitch()).toEqual({ on: false, label: null });
+    await tailorFirst();
+    expect([...host.querySelectorAll<HTMLButtonElement>(".gl-draw-tools button")].slice(1).some((button) => !button.disabled)).toBe(true);
+    expect(firstSwitch()).toEqual({ on: true, label: "this file" });
+    expect(summary()).toBe("2 files · 1 tailored");
 
     // Tailoring the gate marks the file and does not move the tree's gate.
     const copiedGate = plotHarness.props!.payload.gates[0];
@@ -576,56 +589,53 @@ describe("App file selection and plot scope", () => {
     }));
     await settle();
     const movedVertices = plotHarness.props!.payload.gates[0].vertices;
-    expect(host.querySelector(".gate-tailored-badge")).not.toBeNull();
+    expect(firstSwitch()).toEqual({ on: true, label: "this file" });
     expect(summary()).toBe("2 files · 1 tailored");
     expect(tailoredBadge("D2.fcs")).toBe("1");
 
-    await editTree();
+    // Pooled, the clicked file's version is the solid one: D2's own, the tree's dashed.
     await poolFiles();
+    expect(plottedCount()).toBe(7);
+    expect(plotHarness.props!.payload.gates[0].vertices).toEqual(movedVertices);
+    expect(references()).toHaveLength(1);
+    // Clicking D1 in the pool makes its version, the tree's, the solid one; the pool stays.
+    act(() => fileRow("D1.fcs").click()); await settle();
     expect(plottedCount()).toBe(7);
     expect(plotHarness.props!.payload.gates[0].vertices).not.toEqual(movedVertices);
 
-    // An edit to the tree reaches D1 (no copy: it simply follows) and not D2's tailored gate.
+    // An edit to the tree, from D1, reaches D1 (no copy: it simply follows) and not D2's tailored gate.
     const templateGate = plotHarness.props!.payload.gates[0];
     act(() => plotHarness.props!.onGateEdit({ gate_id: templateGate.gate_id, vertices: [[15.03, 15.03], [176.28, 176.28]] }));
     await settle();
     const treeEdited = structuredClone(plotHarness.props!.payload.gates[0].vertices);
-    // On the tree, the tailored file still shows the tree's gate; file mode shows its own.
+    // The tailored file shows its own gate, the tree's beside it, dashed; D1 the tree's.
     await view("D2.fcs");
-    expect(editTarget()).toBe("tree");
-    expect(plotHarness.props!.payload.gates[0].vertices).toEqual(treeEdited);
-    await editFile();
     expect(plotHarness.props!.payload.gates[0].vertices).toEqual(movedVertices);
-    // The mode holds from file to file: D1 gets a quiet copy that follows the tree.
+    expect(references().map((ref) => ref.vertices)).toEqual([treeEdited]);
     await view("D1.fcs");
-    expect(editTarget()).toBe("file");
     expect(plotHarness.props!.payload.gates[0].vertices).toEqual(treeEdited);
     expect(plotHarness.props!.payload.gates[0].vertices).not.toEqual(movedVertices);
 
-    // Viewing recorded nothing: one Undo takes back the tree edit, the next the tailoring.
+    // Viewing recorded nothing: one Undo takes back the tree edit, the next D2's drag, the next its switch.
     await undo();
     await view("D2.fcs");
     expect(plotHarness.props!.payload.gates[0].vertices).toEqual(movedVertices);
     await undo();
+    expect(summary()).toBe("2 files · 1 tailored");
+    expect(firstSwitch()).toEqual({ on: true, label: "this file" });
+    await undo();
     expect(summary()).toBe("2 files · all following");
+    expect(firstSwitch()).toEqual({ on: false, label: null });
     expect(tailoredBadge("D2.fcs")).toBeNull();
-    expect(editTarget()).toBe("file"); // the mode is the user's
-    await editTree();
-    expect(editTarget()).toBe("tree");
-    await view("D1.fcs");
-    await view("D2.fcs");
-    expect(editTarget()).toBe("tree");
 
     // Tailor once more and revert the file: it follows the tree again, and pooling still works.
-    await editFile();
+    await tailorFirst();
     act(() => plotHarness.props!.onGateEdit({ gate_id: plotHarness.props!.payload.gates[0].gate_id, vertices: [[226.42, 226.42], [285.65, 285.65]] }));
     await settle();
     expect(summary()).toBe("2 files · 1 tailored");
     act(() => host.querySelector<HTMLButtonElement>(".population-tree-revert-group")!.click());
     await settle();
     expect(summary()).toBe("2 files · all following");
-    expect(editTarget()).toBe("file");
-    await editTree();
     expect(host.textContent).toContain("D2.fcs follows the tree again");
     await poolFiles();
     expect(plottedCount()).toBe(7);
@@ -648,7 +658,7 @@ describe("App file selection and plot scope", () => {
     expect(plottedCount()).toBe(11);
     expect(host.textContent).toContain("Pooled view · 3 files");
     expect(host.textContent).toContain("3 of 3 selected");
-    clickButton("Manage…");
+    clickButton("Manage files…");
     act(() => host.querySelector<HTMLInputElement>('input[aria-label="Select D1.fcs for management"]')!.click());
     clickButton("Remove selected…");
     clickButton("Remove");
@@ -658,7 +668,7 @@ describe("App file selection and plot scope", () => {
     expect(host.textContent).not.toContain("The pool was closed");
     expect(plottedCount()).toBe(8);
     // With the last file removed the mode ends, so the next file added is viewed, not pooled.
-    clickButton("Manage…");
+    clickButton("Manage files…");
     act(() => host.querySelector<HTMLInputElement>('input[aria-label="Select D2.fcs for management"]')!.click());
     act(() => host.querySelector<HTMLInputElement>('input[aria-label="Select D3.fcs for management"]')!.click());
     clickButton("Remove selected…");
@@ -719,41 +729,29 @@ describe("App file selection and plot scope", () => {
     expect(host.textContent).toContain("2 of 3 selected");
     expect(fileRow("D1.fcs").getAttribute("aria-selected")).toBe("false");
     expect(fileRow("D1.fcs").getAttribute("aria-current")).toBe("true");
-    const selection = host.querySelector('.gl-sample-inclusion-actions')!;
-    act(() => [...selection.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "None")!.click());
+    selectAll(false);
     await settle();
     expect(plottedCount()).toBe(3);
     expect(host.textContent).toContain("0 of 3 selected");
     // Pooled with nothing selected, the plot stays on screen and shows no events.
-    act(() => [...selection.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "All")!.click());
+    selectAll(true);
     await settle();
     await poolFiles();
     expect(plottedCount()).toBe(11);
-    act(() => [...selection.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "None")!.click());
+    selectAll(false);
     await settle();
     expect(plottedCount()).toBe(0);
     expect(host.textContent).toContain("Pooled view · 0 files");
     // The gate list pools over no files, as the plot and the tree do.
     expect(host.textContent).toContain("pooled · 0 FCS");
-    // Choosing to edit one file alone leaves the pool for the viewed file.
-    act(() => [...selection.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "All")!.click());
+    // Pooled, each gate's switch is the clicked file's; nothing is tailored by pooling.
+    selectAll(true);
     await settle();
-    await editFile();
-    expect(host.querySelector(".gl-pool-toolbar")?.textContent).toContain("Viewing:");
-    expect(editTarget()).toBe("file");
-    // Pooled again with the file mode held underneath, the pool edits the tree, with nothing
-    // selected too: no copy is put live or made for the viewed file.
-    await poolFiles();
-    expect(editTarget()).toBe("tree");
-    act(() => [...selection.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "None")!.click());
-    await settle();
-    expect(editTarget()).toBe("tree");
+    expect(firstSwitch()).toEqual({ on: false, label: null });
     expect(summary()).toBe("3 files · all following");
-    act(() => [...selection.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "All")!.click());
-    await settle();
+    act(() => host.querySelector<HTMLButtonElement>(".gl-pool-toggle [aria-checked=false]")!.click()); await settle();
+    expect(firstSwitch()).toEqual({ on: false, label: null });
     expect(summary()).toBe("3 files · all following");
-    clickButton("Return to single file"); await settle();
-    expect(editTarget()).toBe("file"); // the mode is the user's, back with the single file
   });
 
   it("holds a locked frame across the original and compensated views of a file", async () => {
@@ -767,16 +765,17 @@ describe("App file selection and plot scope", () => {
     });
     await settle();
     const range = () => [...plotHarness.props!.payload.x_range] as [number, number];
-    const assay = () => host.querySelector<HTMLSelectElement>('select[aria-label="Active assay layer for all tabs"]')!;
+    // The header's Original | Compensated switch.
+    const layerButton = (layer: "original" | "compensated") =>
+      host.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Active assay layer for all tabs"] [role="radio"]')[layer === "original" ? 0 : 1];
     const view = async (layer: "original" | "compensated") => {
       await act(async () => {
-        assay().value = layer;
-        assay().dispatchEvent(new Event("change", { bubbles: true }));
+        layerButton(layer).click();
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
       await settle();
     };
-    expect(assay().querySelector<HTMLOptionElement>('option[value="compensated"]')?.disabled).toBe(false);
+    expect(layerButton("compensated").disabled).toBe(false);
     const original = range();
     // Unlocked, each view is fitted to its own values.
     await view("compensated");
@@ -785,7 +784,7 @@ describe("App file selection and plot scope", () => {
     await view("original");
     expect(range()).toEqual(original);
     // Locked, the frame on screen holds across the views too.
-    const lock = [...host.querySelectorAll<HTMLButtonElement>("button")]
+    const lock = [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")]
       .find((button) => button.textContent?.trim() === "Lock scales between files")!;
     act(() => lock.click());
     await settle();
@@ -821,7 +820,7 @@ describe("App file selection and plot scope", () => {
     act(() => row("D1.fcs").click());
     await settle();
     const d1Range = range();
-    const lockButton = () => [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Lock scales between files")!;
+    const lockButton = () => [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")].find((button) => button.textContent?.trim() === "Lock scales between files")!;
     expect(lockButton().getAttribute("aria-pressed")).toBe("false");
 
     act(() => row("D2.fcs").click());
@@ -833,7 +832,7 @@ describe("App file selection and plot scope", () => {
     await settle();
     expect(range()).toEqual(d1Range);
 
-    const lock = [...host.querySelectorAll<HTMLButtonElement>("button")]
+    const lock = [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")]
       .find((button) => button.textContent?.trim() === "Lock scales between files")!;
     act(() => lock.click());
     await settle();
@@ -872,7 +871,7 @@ describe("App file selection and plot scope", () => {
     const d2Own = range();
     act(() => row("D1.fcs").click());
     await settle();
-    const lock = [...host.querySelectorAll<HTMLButtonElement>("button")]
+    const lock = [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")]
       .find((button) => button.textContent?.trim() === "Lock scales between files")!;
     act(() => lock.click());
     await settle();

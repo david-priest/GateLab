@@ -40,12 +40,14 @@ export interface ChannelScaleParticipant {
   ownAutoLogicleW(idx: number): number;
   /** This file's own top-of-scale, before workspace sharing. */
   ownAutoLogicleT(idx: number): number;
+  /** This file's own auto biex width basis (Sample.defaultBiex); NaN where it has none. */
+  ownAutoBiexWidth?(idx: number): number;
   /** Drop cached display coordinates for one channel after a settings change. */
   invalidateChannelForScales(idx: number): void;
 }
 
 /** One string per set of biexponential parameters, for equality. */
-function biexIdentity(p: BiexParams): string {
+export function biexIdentity(p: BiexParams): string {
   return [p.maxValue, p.pos, p.neg, p.widthBasis, p.channelRange, p.tableChannels ?? null, p.spline ? 1 : 0].join("\u0001");
 }
 
@@ -89,6 +91,7 @@ export class ChannelScales {
   private readonly fluorBiex = new Map<string, BiexParams>();
   private readonly sharedAutoW = new Map<string, number>();
   private readonly sharedAutoT = new Map<string, number>();
+  private readonly sharedAutoBiexW = new Map<string, number>();
   private readonly participants = new Set<ChannelScaleParticipant>();
   private readonly listeners = new Set<() => void>();
 
@@ -110,6 +113,7 @@ export class ChannelScales {
     this.participants.add(participant);
     this.sharedAutoW.clear();
     this.sharedAutoT.clear();
+    this.sharedAutoBiexW.clear();
     this.rosterVersion++;
     this.notify();
   }
@@ -118,6 +122,7 @@ export class ChannelScales {
     if (!this.participants.delete(participant)) return;
     this.sharedAutoW.clear();
     this.sharedAutoT.clear();
+    this.sharedAutoBiexW.clear();
     this.rosterVersion++;
     this.notify();
   }
@@ -153,6 +158,27 @@ export class ChannelScales {
     }
     if (best !== undefined) this.sharedAutoW.set(key, best);
     return best;
+  }
+
+  /**
+   * One auto biex width basis shared by every file in the context: the widest (most negative),
+   * for the reason autoLogicleW takes the largest W.
+   */
+  autoBiexWidth(contextKey: string, channelKey: string): number | undefined {
+    const key = slot(contextKey, channelKey);
+    const hit = this.sharedAutoBiexW.get(key);
+    if (hit !== undefined) return hit;
+    let widest: number | undefined;
+    for (const participant of this.participants) {
+      if (participant.workspaceScaleContextKey !== contextKey || !participant.ownAutoBiexWidth) continue;
+      const idx = participant.index(channelKey);
+      if (idx === undefined) continue;
+      const width = participant.ownAutoBiexWidth(idx);
+      if (!Number.isFinite(width)) continue;
+      if (widest === undefined || width < widest) widest = width;
+    }
+    if (widest !== undefined) this.sharedAutoBiexW.set(key, widest);
+    return widest;
   }
 
   scatterCofactor(contextKey: string, channelKey: string): number | undefined {
@@ -304,6 +330,7 @@ export class ChannelScales {
     this.fluorBiex.clear();
     this.sharedAutoW.clear();
     this.sharedAutoT.clear();
+    this.sharedAutoBiexW.clear();
     if (had) this.notify();
   }
 

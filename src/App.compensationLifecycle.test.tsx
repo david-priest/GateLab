@@ -113,21 +113,23 @@ describe("App compensation lifecycle", () => {
     expect([...host.querySelectorAll<HTMLButtonElement>("button")]
       .some((button) => button.textContent?.trim() === "Fit data + gates")).toBe(true);
 
-    const selector = host.querySelector<HTMLSelectElement>('select[aria-label="Active assay layer for all tabs"]')!;
-    expect(selector.value).toBe("original");
-    expect(selector.querySelector<HTMLOptionElement>('option[value="compensated"]')?.disabled).toBe(false);
+    // The header's Original | Compensated switch: the checked radio is the layer in use.
+    const switchSelector = '[role="radiogroup"][aria-label="Active assay layer for all tabs"]';
+    const layer = () => host.querySelector(`${switchSelector} [aria-checked="true"]`)?.textContent;
+    const compensatedButton = host.querySelectorAll<HTMLButtonElement>(`${switchSelector} [role="radio"]`)[1];
+    expect(layer()).toBe("Original");
+    expect(compensatedButton.disabled).toBe(false);
     await act(async () => {
-      selector.value = "compensated";
-      selector.dispatchEvent(new Event("change", { bubbles: true }));
+      compensatedButton.click();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    expect(selector.value).toBe("compensated");
+    expect(layer()).toBe("Compensated");
 
     const statisticsTab = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
       .find((button) => button.textContent === "Statistics")!;
     act(() => statisticsTab.click());
-    expect(selector.value).toBe("compensated");
-    expect(host.querySelectorAll('select[aria-label="Active assay layer for all tabs"]')).toHaveLength(1);
+    expect(layer()).toBe("Compensated");
+    expect(host.querySelectorAll(switchSelector)).toHaveLength(1);
   });
 
   it("keeps an imported matrix mounted across analysis-tab changes", async () => {

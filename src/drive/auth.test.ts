@@ -12,9 +12,13 @@ function fakeGis(granted = true) {
   const gis: GisOAuth2 = {
     initTokenClient(config) {
       requested.push(config);
+      let issued = 0;
       client = {
         callback: config.callback,
-        requestAccessToken: () => client!.callback({ access_token: "token-1", expires_in: 3600, scope: DRIVE_SCOPE }),
+        requestAccessToken: (overrides: unknown) => {
+          requested.push(overrides);
+          client!.callback({ access_token: `token-${++issued}`, expires_in: 3600, scope: DRIVE_SCOPE });
+        },
       } as never;
       return client as never;
     },
@@ -42,6 +46,33 @@ describe("lab Drive sign-in", () => {
     auth.signOut();
     expect(auth.account()).toBeNull();
     expect(() => auth.token()).toThrow(DriveAuthError);
+  });
+
+  it("reconnects the member signed in once the token has run out, and refuses another account", async () => {
+    let now = 1_000_000;
+    let email = "member1@lab.example.org";
+    const { gis, requested } = fakeGis();
+    const about = (async () => Response.json({ user: { emailAddress: email, displayName: "Member" } })) as typeof fetch;
+    const auth = createDriveAuth(FAKE_CONFIG, { loadGis: async () => gis, fetchImpl: about, now: () => now });
+    await auth.signIn();
+    now += 3600_000;
+    expect(() => auth.token()).toThrow(DriveAuthError);
+
+    // Google is asked for the same account again.
+    await auth.reconnect();
+    expect(requested.at(-1)).toEqual({ prompt: "", hint: "member1@lab.example.org" });
+    expect(auth.token()).toBe("token-2");
+    expect(auth.expiresAt()).toBe(now + 3600_000);
+
+    // Another lab account at the reconnect is refused; the member stays signed in, the token run out.
+    now += 3600_000;
+    email = "member2@lab.example.org";
+    await expect(auth.reconnect()).rejects.toThrow(/signed in as member1@lab\.example\.org/);
+    expect(auth.account()?.email).toBe("member1@lab.example.org");
+    expect(() => auth.token()).toThrow(DriveAuthError);
+    email = "member1@lab.example.org";
+    await auth.reconnect();
+    expect(auth.token()).toBe("token-4");
   });
 
   it("refuses an account of another domain", async () => {

@@ -13,6 +13,7 @@
 // invert them back to the gating space GateLab masks in (raw for flow, arcsinh for
 // CyTOF).
 
+import type { BiexParams } from "./biex";
 import {
   newRootPopulation,
   newPopulation,
@@ -28,7 +29,7 @@ import {
   type TransformSpec,
   type Vertex,
 } from "./models";
-import { COMPENSATED_FCS_MARK, WSP_GATE_SPACE_TAG, WSP_COMPLEMENT_TAG, WSP_DERIVED_TAG, WSP_CURLY_TAG, WSP_OPERAND_TAG, WSP_RECT_BOUNDS_TAG, WSP_FLOWJO_AXES_TAG, WSP_FLOWJO_POLYGON_TAG } from "./flowjoWorkspace";
+import { COMPENSATED_FCS_MARK, WSP_GATE_SPACE_TAG, WSP_COMPLEMENT_TAG, WSP_DERIVED_TAG, WSP_CURLY_TAG, WSP_SPIDER_TAG, WSP_OPERAND_TAG, WSP_RECT_BOUNDS_TAG, WSP_FLOWJO_AXES_TAG, WSP_FLOWJO_POLYGON_TAG } from "./flowjoWorkspace";
 import { isRectangleBounds, type PolyRectGate, type RectangleBounds } from "./models";
 import { gatingMLWriter, writerRectangleBounds, type GatingMLWriter } from "./gatingmlWriter";
 import { gainConventionOf, gatesFromGatingMlScale } from "./gatingmlGain";
@@ -40,13 +41,14 @@ import {
   GATINGML_GRID_TAG, fingerprintRing, isFlowJoGridSpec, parseFlowJoGridAxis, parseFlowJoGridMark, type FlowJoGridMark,
 } from "./flowjoGrid";
 import type { FlowJoGridAxis } from "./models";
-import { validCurl, type QuadrantCurl } from "./models";
+import { cloneArms, validArms, validCurl, type QuadrantCurl } from "./models";
 import type { WspDerivedPopulation } from "./flowjoWorkspace";
 import { invertMatrix, type DisplaySpillover } from "./compensation";
 import { DEFAULT_FLOW_SOLVER_SETTINGS, prepareFlowCompensation } from "./flowCompensationEngine";
 import type { Sample } from "./sample";
 import type { FcsFile, NumericColumn } from "./fcs";
 import { isQcChannel, isScatterChannel, withinLogicleBound } from "./transforms";
+import { Hyperlog } from "./hyperlog";
 import { metalOf, punctuationInsensitive } from "./channelMatch";
 import { COMPENSATION_REFERENCE, GATELAB_ABOUT_LOGICLE_SCALE, GATELAB_FORMAT_TAG, GATELAB_OPERAND_TAG } from "./gatingmlExport";
 
@@ -498,6 +500,7 @@ function detectSource(root: Element): "gatelabr" | "cytobank" | "generic" {
 
 type TransformDef = (
   | { type: "logicle"; T: number; W: number; M: number; A: number }
+  | { type: "hyperlog"; T: number; W: number; M: number; A: number }
   | { type: "fasinh"; T: number; M: number; A: number }
   | { type: "flog"; T: number; M: number }
   | { type: "flin"; T: number; A: number }
@@ -517,7 +520,7 @@ interface ParsedTransforms {
  * Every top-level transformation GateLab can read, by id, and the ones whose parameters are
  * invalid. An invalid transformation used to be dropped here, and then refused as "unsupported or
  * missing", or, for a fasinh, inverted into raw with a gate of 0 events and no message; it is now
- * refused by name with what is wrong with it. Anything else (fratio, hyperlog) is left out and
+ * refused by name with what is wrong with it. Anything else (fratio) is left out and
  * refused as unsupported where a dimension references it.
  *
  * A parameter the file writes and GateLab cannot read as a finite number ("abc", "", INF, NaN) is
@@ -567,6 +570,29 @@ function parseTransforms(root: Element): ParsedTransforms {
       ...(bMin !== undefined && bMin !== -Infinity ? { boundMin: bMin } : {}),
       ...(bMax !== undefined && bMax !== Infinity ? { boundMax: bMax } : {}),
     };
+
+    const hl = firstChildLocal(el, "hyperlog");
+    if (hl) {
+      const unread = unreadable(hl, ["T", "W", "M", "A"]);
+      if (unread) {
+        bad(`hyperlog with ${unread}`);
+        continue;
+      }
+      const t = num(attrLocal(hl, "T"));
+      const w = num(attrLocal(hl, "W"));
+      const m = num(attrLocal(hl, "M"));
+      const a = num(attrLocal(hl, "A"));
+      if (!hasNum(t) || !hasNum(w) || !hasNum(m) || !hasNum(a)) bad("hyperlog without numeric T, W, M and A");
+      else {
+        try {
+          new Hyperlog(t, w, m, a);
+          defs[id] = { type: "hyperlog", T: t, W: w, M: m, A: a, ...bounds };
+        } catch (error) {
+          bad(`hyperlog: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      continue;
+    }
 
     const lg = firstChildLocal(el, "logicle");
     if (lg) {
@@ -1100,6 +1126,13 @@ function specFromGmlTransform(
     };
   };
 
+  if (tr.type === "hyperlog") {
+    const { T, W, M, A } = tr;
+    // Hyperlog coordinates have always been on Gating-ML's unit scale; the historical
+    // flowCore Logicle scale flag does not apply to this distinct transform.
+    return withBounds({ spec: { kind: "hyperlog", T, W, M, A }, toGateUnits: (v) => v });
+  }
+
   if (tr.type === "logicle") {
     const { T, W, M, A } = tr;
     if (!(T > 0) || !(W >= 0) || !(M > 0) || !(A >= 0) || !withinLogicleBound(W, M / 2, M)) return null;
@@ -1226,6 +1259,7 @@ function inTicks(axis: GateAxisSpec, timestep: number): GateAxisSpec {
         ...(axis.rawRect ? { rawRect: inTicks(axis.rawRect, timestep) } : {}),
       };
     case "logicle":
+    case "hyperlog":
     case "flog":
       return {
         spec: { ...s, T: s.T / timestep }, toGateUnits: axis.toGateUnits,
@@ -1397,6 +1431,12 @@ function parseWspCurly(node: Element): { curl: QuadrantCurl | null } | undefined
   return undefined;
 }
 
+/** Whether a polygon carries the spider-quadrant mark (WSP_SPIDER_TAG). */
+function parseWspSpider(node: Element): true | undefined {
+  for (const info of descendants(node)) if (info.localName === WSP_SPIDER_TAG) return true;
+  return undefined;
+}
+
 function parseWspGateSpace(node: Element): WspGateSpace | null {
   for (const info of descendants(node)) {
     if (info.localName !== WSP_GATE_SPACE_TAG) continue;
@@ -1514,6 +1554,8 @@ interface RawGate {
   color?: string;
   /** Present on the rectangle that stands for a whole curly quadrant gate (WSP_CURLY_TAG). */
   wsp_curly?: { curl: QuadrantCurl | null };
+  /** Set on the polygon that stands for a whole spider quadrant gate (WSP_SPIDER_TAG). */
+  wsp_spider?: true;
   /** The edge rule a converter recorded on this rectangle (WSP_RECT_BOUNDS_TAG), if any. */
   rect_bounds?: RectangleBounds;
   /** Each dimension's bounds as the file states them (rectangleRecord.ts, `written`). */
@@ -1624,6 +1666,7 @@ function parseGateNode(node: Element): RawGate | null {
       wsp_space: parseWspGateSpace(node),
       grid_mark: parseGridMark(node, verts),
       flowjo_polygon: parseWspFlowJoPolygon(node),
+      wsp_spider: parseWspSpider(node),
       // Read for every gate kind: a NotNode's copy can be a polygon or an ellipse as easily as
       // a rectangle, and reading the mark on rectangles alone imported the other two as the
       // gate itself -- exactly the events the user had excluded.
@@ -1857,6 +1900,13 @@ export interface GatingMLScaleEntry {
   /** Axis endpoints in compensated linear measurement space (portable across display implementations). */
   raw_lo?: number;
   raw_hi?: number;
+  /**
+   * A fluorescence channel shown on FlowJo's biexponential at these parameters: written by the
+   * FlowJo 11 reader for the biex a channel's gates were drawn on (flowjoWorkspace.ts), so the
+   * import shows them as drawn. A reader that predates it ignores it and shows the channel on its
+   * own scale; it is display only and moves no gate.
+   */
+  biex?: BiexParams;
 }
 
 export type GatingMLCompensationRef = "FCS" | "uncompensated";
@@ -1941,7 +1991,7 @@ function parseScaleChannels(value: unknown): Record<string, GatingMLScaleEntry> 
     throw new Error("Channel scale settings are malformed.");
   }
   const out: Record<string, GatingMLScaleEntry> = {};
-  const numericKeys: (keyof GatingMLScaleEntry)[] = ["w", "cofactor", "lo", "hi", "raw_lo", "raw_hi"];
+  const numericKeys: Exclude<keyof GatingMLScaleEntry, "biex">[] = ["w", "cofactor", "lo", "hi", "raw_lo", "raw_hi"];
   for (const [channel, rawEntry] of Object.entries(value as Record<string, unknown>)) {
     if (!channel || !rawEntry || typeof rawEntry !== "object" || Array.isArray(rawEntry)) {
       throw new Error("A channel scale entry is malformed.");
@@ -1957,6 +2007,20 @@ function parseScaleChannels(value: unknown): Record<string, GatingMLScaleEntry> 
     }
     if (entry.cofactor !== undefined && entry.cofactor <= 0) {
       throw new Error(`Scale cofactor for ${channel} must be positive.`);
+    }
+    if (record.biex !== undefined) {
+      const b = record.biex as Record<string, unknown> | null;
+      const finite = (k: string): boolean => !!b && typeof b[k] === "number" && Number.isFinite(b[k] as number);
+      if (!b || typeof b !== "object" || !["maxValue", "pos", "neg", "widthBasis", "channelRange"].every(finite)
+        || !((b.pos as number) > 0) || !((b.widthBasis as number) < 0) || !((b.channelRange as number) > 1)
+        || (b.tableChannels !== undefined && !(Number.isInteger(b.tableChannels) && (b.tableChannels as number) > 1))) {
+        throw new Error(`Biex scale for ${channel} is malformed.`);
+      }
+      entry.biex = {
+        maxValue: b.maxValue as number, pos: b.pos as number, neg: b.neg as number,
+        widthBasis: b.widthBasis as number, channelRange: b.channelRange as number,
+        ...(b.tableChannels !== undefined ? { tableChannels: b.tableChannels as number } : {}),
+      };
     }
     if ((entry.raw_lo === undefined) !== (entry.raw_hi === undefined) ||
         (entry.raw_lo !== undefined && entry.raw_hi! <= entry.raw_lo)) {
@@ -2048,8 +2112,16 @@ export function restoreGatingMLScaleState(
     transformsChanged = true;
   }
 
-  for (const [key, state] of Object.entries(scales ?? {})) {
+  // An entry names a channel by its key, or by its $PnN where a converter wrote it (a FlowJo
+  // workspace names parameters, and a channel with a marker is keyed "CD3-A (BUV805-A)").
+  const indexOf = (key: string): number | undefined => {
     const idx = sample.index(key);
+    if (idx !== undefined) return idx;
+    const byPnn = sample.channels.findIndex((c) => c.pnn === key);
+    return byPnn >= 0 ? byPnn : undefined;
+  };
+  for (const [key, state] of Object.entries(scales ?? {})) {
+    const idx = indexOf(key);
     if (idx === undefined) continue;
     if (sample.instrument === "flow" && !isQcChannel(key) && !isScatterChannel(key) &&
         state.w !== undefined && sample.currentLogicleW(idx) !== state.w) {
@@ -2082,6 +2154,14 @@ export function restoreGatingMLScaleState(
       }
       if (cofactor !== undefined && sample.currentScatterCofactor(idx) !== cofactor) {
         sample.setScatterCofactor(idx, cofactor);
+        transformsChanged = true;
+      }
+    }
+    // A fluorescence channel to be shown on FlowJo's biexponential at the parameters given.
+    if (sample.instrument === "flow" && sample.isFluorChannel(idx) && state.biex) {
+      const shown = sample.fluorBiexParams(idx);
+      if (!shown || JSON.stringify(shown) !== JSON.stringify(state.biex)) {
+        sample.applyFluorBiex({ [sample.channels[idx].key]: state.biex });
         transformsChanged = true;
       }
     }
@@ -2671,10 +2751,10 @@ export function importGatingML(
       const channels = [...gatesOn.keys()];
       importProblems.push(
         `${gates.length === 1 ? "The gate" : "The gates"} ${gates.slice(0, 3).map((g) => `"${g}"`).join(", ")}` +
-        `${gates.length > 3 ? `, and ${gates.length - 3} more,` : ""} ${gates.length === 1 ? "was" : "were"} drawn in FlowJo on ` +
+        `${gates.length > 3 ? `, and ${gates.length - 3} more,` : ""} ${gates.length === 1 ? "was" : "were"} drawn on ` +
         `compensated values of ${channels.join(", ")}, and no spillover matrix that applies to this file covers ` +
         `${channels.length === 1 ? "it" : "them"}: neither the workspace's nor the FCS file's own. Evaluated on the stored ` +
-        "values, they would not hold the events FlowJo's hold.",
+        "values, they would not hold the events the workspace counted in them.",
       );
     }
   }
@@ -2800,8 +2880,13 @@ export function importGatingML(
           })
           .map((d) => d.channel);
         if (clash.length) {
-          g.lost_reason = `declares uncompensated values on ${[...new Set(clash)].join(", ")}, which the file's ` +
-            "other gates compensate; GateLab evaluates a sample on one compensation";
+          // FlowJo lists both the raw and the "Comp-" parameter, so a gate drawn on the wrong one is
+          // an easy slip there; the message says which parameter to redraw it on.
+          const named = [...new Set(clash)];
+          g.lost_reason = `declares uncompensated values on ${named.join(", ")}, which the file's ` +
+            "other gates compensate; GateLab evaluates a sample on one compensation. Redraw it on the " +
+            `compensated parameter (${named.map((c) => `Comp-${c}`).join(", ")} in the workspace) and import again, ` +
+            "or redraw it in GateLab after import";
         }
       }
     }
@@ -2880,12 +2965,18 @@ export function importGatingML(
         space: "display",
         transforms: { [xCh]: g.wsp_space.x, [yCh]: g.wsp_space.y },
       };
-      // A grid is a pair or nothing: one grid axis without the other is not FlowJo's rule.
+      // A grid is a pair or nothing: one grid axis without the other is not FlowJo's rule. FlowJo
+      // 10 grids polygons only; FlowJo 11 also tests a curly quadrant's crosshair on its grid
+      // (flowjo11Workbench.ts), so a quadrant whose axes are both FlowJo 11's grid is held there.
       const gx = isFlowJoGridSpec(g.wsp_space.x);
-      if (gx !== isFlowJoGridSpec(g.wsp_space.y) || (gx && g.gate_type !== "polygon")) {
+      const wx = g.wsp_space.x;
+      const wy = g.wsp_space.y;
+      const flowJo11Quadrant = g.wsp_curly !== undefined && isFlowJoGridSpec(wx) && isFlowJoGridSpec(wy)
+        && wx.rule === "flowjo11" && wy.rule === "flowjo11";
+      if (gx !== isFlowJoGridSpec(g.wsp_space.y) || (gx && g.gate_type !== "polygon" && !flowJo11Quadrant)) {
         // Left out by name, as every gate GateLab cannot hold as declared is (fix/gatingml-transforms).
         nSkipped++;
-        lostGates.set(gmlId, "is on FlowJo's channel grid on one axis only, or is not a polygon; FlowJo grids a polygon on both axes");
+        lostGates.set(gmlId, "is on a recorded channel grid on one axis only, or is not a polygon; a workspace grids a polygon on both axes");
         continue;
       }
       if (gx && g.wsp_space.raw?.length === verts.length) flowJoVertices = g.wsp_space.raw;
@@ -2976,6 +3067,38 @@ export function importGatingML(
         y_channel: yCh,
         center: [verts[0][0], verts[0][1]],
         ...(curl ? { curl: { ...curl } } : {}),
+        color: g.color ?? nextGateColor(Object.keys(appGates).length),
+        label_offset: null,
+        ...spaceFields,
+      };
+      gateOrder.push(appId);
+      gmlToApp[gmlId] = appId;
+      continue;
+    }
+    if (g.wsp_spider) {
+      // The polygon stands for a whole spider quadrant gate: its vertices are the centre and the
+      // down, right, up and left arm ends, carried into the space FlowJo draws the arms straight
+      // in; the four FlowJo populations arrive as derived populations naming one quadrant each.
+      // Arms that are not valid here (the converter checked them before carrying them) are not
+      // straightened into another gate: the gate is left out by name, as any gate GateLab cannot
+      // hold as declared is.
+      const center: [number, number] = [verts[0][0], verts[0][1]];
+      const arms = verts.length === 5
+        ? { down: verts[1], right: verts[2], up: verts[3], left: verts[4] }
+        : null;
+      if (!arms || !validArms(center, arms)) {
+        nSkipped++;
+        lostGates.set(gmlId, "is a spider quadrant whose arms cross or do not each lie on their own side of its centre");
+        continue;
+      }
+      appGates[appId] = {
+        gate_id: appId,
+        name: g.name,
+        gate_type: "quadrant",
+        x_channel: xCh,
+        y_channel: yCh,
+        center,
+        arms: cloneArms(arms),
         color: g.color ?? nextGateColor(Object.keys(appGates).length),
         label_offset: null,
         ...spaceFields,
@@ -3570,7 +3693,7 @@ function buildPopulationsFromBooleans(
       if (g.gate_type !== "boolean") {
         if (skips?.lostGates.has(gml)) return { lost: gml };
         const app = gmlToApp[gml];
-        if (!app || !appGates[app] || g.wsp_curly || g.wsp_complement) return null;
+        if (!app || !appGates[app] || g.wsp_curly || g.wsp_spider || g.wsp_complement) return null;
         return [{ gml, include: !complement }];
       }
       if (g.operation === "or") return null;
@@ -3629,16 +3752,16 @@ function buildPopulationsFromBooleans(
     // Each gate here is its own population, so a gate that was not imported is a population
     // left out, with what the file places beneath it.
     for (const [gml] of skips?.lostGates ?? []) {
-      if (rawGates[gml] && !rawGates[gml].wsp_curly && !operandGates.has(gml)) skips!.warnLost(rawGates[gml].name, gml);
+      if (rawGates[gml] && !rawGates[gml].wsp_curly && !rawGates[gml].wsp_spider && !operandGates.has(gml)) skips!.warnLost(rawGates[gml].name, gml);
     }
     let gatesLeft = ordered;
     let derivedLeft = derived;
     while (gatesLeft.length || derivedLeft.length) {
       const gatesWaiting: string[] = [];
       for (const gid of gatesLeft) {
-        // A curly quadrant's shared gate has no population of its own; its four populations
-        // are the derived ones that name its quadrants.
-        if (rawGates[appToGml[gid]]?.wsp_curly) { placed.add(gid); continue; }
+        // A curly or spider quadrant's shared gate has no population of its own; its four
+        // populations are the derived ones that name its quadrants.
+        if (rawGates[appToGml[gid]]?.wsp_curly || rawGates[appToGml[gid]]?.wsp_spider) { placed.add(gid); continue; }
         // GateLab's own operand helper: its gate serves the intersections that name it.
         if (operandGates.has(appToGml[gid])) { placed.add(gid); continue; }
         const parentPid = containerOf(rawGates[appToGml[gid]]?.parent_id, gid);

@@ -1,8 +1,10 @@
 // auth.ts — signing a lab member in to the lab Drive with Google Identity Services. The access
 // token lives in this module's closure only: never React state, storage or a URL, and it is sent
 // only in the Authorization header. GIS gives no refresh token, so a token that runs out (after
-// an hour) takes a click on Reconnect. Sign-out drops the token; it does not call revoke, whose
-// effect on the files a member has picked for GateLab is untested.
+// an hour) takes a click on Reconnect, which keeps the member signed in: another account is
+// refused there, so a workspace opened as one member is never saved as another. Sign-out drops
+// the token; it does not call revoke, whose effect on the files a member has picked for GateLab is
+// untested.
 
 import { DriveAuthError, DriveError } from "./api";
 import type { DriveConfig } from "./config";
@@ -54,8 +56,13 @@ export interface DriveAccount {
 export interface DriveAuth {
   /** Load Google's sign-in library ahead of the click that signs in, so its window is not blocked. */
   prepare(): Promise<void>;
-  /** Sign in, or reconnect once the token has run out. Call it from a click. */
+  /** Sign in. Call it from a click. */
   signIn(): Promise<DriveAccount>;
+  /**
+   * A new token for the member signed in, once theirs has run out; another account is refused and
+   * the sign-in stays as it was. Signs in when nobody is. Call it from a click.
+   */
+  reconnect(): Promise<DriveAccount>;
   signOut(): void;
   /** The token for one request; throws DriveAuthError when there is none or it is about to run out. */
   token(): string;
@@ -64,6 +71,16 @@ export interface DriveAuth {
   expiresAt(): number | null;
   /** Called on sign-in, sign-out, and when the token comes within the margin of running out. */
   subscribe(listener: () => void): () => void;
+}
+
+/** Whether the token can be used now: signed in, and not within TOKEN_MARGIN_MS of running out. */
+export function tokenLive(auth: DriveAuth): boolean {
+  try {
+    auth.token();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface DriveAuthDeps {
@@ -134,41 +151,53 @@ export function createDriveAuth(config: DriveConfig, deps: Partial<DriveAuthDeps
     });
   };
 
+  /** A token, and who it is for; `expected` is the member a reconnect must be. */
+  const connect = async (expected: string | null): Promise<DriveAccount> => {
+    const granted = await requestToken();
+    // A reconnect that fails leaves the member signed in, with the token that ran out.
+    const refuse = (error: DriveError): never => {
+      if (expected === null) {
+        clear();
+        notify();
+      }
+      throw error;
+    };
+    // Who signed in, and that it is a lab account: the client is Internal to the university's
+    // Workspace already, and this refuses any other account outright.
+    const response = await fetchImpl("https://www.googleapis.com/drive/v3/about?fields=user(displayName,emailAddress)", {
+      headers: { Authorization: `Bearer ${granted.token}` },
+      cache: "no-store",
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+    });
+    if (!response.ok) return refuse(new DriveError(`Signed in, but Drive refused to say who (HTTP ${response.status}).`, response.status));
+    const user = ((await response.json()) as { user?: { displayName?: unknown; emailAddress?: unknown } }).user ?? {};
+    const email = typeof user.emailAddress === "string" ? user.emailAddress : "";
+    if (!email.toLowerCase().endsWith(`@${config.domain}`)) {
+      return refuse(new DriveAuthError(`The lab Drive takes ${config.domain} accounts only; ${email || "this account"} is not one.`));
+    }
+    if (expected !== null && email.toLowerCase() !== expected.toLowerCase()) {
+      return refuse(new DriveAuthError(
+        `Google reconnected ${email}, but the lab Drive here is signed in as ${expected}. Reconnect as ${expected}, ` +
+          "or sign out first to change account; nothing open here is lost.",
+      ));
+    }
+    token = granted.token;
+    expiry = now() + granted.expiresIn * 1000;
+    account = Object.freeze({ email, name: typeof user.displayName === "string" ? user.displayName : null });
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(notify, Math.max(0, expiry - TOKEN_MARGIN_MS - now()));
+    notify();
+    return account;
+  };
+
   return {
     async prepare() {
       await ensureClient();
     },
 
-    async signIn() {
-      const granted = await requestToken();
-      // Who signed in, and that it is a lab account: the client is Internal to the university's
-      // Workspace already, and this refuses any other account outright.
-      const response = await fetchImpl("https://www.googleapis.com/drive/v3/about?fields=user(displayName,emailAddress)", {
-        headers: { Authorization: `Bearer ${granted.token}` },
-        cache: "no-store",
-        credentials: "omit",
-        referrerPolicy: "no-referrer",
-      });
-      if (!response.ok) {
-        clear();
-        notify();
-        throw new DriveError(`Signed in, but Drive refused to say who (HTTP ${response.status}).`, response.status);
-      }
-      const user = ((await response.json()) as { user?: { displayName?: unknown; emailAddress?: unknown } }).user ?? {};
-      const email = typeof user.emailAddress === "string" ? user.emailAddress : "";
-      if (!email.toLowerCase().endsWith(`@${config.domain}`)) {
-        clear();
-        notify();
-        throw new DriveAuthError(`The lab Drive takes ${config.domain} accounts only; ${email || "this account"} is not one.`);
-      }
-      token = granted.token;
-      expiry = now() + granted.expiresIn * 1000;
-      account = Object.freeze({ email, name: typeof user.displayName === "string" ? user.displayName : null });
-      if (timer !== null) clearTimeout(timer);
-      timer = setTimeout(notify, Math.max(0, expiry - TOKEN_MARGIN_MS - now()));
-      notify();
-      return account;
-    },
+    signIn: () => connect(null),
+    reconnect: () => connect(account?.email ?? null),
 
     signOut() {
       clear();

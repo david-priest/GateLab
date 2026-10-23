@@ -169,6 +169,7 @@ const SAMPLE_V3_ALLOWED_KEYS = [
   "scatterLinear",
   "fluorArcsinh",
   "fluorBiex",
+  "fluorBiexRecorded",
   "cytofCofactor",
   "instrumentMode",
   "labels",

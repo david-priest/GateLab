@@ -159,7 +159,7 @@ async function openFiles(withImages: boolean): Promise<void> {
   Object.defineProperty(window, "showOpenFilePicker", { configurable: true, value: vi.fn().mockResolvedValue(handles) });
   Object.defineProperty(window, "showSaveFilePicker", { configurable: true, value: vi.fn() });
   act(() => root.render(<App />));
-  const button = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "+ Files…")!;
+  const button = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Add files…")!;
   await act(async () => { button.click(); await new Promise((resolve) => setTimeout(resolve, 20)); });
   for (let i = 0; i < 4; i++) await settle();
 }

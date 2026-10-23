@@ -4,7 +4,57 @@
 // IndexedDB store for persisting FCS file handles so a reference workspace re-links its data.
 
 export const supportsFileSystemAccess = (): boolean =>
+  !readsRefused && !refusesPickedFiles() &&
   typeof window !== "undefined" && typeof window.showOpenFilePicker === "function" && typeof window.showSaveFilePicker === "function";
+
+/**
+ * Set once the browser has handed GateLab a file from its picker and then refused to read it. An
+ * embedded browser (the Claude desktop app's browser pane, 2026-10-22) did that on reopening a
+ * saved workspace: "Failed to execute 'getFile' on 'FileSystemFileHandle': The request is not
+ * allowed by the user agent or the platform in the current context." That is a property of the
+ * browser, not of one file, so for the rest of the page's life GateLab reports the picker as
+ * unavailable and every open goes through the browser's ordinary file chooser instead.
+ */
+let readsRefused = false;
+
+/**
+ * The Claude desktop app's browser pane, which says so in its user agent ("Claude/2.42304.0"),
+ * refuses both reads and writes of a picked file. Its save dialog made the file before the write
+ * was refused, and with reads refused too GateLab could not tell that file was empty to remove it,
+ * so its dialogs are never offered there.
+ */
+function refusesPickedFiles(): boolean {
+  return typeof navigator !== "undefined" && /\bClaude\/\d/.test(navigator.userAgent ?? "");
+}
+
+/** A write to a picked file was refused: opening goes through the ordinary chooser too. */
+export function noteHandlesRefused(): void {
+  readsRefused = true;
+}
+
+export function handleReadsRefused(): boolean {
+  return readsRefused;
+}
+
+/** For tests. */
+export function resetHandleReadsRefused(): void {
+  readsRefused = false;
+}
+
+export const READ_REFUSED_MESSAGE =
+  "This browser let GateLab choose the file but refused to read it. Choose it again: for the rest of " +
+  "this session GateLab uses the browser's ordinary file chooser, which this browser allows.";
+
+/** A picked file's contents, or, where the browser refuses the read, the message that says what to do. */
+export async function readPickedFile(handle: FileSystemFileHandle): Promise<File> {
+  try {
+    return await handle.getFile();
+  } catch (e) {
+    if ((e as DOMException | null)?.name !== "NotAllowedError") throw e;
+    readsRefused = true;
+    throw new Error(READ_REFUSED_MESSAGE, { cause: e });
+  }
+}
 
 interface DirectoryPickerWindow extends Window {
   showDirectoryPicker?: (options?: {
@@ -21,6 +71,7 @@ interface IterableDirectoryHandle extends FileSystemDirectoryHandle {
 const directoryPickerWindow = (): DirectoryPickerWindow => window as DirectoryPickerWindow;
 
 export const supportsDirectoryAccess = (): boolean =>
+  !readsRefused && !refusesPickedFiles() &&
   typeof window !== "undefined" && typeof directoryPickerWindow().showDirectoryPicker === "function";
 
 export interface PickedFile {
@@ -31,11 +82,31 @@ export interface PickedFile {
 
 /** A user-approved file that has not yet been read into GateLab's data model. */
 export interface PickedFileSource {
-  handle: FileSystemFileHandle;
+  /** Null when the file came from the browser's ordinary chooser, which hands out no handle. */
+  handle: FileSystemFileHandle | null;
   file: File;
   name: string;
   /** Path below a selected source folder; just the filename for a normal file picker. */
   relativePath: string;
+}
+
+/**
+ * Files from the browser's ordinary chooser, for a browser that gives GateLab no file handles.
+ * `accept` lists extensions (".fcs"). Null when the chooser is dismissed.
+ */
+export function pickFilesWithChooser(accept: readonly string[], multiple = true): Promise<PickedFileSource[] | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = multiple;
+    input.accept = accept.join(",");
+    input.addEventListener("change", () => {
+      const files = [...(input.files ?? [])];
+      resolve(files.length ? files.map((file) => ({ handle: null, file, name: file.name, relativePath: file.name })) : null);
+    }, { once: true });
+    input.addEventListener("cancel", () => resolve(null), { once: true });
+    input.click();
+  });
 }
 
 export interface PickedDirectory {
@@ -105,7 +176,7 @@ function pickerPlacement(options: PickFileOptions = {}): { id: string; startIn?:
 }
 
 async function readHandle(handle: FileSystemFileHandle): Promise<{ bytes: Uint8Array; name: string }> {
-  const file = await handle.getFile();
+  const file = await readPickedFile(handle);
   return { bytes: new Uint8Array(await file.arrayBuffer()), name: file.name };
 }
 
@@ -153,7 +224,7 @@ export async function pickFileSource(
       ...pickerPlacement(options),
     });
     rememberPickerLocation(handle);
-    const file = await handle.getFile();
+    const file = await readPickedFile(handle);
     return { handle, file, name: file.name, relativePath: file.name };
   } catch (e) {
     if ((e as DOMException)?.name === "AbortError") return null;
@@ -175,7 +246,7 @@ export async function pickFiles(
     });
     rememberPickerLocation(handles[0]);
     return await Promise.all(handles.map(async (handle) => {
-      const file = await handle.getFile();
+      const file = await readPickedFile(handle);
       return { handle, file, name: file.name, relativePath: file.name };
     }));
   } catch (e) {
@@ -213,7 +284,7 @@ export async function pickDirectoryFiles(
         const extension = dot >= 0 ? entry.name.slice(dot).toLowerCase() : "";
         if (!allowed.has(extension)) continue;
         const fileHandle = entry as FileSystemFileHandle;
-        const file = await fileHandle.getFile();
+        const file = await readPickedFile(fileHandle);
         files.push({ handle: fileHandle, file, name: file.name, relativePath });
       }
     };

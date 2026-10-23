@@ -56,6 +56,9 @@ vi.mock("./engine/workspace", async (importOriginal) => {
 import App from "./App";
 import { readWorkspaceEnvelopeFromFile } from "./engine/workspace";
 
+/** What the page says, the status line's whole text (its tooltip) included. */
+const shown = (root: ParentNode): string => `${root.textContent ?? ""} ${root.querySelector(".gl-status-line")?.getAttribute("title") ?? ""}`;
+
 let root: Root;
 let host: HTMLDivElement;
 let uuid = 0;
@@ -261,8 +264,8 @@ describe("App reference workspace relinking", () => {
     expect(sampleRows).toHaveLength(2);
     expect(sampleRows[0].textContent).toContain("donor-a.fcs");
     expect(sampleRows[1].textContent).toContain("donor-b.fcs");
-    expect(host.textContent).toContain("Opened analysis.gatelab · 2 samples · linked FCS");
-    expect([...host.querySelectorAll<HTMLButtonElement>("button")]
+    expect(shown(host)).toContain("Opened analysis.gatelab · 2 samples · linked FCS");
+    expect([...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")]
       .find((button) => button.textContent?.trim() === "Lock scales between files")
       ?.getAttribute("aria-pressed")).toBe("true");
   });
@@ -298,7 +301,7 @@ describe("App reference workspace relinking", () => {
     // The range the plot is drawn with; the header no longer carries range inputs (they live
     // in the Scales tab, and the plot honours the same map).
     const xRange = () => (plotCapture.payload.x_range as [number, number]).map((v: number) => Math.round(v * 1000) / 1000);
-    const lock = [...host.querySelectorAll<HTMLButtonElement>("button")]
+    const lock = [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")]
       .find((button) => button.textContent?.trim() === "Lock scales between files")!;
     expect(lock.getAttribute("aria-pressed")).toBe("false");
     expect(xRange()).toEqual([1, 2]);
@@ -363,7 +366,7 @@ describe("App reference workspace relinking", () => {
     await clickChooseFcsFolder();
     folderKeywords.byFile.clear();
     expect(host.querySelectorAll<HTMLElement>('[role="option"]')).toHaveLength(2);
-    expect(host.textContent).toContain("Opened analysis.gatelab · 2 samples · linked FCS");
+    expect(shown(host)).toContain("Opened analysis.gatelab · 2 samples · linked FCS");
   });
 
   // The only file of the name records another acquisition. It is never relinked unasked, and it
@@ -388,7 +391,7 @@ describe("App reference workspace relinking", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
     expect(host.querySelectorAll<HTMLElement>('[role="option"]')).toHaveLength(2);
-    expect(host.textContent).toContain("relinked by choice to files that record another acquisition: flow-data/donor-b.fcs as donor-b.fcs");
+    expect(shown(host)).toContain("Relinked by choice to files that record another acquisition: flow-data/donor-b.fcs as donor-b.fcs");
   });
 
   // The files of a workspace spread over two folders: the first choice keeps what it found, the
@@ -437,7 +440,7 @@ describe("App reference workspace relinking", () => {
     expect(sampleRows).toHaveLength(2);
     expect(sampleRows[0].textContent).toContain("donor-a.fcs");
     expect(sampleRows[1].textContent).toContain("donor-b.fcs");
-    expect(host.textContent).toContain("Opened analysis.gatelab · 2 samples · linked FCS");
+    expect(shown(host)).toContain("Opened analysis.gatelab · 2 samples · linked FCS");
   });
 
   it("reports all unmatched files together without partially opening the workspace", async () => {
@@ -491,7 +494,7 @@ describe("App reference workspace relinking, by identity and without one", () =>
     expect(host.textContent).not.toContain("Another acquisition");
     expect(host.textContent).not.toContain("Relink to these files anyway");
     expect(host.querySelectorAll<HTMLElement>('[role="option"]')).toHaveLength(2);
-    expect(host.textContent).toContain("Opened analysis.gatelab · 2 samples · linked FCS");
+    expect(shown(host)).toContain("Opened analysis.gatelab · 2 samples · linked FCS");
     // Both declarations carried their identity, so nothing is said to be unconfirmed.
     expect(host.textContent).not.toContain("unconfirmed");
   });
@@ -515,9 +518,9 @@ describe("App reference workspace relinking, by identity and without one", () =>
     await clickOpenWorkspace();
     await clickChooseFcsFolder();
     folderKeywords.byName = {};
-    expect(host.textContent).toContain("Opened analysis.gatelab · 2 samples · linked FCS");
+    expect(shown(host)).toContain("Opened analysis.gatelab · 2 samples · linked FCS");
     expect(host.textContent).toContain(
-      "relinked without confirmation: flow-data/specimen_001_tube_001.fcs as Specimen_001_Tube_001.fcs, chosen over " +
+      "Relinked without confirmation: flow-data/specimen_001_tube_001.fcs as Specimen_001_Tube_001.fcs, chosen over " +
       "flow-data/Specimen_001_Tube_001.fcs: it agrees with what it was saved with on $TOT only, which does not confirm it");
   });
 
@@ -537,7 +540,7 @@ describe("App reference workspace relinking, by identity and without one", () =>
     await clickChooseFcsFolder();
     folderKeywords.byName = {};
     expect(host.textContent).not.toContain("multiple FCS files with the same filename");
-    expect(host.textContent).toContain("Opened analysis.gatelab · 2 samples · linked FCS");
+    expect(shown(host)).toContain("Opened analysis.gatelab · 2 samples · linked FCS");
     expect(host.textContent).toContain('so nothing confirms it is the file it was saved with: "D1.fcs"');
   });
 
@@ -553,7 +556,56 @@ describe("App reference workspace relinking, by identity and without one", () =>
     await clickOpenWorkspace();
     await clickChooseFcsFolder();
     expect(host.querySelectorAll<HTMLElement>('[role="option"]')).toHaveLength(2);
-    expect(host.textContent).toContain(
-      'relinked by name alone, unconfirmed: the workspace was saved without the acquisition keywords of these 2 files, so nothing confirms they are the files it was saved with: "donor-a.fcs", "donor-b.fcs"');
+    expect(shown(host)).toContain(
+      'Relinked by name alone, unconfirmed: the workspace was saved without the acquisition keywords of these 2 files, so nothing confirms they are the files it was saved with: "donor-a.fcs", "donor-b.fcs"');
+  });
+});
+
+describe("App reference workspace relinking in a browser without file handles", () => {
+  // Firefox, Safari and the Claude app's browser pane give GateLab no file handles. Relinking
+  // threw "This browser cannot select a folder for linked FCS recovery", so a workspace saved
+  // with linked FCS files could not be opened there at all; the ordinary chooser does the job.
+  it("asks for the FCS files through the browser's own chooser and opens the workspace", async () => {
+    for (const name of ["showOpenFilePicker", "showSaveFilePicker", "showDirectoryPicker"]) {
+      delete (window as unknown as Record<string, unknown>)[name];
+    }
+    vi.mocked(readWorkspaceEnvelopeFromFile).mockResolvedValue({
+      raw: referenceWorkspace(),
+      fcsByPath: null,
+      storage: "reference",
+      portableAssays: null,
+    });
+    const chosen = [testFile("donor-b.fcs"), testFile("donor-a.fcs")];
+    const clicked: HTMLInputElement[] = [];
+    vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(function (this: HTMLInputElement) {
+      clicked.push(this);
+      if (this.accept !== ".fcs,.cvw") return;
+      Object.defineProperty(this, "files", { configurable: true, value: chosen });
+      this.dispatchEvent(new Event("change"));
+    });
+
+    act(() => root.render(<App />));
+    const workspaceInput = host.querySelector<HTMLInputElement>('input[type="file"][accept*=".gatelab"]')!;
+    Object.defineProperty(workspaceInput, "files", { configurable: true, value: [testFile("analysis.gatelab")] });
+    await act(async () => {
+      workspaceInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(host.textContent).toContain("Locate linked FCS files");
+    expect(host.textContent).not.toContain("cannot select a folder");
+
+    const choose = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => /Choose (all FCS files|FCS folder)…/.test(button.textContent ?? ""))!;
+    await act(async () => {
+      choose.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(clicked.some((input) => input.accept === ".fcs,.cvw" && input.multiple)).toBe(true);
+    const sampleRows = host.querySelectorAll<HTMLElement>('[role="option"]');
+    expect(sampleRows).toHaveLength(2);
+    expect(sampleRows[0].textContent).toContain("donor-a.fcs");
+    expect(sampleRows[1].textContent).toContain("donor-b.fcs");
+    expect(shown(host)).toContain("2 samples · linked FCS");
   });
 });

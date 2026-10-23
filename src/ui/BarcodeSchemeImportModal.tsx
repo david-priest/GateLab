@@ -11,6 +11,7 @@ import type { BarcodeChannelLike, BarcodePlane, BarcodeScheme, BarcodeTable, QcC
 type QcPreviewWithSource = QcChainPreview & { source?: "file" | "template" | "none" };
 import type { BarcodeTemplate } from "../engine/barcodeTemplate";
 import { useI18n } from "./i18n";
+import { ModalEscape } from "./useModalEscape";
 import { pickFilesOrInput } from "../engine/fsAccess";
 
 export interface BarcodeImportDraft {
@@ -98,6 +99,7 @@ export function BarcodeSchemeImportModal({
 
   return (
     <div className="gl-modal-backdrop">
+      <ModalEscape onClose={onCancel} />
       <div className="gl-modal" style={{ maxWidth: 720 }}>
         <div className="gl-modal-title">{t("Import hierarchy")}</div>
         <div className="gl-modal-note">

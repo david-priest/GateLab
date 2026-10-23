@@ -4,9 +4,11 @@
 // tables in the Metadata tab. Values are keyed by row id (sample id / population id).
 
 import { useRef, useState } from "react";
+import { CloseIcon } from "./icons";
 import { pickFilesOrInput } from "../engine/fsAccess";
 import type { MetadataColumn } from "../engine/metadata";
 import { useI18n } from "./i18n";
+import { TabIntro, TabIntroToggle, type TabIntroState } from "./TabIntro";
 
 export interface MetaRow {
   id: string; // join key: sample id or population id
@@ -31,12 +33,21 @@ interface Props {
   hint: string;
   emptyMessage: string;
   protectedColumns?: string[];
+  /** Editable columns given more room: the sample_id, which is usually as long as a filename. */
+  wideColumns?: string[];
+  /** Read-only text columns after the name, each a header and a value per row id. */
+  textColumns?: { header: string; values: Record<string, string> }[];
+  /** The tab's explanation: the hint shows with it, and its "?" by the title when hidden. */
+  intro?: TabIntroState;
+  /** False where another table on the tab already carries the "?". */
+  introToggle?: boolean;
 }
 
 export function EditableMetaTable({
   title, rowHeader, fixedHeaders, rows, columns, values,
   onSetCell, onAddColumn, onRenameColumn, onDeleteColumn, onImport,
-  templateFilename, templateKeyHeader, hint, emptyMessage, protectedColumns = [],
+  templateFilename, templateKeyHeader, hint, emptyMessage, protectedColumns = [], wideColumns = [],
+  textColumns = [], intro, introToggle = true,
 }: Props) {
   const { t } = useI18n();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -64,7 +75,7 @@ export function EditableMetaTable({
   return (
     <div className="gl-meta-section">
       <div className="gl-tab-head">
-        <h2 className="gl-tab-title">{title}</h2>
+        <h2 className="gl-tab-title">{title}{intro && introToggle && <TabIntroToggle intro={intro} />}</h2>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="gl-btn-ghost" onClick={() => onAddColumn(`field${columns.length + 1}`)}>{t("+ Field")}</button>
           <button className="gl-btn-ghost" onClick={downloadTemplate}>{t("Export template")}</button>
@@ -82,7 +93,7 @@ export function EditableMetaTable({
           )}
         </div>
       </div>
-      <p className="gl-hint gl-panel-hint">{hint}</p>
+      {intro ? <TabIntro intro={intro} className="gl-panel-hint">{hint}</TabIntro> : <p className="gl-hint gl-panel-hint">{hint}</p>}
 
       {rows.length === 0 ? (
         <p className="gl-hint">{emptyMessage}</p>
@@ -92,19 +103,20 @@ export function EditableMetaTable({
             <thead>
               <tr>
                 <th className="gl-stats-name">{rowHeader}</th>
+                {textColumns.map((c) => <th key={c.header} className="gl-stats-name gl-meta-readonly">{c.header}</th>)}
                 {fixedHeaders.map((h) => <th key={h} className="gl-stats-num">{h}</th>)}
                 {columns.map((c) => (
                   <th key={c.name} className="gl-meta-col">
                     <div className="gl-meta-col-head">
                       <input
-                        className="gl-field-input gl-meta-hdr-input"
+                        className={`gl-field-input gl-meta-hdr-input${wideColumns.includes(c.name) ? " is-wide" : ""}`}
                         readOnly={protectedColumns.includes(c.name)}
                         value={draft[hdrKey(c.name)] ?? c.name}
                         onChange={(e) => setDraft((d) => ({ ...d, [hdrKey(c.name)]: e.target.value }))}
                         onBlur={(e) => { const v = e.currentTarget.value.trim(); if (v && v !== c.name) onRenameColumn(c.name, v); clear(hdrKey(c.name)); }}
                         onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
                       />
-                      {!protectedColumns.includes(c.name) && <button className="gl-meta-del" title={t("Delete field")} onClick={() => onDeleteColumn(c.name)}>×</button>}
+                      {!protectedColumns.includes(c.name) && <button className="gl-meta-del" title={t("Delete field")} aria-label={t("Delete field")} onClick={() => onDeleteColumn(c.name)}><CloseIcon size={12} /></button>}
                     </div>
                   </th>
                 ))}
@@ -114,6 +126,7 @@ export function EditableMetaTable({
               {rows.map((r) => (
                 <tr key={r.id}>
                   <td className="gl-stats-name">{r.name}</td>
+                  {textColumns.map((c) => <td key={c.header} className="gl-stats-name gl-meta-readonly">{c.values[r.id] ?? ""}</td>)}
                   {r.fixed.map((v, i) => <td key={i} className="gl-stats-num">{v}</td>)}
                   {columns.map((c) => {
                     const k = cellKey(r.id, c.name);
@@ -121,7 +134,7 @@ export function EditableMetaTable({
                     return (
                       <td key={c.name} className="gl-meta-cell">
                         <input
-                          className="gl-field-input gl-meta-input"
+                          className={`gl-field-input gl-meta-input${wideColumns.includes(c.name) ? " is-wide" : ""}`}
                           value={draft[k] ?? val}
                           onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))}
                           onBlur={(e) => { onSetCell(r.id, c.name, e.currentTarget.value); clear(k); }}

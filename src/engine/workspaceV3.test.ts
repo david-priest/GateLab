@@ -828,6 +828,32 @@ describe("compensated v3 restoration", () => {
     ]);
   });
 
+  it("round-trips matrix names and the active profile through a saved file, bindings unchanged", async () => {
+    const { workspace, flow, contexts } = await compensatedWorkspace();
+    workspace.compensation = {
+      ...workspace.compensation,
+      lineages: workspace.compensation.lineages.map((lineage) =>
+        lineage.baselineProfileId === flow.profileId ? { ...lineage, name: "Panel B1" } : lineage),
+      activeProfileId: flow.profileId,
+    };
+    const unnamed = await validateWorkspaceV3(clone((await compensatedWorkspace()).workspace), contexts);
+
+    const reopened = await validateWorkspaceV3(
+      clone(readWorkspaceEnvelope(packWorkspaceV3Reference(workspace)).raw),
+      contexts,
+    );
+
+    expect(reopened.compensation.activeProfileId).toBe(flow.profileId);
+    expect(reopened.compensation.lineages.find(({ baselineProfileId }) => baselineProfileId === flow.profileId)?.name)
+      .toBe("Panel B1");
+    expect(reopened.compensation.lineages.find(({ baselineProfileId }) => baselineProfileId === "cytof-root"))
+      .not.toHaveProperty("name");
+    // The name and the marker sit beside the records and the bindings and change neither.
+    expect(reopened.samples.map(({ assay: binding }) => binding)).toEqual(unnamed.samples.map(({ assay: binding }) => binding));
+    expect(reopened.compensation.lineages.map(({ records }) => records))
+      .toEqual(unnamed.compensation.lineages.map(({ records }) => records));
+  });
+
   it("retains an installed compensated layer while Original remains active", async () => {
     const { workspace, contexts } = await compensatedWorkspace();
     workspace.samples[0].assay = assay(

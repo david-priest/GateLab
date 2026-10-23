@@ -82,7 +82,7 @@ async function loadAndImport(xml: string): Promise<void> {
   Object.defineProperty(fcsInput, "files", { configurable: true, value: [fcs] });
   await act(async () => { fcsInput.dispatchEvent(new Event("change", { bubbles: true })); });
   await settle();
-  const xmlInput = host.querySelector<HTMLInputElement>('input[accept=".xml,.wsp,.cef"]')!;
+  const xmlInput = host.querySelector<HTMLInputElement>('input[accept=".xml,.wsp,.flowjo,.cef"]')!;
   const file = new File([xml], "gates.xml", { type: "text/xml" });
   Object.defineProperty(file, "text", { value: async () => xml });
   Object.defineProperty(file, "arrayBuffer", { value: async () => new TextEncoder().encode(xml).buffer });
@@ -90,7 +90,7 @@ async function loadAndImport(xml: string): Promise<void> {
   await act(async () => { xmlInput.dispatchEvent(new Event("change", { bubbles: true })); });
   await settle();
   await settle();
-  const importButton = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === "Import");
+  const importButton = [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")].find((b) => b.textContent?.trim() === "Import");
   if (importButton) {
     act(() => importButton.click());
     await settle();

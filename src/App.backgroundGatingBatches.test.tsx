@@ -171,7 +171,8 @@ describe("background gating of pooled files", () => {
     await settle(50);
     expect(container.textContent).toContain(`${SAMPLE_COUNT} samples`);
 
-    await act(async () => button("Pool selected files")?.click());
+    // The SCE opens pooled already. (This once clicked "Pool selected files", which the R host
+    // names "samples", so it never matched; the pool toggle would now un-pool.)
     await act(async () => button("Edit the tree")?.click());
     await countsReady();
 

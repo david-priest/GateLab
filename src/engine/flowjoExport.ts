@@ -55,7 +55,7 @@
  */
 
 import type { Sample } from "./sample";
-import { UNBOUNDED, isUnbounded, type EllipseGate, type FlowJoGridAxis, type Gate, type GateRef, type PolyRectGate, type PopulationMap, type QuadrantGate, type TransformSpec, type Vertex } from "./models";
+import { UNBOUNDED, isUnbounded, type QuadrantArms, type EllipseGate, type FlowJoGridAxis, type Gate, type GateRef, type PolyRectGate, type PopulationMap, type QuadrantGate, type TransformSpec, type Vertex } from "./models";
 import { FLOWJO_BIEX_TABLE_CHANNELS, biexBreakpoints, biexTransform, wspLogTransform, type BiexParams } from "./biex";
 import { flowJoGridScale, isFlowJoGridGate, isFlowJoGridSpec, logVertexAtZeroOnFloor, parseFlowJoGridAxis, type FlowJoGridScale, type FlowJoGridSpec } from "./flowjoGrid";
 import { axesFromCovariance, ellipseBoundary } from "./ellipse";
@@ -94,7 +94,10 @@ export interface FlowJoExportOpts {
   groups?: readonly { name: string; fileNames: readonly string[] }[];
   /** Written as the workspace's modification time; injectable for deterministic tests. */
   now?: Date;
-  /** Named in a comment at the top of the file, e.g. "GateLab 0.7.7". */
+  /**
+   * Not written. It was named in a comment at the top of the file, which FlowJo 10.10 refused
+   * before loading the samples; kept so that callers need not change.
+   */
   producer?: string;
   /**
    * Skip the per-population event counts. Counts mean evaluating every population of every
@@ -690,10 +693,19 @@ function ellipseReach(g: EllipseGate): Vertex[] {
   return out;
 }
 
+/**
+ * The points a quadrant gate is written through: its crosshair and, for a spider quadrant, its arms'
+ * ends, which with the crosshair give every vertex of its four polygons (the corners included).
+ */
+function quadrantReach(g: QuadrantGate): Vertex[] {
+  const a = g.arms;
+  return a ? [g.center, a.down, a.right, a.up, a.left] : [g.center];
+}
+
 /** A gate's coordinates on one channel, in raw values, the edges with no bound left out. */
 function rawCoordinates(sample: Sample, g: Gate, channel: string): number[] {
   const points: readonly Vertex[] = g.gate_type === "quadrant"
-    ? [g.center]
+    ? quadrantReach(g)
     : g.gate_type === "ellipse"
       ? ellipseReach(g)
       : g.vertices;
@@ -871,7 +883,7 @@ function declareAxis(
       biexTransform(params);
       return { decl: { kind: "biex", params }, fileScale };
     } catch {
-      warnings.push(`FlowJo's default biex could not be built for ${ch.pnn}; the parameter is declared linear.`);
+      warnings.push(`The workspace's default biex could not be built for ${ch.pnn}; the parameter is declared linear.`);
     }
   }
   // Linear: scatter, QC, time, anything GateLab shows linear, and the fallbacks above.
@@ -1012,7 +1024,7 @@ function polygonXml(
     // holds, and a channel's centre where it was edited. Nothing is densified -- FlowJo grids the
     // polygon on the declared axis, which is the gate's own when `straight`.
     if (!straight) {
-      warnings?.push(`${gate.name}: it is on FlowJo's grid for an axis this file declares differently, so FlowJo will grid it on the declared axis instead.`);
+      warnings?.push(`${gate.name}: it is on a recorded grid for an axis this file declares differently, so it will be gridded on the declared axis instead.`);
     }
     return {
       densified: false,
@@ -1174,11 +1186,13 @@ function polygonXml(
     "</gating:PolygonGate>",
   ];
   // GateLab evaluates this polygon continuously, and FlowJo, which has no continuous polygon, will
-  // grid it; so does an import of the file with "Evaluate gates as FlowJo does" on. GateLab's record
+  // grid it; so does an import of the file with "Evaluate gates on the recorded grid" on. GateLab's record
   // (polygonRecord.ts) gives it back to GateLab as it is held here, whichever answer the import is
   // given, while the file still states these coordinates. A quadrant's panels are not polygons of
-  // their own and carry none: an import reads them continuously in either mode.
-  if (quadId === -1) {
+  // their own and carry none: an import reads them continuously in either mode. A spider
+  // quadrant's do, so the import builds the gate from the panels as GateLab held them, where the
+  // file's vertices may trace an arm that is straight in GateLab's display and not in the declared one.
+  if (quadId === -1 || (gate.gate_type === "quadrant" && gate.arms)) {
     const record = polygonRecordOf(sample, gate, held, writtenPolygonCoordinates(lines).get(id) ?? []);
     lines[0] = lines[0].replace(/ gating:id="/, ` ${WSP_POLYGON_ATTR}="${escAttr(JSON.stringify(record))}" gating:id="`);
   }
@@ -1309,7 +1323,7 @@ interface GridScope {
  * where FlowJo reads none of the parent's events otherwise, which is then the population's count too.
  */
 function gridNote(gate: Gate, o: Extract<GridOutcome, { kind: "named" }>, scope: GridScope | null): string | null {
-  const head = `"${gate.name}" is ${o.shape}, which FlowJo tests on its ${o.channels}-channel grid: `;
+  const head = `"${gate.name}" is ${o.shape}, which the workspace tests on a ${o.channels}-channel grid: `;
   if (scope?.parent) {
     const { ex, ey, nx, slot, inside, mask } = o.reading;
     let n = 0;
@@ -1321,9 +1335,9 @@ function gridNote(gate: Gate, o: Extract<GridOutcome, { kind: "named" }>, scope:
       if ((s >= 0 && inside[s] !== 0) !== (mask[i] !== 0)) k++;
     }
     if (!k) return null;
-    return head + `at this gate FlowJo reads ${k} of the ${n} events of "${scope.population}"'s parent otherwise than GateLab does.`;
+    return head + `at this gate the grid reads ${k} of the ${n} events of "${scope.population}"'s parent otherwise than GateLab does.`;
   }
-  return head + `at this gate FlowJo reads ${o.differ} of this file's ${o.events} events otherwise than GateLab does.`;
+  return head + `at this gate the grid reads ${o.differ} of this file's ${o.events} events otherwise than GateLab does.`;
 }
 
 /**
@@ -1984,8 +1998,8 @@ function rectangleForFlowJo(
       const below = rawLo !== null && rawLo * fileScale <= edgeLo ? beyond((v) => v < rawLo) : 0;
       const above = rawHi !== null && rawHi * fileScale >= edgeHi ? beyond((v) => v > rawHi) : 0;
       const kept = below + above === 0
-        ? "where FlowJo's clamp keeps GateLab's events"
-        : `where FlowJo moves the ${below + above} events of this file ${below ? `below ${fmtNum(rawLo!)}` : ""}${below && above ? " and " : ""}${above ? `above ${fmtNum(rawHi!)}` : ""} onto the axis's edge and counts them inside it, as GateLab does not`;
+        ? "where the axis's clamp keeps GateLab's events"
+        : `where the ${below + above} events of this file ${below ? `below ${fmtNum(rawLo!)}` : ""}${below && above ? " and " : ""}${above ? `above ${fmtNum(rawHi!)}` : ""} are moved onto the axis's edge and counted inside it, as GateLab does not`;
       notes.push(`${a.name}: saved on ${describeFlowJoAxis(own)}, written against the declared ${describeAxisDecl(a.decl)}, ${kept}`);
     }
     // Moved in raw values, the events' own, so that no float32 event lies between the edge and the
@@ -1998,18 +2012,19 @@ function rectangleForFlowJo(
     // GateLab puts every event below a FlowJo log's offset, a floored flog's or a biex table's first
     // entry on the display's floor (floorOf). On an axis that does not move them onto that very value
     // (clampsAtFloor: a channel declared otherwise, logMisreadsOtherGates, biexMisreadsOtherGates, or
-    // a biex on FlowJo's own table), a rectangle holding the floor goes out with no lower bound, and
-    // one below the floor, which holds none of them nor any other event, where no event lies for any
-    // reader (emptyAt).
+    // a biex on FlowJo's own table), a rectangle holding the floor goes out with no lower bound.
+    // A rectangle ending at or below a floor it excludes is empty under either declaration.
+    // It must be placed off the events inside the declared display (emptyAt): moving its upper
+    // bound just below the floor still leaves a closed rectangle on that floor after clamping.
     const clamp = floorOf(gateSpec(sample, gate, channel));
-    if (clamp !== null && !clampsAtFloor(a.decl, clamp * fileScale)) {
+    if (clamp !== null) {
       const floor = sample.rawToGate(gate, channel, clamp);
       const holdsFloor = (isOpenBound(lo) || lo <= floor) && (isOpenBound(hi) || (rule === "half-open" ? floor < hi : floor <= hi));
       if (!holdsFloor && !isOpenBound(hi) && hi <= floor) {
         const empty = emptyAt(sample, channel, a);
         return [empty, empty, empty, empty];
       }
-      if (holdsFloor && !isOpenBound(lo)) return [-UNBOUNDED, top, -UNBOUNDED, topBefore];
+      if (!clampsAtFloor(a.decl, clamp * fileScale) && holdsFloor && !isOpenBound(lo)) return [-UNBOUNDED, top, -UNBOUNDED, topBefore];
     }
     let bottom = isOpenBound(lo) ? saved?.[0] ?? lo : Math.min(sample.gateToRaw(gate, channel, lo), top);
     const bottomBefore = isOpenBound(lo) ? bottom : Math.min(sample.gateToRaw(gate, channel, lo), topBefore);
@@ -2024,7 +2039,7 @@ function rectangleForFlowJo(
   const [x0, x1, bx0, bx1] = placed(gate.x_channel, 0, ax);
   const [y0, y1, by0, by1] = placed(gate.y_channel, 1, ay);
   // A range's one channel is both axes; it is named once.
-  if (notes.length) warnings?.push(`"${gate.name}" was saved by FlowJo on an axis this file declares differently (${[...new Set(notes)].join("; ")}).`);
+  if (notes.length) warnings?.push(`"${gate.name}" was saved on an axis this file declares differently (${[...new Set(notes)].join("; ")}).`);
   if (!flowJoOwn) {
     const moved = eventsFlowJoMoves(sample, gate, ax, ay, [x0, x1], [y0, y1]);
     if (moved) warnings?.push(moved);
@@ -2243,8 +2258,8 @@ function eventsFlowJoMoves(
   ]))];
   const events = (n: number) => `${n} event${n === 1 ? "" : "s"}`;
   return wholly
-    ? `"${gate.name}" lies at or beyond an edge FlowJo moves events onto before it compares a rectangle's bounds (${where.join("; ")}): FlowJo moves the ${events(moved)} of this file beyond it onto that edge, where the ${heldMoved} of them GateLab holds cannot be told from the rest.`
-    : `"${gate.name}" has a bound at or beyond an edge FlowJo moves events onto before it compares a rectangle's bounds (${where.join("; ")}): FlowJo counts ${events(differ)} of this file otherwise than GateLab does.`;
+    ? `"${gate.name}" lies at or beyond an edge events are moved onto before a rectangle's bounds are compared (${where.join("; ")}): the ${events(moved)} of this file beyond it are moved onto that edge, where the ${heldMoved} of them GateLab holds cannot be told from the rest.`
+    : `"${gate.name}" has a bound at or beyond an edge events are moved onto before a rectangle's bounds are compared (${where.join("; ")}): ${events(differ)} of this file are counted otherwise than GateLab counts them.`;
 }
 
 /**
@@ -2290,6 +2305,7 @@ function ellipsoidXml(sample: Sample, gate: EllipseGate, ax: Axis, ay: Axis, id:
  * densifies it wherever the declared display bends a bent arm.
  */
 function quadrantRing(sample: Sample, gate: QuadrantGate, quadrant: number, ax: Axis, ay: Axis): { ring: Vertex[]; corners: number[] } {
+  if (gate.arms) return spiderRing(gate.center, gate.arms, quadrant);
   const toGateX = (file: number): number => sample.rawToGate(gate, gate.x_channel, file / ax.fileScale);
   const toGateY = (file: number): number => sample.rawToGate(gate, gate.y_channel, file / ay.fileScale);
   const [cx, cy] = gate.center;
@@ -2352,6 +2368,21 @@ function quadrantRing(sample: Sample, gate: QuadrantGate, quadrant: number, ax: 
     default: // 4, x−/y−
       return { ring: [[xlo, ylo], [cx, ylo], [cx, cy], [xlo, cy]], corners: [0, 1, 2, 3] };
   }
+}
+
+/**
+ * One quadrant of a spider quadrant as FlowJo 10 writes it (flowjoWorkspace.ts, spiderFromPanels):
+ * the end of its horizontal arm, the corner of the box between it and the vertical arm's end, that
+ * end, and the centre. That polygon is the quadrant exactly (QuadrantArms), so the import reads the
+ * four back as one gate. It is straight in the gate's own space; polygonXml densifies it wherever
+ * the declared display bends it.
+ */
+function spiderRing(center: [number, number], arms: QuadrantArms, quadrant: number): { ring: Vertex[]; corners: number[] } {
+  // GateLab's quadrants: 1 = x−/y+, 2 = x+/y+, 3 = x+/y−, 4 = x−/y−.
+  const side = quadrant === 2 || quadrant === 3 ? arms.right : arms.left;
+  const vertical = quadrant === 1 || quadrant === 2 ? arms.up : arms.down;
+  const ring: Vertex[] = [[side[0], side[1]], [side[0], vertical[1]], [vertical[0], vertical[1]], [center[0], center[1]]];
+  return { ring, corners: [0, 1, 2, 3] };
 }
 
 /**
@@ -2685,7 +2716,8 @@ function gateFor(ctx: SampleContext, ref: GateRef, id: string, scope: GridScope 
   if (gate.gate_type !== "quadrant") return null;
   const q = ref.quadrant ?? 1;
   const { ring, corners } = quadrantRing(ctx.sample, gate, q, ax, ay);
-  const pullIn = {
+  // A spider quadrant is written as its own four polygons, whose shared edges are its arms.
+  const pullIn = gate.arms ? undefined : {
     x: quadrantPullIn(ctx.sample, gate, gate.x_channel, gate.center[0], ax.fileScale, 0),
     y: quadrantPullIn(ctx.sample, gate, gate.y_channel, gate.center[1], ay.fileScale, 1),
   };
@@ -2779,7 +2811,7 @@ function subpopulations(
     const name = uniqueName(own, taken);
     names.set(childId, name);
     if (name !== own) {
-      ctx.warnings.push(`Two populations beside each other are both called "${own}"; the second was written as "${name}", because FlowJo names populations by their path.`);
+      ctx.warnings.push(`Two populations beside each other are both called "${own}"; the second was written as "${name}", because the workspace names populations by their path.`);
     }
   }
   const out: string[] = [];
@@ -2823,7 +2855,7 @@ function emitPopulation(
   const mask = ctx.masks?.[popId] ?? null;
   const name = names.get(popId) ?? flowJoName(ctx.populations, popId);
   if (name.includes("/")) {
-    ctx.warnings.push(`"${name}" contains "/", which FlowJo uses to separate a population path; a Boolean population naming it may not resolve in FlowJo.`);
+    ctx.warnings.push(`"${name}" contains "/", which separates a population path in the workspace; a Boolean population naming it may not resolve.`);
   }
 
   // A warning about one of the population's gates counts within its parent (gridNote).
@@ -2990,7 +3022,7 @@ function flowJoParameterNames(sample: Sample, warnings: string[]): Map<string, s
   sample.channels.forEach((c, i) => {
     const clash = swapped[i] !== pnns[i] && pnns.some((p, j) => j !== i && (p === swapped[i] || swapped[j] === swapped[i]));
     if (clash) {
-      warnings.push(`${pnns[i]} keeps its "/" in the workspace: FlowJo writes "/" in a parameter name as "_", and ${swapped[i]} would name another parameter of the file.`);
+      warnings.push(`${pnns[i]} keeps its "/" in the workspace: the workspace writes "/" in a parameter name as "_", and ${swapped[i]} would name another parameter of the file.`);
     }
     out.set(c.key, clash ? pnns[i] : swapped[i]);
   });
@@ -3070,7 +3102,7 @@ function sampleBlock(entry: FlowJoExportSample, sampleId: number, opts: FlowJoEx
   for (const g of Object.values(entry.gates)) {
     if (!g) continue;
     const points: readonly Vertex[] = g.gate_type === "quadrant"
-      ? [g.center]
+      ? quadrantReach(g)
       : g.gate_type === "ellipse"
         ? ellipseReach(g)
         : g.vertices;
@@ -3123,7 +3155,14 @@ function sampleBlock(entry: FlowJoExportSample, sampleId: number, opts: FlowJoEx
   const rootAxes: [string, string] = firstGate
     ? [axes.get(firstGate.x_channel)?.name ?? firstGate.x_channel, axes.get(firstGate.y_channel)?.name ?? firstGate.y_channel]
     : [axes.get(sample.channels[0]?.key ?? "")?.name ?? "", axes.get(sample.channels[1]?.key ?? "")?.name ?? ""];
-  const keywords = Object.entries({ FJ_FCS_VERSION: sample.fcs.version, ...sample.fcs.keywords });
+  // FJ_FCS_VERSION as FlowJo writes it, not the FCS header's "FCS3.1": "3.1" and "3.2", but "3"
+  // and "2" for FCS3.0 and FCS2.0 (FlowJo 10 writes no "3.0"; 17,309 of FlowRepository's FCS3.0
+  // samples read "3"). The header also supersedes a stale FJ_FCS_VERSION carried in the file's
+  // TEXT keywords; neither source field is modified.
+  const keywords = Object.entries({
+    ...sample.fcs.keywords,
+    FJ_FCS_VERSION: sample.fcs.version.replace(/^FCS(\d\.\d)$/, "$1").replace(/^(\d)\.0$/, "$1"),
+  });
 
   const lines = [
     "<Sample>",
@@ -3164,18 +3203,18 @@ export function exportFlowJoWorkspace(opts: FlowJoExportOpts): FlowJoExportResul
   if (counters.densified) {
     warnings.push(
       `${counters.densified} polygon gate(s) were written with extra vertices: their edges are straight in ` +
-      "GateLab's space and not in the axis FlowJo will display them on, so the boundary was traced there " +
+      "GateLab's space and not on the axis the workspace displays them on, so the boundary was traced there " +
       "to within 0.2% of each gate's extent.",
     );
   }
   if (counters.ellipses) {
-    warnings.push(`${counters.ellipses} ellipse gate(s) were written as their boundary polygon, because the axis FlowJo will display them on bends an ellipse out of shape.`);
+    warnings.push(`${counters.ellipses} ellipse gate(s) were written as their boundary polygon, because the axis the workspace displays them on bends an ellipse out of shape.`);
   }
   if (counters.quadrants) {
-    warnings.push(`${counters.quadrants} quadrant population(s) were written as FlowJo writes its own quadrants: one polygon per quadrant, reaching the axis limits.`);
+    warnings.push(`${counters.quadrants} quadrant population(s) were written as the workspace writes quadrants: one polygon per quadrant, reaching the axis limits.`);
   }
   if (counters.helpers) {
-    warnings.push(`${counters.helpers} helper population(s) were added beside NOT and AND populations, which FlowJo defines by naming sibling populations rather than gates.`);
+    warnings.push(`${counters.helpers} helper population(s) were added beside NOT and AND populations, which the workspace defines by naming sibling populations rather than gates.`);
   }
 
   const matrices = blocks.map((b) => b.matrix).filter((m): m is string[] => m !== null);
@@ -3190,7 +3229,6 @@ export function exportFlowJoWorkspace(opts: FlowJoExportOpts): FlowJoExportResul
       ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"' +
       ` xmlns:gating="${GATING_NS}" xmlns:transforms="${TRANSFORMS_NS}" xmlns:data-type="${DATATYPE_NS}"` +
       ` xsi:schemaLocation="${schemaLoc}">`,
-    `  <!-- Written by ${escAttr(opts.producer ?? "GateLab")} in the layout of a FlowJo ${FLOWJO_VERSION} workspace: one Sample per file, gates in raw values, axes declared per parameter. -->`,
     ...(matrices.length ? ["  <Matrices>", ...matrices.flatMap((m) => indent(m, "    ")), "  </Matrices>"] : []),
     "  <Groups>",
     '    <GroupNode name="All Samples" annotation="" owningGroup="All Samples" expanded="1" sortPriority="10" count="-1">',

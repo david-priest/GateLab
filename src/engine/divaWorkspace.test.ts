@@ -6,9 +6,8 @@ import { importGatingML } from "./gatingml";
 import { applyGatingStrategy } from "./populations";
 import { parseFcs } from "./fcs";
 import { Sample } from "./sample";
+import { S6_SOURCE_DIR as BASE } from "../testFixtures";
 
-const BASE =
-  "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/GateLab Paper/GateLab-2026-08-15-B flowjo-and-cytobank-concordance/data/bass12-priest2024-s6/source";
 const DIVA = `${BASE}/diva-experiment/B cell assay 12.xml`;
 const WSP = `${BASE}/flowjo-workspace/25-Sep-2023.wsp`;
 const FCS = `${BASE}/flowjo-workspace/Specimen_001_B cell presort.fcs`;

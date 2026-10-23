@@ -2,14 +2,21 @@
 // (its state, its samples with their gating, its dispatch, its view, its plot) and the handler
 // does the reading and the arithmetic: counts, distributions, medians, a command previewed on a
 // copy of the state, a command applied through the reducer. Nothing here keeps state of its own
-// beyond the revision counter, so what the agent sees is what the user sees.
+// beyond the revision counter, so what the agent sees is what the user sees. A whole strategy is a
+// strategy proposal (proposals/strategyProposal.ts): the agent reads one on a copy, and a proposal
+// from any other source is previewed here for the user and applied when they accept it.
 
-import { coreReducer, recomputeGating, type Action, type CoreState, type GatingDerived } from "../store";
+import { coreReducer, recomputeGating, sameGatingStructure, type Action, type CoreState, type GatingDerived } from "../store";
 import { populationTreeOrder } from "../engine/populations";
 import type { Gate, GateProvenance, GateTransforms, Vertex } from "../engine/models";
+import { cloneArms } from "../engine/models";
 import type { Sample } from "../engine/sample";
-import { buildHostedMemberships, gatingStateForTree, workspaceHierarchyTrees, type HierarchyTree } from "../host/hostedMemberships";
+import { buildHostedMemberships, gatingStateForTree, hostedMembershipReader, workspaceHierarchyTrees, type HierarchyTree } from "../host/hostedMemberships";
 import { AgentCommandError, commandToAction, type AgentCommand } from "./commands";
+import {
+  DEFAULT_PROPOSAL_STEP_LIMIT, PROPOSAL_TARGET_LIMIT, StrategyMovedError, replayStrategy, strategyChanges, strategyProvenance, strategyTargets,
+  type StrategyApplied, type StrategyProposal, type StrategyReview,
+} from "../proposals/strategyProposal";
 import {
   QUANTILES, STATS_SAMPLE,
   type AgentApplied, type AgentApplyParams, type AgentAxisDistribution, type AgentChannel, type AgentDescribe,
@@ -17,7 +24,7 @@ import {
   type AgentHostInfo, type AgentMemberships, type AgentMembershipsParams, type AgentPopulation, type AgentPopulationStats,
   type AgentPreview, type AgentPreviewParams, type AgentRender, type AgentRenderParams, type AgentRequest, type AgentResponse,
   type AgentSampleInfo, type AgentSeriesSelection, type AgentStats, type AgentStatsParams, type AgentView, type AgentViewParams,
-  type AgentWorkspace,
+  type AgentWorkspace, type AgentDataContext, type AgentGatingTask, type StrategyProposalParams,
 } from "./protocol";
 
 /** One loaded file or SCE sample, as the app holds it. */
@@ -47,6 +54,10 @@ export interface AgentAdapter {
   setView(view: AgentViewParams): Promise<void>;
   render(params: AgentRenderParams): Promise<{ png: string; width: number; height: number }>;
   workspaceJson(): string | null;
+  /** Actual assay and plot pooling, distinct from checked files and all-sample population counts. */
+  context?(): AgentDataContext;
+  gatingTask?(): AgentGatingTask | null;
+  setGatingTask?(task: AgentGatingTask): Promise<void>;
   /** Fit the Gating plot's axes to the data and the gates on them, as the Fit button does. */
   fit(): void;
   /** Hold a channel at a range in display units, as the Scales tab's Min/Max does. */
@@ -63,6 +74,63 @@ export interface AgentHandler {
   revision(): number;
   /** The name the agent introduced itself with, put on every gate it makes. */
   setWriter(name: string): void;
+}
+
+/** The app's side of a strategy proposal from a source other than the relay. */
+export interface StrategyReviewer {
+  /**
+   * The proposal replayed on a copy of the state with the checks an agent's proposal gets, and
+   * counted on its samples, for the user to review. Nothing changes.
+   */
+  previewStrategy(proposal: StrategyProposal): StrategyReview;
+  /** The reviewed proposal applied as one undo step; StrategyMovedError when the gating moved since. */
+  applyStrategy(review: StrategyReview): Promise<StrategyApplied>;
+}
+
+type LoadedSample = { view: AgentSampleView; gating: GatingDerived; events: number };
+
+export { DEFAULT_PROPOSAL_STEP_LIMIT };
+
+export interface AgentHandlerOptions {
+  /**
+   * The most steps (commands) one strategy proposal may carry, from the agent or any other source;
+   * DEFAULT_PROPOSAL_STEP_LIMIT when absent. Each step is replayed on reducer copies, so a host may
+   * lower it; a whole multi-target strategy with local exits needs about one step per gate and one
+   * per NOT population.
+   */
+  proposalStepLimit?: number;
+}
+
+/**
+ * Reads use the active tree's IDs; each sample's own IDs are retained for membership export. A
+ * population the sample's own tree has no counterpart for is not evaluated for it, as in the Stats
+ * tab: `notEvaluated` holds the note saying so, keyed by population, and its mask is empty.
+ */
+function withActivePopulationIds(state: CoreState, all: LoadedSample[]) {
+  const reader = hostedMembershipReader(state, all.map((s) => ({
+    hierarchyId: s.view.hierarchyId,
+    name: s.view.name,
+    gatingFor: (tree: HierarchyTree) => tree.id === s.view.hierarchyId
+      ? s.gating
+      : recomputeGating(s.view.sample, gatingStateForTree(state, tree)),
+  })));
+  const active = reader.trees.find((tree) => tree.active);
+  return all.map((s, index) => {
+    const notEvaluated = new Map<string, string>();
+    if (!active || s.view.hierarchyId === active.id) return { ...s, ownGating: s.gating, notEvaluated };
+    const masks: GatingDerived["masks"] = {};
+    const stats: GatingDerived["stats"] = { event_count: {}, percent_of_parent: {}, percent_of_total: {} };
+    for (const id of Object.keys(active.populations)) {
+      const source = reader.source(index, active, id);
+      if (!source) notEvaluated.set(id, reader.notEvaluatedNote(index, active, id));
+      const own = source ? reader.gating(index, source.tree) : null;
+      masks[id] = (source ? own?.masks[source.populationId] : null) ?? new Uint8Array(s.events);
+      for (const key of ["event_count", "percent_of_parent", "percent_of_total"] as const) {
+        stats[key][id] = source ? own?.stats[key][source.populationId] ?? null : null;
+      }
+    }
+    return { ...s, ownGating: s.gating, gating: { ...s.gating, masks, stats }, notEvaluated };
+  });
 }
 
 const fail = (code: AgentError["code"], message: string, revision?: number): AgentError => ({ code, message, ...(revision === undefined ? {} : { revision }) });
@@ -90,7 +158,10 @@ function gateView(gate: Gate): AgentGate {
     ...(gate.transforms ? { transforms: gate.transforms } : {}),
     ...(gate.provenance ? { provenance: gate.provenance } : {}),
   };
-  if (gate.gate_type === "quadrant") return { ...base, center: [...gate.center] as Vertex };
+  if (gate.gate_type === "quadrant") {
+    // A spider quadrant's leaning arms are part of its shape; without them it reads as a crosshair.
+    return { ...base, center: [...gate.center] as Vertex, ...(gate.arms ? { arms: cloneArms(gate.arms) } : {}) };
+  }
   if (gate.gate_type === "ellipse") {
     const [[a, b], [c, d]] = gate.covariance;
     return { ...base, ellipse: { mean: [...gate.mean] as Vertex, covariance: [[a, b], [c, d]], distanceSquare: gate.distance_square } };
@@ -98,20 +169,27 @@ function gateView(gate: Gate): AgentGate {
   return { ...base, vertices: gate.vertices.map((v) => [...v] as Vertex), ...(gate.bounds ? { bounds: gate.bounds } : {}) };
 }
 
-/** The sum of a population's counts over the samples, with the root's own total as the parent of the root. */
-function populationViews(state: CoreState, samples: readonly { id: string; gating: GatingDerived; events: number }[]): AgentPopulation[] {
+/**
+ * The sum of a population's counts over the samples, with the root's own total as the parent of the
+ * root. A sample the population or its parent is not evaluated for has no count there and is left
+ * out of the pooled figures, numerator and denominator alike.
+ */
+function populationViews(state: CoreState, samples: readonly { id: string; gating: GatingDerived; events: number; notEvaluated?: ReadonlyMap<string, string> }[]): AgentPopulation[] {
   const rootId = state.root_population_id;
   if (!rootId) return [];
-  const total = samples.reduce((sum, s) => sum + s.events, 0);
   return populationTreeOrder(state.populations, rootId).map(({ popId, depth }) => {
     const population = state.populations[popId];
     const counts = samples.map((s) => {
-      const n = s.gating.stats.event_count[popId] ?? 0;
-      const parentN = population.parent_id ? (s.gating.stats.event_count[population.parent_id] ?? 0) : s.events;
-      return { sampleId: s.id, n, parentN, percentOfParent: parentN ? (100 * n) / parentN : null };
+      const note = s.notEvaluated?.get(popId);
+      const n = note === undefined ? (s.gating.stats.event_count[popId] ?? 0) : null;
+      const parentN = !population.parent_id ? s.events
+        : s.notEvaluated?.has(population.parent_id) ? null : (s.gating.stats.event_count[population.parent_id] ?? 0);
+      return { sampleId: s.id, n, parentN, percentOfParent: n !== null && parentN ? (100 * n) / parentN : null, ...(note === undefined ? {} : { notEvaluated: note }) };
     });
-    const n = counts.reduce((sum, c) => sum + c.n, 0);
-    const parentN = counts.reduce((sum, c) => sum + c.parentN, 0);
+    const pool = counts.flatMap((c, i) => (c.n !== null && c.parentN !== null ? [{ n: c.n, parentN: c.parentN, events: samples[i].events }] : []));
+    const n = pool.reduce((sum, c) => sum + c.n, 0);
+    const parentN = pool.reduce((sum, c) => sum + c.parentN, 0);
+    const total = pool.reduce((sum, c) => sum + c.events, 0);
     return {
       id: popId, name: population.name, parentId: population.parent_id, depth,
       gates: population.gate_refs.map((ref) => ({ gateId: ref.gate_id, include: ref.include, ...(ref.quadrant === undefined || ref.quadrant === null ? {} : { quadrant: ref.quadrant }) })),
@@ -178,7 +256,9 @@ export function valleysOf(counts: readonly number[], edges: readonly number[]): 
   return valleys.sort((a, b) => b.depth - a.depth).slice(0, 3).map((v) => v.at);
 }
 
-export function createAgentHandler(adapter: AgentAdapter): AgentHandler {
+export function createAgentHandler(adapter: AgentAdapter, options: AgentHandlerOptions = {}): AgentHandler & StrategyReviewer {
+  const stepLimit = options.proposalStepLimit ?? DEFAULT_PROPOSAL_STEP_LIMIT;
+  if (!Number.isSafeInteger(stepLimit) || stepLimit < 1) throw new Error("proposalStepLimit must be a positive integer.");
   let lastState: CoreState | null = null;
   let rev = 0;
   const revision = () => {
@@ -187,10 +267,16 @@ export function createAgentHandler(adapter: AgentAdapter): AgentHandler {
     return rev;
   };
 
-  const loaded = () => adapter.samples().map((view) => ({ view, gating: view.gating(), events: view.sample.fcs.nEvents }));
+  const loaded = () => withActivePopulationIds(adapter.state(), adapter.samples().map((view) => ({ view, gating: view.gating(), events: view.sample.fcs.nEvents })));
   const sampleInfo = (s: ReturnType<typeof loaded>[number]): AgentSampleInfo => ({ id: s.view.id, name: s.view.name, events: s.events, viewed: s.view.viewed, checked: s.view.checked, metadata: { ...s.view.metadata } });
-  const populationsOf = (state: CoreState, all: ReturnType<typeof loaded>) => populationViews(state, all.map((s) => ({ id: s.view.id, gating: s.gating, events: s.events })));
+  const populationsOf = (state: CoreState, all: ReturnType<typeof loaded>) => populationViews(state, all.map((s) => ({ id: s.view.id, gating: s.gating, events: s.events, notEvaluated: s.notEvaluated })));
   const gatesOf = (state: CoreState) => (state.gate_order.length ? state.gate_order : Object.keys(state.gates)).map((id) => state.gates[id]).filter(Boolean).map(gateView);
+
+  /** The notes of a series' samples the population is not evaluated for; their events are not read. */
+  const notEvaluatedIn = (parts: ReturnType<typeof loaded>, populationId: string) => {
+    const notes = parts.flatMap((s) => s.notEvaluated.get(populationId) ?? []);
+    return notes.length ? { notEvaluated: notes } : {};
+  };
 
   /** The sample whose channels and transforms stand for the data: the viewed one, else the first. */
   const reference = (all: ReturnType<typeof loaded>) => all.find((s) => s.view.viewed) ?? all[0] ?? null;
@@ -233,11 +319,11 @@ export function createAgentHandler(adapter: AgentAdapter): AgentHandler {
   /** The gating of every sample under a state other than the app's: a preview. */
   const gatingUnder = (next: CoreState, all: ReturnType<typeof loaded>) => {
     const trees = workspaceHierarchyTrees(next);
-    return all.map((s) => {
+    return withActivePopulationIds(next, all.map((s) => {
       const tree = trees.find((t) => t.id === s.view.hierarchyId) ?? trees.find((t) => t.active) ?? null;
       const gating = tree && !tree.active ? recomputeGating(s.view.sample, gatingStateForTree(next, tree)) : recomputeGating(s.view.sample, next);
       return { ...s, gating };
-    });
+    }));
   };
 
   /** The samples a series selection names, and the population it reads. */
@@ -275,6 +361,8 @@ export function createAgentHandler(adapter: AgentAdapter): AgentHandler {
       populations: populationsOf(state, all),
       gates: gatesOf(state),
       view: adapter.view(),
+      ...(adapter.context ? { context: adapter.context() } : {}),
+      ...(adapter.gatingTask ? { gatingTask: adapter.gatingTask() } : {}),
     };
   };
 
@@ -326,6 +414,7 @@ export function createAgentHandler(adapter: AgentAdapter): AgentHandler {
       const out: AgentDistributionSeries = {
         series: group.series, n: xv.length, dropped,
         x: axisDistribution(x, transformX!, xv, bins, xRange),
+        ...notEvaluatedIn(group.parts, populationId),
       };
       if (y !== undefined) {
         const yv = Float64Array.from(ys);
@@ -395,13 +484,13 @@ export function createAgentHandler(adapter: AgentAdapter): AgentHandler {
           medians[key] = sorted.length ? (sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2) : null;
           if (threshold !== undefined) positive[key] = finite ? above / finite : null;
         }
-        populations.push({ populationId: popId, series: group.series, n, sampled: stride > 1, medians, ...(Object.keys(positive).length ? { positive } : {}) });
+        populations.push({ populationId: popId, series: group.series, n, sampled: stride > 1, medians, ...(Object.keys(positive).length ? { positive } : {}), ...notEvaluatedIn(group.parts, popId) });
       }
     }
     return { revision: revision(), populations };
   };
 
-  const provenanceFor = (rationale: string): GateProvenance => ({ by: writerName, rationale, at: new Date().toISOString() });
+  const provenanceFor = (rationale: string): GateProvenance => strategyProvenance(writerName, rationale, "agent");
   let writerName = "agent";
 
   const preview = (raw: unknown): AgentPreview => {
@@ -443,10 +532,47 @@ export function createAgentHandler(adapter: AgentAdapter): AgentHandler {
     };
   };
 
+  /**
+   * The tab a view asks for, and its Strategy selection checked against the live tree: ids known,
+   * none twice, not the root, one for a single strategy. The Strategy tab draws the active tree,
+   * so a population of another tree is refused, and named as such.
+   */
+  const viewTab = (state: CoreState, all: ReturnType<typeof loaded>, params: AgentViewParams): Pick<AgentViewParams, "tab" | "strategy"> => {
+    const tab = params.tab ?? (params.strategy === undefined ? "gating" : "strategy");
+    if (tab !== "gating" && tab !== "strategy") throw new AgentCommandError('tab must be "gating" or "strategy".');
+    if (tab === "strategy") {
+      for (const field of ["x", "y", "fit", "xRange", "yRange"] as const) {
+        if (params[field] !== undefined) throw new AgentCommandError(`${field} sets the Gating plot; leave it out with tab "strategy".`);
+      }
+    }
+    if (params.strategy === undefined) return { tab };
+    if (tab !== "strategy") throw new AgentCommandError('strategy sets the Strategy tab, so it needs tab "strategy" (the default with strategy).');
+    if (!all.length) throw new AgentCommandError("No data is loaded; the Strategy tab draws the viewed file.");
+    const strategy = record(params.strategy);
+    const ids = stringList(strategy.populationIds, "strategy.populationIds");
+    if (!ids?.length) throw new AgentCommandError("strategy.populationIds must name at least one population.");
+    if (new Set(ids).size !== ids.length) throw new AgentCommandError("strategy.populationIds names a population twice.");
+    for (const id of ids) {
+      if (id === state.root_population_id) throw new AgentCommandError("The root has no gating strategy; name a gated population.");
+      if (state.populations[id]) continue;
+      const other = Object.values(state.stored_hierarchies ?? {}).find((tree) => tree.populations[id]);
+      throw new AgentCommandError(other
+        ? `Population “${id}” is in the tree “${other.name}”, not the active one; the Strategy tab draws the active tree.`
+        : `Unknown population “${id}”.`);
+    }
+    const mode = strategy.mode ?? (ids.length === 1 ? "single" : "multi");
+    if (mode !== "single" && mode !== "multi") throw new AgentCommandError('strategy.mode must be "single" or "multi".');
+    if (mode === "single" && ids.length !== 1) throw new AgentCommandError('A single strategy traces one population; use mode "multi" for several.');
+    if (strategy.fullPath !== undefined && typeof strategy.fullPath !== "boolean") throw new AgentCommandError("strategy.fullPath must be true or false.");
+    if (mode === "multi" && strategy.fullPath !== undefined) throw new AgentCommandError("fullPath is for a single strategy; the multi-population grid always draws every gate from the root.");
+    return { tab, strategy: { mode, populationIds: ids, ...(strategy.fullPath === undefined ? {} : { fullPath: strategy.fullPath }) } };
+  };
+
   const view = async (raw: unknown): Promise<AgentView> => {
     const params = record(raw) as AgentViewParams;
     const state = adapter.state();
     const all = loaded();
+    const { tab, strategy } = viewTab(state, all, params);
     if (params.populationId !== undefined && !state.populations[params.populationId]) throw new AgentCommandError(`Unknown population “${params.populationId}”.`);
     if (params.sampleId !== undefined && !all.some((s) => s.view.id === params.sampleId)) throw new AgentCommandError(`Unknown sample “${params.sampleId}”.`);
     const ref = reference(all);
@@ -458,8 +584,18 @@ export function createAgentHandler(adapter: AgentAdapter): AgentHandler {
     };
     const xRange = checkRange(params.xRange, "xRange"), yRange = checkRange(params.yRange, "yRange");
     if (params.fit !== undefined && params.fit !== true && params.fit !== false && params.fit !== "data") throw new AgentCommandError('fit must be true, false or "data".');
-    await adapter.setView(params);
+    await adapter.setView({ ...params, tab, strategy });
     const after = adapter.view();
+    if (strategy) {
+      // What the tab holds, not what was asked: a core that cannot take the selection, or a tab
+      // that never opened, is reported rather than passed off as done.
+      const shown = after.strategy;
+      const same = after.tab === "strategy" && !!shown && shown.mode === strategy.mode
+        && shown.populationIds.length === strategy.populationIds.length && shown.populationIds.every((id, i) => id === strategy.populationIds[i])
+        && (strategy.fullPath === undefined || shown.fullPath === strategy.fullPath);
+      if (!same) throw new Error("The Strategy tab did not take the selection.");
+      return after;
+    }
     if (params.fit === true) {
       // The fit reads the axes as they are after the view settled. A pan the plot reports in the
       // same tick would put the old frame back over the fitted one (seen once on a 69-sample
@@ -504,14 +640,10 @@ export function createAgentHandler(adapter: AgentAdapter): AgentHandler {
     return { revision: revision(), view: adapter.view(), ...image };
   };
 
-  const memberships = (raw: unknown): AgentMemberships => {
-    const params = record(raw) as AgentMembershipsParams;
-    const state = adapter.state();
-    const all = loaded();
-    const wanted = stringList(params.populationIds, "populationIds");
+  const membershipsOf = (state: CoreState, all: ReturnType<typeof loaded>, wanted?: string[]): AgentMemberships => {
     const built = buildHostedMemberships(state, all.map((s) => ({
       sampleId: s.view.id, eventCount: s.events, name: s.view.name, hierarchyId: s.view.hierarchyId,
-      gatingFor: (tree: HierarchyTree) => (tree.id === s.view.hierarchyId ? s.gating : recomputeGating(s.view.sample, gatingStateForTree(state, tree))),
+      gatingFor: (tree: HierarchyTree) => (tree.id === s.view.hierarchyId ? s.ownGating : recomputeGating(s.view.sample, gatingStateForTree(state, tree))),
     })));
     return {
       revision: revision(),
@@ -520,9 +652,86 @@ export function createAgentHandler(adapter: AgentAdapter): AgentHandler {
         .filter((p) => !wanted || wanted.includes(p.populationId))
         .map((p) => ({
           id: p.populationId, name: p.populationName, hierarchyId: p.hierarchyId,
-          sampleMasks: p.sampleMasks.map((m) => ({ sampleId: m.sampleId, eventCount: m.eventCount, membershipBitsBase64: m.membershipBitsBase64 })),
+          sampleMasks: p.sampleMasks.map((m) => ({ sampleId: m.sampleId, eventCount: m.eventCount, membershipBitsBase64: m.membershipBitsBase64, ...(m.notEvaluated ? { notEvaluated: m.notEvaluated } : {}) })),
         })),
     };
+  };
+
+  const memberships = (raw: unknown): AgentMemberships => membershipsOf(adapter.state(), loaded(), stringList((record(raw) as AgentMembershipsParams).populationIds, "populationIds"));
+
+  // An agent's strategy proposal, replayed on reducer copies and read back with its memberships.
+  // No dispatch, view update, autosave or SCE write; the agent applies it command by command.
+  const proposal = (raw: unknown) => {
+    const params = record(raw) as unknown as StrategyProposalParams;
+    const current = revision();
+    if (params.expectedRevision !== current) throw new AgentCommandError(`The gating has moved: revision ${current}; restart the search.`);
+    if (!Array.isArray(params.steps) || params.steps.length > stepLimit) throw new AgentCommandError(`A proposal needs at most ${stepLimit} steps.`);
+    const ids = stringList(params.sampleIds, "sampleIds");
+    const targets = stringList(params.populationIds, "populationIds");
+    if (!ids?.length || new Set(ids).size !== ids.length || !targets?.length || targets.length > PROPOSAL_TARGET_LIMIT) throw new AgentCommandError(`Explicit unique sampleIds and 1–${PROPOSAL_TARGET_LIMIT} populationIds are required.`);
+    const before = describe();
+    const selected = loaded().filter((s) => ids.includes(s.view.id));
+    if (selected.length !== ids.length) throw new AgentCommandError("Unknown sample in proposal.");
+    const { next, aliases, resolve } = replayStrategy(adapter.state(), params.steps, stepLimit, (state) => commandContext(state, selected, provenanceFor("Read-only candidate")));
+    const { populationIds, wanted } = strategyTargets(next, targets, resolve);
+    const after = gatingUnder(next, selected);
+    return {
+      baseRevision: current, aliases, populationIds,
+      describe: { ...before, populations: populationsOf(next, after), gates: gatesOf(next) },
+      memberships: membershipsOf(next, after, wanted),
+    };
+  };
+
+  // A proposal from any source, for the user: the same replay and checks as the agent's, under the
+  // provenance it will carry when accepted. Its gates are made over every loaded sample, as an
+  // applied command's are, so an open edge of a range does not depend on what is counted; the
+  // counts are over the samples it names, or every loaded one.
+  const previewStrategy = (proposal: StrategyProposal): StrategyReview => {
+    const base = adapter.state();
+    const all = loaded();
+    const labels = Object.keys(proposal.targets);
+    if (!labels.length || labels.length > PROPOSAL_TARGET_LIMIT) throw new AgentCommandError(`A proposal needs 1–${PROPOSAL_TARGET_LIMIT} target populations.`);
+    const ids = proposal.sampleIds;
+    if (ids && (!ids.length || new Set(ids).size !== ids.length)) throw new AgentCommandError("sampleIds must name each sample once.");
+    const counted = ids ? all.filter((s) => ids.includes(s.view.id)) : all;
+    if (ids && counted.length !== ids.length) throw new AgentCommandError("Unknown sample in proposal.");
+    if (!counted.length) throw new AgentCommandError("No data is loaded.");
+    const provenance = strategyProvenance(proposal.by, proposal.rationale, proposal.source);
+    const { next, aliases, resolve } = replayStrategy(base, proposal.steps, stepLimit, (state) => commandContext(state, all, provenance));
+    const { populationIds } = strategyTargets(next, labels.map((label) => proposal.targets[label]), resolve);
+    const targetIds = new Set(populationIds);
+    const after = gatingUnder(next, counted);
+    return {
+      proposal, base, next, aliases,
+      targets: Object.fromEntries(labels.map((label, i) => [label, populationIds[i]])),
+      sampleIds: counted.map((s) => s.view.id),
+      populations: populationsOf(next, after).map((p) => ({ ...p, isNew: !base.populations[p.id], isTarget: targetIds.has(p.id) })),
+      changes: strategyChanges(base, next),
+    };
+  };
+
+  // The state the user previewed, installed as one undo step, while the gating is still the one it
+  // was previewed on: the gates and ids are the previewed ones, not a second replay's.
+  const applyStrategy = async (review: StrategyReview): Promise<StrategyApplied> => {
+    const live = adapter.state();
+    if (!sameGatingStructure(live, review.base)) throw new StrategyMovedError();
+    adapter.dispatch({ type: "adoptStrategy", base: live, next: review.next });
+    await adapter.settled();
+    if (adapter.state() === live) throw new StrategyMovedError();
+    return {
+      revision: revision(), targets: review.targets, aliases: review.aliases,
+      createdGateIds: review.changes.createdGateIds, createdPopulationIds: review.changes.createdPopulationIds,
+    };
+  };
+
+  const gatingTask = async (raw: unknown) => {
+    const task = record(raw) as unknown as AgentGatingTask;
+    if (!adapter.setGatingTask) throw new AgentCommandError("This core does not display gating search progress; update it before starting a search.");
+    if (typeof task.id !== "string" || !task.id || !["population", "cluster"].includes(task.mode) || typeof task.target !== "string" || !task.target.trim() || !["searching", "review", "cancelled"].includes(task.status) || !Number.isSafeInteger(task.candidates) || !Number.isSafeInteger(task.budget) || task.budget < 1 || task.budget > 100 || task.candidates < 0 || task.candidates > task.budget || typeof task.message !== "string") throw new AgentCommandError("Invalid gating task progress.");
+    const previous = adapter.gatingTask?.();
+    if (previous?.id === task.id && previous.status !== "searching" && task.status !== "cancelled") throw new AgentCommandError("This search has ended; start a new session.");
+    await adapter.setGatingTask(task);
+    return task;
   };
 
   const workspace = (): AgentWorkspace => ({ revision: revision(), json: adapter.workspaceJson() });
@@ -545,6 +754,8 @@ export function createAgentHandler(adapter: AgentAdapter): AgentHandler {
           case "distribution": return reply(distribution(request.params));
           case "stats": return reply(stats(request.params));
           case "preview": return reply(preview(request.params));
+          case "proposal": return reply(proposal(request.params));
+          case "gatingTask": return reply(await gatingTask(request.params));
           case "apply": {
             const result = await apply(request.params);
             return "code" in result ? refused(result) : reply(result);
@@ -562,5 +773,7 @@ export function createAgentHandler(adapter: AgentAdapter): AgentHandler {
       }
     },
     setWriter(name: string) { writerName = name || "agent"; },
+    previewStrategy,
+    applyStrategy,
   };
 }

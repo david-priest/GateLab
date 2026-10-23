@@ -77,7 +77,7 @@ async function feed(selector: string, file: File): Promise<void> {
 async function importOntoLoadedFile(gating: File): Promise<void> {
   act(() => root.render(<App />));
   await feed('input[type=file][accept=".fcs"][multiple]', fileOf("D1.fcs", Uint8Array.from([1])));
-  await feed('input[accept=".xml,.wsp,.cef"]', gating);
+  await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', gating);
 }
 const errorText = () => host.querySelector(".gl-error")?.textContent ?? "";
 

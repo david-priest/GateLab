@@ -15,6 +15,24 @@
  * genuinely missing (a bad deploy, a host serving a partial upload) would otherwise reload
  * forever. One reload, then the real error is allowed through to the boundary.
  */
+/**
+ * Asked before a reload: why reloading now would lose work, or null to reload. The lab build sets
+ * one, because a lab Drive workspace is kept nowhere in the browser: a chunk that fails there
+ * after the lab site's login has lapsed must not take the unsaved workspace with it.
+ */
+let reloadGuard: (() => string | null) | null = null;
+export function setChunkReloadGuard(guard: (() => string | null) | null): void {
+  reloadGuard = guard;
+}
+
+/** A chunk failed to load and the page was not reloaded, because reloading would lose work. */
+export class ChunkReloadHeldError extends Error {
+  constructor(message: string, readonly chunkError: unknown) {
+    super(message);
+    this.name = "ChunkReloadHeldError";
+  }
+}
+
 export function lazyChunk<T>(name: string, load: () => Promise<T>): () => Promise<T> {
   const key = `gatelab.chunk-reload.${name}`;
   return async () => {
@@ -25,6 +43,9 @@ export function lazyChunk<T>(name: string, load: () => Promise<T>): () => Promis
       return loaded;
     } catch (error) {
       if (!isStaleChunk(error)) throw error;
+      // Asked first, and the marker left alone: the reload is held, not spent.
+      const held = reloadGuard?.() ?? null;
+      if (held) throw new ChunkReloadHeldError(held, error);
       let alreadyTried = true;
       try {
         alreadyTried = sessionStorage.getItem(key) === "1";

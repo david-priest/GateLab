@@ -6,7 +6,7 @@
 // looks like a broken app rather than a stale page.
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { lazyChunk } from "./lazyChunk";
+import { ChunkReloadHeldError, lazyChunk, setChunkReloadGuard } from "./lazyChunk";
 
 const reload = vi.fn();
 
@@ -17,7 +17,10 @@ beforeEach(() => {
     value: { ...window.location, reload }, writable: true, configurable: true,
   });
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  setChunkReloadGuard(null);
+});
 
 const staleChunk = () =>
   new TypeError("Failed to fetch dynamically imported module: https://x/assets/CompensationTab-ZbMXZv-p.js");
@@ -91,5 +94,27 @@ describe("loading a code-split chunk after a deploy", () => {
       await Promise.resolve(); await Promise.resolve();
       expect(reload, message).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it("does not reload while the guard says reloading would lose work, and says why", async () => {
+    let unsaved = true;
+    setChunkReloadGuard(() => (unsaved ? "Save to the lab Drive first, then reload." : null));
+    const load = lazyChunk("T", async () => { throw staleChunk(); });
+    const held = await load().catch((error: unknown) => error);
+    expect(held).toBeInstanceOf(ChunkReloadHeldError);
+    expect((held as Error).message).toBe("Save to the lab Drive first, then reload.");
+    expect(reload).not.toHaveBeenCalled();
+    // The reload was held, not spent: once saved, it reloads as before.
+    unsaved = false;
+    void load().catch(() => {});
+    await Promise.resolve(); await Promise.resolve();
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not ask the guard about a module that loaded and then threw", async () => {
+    const guard = vi.fn(() => "held");
+    setChunkReloadGuard(guard);
+    await expect(lazyChunk("T", async () => { throw new Error("a real fault"); })()).rejects.toThrow("a real fault");
+    expect(guard).not.toHaveBeenCalled();
   });
 });

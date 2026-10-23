@@ -114,6 +114,24 @@ export function panGestureStep(
   };
 }
 
+// ── the zoom buttons ────────────────────────────────────────────────────────────────────────
+
+/**
+ * One press of a zoom button divides (in) or multiplies (out) each axis's span by this: √1.5,
+ * about 1.22, so two presses make the 1.5-fold step the buttons first had.
+ */
+export const ZOOM_BUTTON_STEP = Math.sqrt(1.5);
+
+/**
+ * One zoom-button step on one axis. The minimum stays where it is, as in the anchored stretch, so
+ * the plot's bottom-left corner holds still while the rest of the view magnifies or shrinks
+ * towards it. Zooming in and then out returns the range it started from.
+ */
+export function zoomAnchored(range: Range, direction: "in" | "out", step: number = ZOOM_BUTTON_STEP): Range {
+  const span = range[1] - range[0];
+  return [range[0], range[0] + (direction === "in" ? span / step : span * step)];
+}
+
 // ── the drag session ────────────────────────────────────────────────────────────────────────
 //
 // Turning DOM events into gesture steps is where the remaining risk lives: the maths above is

@@ -5,6 +5,7 @@
 import { useState } from "react";
 import type { ChorusImportRecord, ChorusStatistics, ChorusStatisticsComparison, ComparedPopulation, RecordingComparison } from "../engine/chorusStatistics";
 import { useI18n } from "./i18n";
+import { ModalEscape } from "./useModalEscape";
 
 interface Props {
   stats: ChorusStatistics;
@@ -47,6 +48,7 @@ export function ChorusStatisticsModal({ stats, comparison, record, onClose }: Pr
 
   return (
     <div className="gl-modal-backdrop" onClick={onClose}>
+      <ModalEscape onClose={onClose} />
       <div className="gl-modal gl-chorus-stats" role="dialog" aria-label="FACSChorus statistics" onClick={(e) => e.stopPropagation()}>
         <div className="gl-modal-title">{t("FACSChorus statistics")}</div>
         <div className="gl-modal-note">

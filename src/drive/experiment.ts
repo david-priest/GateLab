@@ -4,6 +4,10 @@
 // name alone: Drive allows two files of one name in a folder. The FCS a workspace declares are
 // matched as a local relink matches them (planWorkspaceFcsRelink), the acquisition keywords of a
 // same-named file read from its header by Range requests, so another acquisition is never taken.
+//
+// Each request to Drive takes 0.3 to 0.6 s, so the per-file requests run side by side: the files'
+// details and their header reads at most CHECK_CONCURRENCY at a time, the downloads at most
+// DOWNLOAD_CONCURRENCY. Every check is still made on every file.
 
 import {
   extractNamedFcsDataSet,
@@ -20,15 +24,50 @@ import {
   type WorkspaceFcsRequirement,
 } from "../engine/workspaceRelink";
 import { WORKSPACE_VERSION_3 } from "../engine/workspaceV3";
-import { checkDriveId, DriveError, DriveTooLargeError, type DriveApi, type DriveFile } from "./api";
+import {
+  checkDriveId,
+  DriveAuthError,
+  DriveError,
+  DriveNotFoundError,
+  DriveTooLargeError,
+  type DriveApi,
+  type DriveFile,
+} from "./api";
 import type { PickedDoc } from "./picker";
 import type { DriveResolvedFcs } from "./types";
 
 /** The cap on a workspace file, as for any workspace JSON GateLab reads. */
 export const MAX_WORKSPACE_BYTES = 64 * 1024 * 1024;
+/** Files whose details or header are read at once. */
+export const CHECK_CONCURRENCY = 4;
+/** Files downloaded at once. */
+export const DOWNLOAD_CONCURRENCY = 2;
 /** How a sample read from the lab Drive names its source: "Drive: <experiment>/<file>". */
 export const DRIVE_SOURCE_PREFIX = "Drive: ";
 const FOLDER_MIME = "application/vnd.google-apps.folder";
+
+/**
+ * `run` over `items`, at most `limit` at a time, with the results in the items' order. The first
+ * failure is thrown, and no item not yet started is started after it.
+ */
+export async function mapLimit<T, R>(items: readonly T[], limit: number, run: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < items.length) {
+      const index = next++;
+      try {
+        results[index] = await run(items[index], index);
+      } catch (cause) {
+        failed = true;
+        throw cause;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker));
+  return results;
+}
 
 export const isWorkspaceName = (name: string): boolean => /\.gatelab$/i.test(name);
 export const isFcsName = (name: string): boolean => /\.fcs$/i.test(name);
@@ -47,17 +86,13 @@ export interface PickedExperiment {
 
 /** Confirm each picked file with Drive and find the experiment folder they share. */
 export async function confirmPicked(api: DriveApi, docs: readonly PickedDoc[], folderId?: string): Promise<PickedExperiment> {
-  const files: DriveFile[] = [];
-  const seen = new Set<string>();
-  for (const doc of docs) {
-    if (seen.has(doc.id)) continue;
-    seen.add(doc.id);
-    const file = await api.getMetadata(checkDriveId(doc.id));
+  const ids = [...new Set(docs.map((doc) => checkDriveId(doc.id)))];
+  const files = await mapLimit(ids, CHECK_CONCURRENCY, (id) => api.getMetadata(id));
+  for (const file of files) {
     if (file.mimeType === FOLDER_MIME) {
       throw new DriveError(`"${file.name}" is a folder. Open the experiment folder in the picker and select the files inside it.`);
     }
     if (file.trashed) throw new DriveError(`"${file.name}" is in the Drive trash.`);
-    files.push(file);
   }
   if (files.length === 0) throw new DriveError("Nothing was picked.");
   const folders = new Set(files.map((file) => file.parents[0] ?? ""));
@@ -76,6 +111,70 @@ export async function confirmPicked(api: DriveApi, docs: readonly PickedDoc[], f
     fcs: files.filter((file) => isFcsName(file.name)),
     other: files.filter((file) => !isWorkspaceName(file.name) && !isFcsName(file.name)),
   });
+}
+
+/** How many folders up from an experiment folder the lab folder is looked for. */
+export const MAX_LAB_DEPTH = 8;
+
+/**
+ * Where a folder is, from Drive's record of its parents: in the lab folder (the folder itself, or
+ * one whose parents lead up to it, at any depth), outside it (a folder at the top of a drive or of
+ * another Shared drive, or too deep), or not known yet, at the first folder on the way up that
+ * GateLab cannot read. Under drive.file a folder is read only once this member's GateLab made it
+ * or the member chose it in the picker, so a folder made by hand or by a colleague is not read
+ * until it is chosen once.
+ */
+export type LabPlacement =
+  | {
+      readonly kind: "inside";
+      /** The folder asked about, when GateLab could read it (null for the lab folder itself). */
+      readonly folder: DriveFile | null;
+      /** The names of the folders from just inside the lab folder down to it; [] for the lab folder. */
+      readonly path: readonly string[];
+    }
+  | { readonly kind: "outside" }
+  | {
+      readonly kind: "unknown";
+      /** The folder GateLab cannot read yet. */
+      readonly folderId: string;
+      /** The folder below it that GateLab read, or null when the folder asked about is the one it cannot read. */
+      readonly child: DriveFile | null;
+    };
+
+export async function labPlacement(api: DriveApi, folderId: string, labFolderId: string): Promise<LabPlacement> {
+  let id = folderId;
+  let first: DriveFile | null = null;
+  let child: DriveFile | null = null;
+  const names: string[] = [];
+  for (let depth = 0; depth <= MAX_LAB_DEPTH; depth++) {
+    if (id === labFolderId) return { kind: "inside", folder: first, path: names.reverse() };
+    let folder: DriveFile;
+    try {
+      folder = await api.getMetadata(checkDriveId(id, "folder"));
+    } catch (cause) {
+      if (cause instanceof DriveNotFoundError) return { kind: "unknown", folderId: id, child };
+      throw cause;
+    }
+    if (folder.mimeType !== FOLDER_MIME || folder.trashed) return { kind: "outside" };
+    first ??= folder;
+    names.push(folder.name);
+    const parent = folder.parents[0];
+    // At the top of a drive: My Drive's top level, or a Shared drive's (whose ID is the drive's).
+    if (!parent || (parent === folder.driveId && parent !== labFolderId)) return { kind: "outside" };
+    child = folder;
+    id = parent;
+  }
+  return { kind: "outside" };
+}
+
+/** Why a folder is refused: not in the lab folder, as far as Drive's record of its parents shows. */
+export function outsideLabMessage(what: "open" | "location", labName: string | null): string {
+  const lab = labName ? `the lab folder "${labName}"` : "the lab folder (the folder Open experiment starts in)";
+  return what === "open"
+    ? `The files picked are not in ${lab}. GateLab opens an experiment only from a folder inside the lab folder, at any depth, ` +
+        "as Drive's record of the folders' parents shows. Nothing was opened; the current workspace is unchanged."
+    : `The folder chosen is not in ${lab}. GateLab makes a new experiment only in the lab folder or a folder inside it, at any ` +
+        "depth, as Drive's record of the folders' parents shows. Nothing was saved.";
 }
 
 /** The FCS a workspace declares, as the local open reads them (App.tsx, openWorkspaceFromEnvelope). */
@@ -134,7 +233,9 @@ export async function readDriveFcsIdentity(api: DriveApi, file: DriveFile): Prom
     const text = await api.readRange(file.id, 0, end - 1);
     const keywords = readFcsKeywords(text.slice().buffer);
     return keywords ? identityKeywords(keywords) : null;
-  } catch {
+  } catch (cause) {
+    // A sign-in that ran out is not an unreadable header: the open stops for a reconnect.
+    if (cause instanceof DriveAuthError) throw cause;
     return null;
   }
 }
@@ -162,11 +263,9 @@ export async function matchExperimentFcs(
   const normal = (name: string) => name.normalize("NFC").toLocaleLowerCase();
   const named = new Set(requirements.filter((r) => r.identity && !parseFcsDataSetFileName(r.fileName)).map((r) => normal(r.fileName)));
   const identities = new Map<string, RecordedIdentity>();
-  for (const file of candidates) {
-    if (!named.has(normal(file.name))) continue;
-    const identity = await readDriveFcsIdentity(api, file);
-    if (identity) identities.set(file.id, identity);
-  }
+  const toRead = candidates.filter((file) => named.has(normal(file.name)));
+  const read = await mapLimit(toRead, CHECK_CONCURRENCY, (file) => readDriveFcsIdentity(api, file));
+  toRead.forEach((file, index) => { if (read[index]) identities.set(file.id, read[index]!); });
   const sources = candidates.map((file) => ({ name: file.name, relativePath: file.name, file }));
   const plan = planWorkspaceFcsRelink(requirements, sources, (source) => identities.get(source.file.id) ?? null);
   const problems: string[] = [];
@@ -187,6 +286,38 @@ export async function matchExperimentFcs(
   return { matches, missing: plan.missing, problems };
 }
 
+/**
+ * Download files, DOWNLOAD_CONCURRENCY at a time, with one progress line for them all; the bytes in
+ * the files' order.
+ */
+export async function downloadFiles(
+  api: DriveApi,
+  files: readonly DriveFile[],
+  progress: (message: string) => void = () => undefined,
+): Promise<Uint8Array[]> {
+  const loaded = new Array<number>(files.length).fill(0);
+  const sized = files.every((file) => file.size !== null);
+  const total = files.reduce((sum, file) => sum + (file.size ?? 0), 0);
+  let finished = 0;
+  const tell = () => progress(
+    `Opening from the lab Drive · ${finished} / ${files.length} FCS file${files.length === 1 ? "" : "s"} read` +
+      (sized && total > 0 ? ` · ${Math.round(loaded.reduce((sum, bytes) => sum + bytes, 0) / total * 100)}%` : ""),
+  );
+  tell();
+  return mapLimit(files, DOWNLOAD_CONCURRENCY, async (file, index) => {
+    const bytes = await api.download(file.id, {
+      size: file.size,
+      onProgress: (bytesLoaded) => {
+        loaded[index] = bytesLoaded;
+        tell();
+      },
+    });
+    finished++;
+    tell();
+    return bytes;
+  });
+}
+
 /** Download each matched file once, taking a data set out of its file as a local relink does. */
 export async function readMatchedFcs(
   api: DriveApi,
@@ -195,24 +326,19 @@ export async function readMatchedFcs(
   experiment: string,
   progress: (message: string) => void = () => undefined,
 ): Promise<Map<string, DriveResolvedFcs>> {
-  const files = new Map<string, Uint8Array>();
-  const resolved = new Map<string, DriveResolvedFcs>();
-  const toRead = [...new Set([...matches.values()])];
   for (const requirement of requirements) {
-    const file = matches.get(requirement.dataPath);
-    if (!file) throw new DriveError(`${requirement.fileName} was not matched.`);
-    let whole = files.get(file.id);
-    if (!whole) {
-      const index = toRead.indexOf(file) + 1;
-      whole = await api.download(file.id, {
-        size: file.size,
-        onProgress: (loaded, total) => progress(
-          `Opening from the lab Drive · ${index} / ${toRead.length} · ${file.name}` +
-            (total ? ` · ${Math.round(loaded / total * 100)}%` : ""),
-        ),
-      });
-      files.set(file.id, whole);
-    }
+    if (!matches.get(requirement.dataPath)) throw new DriveError(`${requirement.fileName} was not matched.`);
+  }
+  const toRead = [...new Map(requirements.map((requirement) => {
+    const file = matches.get(requirement.dataPath)!;
+    return [file.id, file] as const;
+  })).values()];
+  const read = await downloadFiles(api, toRead, progress);
+  const files = new Map(toRead.map((file, index) => [file.id, read[index]] as const));
+  const resolved = new Map<string, DriveResolvedFcs>();
+  for (const requirement of requirements) {
+    const file = matches.get(requirement.dataPath)!;
+    const whole = files.get(file.id)!;
     const dataSet = parseFcsDataSetFileName(requirement.fileName);
     const bytes = dataSet ? extractNamedFcsDataSet(whole.slice().buffer, dataSet.index, dataSet.count) : whole;
     resolved.set(requirement.dataPath, {

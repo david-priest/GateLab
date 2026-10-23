@@ -419,6 +419,85 @@ describe("workspace compensation histories", () => {
   });
 });
 
+describe("matrix names and the active profile", () => {
+  it("round-trips a lineage name and the active profile idempotently, leaving records and hashes alone", async () => {
+    const root = await baseline("flow-root", flowScientific());
+    const edit = await revision(root, "flow-edit", flowScientific(0.2));
+    const other = await baseline("other-root", flowScientific(0.3));
+    const input = {
+      schema: WORKSPACE_COMPENSATION_SCHEMA,
+      lineages: [
+        { baselineProfileId: "flow-root", records: [root, edit], name: "  Panel B1 " },
+        { baselineProfileId: "other-root", records: [other] },
+      ],
+      activeProfileId: "flow-edit",
+    };
+
+    const first = await validateWorkspaceCompensationState(clone(input));
+    const second = await validateWorkspaceCompensationState(clone(first));
+
+    expect(first.activeProfileId).toBe("flow-edit");
+    expect(first.lineages[0].name).toBe("Panel B1");
+    expect("name" in first.lineages[1]).toBe(false);
+    expect(second).toEqual(first);
+    // A name lives beside the records: every record, and so every hash, is the one supplied.
+    expect(first.lineages[0].records).toEqual([root, edit]);
+    expect(first.lineages[0].records.map(({ matrixHash, profileHash }) => [matrixHash, profileHash]))
+      .toEqual([root, edit].map(({ matrixHash, profileHash }) => [matrixHash, profileHash]));
+    expect(Object.isFrozen(first.lineages[0])).toBe(true);
+  });
+
+  it("reads a state without names or an active profile as before", async () => {
+    const root = await baseline("flow-root", flowScientific());
+    const result = await validateWorkspaceCompensationState({
+      schema: WORKSPACE_COMPENSATION_SCHEMA,
+      lineages: [{ baselineProfileId: "flow-root", records: [root] }],
+    });
+    expect(Object.keys(result).sort()).toEqual(["lineages", "schema"]);
+    expect(Object.keys(result.lineages[0]).sort()).toEqual(["baselineProfileId", "records"]);
+  });
+
+  it("keeps a sample binding valid whatever its lineage is called", async () => {
+    const root = await baseline("flow-root", flowScientific());
+    const named = await validateWorkspaceCompensationState({
+      schema: WORKSPACE_COMPENSATION_SCHEMA,
+      lineages: [{ baselineProfileId: "flow-root", records: [root], name: "Renamed" }],
+      activeProfileId: "flow-root",
+    });
+    const unnamed = await validateWorkspaceCompensationState({
+      schema: WORKSPACE_COMPENSATION_SCHEMA,
+      lineages: [{ baselineProfileId: "flow-root", records: [root] }],
+    });
+    const binding = assay(flowLayer(root));
+    expect(validateSampleAssayBinding(clone(binding), named, flowContext()))
+      .toEqual(validateSampleAssayBinding(clone(binding), unnamed, flowContext()));
+  });
+
+  it.each(["", "   ", 7, null, "x".repeat(201)])("rejects an unusable lineage name %#", async (name) => {
+    const root = await baseline("flow-root", flowScientific());
+    const error = await expectWorkspaceError(
+      validateWorkspaceCompensationState({
+        schema: WORKSPACE_COMPENSATION_SCHEMA,
+        lineages: [{ baselineProfileId: "flow-root", records: [root], name }],
+      }),
+      "invalid-lineage-entry",
+    );
+    expect(error.lineageIndex).toBe(0);
+  });
+
+  it.each(["not-stored", 3, null])("rejects an active profile the workspace does not store %#", async (activeProfileId) => {
+    const root = await baseline("flow-root", flowScientific());
+    await expectWorkspaceError(
+      validateWorkspaceCompensationState({
+        schema: WORKSPACE_COMPENSATION_SCHEMA,
+        lineages: [{ baselineProfileId: "flow-root", records: [root] }],
+        activeProfileId,
+      }),
+      "missing-profile",
+    );
+  });
+});
+
 describe("original and legacy sample assay bindings", () => {
   it("creates and validates a deeply immutable Original binding", async () => {
     const compensation = await validateWorkspaceCompensationState({

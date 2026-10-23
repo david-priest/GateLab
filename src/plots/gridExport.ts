@@ -121,6 +121,25 @@ export function composeGridSVG(gridId: string, dpi: number): { root: SVGSVGEleme
   return { root, width, height };
 }
 
+/** A page composed apart from the grid, such as the Strategy tab's gating tree, with its size in CSS pixels. */
+export interface ComposedPage {
+  root: SVGSVGElement;
+  width: number;
+  height: number;
+}
+
+/** A composed page as an SVG file of its own. */
+export function exportComposedSVG(page: ComposedPage, filename: string) {
+  const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(page.root);
+  downloadBlob(new Blob([xml], { type: "image/svg+xml" }), filename + ".svg");
+}
+
+/** A composed page as a PNG file of its own, at `dpi`. */
+export async function exportComposedPNG(page: ComposedPage, filename: string, dpi: number) {
+  const canvas = await rasterizeSvg(page, dpi);
+  downloadBlob(await pngBlob(canvas, dpi), filename + ".png");
+}
+
 /** Composite SVG download: per-cell vector axes/gates over the data layer re-rendered at `dpi`. */
 export function exportGridSVG(gridId: string, filename: string, dpi = 300) {
   const composed = composeGridSVG(gridId, dpi);
@@ -158,7 +177,8 @@ export async function rasterizeSvg(composed: { root: SVGSVGElement; width: numbe
   });
 }
 
-export async function exportGridPDF(gridId: string, filename: string, dpi = 300) {
+/** The grid as a PDF; `morePages` follow it, each a page of its own size, as the Strategy tab's gating tree does. */
+export async function exportGridPDF(gridId: string, filename: string, dpi = 300, morePages: readonly ComposedPage[] = []) {
   const composed = composeGridSVG(gridId, dpi);
   if (!composed) return;
   // CSS pixels are 1/96 inch; PDF points are 1/72 inch. DPI changes resolution, not paper size.
@@ -171,6 +191,14 @@ export async function exportGridPDF(gridId: string, filename: string, dpi = 300)
   if (!(await pdfVectorPage(pdf, composed.root, { width, height }))) {
     const canvas = await rasterizeSvg(composed, dpi);
     pdf.addImage(canvas, "PNG", 0, 0, width, height, undefined, "FAST");
+  }
+  for (const page of morePages) {
+    const pageWidth = page.width * 72 / 96, pageHeight = page.height * 72 / 96;
+    pdf.addPage([pageWidth, pageHeight], pageWidth >= pageHeight ? "landscape" : "portrait");
+    if (!(await pdfVectorPage(pdf, page.root, { width: pageWidth, height: pageHeight }))) {
+      const canvas = await rasterizeSvg(page, dpi);
+      pdf.addImage(canvas, "PNG", 0, 0, pageWidth, pageHeight, undefined, "FAST");
+    }
   }
   pdf.save(filename + ".pdf");
 }

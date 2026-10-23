@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// "Evaluate gates as FlowJo does" in the dialog that opens a FlowJo workspace: on at every open,
+// "Evaluate gates on the recorded grid" in the dialog that opens a FlowJo workspace: on at every open,
 // and the answer holds for the whole import -- every file of a per-file import, and a tree chosen
 // again after the first could not be imported. A workspace imported onto the loaded files from the
 // Import menu is asked it in its import dialog, on by default, and changing it there reads the
@@ -110,10 +110,10 @@ async function feed(selector: string, file: File | File[]): Promise<void> {
   await settle(); await settle(); await settle();
 }
 const dialog = () => host.querySelector<HTMLElement>('[aria-label="Open a FlowJo workspace"]');
-const option = () => dialog()!.querySelector<HTMLInputElement>('input[aria-label="Evaluate gates as FlowJo does"]');
+const option = () => dialog()!.querySelector<HTMLInputElement>('input[aria-label="Evaluate gates on the recorded grid"]');
 async function openWorkspace(wsp = WSP, fcs: string[] = ["D1.fcs"]): Promise<void> {
   act(() => root.render(<App />));
-  await feed('input[accept=".gatelab,.wsp,.cef"]', fileOf("strategy.wsp", wsp));
+  await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', fileOf("strategy.wsp", wsp));
   expect(dialog()).not.toBeNull();
   await feed('input[data-role="flowjo-workspace-fcs"]', fcs.map((name) => fileOf(name, Uint8Array.from([1]))));
 }
@@ -138,16 +138,16 @@ async function importNow(): Promise<void> {
 }
 const treePicker = () => host.querySelector<HTMLElement>('[aria-label="Choose a gating tree"]');
 
-describe("Evaluate gates as FlowJo does, in the FlowJo workspace dialog", () => {
+describe("Evaluate gates on the recorded grid, in the FlowJo workspace dialog", () => {
   it("is offered on by default, and says what it does, what off means and what it does not cover", async () => {
     await openWorkspace();
     expect(option()).not.toBeNull();
     expect(option()!.checked).toBe(true);
     const text = dialog()!.textContent ?? "";
-    expect(text).toContain("(polygons on FlowJo's 256-channel grid, rectangles clamped to the axis)");
-    expect(text).toContain("Off: every gate is evaluated continuously on the geometry it was drawn with, as FlowKit and Cytobank evaluate gates. Biex axes are read on FlowJo's own table either way; FlowKit's differs from it where the width basis lies between −1 and −3.16.");
-    expect(text).toContain("Either way, FlowJo's rule is not established for these, which are evaluated continuously: ellipses, curly quadrants, and polygons with no gate resolution or on a Time, FlowJo ArcSinh, Logicle or gained linear axis.");
-    expect(text).toContain("A rectangle is not clamped on a Time, gained or compensated linear axis, and one lying wholly beyond where FlowJo clamps is counted as drawn.");
+    expect(text).toContain("(polygons on the workspace's 256-channel grid, rectangles clamped to the axis)");
+    expect(text).toContain("Off: every gate is evaluated continuously on the geometry it was drawn with, as FlowKit and Cytobank evaluate gates. Biex axes are read on the same biex table either way; FlowKit's differs from it where the width basis lies between −1 and −3.16.");
+    expect(text).toContain("Either way, the grid rule is not established for these, which are evaluated continuously: ellipses, curly and spider quadrants, and polygons with no gate resolution or on a Time, ArcSinh, Logicle or gained linear axis.");
+    expect(text).toContain("A rectangle is not clamped on a Time, gained or compensated linear axis, and one lying wholly beyond where the axis clamps is counted as drawn.");
     expect(text).toContain("A polygon with a gate resolution other than 256 is put on a grid of that many channels, which has not been measured.");
   });
 
@@ -172,16 +172,16 @@ describe("Evaluate gates as FlowJo does, in the FlowJo workspace dialog", () => 
   it("says which way the gates were read in Japanese too", async () => {
     window.localStorage.setItem("gatelab.uiLanguage", "ja");
     act(() => root.render(<I18nProvider><App /></I18nProvider>));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', fileOf("strategy.wsp", WSP));
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', fileOf("strategy.wsp", WSP));
     await feed('input[data-role="flowjo-workspace-fcs"]', fileOf("D1.fcs", Uint8Array.from([1])));
     const ja = (text: string) => translateUi("ja", text);
     const opened = host.querySelector<HTMLElement>(`[aria-label="${ja("Open a FlowJo workspace")}"]`)!;
-    expect(opened.querySelector<HTMLInputElement>(`input[aria-label="${ja("Evaluate gates as FlowJo does")}"]`)!.checked).toBe(true);
+    expect(opened.querySelector<HTMLInputElement>(`input[aria-label="${ja("Evaluate gates on the recorded grid")}"]`)!.checked).toBe(true);
     const button = [...opened.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === ja("Import"))!;
     await act(async () => { button.click(); });
     for (let i = 0; i < 6; i++) await settle();
-    expect(host.textContent).toContain("FlowJoと同じ方法で評価（1個のポリゴンをFlowJoのグリッド上で評価）");
-    expect(host.textContent).not.toContain("evaluated as FlowJo does");
+    expect(host.textContent).toContain("記録されたグリッド上で評価（ポリゴン1個）");
+    expect(host.textContent).not.toContain("evaluated on the recorded grid");
   });
 
   // The importer's notes this option brings were written in English whatever the language: a
@@ -193,7 +193,7 @@ describe("Evaluate gates as FlowJo does, in the FlowJo workspace dialog", () => 
     act(() => root.render(<I18nProvider><App /></I18nProvider>));
     // One tree: the second polygon beneath the first.
     const tree = unresolved.replace(/<\/Population>$/, `<Subpopulations>${coarse}</Subpopulations></Population>`);
-    await feed('input[accept=".gatelab,.wsp,.cef"]', fileOf("strategy.wsp", `<?xml version="1.0"?><Workspace><SampleList>${sampleOf("D1.fcs", tree)}</SampleList></Workspace>`));
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', fileOf("strategy.wsp", `<?xml version="1.0"?><Workspace><SampleList>${sampleOf("D1.fcs", tree)}</SampleList></Workspace>`));
     await feed('input[data-role="flowjo-workspace-fcs"]', fileOf("D1.fcs", Uint8Array.from([1])));
     const ja = (text: string) => translateUi("ja", text);
     const opened = host.querySelector<HTMLElement>(`[aria-label="${ja("Open a FlowJo workspace")}"]`)!;
@@ -204,9 +204,9 @@ describe("Evaluate gates as FlowJo does, in the FlowJo workspace dialog", () => 
     await act(async () => { button.click(); });
     for (let i = 0; i < 6; i++) await settle();
     const text = host.textContent ?? "";
-    expect(text).toContain("1個のポリゴンは、FlowJoの規則が確立されていないため、FlowJoのグリッドではなく連続的に評価されます。そのため、境界付近のイベントの分だけFlowJoの数と異なることがあります：「CD4_positive」はゲート解像度を宣言していません。");
-    expect(text).toContain("1個のポリゴンが256以外のゲート解像度を宣言しており、そのチャンネル数のグリッドに置かれます。測定したFlowJoのポリゴンはすべて256を宣言しているため、他の解像度での数はFlowJoの数と比較されていません：「CD8_positive」（128）。");
-    expect(text).not.toContain("evaluated continuously rather than on FlowJo's grid");
+    expect(text).toContain("1個のポリゴンは、グリッドの規則が確立されていないため、記録されたグリッドではなく連続的に評価されます。そのため、境界付近のイベントの分だけ記録されたカウントと異なることがあります：「CD4_positive」はゲート解像度を宣言していません。");
+    expect(text).toContain("1個のポリゴンが256以外のゲート解像度を宣言しており、そのチャンネル数のグリッドに置かれます。測定したワークスペースのポリゴンはすべて256を宣言しているため、他の解像度での数は記録されたカウントと比較されていません：「CD8_positive」（128）。");
+    expect(text).not.toContain("evaluated continuously rather than on the recorded grid");
     expect(text).not.toContain("declare a gate resolution other than 256");
   });
 
@@ -225,21 +225,21 @@ describe("Evaluate gates as FlowJo does, in the FlowJo workspace dialog", () => 
     await openWorkspace(xml);
     expect(option()!.checked).toBe(true);
     await importNow();
-    expect(host.textContent).toContain("evaluated as FlowJo does (0 polygon(s) on FlowJo's grid) · 1 polygon(s) GateLab wrote read as GateLab held them");
+    expect(host.textContent).toContain("evaluated on the recorded grid (0 polygon(s)) · 1 polygon(s) GateLab wrote read as GateLab held them");
   });
 
   it("imports the polygons onto FlowJo's grid when on, and says so", async () => {
     await openWorkspace();
     await importNow();
-    expect(host.textContent).toContain("evaluated as FlowJo does (1 polygon(s) on FlowJo's grid)");
+    expect(host.textContent).toContain("evaluated on the recorded grid (1 polygon(s))");
   });
 
   it("imports them continuously when off, and says so", async () => {
     await openWorkspace();
     await setOption(false);
     await importNow();
-    expect(host.textContent).toContain("evaluated continuously, not on FlowJo's grid");
-    expect(host.textContent).not.toContain("on FlowJo's grid)");
+    expect(host.textContent).toContain("evaluated continuously, not on the recorded grid");
+    expect(host.textContent).not.toContain("evaluated on the recorded grid (");
   });
 
   it("keeps the answer for a tree chosen again after the first could not be imported", async () => {
@@ -252,7 +252,7 @@ describe("Evaluate gates as FlowJo does, in the FlowJo workspace dialog", () => 
     for (let i = 0; i < 6; i++) await settle();
     expect(treePicker()).toBeNull();
     expect(host.textContent).toContain('tree "CD8_positive", 2 of 3');
-    expect(host.textContent).toContain("evaluated continuously, not on FlowJo's grid");
+    expect(host.textContent).toContain("evaluated continuously, not on the recorded grid");
   });
 
   it("applies it to every file of a per-file import", async () => {
@@ -260,40 +260,40 @@ describe("Evaluate gates as FlowJo does, in the FlowJo workspace dialog", () => 
     expect(option()!.checked).toBe(true);
     await importNow();
     // D1's polygon and D2's, each on FlowJo's grid.
-    expect(host.textContent).toContain("evaluated as FlowJo does (2 polygon(s) on FlowJo's grid)");
+    expect(host.textContent).toContain("evaluated on the recorded grid (2 polygon(s))");
   });
 
   it("applies it off to every file of a per-file import too", async () => {
     await openWorkspace(PER_FILE, ["D1.fcs", "D2.fcs"]);
     await setOption(false);
     await importNow();
-    expect(host.textContent).toContain("evaluated continuously, not on FlowJo's grid");
+    expect(host.textContent).toContain("evaluated continuously, not on the recorded grid");
   });
 
   it("has its text in Japanese too", () => {
     for (const text of [
-      "Evaluate gates as FlowJo does",
-      "(polygons on FlowJo's 256-channel grid, rectangles clamped to the axis)",
+      "Evaluate gates on the recorded grid",
+      "(polygons on the workspace's 256-channel grid, rectangles clamped to the axis)",
       FLOWJO_GRID_OFF_NOTE,
       FLOWJO_GRID_NOT_COVERED,
       FLOWJO_GRID_GATELAB_POLYGONS,
       "What either way leaves continuous",
-      "evaluated as FlowJo does ({count} polygon(s) on FlowJo's grid)",
-      "evaluated continuously, not on FlowJo's grid",
+      "evaluated on the recorded grid ({count} polygon(s))",
+      "evaluated continuously, not on the recorded grid",
       "{count} polygon(s) GateLab wrote read as GateLab held them",
       // The importer's notes (flowjoWorkspace.ts), each template and each part it is built from.
-      "\"{name}\" lies wholly below {where} on {channel} ({bound}). FlowJo places every event below it there, so by FlowJo's rule this gate holds none; GateLab tests the recorded values, and counts the events that fall inside its drawn bounds.",
-      "\"{name}\" lies wholly beyond the {channel} axis range ({min} to {max}). FlowJo places every event beyond the range on the axis edge, so it counts none inside this gate; GateLab tests the recorded values, and counts the events that fall inside its drawn bounds.",
-      "the bottom of FlowJo's biex table",
+      "\"{name}\" lies wholly below {where} on {channel} ({bound}). Every event below it is placed there on the axis, so under that clamp this gate holds none; GateLab tests the recorded values, and counts the events that fall inside its drawn bounds.",
+      "\"{name}\" lies wholly beyond the {channel} axis range ({min} to {max}). Every event beyond the range is placed on the axis edge, so under that clamp none falls inside this gate; GateLab tests the recorded values, and counts the events that fall inside its drawn bounds.",
+      "the bottom of the biex table",
       "the log axis's offset",
-      "{count} polygon(s) declare a gate resolution other than 256 and are put on a grid of that many channels; every FlowJo polygon measured declares 256, so no count at another resolution has been compared with FlowJo's: {list}",
+      "{count} polygon(s) declare a gate resolution other than 256 and are put on a grid of that many channels; every workspace polygon measured declares 256, so no count at another resolution has been compared with a recorded count: {list}",
       "\"{name}\" ({channels})",
-      "{count} polygon(s) are evaluated continuously rather than on FlowJo's grid, because FlowJo's rule for them is not established, so their counts can differ from FlowJo's by the events near their edges: {list}",
+      "{count} polygon(s) are evaluated continuously rather than on the recorded grid, because the grid rule for them is not established, so their counts can differ from the recorded counts by the events near their edges: {list}",
       "\"{name}\" {why}",
       "declares no gate resolution",
       "is a panel of a quadrant gate",
       "is on a Time axis",
-      "is on {channel}, whose axis FlowJo's grid is not established for",
+      "is on {channel}, whose axis the grid rule is not established for",
       "; ",
       "; and {count} more.",
       ".",
@@ -308,7 +308,7 @@ describe("Evaluate gates as FlowJo does, in the FlowJo workspace dialog", () => 
     await setOption(false);
     const cancel = [...dialog()!.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Cancel")!;
     await act(async () => { cancel.click(); });
-    await feed('input[accept=".gatelab,.wsp,.cef"]', fileOf("strategy.wsp", WSP));
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', fileOf("strategy.wsp", WSP));
     expect(option()!.checked).toBe(true);
   });
 
@@ -316,11 +316,11 @@ describe("Evaluate gates as FlowJo does, in the FlowJo workspace dialog", () => 
   // asks it. It used to be read by FlowJo's rule with no way to choose, and merged into a tree
   // imported with the option off, it added each polygon again beside its continuous twin.
   const importModal = () => host.querySelector<HTMLElement>(".gl-modal");
-  const modalOption = () => importModal()?.querySelector<HTMLInputElement>('input[aria-label="Evaluate gates as FlowJo does"]') ?? null;
+  const modalOption = () => importModal()?.querySelector<HTMLInputElement>('input[aria-label="Evaluate gates on the recorded grid"]') ?? null;
   async function importMenu(wsp: string, fcs: string[] = ["D1.fcs"]): Promise<void> {
     act(() => root.render(<App />));
     await feed('input[type=file][accept=".fcs"][multiple]', fcs.map((name) => fileOf(name, Uint8Array.from([1]))));
-    await feed('input[accept=".xml,.wsp,.cef"]', fileOf("strategy.wsp", wsp));
+    await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', fileOf("strategy.wsp", wsp));
     for (let i = 0; i < 6; i++) await settle();
   }
   async function confirmImport(): Promise<void> {
@@ -337,9 +337,9 @@ describe("Evaluate gates as FlowJo does, in the FlowJo workspace dialog", () => 
     await importMenu(PER_FILE);
     expect(modalOption()).not.toBeNull();
     expect(modalOption()!.checked).toBe(true);
-    expect(importModal()!.textContent).toContain("Off: every gate is evaluated continuously on the geometry it was drawn with, as FlowKit and Cytobank evaluate gates. Biex axes are read on FlowJo's own table either way; FlowKit's differs from it where the width basis lies between −1 and −3.16.");
+    expect(importModal()!.textContent).toContain("Off: every gate is evaluated continuously on the geometry it was drawn with, as FlowKit and Cytobank evaluate gates. Biex axes are read on the same biex table either way; FlowKit's differs from it where the width basis lies between −1 and −3.16.");
     await confirmImport();
-    expect(host.textContent).toContain("evaluated as FlowJo does (1 polygon(s) on FlowJo's grid)");
+    expect(host.textContent).toContain("evaluated on the recorded grid (1 polygon(s))");
   });
 
   it("reads the workspace again, continuously, when it is cleared in that dialog", async () => {
@@ -347,8 +347,8 @@ describe("Evaluate gates as FlowJo does, in the FlowJo workspace dialog", () => 
     await clearModalOption();
     expect(modalOption()!.checked).toBe(false);
     await confirmImport();
-    expect(host.textContent).toContain("evaluated continuously, not on FlowJo's grid");
-    expect(host.textContent).not.toContain("on FlowJo's grid)");
+    expect(host.textContent).toContain("evaluated continuously, not on the recorded grid");
+    expect(host.textContent).not.toContain("evaluated on the recorded grid (");
   });
 
   it("asks it after a tree chosen by hand on a loaded file, and keeps the answer", async () => {
@@ -360,7 +360,7 @@ describe("Evaluate gates as FlowJo does, in the FlowJo workspace dialog", () => 
     await clearModalOption();
     await confirmImport();
     expect(host.textContent).toContain('tree "CD8_positive", 2 of 3');
-    expect(host.textContent).toContain("evaluated continuously, not on FlowJo's grid");
+    expect(host.textContent).toContain("evaluated continuously, not on the recorded grid");
   });
 
   it("applies the answer given there to every file of a per-file import from the Import menu", async () => {
@@ -368,6 +368,6 @@ describe("Evaluate gates as FlowJo does, in the FlowJo workspace dialog", () => 
     expect(modalOption()!.checked).toBe(true);
     await clearModalOption();
     await confirmImport();
-    expect(host.textContent).toContain("evaluated continuously, not on FlowJo's grid");
+    expect(host.textContent).toContain("evaluated continuously, not on the recorded grid");
   });
 });

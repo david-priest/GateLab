@@ -7,6 +7,7 @@ import type { ChorusTimeline, ChorusTimelineItem } from "../engine/chorusTimelin
 import { chorusTime } from "../engine/chorusTimeline";
 import { hierarchyColour } from "../engine/hierarchies";
 import { useI18n } from "./i18n";
+import { ModalEscape } from "./useModalEscape";
 
 interface Props {
   /** Null when the dialog stands on the loaded files alone. */
@@ -61,6 +62,7 @@ export function ChorusTimelineModal({ experimentName, timeline, hasSample, targe
 
   return (
     <div className="gl-modal-backdrop" onClick={onCancel}>
+      <ModalEscape onClose={onCancel} />
       <div className="gl-modal gl-chorus-timeline" role="dialog" aria-label="Choose which gates to import" onClick={(e) => e.stopPropagation()}>
         <div className="gl-modal-title">
           {experimentName ? `${t("FACSChorus experiment")} · ${experimentName}` : t("Gates recorded in the loaded files")}

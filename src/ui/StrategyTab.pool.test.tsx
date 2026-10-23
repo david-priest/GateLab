@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StrategyTab } from "./StrategyTab";
+import { clearPersistedTabState } from "./tabState";
 import { I18nProvider } from "./i18n";
 import { initialCoreState, type CoreState, type Derived } from "../store";
 import { DEFAULT_HIERARCHY_ID } from "../engine/hierarchies";
@@ -20,6 +21,7 @@ vi.mock("../plots/loadPlots", () => ({ loadMiniPlots: () => renderer }));
 let host: HTMLDivElement;
 let root: Root;
 beforeEach(() => {
+  clearPersistedTabState();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.useFakeTimers();
   renderer.renderStrategyGrid.mockClear();
@@ -78,24 +80,28 @@ const lastPayload = () =>
 const status = () => host.querySelector('[role="status"]')!.textContent;
 
 describe("a pooled Strategy tab", () => {
-  it("draws the Gating tab's pool, says what it pooled, and returns to one file when the pool is off", async () => {
+  const propsOf = (fx: ReturnType<typeof fixture>, checkedSampleIds: string[] = []) => ({
+    state: fx.state as CoreState,
+    sample: fx.files[0].sample,
+    sampleName: "D1.fcs",
+    derived: { masks: {} } as Derived,
+    globalScales: {},
+    configRef: { current: null },
+    dataRevision: 0,
+    densityColorPower: 1,
+    onDensityColorPowerChange: vi.fn(),
+    onFitChannels: vi.fn(),
+    files: fx.files,
+    checkedSampleIds,
+    onViewFile: vi.fn(),
+    activeSampleId: "D1",
+  });
+  const poolBox = () => [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.includes("Pool checked files"))!.querySelector("input")!;
+  const fileRow = (name: string) => [...host.querySelectorAll<HTMLLabelElement>(".gl-strategy-files label")].find((l) => l.textContent === name)!.querySelector("input")!;
+
+  it("draws the files ticked in its own list, first the Gating tab's pool, and the viewed file once the pool is off", async () => {
     const fx = fixture();
-    const onPoolChange = vi.fn();
-    const props = {
-      state: fx.state as CoreState,
-      sample: fx.files[0].sample,
-      sampleName: "D1.fcs",
-      derived: { masks: {} } as Derived,
-      globalScales: {},
-      configRef: { current: null },
-      dataRevision: 0,
-      densityColorPower: 1,
-      onDensityColorPowerChange: vi.fn(),
-      onFitChannels: vi.fn(),
-      files: fx.files,
-      poolable: true,
-      onPoolChange,
-    };
+    const props = propsOf(fx);
     act(() => root.render(<I18nProvider><StrategyTab {...props} poolIds={["D1", "D2"]} /></I18nProvider>));
     await flush();
     expect(renderer.renderStrategyGrid).toHaveBeenCalled();
@@ -106,44 +112,53 @@ describe("a pooled Strategy tab", () => {
     expect(payload.strategy_context_title).toBe("Lymphocytes · 2 files pooled");
     expect(host.textContent).toContain("2 files pooled · Main");
     expect(status()).toBe("1 strategy steps · 2 files pooled");
+    expect(poolBox().checked).toBe(true);
+    expect([fileRow("D1.fcs"), fileRow("D2.fcs")].map((input) => [input.type, input.checked])).toEqual([["checkbox", true], ["checkbox", true]]);
 
-    const pool = [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.includes("Pool checked files"))!.querySelector("input")!;
-    expect(pool.checked).toBe(true);
-    act(() => pool.click());
-    expect(onPoolChange).toHaveBeenCalledWith(false);
-
-    act(() => root.render(<I18nProvider><StrategyTab {...props} poolIds={null} /></I18nProvider>));
+    // Unticking a file is the Strategy tab's own change: the Gating tab's pool is not asked.
+    act(() => fileRow("D2.fcs").click());
     await flush();
     expect(lastPayload().steps[0]).toMatchObject({ n_before: 3, n_after: 1 });
-    expect(lastPayload().steps[0].x).toHaveLength(3);
+    expect(status()).toBe("1 strategy steps · 1 files pooled");
+
+    // The pool off: the one file drawn is the file viewed, and the list chooses which.
+    act(() => poolBox().click());
+    await flush();
+    expect(lastPayload().steps[0]).toMatchObject({ n_before: 3, n_after: 1 });
     expect(lastPayload().strategy_context_title).toBe("Lymphocytes · D1.fcs");
     expect(host.textContent).toContain("D1.fcs · Main");
     expect(status()).toBe("1 strategy steps · current file and hierarchy");
+    expect([fileRow("D1.fcs"), fileRow("D2.fcs")].map((input) => [input.type, input.checked])).toEqual([["radio", true], ["radio", false]]);
+    act(() => fileRow("D2.fcs").click());
+    expect(props.onViewFile).toHaveBeenCalledWith("D2");
   });
 
-  it("says when nothing is pooled, and names the files the Gating tab left out", async () => {
+  it("says when nothing is pooled, and takes the checked files on request", async () => {
     const fx = fixture();
-    const props = {
-      state: fx.state as CoreState,
-      sample: fx.files[0].sample,
-      sampleName: "D1.fcs",
-      derived: { masks: {} } as Derived,
-      globalScales: {},
-      configRef: { current: null },
-      dataRevision: 0,
-      densityColorPower: 1,
-      onDensityColorPowerChange: vi.fn(),
-      onFitChannels: vi.fn(),
-      files: fx.files,
-      poolable: true,
-      onPoolChange: vi.fn(),
-    };
-    act(() => root.render(<I18nProvider><StrategyTab {...props} poolIds={[]} /></I18nProvider>));
+    act(() => root.render(<I18nProvider><StrategyTab {...propsOf(fx, ["D2"])} poolIds={[]} /></I18nProvider>));
     await flush();
-    expect(status()).toBe("Nothing is pooled: check the files to pool in the file list.");
+    expect(status()).toBe("Nothing is pooled: tick the files to pool in the list.");
 
-    act(() => root.render(<I18nProvider><StrategyTab {...props} poolIds={["D1"]} poolNote="Not pooled, different panel: D2.fcs" /></I18nProvider>));
+    act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Use checked files")!.click());
     await flush();
-    expect(status()).toBe("1 strategy steps · 1 files pooled · Not pooled, different panel: D2.fcs");
+    expect(fileRow("D2.fcs").checked).toBe(true);
+    expect(fileRow("D1.fcs").checked).toBe(false);
+    expect(status()).toBe("1 strategy steps · 1 files pooled");
+  });
+
+  it("starts from the checked files when the Gating tab is not pooling, and keeps its pool on return", async () => {
+    const fx = fixture();
+    act(() => root.render(<I18nProvider><StrategyTab {...propsOf(fx, ["D1", "D2"])} poolIds={null} /></I18nProvider>));
+    await flush();
+    expect(poolBox().checked).toBe(false);
+    act(() => poolBox().click());
+    await flush();
+    expect(status()).toBe("1 strategy steps · 2 files pooled");
+    // The tab is left and opened again: its pool is as it was, whatever the Gating tab does.
+    act(() => root.render(<div />));
+    act(() => root.render(<I18nProvider><StrategyTab {...propsOf(fx, [])} poolIds={null} /></I18nProvider>));
+    await flush();
+    expect(poolBox().checked).toBe(true);
+    expect(status()).toBe("1 strategy steps · 2 files pooled");
   });
 });

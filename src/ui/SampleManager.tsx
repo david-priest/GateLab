@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { useI18n } from "./i18n";
-import { MenuButton } from "./MenuButton";
+import { MenuButton, type MenuEntry } from "./MenuButton";
+import { ContextMenu, type ContextMenuState } from "./ContextMenu";
+import { ChevronIcon, MoreIcon, PlusIcon } from "./icons";
+import { HIERARCHY_COLOURS } from "../engine/hierarchies";
+import { ModalEscape } from "./useModalEscape";
 import { groupCheckedCount, type FacetColumn } from "../engine/sampleFacets";
 
 export interface SampleListItem {
@@ -27,15 +31,26 @@ export interface SampleListItem {
   metadata?: Record<string, string>;
 }
 
-/** What the Groups menu asks the app to do; "new", "assign" and "remove" act on the selected files. */
+/**
+ * What the file list asks the app to do with groups. "new", "assign" and "remove" act on
+ * `fileIds` when given (a drag, a right-click), else on the selected files; "rename" with a
+ * `name` renames in place, without one opens the dialog.
+ */
 export type GroupAction =
-  | { kind: "new" }
+  | { kind: "new"; fileIds?: readonly string[] }
   /** One group per value of a metadata column. */
   | { kind: "fromMetadata" }
-  | { kind: "assign"; groupId: string }
-  | { kind: "remove" }
-  | { kind: "rename"; groupId: string }
-  | { kind: "delete"; groupId: string };
+  | { kind: "assign"; groupId: string; fileIds?: readonly string[] }
+  | { kind: "remove"; fileIds?: readonly string[] }
+  | { kind: "rename"; groupId: string; name?: string }
+  | { kind: "delete"; groupId: string }
+  | { kind: "colour"; groupId: string; colour: string }
+  | { kind: "reorder"; ids: readonly string[] };
+
+/** What is being dragged inside the file list: files, or a group header. */
+type ListDrag = { kind: "files"; ids: readonly string[] } | { kind: "group"; id: string };
+const FILES_MIME = "application/x-gatelab-files";
+const GROUP_MIME = "application/x-gatelab-group";
 
 export interface FolderImportItem {
   id: string;
@@ -68,7 +83,7 @@ function carriesFiles(event: DragEvent<HTMLElement>): boolean {
  * Directories dropped alongside files, counted from the drag entries.
  *
  * A dropped folder still appears in `dataTransfer.files`, as a name-only entry that no reader
- * can open, so counting the real directories here is what lets the caller say "use + Folder…"
+ * can open, so counting the real directories here is what lets the caller say "use Add folder…"
  * instead of failing to parse something the user can plainly see they dropped.
  */
 function droppedDirectoryCount(event: DragEvent<HTMLElement>): number {
@@ -86,6 +101,9 @@ const SAMPLE_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensi
 export function compareSampleNames(a: string, b: string): number {
   return SAMPLE_NAME_COLLATOR.compare(a, b);
 }
+
+/** The file list's folded groups, by name ("" for "No group"), kept per viewer. */
+const FOLDED_GROUPS_KEY = "gatelab.fileList.foldedGroups";
 
 function matchesQuery(item: SampleListItem, query: string): boolean {
   const needle = query.trim().toLocaleLowerCase();
@@ -115,6 +133,7 @@ export function SampleNavigator({
   onIncludeAll,
   onIncludeNone,
   onInvertIncluded,
+  pool,
   facets = [],
   facetColumnNames = [],
   facetPartialColumns = [],
@@ -127,8 +146,12 @@ export function SampleNavigator({
   onDropFiles,
   groups,
   onGroupAction,
+  fileMenuOf,
+  treeSummary = null,
 }: {
   items: readonly SampleListItem[];
+  /** How the files stand against the tree, "4 files · 1 tailored": the header's second line. */
+  treeSummary?: string | null;
   activeId: string | null;
   excludedIds: ReadonlySet<string>;
   busy: boolean;
@@ -148,10 +171,14 @@ export function SampleNavigator({
   onIncludeAll: () => void;
   onIncludeNone: () => void;
   onInvertIncluded: () => void;
+  /** The plot's pool, after All · None · Invert: one toggle, pressed while the checked files are pooled. */
+  pool?: { on: boolean; count: number; disabled: boolean; title: string; onToggle: () => void };
   /** Metadata columns offered as chip rows, each with its values. Empty hides the board. */
-  /** The workspace's groups, for the Groups menu; absent hides the menu. */
-  groups?: readonly { id: string; name: string }[];
+  /** The workspace's groups, in order, with their colours: the Groups menu and the list's headers. */
+  groups?: readonly { id: string; name: string; colour?: string }[];
   onGroupAction?: (action: GroupAction) => void;
+  /** A right-click on a file row: the menu for these files (the checked files, when the row is one of them). */
+  fileMenuOf?: (fileIds: readonly string[]) => MenuEntry[];
   facets?: readonly FacetColumn[];
   /** Every metadata column in the workspace, so the columns control can offer the hidden ones. */
   facetColumnNames?: readonly string[];
@@ -189,7 +216,49 @@ export function SampleNavigator({
   // flickers off as soon as the drag reaches a button. Depth counting tracks the panel as a whole.
   const dragDepth = useRef(0);
   const dropEnabled = Boolean(onDropFiles) && showImportActions && !busy;
-  const visible = useMemo(() => items.filter((item) => matchesQuery(item, query)), [items, query]);
+  // With groups, the list is shown under a header per group, in the groups' order, then "No
+  // group". A folded group's files leave the list, the arrow keys and Shift ranges alike; a search
+  // looks inside folded groups too, and shows what it finds.
+  const [foldedGroups, setFoldedGroups] = useState<ReadonlySet<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem(FOLDED_GROUPS_KEY) ?? "[]") as string[]); } catch { return new Set(); }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(FOLDED_GROUPS_KEY, JSON.stringify([...foldedGroups])); } catch { /* private mode */ }
+  }, [foldedGroups]);
+  const sections = useMemo(() => {
+    if (!items.some((item) => item.group) && !groups?.length) return null;
+    const names = [...new Set([
+      ...(groups ?? []).map((g) => g.name),
+      ...items.map((item) => item.group).filter((name): name is string => !!name),
+    ])];
+    // An empty group keeps its header, so files can be dragged into it.
+    const out: { key: string; name: string; id: string | null; colour: string | null; items: SampleListItem[] }[] = names.map((name) => {
+      const group = groups?.find((g) => g.name === name);
+      return {
+        key: name,
+        name,
+        id: group?.id ?? null,
+        colour: group?.colour ?? items.find((item) => item.group === name)?.groupColour ?? null,
+        items: items.filter((item) => item.group === name),
+      };
+    });
+    const ungrouped = items.filter((item) => !item.group);
+    out.push({ key: "", name: "", id: null, colour: null, items: ungrouped });
+    return out;
+  }, [items, groups]);
+  const [menu, setMenu] = useState<ContextMenuState | null>(null);
+  /** The group whose name is being edited in its header, and the one whose colour picker is open. */
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [colouring, setColouring] = useState<string | null>(null);
+  /** The section a drag is over, by key, and what is being dragged (dataTransfer cannot be read before the drop). */
+  const [dragOver, setDragOver] = useState<string | null>(null);
+  const listDrag = useRef<ListDrag | null>(null);
+  /** Files are being dragged in the list: "No group" shows even when empty, as a place to drop them. */
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  const isFolded = (key: string) => !query && foldedGroups.has(key);
+  const visible = useMemo(() => (sections
+    ? sections.flatMap((section) => (!query && foldedGroups.has(section.key) ? [] : section.items))
+    : items).filter((item) => matchesQuery(item, query)), [items, sections, foldedGroups, query]);
   const anchor = useRef<string | null>(null);
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const tabStop = visible.some(item => item.id === focusedId) ? focusedId
@@ -204,6 +273,256 @@ export function SampleNavigator({
     onSelectIds?.([...ids]);
   }
   const includedCount = items.reduce((count, item) => count + Number(!excludedIds.has(item.id)), 0);
+  // Files with gates of their own: the header says how many; its tooltip says the rest.
+  const tailoredFiles = items.filter((item) => item.tailored?.length).length;
+  // The header's ⋯: managing the files, the groups, Invert, and the keys the list answers to.
+  const keyHints = [
+    ...t("↑↓: view · Shift: range · Cmd/Ctrl: add or remove · Enter: inspect").split(" · "),
+    ...(tailoredFiles > 0 ? [t("n = gates tailored for that file")] : []),
+  ];
+  const moreItems: MenuEntry[] = [
+    ...(showManageActions
+      ? [{ label: t("Manage files…"), className: "gl-sample-manage", disabled: busy || items.length === 0, onClick: onManage }]
+      : []),
+    ...(onGroupAction
+      ? [
+          { section: t("Groups") },
+          {
+            label: t("New group from the {count} selected…", { count: includedCount }),
+            className: "gl-sample-group-new",
+            title: t("A named set of files with gate coordinates of its own, between the tree and the files"),
+            disabled: includedCount === 0,
+            onClick: () => onGroupAction({ kind: "new" }),
+          },
+          {
+            label: t("Groups from a metadata column…"),
+            className: "gl-sample-group-from-metadata",
+            title: t("One group per value of a column, each file in the group of its value; a group already named as a value takes the files"),
+            disabled: !(facetColumnNames ?? []).length,
+            onClick: () => onGroupAction({ kind: "fromMetadata" }),
+          },
+          ...((groups ?? []).length
+            ? [
+                "separator" as const,
+                ...(groups ?? []).map((group) => ({
+                  label: t("Add the {count} selected to {name}", { count: includedCount, name: group.name }),
+                  className: "gl-sample-group-assign",
+                  disabled: includedCount === 0,
+                  onClick: () => onGroupAction({ kind: "assign", groupId: group.id }),
+                })),
+                {
+                  label: t("Remove the {count} selected from their group", { count: includedCount }),
+                  className: "gl-sample-group-remove",
+                  disabled: includedCount === 0,
+                  onClick: () => onGroupAction({ kind: "remove" }),
+                },
+                "separator" as const,
+                ...(groups ?? []).map((group) => (
+                  { label: t("Rename {name}…", { name: group.name }), className: "gl-sample-group-rename", onClick: () => onGroupAction({ kind: "rename", groupId: group.id }) }
+                )),
+                // The deletes last, after a separator, as in every menu.
+                "separator" as const,
+                ...(groups ?? []).map((group) => (
+                  { label: t("Delete {name}…", { name: group.name }), className: "gl-sample-group-delete", danger: true, onClick: () => onGroupAction({ kind: "delete", groupId: group.id }) }
+                )),
+              ]
+            : []),
+        ]
+      : []),
+    ...(items.length > 0
+      ? [
+          { section: t("Selection") },
+          { label: t("Invert selection"), className: "gl-sample-invert", onClick: onInvertIncluded },
+          // What the "?" at the end of the header said, as notes: picking one does nothing.
+          { section: t("Keyboard shortcuts") },
+          ...keyHints.map((hint) => ({ label: hint, className: "gl-menu-note gl-sample-key-hint", onClick: () => undefined })),
+        ]
+      : []),
+  ];
+  type Section = NonNullable<typeof sections>[number];
+  function toggleFold(key: string) {
+    setFoldedGroups((was) => {
+      const next = new Set(was);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+  /** The files a drag or a right-click on this row is about: the checked files when it is one of several checked, else the row. */
+  function filesFor(item: SampleListItem): string[] {
+    if (!excludedIds.has(item.id)) {
+      const checked = items.filter((entry) => !excludedIds.has(entry.id)).map((entry) => entry.id);
+      if (checked.length > 1) return checked;
+    }
+    return [item.id];
+  }
+  function startDrag(event: DragEvent<HTMLElement>, drag: ListDrag) {
+    listDrag.current = drag;
+    if (drag.kind === "files") setDraggingFiles(true);
+    event.dataTransfer?.setData(drag.kind === "files" ? FILES_MIME : GROUP_MIME, drag.kind === "files" ? drag.ids.join("\n") : drag.id);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+  }
+  function endListDrag() {
+    listDrag.current = null;
+    setDragOver(null);
+    setDraggingFiles(false);
+  }
+  function sectionDragOver(event: DragEvent<HTMLElement>, section: Section) {
+    const drag = listDrag.current;
+    if (!drag || !onGroupAction) return;
+    // Groups reorder among themselves; "No group" stays last.
+    if (drag.kind === "group" && !section.id) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    if (dragOver !== section.key) setDragOver(section.key);
+  }
+  function sectionDrop(event: DragEvent<HTMLElement>, section: Section) {
+    const drag = listDrag.current;
+    endListDrag();
+    if (!drag || !onGroupAction) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (drag.kind === "files") {
+      onGroupAction(section.id ? { kind: "assign", groupId: section.id, fileIds: drag.ids } : { kind: "remove", fileIds: drag.ids });
+    } else if (section.id && section.id !== drag.id) {
+      // The dragged group goes before the one it is dropped on.
+      const order = (groups ?? []).map((g) => g.id).filter((id) => id !== drag.id);
+      order.splice(order.indexOf(section.id), 0, drag.id);
+      onGroupAction({ kind: "reorder", ids: order });
+    }
+  }
+  /** A group header's actions: its ⋯ menu and its right-click menu alike. */
+  function headerMenu(section: Section): MenuEntry[] {
+    const folded = foldedGroups.has(section.key);
+    const id = section.id;
+    return [
+      ...(id && onGroupAction ? [
+        { label: t("Rename…"), className: "gl-group-menu-rename", onClick: () => setRenaming(id) },
+        { label: t("Colour…"), className: "gl-group-menu-colour", onClick: () => setColouring(id) },
+      ] : []),
+      { label: folded ? t("Expand") : t("Collapse"), className: "gl-group-menu-fold", disabled: !!query, onClick: () => toggleFold(section.key) },
+      { label: t("Select its files"), className: "gl-group-menu-select", disabled: !section.items.length || !onSelectIds, onClick: () => onSelectIds?.(section.items.map((item) => item.id)) },
+      ...(id && onGroupAction ? [
+        "separator" as const,
+        {
+          label: t("Delete group…"),
+          className: "gl-group-menu-delete",
+          danger: true,
+          title: t("The group goes; its files move to No group, each keeping its own tailoring."),
+          onClick: () => onGroupAction({ kind: "delete", groupId: id }),
+        },
+      ] : []),
+    ];
+  }
+  function commitRename(id: string, name: string) {
+    setRenaming(null);
+    onGroupAction?.({ kind: "rename", groupId: id, name });
+  }
+  const renderRow = (item: SampleListItem) => {
+    const included = !excludedIds.has(item.id);
+    const active = item.id === activeId;
+    const exactSummary = `${item.eventCount.toLocaleString()} events · ${item.channelCount} channels`;
+    return (
+      <div
+        key={item.id}
+        className={`gl-sample-row${included ? " included" : ""}${active ? " active" : ""}`}
+        data-group={item.group}
+        draggable={!!sections && !!onGroupAction}
+        onDragStart={sections && onGroupAction ? (event) => startDrag(event, { kind: "files", ids: filesFor(item) }) : undefined}
+        onDragEnd={endListDrag}
+        onContextMenu={fileMenuOf ? (event) => {
+          const entries = fileMenuOf(filesFor(item));
+          if (!entries.length) return;
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY, items: entries });
+        } : undefined}
+        role="option"
+        aria-selected={included}
+        aria-current={active ? "true" : undefined}
+        tabIndex={item.id === tabStop ? 0 : -1}
+        title={`${item.sourcePath ?? item.name}\n${exactSummary}${item.group ? `\n${t("In the group {name}", { name: item.group })}` : ""}`}
+        onFocus={() => setFocusedId(item.id)}
+        onClick={(event) => {
+          event.currentTarget.focus();
+          if (event.shiftKey) selectRange(item.id, event.metaKey || event.ctrlKey);
+          else if (event.metaKey || event.ctrlKey) {
+            anchor.current = item.id;
+            onToggleIncluded(item.id, !included);
+          } else {
+            anchor.current = item.id;
+            onActivate(item.id);
+          }
+        }}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+            event.preventDefault();
+            onSelectIds?.(visible.map(entry => entry.id));
+          } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+            event.preventDefault();
+            const index = visible.findIndex(entry => entry.id === item.id);
+            const next = event.key === "Home" ? 0 : event.key === "End" ? visible.length - 1
+              : Math.max(0, Math.min(visible.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
+            const id = visible[next].id;
+            if (event.shiftKey) {
+              if (!anchor.current) anchor.current = item.id;
+              selectRange(id, event.metaKey || event.ctrlKey);
+            } else if (!(event.metaKey || event.ctrlKey) && id !== item.id) {
+              // A plain arrow views the file it lands on, as Enter does, leaving the
+              // checked selection as it is; Cmd or Ctrl moves the cursor alone, and Shift
+              // extends the selection.
+              (onInspect ?? onActivate)(id);
+            }
+            (event.currentTarget.closest(".gl-sample-list")?.querySelectorAll<HTMLElement>('[role="option"]')[next])?.focus();
+          } else if (event.key === "Enter") {
+            event.preventDefault();
+            (onInspect ?? onActivate)(item.id);
+          } else if (event.key === " ") {
+            event.preventDefault();
+            if (event.shiftKey) selectRange(item.id);
+            else { anchor.current = item.id; onToggleIncluded(item.id, !included); }
+          }
+        }}
+      >
+        <span className="gl-sample-name">
+          {item.name}
+          {item.metadata?.sample_id && item.metadata.sample_id !== item.name && <small className="gl-sample-display-id" title={`Sample ID: ${item.metadata.sample_id}`}>{item.metadata.sample_id}</small>}
+        </span>
+        <span className="gl-sample-viewing">{active ? t("Viewing") : ""}</span>
+        <span className="gl-sample-meta" title={exactSummary}>
+          {/* The tailored count sits with the counts, so its appearance never moves the name. */}
+          {item.tailored && item.tailored.length > 0 && (
+            <span
+              className={"gl-sample-tailored" + (item.gatedElsewhere ? " gl-hierarchy-elsewhere" : "")}
+              title={t("{count} gates tailored for this file: {names}", { count: item.tailored.length, names: item.tailored.join(", ") })}
+            >
+              {item.tailored.length}
+            </span>
+          )}
+          {item.images && (
+            <span className="gl-sample-images" title={t("Cell images attached: {name}", { name: item.images })}>
+              {t("img")}
+            </span>
+          )}
+          {localizedCompactNumber.format(item.eventCount)} · {item.channelCount}ch
+        </span>
+        {showManageActions && (
+          <button
+            type="button"
+            className="gl-sample-row-menu"
+            aria-label={t("Manage {name}", { name: item.name })}
+            title={t("Manage this sample")}
+            onClick={(event) => {
+              event.stopPropagation();
+              onManageSample(item.id);
+            }}
+          >
+            <MoreIcon />
+          </button>
+        )}
+      </div>
+    );
+  };
+
   const localizedCompactNumber = useMemo(() => new Intl.NumberFormat(language === "ja" ? "ja-JP" : undefined, {
     notation: "compact",
     maximumFractionDigits: 1,
@@ -255,88 +574,74 @@ export function SampleNavigator({
       {dropEnabled && dropActive && (
         <div className="gl-sample-drop-overlay">{t("Drop .fcs files to add them")}</div>
       )}
+      {/* Two rows: the title with the counts and the ＋ and ⋯ menus; then Select all and the
+          plot's Single | Pooled (David, 2026-10-23). */}
       <div className="gl-sample-heading">
-        <div className="gl-side-title">{t("Files / samples")}</div>
-        <span>{t("{count} of {total} selected", { count: includedCount, total: items.length })}</span>
-      </div>
-      {(showImportActions || showManageActions) && (
-        <div className="gl-sample-add-actions">
+        <div className="gl-side-title">{t("Files")}</div>
+        <span className="gl-sample-heading-end">
+          {/* How the files stand against the tree, in full, is the count's tooltip; the count says only how many are tailored. */}
+          {items.length > 0 && (
+            <span className="gl-sample-count gl-sample-tree-summary" title={treeSummary ?? undefined}>
+              {t("{count} of {total} selected", { count: includedCount, total: items.length })}
+              {tailoredFiles > 0 && <>{" · "}{t("{count} tailored", { count: tailoredFiles })}</>}
+            </span>
+          )}
           {showImportActions && (
-            <>
-              <button type="button" className="gl-btn gl-sample-add-primary" disabled={busy} onClick={onOpenFiles}>
-                {t("+ Files…")}
-              </button>
-              <button type="button" className="gl-mini-btn" disabled={busy} onClick={onOpenFolder}>
-                {t("+ Folder…")}
-              </button>
-            </>
-          )}
-          {showManageActions && (
-            <button type="button" className="gl-mini-btn" disabled={busy || items.length === 0} onClick={onManage}>
-              {t("Manage…")}
-            </button>
-          )}
-          {onGroupAction && (
             <MenuButton
-              label={t("Groups")}
-              className="gl-sample-groups-menu"
+              label={t("Add files")}
+              icon={<PlusIcon size={16} />}
+              className="gl-sample-add-menu"
+              disabled={busy}
               items={[
-                {
-                  label: t("New group from the {count} selected…", { count: includedCount }),
-                  className: "gl-sample-group-new",
-                  title: t("A named set of files with gate coordinates of its own, between the tree and the files"),
-                  disabled: includedCount === 0,
-                  onClick: () => onGroupAction({ kind: "new" }),
-                },
-                {
-                  label: t("Groups from a metadata column…"),
-                  className: "gl-sample-group-from-metadata",
-                  title: t("One group per value of a column, each file in the group of its value; a group already named as a value takes the files"),
-                  disabled: !(facetColumnNames ?? []).length,
-                  onClick: () => onGroupAction({ kind: "fromMetadata" }),
-                },
-                ...((groups ?? []).length
-                  ? [
-                      "separator" as const,
-                      ...(groups ?? []).map((group) => ({
-                        label: t("Add the {count} selected to {name}", { count: includedCount, name: group.name }),
-                        className: "gl-sample-group-assign",
-                        disabled: includedCount === 0,
-                        onClick: () => onGroupAction({ kind: "assign", groupId: group.id }),
-                      })),
-                      {
-                        label: t("Remove the {count} selected from their group", { count: includedCount }),
-                        className: "gl-sample-group-remove",
-                        disabled: includedCount === 0,
-                        onClick: () => onGroupAction({ kind: "remove" }),
-                      },
-                      "separator" as const,
-                      ...(groups ?? []).flatMap((group) => [
-                        { label: t("Rename {name}…", { name: group.name }), className: "gl-sample-group-rename", onClick: () => onGroupAction({ kind: "rename", groupId: group.id }) },
-                        { label: t("Delete {name}…", { name: group.name }), className: "gl-sample-group-delete", onClick: () => onGroupAction({ kind: "delete", groupId: group.id }) },
-                      ]),
-                    ]
-                  : []),
+                { label: t("Add files…"), className: "gl-sample-add-files", onClick: onOpenFiles },
+                { label: t("Add folder…"), className: "gl-sample-add-folder", onClick: onOpenFolder },
               ]}
             />
           )}
-        </div>
-      )}
+          {moreItems.length > 0 && (
+            <MenuButton label={t("File list actions")} icon={<MoreIcon />} className="gl-sample-more-menu" items={moreItems} />
+          )}
+        </span>
+      </div>
 
       {items.length > 0 && (
-        <>
-          <div className="gl-sample-inclusion-actions" aria-label={t("File selection")}>
-            <button type="button" onClick={onIncludeAll}>{t("All")}</button>
-            <button type="button" onClick={onIncludeNone}>{t("None")}</button>
-            <button type="button" onClick={onInvertIncluded}>{t("Invert")}</button>
-          </div>
-          <div className="gl-sample-scope-key">
-            <span>{t("↑↓: view · Shift: range · Cmd/Ctrl: add or remove · Enter: inspect")}</span>
-            {items.some((item) => item.tailored?.length) && (
-              <span><span className="gl-sample-tailored">n</span> {t("= gates tailored for that file")}</span>
-            )}
-          </div>
-        </>
+        <div className="gl-sample-inclusion-actions" aria-label={t("File selection")}>
+          <label className="gl-check gl-sample-select-all">
+            <input
+              type="checkbox"
+              ref={(el) => { if (el) el.indeterminate = includedCount > 0 && includedCount < items.length; }}
+              checked={includedCount === items.length}
+              onChange={() => (includedCount === items.length ? onIncludeNone() : onIncludeAll())}
+            />
+            {t("Select all")}
+          </label>
+          {pool && (
+            // The same control as the header's Original | Compensated: both choices shown, the current one selected.
+            <div className="gl-segmented gl-pool-toggle" role="radiogroup" aria-label={t("Plot the selected files")}>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={!pool.on}
+                className={"gl-pool-single" + (pool.on ? "" : " is-selected")}
+                title={pool.on ? pool.title : undefined}
+                onClick={() => { if (pool.on) pool.onToggle(); }}
+              >
+                {t("Single")}
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={pool.on}
+                className={"gl-pool-pooled" + (pool.on ? " is-selected" : "")}
+                disabled={!pool.on && pool.disabled}
+                title={pool.on ? undefined : pool.title}
+                onClick={() => { if (!pool.on) pool.onToggle(); }}
+              >
+                {t("Pooled · {count}", { count: pool.count })}
+              </button>
+            </div>
+          )}
+        </div>
       )}
 
       {facets.length > 0 && (
@@ -544,121 +849,116 @@ export function SampleNavigator({
 
       <div className="gl-sample-list" role="listbox" aria-multiselectable="true" aria-label={t("Loaded FCS samples")}>
         {items.length === 0 ? (
-          <em className="gl-hint">{t("No files loaded.")}</em>
+          showImportActions ? (
+            // The one thing to do on an empty list, so the one primary button.
+            <div className="gl-sample-empty">
+              <button type="button" className="gl-btn gl-sample-add-primary" disabled={busy} onClick={onOpenFiles}>
+                {t("+ Add files…")}
+              </button>
+              {dropEnabled && <span className="gl-hint">{t("or drop FCS files here")}</span>}
+            </div>
+          ) : (
+            <em className="gl-hint">{t("No files loaded.")}</em>
+          )
         ) : visible.length === 0 ? (
           <em className="gl-hint">{t("No samples match “{query}”.", { query })}</em>
-        ) : visible.map((item) => {
-          const included = !excludedIds.has(item.id);
-          const active = item.id === activeId;
-          const exactSummary = `${item.eventCount.toLocaleString()} events · ${item.channelCount} channels`;
+        ) : sections ? sections.map((section) => {
+          const folded = isFolded(section.key);
+          const rows = folded ? [] : visible.filter((item) => section.items.includes(item));
+          if (query && !rows.length) return null;
+          // "No group" with nothing in it is shown only as a place to drop files.
+          if (!section.name && !section.items.length && !draggingFiles) return null;
+          const label = section.name || t("No group");
           return (
             <div
-              key={item.id}
-              className={`gl-sample-row${included ? " included" : ""}${active ? " active" : ""}`}
-              role="option"
-              aria-selected={included}
-              aria-current={active ? "true" : undefined}
-              tabIndex={item.id === tabStop ? 0 : -1}
-              title={`${item.sourcePath ?? item.name}\n${exactSummary}`}
-              onFocus={() => setFocusedId(item.id)}
-              onClick={(event) => {
-                event.currentTarget.focus();
-                if (event.shiftKey) selectRange(item.id, event.metaKey || event.ctrlKey);
-                else if (event.metaKey || event.ctrlKey) {
-                  anchor.current = item.id;
-                  onToggleIncluded(item.id, !included);
-                } else {
-                  anchor.current = item.id;
-                  onActivate(item.id);
-                }
-              }}
-              onKeyDown={(event) => {
-                if (event.target !== event.currentTarget) return;
-                if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
-                  event.preventDefault();
-                  onSelectIds?.(visible.map(entry => entry.id));
-                } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
-                  event.preventDefault();
-                  const index = visible.findIndex(entry => entry.id === item.id);
-                  const next = event.key === "Home" ? 0 : event.key === "End" ? visible.length - 1
-                    : Math.max(0, Math.min(visible.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
-                  const id = visible[next].id;
-                  if (event.shiftKey) {
-                    if (!anchor.current) anchor.current = item.id;
-                    selectRange(id, event.metaKey || event.ctrlKey);
-                  } else if (!(event.metaKey || event.ctrlKey) && id !== item.id) {
-                    // A plain arrow views the file it lands on, as Enter does, leaving the
-                    // checked selection as it is; Cmd or Ctrl moves the cursor alone, and Shift
-                    // extends the selection.
-                    (onInspect ?? onActivate)(id);
-                  }
-                  (event.currentTarget.parentElement?.querySelectorAll<HTMLElement>('[role="option"]')[next])?.focus();
-                } else if (event.key === "Enter") {
-                  event.preventDefault();
-                  (onInspect ?? onActivate)(item.id);
-                } else if (event.key === " ") {
-                  event.preventDefault();
-                  if (event.shiftKey) selectRange(item.id);
-                  else { anchor.current = item.id; onToggleIncluded(item.id, !included); }
-                }
-              }}
+              key={`group-${section.key}`}
+              role="group"
+              aria-label={label}
+              className={"gl-sample-group-section" + (section.name ? "" : " is-ungrouped") + (dragOver === section.key ? " is-drop-target" : "")}
+              style={section.colour ? ({ "--gl-group-colour": section.colour } as React.CSSProperties) : undefined}
+              onDragOver={(event) => sectionDragOver(event, section)}
+              onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null) && dragOver === section.key) setDragOver(null); }}
+              onDrop={(event) => sectionDrop(event, section)}
             >
-              <span className="gl-sample-name">
-                {item.group && (
-                  <span
-                    className="gl-sample-group"
-                    style={item.groupColour ? { background: item.groupColour } : undefined}
-                    title={t("In the group {name}", { name: item.group })}
+              <div
+                className="gl-sample-group-headrow"
+                draggable={!!section.id && !!onGroupAction && renaming !== section.id}
+                onDragStart={section.id && onGroupAction ? (event) => startDrag(event, { kind: "group", id: section.id! }) : undefined}
+                onDragEnd={endListDrag}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setMenu({ x: event.clientX, y: event.clientY, items: headerMenu(section) });
+                }}
+              >
+                {renaming === section.id && section.id ? (
+                  <input
+                    className="gl-sample-group-name-input"
+                    aria-label={t("Rename {name}", { name: label })}
+                    defaultValue={section.name}
+                    autoFocus
+                    onFocus={(event) => event.currentTarget.select()}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") commitRename(section.id!, event.currentTarget.value);
+                      else if (event.key === "Escape") { event.stopPropagation(); setRenaming(null); }
+                    }}
+                    onBlur={(event) => { if (renaming === section.id) commitRename(section.id!, event.currentTarget.value); }}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="gl-sample-group-head"
+                    aria-expanded={!folded}
+                    disabled={!!query}
+                    title={(folded ? t("Show the files in {name}", { name: label }) : t("Hide the files in {name}", { name: label }))
+                      + (section.id && onGroupAction ? `\n${t("Double-click to rename; drag to reorder; drop files here to move them in")}` : `\n${t("Drop files here to take them out of their group")}`)}
+                    onClick={(event) => { if (event.detail <= 1) toggleFold(section.key); }}
+                    onDoubleClick={section.id && onGroupAction ? () => setRenaming(section.id) : undefined}
                   >
-                    {item.group}
-                  </span>
+                    <span className="gl-sample-group-head-mark" aria-hidden="true"><ChevronIcon open={!folded} size={12} /></span>
+                    <span className="gl-sample-group-head-name">{label}</span>
+                    <span className="gl-sample-group-head-count">{section.items.length}</span>
+                  </button>
                 )}
-                {item.name}
-                {item.metadata?.sample_id && item.metadata.sample_id !== item.name && <small className="gl-sample-display-id" title={`Sample ID: ${item.metadata.sample_id}`}>{item.metadata.sample_id}</small>}
-              </span>
-              <span className="gl-sample-viewing">{active ? t("Viewing") : ""}</span>
-              <span className="gl-sample-meta" title={exactSummary}>
-                {/* The tailored count sits with the counts, so its appearance never moves the name. */}
-                {item.tailored && item.tailored.length > 0 && (
-                  <span
-                    className={"gl-sample-tailored" + (item.gatedElsewhere ? " gl-hierarchy-elsewhere" : "")}
-                    title={t("{count} gates tailored for this file: {names}", { count: item.tailored.length, names: item.tailored.join(", ") })}
-                  >
-                    {item.tailored.length}
-                  </span>
+                <MenuButton label={t("{name}: group actions", { name: label })} items={headerMenu(section)} icon={<MoreIcon />} className="gl-sample-group-menu" />
+                {colouring === section.id && section.id && (
+                  <div className="gl-group-colour-pop" role="dialog" aria-label={t("Colour of {name}", { name: label })}
+                    onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); setColouring(null); } }}>
+                    {HIERARCHY_COLOURS.map((colour) => (
+                      <button
+                        key={colour}
+                        type="button"
+                        className={"gl-group-colour-swatch" + (colour === section.colour ? " is-current" : "")}
+                        style={{ background: colour }}
+                        aria-label={colour}
+                        aria-pressed={colour === section.colour}
+                        onClick={() => { setColouring(null); onGroupAction?.({ kind: "colour", groupId: section.id!, colour }); }}
+                      />
+                    ))}
+                    <input
+                      type="color"
+                      className="gl-group-colour-custom"
+                      aria-label={t("Another colour")}
+                      defaultValue={section.colour ?? "#7b8491"}
+                      onChange={(event) => onGroupAction?.({ kind: "colour", groupId: section.id!, colour: event.currentTarget.value })}
+                    />
+                    <button type="button" className="gl-mini-btn" onClick={() => setColouring(null)}>{t("Done")}</button>
+                  </div>
                 )}
-                {item.images && (
-                  <span className="gl-sample-images" title={t("Cell images attached: {name}", { name: item.images })}>
-                    {t("img")}
-                  </span>
-                )}
-                {localizedCompactNumber.format(item.eventCount)} · {item.channelCount}ch
-              </span>
-              {showManageActions && (
-                <button
-                  type="button"
-                  className="gl-sample-row-menu"
-                  aria-label={t("Manage {name}", { name: item.name })}
-                  title={t("Manage this sample")}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onManageSample(item.id);
-                  }}
-                >
-                  ⋯
-                </button>
-              )}
+              </div>
+              {rows.map(renderRow)}
             </div>
           );
-        })}
+        }) : visible.map(renderRow)}
       </div>
+      <ContextMenu menu={menu} onClose={() => setMenu(null)} />
     </section>
   );
 }
 
-function ModalFrame({ title, children }: { title: string; children: React.ReactNode }) {
+function ModalFrame({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   return (
     <div className="gl-modal-backdrop">
+      <ModalEscape onClose={onClose} />
       <div className="gl-modal gl-sample-manager-modal" role="dialog" aria-modal="true" aria-label={title}>
         <div className="gl-modal-title">{title}</div>
         {children}
@@ -716,7 +1016,7 @@ export function SampleManagerModal({
   };
 
   return (
-    <ModalFrame title={t("Manage samples")}>
+    <ModalFrame title={t("Manage samples")} onClose={confirmRemove ? () => setConfirmRemove(false) : onClose}>
       <div className="gl-sample-manager-toolbar">
         <input
           type="search"
@@ -895,7 +1195,7 @@ export function FolderImportModal({
   };
 
   return (
-    <ModalFrame title={t("Import FCS folder · {folder}", { folder: folderName })}>
+    <ModalFrame title={t("Import FCS folder · {folder}", { folder: folderName })} onClose={onCancel}>
       <div className="gl-folder-import-summary">
         {t("Found {count} FCS files. Review this snapshot before adding it to the workspace.", { count: items.length })}
       </div>

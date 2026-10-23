@@ -432,6 +432,7 @@ function strategyPayload(
           return {
             center: shape.center,
             ...(shape.arms ? { arms: shape.arms } : {}),
+            ...(shape.anchors ? { quadrant_anchors: shape.anchors } : {}),
             quadrant_pcts: only(s.pct_pass),
             ...(s.quadrant.gate.quadrant_label_offsets ? { quadrant_label_offsets: s.quadrant.gate.quadrant_label_offsets } : {}),
           };

@@ -6,6 +6,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StrategyTab } from "./StrategyTab";
+import { clearPersistedTabState } from "./tabState";
 import { I18nProvider } from "./i18n";
 import { initialCoreState, type CoreState, type Derived } from "../store";
 import { DEFAULT_HIERARCHY_ID } from "../engine/hierarchies";
@@ -23,6 +24,7 @@ vi.mock("../plots/loadPlots", () => ({ loadMiniPlots: () => renderer }));
 let host: HTMLDivElement;
 let root: Root;
 beforeEach(() => {
+  clearPersistedTabState();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.useFakeTimers();
   // The renderer stands in for mini_plot: one cell per step, keyed by its gate as the real grid keys them.
@@ -90,7 +92,7 @@ function fixture() {
 
 const menuItems = () => [...host.querySelectorAll<HTMLButtonElement>('[role="menu"] [role="menuitem"]')];
 const menuItem = (label: string) => menuItems().find((b) => b.textContent === label);
-const button = (label: string) => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label);
+const button = (label: string) => [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")].find((b) => b.textContent?.trim() === label);
 
 describe("the Strategy tab's draw", () => {
   // Reported from GateLabR as the cursor flickering over a strategy: the grid was drawn again
@@ -118,8 +120,8 @@ describe("the Strategy tab's draw", () => {
           onFitChannels={vi.fn()}
           files={fx.files}
           poolIds={null}
-          poolable={false}
-          onPoolChange={vi.fn()}
+          checkedSampleIds={[]}
+          onViewFile={vi.fn()}
           activeSampleId="D1"
           onGateLabelMove={onGateLabelMove}
         />
@@ -150,6 +152,22 @@ describe("the box the strategy is drawn in", () => {
     expect(rule).toMatch(/overflow: auto;/);
     expect(rule).toMatch(/scrollbar-gutter: stable;/);
   });
+
+  // The file lists of Strategy, Illustration and Plotting grow with their rows to about two
+  // fifths of the window before they scroll, rather than stopping at a fixed short height.
+  it("lets the side tabs' file lists grow to 40% of the window height", () => {
+    const figureCss = readFileSync("src/ui/figure.css", "utf8");
+    const css = readFileSync("src/styles.css", "utf8");
+    expect(/\.gl-figure-list \{[^}]*max-height: max\(160px, 40vh\);/.test(figureCss)).toBe(true);
+    expect(/\.gl-plotting-filelist \{[^}]*max-height: max\(160px, 40vh\);/.test(css)).toBe(true);
+  });
+
+  // Beside the side tabs the figure column can be narrow; its heading stays one line, shortened.
+  it("keeps the heading on one line, the names shortened with an ellipsis", () => {
+    const css = readFileSync("src/styles.css", "utf8");
+    expect(/\.gl-strategy-workspace \.gl-plotting-head \{[^}]*white-space: nowrap;/.test(css)).toBe(true);
+    expect(/\.gl-strategy-workspace \.gl-plotting-head > span \{[^}]*text-overflow: ellipsis;/.test(css)).toBe(true);
+  });
 });
 
 describe("the Strategy tab and the Layout tab", () => {
@@ -172,8 +190,8 @@ describe("the Strategy tab and the Layout tab", () => {
           onFitChannels={vi.fn()}
           files={fx.files}
           poolIds={null}
-          poolable={false}
-          onPoolChange={vi.fn()}
+          checkedSampleIds={[]}
+          onViewFile={vi.fn()}
           activeSampleId="D1"
           onAddToLayout={onAddToLayout}
           onOpenStep={onOpenStep}
@@ -230,8 +248,8 @@ describe("the Strategy tab and the Layout tab", () => {
           onFitChannels={vi.fn()}
           files={fx.files}
           poolIds={null}
-          poolable={false}
-          onPoolChange={vi.fn()}
+          checkedSampleIds={[]}
+          onViewFile={vi.fn()}
           activeSampleId="D1"
           onAddToLayout={onAddToLayout}
         />
@@ -256,10 +274,201 @@ describe("the Strategy tab and the Layout tab", () => {
       expect.objectContaining({
         kind: "strategy", sampleId: "D1", populationId: fx.bcellsId, fullPath: true, displayMode: "pseudocolor",
         populationIds: [fx.bcellsId], layout: "tree", columns: 4, showArrows: true, arrowWidth: 1.5, title: "{sample}",
-        plotSize: 200, labelBackground: 0.6,
+        plotSize: 200, labelBackground: 0.85,
         style: expect.objectContaining({ pointSize: 1.2, pointAlpha: 0.35, contourLevels: 10, pubStyle: false, fontGate: 12 }),
       }),
       { width: 244, height: 250 },
     );
+  });
+});
+
+describe("the Strategy tab's controls", () => {
+  it("sit in side tabs, Data / Plot / Style / Export, with Mode and Population first", async () => {
+    const fx = fixture();
+    act(() => root.render(
+      <I18nProvider>
+        <StrategyTab
+          state={fx.state as CoreState}
+          sample={fx.files[0].sample}
+          sampleName="D1.fcs"
+          derived={{ masks: {} } as Derived}
+          globalScales={{}}
+          configRef={{ current: null }}
+          dataRevision={0}
+          densityColorPower={1}
+          onDensityColorPowerChange={vi.fn()}
+          onFitChannels={vi.fn()}
+          files={fx.files}
+          poolIds={null}
+          checkedSampleIds={[]}
+          onViewFile={vi.fn()}
+          activeSampleId="D1"
+          onAddToLayout={vi.fn()}
+        />
+      </I18nProvider>,
+    ));
+    await flush();
+    const inspector = host.querySelector<HTMLElement>(".gl-strategy-inspector")!;
+    const tabs = [...inspector.querySelectorAll<HTMLButtonElement>(".gl-presentation-tabs button")];
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["Data", "Plot", "Style", "Export"]);
+    expect(tabs.map((tab) => tab.getAttribute("aria-pressed"))).toEqual(["true", "false", "false", "false"]);
+    const sections = () => [...inspector.querySelectorAll<HTMLElement>("section.gl-strategy-section")];
+    const shown = () => sections().filter((section) => !section.hidden);
+    expect(shown()).toHaveLength(1);
+
+    // Data: Mode first, then the population and its path, then the pool and what each step shows.
+    const data = shown()[0];
+    expect(data.querySelector("h3")!.textContent).toBe("Mode");
+    const text = data.textContent ?? "";
+    const order = ["Single", "Multiple pops", "Population", "Full path from root", "Pool checked files", "Gate view", "Back-gated", "Max events/panel"];
+    expect(order.map((word) => text.indexOf(word))).toEqual([...order.map((word) => text.indexOf(word))].sort((a, b) => a - b));
+    expect(order.every((word) => text.includes(word))).toBe(true);
+    expect(data.querySelector<HTMLSelectElement>("select")!.value).toBe(fx.bcellsId);
+
+    // Each side tab shows its own controls and nothing else.
+    const open = (label: string) => act(() => tabs.find((tab) => tab.textContent === label)!.click());
+    open("Plot");
+    expect(shown()[0].textContent).toContain("Plot size");
+    expect(shown()[0].textContent).toContain("Fit data + gates");
+    open("Style");
+    expect(shown()[0].textContent).toContain("Point size");
+    expect(shown()[0].textContent).toContain("Gate edges");
+    open("Export");
+    expect(shown()[0].textContent).toContain("With gating tree");
+    expect([...shown()[0].querySelectorAll("button")].map((b) => b.textContent)).toEqual(["PNG", "SVG", "PDF", "Add to Layout"]);
+    expect(shown()).toHaveLength(1);
+    // The old stacked rows and the Appearance fold are gone.
+    expect(host.querySelector(".gl-strategy-controls")).toBeNull();
+    expect(host.querySelector("details")).toBeNull();
+  });
+});
+
+describe("Fit to columns", () => {
+  it("sizes the panels so the steps fill the width, and draws Plot size once unticked", async () => {
+    const fx = fixture();
+    let observed: ((entries: { contentRect: { width: number } }[]) => void) | null = null;
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: (entries: { contentRect: { width: number } }[]) => void) { observed = callback; }
+      observe() {}
+      disconnect() {}
+    });
+    act(() => root.render(
+      <I18nProvider>
+        <StrategyTab
+          state={fx.state as CoreState}
+          sample={fx.files[0].sample}
+          sampleName="D1.fcs"
+          derived={{ masks: {} } as Derived}
+          globalScales={{}}
+          configRef={{ current: null }}
+          dataRevision={0}
+          densityColorPower={1}
+          onDensityColorPowerChange={vi.fn()}
+          onFitChannels={vi.fn()}
+          files={fx.files}
+          poolIds={null}
+          checkedSampleIds={[]}
+          onViewFile={vi.fn()}
+          activeSampleId="D1"
+        />
+      </I18nProvider>,
+    ));
+    act(() => observed!([{ contentRect: { width: 608 } }]));
+    await flush();
+    const drawn = () => renderer.renderStrategyGrid.mock.calls.at(-1)![1] as { plot_size: number; fit_to_columns: boolean; steps: unknown[] };
+    // One step fills the width, up to the cap, rather than drawing one 200 px panel in it.
+    expect(drawn().steps).toHaveLength(1);
+    expect(drawn().plot_size).toBe(500);
+    // The full path to B cells is two steps: two columns of (608 - 8 - 8) / 2 px, not four of 200.
+    const fullPath = [...host.querySelectorAll<HTMLLabelElement>("label")].find((label) => label.textContent === "Full path from root")!.querySelector("input")!;
+    act(() => fullPath.click());
+    await flush();
+    expect(drawn().steps).toHaveLength(2);
+    expect(drawn().plot_size).toBe(296);
+    expect(drawn().fit_to_columns).toBe(false);
+    expect(host.textContent).toContain("drawn at 296 px");
+
+    // A wide figure area is capped.
+    act(() => observed!([{ contentRect: { width: 2000 } }]));
+    await flush();
+    expect(drawn().plot_size).toBe(500);
+
+    // A size typed in Plot size is the size wanted: Fit switches off and the panels are that size.
+    const plotSize = [...host.querySelectorAll<HTMLLabelElement>("label")].find((label) => label.textContent?.includes("Plot size"))!.querySelector("input")!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(plotSize, "250");
+      plotSize.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await flush();
+    expect(drawn().plot_size).toBe(250);
+    expect(host.textContent).not.toContain("drawn at");
+  });
+});
+
+describe("choosing several populations", () => {
+  it("happens in the Data side tab, from the tree as one column, and not from the Gating tab's ticks", async () => {
+    const fx = fixture();
+    // Ticked on the Gating tab: the Strategy tab's selection is its own and ignores this.
+    fx.state.selected_pop_ids = [fx.lymphId];
+    act(() => root.render(
+      <I18nProvider>
+        <StrategyTab
+          state={fx.state as CoreState}
+          sample={fx.files[0].sample}
+          sampleName="D1.fcs"
+          derived={{ masks: {} } as Derived}
+          globalScales={{}}
+          configRef={{ current: null }}
+          dataRevision={0}
+          densityColorPower={1}
+          onDensityColorPowerChange={vi.fn()}
+          onFitChannels={vi.fn()}
+          files={fx.files}
+          poolIds={null}
+          checkedSampleIds={[]}
+          onViewFile={vi.fn()}
+          activeSampleId="D1"
+        />
+      </I18nProvider>,
+    ));
+    await flush();
+    const data = () => host.querySelector<HTMLElement>('.gl-strategy-inspector section[aria-label="Data"]')!;
+    // Single: the Population list, and no checklist.
+    expect(data().querySelector("select")).not.toBeNull();
+    expect(host.querySelector(".gl-strategy-pops")).toBeNull();
+
+    const multiple = [...data().querySelectorAll<HTMLLabelElement>("label")].find((label) => label.textContent === "Multiple pops")!.querySelector("input")!;
+    act(() => multiple.click());
+    await flush();
+    // Nothing ticked: the note says where to tick; there is no Render button, it draws on a tick.
+    const empty = renderer.renderMultiStrategyGrid.mock.calls.at(-1)![1] as { error_msg?: string };
+    expect(empty.error_msg).toBe("Tick populations in the Data tab to draw their strategy.");
+    expect(host.querySelector('[role="status"]')!.textContent).toBe("Tick populations in the Data tab to draw their strategy.");
+    const picker = data().querySelector<HTMLElement>(".gl-strategy-pops.is-compact")!;
+    expect(picker).not.toBeNull();
+    // It replaces the Population list, and nothing above the figure picks populations any more.
+    expect(data().querySelector("select")).toBeNull();
+    expect(host.querySelectorAll(".gl-strategy-pops")).toHaveLength(1);
+    expect(host.querySelector(".gl-strategy-body .gl-strategy-pops")).toBeNull();
+    // One column of the tree below the root, each row named in full in its tooltip.
+    expect(picker.querySelectorAll(".gl-strategy-pops-column")).toHaveLength(1);
+    const rows = [...picker.querySelectorAll<HTMLLabelElement>(".gl-strategy-pop-row")];
+    expect(rows.map((row) => row.title)).toEqual(["Lymphocytes", "B cells"]);
+    expect(rows.every((row) => !row.querySelector("input")!.checked)).toBe(true);
+    const actions = [...picker.querySelectorAll<HTMLButtonElement>(".gl-strategy-pops-actions button")].map((b) => b.textContent);
+    expect(actions).toEqual(["All", "None", "Leaves"]);
+
+    const pick = (label: string) => act(() => [...picker.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === label)!.click());
+    pick("Leaves");
+    await flush();
+    expect(rows.map((row) => row.querySelector("input")!.checked)).toEqual([false, true]);
+    const multi = () => renderer.renderMultiStrategyGrid.mock.calls.at(-1)![1] as { strategy_context_title?: string };
+    expect(renderer.renderMultiStrategyGrid).toHaveBeenCalled();
+    expect(JSON.stringify(multi())).toContain("1 population");
+    expect((multi() as { error_msg?: string }).error_msg).toBeUndefined();
+    pick("All");
+    expect(rows.map((row) => row.querySelector("input")!.checked)).toEqual([true, true]);
+    pick("None");
+    expect(rows.map((row) => row.querySelector("input")!.checked)).toEqual([false, false]);
   });
 });

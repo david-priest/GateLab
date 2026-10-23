@@ -10,7 +10,7 @@ import { computeGateCounts, type GateCount, type GateMaskCache } from "./populat
 import type { AxisTicks } from "./ticks";
 import { displayLabelOffset, polygonOutline } from "../plots/gatePayload";
 import { computeRangeFromValues } from "./strategy";
-import { quadrantOverlayShape } from "./quadrantOverlay";
+import { quadrantOverlayShape, type QuadrantArms } from "./quadrantOverlay";
 
 /** Even-spaced downsample of masked event indices (round(seq(1,N,len=cap))). */
 function sampledIndices(mask: Uint8Array, cap: number): number[] {
@@ -34,7 +34,9 @@ export interface GateOverlay {
   vertices?: [number, number][];
   /** Quadrant crosshair and optional FlowJo-style bent positive arms, in cell-axis display space. */
   center?: [number, number];
-  arms?: { h: [number, number][]; v: [number, number][] };
+  arms?: QuadrantArms;
+  /** A spider quadrant's label places in the cell's screen order (quadrantOverlayShape). */
+  quadrant_anchors?: [number, number][];
   quadrant_counts?: number[];
   quadrant_pcts?: number[];
   /** Per-quadrant label offsets in the cell's screen order, display units, swapped when flipped. */
@@ -125,7 +127,7 @@ function buildGatesForChannels(
 
     const c = gateCounts[gid];
     if (gate.gate_type === "quadrant") {
-      const { arms } = quadrantOverlayShape(sample, gate, xCh, yCh, xRange, yRange, flipped);
+      const { arms, anchors } = quadrantOverlayShape(sample, gate, xCh, yCh, xRange, yRange, flipped);
       const quadrants = c?.quadrants ?? [];
       // Cell quadrant order is Q1 top-left, Q2 top-right, Q3 bottom-right, Q4 bottom-left.
       // Swapping axes maps those screen positions back to original Q3,Q2,Q1,Q4 respectively.
@@ -137,6 +139,7 @@ function buildGatesForChannels(
         gate_type: "quadrant",
         center: toCellDisplay(gate.center),
         ...(arms ? { arms } : {}),
+        ...(anchors ? { quadrant_anchors: anchors } : {}),
         quadrant_counts: order.map((index) => quadrants[index]?.event_count ?? 0),
         quadrant_pcts: order.map((index) => quadrants[index]?.percent_of_parent ?? 0),
         color: gate.color,

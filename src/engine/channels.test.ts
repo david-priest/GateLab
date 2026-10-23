@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { isImagingFeature, resolveChannels } from "./channels";
-import { FIXTURES_ROOT, XITOGEN_XTG1600 } from "../testFixtures";
+import { FIXTURES_ROOT, PRIVATE_INSTRUMENT_DIR, XITOGEN_XTG1600 } from "../testFixtures";
 import { parseFcs, type FcsFile, type FcsChannel } from "./fcs";
 
 function mkFcs(
@@ -235,7 +235,7 @@ describe("resolveChannels — CyTOF duplicate markers", () => {
 
 /** A 422-parameter S8 recording with a three-channel imaging set: 33 imaging features, 170
  *  raw detectors, 16 unmixed markers. Private; the test runs where the testing library is. */
-const SPECTRAL = `${FIXTURES_ROOT}/PRIVATE - Wing Lab S6/LP1p PBMC large-file check/source-fcs/LP1p pbmc pre rec.fcs`;
+const SPECTRAL = `${PRIVATE_INSTRUMENT_DIR}/LP1p PBMC large-file check/source-fcs/LP1p pbmc pre rec.fcs`;
 
 describe.runIf(existsSync(SPECTRAL))("resolveChannels — real BD S8 spectral file", () => {
   it("keeps 66 of 422 channels: scatter, unmixed markers, Time and the 33 imaging features", () => {

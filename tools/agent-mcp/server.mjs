@@ -7,10 +7,11 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { serveMcp } from "./mcp.mjs";
 import { DEFAULT_PORT, startRelay } from "./relay.mjs";
 import { gatelabTools, INSTRUCTIONS } from "./tools.mjs";
+import { auditTools, MCP_VERSION } from "./audit.mjs";
 
 const SETTINGS = join(homedir(), ".gatelab", "agent-relay.json");
 
@@ -21,6 +22,8 @@ function parseArgs(argv) {
     if (arg === "--port") out.port = Number(argv[++i]);
     else if (arg === "--writer") out.writer = argv[++i];
     else if (arg === "--token") out.token = argv[++i];
+    else if (arg === "--audit") out.audit = argv[++i];
+    else if (arg === "--model") out.model = argv[++i];
     else if (arg === "--help" || arg === "-h") out.help = true;
   }
   return out;
@@ -42,10 +45,14 @@ async function remember(relay) {
 
 const args = parseArgs(process.argv.slice(2));
 if (args.help) {
-  process.stderr.write("GateLab agent relay (MCP over stdio). Options: --port N, --writer NAME, --token T.\n");
+  process.stderr.write("GateLab agent relay (MCP over stdio). Options: --port N, --writer NAME, --token T, --audit /absolute/path.jsonl, --model CALLER_DECLARED_MODEL.\n");
   process.exit(0);
 }
 const log = (line) => process.stderr.write(`[gatelab-mcp] ${line}\n`);
+if (args.audit !== undefined && !isAbsolute(args.audit)) {
+  process.stderr.write("GateLab agent relay: --audit must be an absolute path.\n");
+  process.exit(1);
+}
 const relay = await startRelay({
   port: Number.isFinite(args.port) ? args.port : DEFAULT_PORT,
   writer: args.writer ?? "agent",
@@ -56,9 +63,9 @@ await remember(relay);
 log(`listening; connect a GateLab tab to ${relay.url}`);
 serveMcp({
   name: "gatelab",
-  version: "0.1.0",
+  version: MCP_VERSION,
   instructions: INSTRUCTIONS,
-  tools: gatelabTools(relay),
+  tools: await auditTools(gatelabTools(relay), { path: args.audit, writer: args.writer ?? "agent", declaredModel: args.model }),
   log,
 });
 const shutdown = () => { void relay.close().finally(() => process.exit(0)); };

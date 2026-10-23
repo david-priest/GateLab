@@ -61,7 +61,8 @@ export interface NewExperimentResult {
 
 /** A save that stopped after its experiment folder was made: the message says what the folder holds. */
 export class DriveExperimentStoppedError extends DriveError {
-  constructor(message: string, readonly cancelled: boolean) {
+  /** `reason` is what stopped it: a DriveAuthError is mended by a reconnect, and saving again goes on. */
+  constructor(message: string, readonly cancelled: boolean, readonly reason: unknown = null) {
     super(message);
     this.name = "DriveExperimentStoppedError";
   }
@@ -102,6 +103,7 @@ const mib = (bytes: number) => `${(bytes / 1048576).toFixed(bytes < 10 * 1048576
 
 export async function saveAsNewExperiment(
   api: DriveApi,
+  /** The folder the experiment folder is made in: the lab folder, or a folder inside it. */
   rootFolderId: string,
   request: {
     readonly name: string;
@@ -172,7 +174,7 @@ export async function saveAsNewExperiment(
     const where = `The experiment folder "${experiment}" in the lab Drive holds ${held} of ${count} FCS file${count === 1 ? "" : "s"} and no workspace; ` +
       "Save as new experiment again under the same name to go on from there, without sending again the files already there.";
     const why = cancelled ? "Cancelled." : `${cause instanceof Error ? cause.message : String(cause)}`;
-    return new DriveExperimentStoppedError(`${why} ${where}`, cancelled);
+    return new DriveExperimentStoppedError(`${why} ${where}`, cancelled, cause);
   };
   try {
     for (let index = 0; index < count; index++) {

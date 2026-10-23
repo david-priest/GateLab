@@ -4,7 +4,7 @@
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ContextMenu, type ContextMenuState } from "./ContextMenu";
+import { ContextMenu, DISMISS_MENUS_EVENT, type ContextMenuState } from "./ContextMenu";
 
 let root: Root;
 let host: HTMLDivElement;
@@ -50,5 +50,31 @@ describe("ContextMenu", () => {
     act(() => host.querySelector<HTMLButtonElement>('[role="menuitem"]')!.click());
     expect(onChoice).toHaveBeenCalledTimes(1);
     expect(document.activeElement).toBe(page);
+  });
+
+  it("closes on a press outside it even where the control stops the event, on window blur, and when the app dismisses menus", () => {
+    act(() => root.render(<Harness onChoice={vi.fn()} />));
+    const page = host.querySelector<HTMLElement>('[data-testid="page"]')!;
+    const open = () => act(() => { page.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
+    const isOpen = () => !!host.querySelector(".gl-context-menu");
+    // A control that swallows its own presses (a tab strip, a plot) still closes the menu.
+    const greedy = document.createElement("button");
+    greedy.addEventListener("pointerdown", (event) => event.stopPropagation());
+    greedy.addEventListener("mousedown", (event) => event.stopPropagation());
+    document.body.appendChild(greedy);
+    open(); expect(isOpen()).toBe(true);
+    act(() => { greedy.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true })); });
+    expect(isOpen()).toBe(false);
+    open(); expect(isOpen()).toBe(true);
+    act(() => { window.dispatchEvent(new Event("blur")); });
+    expect(isOpen()).toBe(false);
+    open(); expect(isOpen()).toBe(true);
+    act(() => { window.dispatchEvent(new Event(DISMISS_MENUS_EVENT)); });
+    expect(isOpen()).toBe(false);
+    // A press inside it does not.
+    open();
+    act(() => { host.querySelector(".gl-context-menu")!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true })); });
+    expect(isOpen()).toBe(true);
+    greedy.remove();
   });
 });

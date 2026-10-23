@@ -12,7 +12,8 @@
  */
 
 import type { HierarchyRef, StoredHierarchy } from "./hierarchies";
-import { foldName, gateMatchKey, groupByStructure, strategyStructureKey, tailoredCopy, type StrategyTree, type TailoredFile, type TailoredGroup } from "./tailoredImport";
+import { foldName, gateMatchKey, groupByStructure, matchByDetector, strategyStructureKey, tailoredCopy, type StrategyTree, type TailoredFile, type TailoredGroup } from "./tailoredImport";
+import type { Gate } from "./models";
 import { gateGeometryEquals } from "./templateSync";
 
 export interface DifferingFile {
@@ -158,6 +159,46 @@ export function tailorFilesToTree(
 }
 
 /**
+ * The file of a group whose gate coordinates the most other files of the group share, gate by
+ * gate; `leadFileId`, then the group's own lead, breaks ties. A FlowJo workspace keeps a gate's
+ * coordinates for the group and a version of its own for each sample that was adjusted, and the
+ * sample viewed when importing led the tree whatever it held: with that sample the one adjusted,
+ * the tree carried its version, every other file was tailored back to the group's, and a file
+ * viewed under "the tree · all files" was drawn a gate it does not use.
+ */
+function mostSharedLead(group: TailoredGroup, leadFileId: string | null): TailoredFile {
+  const byDetector = matchByDetector(group.files);
+  const gatesOf = (f: TailoredFile) => {
+    const out = new Map<string, Gate[]>();
+    for (const id of f.tree.gate_order) {
+      const g = f.tree.gates[id];
+      if (!g) continue;
+      const key = gateMatchKey(g, byDetector ? f.detectors : undefined);
+      out.set(key, [...(out.get(key) ?? []), g]);
+    }
+    return out;
+  };
+  const all = group.files.map((f) => ({ file: f, gates: gatesOf(f) }));
+  const shared = (a: Map<string, Gate[]>, b: Map<string, Gate[]>) => {
+    let n = 0;
+    for (const [key, gs] of a) {
+      const other = b.get(key);
+      if (other) gs.forEach((g, i) => { if (other[i] && gateGeometryEquals(g, other[i])) n += 1; });
+    }
+    return n;
+  };
+  const score = (i: number) => all.reduce((sum, o, j) => (j === i ? sum : sum + shared(all[i].gates, o.gates)), 0);
+  const scores = all.map((_, i) => score(i));
+  const best = Math.max(...scores);
+  const preferred = [leadFileId, group.lead.fileId];
+  for (const id of preferred) {
+    const i = all.findIndex((o) => o.file.fileId === id);
+    if (i >= 0 && scores[i] === best) return all[i].file;
+  }
+  return all[scores.indexOf(best)].file;
+}
+
+/**
  * `name` is the tree's, or how to name it from the lead file the plan chooses; each file's copy is
  * named after it ("D2.fcs · <name>"). Passed "" and renamed afterwards, the copies were "D2.fcs · ".
  */
@@ -167,7 +208,8 @@ export function planOneTreeImport(
 ): OneTreePlan {
   if (!files.length) throw new Error("planOneTreeImport needs at least one file");
   const groups = groupByStructure(files, opts.leadFileId);
-  const lead = leadGroup(groups, opts.leadFileId);
+  const chosen = leadGroup(groups, opts.leadFileId);
+  const lead = { ...chosen, lead: mostSharedLead(chosen, opts.leadFileId) };
   const name = typeof opts.name === "function" ? opts.name(lead.lead) : opts.name;
   const template = { id: opts.templateId, name, tree: lead.lead.tree, ...(lead.lead.detectors ? { detectors: lead.lead.detectors } : {}) };
   const tailoring = tailorFilesToTree(template, files, opts.existing, new Set(lead.files.map((f) => f.fileId)));

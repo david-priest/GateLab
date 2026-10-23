@@ -90,3 +90,27 @@ describe("Division tab events", () => {
     expect(payload().x).toHaveLength(1000);
   });
 });
+
+describe("Division tab explanation", () => {
+  it("hides with × and comes back with ? at the end of the controls", async () => {
+    act(() => root.render(
+      <DivisionTab
+        sample={sampleOf()}
+        sampleName="D1.fcs"
+        derived={{ activeMask: null } as Derived}
+        savedProfile={null}
+        profileStale={false}
+        onApply={vi.fn()}
+        dataRevision={0}
+      />,
+    ));
+    await flush();
+    const text = "drag the black lines to fit the dilution peaks";
+    expect(host.textContent).toContain(text);
+    act(() => host.querySelector<HTMLButtonElement>('button[aria-label="Hide this explanation"]')!.click());
+    expect(host.textContent).not.toContain(text);
+    act(() => host.querySelector<HTMLButtonElement>('button[aria-label="Show the explanation"]')!.click());
+    expect(host.textContent).toContain(text);
+    localStorage.clear();
+  });
+});

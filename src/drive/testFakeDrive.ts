@@ -4,6 +4,7 @@
 
 import { writeFcs } from "../engine/fcsExport";
 import {
+  DriveAuthError,
   DriveError,
   DriveNetworkError,
   DriveNotFoundError,
@@ -117,6 +118,27 @@ export class FakeDrive implements DriveApi {
         { displayName: "Member Two", emailAddress: "member2@lab.example.org" }),
     });
     return id;
+  }
+
+  /**
+   * A folder with a chosen ID, made outside GateLab: reachable only once picked, unless `reachable`
+   * (made by this member's GateLab, or chosen before).
+   */
+  addFolder(id: string, parentId: string, name: string, options: { reachable?: boolean; driveId?: string | null } = {}): string {
+    this.files.set(id, {
+      bytes: new Uint8Array(0),
+      revision: 1,
+      meta: this.metaOf(id, name, parentId, new Uint8Array(0), 1, { [FOLDER_MARK]: "1" }, options.driveId === undefined ? "SHARED_DRIVE_01" : options.driveId, false,
+        { displayName: "Member Two", emailAddress: "member2@lab.example.org" }),
+    });
+    if (options.reachable) this.reachable.add(id);
+    return id;
+  }
+
+  /** A file or folder moved to another folder, as a member might in Drive. */
+  move(id: string, parentId: string): void {
+    const stored = this.files.get(id)!;
+    stored.meta = Object.freeze({ ...stored.meta, parents: [parentId] });
   }
 
   /** What the Picker hands back once the user picks these files: they become reachable. */
@@ -323,23 +345,88 @@ export class FakeDrive implements DriveApi {
   }
 }
 
-/** A signed-in member whose token never runs out. */
-export function fakeAuth(account: DriveAccount = { email: "member1@lab.example.org", name: "Member One" }): DriveAuth & { signedIn: boolean } {
+/**
+ * A Drive whose every request takes `latencyMs` before the in-memory Drive answers, as each request
+ * to the real Drive takes 0.3 to 0.6 s. It counts the requests and the most in flight at once.
+ */
+export class SlowDrive implements DriveApi {
+  requests = 0;
+  readonly peak: Record<string, number> = {};
+  private readonly running: Record<string, number> = {};
+
+  constructor(readonly inner: FakeDrive, readonly latencyMs: number) {}
+
+  private async slow<T>(kind: string, run: () => Promise<T>): Promise<T> {
+    this.requests++;
+    this.running[kind] = (this.running[kind] ?? 0) + 1;
+    this.peak[kind] = Math.max(this.peak[kind] ?? 0, this.running[kind]);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, this.latencyMs));
+      return await run();
+    } finally {
+      this.running[kind]--;
+    }
+  }
+
+  getMetadata(fileId: string) { return this.slow("get", () => this.inner.getMetadata(fileId)); }
+  listChildren(folderId: string) { return this.slow("list", () => this.inner.listChildren(folderId)); }
+  readRange(fileId: string, start: number, end: number) { return this.slow("range", () => this.inner.readRange(fileId, start, end)); }
+  download(fileId: string, options?: { maxBytes?: number; onProgress?: (loaded: number, total: number | null) => void }) {
+    return this.slow("download", () => this.inner.download(fileId, options));
+  }
+  createFile(meta: DriveFileWrite, bytes: Uint8Array) { return this.slow("create", () => this.inner.createFile(meta, bytes)); }
+  updateMedia(fileId: string, meta: DriveFileWrite, bytes: Uint8Array) { return this.slow("update", () => this.inner.updateMedia(fileId, meta, bytes)); }
+  setKeepForever(fileId: string, revisionId: string) { return this.slow("keep", () => this.inner.setKeepForever(fileId, revisionId)); }
+  createFolder(meta: { name: string; parentId: string; appProperties?: Readonly<Record<string, string>> }) {
+    return this.slow("folder", () => this.inner.createFolder(meta));
+  }
+  startUpload(meta: DriveFileWrite, size: number) { return this.slow("start", () => this.inner.startUpload(meta, size)); }
+  putUploadChunk(url: string, chunk: Uint8Array, start: number, size: number, signal?: AbortSignal) {
+    return this.slow("chunk", () => this.inner.putUploadChunk(url, chunk, start, size, signal));
+  }
+  queryUpload(url: string, size: number, signal?: AbortSignal) { return this.slow("query", () => this.inner.queryUpload(url, size, signal)); }
+}
+
+/** A signed-in member whose token runs out only when the test sets `expired`. */
+export function fakeAuth(account: DriveAccount = { email: "member1@lab.example.org", name: "Member One" }): DriveAuth & {
+  signedIn: boolean;
+  expired: boolean;
+  reconnects: number;
+  /** Run out the token, as an hour passing does, and tell the listeners. */
+  expire(): void;
+} {
   const listeners = new Set<() => void>();
+  const notify = () => { for (const listener of listeners) listener(); };
   const auth = {
     signedIn: true,
+    expired: false,
+    reconnects: 0,
     prepare: async () => undefined,
     signIn: async () => {
       auth.signedIn = true;
-      for (const listener of listeners) listener();
+      auth.expired = false;
+      notify();
       return account;
+    },
+    reconnect: async () => {
+      auth.reconnects++;
+      auth.signedIn = true;
+      auth.expired = false;
+      notify();
+      return account;
+    },
+    expire: () => {
+      auth.expired = true;
+      notify();
     },
     signOut: () => {
       auth.signedIn = false;
-      for (const listener of listeners) listener();
+      auth.expired = false;
+      notify();
     },
     token: () => {
       if (!auth.signedIn) throw new DriveError("signed out", 401);
+      if (auth.expired) throw new DriveAuthError();
       return "fake-token";
     },
     account: () => (auth.signedIn ? account : null),
@@ -378,9 +465,16 @@ export class FakePicker implements DrivePicker {
   /** Called when a folder is picked, as Drive would then let GateLab create files in it. */
   onFolderPicked: ((folder: PickedDoc) => void) | null = null;
 
-  async pickFolder(kind: "experiment" | "lab" = "experiment"): Promise<PickedDoc | null> {
-    this.opened.push(kind === "lab" ? "lab folder" : "folder");
-    if (this.folder) this.onFolderPicked?.(this.folder);
-    return this.folder;
+  /** Folders handed back by the next folder picks, before `folder`; null is a cancel. */
+  readonly folders: (PickedDoc | null)[] = [];
+  /** The titles the folder picks were opened with. */
+  readonly folderTitles: (string | undefined)[] = [];
+
+  async pickFolder(kind: "experiment" | "lab" | "location" = "experiment", title?: string): Promise<PickedDoc | null> {
+    this.opened.push(kind === "lab" ? "lab folder" : kind === "location" ? "location" : "folder");
+    this.folderTitles.push(title);
+    const folder = this.folders.length > 0 ? this.folders.shift() ?? null : this.folder;
+    if (folder) this.onFolderPicked?.(folder);
+    return folder;
   }
 }

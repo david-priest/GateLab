@@ -4,7 +4,7 @@
 // per move, so the two handlers on one plot disagreed about what Shift means.
 
 import { describe, it, expect } from "vitest";
-import { panGestureStart, panGestureStep, panModeFor, type PlotRect, type Range } from "./panGesture";
+import { panGestureStart, panGestureStep, panModeFor, zoomAnchored, ZOOM_BUTTON_STEP, type PlotRect, type Range } from "./panGesture";
 
 const RECT: PlotRect = { left: 100, top: 50, width: 400, height: 400 };
 const XR: Range = [0, 100];
@@ -149,5 +149,31 @@ describe("the stretch itself", () => {
       expect(Number.isFinite(r.xr[1])).toBe(true);
       expect(Number.isFinite(r.yr[1])).toBe(true);
     }
+  });
+});
+
+describe("the zoom buttons' step", () => {
+  it("holds the minimum, as the stretch does, and divides or multiplies the span by the step", () => {
+    const r: Range = [-20, 280];
+    const zoomedIn = zoomAnchored(r, "in");
+    expect(zoomedIn[0]).toBe(-20);
+    expect(zoomedIn[1] - zoomedIn[0]).toBeCloseTo(300 / ZOOM_BUTTON_STEP, 9);
+    const zoomedOut = zoomAnchored(r, "out");
+    expect(zoomedOut[0]).toBe(-20);
+    expect(zoomedOut[1] - zoomedOut[0]).toBeCloseTo(300 * ZOOM_BUTTON_STEP, 9);
+  });
+
+  it("takes two presses to make a 1.5-fold change", () => {
+    const r: Range = [10, 70];
+    const twice = zoomAnchored(zoomAnchored(r, "in"), "in");
+    expect(twice[0]).toBe(10);
+    expect(twice[1] - twice[0]).toBeCloseTo(60 / 1.5, 9);
+  });
+
+  it("returns to the starting range when zoomed in and then out", () => {
+    const r: Range = [0.5, 4.25];
+    const back = zoomAnchored(zoomAnchored(zoomAnchored(r, "in"), "in"), "out");
+    expect(zoomAnchored(back, "out")[0]).toBe(r[0]);
+    expect(zoomAnchored(back, "out")[1]).toBeCloseTo(r[1], 9);
   });
 });

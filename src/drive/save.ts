@@ -13,6 +13,11 @@ import { outcomeUnknown, pause } from "./upload";
 export const WRITER_KEY = "gatelabWriter";
 export const SAVE_KEY = "gatelabSave";
 export const WORKSPACE_MIME = "application/json";
+/**
+ * A Drive workspace with unsaved changes is written back at most once in this long: the first
+ * change after a save starts the wait, and further changes do not restart it.
+ */
+export const DRIVE_AUTOSAVE_MS = 3 * 60 * 1000;
 
 /** Thrown when GateLab may not create a file in the experiment folder until the folder is picked once. */
 export class DriveFolderAccessError extends DriveError {

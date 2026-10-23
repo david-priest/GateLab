@@ -6,6 +6,7 @@
 import { useState } from "react";
 import type { FlowJoCheckedPopulation, FlowJoCountCheck, FlowJoFileCheck } from "../engine/flowjoCountCheck";
 import { useI18n } from "./i18n";
+import { ModalEscape } from "./useModalEscape";
 
 interface Props {
   check: FlowJoCountCheck;
@@ -31,29 +32,30 @@ export function FlowJoCountCheckModal({ check, onExport, onClose }: Props) {
       // Short, so the column fits beside a long qualified name; the note above says what each means.
       case "own": return t("at its own gate");
       case "inherited": return t("within {name}, which differs", { name: row.reason.from });
-      case "flowjo-only": return t("in FlowJo's record, not in this tree");
-      case "gatelab-only": return t("not in FlowJo's record");
-      case "unrecorded": return t("no count recorded by FlowJo");
+      case "flowjo-only": return t("in the workspace's record, not in this tree");
+      case "gatelab-only": return t("not in the workspace's record");
+      case "unrecorded": return t("no count recorded in the workspace");
     }
   };
   const rows = current ? (differingOnly ? current.rows.filter((row) => row.delta !== 0) : current.rows) : [];
 
   return (
     <div className="gl-modal-backdrop" onClick={onClose}>
-      <div className="gl-modal gl-chorus-stats gl-flowjo-check" role="dialog" aria-label="Counts against FlowJo" onClick={(e) => e.stopPropagation()}>
-        <div className="gl-modal-title">{t("Counts against FlowJo")}</div>
+      <ModalEscape onClose={onClose} />
+      <div className="gl-modal gl-chorus-stats gl-flowjo-check" role="dialog" aria-label="Counts against the workspace" onClick={(e) => e.stopPropagation()}>
+        <div className="gl-modal-title">{t("Counts against the workspace")}</div>
         <div className="gl-modal-note">
           {check.compared > 0 && check.exact === check.compared
-            ? t("All {compared} populations compared count exactly as FlowJo recorded.", { compared: check.compared })
-            : t("{exact} of {compared} populations compared count exactly as FlowJo recorded.", { exact: check.exact, compared: check.compared })}
+            ? t("All {compared} populations compared count exactly as the workspace recorded.", { compared: check.compared })
+            : t("{exact} of {compared} populations compared count exactly as the workspace recorded.", { exact: check.exact, compared: check.compared })}
           {check.largest
             ? ` ${check.files.length > 1
               ? t("The largest difference is {delta} events ({relative}) on {name}, {file}.", { delta: signed(check.largest.row.delta), relative: rel(check.largest.row.relative), name: check.largest.row.name, file: check.largest.fileName })
               : t("The largest difference is {delta} events ({relative}) on {name}.", { delta: signed(check.largest.row.delta), relative: rel(check.largest.row.relative), name: check.largest.row.name })}`
             : ""}
-          {check.flowJoOnly > 0 ? ` ${t("{count} population(s) FlowJo recorded are not in the tree.", { count: check.flowJoOnly })}` : ""}
+          {check.flowJoOnly > 0 ? ` ${t("{count} population(s) the workspace recorded are not in the tree.", { count: check.flowJoOnly })}` : ""}
           <br />
-          {t("FlowJo's numbers are the counts stored in the workspace file when it was last saved; GateLab's are counted now, under the gates and compensation as they stand, so a gate edited since the import shows here as a difference. A difference at a population's own gate (every population above it exact) is usually events on the gate's edge, a gate drawn on a biexponential axis evaluated off FlowJo's grid, or a compensation matrix other than the one FlowJo used. A population within one that differs inherits its difference. A population in FlowJo's record and not in the tree was not imported, or has been renamed or removed since.")}
+          {t("The recorded numbers are the counts stored in the workspace file when it was last saved; GateLab's are counted now, under the gates and compensation as they stand, so a gate edited since the import shows here as a difference. A difference at a population's own gate (every population above it exact) is usually events on the gate's edge, a gate drawn on a biexponential axis evaluated off the recorded grid, or a compensation matrix other than the one the recorded counts were made with. A population within one that differs inherits its difference. A population in the workspace's record and not in the tree was not imported, or has been renamed or removed since.")}
         </div>
 
         {check.files.length > 1 && (
@@ -79,7 +81,7 @@ export function FlowJoCountCheckModal({ check, onExport, onClose }: Props) {
               {current.sampleName && current.sampleName !== current.fileName ? ` · ${t("FlowJo sample")} ${current.sampleName}` : ""}
               {" · "}
               {current.flowJoEvents !== null && current.flowJoEvents !== current.fileEvents
-                ? <span className="gl-chorus-stats-warn">{t("event totals differ")}: {t("file")} {fmt(current.fileEvents)}, FlowJo {fmt(current.flowJoEvents)} — {t("this file is not the one FlowJo counted")}</span>
+                ? <span className="gl-chorus-stats-warn">{t("event totals differ")}: {t("file")} {fmt(current.fileEvents)}, {t("recorded")} {fmt(current.flowJoEvents)} — {t("this file is not the one the recorded counts are for")}</span>
                 : <>{fmt(current.fileEvents)} {t("events")}</>}
               <br />
               {current.compared} {t("populations compared")}, {current.exact} {t("exact")}
@@ -94,11 +96,11 @@ export function FlowJoCountCheckModal({ check, onExport, onClose }: Props) {
                 <thead>
                   <tr>
                     <th>{t("Population")}</th>
-                    <th className="gl-stats-num">FlowJo</th>
+                    <th className="gl-stats-num">{t("Recorded")}</th>
                     <th className="gl-stats-num">{t("GateLab")}</th>
                     <th className="gl-stats-num">Δ</th>
-                    <th className="gl-stats-num">Δ / FlowJo</th>
-                    <th className="gl-stats-num">{t("FlowJo % parent")}</th>
+                    <th className="gl-stats-num">{t("Δ / recorded")}</th>
+                    <th className="gl-stats-num">{t("Recorded % parent")}</th>
                     <th className="gl-stats-num">{t("GateLab % parent")}</th>
                     <th>{t("Why")}</th>
                   </tr>
@@ -117,7 +119,7 @@ export function FlowJoCountCheckModal({ check, onExport, onClose }: Props) {
                     </tr>
                   ))}
                   {rows.length === 0 && (
-                    <tr><td colSpan={8} className="gl-chorus-stats-why">{t("Every population of this file counts exactly as FlowJo recorded.")}</td></tr>
+                    <tr><td colSpan={8} className="gl-chorus-stats-why">{t("Every population of this file counts exactly as the workspace recorded.")}</td></tr>
                   )}
                 </tbody>
               </table>

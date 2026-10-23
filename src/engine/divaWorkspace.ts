@@ -316,7 +316,7 @@ function resolveParm(
     warnings.push(
       `Diva names the parameter "${parm}" but declares it as ${want === "-W" ? "a width" : "a height"} ` +
         `(type ${types.get(parm)}); gates on it were mapped to the FCS column "${mapped}", ` +
-        "matching how FlowJo converts this experiment and Diva's own event counts.",
+        "matching Diva's own event counts.",
     );
   }
   return mapped;

@@ -8,7 +8,7 @@ import {
 } from "./host/contracts";
 
 vi.mock("./App", () => ({
-  default: () => <main>GateLab shared shell</main>,
+  default: ({ hostProposals }: { hostProposals?: unknown }) => <main>GateLab shared shell{hostProposals ? " · host proposals" : ""}</main>,
 }));
 
 import { mountGateLab } from "./bootstrap";
@@ -65,6 +65,25 @@ describe("mountGateLab", () => {
     app!.unmount();
     expect(unmounted).toHaveBeenCalledOnce();
     expect(container.textContent).toBe("");
+  });
+
+  // GateLabR's page: the strategy-proposal channel is put on its Shiny client at mount, before the
+  // plots' stand-in replaces window.Shiny; the browser host has none.
+  it("opens the host's strategy-proposal channel on GateLabR's Shiny client", () => {
+    const addCustomMessageHandler = vi.fn();
+    vi.stubGlobal("Shiny", { addCustomMessageHandler, setInputValue: vi.fn() });
+    const sce: GateLabHostAdapter = { ...createMinimalHost(), id: "test-r-host", kind: "r-sce" };
+    let app: ReturnType<typeof mountGateLab>;
+    act(() => { app = mountGateLab(container, { host: sce }); });
+    expect(addCustomMessageHandler).toHaveBeenCalledWith("gatelabr-strategy-proposal", expect.any(Function));
+    expect(container.textContent).toContain("host proposals");
+    act(() => app!.unmount());
+
+    addCustomMessageHandler.mockClear();
+    act(() => { app = mountGateLab(container, { host: createMinimalHost() }); });
+    expect(addCustomMessageHandler).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain("host proposals");
+    act(() => app!.unmount());
   });
 
   it("rejects an incompatible host before mounting the application", () => {

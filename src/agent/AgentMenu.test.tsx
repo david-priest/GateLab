@@ -31,6 +31,21 @@ const input = (value: string) => {
 };
 
 describe("AgentMenu", () => {
+  it("explains both modes and lets the user end a preview search", () => {
+    const onEndSearch = vi.fn();
+    act(() => root.render(<AgentMenu status={{ state: "idle" }} onConnect={vi.fn()} onDisconnect={vi.fn()} />));
+    act(() => button("Agent-assisted gating…")!.click());
+    expect(host.textContent).toContain("Population mode");
+    const select = host.querySelector("select")!;
+    act(() => { select.value = "cluster"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    expect(host.textContent).toContain("separate training and validation");
+    expect(button("Copy request for agent")!.disabled).toBe(true);
+    act(() => root.render(<AgentMenu status={{ state: "idle" }} task={{ id: "search", mode: "cluster", target: "CD4_positive", status: "searching", candidates: 2, budget: 4, message: "Training F1 0.8; live gates unchanged." }} onEndSearch={onEndSearch} onConnect={vi.fn()} onDisconnect={vi.fn()} />));
+    expect(host.querySelector("[role=status]")!.textContent).toContain("2/4 candidates");
+    expect(host.querySelector("select")!.disabled).toBe(true);
+    act(() => button("End search")!.click());
+    expect(onEndSearch).toHaveBeenCalledOnce();
+  });
   it("offers a connection, checks the address and remembers it", () => {
     const onConnect = vi.fn();
     act(() => root.render(<AgentMenu status={{ state: "idle" }} onConnect={onConnect} onDisconnect={vi.fn()} />));
@@ -71,7 +86,7 @@ describe("AgentMenu", () => {
 });
 
 describe("an agent's gate in the gate list", () => {
-  it("wears a badge whose tooltip is the rationale", () => {
+  it("carries the proposal in its row menu, whose tooltip is the rationale", () => {
     let state: CoreState = coreReducer(initialCoreState(), { type: "loadSample", nEvents: 4 });
     state = coreReducer(state, {
       type: "addGate", gateType: "rectangle", name: "CD4 high", xChannel: "A", yChannel: "B", vertices: [[0, 0], [1, 1]],
@@ -80,10 +95,11 @@ describe("an agent's gate in the gate list", () => {
     });
     state = coreReducer(state, { type: "addGate", gateType: "rectangle", name: "By hand", xChannel: "A", yChannel: "B", vertices: [[0, 0], [2, 2]] });
     act(() => root.render(<GateList state={state} derived={{ gateCounts: {} } as never} dispatch={vi.fn()} />));
-    const badges = [...host.querySelectorAll(".gate-agent-badge")];
-    expect(badges).toHaveLength(1);
-    expect(badges[0].textContent).toBe("agent");
-    expect(badges[0].getAttribute("title")).toBe("Proposed by claude: The valley between the modes.");
-    expect(badges[0].closest(".gate-card")!.textContent).toContain("CD4 high");
+    const items = [...host.querySelectorAll(".gate-proposal-item")];
+    expect(items).toHaveLength(1);
+    expect(items[0].textContent).toBe("Proposed by agent…");
+    expect(items[0].getAttribute("title")).toBe("Proposed by claude: The valley between the modes.");
+    expect(items[0].closest(".gate-card")!.textContent).toContain("CD4 high");
+    expect(host.querySelectorAll(".gate-row-menu.has-proposal")).toHaveLength(1);
   });
 });

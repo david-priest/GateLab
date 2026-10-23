@@ -175,6 +175,7 @@ function rawVertices(
       const [cx, cy] = toRaw(gate.center);
       const [[xlo, xhi], [ylo, yhi]] = windows;
       if (gate.curl) warn(`"${gate.name}" is a curly quadrant; its arms are written straight, as Chorus draws.`);
+      if (gate.arms) warn(`"${gate.name}" is a spider quadrant; it is written as a crosshair at its centre over the whole axis window, as Chorus draws.`);
       const rect = (x0: number, x1: number, y0: number, y1: number) => [{ x: num(x0), y: num(y0) }, { x: num(x1), y: num(y0) }, { x: num(x1), y: num(y1) }, { x: num(x0), y: num(y1) }];
       // Q1 = x- y+, Q2 = x+ y+, Q3 = x+ y-, Q4 = x- y-, GateLab's order; bounded by the axis window.
       return [rect(xlo, cx, cy, yhi), rect(cx, xhi, cy, yhi), rect(cx, xhi, ylo, cy), rect(xlo, cx, ylo, cy)];

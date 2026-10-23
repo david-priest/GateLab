@@ -23,13 +23,14 @@
  */
 
 import { fcsDataSetLabelToken, parseFcsDataSetFileName, type SpilloverMatrix } from "./fcs";
-import { FLOWJO_CURLY_QUAD_CURL, type FlowJoGridAxis, type QuadrantCurl, type RectangleBounds, type TransformSpec, type Vertex } from "./models";
+import { FLOWJO_CURLY_QUAD_CURL, validArms, validCurl, type FlowJoGridAxis, type QuadrantCurl, type RectangleBounds, type TransformSpec, type Vertex } from "./models";
 import { WSP_RECTANGLE_ATTR, WSP_WRITING, parseRectangleRecord, statesRecord, writtenBound, type RectangleRecord } from "./rectangleRecord";
 import { WSP_POLYGON_ATTR, parsePolygonRecord, type PolygonRecord } from "./polygonRecord";
 import { transformFromSpec } from "./sample";
 import { invertMatrix } from "./compensation";
 import { withinLogicleBound } from "./transforms";
-import { FLOWJO_BIEX_TABLE_CHANNELS, biexBreakpoints, biexTransform } from "./biex";
+import { Hyperlog } from "./hyperlog";
+import { FLOWJO_BIEX_TABLE_CHANNELS, biexBreakpoints, biexTransform, type BiexParams } from "./biex";
 import { FLOWJO_GATE_RESOLUTION, flowJoGridScale, logVertexAtZeroOnFloor, parseFlowJoGridAxis, type FlowJoGridSpec } from "./flowjoGrid";
 import {
   compareIdentity,
@@ -43,6 +44,76 @@ import {
   type RecordedIdentity,
 } from "./fileIdentity";
 import { GATELAB_FORMAT_TAG } from "./gatingmlExport";
+
+/**
+ * The attribute, "1", on a population's own <Transformations> block: its gate is evaluated on the
+ * axes that block declares rather than on the sample's. Written by the FlowJo 11 reader
+ * (flowjo11Workbench.ts), since FlowJo 11 stores a transform with each gate; FlowJo 10 never writes
+ * a block there.
+ */
+export const WSP_GATE_AXES_ATTR = "gatelabGateAxes";
+
+/**
+ * The attribute, "1", on the Workspace element of a document the FlowJo 11 reader wrote
+ * (flowjo11Workbench.ts): its polygons are tested on FlowJo 11's grid (flowjoGrid.ts), not FlowJo 10's.
+ */
+export const WSP_FLOWJO11_ATTR = "gatelabFlowJo11";
+
+/**
+ * The attribute on a PolygonGate the FlowJo 11 reader writes (flowjo11Workbench.ts): its vertices as
+ * FlowJo 11 saved them, in the display units of its axes, as JSON `[[x, y], ...]`. On FlowJo 11's
+ * grid they are the gate's vertices, in place of the raw ones taken forward again.
+ */
+export const WSP_DISPLAY_VERTICES_ATTR = "gatelabDisplayVertices";
+
+/** Overwrite a polygon's vertices with the display vertices a FlowJo 11 reader stated, when they fit. */
+function placeExactVertices(el: Element, stated: string | null): void {
+  if (!stated) return;
+  let vertices: unknown;
+  try {
+    vertices = JSON.parse(stated);
+  } catch {
+    return;
+  }
+  const own = Array.from(el.getElementsByTagName("*")).filter((v) => v.localName === "vertex");
+  if (!Array.isArray(vertices) || vertices.length !== own.length) return;
+  if (!vertices.every((v) => Array.isArray(v) && v.length === 2 && v.every((n) => typeof n === "number" && Number.isFinite(n)))) return;
+  own.forEach((v, i) => {
+    const coords: Element[] = [];
+    for (let c = v.firstElementChild; c; c = c.nextElementSibling) if (c.localName === "coordinate") coords.push(c);
+    coords.slice(0, 2).forEach((c, j) => c.setAttributeNS(DATATYPE_NS, "data-type:value", String((vertices as number[][])[i][j])));
+  });
+}
+
+/**
+ * The attribute on a CurlyQuad the FlowJo 11 reader writes (flowjo11Workbench.ts): FlowJo 11's bend
+ * of its arms, as a QuadrantCurl in JSON, in the 256-channel display. FlowJo 11's arm is
+ * (distance)² / 1000 channels off the crosshair, which its saved quadrants trace to the channel at
+ * every vertex; FlowJo 10's curl (FLOWJO_CURLY_QUAD_CURL) is another curve. The value "straight"
+ * marks FlowJo 11's plain quadrant, written the same way so that it, too, imports as one quadrant
+ * gate, with straight arms.
+ */
+export const WSP_FLOWJO11_CURL_ATTR = "gatelabFlowJo11Curl";
+
+/**
+ * The attribute on a RectangleGate the FlowJo 11 reader writes (flowjo11Workbench.ts) where FlowJo
+ * 11 tests the gate on its biex table: the bounds are table entries, low edge in and high edge out,
+ * so the rectangle is evaluated half-open (models.ts, RectangleBounds) rather than closed as
+ * FlowJo 10's rectangles are (WSP_RECT_BOUNDS_TAG).
+ */
+export const WSP_FLOWJO11_HALF_OPEN_ATTR = "gatelabFlowJo11HalfOpen";
+
+/** The FlowJo 11 curl a CurlyQuad states, or null (none stated, or "straight" for a plain quadrant). */
+function flowJo11CurlOf(el: Element): QuadrantCurl | null {
+  const stated = el.getAttribute(WSP_FLOWJO11_CURL_ATTR);
+  if (!stated) return null;
+  try {
+    const curl: unknown = JSON.parse(stated);
+    return validCurl(curl) ? { ...curl } : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Marker the converter writes and importGatingML reads back. Internal to that handoff. */
 export const WSP_GATE_SPACE_TAG = "gatelab_gate_space";
@@ -198,6 +269,13 @@ export interface WspDerivedPopulation {
  */
 export const WSP_CURLY_TAG = "gatelab_curly_quadrant";
 
+/**
+ * Marks a polygon that stands for a whole spider quadrant gate: its five vertices are the centre
+ * and the down, right, up and left arm ends (QuadrantArms), and the four FlowJo populations of the
+ * gate are written as derived populations naming one quadrant each.
+ */
+export const WSP_SPIDER_TAG = "gatelab_spider_quadrant";
+
 const GATING_NS = "http://www.isac-net.org/std/Gating-ML/v2.0/gating";
 const DATATYPE_NS = "http://www.isac-net.org/std/Gating-ML/v2.0/datatypes";
 const TRANSFORMS_NS = "http://www.isac-net.org/std/Gating-ML/v2.0/transformations";
@@ -328,7 +406,7 @@ export interface FlowJoConversion {
 /**
  * How the import evaluates FlowJo's gates.
  *
- * `flowJoGrid` (default true) is the open dialog's "Evaluate gates as FlowJo does": polygons on
+ * `flowJoGrid` (default true) is the open dialog's "Evaluate gates on the recorded grid": polygons on
  * FlowJo's 256-channel grid (flowjoGrid.ts), rectangles in raw units with FlowJo's axis rules --
  * a linear bound at or beyond its axis's range left open, a biex lower bound at or below the
  * bottom of FlowJo's table or a log one at or below the offset left open, and nothing pinned at
@@ -653,6 +731,54 @@ function writeCurlyMark(doc: Document, el: Element, curl: QuadrantCurl | null): 
   el.insertBefore(info, el.firstChild);
 }
 
+/** Mark the polygon that stands for a whole spider quadrant gate; see WSP_SPIDER_TAG. */
+function writeSpiderMark(doc: Document, el: Element): void {
+  const info = doc.createElementNS(DATATYPE_NS, "data-type:custom_info");
+  info.appendChild(doc.createElementNS(DATATYPE_NS, WSP_SPIDER_TAG));
+  el.insertBefore(info, el.firstChild);
+}
+
+/** A FlowJo quadId (0 = x−/y−, 1 = x+/y−, 2 = x−/y+, 3 = x+/y+) as GateLab's quadrant number. */
+const QUADRANT_OF_FLOWJO_QUAD_ID = [4, 3, 1, 2] as const;
+
+/** A FlowJo polygon's quadId when it is one panel of a quadrant gate (0 to 3), else null. */
+function quadrantPanelId(el: Element): number | null {
+  if (el.localName !== "PolygonGate") return null;
+  const q = Number(el.getAttribute("quadId") ?? "-1");
+  return Number.isInteger(q) && q >= 0 && q <= 3 ? q : null;
+}
+
+/**
+ * A spider quadrant read off the four panels FlowJo 10 writes for one: each a PolygonGate with
+ * quadId 0 to 3 (0 = x−/y−, 1 = x+/y−, 2 = x−/y+, 3 = x+/y+), in raw units, running from its
+ * horizontal arm's end round any plot corners to its vertical arm's end and back to the centre.
+ * Every complete group of four quadId polygons in the FlowRepository corpus has this layout (2,460
+ * groups in 47 workspaces). Each panel must be exactly that polygon, four vertices with the corner
+ * where its two ends' edges meet, and the panels must agree: one centre, and each arm end the same
+ * in the two panels it bounds. The one gate then holds what the four polygons held (QuadrantArms).
+ * `rings` are the panels' vertices by quadId. Null for a group that is incomplete or does not agree.
+ */
+function spiderFromPanels(rings: ReadonlyArray<Vertex[] | undefined>): { center: Vertex; down: Vertex; right: Vertex; up: Vertex; left: Vertex } | null {
+  const same = (a: Vertex, b: Vertex) => a[0] === b[0] && a[1] === b[1];
+  const r: Vertex[][] = [];
+  for (let q = 0; q < 4; q++) {
+    let ring = rings[q];
+    // A ring written closed, its first vertex repeated at the end, as GateLab's export writes one.
+    if (ring && ring.length === 5 && same(ring[0], ring[4])) ring = ring.slice(0, -1);
+    if (!ring || ring.length !== 4 || ring.some(([x, y]) => !Number.isFinite(x) || !Number.isFinite(y))) return null;
+    // The corner where the horizontal arm's end's edge meets the vertical arm's end's edge.
+    if (ring[1][0] !== ring[0][0] || ring[1][1] !== ring[2][1]) return null;
+    r.push(ring);
+  }
+  const first = (q: number) => r[q][0];
+  const vertical = (q: number) => r[q][r[q].length - 2];
+  const centre = (q: number) => r[q][r[q].length - 1];
+  if (![1, 2, 3].every((q) => same(centre(q), centre(0)))) return null;
+  if (!same(first(0), first(2)) || !same(first(1), first(3))) return null;
+  if (!same(vertical(0), vertical(1)) || !same(vertical(2), vertical(3))) return null;
+  return { center: centre(0), down: vertical(0), right: first(1), up: vertical(2), left: first(0) };
+}
+
 /**
  * The <Transformations> block that governs a sample's axes.
  *
@@ -717,6 +843,24 @@ function specForTransformElement(el: Element): TransformSpec | null {
       const cofactor = T / Math.sinh(M * Math.LN10);
       return Number.isFinite(cofactor) && cofactor > 0 ? { kind: "asinh", cofactor } : null;
     }
+    case "hyperlog": {
+      // FlowJo's hyperlog axis carries Gating-ML Hyperlog's four parameters (T, W, M, A) and is
+      // read as that transform (hyperlog.ts, from the Gating-ML 2.0 specification). Checked
+      // black-box against FlowJo's own population exports of FlowRepository FR-FCM-Z2JN, whose
+      // workspace declares hyperlog on its fluorescence axes. Ellipsoids on such an axis are not
+      // converted: channelMapForTransformElement has no hyperlog entry (see there).
+      const required = (name: string): number => {
+        const value = el.getAttributeNS(TRANSFORMS_NS, name) ?? el.getAttribute(`transforms:${name}`);
+        return value === null || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value.trim()) ? NaN : Number(value);
+      };
+      const spec = { kind: "hyperlog" as const, T: required("T"), W: required("W"), M: required("M"), A: required("A") };
+      try {
+        new Hyperlog(spec.T, spec.W, spec.M, spec.A);
+        return spec;
+      } catch {
+        return null;
+      }
+    }
     case "logicle": {
       // FlowJo can display an axis with logicle instead of biex. None of the workspaces this
       // importer was built against use it (seven files, 2016-2025, carry only linear/biex/log),
@@ -777,6 +921,10 @@ export function workspaceTransformSpecs(node: Element): Map<string, TransformSpe
  *   biex     forward(maxRange) == length == 256     ->  channel, the two spaces coincide
  *   log      forward spans 0..1 across the decades  ->  channel / 256
  *   logicle  forward spans 0..1                     ->  channel / 256
+ *
+ * A hyperlog axis has no entry. Where FlowJo writes an ellipsoid on one has not been checked
+ * against a FlowJo export (the hyperlog workspace checked holds no ellipsoid), so such an
+ * ellipsoid is skipped with a warning, as it was before hyperlog axes were read.
  */
 interface ChannelMap {
   offset: number;
@@ -861,7 +1009,7 @@ function workspaceLinearRanges(node: Element): Map<string, { min: number; max: n
 /**
  * Each parameter's axis as FlowJo's gate grid reads it (flowjoGrid.ts), keyed by parameter name:
  * a unit-gain linear axis's range, a log axis's offset and decades, a biex axis's parameters.
- * Anything else (a gain other than 1, fasinh, logicle, an unknown kind) has no grid here, and a
+ * Anything else (a gain other than 1, fasinh, logicle, hyperlog, an unknown kind) has no grid here, and a
  * polygon on it stays continuous.
  */
 function workspaceGridAxes(node: Element): Map<string, FlowJoGridAxis> {
@@ -1182,11 +1330,46 @@ function curlyQuadGroupRectangle(doc: Document, el: Element): Element {
  */
 const REPRESENTABLE_FLOWJO_TRANSFORMS = new Set(["linear"]);
 
+/**
+ * The namespaces FlowJo 10 declares on a workspace's root for the prefixes it writes throughout.
+ * FlowJo 11.2's File ▸ Export as FlowJo V10 (.wsp) writes the same prefixes and declares none of
+ * them (its root is a bare `<Workspace flowJoVersion="10.10.1">`), which no XML parser accepts.
+ */
+const WORKSPACE_PREFIX_NS: ReadonlyArray<readonly [string, string]> = [
+  ["gating", GATING_NS],
+  ["transforms", TRANSFORMS_NS],
+  ["data-type", DATATYPE_NS],
+  ["xsi", "http://www.w3.org/2001/XMLSchema-instance"],
+];
+
+/**
+ * The workspace with the declarations FlowJo 10 makes added to its root start tag, for each of
+ * those prefixes the text uses and the root does not declare; null when there is none to add.
+ * Only called on a text that did not parse, so a workspace that reads today is never rewritten.
+ */
+function declareWorkspacePrefixes(xmlText: string): string | null {
+  const root = /<([A-Za-z_][\w.-]*)(?=[\s/>])((?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|'[^']*'))*)/.exec(
+    xmlText.replace(/<\?[\s\S]*?\?>|<!--[\s\S]*?-->|<!DOCTYPE[^>]*>/g, (m) => " ".repeat(m.length)),
+  );
+  if (!root) return null;
+  const add = WORKSPACE_PREFIX_NS.filter(([prefix]) =>
+    !new RegExp(`\\sxmlns:${prefix}\\s*=`).test(root[2]) && new RegExp(`[<\\s/]${prefix}:[A-Za-z_]`).test(xmlText));
+  if (!add.length) return null;
+  const at = root.index + 1 + root[1].length;
+  return xmlText.slice(0, at) + add.map(([prefix, ns]) => ` xmlns:${prefix}="${ns}"`).join("") + xmlText.slice(at);
+}
+
 function parseWorkspace(xmlText: string): Document {
-  const doc = new DOMParser().parseFromString(xmlText, "application/xml");
-  if (doc.getElementsByTagName("parsererror").length) {
-    throw new Error("This file is not valid XML, so it cannot be read as a FlowJo workspace.");
-  }
+  const parse = (text: string) => {
+    const doc = new DOMParser().parseFromString(text, "application/xml");
+    return doc.getElementsByTagName("parsererror").length ? null : doc;
+  };
+  const declared = () => {
+    const text = declareWorkspacePrefixes(xmlText);
+    return text === null ? null : parse(text);
+  };
+  const doc = parse(xmlText) ?? declared();
+  if (!doc) throw new Error("This file is not valid XML, so it cannot be read as a FlowJo workspace.");
   return doc;
 }
 
@@ -2447,7 +2630,7 @@ function readSpilloverMatrix(el: Element): MatrixReading {
     const off = matrix.findIndex((row) => Math.abs(Math.max(...row) - 1) >= 1e-3);
     if (off >= 0) {
       return decline(`its row "${params[off]}" has a largest coefficient of ${Math.max(...matrix[off])}, not 1, ` +
-        "so it is not a spectral matrix in FlowJo's convention");
+        "so it is not a spectral matrix in the workspace's convention");
     }
   } else {
     const off = matrix.findIndex((row, i) => Math.abs(row[i] - 1) >= 1e-3);
@@ -2602,6 +2785,8 @@ export function flowJoWorkspaceToGatingML(
   const doc = parseWorkspace(xmlText);
   refuseOlderGatingML(doc, say);
   const floorsLogVertexAtZero = logVertexAtZeroOnFloor(doc.documentElement?.getAttribute("flowJoVersion"));
+  /** Written from a FlowJo 11 workbench, whose polygons are on FlowJo 11's grid (flowjoGrid.ts). */
+  const flowJo11 = doc.documentElement?.getAttribute(WSP_FLOWJO11_ATTR) === "1";
   const nodes = sampleNodes(doc);
   const node = nodes[sampleIndex];
   if (!node) {
@@ -2640,6 +2825,48 @@ export function flowJoWorkspaceToGatingML(
   const channelMaps = workspaceChannelMaps(node);
   const linearRanges = workspaceLinearRanges(node);
   const gridAxes = workspaceGridAxes(node);
+  /**
+   * The axes a population's gate is evaluated on: its own, where the document gives the population
+   * a Transformations block of its own (WSP_GATE_AXES_ATTR), otherwise the sample's. FlowJo 11
+   * stores a transform with every gate, so two gates on one parameter may be on different axes; a
+   * FlowJo 10 workspace states one per parameter, and none of its populations carries a block.
+   */
+  const sampleAxes = { transformKinds, transformSpecs, channelMaps, linearRanges, gridAxes };
+  /**
+   * FlowJo 11 only: the biex each fluorescence channel's gates were drawn on, by uncompensated
+   * channel name, each set of parameters with how many gate axes used it. The import shows the
+   * channel on the one most of them used (GatingMLScaleEntry.biex), so a gate looks as it was drawn.
+   */
+  const drawnBiex = new Map<string, Map<string, { params: BiexParams; n: number }>>();
+  const noteDrawnBiex = (channel: string, spec: TransformSpec | undefined): void => {
+    if (!flowJo11 || spec?.kind !== "biex" || isTimeAxis(channel)) return;
+    const base = (spill ? uncompensatedName(channel, spill) : null) ?? channel.replace(/^Comp-/, "");
+    const params: BiexParams = {
+      maxValue: spec.maxValue, pos: spec.pos, neg: spec.neg, widthBasis: spec.widthBasis,
+      channelRange: spec.channelRange, tableChannels: FLOWJO_BIEX_TABLE_CHANNELS,
+    };
+    const key = JSON.stringify(params);
+    if (!drawnBiex.has(base)) drawnBiex.set(base, new Map());
+    const seen = drawnBiex.get(base)!;
+    seen.set(key, { params, n: (seen.get(key)?.n ?? 0) + 1 });
+  };
+  const ownAxes = new Map<Element, typeof sampleAxes>();
+  const axesOfPopulation = (pop: Element): typeof sampleAxes => {
+    const block = childrenByLocalName(pop, "Transformations").find((t) => t.getAttribute(WSP_GATE_AXES_ATTR) === "1");
+    if (!block) return sampleAxes;
+    let axes = ownAxes.get(pop);
+    if (!axes) {
+      axes = {
+        transformKinds: workspaceTransformKinds(pop),
+        transformSpecs: workspaceTransformSpecs(pop),
+        channelMaps: workspaceChannelMaps(pop),
+        linearRanges: workspaceLinearRanges(pop),
+        gridAxes: workspaceGridAxes(pop),
+      };
+      ownAxes.set(pop, axes);
+    }
+    return axes;
+  };
   /** Polygons put on FlowJo's grid, and those the option could not put there, with why. */
   let gridPolygons = 0;
   let gateLabPolygons = 0;
@@ -2721,6 +2948,11 @@ export function flowJoWorkspaceToGatingML(
       const cross = curlyQuadCrosshair(el);
       if (cross) return visitCurlyQuad(pop, el, name, depth, cross);
     }
+    const panel = quadrantPanelId(el);
+    if (panel !== null) {
+      const group = spiderGroupOf(pop, el);
+      if (group) return visitSpiderPanel(pop, name, depth, group, panel);
+    }
     // A helper GateLab's export added holds a gate of GateLab's, written with its "/" as
     // WSP_OPERAND_SLASH so that the paths naming it stay paths; the gate takes its own name back.
     return emitGate(pop, el, isOperandHelper(pop) ? name.split(WSP_OPERAND_SLASH).join("/") : name, depth);
@@ -2740,7 +2972,7 @@ export function flowJoWorkspaceToGatingML(
    * are left continuous.
    */
   const gridFor = (
-    el: Element, axes: [string, string],
+    el: Element, axes: [string, string], axesOf: Map<string, FlowJoGridAxis> = gridAxes,
   ): { x: FlowJoGridSpec; y: FlowJoGridSpec } | { why: string } => {
     const resolution = el.getAttribute("gateResolution");
     const channels = resolution === null || resolution === "" ? NaN : Number(resolution);
@@ -2753,17 +2985,20 @@ export function flowJoWorkspaceToGatingML(
     const specs: FlowJoGridSpec[] = [];
     for (const ch of axes) {
       if (isTimeAxis(ch)) return { why: say("is on a Time axis") };
-      const axis = gridAxes.get(ch) ?? gridAxes.get(ch.replace(/^Comp-/, ""));
-      if (!axis) return { why: say("is on {channel}, whose axis FlowJo's grid is not established for", { channel: ch }) };
-      specs.push({ kind: "flowjoChannels", channels, axis });
+      const axis = axesOf.get(ch) ?? axesOf.get(ch.replace(/^Comp-/, ""));
+      if (!axis) return { why: say("is on {channel}, whose axis the grid rule is not established for", { channel: ch }) };
+      specs.push(flowJo11 ? { kind: "flowjoChannels", channels, axis, rule: "flowjo11" } : { kind: "flowjoChannels", channels, axis });
     }
     return { x: specs[0], y: specs[1] };
   };
 
   const emitGate = (
     pop: Element, el: Element, name: string, depth: number, gateId?: string, register = true,
+    /** A gate that is not the population's own, given back as GateLab held it (a spider's). */
+    restore: PolygonRecord | null = null,
   ): boolean => {
     const imported = out.importNode(el, true) as Element;
+    const own = axesOfPopulation(pop);
     // A curly quadrant whose crosshair could not be read carries a rectangle's content under
     // another name; it becomes one here so every later step sees the gate kind it describes.
     const copy = imported.localName === "CurlyQuad"
@@ -2787,9 +3022,15 @@ export function flowJoWorkspaceToGatingML(
     // lookalike. Where it cannot, the gate still imports — straight in raw — and is named.
     const axes = gateAxisNames(el);
     const specFor = (ch: string): TransformSpec | undefined =>
-      transformSpecs.get(ch) ?? transformSpecs.get(ch.replace(/^Comp-/, ""));
+      own.transformSpecs.get(ch) ?? own.transformSpecs.get(ch.replace(/^Comp-/, ""));
     const sx = axes ? specFor(axes[0]) : undefined;
     const sy = axes ? specFor(axes[1]) : undefined;
+    if (axes) {
+      noteDrawnBiex(axes[0], sx);
+      noteDrawnBiex(axes[1], sy);
+    } else {
+      for (const ch of dimensionNames(el)) noteDrawnBiex(ch, specFor(ch));
+    }
     // A Time axis comes back from FlowJo's units to the file's ticks first (see sampleTimeScale);
     // any display transform is applied on top of that, exactly as FlowJo built it. A range (a
     // histogram's gate) has one dimension and no pair of axes, and its Time bound is in seconds
@@ -2819,25 +3060,25 @@ export function flowJoWorkspaceToGatingML(
         const ch = fcs ? (fcs.getAttributeNS(DATATYPE_NS, "name") ?? fcs.getAttribute("data-type:name")) : null;
         const spec = ch ? specFor(ch) : undefined;
         if (spec?.kind === "biex") {
-          return { ch, where: say("the bottom of FlowJo's biex table"), bottom: biexBreakpoints({ ...spec, tableChannels: FLOWJO_BIEX_TABLE_CHANNELS }).raw[0] };
+          return { ch, where: say("the bottom of the biex table"), bottom: biexBreakpoints({ ...spec, tableChannels: FLOWJO_BIEX_TABLE_CHANNELS }).raw[0] };
         }
         if (spec?.kind === "wsplog") return { ch, where: say("the log axis's offset"), bottom: spec.offset };
         return null;
       });
       const below = pins.findIndex((pin, i) => pin !== null && liesBelow(copy, i, pin.bottom));
-      const beyond = below < 0 ? openLinearRangeEdges(copy, linearRanges) : null;
+      const beyond = below < 0 ? openLinearRangeEdges(copy, own.linearRanges) : null;
       if (below >= 0) {
         const pin = pins[below]!;
         warnings.push(say(
-          "\"{name}\" lies wholly below {where} on {channel} ({bound}). FlowJo places every event below it there, " +
-          "so by FlowJo's rule this gate holds none; GateLab tests the recorded values, and counts the events that " +
+          "\"{name}\" lies wholly below {where} on {channel} ({bound}). Every event below it is placed there on the axis, " +
+          "so under that clamp this gate holds none; GateLab tests the recorded values, and counts the events that " +
           "fall inside its drawn bounds.",
           { name, where: pin.where, channel: pin.ch ?? "", bound: fmtBound(pin.bottom) },
         ));
       } else if (beyond) {
         warnings.push(say(
-          "\"{name}\" lies wholly beyond the {channel} axis range ({min} to {max}). FlowJo places every event " +
-          "beyond the range on the axis edge, so it counts none inside this gate; GateLab tests the recorded " +
+          "\"{name}\" lies wholly beyond the {channel} axis range ({min} to {max}). Every event beyond the range " +
+          "is placed on the axis edge, so under that clamp none falls inside this gate; GateLab tests the recorded " +
           "values, and counts the events that fall inside its drawn bounds.",
           { name, channel: beyond.axis, min: String(beyond.min), max: String(beyond.max) },
         ));
@@ -2849,17 +3090,17 @@ export function flowJoWorkspaceToGatingML(
     // A polygon GateLab evaluates continuously and wrote itself comes back as GateLab held it,
     // whatever the option says (polygonRecord.ts). The record is read off the element as the file
     // states it, so a polygon FlowJo has moved since is FlowJo's own again.
-    const ownPolygon = copy.localName === "PolygonGate" && register ? gateLabPolygonRecord(el) : null;
+    const ownPolygon = copy.localName === "PolygonGate" ? (register ? gateLabPolygonRecord(el) : restore) : null;
     if (ownPolygon) {
       restoreGateLabPolygon(out, copy, ownPolygon);
-      writeFlowJoPolygonAttributes(out, copy, el);
+      if (register) writeFlowJoPolygonAttributes(out, copy, el);
       if (ownPolygon.space === "display") carried++;
       gateLabPolygons++;
     } else if (copy.localName === "EllipsoidGate") {
       // Ellipsoids arrive in display channels, not raw, so they take their own conversion and
       // must NOT also go through the raw->display forward pass below.
       const mapFor = (ch: string): ChannelMap | undefined =>
-        channelMaps.get(ch) ?? channelMaps.get(ch.replace(/^Comp-/, ""));
+        own.channelMaps.get(ch) ?? own.channelMaps.get(ch.replace(/^Comp-/, ""));
       const mx = axes ? mapFor(axes[0]) : undefined;
       const my = axes ? mapFor(axes[1]) : undefined;
       if (!axes || !mx || !my || !sx || !sy || !convertFlowJoEllipsoid(out, copy, mx, my)) {
@@ -2874,21 +3115,33 @@ export function flowJoWorkspaceToGatingML(
         carried++;
       }
     } else if (axes && sx && sy) {
-      const grid = flowJoGrid && copy.localName === "PolygonGate" ? gridFor(el, axes) : null;
+      // A gate that is not the population's own (a spider quadrant's) is not a FlowJo polygon. A
+      // FlowJo 11 curly quadrant's crosshair goes on FlowJo 11's grid with the polygons, its arms
+      // bent there by FlowJo 11's curl (WSP_FLOWJO11_CURL_ATTR).
+      const curlyOnGrid = flowJo11 && !register && flowJo11CurlOf(el) !== null;
+      // A FlowJo 11 spider quadrant's gate (the one polygon its four panels share) goes on FlowJo
+      // 11's grid too.
+      const spiderOnGrid = flowJo11 && !register && copy.localName === "PolygonGate";
+      const polygonOnGrid = register && copy.localName === "PolygonGate";
+      const grid = flowJoGrid && (polygonOnGrid || curlyOnGrid || spiderOnGrid) ? gridFor(el, axes, own.gridAxes) : null;
       if (grid && "x" in grid) {
         // FlowJo's grid (flowjoGrid.ts): the vertices go onto their channels by FlowJo's rule
         // (beyond a linear or log axis unclamped, on a biex axis within the table), and the gate
         // keeps the raw vertices FlowJo saved for the way back out.
-        const raw = polygonVertexValues(copy);
+        const raw = polygonOnGrid ? polygonVertexValues(copy) : undefined;
         const gx = flowJoGridScale(grid.x);
         const gy = flowJoGridScale(grid.y);
         // A log vertex at or below zero is on the floor for FlowJo 10.6 and later (flowjoGrid.ts).
         const cellOf = (spec: FlowJoGridSpec, cell: (v: number) => number) =>
           floorsLogVertexAtZero && spec.axis.kind === "wsplog" ? (v: number) => (v <= 0 ? 0 : cell(v)) : cell;
         applyForwardTransform(copy, cellOf(grid.x, gx.vertexCell), cellOf(grid.y, gy.vertexCell));
+        // FlowJo 11's own vertices, in its display units, where the reader gave them: a vertex
+        // taken to raw and back comes back a rounding error off (145 as 144.9999999999), and on a
+        // grid where events lie on whole channels that moves the ones lying on an edge.
+        if (flowJo11) placeExactVertices(copy, el.getAttribute(WSP_DISPLAY_VERTICES_ATTR));
         writeGateSpace(out, copy, grid.x, grid.y, raw);
         carried++;
-        gridPolygons++;
+        if (polygonOnGrid) gridPolygons++;
         if (grid.x.channels !== FLOWJO_GATE_RESOLUTION) otherResolution.set(name, grid.x.channels);
       } else {
         if (grid) offGrid.set(name, grid.why);
@@ -2921,7 +3174,7 @@ export function flowJoWorkspaceToGatingML(
       for (const [i, ch] of axes.entries()) {
         const spec = i === 0 ? sx : sy;
         if (spec !== undefined && spec.kind === "identity") continue; // linear: nothing bends
-        const kind = transformKinds.get(ch) ?? transformKinds.get(ch.replace(/^Comp-/, ""));
+        const kind = own.transformKinds.get(ch) ?? own.transformKinds.get(ch.replace(/^Comp-/, ""));
         if (spec !== undefined) {
           // Carriable on its own; lost to an undeclared partner.
           if (!approximated.has(name)) approximated.set(name, new Set());
@@ -2944,7 +3197,7 @@ export function flowJoWorkspaceToGatingML(
     const recordAxes: [string, string] | null = axes ?? (oneDimension.length === 1 ? [oneDimension[0], oneDimension[0]] : null);
     if (rawRule && recordAxes && saved) {
       const gridAxis = (ch: string): FlowJoGridAxis | null =>
-        isTimeAxis(ch) ? null : gridAxes.get(ch) ?? gridAxes.get(ch.replace(/^Comp-/, "")) ?? null;
+        isTimeAxis(ch) ? null : own.gridAxes.get(ch) ?? own.gridAxes.get(ch.replace(/^Comp-/, "")) ?? null;
       const ax = gridAxis(recordAxes[0]);
       const ay = gridAxis(recordAxes[1]);
       // The bounds the rule opened, as FlowJo saved them, for the FlowJo export (flowjo_bounds), in
@@ -2968,7 +3221,7 @@ export function flowJoWorkspaceToGatingML(
     if (imported.localName === "RectangleGate" && register) {
       const own = gateLabRectangleRecord(el, [stepX, stepY]);
       if (own) restoreGateLabRectangle(out, copy, own);
-      else writeRectBoundsMark(out, copy);
+      else writeRectBoundsMark(out, copy, flowJo11 && el.getAttribute(WSP_FLOWJO11_HALF_OPEN_ATTR) === "1" ? "half-open" : "closed");
     }
     // FlowJo ids are unique within one file, which is all that is needed here; a generated id
     // keeps the document valid when one is missing.
@@ -3001,6 +3254,14 @@ export function flowJoWorkspaceToGatingML(
    * what FlowJo gated beneath a quadrant gates beneath it here as it does beneath an
    * intersection.
    */
+  /**
+   * The gate a curly or spider quadrant's four populations share, by the gate's id: its element and
+   * name. The populations have no element of their own, so when a node above them is skipped the
+   * shared gate goes with them here (dropSubtree), and what names one of its quadrants is refused.
+   */
+  const sharedGates = new Map<string, { copy: Element; name: string }>();
+  /** A curly or spider quadrant population's id -> the id of the gate it shares. */
+  const sharedGateOf = new Map<string, string>();
   const curlyGroups = new Map<string, { gateId: string; curled: boolean }>();
   const curlyPops: Array<{ pop: Element; name: string; gateId: string; quadrant: number }> = [];
   let curlySerial = 0;
@@ -3024,11 +3285,14 @@ export function flowJoWorkspaceToGatingML(
       // The bend is a shape in FlowJo's display space. When that space could not be carried
       // the crosshair imports straight in raw, and says so, rather than bending in raw units.
       const curled = carried > before;
-      writeCurlyMark(out, lastEmitted!, curled ? { ...FLOWJO_CURLY_QUAD_CURL } : null);
-      if (!curled) {
+      // FlowJo 11's plain quadrant takes this path with straight arms (WSP_FLOWJO11_CURL_ATTR "straight").
+      const straight = el.getAttribute(WSP_FLOWJO11_CURL_ATTR) === "straight";
+      writeCurlyMark(out, lastEmitted!, curled && !straight ? flowJo11CurlOf(el) ?? { ...FLOWJO_CURLY_QUAD_CURL } : null);
+      sharedGates.set(gateId, { copy: lastEmitted!, name: `${axes[0]} × ${axes[1]} quadrant` });
+      if (!curled && !straight) {
         warnings.push(
           `"${name}" is a curly quadrant on axes whose display could not be carried, so its ` +
-          "arms were imported straight; its counts will differ from FlowJo's near the crosshair.",
+          "arms were imported straight; its counts will differ from the recorded counts near the crosshair.",
         );
       }
       group = { gateId, curled };
@@ -3036,12 +3300,120 @@ export function flowJoWorkspaceToGatingML(
     }
     if (curlyQuadIsCurved(el)) {
       warnings.push(
-        `"${name}" declares a curly-quadrant percentage FlowJo does not document; its arms ` +
-        "were given the bend fitted to FlowJo's own counts.",
+        `"${name}" declares a curly-quadrant percentage that is not documented; its arms ` +
+        "were given the bend fitted to recorded counts.",
       );
     }
     idOf.set(pop, `wsp_cq_${++curlyPopSerial}`);
+    sharedGateOf.set(idOf.get(pop)!, group.gateId);
     curlyPops.push({ pop, name, gateId: group.gateId, quadrant: cross.quadrant });
+    return true;
+  };
+
+  /**
+   * A FlowJo spider quadrant: four PolygonGates with quadId 0 to 3 beside one another, on one pair
+   * of axes (spiderFromPanels). Like a curly quadrant it becomes ONE GateLab quadrant gate, here
+   * with leaning arms: emitted once, as a polygon whose vertices are the centre and the four arm
+   * ends and which is carried into the display like any polygon, and each population becomes a
+   * derived one naming its quadrant. A group whose panels do not agree, whose axes cannot both be
+   * carried, which is on a Time axis, or whose arms are not valid once carried (validArms) imports
+   * as four polygons, as FlowJo wrote it.
+   */
+  type SpiderGroup = {
+    el: Element; spider: NonNullable<ReturnType<typeof spiderFromPanels>>; gateId: string | null; failed: boolean;
+    /** Where GateLab wrote the panels: their space, and the gate's five vertices in it. */
+    record: PolygonRecord | null;
+  };
+  const spiderGroups = new Map<Element, Map<string, SpiderGroup | null>>();
+  const spiderPops: Array<{ pop: Element; name: string; gateId: string; quadrant: number }> = [];
+  /** A spider panel's population id → the quadrant of the shared gate it is. */
+  const spiderRefOf = new Map<string, { gate: string; quadrant: number }>();
+  let spiderSerial = 0;
+  let spiderPopSerial = 0;
+  const spiderGroupOf = (pop: Element, el: Element): SpiderGroup | null => {
+    const siblings = pop.parentElement;
+    const axes = gateAxisNames(el);
+    if (!siblings || !axes) return null;
+    const key = `${axes[0]}|${axes[1]}`;
+    let byAxes = spiderGroups.get(siblings);
+    if (!byAxes) spiderGroups.set(siblings, (byAxes = new Map()));
+    if (byAxes.has(key)) return byAxes.get(key) ?? null;
+    let group: SpiderGroup | null = null;
+    const panels = new Map<number, Element>();
+    let duplicate = false;
+    for (const sib of Array.from(siblings.children)) {
+      if (sib.localName !== "Population") continue;
+      const sibEl = gateElementOf(sib).el;
+      const q = sibEl ? quadrantPanelId(sibEl) : null;
+      const sibAxes = sibEl ? gateAxisNames(sibEl) : null;
+      if (q === null || !sibAxes || sibAxes[0] !== axes[0] || sibAxes[1] !== axes[1]) continue;
+      if (panels.has(q)) duplicate = true;
+      panels.set(q, sibEl!);
+    }
+    const ordered = [0, 1, 2, 3].map((q) => panels.get(q));
+    // A spider GateLab wrote carries GateLab's record on each panel (polygonRecord.ts): the panel in
+    // the gate's own space, as GateLab held it, which the file's vertices may only trace. Read from
+    // the records when all four agree on that space, so the gate comes back as it was.
+    const records = ordered.map((p) => (p ? gateLabPolygonRecord(p) : null));
+    const sameSpace = records.every((rec) => rec && rec.space === records[0]!.space
+      && JSON.stringify(rec.transforms ?? null) === JSON.stringify(records[0]!.transforms ?? null));
+    const fromRecords = !duplicate && sameSpace ? spiderFromPanels(records.map((rec) => rec!.vertices)) : null;
+    if (fromRecords) {
+      const { center, down, right, up, left } = fromRecords;
+      if (validArms(center, { down, right, up, left })) {
+        const rec = records[0]!;
+        group = { el, spider: fromRecords, gateId: null, failed: false, record: { ...rec, vertices: [center, down, right, up, left], written: [] } };
+      }
+    }
+    const spider = duplicate || group ? null : spiderFromPanels(ordered.map((p) => (p ? polygonVertexValues(p) : undefined)));
+    // The axes the panels' own population declares, where it declares them (FlowJo 11).
+    const ownSpecs = axesOfPopulation(pop).transformSpecs;
+    const specFor = (ch: string): TransformSpec | undefined =>
+      ownSpecs.get(ch) ?? ownSpecs.get(ch.replace(/^Comp-/, ""));
+    const sx = specFor(axes[0]);
+    const sy = specFor(axes[1]);
+    if (spider && sx && sy && !isTimeAxis(axes[0]) && !isTimeAxis(axes[1])) {
+      const fx = transformFromSpec(sx).forward;
+      const fy = transformFromSpec(sy).forward;
+      const shown = (v: Vertex): Vertex => [fx(v[0]), fy(v[1])];
+      const arms = { down: shown(spider.down), right: shown(spider.right), up: shown(spider.up), left: shown(spider.left) };
+      if (validArms(shown(spider.center), arms)) group = { el, spider, gateId: null, failed: false, record: null };
+    }
+    byAxes.set(key, group);
+    return group;
+  };
+  const visitSpiderPanel = (pop: Element, name: string, depth: number, group: SpiderGroup, panel: number): boolean => {
+    if (group.failed) return false;
+    if (!group.gateId) {
+      const gateId = `wsp_spider_${++spiderSerial}`;
+      const poly = out.importNode(group.el, true) as Element;
+      for (const v of childrenByLocalName(poly, "vertex")) poly.removeChild(v);
+      poly.removeAttribute("quadId");
+      const { center, down, right, up, left } = group.spider;
+      for (const [x, y] of [center, down, right, up, left]) {
+        const vertex = out.createElementNS(GATING_NS, "gating:vertex");
+        for (const value of [x, y]) {
+          const coordinate = out.createElementNS(GATING_NS, "gating:coordinate");
+          coordinate.setAttributeNS(DATATYPE_NS, "data-type:value", String(value));
+          vertex.appendChild(coordinate);
+        }
+        poly.appendChild(vertex);
+      }
+      const axes = gateAxisNames(group.el) ?? ["", ""];
+      if (!emitGate(pop, poly, `${axes[0]} × ${axes[1]} spider quadrant`, depth, gateId, false, group.record)) {
+        group.failed = true;
+        return false;
+      }
+      writeSpiderMark(out, lastEmitted!);
+      sharedGates.set(gateId, { copy: lastEmitted!, name: `${axes[0]} × ${axes[1]} spider quadrant` });
+      group.gateId = gateId;
+    }
+    const id = `wsp_sq_${++spiderPopSerial}`;
+    const quadrant = QUADRANT_OF_FLOWJO_QUAD_ID[panel];
+    idOf.set(pop, id);
+    spiderRefOf.set(id, { gate: group.gateId, quadrant });
+    sharedGateOf.set(id, group.gateId);
+    spiderPops.push({ pop, name, gateId: group.gateId, quadrant });
     return true;
   };
 
@@ -3074,6 +3446,13 @@ export function flowJoWorkspaceToGatingML(
       if (copy?.parentNode === root) root.removeChild(copy);
       const id = idOf.get(child);
       if (id) lostWith.set(id, by);
+      // A quadrant population takes the gate its quadrants share with it.
+      const shared = id ? sharedGateOf.get(id) : undefined;
+      if (shared) {
+        const gate = sharedGates.get(shared);
+        if (gate?.copy.parentNode === root) root.removeChild(gate.copy);
+        lostWith.set(shared, by);
+      }
       n += 1 + dropSubtree(child, by);
     }
     return n;
@@ -3159,14 +3538,16 @@ export function flowJoWorkspaceToGatingML(
           why = `"${label}" combines with OR, which GateLab cannot represent`;
         } else {
           const gate = idOf.get(target);
+          const spider = gate ? spiderRefOf.get(gate) : undefined;
           if (gate?.startsWith("wsp_cq_")) why = `"${label}" is one quadrant of a curly quadrant, which an intersection cannot name yet`;
+          else if (spider) refs.push({ gate: spider.gate, include: true, quadrant: spider.quadrant });
           else if (gate) refs.push({ gate, include: true });
           else why = `"${label}" was itself skipped`;
         }
       }
       inProgress.delete(node);
       // The same gate reached through two nested intersections is one condition, not two.
-      const unique = [...new Map(refs.map((r) => [`${r.gate}|${r.include}`, r] as const)).values()];
+      const unique = [...new Map(refs.map((r) => [`${r.gate}|${r.include}|${r.quadrant ?? ""}`, r] as const)).values()];
       const res: Resolution = why ? { why } : { refs: unique };
       resolved.set(node, res);
       return res;
@@ -3243,14 +3624,14 @@ export function flowJoWorkspaceToGatingML(
       if (wentWith !== undefined) {
         sayKept(id,
           `"${name}" is the complement of "${label}", which ${wentWith === "" ? "was skipped" : `went with "${wentWith}" when that was skipped`}. ` +
-          `FlowJo excludes that population's gate alone, so the gate was imported as "${name}"'s own, and "${name}" was kept` +
-          (differs ? "; the copy of the gate FlowJo stored inside it differs from the current one, and was not used." : "."),
+          `The workspace excludes that population's gate alone, so the gate was imported as "${name}"'s own, and "${name}" was kept` +
+          (differs ? "; the copy of the gate the workspace stores inside it differs from the current one, and was not used." : "."),
         );
       } else if (differs) {
         sayKept(id,
           `"${name}" is the complement of "${label}", a gate in another of this sample's trees. The ` +
-          `copy of that gate FlowJo stored inside "${name}" differs from the current one; the ` +
-          "current gate was used, as FlowJo counts it, and the copy was not.",
+          `copy of that gate the workspace stores inside "${name}" differs from the current one; the ` +
+          "current gate was used, as the recorded counts use it, and the copy was not.",
         );
       }
       return { refs: [{ gate: id, include: false }], fallback: true };
@@ -3288,14 +3669,16 @@ export function flowJoWorkspaceToGatingML(
           const inner: Resolution = readable.has(target) ? resolveNot(target) : { why: "it was itself skipped" };
           if ("why" in inner) res = { why: `"${label}" cannot be resolved: ${inner.why}` };
           else if (inner.refs.length !== 1) res = { why: `"${label}" negates more than one gate, and the complement of that is a union GateLab cannot represent` };
-          else res = { refs: [{ gate: inner.refs[0].gate, include: !inner.refs[0].include }] };
+          else res = { refs: [{ ...inner.refs[0], include: !inner.refs[0].include }] };
         } else {
           const gate = idOf.get(target);
           // A population that was not imported -- beneath an OR, or a population whose gate cannot
           // be read -- is excluded by its gate alone, as a population in another tree is.
           const skipped = !gate && target.localName === "Population" ? skippedWith(target) : null;
+          const spider = gate ? spiderRefOf.get(gate) : undefined;
           res = gate?.startsWith("wsp_cq_")
             ? { why: `"${label}" is one quadrant of a curly quadrant, which a complement cannot name yet` }
+            : spider ? { refs: [{ gate: spider.gate, include: false, quadrant: spider.quadrant }] }
             : gate ? { refs: [{ gate, include: false }] }
               : skipped ? complementAcrossTrees(node, target, label, skipped === target ? "" : qualifiedNames.get(skipped) ?? skipped.getAttribute("name") ?? "")
                 : { why: `"${label}" was itself skipped` };
@@ -3313,7 +3696,7 @@ export function flowJoWorkspaceToGatingML(
           writeComplementMark(out, copyOf.get(node)!);
           sayKept(id,
             `"${name}" is the complement of a population that could not be read (${res.why}); ` +
-            "the copy of the gate FlowJo stored inside it was used instead, which can be stale " +
+            "the copy of the gate the workspace stores inside it was used instead, which can be stale " +
             "when the workspace tailors gates per sample.",
           );
           res = { refs: [{ gate: id, include: false }], fallback: true };
@@ -3366,7 +3749,7 @@ export function flowJoWorkspaceToGatingML(
     const nodeOfId = new Map([...idOf].map(([el, id]) => [id, el] as const));
     const labelOf = (id: string): string => {
       const el = nodeOfId.get(id);
-      return el ? qualifiedNames.get(el) ?? el.getAttribute("name") ?? id : id;
+      return el ? qualifiedNames.get(el) ?? el.getAttribute("name") ?? id : sharedGates.get(id)?.name ?? id;
     };
     /**
      * A gate that went, by id -> every NOT whose own gate it is now, emitted again, in document
@@ -3410,9 +3793,9 @@ export function flowJoWorkspaceToGatingML(
         const stored = embeddedOf.get(node);
         sayKept(d.id,
           `"${d.name}" is the complement of "${labelOf(ref.gate)}", which went with "${lostWith.get(ref.gate)}" when that ` +
-          `was skipped. FlowJo excludes that population's gate alone, so the gate was imported as "${d.name}"'s own, ` +
+          `was skipped. The workspace excludes that population's gate alone, so the gate was imported as "${d.name}"'s own, ` +
           `and "${d.name}" was kept` +
-          (stored && !sameGateGeometry(stored, el) ? `; the copy of the gate FlowJo stored inside it differs from the current one, and was not used.` : "."),
+          (stored && !sameGateGeometry(stored, el) ? `; the copy of the gate the workspace stores inside it differs from the current one, and was not used.` : "."),
         );
         return true;
       }
@@ -3468,9 +3851,9 @@ export function flowJoWorkspaceToGatingML(
     }
   }
 
-  // Curly-quadrant populations: one derived population per quadrant of the shared gate. One
-  // beneath a dropped intersection went with it.
-  for (const { pop, name, gateId, quadrant } of curlyPops) {
+  // Curly- and spider-quadrant populations: one derived population per quadrant of the shared
+  // gate. One beneath a dropped intersection went with it.
+  for (const { pop, name, gateId, quadrant } of [...curlyPops, ...spiderPops]) {
     if (beneathDropped(pop)) continue;
     const parentNode = containerOf(pop);
     derived.push({
@@ -3539,11 +3922,11 @@ export function flowJoWorkspaceToGatingML(
     const names = [...approximated.keys()];
     const shown = names.slice(0, 6).map((n) => `"${n}"`).join(", ");
     warnings.push(
-      `${names.length} of ${Object.keys(flowJoCounts).length} gate(s) are drawn on axes FlowJo ` +
+      `${names.length} of ${Object.keys(flowJoCounts).length} gate(s) are drawn on axes the workspace ` +
         `displays with ${kinds.join(" / ")}, which could not be carried onto the imported gate ` +
         "(the transform is one GateLab cannot hold, or its partner axis is not declared in the " +
         "workspace). They were imported as straight in RAW space, which is not the boundary " +
-        "FlowJo evaluates, so their event counts will differ from FlowJo's by more than binning alone: " +
+        "the recorded counts were made on, so their event counts will differ from the recorded counts by more than binning alone: " +
         shown + (names.length > 6 ? `, and ${names.length - 6} more.` : "."),
     );
   }
@@ -3561,7 +3944,7 @@ export function flowJoWorkspaceToGatingML(
   if (rootTrees > 1 && trees.length > 1) {
     warnings.push(
       `"${sampleName}" holds ${rootTrees} independent gating trees and all were imported ` +
-        `together, which merges strategies that FlowJo kept apart. ${mergedTreesAdvice}`,
+        `together, which merges strategies that the workspace keeps apart. ${mergedTreesAdvice}`,
     );
   }
 
@@ -3571,16 +3954,16 @@ export function flowJoWorkspaceToGatingML(
     const names = [...otherResolution.entries()];
     warnings.push(say(
       "{count} polygon(s) declare a gate resolution other than 256 and are put on a grid of that many channels; " +
-        "every FlowJo polygon measured declares 256, so no count at another resolution has been compared with " +
-        "FlowJo's: {list}",
+        "every workspace polygon measured declares 256, so no count at another resolution has been compared with " +
+        "a recorded count: {list}",
       { count: names.length, list: listed(names.map(([n, channels]) => say("\"{name}\" ({channels})", { name: n, channels }))) },
     ));
   }
   if (offGrid.size) {
     const names = [...offGrid.entries()];
     warnings.push(say(
-      "{count} polygon(s) are evaluated continuously rather than on FlowJo's grid, because FlowJo's rule for " +
-        "them is not established, so their counts can differ from FlowJo's by the events near their edges: {list}",
+      "{count} polygon(s) are evaluated continuously rather than on the recorded grid, because the grid rule for " +
+        "them is not established, so their counts can differ from the recorded counts by the events near their edges: {list}",
       { count: names.length, list: listed(names.map(([n, why]) => say("\"{name}\" {why}", { name: n, why }))) },
     ));
   }
@@ -3599,7 +3982,7 @@ export function flowJoWorkspaceToGatingML(
         `${trees.length === 1 ? "Its" : "Their"} gates are drawn on compensated parameters ` +
         `(${dims.slice(0, 3).join(", ")}${dims.length > 3 ? ", …" : ""}) of the workspace's matrix ` +
         `"${compensation.declined.name}", which GateLab does not apply: ${compensation.declined.why}. ` +
-        "Evaluated on the stored values, or with another matrix, they would not hold the events FlowJo's hold.",
+        "Evaluated on the stored values, or with another matrix, they would not hold the events the workspace counted in them.",
     );
   }
 
@@ -3616,6 +3999,20 @@ export function flowJoWorkspaceToGatingML(
   }
 
   markConverterDocument(out, { fcsCompensated: true });
+  if (drawnBiex.size) {
+    // Display state, where importGatingML reads GateLab's scales (restoreGatingMLScaleState).
+    const channels: Record<string, { biex: BiexParams }> = {};
+    for (const [channel, seen] of drawnBiex) {
+      const most = [...seen.values()].sort((a, b) => b.n - a.n)[0];
+      channels[channel] = { biex: most.params };
+    }
+    const info = out.documentElement.firstElementChild!;
+    const scales = out.createElementNS(DATATYPE_NS, "data-type:gatelabr_scales");
+    const definition = out.createElementNS(DATATYPE_NS, "data-type:definition");
+    definition.textContent = JSON.stringify({ channels });
+    scales.appendChild(definition);
+    info.appendChild(scales);
+  }
   return {
     gatingMl: new XMLSerializer().serializeToString(out),
     sampleName,

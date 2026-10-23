@@ -113,7 +113,7 @@ async function settle(ms = 30): Promise<void> {
 }
 
 const tabButton = (label: string) => [...host.querySelectorAll<HTMLButtonElement>('button[role="tab"]')].find((b) => b.textContent === label);
-const buttonWithText = (text: string) => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === text);
+const buttonWithText = (text: string) => [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")].find((b) => b.textContent?.trim() === text);
 
 async function openFiles(withImages: boolean): Promise<void> {
   const handles = [handleOf("D1.fcs", Uint8Array.from([70, 67, 83]))];
@@ -121,7 +121,7 @@ async function openFiles(withImages: boolean): Promise<void> {
   Object.defineProperty(window, "showOpenFilePicker", { configurable: true, value: vi.fn().mockResolvedValue(handles) });
   Object.defineProperty(window, "showSaveFilePicker", { configurable: true, value: vi.fn() });
   act(() => root.render(<App />));
-  await act(async () => { buttonWithText("+ Files…")!.click(); await new Promise((resolve) => setTimeout(resolve, 20)); });
+  await act(async () => { buttonWithText("Add files…")!.click(); await new Promise((resolve) => setTimeout(resolve, 20)); });
   for (let i = 0; i < 4; i++) await settle();
 }
 

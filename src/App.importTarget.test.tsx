@@ -96,14 +96,13 @@ async function settle(): Promise<void> {
 }
 
 const button = (label: string) =>
-  [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label)!;
-const summary = () => host.querySelector(".population-tree-hierarchy-count")?.textContent;
-const editTarget = () => host.querySelector<HTMLButtonElement>(".population-tree-edit-file")!.getAttribute("aria-pressed") === "true" ? "file" : "tree";
+  [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")].find((b) => b.textContent?.trim() === label)!;
+const summary = () => host.querySelector(".gl-sample-tree-summary")?.getAttribute("title") ?? undefined;
 const fileRow = (name: string) => [...host.querySelectorAll<HTMLElement>(".gl-sample-row")].find((row) => row.textContent?.includes(name))!;
 const popRows = () => [...host.querySelectorAll(".pop-row")].map((r) => r.textContent?.replace(/\s+/g, " ").slice(0, 30));
 
 async function importXml(doc = GATING_ML): Promise<void> {
-  const input = host.querySelector<HTMLInputElement>('input[accept=".xml,.wsp,.cef"]')!;
+  const input = host.querySelector<HTMLInputElement>('input[accept=".xml,.wsp,.flowjo,.cef"]')!;
   Object.defineProperty(input, "files", { configurable: true, value: [xmlFile(doc)] });
   await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
   await settle();
@@ -123,7 +122,7 @@ describe("importing a tree with several files loaded", () => {
     // Viewing a file leaves the tree live; the import lands on the tree.
     act(() => fileRow("D2.fcs").click());
     await settle();
-    expect(editTarget()).toBe("tree");
+    expect(host.querySelector(".population-tree-edit-target")).toBeNull();
 
     await importXml();
     expect(host.textContent).toContain("Which files should be gated with it?");
@@ -156,7 +155,9 @@ describe("importing a tree with several files loaded", () => {
     expect(host.textContent).toContain("as D2.fcs's tailoring");
     expect(summary()).toBe("2 files · 1 tailored");
     expect(fileRow("D2.fcs").querySelector(".gl-sample-tailored")?.textContent).toBe("1");
-    expect(editTarget()).toBe("file");
+    // The tree stays live; the viewed file's gate shows its tailoring, its switch on.
+    expect(host.querySelector<HTMLInputElement>(".gate-card .gate-tailor-switch input")?.checked).toBe(true);
+    expect(host.querySelector(".gate-card .gate-tailor-switch-label")?.textContent).toBe("this file");
     expect(popRows()).toHaveLength(2);
 
     // A different structure can only replace the tree, for every file; it never makes a second tree.

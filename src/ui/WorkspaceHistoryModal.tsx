@@ -4,6 +4,7 @@
 import { useState } from "react";
 import { CHECKPOINT_REASON_LABELS, checkpointAge, type WorkspaceCheckpoint } from "../engine/workspaceHistory";
 import { useI18n } from "./i18n";
+import { ModalEscape } from "./useModalEscape";
 
 export function WorkspaceHistoryModal({ checkpoints, loading, onRevert, onCancel }: {
   /** Newest first, as listWorkspaceCheckpoints returns them. */
@@ -19,6 +20,7 @@ export function WorkspaceHistoryModal({ checkpoints, loading, onRevert, onCancel
   const openedId = checkpoints.find((checkpoint) => checkpoint.reason === "after-workspace-open")?.id;
   return (
     <div className="gl-modal-backdrop">
+      <ModalEscape onClose={onCancel} />
       <div className="gl-modal gl-modal-history">
         <div className="gl-modal-title">{t("Revert workspace")}</div>
         <p className="gl-modal-note">

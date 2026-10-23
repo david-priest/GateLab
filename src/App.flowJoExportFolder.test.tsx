@@ -43,6 +43,7 @@ import { GateLabHostProvider } from "./host/HostContext";
 import { GATELAB_DATASET_CONTRACT_VERSION, type GateLabHostDatasetDescriptor } from "./host/datasetContract";
 import { GATELAB_HOST_CONTRACT_VERSION, type GateLabHostAdapter } from "./host/contracts";
 import { apfsFold, MemoryDirectoryHandle, MemoryFileHandle, memoryFile } from "./testDirectory";
+import { resetHandleWritesRefused } from "./saveFallback";
 
 let root: Root;
 let host: HTMLDivElement;
@@ -69,6 +70,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   uuid = 0;
+  resetHandleWritesRefused();
   for (const picker of ["showOpenFilePicker", "showSaveFilePicker", "showDirectoryPicker"]) {
     delete (window as unknown as Record<string, unknown>)[picker];
   }
@@ -180,7 +182,7 @@ async function settle(): Promise<void> {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
 }
 const button = (label: string, within: ParentNode = host) =>
-  [...within.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label);
+  [...within.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")].find((b) => b.textContent?.trim() === label);
 async function click(label: string, within: ParentNode = host): Promise<void> {
   const target = button(label, within);
   if (!target) throw new Error(`No button "${label}"`);
@@ -202,11 +204,7 @@ async function countsByName(names: readonly string[] = SOURCES.map((s) => s.name
     if (!name) throw new Error(`No known file in row ${row.textContent}`);
     await act(async () => { row.click(); });
     await settle();
-    const own = host.querySelector<HTMLButtonElement>(".population-tree-edit-file");
-    if (own && !own.disabled && own.getAttribute("aria-pressed") !== "true") {
-      await act(async () => { own.click(); });
-      await settle();
-    }
+    // The population tree counts the viewed file under the tree it is gated under, its own copy included.
     const r1 = [...host.querySelectorAll(".pop-row")].map((r) => r.textContent?.replace(/\s+/g, " ").trim()).find((t) => t?.startsWith("R1"));
     (out[name] ??= []).push(/R1\+(\d+)\(/.exec(r1 ?? "")?.[1] ?? "none");
   }
@@ -491,7 +489,7 @@ describe("a FlowJo folder export of files whose names APFS takes to be one", () 
 });
 
 describe("a FlowJo folder export that fails part way", () => {
-  it("says which file it stopped at and that the folder is incomplete, and leaves no workspace in it", async () => {
+  it("says which file it stopped at and that the folder is incomplete, leaves no workspace in it, and downloads the .zip instead", async () => {
     await openSources();
     const parent = new MemoryDirectoryHandle("Exports", [], "", {
       fail: (path, step) => path === `${STEM}/2/D1.fcs` && step === "write",
@@ -503,6 +501,30 @@ describe("a FlowJo folder export that fails part way", () => {
     );
     expect(text()).not.toContain(`Writing ${STEM}`);
     expect([...parent.files().keys()].some((path) => path.endsWith(".wsp"))).toBe(false);
+    // The same export, as the browser without folder access gets it.
+    expect(downloads.map((d) => d.name)).toEqual([`${STEM}.zip`]);
+    const entries = unzipSync(new Uint8Array(await downloads[0].blob.arrayBuffer()));
+    expect(entries[`${STEM}/2/D1.fcs`]).toEqual(SOURCES[1].bytes);
+    expect(dataSets(new TextDecoder().decode(entries[`${STEM}/${STEM}.wsp`]))).toEqual(FOLDER_URIS);
+    expect(text()).toContain(
+      `GateLab could not write the folder in Exports, so the export was downloaded instead. Saved ${STEM}.zip, stored uncompressed: ${STEM}.wsp and 3 FCS files`,
+    );
+  });
+
+  it("downloads the .zip without asking for a folder once the browser has refused a write", async () => {
+    await openSources();
+    const refused = handleOf("refused.gatelab", new Uint8Array(0));
+    refused.createWritable = async () => { throw new DOMException("not allowed", "NotAllowedError"); };
+    Object.defineProperty(window, "showSaveFilePicker", { configurable: true, value: vi.fn(async () => refused) });
+    await act(async () => { host.querySelector<HTMLButtonElement>(".gl-side-save")!.click(); });
+    for (let i = 0; i < 4; i++) await settle();
+    expect(downloads.map((d) => d.name)).toEqual(["refused.gatelab"]);
+
+    const directoryPicker = vi.fn(async () => new MemoryDirectoryHandle("Exports"));
+    Object.defineProperty(window, "showDirectoryPicker", { configurable: true, value: directoryPicker });
+    await exportFlowJo(true);
+    expect(directoryPicker).not.toHaveBeenCalled();
+    expect(downloads.map((d) => d.name)).toEqual(["refused.gatelab", `${STEM}.zip`]);
   });
 });
 
@@ -541,7 +563,7 @@ describe("a FlowJo folder export of files whose bytes GateLab does not hold", ()
       await new Promise((resolve) => setTimeout(resolve, 30));
     });
     // A gate on CD3, imported as Gating-ML.
-    const input = host.querySelector<HTMLInputElement>('input[accept=".xml,.wsp,.cef"]')!;
+    const input = host.querySelector<HTMLInputElement>('input[accept=".xml,.wsp,.flowjo,.cef"]')!;
     const gatingMl = `<?xml version="1.0" encoding="UTF-8"?>
 <gating:Gating-ML xmlns:gating="${G}" xmlns:data-type="${DT}">
   <gating:RectangleGate gating:id="R1" gating:name="R1">

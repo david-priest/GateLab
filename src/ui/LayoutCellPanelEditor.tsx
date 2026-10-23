@@ -5,6 +5,7 @@
 
 import type { CellPanelColumn, LayoutCellPanelRecipe } from "../engine/cellPanelBlock";
 import { useI18n } from "./i18n";
+import { ArrowDownIcon, ArrowUpIcon, CloseIcon } from "./icons";
 
 export interface LayoutCellPanelEditorProps {
   readonly recipe: LayoutCellPanelRecipe;
@@ -122,10 +123,10 @@ export function LayoutCellPanelEditor({ recipe, onChange }: LayoutCellPanelEdito
                 ))}
               </span>
             )}
-            <button type="button" className="gl-mini-btn" title={t("Move up")} aria-label={t("Move up")} disabled={index === 0} onClick={() => set({ columns: move(recipe.columns, index, -1) })}>↑</button>
-            <button type="button" className="gl-mini-btn" title={t("Move down")} aria-label={t("Move down")} disabled={index === recipe.columns.length - 1} onClick={() => set({ columns: move(recipe.columns, index, 1) })}>↓</button>
+            <button type="button" className="gl-mini-btn" title={t("Move up")} aria-label={t("Move up")} disabled={index === 0} onClick={() => set({ columns: move(recipe.columns, index, -1) })}><ArrowUpIcon size={12} /></button>
+            <button type="button" className="gl-mini-btn" title={t("Move down")} aria-label={t("Move down")} disabled={index === recipe.columns.length - 1} onClick={() => set({ columns: move(recipe.columns, index, 1) })}><ArrowDownIcon size={12} /></button>
             {column.kind === "merge" && (
-              <button type="button" className="gl-mini-btn" title={t("Remove")} aria-label={t("Remove")} onClick={() => set({ columns: recipe.columns.filter((_, i) => i !== index) })}>×</button>
+              <button type="button" className="gl-mini-btn" title={t("Remove")} aria-label={t("Remove")} onClick={() => set({ columns: recipe.columns.filter((_, i) => i !== index) })}><CloseIcon size={12} /></button>
             )}
           </li>
         ))}
@@ -161,9 +162,9 @@ export function LayoutCellPanelEditor({ recipe, onChange }: LayoutCellPanelEdito
               aria-label={t("Label of event {index}", { index: cell.event.toLocaleString() })}
               onChange={(event) => set({ cells: recipe.cells.map((c, i) => (i === index ? { ...c, label: event.target.value } : c)) })}
             />
-            <button type="button" className="gl-mini-btn" title={t("Move up")} aria-label={t("Move up")} disabled={index === 0} onClick={() => set({ cells: move(recipe.cells, index, -1) })}>↑</button>
-            <button type="button" className="gl-mini-btn" title={t("Move down")} aria-label={t("Move down")} disabled={index === recipe.cells.length - 1} onClick={() => set({ cells: move(recipe.cells, index, 1) })}>↓</button>
-            <button type="button" className="gl-mini-btn" title={t("Remove")} aria-label={t("Remove")} disabled={recipe.cells.length <= 1} onClick={() => set({ cells: recipe.cells.filter((_, i) => i !== index) })}>×</button>
+            <button type="button" className="gl-mini-btn" title={t("Move up")} aria-label={t("Move up")} disabled={index === 0} onClick={() => set({ cells: move(recipe.cells, index, -1) })}><ArrowUpIcon size={12} /></button>
+            <button type="button" className="gl-mini-btn" title={t("Move down")} aria-label={t("Move down")} disabled={index === recipe.cells.length - 1} onClick={() => set({ cells: move(recipe.cells, index, 1) })}><ArrowDownIcon size={12} /></button>
+            <button type="button" className="gl-mini-btn" title={t("Remove")} aria-label={t("Remove")} disabled={recipe.cells.length <= 1} onClick={() => set({ cells: recipe.cells.filter((_, i) => i !== index) })}><CloseIcon size={12} /></button>
           </li>
         ))}
       </ol>

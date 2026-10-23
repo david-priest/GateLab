@@ -297,10 +297,11 @@ describe("Gating-ML self round-trip", () => {
     assertExact([rawEllipse, dispEllipse]);
   });
 
-  it("quadrant gates are refused, not silently dropped", () => {
+  it("curved quadrant gates are refused, not silently dropped", () => {
     const q: Gate = {
       gate_id: uuid(), name: "Q", gate_type: "quadrant", x_channel: fx, y_channel: fy,
       center: [500, 500], color: "#888", label_offset: null,
+      curl: { power: 1.5, kx: 0.01, ky: 0.01 },
     } as unknown as Gate;
     const ws = workspaceFor([q]);
     expect(analyzeGatingMLQuadrantOmissions(ws.gates, ws.populations).gateIds).toContain(q.gate_id);

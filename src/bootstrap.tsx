@@ -9,10 +9,17 @@ import {
 import { installNumberInputSteppers } from "./ui/numberInputSteppers";
 import { I18nProvider } from "./ui/i18n";
 import { setHostWording } from "./ui/hostWording";
+import { createShinyProposalChannel, type HostProposalChannel } from "./proposals/hostProposals";
 import "./styles.css";
 
 export interface GateLabMountOptions {
   host?: GateLabHostAdapter;
+  /**
+   * Where the host's strategy proposals arrive (proposals/hostProposals.ts). An R/SCE host gets a
+   * channel on GateLabR's Shiny client by default, made here, before the plots' stand-in replaces
+   * window.Shiny; null for none.
+   */
+  proposals?: HostProposalChannel | null;
 }
 
 export interface MountedGateLab {
@@ -40,6 +47,8 @@ export function mountGateLab(
   // An SCE's samples are not files, and the app's text says so there; a GatingSet is named as
   // what it is where the text says SCE.
   setHostWording(host.kind === "r-sce" ? "samples" : "files", host.objectName);
+  const proposals = options.proposals !== undefined ? options.proposals
+    : host.kind === "r-sce" ? createShinyProposalChannel() : null;
   host.lifecycle?.mounted?.();
   const root = ReactDOM.createRoot(container);
   const removeNumberInputSteppers = installNumberInputSteppers();
@@ -50,7 +59,7 @@ export function mountGateLab(
   root.render(
     <GateLabHostProvider host={host}>
       <I18nProvider>
-        <App />
+        <App hostProposals={proposals} />
       </I18nProvider>
     </GateLabHostProvider>,
   );

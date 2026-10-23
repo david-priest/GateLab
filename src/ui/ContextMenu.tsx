@@ -3,7 +3,10 @@
 // click elsewhere, on Escape or on scrolling, so it never outlives what it was opened on.
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { MenuEntry } from "./MenuButton";
+import { MenuEntries, type MenuEntry } from "./MenuButton";
+
+/** Sent on the window when what a menu was opened on goes out of view, such as a tab switch: every open context menu closes. */
+export const DISMISS_MENUS_EVENT = "gatelab:dismiss-menus";
 
 export interface ContextMenuState {
   x: number;
@@ -26,7 +29,7 @@ export function ContextMenu({ menu, onClose }: { menu: ContextMenuState | null; 
     const left = Math.max(4, Math.min(menu.x, window.innerWidth - rect.width - 4));
     const top = Math.max(4, Math.min(menu.y, window.innerHeight - rect.height - 4));
     setPosition({ left, top });
-    root.current.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus();
+    root.current.querySelector<HTMLButtonElement>('[role^="menuitem"]:not(:disabled)')?.focus();
   }, [menu]);
   // Closed by a choice, a click elsewhere or Escape, the menu returns the keyboard to where it was,
   // so Escape, Delete and the arrows that follow reach the page the menu was opened on.
@@ -49,20 +52,28 @@ export function ContextMenu({ menu, onClose }: { menu: ContextMenuState | null; 
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
-    document.addEventListener("mousedown", onDown);
+    // In the capture phase, so a control that stops its own pointer events still closes the menu.
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("mousedown", onDown, true);
     document.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onClose, true);
     window.addEventListener("resize", onClose);
+    // The window losing focus, and a tab switch however it is made (DISMISS_MENUS_EVENT).
+    window.addEventListener("blur", onClose);
+    window.addEventListener(DISMISS_MENUS_EVENT, onClose);
     return () => {
-      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("mousedown", onDown, true);
       document.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", onClose, true);
       window.removeEventListener("resize", onClose);
+      window.removeEventListener("blur", onClose);
+      window.removeEventListener(DISMISS_MENUS_EVENT, onClose);
     };
   }, [menu, onClose]);
   if (!menu) return null;
   const moveFocus = (from: HTMLElement, step: 1 | -1) => {
-    const enabled = [...(root.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [])];
+    const enabled = [...(root.current?.querySelectorAll<HTMLButtonElement>('[role^="menuitem"]:not(:disabled)') ?? [])];
     const at = enabled.indexOf(from as HTMLButtonElement);
     enabled[(at + step + enabled.length) % enabled.length]?.focus();
   };
@@ -75,30 +86,14 @@ export function ContextMenu({ menu, onClose }: { menu: ContextMenuState | null; 
       style={{ left: position.left, top: position.top }}
       onContextMenu={(event) => event.preventDefault()}
     >
-      {menu.items.map((item, i) =>
-        item === "separator" ? (
-          <div key={`separator-${i}`} className="gl-menu-separator" role="separator" />
-        ) : (
-          <button
-            key={item.label}
-            type="button"
-            role="menuitem"
-            className={`gl-menu-item${item.className ? ` ${item.className}` : ""}`}
-            disabled={item.disabled}
-            title={item.title}
-            onClick={() => {
-              onClose();
-              item.onClick();
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "ArrowDown") { event.preventDefault(); moveFocus(event.currentTarget, 1); }
-              if (event.key === "ArrowUp") { event.preventDefault(); moveFocus(event.currentTarget, -1); }
-            }}
-          >
-            {item.label}
-          </button>
-        ),
-      )}
+      <MenuEntries
+        items={menu.items}
+        moveFocus={moveFocus}
+        onPick={(item) => {
+          onClose();
+          item.onClick();
+        }}
+      />
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { useState, type DragEvent } from "react";
+import { ArrowLeftIcon, ArrowRightIcon } from "./icons";
 import {
   DEFAULT_ILLUSTRATION_LAYOUT,
   ILLUSTRATION_DIMENSIONS,
@@ -117,13 +118,13 @@ export function IllustrationLayoutBuilder({ value, onChange }: Readonly<Props>) 
                       aria-label={t("Move {dimension} earlier", { dimension: dimensionLabel(dimension) })}
                       disabled={index === 0}
                       onClick={() => move(dimension, axis, index - 1)}
-                    >←</button>
+                    ><ArrowLeftIcon size={12} /></button>
                     <button
                       type="button"
                       aria-label={t("Move {dimension} later", { dimension: dimensionLabel(dimension) })}
                       disabled={index === layout[axis].length - 1}
                       onClick={() => move(dimension, axis, index + 1)}
-                    >→</button>
+                    ><ArrowRightIcon size={12} /></button>
                   </div>
                 </div>
               ))}

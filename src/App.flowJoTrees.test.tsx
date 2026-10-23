@@ -100,7 +100,7 @@ const dialog = () => host.querySelector<HTMLElement>('[aria-label="Open a FlowJo
 const treeSelect = () => dialog()!.querySelector<HTMLSelectElement>('select[aria-label="Tree to import"]');
 async function openWorkspace(wsp = WSP, fcs: string[] = ["D1.fcs"]): Promise<void> {
   act(() => root.render(<App />));
-  await feed('input[accept=".gatelab,.wsp,.cef"]', fileOf("strategy.wsp", wsp));
+  await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', fileOf("strategy.wsp", wsp));
   expect(dialog()).not.toBeNull();
   await feed('input[data-role="flowjo-workspace-fcs"]', fcs.map((name) => fileOf(name, Uint8Array.from([1]))));
 }
@@ -318,7 +318,7 @@ describe("opening a FlowJo workspace whose sample holds several trees", () => {
   it("asks which tree when the sample is picked by hand", async () => {
     act(() => root.render(<App />));
     await feed('input[type=file][accept=".fcs"][multiple]', fileOf("D2.fcs", Uint8Array.from([1])));
-    await feed('input[accept=".xml,.wsp,.cef"]', fileOf("strategy.wsp", WSP));
+    await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', fileOf("strategy.wsp", WSP));
     const picker = host.querySelector<HTMLElement>('[aria-label="Choose a FlowJo sample"]')!;
     await act(async () => { picker.querySelector<HTMLButtonElement>(".gl-wsp-row")!.click(); });
     await settle();
@@ -349,7 +349,7 @@ describe("opening a FlowJo workspace whose sample holds a small tree before its 
     expect(select.value).toBe("1");
     // Next to the sample it belongs to, before the grid option and its notes.
     const list = dialog()!.querySelector(".gl-wsp-list")!;
-    const grid = [...dialog()!.querySelectorAll("label")].find((l) => l.textContent?.includes("Evaluate gates as FlowJo does"))!;
+    const grid = [...dialog()!.querySelectorAll("label")].find((l) => l.textContent?.includes("Evaluate gates on the recorded grid"))!;
     expect(grid).toBeTruthy();
     expect(list.compareDocumentPosition(select) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(select.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -378,14 +378,15 @@ describe("opening a FlowJo workspace one hierarchy per file", () => {
     await openWorkspace(PER_FILE, ["D1.fcs", "D2.fcs", "D3.fcs"]);
     await importNow();
     expect(host.textContent).toMatch(/Imported one tree, "[^"]*", from D1\.fcs for 3 files: 2 follow it, 1 tailored\. D3\.fcs follows it without tailoring: its strategy could not be read\./);
-    expect(host.textContent).toContain("3 files · 1 tailored");
+    // The file list's count says how many files tailor; the line in full is its tooltip.
+    expect(host.querySelector(".gl-sample-tree-summary")?.getAttribute("title")).toBe("3 files · 1 tailored");
   });
 
   it("shows every file's notes under its name, and says what can be done about the merged trees", async () => {
     await openWorkspace(PER_FILE, ["D1.fcs", "D2.fcs", "D3.fcs"]);
     await importNow();
     const said = errorText();
-    expect(said).toContain('D1.fcs: "D1.fcs" holds 2 independent gating trees and all were imported together, which merges strategies that FlowJo kept apart. To import one of them alone, open the workspace again with "One hierarchy per file" cleared and choose that tree.');
+    expect(said).toContain('D1.fcs: "D1.fcs" holds 2 independent gating trees and all were imported together, which merges strategies that the workspace keeps apart. To import one of them alone, open the workspace again with "One hierarchy per file" cleared and choose that tree.');
     expect(said).toMatch(/D2\.fcs: "Unreadable" uses FancyGate, which this importer does not read yet; .* "D2\.fcs" holds 2 independent gating trees/);
     expect(said).toMatch(/D3\.fcs: its strategy could not be read, so it follows the imported tree without tailoring\. .*has no gates this importer can read/);
     // No choice exists under a per-file import, so the warning no longer asks for one.
@@ -400,6 +401,10 @@ describe("opening a FlowJo workspace one hierarchy per file", () => {
     expect(lines[0]).toMatch(/^⚠ D1\.fcs: /);
     expect(lines[1]).toMatch(/D2\.fcs: /);
     expect(lines[2]).toMatch(/D3\.fcs: its strategy could not be read/);
+    // In the header they are one chip that opens them, not a block that grows it.
+    const chip = host.querySelector<HTMLDetailsElement>(".gl-header details.gl-header-notes")!;
+    expect(chip.querySelector("summary")!.textContent).toBe("⚠ 3 import notes");
+    expect(chip.open).toBe(false);
   });
 });
 
@@ -418,7 +423,7 @@ describe("a workspace refused when it is opened", () => {
 
   it("says why, and clears the line that said it was being read", async () => {
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', fileOf("T7.wsp", FLOWJO_7));
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', fileOf("T7.wsp", FLOWJO_7));
     expect(dialog()).toBeNull();
     expect(errorText()).toContain("This workspace was saved by FlowJo 7.6.2");
     expect(host.textContent).not.toContain("reading workspace");
@@ -426,7 +431,7 @@ describe("a workspace refused when it is opened", () => {
 
   it("clears it for a file that is no workspace at all", async () => {
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', fileOf("empty.wsp", "<Workspace/>"));
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', fileOf("empty.wsp", "<Workspace/>"));
     expect(errorText()).toContain('"empty.wsp" is not a FlowJo workspace GateLab can read.');
     expect(host.textContent).not.toContain("reading workspace");
   });

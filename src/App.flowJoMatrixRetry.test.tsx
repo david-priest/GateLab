@@ -109,7 +109,7 @@ const treePicker = () => host.querySelector<HTMLElement>('[aria-label="Choose a 
 describe("choosing another tree after the chosen one failed", () => {
   it("asks which spillover matrix to use, since the open dialog could not compare them", async () => {
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", WSP)]);
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", WSP)]);
     await feed('input[data-role="flowjo-workspace-fcs"]', [fileOf("D1.fcs", Uint8Array.from([1]))]);
     // The first tree, the default, cannot be converted: the dialog has nothing to compare.
     expect(dialog()!.textContent).not.toContain("each carry a spillover matrix");

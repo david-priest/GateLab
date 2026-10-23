@@ -66,6 +66,8 @@ import { sanitizeFilePart } from "../engine/fcsExport";
 import { GATE_EDGE_MODES, type GateEdgeMode } from "./gateEdgeModes";
 import "./figure.css";
 import { NumberField } from "./NumberField";
+import { useGateInk } from "../plots/gateInk";
+import { highlightedPopIds } from "./gateSelection";
 
 interface Props {
   samples: readonly FigureSample[];
@@ -159,7 +161,7 @@ export function FigureWorkspace({
     change({ ...(configRef.current ?? config), inspectorWidth: value });
   };
   const inspectorDrag = useRef<{ x: number; w: number } | null>(null);
-  const [config, setConfig] = useState<IllustrationConfig>(() => {
+  const [storedConfig, setConfig] = useState<IllustrationConfig>(() => {
     const legacy = configRef.current,
       initial = samples.filter((s) => checkedSampleIds.includes(s.id));
     return {
@@ -178,6 +180,13 @@ export function FigureWorkspace({
       scaleFontsWithPlot: legacy?.scaleFontsWithPlot ?? false,
     };
   });
+  // The gates' look is the workspace's (gateInk.ts), set here or in any tab: the figure's own
+  // pubStyle, gateLineWidth and labelBackground are still saved but give way to it.
+  const ink = useGateInk();
+  const config = useMemo<IllustrationConfig>(
+    () => ({ ...storedConfig, pubStyle: !ink.coloured, gateLineWidth: ink.lineWidth, labelBackground: ink.labelBackground }),
+    [storedConfig, ink.coloured, ink.lineWidth, ink.labelBackground],
+  );
   const figure = config.figure!;
   const [section, setSection] = useState("data"),
     [search, setSearch] = useState(""),
@@ -672,8 +681,11 @@ export function FigureWorkspace({
   const listedPopulationOptions = populationOptions.filter(
     (ref) => applicableFiles(ref).length || figure.populations.some((p) => refKey(p) === refKey(ref)),
   );
-  /** The Gating tab's ticked populations, as figure references, where the list has them. */
-  const checkedPopulationOptions = state.selected_pop_ids
+  // The options are references into the tree the copies descend from, so with one tree they all
+  // name it; its name is shown only when the listed options come from more than one.
+  const optionsSpanTrees = new Set(listedPopulationOptions.map((ref) => ref.hierarchyId)).size > 1;
+  /** The Gating tab's highlighted populations, as figure references, where the list has them. */
+  const checkedPopulationOptions = highlightedPopIds(state)
     .map((popId) => refKey(canonicalPopulation({ hierarchyId: state.active_hierarchy_id, populationId: popId, label: "" }, trees)))
     .flatMap((key) => listedPopulationOptions.filter((ref) => refKey(ref) === key));
   const channels = [
@@ -855,7 +867,7 @@ export function FigureWorkspace({
         <button onClick={() => setSection("export")}>Export…</button>
       </header>
       <div className="gl-figure-body">
-        <aside className="gl-figure-inspector" aria-label="Figure inspector" style={{ width: inspectorWidth, flex: `0 0 ${inspectorWidth}px` }}>
+        <aside className="gl-figure-inspector" aria-label="Figure inspector" style={{ width: "var(--gl-left-pane-width, 290px)", flex: "0 0 var(--gl-left-pane-width, 290px)" }}>
           <nav role="tablist" aria-label="Figure settings">
             {["data", "plots", "arrange", "style", "export"].map((id) => (
               <button
@@ -1004,10 +1016,10 @@ export function FigureWorkspace({
               <div className="gl-figure-actions gl-figure-list-actions">
                 <button
                   disabled={!checkedPopulationOptions.length}
-                  title="The populations ticked on the Gating tab"
+                  title={t("The populations highlighted on the Gating tab")}
                   onClick={() => editFigure({ populations: checkedPopulationOptions })}
                 >
-                  Use checked populations
+                  {t("Use highlighted populations")}
                 </button>
                 <button onClick={() => editFigure({ populations: listedPopulationOptions })}>All</button>
                 <button onClick={() => editFigure({ populations: [] })}>None</button>
@@ -1053,7 +1065,7 @@ export function FigureWorkspace({
                         }
                       />
                       <span className="gl-figure-row-name">{ref.label}</span>
-                      {Object.keys(trees).length > 1 && (
+                      {optionsSpanTrees && (
                         <small className="gl-figure-row-meta">{trees[ref.hierarchyId]?.name}</small>
                       )}
                       {applicableFiles(ref).length < selectedSamples.length && (
@@ -1338,7 +1350,7 @@ export function FigureWorkspace({
                       <option value="">Repeat selected populations</option>
                       {populationOptions.map((ref) => (
                         <option key={refKey(ref)} value={refKey(ref)}>
-                          {ref.label} · {trees[ref.hierarchyId]?.name}
+                          {optionsSpanTrees ? `${ref.label} · ${trees[ref.hierarchyId]?.name}` : ref.label}
                         </option>
                       ))}
                     </select>
@@ -1902,13 +1914,14 @@ export function FigureWorkspace({
                   ))}
                 </select>
               </label>
-              <label>
+              <label title={t("The workspace's setting, the same as the Gating tab's Display: off draws every gate and its label in black")}>
                 <input
                   type="checkbox"
-                  checked={config.pubStyle}
-                  onChange={(e) => style({ pubStyle: e.target.checked })}
+                  className="gl-coloured-gates-mirror"
+                  checked={!config.pubStyle}
+                  onChange={(e) => ink.setColoured(e.target.checked)}
                 />
-                Plain gate labels
+                {t("Coloured gates")}
               </label>
               <label>
                 Line width
@@ -1917,7 +1930,7 @@ export function FigureWorkspace({
                   max={5}
                   step={0.25}
                   value={config.gateLineWidth}
-                  onCommit={(gateLineWidth) => style({ gateLineWidth })}
+                  onCommit={(gateLineWidth) => ink.setLineWidth(gateLineWidth)}
                 />
               </label>
               <label>
@@ -1937,7 +1950,7 @@ export function FigureWorkspace({
                     max={100}
                     step={5}
                     value={Math.round((config.labelBackground ?? 0.6) * 100)}
-                    onChange={(e) => style({ labelBackground: Number(e.target.value) / 100 })}
+                    onChange={(e) => ink.setLabelBackground(Number(e.target.value) / 100)}
                   />
                   {Math.round((config.labelBackground ?? 0.6) * 100)}%
                 </label>

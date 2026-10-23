@@ -16,7 +16,7 @@
 // which is also GateLab's. Scatter/CyTOF use the natural arcsinh value.
 
 import { generateBiexLut } from "./biex";
-import { transformFromSpec, type Sample } from "./sample";
+import { pinnedInDouble, transformFromSpec, type Sample } from "./sample";
 import { otherRectangleRule, rangeForReader } from "./gates";
 import { rectangleRule } from "./models";
 import {
@@ -35,6 +35,7 @@ import {
   type FlowJoGridMark, type FlowJoGridSpec,
 } from "./flowjoGrid";
 import { gatingMlGains } from "./gatingmlGain";
+import { isCurvedQuadrant, projectStraightQuadrants } from "./gatingmlQuadrants";
 
 const SINH1 = Math.sinh(1); // sinh(log10(e)·ln10) = sinh(1)
 const LOG10E = Math.log10(Math.E); // GatingML fasinh M
@@ -56,6 +57,9 @@ const LOG10E = Math.log10(Math.E); // GatingML fasinh M
 const CYTOBANK_FLOW_COFACTOR = 150;
 
 export type GatingMLFormat = "cytobank" | "standard";
+
+/** Capability declared to independent format validators; straight regions export as rectangles. */
+export const GATINGML_EXPORTS_STRAIGHT_QUADRANTS = true;
 
 /**
  * Root custom_info element that says how a GateLab file is to be read where Gating-ML alone
@@ -129,7 +133,7 @@ export interface GatingMLExportOpts {
   format?: GatingMLFormat;
   /** Timestamp for the export_timestamp field (injectable for deterministic tests). */
   timestamp?: string;
-  /** Explicit acknowledgement that quadrant gates and every dependent population branch are omitted. */
+  /** Explicit acknowledgement that curved quadrant gates and every dependent population branch are omitted. */
   allowQuadrantOmission?: boolean;
   /**
    * Filled, when given, with population id → the id of the BooleanGate written for it, so a
@@ -145,15 +149,19 @@ export interface GatingMLQuadrantOmissions {
   populationIds: string[];
 }
 
-/** Identify the full semantic branch that must be omitted with unsupported quadrant gates. */
+/** Identify the full semantic branch that must be omitted with curved quadrant gates. */
 export function analyzeGatingMLQuadrantOmissions(
   gates: Record<string, Gate>,
   populations: PopulationMap,
 ): GatingMLQuadrantOmissions {
   const gateIds = Object.values(gates)
-    .filter((gate) => gate.gate_type === "quadrant")
+    .filter(isCurvedQuadrant)
     .map((gate) => gate.gate_id);
-  const quadrantIds = new Set(gateIds);
+  return { gateIds, populationIds: branchesUsing(new Set(gateIds), populations) };
+}
+
+/** Every population that references one of these gates, with everything beneath it. */
+function branchesUsing(gateIds: ReadonlySet<string>, populations: PopulationMap): string[] {
   const populationIds = new Set<string>();
   const addBranch = (populationId: string): void => {
     if (populationIds.has(populationId)) return;
@@ -161,11 +169,11 @@ export function analyzeGatingMLQuadrantOmissions(
     for (const childId of populations[populationId]?.children ?? []) addBranch(childId);
   };
   for (const population of Object.values(populations)) {
-    if (population.gate_refs.some((ref) => quadrantIds.has(ref.gate_id))) {
+    if (population.gate_refs.some((ref) => gateIds.has(ref.gate_id))) {
       addBranch(population.population_id);
     }
   }
-  return { gateIds, populationIds: [...populationIds] };
+  return [...populationIds];
 }
 
 /**
@@ -475,7 +483,8 @@ export function ellipseDistanceFor(
  * A rectangle bound written in a space other than the gate's own, exact for GateLab's decision: the
  * written value from which on (a low bound) or up to which (a high bound) an event is inside the
  * stored edge `v` as GateLab decides it, which is on its value in the gate's own space held in
- * single precision (Sample.pinnedColumn). `back` maps the written space to the gate's own.
+ * single precision (Sample.pinnedColumn), or in double for a Hyperlog space, which `round` then
+ * leaves as it is. `back` maps the written space to the gate's own.
  * Converting the edge by the inverse transform alone lands a little to either side of it (a biex
  * table inverts 3,000 to a hair above 3,000), so an event on the edge's own value, which
  * integer-valued data puts there, fell outside on re-import and for FlowKit.
@@ -485,13 +494,14 @@ function exactBound(
   /** GateLab's own decision on a value in the gate's space, where it is not simply "≥ v" or "≤ v". */
   holds?: (gateValue: number) => boolean,
   openTop = false,
+  round: (gateValue: number) => number = Math.fround,
 ): number {
   if (!Number.isFinite(w)) return w;
   // For a low bound: the least u GateLab holds inside. For a high bound: the greatest.
   const inside = holds
-    ? (u: number) => holds(Math.fround(back(u)))
-    : (u: number) => (side === "lo" ? Math.fround(back(u)) >= v
-      : openTop ? Math.fround(back(u)) < v : Math.fround(back(u)) <= v);
+    ? (u: number) => holds(round(back(u)))
+    : (u: number) => (side === "lo" ? round(back(u)) >= v
+      : openTop ? round(back(u)) < v : round(back(u)) <= v);
   const toward = side === "lo" ? -1 : 1;   // the direction that leaves the gate
   let good = w;
   let bad = w;
@@ -527,6 +537,7 @@ type TrDef = (
   | { type: "fasinh"; T: number; M: number; A: number }
   | { type: "flog"; T: number; M: number }
   | { type: "logicle"; T: number; W: number; M: number; A: number }
+  | { type: "hyperlog"; T: number; W: number; M: number; A: number }
   | { type: "flin"; T: number; A: number }
 ) & {
   /** A gate's Gating-ML bounds (TransformSpec bounds), written back as the transformation's. */
@@ -630,6 +641,8 @@ function buildGateExportPlan(
   cytobankMode: boolean,
   /** Channel key → $PnG where the file's Gating-ML scale values are stored values / gain. */
   gains: ReadonlyMap<string, number> = new Map(),
+  /** Straight-quadrant projections use raw logicle bounds, retaining undefined events as NaN. */
+  quadrantRectangles: ReadonlySet<string> = new Set(),
 ): GateExportPlan {
   const trDefs = new Map<string, TrDef>();
   const byKey = new Map<string, GateAxisExport>();
@@ -849,7 +862,20 @@ function buildGateExportPlan(
       };
     }
 
-    // Logicle.
+    // A straight quadrant on a logicle or Hyperlog axis stays rectangular in raw space. FlowKit's
+    // logicle maps NaN to a numeric value, so declaring it on an open-ended region can admit an
+    // undefined event.
+    // The existing exactBound/tieBreak path places these raw edges under the same gate rule.
+    if (quadrantRectangles.has(gate.gate_id)) {
+      const { forward, inverse } = transformFromSpec(own);
+      return {
+        trId: null, cofactor: sample.arcsinhCofactor, convert: inverse, back: forward,
+        rawToExport: (v) => v,
+        ...(bounded ? { clamp: { lo: bounds.boundMin, hi: bounds.boundMax, toRaw: inverse, fromRaw: forward } } : {}),
+      };
+    }
+
+    // Logicle or Hyperlog. Cytobank has neither; its export re-expresses and densifies both.
     if (cytobankMode) {
       // Cytobank knows Linear (1), Log (2) and Arcsinh (4) only — there is no logicle to declare,
       // so the gate is re-expressed as arcsinh of the RAW value. This is the one lossy path in
@@ -877,8 +903,9 @@ function buildGateExportPlan(
     // slider keeps a display W in, not a property of the gate, so a gate with W = 0 was declared
     // with 0.1 and one with 2.2 with 2; and it keyed the transform by channel and W alone, so a
     // second gate with another T, M or A was declared with the first gate's.
-    const trId = declare(`Tr_Logicle_${channelKey.replace(/[^A-Za-z0-9]/g, "_")}_W${idNum(own.W)}${bounded ? "_bounded" : ""}`,
-      { type: "logicle", T: own.T, W: own.W, M: own.M, A: own.A, ...bounds });
+    const label = own.kind === "hyperlog" ? "Hyperlog" : "Logicle";
+    const trId = declare(`Tr_${label}_${channelKey.replace(/[^A-Za-z0-9]/g, "_")}_W${idNum(own.W)}${bounded ? "_bounded" : ""}`,
+      { type: own.kind, T: own.T, W: own.W, M: own.M, A: own.A, ...bounds });
     // Gating-ML 2.0's logicle maps T to 1, exactly as GateLab's own does, so the stored
     // coordinate is already the one the file declares. It was multiplied by M + A until 2026-09,
     // onto flowCore's logicleTransform scale, which put every vertex 4.5 times too high for a
@@ -943,7 +970,7 @@ function buildGateExportPlan(
       // A FlowJo log or biex axis on Time, whose events beyond a clamp are written in raw space:
       // not something FlowJo draws Time on, and not carried into seconds here.
       throw new Error(
-        `The gate "${gate.name}" holds Time on a FlowJo log or biex axis, which the standard format, ` +
+        `The gate "${gate.name}" holds Time on a workspace's log or biex axis, which the standard format, ` +
         "writing Time in seconds, cannot carry. The Cytobank-compatible format writes Time as stored.",
       );
     }
@@ -2688,14 +2715,17 @@ function definitionJson(
 ): string {
   const xs = gate.vertices.map((v) => v[0]);
   const ys = gate.vertices.map((v) => v[1]);
-  const mean = (a: number[]) => a.reduce((s, v) => s + v, 0) / a.length;
+  const mean = (a: number[], range: [number, number]) => a.length
+    ? a.reduce((s, v) => s + v, 0) / a.length : range[0] / 2 + range[1] / 2;
   // The label sits among the gate's own vertices, not out on a skirt (skirtRing), and a rectangle's
   // within the axis range on an unbounded side.
   const labelled = gate.vertices.filter((v) => Math.abs(v[0]) < SKIRT_FAR && Math.abs(v[1]) < SKIRT_FAR);
   const within = (b: { lo?: number; hi?: number }, range: [number, number]) =>
-    ((b.lo ?? range[0]) + (b.hi ?? range[1])) / 2;
-  const cx = rect ? within(rect.x, xRange) : mean(labelled.length ? labelled.map((v) => v[0]) : xs);
-  const cy = rect ? within(rect.y, yRange) : mean(labelled.length ? labelled.map((v) => v[1]) : ys);
+    ((b.lo !== undefined && !isUnbounded(b.lo) ? b.lo : range[0]) + (b.hi !== undefined && !isUnbounded(b.hi) ? b.hi : range[1])) / 2;
+  // An empty/all-side clamp projection may have only sentinel vertices on an axis. They carry
+  // membership, not a label position: averaging them can overflow even though each is finite.
+  const cx = rect ? within(rect.x, xRange) : mean(labelled.length ? labelled.map((v) => v[0]) : xs.filter((v) => !isUnbounded(v)), xRange);
+  const cy = rect ? within(rect.y, yRange) : mean(labelled.length ? labelled.map((v) => v[1]) : ys.filter((v) => !isUnbounded(v)), yRange);
   const sx = scaleJson(xTr, isFlow, xCofactor, xRange);
   const sy = scaleJson(yTr, isFlow, yCofactor, yRange);
   const header = `"scale":{"x":${sx},"y":${sy}},"positive":false,"negative":false,"locked":false,"label":[${fmtNum(cx)},${fmtNum(cy)}]`;
@@ -3048,7 +3078,7 @@ function transformXml(trId: string, tr: TrDef): string[] {
       ? `    <transforms:flog transforms:T="${fmtNum(tr.T)}" transforms:M="${fmtNum(tr.M)}" />`
       : tr.type === "flin"
       ? `    <transforms:flin transforms:T="${fmtNum(tr.T)}" transforms:A="${fmtNum(tr.A)}" />`
-      : `    <transforms:logicle transforms:T="${fmtNum(tr.T)}" transforms:W="${fmtNum(tr.W)}" transforms:M="${fmtNum(tr.M)}" transforms:A="${fmtNum(tr.A)}" />`;
+      : `    <transforms:${tr.type} transforms:T="${fmtNum(tr.T)}" transforms:W="${fmtNum(tr.W)}" transforms:M="${fmtNum(tr.M)}" transforms:A="${fmtNum(tr.A)}" />`;
   const bounds =
     (tr.boundMin !== undefined ? ` transforms:boundMin="${fmtNum(tr.boundMin)}"` : "") +
     (tr.boundMax !== undefined ? ` transforms:boundMax="${fmtNum(tr.boundMax)}"` : "");
@@ -3155,10 +3185,12 @@ function buildScalesJson(sample: Sample, globalScales: Record<string, [number, n
 
 // ── Main export ──────────────────────────────────────────────────────────────
 export function exportGatingML(opts: GatingMLExportOpts): string {
-  const { gates, gate_order, populations, root_population_id, sample } = opts;
+  const { root_population_id, sample } = opts;
+  if (!opts.gates || Object.keys(opts.gates).length === 0) throw new Error("No gates to export.");
+  const { gates, gate_order, populations } = projectStraightQuadrants(opts.gates, opts.gate_order, opts.populations);
+  const quadrantRectangles = new Set(gate_order.filter((id) => !opts.gates[id]));
   const format = opts.format ?? "cytobank";
   const cytobankMode = format === "cytobank";
-  if (!gates || Object.keys(gates).length === 0) throw new Error("No gates to export.");
   if (sample.compensationEnabled && !sample.embeddedCompensationEnabled) {
     throw new Error(
       "Gating-ML export for an uploaded or edited compensation profile is not available yet; " +
@@ -3169,7 +3201,7 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
   const quadrantOmissions = analyzeGatingMLQuadrantOmissions(gates, populations);
   if (quadrantOmissions.gateIds.length > 0 && !opts.allowQuadrantOmission) {
     throw new Error(
-      `This workspace contains ${quadrantOmissions.gateIds.length} unsupported quadrant gate(s) and ` +
+      `This workspace contains ${quadrantOmissions.gateIds.length} unsupported curved or spider quadrant gate(s) and ` +
       `${quadrantOmissions.populationIds.length} dependent population(s). ` +
       "Export again only after explicitly accepting their omission; the .gatelab workspace preserves them in full.",
     );
@@ -3192,7 +3224,7 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
   // (stored value / $PnG); the Cytobank format keeps stored values, as it always has, since
   // whether Cytobank divides by $PnG is not established (gatingmlGain.ts).
   const exportGains: ReadonlyMap<string, number> = cytobankMode ? new Map() : gatingMlGains(sample);
-  const exportPlan = buildGateExportPlan(sample, gates, gate_order, cytobankMode, exportGains);
+  const exportPlan = buildGateExportPlan(sample, gates, gate_order, cytobankMode, exportGains, quadrantRectangles);
   const trDefs = exportPlan.trDefs;
   const scalesJson = buildScalesJson(sample, opts.globalScales);
 
@@ -3287,17 +3319,17 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
    * at twice its values, and the check held a densified polygon to events where GateLab does not
    * read them: 2,496 vertices written where 371 hold the same events.
    */
-  const readBack = (axis: GateAxisExport, raw: ArrayLike<number>): Float32Array | null => {
+  const readBack = (axis: GateAxisExport, raw: ArrayLike<number>): Float32Array | Float64Array | null => {
     const def = axis.trId !== null ? trDefs.get(axis.trId) : undefined;
     if (!def) return null;
     const k = axis.readScale ?? 1;
-    const spec: TransformSpec | null = def.type === "logicle" ? { kind: "logicle", T: def.T / k, W: def.W, M: def.M, A: def.A }
+    const spec: TransformSpec | null = def.type === "logicle" || def.type === "hyperlog" ? { kind: def.type, T: def.T / k, W: def.W, M: def.M, A: def.A }
       : def.type === "flog" ? { kind: "flog", T: def.T / k, M: def.M, standard: true }
       : def.type === "fasinh" && def.A === 0 ? { kind: "asinh", cofactor: def.T / Math.sinh(def.M * Math.log(10)) / k }
       : null;
     if (!spec) return null;
     const f = transformFromSpec(spec).forward;
-    return Float32Array.from(raw, (v) => f(v));
+    return spec.kind === "hyperlog" ? Float64Array.from(raw, (v) => f(v)) : Float32Array.from(raw, (v) => f(v));
   };
   // Each gate's vertices are written in the space that gate declares, so the file describes the
   // gate GateLab actually applies rather than a transformed lookalike.
@@ -3596,7 +3628,7 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     return { ...g, vertices: skirted(vertices) };
   };
 
-  // Assign numeric ids / seq to non-quadrant gates (quadrant gates have no GatingML rep).
+  // Straight quadrants were projected above; curved quadrants remain explicitly unsupported.
   const gateToGmlId = new Map<string, string>();
   const gateNumericId = new Map<string, number>();
   const gateSeq = new Map<string, number>();
@@ -3611,6 +3643,25 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     gateToGmlId.set(gid, gateIdStr(numId, g.name));
     gateSeq.set(gid, i + 1);
   });
+
+  // A straight quadrant's region whose divider this format cannot write between the events on
+  // either side of it (they lie closer together than the written numbers can separate, or one
+  // lies at an infinite or undefined value the region cannot hold) is left out, with every
+  // population that uses it, as a curved quadrant is: only once the omission is accepted, and
+  // named in the warnings. Written anyway, it would move those events to another region.
+  const unwritableRegions = new Map<string, string>();
+  const leaveRegionOut = (gid: string, name: string): void => {
+    if (!opts.allowQuadrantOmission) {
+      throw new Error(
+        `The quadrant region "${name}" cannot be written in the ${cytobankMode ? "Cytobank-compatible" : "standard"} ` +
+        "format without moving events between regions: no boundary the file can state lies between the events " +
+        "either side of its divider. Export again only after explicitly accepting its omission; the .gatelab " +
+        "workspace preserves it in full.",
+      );
+    }
+    unwritableRegions.set(gid, name);
+    gateToGmlId.delete(gid);
+  };
 
   // The data range each channel occupies in the space its gates are written in, memoised by
   // (channel, transform) because a workspace can hold gates on one channel in different spaces.
@@ -3837,9 +3888,9 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     const baseY = exportPlan.axis(gid, g.y_channel);
     const openX = openAt(baseX, isRange ? [edgeLo, edgeHi] : edgeSpan(0));
     const openY = isRange ? openX : openAt(baseY, edgeSpan(1));
-    const xAxis = g.gate_type === "polygon" ? polygonAxis(baseX, span(0))
+    let xAxis = g.gate_type === "polygon" ? polygonAxis(baseX, span(0))
       : openX.lo || openX.hi ? clampedAxis(baseX) : baseX;
-    const yAxis = g.gate_type === "polygon" ? polygonAxis(baseY, span(1))
+    let yAxis = g.gate_type === "polygon" ? polygonAxis(baseY, span(1))
       : openY.lo || openY.hi ? clampedAxis(baseY) : baseY;
     /**
      * One bound of a rectangle in export space, or undefined for none: an edge at a clamp, an edge
@@ -3848,6 +3899,12 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
      * for Cytobank, is +Infinity) all hold every value beyond them. Those edges were written as 0.
      */
     // Each event's value in the gate's own space and as the file writes it, for tieBreak.
+    // The precision GateLab holds this gate's own values in on a channel (Sample.pinnedColumn):
+    // double for a Hyperlog space, single otherwise.
+    const ownRound = (channel: string): ((v: number) => number) => {
+      const spec = sample.gateSpace(g) === "raw" ? undefined : g.transforms?.[channel];
+      return spec && pinnedInDouble(spec) ? (v) => v : Math.fround;
+    };
     const eventsOn = (axis: GateAxisExport, channel: string) => {
       const idx = sample.index(channel);
       const own = gOrig.gate_type === "rectangle" ? sample.gatingDataFor(gOrig).column(channel) : undefined;
@@ -3867,7 +3924,7 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
       }
       const top = side === "hi" && openTop;
       const w0 = axis.convert(v);
-      const w1 = axis.back ? exactBound(w0, edge, axis.back, side, undefined, top) : w0;
+      const w1 = axis.back ? exactBound(w0, edge, axis.back, side, undefined, top, ownRound(channel)) : w0;
       const ev = Number.isFinite(w1) && !isUnbounded(w1) ? eventsOn(axis, channel) : null;
       const w = ev ? tieBreak(w1, side, ev.own, edge, ev.written, axis.trId !== null, 0, top, ev.slack) : w1;
       if (Number.isFinite(w) && !isUnbounded(w)) return w;
@@ -3903,11 +3960,117 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
         const b = rect[k];
         if (b.lo !== undefined && b.hi !== undefined && b.lo > b.hi) rect[k] = unplaced[k];
       }
+      if (quadrantRectangles.has(gid)) {
+        // A projected half-open region wholly outside a clamped display axis is empty. Its
+        // inverse bound is the table endpoint, which would wrongly admit the raw tail beyond it.
+        const empty = (axis: GateAxisExport, [lo, hi]: number[]) =>
+          axis.clamp?.lo !== undefined && hi <= axis.clamp.lo || axis.clamp?.hi !== undefined && lo > axis.clamp.hi;
+        if (empty(baseX, edgeSpan(0))) rect.x = { lo: -UNBOUNDED, hi: -UNBOUNDED };
+        if (empty(baseY, edgeSpan(1))) rect.y = { lo: -UNBOUNDED, hi: -UNBOUNDED };
+      }
     }
-    const finiteOf = (b: { lo?: number; hi?: number }) => [b.lo, b.hi].filter((v): v is number => v !== undefined);
-    const dg = rect
+    // A standard reader (min inclusive, max exclusive, in double precision) must decide every event
+    // of the file on each bound of a straight quadrant's region as GateLab decides it on the divider.
+    // Where tieBreak finds no bound that does, it keeps the one forEveryReader moved 1e-13 below the
+    // divider, and a reader puts an event between the two (one double below the divider) in no
+    // region: 160 events of a float64 fuzz, for FlowKit. The region is left out instead. GateLab's
+    // own re-import reads its record of the rectangle, not this bound.
+    if (rect && !cytobankMode && quadrantRectangles.has(gid)) {
+      const decides = (axis: GateAxisExport, channel: string, b: { lo?: number; hi?: number }, [lo, hi]: number[]): boolean => {
+        const events = eventsOn(axis, channel);
+        const bLo = b.lo !== undefined && !isUnbounded(b.lo) ? b.lo : undefined;
+        const bHi = b.hi !== undefined && !isUnbounded(b.hi) ? b.hi : undefined;
+        if (!events || (bLo === undefined && bHi === undefined)) return true;
+        for (let j = 0; j < events.own.length; j++) {
+          const own = events.own[j];
+          const written = events.written(j);
+          if (bLo !== undefined && (own >= lo) !== (written >= bLo)) return false;
+          if (bHi !== undefined && (own < hi) !== (written < bHi)) return false;
+        }
+        return true;
+      };
+      if (!decides(xAxis, g.x_channel, rect.x, edgeSpan(0)) || !decides(yAxis, g.y_channel, rect.y, edgeSpan(1))) {
+        leaveRegionOut(gid, g.name);
+        return;
+      }
+    }
+    // Cytobank's returned far-negative rectangles lose their upper edge, consistent with
+    // origin + width: -MAX_VALUE + (2 - -MAX_VALUE) becomes 0. Explicit vertices avoid that
+    // cancellation. Both regions use the same cut strictly between events on either side,
+    // since Cytobank's polygon predicate can exclude an event exactly on the divider.
+    const quadrantPolygon = rect && cytobankMode && quadrantRectangles.has(gid);
+    // The cut, or null where none separates the events on the two sides of the divider for every
+    // reader. GateLab reading the file back holds a declared transform's values in single
+    // precision, and FlowJo's log is written as flog one decade up, whose single-precision values
+    // are twice as coarse as GateLab's own column: events either side of the divider can share one,
+    // and no cut in flog separates them (1 or 2 of 5 dragged centres on lognormal float32 data).
+    const placeCut = (axis: GateAxisExport, channel: string, edges: number[], clamp?: GateAxisExport["clamp"]): number | null => {
+      const edge = edges.find((value) => !isUnbounded(value));
+      const events = eventsOn(axis, channel);
+      if (edge === undefined || !events) return null;
+      const below = rangeForReader(-UNBOUNDED, edge, "half-open", "closed")[1];
+      const initial = axis.convert(below);
+      const exact = axis.back ? exactBound(initial, edge, axis.back, "hi", undefined, true, ownRound(channel)) : initial;
+      // A divider at/below a transform's floor has no negative side; one above its ceiling has
+      // no positive side. Inverting the floor instead splits events piled on it (biex 0 maps to
+      // about -93.5, yet raw -700 also maps to 0). Keep the empty side at the unbounded sentinel,
+      // independent of this file's minimum or maximum, and still check every finite event below.
+      const outside = clamp?.lo !== undefined && edge <= clamp.lo ? -UNBOUNDED
+        : clamp?.hi !== undefined && edge > clamp.hi ? UNBOUNDED : undefined;
+      const cut = outside ?? tieBreak(exact, "hi", events.own, edge, events.written, axis.trId !== null, 0, true, events.slack);
+      if (!Number.isFinite(cut) || outside === undefined && isUnbounded(cut)) return null;
+      // tieBreak normally falls back to the original edge when no common placement exists.
+      // A quadrant promises disjoint regions, so refuse that fallback if it changes any event.
+      // An event GateLab puts on one side must have a finite written value: a finite polygon
+      // cannot hold an infinite one, and an undefined one (flog of a negative value written in
+      // raw values) lies on one side of every cut, where GateLab puts it in no quadrant.
+      for (let j = 0; j < events.own.length; j++) {
+        const own = events.own[j], written = events.written(j);
+        if (Number.isNaN(own) && Number.isNaN(written)) continue;
+        if (Number.isNaN(own) || !Number.isFinite(written) || isUnbounded(written)) return null;
+        const slack = events.slack?.(j) ?? 0;
+        const back = axis.trId === null ? written : Math.fround(written);
+        const left = own < edge;
+        if (!(left ? written + slack < cut && back < cut : written - slack > cut && back > cut)) return null;
+      }
+      return cut;
+    };
+    // A cut in the declared transform's values where one separates the events, and otherwise one in
+    // raw values, as the side of a clamped axis that holds its floor already is: GateLab's column is
+    // a nondecreasing function of the raw value, so a raw cut separates the two sides wherever their
+    // raw values differ, and every reader, GateLab's re-import included, compares the raw value as
+    // written. A zero event on Gating-ML's flog (-Infinity) has a finite raw value too; a negative
+    // one, which flog leaves undefined and GateLab in no quadrant, refuses both.
+    const quadrantCut = (axis: GateAxisExport, channel: string, edges: number[], clamp?: GateAxisExport["clamp"]) => {
+      const cut = placeCut(axis, channel, edges, clamp);
+      if (cut !== null || axis.trId === null) return cut === null ? null : { axis, cut };
+      const raw: GateAxisExport = {
+        trId: null, cofactor: axis.cofactor, rawToExport: (v) => v,
+        convert: (v) => sample.gateToRaw(g, channel, v), back: (u) => sample.rawToGate(g, channel, u),
+      };
+      const rawCut = placeCut(raw, channel, edges, clamp);
+      return rawCut === null ? null : { axis: raw, cut: rawCut };
+    };
+    const finiteOf = (b: { lo?: number; hi?: number }) => [b.lo, b.hi].filter((v): v is number => v !== undefined && !isUnbounded(v));
+    let dg = rect
       ? { ...(g as PolyRectGate), vertices: [] as [number, number][] }
       : grid?.gate ?? displayGate(g as PolyRectGate, xAxis, yAxis, gOrig);
+    let quadrantSpans: { x: number[]; y: number[] } | null = null;
+    if (quadrantPolygon) {
+      const xCut = quadrantCut(xAxis, g.x_channel, edgeSpan(0), baseX.clamp);
+      const yCut = quadrantCut(yAxis, g.y_channel, edgeSpan(1), baseY.clamp);
+      if (!xCut || !yCut) {
+        leaveRegionOut(gid, g.name);
+        return;
+      }
+      xAxis = xCut.axis;
+      yAxis = yCut.axis;
+      const x = xCut.cut, y = yCut.cut;
+      const [x0, x1] = isUnbounded(edgeSpan(0)[0]) ? [-UNBOUNDED, x] : [x, UNBOUNDED];
+      const [y0, y1] = isUnbounded(edgeSpan(1)[0]) ? [-UNBOUNDED, y] : [y, UNBOUNDED];
+      dg = { ...dg, gate_type: "polygon", vertices: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]] };
+      quadrantSpans = { x: finiteOf({ lo: x }), y: finiteOf({ lo: y }) };
+    }
     if (dg.vertices.some((v) => !Number.isFinite(v[0]) || !Number.isFinite(v[1]))) {
       throw new Error(`The gate "${g.name}" has a vertex that cannot be written in this format.`);
     }
@@ -3924,8 +4087,9 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     // from a grid ring's outer edges, which stand for no bound at all (flowjoGrid.ts, the largest
     // float32): a scale stretched to them spanned about 1e38. Both lie beyond SKIRT_FAR.
     const inData = dg.vertices.filter((v) => Math.abs(v[0]) < SKIRT_FAR && Math.abs(v[1]) < SKIRT_FAR);
-    const exs = rect ? finiteOf(rect.x) : inData.map((v) => v[0]);
-    const eys = rect ? finiteOf(rect.y) : inData.map((v) => v[1]);
+    // A quadrant region's cut, which may be written in raw values where its rectangle's bound was not.
+    const exs = quadrantSpans?.x ?? (rect ? finiteOf(rect.x) : inData.map((v) => v[0]));
+    const eys = quadrantSpans?.y ?? (rect ? finiteOf(rect.y) : inData.map((v) => v[1]));
     const xRange = axisScaleRange(dataRangeFor(g.x_channel, xAxis), Math.min(...exs), Math.max(...exs));
     const yRange = axisScaleRange(dataRangeFor(g.y_channel, yAxis), Math.min(...eys), Math.max(...eys));
     // Cytobank's ids, read off its own exports: -2 = uncompensated, 0 = the file's internal
@@ -3939,7 +4103,7 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
       : !cytobankMode ? -2
       : sample.spilloverOrigin.kind === "fcs" ? 0
       : EXPORTED_MATRIX_ID;
-    if (rect) {
+    if (rect && !quadrantPolygon) {
       // A range: both axes on one channel, so the gate is the intersection of the two intervals,
       // written as one dimension. Both formats: the two-axis form names one parameter twice, which
       // FlowKit cannot gate at all. Whether Cytobank accepts a one-dimensional RectangleGate has
@@ -3973,6 +4137,18 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
   const popBoolGmlId = new Map<string, string>();
   let nextBoolId = 36000000;
   const omittedPopulationIds = new Set(quadrantOmissions.populationIds);
+  if (unwritableRegions.size) {
+    const left = branchesUsing(new Set(unwritableRegions.keys()), populations).filter((pid) => !omittedPopulationIds.has(pid));
+    for (const pid of left) omittedPopulationIds.add(pid);
+    const names = [...unwritableRegions.values()];
+    const one = names.length === 1;
+    opts.warnings?.push(
+      `The quadrant region${one ? "" : "s"} ${names.map((name) => `"${name}"`).join(", ")} ${one ? "was" : "were"} left out, ` +
+      `with the ${left.length} population${left.length === 1 ? " that uses" : "s that use"} ${one ? "it" : "them"} and everything beneath: ` +
+      "no boundary the file can state lies between the events either side of the divider (they lie closer together " +
+      `than its numbers can separate, or at an infinite or undefined value). The .gatelab workspace keeps ${one ? "it" : "them"}.`,
+    );
+  }
   if (cytobankMode) {
     // Beneath an OR population the Cytobank format's AND of the whole ancestry is not the
     // population, so it is left out with everything beneath it, by name (see

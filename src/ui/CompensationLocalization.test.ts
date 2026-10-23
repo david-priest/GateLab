@@ -9,6 +9,7 @@ const COMPENSATION_UI_FILES = [
   "ScrubbableNumberInput.tsx",
   "CompensationMatrixExportDialog.tsx",
   "CompensationComparisonExportDialog.tsx",
+  "CompensationMatrices.tsx",
 ] as const;
 
 function sourceFile(name: string): ts.SourceFile {

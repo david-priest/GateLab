@@ -9,10 +9,13 @@ import {
   pickFileSource,
   pickFiles,
   pickFilesOrInput,
+  READ_REFUSED_MESSAGE,
   readFromHandleIfPermitted,
+  resetHandleReadsRefused,
   resetPickerLocation,
   saveAsHandle,
   saveAsHandleStream,
+  supportsFileSystemAccess,
   writeHandleStream,
 } from "./fsAccess";
 
@@ -323,5 +326,43 @@ describe("every picker starts where the last one ended", () => {
     expect(await pickFilesOrInput(input, { "text/csv": [".csv"] }, "Table")).toEqual([file]);
     expect(click).toHaveBeenCalledTimes(1);
     expect(lastPickerLocation()).toBe(handle);
+  });
+});
+
+describe("a browser that hands over a file and refuses to read it", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetPickerLocation();
+    resetHandleReadsRefused();
+  });
+
+  const pickerReturning = (getFile: () => Promise<File>) => {
+    const handle = { getFile: vi.fn(getFile) } as unknown as FileSystemFileHandle;
+    Object.defineProperty(window, "showOpenFilePicker", { configurable: true, value: vi.fn().mockResolvedValue([handle]) });
+    Object.defineProperty(window, "showSaveFilePicker", { configurable: true, value: vi.fn() });
+  };
+
+  it("says to choose the file again, and from then on reports the picker unavailable", async () => {
+    pickerReturning(() => Promise.reject(new DOMException(
+      "The request is not allowed by the user agent or the platform in the current context.", "NotAllowedError")));
+    expect(supportsFileSystemAccess()).toBe(true);
+    await expect(pickFileSource(null, "GateLab workspace")).rejects.toThrow(READ_REFUSED_MESSAGE);
+    expect(supportsFileSystemAccess()).toBe(false);
+  });
+
+  it("never offers the file dialogs of the Claude app's browser pane, which refuses both reads and writes", () => {
+    pickerReturning(() => Promise.resolve(new File([], "x.gatelab")));
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Claude/2.42304.0 Chrome/152.0.7977.149 Safari/537.36");
+    expect(supportsFileSystemAccess()).toBe(false);
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.149 Safari/537.36");
+    expect(supportsFileSystemAccess()).toBe(true);
+  });
+
+  it("leaves the picker in use when a read fails for another reason", async () => {
+    pickerReturning(() => Promise.reject(new DOMException("The file was moved.", "NotFoundError")));
+    await expect(pickFiles({ "application/octet-stream": [".fcs"] }, "FCS files")).rejects.toThrow("The file was moved.");
+    expect(supportsFileSystemAccess()).toBe(true);
   });
 });

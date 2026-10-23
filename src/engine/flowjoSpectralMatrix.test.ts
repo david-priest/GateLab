@@ -299,7 +299,7 @@ describe("compensated FlowJo dimensions no matrix covers", () => {
     // No matrix anywhere in the workspace, and none in the file: Gating-ML's "FCS" would evaluate
     // the gate uncompensated, and FlowJo's Comp-FL1-A exists only under a matrix.
     expect(() => importTree(workspace(""), file())).toThrow(
-      /The gate "Double" was drawn in FlowJo on compensated values of FL1-A, FL2-A, and no spillover matrix that applies to this file covers them/,
+      /The gate "Double" was drawn on compensated values of FL1-A, FL2-A, and no spillover matrix that applies to this file covers them/,
     );
     // The same tree on a file carrying a matrix is compensated with it, as before.
     const own: SpilloverMatrix = { channels: ["FL1-A", "FL2-A"], matrix: [[1, 0.3], [0.2, 1]] };
@@ -336,6 +336,6 @@ describe("compensated FlowJo dimensions no matrix covers", () => {
       /\s*<gating:dimension gating:min="400" gating:max="900"><data-type:fcs-dimension data-type:name="Comp-FL2-A" \/><\/gating:dimension>/, "");
     expect(onFl1).not.toContain("Comp-FL2-A");
     expect(flowJoWorkspaceToGatingML(onFl1, 0, 0).spillover?.name).toBe("Spectral");
-    expect(() => importTree(onFl1, file())).toThrow(/The gate "Double" was drawn in FlowJo on compensated values of FL1-A, and no spillover matrix/);
+    expect(() => importTree(onFl1, file())).toThrow(/The gate "Double" was drawn on compensated values of FL1-A, and no spillover matrix/);
   });
 });

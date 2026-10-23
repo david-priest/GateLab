@@ -6,10 +6,11 @@
 // gate's membership fixed afterwards; without it the gate would follow the view, as FlowJo's do.
 
 import { useMemo, useState } from "react";
+import { ModalEscape } from "./useModalEscape";
 import type { NewGate } from "../plots/GatingPlot";
 import type { Sample } from "../engine/sample";
 import type { Action } from "../store";
-import { flowJoCurlForDisplay, type GateSpace, type PopulationMap, type Vertex } from "../engine/models";
+import { flowJoCurlForDisplay, UNBOUNDED, type GateSpace, type PopulationMap, type QuadrantArms, type Vertex } from "../engine/models";
 import {
   quadrantPopulationNames,
   rememberQuadrantNaming,
@@ -74,15 +75,57 @@ export function GateModals({
     // A curly quadrant bends in the space it is drawn in, so like an ellipse it is created in
     // DISPLAY space with the axes' transforms captured, whatever the new-gate space selector
     // says; a straight crosshair follows the selector as before. The bend starts as FlowJo's,
-    // carried into these axes' spans, and the arm handles take it from there.
+    // carried into these axes' spans, and the arm handles take it from there. A spider
+    // quadrant's arms are straight in the display they are drawn on, so it is created there too,
+    // its arms on their axes out to a box around every event until their handles lean them.
     const curlySpaceFields = gateSpace
       ? sample.newGateSpaceFields("display", pending.x_channel, pending.y_channel)
       : {};
-    const spanOf = (channel: string): number => {
+    const rangeOf = (channel: string): [number, number] | null => {
       const idx = sample.index(channel);
-      if (idx === undefined) return 1;
+      if (idx === undefined) return null;
       const [lo, hi] = sample.displayRange(idx);
-      return Number.isFinite(lo) && Number.isFinite(hi) && hi > lo ? hi - lo : 1;
+      return Number.isFinite(lo) && Number.isFinite(hi) && hi > lo ? [lo, hi] : null;
+    };
+    const spanOf = (channel: string): number => {
+      const r = rangeOf(channel);
+      return r ? r[1] - r[0] : 1;
+    };
+    /**
+     * Where a spider's box starts on one axis: past every event of this file (an event outside the
+     * box is in no quadrant) and at least as wide as the plotted range, which drops the tails.
+     */
+    const boxOf = (channel: string): [number, number] | null => {
+      const idx = sample.index(channel);
+      const r = rangeOf(channel);
+      if (idx === undefined || !r) return r;
+      let lo = r[0];
+      let hi = r[1];
+      for (const v of sample.displayColumn(idx)) {
+        if (!Number.isFinite(v)) continue;
+        if (v < lo) lo = v;
+        else if (v > hi) hi = v;
+      }
+      const pad = (hi - lo) * 0.01;
+      return [lo - pad, hi + pad];
+    };
+    /** Arms on their axes from a display-space centre, each end on the box's edge or beyond the centre. */
+    const axisArms = (fields: typeof curlySpaceFields, v: Vertex): QuadrantArms => {
+      const [xr, yr] = [boxOf(pending.x_channel), boxOf(pending.y_channel)];
+      const sx = spanOf(pending.x_channel);
+      const sy = spanOf(pending.y_channel);
+      const lo = (r: [number, number] | null, c: number, span: number) => Math.min(r ? r[0] : c - span, c - span / 2);
+      const hi = (r: [number, number] | null, c: number, span: number) => Math.max(r ? r[1] : c + span, c + span / 2);
+      const at = (dx: number, dy: number): [number, number] => [
+        sample.displayToGate(fields, pending.x_channel, dx),
+        sample.displayToGate(fields, pending.y_channel, dy),
+      ];
+      return {
+        down: at(v[0], lo(yr, v[1], sy)),
+        right: at(hi(xr, v[0], sx), v[1]),
+        up: at(v[0], hi(yr, v[1], sy)),
+        left: at(lo(xr, v[0], sx), v[1]),
+      };
     };
     // The population names take the marker alone where the channel has one, else the
     // detector: "CD4+ CD8-" rather than "CD4 (FITC-A)+ CD8 (PE-A)-".
@@ -100,8 +143,9 @@ export function GateModals({
         parentChoices={parentChoices}
         defaultParent={defaultParent}
         onCancel={onCancel}
-        onConfirm={(prefix, parentId, curly, naming) => {
-          const fields = curly ? curlySpaceFields : spaceFields;
+        onConfirm={(prefix, parentId, armStyle, naming) => {
+          const curly = armStyle === "curly";
+          const fields = armStyle !== "straight" ? curlySpaceFields : spaceFields;
           const v = pending.vertices[0];
           const c: Vertex = [
             sample.displayToGate(fields, pending.x_channel, v[0]),
@@ -122,6 +166,7 @@ export function GateModals({
             ...(curly
               ? { curl: flowJoCurlForDisplay(spanOf(pending.x_channel), spanOf(pending.y_channel)) }
               : {}),
+            ...(armStyle === "spider" ? { arms: axisArms(fields, v) } : {}),
           });
         }}
       />
@@ -200,9 +245,10 @@ interface ParentChoice {
   name: string;
 }
 
-function ModalShell({ title, children }: { title: string; children: React.ReactNode }) {
+function ModalShell({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   return (
     <div className="gl-modal-backdrop">
+      <ModalEscape onClose={onClose} />
       <div className="gl-modal">
         <div className="gl-modal-title">{title}</div>
         {children}
@@ -261,7 +307,7 @@ function GateModal({
   };
 
   return (
-    <ModalShell title={t("Name this gate")}>
+    <ModalShell title={t("Name this gate")} onClose={onCancel}>
       <label className="gl-modal-field">
         {t("Gate name:")}
         <input
@@ -293,7 +339,10 @@ function GateModal({
         </>
       )}
       <div className="gl-modal-note">
-        {pending.gate_type} · {pending.x_channel} / {pending.y_channel}
+        {/* A rectangle with one channel on both axes is a range, drawn on the histogram view. */}
+        {pending.gate_type === "rectangle" && pending.x_channel === pending.y_channel
+          ? `range · ${pending.x_channel}`
+          : `${pending.gate_type} · ${pending.x_channel} / ${pending.y_channel}`}
       </div>
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={onCancel}>
@@ -322,16 +371,17 @@ function QuadrantModal({
   parentChoices: ParentChoice[];
   defaultParent: string;
   onCancel: () => void;
-  onConfirm: (prefix: string, parentId: string, curly: boolean, naming: QuadrantNaming) => void;
+  onConfirm: (prefix: string, parentId: string, armStyle: "straight" | "curly" | "spider", naming: QuadrantNaming) => void;
 }) {
   const { t } = useI18n();
   const [prefix, setPrefix] = useState("");
   const [parentId, setParentId] = useState(defaultParent);
-  const [curly, setCurly] = useState(false);
+  const [armStyle, setArmStyle] = useState<"straight" | "curly" | "spider">("straight");
+  const curly = armStyle === "curly";
   // The scheme chosen last time holds until it is changed; each option reads as the names it gives.
   const [naming, setNaming] = useState<QuadrantNaming>(rememberedQuadrantNaming);
   return (
-    <ModalShell title={t("Create quadrant gate")}>
+    <ModalShell title={t("Create quadrant gate")} onClose={onCancel}>
       <div className="gl-modal-note">
         {t("Splits {x} × {y} into four quadrant populations at the crosshair.", { x: pending.x_channel, y: pending.y_channel })}
       </div>
@@ -352,20 +402,123 @@ function QuadrantModal({
       </label>
       <ParentSelect choices={parentChoices} value={parentId} onChange={setParentId} />
       <label className="gl-modal-check">
-        <input type="checkbox" checked={curly} onChange={(e) => setCurly(e.target.checked)} />
-        {t("Curly arms (FlowJo-style)")}
+        <input type="checkbox" checked={curly} onChange={(e) => setArmStyle(e.target.checked ? "curly" : "straight")} />
+        {t("Curly arms")}
       </label>
       {curly && (
         <div className="gl-modal-note">
           {t("Beyond the crosshair the dividers bend toward the upper right, following photon-counting spread; drag the handle at the end of either arm to set the bend.")}
         </div>
       )}
+      <label className="gl-modal-check">
+        <input type="checkbox" checked={armStyle === "spider"} onChange={(e) => setArmStyle(e.target.checked ? "spider" : "straight")} />
+        {t("Spider arms (each arm moves on its own)")}
+      </label>
+      {armStyle === "spider" && (
+        <div className="gl-modal-note">
+          {t("Four straight arms run from the centre to the edges of a box around the data. Drag an arm's end along its edge to lean it, or the centre to move it. Each quadrant lies between two neighbouring arms, inside the box.")}
+        </div>
+      )}
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={onCancel}>
           {t("Cancel")}
         </button>
-        <button className="gl-btn" onClick={() => onConfirm(prefix, parentId, curly, naming)}>
+        <button className="gl-btn" onClick={() => onConfirm(prefix, parentId, armStyle, naming)}>
           {t("Create 4 populations")}
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+/**
+ * The dialog for a bisector placed on the histogram view: two range gates on one channel that
+ * meet at the split, [−∞, split) and [split, +∞). Both are half-open, so every event is in exactly
+ * one, and both are ordinary ranges (a rectangle with the channel on both axes), so they import,
+ * export and count as any other range. Nothing records that they belong together: on the
+ * histogram, ends that meet share a handle, which is what keeps them a bisector. They are added
+ * as one Undo step.
+ */
+export function BisectorModal({
+  channel,
+  split,
+  sample,
+  populations,
+  activePopId,
+  rootPopId,
+  gateSpace,
+  onCancel,
+  onConfirm,
+}: {
+  channel: string;
+  /** Where the two ranges meet, in display units. */
+  split: number;
+  sample: Sample;
+  populations: PopulationMap;
+  activePopId: string | null;
+  rootPopId: string;
+  gateSpace: GateSpace | null;
+  onCancel: () => void;
+  onConfirm: (a: Action) => void;
+}) {
+  const { t } = useI18n();
+  const idx = sample.index(channel);
+  const label = shortChannelLabel(idx === undefined ? undefined : sample.channels[idx], channel);
+  const [lowName, setLowName] = useState(`${label}-`);
+  const [highName, setHighName] = useState(`${label}+`);
+  const [createPops, setCreatePops] = useState(true);
+  const parentChoices = Object.keys(populations).map((id) => ({ id, name: populations[id].name }));
+  const [parentId, setParentId] = useState(activePopId && populations[activePopId] ? activePopId : rootPopId);
+
+  const confirm = () => {
+    const spaceFields = gateSpace ? sample.newGateSpaceFields(gateSpace, channel, channel) : {};
+    const s = sample.displayToGate(spaceFields, channel, split);
+    const range = (lo: number, hi: number): Vertex[] => [[lo, lo], [hi, lo], [hi, hi], [lo, hi]];
+    const gate = (name: string, vertices: Vertex[]): Extract<Action, { type: "addGate" }> => {
+      const popName = name.trim() || label;
+      return {
+        type: "addGate",
+        gateType: "rectangle",
+        xChannel: channel,
+        yChannel: channel,
+        vertices,
+        name: createPops ? appendSuffix(popName, "gate") : popName,
+        ...spaceFields,
+        bounds: "half-open",
+        createPop: createPops ? { name: popName, parentId } : undefined,
+      };
+    };
+    onConfirm({
+      type: "addGates",
+      gates: [gate(lowName, range(-UNBOUNDED, s)), gate(highName, range(s, UNBOUNDED))],
+    });
+  };
+
+  return (
+    <ModalShell title={t("Create bisector")} onClose={onCancel}>
+      <div className="gl-modal-note">
+        {t("Splits {channel} into two ranges at the line: everything below it, and everything from it up.", { channel: label })}
+      </div>
+      <label className="gl-modal-field">
+        {t("Lower range:")}
+        <input autoFocus aria-label={t("Lower range name")} value={lowName} onChange={(e) => setLowName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") confirm(); }} />
+      </label>
+      <label className="gl-modal-field">
+        {t("Upper range:")}
+        <input aria-label={t("Upper range name")} value={highName} onChange={(e) => setHighName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") confirm(); }} />
+      </label>
+      <label className="gl-modal-check">
+        <input type="checkbox" checked={createPops} onChange={(e) => setCreatePops(e.target.checked)} />
+        {t("Also create a population from each range")}
+      </label>
+      {createPops && <ParentSelect choices={parentChoices} value={parentId} onChange={setParentId} />}
+      <div className="gl-modal-note">{`bisector · ${channel}`}</div>
+      <div className="gl-modal-actions">
+        <button className="gl-btn-ghost" onClick={onCancel}>
+          {t("Cancel")}
+        </button>
+        <button className="gl-btn" onClick={confirm}>
+          {t("Create 2 ranges")}
         </button>
       </div>
     </ModalShell>

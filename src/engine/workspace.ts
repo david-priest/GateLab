@@ -7,7 +7,7 @@
 import { zipSync, unzipSync, strToU8, strFromU8 } from "fflate";
 import { isDerivedChannelRecord, type DerivedChannelRecord } from "./derivedChannels";
 import type { GateEdgeMode } from "../ui/gateEdgeModes";
-import { isRectangleBounds, validCurl, type Gate, type PopulationMap } from "./models";
+import { isRectangleBounds, validArms, validCurl, type Gate, type PopulationMap } from "./models";
 import type { DisplayMode, ExternalSpillover } from "./sample";
 import type { BiexParams } from "./biex";
 import type { TransformSpec } from "./models";
@@ -24,6 +24,7 @@ import type { IllustrationDimensionLayout } from "./illustrationLayout";
 import { isFigureSpec } from "./figureSchema";
 import { WORKSPACE_VERSION_2_WITH_FEATURES, assertKnownWorkspaceFeatures, stampWorkspaceV2 } from "./workspaceFeatures";
 import { parseFlowJoGridAxis, parseFlowJoGridSpec } from "./flowjoGrid";
+import { parseTransformSpec } from "./rectangleRecord";
 
 export const WORKSPACE_EXT = "gatelab";
 export const WORKSPACE_FORMAT = "gatelab-workspace";
@@ -98,6 +99,12 @@ export interface WorkspaceSample {
    * GateLab without the field shows the channel on its logicle, and no gate moves.
    */
   fluorBiex?: Record<string, BiexParams>;
+  /**
+   * For a channel in `fluorBiex` shown at parameters other than those its object, file or import
+   * recorded, the recorded ones, so that a reset after reopening returns to them. Written only for
+   * such channels; absent, the recorded axis is the one shown. Display only.
+   */
+  fluorBiexRecorded?: Record<string, BiexParams>;
   cytofCofactor?: number; // per-sample global CyTOF arcsinh cofactor
   compensationOn: boolean; // per-sample
   instrumentMode?: "auto" | "flow" | "cytof"; // per-sample instrument override ('auto' = detected)
@@ -425,9 +432,10 @@ function positiveNumericRecord(value: unknown): value is Record<string, number> 
 
 /** Each entry a transform spec: a known kind, every other field a finite number, a boolean or a small record. */
 function transformRecord(value: unknown): value is Record<string, TransformSpec> {
-  const kinds = new Set(["identity", "asinh", "logicle", "biex", "wsplog", "flog", "flowjoChannels"]);
+  const kinds = new Set(["identity", "asinh", "logicle", "hyperlog", "biex", "wsplog", "flog", "flowjoChannels"]);
   return isRecord(value) && Object.entries(value).every(([key, entry]) =>
-    key.length > 0 && isRecord(entry) && typeof entry.kind === "string" && kinds.has(entry.kind));
+    key.length > 0 && isRecord(entry) && typeof entry.kind === "string" && kinds.has(entry.kind)
+    && (entry.kind !== "hyperlog" || parseTransformSpec(entry) !== null));
 }
 
 /** Each entry a biexponential's five numbers, with an optional integer table resolution. */
@@ -648,6 +656,9 @@ export function validateWorkspace(ws: WorkspaceFile): true {
     if (sample.fluorBiex !== undefined && !biexRecord(sample.fluorBiex)) {
       invalidWorkspace(`sample ${i + 1} has an invalid biexponential channel list.`);
     }
+    if (sample.fluorBiexRecorded !== undefined && !biexRecord(sample.fluorBiexRecorded)) {
+      invalidWorkspace(`sample ${i + 1} has an invalid recorded biexponential list.`);
+    }
     if (sample.cytofCofactor !== undefined &&
         (typeof sample.cytofCofactor !== "number" || !Number.isFinite(sample.cytofCofactor) || sample.cytofCofactor <= 0)) {
       invalidWorkspace(`sample ${i + 1} has an invalid CyTOF cofactor.`);
@@ -761,27 +772,30 @@ export function validateWorkspace(ws: WorkspaceFile): true {
       // saved on (models.ts): read only by the FlowJo export, and refused whole when malformed.
       if (gate.flowjo_vertices !== undefined && (gate.gate_type !== "polygon" || !Array.isArray(gate.flowjo_vertices)
         || gate.flowjo_vertices.length !== gate.vertices.length || !gate.flowjo_vertices.every(finitePair))) {
-        invalidWorkspace(`${gate.gate_type} gate "${gateId}" has invalid FlowJo vertices.`);
+        invalidWorkspace(`${gate.gate_type} gate "${gateId}" has invalid vertices from a FlowJo workspace.`);
       }
       if (gate.flowjo_axes !== undefined && (gate.gate_type !== "rectangle" || !isRecord(gate.flowjo_axes)
         || !Object.values(gate.flowjo_axes).every((axis) => parseFlowJoGridAxis(axis) !== null))) {
-        invalidWorkspace(`${gate.gate_type} gate "${gateId}" has invalid FlowJo axes.`);
+        invalidWorkspace(`${gate.gate_type} gate "${gateId}" has invalid axes from a FlowJo workspace.`);
       }
       // The bounds FlowJo saved where its rule opened one: finite or null, per channel.
       const boundOrNull = (n: unknown): boolean => n === null || (typeof n === "number" && Number.isFinite(n));
       if (gate.flowjo_bounds !== undefined && (gate.gate_type !== "rectangle" || !isRecord(gate.flowjo_bounds)
         || !Object.values(gate.flowjo_bounds).every((b) => Array.isArray(b) && b.length === 2 && b.every(boundOrNull)))) {
-        invalidWorkspace(`${gate.gate_type} gate "${gateId}" has invalid FlowJo bounds.`);
+        invalidWorkspace(`${gate.gate_type} gate "${gateId}" has invalid bounds from a FlowJo workspace.`);
       }
       const fp = gate.flowjo_polygon as unknown;
       if (fp !== undefined && (gate.gate_type !== "polygon" || !isRecord(fp) || !Number.isInteger(fp.quadId)
         || !(fp.gateResolution === null || Number.isInteger(fp.gateResolution)))) {
-        invalidWorkspace(`${gate.gate_type} gate "${gateId}" has invalid FlowJo polygon attributes.`);
+        invalidWorkspace(`${gate.gate_type} gate "${gateId}" has invalid polygon attributes from a FlowJo workspace.`);
       }
     } else if (gate.gate_type === "quadrant") {
       if (!finitePair(gate.center)) invalidWorkspace(`quadrant gate "${gateId}" has an invalid center.`);
       if (gate.curl !== undefined && !validCurl(gate.curl)) {
         invalidWorkspace(`quadrant gate "${gateId}" has an invalid curl.`);
+      }
+      if (gate.arms !== undefined && (gate.curl !== undefined || !validArms(gate.center, gate.arms))) {
+        invalidWorkspace(`quadrant gate "${gateId}" has invalid arms.`);
       }
     } else if (gate.gate_type === "ellipse") {
       // An ellipse carries the Gating-ML form and no vertices at all: mean, a symmetric 2x2

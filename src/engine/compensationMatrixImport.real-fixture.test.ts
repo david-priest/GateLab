@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { basename } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   CompensationMatrixTableError,
@@ -13,24 +14,23 @@ import {
 } from "./cytofCompensationEngine";
 import { parseFcs } from "./fcs";
 import { Sample } from "./sample";
-import { ARIA_SPILLOVER_CSV } from "../testFixtures";
+import {
+  ARIA_SPILLOVER_CSV,
+  CYTOF_BEAD_FCS,
+  CYTOF_BEAD_MATRIX,
+  CYTOF_SPILL_MATRIX,
+  CYTOF_WORKSPACE,
+  CYTOF_WORKSPACE_FCS,
+  CYTOF_WORKSPACE_MATRIX,
+} from "../testFixtures";
 
-const cytofMatrixPath =
-  process.env.GATELAB_CYTOF_SPILL_MATRIX ??
-  "/Users/davidpriest/code/archive/snakemake-experiments/SLE_AIM_test_260325_snakemake/results/compensation/spillover_matrix_beads.csv";
+const cytofMatrixPath = process.env.GATELAB_CYTOF_SPILL_MATRIX ?? CYTOF_SPILL_MATRIX;
 const flowUnnamedRowsPath = process.env.GATELAB_FLOW_SPILL_MATRIX ?? ARIA_SPILLOVER_CSV;
-const wingLabMatrixPath =
-  process.env.GATELAB_WINGLAB_CYTOF_SPILL_MATRIX ??
-  "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/HyperIgM/260519 Second round of mass phenotyping/data/Compensation/WingLab_QQ_beads_sm_full.csv";
-const wingLabFcsPath =
-  process.env.GATELAB_WINGLAB_CYTOF_FCS ??
-  "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/HyperIgM/260519 Second round of mass phenotyping/data/Tube2 FCS/FCS/Tube2_concat_23.fcs";
-const portalWorkspacePath =
-  "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/Portal.bio/Experiments/Portal-2026-07-02-A test3-diffTF-ko/data/portalbio3_Processed.gatelab";
-const portalFcsPath =
-  "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/Portal.bio/Experiments/Portal-2026-07-02-A test3-diffTF-ko/data/portalbio3_Processed.fcs";
-const desktopWingLabMatrixPath =
-  "/Users/davidpriest/Desktop/WingLab_QQ_beads_sm_full.csv";
+const beadMatrixPath = process.env.GATELAB_CYTOF_BEAD_MATRIX ?? CYTOF_BEAD_MATRIX;
+const beadFcsPath = process.env.GATELAB_CYTOF_BEAD_FCS ?? CYTOF_BEAD_FCS;
+const workspacePath = CYTOF_WORKSPACE;
+const workspaceFcsPath = CYTOF_WORKSPACE_FCS;
+const workspaceMatrixPath = CYTOF_WORKSPACE_MATRIX;
 
 describe("local real compensation matrix import fixtures", () => {
   (existsSync(cytofMatrixPath) ? it : it.skip)(
@@ -90,16 +90,16 @@ describe("local real compensation matrix import fixtures", () => {
     },
   );
 
-  (existsSync(wingLabMatrixPath) && existsSync(wingLabFcsPath) ? it : it.skip)(
-    "matches and numerically solves the reviewed Wing Lab matrix against a real Tube 2 CyTOF FCS",
+  (existsSync(beadMatrixPath) && existsSync(beadFcsPath) ? it : it.skip)(
+    "matches and numerically solves a reviewed bead matrix against a real CyTOF FCS",
     () => {
-      const parsed = parseCompensationMatrixTable(readFileSync(wingLabMatrixPath, "utf8"));
+      const parsed = parseCompensationMatrixTable(readFileSync(beadMatrixPath, "utf8"));
       const validated = validateAndCanonicalizeCompensationMatrix(
         parsed.input,
         "cytof-spillover",
       );
       if (!validated.ok) throw new Error(validated.errors.map(({ message }) => message).join(" "));
-      const bytes = readFileSync(wingLabFcsPath);
+      const bytes = readFileSync(beadFcsPath);
       const fcs = parseFcs(
         bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
       );
@@ -136,21 +136,21 @@ describe("local real compensation matrix import fixtures", () => {
   );
 
   (
-    existsSync(portalWorkspacePath) &&
-      existsSync(portalFcsPath) &&
-      existsSync(desktopWingLabMatrixPath)
+    existsSync(workspacePath) &&
+      existsSync(workspaceFcsPath) &&
+      existsSync(workspaceMatrixPath)
       ? it
       : it.skip
   )(
-    "solves the Portal.bio test-3 workspace source with the reviewed Desktop spill matrix",
+    "solves a saved workspace's CyTOF source with a reviewed 50-source spill matrix",
     () => {
-      const workspace = JSON.parse(readFileSync(portalWorkspacePath, "utf8")) as {
+      const workspace = JSON.parse(readFileSync(workspacePath, "utf8")) as {
         samples?: Array<{ dataPath?: string }>;
       };
-      expect(workspace.samples?.[0]?.dataPath).toBe("data/0_portalbio3_Processed.fcs");
+      expect(workspace.samples?.[0]?.dataPath).toBe(`data/0_${basename(workspaceFcsPath)}`);
 
       const parsed = parseCompensationMatrixTable(
-        readFileSync(desktopWingLabMatrixPath, "utf8"),
+        readFileSync(workspaceMatrixPath, "utf8"),
       );
       const validated = validateAndCanonicalizeCompensationMatrix(
         parsed.input,
@@ -162,7 +162,7 @@ describe("local real compensation matrix import fixtures", () => {
       expect(validated.value.sourceChannels).toHaveLength(50);
       expect(validated.value.receiverChannels).toHaveLength(61);
 
-      const bytes = readFileSync(portalFcsPath);
+      const bytes = readFileSync(workspaceFcsPath);
       const sample = new Sample(parseFcs(
         bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
       ));

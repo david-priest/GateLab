@@ -45,6 +45,27 @@ const FILES: TailoredFile[] = [
 ];
 
 describe("a per-file import as one tree tailored per file", () => {
+  it("takes as the tree the coordinates most files share, not the viewed file's own version", () => {
+    // FlowJo keeps a gate's coordinates for the group and a version for each adjusted sample: D1
+    // was adjusted, D2 to D4 hold the group's. Viewed when importing, D1 led the tree, and the
+    // three files on the group's gate were each tailored back to it.
+    const files: TailoredFile[] = [
+      { fileId: "f1", fileName: "D1.fcs", tree: tree(7) },
+      { fileId: "f2", fileName: "D2.fcs", tree: tree(0) },
+      { fileId: "f3", fileName: "D3.fcs", tree: tree(0) },
+      { fileId: "f4", fileName: "D4.fcs", tree: tree(0) },
+    ];
+    const plan = planOneTreeImport(files, { templateId: "main", name: "Imported", leadFileId: "f1", existing: [] });
+    const cells = Object.values(plan.template.tree.gates).find((g) => g.name === "Cells")!;
+    expect((cells as unknown as { vertices: number[][] }).vertices[0]).toEqual([10, 10]);
+    expect(plan.following).toBe(3);
+    expect(plan.copies).toHaveLength(1);
+    expect(plan.assignments.f1).toBe(plan.copies[0].id);
+    // Where no file's coordinates are shared more than another's, the viewed file still leads.
+    const even = planOneTreeImport(files.slice(0, 2), { templateId: "main", name: "Imported", leadFileId: "f1", existing: [] });
+    expect((Object.values(even.template.tree.gates).find((g) => g.name === "Cells") as unknown as { vertices: number[][] }).vertices[0]).toEqual([17, 10]);
+  });
+
   it("takes the viewed file's strategy as the tree and keeps a copy only where coordinates differ", () => {
     const plan = planOneTreeImport(FILES, { templateId: "main", name: "Imported", leadFileId: "f1", existing: [{ id: "main", name: "Main" }] });
     expect(plan.template).toMatchObject({ id: "main", name: "Imported" });

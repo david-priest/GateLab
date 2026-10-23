@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useReducer } from "react";
 import { readFileSync } from "node:fs";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { coreReducer, initialCoreState, type Derived } from "../store";
+import { coreReducer, initialCoreState, type Action, type CoreState, type Derived } from "../store";
 import type { Gate, Population } from "../engine/models";
 import { PopulationTree, type TreeControlsProps } from "./PopulationTree";
 
@@ -180,6 +180,22 @@ describe("PopulationTree gate alignment", () => {
 
     act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} alignGates={false} />));
     expect(host.querySelector(".population-tree-rows")!.classList.contains("is-aligned")).toBe(false);
+  });
+
+  it("carries a short percentage and the full name for a narrow pane, which shows them in place of the long ones", () => {
+    const { state, derived } = makeInteractionFixture();
+    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} />));
+    const row = host.querySelector<HTMLElement>('.pop-row[data-pop-id="pop-b"]')!;
+    const long = row.querySelector(".pop-row-pct")!.textContent!;
+    expect(long).toMatch(/^\(60% pnt/);
+    const short = row.querySelector<HTMLElement>(".pop-row-pct-short")!;
+    expect(short.textContent).toBe("60%");
+    expect(short.title).toBe(long);
+    // A name truncated to one line is read whole in its tooltip.
+    const name = row.querySelector<HTMLElement>(".pop-row-name")!;
+    expect(name.title.split("\n")[0]).toBe(name.textContent);
+    // The root has no percentage, so no short one either.
+    expect(host.querySelector('.pop-row[data-pop-id="root"] .pop-row-pct-short')).toBeNull();
   });
 });
 
@@ -404,7 +420,8 @@ describe("PopulationTree direct editing", () => {
 
     const add = host.querySelector<HTMLButtonElement>('.pop-row[data-pop-id="pop-b"] .pop-tree-gate-add')!;
     expect(add.disabled).toBe(true);
-    expect(host.querySelector(".population-tree-hint")?.textContent).toContain("Editing this file only");
+    // How rows are edited is the Populations header's "?" hint now; a locked tree says why on the pill.
+    expect(gatePill.getAttribute("title")).toContain("This tree follows its group's template");
   });
 });
 
@@ -484,42 +501,83 @@ describe("highlighting several rows and moving them together", () => {
     };
   }
 
-  it("shift-click highlights the range from the active row, and a shorter range un-highlights", () => {
+  /**
+   * The tree on the store's own reducer, inside the container App gives it, so the highlight is
+   * selected_pop_ids as in the app. `spy` sees every action.
+   */
+  function Live({ initial, derived, spy }: { initial: CoreState; derived: Derived; spy: (action: Action) => void }) {
+    const [state, dispatch] = useReducer(coreReducer, initial);
+    return (
+      <div id="population_tree_container" tabIndex={0}>
+        <PopulationTree state={state} derived={{ ...derived, populations: state.populations }} dispatch={(action) => { spy(action); dispatch(action); }} />
+      </div>
+    );
+  }
+  function live(over: (state: CoreState) => void = () => undefined) {
     const { state, derived } = withCharlie();
-    const dispatch = vi.fn();
-    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={dispatch} />));
+    over(state);
+    const spy = vi.fn();
+    act(() => root.render(<Live initial={state} derived={derived} spy={spy} />));
+    return spy;
+  }
+  const highlightedRows = () => [...host.querySelectorAll<HTMLElement>(".pop-row.active, .pop-row.highlighted")].map((r) => r.dataset.popId);
+  const key = (key: string, mods: KeyboardEventInit = {}) => {
+    const container = host.querySelector<HTMLElement>("#population_tree_container")!;
+    act(() => { container.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...mods })); });
+  };
+
+  it("has no tick column: the highlight is the only selection", () => {
+    live();
+    expect(host.querySelector('.pop-row input[type="checkbox"]')).toBeNull();
+    expect(host.querySelector(".population-tree-check-actions")).toBeNull();
+  });
+
+  it("shift-click highlights the range from the active row, and a shorter range un-highlights", () => {
+    const spy = live();
     // Active is Zulu (first row); the range runs Zulu, Alpha, Charlie in display order.
     act(() => nameCol("pop-c").dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
     expect(rowClass("pop-b").contains("active")).toBe(true);
-    expect(rowClass("pop-a").contains("highlighted")).toBe(true);
-    expect(rowClass("pop-c").contains("highlighted")).toBe(true);
-    // The checkboxes are untouched and the active population does not move.
-    expect(dispatch).not.toHaveBeenCalled();
+    expect(highlightedRows()).toEqual(["pop-b", "pop-a", "pop-c"]);
+    expect(spy).toHaveBeenLastCalledWith({ type: "selectPopulations", activeId: "pop-b", popIds: ["pop-b", "pop-a", "pop-c"] });
     act(() => nameCol("pop-a").dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
-    expect(rowClass("pop-a").contains("highlighted")).toBe(true);
+    expect(highlightedRows()).toEqual(["pop-b", "pop-a"]);
     expect(rowClass("pop-c").contains("highlighted")).toBe(false);
   });
 
-  it("cmd-click adds or removes one row; a plain click collapses the highlight", () => {
-    const { state, derived } = withCharlie();
-    const dispatch = vi.fn();
-    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={dispatch} />));
+  it("cmd-click adds or removes one row; a plain click selects that row alone", () => {
+    const spy = live();
     act(() => nameCol("pop-c").dispatchEvent(new MouseEvent("click", { bubbles: true, metaKey: true })));
-    expect(rowClass("pop-c").contains("highlighted")).toBe(true);
-    expect(dispatch).not.toHaveBeenCalled();
+    expect(highlightedRows()).toEqual(["pop-b", "pop-c"]);
     act(() => nameCol("pop-c").dispatchEvent(new MouseEvent("click", { bubbles: true, metaKey: true })));
-    expect(rowClass("pop-c").contains("highlighted")).toBe(false);
+    expect(highlightedRows()).toEqual(["pop-b"]);
     // The active row cannot be removed from its own highlight.
     act(() => nameCol("pop-b").dispatchEvent(new MouseEvent("click", { bubbles: true, metaKey: true })));
-    expect(rowClass("pop-b").contains("active")).toBe(true);
+    expect(highlightedRows()).toEqual(["pop-b"]);
+    act(() => nameCol("pop-c").dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true })));
     act(() => nameCol("pop-a").dispatchEvent(new MouseEvent("click", { bubbles: true })));
-    expect(dispatch).toHaveBeenCalledWith({ type: "setActivePopulation", popId: "pop-a" });
+    expect(spy).toHaveBeenLastCalledWith({ type: "selectPopulations", activeId: "pop-a", popIds: [] });
+    expect(highlightedRows()).toEqual(["pop-a"]);
+  });
+
+  it("Cmd-A highlights every row; Escape and a click on empty space go back to the active row", () => {
+    live();
+    key("a", { metaKey: true });
+    expect(highlightedRows()).toEqual(["pop-b", "pop-a", "pop-c"]);
+    key("Escape");
+    expect(highlightedRows()).toEqual(["pop-b"]);
+    key("a", { ctrlKey: true });
+    expect(highlightedRows()).toHaveLength(3);
+    act(() => host.querySelector<HTMLElement>(".population-tree-rows")!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(highlightedRows()).toEqual(["pop-b"]);
+  });
+
+  it("opens a workspace's saved selection highlighted", () => {
+    live((state) => { state.selected_pop_ids = ["pop-a", "pop-c"]; });
+    expect(highlightedRows()).toEqual(["pop-b", "pop-a", "pop-c"]);
   });
 
   it("dragging a highlighted row moves every highlighted row, in display order", () => {
-    const { state, derived } = withCharlie();
-    const dispatch = vi.fn();
-    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={dispatch} />));
+    const spy = live();
     // Highlight Zulu (active) and Alpha, then drag Alpha onto Charlie.
     act(() => nameCol("pop-a").dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
     const source = host.querySelector<HTMLDivElement>('.pop-row[data-pop-id="pop-a"]')!;
@@ -531,7 +589,7 @@ describe("highlighting several rows and moving them together", () => {
     expect(source.classList.contains("dragging")).toBe(true);
     expect(target.classList.contains("drop-inside")).toBe(true);
     act(() => source.dispatchEvent(pointerEvent("pointerup", { clientX: 100, clientY: 15 })));
-    expect(dispatch).toHaveBeenCalledWith({
+    expect(spy).toHaveBeenCalledWith({
       type: "movePopulations",
       popIds: ["pop-b", "pop-a"],
       targetId: "pop-c",
@@ -544,9 +602,7 @@ describe("highlighting several rows and moving them together", () => {
     // and moved rows. A plain drag now moves rows, so the selection modifiers are reserved:
     // holding one and dragging must NOT reorder anything, or shift-clicking a range would
     // reorder the tree whenever the pointer drifted between press and release.
-    const { state, derived } = withCharlie();
-    const dispatch = vi.fn();
-    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={dispatch} />));
+    const spy = live();
     const source = host.querySelector<HTMLDivElement>('.pop-row[data-pop-id="pop-a"]')!;
     const target = host.querySelector<HTMLDivElement>('.pop-row[data-pop-id="pop-c"]')!;
     const pointerEvent = mockDrag(source, target);
@@ -559,19 +615,12 @@ describe("highlighting several rows and moving them together", () => {
       act(() => source.dispatchEvent(pointerEvent("pointerup", { clientX: 100, clientY: 15 })));
     }
 
-    expect(dispatch).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: "movePopulations" }),
-    );
-    expect(dispatch).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: "movePopulation" }),
-    );
+    expect(spy).not.toHaveBeenCalledWith(expect.objectContaining({ type: "movePopulations" }));
+    expect(spy).not.toHaveBeenCalledWith(expect.objectContaining({ type: "movePopulation" }));
   });
 
-  it("dragging a row outside the highlight moves that row alone, and checkboxes play no part", () => {
-    const { state, derived } = withCharlie();
-    state.selected_pop_ids = ["pop-b", "pop-c"];
-    const dispatch = vi.fn();
-    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={dispatch} />));
+  it("dragging a row outside the highlight moves that row alone", () => {
+    const spy = live((state) => { state.selected_pop_ids = ["pop-b", "pop-a"]; });
     const source = host.querySelector<HTMLDivElement>('.pop-row[data-pop-id="pop-c"]')!;
     const target = host.querySelector<HTMLDivElement>('.pop-row[data-pop-id="pop-a"]')!;
     const pointerEvent = mockDrag(source, target);
@@ -579,30 +628,11 @@ describe("highlighting several rows and moving them together", () => {
     act(() => source.dispatchEvent(pointerEvent("pointermove", { clientX: 100, clientY: 2 })));
     expect(rowClass("pop-b").contains("dragging")).toBe(false);
     act(() => source.dispatchEvent(pointerEvent("pointerup", { clientX: 100, clientY: 2 })));
-    expect(dispatch).toHaveBeenCalledWith({ type: "movePopulation", popId: "pop-c", targetId: "pop-a", placement: "before" });
-  });
-
-  it("All / None on the hint line check and uncheck every population", () => {
-    const { state, derived } = withCharlie();
-    const dispatch = vi.fn();
-    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={dispatch} />));
-    const buttons = Array.from(host.querySelectorAll<HTMLButtonElement>(".population-tree-check-actions button"));
-    expect(buttons.map((b) => b.textContent)).toEqual(["All", "None"]);
-    expect(buttons[1].disabled).toBe(true);
-    act(() => buttons[0].click());
-    expect(dispatch).toHaveBeenCalledWith({ type: "setPopSelection", popIds: ["pop-b", "pop-a", "pop-c"] });
-    state.selected_pop_ids = ["pop-a"];
-    act(() => root.render(<PopulationTree state={{ ...state }} derived={derived} dispatch={dispatch} />));
-    const none = Array.from(host.querySelectorAll<HTMLButtonElement>(".population-tree-check-actions button"))[1];
-    expect(none.disabled).toBe(false);
-    act(() => none.click());
-    expect(dispatch).toHaveBeenCalledWith({ type: "clearPopSelection" });
+    expect(spy).toHaveBeenCalledWith({ type: "movePopulation", popId: "pop-c", targetId: "pop-a", placement: "before" });
   });
 
   it("a drop onto one of the highlighted rows is refused", () => {
-    const { state, derived } = withCharlie();
-    const dispatch = vi.fn();
-    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={dispatch} />));
+    const spy = live();
     act(() => nameCol("pop-a").dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
     const source = host.querySelector<HTMLDivElement>('.pop-row[data-pop-id="pop-a"]')!;
     const target = host.querySelector<HTMLDivElement>('.pop-row[data-pop-id="pop-b"]')!;
@@ -611,8 +641,42 @@ describe("highlighting several rows and moving them together", () => {
     act(() => source.dispatchEvent(pointerEvent("pointermove", { clientX: 100, clientY: 15 })));
     expect(target.classList.contains("drop-invalid")).toBe(true);
     act(() => source.dispatchEvent(pointerEvent("pointerup", { clientX: 100, clientY: 15 })));
-    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "movePopulations" }));
-    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "movePopulation" }));
+    expect(spy).not.toHaveBeenCalledWith(expect.objectContaining({ type: "movePopulations" }));
+    expect(spy).not.toHaveBeenCalledWith(expect.objectContaining({ type: "movePopulation" }));
+  });
+
+  it("folds the active row's branch with ← and unfolds it with →, and Option-click folds the whole branch", () => {
+    live((state) => {
+      // Charlie under Alpha, Delta under Charlie: a branch two levels deep.
+      state.populations.root.children = ["pop-b", "pop-a"];
+      state.populations["pop-c"].parent_id = "pop-a";
+      state.populations["pop-a"].children = ["pop-c"];
+      state.populations["pop-d"] = { ...state.populations["pop-c"], population_id: "pop-d", name: "Delta", parent_id: "pop-c", children: [] };
+      state.populations["pop-c"].children = ["pop-d"];
+      state.active_population_id = "pop-a";
+    });
+    const rows = () => [...host.querySelectorAll<HTMLElement>(".pop-row")].map((r) => r.dataset.popId);
+    key("ArrowLeft");
+    expect(rows()).not.toContain("pop-c");
+    key("ArrowRight");
+    expect(rows()).toContain("pop-d");
+    const triangle = (id: string) => host.querySelector<HTMLButtonElement>(`.pop-row[data-pop-id="${id}"] button.pop-row-disclosure`)!;
+    act(() => triangle("pop-a").dispatchEvent(new MouseEvent("click", { bubbles: true, altKey: true })));
+    expect(rows()).not.toContain("pop-c");
+    // Unfolding Alpha alone shows Charlie still folded: Option folded every branch under it.
+    act(() => triangle("pop-a").click());
+    expect(rows()).toContain("pop-c");
+    expect(rows()).not.toContain("pop-d");
+    expect(triangle("pop-c").getAttribute("aria-expanded")).toBe("false");
+    act(() => triangle("pop-a").dispatchEvent(new MouseEvent("click", { bubbles: true, altKey: true })));
+    act(() => triangle("pop-a").dispatchEvent(new MouseEvent("click", { bubbles: true, altKey: true })));
+    expect(rows()).toContain("pop-d");
+  });
+
+  it("hides the triangles at rest and shows a folded branch's", () => {
+    expect(styles).toMatch(/\.pop-row \.pop-row-disclosure:not\(\.is-leaf\) \{ opacity: 0;/);
+    expect(styles).toMatch(/\.pop-row \.pop-row-disclosure\[aria-expanded="false"\]:not\(\.is-leaf\) \{ opacity: 1; \}/);
+    expect(styles).not.toMatch(/\.pop-row \{[^}]*border-bottom: 1px solid #e0e0e0/);
   });
 });
 
@@ -666,13 +730,11 @@ describe("authoring a NOT gate reference", () => {
 describe("the tree row", () => {
   const controls = (over: Partial<TreeControlsProps> = {}): TreeControlsProps => ({
     fileName: "D2.fcs",
-    editMode: "tree",
     groupName: null,
     groupFiles: 0,
     groupTailored: false,
     sourceLabel: "the tree",
     fileTailored: false,
-    onEditTarget: vi.fn(),
     onRename: vi.fn(),
     onSwitchTree: vi.fn(),
     onDeleteTree: vi.fn(),
@@ -701,7 +763,7 @@ describe("the tree row", () => {
     expect(host.querySelector(".population-tree-hierarchy-count")!.textContent).toBe("3 files · all following");
   });
 
-  it("offers to name every quadrant gate's populations, in tree mode only, when the tree has a quadrant gate", () => {
+  it("offers to name every quadrant gate's populations when the tree has a quadrant gate", () => {
     const { state, derived } = makeInteractionFixture();
     const onNameQuadrants = vi.fn();
     act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} perFile={controls({ onNameQuadrants })} />));
@@ -714,25 +776,20 @@ describe("the tree row", () => {
     act(() => item("population-tree-name-quadrants-signs")!.click());
     expect(onNameQuadrants).toHaveBeenCalledWith("signs");
 
-    act(() => root.render(<PopulationTree state={withQuadrant} derived={{ ...derived, populations: withQuadrant.populations }} dispatch={vi.fn()} perFile={controls({ onNameQuadrants, editMode: "file" })} />));
-    expect(item("population-tree-name-quadrants-dndp")!.disabled).toBe(true);
+    // The tree is always live, so naming is never blocked by where edits go.
+    expect(item("population-tree-name-quadrants-dndp")!.disabled).toBe(false);
   });
 
-  it("says where edits go, and switches the target through the app", () => {
+  it("is one row: the tree's name and menu and its summary, with no edit target and no status line", () => {
     const { state, derived } = makeInteractionFixture();
-    const perFile = controls();
-    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} perFile={perFile} />));
-    const tree = item("population-tree-edit-tree")!, file = item("population-tree-edit-file")!;
-    expect(tree.getAttribute("aria-pressed")).toBe("true");
-    expect(file.getAttribute("aria-pressed")).toBe("false");
-    expect(file.textContent).toBe("D2.fcs only");
-    act(() => file.click());
-    expect(perFile.onEditTarget).toHaveBeenCalledWith("file");
-    act(() => tree.click());
-    expect(perFile.onEditTarget).toHaveBeenCalledWith("tree");
-    // Nothing loaded: no file to edit alone.
-    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} perFile={controls({ fileName: null })} />));
-    expect(item("population-tree-edit-file")!.disabled).toBe(true);
+    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} perFile={controls()} />));
+    expect(host.querySelectorAll(".population-tree-hierarchy-row")).toHaveLength(1);
+    expect(host.querySelector(".population-tree-edit-target")).toBeNull();
+    expect(host.querySelector(".population-tree-revert-menu")).toBeNull();
+    expect(host.querySelector(".hierarchy-action-status")).toBeNull();
+    expect(host.textContent).not.toContain("Edits change");
+    // Revert lives in the tree's menu.
+    expect(item("population-tree-revert-all")).not.toBeNull();
   });
 
   it("on a tailored file: promote, and every way back, each through the app", () => {
@@ -741,15 +798,13 @@ describe("the tree row", () => {
       { id: "main", name: "Main" },
       { id: "h2", name: "D2.fcs · Main", owner_sample_id: "sample-1", structure_locked: true, source_hierarchy_id: "main" },
     ];
-    state.active_hierarchy_id = "h2";
-    const perFile = controls({ editMode: "file", fileTailored: true, tailoredFiles: 1, summary: "3 files · 1 tailored" });
+    const perFile = controls({ fileTailored: true, tailoredFiles: 1, summary: "3 files · 1 tailored", promoteFrom: "D2.fcs", promoteTo: "the tree" });
     act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} perFile={perFile} />));
     // The row names the tree, not the copy.
     expect(host.querySelector(".population-tree-name-menu")!.textContent).toContain("Main");
-    expect(item("population-tree-edit-file")!.getAttribute("aria-pressed")).toBe("true");
     expect(host.querySelector(".population-tree-hierarchy-count")!.textContent).toBe("3 files · 1 tailored");
     const promote = item("population-tree-promote")!;
-    expect(promote.textContent).toBe("Use for the tree…");
+    expect(promote.textContent).toBe("Use D2.fcs's gates for the tree…");
     act(() => promote.click());
     expect(perFile.onPromote).toHaveBeenCalledTimes(1);
     const revert = item("population-tree-revert-group")!;
@@ -765,36 +820,30 @@ describe("the tree row", () => {
     expect(perFile.onRevertAll).toHaveBeenCalledTimes(1);
   });
 
-  it("offers the file's group as an edit target, names it on Revert and Use for, and reverts the group", () => {
+  it("names the file's group on Revert and Use for, and reverts the group", () => {
     const { state, derived } = makeInteractionFixture();
     state.hierarchies = [
       { id: "main", name: "Main" },
       { id: "g1", name: "Treated", owner_group_id: "grp", structure_locked: true, source_hierarchy_id: "main" },
       { id: "h2", name: "D2.fcs · Treated", owner_sample_id: "sample-1", structure_locked: true, source_hierarchy_id: "g1" },
     ];
-    state.active_hierarchy_id = "g1";
-    const perFile = controls({ editMode: "group", groupName: "Treated", groupFiles: 4, groupTailored: true, sourceLabel: "Treated", onRevertGroup: vi.fn() });
+    const perFile = controls({ groupName: "Treated", groupFiles: 4, groupTailored: true, sourceLabel: "Treated", onRevertGroup: vi.fn(), promoteFrom: "Treated", promoteTo: "the tree" });
     act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} perFile={perFile} />));
-    // The row still names the tree; the group is the middle button.
+    // The row still names the tree.
     expect(host.querySelector(".population-tree-name-menu")!.textContent).toContain("Main");
-    const group = item("population-tree-edit-group")!;
-    expect(group.textContent).toBe("Treated · 4 files");
-    expect(group.getAttribute("aria-pressed")).toBe("true");
-    act(() => item("population-tree-edit-tree")!.click());
-    expect(perFile.onEditTarget).toHaveBeenCalledWith("tree");
-    // On the group: its promote goes to the tree, and the group can be reverted.
-    expect(item("population-tree-promote")!.textContent).toBe("Use for the tree…");
+    // The group tailors: its gates go to the tree, and the group can be reverted.
+    expect(item("population-tree-promote")!.textContent).toBe("Use Treated's gates for the tree…");
     const revertGroup = item("population-tree-revert-groupcopy")!;
     expect(revertGroup.textContent).toBe("Revert Treated to the tree");
     act(() => revertGroup.click());
     expect(perFile.onRevertGroup).toHaveBeenCalledTimes(1);
-    // On a file of the group: the file reverts to, and promotes to, the group.
-    act(() => root.render(<PopulationTree state={{ ...state, active_hierarchy_id: "h2" }} derived={derived} dispatch={vi.fn()} perFile={controls({ editMode: "file", fileTailored: true, groupName: "Treated", groupFiles: 4, sourceLabel: "Treated" })} />));
-    expect(item("population-tree-promote")!.textContent).toBe("Use for Treated…");
+    // A file of the group that tailors: it reverts to, and promotes to, the group.
+    act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} perFile={controls({ fileTailored: true, groupName: "Treated", groupFiles: 4, sourceLabel: "Treated", promoteFrom: "D2.fcs", promoteTo: "Treated" })} />));
+    expect(item("population-tree-promote")!.textContent).toBe("Use D2.fcs's gates for Treated…");
     expect(item("population-tree-revert-group")!.textContent).toBe("Revert D2.fcs to Treated");
-    // No group: no group button.
+    // No group: no group revert.
     act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} perFile={controls()} />));
-    expect(item("population-tree-edit-group")).toBeNull();
+    expect(item("population-tree-revert-groupcopy")).toBeNull();
   });
 
   it("offers no promote, and nothing to revert, while every file follows the tree", () => {
@@ -813,7 +862,7 @@ describe("the tree row", () => {
     const perFile = controls();
     act(() => root.render(<PopulationTree state={state} derived={derived} dispatch={vi.fn()} perFile={perFile} />));
     expect(host.querySelector(".population-tree-name-menu")!.textContent).toContain("Scheme A");
-    expect(host.querySelector(".population-tree-legacy-note")!.textContent).toBe("also here: Scheme B · switch or delete from the tree menu");
+    expect(host.querySelector(".population-tree-legacy-note")!.textContent).toBe("also here: Scheme B · switch or delete from the Populations ⋯ menu");
     expect(host.querySelector(".population-tree-hierarchy-count")!.textContent).toBe("3 files · all following");
     const sw = item("population-tree-switch")!;
     expect(sw.textContent).toBe("Switch to Scheme B");

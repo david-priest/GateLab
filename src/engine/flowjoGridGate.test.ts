@@ -588,7 +588,7 @@ describe("a FlowJo grid gate kept", () => {
     expect(back.flowjo_axes).toEqual(rect.flowjo_axes);
     expect(back.flowjo_bounds).toEqual({ "B-A": [-250.5, null] });
     const bad = { ...rect, flowjo_bounds: { "B-A": [-250.5, "open"] } };
-    expect(() => readWorkspaceBytes(new TextEncoder().encode(JSON.stringify(withBox(bad))))).toThrow(/invalid FlowJo bounds/);
+    expect(() => readWorkspaceBytes(new TextEncoder().encode(JSON.stringify(withBox(bad))))).toThrow(/invalid bounds from a FlowJo workspace/);
   });
 
   it("keeps a continuous FlowJo polygon's own quadId and gateResolution, and refuses malformed ones", () => {
@@ -602,7 +602,7 @@ describe("a FlowJo grid gate kept", () => {
     const back = readWorkspaceBytes(packWorkspaceReference(withPanel(panel))).ws.gating.gates.panel as PolyRectGate;
     expect(back.flowjo_polygon).toEqual({ quadId: 2, gateResolution: null });
     const bad = { ...panel, flowjo_polygon: { quadId: "2", gateResolution: null } };
-    expect(() => readWorkspaceBytes(new TextEncoder().encode(JSON.stringify(withPanel(bad))))).toThrow(/invalid FlowJo polygon attributes/);
+    expect(() => readWorkspaceBytes(new TextEncoder().encode(JSON.stringify(withPanel(bad))))).toThrow(/invalid polygon attributes from a FlowJo workspace/);
   });
 
   it("refuses a saved workspace whose grid cannot be built, rather than reading it as something else", () => {
@@ -647,9 +647,49 @@ describe("a FlowJo grid gate edited and shown", () => {
     const { gate, sample } = importedTree();
     const badge = gateSpaceBadge(sample, gate)!;
     expect(badge.text.slice(0, 2)).toBe("FF");
-    expect(badge.hint).toMatch(/FlowJo's grid/);
-    expect(badge.hint).toMatch(/FlowJo's 256-channel grid, linear 0\.000 to 2\.621e\+5/);
-    expect(badge.hint).toMatch(/biex .* on FlowJo's 4096-channel table/);
+    expect(badge.hint).toMatch(/^Workspace grid/);
+    expect(badge.hint).toMatch(/256-channel grid, linear 0\.000 to 2\.621e\+5/);
+    expect(badge.hint).toMatch(/biex .* on the 4096-channel biex table/);
+  });
+
+  it("stars the badge only when an axis is viewed through another transform, its count unchanged", () => {
+    const { tree, gate, sample } = importedTree();
+    const sy = gate.transforms!["B-A"] as FlowJoGridSpec;
+    if (sy.axis.kind !== "biex") throw new Error("expected a biex grid axis");
+    const { maxValue, pos, neg, widthBasis, channelRange } = sy.axis;
+    const fsc = sample.channels.findIndex((c) => c.key === "FSC-A");
+    const b = sample.channels.findIndex((c) => c.key === "B-A");
+    const count = (): number => maskOf(sample, tree).reduce((s, v) => s + v, 0);
+    // The events at the grid's cell corners that the polygon holds, as master counted them.
+    const expected = 33792;
+    const seen = (): { text: string; n: number } => ({ text: gateSpaceBadge(sample, gate)!.text, n: count() });
+
+    // As a .wsp import opens it: scatter linear, the fluorescence axis on its logicle, not the biex.
+    expect(sample.transformSpec("B-A").kind).toBe("logicle");
+    expect(seen()).toEqual({ text: "FF*", n: expected });
+
+    // Both axes on the space the grid was drawn on: linear scatter, the gate's own biex.
+    sample.applyFluorBiex({ "B-A": { maxValue, pos, neg, widthBasis, channelRange, tableChannels: 4096 } });
+    expect(sample.transformSpec("FSC-A").kind).toBe("identity");
+    expect(seen()).toEqual({ text: "FF", n: expected });
+    expect(gateSpaceBadge(sample, gate)!.hint).not.toMatch(/different transform/);
+
+    // The biex axis viewed on arcsinh.
+    sample.setFluorScale(b, "arcsinh");
+    expect(seen()).toEqual({ text: "FF*", n: expected });
+    expect(gateSpaceBadge(sample, gate)!.hint).toMatch(/viewing it through a different transform/);
+
+    // A biex with other parameters is another transform too.
+    sample.applyFluorBiex({ "B-A": { maxValue, pos, neg: neg + 1, widthBasis, channelRange, tableChannels: 4096 } });
+    expect(seen()).toEqual({ text: "FF*", n: expected });
+
+    // Back on the gate's biex, then the linear axis viewed on arcsinh.
+    sample.applyFluorBiex({ "B-A": { maxValue, pos, neg, widthBasis, channelRange, tableChannels: 4096 } });
+    expect(seen()).toEqual({ text: "FF", n: expected });
+    sample.setScatterScale(fsc, "arcsinh");
+    expect(seen()).toEqual({ text: "FF*", n: expected });
+    sample.setScatterScale(fsc, "linear");
+    expect(seen()).toEqual({ text: "FF", n: expected });
   });
 });
 
@@ -663,14 +703,14 @@ describe("what a user reads about a gate's axes", () => {
       color: "#000000", label_offset: null,
     };
     const legacy: PolyRectGate = { ...onFlowJo, gate_id: "b", transforms: { "B-A": { kind: "biex", maxValue: 262144, pos: 4.41854, neg: 0, widthBasis: -10, channelRange: 256 }, "FSC-A": { kind: "identity" } } };
-    expect(gateSpaceBadge(sample, onFlowJo)!.hint).toMatch(/FlowJo biex \(width -10\.00, neg 0, pos 4\.41854\), on FlowJo's 4096-channel table/);
+    expect(gateSpaceBadge(sample, onFlowJo)!.hint).toMatch(/biex \(width -10\.00, neg 0, pos 4\.41854\), on the 4096-channel biex table/);
     expect(gateSpaceBadge(sample, legacy)!.hint).toMatch(/on the 256-channel table GateLab used before 2026-09-24/);
   });
 
   it("names FlowJo's grid in the hierarchy CSV's note, not the code's word for it", () => {
     const { tree } = importedTree();
     const out = exportHierarchyCsv(Object.values(tree.gates), tree.populations, tree.root_population_id);
-    expect(out.notes.join("\n")).toContain("CD4_positive: a polygon on FlowJo's 256-channel grid, which the file cannot name.");
+    expect(out.notes.join("\n")).toContain("CD4_positive: a polygon on the workspace's 256-channel grid, which the file cannot name.");
     expect(out.notes.join("\n")).not.toContain("flowjoChannels");
   });
 });

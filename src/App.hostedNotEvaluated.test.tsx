@@ -42,7 +42,17 @@ const buttons = () => [...container.querySelectorAll<HTMLButtonElement>("button"
 const button = (label: string) => buttons().find((b) => b.textContent?.trim().startsWith(label))!;
 const fileRow = (name: string) => [...container.querySelectorAll<HTMLElement>(".gl-sample-row")].find((r) => r.textContent?.includes(name))!;
 async function view(name: string) { act(() => fileRow(name).dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }))); await settle(); }
-async function edit(mode: "tree" | "file") { act(() => container.querySelector<HTMLButtonElement>(`.population-tree-edit-${mode}`)!.click()); await settle(); }
+/** Switches on, for the viewed file, the tailoring of the gates named (the first gate when none are): each row's switch. */
+async function switchOn(...names: string[]) {
+  const cards = () => [...container.querySelectorAll<HTMLElement>(".gate-card")];
+  const wanted = names.length ? cards().filter((c) => names.some((n) => c.textContent?.startsWith(n))) : cards().slice(0, 1);
+  if (!wanted.length) throw new Error(`No gate rows for ${names.join(", ") || "the first gate"}`);
+  for (const card of wanted) {
+    const input = card.querySelector<HTMLInputElement>(".gate-tailor-switch input")!;
+    if (!input.checked) act(() => input.click());
+    await settle();
+  }
+}
 async function mount(host: Parameters<typeof GateLabHostProvider>[0]["host"]) {
   await act(async () => {
     root.render(<GateLabHostProvider host={host}><App /></GateLabHostProvider>);
@@ -60,7 +70,7 @@ describe.runIf(bcrxlAvailable())("populations a file's own tree lacks (public BC
     const first = bcrxlHost(sce);
     await mount(first.host);
     await view(tailored);
-    await edit("file");
+    await switchOn("B cells: CD20+/CD3-low");
     const bGate = plotHarness.props!.payload.gates.find((g: { name: string }) => g.name === "B cells: CD20+/CD3-low");
     const lo = Math.min(...bGate.vertices.map((v: number[]) => v[1]));
     act(() => plotHarness.props!.onGateEdit({
@@ -68,7 +78,6 @@ describe.runIf(bcrxlAvailable())("populations a file's own tree lacks (public BC
       vertices: bGate.vertices.map(([x, y]: number[]) => [x, y === lo ? 3.2 : y]),
     }));
     await settle();
-    await edit("tree");
     act(() => button("Save to SCE").click());
     await settle(150);
     const saved = JSON.parse(first.record.writes.filter((w) => w.reason === "explicit").at(-1)!.workspaceJson);

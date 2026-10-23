@@ -13,8 +13,9 @@ import { importGatingML } from "./gatingml";
 import { applyGatingStrategy } from "./populations";
 import { describeDiffering, planOneTreeImport } from "./oneTreeImport";
 import { translateUi } from "../ui/i18n";
+import { S8_SOURCE_DIR } from "../testFixtures";
 
-const WSP = "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/GateLab Paper/GateLab-2026-08-15-B flowjo-and-cytobank-concordance/data/lp4-igcb-s8/source/flowjo-workspace/17-Dec-2025 new.wsp";
+const WSP = `${S8_SOURCE_DIR}/flowjo-workspace/17-Dec-2025 new.wsp`;
 const has = existsSync(WSP);
 const wsp = () => readFileSync(WSP, "utf-8");
 const lp4Index = () =>
@@ -504,9 +505,9 @@ describe("FlowJo workspace import", () => {
         const out = flowJoWorkspaceToGatingML(synthetic(box("P", "p1", 20, 20, inner)), 0);
         const said = out.warnings.join("\n");
         expect(said).toMatch(/"AB-" is a complement that was skipped: "AB" is an intersection.*; the 2 population\(s\) beneath it went with it\./);
-        expect(said).toContain('"T-" is the complement of "T", which went with "AB-" when that was skipped. FlowJo excludes ' +
+        expect(said).toContain('"T-" is the complement of "T", which went with "AB-" when that was skipped. The workspace excludes ' +
           'that population\'s gate alone, so the gate was imported as "T-"\'s own, and "T-" was kept; the copy of the gate ' +
-          "FlowJo stored inside it differs from the current one, and was not used.");
+          "the workspace stores inside it differs from the current one, and was not used.");
         expect(said).not.toContain("R and T-");
         expect(out.gatingMl).not.toContain('gating:id="stale"');
         // Inside Q = {(5,5), (12,5), (2,2)}, T- is Q minus T's gate (0-5 by 0-5) = {(12,5)}, and so
@@ -579,7 +580,7 @@ describe("FlowJo workspace import", () => {
         const merged = flowJoWorkspaceToGatingML(xml, 0, null);
         const said = merged.warnings.join("\n");
         expect(said).not.toMatch(/"N" is a complement that was skipped/);
-        expect(said).toContain('"N" is the complement of "T", which went with "X" when that was skipped. FlowJo excludes ' +
+        expect(said).toContain('"N" is the complement of "T", which went with "X" when that was skipped. The workspace excludes ' +
           'that population\'s gate alone, so the gate was imported as "N"\'s own, and "N" was kept');
         expect(merged.gatingMl).not.toContain('gating:id="stale"');
         // Q = {(5,5), (12,5), (2,2)} minus T's gate (0-5 by 0-5) = {(12,5)}, alone and merged.
@@ -868,7 +869,7 @@ describe("FlowJo workspace import", () => {
       .toMatch(/2 independent gating trees.*Choose one to import it alone\./);
     // The caller says what can be done where no tree can be chosen, as under a per-file import.
     expect(flowJoWorkspaceToGatingML(xml, 0, null, "Open it again to choose one.").warnings.join(" "))
-      .toMatch(/2 independent gating trees .*kept apart\. Open it again to choose one\.$/);
+      .toMatch(/2 independent gating trees .*keeps apart\. Open it again to choose one\.$/);
   });
 
   // Each tree can also be converted on its own, which is what importing them into separate
@@ -1325,7 +1326,7 @@ describe("an event beyond a linear axis's range, as FlowJo places it", () => {
     const xml = wspWith(linear("FSC-A") + linear("SSC-A"), below);
     expect(counts(xml)).toEqual({ debris: 0, "debris-": 6 });
     expect(flowJoWorkspaceToGatingML(xml, 0).warnings.join("\n"))
-      .toMatch(/"debris" lies wholly beyond the FSC-A axis range \(0 to 262144\)\. FlowJo places every event beyond the range on the axis edge, so it counts none inside this gate/);
+      .toMatch(/"debris" lies wholly beyond the FSC-A axis range \(0 to 262144\)\. Every event beyond the range is placed on the axis edge, so under that clamp none falls inside this gate/);
     // In the language the app is in, beside its sibling "lies wholly below", when it passes its translation.
     const ja = flowJoWorkspaceToGatingML(xml, 0, null, undefined, { flowJoGrid: true, translate: (text, values) => translateUi("ja", text, values) }).warnings.join("\n");
     expect(ja).toContain("「debris」はFSC-A軸の範囲（0から262144）より完全に外側にあります。");
@@ -1378,5 +1379,105 @@ describe("a FlowJo 7 workspace", () => {
     expect(() => listFlowJoWorkspaceSamples(flowJo7("7.6.2"), ja)).toThrow(/FlowJo 7\.6\.2 で保存されており.*Gating-ML 1\.5/);
     expect(() => flowJoWorkspaceToGatingML(flowJo7("7.6.2"), 0, null, undefined, { translate: ja })).toThrow(/で保存されており/);
     expect(() => listFlowJoWorkspaceSamples(flowJo7("7.6.2").replace(' flowJoVersion="7.6.2"', ""), ja)).toThrow(/FlowJo 10 より前のバージョン/);
+  });
+});
+
+// FlowJo 11.2's File ▸ Export as FlowJo V10 (.wsp) writes the gating:, transforms: and data-type:
+// prefixes FlowJo 10 writes, under a bare `<Workspace flowJoVersion="10.10.1">` that declares none
+// of them, so no XML parser accepts it and GateLab refused it as "not valid XML". Its populations
+// carry count="-1" and its sample ids are UUIDs. The importer now declares the standard Gating-ML
+// 2.0 namespaces on the root of such a file before reading it. Synthetic names and values.
+describe("a FlowJo 11 export to FlowJo 10 (.wsp)", () => {
+  const sample = (name: string, id: string, cd4Min: number) => `
+    <Sample>
+      <DataSet uri="file:${name}" sampleID="${id}"/>
+      <Transformations>
+        <transforms:linear transforms:minRange="0" transforms:maxRange="262144" gain="1"><data-type:parameter data-type:name="FSC-A"/></transforms:linear>
+        <transforms:linear transforms:minRange="0" transforms:maxRange="262144" gain="1"><data-type:parameter data-type:name="SSC-A"/></transforms:linear>
+        <transforms:linear transforms:minRange="0" transforms:maxRange="262144" gain="1"><data-type:parameter data-type:name="CD4"/></transforms:linear>
+        <transforms:linear transforms:minRange="0" transforms:maxRange="262144" gain="1"><data-type:parameter data-type:name="CD8"/></transforms:linear>
+      </Transformations>
+      <SampleNode name="${name}" count="-1" sampleID="${id}"><Subpopulations>
+        <Population name="Cells" count="-1"><Gate gating:id="${id}-cells">
+          <gating:PolygonGate eventsInside="1" userDefined="1">
+            <gating:dimension><data-type:fcs-dimension data-type:name="FSC-A"/></gating:dimension>
+            <gating:dimension><data-type:fcs-dimension data-type:name="SSC-A"/></gating:dimension>
+            <gating:vertex><gating:coordinate data-type:value="20000"/><gating:coordinate data-type:value="20000"/></gating:vertex>
+            <gating:vertex><gating:coordinate data-type:value="120000"/><gating:coordinate data-type:value="20000"/></gating:vertex>
+            <gating:vertex><gating:coordinate data-type:value="120000"/><gating:coordinate data-type:value="100000"/></gating:vertex>
+            <gating:vertex><gating:coordinate data-type:value="20000"/><gating:coordinate data-type:value="100000"/></gating:vertex>
+          </gating:PolygonGate></Gate>
+          <Subpopulations>
+            <Population name="CD4_positive" count="-1"><Gate gating:id="${id}-cd4" gating:parent_id="${id}-cells">
+              <gating:RectangleGate eventsInside="1" userDefined="1">
+                <gating:dimension gating:min="${cd4Min}" gating:max="200000"><data-type:fcs-dimension data-type:name="CD4"/></gating:dimension>
+                <gating:dimension gating:min="10" gating:max="1000"><data-type:fcs-dimension data-type:name="CD8"/></gating:dimension>
+              </gating:RectangleGate></Gate></Population>
+          </Subpopulations></Population>
+      </Subpopulations></SampleNode>
+    </Sample>`;
+  const exported = `<?xml version="1.0" encoding="UTF-8"?>
+<Workspace flowJoVersion="10.10.1">
+  <SampleList>${sample("D1.fcs", "00000000-0000-4000-8000-000000000001", 1000)}${sample("D2.fcs", "00000000-0000-4000-8000-000000000002", 6000)}
+  </SampleList>
+</Workspace>`;
+  // The same workspace with the root FlowJo 10 writes.
+  const declared = exported.replace(
+    '<Workspace flowJoVersion="10.10.1">',
+    `<Workspace version="20.0" flowJoVersion="10.10.1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ` +
+      `xmlns:gating="${G}" xmlns:transforms="${T}" xmlns:data-type="${D}">`,
+  );
+  // (FSC-A, SSC-A, CD4, CD8): in Cells and CD4+ on both samples; in Cells, CD8+; outside Cells
+  // though CD4+; in Cells and CD4+ on D1 only (CD4 below D2's 6000); outside everything.
+  const events: Array<[number, number, number, number]> = [
+    [50000, 50000, 8000, 100], [60000, 40000, 100, 5000], [200000, 200000, 8000, 100], [70000, 30000, 3000, 200], [1000, 1000, 50, 50],
+  ];
+  const counts = (gatingMl: string): Record<string, number> => {
+    const channels = ["FSC-A", "SSC-A", "CD4", "CD8"];
+    const res = importGatingML(gatingMl, channels, {}, "flow");
+    const cols = Object.fromEntries(channels.map((c, i) => [c, Float64Array.from(events.map((e) => e[i]))]));
+    const { masks } = applyGatingStrategy(res.gates, res.populations, res.root_population_id,
+      { n: events.length, column: (ch: string) => cols[ch] });
+    const out: Record<string, number> = {};
+    for (const [pid, pop] of Object.entries(res.populations)) {
+      const m = (masks as Record<string, Uint8Array>)[pid];
+      if (m && pid !== res.root_population_id) out[(pop as unknown as { name: string }).name] = m.reduce((a, b) => a + b, 0);
+    }
+    return out;
+  };
+
+  it("is malformed XML as FlowJo writes it", () => {
+    const doc = new DOMParser().parseFromString(exported, "application/xml");
+    expect(doc.getElementsByTagName("parsererror").length).toBeGreaterThan(0);
+  });
+
+  it("imports, and its gates hold the events drawn inside them", () => {
+    expect(isFlowJoWorkspace(exported)).toBe(true);
+    expect(listFlowJoWorkspaceSamples(exported).map((s) => s.name)).toEqual(["D1.fcs", "D2.fcs"]);
+    const d1 = flowJoWorkspaceToGatingML(exported, 0);
+    // The note every FlowJo polygon without a stated gate resolution gets, and nothing else.
+    expect(d1.warnings).toEqual([expect.stringMatching(/^1 polygon\(s\) are evaluated continuously.*"Cells" declares no gate resolution/)]);
+    expect(counts(d1.gatingMl)).toEqual({ Cells: 3, CD4_positive: 2 });
+    expect(counts(flowJoWorkspaceToGatingML(exported, 1).gatingMl)).toEqual({ Cells: 3, CD4_positive: 1 });
+  });
+
+  it("reads exactly as the same workspace with FlowJo 10's declarations", () => {
+    for (const index of [0, 1]) {
+      const a = flowJoWorkspaceToGatingML(exported, index);
+      const b = flowJoWorkspaceToGatingML(declared, index);
+      expect(a.gatingMl).toBe(b.gatingMl);
+      expect(a.warnings).toEqual(b.warnings);
+    }
+    expect(listFlowJoWorkspaceSamples(exported)).toEqual(listFlowJoWorkspaceSamples(declared));
+  });
+
+  it("declares only what the root leaves undeclared, and still refuses a file broken otherwise", () => {
+    const partly = exported.replace('<Workspace flowJoVersion="10.10.1">', `<Workspace flowJoVersion="10.10.1" xmlns:gating="${G}">`);
+    expect(flowJoWorkspaceToGatingML(partly, 0).gatingMl).toBe(flowJoWorkspaceToGatingML(declared, 0).gatingMl);
+    const truncated = exported.slice(0, exported.lastIndexOf("</SampleList>"));
+    expect(isFlowJoWorkspace(truncated)).toBe(false);
+    expect(() => listFlowJoWorkspaceSamples(truncated)).toThrow(/not valid XML/);
+    const otherPrefix = exported.replace('<Population name="Cells"', '<Population name="Cells" vendor:flag="1"');
+    expect(() => listFlowJoWorkspaceSamples(otherPrefix)).toThrow(/not valid XML/);
   });
 });

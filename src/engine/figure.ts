@@ -450,7 +450,7 @@ export function figureDisplaySample(
       t = transforms.get(key);
     if (!spec || !t) return sample.channelTicks(idx, range);
     if (spec.kind === "identity") return linearScatterTicks(range);
-    if (spec.kind === "logicle")
+    if (spec.kind === "logicle" || spec.kind === "hyperlog")
       return logicleTicks(
         (v) => t.forward(v),
         (v) => t.inverse(v),

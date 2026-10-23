@@ -93,3 +93,43 @@ describe("PanelTab bulk editing", () => {
     expect([...host.querySelectorAll("button")].some((button) => button.textContent === "Apply panel changes")).toBe(false);
   });
 });
+
+describe("PanelTab locked channels and its explanation", () => {
+  const render = () => act(() => root.render(
+    <I18nProvider>
+      <PanelTab
+        sample={sample}
+        onRename={vi.fn()}
+        onRenameMany={vi.fn()}
+        onResetAll={vi.fn()}
+        labelMode="marker"
+        onLabelModeChange={vi.fn()}
+      />
+    </I18nProvider>,
+  ));
+  afterEach(() => localStorage.clear());
+
+  it("marks a locked channel with a lock icon and the word, its reason as the tooltip, not a LOCKED chip", () => {
+    render();
+    const rows = [...host.querySelectorAll("tbody tr")];
+    const lock = rows[0].querySelector<HTMLElement>(".gl-panel-lock")!;
+    expect(lock.querySelector("svg")).not.toBeNull();
+    expect(lock.getAttribute("title")).toBe("Locked (scatter, QC or imaging feature)");
+    expect(lock.getAttribute("aria-label")).toBe("Locked (scatter, QC or imaging feature)");
+    // The muted word beside the icon (David, 2026-10-23: "Put back the 'locked' word"), not a chip.
+    expect(lock.textContent).toBe("Locked");
+    expect(rows[1].querySelector(".gl-panel-lock")).toBeNull();
+    expect(host.querySelector(".gl-pill-lock")).toBeNull();
+  });
+
+  it("hides the explanation with × and brings it back with ? by the title", () => {
+    render();
+    const text = "Rename the display name (marker) for each channel.";
+    expect(host.textContent).toContain(text);
+    act(() => host.querySelector<HTMLButtonElement>('button[aria-label="Hide this explanation"]')!.click());
+    expect(host.textContent).not.toContain(text);
+    const show = host.querySelector<HTMLButtonElement>('h2 button[aria-label="Show the explanation"]')!;
+    act(() => show.click());
+    expect(host.textContent).toContain(text);
+  });
+});

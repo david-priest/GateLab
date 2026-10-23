@@ -17,6 +17,8 @@ const plot = vi.hoisted(() => ({
   setMode: vi.fn(),
   clear: vi.fn(),
   clearPendingEdit: vi.fn(),
+  cancelPolygonDraft: vi.fn((): boolean => true),
+  undoPolygonVertex: vi.fn((): boolean => true),
 }));
 
 const plotBus = vi.hoisted(() => {
@@ -41,7 +43,7 @@ vi.mock("./loadPlots", () => ({
   }),
 }));
 
-import { GatingPlot } from "./GatingPlot";
+import { GatingPlot, plotCursorAt } from "./GatingPlot";
 
 class ResizeObserverStub {
   observe() {}
@@ -96,7 +98,41 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("the plot's cursor", () => {
+  it("is the renderer's cursor for the node under the pointer or its ancestor, the arrow for a hand or nothing", () => {
+    const container = document.createElement("div");
+    const gate = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    gate.style.cursor = "move";
+    const fill = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    gate.appendChild(fill);
+    const tag = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    tag.style.cursor = "pointer";
+    const bare = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    container.append(gate, tag, bare);
+    expect(plotCursorAt(fill, container)).toBe("move");
+    expect(plotCursorAt(tag, container)).toBe("default");
+    expect(plotCursorAt(bare, container)).toBe("default");
+    expect(plotCursorAt(null, container)).toBe("default");
+  });
+});
+
 describe("GatingPlot render lifecycle", () => {
+  it("does not draw again for a new payload object carrying the fields already drawn", () => {
+    const fields = { points: [1], gates: [{ gate_id: "g1" }], selected_gate_id: null as string | null };
+    const item = mountPlot();
+    act(() => item.root.render(<GatingPlot payload={fields} />));
+    flush();
+    const drawn = plot.render.mock.calls.length;
+    // A memo re-run hands over a new object with the same fields: the gate layer is not rebuilt.
+    act(() => item.root.render(<GatingPlot payload={{ ...fields }} />));
+    flush();
+    expect(plot.render.mock.calls.length).toBe(drawn);
+    // A selected gate is a real change, and is drawn once.
+    act(() => item.root.render(<GatingPlot payload={{ ...fields, selected_gate_id: "g1" }} />));
+    flush();
+    expect(plot.render.mock.calls.length).toBe(drawn + 1);
+  });
+
   it("applies configurable typography and repaints when a font size changes", () => {
     const payload = { points: [1] };
     let width = 800;
@@ -510,6 +546,31 @@ describe("GatingPlot render lifecycle", () => {
   });
 });
 
+describe("the plot's font sizes through an engine render", () => {
+  it("puts the font variables back after the engine sets the container's style afresh", () => {
+    const host = document.createElement("div");
+    Object.defineProperty(host, "clientWidth", { configurable: true, get: () => 800 });
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    mounted.push({ host, root, setWidth: () => undefined });
+    // cytof_plot.js lays the plot out with ctnr.style.cssText = "position:relative;…".
+    const original = plot.render.getMockImplementation()!;
+    plot.render.mockImplementation(() => {
+      const container = document.getElementById("cytof-plot-container")!;
+      container.style.cssText = "position:relative;display:inline-block;width:600px;height:600px";
+      return true;
+    });
+    act(() => root.render(<GatingPlot payload={{ points: [1] }} fontSizes={{ tick: 10, axis: 13, title: 9, gate: 11 }} />));
+    flush();
+    const container = host.querySelector<HTMLElement>("#cytof-plot-container")!;
+    expect(plot.render).toHaveBeenCalled();
+    expect(container.style.getPropertyValue("--gl-gating-font-axis")).toBe("13px");
+    expect(container.style.getPropertyValue("--gl-gating-font-tick")).toBe("10px");
+    expect(container.style.width).toBe("600px");
+    plot.render.mockImplementation(original);
+  });
+});
+
 describe("drag-select interaction", () => {
   // The snap-back mechanism, pinned from both sides. Dragging a NOT-currently-selected gate
   // makes the engine emit gate_select at mousedown and gate_edit at mouseup, with repaints
@@ -566,5 +627,118 @@ describe("drag-select interaction", () => {
     // …and the edit is gone: this is the wrapper behaviour the app must not trigger.
     expect(onGateEdit).not.toHaveBeenCalled();
     expect(plot.clearPendingEdit).toHaveBeenCalledWith("gate-2", 8);
+  });
+});
+
+describe("GatingPlot polygon draft keys", () => {
+  const press = (key: string, target: EventTarget = document.body) => {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    act(() => { target.dispatchEvent(event); });
+    return event;
+  };
+
+  it("cancels a polygon on Escape and takes back its last vertex on Backspace or Delete, spending the key", () => {
+    plot.cancelPolygonDraft.mockClear();
+    plot.undoPolygonVertex.mockClear();
+    mountPlot();
+    flush();
+
+    expect(press("Escape").defaultPrevented).toBe(true);
+    expect(plot.cancelPolygonDraft).toHaveBeenCalledTimes(1);
+    expect(press("Backspace").defaultPrevented).toBe(true);
+    expect(press("Delete").defaultPrevented).toBe(true);
+    expect(plot.undoPolygonVertex).toHaveBeenCalledTimes(2);
+
+    // With no polygon under way the renderer says so, and the key goes on to the rest of the app.
+    plot.undoPolygonVertex.mockReturnValueOnce(false);
+    expect(press("Backspace").defaultPrevented).toBe(false);
+  });
+
+  it("leaves the keys alone while typing, while a dialog is open, and while the plot is hidden", () => {
+    plot.cancelPolygonDraft.mockClear();
+    plot.undoPolygonVertex.mockClear();
+    const item = mountPlot();
+    flush();
+
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    expect(press("Backspace", field).defaultPrevented).toBe(false);
+    field.remove();
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "gl-modal-backdrop";
+    document.body.appendChild(backdrop);
+    expect(press("Escape").defaultPrevented).toBe(false);
+    backdrop.remove();
+
+    act(() => item.root.render(<GatingPlot payload={{ points: [1] }} visible={false} />));
+    expect(press("Escape").defaultPrevented).toBe(false);
+    expect(plot.cancelPolygonDraft).not.toHaveBeenCalled();
+    expect(plot.undoPolygonVertex).not.toHaveBeenCalled();
+  });
+});
+
+describe("deselecting a gate from the plot", () => {
+  const pointer = (type: string, target: Element, x: number, y: number) =>
+    act(() => { target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y })); });
+  function mountSelected(mode = "navigate") {
+    const onGateDeselect = vi.fn();
+    const host = document.createElement("div");
+    Object.defineProperty(host, "clientWidth", { configurable: true, get: () => 800 });
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    act(() => root.render(<GatingPlot payload={{ points: [1], selected_gate_id: "g1" }} mode={mode} onGateDeselect={onGateDeselect} />));
+    mounted.push({ host, root, setWidth: () => undefined });
+    flush();
+    // The renderer's empty-area overlay, and a gate drawn over it.
+    const container = host.querySelector("#cytof-plot-container")!;
+    const overlay = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    overlay.setAttribute("class", "cytof-overlay");
+    const gate = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    gate.setAttribute("class", "gate-hit");
+    container.append(overlay, gate);
+    return { onGateDeselect, overlay, gate };
+  }
+  // jsdom has no PointerEvent; the listeners take a MouseEvent of the same type the same way.
+  beforeEach(() => { if (!("PointerEvent" in window)) vi.stubGlobal("PointerEvent", MouseEvent); });
+
+  it("deselects on a plain click on the empty plot area, and not on a pan drag or a click on a gate", () => {
+    const { onGateDeselect, overlay, gate } = mountSelected();
+    pointer("pointerdown", overlay, 100, 100);
+    pointer("pointerup", overlay, 102, 101);
+    expect(onGateDeselect).toHaveBeenCalledTimes(1);
+    onGateDeselect.mockClear();
+    // A pan drag keeps the selection.
+    pointer("pointerdown", overlay, 100, 100);
+    pointer("pointerup", overlay, 140, 120);
+    expect(onGateDeselect).not.toHaveBeenCalled();
+    // A gate takes its own click.
+    pointer("pointerdown", gate, 100, 100);
+    pointer("pointerup", gate, 100, 100);
+    expect(onGateDeselect).not.toHaveBeenCalled();
+  });
+
+  it("leaves the selection alone with a draw tool, where a click places a vertex", () => {
+    const { onGateDeselect, overlay } = mountSelected("draw-poly");
+    pointer("pointerdown", overlay, 100, 100);
+    pointer("pointerup", overlay, 100, 100);
+    expect(onGateDeselect).not.toHaveBeenCalled();
+  });
+
+  it("deselects on Escape when no polygon is being drawn, and not while a menu is open", () => {
+    const { onGateDeselect } = mountSelected();
+    plot.cancelPolygonDraft.mockReturnValueOnce(true);
+    act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+    expect(onGateDeselect).not.toHaveBeenCalled();
+    const menu = document.createElement("div");
+    menu.className = "gl-menu-popover";
+    document.body.appendChild(menu);
+    plot.cancelPolygonDraft.mockReturnValueOnce(false);
+    act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+    expect(onGateDeselect).not.toHaveBeenCalled();
+    menu.remove();
+    plot.cancelPolygonDraft.mockReturnValueOnce(false);
+    act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+    expect(onGateDeselect).toHaveBeenCalledTimes(1);
   });
 });

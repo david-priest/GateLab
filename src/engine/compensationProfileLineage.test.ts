@@ -39,7 +39,7 @@ const NNLS_SETTINGS = {
 
 const ORIGIN: CompensationProfileOrigin = {
   type: "uploaded",
-  fileName: "Wing Lab reference.csv",
+  fileName: "Reference beads.csv",
   format: "csv",
   sourceColumnHeader: "channel",
 };

@@ -2,7 +2,7 @@
 // Ported from GateLabR inst/app/R/gate_engine.R (gate_mask_* + get_gate_mask).
 // Masks are Uint8Array (1 = in-gate, 0 = out) over display-space channel columns.
 
-import { UNBOUNDED, type EllipseGate, type Gate, type QuadrantCurl, type RectangleBounds, type Vertex } from "./models";
+import { UNBOUNDED, spiderBox, type EllipseGate, type Gate, type QuadrantArms, type QuadrantCurl, type RectangleBounds, type Vertex } from "./models";
 import { ellipseQuadraticForm } from "./ellipse";
 
 /** Column accessor for the currently-displayed (transformed) assay data. */
@@ -435,11 +435,20 @@ export function otherRectangleRule(rule: RectangleBounds): RectangleBounds {
  *   1 = x-/y+, 2 = x+/y+, 3 = x+/y-, 4 = x-/y-  (>= on the positive side;
  *   a point exactly on the crosshair falls in quadrant 2). That is Gating-ML 2.0's rule
  *   (section 5.4.1): a value equal to a divider lies on the divider's upper side.
+ * An undefined (NaN) coordinate belongs to no quadrant, as for the other gate shapes.
  *
  * With `curl`, the two dividers bend beyond the crosshair (see QuadrantCurl): an event is to
  * the right of the vertical divider where its x is at or beyond the divider's position AT ITS
  * OWN y, and above the horizontal divider where its y is at or beyond the divider's position
  * at its own x. The straight case is the same test with both dividers flat.
+ *
+ * With `arms` (a spider quadrant, QuadrantArms) the dividers are the four leaning arms: the
+ * vertical divider is the `down` arm below the centre and the `up` arm above it, the horizontal
+ * one the `left` arm left of the centre and the `right` arm right of it, and the test is the same
+ * one against each divider at the event's own y or x, inside the closed box the arms' ends span; an
+ * event outside it is in no quadrant. For valid arms (validArms) that is the polygon bounded by the
+ * centre, two arm ends and the corner between them; arms that do not lean are the crosshair within
+ * the box.
  */
 export function gateMaskQuadrant(
   xVals: ArrayLike<number>,
@@ -447,6 +456,7 @@ export function gateMaskQuadrant(
   center: [number, number],
   quadrant: number,
   curl?: QuadrantCurl,
+  arms?: QuadrantArms,
 ): Uint8Array {
   const cx = center[0];
   const cy = center[1];
@@ -454,15 +464,28 @@ export function gateMaskQuadrant(
   if (!Number.isFinite(q)) q = 1;
   const n = xVals.length;
   const out = new Uint8Array(n);
-  const bent = !!curl && curl.power > 0 && (curl.kx !== 0 || curl.ky !== 0);
+  const bent = curlBends(curl);
+  // Each ray's run along the divider per unit across it: x per y for the vertical rays, y per x
+  // for the horizontal ones. Zero for an arm on its axis.
+  const downRun = arms ? (arms.down[0] - cx) / (arms.down[1] - cy) : 0;
+  const upRun = arms ? (arms.up[0] - cx) / (arms.up[1] - cy) : 0;
+  const leftRun = arms ? (arms.left[1] - cy) / (arms.left[0] - cx) : 0;
+  const rightRun = arms ? (arms.right[1] - cy) / (arms.right[0] - cx) : 0;
+  const [bx0, bx1, by0, by1] = arms ? spiderBox(arms) : [-Infinity, Infinity, -Infinity, Infinity];
   for (let i = 0; i < n; i++) {
     const x = xVals[i];
     const y = yVals[i];
+    if (Number.isNaN(x) || Number.isNaN(y)) continue;
+    if (x < bx0 || x > bx1 || y < by0 || y > by1) continue;
     let xdiv = cx;
     let ydiv = cy;
     if (bent) {
       if (y > cy) xdiv = cx + curl!.ky * Math.pow(y - cy, curl!.power);
       if (x > cx) ydiv = cy + curl!.kx * Math.pow(x - cx, curl!.power);
+    } else if (arms) {
+      // Within the box every coordinate is finite, and an arm on its axis gives the centre exactly.
+      xdiv = cx + (y - cy) * (y > cy ? upRun : downRun);
+      ydiv = cy + (x - cx) * (x > cx ? rightRun : leftRun);
     }
     const right = x >= xdiv;
     const up = y >= ydiv;
@@ -477,6 +500,11 @@ export function gateMaskQuadrant(
     out[i] = inq ? 1 : 0;
   }
   return out;
+}
+
+/** Whether a curl bends a quadrant's dividers: a zero power or zero slopes leave them straight. */
+export function curlBends(curl: QuadrantCurl | undefined): boolean {
+  return !!curl && curl.power > 0 && (curl.kx !== 0 || curl.ky !== 0);
 }
 
 /**
@@ -511,7 +539,7 @@ export function getGateMask(gate: Gate, data: AssayData, quadrant?: number): Uin
 
   if (gate.gate_type === "polygon") return gateMaskPolygon(x, y, gate.vertices);
   if (gate.gate_type === "rectangle") return gateMaskRectangle(x, y, gate.vertices, gate.bounds);
-  if (gate.gate_type === "quadrant") return gateMaskQuadrant(x, y, gate.center, quadrant ?? 1, gate.curl);
+  if (gate.gate_type === "quadrant") return gateMaskQuadrant(x, y, gate.center, quadrant ?? 1, gate.curl, gate.arms);
   if (gate.gate_type === "ellipse") return gateMaskEllipse(x, y, gate);
   return new Uint8Array(data.n);
 }

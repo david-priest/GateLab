@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { populationTreeOrder } from "../engine/populations";
 import type { CoreState } from "../store";
+import { ModalEscape } from "./useModalEscape";
 
 export interface ScePopulationColumnSpec {
   populationId: string;
@@ -147,6 +148,7 @@ export function SceColDataExportModal({
 
   return (
     <div className="gl-modal-backdrop">
+      <ModalEscape onClose={busy ? null : onCancel} />
       <div
         className="gl-modal gl-sce-coldata-modal"
         role="dialog"

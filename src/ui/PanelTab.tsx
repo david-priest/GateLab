@@ -14,6 +14,8 @@ import {
 } from "../engine/panelTable";
 import type { ChannelLabelMode, Sample } from "../engine/sample";
 import { useI18n } from "./i18n";
+import { LockIcon } from "./icons";
+import { TabIntro, TabIntroToggle, useTabIntro } from "./TabIntro";
 
 interface Props {
   sample: Sample;
@@ -45,6 +47,7 @@ export function PanelTab({
   hostWriteBusy = false,
 }: Props) {
   const { t } = useI18n();
+  const intro = useTabIntro("panel");
   const fileRef = useRef<HTMLInputElement>(null);
   // Local draft so typing is smooth; commit on blur / Enter.
   const [draft, setDraft] = useState<Record<string, string>>({});
@@ -106,7 +109,7 @@ export function PanelTab({
   return (
     <div className="gl-tab-panel">
       <div className="gl-tab-head">
-        <h2 className="gl-tab-title">{t("Panel — channel names")}</h2>
+        <h2 className="gl-tab-title">{t("Panel — channel names")}<TabIntroToggle intro={intro} /></h2>
         {/* The fluorophore is often present in $PnN while the identity key is only the marker,
             so a workspace can look as though it lost it. This is a display choice; it renames
             nothing and cannot move a gate. */}
@@ -152,9 +155,9 @@ export function PanelTab({
           )}
         </div>
       </div>
-      <p className="gl-hint gl-panel-hint">
+      <TabIntro intro={intro} className="gl-panel-hint">
         {t("Rename the display name (marker) for each channel. The FCS channel id ($PnN) is fixed. Scatter, Time/QC and imaging-feature channels are locked. Renames apply to every loaded sample and are cosmetic — gates and statistics are unaffected. Download the template to edit display names in Excel, then upload it here; omitted channels remain unchanged.")}
-      </p>
+      </TabIntro>
 
       {importError && (
         <div className="gl-panel-import gl-panel-import-error" role="alert">
@@ -241,7 +244,12 @@ export function PanelTab({
                         ↺
                       </button>
                     )}
-                    {!r.renamable && <span className="gl-pill-lock">{t("locked")}</span>}
+                    {!r.renamable && (
+                      <span className="gl-panel-lock" role="img" aria-label={t("Locked (scatter, QC or imaging feature)")} title={t("Locked (scatter, QC or imaging feature)")}>
+                        <LockIcon />
+                        <span>{t("Locked")}</span>
+                      </span>
+                    )}
                   </div>
                 </td>
               </tr>

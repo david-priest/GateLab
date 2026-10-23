@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { ChevronIcon } from "./icons";
 import { useI18n } from "./i18n";
 
 interface Props {
@@ -31,7 +32,7 @@ export function CollapsiblePicker({
           title={t(expanded ? "Hide {label}" : "Show {label}", { label })}
           onClick={() => setExpanded((current) => !current)}
         >
-          <span className="gl-picker-chevron" aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+          <span className="gl-picker-chevron" aria-hidden="true"><ChevronIcon open={expanded} size={12} /></span>
           <span className="gl-stats-opt-label">{label}</span>
           {summary === undefined ? null : <span className="gl-picker-summary">{summary}</span>}
         </button>

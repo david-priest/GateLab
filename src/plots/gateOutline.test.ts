@@ -49,16 +49,16 @@ describe("polygon outlines follow the transformed boundary", () => {
       sample.gatingToDisplay(x.key, p[0]),
       sample.gatingToDisplay(y.key, p[1]),
     ];
+    // Outline points lie at dyadic fractions of an edge, down to 2^-15 at the depth cap.
+    const truePoints = SPANNING.flatMap((a, i) => {
+      const b = SPANNING[(i + 1) % SPANNING.length];
+      return Array.from({ length: 32769 }, (_, k) => {
+        const t = k / 32768;
+        return toDisplay([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+      });
+    });
     const onCurve = g.outline!.every((pt) =>
-      SPANNING.some((a, i) => {
-        const b = SPANNING[(i + 1) % SPANNING.length];
-        for (let k = 0; k <= 512; k++) {
-          const t = k / 512;
-          const q = toDisplay([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
-          if (Math.hypot(q[0] - pt[0], q[1] - pt[1]) < 1e-6) return true;
-        }
-        return false;
-      }),
+      truePoints.some((q) => Math.hypot(q[0] - pt[0], q[1] - pt[1]) < 1e-6),
     );
     expect(onCurve).toBe(true);
   });

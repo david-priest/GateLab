@@ -1,5 +1,5 @@
 import type { Gate, Population, PopulationMap } from "./models";
-import { rectangleRule, sortPopulationTree } from "./models";
+import { cloneArms, rectangleRule, sortPopulationTree } from "./models";
 
 export type GatingImportMode = "replace" | "merge";
 /** Which files an imported tree is for: every loaded file, the selected ones, or the viewed file alone. */
@@ -45,7 +45,7 @@ function importedId(sourceId: string, used: Set<string>): string {
  */
 function gateIdentity(gate: Gate): string {
   const shape =
-    gate.gate_type === "quadrant" ? { center: gate.center }
+    gate.gate_type === "quadrant" ? { center: gate.center, ...(gate.arms ? { arms: gate.arms } : {}) }
       : gate.gate_type === "ellipse"
         ? { mean: gate.mean, covariance: gate.covariance, distance_square: gate.distance_square }
         : { vertices: gate.vertices, ...(gate.gate_type === "rectangle" ? { bounds: rectangleRule(gate) } : {}) };
@@ -58,7 +58,10 @@ function gateIdentity(gate: Gate): string {
 function cloneGate(gate: Gate, gateId: string): Gate {
   const labelOffset = gate.label_offset ? [...gate.label_offset] as [number, number] : null;
   if (gate.gate_type === "quadrant") {
-    return { ...gate, gate_id: gateId, center: [...gate.center], label_offset: labelOffset };
+    return {
+      ...gate, gate_id: gateId, center: [...gate.center], label_offset: labelOffset,
+      ...(gate.arms ? { arms: cloneArms(gate.arms) } : {}),
+    };
   }
   if (gate.gate_type === "ellipse") {
     return {
