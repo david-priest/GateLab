@@ -8,14 +8,14 @@ title: "GateLab"
 version: 0.10.0
 date-released: "2026-10-23"
 license: MIT
-doi: 10.5281/zenodo.23388441
+doi: 10.5281/zenodo.23595178
 identifiers:
   - type: doi
     value: 10.5281/zenodo.22787965
     description: "The concept DOI: every version of GateLab."
   - type: doi
-    value: 10.5281/zenodo.23388441
-    description: "GateLab 0.9.3."
+    value: 10.5281/zenodo.23595178
+    description: "GateLab 0.10.0."
 repository-code: "https://github.com/david-priest/GateLab"
 url: "https://david-priest.github.io/GateLab/"
 abstract: "Browser-based manual gating of flow and mass cytometry data, with the cell images of the BD FACSDiscover S8 imaging sorter. FCS files are parsed, transformed and gated locally; one population tree per workspace, tailored per file or per group; FlowJo workspace and FACSChorus import and export; Gating-ML 2.0; compensation; statistics and publication figures. The S8's cell images are decoded from its waveform files in the browser, shown on the plot and on an image wall, and counted and measured into channels that can be gated."
