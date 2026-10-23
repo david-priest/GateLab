@@ -83,6 +83,24 @@ describe("a saved workspace names what it needs of the GateLab that opens it", (
     expect(requiredWorkspaceFeatures({ a: [{ b: GRID }], c: TABLE, d: { bounds: "half-open" } })).toEqual(["flowjo-grid", "flowjo-biex-table", "half-open-rectangle"]);
   });
 
+  // GateLab 0.9.3 keeps no rule for `arms`: it evaluates a spider quadrant as the straight
+  // crosshair at its centre, and each quadrant holds other events without a word.
+  it("names a spider quadrant, and writes a straight or curly one as before", () => {
+    const quadrant = (extra: Record<string, unknown>): WorkspaceFile => {
+      const ws = workspace();
+      ws.gating.gates.g1 = { ...ws.gating.gates.g1, gate_type: "quadrant", vertices: [], center: [0.5, 0.4], ...extra } as unknown as Gate;
+      ws.gating.populations.p1.gate_refs = [{ gate_id: "g1", include: true, quadrant: 1 }];
+      return ws;
+    };
+    const spider = quadrant({ arms: { down: [0.45, 0], right: [1, 0.42], up: [0.4, 1], left: [0, 0.35] } });
+    expect(written(spider)).toMatchObject({ version: 4, requiredFeatures: ["spider-quadrant"] });
+    expect(readWorkspaceBytes(packWorkspaceReference(spider)).ws.gating.gates.g1).toEqual(spider.gating.gates.g1);
+    for (const plain of [quadrant({}), quadrant({ curl: { power: 2, kx: 0.1, ky: 0.1 } })]) {
+      expect(written(plain).version).toBe(2);
+      expect(stampWorkspace(plain)).toBe(plain);
+    }
+  });
+
   it("writes a workspace holding neither exactly as before, the older biex table included", () => {
     for (const ws of [workspace(), workspace({ "FSC-A": { kind: "identity" }, "B-A": OLD_TABLE })]) {
       const file = written(ws);

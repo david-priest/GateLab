@@ -60,6 +60,12 @@ export const WORKSPACE_FEATURES = {
    * opens the file without the channel, and a gate drawn on it has no axis.
    */
   derivedChannels: "derived-channels",
+  /**
+   * A quadrant with leaning arms, FlowJo's spider quadrant (`arms`, models.ts): a GateLab without
+   * them keeps no rule for the key and evaluates a straight crosshair at the centre, so each
+   * quadrant holds other events.
+   */
+  spiderQuadrant: "spider-quadrant",
 } as const;
 
 export type WorkspaceFeature = (typeof WORKSPACE_FEATURES)[keyof typeof WORKSPACE_FEATURES];
@@ -82,6 +88,7 @@ export function requiredWorkspaceFeatures(value: unknown): WorkspaceFeature[] {
   let halfOpen = false;
   let derived = false;
   let hyperlog = false;
+  let spider = false;
   const stack: unknown[] = [value];
   while (stack.length) {
     const v = stack.pop();
@@ -99,12 +106,13 @@ export function requiredWorkspaceFeatures(value: unknown): WorkspaceFeature[] {
     else if (o.kind === "biex" && o.tableChannels !== undefined) table = true;
     if (o.externalSpillover !== undefined) spillover = true;
     if (o.bounds === "half-open") halfOpen = true;
+    if (o.gate_type === "quadrant" && o.arms !== undefined) spider = true;
     if (Array.isArray(o.derived) && o.derived.some((d) => d && typeof d === "object" && typeof (d as { dtype?: unknown }).dtype === "string")) derived = true;
     for (const key in o) {
       const child = o[key];
       if (child && typeof child === "object") stack.push(child);
     }
-    if (grid && grid11 && table && spillover && halfOpen && derived && hyperlog) break;
+    if (grid && grid11 && table && spillover && halfOpen && derived && hyperlog && spider) break;
   }
   return [
     ...(hyperlog ? [WORKSPACE_FEATURES.hyperlog] : []),
@@ -114,6 +122,7 @@ export function requiredWorkspaceFeatures(value: unknown): WorkspaceFeature[] {
     ...(spillover ? [WORKSPACE_FEATURES.externalSpillover] : []),
     ...(halfOpen ? [WORKSPACE_FEATURES.halfOpenRectangle] : []),
     ...(derived ? [WORKSPACE_FEATURES.derivedChannels] : []),
+    ...(spider ? [WORKSPACE_FEATURES.spiderQuadrant] : []),
   ];
 }
 
