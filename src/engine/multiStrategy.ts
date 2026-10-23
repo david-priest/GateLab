@@ -22,7 +22,7 @@ import type { Sample } from "./sample";
 import { ellipseBoundary } from "./ellipse";
 import type { GateEdgeMode } from "../ui/gateEdgeModes";
 import type { Gate, GateRef, Population, PopulationMap, QuadrantGate } from "./models";
-import { quadrantOverlayShape } from "./quadrantOverlay";
+import { quadrantOverlayShape, type QuadrantArms } from "./quadrantOverlay";
 import { columnsForGate, getGateMask } from "./gates";
 import type { AxisTicks } from "./ticks";
 import { computeRangeFromValues, thinEvenly, type StrategyFontSizes } from "./strategy";
@@ -51,7 +51,9 @@ export interface MultiStrategyGate {
    * the four ran into one another and off a strategy panel's edges.
    */
   center?: [number, number];
-  arms?: { h: [number, number][]; v: [number, number][] };
+  arms?: QuadrantArms;
+  /** A spider quadrant's label places in the cell's screen order (quadrantOverlayShape). */
+  quadrant_anchors?: [number, number][];
   quadrant_events?: number[];
   quadrant_pcts?: number[];
   quadrant_label_offsets?: ([number, number] | null)[];
@@ -480,6 +482,7 @@ export function finishMultiStrategyNode(
       ...gatesOut[at],
       center: shape.center,
       ...(shape.arms ? { arms: shape.arms } : {}),
+      ...(shape.anchors ? { quadrant_anchors: shape.anchors } : {}),
       quadrant_events: [...counts],
       quadrant_pcts: counts.map((count) => (nEvents > 0 ? round1((count / nEvents) * 100) : 0)),
       ...(gate.quadrant_label_offsets ? { quadrant_label_offsets: gate.quadrant_label_offsets } : {}),

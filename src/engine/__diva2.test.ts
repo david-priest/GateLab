@@ -2,7 +2,7 @@
 import { it } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { biexTransform } from "./biex";
-const BASE = "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/GateLab Paper/GateLab-2026-08-15-B flowjo-and-cytobank-concordance/data/bass12-priest2024-s6/source";
+import { S6_SOURCE_DIR as BASE } from "../testFixtures";
 it.runIf(existsSync(`${BASE}/diva-experiment/B cell assay 12.xml`))("fit", { timeout: 60000 }, () => {
   const dp = new DOMParser();
   const dd = dp.parseFromString(readFileSync(`${BASE}/diva-experiment/B cell assay 12.xml`, "utf-8"), "text/xml");

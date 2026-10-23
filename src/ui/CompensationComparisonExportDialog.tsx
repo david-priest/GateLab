@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from "react";
+import { useState } from "react";
 import {
   compensationComparisonDownloadName,
   compensationComparisonPageCount,
@@ -6,6 +6,7 @@ import {
   type CompensationComparisonExportProgress,
 } from "../plots/compensationComparisonExport";
 import { useI18n } from "./i18n";
+import { ModalEscape } from "./useModalEscape";
 
 interface Props {
   readonly sampleName: string;
@@ -57,12 +58,9 @@ export function CompensationComparisonExportDialog({
     }
   };
 
-  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape" && !busy) onClose();
-  };
-
   return (
-    <div className="gl-modal-backdrop" onKeyDown={handleKeyDown}>
+    <div className="gl-modal-backdrop">
+      <ModalEscape onClose={busy ? null : onClose} />
       <div
         className="gl-modal gl-comp-export-modal gl-comp-comparison-export-modal"
         role="dialog"

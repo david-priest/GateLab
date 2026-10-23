@@ -91,7 +91,7 @@ async function settle(): Promise<void> {
 const popRow = (name: string) =>
   [...host.querySelectorAll(".pop-row")].map((r) => r.textContent ?? "").find((t) => t.includes(name)) ?? "";
 const button = (label: string) =>
-  [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label)!;
+  [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")].find((b) => b.textContent?.trim() === label)!;
 
 async function loadAndImport(): Promise<void> {
   act(() => root.render(<App />));
@@ -103,7 +103,7 @@ async function loadAndImport(): Promise<void> {
   Object.defineProperty(fcs, "files", { configurable: true, value: [fcsFile] });
   await act(async () => { fcs.dispatchEvent(new Event("change", { bubbles: true })); });
   await settle();
-  const xml = host.querySelector<HTMLInputElement>('input[accept=".xml,.wsp,.cef"]')!;
+  const xml = host.querySelector<HTMLInputElement>('input[accept=".xml,.wsp,.flowjo,.cef"]')!;
   Object.defineProperty(xml, "files", { configurable: true, value: [textFile("gates.xml", CYTOBANK, "text/xml")] });
   await act(async () => { xml.dispatchEvent(new Event("change", { bubbles: true })); });
   await settle();

@@ -8,6 +8,7 @@ import { axesFromCovariance, ellipseBoundary } from "../engine/ellipse";
 import { isUnbounded, type Gate } from "../engine/models";
 import { } from "../engine/gates";
 import { gateSpaceBadge } from "../engine/gateSpaceBadge";
+import { spiderOverlayShape, type QuadrantArms } from "../engine/quadrantOverlay";
 import type { GateCount } from "../engine/populations";
 
 export interface PlotGate {
@@ -54,12 +55,22 @@ export interface PlotGate {
    */
   percent_scope?: string;
   percent_scope_hint?: string;
+  /**
+   * A small orange tag after the label, on a gate the viewed file holds at coordinates of its own
+   * ("this file") or its group's (the group's name); a click on it offers revert and use for the
+   * tree. The hint is its tooltip.
+   */
+  tailored_tag?: string;
+  tailored_tag_hint?: string;
   center?: [number, number];
   /**
    * A curly quadrant's bent dividers, in display coordinates: the horizontal arm from the
-   * crosshair rightwards and the vertical arm upwards. Absent for a straight crosshair.
+   * crosshair rightwards and the vertical arm upwards. For a spider quadrant whose arms lean,
+   * all four from the centre (`l` left, `d` down) with `spider` set. Absent for a straight crosshair.
    */
-  arms?: { h: [number, number][]; v: [number, number][] };
+  arms?: QuadrantArms;
+  /** A spider quadrant's label places, Q1 to Q4, inside each sector, in display coordinates. */
+  quadrant_anchors?: [number, number][];
   quadrant_counts?: number[];
   quadrant_pcts?: number[];
 }
@@ -112,23 +123,42 @@ function subdivideEdge(
   t0 = 0,
   t1 = 1,
   depth = 0,
+  /**
+   * The display points at t0, t1 and halfway between, when the parent step already has them: a
+   * half's ends and midpoint are its parent's ends, midpoint and quarter-point, so they are passed
+   * down rather than transformed again, and each step transforms only its own two quarter-points.
+   * Every t here is dyadic, so a point passed down is bit for bit the one the step would compute.
+   */
+  known0?: [number, number],
+  known1?: [number, number],
+  knownMid?: [number, number],
 ): void {
   const at = (t: number): [number, number] => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-  const p0 = toDisplay(at(t0));
-  const p1 = toDisplay(at(t1));
+  const p0 = known0 ?? toDisplay(at(t0));
+  const p1 = known1 ?? toDisplay(at(t1));
   const tm = (t0 + t1) / 2;
-  const mid = toDisplay(at(tm));
-  const chordX = (p0[0] + p1[0]) / 2;
-  const chordY = (p0[1] + p1[1]) / 2;
-  const off = Math.hypot((mid[0] - chordX) / span[0], (mid[1] - chordY) / span[1]);
-  // The depth cap bounds the work: 2^9 segments per edge is far past visually exact, and stops
-  // a pathological transform from subdividing forever.
-  if (depth >= 9 || !Number.isFinite(off) || off <= tol) {
+  const pm = knownMid ?? toDisplay(at(tm));
+  const q1 = toDisplay(at(t0 + (t1 - t0) * 0.25));
+  const q3 = toDisplay(at(t0 + (t1 - t0) * 0.75));
+  // An edge crossing an inflection can have its midpoint exactly on the chord while both
+  // halves bow away. Inspect the quarter-points too, in the same per-axis display units.
+  const offAt = (point: [number, number], fraction: number): number => Math.hypot(
+    (point[0] - (p0[0] + (p1[0] - p0[0]) * fraction)) / span[0],
+    (point[1] - (p0[1] + (p1[1] - p0[1]) * fraction)) / span[1],
+  );
+  const off = Math.max(offAt(q1, 0.25), offAt(pm, 0.5), offAt(q3, 0.75));
+  // The depth cap stops a transform that never settles from subdividing forever (a jump costs one
+  // path down to it), but a smooth edge needs depth too: one spanning raw values to R on
+  // arcsinh(x / c) bends within about c / R of its length, and takes about log2(R / c) + 3 halvings
+  // to trace. 15 traces mass cytometry to 100,000 and spectral flow to 4,194,304 at cofactor 150.
+  // At 9, raw triangles on mass cytometry ranges to 20,000 were drawn up to 27 times the tolerance
+  // off; a wider R / c than 15 reaches can still be.
+  if (depth >= 15 || !Number.isFinite(off) || off <= tol) {
     out.push(p1);
     return;
   }
-  subdivideEdge(a, b, toDisplay, tol, span, out, t0, tm, depth + 1);
-  subdivideEdge(a, b, toDisplay, tol, span, out, tm, t1, depth + 1);
+  subdivideEdge(a, b, toDisplay, tol, span, out, t0, tm, depth + 1, p0, pm, q1);
+  subdivideEdge(a, b, toDisplay, tol, span, out, tm, t1, depth + 1, pm, p1, q3);
 }
 
 /**
@@ -246,6 +276,32 @@ function usableLabelOffset(
   return stored;
 }
 
+/**
+ * A rectangle's corners after a drag, in its own space, with every corner on an open side kept
+ * open. The plot hands back the four corners of the box buildPlotGates drew, in its order
+ * ([xmin, ymin], [xmax, ymin], [xmax, ymax], [xmin, ymax]), and an open side is drawn past the
+ * plot. Converting that drawn position back gave a finite edge, so moving a FlowJo quadrant's
+ * rectangle closed it at the top of its biex axis and the clip let it run across the margins.
+ */
+export function keepOpenSides(sample: Sample, gate: Gate, edited: [number, number][]): [number, number][] {
+  if (gate.gate_type !== "rectangle" || edited.length !== 4) return edited;
+  const xs = gate.vertices.map((v) => v[0]);
+  const ys = gate.vertices.map((v) => v[1]);
+  const sides = {
+    x: [Math.min(...xs), Math.max(...xs)] as const,
+    y: [Math.min(...ys), Math.max(...ys)] as const,
+  };
+  const open = (ch: string, v: number) => isUnbounded(sample.gateToRaw(gate, ch, v));
+  const openX = [open(gate.x_channel, sides.x[0]), open(gate.x_channel, sides.x[1])];
+  const openY = [open(gate.y_channel, sides.y[0]), open(gate.y_channel, sides.y[1])];
+  if (!openX.some(Boolean) && !openY.some(Boolean)) return edited;
+  return edited.map(([x, y], i) => {
+    const hiX = i === 1 || i === 2 ? 1 : 0;
+    const hiY = i >= 2 ? 1 : 0;
+    return [openX[hiX] ? sides.x[hiX] : x, openY[hiY] ? sides.y[hiY] : y];
+  });
+}
+
 /** Gates drawn on (xChannel, yChannel) in normal orientation, in display space. */
 export function buildPlotGates(
   sample: Sample,
@@ -310,11 +366,17 @@ export function buildPlotGates(
       // bend starts, so sampling evenly in the gate's space drew the first segment as a chord)
       // with each point evaluated in the gate's own space, so the curve on screen is the curve
       // the mask evaluates.
-      let arms: { h: [number, number][]; v: [number, number][] } | undefined;
+      let arms: QuadrantArms | undefined;
       const [xFrame, yFrame] = axisFrames;
       const xEnd = viewFrames[0]?.[1] ?? xFrame?.[1];
       const yEnd = viewFrames[1]?.[1] ?? yFrame?.[1];
-      if (gate.curl && xEnd !== undefined && yEnd !== undefined) {
+      // A spider quadrant's four arms run from its centre to their ends on its box.
+      const xView = viewFrames[0] ?? xFrame;
+      const yView = viewFrames[1] ?? yFrame;
+      const spider = spiderOverlayShape(sample, gate, xChannel, yChannel, false, xView && yView ? { x: xView, y: yView } : undefined);
+      if (spider) {
+        arms = spider.arms;
+      } else if (gate.curl && xEnd !== undefined && yEnd !== undefined) {
         const curl = gate.curl;
         const [cx, cy] = gate.center;
         const armTo = (arm: "h" | "v", displayEnd: number): [number, number][] => {
@@ -341,10 +403,11 @@ export function buildPlotGates(
         label_offset: usableLabelOffset(gate.label_offset, [toDisplay(gate.center)], labelFrames),
         center: toDisplay(gate.center),
         ...(arms ? { arms } : {}),
+        ...(spider ? { quadrant_anchors: spider.anchors } : {}),
         quadrant_counts: counts?.quadrants?.map((q) => q.event_count),
         quadrant_pcts: counts?.quadrants?.map((q) => q.percent_of_parent),
         ...(gate.quadrant_label_offsets
-          ? { quadrant_label_offsets: gate.quadrant_label_offsets.map((o) => usableLabelOffset(o, [toDisplay(gate.center)], labelFrames)) }
+          ? { quadrant_label_offsets: gate.quadrant_label_offsets.map((o, q) => usableLabelOffset(o, [spider?.anchors[q] ?? toDisplay(gate.center)], labelFrames)) }
           : {}),
       });
     } else if (gate.gate_type === "rectangle") {
@@ -369,13 +432,31 @@ export function buildPlotGates(
         y: [open(yChannel, ymin), open(yChannel, ymax)] as [boolean, boolean],
       };
       const anyOpen = unbounded.x.some(Boolean) || unbounded.y.some(Boolean);
+      // An open side is drawn at raw ±1e12 (drawnRaw), which on a logicle axis is a few decades
+      // past the top: zoomed out far enough, it came into the plot as an edge, with the label on
+      // the edge of the view outside it. It is drawn at least a whole span past the wider of the
+      // plotted range and the data, so it stays off the plot however far out the view goes.
+      for (const k of [0, 1] as const) {
+        const frame = labelFrames[k];
+        const sides = k === 0 ? unbounded.x : unbounded.y;
+        if (!frame || !(sides[0] || sides[1])) continue;
+        const span = frame[1] - frame[0];
+        const ends = displayVerts.map((p) => p[k]);
+        const lo = Math.min(...ends), hi = Math.max(...ends);
+        for (const p of displayVerts) {
+          if (sides[0] && p[k] === lo) p[k] = Math.min(lo, frame[0] - span);
+          if (sides[1] && p[k] === hi) p[k] = Math.max(hi, frame[1] + span);
+        }
+      }
       // The renderer anchors a label at the mean of the vertices. With a side drawn past every
       // event that mean is far off the plot, so the automatic label is placed on the rectangle as
-      // it appears within the data's frame, and moved by the difference of the two means.
+      // it appears within the plotted range (the data's frame when the range is not known), and
+      // moved by the difference of the two means.
       let autoLabel = displayLabelOffset(displayVerts);
       if (anyOpen) {
+        const seenFrame = (k: 0 | 1) => viewFrames[k] ?? labelFrames[k];
         const clip = (v: number, k: 0 | 1): number => {
-          const frame = labelFrames[k];
+          const frame = seenFrame(k);
           const sides = k === 0 ? unbounded.x : unbounded.y;
           if (!frame) return v;
           const ends = displayVerts.map((p) => p[k]);
@@ -386,6 +467,15 @@ export function buildPlotGates(
         const seen = displayVerts.map((p) => [clip(p[0], 0), clip(p[1], 1)] as [number, number]);
         const mean = (pts: [number, number][], k: 0 | 1) => pts.reduce((sum, p) => sum + p[k], 0) / pts.length;
         const own = displayLabelOffset(seen);
+        // An open top reaches the top of the plot, where a label set above the rectangle would
+        // sit in the margin: it goes just inside the top instead, no lower than the middle.
+        const yFrame = seenFrame(1);
+        if (unbounded.y[1] && yFrame) {
+          const ys = seen.map((p) => p[1]);
+          const top = Math.max(...ys);
+          const inside = Math.max(mean(seen, 1), top - (yFrame[1] - yFrame[0]) * 0.06);
+          own[1] = inside - mean(seen, 1);
+        }
         autoLabel = [own[0] + mean(seen, 0) - mean(displayVerts, 0), own[1] + mean(seen, 1) - mean(displayVerts, 1)];
       }
       out.push({

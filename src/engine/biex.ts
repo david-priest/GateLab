@@ -68,6 +68,80 @@ export interface BiexParams {
 export const FLOWJO_BIEX_TABLE_CHANNELS = 4096;
 
 /**
+ * The biexponential for a channel nobody has adjusted, from the channel's $PnR: the top of the
+ * scale at $PnR, log10($PnR) − 1 positive decades, no extra negative decades, a width basis of
+ * −100 and 256 output channels, on the 4096-channel table. Null where $PnR cannot carry a positive
+ * decade. Sample.defaultBiex replaces the width with estimateBiexWidthBasis's.
+ *
+ * Read from saved workspace files only. In the 609 version-10 .wsp workspaces FlowRepository
+ * serves (184 deposits with a biex axis, 582,753 biex channel entries), pos is log10(maxRange) − 1
+ * in 96% of entries, maxRange is the channel's $PnR in 75% (180 deposits), and the commonest set
+ * is maxRange 262144 at $PnR 262144, pos 4.418539922, neg 0, width −100 (119 deposits). A
+ * version-10.10 workspace of a FACSDiscover S8 file writes the same rule for the channels its
+ * instrument preset does not cover: maxRange 2147483648 ($PnR), pos 8.3319298656, neg 0, width −100.
+ *
+ * Version-11 workbenches depart from it through per-instrument presets in their cytometer rules
+ * (FACSymphony: T 262144, M 4.5, W −100; Aurora: T 4194304, M 5.62, W −250; FACSDiscover: T
+ * 8200000, M 5, W −100; A 0 in all three). GateLab keeps no instrument table, so it takes the rule
+ * that applies to any channel.
+ */
+export function defaultBiexParams(pnr: number): BiexParams | null {
+  if (!Number.isFinite(pnr) || !(pnr > 10)) return null;
+  return {
+    maxValue: pnr,
+    pos: Math.log10(pnr) - 1,
+    neg: 0,
+    widthBasis: BIEX_FALLBACK_WIDTH,
+    channelRange: 256,
+    tableChannels: FLOWJO_BIEX_TABLE_CHANNELS,
+  };
+}
+
+/** The width basis version-10 workspaces write for an unadjusted channel, and the auto width's fallback. */
+export const BIEX_FALLBACK_WIDTH = -100;
+
+/**
+ * The widths the auto estimate may choose. −1000 is the most negative width basis written: none
+ * of the 582,753 biex entries in FlowRepository's version-10 workspaces goes beyond it, and
+ * the table treats anything wider as −10^0.5 (generateBiexLut). −10^0.6 (−3.98) is the narrowest
+ * width all but 5% of those deposits used (one count per deposit and width; median −100).
+ */
+export const BIEX_AUTO_WIDTH_RANGE: readonly [number, number] = [-1000, -Math.pow(10, 0.6)];
+
+/**
+ * The width basis that puts a channel's 5th percentile at the bottom of its biex axis, the rule
+ * Parks et al. (2006) give for the logicle's W and GateLab uses for it (estimateLogicleW): the
+ * axis shows the channel's negative spread and little beyond it. Solved on the table itself,
+ * since biex has no closed form: the table's lowest raw value grows with the width basis, about
+ * 16·|W| at defaultBiexParams's top and decades. Clamped to BIEX_AUTO_WIDTH_RANGE, rounded to four
+ * significant figures as the width slider rounds, and BIEX_FALLBACK_WIDTH where fewer than 5% of
+ * the events are negative, as the logicle falls back to its default W.
+ */
+export function estimateBiexWidthBasis(values: ArrayLike<number>, base: BiexParams): number {
+  const finite: number[] = [];
+  for (let i = 0; i < values.length; i++) if (Number.isFinite(values[i])) finite.push(values[i]);
+  if (finite.length === 0) return BIEX_FALLBACK_WIDTH;
+  const sorted = Float64Array.from(finite).sort();
+  // R quantile type 7, as estimateLogicleW takes it.
+  const h = (sorted.length - 1) * 0.05;
+  const lo = Math.floor(h);
+  const q5 = sorted[lo] + (h - lo) * (sorted[Math.min(lo + 1, sorted.length - 1)] - sorted[lo]);
+  if (!(q5 < 0)) return BIEX_FALLBACK_WIDTH;
+  const floorAt = (logWidth: number): number => generateBiexLut({ ...base, widthBasis: -Math.pow(10, logWidth) }).x[0];
+  // The floor falls as the width widens, so bisect on log10 |W| between the clamp's ends.
+  let narrow = Math.log10(-BIEX_AUTO_WIDTH_RANGE[1]);
+  let wide = Math.log10(-BIEX_AUTO_WIDTH_RANGE[0]);
+  if (floorAt(wide) >= q5) return BIEX_AUTO_WIDTH_RANGE[0];
+  if (floorAt(narrow) <= q5) return BIEX_AUTO_WIDTH_RANGE[1];
+  for (let i = 0; i < 40; i++) {
+    const mid = (narrow + wide) / 2;
+    if (floorAt(mid) > q5) narrow = mid;
+    else wide = mid;
+  }
+  return -Number(Math.pow(10, (narrow + wide) / 2).toPrecision(4));
+}
+
+/**
  * Solve for the negative range.
  *
  * Newton's method with a bisection fallback, as cytolib has it. cytolib casts to int64_t in the

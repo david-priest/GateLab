@@ -46,6 +46,19 @@ describe("saving to the lab Drive", () => {
     expect(drive.kept).toEqual([`${target.fileId}_rev2`]);
   });
 
+  it("as an autosave, makes the same checks and does not keep the revision", async () => {
+    const drive = new FakeDrive();
+    const target = opened(drive);
+    const result = await saveWorkspaceToDrive(drive, target, json("{\"v\":2}"), SOURCES, { keepForever: false });
+    expect(result.kind).toBe("saved");
+    expect(drive.calls).toEqual([`get ${target.fileId}`, `update ${target.fileId}`, `get ${target.fileId}`]);
+    expect(drive.kept).toEqual([]);
+    drive.externalWrite(target.fileId!, json("{\"v\":3}"));
+    if (result.kind !== "saved") return;
+    expect((await saveWorkspaceToDrive(drive, result.target, json("{\"v\":4}"), SOURCES, { keepForever: false })).kind).toBe("conflict");
+    expect(drive.text(target.fileId!)).toBe("{\"v\":3}");
+  });
+
   it("refuses when another save moved the head revision, and writes nothing", async () => {
     const drive = new FakeDrive();
     const target = opened(drive);

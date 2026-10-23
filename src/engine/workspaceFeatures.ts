@@ -32,8 +32,16 @@
 
 /** Each feature, and what in the workspace needs it. */
 export const WORKSPACE_FEATURES = {
+  /** A Hyperlog gate axis must be refused by a reader that only knows Logicle. */
+  hyperlog: "hyperlog",
   /** A gate axis on FlowJo's gate grid: a TransformSpec of kind "flowjoChannels". */
   flowjoGrid: "flowjo-grid",
+  /**
+   * A gate axis on FlowJo 11's grid (`rule: "flowjo11"`, flowjoGrid.ts): a GateLab without the rule
+   * reads it as FlowJo 10's grid, rounding each event and vertex to the nearest channel, and moves
+   * the events along the gate's edges.
+   */
+  flowjo11Grid: "flowjo11-grid",
   /** A biex axis on a stated table (FlowJo's 4096 channels): a biex TransformSpec with tableChannels. */
   flowjoBiexTable: "flowjo-biex-table",
   /**
@@ -68,10 +76,12 @@ export const WORKSPACE_VERSION_2_WITH_FEATURES = 4 as const;
  */
 export function requiredWorkspaceFeatures(value: unknown): WorkspaceFeature[] {
   let grid = false;
+  let grid11 = false;
   let table = false;
   let spillover = false;
   let halfOpen = false;
   let derived = false;
+  let hyperlog = false;
   const stack: unknown[] = [value];
   while (stack.length) {
     const v = stack.pop();
@@ -81,7 +91,11 @@ export function requiredWorkspaceFeatures(value: unknown): WorkspaceFeature[] {
       continue;
     }
     const o = v as Record<string, unknown>;
-    if (o.kind === "flowjoChannels") grid = true;
+    if (o.kind === "flowjoChannels") {
+      grid = true;
+      if (o.rule === "flowjo11") grid11 = true;
+    }
+    else if (o.kind === "hyperlog") hyperlog = true;
     else if (o.kind === "biex" && o.tableChannels !== undefined) table = true;
     if (o.externalSpillover !== undefined) spillover = true;
     if (o.bounds === "half-open") halfOpen = true;
@@ -90,10 +104,12 @@ export function requiredWorkspaceFeatures(value: unknown): WorkspaceFeature[] {
       const child = o[key];
       if (child && typeof child === "object") stack.push(child);
     }
-    if (grid && table && spillover && halfOpen && derived) break;
+    if (grid && grid11 && table && spillover && halfOpen && derived && hyperlog) break;
   }
   return [
+    ...(hyperlog ? [WORKSPACE_FEATURES.hyperlog] : []),
     ...(grid ? [WORKSPACE_FEATURES.flowjoGrid] : []),
+    ...(grid11 ? [WORKSPACE_FEATURES.flowjo11Grid] : []),
     ...(table ? [WORKSPACE_FEATURES.flowjoBiexTable] : []),
     ...(spillover ? [WORKSPACE_FEATURES.externalSpillover] : []),
     ...(halfOpen ? [WORKSPACE_FEATURES.halfOpenRectangle] : []),

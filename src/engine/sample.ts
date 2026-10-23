@@ -14,17 +14,18 @@ import type { AssayData, GateAssayData } from "./gates";
 import { drawnRaw, isUnbounded, type Gate, type GateSpace, type GateTransforms, type TransformSpec } from "./models";
 import { resolveChannels, type ResolvedChannel, isImagingFeature } from "./channels";
 import type { DerivedChannelSpec } from "./derivedChannels";
-import { biexTransform, flogTransform, wspLogTransform, type BiexParams } from "./biex";
+import { biexTransform, estimateBiexWidthBasis, flogTransform, defaultBiexParams, wspLogTransform, type BiexParams } from "./biex";
 import { flowJoGridScale } from "./flowjoGrid";
+import { Hyperlog } from "./hyperlog";
 import type { MatrixChannelBinding } from "./compensationCompatibility";
 import type {
   PersistedCompensatedLayerBinding,
   PersistedTransformBinding,
 } from "./workspaceCompensation";
 import { encodeFloat32Base64, encodeUint8Base64 } from "./encode";
-import { robustAxisRange } from "./axisRange";
+import { orderedQuantileSample, robustAxisRange, robustAxisRangeOfSorted } from "./axisRange";
 import { DEFAULT_DENSITY_COLOR_POWER } from "./pseudocolor";
-import type { ChannelScales } from "./channelScales";
+import { biexIdentity, type ChannelScales } from "./channelScales";
 import type { RawPrecision } from "./float32Bounds";
 import { logicleTicks, scatterTicks, linearScatterTicks, type AxisTicks } from "./ticks";
 import {
@@ -81,6 +82,15 @@ function asinhTransform(cf: number): ChannelTransform {
  * computable from the gate alone — never from whatever the sample is currently showing. That is
  * the whole difference between a stable Gating-ML gate and a FlowJo one.
  */
+/**
+ * Whether Sample.pinnedColumn holds a gate space's values in double precision: Hyperlog, which is
+ * evaluated like its definition; every other kind keeps single precision. The Gating-ML exporter
+ * places bounds by the same rule (gatingmlExport.ts, exactBound).
+ */
+export function pinnedInDouble(spec: TransformSpec): boolean {
+  return spec.kind === "hyperlog";
+}
+
 export function transformFromSpec(spec: TransformSpec): ChannelTransform {
   const bounds = "bounds" in spec ? spec.bounds : undefined;
   if (bounds && (bounds.min !== undefined || bounds.max !== undefined)) {
@@ -118,6 +128,10 @@ export function transformFromSpec(spec: TransformSpec): ChannelTransform {
     // does not use `forward`, which clamps: see Sample.rawToGate.
     const g = flowJoGridScale(spec);
     return { kind: "asinh", forward: g.eventCell, inverse: g.centre };
+  }
+  if (spec.kind === "hyperlog") {
+    const h = new Hyperlog(spec.T, spec.W, spec.M, spec.A);
+    return { kind: "asinh", forward: (v) => h.scale(v), inverse: (v) => h.inverse(v) };
   }
   const lg = new Logicle(spec.T, spec.W, spec.M, spec.A);
   const fallback = asinhTransform(150);
@@ -1448,6 +1462,7 @@ export class Sample {
     this.gatingCache.clear();
     this.rangeCache.clear();
     this.logicleParamsCache.clear();
+    this.biexWidthCache.clear();
   }
 
   private freezeProfileMetadata(
@@ -1943,6 +1958,8 @@ export class Sample {
 
   /** Auto-estimated {T, W} per channel (single sort), cached. */
   private readonly logicleParamsCache = new Map<number, { t: number; w: number; m: number }>();
+  /** This file's own auto biex width basis per channel (estimateBiexWidthBasis), cached. */
+  private readonly biexWidthCache = new Map<number, number>();
   /** User-set logicle W per channel (overrides the auto estimate). */
   private readonly wOverride = new Map<number, number>();
   /** Workspace-wide owner of display scales; absent in single-sample and unit-test use. */
@@ -2249,8 +2266,8 @@ export class Sample {
 
   /**
    * Switch a flow fluorescence channel between its logicle, arcsinh (cofactor 150) and FlowJo's
-   * biexponential at the parameters the channel records (recordedBiex), which is offered only
-   * where the object or file declared one.
+   * biexponential, at the parameters the channel records (recordedBiex) or, where the object or
+   * file declared none, at the default for its $PnR (defaultBiex).
    *
    * Gates are stored in raw space for flow, so this never moves a gate -- only what the axis
    * looks like. Any logicle W the user set is kept, so switching back restores their axis.
@@ -2258,7 +2275,7 @@ export class Sample {
   setFluorScale(idx: number, scale: FluorScale): void {
     if (!this.isFluorChannel(idx)) return;
     const key = this.channels[idx]?.key;
-    const biex = scale === "biex" ? this.recordedBiex(idx) : null;
+    const biex = scale === "biex" ? this.recordedBiex(idx) ?? this.defaultBiex(idx) : null;
     if (scale === "biex" && !biex) return;
     if (this.channelScales && key) {
       this.channelScales.setFluorBiex(this.workspaceScaleContextKey, key, biex);
@@ -2272,11 +2289,103 @@ export class Sample {
     this.invalidateChannel(idx);
   }
 
+  /**
+   * Show a channel already on a biexponential at other parameters. Display only: gates are held
+   * in raw values, or in their own stored transform for an imported FlowJo gate, so no gate moves
+   * and no count changes. Workspace-wide where the scales are shared, as every scale choice.
+   * Refused (false) for a channel not on biex, and for parameters whose calibration table cannot
+   * be built (generateBiexLut throws), which would otherwise fail at the next draw.
+   */
+  setFluorBiexParams(idx: number, params: BiexParams): boolean {
+    if (!this.isFluorChannel(idx) || !this.fluorBiexParams(idx)) return false;
+    try {
+      biexTransform(params);
+    } catch {
+      return false;
+    }
+    const key = this.channels[idx]?.key;
+    if (this.channelScales && key) {
+      this.channelScales.setFluorBiex(this.workspaceScaleContextKey, key, params);
+      return true;
+    }
+    this.fluorBiexOverride.set(idx, { ...params });
+    this.invalidateChannel(idx);
+    return true;
+  }
+
+  /**
+   * Return a biexponential channel to the parameters the object, file or import recorded, or to
+   * the default for its $PnR where none were recorded.
+   */
+  resetFluorBiex(idx: number): void {
+    const target = this.recordedBiex(idx) ?? this.defaultBiex(idx);
+    if (target) this.setFluorBiexParams(idx, target);
+  }
+
   /** The biexponential the object or file declares for a channel, which the axis can be switched to. */
   recordedBiex(idx: number): BiexParams | null {
     const key = this.channels[idx]?.key;
     const params = key ? this.recordedBiexByKey.get(key) : undefined;
     return params ? { ...params } : null;
+  }
+
+  /**
+   * The biexponential a fluorescence channel takes when switched to biex with nothing recorded,
+   * and Reset's target: the top and decades for its $PnR (defaultBiexParams), with the
+   * width basis estimated from the channel's negative spread (estimateBiexWidthBasis), shared
+   * across the workspace as the logicle W is. Null for any other channel, and where $PnR gives no
+   * table that can be built.
+   */
+  defaultBiex(idx: number): BiexParams | null {
+    if (!this.isFluorChannel(idx)) return null;
+    const base = defaultBiexParams(this.channels[idx]?.range ?? NaN);
+    if (!base) return null;
+    try {
+      biexTransform(base);
+    } catch {
+      return null;
+    }
+    const key = this.channels[idx].key;
+    const width = (this.channelScales && this.channelScales.autoBiexWidth(this.workspaceScaleContextKey, key)) ?? this.ownAutoBiexWidth(idx);
+    const params = { ...base, widthBasis: Number.isFinite(width) ? width : base.widthBasis };
+    try {
+      biexTransform(params);
+      return params;
+    } catch {
+      return base;
+    }
+  }
+
+  /**
+   * Whether the channel can be shown on biex: recorded parameters, or a default its $PnR can
+   * build. Cheap, for the scale menu; the width estimate waits until biex is chosen.
+   */
+  biexOffered(idx: number): boolean {
+    if (this.recordedBiex(idx)) return true;
+    const base = this.isFluorChannel(idx) ? defaultBiexParams(this.channels[idx]?.range ?? NaN) : null;
+    if (!base) return false;
+    try {
+      biexTransform(base);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** This file's own auto width basis for a channel, ignoring the shared owner; NaN off fluorescence. */
+  ownAutoBiexWidth(idx: number): number {
+    let width = this.biexWidthCache.get(idx);
+    if (width === undefined) {
+      const base = this.isFluorChannel(idx) ? defaultBiexParams(this.channels[idx]?.range ?? NaN) : null;
+      if (!base) return NaN;
+      try {
+        width = estimateBiexWidthBasis(this.activeLinearColumn(idx), base);
+      } catch {
+        width = base.widthBasis;
+      }
+      this.biexWidthCache.set(idx, width);
+    }
+    return width;
   }
 
   /** The biexponential a fluorescence channel is shown on, or null when it is on its logicle or arcsinh. */
@@ -2297,13 +2406,35 @@ export class Sample {
     return out;
   }
 
-  /** Restore biexponential channels from a saved workspace; the parameters saved are the ones shown. */
-  applyFluorBiex(entries: Readonly<Record<string, BiexParams>>): void {
+  /**
+   * The recorded parameters of the channels shown at other ones, for workspace save, so that a
+   * reset after reopening returns to what the object, file or import recorded. Empty while every
+   * biex channel is shown as recorded, which keeps such a workspace as it was written before. A
+   * channel with nothing recorded is measured against its default, which it then reopens with
+   * as the parameters Reset returns to.
+   */
+  fluorBiexRecordedEntries(): Record<string, BiexParams> {
+    const out: Record<string, BiexParams> = {};
+    this.channels.forEach((channel, idx) => {
+      const shown = this.fluorBiexParams(idx);
+      if (!shown) return;
+      const recorded = this.recordedBiex(idx) ?? this.defaultBiex(idx);
+      if (recorded && biexIdentity(shown) !== biexIdentity(recorded)) out[channel.key] = recorded;
+    });
+    return out;
+  }
+
+  /**
+   * Restore biexponential channels from a saved workspace; the parameters saved are the ones
+   * shown. `recorded` holds, for a channel shown at adjusted parameters, the ones it was recorded
+   * at (fluorBiexRecordedEntries); any other channel's recorded axis is the one shown.
+   */
+  applyFluorBiex(entries: Readonly<Record<string, BiexParams>>, recorded: Readonly<Record<string, BiexParams>> = {}): void {
     for (const [key, params] of Object.entries(entries)) {
       const idx = this.byName.get(key);
       if (idx === undefined || !this.isFluorChannel(idx)) continue;
       // The saved parameters become the channel's recorded axis, so the Scales tab offers them.
-      this.recordedBiexByKey.set(key, { ...params });
+      this.recordedBiexByKey.set(key, { ...(recorded[key] ?? params) });
       if (this.channelScales) {
         this.channelScales.setFluorBiex(this.workspaceScaleContextKey, key, params);
         this.channelScales.setFluorArcsinh(this.workspaceScaleContextKey, key, false);
@@ -2883,16 +3014,19 @@ export class Sample {
     const hit = this.pinnedCache.get(key);
     if (hit) return hit;
     // Evict columns pinned under OTHER assay bindings before adding one. Each entry is
-    // nEvents x 4 bytes, and nothing else ever clears this cache -- a session that toggled
-    // compensation while holding several imported .wsp gates accumulated a full set of pinned
-    // columns per layer, forever. Correctness never depended on this (the binding key already
-    // prevents stale hits); it is purely the memory bound.
+    // nEvents x 4 bytes (8 for a Hyperlog column), and nothing else ever clears this cache --
+    // a session that toggled compensation while holding several imported .wsp gates accumulated
+    // a full set of pinned columns per layer, forever. Correctness never depended on this (the
+    // binding key already prevents stale hits); it is purely the memory bound.
     for (const k of this.pinnedCache.keys()) {
       if (!k.startsWith(prefix)) this.pinnedCache.delete(k);
     }
     const raw = this.activeLinearColumn(idx);
     const t = transformFromSpec(spec);
-    const out = new Float32Array(raw.length);
+    // Hyperlog is a new stored gate space, evaluated in double precision like its definition.
+    // Rounding the transformed column to float32 changes membership on near-boundary events
+    // in the ISAC compliance fixture. Existing transform kinds keep their saved precision.
+    const out = pinnedInDouble(spec) ? new Float64Array(raw.length) : new Float32Array(raw.length);
     if (t.kind === "identity") out.set(raw);
     else for (let i = 0; i < raw.length; i++) out[i] = t.forward(raw[i]);
     this.pinnedCache.set(key, out);
@@ -2904,11 +3038,52 @@ export class Sample {
     this.syncScaleRoster();
     const hit = this.rangeCache.get(idx);
     if (hit) return hit;
-    const r = robustAxisRange(this.displayColumn(idx));
+    const r = this.biexDisplayRange(idx) ?? robustAxisRange(this.displayColumn(idx), this.displayCeiling(idx));
     this.rangeCache.set(idx, r);
     return r;
   }
+
+  /**
+   * The top of what the instrument measures on a channel, in display units: $PnR, past which an
+   * automatic frame does not reach. Undefined for mass cytometry, whose $PnR says nothing about
+   * its counts, and for a channel with no $PnR.
+   */
+  displayCeiling(idx: number): number | undefined {
+    const range = this.channels[idx]?.range;
+    if (this.instrument !== "flow" || !(range > 0)) return undefined;
+    const top = this.transform(idx).forward(range);
+    return Number.isFinite(top) ? top : undefined;
+  }
   private readonly rangeCache = new Map<number, [number, number]>();
+
+  /**
+   * displayRange of a channel on FlowJo's biex table, without sorting its display column: the
+   * table's interpolation never decreases, so the column's sorted sample is the raw column's,
+   * which is kept per column (orderedQuantileSample), mapped through the table. The same range
+   * robustAxisRange gives, at a fraction of the cost: on 74,000 events the sort was 18 ms of every
+   * step of a biex slider's drag. Null for any other axis, and for cytolib's spline, which can
+   * overshoot between its nodes and so is not certain to keep the order.
+   */
+  private biexDisplayRange(idx: number): [number, number] | null {
+    const biex = this.fluorBiexParams(idx);
+    if (!biex || biex.spline) return null;
+    const raw = this.activeLinearColumn(idx);
+    let ordered = this.orderedRawSamples.get(raw);
+    if (!ordered) {
+      ordered = orderedQuantileSample(raw);
+      this.orderedRawSamples.set(raw, ordered);
+    }
+    const t = this.transform(idx);
+    const sorted: number[] = [];
+    for (const v of ordered) {
+      const d = Math.fround(t.forward(v));
+      if (Number.isFinite(d)) sorted.push(d);
+    }
+    // finiteQuantileSample scans the whole column when its positions hold nothing finite.
+    return sorted.length ? robustAxisRangeOfSorted(sorted, this.displayCeiling(idx)) : null;
+  }
+  /** orderedQuantileSample of each linear column, by the column itself. */
+  private readonly orderedRawSamples = new WeakMap<object, number[]>();
 
   /**
    * Display-space axis ticks for a channel over the given visible range (mirrors

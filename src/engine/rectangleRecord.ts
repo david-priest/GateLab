@@ -36,6 +36,7 @@ import { isRectangleBounds, rectangleRule } from "./models";
 import { transformFromSpec } from "./sample";
 import { otherRectangleRule, rangeForReader } from "./gates";
 import { parseFlowJoGridSpec } from "./flowjoGrid";
+import { Hyperlog } from "./hyperlog";
 
 export interface RectangleRecord {
   bounds: RectangleBounds;
@@ -147,6 +148,16 @@ export function parseTransformSpec(value: unknown): TransformSpec | null {
       return all("T", "W", "M", "A")
         ? { kind: "logicle", T: v.T as number, W: v.W as number, M: v.M as number, A: v.A as number, ...withBounds }
         : null;
+    case "hyperlog": {
+      if (!all("T", "W", "M", "A")) return null;
+      const spec = { kind: "hyperlog" as const, T: v.T as number, W: v.W as number, M: v.M as number, A: v.A as number, ...withBounds };
+      try {
+        new Hyperlog(spec.T, spec.W, spec.M, spec.A);
+        return spec;
+      } catch {
+        return null;
+      }
+    }
     case "biex": {
       if (!all("maxValue", "pos", "neg", "widthBasis", "channelRange")) return null;
       // Absent keeps the table a spec saved before FlowJo's own was adopted (biex.ts); a value

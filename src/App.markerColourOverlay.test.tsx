@@ -261,7 +261,7 @@ describe("Colour by a third marker", () => {
     // ramp identically and look the same; pooled, one file must sit low on the ramp and the other
     // high, with the empty space between them showing as empty.
     await load(testFile("a.fcs", 1), testFile("b.fcs", 2));
-    act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.startsWith("Pool selected files"))!.click());
+    act(() => host.querySelector<HTMLButtonElement>(".gl-pool-toggle [aria-checked=false]")!.click());
     await settle();
     await chooseColourBy("channel:CD4");
     const got = levels();
@@ -287,7 +287,7 @@ describe("Colour by a third marker", () => {
     // a.fcs is loaded last so it is the primary: the "Colour by" list is the active file's
     // channels, and only it carries CD4.
     await load(testFile("c.fcs", 3), testFile("a.fcs", 1));
-    act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.startsWith("Pool selected files"))!.click());
+    act(() => host.querySelector<HTMLButtonElement>(".gl-pool-toggle [aria-checked=false]")!.click());
     await settle();
     await chooseColourBy("channel:CD4");
     expect(host.textContent).toContain("different panel");
@@ -343,7 +343,7 @@ describe("Colour by a third marker", () => {
 
   it("drops the overlay when the chosen channel leaves the workspace", async () => {
     await load(testFile("c.fcs", 3), testFile("a.fcs", 1));
-    act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.startsWith("Pool selected files"))!.click());
+    act(() => host.querySelector<HTMLButtonElement>(".gl-pool-toggle [aria-checked=false]")!.click());
     await settle();
     await chooseColourBy("channel:CD4");
     expect(host.querySelector(".gl-marker-colour-bar")).not.toBeNull();
@@ -351,7 +351,7 @@ describe("Colour by a third marker", () => {
     // Removing the file that carries CD4 removes the channel with it. A stale pick would leave
     // "Colour by: CD4" selected over a plot drawn in one flat colour.
     act(() => [...host.querySelectorAll<HTMLButtonElement>("button")]
-      .find((b) => b.textContent === "Manage…")!.click());
+      .find((b) => b.textContent === "Manage files…")!.click());
     act(() => host.querySelector<HTMLInputElement>(
       'input[aria-label="Select a.fcs for management"]')!.click());
     act(() => [...host.querySelectorAll<HTMLButtonElement>("button")]

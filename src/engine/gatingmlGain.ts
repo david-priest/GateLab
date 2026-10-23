@@ -128,6 +128,7 @@ export function scaleTransformSpec(spec: TransformSpec, g: number): TransformSpe
     case "identity": return spec;
     case "asinh": return { ...spec, cofactor: spec.cofactor * g };
     case "logicle": return { ...spec, T: spec.T * g };
+    case "hyperlog": return { ...spec, T: spec.T * g };
     case "flog": return { ...spec, T: spec.T * g };
     case "wsplog": return { ...spec, offset: spec.offset * g };
     case "biex": return null; // FlowJo's biex is not a scale family; it never arrives from Gating-ML
@@ -183,7 +184,11 @@ export function gatesFromGatingMlScale(
     }
     const withTransforms = transforms ? { transforms } : {};
     if (gate.gate_type === "quadrant") {
-      out[id] = { ...gate, ...withTransforms, center: [scaleCoord(gate.center[0], kx), scaleCoord(gate.center[1], ky)] };
+      const scale = ([x, y]: [number, number]): [number, number] => [scaleCoord(x, kx), scaleCoord(y, ky)];
+      const arms = gate.arms
+        ? { down: scale(gate.arms.down), right: scale(gate.arms.right), up: scale(gate.arms.up), left: scale(gate.arms.left) }
+        : undefined;
+      out[id] = { ...gate, ...withTransforms, center: scale(gate.center), ...(arms ? { arms } : {}) };
     } else if (gate.gate_type === "ellipse") {
       const c = gate.covariance;
       out[id] = {

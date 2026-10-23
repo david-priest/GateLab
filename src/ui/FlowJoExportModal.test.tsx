@@ -8,7 +8,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FlowJoExportModal, type FlowJoExportFolderOption } from "./CrudModals";
+import { FlowJo11ExportModal, FlowJoExportModal, type FlowJoExportFolderOption } from "./CrudModals";
 import { hasUiTranslation, I18nProvider } from "./i18n";
 import type { FlowJoFolderPreview } from "../engine/flowjoExportFolder";
 
@@ -133,21 +133,21 @@ describe("FlowJoExportModal's self-contained folder", () => {
   it("is in Japanese in the Japanese UI", () => {
     const keys = [
       "Save the FCS files with it, in a self-contained folder",
-      "Each file is written as GateLab loaded it, byte for byte, beside the workspace and under its own name, and the workspace names it there, so FlowJo, FlowKit, CytoML and GateLab find the files wherever the folder is moved.",
+      "Each file is written as GateLab loaded it, byte for byte, beside the workspace and under its own name, and the workspace names it there, so programs that read the workspace find the files wherever the folder is moved.",
       "{workspace} and 1 FCS file, {size}, are written into a new folder, {folder}, inside the folder you choose.",
       "{workspace} and {count} FCS files, {size}, are written into a new folder, {folder}, inside the folder you choose.",
       "This browser cannot write a folder, so the folder is downloaded as {folder}.zip, stored uncompressed: {workspace} and 1 FCS file, at most {size} in all.",
       "This browser cannot write a folder, so the folder is downloaded as {folder}.zip, stored uncompressed: {workspace} and {count} FCS files, at most {size} in all.",
       "That is more than one .zip can hold ({limit}). Export fewer files, or use a browser that writes folders, such as Chrome or Edge.",
       "In a subfolder under their own names, because another file of the export has the name; the workspace names each where it is:",
-      "Chrome will not write these names as they are, so each file is written under the name shown. The workspace names it by that name, and its bytes are unchanged, keywords and $FIL included, so FlowJo, FlowKit, CytoML and GateLab still pair it with its sample:",
+      "Chrome will not write these names as they are, so each file is written under the name shown. The workspace names it by that name, and its bytes are unchanged, keywords and $FIL included, so programs that read the workspace still pair it with its sample:",
       "holds {characters}, which a file name cannot",
       'begins or ends with a space, "." or "~"',
       "ends in .{extension}, which Chrome will not write",
       "is a name Windows reserves",
       'is a short name with a "~", which Chrome will not write on Windows',
       'is empty, "." or ".."',
-      "GateLab does not hold the bytes of these files, so the folder will not have them; the workspace still names each, and FlowJo will look for it beside the workspace:",
+      "GateLab does not hold the bytes of these files, so the folder will not have them; the workspace still names each, to be looked for beside it:",
     ];
     expect(keys.filter((key) => !hasUiTranslation("ja", key))).toEqual([]);
     window.localStorage.setItem("gatelab.uiLanguage", "ja");
@@ -162,5 +162,34 @@ describe("FlowJoExportModal's self-contained folder", () => {
     } finally {
       window.localStorage.removeItem("gatelab.uiLanguage");
     }
+  });
+});
+
+describe("FlowJo11ExportModal", () => {
+  it("lists the dry run's notes, asks for an absolute folder and exports with it, in Japanese as well", () => {
+    const onExport = vi.fn();
+    const plan = vi.fn(() => ({ warnings: ["D1.fcs: FlowJo 11 tests the ellipse \"E1\" at the middle of each channel, which puts 2 events of \"Cells\" on the other side of it than GateLab."], sampleCount: 1, populationCount: 2 }));
+    act(() => root.render(
+      <FlowJo11ExportModal
+        files={[{ id: "a", name: "D1.fcs", hierarchy: "Tree", checked: true }]}
+        plan={plan}
+        initialFolder="/Users/D1/fcs"
+        onCancel={vi.fn()}
+        onExport={onExport}
+      />,
+    ));
+    expect(host.querySelector(".gl-modal-warning")?.textContent).toContain("2 events of \"Cells\"");
+    expect(host.textContent).toContain("2 population(s) across 1 sample(s).");
+    const exportButton = [...host.querySelectorAll("button")].find((b) => b.textContent === "Export")!;
+    act(() => exportButton.click());
+    expect(onExport).toHaveBeenCalledWith("checked", "/Users/D1/fcs");
+    expect(plan).toHaveBeenCalledTimes(1);
+    for (const source of [
+      "Export FlowJo 11 workbench (.flowjo)…",
+      "Export FlowJo 11 workbench",
+      "Folder of the FCS files",
+      "The folder must be an absolute path, such as /Users/name/Data or C:\\Data.",
+      "{populations} population(s) across {samples} sample(s).",
+    ]) expect(hasUiTranslation("ja", source)).toBe(true);
   });
 });

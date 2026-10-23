@@ -4,7 +4,9 @@
 import { useEffect, useRef, useState } from "react";
 import { MenuButton, type MenuEntry } from "../ui/MenuButton";
 import { useI18n } from "../ui/i18n";
+import { ModalEscape } from "../ui/useModalEscape";
 import { parseAgentUrl, type AgentLinkStatus } from "./agentLink";
+import type { AgentGatingTask } from "./protocol";
 
 export const AGENT_URL_STORAGE_KEY = "gatelab.agent.url";
 
@@ -27,13 +29,18 @@ export function rememberAgentUrl(url: string): void {
   }
 }
 
-export function AgentMenu({ status, onConnect, onDisconnect }: {
+export function AgentMenu({ status, task, onEndSearch, onConnect, onDisconnect }: {
   status: AgentLinkStatus;
+  task?: AgentGatingTask | null;
+  onEndSearch?: () => void;
   onConnect: (url: string) => void;
   onDisconnect: () => void;
 }) {
   const { t } = useI18n();
   const [dialog, setDialog] = useState(false);
+  const [searchDialog, setSearchDialog] = useState(false);
+  const [mode, setMode] = useState<"population" | "cluster">("population");
+  const [target, setTarget] = useState("");
   const [url, setUrl] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -62,6 +69,7 @@ export function AgentMenu({ status, onConnect, onDisconnect }: {
     : status.state === "closed" ? t("Agent · not connected")
     : t("Agent");
   const items: MenuEntry[] = [];
+  items.push({ label: task?.status === "searching" ? t("Gating search · {count}/{budget}", { count: task.candidates, budget: task.budget }) : t("Agent-assisted gating…"), onClick: () => setSearchDialog(true) });
   if (status.state === "connected") {
     items.push({
       label: status.writer ? t("{writer}: {count} requests", { writer: status.writer, count: status.requests }) : t("{count} requests", { count: status.requests }),
@@ -100,8 +108,31 @@ export function AgentMenu({ status, onConnect, onDisconnect }: {
         title={t("Let an agent on this computer read the gating and propose gates, which appear here as you work")}
         items={items}
       />
+      {searchDialog && <div className="gl-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSearchDialog(false); }}>
+        <ModalEscape onClose={() => setSearchDialog(false)} />
+        <div className="gl-modal gl-agent-dialog" role="dialog" aria-modal="true" aria-label={t("Agent-assisted gating")}>
+          <div className="gl-modal-title">{t("Agent-assisted gating")}</div>
+          <p>{t("Choose a goal to discuss with your connected agent. The agent proposes and revises strategies using read-only previews. Applying gates and saving remain separate review steps.")}</p>
+          <label className="gl-modal-field">{t("Mode")}<select value={task?.status === "searching" ? task.mode : mode} disabled={task?.status === "searching"} onChange={(event) => setMode(event.target.value as "population" | "cluster")}>
+            <option value="population">{t("Fit a known or described population")}</option>
+            <option value="cluster">{t("Fit cluster labels")}</option>
+          </select></label>
+          {(task?.status === "searching" ? task.mode : mode) === "population"
+            ? <p>{t("Population mode uses your phenotype description, marker distributions and biological reasoning. It does not report cluster concordance without reference labels.")}</p>
+            : <p>{t("Cluster mode requires aligned labels and separate training and validation samples. The agent receives training precision, recall, F1 and ancestor losses. Validation selects a frozen proposal once; final test samples remain excluded.")}</p>}
+          <label className="gl-modal-field">{t("Target definition")}<textarea value={task?.status === "searching" ? task.target : target} disabled={task?.status === "searching"} onChange={(event) => setTarget(event.target.value)} /></label>
+          {!task || task.status !== "searching" ? <p>{t("Ask your connected agent to start this mode with the target above, an explicit sample selection, candidate budget and a new local history file. This dialog does not start a model or transfer labels automatically.")}</p> : null}
+          {task && <div role="status"><p>{t("{mode} mode · {status} · {count}/{budget} candidates", { mode: task.mode, status: task.status, count: task.candidates, budget: task.budget })}</p><p>{task.target}</p><p>{task.message}</p></div>}
+          <div className="gl-modal-actions">
+            {task?.status !== "searching" && <button type="button" disabled={!target.trim()} onClick={() => copy(`Start a GateLab ${mode}-mode gating fit. Target: ${target.trim()}. Agree an explicit sample selection, candidate budget and new history file; preview revisions without applying gates. ${mode === "cluster" ? "Use training labels for feedback and disjoint validation samples for one final selection; exclude final test samples." : "Explain the phenotype and marker choices; do not report cluster concordance without labels."}`)}>{copied ? t("Copied") : t("Copy request for agent")}</button>}
+            {task?.status === "searching" && onEndSearch && <button type="button" onClick={onEndSearch}>{t("End search")}</button>}
+            <button type="button" onClick={() => setSearchDialog(false)}>{t("Close")}</button>
+          </div>
+        </div>
+      </div>}
       {dialog && (
         <div className="gl-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setDialog(false); }}>
+          <ModalEscape onClose={() => setDialog(false)} />
           <div className="gl-modal gl-agent-dialog" role="dialog" aria-modal="true" aria-label={t("Connect to an agent")}>
             <div className="gl-modal-title">{t("Connect to an agent")}</div>
             <p>{t("An agent is an AI assistant on this computer (Claude Code, or anything that speaks MCP) that reads the gating in this tab and proposes gates. They appear in the plot and the tree with a badge and the agent's reason; you adjust or undo them as any other, and saving stays yours.")}</p>

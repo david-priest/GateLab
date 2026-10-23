@@ -93,7 +93,7 @@ describe("the checkpoint after a gating import", () => {
     act(() => root.render(<App />));
     await feed('input[type=file][accept=".fcs"][multiple]', fileOf("D1.fcs", Uint8Array.from([1])));
     expect(host.textContent).toContain("D1.fcs");
-    await feed('input[accept=".xml,.wsp,.cef"]', fileOf("gates.xml", GATING_ML));
+    await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', fileOf("gates.xml", GATING_ML));
     const importButton = [...host.querySelectorAll<HTMLButtonElement>(".gl-modal button")].find((b) => /^Import/.test(b.textContent ?? ""));
     if (importButton) { await act(async () => { importButton.click(); }); await settle(); await settle(); }
     expect(host.textContent).toContain("CD4_positive");

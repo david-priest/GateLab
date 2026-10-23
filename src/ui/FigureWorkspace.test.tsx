@@ -488,7 +488,7 @@ describe("FigureWorkspace", () => {
     expect(populations()).toHaveLength(0);
     click("Leaves");
     expect(populations().length).toBeGreaterThan(0);
-    click("Use checked populations");
+    click("Use highlighted populations");
     expect(populations()).toHaveLength(1);
     expect(populations()[0].populationId).toBe(props.state.root_population_id);
     const find = host.querySelector<HTMLInputElement>('input[aria-label="Find figure populations"]')!;
@@ -497,6 +497,32 @@ describe("FigureWorkspace", () => {
       find.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(host.querySelectorAll('input[aria-label="Find figure populations"] ~ .gl-figure-list .gl-figure-row')).toHaveLength(0);
+  });
+
+  it("does not repeat the tree's name on every population row when the files' copies all follow one tree", async () => {
+    const props = fixture();
+    act(() => root.render(<FigureWorkspace {...props} />));
+    await flush();
+    const rows = () => [...host.querySelectorAll('input[aria-label="Find figure populations"] ~ .gl-figure-list .gl-figure-row')];
+    expect(rows().length).toBeGreaterThan(0);
+    const treeName = props.state.hierarchies.find((h) => h.id === props.state.active_hierarchy_id)!.name;
+    expect(rows().some((row) => [...row.querySelectorAll(".gl-figure-row-meta")].some((meta) => meta.textContent === treeName))).toBe(false);
+
+    // A second tree of its own, not a copy, with a file under it: the rows say which tree each
+    // population is from.
+    const second = cloneHierarchyTree(props.state.populations, props.state.root_population_id!, {}, []);
+    const ref = { id: "second", name: "Second tree" };
+    const state = {
+      ...props.state,
+      hierarchies: [...props.state.hierarchies, ref],
+      stored_hierarchies: { ...props.state.stored_hierarchies, second: storeHierarchy(ref, { ...props.state, ...second }) },
+    };
+    const samples = props.samples.map((sample, index) => (index === 0 ? { ...sample, hierarchyId: "second" } : sample));
+    act(() => root.render(<FigureWorkspace {...props} samples={samples} state={state} />));
+    await flush();
+    const metas = rows().flatMap((row) => [...row.querySelectorAll(".gl-figure-row-meta")].map((meta) => meta.textContent));
+    expect(metas).toContain(treeName);
+    expect(metas).toContain("Second tree");
   });
 
   it("picks a plot's channel through the searchable picker, typing part of a name and pressing Enter", async () => {

@@ -1,0 +1,62 @@
+/* tokens.css — the design tokens every rule in styles.css draws from (visual design pass, 2026-10-23).
+   One type scale, one spacing grid, three radii, two border colours, three text colours and one
+   accent. Where a token matches a value the app draws today, the older variable in styles.css
+   points at it; the rest are not used yet and are adopted area by area. Names avoid every variable
+   a rule already reads with a fallback (--border, --ink, --danger, --gl-accent, --gl-border,
+   --gl-muted), since defining one of those would change what that rule draws. */
+
+:root {
+  /* Type: 11 px captions and metadata, 12 px secondary text, 13 px controls and lists (the body
+     size), 15 px headings. No text below 11 px. */
+  --gl-font-size-caption: 11px;
+  --gl-font-size-secondary: 12px;
+  --gl-font-size-body: 13px;
+  --gl-font-size-heading: 15px;
+  --gl-font-weight-semibold: 600;
+
+  /* Spacing on a 4 px grid. */
+  --gl-space-1: 4px;
+  --gl-space-2: 8px;
+  --gl-space-3: 12px;
+  --gl-space-4: 16px;
+  --gl-space-6: 24px;
+  --gl-pane-padding: var(--gl-space-3);
+  --gl-section-header-height: 32px;
+
+  /* Radii: inputs and chips; buttons, menus and panels; switches. */
+  --gl-radius-sm: 4px;
+  --gl-radius-md: 6px;
+  --gl-radius-round: 999px;
+
+  /* Control heights: compact and default. */
+  --gl-control-height-compact: 24px;
+  --gl-control-height: 28px;
+
+  /* Colour. Two borders, three text colours, one accent, and the fills built on them. */
+  --gl-color-divider: #dde1e7;
+  --gl-color-control-border: #c8d1dc;
+  --gl-color-text: #1b2027;
+  --gl-color-text-secondary: #6b7280;
+  --gl-color-text-tertiary: #8b929c; /* placeholders, disabled text and faint metadata only */
+  --gl-color-accent: #2f80ed;
+  --gl-color-danger: #b42318;
+  --gl-color-selected: #e4eefb; /* selected row fill */
+  --gl-color-hover: #f1f3f5; /* row and ghost-button hover fill */
+  --gl-color-focus-ring: rgba(47, 128, 237, 0.42);
+  /* The grey a figure or plot sits on: the Gating plot area, Illustration's workspace, Layout's
+     page surround. Panes and chrome are --panel; content cards are white. */
+  --gl-surface-canvas: #eef1f5;
+
+  /* Motion. */
+  --gl-duration-fast: 150ms;
+}
+
+/* Counts and percentages in columns: digits of one width, so they align. */
+.gl-tabular-nums { font-variant-numeric: tabular-nums; }
+
+/* Icons (src/ui/icons.tsx). A disclosure chevron points right when closed and down when open. It
+   turns at once, with no transition: an animated turn could be left part-way, or rotated, in an
+   embedded browser (David, 2026-10-23), and the state it shows must always be the state it is. */
+.gl-icon { flex: none; display: inline-block; vertical-align: middle; }
+.gl-icon-chevron { display: inline-flex; flex: none; transform-origin: 50% 50%; transform: rotate(0deg); }
+.gl-icon-chevron.is-open { transform: rotate(90deg); }

@@ -15,6 +15,7 @@ import type { Sample } from "../engine/sample";
 import { loadDivisionPlots } from "../plots/loadPlots";
 import { buildDivisionPayload, seedDivisionBoundaries, spaceEvenly, resizeBoundaries, computeAxisRange } from "../engine/division";
 import { useI18n } from "./i18n";
+import { TabIntro, TabIntroToggle, useTabIntro } from "./TabIntro";
 
 export interface DivisionProfile {
   channelKey: string;
@@ -34,6 +35,10 @@ interface Props {
   onWriteToHost?: (profile: DivisionProfile) => void;
   hostWriteBusy?: boolean;
   dataRevision: number;
+  /** The loaded files, for the Data side tab's file choice, and the one shown. */
+  files?: { id: string; name: string }[];
+  activeFileId?: string | null;
+  onChooseFile?: (id: string) => void;
 }
 
 const guessChannel = (keys: string[], re: RegExp, fallback: number) => {
@@ -58,8 +63,14 @@ export function DivisionTab({
   onWriteToHost,
   hostWriteBusy = false,
   dataRevision,
+  files = [],
+  activeFileId = null,
+  onChooseFile,
 }: Props) {
   const { t } = useI18n();
+  // The left pane's side tab: what to fit (Data), the fit itself (Fit), how it is drawn (Display).
+  const [section, setSection] = usePersistedTabState<"data" | "fit" | "display">("div.section", "data");
+  const intro = useTabIntro("division");
   const keys = sample.channels.map((c) => c.key);
   const [dyeIdx, setDyeIdx] = useState(() => guessChannel(keys, /CFSE|CTV|CellTrace|Violet|Tag/i, 0));
   const [yMarker, setYMarker] = usePersistedTabState<string>("div.yMarker", ""); // "" = none
@@ -185,80 +196,109 @@ export function DivisionTab({
   const apply = () => onApply(currentProfile());
 
   return (
-    <div className="gl-tab-panel">
-      <div className="gl-strategy-controls">
-        <label className="gl-field-inline">
-          {t("Dye channel")}
-          <SearchableSelect
-            label={t("Dye channel")}
-            value={String(dyeIdx)}
-            options={sample.channels.map((_, i) => ({ value: String(i), label: sample.channelLabel(i) }))}
-            onChange={(value) => setDyeIdx(+value)}
-          />
-        </label>
-        <label className="gl-field-inline">
-          {t("# divisions")}
-          <input type="number" min={1} max={11} value={n} onChange={(e) => changeN(+e.target.value || 1)} />
-        </label>
-        <button className="gl-mini-btn" onClick={() => changeN(n - 1)}>−</button>
-        <button className="gl-mini-btn" onClick={() => changeN(n + 1)}>+</button>
-        <button className="gl-mini-btn" onClick={() => reseed()}>{t("Re-seed")}</button>
-        <button className="gl-mini-btn" onClick={() => setBoundaries((prev) => (prev.length >= 2 ? spaceEvenly(prev) : seedDivisionBoundaries(maskedDye, n)))}>{t("Space evenly")}</button>
-        <button className="gl-mini-btn" onClick={() => shift(-1)}>{t("← shift")}</button>
-        <button className="gl-mini-btn" onClick={() => shift(1)}>{t("shift →")}</button>
+    // The left pane every analysis tab has (Data / Fit / Display, Apply at its foot), the chart taking
+    // the rest of the width (David, 2026-10-23).
+    <div className={`gl-tab-panel gl-tab-fill gl-plotting-workspace gl-division-workspace section-${section}`}>
+      <div className="gl-plotting-head">
+        <strong>{t("Division")}</strong>
+        <span>{sampleName}</span>
+        <TabIntroToggle intro={intro} />
       </div>
-
-      <div className="gl-strategy-controls">
-        <label className="gl-field-inline">{t("Bins")}<input type="number" min={10} max={1000} value={bins} onChange={(e) => setBins(e.target.value === "" ? 0 : +e.target.value)} onBlur={(e) => setBins(Math.max(10, Math.min(1000, +e.target.value || 120)))} /></label>
-        <label className="gl-field-inline">{t("Subsample")}<input type="number" min={1000} step={1000} value={subsample || ""} placeholder={t("all")} disabled={subsample === 0} onChange={(e) => setSubsample(Math.max(1000, +e.target.value || 50000))} /></label>
-        <label className="gl-check" title={t("Draw every event of the population in the histogram and the biplot rather than a sample of them; the boundaries and counts always use every event")}>
-          <input type="checkbox" aria-label={t("All events in the division plots")} checked={subsample === 0} onChange={(e) => setSubsample(e.target.checked ? 0 : lastSubsample.current)} />
-          {t("All events")}
-        </label>
-        <label className="gl-field-inline">{t("X min")}<input type="number" step={0.2} value={xmin} placeholder="auto" onChange={(e) => setXmin(e.target.value === "" ? "" : +e.target.value)} /></label>
-        <label className="gl-field-inline">{t("X max")}<input type="number" step={0.2} value={xmax} placeholder="auto" onChange={(e) => setXmax(e.target.value === "" ? "" : +e.target.value)} /></label>
-        <span className="gl-ctl-sep" />
-        <label className="gl-field-inline">
-          {t("Y marker")}
-          <SearchableSelect
-            label={t("Y marker")}
-            value={yMarker || NO_MARKER}
-            options={[{ value: NO_MARKER, label: t("(none)") }, ...sample.channels.map((c, i) => ({ value: c.key, label: sample.channelLabel(i) }))]}
-            onChange={(value) => setYMarker(value === NO_MARKER ? "" : value)}
-          />
-        </label>
-        <label className="gl-field-inline">{t("Opacity")}<input type="range" min={0.02} max={1} step={0.05} value={pointAlpha} onChange={(e) => setPointAlpha(+e.target.value)} /></label>
-        <span className="gl-ctl-sep" />
-        <label className="gl-field-inline">{t("Column")}<input type="text" value={colName} onChange={(e) => setColName(e.target.value)} style={{ width: 70 }} /></label>
-        <button
-          className="gl-mini-btn gl-btn-apply"
-          onClick={apply}
-          disabled={!profileValid}
-          title={profileValid ? "" : t("Re-seed or separate the division boundaries before applying")}
-        >
-          {t("Apply to {sample}", { sample: sampleName })}
-        </button>
-        {onWriteToHost && (
+      <aside className="gl-plotting-inspector gl-division-inspector" aria-label={t("Division controls")}>
+        <nav className="gl-presentation-tabs" aria-label={t("Division settings")}>
+          {(["data", "fit", "display"] as const).map((id) => (
+            <button key={id} type="button" aria-pressed={section === id} onClick={() => setSection(id)}>
+              {t(id === "data" ? "Data" : id === "fit" ? "Fit" : "Display")}
+            </button>
+          ))}
+        </nav>
+        <section className="gl-division-section gl-division-data">
+          {files.length > 1 && onChooseFile && (
+            <label className="gl-field-inline">
+              {t("File")}
+              <select value={activeFileId ?? ""} onChange={(e) => onChooseFile(e.target.value)}>
+                {files.map((file) => <option key={file.id} value={file.id}>{file.name}</option>)}
+              </select>
+            </label>
+          )}
+          <label className="gl-field-inline">
+            {t("Dye channel")}
+            <SearchableSelect
+              label={t("Dye channel")}
+              value={String(dyeIdx)}
+              options={sample.channels.map((_, i) => ({ value: String(i), label: sample.channelLabel(i) }))}
+              onChange={(value) => setDyeIdx(+value)}
+            />
+          </label>
+          <label className="gl-field-inline">{t("Subsample")}<input type="number" min={1000} step={1000} value={subsample || ""} placeholder={t("all")} disabled={subsample === 0} onChange={(e) => setSubsample(Math.max(1000, +e.target.value || 50000))} /></label>
+          <label className="gl-check" title={t("Draw every event of the population in the histogram and the biplot rather than a sample of them; the boundaries and counts always use every event")}>
+            <input type="checkbox" aria-label={t("All events in the division plots")} checked={subsample === 0} onChange={(e) => setSubsample(e.target.checked ? 0 : lastSubsample.current)} />
+            {t("All events")}
+          </label>
+        </section>
+        <section className="gl-division-section gl-division-fit">
+          <label className="gl-field-inline">
+            {t("# divisions")}
+            <input type="number" min={1} max={11} value={n} onChange={(e) => changeN(+e.target.value || 1)} />
+          </label>
+          <div className="gl-division-buttons">
+            <button className="gl-mini-btn" onClick={() => changeN(n - 1)}>−</button>
+            <button className="gl-mini-btn" onClick={() => changeN(n + 1)}>+</button>
+            <button className="gl-mini-btn" onClick={() => reseed()}>{t("Re-seed")}</button>
+            <button className="gl-mini-btn" onClick={() => setBoundaries((prev) => (prev.length >= 2 ? spaceEvenly(prev) : seedDivisionBoundaries(maskedDye, n)))}>{t("Space evenly")}</button>
+            <button className="gl-mini-btn" onClick={() => shift(-1)}>{t("← shift")}</button>
+            <button className="gl-mini-btn" onClick={() => shift(1)}>{t("shift →")}</button>
+          </div>
+        </section>
+        <section className="gl-division-section gl-division-display">
+          <label className="gl-field-inline">{t("Bins")}<input type="number" min={10} max={1000} value={bins} onChange={(e) => setBins(e.target.value === "" ? 0 : +e.target.value)} onBlur={(e) => setBins(Math.max(10, Math.min(1000, +e.target.value || 120)))} /></label>
+          <label className="gl-field-inline">{t("X min")}<input type="number" step={0.2} value={xmin} placeholder="auto" onChange={(e) => setXmin(e.target.value === "" ? "" : +e.target.value)} /></label>
+          <label className="gl-field-inline">{t("X max")}<input type="number" step={0.2} value={xmax} placeholder="auto" onChange={(e) => setXmax(e.target.value === "" ? "" : +e.target.value)} /></label>
+          <label className="gl-field-inline">
+            {t("Y marker")}
+            <SearchableSelect
+              label={t("Y marker")}
+              value={yMarker || NO_MARKER}
+              options={[{ value: NO_MARKER, label: t("(none)") }, ...sample.channels.map((c, i) => ({ value: c.key, label: sample.channelLabel(i) }))]}
+              onChange={(value) => setYMarker(value === NO_MARKER ? "" : value)}
+            />
+          </label>
+          <label className="gl-field-inline">{t("Opacity")}<input type="range" min={0.02} max={1} step={0.05} value={pointAlpha} onChange={(e) => setPointAlpha(+e.target.value)} /></label>
+        </section>
+        {/* Apply, whichever side tab is open: what the fit is for. */}
+        <section className="gl-division-apply">
+          <label className="gl-field-inline">{t("Column")}<input type="text" value={colName} onChange={(e) => setColName(e.target.value)} /></label>
           <button
             className="gl-mini-btn gl-btn-apply"
-            onClick={() => onWriteToHost(currentProfile())}
-            disabled={!profileValid || hostWriteBusy}
-            title={t("Persist division calls for compatible samples in SingleCellExperiment colData")}
+            onClick={apply}
+            disabled={!profileValid}
+            title={profileValid ? "" : t("Re-seed or separate the division boundaries before applying")}
           >
-            {hostWriteBusy ? t("Writing…") : t("Write divisions to SCE")}
+            {t("Apply to {sample}", { sample: sampleName })}
           </button>
+          {onWriteToHost && (
+            <button
+              className="gl-mini-btn gl-btn-apply"
+              onClick={() => onWriteToHost(currentProfile())}
+              disabled={!profileValid || hostWriteBusy}
+              title={t("Persist division calls for compatible samples in SingleCellExperiment colData")}
+            >
+              {hostWriteBusy ? t("Writing…") : t("Write divisions to SCE")}
+            </button>
+          )}
+        </section>
+      </aside>
+      <div className="gl-prop-body gl-division-body">
+        <TabIntro intro={intro} className="gl-panel-hint">
+          {t("Div0 = brightest (undivided); drag the black lines to fit the dilution peaks. Apply writes a per-event Div0..Div{n} level for {sample}, usable as a Proportions Category.", { n, sample: sampleName })}
+        </TabIntro>
+        {profileStale && (
+          <div className="gl-hint gl-panel-hint" role="alert">
+            {t("The saved division profile was fitted in another data layer or display transform and is not being applied. Re-fit the boundaries here, then apply them for the current view.")}
+          </div>
         )}
+        <div id="division-plot-container" ref={containerRef} className="gl-division-container" style={{ flex: "none", overflow: "visible" }} />
       </div>
-
-      <div className="gl-hint gl-panel-hint">
-        {t("Div0 = brightest (undivided); drag the black lines to fit the dilution peaks. Apply writes a per-event Div0..Div{n} level for {sample}, usable as a Proportions Category.", { n, sample: sampleName })}
-      </div>
-      {profileStale && (
-        <div className="gl-hint gl-panel-hint" role="alert">
-          {t("The saved division profile was fitted in another data layer or display transform and is not being applied. Re-fit the boundaries here, then apply them for the current view.")}
-        </div>
-      )}
-      <div id="division-plot-container" ref={containerRef} className="gl-division-container" style={{ maxWidth: 820, flex: "none", overflow: "visible" }} />
     </div>
   );
 }

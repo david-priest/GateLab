@@ -25,6 +25,7 @@ import { OVERLAY_PALETTES, paletteColors, type PaletteName } from "../engine/pal
 import type { MetadataColumn } from "../engine/metadata";
 import { SAMPLE_ID_FIELD } from "../engine/metadata";
 import { useI18n } from "./i18n";
+import { TabIntro, TabIntroToggle, useTabIntro } from "./TabIntro";
 import { figureHierarchies } from "../engine/figure";
 import {
   buildProportionsModel,
@@ -74,12 +75,14 @@ export function ProportionsTab({
   onAddToLayout,
 }: Props) {
   const { t } = useI18n();
+  const intro = useTabIntro("plotting");
   const [section, setSection] = useState("data");
   // The settings before the user touches anything, shared with the Layout tab, so a chart taken
   // from there before this tab has been opened is the chart this tab would show.
   const [defaults] = useState(() => defaultProportionsSettings(files, activeState, metadataColumns));
   const [selectedFiles, setSelectedFiles] = usePersistedTabState<string[]>("prop.files", () => defaults.files);
-  const [hierarchyId, setHierarchyId] = usePersistedTabState("prop.hierarchy", defaults.hierarchy);
+  // One tree per workspace: the files' copies follow it by provenance, so there is no tree to pick.
+  const [hierarchyId] = usePersistedTabState("prop.hierarchy", defaults.hierarchy);
   const trees = figureHierarchies(activeState);
   const tree = trees[hierarchyId] ?? trees[activeState.active_hierarchy_id];
   const state = { ...activeState, ...tree };
@@ -237,6 +240,7 @@ export function ProportionsTab({
       <div className="gl-plotting-head">
         <strong>Plotting</strong>
         <span>Population composition and replicate-level distributions</span>
+        <TabIntroToggle intro={intro} />
         {onAddToLayout && (
           <div className="gl-plotting-head-actions">
             <button
@@ -294,28 +298,6 @@ export function ProportionsTab({
               </label>
             ))}
           </div>
-          {Object.keys(trees).length > 1 && (<>
-          <label className="gl-field-inline">
-            Population hierarchy
-            <select
-              value={tree.id}
-              onChange={(event) => {
-                setHierarchyId(event.target.value);
-                setSelectedPops([]);
-              }}
-            >
-              {Object.values(trees).map((tree) => (
-                <option key={tree.id} value={tree.id}>
-                  {tree.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <p className="gl-hint">
-            Each file uses its own gates. Correspondence follows hierarchy
-            provenance, not population names.
-          </p>
-          </>)}
         </section>
         <div className="gl-control-sections" aria-label="Plotting settings">
           <section
@@ -403,11 +385,11 @@ export function ProportionsTab({
                   {factorOptions}
                 </select>
               </label>
-              <p className="gl-hint">
+              <TabIntro intro={intro}>
                 Group controls the bars or box colours. Facet creates separate
                 panels. Each boxplot observation represents one replicate unit,
                 not one event.
-              </p>
+              </TabIntro>
               <label
                 className="gl-check"
                 title="Normalise within each unit before averaging across units"
@@ -427,7 +409,7 @@ export function ProportionsTab({
                 />
                 {parentId === rootId ? t("Include ungated") : t("Include the rest of the parent")}
               </label>
-              <p className="gl-hint">Composition assigns events to their deepest selected population. Excluding ungated events renormalizes percentages to the selected populations.</p>
+              <TabIntro intro={intro}>Composition assigns events to their deepest selected population. Excluding ungated events renormalizes percentages to the selected populations.</TabIntro>
             </div>
           </section>
 

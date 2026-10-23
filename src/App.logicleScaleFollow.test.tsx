@@ -169,7 +169,7 @@ describe("logicle W is a property of the channel, not of one file", () => {
   it("moves every plotted point, not only the active file's", async () => {
     await mount([testFile("sample-a.fcs", 70), testFile("sample-b.fcs", 71)]);
 
-    act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.startsWith("Pool selected files"))!.click());
+    act(() => host.querySelector<HTMLButtonElement>(".gl-pool-toggle [aria-checked=false]")!.click());
     await settle();
     const before = Float32Array.from(plotted("x"));
     expect(before.length).toBeGreaterThan(N_EVENTS); // both files contribute
@@ -217,7 +217,7 @@ describe("logicle W is a property of the channel, not of one file", () => {
       .find((b) => b.getAttribute("aria-label")?.startsWith("Reset X logicle W"));
     expect(resetButton).toBeTruthy();
 
-    act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.startsWith("Pool selected files"))!.click());
+    act(() => host.querySelector<HTMLButtonElement>(".gl-pool-toggle [aria-checked=false]")!.click());
     await settle();
     const before = Float32Array.from(plotted("x"));
     act(() => resetButton!.click());

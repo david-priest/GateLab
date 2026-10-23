@@ -68,8 +68,9 @@ describe("App sample management", () => {
 
     expect(host.querySelector<HTMLElement>('[aria-label="Samples and workspace"]')?.style.width)
       .toBe("330px");
+    // The side pane starts at 460 px since its rows fit narrow panes (2026-10-23), leaving the plot the room.
     expect(host.querySelector<HTMLElement>('[aria-label="Gates and populations"]')?.style.width)
-      .toBe("672px");
+      .toBe("460px");
   });
 
   it("imports a batch atomically and removes selected files through the manager", async () => {
@@ -100,7 +101,7 @@ describe("App sample management", () => {
     expect(host.textContent).toContain("2 of 2 selected");
 
     const manage = [...host.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent === "Manage…")!;
+      .find((button) => button.textContent === "Manage files…")!;
     act(() => manage.click());
     expect(host.textContent).toContain("Manage samples");
 
@@ -139,7 +140,7 @@ describe("App sample management", () => {
     });
 
     act(() => [...host.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent === "Manage…")!.click());
+      .find((button) => button.textContent === "Manage files…")!.click());
     act(() => host.querySelector<HTMLInputElement>(
       'input[aria-label="Select donor-a.fcs for management"]',
     )!.click());

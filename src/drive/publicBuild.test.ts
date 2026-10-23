@@ -1,5 +1,5 @@
-// The public build carries none of src/drive: built without the lab Drive configuration, no module
-// of it is in the bundle and no Google address is either. Built with a configuration (synthetic
+// The public build carries none of src/drive, nor the lab build's preload: built without the lab
+// Drive configuration, no module of them is in the bundle and no Google address is either. Built with a configuration (synthetic
 // values here), the same checks find it, so they are not passing for want of looking.
 
 import { fileURLToPath } from "node:url";
@@ -60,7 +60,7 @@ describe("the lab Drive code in the build", () => {
   it("is absent from the public build", async () => {
     const { modules, code } = await bundle({});
     expect(modules.length).toBeGreaterThan(100);
-    expect(modules.filter((id) => id.includes("/src/drive/"))).toEqual([]);
+    expect(modules.filter((id) => id.includes("/src/drive/") || id.includes("/src/labPreload"))).toEqual([]);
     for (const marker of MARKERS) expect(code, marker).not.toContain(marker);
     expect(code).not.toContain("lab build");
   }, 180_000);
@@ -68,6 +68,7 @@ describe("the lab Drive code in the build", () => {
   it("is present in a build given the lab configuration", async () => {
     const { modules, code } = await bundle({ ...LAB_ENV, GATELAB_BUILD_COMMIT: BUILD_COMMIT });
     expect(modules.filter((id) => id.includes("/src/drive/")).length).toBeGreaterThan(5);
+    expect(modules.filter((id) => id.includes("/src/labPreload")).length).toBe(1);
     for (const marker of MARKERS) expect(code, marker).toContain(marker);
     // The header's stamp: the commit's first seven characters and the build date.
     expect(code).toContain(`0123abc · ${new Date().toISOString().slice(0, 10)}`);

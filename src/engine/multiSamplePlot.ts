@@ -295,8 +295,13 @@ export function buildWorkspaceAxisRanges(
     rangeSampleCap,
   );
   if (cloud.x.length === 0 || cloud.y.length === 0) return null;
+  // The highest of the files' instrument ceilings, and none where a file has none.
+  const ceiling = (axis: "xIndex" | "yIndex"): number | undefined => {
+    const tops = inputs.map((input) => input.sample.displayCeiling(input[axis]));
+    return tops.every((t) => t !== undefined) ? Math.max(...(tops as number[])) : undefined;
+  };
   return {
-    xRange: robustAxisRange(cloud.x),
-    yRange: robustAxisRange(cloud.y),
+    xRange: robustAxisRange(cloud.x, ceiling("xIndex")),
+    yRange: robustAxisRange(cloud.y, ceiling("yIndex")),
   };
 }

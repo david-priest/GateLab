@@ -8,7 +8,44 @@ import React from "react";
 
 export const SEG = 16; // px per depth level
 const HGT = 20; // connector SVG height (rows must be ~this tall for the │ segments to join)
-const LINE_COLOR = "#bfc5cf";
+export const TREE_LINE_COLOR = "#bfc5cf";
+
+/** One line of a row's glyphs; y as px, or as a percentage of the row's height. */
+export interface TreeConnectorLine {
+  key: string;
+  x1: number;
+  y1: number | string;
+  x2: number;
+  y2: number | string;
+}
+
+/**
+ * The lines of one row's glyphs, `depth * SEG` px wide: └ or ├ at the row's own level, and │ for
+ * each ancestor level still to be continued. `mid` and `bottom` are the row's middle and foot. The
+ * Strategy tab's gating-tree export draws its rows from these too.
+ */
+export function treeConnectorLines(depth: number, isLastPath: boolean[], mid: number | string, bottom: number | string): TreeConnectorLine[] {
+  const total = depth * SEG;
+  const lines: TreeConnectorLine[] = [];
+  const line = (x1: number, y1: number | string, x2: number, y2: number | string, key: string) => lines.push({ key, x1, y1, x2, y2 });
+  for (let i = 1; i <= depth; i++) {
+    const cx = (i - 1) * SEG + Math.floor(SEG / 2);
+    const isLast = isLastPath[i - 1] === true;
+    const isLeaf = i === depth;
+    if (isLeaf) {
+      if (isLast) {
+        line(cx, 0, cx, mid, `v${i}`); // └
+        line(cx, mid, total, mid, `h${i}`);
+      } else {
+        line(cx, 0, cx, bottom, `v${i}`); // ├
+        line(cx, mid, total, mid, `h${i}`);
+      }
+    } else if (!isLast) {
+      line(cx, 0, cx, bottom, `a${i}`); // │
+    }
+  }
+  return lines;
+}
 
 // `fill`: the glyphs follow the row height, so the │ segments join across rows taller than HGT —
 // a population row whose gate badges wrap to several lines, or a Statistics <td>. The vertical
@@ -20,26 +57,9 @@ export function TreeConnectors({ depth, isLastPath, fill }: { depth: number; isL
   const total = depth * SEG;
   const mid: number | string = fill ? "50%" : Math.floor(HGT / 2);
   const bottom: number | string = fill ? "100%" : HGT;
-  const lines: React.ReactNode[] = [];
-  const line = (x1: number, y1: number | string, x2: number, y2: number | string, key: string) => (
-    <line key={key} x1={x1} y1={y1} x2={x2} y2={y2} stroke={LINE_COLOR} strokeWidth={1.5} strokeLinecap="square" />
-  );
-  for (let i = 1; i <= depth; i++) {
-    const cx = (i - 1) * SEG + Math.floor(SEG / 2);
-    const isLast = isLastPath[i - 1] === true;
-    const isLeaf = i === depth;
-    if (isLeaf) {
-      if (isLast) {
-        lines.push(line(cx, 0, cx, mid, `v${i}`)); // └
-        lines.push(line(cx, mid, total, mid, `h${i}`));
-      } else {
-        lines.push(line(cx, 0, cx, bottom, `v${i}`)); // ├
-        lines.push(line(cx, mid, total, mid, `h${i}`));
-      }
-    } else if (!isLast) {
-      lines.push(line(cx, 0, cx, bottom, `a${i}`)); // │
-    }
-  }
+  const lines: React.ReactNode[] = treeConnectorLines(depth, isLastPath, mid, bottom).map(({ key, x1, y1, x2, y2 }) => (
+    <line key={key} x1={x1} y1={y1} x2={x2} y2={y2} stroke={TREE_LINE_COLOR} strokeWidth={1.5} strokeLinecap="square" />
+  ));
   if (!fill) {
     return (
       <svg width={total} height={HGT} viewBox={`0 0 ${total} ${HGT}`} style={{ flexShrink: 0, overflow: "visible" }}>

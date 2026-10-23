@@ -11,12 +11,9 @@ import {
   type FlowJoSampleSummary,
   type FlowJoWorkspaceFile,
 } from "./flowjoWorkspace";
+import { S6_WORKSPACE as S6, S8_SOURCE_DIR } from "../testFixtures";
 
-const ROOT =
-  "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/" +
-  "GateLab Paper/GateLab-2026-08-15-B flowjo-and-cytobank-concordance/data";
-const S6 = `${ROOT}/bass12-priest2024-s6/source/flowjo-workspace/25-Sep-2023.wsp`;
-const S8 = `${ROOT}/lp4-igcb-s8/source/flowjo-workspace/17-Dec-2025 new.wsp`;
+const S8 = `${S8_SOURCE_DIR}/flowjo-workspace/17-Dec-2025 new.wsp`;
 
 /**
  * What an importer needs to open a workspace without an FCS already loaded: which files each

@@ -72,11 +72,21 @@ function fcsFile(name: string, seed: number): File {
 }
 async function settle(): Promise<void> { await act(async () => { await new Promise((r) => setTimeout(r, 20)); }); }
 const fileRow = (name: string) => [...host.querySelectorAll<HTMLElement>(".gl-sample-row")].find((r) => r.textContent?.includes(name))!;
-const button = (label: string) => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label)!;
-const summary = () => host.querySelector(".population-tree-hierarchy-count")?.textContent;
+const button = (label: string) => [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")].find((b) => b.textContent?.trim() === label)!;
+const summary = () => host.querySelector(".gl-sample-tree-summary")?.getAttribute("title") ?? undefined;
 const gate = () => plotHarness.props!.payload.gates[0];
 async function view(name: string) { act(() => fileRow(name).dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }))); await settle(); }
-async function edit(mode: "tree" | "group" | "file") { act(() => host.querySelector<HTMLButtonElement>(`.population-tree-edit-${mode}`)!.click()); await settle(); }
+/** Switches on, for the viewed file, the tailoring of the gates named (the first gate when none are): each row's switch. */
+async function switchOn(...names: string[]) {
+  const cards = () => [...host.querySelectorAll<HTMLElement>(".gate-card")];
+  const wanted = names.length ? cards().filter((c) => names.some((n) => c.textContent?.startsWith(n))) : cards().slice(0, 1);
+  if (!wanted.length) throw new Error(`No gate rows for ${names.join(", ") || "the first gate"}`);
+  for (const card of wanted) {
+    const input = card.querySelector<HTMLInputElement>(".gate-tailor-switch input")!;
+    if (!input.checked) act(() => input.click());
+    await settle();
+  }
+}
 function blobBytes(blob: Blob): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -106,7 +116,7 @@ async function exportedNames(scope: "active" | "split"): Promise<string[]> {
     const confirm = [...host.querySelectorAll<HTMLButtonElement>(".gl-modal button")].find((b) => /^Export \d+ FCS$/.test(b.textContent?.trim() ?? ""))!;
     act(() => confirm.click());
   } else {
-    act(() => [...modal.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === "Export")!.click());
+    act(() => [...modal.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")].find((b) => b.textContent?.trim() === "Export")!.click());
   }
   await settle();
   expect(downloads.length).toBe(before + 1);
@@ -166,7 +176,7 @@ describe("FCS export under tailored trees", () => {
     // D2 tailors the gate to end between its second and third event (asinh(201/150) = 1.1024,
     // asinh(202/150) = 1.1068); D1 keeps following the tree.
     await view("D2.fcs");
-    await edit("file");
+    await switchOn();
     act(() => plotHarness.props!.onGateEdit({ gate_id: gate().gate_id, vertices: [[0, 0], [201.5, 300]] }));
     await settle();
     expect(summary()).toBe("2 files · 1 tailored");
@@ -180,7 +190,7 @@ describe("FCS export under tailored trees", () => {
     expect(countFor(fromTree, "D1")).toBe(3);
     expect(countFor(fromTree, "D2")).toBe(2);
 
-    // Viewing D2 (its copy is live): D1 is written under the tree, not the copy.
+    // Viewing D2 (the tree still live, D2 shown under its copy): D1 is written under the tree, not the copy.
     await view("D2.fcs");
     expect(gate().vertices).not.toEqual(treeGate);
     const fromCopy = await exportSplit();

@@ -197,6 +197,7 @@ afterEach(() => {
   host.remove();
   clearPersistedTabState();
   window.localStorage.removeItem("gatelab.uiLanguage");
+  window.localStorage.removeItem("gatelab.intro.compensation.hidden");
   Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
   vi.unstubAllGlobals();
 });
@@ -413,7 +414,7 @@ describe("CompensationTab common path", () => {
       selector.dispatchEvent(new Event("change", { bubbles: true }));
     });
     expect(host.querySelector(".gl-comp-review-population")?.textContent).toContain("2 events");
-    expect(host.querySelector(".gl-comp-review-population")?.textContent).toContain("applies to biplots, attention ranking, and sweeps");
+    expect(host.querySelector(".gl-comp-review-population small")?.getAttribute("title")).toContain("applies to biplots, attention ranking, and sweeps");
 
     const attention = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
       .find((button) => button.textContent?.includes("Flagged"))!;
@@ -430,7 +431,9 @@ describe("CompensationTab common path", () => {
     expect(host.textContent).toContain("Assay selection in the top bar applies to every tab");
 
     const drawerButtons = [...host.querySelectorAll<HTMLButtonElement>(".gl-comp-drawer-toggle")];
-    expect(drawerButtons.map((button) => button.textContent?.trim())).toEqual(["Evidence▸", "Review queue▸"]);
+    expect(drawerButtons.map((button) => button.textContent?.trim())).toEqual(["Evidence", "Review queue"]);
+    // Closed: each drawer's chevron points right.
+    expect(drawerButtons.every((button) => button.querySelector(".gl-icon-chevron:not(.is-open)"))).toBe(true);
     expect(drawerButtons.map((button) => button.getAttribute("aria-expanded"))).toEqual(["false", "false"]);
     expect(host.querySelectorAll('[role="region"]')).toHaveLength(0);
     expect(host.textContent).not.toContain("Propagation");
@@ -820,6 +823,10 @@ describe("CompensationTab common path", () => {
     const sample = flowSample();
     renderTab(sample, { stateKey: "workspace-a:resizer" });
     const commonPath = host.querySelector<HTMLElement>(".gl-comp-common-path")!;
+    // The coefficient panel, and its resizer, open once a cell is selected.
+    const cell = [...host.querySelectorAll<HTMLButtonElement>(".gl-comp-cell")]
+      .find((button) => !button.disabled && button.getAttribute("aria-label")?.includes("5%"))!;
+    act(() => cell.click());
     const separator = host.querySelector<HTMLElement>('[role="separator"][aria-label="Resize compensation inspector"]')!;
     commonPath.getBoundingClientRect = () => ({
       x: 0,
@@ -845,20 +852,118 @@ describe("CompensationTab common path", () => {
 
   it("previews a cell and its crosshairs on hover without pinning it", () => {
     renderTab(flowSample());
-    const cell = [...host.querySelectorAll<HTMLButtonElement>(".gl-comp-cell")]
-      .find((button) => !button.disabled && button.getAttribute("aria-label")?.includes("5%"))!;
+    const cellOf = (percent: string) => [...host.querySelectorAll<HTMLButtonElement>(".gl-comp-cell")]
+      .find((button) => !button.disabled && button.getAttribute("aria-label")?.includes(percent))!;
+    const cell = cellOf("5%");
 
+    // Before any cell is selected the matrix has the room to itself: a hover marks the
+    // crosshairs and opens no panel.
     act(() => cell.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
     expect(cell.getAttribute("aria-pressed")).toBe("false");
     expect(cell.classList.contains("selected")).toBe(true);
-    expect(host.querySelector(".gl-comp-pair-detail")?.textContent).toContain("5.0%");
     expect(host.querySelectorAll(".gl-comp-cell.is-selected-source")).toHaveLength(2);
     expect(host.querySelectorAll(".gl-comp-cell.is-selected-receiver")).toHaveLength(2);
+    expect(host.querySelector(".gl-comp-inspector")).toBeNull();
+    act(() => cell.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body })));
+    expect(cell.classList.contains("selected")).toBe(false);
+
+    // With the other cell pinned, the panel is open and a hover previews this one in it.
+    act(() => cellOf("2%").click());
+    expect(host.querySelector(".gl-comp-pair-detail")?.textContent).toContain("2.0%");
+    act(() => cell.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+    expect(cell.getAttribute("aria-pressed")).toBe("false");
+    expect(host.querySelector(".gl-comp-pair-detail")?.textContent).toContain("5.0%");
     expect(host.textContent).toContain("Hover preview · click to pin this pair.");
 
     act(() => cell.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body })));
-    expect(host.querySelector(".gl-comp-pair-detail")).toBeNull();
+    expect(host.querySelector(".gl-comp-pair-detail")?.textContent).toContain("2.0%");
     expect(cell.classList.contains("selected")).toBe(false);
+  });
+
+  it("draws the matrix cells as large as the free space allows, up to a cap, and never smaller than before", () => {
+    const cellWidth = () => /repeat\(\d+, (\d+)px\)/.exec(host.querySelector<HTMLElement>(".gl-comp-matrix")!.style.gridTemplateColumns)?.[1];
+    // Ten channels drew at 38 px before, whatever the room.
+    renderTab(flowSample({ channelCount: 10 }));
+    expect(cellWidth()).toBe("38");
+    act(() => root.unmount());
+    root = createRoot(host);
+
+    const space = { width: 0, height: 0 };
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (!this.classList.contains("gl-comp-matrix-scroll")) return original.call(this);
+      return { x: 0, y: 0, top: 0, left: 0, right: space.width, bottom: space.height, width: space.width, height: space.height, toJSON: () => ({}) };
+    });
+    const observers: (() => void)[] = [];
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: () => void) { observers.push(callback); }
+      observe() {}
+      disconnect() {}
+    });
+    const resize = (width: number, height: number) => {
+      space.width = width;
+      space.height = height;
+      act(() => observers.forEach((callback) => callback()));
+    };
+
+    space.width = 1600;
+    space.height = 1000;
+    renderTab(flowSample({ channelCount: 10 }));
+    // The room would allow over 80 px; the cap holds them at 44.
+    expect(cellWidth()).toBe("44");
+    resize(700, 560);
+    expect(Number(cellWidth())).toBeGreaterThan(38);
+    expect(Number(cellWidth())).toBeLessThan(44);
+    // A small window scrolls, as before, rather than drawing cells too small to read.
+    resize(400, 300);
+    expect(cellWidth()).toBe("38");
+  });
+
+  it("keeps the left column's explanations behind its ? hints, in side tabs as the other panes have", () => {
+    const sample = flowSample();
+    sample.fcs.keywords.$SPILLOVER = "2,FL1-A,FL2-A,1,0.07125,0.02,1";
+    renderTab(sample, { onApplyProfile: vi.fn(async () => undefined) });
+    const pane = host.querySelector<HTMLElement>(".gl-comp-inspector-left")!;
+    expect(pane.textContent).not.toContain("Install this exact matrix as the immutable baseline");
+    const hints = [...pane.querySelectorAll<HTMLElement>(".gl-comp-pane-hint")].map((hint) => hint.title);
+    expect(hints.some((title) => title.includes("Install this exact matrix as the immutable baseline"))).toBe(true);
+    expect(hints.some((title) => title.includes("Start from an identity matrix"))).toBe(true);
+    expect([...pane.querySelectorAll("button")].some((button) => button.textContent === "Enable matrix editing")).toBe(true);
+
+    // Matrices, Review and Display: one shown at a time, the others kept mounted.
+    const tabs = [...pane.querySelectorAll<HTMLButtonElement>(".gl-presentation-tabs button")];
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["Matrices", "Review", "Display"]);
+    expect(pane.classList.contains("section-matrices")).toBe(true);
+    act(() => tabs[1].click());
+    expect(pane.classList.contains("section-review")).toBe(true);
+    expect(tabs[1].getAttribute("aria-pressed")).toBe("true");
+    expect(pane.querySelector(".gl-comp-pane-review .gl-comp-review-population")).not.toBeNull();
+    expect(pane.querySelector(".gl-comp-pane-matrices .gl-comp-flow-enable")).not.toBeNull();
+  });
+
+  it("says in one line why the embedded matrix cannot be edited, the engine's text under Details", () => {
+    renderTab(flowSample({ matrix: [[0.9, 0.07125], [-0.02, 1]] }), { onApplyProfile: vi.fn(async () => undefined) });
+    const problem = host.querySelector<HTMLElement>(".gl-comp-pane-problem")!;
+    expect(problem.querySelector("span")?.textContent).toBe("Not editable: negative coefficients, diagonal not 1");
+    expect(problem.querySelector("details p")?.textContent).toContain("The embedded compensation matrix cannot be applied or edited.");
+    expect(host.querySelector(".gl-comp-inspector-left [role=\"alert\"]")).toBeNull();
+  });
+
+  it("opens the coefficient panel only once a cell is selected, and its × closes it", () => {
+    renderTab(flowSample());
+    const path = () => host.querySelector<HTMLElement>(".gl-comp-common-path")!;
+    expect(host.querySelector(".gl-comp-inspector")).toBeNull();
+    expect(path().style.gridTemplateColumns).toBe("minmax(0, 1fr)");
+
+    const cell = [...host.querySelectorAll<HTMLButtonElement>(".gl-comp-cell")]
+      .find((button) => !button.disabled && button.getAttribute("aria-label")?.includes("5%"))!;
+    act(() => cell.click());
+    expect(host.querySelector(".gl-comp-pair-detail")?.textContent).toContain("5.0%");
+    expect(path().style.gridTemplateColumns).toContain("624px");
+
+    act(() => host.querySelector<HTMLButtonElement>('button[aria-label="Close the coefficient panel"]')!.click());
+    expect(host.querySelector(".gl-comp-inspector")).toBeNull();
+    expect(path().style.gridTemplateColumns).toBe("minmax(0, 1fr)");
   });
 
   it("uses a single roving tab stop and arrow/Home/End navigation in a six-channel matrix", () => {

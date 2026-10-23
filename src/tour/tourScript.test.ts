@@ -82,8 +82,8 @@ describe("the tutorial script", () => {
     expect(step("welcome").done).toBeUndefined();
     expect(step("finish").done).toBeUndefined();
     // The last card invites bug reports and points at the header's issue link.
-    expect(stepBody(step("finish"), demoContext())).toContain("Bug reports and suggestions are welcome");
-    expect(stepTarget(step("finish"), demoContext())).toBe('[data-tour="issues-link"]');
+    expect(stepBody(step("finish"), demoContext())).toContain("for bug reports and suggestions");
+    expect(stepTarget(step("finish"), demoContext())).toBe(".gl-help-menu > button");
     expect(TOUR_STEPS.filter((candidate) => candidate.done).length).toBeGreaterThan(20);
   });
 
@@ -112,7 +112,7 @@ describe("the tutorial script", () => {
     expect(stepBody(step("scales-info"), { ...ja, scales: { adjusted: ["FSC-A", "SSC-A"], fitted: [], locked: true } })).toContain("FSC-A、SSC-Aが青い");
     expect(stepBody(step("scales-info"), { ...ja, scales: { adjusted: ["A", "B", "C", "D", "E"], fitted: [], locked: true } })).toContain("A、B、C、他2件が青い");
     // The step points at the label the Japanese interface shows, not the English one.
-    expect(stepTarget(step("pool-files"), ja)).toEqual([{ selector: ".gl-pool-toolbar button", text: "選択したファイルをプール", exact: false }, ".gl-pool-toolbar"]);
+    expect(stepTarget(step("pool-files"), ja)).toBe(".gl-pool-toggle");
     expect(stepTarget(step("strategy-full-path"), ja)).toEqual({ selector: "label.gl-check", text: "ルートからの全パス", exact: false });
     expect(stepTarget(step("layout-export"), ja)).toEqual([{ selector: "button", text: "PDF を書き出す", exact: true }, { selector: "button", text: "書き出し", exact: true }]);
     expect(stepTarget(step("layout-export"), demoContext())).toEqual([{ selector: "button", text: "Export PDF", exact: true }, { selector: "button", text: "Export", exact: true }]);
@@ -120,7 +120,7 @@ describe("the tutorial script", () => {
     expect(stepTarget(step("view-file"), ja)).toEqual({ selector: '.gl-sample-list [role="option"]', text: "D2.fcs" });
     // English is untouched.
     expect(stepTitle(step("welcome"), demoContext())).toBe("A walk through GateLab");
-    expect(stepTarget(step("pool-files"), demoContext())).toEqual([{ selector: ".gl-pool-toolbar button", text: "Pool selected", exact: false }, ".gl-pool-toolbar"]);
+    expect(stepTarget(step("pool-files"), demoContext())).toBe(".gl-pool-toggle");
   });
 
   it("names the demo's own files, populations and gates", () => {
@@ -134,12 +134,12 @@ describe("the tutorial script", () => {
     expect(stepBody(step("about-demo"), ctx)).toContain("Supplementary Figure 10A");
     expect(stepBody(step("about-demo"), ctx)).toContain("10.1038/s41467-024-50997-4");
     expect(stepBody(step("about-demo"), { ...ctx, workspaceName: "other.gatelab" })).toContain("goes on with the workspace you opened");
-    expect(stepBody(step("gate-edges"), ctx)).toContain("FlowJo's 256-channel grid");
+    expect(stepBody(step("gate-edges"), ctx)).toContain("the workspace's 256-channel grid");
     expect(stepBody(step("gate-edges"), ctx)).toContain("Here the two coincide");
     expect(stepBody(step("gate-edges"), arcsinhContext())).toContain("the plot is on arcsinh");
     // The gate on the plot defines "Cells": the stepping step names it, and the tree step then names another row.
     expect(stepBody(step("gate-population"), ctx)).toContain("click “Cells”");
-    expect(stepBody(step("gate-population"), ctx)).toContain("FlowJo's 256-channel grid");
+    expect(stepBody(step("gate-population"), ctx)).toContain("the workspace's 256-channel grid");
     expect(stepTarget(step("gate-population"), ctx)).toEqual({ selector: ".pop-row-name", text: "Cells", exact: true });
     expect(stepBody(step("pan-stretch"), ctx)).toContain("the steps of the grid come into view");
     expect(stepBody(step("click-population"), { ...ctx, activePopulationId: "cells" })).toContain("Click “Singlets”");

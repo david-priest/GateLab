@@ -9,6 +9,11 @@ export interface NumberFieldProps extends Omit<InputHTMLAttributes<HTMLInputElem
   step?: number;
   /** Round the committed value to a whole number. */
   integer?: boolean;
+  /**
+   * How the value is shown while the field is not being edited, e.g. rounded. Text left as shown
+   * commits nothing, so focusing and leaving the field keeps the exact value underneath.
+   */
+  format?: (value: number) => string;
 }
 
 /**
@@ -18,14 +23,15 @@ export interface NumberFieldProps extends Omit<InputHTMLAttributes<HTMLInputElem
  * and the mouse wheel commit at once, since they produce a whole value. Escape restores the
  * committed value.
  */
-export function NumberField({ value, onCommit, min, max, step, integer, onKeyDown, onBlur, onFocus, ...rest }: NumberFieldProps) {
-  const [draft, setDraft] = useState(String(value));
+export function NumberField({ value, onCommit, min, max, step, integer, format, onKeyDown, onBlur, onFocus, ...rest }: NumberFieldProps) {
+  const shown = format ? format(value) : String(value);
+  const [draft, setDraft] = useState(shown);
   const [editing, setEditing] = useState(false);
   // Escape blurs the field; the blur that follows must not commit the draft being thrown away.
   const cancelled = useRef(false);
   useEffect(() => {
-    if (!editing) setDraft(String(value));
-  }, [value, editing]);
+    if (!editing) setDraft(shown);
+  }, [shown, editing]);
 
   const clamp = (raw: string): number | null => {
     if (raw.trim() === "") return null;
@@ -37,9 +43,14 @@ export function NumberField({ value, onCommit, min, max, step, integer, onKeyDow
     return next;
   };
   const commit = (raw: string) => {
+    // The shown text left as it was: nothing typed, so the exact value stands.
+    if (format && raw === shown) {
+      setDraft(shown);
+      return;
+    }
     const next = clamp(raw);
     if (next === null) {
-      setDraft(String(value));
+      setDraft(shown);
       return;
     }
     setDraft(String(next));
@@ -78,7 +89,7 @@ export function NumberField({ value, onCommit, min, max, step, integer, onKeyDow
         } else if (event.key === "Escape") {
           event.preventDefault();
           cancelled.current = true;
-          setDraft(String(value));
+          setDraft(shown);
           event.currentTarget.blur();
         }
         onKeyDown?.(event);

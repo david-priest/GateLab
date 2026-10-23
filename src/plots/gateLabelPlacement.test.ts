@@ -7,7 +7,8 @@
 
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import { buildPlotGates } from "./gatePayload";
+import { buildPlotGates, keepOpenSides } from "./gatePayload";
+import { columnsForGate, getGateMask } from "../engine/gates";
 import { includePlotGatesInAxisRange } from "../engine/axisRange";
 import { parseFcs } from "../engine/fcs";
 import { Sample } from "../engine/sample";
@@ -202,4 +203,55 @@ describe("a rectangle with an unbounded side", () => {
       expect(labelY).toBeLessThanOrEqual(fitted[1]);
     });
   }
+  it("keeps an open side open when the rectangle is dragged, and its count with it", () => {
+    const s = load();
+    const gate = gateOn();
+    const count = (g: Gate) => getGateMask(g, columnsForGate(s.gateAssayData(), g)).reduce((a, b) => a + b, 0);
+    const before = count(gate);
+    // The plot's drag hands back the drawn corners; here unmoved, read back as App reads them.
+    const plotted = buildPlotGates(s, { g: gate }, ["g"], {}, "FSC-A", "SSC-A")[0];
+    const back = plotted.vertices!.map(([x, y]) =>
+      [s.displayToGate(gate, "FSC-A", x), s.displayToGate(gate, "SSC-A", y)] as [number, number]);
+    // Read back as drawn, the open top becomes a finite edge at the drawn position.
+    expect(Math.max(...back.map((v) => v[1]))).toBeLessThan(Number.MAX_VALUE);
+    const kept = keepOpenSides(s, gate, back);
+    expect(Math.max(...kept.map((v) => v[1]))).toBe(Number.MAX_VALUE);
+    const moved = { ...gate, vertices: kept } as Gate;
+    expect(count(moved)).toBe(before);
+    // The closed sides take the drag: x moved by a display offset lands where it was dragged.
+    const shifted = keepOpenSides(s, gate, plotted.vertices!.map(([x, y]) =>
+      [s.displayToGate(gate, "FSC-A", x + 1000), s.displayToGate(gate, "SSC-A", y)] as [number, number]));
+    expect(Math.min(...shifted.map((v) => v[0]))).toBeCloseTo(s.displayToGate(gate, "FSC-A", plotted.vertices![0][0] + 1000), 3);
+    expect(Math.max(...shifted.map((v) => v[1]))).toBe(Number.MAX_VALUE);
+  });
+
+  it("draws an open side past the plotted range however far the view is zoomed out", () => {
+    const s = load();
+    const gate = gateOn();
+    const fsc = s.index("FSC-A")!, ssc = s.index("SSC-A")!;
+    const frame = s.displayRange(ssc);
+    const span = frame[1] - frame[0];
+    // Zoomed out to a range far wider than the data on both axes.
+    const view: [[number, number], [number, number]] = [s.displayRange(fsc), [frame[0] - span * 1e6, frame[1] + span * 1e6]];
+    const plotted = buildPlotGates(s, { g: gate }, ["g"], {}, "FSC-A", "SSC-A", null, view)[0];
+    const ys = plotted.vertices!.map((v) => v[1]);
+    expect(Math.max(...ys)).toBeGreaterThan(view[1][1]);
+    // The closed bottom stays where it is.
+    expect(Math.min(...ys)).toBeLessThan(frame[1]);
+  });
+
+  it("puts the label of an open top just inside the top of the plotted range, not in the margin above it", () => {
+    const s = load();
+    const gate = gateOn();
+    const frame = s.displayRange(s.index("SSC-A")!);
+    const xFrame = s.displayRange(s.index("FSC-A")!);
+    const span = frame[1] - frame[0];
+    // Zoomed in to the lower half of the data: the label follows the plotted range, not the data's.
+    const view: [[number, number], [number, number]] = [xFrame, [frame[0], frame[0] + span / 2]];
+    const plotted = buildPlotGates(s, { g: gate }, ["g"], {}, "FSC-A", "SSC-A", null, view)[0];
+    const ys = plotted.vertices!.map((v) => v[1]);
+    const labelY = ys.reduce((a, b) => a + b, 0) / ys.length + plotted.label_offset![1];
+    expect(labelY).toBeLessThan(view[1][1]);
+    expect(labelY).toBeGreaterThan(view[1][1] - (view[1][1] - view[1][0]) * 0.1);
+  });
 });

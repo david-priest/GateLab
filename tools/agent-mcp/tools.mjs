@@ -7,6 +7,8 @@ import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { json } from "./mcp.mjs";
 import { RelayError } from "./relay.mjs";
+import { createGatingFit } from "./gating-fit.mjs";
+import { contextOf, evaluateMemberships, populationChain, sha256, snapshotKey } from "./feedback.mjs";
 
 /** The specification an agent reads once, next to this file; gatelab_guide returns it. */
 export const SPEC_PATH = join(dirname(fileURLToPath(import.meta.url)), "AGENT_SPEC.md");
@@ -17,11 +19,13 @@ How to work:
 0. gatelab_guide once, before the first gate: the whole contract — the data model, the coordinate spaces, every command with its fields and refusals (the quadrant order Q1 = x− y+, Q2 = x+ y+, Q3 = x+ y−, Q4 = x− y−), what the user sees, and the GateLabR host.
 1. gatelab_status, then gatelab_describe: the files with their metadata, the channels as drawn (each with its transform), the population tree with counts per sample and pooled, the gates with their coordinates, and the view.
 2. Look before you gate: gatelab_distribution gives a histogram (with quantiles and its valleys — the antimodes where a threshold goes) or a 2-D binned density, in display units (the axes as drawn), per sample or pooled; gatelab_stats gives marker medians and, with thresholds, the fraction positive; gatelab_render gives a PNG of the plot after gatelab_view (with fit: true) puts the population and axes on screen.
-3. gatelab_preview a command to see the counts it would give; then gatelab_apply it with a rationale the user will read on the gate.
+3. gatelab_context makes the actual plot selection, assay and population chain explicit. gatelab_preview a command to see the counts it would give; then gatelab_apply it with a rationale the user will read on the gate. When aligned reference masks are supplied locally, gatelab_evaluate reports exact agreement and losses at ancestors on explicitly named samples. Preserve natural prevalence, name the split used for feedback, and keep final-test references out of discovery.
+For iterative work use gatelab_fit_start, gatelab_fit_candidate and gatelab_fit_finish. Population mode fits a described phenotype and reports no reference concordance. Cluster mode fixes aligned references, disjoint training/validation samples, objective and candidate budget; feedback during search is training-only. Propose complete shared or semi-shared strategies with step aliases; revise gates from counts and ancestor losses, retaining the reasons. Rectangles and simple polygons (including clipped corners, up to 128 vertices) use the same native-core preview. Finish closes the search before reading validation, selects once and freezes commands for human review. No fit tool applies gates or saves an SCE. Do not inspect final test labels or restart after seeing validation to improve a claimed held-out result.
 4. Check the result per sample, not only pooled: a threshold that fits the pool can miss a file whose staining sits elsewhere; gatelab_distribution with sampleIds shows each file's own valleys, and the metadata tells which files belong together.
 5. Keep the tree tidy: deleting a gate leaves its population ungated (100%), so use deletePopulation for a population you no longer want; edit a gate in place rather than delete and redraw.
 6. Look at what you drew: gatelab_render after gatelab_view. If the data is cut off at an edge, gatelab_view with fit: "data" shows every event (the Fit button's frame drops the pile at zero of an arcsinh axis), or set xRange/yRange yourself.
 7. A shape traced from density: a convex hull bulges, so on a cloud with a tail toward an axis (PD-1-negative cells along PD-1 = 0) cut the tail at its valley before taking the hull, or the "high" gate holds the low cells too.
+8. To show the user a gating strategy to inspect or print: gatelab_view with strategy {populationIds} opens the Strategy tab on those populations (one: its path; several: one grid from the root); gatelab_render then returns that grid. It changes no gate and selects nothing in the tree.
 
 Rules: coordinates in commands are in the space you say — "display" is the axes as drawn, the same units gatelab_distribution reports; "raw" is raw channel values. A gate is drawn only on plots with its own x and y, so put x and y the way the user's gates on the same channels have them. A null range bound is the edge of the data (not an infinite edge), so a range is always drawn within the chart. Name parents and gates by the ids gatelab_describe gives. You cannot save the workspace or write to the SCE: saving is the user's, in the tab. gatelab_export writes a file of the current gating and memberships for another process to read.`;
 
@@ -54,7 +58,10 @@ export function gatelabTools(relay) {
       return refused(error);
     }
   };
+  // One fit session per server, shared with gatelab_evaluate so a search's held-out samples stay unscored.
+  const fit = createGatingFit(relay);
   return [
+    ...fit.tools.map((tool) => ({ ...tool, run: async (args) => { try { return json(await tool.run(args)); } catch (error) { return refused(error); } } })),
     {
       name: "gatelab_guide",
       description: "The specification of this interface, to read once before the first gate: what the tab is, how to connect, the data model gatelab_describe returns, the coordinate spaces, every command with its fields, conventions and refusals, what the user sees, the rules of good gating, and what differs under GateLabR.",
@@ -78,6 +85,44 @@ export function gatelabTools(relay) {
       description: "The loaded data and gating: channels as drawn (key, label, kind, transform), samples (id, name, events, viewed, checked), the population tree in order with each population's gates and counts per sample and pooled, every gate's geometry in its own space, and the view (active population, viewed sample, axes). Call it first and after the user changes something.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       run: () => call("describe", {}),
+    },
+    {
+      name: "gatelab_context",
+      description: "Read the active population chain, actual plot pooling and assay binding, checked samples, channel transforms and sample-manifest hash. Population totals pool all loaded samples; gate-card counts test geometry inside the active displayed population. Older cores explicitly report unknown plot pooling and assay rather than guessing.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      run: async () => {
+        try { return json(contextOf(await relay.call("describe", {}))); }
+        catch (error) { return refused(error); }
+      },
+    },
+    {
+      name: "gatelab_evaluate",
+      description: "Read-only exact agreement of cumulative populations with locally supplied aligned reference masks: precision, recall, F1, false-positive rate, prevalence, abundance bias, per-sample and optional metadata-group results, and target losses at each ancestor. Explicit sample selection prevents silent balancing or test-set inclusion. The local reference file uses gatelab-reference-masks version 1 (see guide); it never changes the SCE or gates.",
+      inputSchema: {
+        type: "object", properties: {
+          referencePath: { type: "string", description: "Absolute path to a local gatelab-reference-masks JSON file; event order must match the loaded samples." },
+          populationIds: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 128, uniqueItems: true },
+          sampleIds: { type: "array", items: { type: "string" }, minItems: 1, uniqueItems: true, description: "Explicit evaluation samples; never inferred from the current plot or all loaded files." },
+          groupBy: { type: "string", description: "Sample metadata column, such as donor, for grouped metrics. Missing values are refused." },
+          projectedPrevalence: { type: "number", minimum: 0, maximum: 1, description: "Optional precision projection assuming unchanged sensitivity and false-positive rate." },
+        }, required: ["referencePath", "populationIds", "sampleIds"], additionalProperties: false,
+      },
+      run: async (args) => {
+        try {
+          if (typeof args.referencePath !== "string" || !isAbsolute(args.referencePath)) throw new Error("referencePath must be absolute.");
+          const referenceText = await readFile(args.referencePath, "utf8");
+          const reference = JSON.parse(referenceText);
+          const before = await relay.call("describe", {});
+          const heldOut = fit.evaluationRefusal(args.sampleIds, before);
+          if (heldOut) throw new Error(heldOut);
+          if (!Array.isArray(args.populationIds) || !args.populationIds.length) throw new Error("populationIds must be nonempty.");
+          const wanted = [...new Set(args.populationIds.flatMap((id) => populationChain(before, id).map((p) => p.id)))];
+          const memberships = await relay.call("memberships", { populationIds: wanted });
+          const after = await relay.call("describe", {});
+          if (snapshotKey(before) !== snapshotKey(after)) throw new Error("The data, selection or gating changed while reading feedback; retry.");
+          return json({ ...evaluateMemberships(before, memberships, reference, args), referenceSha256: sha256(referenceText) });
+        } catch (error) { return refused(error); }
+      },
     },
     {
       name: "gatelab_distribution",
@@ -134,7 +179,7 @@ export function gatelabTools(relay) {
     },
     {
       name: "gatelab_view",
-      description: "Put a population, a sample and two channels on the user's Gating plot, so they see what you are looking at, and set the axes: fit: true fits them as the Fit button does (the viewed file's 0.1st to 99.9th percentiles, widened to the gates); fit: \"data\" fits them to every event of every sample, 2% past the last, widened to the gates, so nothing is cut off; xRange/yRange hold an axis at a range in display units. The reply reports the ranges shown. gatelab_render then draws that plot.",
+      description: "Put a population, a sample and two channels on the user's Gating plot, so they see what you are looking at, and set the axes: fit: true fits them as the Fit button does (the viewed file's 0.1st to 99.9th percentiles, widened to the gates); fit: \"data\" fits them to every event of every sample, 2% past the last, widened to the gates, so nothing is cut off; xRange/yRange hold an axis at a range in display units. The reply reports the ranges shown. gatelab_render then draws that plot. With strategy (or tab: \"strategy\") it opens the Strategy tab instead, drawing the gating strategy of the populations named, for the user to inspect, export or print: one population is its path (fullPath: true from the root); several, or mode \"multi\", are one grid laid out as the tree from the root. The ids must be populations of the active tree, not the root, each once. strategy changes only the tab's controls: no gate, no selection in the tree, and the revision does not move. x, y, fit and the ranges are for the Gating plot and are refused with the Strategy tab. The reply's strategy is what the tab now holds.",
       inputSchema: {
         type: "object",
         properties: {
@@ -142,15 +187,38 @@ export function gatelabTools(relay) {
           fit: { anyOf: [{ type: "boolean" }, { type: "string", enum: ["data"] }] },
           xRange: { type: "array", items: { type: "number" }, minItems: 2, maxItems: 2 },
           yRange: { type: "array", items: { type: "number" }, minItems: 2, maxItems: 2 },
+          tab: { type: "string", enum: ["gating", "strategy"], description: "The tab shown: \"gating\" by default, \"strategy\" when strategy is given." },
+          strategy: {
+            type: "object",
+            description: "What the Strategy tab draws.",
+            properties: {
+              populationIds: { type: "array", items: { type: "string" }, minItems: 1, uniqueItems: true, description: "Population ids from gatelab_describe, in the active tree; not the root." },
+              mode: { type: "string", enum: ["single", "multi"], description: "\"single\": one population's path (exactly one id). \"multi\": the populations together in one grid. Default: single for one id, multi for more." },
+              fullPath: { type: "boolean", description: "Single mode only: draw every gate from the root, not only the population's own. Left as the tab has it when absent." },
+            },
+            required: ["populationIds"],
+            additionalProperties: false,
+          },
         },
         additionalProperties: false,
       },
-      run: (args) => call("view", args),
+      run: async (args) => {
+        try {
+          const result = await relay.call("view", args);
+          // A core from before the Strategy selection ignores it and answers on the Gating tab.
+          if ((args.strategy !== undefined || args.tab === "strategy") && result?.tab !== "strategy") {
+            return refused(new Error("unknown-method: the tab's core predates opening the Strategy tab from an agent (it answered on the Gating tab); update the core, then gatelab_reload."));
+          }
+          return json(result);
+        } catch (error) {
+          return refused(error);
+        }
+      },
     },
     {
       name: "gatelab_render",
-      description: "A PNG of the Gating plot as the user sees it: the events of the active population on the current axes with the gates drawn. Set the view first with gatelab_view.",
-      inputSchema: { type: "object", properties: { width: { type: "integer", minimum: 100, maximum: 4000, description: "Pixels wide; the plot's own size when absent." } }, additionalProperties: false },
+      description: "A PNG of the plot the user sees: on the Gating tab, the events of the active population on the current axes with the gates drawn; on the Strategy tab, the strategy grid as its exports compose it (every panel, the arrows, the title), once the tab has finished drawing. Set the view first with gatelab_view. The reply's view.tab says which.",
+      inputSchema: { type: "object", properties: { width: { type: "integer", minimum: 100, maximum: 4000, description: "Pixels wide; the plot's (or the grid's) own size when absent." } }, additionalProperties: false },
       run: async (args) => {
         try {
           const result = await relay.call("render", args);
@@ -180,10 +248,14 @@ export function gatelabTools(relay) {
       run: async (args) => {
         if (typeof args.path !== "string" || !isAbsolute(args.path)) return refused(new Error("path must be absolute."));
         try {
+          const before = await relay.call("describe", {});
           const [workspace, memberships] = await Promise.all([relay.call("workspace", {}), relay.call("memberships", { populationIds: args.populationIds })]);
+          const after = await relay.call("describe", {});
+          if (snapshotKey(before) !== snapshotKey(after) || workspace.revision !== before.revision || memberships.revision !== before.revision) throw new Error("The data or gating changed during export; no file written. Retry.");
           const payload = {
             format: "gatelab-agent-export", version: 1, exportedAt: new Date().toISOString(),
             tab: relay.info, revision: memberships.revision,
+            context: contextOf(before),
             workspace: workspace.json ? JSON.parse(workspace.json) : null,
             samples: memberships.samples, populations: memberships.populations,
           };

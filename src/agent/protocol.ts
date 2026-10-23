@@ -37,6 +37,8 @@ export type AgentMethod =
   | "distribution"
   | "stats"
   | "preview"
+  | "proposal"
+  | "gatingTask"
   | "apply"
   | "view"
   | "render"
@@ -94,9 +96,17 @@ export interface AgentSampleInfo {
 
 export interface AgentPopulationCount {
   sampleId: string;
-  n: number;
-  parentN: number;
+  /** Null when the population is not evaluated for the sample. */
+  n: number | null;
+  /** Null when the parent population is not evaluated for the sample. */
+  parentN: number | null;
   percentOfParent: number | null;
+  /**
+   * Present when the population is not evaluated for the sample: the tree the sample is gated
+   * under (a copy whose structure was unlocked and changed) has no counterpart for it. Names the
+   * file, the population and the file's tree.
+   */
+  notEvaluated?: string;
 }
 
 export interface AgentPopulation {
@@ -106,6 +116,7 @@ export interface AgentPopulation {
   depth: number;
   gates: { gateId: string; include: boolean; quadrant?: number }[];
   counts: AgentPopulationCount[];
+  /** Over the samples whose count and parent count are both evaluated. */
   pooled: { n: number; parentN: number; percentOfParent: number | null; percentOfTotal: number };
 }
 
@@ -136,6 +147,31 @@ export interface AgentView {
   tab: string;
   /** The ranges the plot shows on each axis, in display units; null until the plot has one. */
   ranges: { x: [number, number] | null; y: [number, number] | null };
+  /**
+   * What the Strategy tab draws, as its controls hold it; null until the tab has been opened or a
+   * workspace restored it. Absent on older cores.
+   */
+  strategy?: AgentStrategyView | null;
+}
+
+/** The Strategy tab's selection: the populations whose gating strategy it draws. */
+export interface AgentStrategySelection {
+  /** Populations of the active tree, not the root. "single" takes exactly one. */
+  populationIds: string[];
+  /**
+   * "single": one population's path, a strip of plots. "multi": the populations together, one
+   * grid laid out as the tree from the root. Absent: "single" for one id, "multi" for more.
+   */
+  mode?: "single" | "multi";
+  /** Single mode: every gate from the root rather than the population's own. Unchanged when absent. */
+  fullPath?: boolean;
+}
+
+export interface AgentStrategyView {
+  mode: "single" | "multi";
+  /** Single mode: the one population traced. Multi mode: the populations selected, in their order. */
+  populationIds: string[];
+  fullPath: boolean;
 }
 
 export interface AgentDescribe {
@@ -147,6 +183,40 @@ export interface AgentDescribe {
   populations: AgentPopulation[];
   gates: AgentGate[];
   view: AgentView;
+  /** Explicit plot selection; absent on older cores. Counts above still pool all loaded samples. */
+  context?: AgentDataContext;
+  gatingTask?: AgentGatingTask | null;
+}
+
+/** Search progress is transient UI state, never saved into the gating workspace or SCE. */
+export interface AgentGatingTask {
+  id: string;
+  mode: "population" | "cluster";
+  target: string;
+  status: "searching" | "review" | "cancelled";
+  candidates: number;
+  budget: number;
+  message: string;
+}
+
+/**
+ * The relay's "proposal" method: an agent's strategy proposal (proposals/strategyProposal.ts), read
+ * on a copy of the state. The same proposal from any other source is previewed for the user.
+ */
+export interface StrategyProposalParams {
+  expectedRevision: number;
+  /** Later commands may use @key.population or @key.gate in ID fields, and @root for the root. */
+  steps: { key: string; command: AgentCommand }[];
+  populationIds: string[];
+  sampleIds: string[];
+}
+
+export interface AgentDataContext {
+  assay: { id: string | null; space: "linear" | "display" | null };
+  plot: { pooled: boolean; sampleIds: string[] };
+  gateVisibility?: { branchOnly: boolean; showUnowned: boolean; selectedGateId: string | null; checkedGateIds: string[] };
+  populationCountScope: "all-loaded-samples";
+  gateCountScope: "geometry-within-active-population";
 }
 
 // ── distribution ────────────────────────────────────────────────────────────────────────────────
@@ -198,6 +268,8 @@ export interface AgentDistributionSeries {
   y?: AgentAxisDistribution;
   /** With y: bins × bins counts, row-major by y bin then x bin (grid[yi * bins + xi]). */
   grid?: number[];
+  /** One note per sample of the series the population is not evaluated for; none of its events are read. */
+  notEvaluated?: string[];
 }
 
 export interface AgentDistribution {
@@ -227,6 +299,8 @@ export interface AgentPopulationStats {
   medians: Record<string, number | null>;
   /** With thresholds: per channel, the fraction (0 to 1) of the population at or above it. */
   positive?: Record<string, number | null>;
+  /** One note per sample of the series the population is not evaluated for; `n` counts none of its events. */
+  notEvaluated?: string[];
 }
 
 export interface AgentStats {
@@ -278,7 +352,16 @@ export interface AgentViewParams {
   /** Hold an axis at a range, in display units, as the Scales tab's Min/Max does; applied after any fit. */
   xRange?: [number, number];
   yRange?: [number, number];
+  /**
+   * The tab shown: "gating" (absent, without `strategy`) or "strategy" (absent, with it). The
+   * axes, fit and ranges above set the Gating plot and are refused with "strategy".
+   */
+  tab?: AgentViewTab;
+  /** What the Strategy tab draws. Sets the tab's controls only: no gating change, no selection in the tree. */
+  strategy?: AgentStrategySelection;
 }
+
+export type AgentViewTab = "gating" | "strategy";
 
 export interface AgentRenderParams {
   /** Pixels; the plot's own size when absent. */
@@ -306,8 +389,11 @@ export interface AgentMemberships {
     id: string;
     name: string;
     hierarchyId: string;
-    /** One packed mask per sample, least significant bit first, as colData export packs them. */
-    sampleMasks: { sampleId: string; eventCount: number; membershipBitsBase64: string }[];
+    /**
+     * One packed mask per sample, least significant bit first, as colData export packs them. A
+     * sample the population is not evaluated for has no bits and a `notEvaluated` note instead.
+     */
+    sampleMasks: { sampleId: string; eventCount: number; membershipBitsBase64: string; notEvaluated?: string }[];
   }[];
 }
 

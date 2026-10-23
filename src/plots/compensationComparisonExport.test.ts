@@ -63,8 +63,8 @@ describe("compensation comparison export", () => {
   });
 
   it("uses direct single-page names and zipped multipage image names", () => {
-    expect(compensationComparisonFileBase("portal bio/test 3.fcs", "Live cells"))
-      .toBe("gatelab-compensation-portal-bio-test-3-Live-cells");
+    expect(compensationComparisonFileBase("donor D1/treated 3.fcs", "Live cells"))
+      .toBe("gatelab-compensation-donor-D1-treated-3-Live-cells");
     expect(compensationComparisonDownloadName("test.fcs", "All Events", "pdf", 3))
       .toBe("gatelab-compensation-test-All-Events.pdf");
     expect(compensationComparisonDownloadName("test.fcs", "All Events", "png", 1))
@@ -76,8 +76,8 @@ describe("compensation comparison export", () => {
   it("composes clean paired Original and Compensated panels with scientific context", () => {
     renderSurfaceMock.mockClear();
     const page = composeCompensationComparisonPageSvg([pair], {
-      sampleName: "portal.bio test 3.fcs",
-      profileName: "WingLab spill matrix",
+      sampleName: "D1.treated test 3.fcs",
+      profileName: "Reference spill matrix",
       populationName: "Live cells",
       filterLabel: "Flagged for follow-up",
       densitySmoothing: 6,

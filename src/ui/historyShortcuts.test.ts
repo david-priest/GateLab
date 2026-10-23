@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it } from "vitest";
-import { historyShortcutAction } from "./historyShortcuts";
+import { historyShortcutAction, workspaceShortcutAction } from "./historyShortcuts";
 
 function shortcut(
   init: KeyboardEventInit,
@@ -48,5 +48,24 @@ describe("historyShortcutAction", () => {
     const handled = shortcut({ metaKey: true });
     handled.preventDefault();
     expect(historyShortcutAction(handled)).toBeNull();
+  });
+});
+
+describe("workspaceShortcutAction", () => {
+  it("maps Command/Control-S to save and Command/Control-O to open, from a text field too", () => {
+    expect(workspaceShortcutAction(shortcut({ key: "s", metaKey: true }))).toBe("save");
+    expect(workspaceShortcutAction(shortcut({ key: "S", ctrlKey: true }))).toBe("save");
+    expect(workspaceShortcutAction(shortcut({ key: "o", metaKey: true }))).toBe("open");
+    expect(workspaceShortcutAction(shortcut({ key: "s", metaKey: true }, document.createElement("input")))).toBe("save");
+  });
+
+  it("leaves other keys, Shift and Option variants and handled events alone", () => {
+    expect(workspaceShortcutAction(shortcut({ key: "s" }))).toBeNull();
+    expect(workspaceShortcutAction(shortcut({ key: "s", metaKey: true, shiftKey: true }))).toBeNull();
+    expect(workspaceShortcutAction(shortcut({ key: "o", ctrlKey: true, altKey: true }))).toBeNull();
+    expect(workspaceShortcutAction(shortcut({ key: "z", metaKey: true }))).toBeNull();
+    const handled = shortcut({ key: "s", metaKey: true });
+    handled.preventDefault();
+    expect(workspaceShortcutAction(handled)).toBeNull();
   });
 });

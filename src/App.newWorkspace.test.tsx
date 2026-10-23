@@ -83,7 +83,8 @@ describe("App New Workspace", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    expect(host.textContent).toContain("No files loaded.");
+    // An empty file list offers the one thing to do.
+    expect(host.querySelector(".gl-sample-empty")?.textContent).toContain("+ Add files…");
     expect(host.textContent).toContain("Open an FCS file or a workspace to begin.");
     expect(host.textContent).toContain("New workspace ready · add an FCS file to begin.");
     expect(host.textContent).not.toContain("test.fcs");

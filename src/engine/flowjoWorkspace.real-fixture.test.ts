@@ -5,6 +5,7 @@ import { flowJoWorkspaceToGatingML, listFlowJoWorkspaceSamples } from "./flowjoW
 import { importGatingML, resolveGatingMLCompensation } from "./gatingml";
 import { parseFcs } from "./fcs";
 import { Sample, maxCoefficientDelta } from "./sample";
+import { S6_WORKSPACE } from "../testFixtures";
 
 /**
  * The BD FACSDiva sort workspace published as Supplementary Figure 10A of Priest et al. 2024.
@@ -14,11 +15,7 @@ import { Sample, maxCoefficientDelta } from "./sample";
  * established by matching all 17 gate percentages against the printed figure; the counts asserted
  * below are the ones the figure was drawn from, so a change in either direction is a regression.
  */
-const wspPath =
-  process.env.GATELAB_PRIEST_SORT_WSP ??
-  "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/" +
-    "GateLab Paper/GateLab-2026-08-15-B flowjo-and-cytobank-concordance/data/" +
-    "bass12-priest2024-s6/source/flowjo-workspace/25-Sep-2023.wsp";
+const wspPath = process.env.GATELAB_PRIEST_SORT_WSP ?? S6_WORKSPACE;
 
 const fcsPath = wspPath.replace(/25-Sep-2023\.wsp$/, "Specimen_001_B cell presort.fcs");
 

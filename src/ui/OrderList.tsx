@@ -4,6 +4,7 @@
 // is dropped; the arrow buttons step it by one; a sort button orders everything at once.
 
 import { useRef, useState, type DragEvent, type MouseEvent } from "react";
+import { GripIcon } from "./icons";
 
 export interface OrderSort<T> {
   label: string;
@@ -156,7 +157,7 @@ export function OrderList<T>({ items, keyOf, labelOf, onReorder, label, sorts }:
               onDragOver={(event) => dragOver(index, event)}
               onDragEnd={() => setDropAt(null)}
             >
-              <span className="gl-order-row-grip" aria-hidden="true">⋮⋮</span>
+              <span className="gl-order-row-grip" aria-hidden="true"><GripIcon size={14} /></span>
               <span className="gl-order-row-label">{labelOf(item)}</span>
             </div>
           );

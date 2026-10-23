@@ -23,10 +23,12 @@ export interface DrivePicker {
   /** The files a workspace still needs, picked from its experiment folder. */
   pickMissing(folderId: string, names: readonly string[]): Promise<PickedDoc[] | null>;
   /**
-   * A folder, picked so GateLab may create a file in it: an experiment folder, chosen in the lab
-   * folder, or the lab folder itself, chosen from the Shared drives above it.
+   * A folder: an experiment folder, or a folder above one, chosen in the lab folder (so GateLab may
+   * create a file in it, or read where it is); the place for a new experiment, chosen in the lab
+   * folder; or the lab folder itself, chosen from the Shared drives above it. `title` replaces the
+   * picker's own for an experiment folder.
    */
-  pickFolder(kind?: "experiment" | "lab"): Promise<PickedDoc | null>;
+  pickFolder(kind?: "experiment" | "lab" | "location", title?: string): Promise<PickedDoc | null>;
 }
 
 /* The parts of the Picker API used here. */
@@ -128,7 +130,7 @@ export function createDrivePicker(config: DriveConfig, token: () => string): Dri
       multiselect: true,
       folders: false,
     }),
-    pickFolder: async (kind = "experiment") => {
+    pickFolder: async (kind = "experiment", title) => {
       const docs = await open(kind === "lab"
         ? {
             title: "Choose the lab folder (the one that holds the experiment folders), so GateLab may make a new experiment in it",
@@ -136,12 +138,19 @@ export function createDrivePicker(config: DriveConfig, token: () => string): Dri
             multiselect: false,
             folders: true,
           }
-        : {
-            title: "Choose the experiment folder to save the workspace in",
-            parentId: config.rootFolderId,
-            multiselect: false,
-            folders: true,
-          });
+        : kind === "location"
+          ? {
+              title: "Choose where the new experiment goes: a folder in the lab folder (open folders to go deeper, then select one)",
+              parentId: config.rootFolderId,
+              multiselect: false,
+              folders: true,
+            }
+          : {
+              title: title ?? "Choose the experiment folder to save the workspace in",
+              parentId: config.rootFolderId,
+              multiselect: false,
+              folders: true,
+            });
       return docs?.[0] ?? null;
     },
   };

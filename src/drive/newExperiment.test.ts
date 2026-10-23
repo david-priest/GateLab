@@ -16,7 +16,9 @@ import {
   type ExperimentUpload,
 } from "./newExperiment";
 import { DriveFolderAccessError, SAVE_KEY, WRITER_KEY } from "./save";
-import { FakeDrive } from "./testFakeDrive";
+import { createDriveSession } from "./session";
+import { FAKE_CONFIG, FakeDrive, FakePicker, fakeAuth } from "./testFakeDrive";
+import type { DriveFolderRequest } from "./types";
 import { UPLOAD_CHUNK_BYTES } from "./upload";
 
 const ROOT = "ROOT_FOLDER_0001";
@@ -163,5 +165,103 @@ describe("saving as a new experiment", () => {
     await expect(saveAsNewExperiment(drive, ROOT, request, { sleep: noWait }))
       .rejects.toThrow(/HTTP 403.*holds 1 of 2 FCS files and no workspace/);
     expect(drive.byName("Experiment 1.gatelab")).toHaveLength(0);
+  });
+});
+
+describe("where a new experiment goes", () => {
+  const FOLDER = "application/vnd.google-apps.folder";
+  const samples = [
+    { id: "s1", name: "D1_treated.fcs", bytes: bytesOf(UPLOAD_CHUNK_BYTES + 100, 1) },
+    { id: "s2", name: "D2_control.fcs", bytes: bytesOf(2000, 2) },
+  ];
+  /** Lab / David (made by hand, not readable until chosen) / For testing. */
+  function nested() {
+    const drive = new FakeDrive();
+    drive.writableFolders.add(ROOT);
+    drive.addFolder(ROOT, "SHARED_DRIVE_01", "Lab");
+    drive.addFolder("DAVID_FOLDER_0001", ROOT, "David");
+    drive.addFolder("TESTING_FOLDER_01", "DAVID_FOLDER_0001", "For testing");
+    const picker = new FakePicker();
+    // A folder chosen in the picker becomes readable, and GateLab may create in it.
+    picker.onFolderPicked = (folder) => {
+      drive.pick(folder.id);
+      drive.writableFolders.add(folder.id);
+    };
+    const session = createDriveSession(FAKE_CONFIG, { auth: fakeAuth(), api: drive, picker, writerId: "tab-1" });
+    return { drive, picker, session };
+  }
+
+  it("is the lab folder, or a folder inside it several folders down, each folder on the way confirmed", async () => {
+    const { drive, picker, session } = nested();
+    picker.folders.push(
+      { id: "TESTING_FOLDER_01", name: "For testing", mimeType: FOLDER },
+      { id: "DAVID_FOLDER_0001", name: "David", mimeType: FOLDER },
+    );
+    const asked: DriveFolderRequest[] = [];
+    const location = await session.chooseLocation({ askFolder: async (request) => { asked.push(request); return true; } });
+    expect(picker.opened).toEqual(["location", "folder"]);
+    expect(asked).toEqual([{ kind: "above", child: "For testing" }]);
+    expect(location).toEqual({ folderId: "TESTING_FOLDER_01", path: ["David", "For testing"] });
+
+    const result = await session.saveAsNewExperiment({ name: "Experiment 1", samples, workspace: json("{\"v\":1}"), location });
+    const [made] = drive.folders("TESTING_FOLDER_01", "Experiment 1");
+    expect(result.target.folderId).toBe(made.id);
+    expect(drive.inFolder(made.id).map((file) => file.name)).toEqual(["D1_treated.fcs", "D2_control.fcs", "Experiment 1.gatelab"]);
+    expect(drive.folders(ROOT, "Experiment 1")).toEqual([]);
+
+    // Chosen once: the next choice of the same place asks nothing, and the lab folder itself is a place too.
+    picker.folders.push({ id: "TESTING_FOLDER_01", name: "For testing", mimeType: FOLDER });
+    expect(await session.chooseLocation({ askFolder: async () => { throw new Error("asked again"); } }))
+      .toEqual({ folderId: "TESTING_FOLDER_01", path: ["David", "For testing"] });
+    picker.folders.push({ id: ROOT, name: "Lab", mimeType: FOLDER });
+    expect(await session.chooseLocation({ askFolder: async () => true })).toEqual({ folderId: ROOT, path: [] });
+  });
+
+  it("refuses a folder outside the lab folder, saying so", async () => {
+    const { drive, picker, session } = nested();
+    drive.addFolder("OWN_FOLDER_0001", "", "Elsewhere");
+    picker.folders.push({ id: "OWN_FOLDER_0001", name: "Elsewhere", mimeType: FOLDER });
+    await expect(session.chooseLocation({ askFolder: async () => true }))
+      .rejects.toThrow(/^The folder chosen is not in the lab folder .*GateLab makes a new experiment only in the lab folder or a folder inside it, at any depth/);
+    // In another Shared drive, below a folder GateLab cannot read: refused without asking.
+    drive.addFolder(ROOT, "LAB_DRIVE_ROOT_01", "Lab", { reachable: true, driveId: "LAB_DRIVE_ROOT_01" });
+    drive.addFolder("OTHER_PARENT_0001", "OTHER_DRIVE_ROOT", "Other", { driveId: "OTHER_DRIVE_ROOT" });
+    drive.addFolder("OTHER_FOLDER_0001", "OTHER_PARENT_0001", "Other experiments", { driveId: "OTHER_DRIVE_ROOT" });
+    picker.folders.push({ id: "OTHER_FOLDER_0001", name: "Other experiments", mimeType: FOLDER });
+    await expect(session.chooseLocation({ askFolder: async () => { throw new Error("asked"); } }))
+      .rejects.toThrow(/The folder chosen is not in the lab folder "Lab"/);
+    // A choice cancelled is no location, and nothing is made.
+    picker.folders.push(null);
+    expect(await session.chooseLocation({ askFolder: async () => true })).toBeNull();
+    expect(drive.calls.filter((call) => /^(folder|create|start) /.test(call))).toEqual([]);
+  });
+
+  it("goes on in the same subfolder after a save that stopped, and refuses a place moved out of the lab folder", async () => {
+    const { drive, picker, session } = nested();
+    picker.folders.push(
+      { id: "TESTING_FOLDER_01", name: "For testing", mimeType: FOLDER },
+      { id: "DAVID_FOLDER_0001", name: "David", mimeType: FOLDER },
+    );
+    const location = await session.chooseLocation({ askFolder: async () => true });
+    const controller = new AbortController();
+    const request = { name: "Experiment 1", samples, workspace: json("{\"v\":1}"), location };
+    const stopped = await session.saveAsNewExperiment(request, {
+      signal: controller.signal,
+      onProgress: (progress) => { if (progress.index === 2 && progress.phase === "checking") controller.abort(); },
+    }).catch((cause: unknown) => cause);
+    expect(stopped).toBeInstanceOf(DriveExperimentStoppedError);
+    const [made] = drive.folders("TESTING_FOLDER_01", "Experiment 1");
+    expect(drive.inFolder(made.id).map((file) => file.name)).toEqual(["D1_treated.fcs"]);
+
+    const result = await session.saveAsNewExperiment(request);
+    expect(result).toMatchObject({ resumed: true, uploaded: 1, already: 1, target: { folderId: made.id } });
+    expect(drive.folders("TESTING_FOLDER_01", "Experiment 1")).toHaveLength(1);
+    expect(drive.inFolder(made.id).map((file) => file.name)).toEqual(["D1_treated.fcs", "D2_control.fcs", "Experiment 1.gatelab"]);
+
+    // Moved out of the lab folder after it was chosen: nothing is made there.
+    drive.addFolder("OWN_FOLDER_0001", "", "Elsewhere", { reachable: true });
+    drive.move("DAVID_FOLDER_0001", "OWN_FOLDER_0001");
+    await expect(session.saveAsNewExperiment({ ...request, name: "Experiment 2" })).rejects.toThrow(/still in the lab folder, so nothing was saved/);
+    expect(drive.folders("TESTING_FOLDER_01", "Experiment 2")).toEqual([]);
   });
 });

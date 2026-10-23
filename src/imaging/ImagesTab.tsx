@@ -5,6 +5,7 @@
 // ignores every prop while both the old and the new render are hidden.
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowDownIcon, ArrowUpIcon, CloseIcon } from "../ui/icons";
 import type { HoveredCell } from "../engine/cellHoverStore";
 import { useI18n } from "../ui/i18n";
 import { usePersistedTabState } from "../ui/tabState";
@@ -475,7 +476,7 @@ function ImagesTabImpl({
                 ))}
               </select>
               <button type="button" className="gl-mini-btn" aria-pressed={sortDesc} onClick={() => setSortDesc((d) => !d)} title={t("Reverse the order")}>
-                {sortDesc ? "↓" : "↑"}
+                {sortDesc ? <ArrowDownIcon size={12} /> : <ArrowUpIcon size={12} />}
               </button>
             </label>
             {histogram && histChannel && (
@@ -503,7 +504,7 @@ function ImagesTabImpl({
                 {activeRange && (
                   <span className="gl-images-range">
                     {`${formatWallValue(activeRange[0])}–${formatWallValue(activeRange[1])}`}
-                    <button type="button" className="gl-mini-btn" onClick={() => setWallRange(null)} title={t("Show every cell again")}>×</button>
+                    <button type="button" className="gl-mini-btn" onClick={() => setWallRange(null)} title={t("Show every cell again")} aria-label={t("Show every cell again")}><CloseIcon size={12} /></button>
                   </span>
                 )}
               </span>

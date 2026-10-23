@@ -5,9 +5,9 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: #f4f6f9;
+  background: var(--gl-surface-canvas);
   color: #26364a;
-  font-size: 13px;
+  font-size: var(--gl-font-size-body);
 }
 .gl-figure-workspace button,
 .gl-figure-workspace input,
@@ -20,7 +20,7 @@
   background: white;
   color: #33465e;
   padding: 6px 9px;
-  cursor: pointer;
+  cursor: default;
 }
 .gl-figure-workspace button:hover:not(:disabled) {
   background: #edf3fd;
@@ -69,7 +69,7 @@
 .gl-figure-viewbar,
 .gl-figure-footer {
   color: #5a6a7f;
-  font-size: 12px;
+  font-size: var(--gl-font-size-secondary);
 }
 .gl-figure-flex {
   flex: 1;
@@ -83,8 +83,9 @@
 .gl-figure-inspector {
   width: 290px;
   flex: 0 0 290px;
-  background: white;
-  border-right: 1px solid #dce3ec;
+  /* The shell every tab's left pane shares (styles.css, "One left pane for every tab"). */
+  background: var(--panel);
+  border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -95,7 +96,7 @@
    their own -- a bordered block, one labelled row per column, chips wrapping -- rather than the
    navigator's fixed-height grid with its lock column, which squashed them here. */
 .gl-figure-facets-fold { margin: 10px 0 6px; }
-.gl-figure-facets-fold > summary { cursor: pointer; font-size: 11px; font-weight: 600; color: #475569; list-style: none; }
+.gl-figure-facets-fold > summary { cursor: default; font-size: var(--gl-font-size-caption); font-weight: 600; color: #475569; list-style: none; }
 .gl-figure-facets-fold > summary::-webkit-details-marker { display: none; }
 .gl-figure-facets-fold > summary::before { content: "\25be "; color: #94a3b8; }
 .gl-figure-facets-fold:not([open]) > summary::before { content: "\25b8 "; }
@@ -120,34 +121,41 @@
 .gl-figure-facets .gl-sample-facet-name {
   flex: 0 0 76px;
   padding-top: 3px;
-  font-size: 11px;
+  font-size: var(--gl-font-size-caption);
   font-weight: 600;
   color: #475569;
   white-space: normal;
   overflow-wrap: anywhere;
 }
 .gl-figure-facets .gl-sample-facet-values { flex: 1 1 auto; display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
-.gl-figure-facets .gl-sample-facet-chip { font-size: 11px; line-height: 18px; }
+.gl-figure-facets .gl-sample-facet-chip { font-size: var(--gl-font-size-caption); line-height: 18px; }
 .gl-figure-inspector nav {
   display: flex;
-  padding: 8px 6px;
-  border-bottom: 1px solid #dce3ec;
+  flex-wrap: wrap;
+  padding: var(--gl-space-2);
+  border-bottom: 1px solid var(--line);
   gap: 2px;
 }
 .gl-figure-inspector nav button {
+  min-height: var(--gl-control-height);
+  padding: 0 var(--gl-space-2);
   border-color: transparent;
-  padding: 6px 7px;
+  border-radius: var(--gl-radius-md);
+  background: transparent;
+  color: var(--gl-color-text-secondary);
+  font-size: var(--gl-font-size-body);
 }
+.gl-figure-inspector nav button:hover:not([aria-selected="true"]):not(:disabled) { background: var(--gl-color-hover); color: var(--text); border-color: transparent; }
 .gl-figure-inspector nav button[aria-selected="true"] {
-  background: #eaf1fc;
-  color: #1d58a5;
-  border-color: #b6ccea;
+  background: color-mix(in srgb, var(--gl-color-accent) 13%, var(--bg));
+  color: var(--gl-color-accent);
+  border-color: var(--gl-color-accent);
 }
 .gl-figure-fields {
   min-width: 0;
   border: 0;
   margin: 0;
-  padding: 10px 12px 14px;
+  padding: var(--gl-space-3) var(--gl-pane-padding);
   overflow: auto;
   flex: 1;
   display: flex;
@@ -162,25 +170,25 @@
   display: none;
 }
 .gl-figure-fields h3 {
-  margin: 0 0 6px;
-  font-size: 12px;
-  font-weight: 600;
+  margin: 0 0 var(--gl-space-2);
+  font-size: var(--gl-font-size-caption);
+  font-weight: var(--gl-font-weight-semibold);
   display: flex;
   justify-content: space-between;
   align-items: baseline;
   gap: 8px;
 }
 .gl-figure-fields h3:not(:first-child) {
-  margin-top: 14px;
+  margin-top: var(--gl-space-4);
 }
 .gl-figure-fields h3 span {
   color: #66768b;
   font-weight: 400;
-  font-size: 11px;
+  font-size: var(--gl-font-size-caption);
   white-space: nowrap;
 }
 .gl-figure-fields p {
-  font-size: 11.5px;
+  font-size: var(--gl-font-size-secondary);
   color: #5a6a7f;
   line-height: 1.45;
   margin: 4px 0 8px;
@@ -205,15 +213,18 @@
 /* The Files and Populations lists: the navigator's compact rows -- one line each, a hairline
    between rows, the name trimmed with an ellipsis (the full name is the row's title) -- rather
    than padded two-line entries. Populations indent by tree depth. */
+/* A list grows with its rows up to about two fifths of the window, then scrolls (David,
+   2026-10-23: a fixed 260 px cut the file list short). The Strategy and Plotting tabs' file lists
+   follow the same rule. */
 .gl-figure-list {
-  max-height: 260px;
+  max-height: max(160px, 40vh);
   overflow: auto;
   border: 1px solid #e4e9f0;
   border-radius: 5px;
 }
 .gl-figure-list-actions button {
   padding: 3px 7px;
-  font-size: 11px;
+  font-size: var(--gl-font-size-caption);
 }
 .gl-figure-list label.gl-figure-row {
   display: flex;
@@ -225,12 +236,13 @@
   margin: 0;
   border-radius: 0;
   border-bottom: 1px solid #eef2f7;
-  cursor: pointer;
+  cursor: default;
 }
 .gl-figure-list label.gl-figure-row:last-child { border-bottom: 0; }
 .gl-figure-list label.gl-figure-row:hover { background: #f6f9fd; }
 .gl-figure-list label.gl-figure-row:has(input:checked) { background: #f0f5fc; }
-.gl-figure-list label.gl-figure-row input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
+.gl-figure-list label.gl-figure-row input[type="checkbox"],
+.gl-figure-list label.gl-figure-row input[type="radio"] { flex: 0 0 auto; margin: 0; }
 .gl-figure-row-name {
   flex: 1 1 auto;
   min-width: 0;
@@ -241,7 +253,7 @@
 }
 .gl-figure-row-name small {
   display: block;
-  font-size: 11px;
+  font-size: var(--gl-font-size-caption);
   line-height: 1.25;
   color: #69788c;
   overflow: hidden;
@@ -250,14 +262,14 @@
 .gl-figure-fields .gl-figure-row-meta {
   display: inline;
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: var(--gl-font-size-caption);
   color: #69788c;
   font-variant-numeric: tabular-nums;
 }
 .gl-figure-fields small {
   display: block;
   color: #69788c;
-  font-size: 11px;
+  font-size: var(--gl-font-size-caption);
 }
 .gl-figure-actions {
   display: flex;
@@ -270,12 +282,12 @@
   padding-top: 8px;
 }
 .gl-figure-fields summary {
-  cursor: pointer;
+  cursor: default;
   font-weight: 500;
 }
 .gl-figure-mapping {
   margin-top: 12px;
-  font-size: 12px;
+  font-size: var(--gl-font-size-secondary);
 }
 .gl-figure-plot-editor {
   border: 1px solid #dce3ec;
@@ -286,7 +298,7 @@
 }
 .gl-figure-fields .gl-figure-note {
   padding: 4px 0;
-  font-size: 11px;
+  font-size: var(--gl-font-size-caption);
   background: none;
 }
 .gl-figure-shelf {
@@ -367,13 +379,13 @@
 }
 .gl-figure-grid caption {
   text-align: left;
-  font-size: 15px;
+  font-size: var(--gl-font-size-heading);
   font-weight: 600;
   padding: 8px 12px;
 }
 .gl-figure-grid th {
   font-weight: 500;
-  font-size: 12px;
+  font-size: var(--gl-font-size-secondary);
   text-align: center;
   overflow-wrap: anywhere;
 }
@@ -394,7 +406,7 @@
 }
 .gl-figure-panel-meta,
 .gl-figure-tailored {
-  font-size: 11px;
+  font-size: var(--gl-font-size-caption);
   color: #5a6a7f;
   text-align: center;
   min-height: 18px;
@@ -408,7 +420,7 @@
   color: #75502c;
   background: #fffdfa;
   text-align: center;
-  font-size: 12px;
+  font-size: var(--gl-font-size-secondary);
 }
 .gl-figure-warning {
   margin: 8px 12px;
@@ -417,7 +429,7 @@
   border-radius: 4px;
   background: #fff7e9;
   color: #69491e;
-  font-size: 12px;
+  font-size: var(--gl-font-size-secondary);
 }
 .gl-figure-warning button {
   margin-top: 8px;
@@ -425,7 +437,7 @@
 .gl-figure-note {
   padding: 6px 15px;
   color: #5c687b;
-  font-size: 12px;
+  font-size: var(--gl-font-size-secondary);
   background: #edf2f9;
 }
 .gl-figure-footer {
@@ -477,7 +489,7 @@
   flex-wrap: wrap;
   justify-content: center;
   gap: 4px 10px;
-  font-size: 11px;
+  font-size: var(--gl-font-size-caption);
   padding-top: 5px;
 }
 .gl-figure-workspace {
@@ -485,19 +497,19 @@
 }
 
 /* The chosen panels' count and actions in the footer, beside the page status. */
-.gl-figure-selection { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; font-size: 12px; color: #334155; }
-.gl-figure-selection button { padding: 2px 7px; font-size: 11px; }
+.gl-figure-selection { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; font-size: var(--gl-font-size-secondary); color: #334155; }
+.gl-figure-selection button { padding: 2px 7px; font-size: var(--gl-font-size-caption); }
 
 /* The Arrange tab's order lists: rows chosen like files in a finder and dragged to their place. */
 .gl-order-list { margin: 4px 0 10px; }
 .gl-order-list-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-bottom: 4px; }
-.gl-order-list-actions button { padding: 2px 7px; font-size: 11px; }
-.gl-order-list-hint { font-size: 11px; color: #64748b; }
+.gl-order-list-actions button { padding: 2px 7px; font-size: var(--gl-font-size-caption); }
+.gl-order-list-hint { font-size: var(--gl-font-size-caption); color: #64748b; }
 .gl-order-list-rows { border: 1px solid #e4e9f0; border-radius: 5px; max-height: 320px; overflow: auto; }
-.gl-order-row { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 12px; cursor: grab; user-select: none; -webkit-user-select: none; border-top: 1px solid #eef2f6; }
+.gl-order-row { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: var(--gl-font-size-secondary); cursor: grab; user-select: none; -webkit-user-select: none; border-top: 1px solid #eef2f6; }
 .gl-order-row:first-child { border-top: 0; }
 .gl-order-row.is-chosen { background: #e6f0fc; }
 .gl-order-row.drop-before { box-shadow: inset 0 2px 0 #2f80ed; }
 .gl-order-row.drop-after { box-shadow: inset 0 -2px 0 #2f80ed; }
-.gl-order-row-grip { color: #b7c1cd; font-size: 10px; letter-spacing: -2px; }
+.gl-order-row-grip { display: inline-flex; color: #b7c1cd; }
 .gl-order-row-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

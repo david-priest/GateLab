@@ -3,7 +3,7 @@
  * beside the vertices FlowJo reads.
  *
  * FlowJo has no continuous polygon: it tests every PolygonGate on its gate grid (flowjoGrid.ts),
- * and so does GateLab's import with "Evaluate gates as FlowJo does" on. A polygon GateLab drew, or
+ * and so does GateLab's import with "Evaluate gates on the recorded grid" on. A polygon GateLab drew, or
  * one it imported from FlowJo with the option off, is evaluated continuously on its drawn
  * geometry, so reading the file back under the option put it on a grid it was never on, and moved
  * the events near its edges (168,507 across a saved bundle's 18 populations when the declared axis

@@ -11,7 +11,7 @@
 
 import type { Gate, TransformSpec } from "./models";
 import type { Sample } from "./sample";
-import { describeFlowJoGridAxis, isFlowJoGridSpec, sameFlowJoGridSpec } from "./flowjoGrid";
+import { describeFlowJoGridAxis, isFlowJoGridSpec, sameFlowJoGridSpec, type FlowJoGridSpec } from "./flowjoGrid";
 
 // B and G only ever appear on gates imported from a FlowJo workspace: GateLab does not display
 // on either, it only holds gates in those spaces so they evaluate the way FlowJo evaluates them.
@@ -21,6 +21,7 @@ const LETTER: Record<TransformSpec["kind"], string> = {
   identity: "N",
   asinh: "A",
   logicle: "L",
+  hyperlog: "H",
   biex: "B",
   wsplog: "G",
   flog: "O",
@@ -32,17 +33,18 @@ function describe(spec: TransformSpec | undefined): string {
   if (spec.kind === "identity") return "linear";
   if (spec.kind === "asinh") return `arcsinh (cofactor ${spec.cofactor})`;
   if (spec.kind === "logicle") return `logicle (T ${spec.T.toPrecision(4)}, W ${spec.W.toPrecision(3)})`;
+  if (spec.kind === "hyperlog") return `Hyperlog (T ${spec.T.toPrecision(4)}, W ${spec.W.toPrecision(3)}, M ${spec.M}, A ${spec.A})`;
   if (spec.kind === "biex") {
     // Which table: two gates on the same biex parameters draw the same and can hold different
     // events near their edges, so the tooltip says which one this gate is evaluated on (biex.ts).
     const table = spec.tableChannels === undefined
       ? "on the 256-channel table GateLab used before 2026-09-24, which this gate was saved on"
-      : `on FlowJo's ${spec.tableChannels}-channel table`;
-    return `FlowJo biex (width ${spec.widthBasis.toPrecision(4)}, neg ${spec.neg}, pos ${spec.pos}), ${table}`;
+      : `on the ${spec.tableChannels}-channel biex table`;
+    return `biex (width ${spec.widthBasis.toPrecision(4)}, neg ${spec.neg}, pos ${spec.pos}), ${table}`;
   }
   if (spec.kind === "flog") return `log (T ${spec.T.toPrecision(4)}, M ${spec.M.toPrecision(4)})`;
   if (spec.kind === "flowjoChannels") return describeFlowJoGridAxis(spec);
-  return `FlowJo log (offset ${spec.offset.toPrecision(4)}, ${spec.decades.toPrecision(4)} decades)`;
+  return `log (offset ${spec.offset.toPrecision(4)}, ${spec.decades.toPrecision(4)} decades)`;
 }
 
 /**
@@ -54,10 +56,11 @@ export function transformPhrase(spec: TransformSpec): string {
     case "identity": return "a linear axis";
     case "asinh": return "an arcsinh axis";
     case "logicle": return "a logicle axis";
-    case "biex": return "a FlowJo biex axis";
-    case "wsplog": return "a FlowJo log axis";
+    case "hyperlog": return "a Hyperlog axis";
+    case "biex": return "a biex axis";
+    case "wsplog": return "a workspace log axis";
     case "flog": return "a Gating-ML log axis";
-    case "flowjoChannels": return `FlowJo's ${spec.channels}-channel grid`;
+    case "flowjoChannels": return `the workspace's ${spec.channels}-channel grid`;
   }
 }
 
@@ -76,6 +79,9 @@ function sameSpec(a: TransformSpec, b: TransformSpec): boolean {
   if (a.kind === "logicle" && b.kind === "logicle") {
     return a.T === b.T && a.W === b.W && a.M === b.M && a.A === b.A;
   }
+  if (a.kind === "hyperlog" && b.kind === "hyperlog") {
+    return a.T === b.T && a.W === b.W && a.M === b.M && a.A === b.A;
+  }
   if (a.kind === "biex" && b.kind === "biex") {
     return a.maxValue === b.maxValue && a.pos === b.pos && a.neg === b.neg
       && a.widthBasis === b.widthBasis && a.channelRange === b.channelRange
@@ -87,6 +93,23 @@ function sameSpec(a: TransformSpec, b: TransformSpec): boolean {
   }
   if (a.kind === "flog" && b.kind === "flog") return a.T === b.T && a.M === b.M;
   return true; // identity
+}
+
+/**
+ * Whether the view is the axis a FlowJo grid gate was drawn on. Sample.transformSpec never returns
+ * a grid spec, so comparing the two kinds would star every grid polygon. A grid channel is the
+ * axis's value scaled, so the axis itself is the same space: linear for a linear grid, the same
+ * biex for a biex grid. GateLab has no FlowJo log view, so a log grid axis is always seen through
+ * another transform.
+ */
+function viewIsGridAxis(view: TransformSpec, grid: FlowJoGridSpec): boolean {
+  const a = grid.axis;
+  if (a.kind === "linear") return view.kind === "identity";
+  if (a.kind === "biex" && view.kind === "biex") {
+    return view.maxValue === a.maxValue && view.pos === a.pos && view.neg === a.neg
+      && view.widthBasis === a.widthBasis && view.channelRange === a.channelRange;
+  }
+  return false;
 }
 
 /**
@@ -108,7 +131,7 @@ function viewDiffersFromGate(sample: Sample, gate: Gate): boolean {
     const own: TransformSpec = space === "raw"
       ? { kind: "identity" }
       : (gate.transforms?.[ch] ?? current);
-    if (!sameSpec(current, own)) return true;
+    if (isFlowJoGridSpec(own) ? !viewIsGridAxis(current, own) : !sameSpec(current, own)) return true;
   }
   return false;
 }
@@ -141,7 +164,7 @@ export function gateSpaceBadge(sample: Sample, gate: Gate): GateSpaceBadge | nul
   if (isFlowJoGridSpec(tx) || isFlowJoGridSpec(ty)) {
     return {
       text,
-      hint: `FlowJo's grid — tested as FlowJo tests it: each event on its channel of FlowJo's grid, `
+      hint: `Workspace grid — tested on the grid the workspace records: each event on its channel of that grid, `
         + `against the polygon's vertices on the same channels, edge included. x: ${describe(tx)} · `
         + `y: ${describe(ty)}. Edited vertices stay on channels. Changing the axis scale redraws it `
         + "but cannot move it." + warn,

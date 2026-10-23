@@ -65,7 +65,7 @@ afterEach(() => {
 async function settle(): Promise<void> {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
 }
-const button = (label: string) => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label)!;
+const button = (label: string) => [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")].find((b) => b.textContent?.trim() === label)!;
 const labelled = (text: string) => [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.trim().startsWith(text))!;
 
 describe("the Strategy tab's settings in the workspace file", () => {
@@ -88,7 +88,7 @@ describe("the Strategy tab's settings in the workspace file", () => {
     await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
     for (let i = 0; i < 3; i++) await settle();
 
-    // Strategy tab: Multiple pops, Wrapped, bold labels.
+    // Strategy tab: Multiple pops, Wrapped, bold labels, the gating tree with the exports.
     await act(async () => { button("Strategy").click(); });
     await settle();
     await act(async () => { labelled("Multiple pops").querySelector("input")!.click(); });
@@ -98,6 +98,7 @@ describe("the Strategy tab's settings in the workspace file", () => {
       layout.dispatchEvent(new Event("change", { bubbles: true }));
     });
     await act(async () => { labelled("Bold gate labels").querySelector("input")!.click(); });
+    await act(async () => { labelled("With gating tree").querySelector("input")!.click(); });
     await settle();
 
     await act(async () => { button("Save As…").click(); });
@@ -107,6 +108,6 @@ describe("the Strategy tab's settings in the workspace file", () => {
     const saved = readWorkspaceBytes(typeof chunk === "string" ? new TextEncoder().encode(chunk) : new Uint8Array(chunk as Uint8Array));
     const strategy = (saved.ws as { strategy?: Record<string, unknown> }).strategy;
     expect(strategy).toBeTruthy();
-    expect(strategy).toMatchObject({ mode: "multi", layout: "flow", gateLabelBold: true, showArrows: true, pointSize: 1.2 });
+    expect(strategy).toMatchObject({ mode: "multi", layout: "flow", gateLabelBold: true, showArrows: true, pointSize: 1.2, exportTree: true });
   });
 });

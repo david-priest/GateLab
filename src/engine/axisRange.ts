@@ -24,6 +24,8 @@ type PlotGateGeometry = Readonly<{
   label_offset?: unknown;
   /** A rectangle's sides with no bound, [low, high] per axis (PlotGate.unbounded). */
   unbounded?: unknown;
+  /** A quadrant's drawn arms; a spider quadrant's (`spider` set) end on its box (PlotGate.arms). */
+  arms?: unknown;
 }>;
 
 /**
@@ -58,15 +60,46 @@ export function finiteQuantileSample(values: ArrayLike<number>): number[] {
 }
 
 /**
+ * The values at finiteQuantileSample's positions, NaN left out and the rest (infinities included)
+ * in ascending order. For a non-decreasing display transform f, mapping these through f, rounding
+ * to float32 as a display column stores them, and dropping what is not finite gives exactly
+ * finiteQuantileSample of the display column, without sorting it again: the raw order does not
+ * change when f does, so it can be kept while an axis's parameters are dragged.
+ */
+export function orderedQuantileSample(values: ArrayLike<number>): number[] {
+  const n = values.length;
+  const sampleN = Math.min(n, MAX_QUANTILE_SAMPLES);
+  const out: number[] = [];
+  const denom = sampleN > 1 ? sampleN - 1 : 1;
+  for (let i = 0; i < sampleN; i++) {
+    const value = values[sampleN === n ? i : Math.round((i * (n - 1)) / denom)];
+    if (!Number.isNaN(value)) out.push(value);
+  }
+  out.sort((a, b) => a - b);
+  return out;
+}
+
+/**
  * Initial display-space range. Outliers beyond the returned limits remain visible because the
  * main plot clamps event marks (but not gates) to the corresponding axis edge.
+ *
+ * `ceiling` is the top of what the instrument measures ($PnR in display units), past which the
+ * frame does not reach. A flow file's linear SSC with 18 of 1,080 events recorded above $PnR
+ * 262,144, up to 12 million, had its 99.9th percentile at 6.9 million, and every cell lay flat
+ * along the bottom of the plot; FlowJo's axis stops at $PnR. The events beyond it stay, piled on
+ * the edge, and no gate or count changes.
  */
-export function robustAxisRange(values: ArrayLike<number>): [number, number] {
-  const sorted = finiteQuantileSample(values);
+export function robustAxisRange(values: ArrayLike<number>, ceiling?: number): [number, number] {
+  return robustAxisRangeOfSorted(finiteQuantileSample(values), ceiling);
+}
+
+/** robustAxisRange from finiteQuantileSample's output (or orderedQuantileSample's, mapped). */
+export function robustAxisRangeOfSorted(sorted: number[], ceiling?: number): [number, number] {
   if (sorted.length === 0) return [0, 1];
 
   const lo = quantileType7(sorted, LOWER_QUANTILE);
-  const hi = quantileType7(sorted, UPPER_QUANTILE);
+  let hi = quantileType7(sorted, UPPER_QUANTILE);
+  if (ceiling !== undefined && Number.isFinite(ceiling) && ceiling > lo && hi > ceiling) hi = ceiling;
   if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
 
   const span = hi - lo;
@@ -157,6 +190,14 @@ export function includePlotGatesInAxisRange(
 
     const center = finitePair(gate.center);
     if (center) geometry.push(center[axisIndex]);
+    // A spider quadrant reaches its arms' ends, where its handles are.
+    const arms = gate.arms as { spider?: unknown; h?: unknown; v?: unknown; l?: unknown; d?: unknown } | undefined;
+    if (arms && arms.spider) {
+      for (const line of [arms.h, arms.v, arms.l, arms.d]) {
+        const end = Array.isArray(line) && line.length ? finitePair(line[line.length - 1]) : null;
+        if (end) geometry.push(end[axisIndex]);
+      }
+    }
 
     // A user-positioned label is part of the visible annotation. Auto-generated labels are
     // also included, but only when a finite gate centroid exists.

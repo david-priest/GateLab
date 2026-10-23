@@ -79,7 +79,7 @@ describe("BulkRenameModal population definitions", () => {
     expect(host.textContent).toContain("1 renames");
     expect(host.textContent).toContain("1 gate definitions changed");
 
-    const apply = [...host.querySelectorAll<HTMLButtonElement>("button")]
+    const apply = [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")]
       .find((button) => button.textContent?.trim() === "Apply changes")!;
     act(() => apply.click());
     expect(onConfirm).toHaveBeenCalledTimes(1);

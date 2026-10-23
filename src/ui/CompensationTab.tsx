@@ -11,6 +11,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { SearchableSelect } from "./SearchableSelect";
+import { ChevronIcon } from "./icons";
 import { pickFilesOrInput } from "../engine/fsAccess";
 import { DEFAULT_DENSITY_COLOR_POWER } from "../engine/pseudocolor";
 import {
@@ -26,6 +27,7 @@ import {
   type CanonicalCompensationMatrix,
   type CompensationProfileHashInput,
   type MatrixValidationIssue,
+  type MatrixValidationResult,
 } from "../engine/compensationProfile";
 import {
   createCompensationBaselineProfile,
@@ -74,9 +76,11 @@ import {
 } from "../plots/compensationComparisonExport";
 import { CompensationComparisonExportDialog } from "./CompensationComparisonExportDialog";
 import { CompensationMatrixExportDialog } from "./CompensationMatrixExportDialog";
+import { CompensationMatrices, type CompensationMatricesProps } from "./CompensationMatrices";
 import { usePersistedTabState } from "./tabState";
 import { DensityColourControl } from "./DensityColourControl";
 import { useI18n } from "./i18n";
+import { TabIntro, TabIntroToggle, useTabIntro } from "./TabIntro";
 import {
   compensationMatrixCellAppearance,
   percentText,
@@ -100,6 +104,8 @@ import {
 const MATRIX_LABEL_FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
 /** The column labels' rotation, matching `.gl-comp-column-labels > div > span` in styles.css. */
 const COLUMN_LABEL_ANGLE = (58 * Math.PI) / 180;
+/** The matrix scroll area's padding, the axis captions and a scrollbar: room the cells cannot use. */
+const MATRIX_STAGE_CHROME = 18 + 18 + 18;
 
 interface Props {
   sample: Sample;
@@ -155,6 +161,8 @@ interface Props {
    */
   channelLabelMode?: string;
   onDensityColorPowerChange?: (value: number) => void;
+  /** The Matrices list at the head of the left pane, for a flow file; absent, no list is shown. */
+  matrices?: CompensationMatricesProps;
 }
 
 export interface ExistingHostCompensatedAssay {
@@ -276,6 +284,34 @@ const GLOBAL_PAIR_FILTER_LABELS: Readonly<Record<CompensationGlobalPairFilter, s
   flagged: "Flagged for follow-up",
   all: "All included pairs",
 };
+
+/** The left pane's side tabs, as Division's Data / Fit / Display. */
+type CompensationPaneSection = "matrices" | "review" | "display";
+
+const PANE_SECTIONS: ReadonlyArray<Readonly<{ id: CompensationPaneSection; label: string }>> = [
+  { id: "matrices", label: "Matrices" },
+  { id: "review", label: "Review" },
+  { id: "display", label: "Display" },
+];
+
+/** A "?" whose tooltip holds a section's explanation, as the plot's hints are given. */
+function PaneHint({ label, text }: { label: string; text: string }) {
+  return <span className="gl-hint-icon gl-comp-pane-hint" role="img" aria-label={label} title={text}>?</span>;
+}
+
+/**
+ * Why an embedded matrix cannot be edited, in a few words for the pane's one line; the full
+ * engine message is under Details.
+ */
+function embeddedMatrixProblemSummary(validation: MatrixValidationResult | null | undefined): string[] {
+  if (!validation) return ["its channels do not map to the file"];
+  if (validation.ok) return ["not a valid spillover matrix"];
+  const codes = new Set(validation.errors.map(({ code }) => code));
+  const reasons: string[] = [];
+  if (codes.has("negative-coefficient")) reasons.push("negative coefficients");
+  if (codes.has("non-unit-diagonal")) reasons.push("diagonal not 1");
+  return reasons.length > 0 ? reasons : ["not a valid spillover matrix"];
+}
 
 type DrawerId = "evidence" | "review";
 
@@ -583,8 +619,10 @@ function CompensationTabImpl({
   densityColorPower = DEFAULT_DENSITY_COLOR_POWER,
   channelLabelMode = "marker",
   onDensityColorPowerChange = () => undefined,
+  matrices,
 }: Props) {
   const { t } = useI18n();
+  const intro = useTabIntro("compensation");
   const installedStatus = sample.compensatedLayerStatus();
   const installedMetadata = installedStatus.state === "missing" ? null : installedStatus.metadata;
   const profileMetadata = installedMetadata?.runtimeIdentity === "profile" ? installedMetadata : null;
@@ -643,6 +681,10 @@ function CompensationTabImpl({
   const [pointSize, setPointSize] = usePersistedTabState<number>(
     "compensation.pointSize.v1",
     1,
+  );
+  const [paneSection, setPaneSection] = usePersistedTabState<CompensationPaneSection>(
+    "compensation.paneSection.v1",
+    "matrices",
   );
   const [pairPreviewEventLimit, setPairPreviewEventLimit] = usePersistedTabState<PairPreviewEventLimit>(
     "compensation.pairPreviewEventLimit.v1",
@@ -723,6 +765,27 @@ function CompensationTabImpl({
   const cytofFileRef = useRef<HTMLInputElement>(null);
   const matrixRef = useRef<HTMLDivElement>(null);
   const commonPathRef = useRef<HTMLDivElement>(null);
+  // The matrix panel's room for its cells; null until measured, and where nothing is laid out.
+  const [matrixScroll, setMatrixScroll] = useState<HTMLDivElement | null>(null);
+  const [matrixSpace, setMatrixSpace] = useState<{ width: number; height: number } | null>(null);
+  useEffect(() => {
+    if (!matrixScroll || typeof ResizeObserver === "undefined") {
+      setMatrixSpace(null);
+      return;
+    }
+    const measure = () => {
+      const { width, height } = matrixScroll.getBoundingClientRect();
+      setMatrixSpace((current) => {
+        if (width <= 0 || height <= 0) return null;
+        const next = { width: Math.round(width), height: Math.round(height) };
+        return current && current.width === next.width && current.height === next.height ? current : next;
+      });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(matrixScroll);
+    return () => observer.disconnect();
+  }, [matrixScroll]);
   const applyBusy = applyingProfile || applyStatus !== null;
   const resolvedApplyTargetCount = Math.max(0, Math.floor(applyTargetCount));
   const resolvedApplyTargetEventCount = Math.max(
@@ -930,6 +993,14 @@ function CompensationTabImpl({
     setSweepWorkerCount((current) => Math.max(1, Math.min(MAX_SWEEP_WORKERS, Math.round(current) || 1)));
   }, [setSweepWorkerCount]);
   const activePairKey = hoveredPairKey ?? selectedPairKey;
+  /** A matrix cell is selected: the matrix view opens the coefficient panel beside it. */
+  const pinnedInMatrix = useMemo(() => {
+    if (!matrixView || !selectedPairKey) return false;
+    const [sourceKey, receiverKey] = selectedPairKey.split(PAIR_SEPARATOR);
+    return sourceKey !== receiverKey &&
+      matrixView.sourceAxisKeys.includes(sourceKey) &&
+      matrixView.receiverAxisKeys.includes(receiverKey);
+  }, [matrixView, selectedPairKey]);
   const selectedPair = useMemo(() => {
     if (!matrixView || !activePairKey) return null;
     const [sourceKey, receiverKey] = activePairKey.split(PAIR_SEPARATOR);
@@ -1556,23 +1627,13 @@ function CompensationTabImpl({
     matrixView &&
     Math.max(matrixView.sourceAxisKeys.length, matrixView.receiverAxisKeys.length) <= FLOW_INLINE_MATRIX_LIMIT,
   );
-  const matrixCellSize = matrixView
-    ? flowInlineMatrix
-      ? Math.max(42, Math.min(54, Math.floor(960 / Math.max(
-          matrixView.sourceAxisKeys.length,
-          matrixView.receiverAxisKeys.length,
-        ))))
-      : Math.max(13, Math.min(38, Math.floor(760 / Math.max(
-          matrixView.sourceAxisKeys.length,
-          matrixView.receiverAxisKeys.length,
-        ))))
-    : 13;
   // The label columns are sized from the longest name rather than clipped to a fixed width: an
   // S8 writes "Max Intensity (LightLoss (Imaging))", which lost its first word on the left and
   // its last on the top. Measured in the labels' own font where a canvas exists, estimated per
   // character where it does not.
-  const matrixLabelLayout = useMemo(() => {
-    const fontSize = flowInlineMatrix ? 9.5 : 8;
+  const matrixLabelSizes = useMemo(() => {
+    // The matrix's labels and values are 11 px, the type scale's floor (David, 2026-10-23).
+    const fontSize = 11;
     const labels = [...sourceChannels, ...receiverChannels].map((channel) => channel.combined);
     const context = typeof document === "undefined" ? null : document.createElement("canvas").getContext("2d");
     if (context) context.font = `${fontSize}px ${MATRIX_LABEL_FONT}`;
@@ -1581,10 +1642,31 @@ function CompensationTabImpl({
     const rowLabelWidth = Math.min(320, Math.max(94, Math.ceil(longest) + 12));
     const columnLabelWidth = Math.min(260, Math.max(82, Math.ceil(longest) + 6));
     const columnLabelHeight = Math.max(88, Math.ceil(columnLabelWidth * Math.sin(COLUMN_LABEL_ANGLE) + 12));
+    return { rowLabelWidth, columnLabelWidth, columnLabelHeight };
+  }, [flowInlineMatrix, receiverChannels, sourceChannels]);
+  // The cells take the room the matrix panel has, up to a cap, and never draw smaller than the
+  // fixed budget gave them before the panel was measured: a wide window draws a 40-channel CyTOF
+  // matrix at a readable size, and a narrow one scrolls as it always did.
+  const matrixCellSize = matrixView
+    ? (() => {
+        const channels = Math.max(matrixView.sourceAxisKeys.length, matrixView.receiverAxisKeys.length);
+        // At least 32 px a cell, so an 11 px value fits: a wide panel scrolls rather than shrinking the type.
+        const [least, budgeted, most, budget] = flowInlineMatrix ? [42, 54, 64, 960] : [32, 38, 44, 760];
+        const before = Math.max(least, Math.min(budgeted, Math.floor(budget / channels)));
+        if (!matrixSpace) return before;
+        const fitted = Math.min(
+          matrixSpace.width - MATRIX_STAGE_CHROME - matrixLabelSizes.rowLabelWidth
+            - matrixLabelSizes.columnLabelWidth * Math.cos(COLUMN_LABEL_ANGLE),
+          matrixSpace.height - MATRIX_STAGE_CHROME - matrixLabelSizes.columnLabelHeight,
+        );
+        return Math.max(before, Math.min(most, Math.floor(fitted / channels)));
+      })()
+    : 13;
+  const matrixLabelLayout = useMemo(() => ({
+    ...matrixLabelSizes,
     // The last column's label leans past the matrix's right edge by its horizontal extent.
-    const overhang = Math.max(0, Math.ceil(columnLabelWidth * Math.cos(COLUMN_LABEL_ANGLE) - matrixCellSize / 2));
-    return { rowLabelWidth, columnLabelWidth, columnLabelHeight, overhang };
-  }, [flowInlineMatrix, matrixCellSize, receiverChannels, sourceChannels]);
+    overhang: Math.max(0, Math.ceil(matrixLabelSizes.columnLabelWidth * Math.cos(COLUMN_LABEL_ANGLE) - matrixCellSize / 2)),
+  }), [matrixLabelSizes, matrixCellSize]);
 
   useEffect(() => {
     setStagedCoefficients({});
@@ -2480,8 +2562,8 @@ function CompensationTabImpl({
               <button
                 type="button"
                 className="gl-mini-btn gl-comp-inspector-close"
-                aria-label={t("Close global compensation pair details")}
-                title={t("Close details and return to the full gallery")}
+                aria-label={t(compactGlobal ? "Close global compensation pair details" : "Close the coefficient panel")}
+                title={t(compactGlobal ? "Close details and return to the full gallery" : "Close the coefficient panel; selecting a cell opens it again")}
                 onClick={onClose}
               >
                 ×
@@ -2808,7 +2890,7 @@ function CompensationTabImpl({
     >
       <div className={`gl-plotting-head gl-comp-head gl-comp-overview${workspaceView === "global" ? " is-global-scan" : ""}`}>
         <div className="gl-comp-overview-title">
-          <h2 className="gl-tab-title">{t("Compensation")}</h2>
+          <h2 className="gl-tab-title">{t("Compensation")}<TabIntroToggle intro={intro} /></h2>
           {!profileMetadata && <span className="gl-comp-method">{displayMethod}</span>}
         </div>
         {profileMetadata ? (
@@ -2883,82 +2965,112 @@ function CompensationTabImpl({
             </button>
           </div>
         )}
-        {canToggle && <span className="gl-comp-global-layer-note">{t("Assay selection in the top bar applies to every tab.")}</span>}
+        {canToggle && (
+          <TabIntro intro={intro} className="gl-comp-global-layer-note">
+            {t("Assay selection in the top bar applies to every tab.")}
+          </TabIntro>
+        )}
       </div>
 
-      {/* The left pane, as the Plotting, Illustration and Statistics tabs have: the view, the
-          review scope, the Apply controls and the biplot display, out of the head and the body. */}
-      <aside className="gl-plotting-inspector gl-comp-inspector-left" aria-label={t("Compensation controls")}>
+      {/* The left pane every analysis tab has (David, 2026-10-23): side tabs for the matrices, the
+          review scope and the biplot display. Every section stays mounted, hidden by CSS when it is
+          not the chosen one, as Division's are. */}
+      <aside className={`gl-plotting-inspector gl-comp-inspector-left section-${paneSection}`} aria-label={t("Compensation controls")}>
+        <nav className="gl-presentation-tabs" aria-label={t("Compensation settings")}>
+          {PANE_SECTIONS.map(({ id, label }) => (
+            <button key={id} type="button" aria-pressed={paneSection === id} onClick={() => setPaneSection(id)}>
+              {t(label)}
+            </button>
+          ))}
+        </nav>
+        <div className="gl-comp-pane-section gl-comp-pane-matrices">
+        {matrices && sample.instrument === "flow" && <CompensationMatrices {...matrices} />}
         {sample.instrument === "flow" && !profileMetadata && (
           <section className="gl-comp-pane-matrix">
-            <h3>{t("Matrix")}</h3>
-          {sample.instrument === "flow" && spill && !profileMetadata && (
-            <section className="gl-comp-flow-enable" aria-labelledby="comp-flow-enable-heading">
-              <div>
-                <strong id="comp-flow-enable-heading">
+            <h3>{t("Edit coefficients")}</h3>
+          {spill && (
+            <div className="gl-comp-flow-enable" aria-labelledby="comp-flow-enable-heading">
+              <p className="gl-comp-pane-line">
+                <span id="comp-flow-enable-heading">
                   {t(hostedFlowMatrix
                     ? "SCE spillover matrix"
                     : "Embedded FCS matrix")}
-                </strong>
-                <span>{t("Install this exact matrix as the immutable baseline to edit coefficients and preview their effect.")}</span>
-              </div>
-              {hasExistingGates && (
-                <label className="gl-comp-gate-acknowledgement is-compact">
-                  <input
-                    type="checkbox"
-                    checked={gateRecomputeAcknowledged}
-                    disabled={applyBusy}
-                    onChange={(event) => setGateRecomputeAcknowledged(event.currentTarget.checked)}
-                  />
-                  <span>{t("Recompute existing gate memberships in compensated coordinates.")}</span>
-                </label>
-              )}
-              {otherEmbeddedLayerFiles.length > 0 && !embeddedFlowProfileMatrix?.error && (
-                <p className="gl-hint gl-comp-embedded-others">
-                  {t("Enabling also returns {count} other files to Original: {files}. A workspace keeps one kind of compensation, and these draw from their own embedded matrix.", {
-                    count: otherEmbeddedLayerFiles.length,
-                    files: otherEmbeddedLayerFiles.join(", "),
-                  })}
-                </p>
-              )}
+                </span>
+                <PaneHint
+                  label={t("About editing this matrix")}
+                  text={t("Install this exact matrix as the immutable baseline to edit coefficients and preview their effect.")}
+                />
+              </p>
               {embeddedFlowProfileMatrix?.error ? (
-                <div className="gl-comp-error" role="alert">{embeddedFlowProfileMatrix.error}</div>
-              ) : applyBusy ? (
-                <div className="gl-comp-flow-enable-progress" role="status">
-                  {visibleApplyProgress
-                    ? t("Preparing editor… {percent}%", { percent: Math.round(visibleApplyProgress.fraction * 100) })
-                    : t("Preparing editor…")}
-                  <button
-                    type="button"
-                    className="gl-btn-ghost"
-                    disabled={visibleApplyProgress?.phase === "cancelling"}
-                    onClick={onCancelApply}
-                  >
-                    {t(visibleApplyProgress?.phase === "cancelling" ? "Cancelling…" : "Cancel")}
-                  </button>
+                <div className="gl-comp-pane-problem">
+                  <span title={embeddedFlowProfileMatrix.error}>
+                    {t("Not editable: {reason}", {
+                      reason: embeddedMatrixProblemSummary(embeddedFlowProfileMatrix.validation).map((reason) => t(reason)).join(", "),
+                    })}
+                  </span>
+                  <details>
+                    <summary>{t("Details")}</summary>
+                    <p>{embeddedFlowProfileMatrix.error}</p>
+                  </details>
                 </div>
               ) : (
-                <button
-                  type="button"
-                  className="gl-btn"
-                  disabled={!onApplyProfile || (hasExistingGates && !gateRecomputeAcknowledged)}
-                  onClick={() => void enableEmbeddedFlowEditing()}
-                >
-                  {t("Enable matrix editing")}
-                </button>
+                <>
+                  {hasExistingGates && (
+                    <label className="gl-comp-gate-acknowledgement is-compact">
+                      <input
+                        type="checkbox"
+                        checked={gateRecomputeAcknowledged}
+                        disabled={applyBusy}
+                        onChange={(event) => setGateRecomputeAcknowledged(event.currentTarget.checked)}
+                      />
+                      <span>{t("Recompute existing gate memberships in compensated coordinates.")}</span>
+                    </label>
+                  )}
+                  {otherEmbeddedLayerFiles.length > 0 && (
+                    <p className="gl-hint gl-comp-embedded-others">
+                      {t("Enabling also returns {count} other files to Original: {files}. A workspace keeps one kind of compensation, and these draw from their own embedded matrix.", {
+                        count: otherEmbeddedLayerFiles.length,
+                        files: otherEmbeddedLayerFiles.join(", "),
+                      })}
+                    </p>
+                  )}
+                  {applyBusy ? (
+                    <div className="gl-comp-flow-enable-progress" role="status">
+                      {visibleApplyProgress
+                        ? t("Preparing editor… {percent}%", { percent: Math.round(visibleApplyProgress.fraction * 100) })
+                        : t("Preparing editor…")}
+                      <button
+                        type="button"
+                        className="gl-btn-ghost"
+                        disabled={visibleApplyProgress?.phase === "cancelling"}
+                        onClick={onCancelApply}
+                      >
+                        {t(visibleApplyProgress?.phase === "cancelling" ? "Cancelling…" : "Cancel")}
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="gl-btn"
+                      disabled={!onApplyProfile || (hasExistingGates && !gateRecomputeAcknowledged)}
+                      onClick={() => void enableEmbeddedFlowEditing()}
+                    >
+                      {t("Enable matrix editing")}
+                    </button>
+                  )}
+                </>
               )}
-            </section>
+            </div>
           )}
-
-          {sample.instrument === "flow" && !profileMetadata && (
-            <section className="gl-comp-flow-enable" aria-labelledby="comp-flow-empty-heading">
-              <div>
-                <strong id="comp-flow-empty-heading">{t("Empty matrix")}</strong>
-                <span>{t(spill
-                  ? "Or start from an identity matrix over the file's fluorescence channels, every spillover at zero, and set the coefficients by hand."
-                  : "Start from an identity matrix over the file's fluorescence channels, every spillover at zero, and set the coefficients by hand.")}</span>
-              </div>
-              {hasExistingGates && !spill && (
+            <div className="gl-comp-flow-enable" aria-labelledby="comp-flow-empty-heading">
+              <p className="gl-comp-pane-line">
+                <span id="comp-flow-empty-heading">{t("Empty matrix")}</span>
+                <PaneHint
+                  label={t("About the empty matrix")}
+                  text={t("Start from an identity matrix over the file's fluorescence channels, every spillover at zero, and set the coefficients by hand.")}
+                />
+              </p>
+              {hasExistingGates && (!spill || Boolean(embeddedFlowProfileMatrix?.error)) && (
                 <label className="gl-comp-gate-acknowledgement is-compact">
                   <input
                     type="checkbox"
@@ -2974,87 +3086,22 @@ function CompensationTabImpl({
               ) : (
                 <button
                   type="button"
-                  className="gl-btn"
+                  className="gl-btn-ghost"
                   disabled={!onApplyProfile || (hasExistingGates && !gateRecomputeAcknowledged)}
                   onClick={() => void startEmptyFlowMatrix()}
                 >
                   {t("Start from an empty matrix")}
                 </button>
               )}
-            </section>
-          )}
+            </div>
           </section>
         )}
-        <section>
-          <h3>{t("Review scope")}</h3>
-        <label className="gl-comp-review-population">
-          <span>{t("Review population")}</span>
-          <select
-            aria-label={t("Compensation review population")}
-            value={activeReviewPopulation?.id ?? "all"}
-            disabled={sweepProgress !== null || boundsPreviewPairKey !== null}
-            onChange={(event) => setReviewPopulationId(event.currentTarget.value)}
-          >
-            <option value="all">{t("All Events")}</option>
-            {reviewPopulations.map((population) => (
-              <option key={population.id} value={population.id}>
-                {`${"· ".repeat(population.depth)}${population.name} (${population.eventCount.toLocaleString()})`}
-              </option>
-            ))}
-          </select>
-          <small>{t("{count} events · applies to biplots, attention ranking, and sweeps; membership frozen from the current assay", {
-            count: reviewEventCount.toLocaleString(),
-          })}</small>
-        </label>
-        {workspaceView !== "global" && (
-          <label
-            className="gl-comp-preview-events"
-            title={t("Controls the frozen event set shown in the selected-pair Original and comparison biplots. Applying compensation still processes every event.")}
-          >
-            <span>{t("Pair preview")}</span>
-            <select
-              aria-label={t("Compensation pair preview event count")}
-              value={String(resolvedPairPreviewEventLimit)}
-              disabled={applyBusy}
-              onChange={(event) => {
-                const value = event.currentTarget.value;
-                setPairPreviewEventLimit(value === "all" ? "all" : Number(value) as PairPreviewEventLimit);
-              }}
-            >
-              {PAIR_PREVIEW_EVENT_LIMITS.map((limit) => (
-                <option key={limit} value={limit}>{t("{count} events", { count: limit.toLocaleString() })}</option>
-              ))}
-              <option value="all">{t("All available")}</option>
-            </select>
-            <small>{t("Showing {shown} of {total}; Apply always uses all events.", {
-              shown: reviewBiplotEventIndices.length.toLocaleString(),
-              total: reviewEventCount.toLocaleString(),
-            })}</small>
-          </label>
-        )}
-        </section>
-        {((applyWorkerCount !== undefined && applyWorkerLimit !== undefined && onApplyWorkerCountChange) || (matrixView && Object.keys(stagedCoefficients).length > 0)) && (
-          <section>
-            <h3>{t("Apply")}</h3>
-          {applyWorkerCount !== undefined && applyWorkerLimit !== undefined && onApplyWorkerCountChange && (
-            <label
-              className="gl-comp-worker-control"
-              title={t("Event-parallel Apply workers. The aggregate memory budget stays fixed; more workers are not always faster.")}
-            >
-              <span>{t("Apply workers")}</span>
-              <select
-                aria-label={t("Compensation Apply worker count")}
-                value={applyWorkerCount}
-                disabled={applyBusy}
-                onChange={(event) => onApplyWorkerCountChange(Number(event.currentTarget.value))}
-              >
-                {Array.from({ length: applyWorkerLimit }, (_, index) => index + 1).map((count) => (
-                  <option key={count} value={count}>{count}</option>
-                ))}
-              </select>
-              <small>/ {applyWorkerLimit}</small>
-            </label>
-          )}
+        {profileMetadata && (
+          <section className="gl-comp-pane-matrix">
+            <h3>{t("Edit coefficients")}</h3>
+            {!(matrixView && Object.keys(stagedCoefficients).length > 0) && (
+              <p className="gl-comp-pane-line">{t("Select a pair in the matrix to change its coefficient.")}</p>
+            )}
             {matrixView && Object.keys(stagedCoefficients).length > 0 && (
                 <div className="gl-comp-staged-actions">
                   <span>
@@ -3093,7 +3140,107 @@ function CompensationTabImpl({
             )}
           </section>
         )}
-        {matrixView && (
+        {sample.instrument === "cytof" && !profileMetadata && (
+          <p className="gl-hint">{t("Choose a CyTOF spillover matrix in the main panel.")}</p>
+        )}
+        </div>
+        <div className="gl-comp-pane-section gl-comp-pane-review">
+        <section>
+          <h3>
+            {t("Review scope")}
+            <PaneHint label={t("About the review scope")} text={t("The population and the events the biplots, the attention ranking and the sweeps are drawn from. Membership is frozen from the current assay; Apply always uses every event.")} />
+          </h3>
+        <label className="gl-comp-review-population">
+          <span>{t("Review population")}</span>
+          <select
+            aria-label={t("Compensation review population")}
+            value={activeReviewPopulation?.id ?? "all"}
+            disabled={sweepProgress !== null || boundsPreviewPairKey !== null}
+            onChange={(event) => setReviewPopulationId(event.currentTarget.value)}
+          >
+            <option value="all">{t("All Events")}</option>
+            {reviewPopulations.map((population) => (
+              <option key={population.id} value={population.id}>
+                {`${"· ".repeat(population.depth)}${population.name} (${population.eventCount.toLocaleString()})`}
+              </option>
+            ))}
+          </select>
+          <small title={t("{count} events · applies to biplots, attention ranking, and sweeps; membership frozen from the current assay", {
+            count: reviewEventCount.toLocaleString(),
+          })}>{t("{count} events", { count: reviewEventCount.toLocaleString() })}</small>
+        </label>
+        {workspaceView !== "global" && (
+          <label className="gl-comp-preview-events">
+            <span>{t("Pair preview")}</span>
+            <select
+              aria-label={t("Compensation pair preview event count")}
+              value={String(resolvedPairPreviewEventLimit)}
+              disabled={applyBusy}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                setPairPreviewEventLimit(value === "all" ? "all" : Number(value) as PairPreviewEventLimit);
+              }}
+            >
+              {PAIR_PREVIEW_EVENT_LIMITS.map((limit) => (
+                <option key={limit} value={limit}>{t("{count} events", { count: limit.toLocaleString() })}</option>
+              ))}
+              <option value="all">{t("All available")}</option>
+            </select>
+            <small title={t("Controls the frozen event set shown in the selected-pair Original and comparison biplots. Applying compensation still processes every event.")}>{t("Showing {shown} of {total}; Apply always uses all events.", {
+              shown: reviewBiplotEventIndices.length.toLocaleString(),
+              total: reviewEventCount.toLocaleString(),
+            })}</small>
+          </label>
+        )}
+        </section>
+        {applyWorkerCount !== undefined && applyWorkerLimit !== undefined && onApplyWorkerCountChange && (
+          <section>
+            <h3>{t("Apply")}</h3>
+          {applyWorkerCount !== undefined && applyWorkerLimit !== undefined && onApplyWorkerCountChange && (
+            <label
+              className="gl-comp-worker-control"
+              title={t("Event-parallel Apply workers. The aggregate memory budget stays fixed; more workers are not always faster.")}
+            >
+              <span>{t("Apply workers")}</span>
+              <select
+                aria-label={t("Compensation Apply worker count")}
+                value={applyWorkerCount}
+                disabled={applyBusy}
+                onChange={(event) => onApplyWorkerCountChange(Number(event.currentTarget.value))}
+              >
+                {Array.from({ length: applyWorkerLimit }, (_, index) => index + 1).map((count) => (
+                  <option key={count} value={count}>{count}</option>
+                ))}
+              </select>
+              <small>/ {applyWorkerLimit}</small>
+            </label>
+          )}
+          </section>
+        )}
+        {(matrixView || profileMetadata) && (
+          <section>
+            <h3>{t("Tools")}</h3>
+          <div className="gl-comp-drawer-buttons">
+            {DRAWERS.map(({ id, label }) => (
+              <button
+                type="button"
+                key={id}
+                id={`comp-drawer-${id}-button`}
+                className="gl-comp-drawer-toggle"
+                aria-expanded={openDrawers[id]}
+                aria-controls={`comp-drawer-${id}`}
+                onClick={() => toggleDrawer(id)}
+              >
+                <span>{t(label)}{id === "review" && reviewItems.length > 0 ? ` (${reviewItems.length})` : ""}</span>
+                <span aria-hidden="true"><ChevronIcon open={openDrawers[id]} size={12} /></span>
+              </button>
+            ))}
+          </div>
+          </section>
+        )}
+        </div>
+        <div className="gl-comp-pane-section gl-comp-pane-display">
+        {matrixView ? (
           <section>
             <h3>{t("Biplot display")}</h3>
             <label
@@ -3150,28 +3297,10 @@ function CompensationTabImpl({
               onChange={onDensityColorPowerChange}
             />
           </section>
+        ) : (
+          <p className="gl-hint">{t("The biplot settings apply once a matrix is shown.")}</p>
         )}
-        {(matrixView || profileMetadata) && (
-          <section>
-            <h3>{t("Tools")}</h3>
-          <div className="gl-comp-drawer-buttons">
-            {DRAWERS.map(({ id, label }) => (
-              <button
-                type="button"
-                key={id}
-                id={`comp-drawer-${id}-button`}
-                className="gl-comp-drawer-toggle"
-                aria-expanded={openDrawers[id]}
-                aria-controls={`comp-drawer-${id}`}
-                onClick={() => toggleDrawer(id)}
-              >
-                <span>{t(label)}{id === "review" && reviewItems.length > 0 ? ` (${reviewItems.length})` : ""}</span>
-                <span aria-hidden="true">{openDrawers[id] ? "▾" : "▸"}</span>
-              </button>
-            ))}
-          </div>
-          </section>
-        )}
+        </div>
       </aside>
       <div className="gl-prop-body gl-comp-body">
       {/* The view strip sits above the matrix, as it did before the pane; the pane holds settings. */}
@@ -3486,7 +3615,7 @@ function CompensationTabImpl({
         <div
           ref={commonPathRef}
           className="gl-comp-common-path"
-          style={{ gridTemplateColumns: `minmax(440px, 1fr) 8px ${inspectorWidth}px` }}
+          style={{ gridTemplateColumns: pinnedInMatrix ? `minmax(440px, 1fr) 8px ${inspectorWidth}px` : "minmax(0, 1fr)" }}
         >
           <section className="gl-comp-matrix-panel" aria-labelledby="comp-matrix-heading">
             <div className="gl-comp-panel-head gl-comp-matrix-head">
@@ -3512,7 +3641,7 @@ function CompensationTabImpl({
                 </button>
               </div>
             </div>
-            <div className="gl-comp-matrix-scroll">
+            <div className="gl-comp-matrix-scroll" ref={setMatrixScroll}>
               <div
                 className={`gl-comp-matrix-stage${flowInlineMatrix ? " is-flow-inline" : ""}`}
                 style={{
@@ -3722,8 +3851,12 @@ function CompensationTabImpl({
             </div>
           </section>
 
-          {renderInspectorResizeHandle()}
-          {renderPairInspector()}
+          {/* The coefficient panel opens once a cell is selected, and its × gives the room back. */}
+          {pinnedInMatrix && renderInspectorResizeHandle()}
+          {pinnedInMatrix && renderPairInspector(() => {
+            setHoveredPairKey(null);
+            setSelectedPairKey(null);
+          })}
         </div>
       ) : matrixView && workspaceView === "global" ? (
         <div
@@ -4093,7 +4226,7 @@ function CompensationTabImpl({
                                       })
                                     : t("visual review · residual groups insufficient")}
                                 </span>
-                                <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+                                <span aria-hidden="true"><ChevronIcon open={expanded} size={12} /></span>
                               </button>
                               <label className="gl-comp-followup-list-toggle" title={t("Remove from follow-up queue")}>
                                 <input

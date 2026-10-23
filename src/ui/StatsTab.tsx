@@ -73,6 +73,13 @@ function csvText(records: readonly (readonly (string | number)[])[]): string {
   return records.map((record) => record.map(field).join(",") + "\r\n").join("");
 }
 
+/** "12350" → "12,350"; a fraction, an exponent or a short number is left as it is. */
+function groupThousands(text: string): string {
+  const match = /^(-?)(\d+)(\.\d+)?$/.exec(text);
+  if (!match) return text;
+  return match[1] + match[2].replace(/\B(?=(\d{3})+(?!\d))/g, ",") + (match[3] ?? "");
+}
+
 export function StatsTab({ samples, activeSampleId, state, derived, defaultChannels, dataRevisionKey, nominalLinearFrom = null, onDownload }: Props) {
   const { t } = useI18n();
   const [viewSampleId, setViewSampleId] = useState<string>(() => activeSampleId ?? samples[0]?.id ?? "");
@@ -198,10 +205,10 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
    * the value space: raw runs to tens of thousands, a logicle display coordinate lives in
    * [0, 1]. Significant figures suit both, where a fixed number of decimal places suits
    * neither. Four is enough to separate channels without implying precision the statistic
-   * does not have.
+   * does not have. Thousands are separated, as the counts are; the CSV keeps plain digits.
    */
   const isMfiColumn = (key: string) => key.includes("::");
-  const fmtMfi = (v: number | null) => (v == null ? "—" : significantNumber(v, 4));
+  const fmtMfi = (v: number | null) => (v == null ? "—" : groupThousands(significantNumber(v, 4)));
   const fmtCell = (metric: string, v: number | null) =>
     v == null ? "—" : metric === "count" ? v.toLocaleString() : `${v}%`;
 
@@ -316,10 +323,14 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
             </section>
             {anyMfi && (
               <section className="gl-stats-opt-group gl-stats-channel-picker">
-                <h3>{t("Channels")} <span>{channels.length} {t("selected")}</span></h3>
-                <div className="gl-plotting-actions">
-                  <button className="gl-mini-btn" onClick={() => setChannels(allChannels)}>{t("All")}</button>
-                  <button className="gl-mini-btn" onClick={() => setChannels([])}>{t("None")}</button>
+                {/* One header row (the count left, All · None right, as the file list's), then the
+                    checklist at full width beneath it. */}
+                <div className="gl-stats-picker-head">
+                  <h3>{t("Channels")} <span>· {channels.length} {t("selected")}</span></h3>
+                  <div className="gl-sample-inclusion-actions">
+                    <button type="button" onClick={() => setChannels(allChannels)}>{t("All")}</button>
+                    <button type="button" onClick={() => setChannels([])}>{t("None")}</button>
+                  </div>
                 </div>
                 <div className="gl-plotting-filelist" aria-label={t("Statistics channels")}>
                   {allChannels.map((channel) => (

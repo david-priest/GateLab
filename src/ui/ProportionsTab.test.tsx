@@ -5,7 +5,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_HIERARCHY_ID } from "../engine/hierarchies";
+import { cloneHierarchyTree, DEFAULT_HIERARCHY_ID, storeHierarchy } from "../engine/hierarchies";
 import { newPopulation, newRootPopulation } from "../engine/models";
 import { Sample } from "../engine/sample";
 import type { FcsFile } from "../engine/fcs";
@@ -112,5 +112,35 @@ describe("Plotting tab: Add to Layout", () => {
   it("is not offered without a Layout tab to add to", () => {
     mount(fixture());
     expect(button("Add to Layout")).toBeUndefined();
+  });
+});
+
+describe("Plotting tab: one tree per workspace", () => {
+  it("offers no population hierarchy picker when a file has its own copy of the tree", () => {
+    const fx = fixture();
+    // D2 tailored: its own copy of the tree, as the tree's file copies are.
+    const copy = cloneHierarchyTree(fx.state.populations, fx.rootId);
+    const ref = {
+      id: "copy-D2",
+      name: "Main, D2's own copy",
+      owner_sample_id: "D2",
+      structure_locked: true,
+      source_hierarchy_id: DEFAULT_HIERARCHY_ID,
+      source_population_ids: Object.fromEntries(Object.entries(copy.idMap).map(([from, to]) => [to, from])),
+    };
+    const state = {
+      ...fx.state,
+      hierarchies: [...fx.state.hierarchies, ref],
+      stored_hierarchies: {
+        ...fx.state.stored_hierarchies,
+        [ref.id]: storeHierarchy(ref, { ...copy, active_population_id: copy.root_population_id, selected_pop_ids: [] }),
+      },
+    } as CoreState;
+    mount({ ...fx, state, samples: [fx.samples[0], { ...fx.samples[1], hierarchyId: ref.id }] });
+    expect(host.textContent).not.toContain("Population hierarchy");
+    expect(host.textContent).not.toContain("Correspondence follows hierarchy provenance");
+    expect([...host.querySelectorAll("select")].some((select) => [...select.options].some((option) => option.value === ref.id))).toBe(false);
+    // Both files are drawn under the one tree.
+    expect(host.querySelector("#gl-prop-svg")).not.toBeNull();
   });
 });

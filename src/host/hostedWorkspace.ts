@@ -9,8 +9,9 @@ import type {
   TransformSpec,
   Vertex,
 } from "../engine/models";
-import { isRectangleBounds, validCurl, type RectangleBounds } from "../engine/models";
+import { cloneArms, isRectangleBounds, validArms, validCurl, type RectangleBounds } from "../engine/models";
 import { parseFlowJoGridAxis, parseFlowJoGridSpec } from "../engine/flowjoGrid";
+import { parseTransformSpec } from "../engine/rectangleRecord";
 import {
   migrateWorkspaceToV2,
   validateWorkspace,
@@ -97,6 +98,7 @@ const TRANSFORM_PARAMETERS: Record<TransformSpec["kind"], readonly string[]> = {
   identity: [],
   asinh: ["cofactor"],
   logicle: ["T", "W", "M", "A"],
+  hyperlog: ["T", "W", "M", "A"],
   biex: ["maxValue", "pos", "neg", "widthBasis", "channelRange"],
   wsplog: ["offset", "decades"],
   flog: ["T", "M"],
@@ -153,6 +155,7 @@ export function transformSpec(value: unknown, label: string): TransformSpec {
     }
     spec.bounds = out;
   }
+  if (kind === "hyperlog" && !parseTransformSpec(spec)) throw new Error(`Saved GateLabR workspace has an invalid ${label}.`);
   return spec as TransformSpec;
 }
 
@@ -222,11 +225,15 @@ function normalizeGate(value: unknown, gateId: string, index: number): Gate {
     const curl = validCurl(source.curl)
       ? { power: source.curl.power, kx: source.curl.kx, ky: source.curl.ky }
       : null;
+    const center = pair(source.center, `centre for gate '${name}'`);
+    // Leaning arms likewise: arms that do not validate leave the plain crosshair.
+    const arms = !curl && validArms(center, source.arms) ? cloneArms(source.arms) : null;
     return {
       ...common,
       gate_type: "quadrant",
-      center: pair(source.center, `centre for gate '${name}'`),
+      center,
       ...(curl ? { curl } : {}),
+      ...(arms ? { arms } : {}),
     };
   }
   if (source.gate_type === "ellipse") {
@@ -591,11 +598,11 @@ export function convertHostedGateSpace<
     // grid gate's vertices are channels, which no display-to-raw map can move.
     if (gate.space !== undefined) return gate;
     if (gate.gate_type === "quadrant") {
-      // A bend is a shape in the gate's own space and means nothing in another, so a space
-      // change straightens the crosshair. No hosted workspace written before curly quadrants
+      // A bend or a lean is a shape in the gate's own space and means nothing in another, so a
+      // space change straightens the crosshair. No hosted workspace written before curly quadrants
       // existed carries one, which is the only kind this legacy converter sees.
-      const { curl: _curl, ...rest } = gate;
-      void _curl;
+      const { curl: _curl, arms: _arms, ...rest } = gate;
+      void _curl; void _arms;
       return {
         ...rest,
         center: [

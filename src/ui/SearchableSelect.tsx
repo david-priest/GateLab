@@ -144,7 +144,7 @@ export function SearchableSelect({ value, options, onChange, label, className = 
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
             onKeyDown={(event) => {
-              if (event.key === "Escape") close(true);
+              if (event.key === "Escape") { event.preventDefault(); close(true); }
               else if (event.key === "ArrowDown") {
                 event.preventDefault();
                 listRef.current?.focus();
@@ -169,7 +169,7 @@ export function SearchableSelect({ value, options, onChange, label, className = 
               // itself chooses. The mousedown before it has already made the row the value.
               onClick={(event) => choose(event.currentTarget.value)}
               onKeyDown={(event) => {
-                if (event.key === "Escape") close(true);
+                if (event.key === "Escape") { event.preventDefault(); close(true); }
                 // A sized select fires no change for Enter on the already-selected row, which is
                 // the common case after typing: the first match is selected before Enter is hit.
                 else if (event.key === "Enter" && event.currentTarget.value) {

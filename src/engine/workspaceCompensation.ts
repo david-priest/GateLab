@@ -20,11 +20,24 @@ export const SAMPLE_ASSAY_BINDING_SCHEMA = "gatelab.sample-assay-binding.v1" as 
 export interface WorkspaceCompensationLineage {
   readonly baselineProfileId: string;
   readonly records: readonly CompensationProfileRecord[];
+  /**
+   * The name the user gave this matrix in the Compensation tab's list; absent, the list shows its
+   * record's own name. Display only: it is outside every record, so no matrix or profile hash and
+   * no sample binding reads it.
+   */
+  readonly name?: string;
 }
 
 export interface WorkspaceCompensationState {
   readonly schema: typeof WORKSPACE_COMPENSATION_SCHEMA;
   readonly lineages: readonly WorkspaceCompensationLineage[];
+  /**
+   * The profile the workspace's files are compensated with: the list's Active matrix. Absent in a
+   * workspace saved before the list existed, and where no stored profile is in use. It names a
+   * profile and changes nothing by itself; each file's binding (SampleAssayBinding) says what that
+   * file is compensated with.
+   */
+  readonly activeProfileId?: string;
 }
 
 export interface ValidatedWorkspaceCompensationState extends WorkspaceCompensationState {
@@ -181,6 +194,21 @@ function sameBinding(left: MatrixChannelBinding, right: MatrixChannelBinding): b
     left.included === right.included;
 }
 
+/** A user-set matrix name: trimmed and NFC-normalized, never blank, at most 200 characters. */
+const MAX_LINEAGE_NAME_LENGTH = 200;
+
+function canonicalLineageName(value: unknown, lineageIndex: number): string {
+  const name = typeof value === "string" ? value.trim().normalize("NFC") : "";
+  if (name.length === 0 || name.length > MAX_LINEAGE_NAME_LENGTH) {
+    invalid(
+      "invalid-lineage-entry",
+      `lineage ${lineageIndex + 1} name must be text of 1 to ${MAX_LINEAGE_NAME_LENGTH} characters.`,
+      { lineageIndex },
+    );
+  }
+  return name;
+}
+
 /** Validate and canonicalize all workspace-level profile histories. Empty state is valid. */
 export async function validateWorkspaceCompensationState(
   untrusted: unknown,
@@ -191,13 +219,13 @@ export async function validateWorkspaceCompensationState(
   const state = untrusted as Record<string, unknown>;
   const keys = Object.keys(state);
   if (
-    keys.length !== 2 ||
     !Object.prototype.hasOwnProperty.call(state, "schema") ||
-    !Object.prototype.hasOwnProperty.call(state, "lineages")
+    !Object.prototype.hasOwnProperty.call(state, "lineages") ||
+    keys.some((key) => key !== "schema" && key !== "lineages" && key !== "activeProfileId")
   ) {
     invalid(
       "invalid-compensation-state",
-      "compensation state must contain exactly schema and lineages.",
+      "compensation state must contain schema and lineages, and may contain activeProfileId.",
     );
   }
   if (state.schema !== WORKSPACE_COMPENSATION_SCHEMA) {
@@ -225,17 +253,20 @@ export async function validateWorkspaceCompensationState(
     }
     const entry = candidate as Record<string, unknown>;
     if (
-      Object.keys(entry).length !== 2 ||
       !Object.prototype.hasOwnProperty.call(entry, "baselineProfileId") ||
       !Object.prototype.hasOwnProperty.call(entry, "records") ||
+      Object.keys(entry).some((key) => key !== "baselineProfileId" && key !== "records" && key !== "name") ||
       typeof entry.baselineProfileId !== "string"
     ) {
       invalid(
         "invalid-lineage-entry",
-        `lineage ${index + 1} must contain exactly baselineProfileId and records.`,
+        `lineage ${index + 1} must contain baselineProfileId and records, and may contain name.`,
         { lineageIndex: index },
       );
     }
+    const name = Object.prototype.hasOwnProperty.call(entry, "name")
+      ? canonicalLineageName(entry.name, index)
+      : undefined;
     let lineage: ValidatedCompensationProfileLineage;
     try {
       lineage = await validateCompensationProfileLineage(entry.records);
@@ -257,6 +288,7 @@ export async function validateWorkspaceCompensationState(
       Object.freeze({
         baselineProfileId: lineage.baseline.profileId,
         records: lineage.records,
+        ...(name !== undefined ? { name } : {}),
       }),
     );
   }
@@ -275,9 +307,18 @@ export async function validateWorkspaceCompensationState(
       profileIds.add(record.profileId);
     }
   }
+  const hasActive = Object.prototype.hasOwnProperty.call(state, "activeProfileId");
+  if (hasActive && (typeof state.activeProfileId !== "string" || !profileIds.has(state.activeProfileId))) {
+    invalid(
+      "missing-profile",
+      `the active profile "${String(state.activeProfileId)}" is not stored in the workspace.`,
+      typeof state.activeProfileId === "string" ? { profileId: state.activeProfileId } : {},
+    );
+  }
   return Object.freeze({
     schema: WORKSPACE_COMPENSATION_SCHEMA,
     lineages: Object.freeze(validated),
+    ...(hasActive ? { activeProfileId: state.activeProfileId as string } : {}),
   });
 }
 

@@ -81,7 +81,7 @@ async function settle(): Promise<void> {
 }
 
 const button = (label: string) =>
-  [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label);
+  [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")].find((b) => b.textContent?.trim() === label);
 
 describe("Clear gates and populations", () => {
   it("removes every gate, population and hierarchy, keeps the files, and Undo restores them", async () => {
@@ -113,8 +113,8 @@ describe("Clear gates and populations", () => {
     expect(host.querySelectorAll(".gl-sample-row")).toHaveLength(2);
     expect(host.textContent).toContain("cleared");
     // The one tree is back to its empty self, both files following it.
-    expect(host.querySelector(".population-tree-name-menu")?.textContent).toContain("Main");
-    expect(host.querySelector(".population-tree-hierarchy-count")?.textContent).toBe("2 files · all following");
+    expect(host.querySelector(".gl-pane-menu-populations .population-tree-rename")?.getAttribute("title")).toBe("The tree is called Main.");
+    expect(host.querySelector(".gl-sample-tree-summary")?.getAttribute("title") ?? undefined).toBe("2 files · all following");
 
     act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true })); });
     await settle();

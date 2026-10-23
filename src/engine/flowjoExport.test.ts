@@ -22,7 +22,7 @@ import { exportGatingML } from "./gatingmlExport";
 import { applyGatingStrategy } from "./populations";
 import {
   linkChildToParent, newGate, newGateRef, newPopulation, newQuadrantGate, newRootPopulation,
-  flowJoCurlForDisplay, type Gate, type PopulationMap, type Vertex,
+  flowJoCurlForDisplay, UNBOUNDED, type Gate, type PopulationMap, type Vertex,
 } from "./models";
 import { ARIA_SMALL, FIXTURES_ROOT, S6_FCS, S6_WORKSPACE, VENDOR_MATRIX_DIR, Z2DR_WORKSPACE } from "../testFixtures";
 import { biexTransform, FLOWJO_BIEX_TABLE_CHANNELS } from "./biex";
@@ -202,6 +202,63 @@ function roundTrip(
   const masks = evaluate(fresh, { gates: res.gates, gate_order: Object.keys(res.gates), populations: res.populations, root_population_id: res.root_population_id });
   return { masks, xml, warnings, conv };
 }
+
+describe("FlowJo native workspace XML", () => {
+  it.each([undefined, "D1 validator"])("contains no XML comment nodes with producer %s", (producer) => {
+    const bytes = writeFcs([[101, 102], [128, 320]], [
+      { name: "EventID", desc: "" }, { name: "FSC-A", desc: "" },
+    ]);
+    const sample = new Sample(parseFcs(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer));
+    const tree = new TreeBuilder();
+    const gate = tree.gate(newGate("D1_gate", "rectangle", "EventID", "FSC-A", [[100, 100], [103, 200]]));
+    tree.pop("D1_positive", [{ gate }], tree.root);
+    const { xml } = exportFlowJoWorkspace({ samples: [{ sample, fileName: "D1.fcs", ...tree.tree() }], producer });
+
+    // FlowJo 10.10's native XML cleanup dereferences a null name on comment nodes before loading
+    // samples. Inspect the whole DOM, so moving the comment elsewhere cannot satisfy the contract.
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    expect(doc.querySelector("parsererror")).toBeNull();
+    expect(doc.querySelectorAll("SampleList > Sample")).toHaveLength(1);
+    expect(doc.querySelector('Population[name="D1_positive"]')).not.toBeNull();
+    expect(doc.createTreeWalker(doc, NodeFilter.SHOW_COMMENT).nextNode()).toBeNull();
+  });
+});
+
+describe("FlowJo FCS version metadata", () => {
+  it.each([
+    ["FCS3.0", "3", undefined],
+    ["FCS3.1", "3.1", undefined],
+    ["FCS3.1", "3.1", "FCS3.1"],
+    ["FCS3.0", "3", "3.1"],
+    ["FCS3.2", "3.2", undefined],
+    ["FCS2.0", "2", undefined],
+  ] as const)("declares %s as numeric %s with input keyword %s", (header, expected, inputKeyword) => {
+    const bytes = writeFcs([[101, 102], [128, 320]], [
+      { name: "EventID", desc: "" }, { name: "FSC-A", desc: "" },
+    ], { keywords: inputKeyword === undefined ? [] : [["FJ_FCS_VERSION", inputKeyword]] });
+    bytes.set(new TextEncoder().encode(header), 0);
+    const fcs = parseFcs(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+    const originalKeywords = { ...fcs.keywords };
+    const sample = new Sample(fcs);
+    const tree = new TreeBuilder();
+    const gate = tree.gate(newGate("D1_gate", "rectangle", "EventID", "FSC-A", [[100, 100], [103, 200]]));
+    tree.pop("D1_positive", [{ gate }], tree.root);
+    const { xml } = exportFlowJoWorkspace({ samples: [{ sample, fileName: "D1.fcs", ...tree.tree() }] });
+
+    // FlowJo's native workspace value is numeric, unlike the six-byte FCS magic, and FlowJo writes
+    // FCS3.0 as "3", not "3.0".
+    // Inspect the written XML directly, without using GateLab's workspace importer.
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    expect(doc.querySelector("parsererror")).toBeNull();
+    const keywords = doc.querySelectorAll('SampleList > Sample > Keywords > Keyword[name="FJ_FCS_VERSION"]');
+    expect(keywords).toHaveLength(1);
+    expect(keywords[0].getAttribute("value")).toBe(expected);
+    expect(fcs.version).toBe(header);
+    expect(fcs.keywords).toEqual(originalKeywords);
+    expect(Array.from(fcs.columns[0])).toEqual([101, 102]);
+    expect(Array.from(fcs.columns[1])).toEqual([128, 320]);
+  });
+});
 
 describe.runIf(existsSync(ARIA_SMALL))("FlowJo workspace export, conventional flow", () => {
   const sample = load(ARIA_SMALL);
@@ -587,7 +644,7 @@ describe.runIf(existsSync(S6_WORKSPACE) && existsSync(S6_FCS))("the published S6
       expect(decl, pnn).not.toBeNull();
       expect(decl!.width, pnn).toBeCloseTo(width, 6);
     }
-    expect(warnings.filter((w) => /extra vertices|outside the declared axis|FlowJo's grid/.test(w))).toEqual([]);
+    expect(warnings.filter((w) => /extra vertices|outside the declared axis|on a recorded grid for an axis/.test(w))).toEqual([]);
     for (const [name, ext] of extents) {
       const written = writtenPolygon(xml, name);
       expect(written, name).not.toBeNull();
@@ -750,7 +807,7 @@ describe("FlowJo export of a bent quadrant whose arm leaves every finite raw val
   });
 });
 
-// A FlowJo workspace GateLab wrote, read back with "Evaluate gates as FlowJo does" on (the default).
+// A FlowJo workspace GateLab wrote, read back with "Evaluate gates on the recorded grid" on (the default).
 // A polygon GateLab drew goes to the file with gateResolution 256, since FlowJo grids every polygon
 // it draws (feat/flowjo-grid), and the grid then took it back in quantised: the public PBMC
 // bundle's PBMC morphology went from 87,764 events to 87,910, Singlets from 85,478 to 85,622. Each
@@ -976,7 +1033,7 @@ describe("FlowJo export of a rectangle reaching below a declared log axis's floo
       const { xml, warnings } = exportFlowJoWorkspace({ samples: [{ sample, fileName: "D1.fcs", ...tree }], now: new Date("2026-09-26T00:00:00Z"), producer: "GateLab test" });
       expect(xml, `${lo} to ${hi}`).not.toMatch(/<transforms:log [^>]*>\s*<data-type:parameter data-type:name="FL1-A"/);
       expect(declaredBiex(xml, "FL1-A"), `${lo} to ${hi}`).not.toBeNull();
-      expect(warnings.filter((w) => /an edge FlowJo moves events onto/.test(w)), `${lo} to ${hi}`).toEqual([]);
+      expect(warnings.filter((w) => /an edge events are moved onto/.test(w)), `${lo} to ${hi}`).toEqual([]);
       // FlowJo's reading: GateLab's record taken out, the importer's FlowJo rule on.
       const fresh = read();
       const flowJo = evaluate(fresh, importWorkspace(xml.replace(/ gatelabRectangle="[^"]*"/g, ""), fresh, 0, { flowJoGrid: true }));
@@ -1007,11 +1064,11 @@ describe("FlowJo export of a rectangle reaching below a declared log axis's floo
     const before = evaluate(sample, tree).get("Drawn_cells")!;
     expect(Array.from(before)).toEqual([0, 0, 1, 1, 1, 0, 0]);
     const { xml, warnings } = exportFlowJoWorkspace({ samples: [{ sample, fileName: "D1.fcs", ...tree }], now: new Date("2026-09-26T00:00:00Z"), producer: "GateLab test" });
-    const named = warnings.filter((w) => w.startsWith('"Drawn" has a bound at or beyond an edge FlowJo moves events onto'));
+    const named = warnings.filter((w) => w.startsWith('"Drawn" has a bound at or beyond an edge events are moved onto'));
     expect(named).toHaveLength(1);
     expect(named[0]).toContain("FL1-A below 8.2");
     expect(named[0]).toContain("the floor of the log axis from 8.2");
-    expect(named[0]).toContain("FlowJo counts 2 events of this file otherwise than GateLab does.");
+    expect(named[0]).toContain("2 events of this file are counted otherwise than GateLab counts them.");
     // FlowJo's reading, GateLab's record taken out: the two events below -100 are inside.
     const fresh = read();
     const flowJo = importWorkspace(xml.replace(/ gatelabRectangle="[^"]*"/g, ""), fresh, 0, { flowJoGrid: true });
@@ -1026,16 +1083,16 @@ describe("FlowJo export of a rectangle reaching below a declared log axis's floo
     const tree = build(sample, -450, -100);
     expect(Array.from(evaluate(sample, tree).get("Drawn_cells")!)).toEqual([0, 1, 0, 0, 0, 0, 0]);
     const { warnings } = exportFlowJoWorkspace({ samples: [{ sample, fileName: "D1.fcs", ...tree }], now: new Date("2026-09-26T00:00:00Z"), producer: "GateLab test" });
-    const named = warnings.filter((w) => w.startsWith('"Drawn" lies at or beyond an edge FlowJo moves events onto'));
+    const named = warnings.filter((w) => w.startsWith('"Drawn" lies at or beyond an edge events are moved onto'));
     expect(named).toHaveLength(1);
-    expect(named[0]).toContain("FlowJo moves the 4 events of this file beyond it onto that edge, where the 1 of them GateLab holds cannot be told from the rest.");
+    expect(named[0]).toContain("the 4 events of this file beyond it are moved onto that edge, where the 1 of them GateLab holds cannot be told from the rest.");
   });
 
   it("says nothing of a rectangle above the floor, or of one whose events below it FlowJo counts alike", () => {
     for (const [lo, hi] of [[100, 1000], [-1000, 1000]]) {
       const sample = read();
       const { warnings } = exportFlowJoWorkspace({ samples: [{ sample, fileName: "D1.fcs", ...build(sample, lo, hi) }], now: new Date("2026-09-26T00:00:00Z"), producer: "GateLab test" });
-      expect(warnings.filter((w) => /an edge FlowJo moves events onto/.test(w)), `${lo} to ${hi}`).toEqual([]);
+      expect(warnings.filter((w) => /an edge events are moved onto/.test(w)), `${lo} to ${hi}`).toEqual([]);
     }
   });
 });
@@ -1278,7 +1335,7 @@ describe("FlowJo export of an intersection, read back", () => {
     for (const name of ["Cells", ...names]) expect(moved(before.get(name)!, lookup(after, tree, name)!), name).toBe(0);
   });
 
-  it("writes a Gating-ML polygon of more lines than a call takes arguments, and reads it back", () => {
+  it("writes a Gating-ML polygon of more lines than a call takes arguments, and reads it back", { timeout: 120000 }, () => {
     const b = new TreeBuilder();
     const round = b.gate({ ...newGate("Round", "polygon", x, y, circle(40000, 10000, 10000, 6000)), space: "raw" as const } as Gate);
     b.pop("Round_cells", [{ gate: round }], b.root);
@@ -1499,6 +1556,130 @@ describe("FlowJo export of a quadrant's dividers and box", () => {
       const name = `Quad_Q${q}`;
       expect(count(before.get(name)!), name).toBeGreaterThan(0);
       expect(moved(before.get(name)!, lookup(after, tree, name)!), name).toBe(0);
+    }
+  });
+});
+
+describe("FlowJo export of empty rectangles at a declared log floor", () => {
+  const values = Float32Array.from([-10, 0, 0.5, 1, 2, 5, 50, 500]);
+  const scatter = Float32Array.from([30, 30, 30, 30, 30, 30, 60, 60]);
+  const bytes = writeFcs([values, scatter], [{ name: "FL1-A", desc: "CD4" }, { name: "FSC-A", desc: "" }]);
+  const read = () => new Sample(parseFcs(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer));
+  const flog = { kind: "flog" as const, T: 10000, M: 4 };
+
+  it.each([[0, 0], [-1, 0], [-2, -1]])("keeps the half-open interval [%s, %s) empty beneath a nonempty parent", (lo, hi) => {
+    const sample = read();
+    const [x, y] = sample.channels.map((c) => c.key);
+    const b = new TreeBuilder();
+    const parent = b.gate({ ...newGate("control", "rectangle", y, y, [[20, 20], [40, 40]]), space: "raw", bounds: "closed" } as Gate);
+    const pid = b.pop("control", [{ gate: parent }], b.root);
+    const empty = b.gate({ ...newGate("CD4_positive", "rectangle", x, y, [[lo, 20], [hi, 40]]),
+      space: "display", transforms: { [x]: flog, [y]: { kind: "identity" } }, bounds: "half-open" } as Gate);
+    const eid = b.pop("CD4_positive", [{ gate: empty }], pid);
+    b.pop("treated", [{ gate: parent }], eid);
+    // The same zero-width interval is nonempty under the closed rule: all values <= 1
+    // lie on this log's zero. This prevents fixing the failure by dropping every floor gate.
+    const closed = b.gate({ ...newGate("floor_control", "rectangle", x, y, [[0, 20], [0, 40]]),
+      space: "display", transforms: { [x]: flog, [y]: { kind: "identity" } }, bounds: "closed" } as Gate);
+    b.pop("floor_control", [{ gate: closed }], pid);
+    const tree = b.tree();
+    const expected = new Map([
+      ["control", [1, 1, 1, 1, 1, 1, 0, 0]],
+      ["CD4_positive", [0, 0, 0, 0, 0, 0, 0, 0]],
+      ["treated", [0, 0, 0, 0, 0, 0, 0, 0]],
+      ["floor_control", [1, 1, 1, 1, 0, 0, 0, 0]],
+    ]);
+    const before = evaluate(sample, tree);
+    const { xml } = exportFlowJoWorkspace({ samples: [{ sample, fileName: "D1.fcs", ...tree }] });
+    expect(xml).toMatch(/<transforms:log [^>]*>\s*<data-type:parameter data-type:name="FL1-A"/);
+    for (const withRecords of [true, false]) {
+      const fresh = read();
+      const written = withRecords ? xml : xml.replace(/ gatelab(?:Rectangle|Polygon)="[^"]*"/g, "");
+      const after = evaluate(fresh, importWorkspace(written, fresh, 0, { flowJoGrid: false }));
+      for (const [name, mask] of expected) {
+        expect(Array.from(before.get(name)!), `source ${name}`).toEqual(mask);
+        expect(Array.from(lookup(after, tree, name)!), `${withRecords ? "recorded" : "plain FlowJo"} ${name}`).toEqual(mask);
+      }
+    }
+  });
+
+  // A closed rectangle wholly below the floor, and one with no lower bound (the importer's -1e9 or
+  // UNBOUNDED) that ends below the floor or at it half-open, holds none of the events GateLab puts
+  // on the floor. Written as drawn, FlowJo moved its bounds onto the floor with those events and
+  // held them all; with -1e9 as its lower bound, so did an import that reads GateLab's records. The
+  // closed rectangles reaching the floor are the controls: they hold every event on it.
+  it.each([
+    ["closed", -2, -1, [0, 0, 0, 0, 0, 0, 0, 0]],
+    ["closed", -2, -1e-12, [0, 0, 0, 0, 0, 0, 0, 0]],
+    ["closed", -1e9, -1, [0, 0, 0, 0, 0, 0, 0, 0]],
+    ["closed", -UNBOUNDED, -1, [0, 0, 0, 0, 0, 0, 0, 0]],
+    ["half-open", -1e9, 0, [0, 0, 0, 0, 0, 0, 0, 0]],
+    ["half-open", -UNBOUNDED, 0, [0, 0, 0, 0, 0, 0, 0, 0]],
+    ["closed", -1, 0, [1, 1, 1, 1, 0, 0, 0, 0]],
+    ["closed", -1e9, 0, [1, 1, 1, 1, 0, 0, 0, 0]],
+    ["closed", 0, 0.25, [1, 1, 1, 1, 1, 1, 0, 0]],
+  ] as const)("holds the %s interval from %s to %s as GateLab does", (rule, lo, hi, mask) => {
+    const sample = read();
+    const [x, y] = sample.channels.map((c) => c.key);
+    const b = new TreeBuilder();
+    const gate = b.gate({ ...newGate("CD4_positive", "rectangle", x, y, [[lo, 0], [hi, 100]]),
+      space: "display", transforms: { [x]: flog, [y]: { kind: "identity" } }, bounds: rule } as Gate);
+    b.pop("CD4_positive", [{ gate }], b.root);
+    const tree = b.tree();
+    expect(Array.from(evaluate(sample, tree).get("CD4_positive")!), "source").toEqual(mask);
+    const { xml } = exportFlowJoWorkspace({ samples: [{ sample, fileName: "D1.fcs", ...tree }] });
+    expect(xml).toMatch(/<transforms:log [^>]*>\s*<data-type:parameter data-type:name="FL1-A"/);
+    for (const withRecords of [true, false]) {
+      const fresh = read();
+      const written = withRecords ? xml : xml.replace(/ gatelab(?:Rectangle|Polygon)="[^"]*"/g, "");
+      const after = evaluate(fresh, importWorkspace(written, fresh, 0, { flowJoGrid: false }));
+      expect(Array.from(lookup(after, tree, "CD4_positive")!), withRecords ? "recorded" : "plain FlowJo").toEqual(mask);
+    }
+  });
+});
+
+// The same on FlowJo's biex, declared at the length FlowJo writes (256) and at 4096, each read on
+// FlowJo's own 4096-entry table, whose first entry is the floor below which GateLab and FlowJo both
+// put every event (floorOf, clampEdges): here -5000, -500 and -200 lie on it, at display 0, and -50
+// above it. Synthetic names and events.
+describe.each([256, 4096])("FlowJo export of empty rectangles at the floor of a biex of length %i", (length) => {
+  const values = Float32Array.from([-5000, -500, -200, -50, 0, 50, 500, 5000, 50000]);
+  const scatter = Float32Array.from(values, () => 30);
+  const bytes = writeFcs([values, scatter], [{ name: "FL1-A", desc: "CD4" }, { name: "FSC-A", desc: "" }]);
+  const read = () => new Sample(parseFcs(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer));
+  const biex = { kind: "biex" as const, maxValue: 262144, pos: 4.5, neg: 0, widthBasis: -10, channelRange: length, tableChannels: FLOWJO_BIEX_TABLE_CHANNELS };
+
+  it("puts the events below the table's first entry on display 0", () => {
+    const t = biexTransform(biex);
+    expect(t.forward(t.inverse(t.forward(-Number.MAX_VALUE)))).toBe(0);
+    expect(Array.from(values, (v) => t.forward(v) === 0)).toEqual([true, true, true, false, false, false, false, false, false]);
+  });
+
+  it.each([
+    ["half-open", 0, 0, [0, 0, 0, 0, 0, 0, 0, 0, 0]],
+    ["half-open", -10, 0, [0, 0, 0, 0, 0, 0, 0, 0, 0]],
+    ["half-open", -1e9, 0, [0, 0, 0, 0, 0, 0, 0, 0, 0]],
+    ["closed", -20, -10, [0, 0, 0, 0, 0, 0, 0, 0, 0]],
+    ["closed", -1e9, -10, [0, 0, 0, 0, 0, 0, 0, 0, 0]],
+    ["closed", -10, 0, [1, 1, 1, 0, 0, 0, 0, 0, 0]],
+    ["closed", 0, 0, [1, 1, 1, 0, 0, 0, 0, 0, 0]],
+    ["closed", 0, length / 4, [1, 1, 1, 1, 1, 1, 0, 0, 0]],
+  ] as const)("holds the %s interval from %s to %s as GateLab does", (rule, lo, hi, mask) => {
+    const sample = read();
+    const [x, y] = sample.channels.map((c) => c.key);
+    const b = new TreeBuilder();
+    const gate = b.gate({ ...newGate("CD4_positive", "rectangle", x, y, [[lo, 0], [hi, 100]]),
+      space: "display", transforms: { [x]: biex, [y]: { kind: "identity" } }, bounds: rule } as Gate);
+    b.pop("CD4_positive", [{ gate }], b.root);
+    const tree = b.tree();
+    expect(Array.from(evaluate(sample, tree).get("CD4_positive")!), "source").toEqual(mask);
+    const { xml } = exportFlowJoWorkspace({ samples: [{ sample, fileName: "D1.fcs", ...tree }] });
+    expect(xml).toMatch(new RegExp(`<transforms:biex transforms:length="${length}"[^>]*>\\s*<data-type:parameter data-type:name="FL1-A"`));
+    for (const withRecords of [true, false]) {
+      const fresh = read();
+      const written = withRecords ? xml : xml.replace(/ gatelab(?:Rectangle|Polygon)="[^"]*"/g, "");
+      const after = evaluate(fresh, importWorkspace(written, fresh, 0, { flowJoGrid: false }));
+      expect(Array.from(lookup(after, tree, "CD4_positive")!), withRecords ? "recorded" : "plain FlowJo").toEqual(mask);
     }
   });
 });
@@ -1924,7 +2105,7 @@ describe("FlowJo export of log gates with nothing above the floor, on a channel 
 // (flowjoGrid.ts), and the export writes one on every polygon it draws, while GateLab holds such a
 // gate continuously and reads it back from its record. The release candidate's verifier read the
 // export at a799817 through GateLab's own grid import (the importer with GateLab's records taken out,
-// "Evaluate gates as FlowJo does" on): a strip on a log floor, the band an empty gate goes to and an
+// "Evaluate gates on the recorded grid" on): a strip on a log floor, the band an empty gate goes to and an
 // axis-aligned polygon were each read otherwise, at a few to 13,600 events (the public FACSCalibur
 // file), with no warning. Synthetic names and events, and the public vendor files.
 describe("FlowJo export of polygons FlowJo reads on its grid", () => {
@@ -1943,8 +2124,8 @@ describe("FlowJo export of polygons FlowJo reads on its grid", () => {
    * population.
    */
   const named = (warnings: string[], name: string): number | null => {
-    const w = warnings.find((x) => x.startsWith(`"${name}" is a polygon, which FlowJo tests on its 256-channel grid`));
-    const m = w ? /FlowJo reads (\d+) of (?:this file's \d+ events|the \d+ events of ")/.exec(w) : null;
+    const w = warnings.find((x) => x.startsWith(`"${name}" is a polygon, which the workspace tests on a 256-channel grid`));
+    const m = w ? /the grid reads (\d+) of (?:this file's \d+ events|the \d+ events of ")/.exec(w) : null;
     return m ? Number(m[1]) : null;
   };
   /**
@@ -2199,4 +2380,59 @@ describe("FlowJo export of polygons FlowJo reads on its grid", () => {
       expect(named(warnings, "Comb")).toBe(combOff);
     });
   }
+});
+
+// A polygon drawn in raw values on two mass channels, whose diagonal edge runs from (-40, -80) to
+// (40, 80). On the declared fasinh axes, affine in asinh(x / 5), that edge is an S through zero:
+// its midpoint lies exactly on its chord while its halves bow away by up to 3.5% of the gate's
+// extent. Judged by its midpoint alone the edge went out as one straight chord, three vertices for
+// the triangle, and a reader without GateLab's records held 158 of the 20,000 events here otherwise
+// (FlowKit the same 158: tools/interop/lib/wspSymmetricEdge.test.mjs). Synthetic names, and seeded
+// events off a lattice, so that none lies exactly on an edge.
+describe("FlowJo export of a raw polygon edge that bends symmetrically about zero on both axes", () => {
+  it("is traced, so a reader without GateLab's records holds the events GateLab holds", () => {
+    // The display of a mass channel, up to the affine map the declared fasinh adds, and the gate's
+    // extent on it. The export holds an edge to 0.2% of that extent on each axis, so no event is
+    // drawn within twice that of the diagonal: measured on Y at the event's X, which allows for
+    // the diagonal's slope there (at most 2 · sx / sy, at zero).
+    const g = (v: number) => Math.asinh(v / 5);
+    const [sx, sy] = [g(40) - g(-40), g(80) - g(-80)];
+    const clear = 2 * 0.002 * Math.hypot(1, (2 * sx) / sy);
+    let seed = 20261016;
+    const random = (): number => {
+      seed = (seed + 0x6d2b79f5) >>> 0;
+      let t = Math.imul(seed ^ (seed >>> 15), seed | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const xs: number[] = [];
+    const ys: number[] = [];
+    while (xs.length < 20000) {
+      const [x, y] = [Math.fround(-60 + 120 * random()), Math.fround(-96 + 192 * random())];
+      if (Math.abs(g(y) - g(2 * x)) / sy < clear) continue;
+      xs.push(x);
+      ys.push(y);
+    }
+    // Inside the triangle: right of x = -40, below y = 80, above the diagonal y = 2x.
+    const inside = xs.reduce((s, x, i) => s + (x > -40 && ys[i] < 80 && ys[i] > 2 * x ? 1 : 0), 0);
+    const bytes = writeFcs([Float32Array.from(xs), Float32Array.from(ys)], [{ name: "Nd142Di", desc: "CD4" }, { name: "Sm147Di", desc: "CD8" }]);
+    const read = () => new Sample(parseFcs(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer));
+    const sample = read();
+    expect(sample.instrument).toBe("cytof");
+    const [x, y] = sample.channels.map((c) => c.key);
+    const b = new TreeBuilder();
+    const gate = b.gate({ ...newGate("CD4_positive", "polygon", x, y, [[-40, -80], [40, 80], [-40, 80]]), space: "raw" } as Gate);
+    b.pop("CD4_positive", [{ gate }], b.root);
+    const tree = b.tree();
+    const before = evaluate(sample, tree).get("CD4_positive")!;
+    expect(count(before)).toBe(inside);
+    const { xml } = exportFlowJoWorkspace({ samples: [{ sample, fileName: "D1.fcs", ...tree }], now: new Date("2026-10-16T00:00:00Z"), producer: "GateLab test" });
+    expect(xml).toMatch(/<transforms:fasinh [^>]*>\s*<data-type:parameter data-type:name="Nd142Di"/);
+    expect(xml).toMatch(/<transforms:fasinh [^>]*>\s*<data-type:parameter data-type:name="Sm147Di"/);
+    const fresh = read();
+    const after = lookup(evaluate(fresh, importWorkspace(xml.replace(/ gatelab(?:Rectangle|Polygon)="[^"]*"/g, ""), fresh)), tree, "CD4_positive")!;
+    expect(moved(before, after)).toBe(0);
+    expect(count(after)).toBe(inside);
+    expect(writtenPolygon(xml, "CD4_positive")!.length, "the diagonal is traced").toBeGreaterThan(3);
+  });
 });

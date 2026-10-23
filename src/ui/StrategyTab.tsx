@@ -9,16 +9,17 @@ import type { CoreState, Derived } from "../store";
 import type { Sample } from "../engine/sample";
 import { loadMiniPlots } from "../plots/loadPlots";
 import { GATE_EDGE_MODES, type GateEdgeMode } from "./gateEdgeModes";
-import { exportGridPNG, exportGridSVG, exportGridPDF } from "../plots/gridExport";
+import { exportComposedPNG, exportComposedSVG, exportGridPNG, exportGridSVG, exportGridPDF } from "../plots/gridExport";
 import { computeGatingStrategy, buildStrategyPayload, buildPooledStrategyPayload, type StrategyPart } from "../engine/strategy";
 import { computeMultiPopStrategy, buildMultiStrategyPayload, flowLayout, tidyLayout } from "../engine/multiStrategy";
 import { computePooledGatingStrategy, computePooledMultiPopStrategy, type StrategyLeftOut, type StrategyMember } from "../engine/pooledStrategy";
 import { figureHierarchies, resolvePopulationInTree, type FigureSample } from "../engine/figure";
 import { useFigureSources } from "./useFigureSources";
+import { useGateInk } from "../plots/gateInk";
 import { populationTreeOrder } from "../engine/populations";
 import { sanitizeFilePart } from "../engine/fcsExport";
 import type { LayoutPlotRecipe, LayoutStrategyRecipe } from "../engine/layout";
-import type { StrategyConfig } from "../engine/workspace";
+import type { StrategyConfig as SavedStrategyConfig } from "../engine/workspace";
 import { ContextMenu, type ContextMenuState } from "./ContextMenu";
 import type { MenuEntry } from "./MenuButton";
 import { StrategyPopulationPicker } from "./StrategyPopulationPicker";
@@ -26,6 +27,8 @@ import { drawStrategyArrows, strategyArrowGap, strategyArrowRowGap, strategyArro
 import { attachGridPan, type PannablePanel } from "./gridPan";
 import { DensityColourControl } from "./DensityColourControl";
 import { useI18n } from "./i18n";
+import { usePersistedTabState } from "./tabState";
+import { composeStrategyTree, strategyTreeRows } from "./strategyTree";
 
 interface Props {
   sample: Sample;
@@ -42,15 +45,18 @@ interface Props {
   onFitChannels: (keys: readonly string[]) => void;
   /** Every file of the workspace as the Illustration tab sees it, for a pooled strategy. */
   files: readonly FigureSample[];
-  /** The Gating tab's pool, in file order; null while the Gating tab draws one file. */
+  /**
+   * The Gating tab's pool, in file order, when the Strategy tab is first opened; null while the
+   * Gating tab draws one file. It seeds the Strategy tab's own pool, as the checked files seed the
+   * Illustration tab's selection.
+   */
   poolIds: readonly string[] | null;
-  /** Checked files the Gating tab left out of its pool, and why. */
-  poolNote?: string;
-  /** Whether a pool can be started: two or more files are checked. */
-  poolable: boolean;
+  /** The files checked in the file list: the pool's first ticks, and "Use checked files". */
+  checkedSampleIds: readonly string[];
   /** An SCE host's files are samples. */
   isSceHost?: boolean;
-  onPoolChange: (pooled: boolean) => void;
+  /** View a file app-wide: the one file Strategy draws when nothing is pooled. */
+  onViewFile: (id: string) => void;
   /** The file viewed on the Gating tab, which a strategy or plot sent to the Layout tab is of. */
   activeSampleId?: string | null;
   /** Put the strategy, or one of its plots, on the Layout tab. */
@@ -62,11 +68,50 @@ interface Props {
   onGateLabelMove?: (hierarchyId: string, gateId: string, offset: [number, number], quadrant?: number) => void;
   /** A panel panned or stretched: the channel's new range for the workspace's scales, as the Gating tab's drag sets it. */
   onScaleChange?: (channelKey: string, range: [number, number]) => void;
+  /** A selection an agent asked for (gatelab_view): taken once, whether the tab opens with it or is open already. */
+  request?: StrategyRequest | null;
+  /** The request with this nonce has been taken, so the App can drop it and a later remount restores the user's controls. */
+  onRequestTaken?: (nonce: number) => void;
 }
+
+/** What an agent asks the tab to draw; the populations are checked against the active tree before it gets here. */
+export interface StrategyRequest {
+  nonce: number;
+  mode: "single" | "multi";
+  populationIds: string[];
+  /** Single mode; the control is left as it is when absent. */
+  fullPath?: boolean;
+}
+
+/**
+ * The Strategy tab's controls as the workspace saves them: engine/workspace.ts's StrategyConfig,
+ * and whether the exports carry the gating tree (absent reads as off). That one is declared here,
+ * engine/ being frozen; the workspace writes the tab's config whole and reads it back as written,
+ * so it is saved and restored with the others.
+ */
+export type StrategyConfig = SavedStrategyConfig & { exportTree?: boolean };
 
 type GateView = StrategyConfig["gateView"][number];
 
-export type { StrategyConfig };
+/** The element the strategy grid is drawn in, which the exports compose. */
+export const GRID_ID = "strategy-grid-container-grid";
+
+/** The largest panel Fit to columns draws, as the Plot size field allows. */
+const FIT_MAX_PLOT_SIZE = 500;
+/**
+ * Fit to columns: the panel size at which `columns` panels, `gap` apart, fill `width`; never under
+ * the renderer's smallest panel (120 px), never over FIT_MAX_PLOT_SIZE.
+ */
+function fitPanelSize(width: number, columns: number, gap: number): number {
+  return Math.max(120, Math.min(FIT_MAX_PLOT_SIZE, Math.floor((width - gap * (columns - 1)) / columns)));
+}
+
+/** Several populations, none ticked yet. */
+const NOTHING_TICKED = "Tick populations in the Data tab to draw their strategy.";
+
+const STRATEGY_SECTIONS = ["data", "plot", "style", "export"] as const;
+type StrategySection = typeof STRATEGY_SECTIONS[number];
+const STRATEGY_SECTION_LABELS: Record<StrategySection, string> = { data: "Data", plot: "Plot", style: "Style", export: "Export" };
 
 export function StrategyTab({
   onFitChannels,
@@ -81,21 +126,23 @@ export function StrategyTab({
   onDensityColorPowerChange,
   files,
   poolIds,
-  poolNote,
-  poolable,
+  checkedSampleIds,
   isSceHost = false,
-  onPoolChange,
+  onViewFile,
   activeSampleId,
   onAddToLayout,
   onOpenStep,
   onGateLabelMove,
   onScaleChange,
+  request,
+  onRequestTaken,
 }: Props) {
   /** Channels of the plots most recently rendered, for Fit. */
   const shownChannels = useRef<readonly string[]>([]);
   const { t } = useI18n();
   const rootId = state.root_population_id ?? "";
   const c0 = configRef.current; // restore on (re)mount; null = first-ever
+  const [section, setSection] = useState<StrategySection>("data");
   const [mode, setMode] = useState<"single" | "multi">(c0?.mode ?? "single");
   const [exportDpi, setExportDpi] = useState(c0?.exportDpi ?? 300); // SVG/PDF export resolution (72–1200)
   const [multiPops, setMultiPops] = useState<string[]>(c0?.multiPops ?? []);
@@ -118,22 +165,33 @@ export function StrategyTab({
   const [arrowAnchor, setArrowAnchor] = useState<"label" | "gate">(c0?.arrowAnchor ?? "label");
   const [kdeBandwidth, setKdeBandwidth] = useState(c0?.kdeBandwidth ?? 0);
   const manualKdeBandwidth = useRef(c0?.kdeBandwidth && c0.kdeBandwidth > 0 ? c0.kdeBandwidth : 4);
-  const [pubStyle, setPubStyle] = useState(c0?.pubStyle ?? false);
+  // The gates' look is the workspace's (gateInk.ts), set here or in any tab; a config's own
+  // pubStyle, labelBackground and gateLineWidth are still written but no longer read.
+  const ink = useGateInk();
+  const pubStyle = !ink.coloured;
+  const setPubStyle = (next: boolean) => ink.setColoured(!next);
   const [gateLabelBold, setGateLabelBold] = useState(c0?.gateLabelBold ?? false);
-  const [labelBackground, setLabelBackground] = useState(c0?.labelBackground ?? 0.6);
+  const labelBackground = ink.labelBackground;
+  const setLabelBackground = ink.setLabelBackground;
   const [layout, setLayout] = useState<"tree" | "flow">(c0?.layout ?? "tree");
-  const [gateLineWidth, setGateLineWidth] = useState(c0?.gateLineWidth ?? 1.5);
+  const gateLineWidth = ink.lineWidth;
+  const setGateLineWidth = ink.setLineWidth;
   const [gateEdgeMode, setGateEdgeMode] = useState<GateEdgeMode>(c0?.gateEdgeMode ?? "straight-bow");
   const [fontTick, setFontTick] = useState(c0?.fontTick ?? 12);
   const [fontAxis, setFontAxis] = useState(c0?.fontAxis ?? 12);
   const [fontTitle, setFontTitle] = useState(c0?.fontTitle ?? 12);
   const [fontGate, setFontGate] = useState(c0?.fontGate ?? 12);
+  const [exportTree, setExportTree] = useState(c0?.exportTree ?? false);
 
-  // Pooled, the strategy draws the Gating tab's pool: each member prepared as the Illustration
-  // tab prepares a file (cached across the tabs), the traced population followed into each
-  // member's tree by lineage, so a tailored copy traces its own gates.
-  const pooled = poolIds !== null;
-  const poolKey = (poolIds ?? []).join("|");
+  // The files: one file is the file viewed app-wide, chosen in the list here as in the file list.
+  // Pooled, the strategy draws the files ticked here, the Strategy tab's own selection, first
+  // taken from the Gating tab's pool or checked files as the Illustration tab's is: each member
+  // prepared as the Illustration tab prepares a file (cached across the tabs), the traced
+  // population followed into each member's tree by lineage, so a tailored copy traces its own gates.
+  const [pooled, setPooled] = usePersistedTabState<boolean>("strategy.pooled", () => poolIds !== null);
+  const [poolTicks, setPoolTicks] = usePersistedTabState<string[]>("strategy.poolTicks", () => [...(poolIds ?? checkedSampleIds)]);
+  const [fileSearch, setFileSearch] = useState("");
+  const poolKey = pooled ? files.filter((file) => poolTicks.includes(file.id)).map((file) => file.id).join("|") : "";
   const poolList = useMemo(() => (poolKey ? poolKey.split("|") : []), [poolKey]);
   const sources = useFigureSources(files, poolList, state, dataRevision);
   const trees = useMemo(() => figureHierarchies(state), [state]);
@@ -193,16 +251,41 @@ export function StrategyTab({
     setMultiPops(ids => ids.filter(id => !!state.populations[id]));
   }, [state.active_hierarchy_id]); // Local population IDs must not leak into another hierarchy.
 
-  // Follow the active population when it changes in the tree.
+  // An agent's selection, taken in the render that receives it, so the commit that opens or
+  // updates the tab already holds it (an effect's updates can land in a later render than the
+  // App's own). The controls are set as the user sets them; nothing is dispatched.
+  const [takenRequest, setTakenRequest] = useState<number | null>(null);
+  const notifiedRequest = useRef<number | null>(null);
+  if (request && request.nonce !== takenRequest) {
+    setTakenRequest(request.nonce);
+    setMode(request.mode);
+    if (request.mode === "multi") setMultiPops([...request.populationIds]);
+    else setPopId(request.populationIds[0]);
+    if (request.fullPath !== undefined) setFullPath(request.fullPath);
+  }
+
+  // Follow the active population when it changes in the tree; in the commit that took an agent's
+  // request, the request's population stands.
   useEffect(() => {
+    if (takenRequest !== notifiedRequest.current) return;
     if (state.active_population_id) setPopId(state.active_population_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.active_population_id]);
+
+  const onRequestTakenRef = useRef(onRequestTaken);
+  onRequestTakenRef.current = onRequestTaken;
+  useEffect(() => {
+    if (takenRequest === null || takenRequest === notifiedRequest.current) return;
+    notifiedRequest.current = takenRequest;
+    onRequestTakenRef.current?.(takenRequest);
+  }, [takenRequest]);
 
   // Mirror the controls into the App-held ref after each render so they persist across tab switches.
   const currentConfig: StrategyConfig = {
     mode, exportDpi, multiPops, popId, fullPath, gateView, displayMode, maxEvents, allEvents,
     plotSize, nColumns, fitToColumns, pointSize, pointAlpha, contourThreshold, contourLevels, kdeBandwidth,
     pubStyle, gateLineWidth, gateEdgeMode, gateLabelBold, labelBackground, showArrows, arrowWidth, arrowAnchor, layout, fontTick, fontAxis, fontTitle, fontGate,
+    exportTree,
   };
   useEffect(() => {
     configRef.current = currentConfig;
@@ -243,11 +326,11 @@ export function StrategyTab({
           globalScales,
         });
         const nodes = layout === "flow" ? flowLayout(computed, nColumns, state.populations) : tidyLayout(computed, state.populations);
-        // Fit ticked: the panels are drawn at Plot size, or smaller when the grid's columns would
-        // not otherwise fit the width (never larger; the renderer's smallest panel is 120 px), and
-        // the text is drawn smaller by the same ratio, so a fitted strategy is the strategy at
-        // Plot size seen smaller rather than small panels under full-size labels. Unticked: the
-        // panels are Plot size, and a strategy wider than the pane scrolls.
+        // Fit ticked: the panels are sized so the grid's columns fill the width (fitPanelSize). Where
+        // that is smaller than Plot size the text is drawn smaller by the same ratio, so a fitted
+        // strategy is the strategy at Plot size seen smaller rather than small panels under
+        // full-size labels. Unticked: the panels are Plot size, and a strategy wider than the pane
+        // scrolls.
         // The gutters are as wide as the busiest one's lines need, so lines that run side by side
         // stay apart.
         const arrows = showArrows ? strategyArrows(nodes, state.populations) : [];
@@ -255,9 +338,7 @@ export function StrategyTab({
         // The rows sit close unless a line runs between them, which a tree's never do.
         const gridRowGap = showArrows ? strategyArrowRowGap(arrows) : 8;
         const gridCols = nodes.length ? Math.max(...nodes.map((node) => node.col)) + 1 : 1;
-        const fitted = fitToColumns && availableWidth > 0
-          ? Math.max(120, Math.min(plotSize, Math.floor((availableWidth - 8 - gridGap * (gridCols - 1)) / gridCols)))
-          : plotSize;
+        const fitted = fitToColumns && availableWidth > 0 ? fitPanelSize(availableWidth - 8, gridCols, gridGap) : plotSize;
         const fontScale = fitted < plotSize ? fitted / plotSize : 1;
         const scaled = (size: number) => Math.max(5, Math.round(size * fontScale * 10) / 10);
         const gridFonts = fontScale < 1
@@ -291,7 +372,9 @@ export function StrategyTab({
             ? `${multiPops.length} population${multiPops.length === 1 ? "" : "s"} · ${pool.drawn.length} ${isSceHost ? "samples" : "files"} pooled`
             : `${multiPops.length} population${multiPops.length === 1 ? "" : "s"}${sampleName ? ` · ${sampleName}` : ""}`,
         });
-        loadMiniPlots().renderMultiStrategyGrid("strategy-grid-container", payload);
+        // With nothing ticked, the renderer's own note points at a selector and a Render button
+        // this tab does not have; it draws as soon as a population is ticked.
+        loadMiniPlots().renderMultiStrategyGrid("strategy-grid-container", nodes.length ? payload : { ...payload, error_msg: t(NOTHING_TICKED) });
         panelsRef.current = new Map(nodes.map((node) => [node.node_id, {
           xKey: sample.keyForLabel(node.x_channel), yKey: sample.keyForLabel(node.y_channel), xr: node.x_range, yr: node.y_range,
         }]));
@@ -318,13 +401,20 @@ export function StrategyTab({
       const parts: StrategyPart[] = pool
         ? pool.drawn.map((member) => ({ sample: member.sample, finalMask: back ? member.gating.masks[member.populationId] ?? null : null }))
         : [];
+      // Fit ticked: the steps' columns, no more than there are steps, fill the width, as in the
+      // multi-population grid; the renderer is then given that size rather than fitting again.
+      const columns = Math.max(1, Math.min(nColumns, steps.length));
+      const fitted = fitToColumns && availableWidth > 0 ? fitPanelSize(availableWidth - 8, columns, 8) : plotSize;
+      const fontScale = fitted < plotSize ? fitted / plotSize : 1;
+      const scaled = (size: number) => Math.max(5, Math.round(size * fontScale * 10) / 10);
+      setDrawnSize(fitted);
       const payloadOptions = {
         gateView,
         displayMode: effMode,
         maxEvents: cap,
         nColumns,
-        plotSize,
-        fitToColumns,
+        plotSize: fitted,
+        fitToColumns: false,
         contourThreshold,
         contourLevels,
         onLabelMove,
@@ -337,7 +427,9 @@ export function StrategyTab({
         pubStyle,
         gateLineWidth,
         gateEdgeMode,
-        fontSizes,
+        fontSizes: fontScale < 1
+          ? { tick: scaled(fontSizes.tick), axis_label: scaled(fontSizes.axis_label), gate_label: scaled(fontSizes.gate_label), title: scaled(fontSizes.title) }
+          : fontSizes,
         // The grid's title names what it draws, so an export says which file or pool it was.
         contextTitle: pool
           ? `${state.populations[popId]?.name ?? ""} · ${pool.drawn.length} ${isSceHost ? "samples" : "files"} pooled`
@@ -378,6 +470,33 @@ export function StrategyTab({
     : [{ v: "scatter", l: "Scatter" }, { v: "pseudocolor", l: "Pseudo" }, { v: "contour", l: "Contour" }];
 
   const popName = sanitizeFilePart(state.populations[popId]?.name ?? "strategy");
+  /**
+   * The gating tree the exports carry when asked: the populations drawn and their ancestors, with
+   * this file's counts. Pooled, the panels sum several files, so no tree is written.
+   */
+  const treePage = () => {
+    if (!exportTree || pooled) return null;
+    const rows = strategyTreeRows(state.populations, rootId, mode === "multi" ? multiPops : [popId], derived.masks, sample.fcs.nEvents);
+    return rows.length ? composeStrategyTree(rows, { title: ["Gating tree", sampleName].filter((part) => !!part).join(" · "), fontSize: fontTitle }) : null;
+  };
+  /** The strategy as PNG, SVG or PDF; with the tree as the PDF's second page, or as a second file named "<strategy>_tree". */
+  const exportStrategy = async (format: "png" | "svg" | "pdf") => {
+    const name = popName + "_strategy";
+    try {
+      const tree = treePage();
+      if (format === "pdf") {
+        await exportGridPDF(GRID_ID, name, exportDpi, tree ? [tree] : []);
+        return;
+      }
+      if (format === "png") await exportGridPNG(GRID_ID, name, exportDpi);
+      else exportGridSVG(GRID_ID, name, exportDpi);
+      if (!tree) return;
+      if (format === "png") await exportComposedPNG(tree, name + "_tree", exportDpi);
+      else exportComposedSVG(tree, name + "_tree");
+    } catch (e) {
+      setRenderError(String(e));
+    }
+  };
   /** Each gate of the single-population path with the population it belongs to, as the grid draws them. */
   const stepOwners = useMemo(() => {
     const owners: { gateId: string; populationId: string; parentId: string | null }[] = [];
@@ -484,9 +603,9 @@ export function StrategyTab({
         ...stepItems,
         { label: t("Fit data + gates"), title: t("Fit every plot shown here to its data and the gates on it"), onClick: () => onFitChannels(shownChannels.current) },
         "separator",
-        { label: t("Export PNG"), onClick: () => void exportGridPNG("strategy-grid-container-grid", popName + "_strategy", exportDpi).catch(e => setRenderError(String(e))) },
-        { label: t("Export SVG"), onClick: () => exportGridSVG("strategy-grid-container-grid", popName + "_strategy", exportDpi) },
-        { label: t("Export PDF"), onClick: () => void exportGridPDF("strategy-grid-container-grid", popName + "_strategy", exportDpi).catch(e => setRenderError(String(e))) },
+        { label: t("Export PNG"), onClick: () => void exportStrategy("png") },
+        { label: t("Export SVG"), onClick: () => void exportStrategy("svg") },
+        { label: t("Export PDF"), onClick: () => void exportStrategy("pdf") },
       ],
     });
   };
@@ -500,7 +619,6 @@ export function StrategyTab({
         poolReport.leftOut.length
           ? t("Not pooled: {files}", { files: poolReport.leftOut.map((entry) => `${entry.name} (${entry.reason})`).join(", ") })
           : null,
-        poolNote || null,
       ].filter((note): note is string => !!note)
     : [];
   const statusText = renderPending
@@ -509,8 +627,8 @@ export function StrategyTab({
       ? t("Preparing {count} {unit}…", { count: poolList.length, unit })
       : !panelCount
         ? pooled && !poolList.length
-          ? t("Nothing is pooled: check the {unit} to pool in the file list.", { unit })
-          : "Select a gated population to show its strategy."
+          ? t("Nothing is pooled: tick the {unit} to pool in the list.", { unit })
+          : mode === "multi" ? t(NOTHING_TICKED) : "Select a gated population to show its strategy."
         : pooled
           ? [t("{steps} strategy steps · {count} {unit} pooled", { steps: panelCount, count: poolReport?.drawn ?? poolList.length, unit }), ...poolNotes].join(" · ")
           : `${panelCount} strategy steps · current file and hierarchy`;
@@ -519,262 +637,324 @@ export function StrategyTab({
     setter(Number.isFinite(v) ? v : fallback);
   };
 
+  /** What is drawn, in the heading: the file or the pool, and the tree. */
+  const headContext = `${pooled ? t("{count} {unit} pooled", { count: poolList.length, unit }) : sampleName} · ${state.hierarchies.find(h => h.id === state.active_hierarchy_id)?.name ?? ""}`;
   return (
-    <div className="gl-tab-panel gl-tab-fill">
-      <div className="gl-strategy-controls"><strong>Gating strategy</strong><span>{pooled ? t("{count} {unit} pooled", { count: poolList.length, unit }) : sampleName} · {state.hierarchies.find(h => h.id === state.active_hierarchy_id)?.name}</span><span>Trace a gating path or back-gate selected populations.</span></div>
-      <div className="gl-strategy-controls">
-        <span className="gl-stats-opt-label">{t("Mode")}</span>
-        {(["single", "multi"] as const).map((m) => (
-          <label key={m} className="gl-check">
-            <input type="radio" name="strat-scope" checked={mode === m} onChange={() => setMode(m)} />
-            {m === "single" ? t("Single") : t("Multiple pops")}
-          </label>
-        ))}
-        <span className="gl-ctl-sep" />
-        {/* The Gating tab's own pool switch, here too: the strategy draws whatever the Gating tab pools. */}
-        <label
-          className="gl-check"
-          title={t("Draw every step from the checked files' events together, as the Gating tab pools them: the point cap is shared out by population size, the counts are summed, and a gate is drawn where every pooled file has it alike")}
-        >
-          <input type="checkbox" checked={pooled} disabled={!pooled && !poolable} onChange={(e) => onPoolChange(e.target.checked)} />
-          {isSceHost ? t("Pool checked samples") : t("Pool checked files")}
-        </label>
-        {mode === "single" && (<>
-        <span className="gl-ctl-sep" />
-        <label className="gl-field-inline">
-          {t("Population")}
-          <select value={popId} onChange={(e) => setPopId(e.target.value)}>
-            {order.map(({ popId: id, depth }) => (
-              <option key={id} value={id}>
-                {" ".repeat(depth * 2)}
-                {state.populations[id]?.name ?? id}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="gl-check">
-          <input type="checkbox" checked={fullPath} onChange={(e) => setFullPath(e.target.checked)} />
-          {t("Full path from root")}
-        </label>
-        </>)}
-
-        <span className="gl-ctl-sep" />
-        <span className="gl-stats-opt-label">{t("Gate view")}</span>
-        {(["forward", "back"] as GateView[]).map((v) => (
-          <label key={v} className="gl-check">
-            <input type="checkbox" checked={gateView.includes(v)} onChange={() => toggleGateView(v)} />
-            {v === "forward" ? t("Forward") : t("Back-gated")}
-          </label>
-        ))}
-
+    <div className="gl-tab-panel gl-tab-fill gl-plotting-workspace gl-strategy-workspace">
+      <div className="gl-plotting-head">
+        <strong>{t("Gating strategy")}</strong>
+        <span title={headContext}>{headContext}</span>
+        <span title={t("Trace a gating path or back-gate selected populations.")}>{t("Trace a gating path or back-gate selected populations.")}</span>
       </div>
-
-      <div className="gl-strategy-controls">
-        <label className="gl-field-inline">
-          {t("Max events/panel")}
-          <input
-            type="number"
-            min={0}
-            step={1000}
-            value={maxEvents}
-            disabled={allEvents}
-            onChange={(e) => setMaxEvents(Math.max(0, Math.floor(+e.target.value) || 0))}
-          />
-        </label>
-        <label className="gl-check">
-          <input type="checkbox" checked={allEvents} onChange={(e) => setAllEvents(e.target.checked)} />
-          {t("All events")}
-        </label>
-        <span className="gl-ctl-sep" />
-        <label className="gl-field-inline">
-          {t("Plot size")}
-          {/* A size typed here is the size wanted: Fit to columns, which would draw the plots
-              smaller to fit the width whatever is typed, is switched off with it. */}
-          <input type="number" min={150} max={500} step={25} value={plotSize} onChange={(e) => { setPlotSize(+e.target.value || 200); setFitToColumns(false); }} />
-        </label>
-        <label className="gl-field-inline">
-          {t("Columns")}
-          <input type="number" min={1} max={12} value={nColumns} onChange={(e) => setNColumns(Math.max(1, +e.target.value || 4))} />
-        </label>
-        <label className="gl-check" title={t("Ticked: the plots, and their text in proportion, are drawn smaller than Plot size when the columns would not otherwise fit the width. Unticked: the plots are Plot size, and a wide strategy scrolls.")}>
-          <input type="checkbox" checked={fitToColumns} onChange={(e) => setFitToColumns(e.target.checked)} />
-          {t("Fit to columns")}
-        </label>
-        {mode === "multi" && fitToColumns && drawnSize !== null && drawnSize < plotSize && (
-          <span className="gl-num-badge" title={t("Fit to columns drew the plots smaller than Plot size so the strategy fits the width; untick it to draw them at Plot size and scroll")}>
-            {t("drawn at {size} px", { size: drawnSize })}
-          </span>
-        )}
-        {mode === "multi" && (
-          <label className="gl-field-inline" title={t("Tree: a column per depth and a row per traced population. Wrapped: the tree walked depth first and wrapped into rows of the columns above; the arrows say what leads to what.")}>
-            {t("Layout")}
-            <select value={layout} onChange={(e) => setLayout(e.target.value as "tree" | "flow")}>
-              <option value="tree">{t("Tree")}</option>
-              <option value="flow">{t("Wrapped")}</option>
-            </select>
-          </label>
-        )}
-        <span className="gl-ctl-sep" />
-        <label className="gl-field-inline" title="Export resolution for SVG/PDF (72–1200 DPI)">
-          DPI
-          <input type="number" min={72} max={1200} step={1} value={exportDpi} onChange={(e) => setExportDpi(Math.max(72, Math.min(1200, Math.round(+e.target.value) || 300)))} />
-        </label>
-        <button
-          className="gl-mini-btn"
-          disabled={renderPending || !panelCount}
-          title="Fit shown channels in the workspace Scales settings, including the current scale-lock scope"
-          onClick={() => onFitChannels(shownChannels.current)}
-        >{t("Fit data + gates")}</button>
-        <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => void exportGridPNG("strategy-grid-container-grid", popName + "_strategy", exportDpi).catch(e => setRenderError(String(e)))}>PNG</button>
-        <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => exportGridSVG("strategy-grid-container-grid", popName + "_strategy", exportDpi)}>SVG</button>
-        <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => void exportGridPDF("strategy-grid-container-grid", popName + "_strategy", exportDpi).catch(e => setRenderError(String(e)))}>PDF</button>
-        {onAddToLayout && (
-          <button type="button" className="gl-mini-btn" disabled={renderPending || !panelCount || !strategyRecipe()} title={strategyToLayoutTitle} onClick={addStrategyToLayout}>
-            {t("Add to Layout")}
-          </button>
-        )}
-      </div>
-
-      <details><summary style={{ cursor: "pointer", padding: "8px 12px" }}>{t("Appearance")}</summary><div className="gl-strategy-controls">
-        <span className="gl-stats-opt-label">{t("Display")}</span>
-        {modeOpts.map((m) => (
-          <label key={m.v} className="gl-check">
-            <input type="radio" name="strat-mode" checked={displayMode === m.v} onChange={() => setDisplayMode(m.v)} />
-            {t(m.l)}
-          </label>
-        ))}
-        <span className="gl-ctl-sep" />
-        <label className="gl-field-inline" title={t("The size of each drawn event, px")}>
-          {t("Point size")}
-          <input type="range" min={0.2} max={4} step={0.1} value={pointSize} onChange={num(setPointSize, 1.2)} />
-          <span className="gl-num-badge">{pointSize.toFixed(1)}</span>
-        </label>
-        <label className="gl-field-inline">
-          {t("Opacity")}
-          <input type="range" min={0.05} max={1} step={0.05} value={pointAlpha} onChange={num(setPointAlpha, 0.35)} />
-          <span className="gl-num-badge">{pointAlpha.toFixed(2)}</span>
-        </label>
-        {displayMode === "pseudocolor" && (
-          <DensityColourControl value={densityColorPower} onChange={onDensityColorPowerChange} />
-        )}
-        {isContour && <label className="gl-field-inline" title={t("How many contour lines each panel draws")}>
-          {t("Contours")}
-          <select value={contourLevels} onChange={(e) => setContourLevels(+e.target.value)}>
-            {[4, 6, 8, 10, 12, 18, 24, 30].map((value) => <option key={value} value={value}>{value}</option>)}
-          </select>
-        </label>}
-        {isContour && <label className="gl-field-inline" title={t("The outer contour, as a percentage of the peak density")}>
-          {t("Contour %")}
-          <input type="number" min={0} max={50} step={1} value={contourThreshold} onChange={num(setContourThreshold, 5)} />
-        </label>}
-        {isContour && (
-          <>
-            <label className="gl-check" title="Choose a bandwidth automatically from the event count and panel size">
-              <input
-                type="checkbox"
-                checked={kdeBandwidth === 0}
-                onChange={(e) => {
-                  if (e.target.checked) {
-                    if (kdeBandwidth > 0) manualKdeBandwidth.current = kdeBandwidth;
-                    setKdeBandwidth(0);
-                  } else {
-                    setKdeBandwidth(manualKdeBandwidth.current);
-                  }
-                }}
-              />
-              {t("Auto smoothing")}
+      {/* The side tabs Illustration and Plotting have: what to draw first, then how it looks. */}
+      <aside className="gl-plotting-inspector gl-strategy-inspector" aria-label={t("Strategy controls")}>
+        <nav className="gl-presentation-tabs" aria-label={t("Strategy settings")}>
+          {STRATEGY_SECTIONS.map((id) => (
+            <button key={id} type="button" aria-pressed={section === id} onClick={() => setSection(id)}>
+              {t(STRATEGY_SECTION_LABELS[id])}
+            </button>
+          ))}
+        </nav>
+        <section className="gl-strategy-section" hidden={section !== "data"} aria-label={t("Data")}>
+          <h3>{t("Mode")}</h3>
+          {(["single", "multi"] as const).map((m) => (
+            <label key={m} className="gl-check">
+              <input type="radio" name="strat-scope" checked={mode === m} onChange={() => setMode(m)} />
+              {m === "single" ? t("Single") : t("Multiple pops")}
             </label>
-            {kdeBandwidth > 0 && (
-              <label className="gl-field-inline" title="Higher bandwidth gives stronger contour smoothing">
-                {t("Bandwidth")}
+          ))}
+          {/* Several populations are chosen here, the Strategy tab's own selection: not the
+              Populations pane's ticks, which belong to the Gating tab. */}
+          {mode === "multi" && (
+            <StrategyPopulationPicker
+              compact
+              rows={selectablePops}
+              populations={state.populations}
+              gates={state.gates}
+              counts={derived.stats?.event_count ?? {}}
+              selected={multiPops}
+              onChange={setMultiPops}
+            />
+          )}
+          {mode === "single" && (<>
+            <label className="gl-field-inline">
+              {t("Population")}
+              <select value={popId} onChange={(e) => setPopId(e.target.value)}>
+                {order.map(({ popId: id, depth }) => (
+                  <option key={id} value={id}>
+                    {" ".repeat(depth * 2)}
+                    {state.populations[id]?.name ?? id}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="gl-check">
+              <input type="checkbox" checked={fullPath} onChange={(e) => setFullPath(e.target.checked)} />
+              {t("Full path from root")}
+            </label>
+          </>)}
+          <h3>
+            {t("Files / samples")}
+            {pooled && <span>{t("{selected} of {total} selected", { selected: poolList.length, total: files.length })}</span>}
+          </h3>
+          <label
+            className="gl-check"
+            title={t("Draw every step from the checked files' events together, as the Gating tab pools them: the point cap is shared out by population size, the counts are summed, and a gate is drawn where every pooled file has it alike")}
+          >
+            <input type="checkbox" checked={pooled} onChange={(e) => setPooled(e.target.checked)} />
+            {isSceHost ? t("Pool checked samples") : t("Pool checked files")}
+          </label>
+          {pooled && (
+            <div className="gl-figure-actions gl-figure-list-actions">
+              <button type="button" onClick={() => setPoolTicks([...checkedSampleIds])}>{t("Use checked files")}</button>
+              <button type="button" onClick={() => setPoolTicks(files.map((file) => file.id))}>{t("All")}</button>
+              <button type="button" onClick={() => setPoolTicks([])}>{t("None")}</button>
+            </div>
+          )}
+          {files.length > 6 && (
+            <input
+              type="search"
+              className="gl-strategy-file-search"
+              aria-label={t("Find file / sample…")}
+              placeholder={t("Find file / sample…")}
+              value={fileSearch}
+              onChange={(e) => setFileSearch(e.target.value)}
+            />
+          )}
+          {/* One file: a choice of the file viewed, as clicking it in the file list makes it.
+              Pooled: the files ticked to pool. */}
+          <div className="gl-figure-list gl-strategy-files" role={pooled ? "group" : "radiogroup"} aria-label={t("Files / samples")}>
+            {files
+              .filter((file) => `${file.name} ${file.fileName ?? ""}`.toLowerCase().includes(fileSearch.trim().toLowerCase()))
+              .map((file) => (
+                <label key={file.id} className="gl-figure-row" title={file.fileName && file.fileName !== file.name ? `${file.name} · ${file.fileName}` : file.name}>
+                  {pooled ? (
+                    <input
+                      type="checkbox"
+                      checked={poolTicks.includes(file.id)}
+                      onChange={() => setPoolTicks((ticks) => (ticks.includes(file.id) ? ticks.filter((id) => id !== file.id) : [...ticks, file.id]))}
+                    />
+                  ) : (
+                    <input type="radio" name="strategy-file" checked={file.id === activeSampleId} onChange={() => onViewFile(file.id)} />
+                  )}
+                  <span className="gl-figure-row-name">{file.name}{file.fileName && file.fileName !== file.name && <small>{file.fileName}</small>}</span>
+                </label>
+              ))}
+          </div>
+          <h3>{t("Gate view")}</h3>
+          {(["forward", "back"] as GateView[]).map((v) => (
+            <label key={v} className="gl-check">
+              <input type="checkbox" checked={gateView.includes(v)} onChange={() => toggleGateView(v)} />
+              {v === "forward" ? t("Forward") : t("Back-gated")}
+            </label>
+          ))}
+          <label className="gl-field-inline">
+            {t("Max events/panel")}
+            <input
+              type="number"
+              min={0}
+              step={1000}
+              value={maxEvents}
+              disabled={allEvents}
+              onChange={(e) => setMaxEvents(Math.max(0, Math.floor(+e.target.value) || 0))}
+            />
+          </label>
+          <label className="gl-check">
+            <input type="checkbox" checked={allEvents} onChange={(e) => setAllEvents(e.target.checked)} />
+            {t("All events")}
+          </label>
+        </section>
+        <section className="gl-strategy-section" hidden={section !== "plot"} aria-label={t("Plot")}>
+          <label className="gl-field-inline">
+            {t("Plot size")}
+            {/* A size typed here is the size wanted: Fit to columns, which would draw the plots
+                smaller to fit the width whatever is typed, is switched off with it. */}
+            <input type="number" min={150} max={500} step={25} value={plotSize} onChange={(e) => { setPlotSize(+e.target.value || 200); setFitToColumns(false); }} />
+          </label>
+          <label className="gl-field-inline">
+            {t("Columns")}
+            <input type="number" min={1} max={12} value={nColumns} onChange={(e) => setNColumns(Math.max(1, +e.target.value || 4))} />
+          </label>
+          <label className="gl-check" title={t("Ticked: the plots are sized so the columns fill the width, up to 500 px, and their text drawn smaller in proportion where they are smaller than Plot size. Unticked: the plots are Plot size, and a wide strategy scrolls.")}>
+            <input type="checkbox" checked={fitToColumns} onChange={(e) => setFitToColumns(e.target.checked)} />
+            {t("Fit to columns")}
+          </label>
+          {fitToColumns && drawnSize !== null && drawnSize !== plotSize && (
+            <span className="gl-num-badge" title={t("Fit to columns drew the plots at this size so the strategy fills the width; untick it to draw them at Plot size")}>
+              {t("drawn at {size} px", { size: drawnSize })}
+            </span>
+          )}
+          {mode === "multi" && (
+            <label className="gl-field-inline" title={t("Tree: a column per depth and a row per traced population. Wrapped: the tree walked depth first and wrapped into rows of the columns above; the arrows say what leads to what.")}>
+              {t("Layout")}
+              <select value={layout} onChange={(e) => setLayout(e.target.value as "tree" | "flow")}>
+                <option value="tree">{t("Tree")}</option>
+                <option value="flow">{t("Wrapped")}</option>
+              </select>
+            </label>
+          )}
+          <button
+            className="gl-mini-btn"
+            disabled={renderPending || !panelCount}
+            title="Fit shown channels in the workspace Scales settings, including the current scale-lock scope"
+            onClick={() => onFitChannels(shownChannels.current)}
+          >{t("Fit data + gates")}</button>
+        </section>
+        <section className="gl-strategy-section" hidden={section !== "style"} aria-label={t("Style")}>
+          <h3>{t("Display")}</h3>
+          {modeOpts.map((m) => (
+            <label key={m.v} className="gl-check">
+              <input type="radio" name="strat-mode" checked={displayMode === m.v} onChange={() => setDisplayMode(m.v)} />
+              {t(m.l)}
+            </label>
+          ))}
+          <label className="gl-field-inline" title={t("The size of each drawn event, px")}>
+            {t("Point size")}
+            <input type="range" min={0.2} max={4} step={0.1} value={pointSize} onChange={num(setPointSize, 1.2)} />
+            <span className="gl-num-badge">{pointSize.toFixed(1)}</span>
+          </label>
+          <label className="gl-field-inline">
+            {t("Opacity")}
+            <input type="range" min={0.05} max={1} step={0.05} value={pointAlpha} onChange={num(setPointAlpha, 0.35)} />
+            <span className="gl-num-badge">{pointAlpha.toFixed(2)}</span>
+          </label>
+          {displayMode === "pseudocolor" && (
+            <DensityColourControl value={densityColorPower} onChange={onDensityColorPowerChange} />
+          )}
+          {isContour && <label className="gl-field-inline" title={t("How many contour lines each panel draws")}>
+            {t("Contours")}
+            <select value={contourLevels} onChange={(e) => setContourLevels(+e.target.value)}>
+              {[4, 6, 8, 10, 12, 18, 24, 30].map((value) => <option key={value} value={value}>{value}</option>)}
+            </select>
+          </label>}
+          {isContour && <label className="gl-field-inline" title={t("The outer contour, as a percentage of the peak density")}>
+            {t("Contour %")}
+            <input type="number" min={0} max={50} step={1} value={contourThreshold} onChange={num(setContourThreshold, 5)} />
+          </label>}
+          {isContour && (
+            <>
+              <label className="gl-check" title="Choose a bandwidth automatically from the event count and panel size">
                 <input
-                  type="range"
-                  min={0.2}
-                  max={14}
-                  step={0.2}
-                  value={kdeBandwidth}
+                  type="checkbox"
+                  checked={kdeBandwidth === 0}
                   onChange={(e) => {
-                    const next = Math.max(0.2, Number(e.target.value) || 4);
-                    manualKdeBandwidth.current = next;
-                    setKdeBandwidth(next);
+                    if (e.target.checked) {
+                      if (kdeBandwidth > 0) manualKdeBandwidth.current = kdeBandwidth;
+                      setKdeBandwidth(0);
+                    } else {
+                      setKdeBandwidth(manualKdeBandwidth.current);
+                    }
                   }}
                 />
-                <span className="gl-num-badge">{kdeBandwidth.toFixed(1)}</span>
+                {t("Auto smoothing")}
               </label>
-            )}
-          </>
-        )}
-        <span className="gl-ctl-sep" />
-        <label className="gl-check">
-          <input type="checkbox" checked={pubStyle} onChange={(e) => setPubStyle(e.target.checked)} />
-          {t("Publication style")}
-        </label>
-        <label className="gl-check" title={t("Gate labels in a bold face")}>
-          <input type="checkbox" checked={gateLabelBold} onChange={(e) => setGateLabelBold(e.target.checked)} />
-          {t("Bold gate labels")}
-        </label>
-        {pubStyle && (
-          <label className="gl-field-inline" title={t("A white backing behind each plain gate label, so it reads on a dense pile of points; 0 for none")}>
-            {t("Label backing")}
-            <input type="range" min={0} max={1} step={0.05} value={labelBackground} onChange={(e) => setLabelBackground(Number(e.target.value))} />
-            <span className="gl-num-badge">{Math.round(labelBackground * 100)}%</span>
+              {kdeBandwidth > 0 && (
+                <label className="gl-field-inline" title="Higher bandwidth gives stronger contour smoothing">
+                  {t("Bandwidth")}
+                  <input
+                    type="range"
+                    min={0.2}
+                    max={14}
+                    step={0.2}
+                    value={kdeBandwidth}
+                    onChange={(e) => {
+                      const next = Math.max(0.2, Number(e.target.value) || 4);
+                      manualKdeBandwidth.current = next;
+                      setKdeBandwidth(next);
+                    }}
+                  />
+                  <span className="gl-num-badge">{kdeBandwidth.toFixed(1)}</span>
+                </label>
+              )}
+            </>
+          )}
+          <label className="gl-check" title={t("The workspace's setting, the same as the Gating tab's Display: off draws every gate and its label in black")}>
+            <input type="checkbox" className="gl-coloured-gates-mirror" checked={!pubStyle} onChange={(e) => setPubStyle(!e.target.checked)} />
+            {t("Coloured gates")}
           </label>
-        )}
-        {mode === "multi" && (
-          <label className="gl-check" title={t("An arrow from each gate to the panel of the population it makes, routed between the panels; in the exports too")}>
-            <input type="checkbox" checked={showArrows} onChange={(e) => setShowArrows(e.target.checked)} />
-            {t("Arrows")}
+          <label className="gl-check" title={t("Gate labels in a bold face")}>
+            <input type="checkbox" checked={gateLabelBold} onChange={(e) => setGateLabelBold(e.target.checked)} />
+            {t("Bold gate labels")}
           </label>
-        )}
-        {mode === "multi" && showArrows && (
-          <label className="gl-field-inline" title={t("The arrows' line width, px; the heads grow with it")}>
-            {t("Arrow width")}
-            <input type="number" min={0.5} max={6} step={0.25} value={arrowWidth} onChange={num(setArrowWidth, 1.5)} />
+          {pubStyle && (
+            <label className="gl-field-inline" title={t("A white backing behind each plain gate label, so it reads on a dense pile of points; 0 for none")}>
+              {t("Label backing")}
+              <input type="range" min={0} max={1} step={0.05} value={labelBackground} onChange={(e) => setLabelBackground(Number(e.target.value))} />
+              <span className="gl-num-badge">{Math.round(labelBackground * 100)}%</span>
+            </label>
+          )}
+          {mode === "multi" && (
+            <label className="gl-check" title={t("An arrow from each gate to the panel of the population it makes, routed between the panels; in the exports too")}>
+              <input type="checkbox" checked={showArrows} onChange={(e) => setShowArrows(e.target.checked)} />
+              {t("Arrows")}
+            </label>
+          )}
+          {mode === "multi" && showArrows && (
+            <label className="gl-field-inline" title={t("The arrows' line width, px; the heads grow with it")}>
+              {t("Arrow width")}
+              <input type="number" min={0.5} max={6} step={0.25} value={arrowWidth} onChange={num(setArrowWidth, 1.5)} />
+            </label>
+          )}
+          {mode === "multi" && showArrows && (
+            <label className="gl-field-inline" title={t("Where an arrow leaves its panel: level with the gate's label, or with the centre of the gate itself")}>
+              {t("Arrows from")}
+              <select value={arrowAnchor} onChange={(e) => setArrowAnchor(e.target.value === "gate" ? "gate" : "label")}>
+                <option value="label">{t("Gate label")}</option>
+                <option value="gate">{t("Gate centre")}</option>
+              </select>
+            </label>
+          )}
+          <label className="gl-field-inline">
+            {t("Gate line")}
+            <input type="number" min={0.5} max={5} step={0.25} value={gateLineWidth} onChange={num(setGateLineWidth, 1.5)} />
           </label>
-        )}
-        {mode === "multi" && showArrows && (
-          <label className="gl-field-inline" title={t("Where an arrow leaves its panel: level with the gate's label, or with the centre of the gate itself")}>
-            {t("Arrows from")}
-            <select value={arrowAnchor} onChange={(e) => setArrowAnchor(e.target.value === "gate" ? "gate" : "label")}>
-              <option value="label">{t("Gate label")}</option>
-              <option value="gate">{t("Gate centre")}</option>
+          <label className="gl-field-inline" title={GATE_EDGE_MODES.find((m) => m.id === gateEdgeMode)?.hint}>
+            {t("Gate edges")}
+            <select value={gateEdgeMode} onChange={(e) => setGateEdgeMode(e.target.value as GateEdgeMode)}>
+              {GATE_EDGE_MODES.map((m) => (
+                <option key={m.id} value={m.id}>{t(m.label)}</option>
+              ))}
             </select>
           </label>
-        )}
-        <label className="gl-field-inline">
-          {t("Gate line")}
-          <input type="number" min={0.5} max={5} step={0.25} value={gateLineWidth} onChange={num(setGateLineWidth, 1.5)} />
-        </label>
-        <label className="gl-field-inline" title={GATE_EDGE_MODES.find((m) => m.id === gateEdgeMode)?.hint}>
-          {t("Gate edges")}
-          <select value={gateEdgeMode} onChange={(e) => setGateEdgeMode(e.target.value as GateEdgeMode)}>
-            {GATE_EDGE_MODES.map((m) => (
-              <option key={m.id} value={m.id}>{t(m.label)}</option>
-            ))}
-          </select>
-        </label>
-        <span className="gl-ctl-sep" />
-        <span className="gl-stats-opt-label">{t("Fonts")}</span>
-        <label className="gl-field-inline">{t("Tick")}<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 8)} /></label>
-        <label className="gl-field-inline">{t("Axis")}<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 10)} /></label>
-        <label className="gl-field-inline">{t("Title")}<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 10)} /></label>
-        <label className="gl-field-inline">{t("Gate")}<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 8)} /></label>
-      </div></details>
-
-      {mode === "multi" && (
-        <StrategyPopulationPicker
-          rows={selectablePops}
-          populations={state.populations}
-          gates={state.gates}
-          counts={derived.stats?.event_count ?? {}}
-          selected={multiPops}
-          onChange={setMultiPops}
-          checkedIds={state.selected_pop_ids}
+          <h3>{t("Fonts")}</h3>
+          <label className="gl-field-inline">{t("Tick")}<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 8)} /></label>
+          <label className="gl-field-inline">{t("Axis")}<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 10)} /></label>
+          <label className="gl-field-inline">{t("Title")}<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 10)} /></label>
+          <label className="gl-field-inline">{t("Gate")}<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 8)} /></label>
+        </section>
+        <section className="gl-strategy-section" hidden={section !== "export"} aria-label={t("Export")}>
+          <label className="gl-field-inline" title="Export resolution for SVG/PDF (72–1200 DPI)">
+            DPI
+            <input type="number" min={72} max={1200} step={1} value={exportDpi} onChange={(e) => setExportDpi(Math.max(72, Math.min(1200, Math.round(+e.target.value) || 300)))} />
+          </label>
+          <label
+            className="gl-check"
+            title={pooled
+              ? t("The gating tree gives one file's counts, so it is not exported while files are pooled")
+              : t("The exports carry the gating tree: the populations drawn and their ancestors in tree order, each with its event count and % of parent. In a PDF it is the second page; with a PNG or SVG it is a second file, named as the strategy's with _tree added.")}
+          >
+            <input type="checkbox" checked={exportTree} disabled={pooled} onChange={(e) => setExportTree(e.target.checked)} />
+            {t("With gating tree")}
+          </label>
+          <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => void exportStrategy("png")}>PNG</button>
+          <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => void exportStrategy("svg")}>SVG</button>
+          <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => void exportStrategy("pdf")}>PDF</button>
+          {onAddToLayout && (
+            <button type="button" className="gl-mini-btn" disabled={renderPending || !panelCount || !strategyRecipe()} title={strategyToLayoutTitle} onClick={addStrategyToLayout}>
+              {t("Add to Layout")}
+            </button>
+          )}
+        </section>
+      </aside>
+      <div className="gl-prop-body gl-strategy-body">
+        {renderError && <p role="alert">{renderError}</p>}
+        <p role="status">{statusText}</p>
+        {/* data-state tells an agent's render when the grid is finished, or why there is none. */}
+        <div
+          id="strategy-grid-container" ref={containerRef} aria-busy={renderPending} style={{ opacity: renderPending ? .5 : 1 }} className="gl-mini-grid-container" onContextMenu={openGridMenu}
+          data-state={renderPending ? "drawing" : !poolReady ? "preparing" : renderError ? "error" : panelCount ? "drawn" : "empty"}
         />
-      )}
-      {renderError && <p role="alert">{renderError}</p>}
-      <p role="status">{statusText}</p>
-      <div id="strategy-grid-container" ref={containerRef} aria-busy={renderPending} style={{ opacity: renderPending ? .5 : 1 }} className="gl-mini-grid-container" onContextMenu={openGridMenu} />
+      </div>
       <ContextMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
   );

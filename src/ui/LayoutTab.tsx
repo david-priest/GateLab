@@ -106,6 +106,7 @@ import { DEFAULT_ITERATION, expandLayoutSheet, followsIteration, iterationUnits,
 import { automaticTitleTemplate, fieldsFromTemplate, plotTitle, plotTitleContext, templateFromFields, titleFields, TITLE_PLACEHOLDERS, TITLE_PRESETS, TITLE_SEPARATORS } from "../engine/layoutTitle";
 import { alignItems, arrangeUnits, distributeItems, fitContentToPage, fitPageToContent, groupItems, ungroupItems, type AlignHow, type DistributeHow } from "../engine/layoutArrange";
 import { useI18n } from "./i18n";
+import { TabIntro, TabIntroToggle, useTabIntro } from "./TabIntro";
 import { hostWords } from "./hostWording";
 import { historyShortcutAction } from "./historyShortcuts";
 import { NumberField } from "./NumberField";
@@ -1122,6 +1123,7 @@ export function LayoutTab({
   onExported,
 }: Readonly<Props>) {
   const { t } = useI18n();
+  const keysIntro = useTabIntro("layout");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   /** The text block whose editor is open, by its page id. */
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
@@ -2592,9 +2594,12 @@ export function LayoutTab({
                 </div>
               )}
               {!selectedItems.length && (
-                <p className="gl-hint">
-                  {t("Click an item to select it, drag empty page to select several, Shift-click to add or remove. Drag to move, Shift holds the direction; drag a corner handle or an edge to resize, Shift keeps the proportions, Option resizes from the centre; Cmd turns snapping off; Option-drag copies. Delete removes, arrows nudge (Shift: 10 px), Cmd-D duplicates, Cmd-A selects all, Cmd-] and Cmd-[ bring forward and send backward (Shift: to the front or back), Cmd-G groups and Shift-Cmd-G ungroups, Shift-Cmd-L locks, Cmd-Z undoes.")}
-                </p>
+                <>
+                  <TabIntro intro={keysIntro} className="gl-hint">
+                    {t("Click an item to select it, drag empty page to select several, Shift-click to add or remove. Drag to move, Shift holds the direction; drag a corner handle or an edge to resize, Shift keeps the proportions, Option resizes from the centre; Cmd turns snapping off; Option-drag copies. Delete removes, arrows nudge (Shift: 10 px), Cmd-D duplicates, Cmd-A selects all, Cmd-] and Cmd-[ bring forward and send backward (Shift: to the front or back), Cmd-G groups and Shift-Cmd-G ungroups, Shift-Cmd-L locks, Cmd-Z undoes.")}
+                  </TabIntro>
+                  <TabIntroToggle intro={keysIntro} />
+                </>
               )}
               {selectedItem && (
                 <div

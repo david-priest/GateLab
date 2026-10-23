@@ -31,8 +31,10 @@ describe.runIf(existsSync(Z2V4_WORKSPACE))("FlowJo Boolean populations, FR-FCM-Z
 
     // The whole tree, not the four nodes that sat above the first Boolean one: 36 gates, plus
     // the two NOT populations, which are derived from the populations they name rather than
-    // emitted as the gate copies FlowJo stores inside them.
-    expect(gates).toBe(36);
+    // emitted as the gate copies FlowJo stores inside them. Three of the 36 are spider quadrants,
+    // whose four panels FlowJo writes as four polygons and the import reads as one gate: 27.
+    expect(gates).toBe(27);
+    expect((result.gatingMl.match(/gatelab_spider_quadrant/g) ?? []).length).toBe(3);
     expect(result.warnings.filter((w) => /skipped/i.test(w))).toEqual([]);
   });
 
@@ -129,7 +131,9 @@ describe.runIf(existsSync(Z2V4_WORKSPACE))("FlowJo Boolean populations, FR-FCM-Z
       [...gatingMl.matchAll(/data-type:name="([^"]+)"/g)].map((m) => m[1]))];
 
     const res = importGatingML(gatingMl, channels, {}, "flow");
-    expect(res.n_gates_imported).toBeGreaterThan(30);
+    // 27 gates, three of them spider quadrants (above).
+    expect(res.n_gates_imported).toBe(27);
+    expect(Object.values(res.gates).filter((g) => g.gate_type === "quadrant" && g.arms).length).toBe(3);
     // The NOT population arrives as a population holding an excluded reference, not as a gate
     // that would select the events INSIDE the boundary it was drawn from.
     const notPop = Object.values(res.populations).find((p) => p.name === "debris-");

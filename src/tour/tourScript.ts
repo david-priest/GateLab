@@ -12,7 +12,7 @@ export const DEMO_WORKSPACE_PATH = `demo/${DEMO_WORKSPACE_FILE}`;
 
 /**
  * Where the demo workspace's gating strategy and records come from. The tutorial says so when
- * the demo opens and the Tutorial menu keeps it, since a demo made from published work names it.
+ * the demo opens and the Help menu keeps it, since a demo made from published work names it.
  */
 export const DEMO_WORKSPACE_CITATION = {
   authors: "Priest DG, Ebihara T, Tulyeu J, Søndergaard JN, Sakakibara S, Sugihara F, et al.",
@@ -219,7 +219,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "welcome",
     title: "A walk through GateLab",
     body:
-      "This tutorial goes through every tab with the demo workspace: a published B cell sort strategy with its FCS records and compensation. Each step says what to do and moves on when you have done it; Skip moves on without. End tutorial keeps your place, and the Tutorial menu brings you back to it.",
+      "This tutorial goes through every tab with the demo workspace: a published B cell sort strategy with its FCS records and compensation. Each step says what to do and moves on when you have done it; Skip moves on without. End tutorial keeps your place, and the Help menu brings you back to it.",
   },
   {
     id: "open-demo",
@@ -242,7 +242,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
       const c = DEMO_WORKSPACE_CITATION;
       const reference = `${c.authors} ${c.title} ${c.journal} doi:${c.doi}`;
       return isDemo(ctx)
-        ? tr(ctx)("The demo is the gating strategy of {figure} of {reference} (“{legend}”), on its presort record and companion records. The Tutorial menu keeps this reference under “About the demo workspace”.", { figure: c.figure, reference, legend: c.figureLegend })
+        ? tr(ctx)("The demo is the gating strategy of {figure} of {reference} (“{legend}”), on its presort record and companion records. The Help menu keeps this reference under “About the demo workspace”.", { figure: c.figure, reference, legend: c.figureLegend })
         : tr(ctx)("The tutorial goes on with the workspace you opened. It was written for the demo: the gating strategy of {figure} of {reference}", { figure: c.figure, reference });
     },
   },
@@ -271,7 +271,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     title: "The same gate on arcsinh",
     body: (ctx) =>
       tr(ctx)(ctx.axes.xLinearOffered || ctx.axes.yLinearOffered
-        ? "Scatter opens on linear axes, and this gate was drawn on them. Under Transforms, set X and Y to Arcsinh: the gate is redrawn on the new scale, and a thin grey line appears beside its red sides."
+        ? "Scatter opens on linear axes, and this gate was drawn on them. Under Transforms, set X and Y to Arcsinh: the gate is redrawn on the new scale, and a thin grey line appears beside its straight sides."
         : "Where an axis offers a choice of scale (scatter does), Transforms sets it, and a gate shown on another scale than it was drawn on bows along its sides. These axes offer none, so the tutorial goes on."),
     // The axis still to change: X first, then Y once X is arcsinh.
     target: (ctx) => scaleSelect(ctx, "arcsinh"),
@@ -287,13 +287,13 @@ export const TOUR_STEPS: readonly TourStep[] = [
       const bowed = !axesLinear(ctx);
       const t = tr(ctx);
       return [
-        t("The red polygon joins the gate's vertices with straight sides, to work with. The thin grey line is the gate's own edge on these axes."),
+        t("The gate's outline joins its vertices with straight sides, to work with. The thin grey line is the gate's own edge on these axes."),
         t(bowed
           ? "They differ because the gate was drawn on linear axes and the plot is on arcsinh: a side that is straight on one scale bows on another."
           : "Here the two coincide: these are the axes the gate was drawn on. Shown on another scale, a straight side bows."),
         t("GateLab keeps a gate in the space it was drawn in, so changing a scale redraws the gate and never moves an event in or out of it."),
         gate?.onFlowJoGrid
-          ? t("The F on this gate's badge says it came from FlowJo and is tested on FlowJo's 256-channel grid, as FlowJo tests it, so GateLab takes the events FlowJo takes.")
+          ? t("The F on this gate's badge says it came from a FlowJo workspace and is tested on the workspace's 256-channel grid, so GateLab takes the events the workspace counted.")
           : "",
       ].filter(Boolean).join(sentenceGap(ctx));
     },
@@ -329,8 +329,8 @@ export const TOUR_STEPS: readonly TourStep[] = [
       return [
         t("In the tree on the right, click {name}: the plot keeps these axes and shows only the events inside the gate, with the gate drawn around them.", { name: name(ctx, pop, "the population this gate defines") }),
         t(gate?.onFlowJoGrid
-          ? "Along the grey edge the events end in steps: a gate from FlowJo is tested on FlowJo's 256-channel grid, so events are taken a channel at a time, and a few lie across the line."
-          : "The events end at the grey edge: that line, not the red one, is where the gate falls."),
+          ? "Along the grey edge the events end in steps: a gate from a FlowJo workspace is tested on the workspace's 256-channel grid, so events are taken a channel at a time, and a few lie across the line."
+          : "The events end at the grey edge: that line, not the straight-sided outline, is where the gate falls."),
       ].join(sentenceGap(ctx));
     },
     target: (ctx) => popRow(gatePopulation(ctx, plottedGate(ctx))),
@@ -373,7 +373,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     title: "The gate on its own axes",
     body: (ctx) =>
       tr(ctx)(ctx.axes.xLinearOffered || ctx.axes.yLinearOffered
-        ? "Under Transforms, set X and Y back to Linear. The grey edge straightens onto the red sides: these are the axes the gate was drawn on, and scatter opens on them. Nothing was regated; only the picture changed. That is how GateLab holds every gate: in the space it was drawn in, shown through whichever scale you choose."
+        ? "Under Transforms, set X and Y back to Linear. The grey edge straightens onto the gate's sides: these are the axes the gate was drawn on, and scatter opens on them. Nothing was regated; only the picture changed. That is how GateLab holds every gate: in the space it was drawn in, shown through whichever scale you choose."
         : "Where an axis offers a linear scale (scatter does), Transforms sets it, and a gate drawn on linear axes then shows its sides straight. These axes offer none, so the tutorial goes on."),
     // The axis still to change: X first, then Y once X is linear.
     target: (ctx) => scaleSelect(ctx, "linear"),
@@ -520,8 +520,8 @@ export const TOUR_STEPS: readonly TourStep[] = [
     id: "check-all-files",
     chapter: "gates",
     title: "Check every file",
-    body: "Several files can be drawn as one cloud. First tick every file: press All above the file list, or tick the boxes one by one.",
-    target: (ctx) => [labelled(ctx, ".gl-left button", "All", true), ".gl-sample-list"],
+    body: "Several files can be drawn as one cloud. First tick every file: tick Select all above the file list, or tick the files one by one.",
+    target: [".gl-sample-select-all", ".gl-sample-list"],
     pointer: "click",
     done: (ctx) => ctx.files.length > 0 && ctx.files.every((file) => file.checked),
   },
@@ -530,8 +530,8 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "gates",
     title: "Pool the files",
     body:
-      "Press “Pool selected files”: the plot pools the checked files' events, and the counts on the gates and in the tree pool with it. A file whose channels differ from the viewed file's is named above the plot and left out.",
-    target: (ctx) => [labelled(ctx, ".gl-pool-toolbar button", "Pool selected"), ".gl-pool-toolbar"],
+      "Choose “Pooled” in the file list's Single | Pooled: the plot pools the checked files' events, and the counts on the gates and in the tree pool with it. A file whose channels differ from the viewed file's is named above the plot and left out.",
+    target: ".gl-pool-toggle",
     pointer: "click",
     done: (ctx) => ctx.pooled,
   },
@@ -540,8 +540,8 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "gates",
     title: "How the events are drawn",
     body:
-      "The Display popover above the plot sets the plot mode, how many events are drawn (All events for every one), the point size and the fonts. Open it and switch the mode to Contour.",
-    target: "details.gl-display-popover > summary",
+      "The plot-type buttons above the plot switch between pseudocolour, dots and contours; the Display popover beside them sets how many events are drawn (All events for every one), the colouring, the point size and the fonts. Switch the plot to Contour.",
+    target: ".gl-plot-types",
     pointer: "click",
     done: (ctx) => ctx.displayMode === "contour",
   },
@@ -549,8 +549,8 @@ export const TOUR_STEPS: readonly TourStep[] = [
     id: "return-single",
     chapter: "gates",
     title: "Back to one file",
-    body: "Press “Return to single file” to view one file again; the checked files stay checked for the other tabs.",
-    target: (ctx) => [labelled(ctx, ".gl-pool-toolbar button", "Return to single"), ".gl-pool-toolbar"],
+    body: "Choose “Single” to view one file again; the checked files stay checked for the other tabs.",
+    target: ".gl-pool-toggle",
     pointer: "click",
     done: (ctx) => !ctx.pooled,
   },
@@ -602,7 +602,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     chapter: "illustration",
     title: "Choose what to show",
     body: "Under Data, the Populations list sets which populations the figure shows. Tick or untick one in the list (None clears them, Leaves takes every population at the end of a path); the grid follows.",
-    target: (ctx) => [labelled(ctx, "button", "Leaves", true), labelled(ctx, "button", "Use checked populations")],
+    target: (ctx) => [labelled(ctx, "button", "Leaves", true), labelled(ctx, "button", "Use highlighted populations")],
     pointer: "click",
     enter: (ctx) => ctx.illustration?.populations ?? 0,
     done: (ctx, memo) => (ctx.illustration?.populations ?? 0) !== (memo as number),
@@ -862,7 +862,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     id: "save-workspace",
     chapter: "finish",
     title: "Saving your work",
-    body: "The Workspace menu saves: “Save Portable Copy” writes one .gatelab file with the FCS data, the compensation and the gating inside, which opens anywhere. Save a copy, or Skip. Import brings in FlowJo and FACSChorus gates and Gating-ML; Export writes them back out.",
+    body: "The Workspace menu saves: “Save Portable Copy” writes one .gatelab file with the FCS data, the compensation and the gating inside, which opens anywhere. Save a copy, or Skip. Import brings in gates from FlowJo workspaces, FACSChorus experiments and Gating-ML; Export writes them back out.",
     target: (ctx) => [labelled(ctx, '[role="menuitem"]', "Save Portable Copy"), ".gl-tour-workspace-menu > button"],
     pointer: "click",
     enter: (ctx) => ctx.signals.workspaceSaves,
@@ -872,8 +872,8 @@ export const TOUR_STEPS: readonly TourStep[] = [
     id: "finish",
     chapter: "finish",
     title: "That is the tour",
-    body: "You have seen every tab. The Tutorial menu starts it again from the beginning whenever you like. Bug reports and suggestions are welcome on the repository: the link at the top right, “please leave an issue at the repo”, opens its issue tracker.",
-    target: '[data-tour="issues-link"]',
+    body: "You have seen every tab. The Help menu at the top right starts it again from the beginning whenever you like, and its “Report a bug or ask a question…” opens the repository's issue tracker for bug reports and suggestions.",
+    target: ".gl-help-menu > button",
     pointer: "none",
   },
 ];

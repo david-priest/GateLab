@@ -30,6 +30,9 @@ vi.mock("./engine/workspaceHistory", async (importOriginal) => {
 import App from "./App";
 import { readWorkspaceEnvelopeFromFile } from "./engine/workspace";
 
+/** What the page says, the status line's whole text (its tooltip) included. */
+const shown = (root: ParentNode): string => `${root.textContent ?? ""} ${root.querySelector(".gl-status-line")?.getAttribute("title") ?? ""}`;
+
 let root: Root;
 let host: HTMLDivElement;
 let uuid = 0;
@@ -118,7 +121,7 @@ describe("a workspace holding a multi-data-set file as one sample", () => {
     act(() => root.render(<App />));
     const open = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Open Workspace…")!;
     await act(async () => { open.click(); await new Promise((r) => setTimeout(r, 20)); });
-    expect(host.textContent).toContain("Opened analysis.gatelab · 1 sample");
+    expect(shown(host)).toContain("Opened analysis.gatelab · 1 sample");
     expect(host.textContent).toContain("plate.fcs holds 2 data sets and this workspace uses the first, as it was saved");
     expect(host.textContent).toContain("plate.fcs — 2 events · 2 channels");
   });

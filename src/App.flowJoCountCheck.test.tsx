@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Counts against FlowJo: a FlowJo workspace records an event count on every population, and once
+// Counts against the workspace: a FlowJo workspace records an event count on every population, and once
 // its strategy is imported the result line says how many of the populations count exactly as
 // FlowJo recorded, with a dialog that sets the two counts side by side for each file and says
 // whether a difference arises at a population's own gate or is inherited from one above it.
@@ -107,7 +107,7 @@ async function feed(selector: string, file: File | File[]): Promise<void> {
 const openDialog = () => host.querySelector<HTMLElement>('[aria-label="Open a FlowJo workspace"]');
 async function importWorkspace(wsp: string, fcs: string[]): Promise<void> {
   act(() => root.render(<App />));
-  await feed('input[accept=".gatelab,.wsp,.cef"]', fileOf("strategy.wsp", wsp));
+  await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', fileOf("strategy.wsp", wsp));
   expect(openDialog()).not.toBeNull();
   await feed('input[data-role="flowjo-workspace-fcs"]', fcs.map((name) => fileOf(name, Uint8Array.from([1]))));
   const button = [...openDialog()!.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Import")!;
@@ -119,18 +119,18 @@ async function importWorkspace(wsp: string, fcs: string[]): Promise<void> {
   for (let i = 0; i < 6; i++) await settle();
 }
 const line = () => host.querySelector<HTMLElement>(".gl-flowjo-check-line");
-const report = () => host.querySelector<HTMLElement>('[aria-label="Counts against FlowJo"]');
+const report = () => host.querySelector<HTMLElement>('[aria-label="Counts against the workspace"]');
 async function showCounts(): Promise<void> {
   await act(async () => { line()!.querySelector("button")!.click(); });
 }
 const rowsOf = () => [...report()!.querySelectorAll("tbody tr")].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent));
 
-describe("Counts against FlowJo, after a FlowJo workspace is imported", () => {
+describe("Counts against the workspace, after a FlowJo workspace is imported", () => {
   it("says every population counts as FlowJo recorded where it does", async () => {
     await importWorkspace(wspOf(sampleOf("D1.fcs", tree(1))), ["D1.fcs"]);
-    expect(line()!.textContent).toContain("At import, all 2 populations compared counted exactly as FlowJo recorded.");
+    expect(line()!.textContent).toContain("At import, all 2 populations compared counted exactly as the workspace recorded.");
     await showCounts();
-    expect(report()!.textContent).toContain("All 2 populations compared count exactly as FlowJo recorded.");
+    expect(report()!.textContent).toContain("All 2 populations compared count exactly as the workspace recorded.");
     expect(rowsOf().map((cells) => cells.slice(0, 4))).toEqual([
       ["CD4_positive", "2", "2", "0"],
       ["Naive", "1", "1", "0"],
@@ -139,9 +139,9 @@ describe("Counts against FlowJo, after a FlowJo workspace is imported", () => {
 
   it("counts the populations that differ, and says a difference is the gate's own where everything above is exact", async () => {
     await importWorkspace(wspOf(sampleOf("D1.fcs", tree(2))), ["D1.fcs"]);
-    expect(line()!.textContent).toContain("At import, 1 of 2 populations compared counted exactly as FlowJo recorded.");
+    expect(line()!.textContent).toContain("At import, 1 of 2 populations compared counted exactly as the workspace recorded.");
     await showCounts();
-    expect(report()!.textContent).toContain("1 of 2 populations compared count exactly as FlowJo recorded.");
+    expect(report()!.textContent).toContain("1 of 2 populations compared count exactly as the workspace recorded.");
     expect(report()!.textContent).toContain("The largest difference is −1 events (−50.00%) on Naive.");
     const rows = rowsOf();
     expect(rows[0].slice(0, 5)).toEqual(["CD4_positive", "2", "2", "0", "0"]);
@@ -160,7 +160,7 @@ describe("Counts against FlowJo, after a FlowJo workspace is imported", () => {
 
   it("compares each file of a per-file import with its own sample's counts", async () => {
     await importWorkspace(wspOf(sampleOf("D1.fcs", tree(1)), sampleOf("D2.fcs", tree(2))), ["D1.fcs", "D2.fcs"]);
-    expect(line()!.textContent).toContain("At import, 3 of 4 populations compared counted exactly as FlowJo recorded.");
+    expect(line()!.textContent).toContain("At import, 3 of 4 populations compared counted exactly as the workspace recorded.");
     await showCounts();
     const files = [...report()!.querySelectorAll<HTMLButtonElement>(".gl-chorus-stats-files button")];
     // A file with a population that differs carries how many beside its name.

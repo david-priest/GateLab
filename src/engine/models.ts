@@ -58,9 +58,11 @@ export type GateSpace = "raw" | "display";
  *
  * `flowjoChannels` is FlowJo's gate grid (flowjoGrid.ts): the axis quantised to `channels`
  * integer channels by FlowJo's rule for its `axis`, events clamped to the grid, vertices on it. It
- * arrives only on polygons imported from a .wsp with "Evaluate gates as FlowJo does" on, and
+ * arrives only on polygons imported from a .wsp with "Evaluate gates on the recorded grid" on, and
  * only on both axes of a gate at once. Editing such a gate keeps its vertices on channels; no
- * gate is ever drawn on it.
+ * gate is ever drawn on it. `rule: "flowjo11"` is FlowJo 11's grid (a polygon from a .flowjo
+ * workbench): an event goes to the channel its value falls in, rounded down rather than to the
+ * nearest, and the vertices stay where FlowJo 11 saved them, between channels (flowjoGrid.ts).
  *
  * `bounds` is a Gating-ML 2.0 transformation's boundMin and boundMax, in the spec's own output
  * units: a transformed value below `min` is taken as `min`, and one above `max` as `max`, before
@@ -71,6 +73,7 @@ export type TransformSpec =
   | { kind: "identity"; bounds?: TransformBounds }
   | { kind: "asinh"; cofactor: number; bounds?: TransformBounds }
   | { kind: "logicle"; T: number; W: number; M: number; A: number; bounds?: TransformBounds }
+  | { kind: "hyperlog"; T: number; W: number; M: number; A: number; bounds?: TransformBounds }
   | {
     kind: "biex"; maxValue: number; pos: number; neg: number; widthBasis: number; channelRange: number;
     /** 4096 on FlowJo's table; absent on a spec saved before it, which keeps the old table. */
@@ -91,7 +94,7 @@ export type TransformSpec =
       standard?: boolean;
       bounds?: TransformBounds;
     }
-  | { kind: "flowjoChannels"; channels: number; axis: FlowJoGridAxis };
+  | { kind: "flowjoChannels"; channels: number; axis: FlowJoGridAxis; rule?: "flowjo11" };
 
 /**
  * One axis of FlowJo's gate grid, as the sample's <Transformations> element saved it: a linear
@@ -274,6 +277,72 @@ export function flowJoCurlForDisplay(spanX: number, spanY: number): QuadrantCurl
   };
 }
 
+/**
+ * Leaning quadrant arms: FlowJo's "spider" quadrant.
+ *
+ * A centre and four straight arms running from it to four end points on the edges of a box: `down`
+ * on its bottom edge, `right` on its right edge, `up` on its top edge and `left` on its left edge.
+ * The box is the one the ends span (spiderBox), and each arm leans independently. Each quadrant is
+ * the polygon bounded by the centre, its two arm ends and the corner of the box between them, so
+ * x−/y− is bounded by `left`, the lower-left corner and `down`; an event outside the box is in no
+ * quadrant. In the gate's own coordinates, like the centre.
+ *
+ * That is FlowJo's definition. FlowJo 10 writes a spider quadrant as four PolygonGates with quadId
+ * 0 to 3, each exactly that polygon, the box being the plot's range; FlowJo 11 as one `spiderQuad`
+ * whose five display vertices are [centre, down, right, up, left], which is this order, the ends
+ * on the 0-256 display's edges. Over the 216 spider-quadrant populations FlowJo counted in the
+ * FlowRepository corpus this reading and FlowJo's four polygons hold the same events; reading the
+ * arms as rays past the box moved 27 of them, 8 away from FlowJo's own count (2026-10-22).
+ */
+export interface QuadrantArms {
+  down: [number, number];
+  right: [number, number];
+  up: [number, number];
+  left: [number, number];
+}
+
+/** The arms in counter-clockwise order, as the quadrants between them run. */
+export const QUADRANT_ARM_ORDER = ["down", "right", "up", "left"] as const;
+
+/** The box a spider quadrant's arm ends span, [xmin, xmax, ymin, ymax]: the edges they lie on. */
+export function spiderBox(arms: QuadrantArms): [number, number, number, number] {
+  return [arms.left[0], arms.right[0], arms.down[1], arms.up[1]];
+}
+
+/**
+ * Whether arms make a spider quadrant about `center`: every end finite, the centre strictly inside
+ * the box the ends span, and each end on its own edge of that box, within it (down and up between
+ * the left and right edges, left and right between the bottom and top). With the ends so placed the
+ * four arms run counter-clockwise from `down`; one quadrant may span more than a half-turn.
+ */
+export function validArms(center: readonly number[], arms: unknown): arms is QuadrantArms {
+  if (!arms || typeof arms !== "object" || center.length !== 2) return false;
+  const a = arms as Record<string, unknown>;
+  for (const key of QUADRANT_ARM_ORDER) {
+    const p = a[key];
+    if (!Array.isArray(p) || p.length !== 2 || !p.every((v) => typeof v === "number" && Number.isFinite(v))) return false;
+  }
+  const [cx, cy] = center;
+  if (!Number.isFinite(cx) || !Number.isFinite(cy)) return false;
+  const { down, right, up, left } = a as unknown as QuadrantArms;
+  const [x0, x1, y0, y1] = spiderBox(a as unknown as QuadrantArms);
+  if (!(x0 < cx && cx < x1 && y0 < cy && cy < y1)) return false;
+  const within = (v: number, lo: number, hi: number) => v >= lo && v <= hi;
+  return within(down[0], x0, x1) && within(up[0], x0, x1) && within(left[1], y0, y1) && within(right[1], y0, y1);
+}
+
+/** A copy of the arms that shares no array with them. */
+export function cloneArms(arms: QuadrantArms): QuadrantArms {
+  return { down: [arms.down[0], arms.down[1]], right: [arms.right[0], arms.right[1]], up: [arms.up[0], arms.up[1]], left: [arms.left[0], arms.left[1]] };
+}
+
+/** Whether any arm leans off its axis; one whose arms do not is the crosshair within its box. */
+export function armsLean(center: readonly number[], arms: QuadrantArms | undefined): boolean {
+  if (!arms) return false;
+  return arms.down[0] !== center[0] || arms.up[0] !== center[0]
+    || arms.right[1] !== center[1] || arms.left[1] !== center[1];
+}
+
 export interface QuadrantGate {
   gate_id: string;
   name: string;
@@ -283,6 +352,8 @@ export interface QuadrantGate {
   center: [number, number];
   /** Curved arms beyond the crosshair; absent means a straight crosshair. */
   curl?: QuadrantCurl;
+  /** A spider quadrant's four arms, each leaning on its own, within their box (QuadrantArms); never with `curl`. */
+  arms?: QuadrantArms;
   /** Space the vertices are straight in; absent = this sample's pre-field default. */
   space?: GateSpace;
   /** Per-axis transform the gate was drawn under. Present only when space is display. */
@@ -461,6 +532,12 @@ export function validateGate(gate: Gate): true {
   }
   if (gate.gate_type === "quadrant" && (gate as QuadrantGate).curl !== undefined && !validCurl((gate as QuadrantGate).curl)) {
     throw new Error("Quadrant gate curl must have a positive finite power and finite kx, ky");
+  }
+  if (gate.gate_type === "quadrant" && gate.arms !== undefined) {
+    if (gate.curl !== undefined) throw new Error("Quadrant gate cannot have both curled and leaning arms");
+    if (!validArms(gate.center, gate.arms)) {
+      throw new Error("Quadrant gate arms must end on their own edges of the box they span, with the centre inside it");
+    }
   }
   return true;
 }

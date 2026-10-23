@@ -24,9 +24,9 @@ The agent cannot save. "Save to SCE" in GateLabR and the workspace save in the b
 - **host** — `{app, version, host, workspaceName}`.
 - **channels** — one per channel: `key` (the name every other tool and command uses), `label`, `pnn` ($PnN), `marker`, `kind` (`scatter` | `fluorescence` | `cytof` | `other`) and `transform`, the display transform the axis is drawn with (for example `{kind: "asinh", cofactor: 5}` on a mass cytometry channel; `linear`, `logicle` or `biex` on flow).
 - **samples** — one per file or SCE sample: `id`, `name`, `events`, `viewed` (the one on the plot), `checked` (ticked in the file list: pooled and taken by the other tabs), and `metadata`, the Metadata tab's columns for this sample (an SCE's colData that is constant within the sample, for example `condition`, `batch`).
-- **rootPopulationId** and **populations** — the tree in display order. Each population: `id`, `name`, `parentId`, `depth`, `gates` (`[{gateId, include, quadrant?}]`: the population is the AND of these, a gate with `include: false` excluded, `quadrant` 0–3 for one corner of a quadrant gate), `counts` per sample (`{sampleId, n, parentN, percentOfParent}`) and `pooled` (`{n, parentN, percentOfParent, percentOfTotal}` over every sample).
-- **gates** — each: `id`, `name`, `type` (`rectangle` | `polygon` | `quadrant` | `ellipse`), `x`, `y` (channel keys), `space` (`display` | `raw` | null for a gate saved without one), `transforms` where the gate records them, and its geometry in its own space: `vertices` (a rectangle is two opposite corners; a polygon its vertices in order), `bounds` for a rectangle (`half-open`: an event on the upper edge of either axis is outside; `closed`), `center` for a quadrant (the crosshair), `ellipse` (`{mean, covariance, distanceSquare}`), `color`, and `provenance` (`{by, rationale, at}`) on gates an agent made.
-- **view** — `{populationId, sampleId, x, y, tab, ranges: {x: [lo, hi] | null, y: …}}`: what the user's Gating plot shows, with the axis ranges in display units.
+- **rootPopulationId** and **populations** — the tree in display order. Each population: `id`, `name`, `parentId`, `depth`, `gates` (`[{gateId, include, quadrant?}]`: the population is the AND of these, a gate with `include: false` excluded, `quadrant` 1–4 for one corner of a quadrant gate (1 = upper left, 2 = upper right, 3 = lower right, 4 = lower left; the positive side includes the crosshair)), `counts` per sample (`{sampleId, n, parentN, percentOfParent}`) and `pooled` (`{n, parentN, percentOfParent, percentOfTotal}` over every sample). A population is not evaluated for a sample whose own tree (a tailored or group copy whose structure was unlocked and changed) has no counterpart for it: that sample's count has `n` and `percentOfParent` null and a `notEvaluated` note naming the file and its tree, and it is left out of `pooled`, as the Statistics tab shows it. Report it as not evaluated, never as 0.
+- **gates** — each: `id`, `name`, `type` (`rectangle` | `polygon` | `quadrant` | `ellipse`), `x`, `y` (channel keys), `space` (`display` | `raw` | null for a gate saved without one), `transforms` where the gate records them, and its geometry in its own space: `vertices` (a rectangle is two opposite corners; a polygon its vertices in order), `bounds` for a rectangle (`half-open`: an event on the upper edge of either axis is outside; `closed`), `center` for a quadrant (the crosshair) and, for a spider quadrant, `arms` (`{down, right, up, left}`, the ends of its four arms on the edges of the box they span; each quadrant is the polygon of the centre, its two arm ends and the box corner between them, and an event outside the box is in none), `ellipse` (`{mean, covariance, distanceSquare}`), `color`, and `provenance` (`{by, rationale, at, source}`) on gates a command or a strategy proposal made (section 16): `source` is `agent` for yours, or the source of a proposal the user accepted in the tab; a gate made before sources were recorded has none.
+- **view** — `{populationId, sampleId, x, y, tab, ranges: {x: [lo, hi] | null, y: …}, strategy}`: what the user's Gating plot shows, with the axis ranges in display units, the tab on screen, and `strategy`, what the Strategy tab draws as its controls hold it (`{mode: "single" | "multi", populationIds, fullPath}`; null until the tab has been opened or a workspace restored it).
 
 Populations are addressed by `id`, gates by `id`, channels by `key`, samples by `id`. Names are for people; two populations may share a name.
 
@@ -45,15 +45,17 @@ Populations are addressed by `id`, gates by `id`, channels by `key`, samples by 
 - With `y`: also `grid`, `bins × bins` counts, row-major by y bin then x bin: `grid[yi * bins + xi]`.
 - `range` fixes the axes (`{x: [lo, hi], y: [lo, hi]}`) so series compare bin for bin; otherwise each series spans its own data.
 
-**gatelab_stats** `{populationIds?, channels?, thresholds?, populationId?, sampleIds?, pooled?}` — per population and series: `n`, `medians` per channel in display units (null where no event is finite), and with `thresholds` (`{channelKey: value}` in display units) `positive`, the fraction of the population at or above each threshold, 0 to 1. Over more than 200,000 events the medians and fractions are read on every k-th event and `sampled` is true; `n` is still the full count.
+**gatelab_stats** `{populationIds?, channels?, thresholds?, populationId?, sampleIds?, pooled?}` — per population and series: `n`, `medians` per channel in display units (null where no event is finite), and with `thresholds` (`{channelKey: value}` in display units) `positive`, the fraction of the population at or above each threshold, 0 to 1. Over more than 200,000 events the medians and fractions are read on every k-th event and `sampled` is true; `n` is still the full count. In both tools a series that includes a sample the population is not evaluated for carries `notEvaluated`, one note per such sample, and reads none of its events.
 
 **gatelab_view** `{populationId?, sampleId?, x?, y?, fit?, xRange?, yRange?}` — sets the user's Gating plot: the population, the sample and the two channels, then the axes. `fit: true` fits them as the Fit button does (the viewed file's 0.1st to 99.9th percentiles, widened to the gates on those channels) — note that this drops the pile at zero of an arcsinh axis. `fit: "data"` fits them to every event of every sample, 2% past the last, widened to the gates, so nothing is cut off. `xRange` / `yRange` hold an axis at a range in display units (as the Scales tab's Min/Max does), applied after any fit. The reply is the view with the `ranges` now shown. The view is the user's too: setting it moves their plot.
 
-**gatelab_render** `{width?}` — a PNG of the Gating plot as the user sees it: the events of the active population, the current axes, the gates on those channels. Set the view first. The reply carries the view and the pixel size.
+**gatelab_view** with `strategy` `{populationIds, mode?, fullPath?}` (and `tab: "strategy"`, the default when `strategy` is given) opens the user's Strategy tab on those populations, for them to inspect, export or print. One population is drawn as its gating path, a strip of plots (`mode: "single"`; `fullPath: true` takes every gate from the root rather than the population's own, and leaving it out keeps the tab's setting); several, or `mode: "multi"`, are drawn together in one grid laid out as the tree from the root. The ids are populations of the active tree from the latest describe, each once, not the root; a population of another tree is refused by name, since the tab draws the active one. `fullPath` with `mode: "multi"` is refused, and so are `x`, `y`, `fit`, `xRange` and `yRange`, which set the Gating plot. Only the tab's controls change: no gate, no selection in the tree, and the revision does not move, so an open gating search continues. The Strategy tab draws the viewed file, or the Gating tab's pool when the user has pooled the checked files; `sampleId` changes the viewed file. The reply's `strategy` is what the tab now holds; a tab that did not take the selection is `failed`, and a core from before this feature answers on the Gating tab, which the relay reports as `unknown-method`. `tab: "strategy"` without `strategy` opens the tab on what it last drew.
+
+**gatelab_render** `{width?}` — a PNG of the plot on screen. On the Gating tab: the events of the active population, the current axes, the gates on those channels. On the Strategy tab: the strategy grid as its PNG, SVG and PDF exports compose it (every panel, the arrows, the title), once the tab has finished drawing; an empty grid is refused with the tab's own status line. Set the view first. The reply carries the view and the pixel size.
 
 **gatelab_wait_for_change** `{timeoutSeconds?}` — waits for the next change the user makes (or the timeout, 60 s by default; null then) and returns the new revision.
 
-Two more methods reach the tab through `gatelab_export` rather than tools of their own: **workspace** (the workspace JSON as the app saves it, without the data) and **memberships** (per population, one packed bit mask per sample, least significant bit first, as the colData export packs them).
+Two more methods reach the tab through `gatelab_export` rather than tools of their own: **workspace** (the workspace JSON as the app saves it, without the data) and **memberships** (per population, one packed bit mask per sample, least significant bit first, as the colData export packs them; a sample the population is not evaluated for has no bits and a `notEvaluated` note).
 
 ## 6. Changing the gating
 
@@ -69,7 +71,7 @@ A command that fails a check is refused as a whole — nothing changes — with 
 | `createEllipse` | `name`, `parentId`, `x`, `y`, `space`, `center: [x, y]`, `radii: [rx, ry]` | An axis-aligned ellipse of those semi-axes (in the command's space) and its population. For a density-following ellipse take the mean and SD of the cells from a 2-D distribution and use a multiple of the SDs. | A radius not positive. |
 | `definePopulation` | `name`, `parentId`, `gates: [{gateId, include}]` | A population from gates already drawn: the AND of them, a NOT for `include: false`. | No gates; `include` not boolean; an unknown gate. |
 | `editGate` | `gateId`, `vertices` | Replaces a rectangle's corners or a polygon's vertices in the gate's own space; the population is re-evaluated. Prefer it to delete-and-redraw. | As `createGate`'s vertex checks; a quadrant or ellipse. |
-| `moveQuadrantCenter` | `gateId`, `center` | Moves a quadrant's crosshair. | Not a quadrant. |
+| `moveQuadrantCenter` | `gateId`, `center` | Moves a quadrant's crosshair; a spider quadrant's arm ends stay where they are. | Not a quadrant; a spider quadrant's centre outside its box. |
 | `renameGate` / `renamePopulation` | `gateId` \| `populationId`, `name` | Renames. | Empty name; unknown id. |
 | `movePopulation` | `populationId`, `targetId`, `placement: "inside" \| "before" \| "after"` | Moves a population under or beside another, with its subtree. | The root; onto itself; unknown ids. |
 | `deleteGate` | `gateId` | Removes the gate. **Its population stays, now ungated (100% of its parent).** | Unknown gate. |
@@ -85,9 +87,9 @@ Conventions that are not checked but matter:
 
 ## 7. What the user sees and does
 
-- Every gate the agent makes carries `provenance {by, rationale, at}`; the tab shows the badge with `by` (the relay's `--writer` name) on the gate card and the rationale in its tooltip.
+- Every gate the agent makes carries `provenance {by, rationale, at, source: "agent"}`; the tab shows a badge naming the source on the gate card, `by` (the relay's `--writer` name) and the rationale in its tooltip, and the whole record under the badge.
 - The user may edit, move, rename, undo or delete anything, including the agent's gates, at any time. The tab sends a `changed` event with the new revision after every change, the user's or the agent's; the relay keeps the latest revision (`gatelab_status`) and `gatelab_wait_for_change` returns when it moves. After a change, call `gatelab_describe` again before building on ids or counts.
-- `gatelab_view` moves the user's plot. Use it to show them what you are looking at, and put it back on their population when you are done.
+- `gatelab_view` moves the user's plot, or opens their Strategy tab. Use it to show them what you are looking at, and put it back on their population when you are done. The Strategy tab's controls stay as you left them until the user changes them, and are written with the workspace at its next save (in GateLabR, its next autosave).
 - The user alone saves. In GateLabR an autosave keeps the gates in the SCE after every change, but the memberships the R readers need are stored only by the user's "Save to SCE"; say so when a result is ready to be read in R.
 
 ## 8. Rules of good gating with these tools
@@ -134,4 +136,77 @@ gatelab_preview {command: {type: "createRange", name: "CD45RO+CD62L+ (agent)", p
 gatelab_apply {command: …, rationale: "Memory gate from the two marginal valleys …", expectedRevision: 2}
 gatelab_distribution {x: "CD62L", populationId: R, sampleIds: […]}       → six samples with CD62L dim: report them
 gatelab_view {populationId: R, x: "CD62L", y: "CD45RO", fit: "data"} ; gatelab_render
+gatelab_view {strategy: {populationIds: [P1, <the new population>]}} ; gatelab_render   → both strategies in one grid, for the user to print
 ```
+
+## 13. Context and reference-label feedback
+
+`gatelab_context` reads the active population chain, channel transforms, sample metadata, assay binding and actual plot sample selection. Checked samples are not necessarily pooled: incompatible trees, panels or assay layers can be left out of the plot. `plotSelection` is the actual plot pool. `populationCountScope` remains all loaded samples. Older cores return null for unavailable assay and plot selection rather than guessing. `gateVisibility` names the selected and checked gates when available: selection can bring a sibling gate onto a branch-scoped plot.
+
+`gatelab_evaluate {referencePath, populationIds, sampleIds, groupBy?, projectedPrevalence?}` reads the tab's cumulative membership masks without changing the workspace. Every sample must be named explicitly. Each population is scored over all events in those samples, including target cells lost at ancestors. Replies contain pooled and per-sample confusion counts, precision, recall, F1, false-positive rate, prevalence and abundance bias in percentage points. `groupBy` names a sample-metadata column for additional grouped results; missing grouping values are refused. `stages` and `perSampleStages` show target retention and losses from the root through each requested population. Counts are exact, not the plotted event cap or a balanced subsample. Undefined ratios are null. Unevaluated sample/population pairs are excluded with a reason, not scored as zero selections.
+
+The reference file is local JSON. For example, a synthetic five-event sample whose second and third events are labelled positive has packed bits 00000110, encoded as `Bg==`:
+
+```json
+{
+  "format": "gatelab-reference-masks",
+  "version": 1,
+  "label": "CD4_positive",
+  "eventOrder": "as-loaded",
+  "sampleManifestSha256": "COPY_FROM_GATELAB_CONTEXT",
+  "sampleMasks": [
+    {"sampleId": "D1", "eventCount": 5, "membershipBitsBase64": "Bg=="}
+  ]
+}
+```
+
+Bits are least significant first in each sample's loaded event order. The producer must derive them from the same event identities and order as the loaded data. The manifest hash covers ordered sample IDs/names/counts, channel keys/transforms and available assay binding; it does not prove within-sample event identity. Mask lengths, duplicate IDs, padding, manifest, revision and nested memberships are checked. The tool refuses feedback if the describe snapshot changes while memberships are read. A successful check cannot detect a same-length, silently reordered reference. Keep the original identity audit with the reference file.
+
+Labels are supplied reference annotations, not evidence of biological correctness. State whether feedback uses training or validation samples, preserve their natural prevalence, and do not open final-test labels while developing proposals. `projectedPrevalence` optionally reports expected precision at a stated prevalence, assuming the measured sensitivity and false-positive rate remain unchanged; it is not a held-out measurement.
+
+## 14. Optional local transport audit
+
+Launch the server with `--audit /absolute/path/agent-calls.jsonl` to append a local request/response record. `--writer` names the gate writer; it is not a model identifier. Optional `--model` records a caller-declared model string with that limitation explicit; without it model identity is unknown. The session record includes the MCP version and SHA-256 hashes of the relay/tool sources and guide. The connected tab reports its own version; a core commit is not inferred from that version.
+
+The audit includes command parameters, rationales, previews, returned IDs, revisions and feedback. It contains sample metadata and other tool outputs, so keep it in the approved local experiment record. Image pixels are replaced by a hash. An audit request is written before a tool starts. If response logging fails after an apply, the reply retains the operation result and warns to inspect state before retrying. Server tool calls are serialized, with or without auditing, so multi-request feedback cannot interleave with another tool's mutation. `gatelab_wait_for_change`, `gatelab_status` and `gatelab_guide` run beside that queue: a pending wait does not hold up other calls. Audit records supplement an experiment notebook; they do not replace its scientific provenance.
+
+`gatelab_export` also records context and refuses an inconsistent workspace/membership snapshot. It remains a local export, not a Save to SCE operation.
+
+## 15. Gating searches: population and cluster modes
+
+The Agent menu's **Agent-assisted gating…** dialog explains both modes, prepares a request for the connected agent, and displays its target, progress and stopping state. It does not contain an LLM or automatically derive labels from an SCE.
+
+- **Population mode** fits a known or user-described phenotype. Inspect distributions and explain marker choices and boundaries. No reference-concordance score is reported without labels.
+- **Cluster mode** reconstructs explicit labels supplied as aligned local reference masks (section 13). These annotations are the optimization target, not biological ground truth. Fix training and validation samples before searching. With `groupBy`, grouping values must also be disjoint, so repeated acquisitions from one donor cannot cross the split. Final test samples belong in neither list.
+
+`gatelab_fit_start` declares mode, target, budget (1–100 candidates), a new absolute `historyPath`, and `trainingSampleIds`. Cluster mode also requires `validationSampleIds` and `references: [{key, path}]`, using the reference format of section 13. The objective is the macro average across targets of `f1` (default), `precision` or `recall`, minus `complexityPenalty × distinct gates` (default zero), optionally subject to `minPrecision`. Choices cannot change during a session.
+
+`gatelab_fit_candidate` takes a rationale, a complete list of steps from the unchanged baseline, and a target mapping: a strategy proposal (section 16). Each step is `{key, command}`. Later ID fields can use `@key.population` or `@key.gate` when a step created exactly one such object, and `@root` for the active tree's root. Quadrants create four populations and have no single-population alias. Target mappings name reference keys in cluster mode or descriptive keys in population mode. For example:
+
+```json
+{
+  "rationale": "Keep the broad parent, then remove the double-low wedge.",
+  "steps": [
+    {"key":"parent", "command":{"type":"createGate","shape":"rectangle","name":"Parent","parentId":"ROOT_ID","x":"X","y":"Y","space":"display","vertices":[[0,0],[6,6]]}},
+    {"key":"child", "command":{"type":"createGate","shape":"polygon","name":"CD4_positive","parentId":"@parent.population","x":"X","y":"Y","space":"display","vertices":[[2,0],[6,0],[6,6],[0,6],[0,2]]}}
+  ],
+  "targets":{"positive":"@child.population"}
+}
+```
+
+The tab evaluates reducer copies with its native core and exports only selected samples' masks. No dispatch, selection change, autosave or SCE write occurs. Nested membership includes every ancestor. Cluster feedback contains training precision, recall, F1, sample results and target losses at each ancestor. Revise complete candidates from these errors: relax an ancestor that loses targets, refine an impure terminal, or use a local exit when a shared parent is incompatible. Polygons may have at most 128 vertices. A candidate may have at most 128 steps; a host may set a lower limit, and the refusal names the limit in force. A clipped-corner rectangle removes a double-low wedge; clipping fixed bounds can only remove events, so adjust bounds and the diagonal together when recovery needs to increase. Accepted and native-refused candidates consume the budget and are retained. Malformed tool arguments are refused before preview.
+
+The agent proposes and optimizes; the server supplies feedback and enforces the declared protocol. It does not guarantee a global optimum. The loop is **propose → native preview → training feedback → revise → freeze → human review**. A change to the live tree, the data, the assay or the samples' metadata ends the session; selecting a population or gate, viewing another file or panning in the tab does not. While a cluster search runs, `gatelab_evaluate` scores only its training samples; validation is read once, by `gatelab_fit_finish`.
+
+`gatelab_fit_finish` closes cluster search before reading validation, scores valid retained candidates once, and selects the highest declared objective subject to constraints. Ties prefer fewer gates, then earlier candidates. No further candidate is accepted, including after validation failure. Population mode instead requires `candidateId` and a selection rationale. The frozen proposal retains original commands and aliases. Hypothetical IDs must never be applied as live IDs: replay original commands through the reviewed workflow, rebinding aliases to IDs returned by each actual apply. Saving remains the user's action.
+
+The mandatory append-only JSONL history contains the baseline, manifest, declared references and hashes, rationales, geometry, training feedback and final validation selection. Keep this private local artifact in the experiment record. Existing history files are never overwritten. `gatelab_fit_cancel` or **End search** stops a search without applying or undoing gates. A server restart loses its active in-memory search; the history remains. Restarting after seeing validation is a new experiment and cannot be described as an untouched holdout. This protocol cannot stop other tools or the user inspecting test labels; blinding remains an experimental responsibility.
+
+## 16. Strategy proposals
+
+A whole strategy proposed at once (keyed steps, the `@key.population`, `@key.gate` and `@root` aliases, and the target populations) is a strategy proposal, whatever proposes it. An agent is one source of them; a host is another (GateLabR sends one from R), and a file can be a third. Every source gets the same checks: at most 128 steps (or the lower limit the host sets), keys that are unique identifiers, no undo or redo, each command checked as `gatelab_apply` checks it, and 1 to 128 targets that resolve to populations.
+
+- **From an agent**, the relay's `proposal` method (used by `gatelab_fit_candidate`) replays the steps on a copy of the gating and returns the populations, gates and memberships. Nothing changes; the method name and the tools are as they were, so a tab with an older core still answers them. A frozen proposal is applied command by command with `gatelab_apply`, as section 15 says.
+- **From any other source**, the tab replays the proposal the same way and opens a Strategy proposal dialog: the source, the writer, the rationale, the steps, the gates and populations it makes, any existing gate or population it would change or remove, and the pooled counts of its new and target populations. Nothing changes until the user chooses Apply proposal; the proposal is then applied exactly as previewed, as one step that Undo removes. Reject drops it. If the gating changed while the dialog was open, the tab previews the proposal again on the gating as it is and the user decides again.
+- Every gate an applied proposal makes records its source in `provenance.source`: `agent` for the relay, otherwise the source the proposal named (`autogate`, `host` or `file`). The agent sees these gates in `gatelab_describe` like any other, and a `changed` event when one is applied.
+

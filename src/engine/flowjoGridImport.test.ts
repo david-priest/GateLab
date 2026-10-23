@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// The FlowJo importer under "Evaluate gates as FlowJo does" (FlowJoImportOptions.flowJoGrid): which
+// The FlowJo importer under "Evaluate gates on the recorded grid" (FlowJoImportOptions.flowJoGrid): which
 // gates go on FlowJo's grid, which stay continuous and say so, and FlowJo's rectangle rules, each
 // against the option off. Synthetic workspace, file, gate and channel names.
 
@@ -96,9 +96,9 @@ describe("which FlowJo polygons go on FlowJo's grid", () => {
       const kinds = Object.values(byName(name).transforms ?? {}).map((t) => t.kind);
       expect(kinds, name).not.toContain("flowjoChannels");
     }
-    const note = conv.warnings.find((w) => /evaluated continuously rather than on FlowJo's grid/.test(w))!;
+    const note = conv.warnings.find((w) => /evaluated continuously rather than on the recorded grid/.test(w))!;
     expect(note).toMatch(/"OnTime" is on a Time axis/);
-    expect(note).toMatch(/"Gained" is on G-A, whose axis FlowJo's grid is not established for/);
+    expect(note).toMatch(/"Gained" is on G-A, whose axis the grid rule is not established for/);
     expect(note).toMatch(/"GainedPrefixed" is on H-A/);
     expect(note).toMatch(/"Panel" is a panel of a quadrant gate/);
     expect(note).toMatch(/"Unresolved" declares no gate resolution/);
@@ -120,7 +120,7 @@ describe("which FlowJo polygons go on FlowJo's grid", () => {
   it("puts nothing on the grid with the option off, and says nothing about it", () => {
     const { conv, byName } = imported(xml, { flowJoGrid: false });
     expect(conv.gridPolygons).toBe(0);
-    expect(conv.warnings.some((w) => /FlowJo's grid/.test(w))).toBe(false);
+    expect(conv.warnings.some((w) => /recorded grid/.test(w))).toBe(false);
     const scatter = byName("Scatter");
     expect(scatter.space ?? "raw").toBe("raw");
     expect(scatter.gate_type === "polygon" && scatter.vertices[0]).toEqual([20000, 20000]);
@@ -282,7 +282,7 @@ describe("FlowJo's rectangle rules", () => {
     for (const name of ["UnderTable", "UnderOffset", "UnderOffset2D"]) expect(notes).toContain(`"${name}" lies wholly below`);
     // In the language the app is in, when it passes its translation.
     const ja = flowJoWorkspaceToGatingML(xml, 0, null, undefined, { flowJoGrid: true, translate: (text, values) => translateUi("ja", text, values) }).warnings.join(" ");
-    expect(ja).toContain("「UnderTable」はB-A上でFlowJoのbiexテーブルの下端（");
+    expect(ja).toContain("「UnderTable」はB-A上でbiexテーブルの下端（");
     expect(ja).toContain("「UnderOffset」はL-A上でlog軸のオフセット（100）より完全に下にあります。");
     expect(ja).not.toContain("lies wholly below");
   });

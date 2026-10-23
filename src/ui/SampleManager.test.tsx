@@ -99,10 +99,12 @@ describe("SampleNavigator", () => {
     expect(badges.map((b) => b.textContent)).toEqual(["2"]);
     expect(badges[0].title).toBe("2 gates tailored for this file: Cells, Singlets");
     expect(badges[0].closest(".gl-sample-row")!.textContent).toContain("donor-b.fcs");
-    expect(host.querySelector(".gl-sample-scope-key")!.textContent).toContain("gates tailored for that file");
+    // The header counts the tailored files; the badge's key is with the keys, in the header's ⋯.
+    expect(host.querySelector(".gl-sample-count")!.textContent).toContain(" · 1 tailored");
+    expect([...host.querySelectorAll(".gl-sample-more-menu .gl-sample-key-hint")].map((el) => el.textContent)).toContain("n = gates tailored for that file");
   });
 
-  it("tags a file with its group, and the Groups menu acts on the selected files", () => {
+  it("lists a file under its group's header, and the Groups menu acts on the selected files", () => {
     const onGroupAction = vi.fn();
     const tagged: SampleListItem[] = [{ ...items[0], group: "Treated", groupColour: "#e6820e" }, { ...items[1] }];
     act(() => root.render(
@@ -125,11 +127,15 @@ describe("SampleNavigator", () => {
         onInvertIncluded={vi.fn()}
       />,
     ));
-    const tags = [...host.querySelectorAll<HTMLElement>(".gl-sample-row .gl-sample-group")];
-    expect(tags.map((tag) => tag.textContent)).toEqual(["Treated"]);
-    expect(tags[0].closest(".gl-sample-row")!.textContent).toContain("donor-a.fcs");
-    expect(tags[0].style.background).toContain("230, 130, 14"); // the group's own colour
-    const item = (cls: string) => host.querySelector<HTMLButtonElement>(`.gl-sample-groups-menu .${cls}`)!;
+    // One place says which group a file is in: the header it sits under. No chip on the row.
+    expect(host.querySelector(".gl-sample-row .gl-sample-group")).toBeNull();
+    const sections = [...host.querySelectorAll<HTMLElement>(".gl-sample-group-section")];
+    expect(sections.map((section) => section.getAttribute("aria-label"))).toEqual(["Treated", "No group"]);
+    expect(sections.map((section) => [...section.querySelectorAll(".gl-sample-row .gl-sample-name")].map((name) => name.textContent))).toEqual([["donor-a.fcs"], ["donor-b.fcs"]]);
+    expect(sections[0].style.getPropertyValue("--gl-group-colour")).toBe("#e6820e"); // the header and the bar
+    expect(sections[1].style.getPropertyValue("--gl-group-colour")).toBe("");
+    expect(sections[0].querySelector(".gl-sample-row")!.getAttribute("title")).toContain("In the group Treated");
+    const item = (cls: string) => host.querySelector<HTMLButtonElement>(`.gl-sample-more-menu .${cls}`)!;
     expect(item("gl-sample-group-new").textContent).toBe("New group from the 1 selected…");
     act(() => item("gl-sample-group-new").click());
     expect(onGroupAction).toHaveBeenCalledWith({ kind: "new" });
@@ -168,9 +174,55 @@ describe("SampleNavigator", () => {
     expect(item("gl-sample-group-from-metadata").disabled).toBe(false);
     act(() => item("gl-sample-group-from-metadata").click());
     expect(onGroupAction).toHaveBeenCalledWith({ kind: "fromMetadata" });
-    // Creation first, then the assignments, then each group's own entries, separated.
-    const labels = [...host.querySelectorAll<HTMLElement>(".gl-sample-groups-menu [role='menuitem'], .gl-sample-groups-menu [role='separator']")].map((el) => el.getAttribute("role") === "separator" ? "—" : el.textContent);
-    expect(labels).toEqual(["New group from the 1 selected…", "Groups from a metadata column…", "—", "Add the 1 selected to Treated", "Remove the 1 selected from their group", "—", "Rename Treated…", "Delete Treated…"]);
+    // Creation first, then the assignments, then the renames, and the deletes last, each run separated.
+    // In the header's ⋯, after Manage files… and before Invert selection.
+    const all = [...host.querySelectorAll<HTMLElement>(".gl-sample-more-menu [role='menuitem'], .gl-sample-more-menu [role='separator']")].map((el) => el.getAttribute("role") === "separator" ? "—" : el.textContent);
+    const labels = all.slice(all.indexOf("Manage files…") + 1, all.indexOf("Invert selection"));
+    expect(labels).toEqual(["New group from the 1 selected…", "Groups from a metadata column…", "—", "Add the 1 selected to Treated", "Remove the 1 selected from their group", "—", "Rename Treated…", "—", "Delete Treated…"]);
+  });
+
+  it("folds a group's files away, keeps the fold for the viewer, and leaves folded files out of the arrow keys", () => {
+    localStorage.removeItem("gatelab.fileList.foldedGroups");
+    const onInspect = vi.fn();
+    const grouped: SampleListItem[] = [
+      { id: "D1", name: "D1.fcs", eventCount: 100, channelCount: 2, group: "Treated", groupColour: "#e6820e" },
+      { id: "D2", name: "D2.fcs", eventCount: 100, channelCount: 2 },
+      { id: "D3", name: "D3.fcs", eventCount: 100, channelCount: 2, group: "Control", groupColour: "#2f6fe4" },
+      { id: "D4", name: "D4.fcs", eventCount: 100, channelCount: 2, group: "Treated", groupColour: "#e6820e" },
+    ];
+    const render = () => root.render(
+      <SampleNavigator items={grouped} activeId="D1" excludedIds={new Set()} busy={false} importProgress={null}
+        groups={[{ id: "g2", name: "Control" }, { id: "g1", name: "Treated" }]}
+        onOpenFiles={vi.fn()} onOpenFolder={vi.fn()} onManage={vi.fn()} onManageSample={vi.fn()}
+        onActivate={vi.fn()} onInspect={onInspect} onToggleIncluded={vi.fn()}
+        onIncludeAll={vi.fn()} onIncludeNone={vi.fn()} onInvertIncluded={vi.fn()} />,
+    );
+    act(render);
+    const heads = () => [...host.querySelectorAll<HTMLButtonElement>(".gl-sample-group-head")];
+    const rows = () => [...host.querySelectorAll<HTMLElement>(".gl-sample-row")].map((row) => row.querySelector(".gl-sample-name")!.textContent);
+    // The groups' own order, then the files in no group; each header counts its files.
+    expect(heads().map((head) => head.textContent)).toEqual(["Control1", "Treated2", "No group1"]);
+    // Open: each head's chevron turns down.
+    expect(heads().every((head) => head.querySelector(".gl-icon-chevron.is-open"))).toBe(true);
+    expect(rows()).toEqual(["D3.fcs", "D1.fcs", "D4.fcs", "D2.fcs"]);
+    act(() => heads()[0].click());
+    expect(heads()[0].getAttribute("aria-expanded")).toBe("false");
+    expect(rows()).toEqual(["D1.fcs", "D4.fcs", "D2.fcs"]);
+    // Up from the first row lands on nothing folded away.
+    const first = host.querySelector<HTMLElement>(".gl-sample-row")!;
+    act(() => first.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true })));
+    expect(onInspect).not.toHaveBeenCalled();
+    act(() => first.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true })));
+    expect(onInspect).toHaveBeenLastCalledWith("D2");
+    expect(document.activeElement?.querySelector(".gl-sample-name")?.textContent).toBe("D2.fcs");
+    // The fold comes back with the list.
+    act(() => root.unmount());
+    root = createRoot(host);
+    act(render);
+    expect(rows()).toEqual(["D1.fcs", "D4.fcs", "D2.fcs"]);
+    act(() => heads()[0].click());
+    expect(rows()).toEqual(["D3.fcs", "D1.fcs", "D4.fcs", "D2.fcs"]);
+    expect(JSON.parse(localStorage.getItem("gatelab.fileList.foldedGroups") ?? "null")).toEqual([]);
   });
 
   it("shows no badge and no key while nothing is tailored", () => {
@@ -193,7 +245,8 @@ describe("SampleNavigator", () => {
       />,
     ));
     expect(host.querySelector(".gl-sample-tailored")).toBeNull();
-    expect(host.querySelector(".gl-sample-scope-key")!.textContent).not.toContain("tailored");
+    expect(host.querySelector(".gl-sample-count")!.textContent).not.toContain("tailored");
+    expect([...host.querySelectorAll(".gl-sample-more-menu .gl-sample-key-hint")].map((el) => el.textContent).join(" ")).not.toContain("tailored");
   });
 
   it("keeps active-sample selection separate from display and analysis inclusion", () => {
@@ -231,10 +284,34 @@ describe("SampleNavigator", () => {
     expect(onToggleIncluded).toHaveBeenCalledWith("b", true);
     expect(onActivate).toHaveBeenCalledTimes(1);
 
-    const invert = [...host.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent === "Invert")!;
-    act(() => invert.click());
+    // Invert is in the header's ⋯.
+    act(() => host.querySelector<HTMLButtonElement>(".gl-sample-more-menu .gl-sample-invert")!.click());
     expect(onInvertIncluded).toHaveBeenCalledTimes(1);
+  });
+
+  it("has one Select all box: mixed while some are checked, and a click from some or none selects all, from all none", () => {
+    const onIncludeAll = vi.fn();
+    const onIncludeNone = vi.fn();
+    const render = (excluded: string[]) => act(() => root.render(
+      <SampleNavigator items={items} activeId="a" excludedIds={new Set(excluded)} busy={false} importProgress={null}
+        onOpenFiles={vi.fn()} onOpenFolder={vi.fn()} onManage={vi.fn()} onManageSample={vi.fn()} onActivate={vi.fn()}
+        onToggleIncluded={vi.fn()} onIncludeAll={onIncludeAll} onIncludeNone={onIncludeNone} onInvertIncluded={vi.fn()} />,
+    ));
+    const box = () => host.querySelector<HTMLInputElement>(".gl-sample-select-all input")!;
+    render(["b"]);
+    expect([box().checked, box().indeterminate]).toEqual([false, true]);
+    act(() => box().click());
+    expect(onIncludeAll).toHaveBeenCalledTimes(1);
+    render([]);
+    expect([box().checked, box().indeterminate]).toEqual([true, false]);
+    act(() => box().click());
+    expect(onIncludeNone).toHaveBeenCalledTimes(1);
+    render(items.map((item) => item.id));
+    expect([box().checked, box().indeterminate]).toEqual([false, false]);
+    act(() => box().click());
+    expect(onIncludeAll).toHaveBeenCalledTimes(2);
+    // No All, None or Invert buttons beside it.
+    expect([...host.querySelectorAll(".gl-sample-inclusion-actions button")].map((b) => b.textContent)).toEqual([]);
   });
 });
 
@@ -310,7 +387,7 @@ describe("FolderImportModal", () => {
 });
 
 // Dragging FCS files onto the samples panel is just another way to reach the same import as
-// "+ Files…", so the panel has to arm for file drags only, stay inert while an import is running
+// "Add files…", so the panel has to arm for file drags only, stay inert while an import is running
 // or when samples come from a host, and report folders rather than silently dropping them.
 describe("SampleNavigator drag and drop", () => {
   function renderNavigator(props: {
@@ -489,7 +566,7 @@ describe("sorting samples by name", () => {
   }
 
   function sortButton(label: string): HTMLButtonElement | undefined {
-    return [...host.querySelectorAll<HTMLButtonElement>("button")]
+    return [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")]
       .find((button) => button.textContent?.trim() === label);
   }
 

@@ -6,8 +6,8 @@
 //
 // Each case is one gate of a set's file, imported on its own with what it depends on (its
 // parent_id chain and the gates a BooleanGate references) and every transformation and matrix the
-// file declares: GateLab refuses a whole file for one gate it cannot hold (a QuadrantGate, a
-// hyperlog), and each case should say what happens to its own gate. The gate's population is then
+// file declares: GateLab refuses a whole file for one gate it cannot hold (a QuadrantGate),
+// and each case should say what happens to its own gate. The gate's population is then
 // compared with the suite's per-event truth, event by event.
 import { readFileSync } from "node:fs";
 import { gunzipSync, strFromU8 } from "fflate";

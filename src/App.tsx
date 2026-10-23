@@ -2,8 +2,9 @@
 // GateLabR) with live counts. Drawing a gate opens the name/population modal; the plot
 // shows the active population's events plus its gates (display space).
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState, type SetStateAction } from "react";
 import { usePopoverDismissal } from "./ui/usePopoverDismissal";
+import { BiexAxisControl } from "./ui/BiexAxisControl";
 import { figureBlockFrame } from "./ui/LayoutFigure";
 import { proportionsBlockFrame } from "./ui/LayoutProportions";
 import { buildProportionsModel, defaultProportionsSettings, type ProportionsSettings } from "./engine/proportionsModel";
@@ -14,13 +15,20 @@ import brandLogo from "./assets/brand/gatelab-logo.jpg";
 import brandWordmarkR from "./assets/brand/gatelabr-wordmark.png";
 import brandLogoR from "./assets/brand/gatelabr-logo.jpg";
 import { clearPersistedTabState, readPersistedTabValues, readProportionsSettings, restorePlottingState, savedPlottingState, writeProportionsSettings } from "./ui/tabState";
-import { historyShortcutAction } from "./ui/historyShortcuts";
+import { historyShortcutAction, isDeleteShortcut } from "./ui/historyShortcuts";
+import { ModalEscape } from "./ui/useModalEscape";
+import { ActionNote } from "./ui/ActionNote";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type GatingPlotActions, type NewGate } from "./plots/GatingPlot";
-import { startPanSession } from "./plots/panGesture";
-import { buildPlotGates, type PlotGate } from "./plots/gatePayload";
+import { startPanSession, zoomAnchored } from "./plots/panGesture";
+import { axisWindowBounds, clampToAxisWindow } from "./plots/axisWindow";
+import { buildPlotGates, keepOpenSides, type PlotGate } from "./plots/gatePayload";
+import { HistogramPlot, type RangeEdit } from "./plots/HistogramPlot";
+import type { AxisTicks } from "./engine/ticks";
+import { liveGateIdsInFileTree, noFileFollowsTree, pooledVersions, tailoredInCopy, viewedFileGates, withOwnGateMasks, workspaceTrees, type DrawnGate, type PooledVersion, type TailoredVersion } from "./plots/tailoredGates";
 import { FIT_GATE_DEFAULTS, clampFitSettings, fitGateToEvents, type FitGateResult, type FitGateSettings } from "./engine/fitGate";
 import { FitGatePanel } from "./ui/FitGatePanel";
 import { branchScopedGateOrder } from "./engine/branchGates";
+import { DEFAULT_GATE_LABEL_BACKGROUND, DEFAULT_GATE_LINE_WIDTH, GATE_INK, GATE_REFERENCE_INK, GateInkContext, MAX_GATE_LINE_WIDTH, MIN_GATE_LINE_WIDTH, inkedForDisplay, restoredColouredGates, restoredGateLabelBackground, restoredGateLineWidth, type GateInk } from "./plots/gateInk";
 import {
   isFlowJoWorkspace,
   listFlowJoWorkspaceSamples,
@@ -35,6 +43,7 @@ import {
   type FlowJoWorkspacePairing,
   type FlowJoSpillover,
 } from "./engine/flowjoWorkspace";
+import { flowJo11WorkbenchToWorkspace, isFlowJo11WorkbenchName, readFlowJo11Workbench } from "./engine/flowjo11Workbench";
 import { isDivaWorkspace, listDivaGateTrees, listDivaTubes, pairDivaTube, divaToGatingML, type DivaGateTreeSummary, type DivaTubeSummary } from "./engine/divaWorkspace";
 import { isChorusExperimentFile, readChorusExperiment, listChorusTrees, chorusToGatingML, chorusRecordingToGatingML, hasChorusRecording, readChorusRecording, treeSignature, type ChorusExperiment, type ChorusTreeSummary } from "./engine/chorusExperiment";
 import { exportChorusExperiment } from "./engine/chorusExport";
@@ -45,8 +54,9 @@ import { ChorusStatisticsModal } from "./ui/ChorusStatisticsModal";
 import { checkAgainstFlowJo, flowJoCountCheckCsv, type FlowJoCountCheck, type FlowJoReference } from "./engine/flowjoCountCheck";
 import { FlowJoCountCheckModal } from "./ui/FlowJoCountCheckModal";
 import { EmptyState } from "./ui/EmptyState";
-import { MenuButton, type MenuEntry } from "./ui/MenuButton";
-import { ContextMenu, type ContextMenuState } from "./ui/ContextMenu";
+import { MenuButton, type MenuEntry, type MenuItem } from "./ui/MenuButton";
+import { ContextMenu, DISMISS_MENUS_EVENT, type ContextMenuState } from "./ui/ContextMenu";
+import { ColourPopover } from "./ui/ColourPopover";
 import { snapGatesToBorders } from "./engine/borderSnap";
 import { quadrantPopulationNames, shortChannelLabel, type QuadrantNaming } from "./engine/quadrantNames";
 import { covarianceFromAxes, ellipseBoundary } from "./engine/ellipse";
@@ -83,7 +93,7 @@ import {
   type MarkerColourScale,
 } from "./engine/markerColour";
 import { assignDivisionLevel, divisionPalette } from "./engine/division";
-import { decodeUint8Base64, encodeFloat32Base64, encodeUint8Base64 } from "./engine/encode";
+import { decodeFloat32Base64, decodeUint8Base64, encodeFloat32Base64, encodeUint8Base64 } from "./engine/encode";
 import {
   aggregateGateCounts,
   aggregatePopulationTreeStats,
@@ -105,6 +115,7 @@ import {
 } from "./engine/gatingml";
 import { exportGatingML, type GatingMLFormat } from "./engine/gatingmlExport";
 import { exportFlowJoWorkspace, flowJoWorkspaceBytesAtMost, planFlowJoExport, type FlowJoExportSample } from "./engine/flowjoExport";
+import { exportFlowJo11Workbench } from "./engine/flowjo11Export";
 import { formatByteSize, planFlowJoFolder, previewFlowJoFolder, writableName, writeFlowJoFolder, writeFlowJoZip } from "./engine/flowjoExportFolder";
 import {
   gatingMergeSpaceConflict,
@@ -169,14 +180,14 @@ import { BarcodeSchemeImportModal, type BarcodeImportDraft } from "./ui/BarcodeS
 import { BarcodeSaveModal, type BarcodeSaveChoice, type BarcodeSaveSummary } from "./ui/BarcodeSaveModal";
 import { HierarchyModal, type HierarchyModalMode } from "./ui/HierarchyModal";
 import type { GroupAction } from "./ui/SampleManager";
-import { cloneHierarchyTree, correspondingHierarchyId, fileHierarchyId, newHierarchyId, referencedGateIds, storeHierarchy, uniqueHierarchyName, hierarchyColour } from "./engine/hierarchies";
+import { canonicalGateId, cloneHierarchyTree, correspondingHierarchyId, fileHierarchyId, isCopyRef, newHierarchyId, referencedGateIds, storeHierarchy, uniqueHierarchyName } from "./engine/hierarchies";
 import { gateChannelKeys, gatesMissingChannels, planChannelKeyRemap, remapGateChannels, savedFileTreeGates } from "./engine/workspaceChannelKeys";
 import { briefReason, describeUnpaired, distinctFileNames, filesToHold, isPaired, namesInBrief, openTreeIndex, plannedFlowJoOpen, reasonWasCut, tiedDataSetsNote, workspaceFilesInFolder, type ChosenTree, type SkippedFile } from "./engine/flowjoOpen";
 import { compareIdentity, describeAgreement, describeContradiction, identityKeywords, sameFileName } from "./engine/fileIdentity";
 import { templateNameFromOrigin, type TailoredFile } from "./engine/tailoredImport";
 import { describeDiffering, planOneTreeImport, sameStructure, tailorFilesToTree } from "./engine/oneTreeImport";
 import { groupsOf, templateOf } from "./engine/groups";
-import { copyOnOwnChannels, gateGeometryEquals, tailoredGateIds } from "./engine/templateSync";
+import { copyOnOwnChannels, gateGeometryEquals, withGeometryOf } from "./engine/templateSync";
 import type { HierarchyRef, StoredHierarchy } from "./engine/hierarchies";
 import {
   SAMPLE_ASSAY_BINDING_SCHEMA,
@@ -209,14 +220,12 @@ import {
   pickWritableDirectory,
   rememberPickerLocation,
   writeHandle,
-  writeHandleStream,
-  saveAsHandle,
-  saveAsHandleStream,
   ensurePermission,
   readFromHandleIfPermitted,
   rememberHandle,
   recallHandle,
-  type PickedFileSource, rememberDirectoryHandle, recallDirectoryHandle } from "./engine/fsAccess";
+  type PickedFileSource, rememberDirectoryHandle, recallDirectoryHandle, readPickedFile, READ_REFUSED_MESSAGE, pickFilesWithChooser } from "./engine/fsAccess";
+import { handleWritesRefused, saveToNewFile, saveToOpenFile } from "./saveFallback";
 import {
   describeRequirement,
   indistinguishableDuplicateNames,
@@ -245,24 +254,30 @@ import {
   recomputeOwnTreeGating,
   gatingKeyedByLiveTree,
   promoteRefusal,
+  switchedOnGateIds,
+  groupColour,
   type Action,
   type Derived,
+  type GateEditAction,
   type GatingDerived,
   type PopulationDisplaySelection,
 } from "./store";
-import { GateList } from "./ui/GateList";
+import { GateList, type TailorSwitch } from "./ui/GateList";
 import { GATE_EDGE_MODES, type GateEdgeMode } from "./ui/gateEdgeModes";
 import { resolveFlowJoTarget } from "./engine/flowjoWorkspace";
-import { isUnbounded, type GateSpace, type Gate } from "./engine/models";
+import { GATE_COLORS, isUnbounded, type GateSpace, type Gate } from "./engine/models";
 import type { ChannelLabelMode } from "./engine/sample";
-import { gateSpaceBadge } from "./engine/gateSpaceBadge";
+import { gateSpaceBadge, type GateSpaceBadge } from "./engine/gateSpaceBadge";
 import { isFlowJoGridGate } from "./engine/flowjoGrid";
-import { HierarchyControls, PopulationTree, type EditTarget, type TreeControlsProps } from "./ui/PopulationTree";
-import { GateModals } from "./ui/GateModals";
-import { GateToolbar, PopToolbar } from "./ui/Toolbars";
+import { legacyTreeNote, POPULATION_TREE_HINT, PopulationTree, treeMenuItems, type TreeControlsProps } from "./ui/PopulationTree";
+import { BisectorModal, GateModals } from "./ui/GateModals";
+import { Pane } from "./ui/Pane";
+import { gateIdsToDelete, highlightedPopIds } from "./ui/gateSelection";
+import { PlusIcon } from "./ui/icons";
+import { HelpHint } from "./ui/HelpHint";
 import { FlowJoGridOption } from "./ui/FlowJoGridOption";
 import { stampHostedWorkspace } from "./engine/workspaceFeatures";
-import { RenameModal, CreatePopModal, EditPopModal, ConfirmModal, BulkRenameModal, FcsExportModal, GatingMlImportModal, GatingMlExportModal, FlowJoExportModal, GroupsFromMetadataModal, type FlowJoExportScope, type MetadataGroupsPreview } from "./ui/CrudModals";
+import { RenameModal, CreatePopModal, EditPopModal, ConfirmModal, BulkRenameModal, FcsExportModal, GatingMlImportModal, GatingMlExportModal, FlowJoExportModal, FlowJo11ExportModal, GroupsFromMetadataModal, type FlowJoExportScope, type MetadataGroupsPreview } from "./ui/CrudModals";
 import { StatsTab } from "./ui/StatsTab";
 import { PanelTab } from "./ui/PanelTab";
 import { MetadataTab } from "./ui/MetadataTab";
@@ -276,7 +291,21 @@ import type {
   CompensationCandidatePreviewSolver,
   CompensationSweepSolver,
 } from "./ui/CompensationTab";
-import { StrategyTab, type StrategyConfig } from "./ui/StrategyTab";
+import type { CompensationMatricesProps } from "./ui/CompensationMatrices";
+import {
+  baselineFromEmbedded,
+  buildMatrixLibrary,
+  copyName,
+  duplicateOfRow,
+  embeddedFlowMatrixOf,
+  importedFlowMatrix,
+  planMatrixSwitch,
+  withDerivedActiveProfile,
+  type EmbeddedFlowMatrix,
+  type FileCompensationUse,
+  type MatrixLibraryRow,
+} from "./ui/compensationLibrary";
+import { GRID_ID as STRATEGY_GRID_ID, StrategyTab, type StrategyConfig, type StrategyRequest } from "./ui/StrategyTab";
 import { FigureWorkspace } from "./ui/FigureWorkspace";
 import {
   allowedByLocks,
@@ -299,7 +328,7 @@ import {
 import { WorkspaceRelinkModal } from "./ui/WorkspaceRelinkModal";
 import { forgetRecentWorkspace, listRecentWorkspaces, rememberRecentWorkspace, type RecentWorkspace } from "./engine/recentWorkspaces";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
-import { NavigateIcon, RectIcon, PolyIcon, EllipseIcon, QuadIcon } from "./ui/icons";
+import { NavigateIcon, RectIcon, PolyIcon, EllipseIcon, QuadIcon, RangeIcon, BisectorIcon, HistogramIcon, ZoomInIcon, ZoomOutIcon } from "./ui/icons";
 import { useSampleDataRevisionKey } from "./ui/useSampleDataRevisions";
 import { useContextualGlobalScales, type GlobalScales } from "./ui/useContextualGlobalScales";
 import {
@@ -307,6 +336,8 @@ import {
   normalizeDensityColorPower,
 } from "./engine/pseudocolor";
 import { createDefaultLayoutWorkspace, effectiveLayoutStyle, layoutGridFrames, normalizeLayoutWorkspace, type LayoutGridCell, type LayoutPlotRecipe, type LayoutPlotStyle, type LayoutStrategyRecipe, type LayoutWorkspace, cloneLayoutWorkspace, nextLayoutItemPosition, type LayoutGridHeading, type LayoutGridHeadings } from "./engine/layout";
+import { ArrowLeftIcon, ArrowRightIcon, RedoIcon, RefreshIcon, ResetIcon, UndoIcon } from "./ui/icons";
+import { workspaceShortcutAction, type WorkspaceShortcutAction } from "./ui/historyShortcuts";
 import { DensityColourControl } from "./ui/DensityColourControl";
 import { MarkerColourBar, type MarkerColourBarTick } from "./ui/MarkerColourBar";
 import { MarkerColourControl } from "./ui/MarkerColourControl";
@@ -316,7 +347,7 @@ import { UI_LANGUAGE_OPTIONS, useI18n, type UiLanguage } from "./ui/i18n";
 import { hostObjectName, hostWords } from "./ui/hostWording";
 import { useTour } from "./tour/useTour";
 import { resolveTourTarget, TourOverlay } from "./tour/TourOverlay";
-import { TourMenu } from "./tour/TourMenu";
+import { HelpMenu } from "./tour/HelpMenu";
 import { DEMO_WORKSPACE_CITATION, DEMO_WORKSPACE_FILE, DEMO_WORKSPACE_PATH } from "./tour/tourScript";
 import type { TourContext, TourNeeds } from "./tour/tourTypes";
 import { useOptionalGateLabHost } from "./host/HostContext";
@@ -358,13 +389,16 @@ import {
 import { AgentLink, parseAgentUrl, type AgentLinkStatus } from "./agent/agentLink";
 // The lab Drive workspace is loaded by dynamic import behind __GATELAB_DRIVE__; only its types here.
 import type * as DriveModule from "./drive";
-import type { DriveOpened, DriveOpenedFcs, DriveTarget, DriveWriter } from "./drive/types";
+import type { DriveOpened, DriveOpenedFcs, DriveReconnectAction, DriveTarget, DriveWriter } from "./drive/types";
 import type { DriveSaveAsRequest } from "./drive/DriveSaveDialogs";
 import type { NewExperimentProgress } from "./drive/newExperiment";
-import { createAgentHandler, type AgentAdapter, type AgentSampleView } from "./agent/handler";
+import { createAgentHandler, type AgentAdapter, type AgentHandler, type AgentSampleView, type StrategyReviewer } from "./agent/handler";
+import { StrategyMovedError, type StrategyReview } from "./proposals/strategyProposal";
+import { hostProposalId, parseHostProposal, type HostProposalChannel, type HostStrategyProposal } from "./proposals/hostProposals";
+import { StrategyProposalReview } from "./ui/StrategyProposalReview";
 import { AgentMenu } from "./agent/AgentMenu";
-import { renderPlotPng } from "./agent/renderPlot";
-import type { AgentView as AgentViewState, AgentViewParams } from "./agent/protocol";
+import { renderGridPng, renderPlotPng } from "./agent/renderPlot";
+import type { AgentView as AgentViewState, AgentViewParams, AgentGatingTask } from "./agent/protocol";
 import {
   GATELAB_HOST_COLDATA_CONTRACT_VERSION,
   type GateLabHostCategoricalColumn,
@@ -375,7 +409,7 @@ import {
   GateLabWorkspaceConflictError,
   type GateLabHostWorkspaceWriteResult,
 } from "./host/workspaceContract";
-import { lazyChunk } from "./ui/lazyChunk";
+import { lazyChunk, setChunkReloadGuard } from "./ui/lazyChunk";
 import {
   SceColDataExportModal,
   type ScePopulationColumnSpec,
@@ -413,6 +447,10 @@ import { similarityScores, type SimilarityColumn } from "./engine/similarity";
 
 import { imageFolderStem, imageHandleKey, isSidecarName, pairImageFolders, pairSidecars } from "./engine/sidecarNames";
 import { usePersistedTabState } from "./ui/tabState";
+import { clampSidePaneWidth, MIN_SIDE_PANE_WIDTH, restoredSidePaneWidth, sidePaneMaxWidthCss } from "./ui/sidePaneWidth";
+/** The gate list's height in the side pane, dragged by the divider under it (David, 2026-10-23). */
+const DEFAULT_GATE_LIST_HEIGHT = 200;
+const MIN_GATE_LIST_HEIGHT = 80;
 
 const CompensationTab = lazy(lazyChunk("CompensationTab", async () => {
   const module = await import("./ui/CompensationTab");
@@ -452,7 +490,7 @@ const FCS_WITH_IMAGES_ACCEPT = { "application/octet-stream": [".fcs", ".cvw"] };
 /** A waveform file on its own, attached to the viewed sample. */
 const CVW_FILE_ACCEPT = { "application/octet-stream": [".cvw"] };
 /** Picker types for the tables and workspaces the sidebar imports through pickFilesOrInput. */
-const GATING_IMPORT_ACCEPT = { "application/xml": [".xml", ".wsp"], "application/zip": [".cef"] };
+const GATING_IMPORT_ACCEPT = { "application/xml": [".xml", ".wsp"], "application/zip": [".cef", ".flowjo"] };
 const TABLE_FILE_ACCEPT = { "text/csv": [".csv", ".tsv", ".txt"] };
 
 
@@ -476,7 +514,11 @@ const fmtCofactor = (cofactor: number): string =>
   : cofactor >= 1000 ? `${(cofactor / 1000).toFixed(1)}K`
   : `${Math.round(cofactor)}`;
 const INITIAL_LEFT_PANE_WIDTH = 330;
-const INITIAL_RIGHT_PANE_WIDTH = 672;
+// The side pane's starting width; its rows fit down to 320 px (container queries in styles.css),
+// so the centre keeps room for the plot and its two strips.
+const INITIAL_RIGHT_PANE_WIDTH = 460;
+/** What the side pane leaves the centre when it fits itself to the population names. */
+const CENTRE_RESERVE = 600;
 /**
  * How long the background gating of the files not on the plot runs before it yields for a
  * paint. Below one 60 Hz frame, so gate editing stays responsive while it runs.
@@ -492,7 +534,7 @@ type CrudModal =
   | { kind: "bulkRename" }
   | { kind: "exportSceColData" };
 
-type DrawMode = "navigate" | "draw-rect" | "draw-poly" | "draw-ellipse" | "draw-quadrant";
+type DrawMode = "navigate" | "draw-rect" | "draw-poly" | "draw-ellipse" | "draw-quadrant" | "draw-range" | "draw-bisector";
 type LiveWorkspaceFile = WorkspaceFile | WorkspaceFileV3;
 
 /**
@@ -544,7 +586,7 @@ export function gatingImportNeedsDecision(
   fileCount = 1,
 ): boolean {
   if (fileCount > 1) return true;
-  // "Evaluate gates as FlowJo does" has not been asked yet: the dialog is where it is asked.
+  // "Evaluate gates on the recorded grid" has not been asked yet: the dialog is where it is asked.
   if (pending.flowJoGridChoice) return true;
   // Compensation rewrites every fluorescence value, so it is never applied unasked. A FlowJo
   // workspace opened through its own dialog has been asked: that dialog states the matrix the gates
@@ -773,7 +815,7 @@ interface PendingGatingMLImport {
    */
   missingMatrix?: { supplied: string | null; useFcs: boolean; error: string | null };
   /**
-   * "Evaluate gates as FlowJo does", for a FlowJo workspace imported onto the loaded files from
+   * "Evaluate gates on the recorded grid", for a FlowJo workspace imported onto the loaded files from
    * the Import menu, which no earlier dialog asked: the import dialog offers it, and `redo` reads
    * the workspace again with the other answer, staging the import afresh. Absent where the dialog
    * that opened the workspace asked it.
@@ -793,11 +835,34 @@ interface PendingNewGate {
   coordinateBindingKeys: readonly [string, string];
 }
 
+/** A bisector placed on the histogram view, waiting for its names: the channel and the split in display units. */
+interface PendingBisector {
+  channel: string;
+  split: number;
+  sampleId: string;
+  dataRevision: number;
+  coordinateBindingKey: string;
+}
+
 interface CachedSampleGating {
   sample: Sample;
   dataRevision: number;
   gateVersion: number;
+  /** Under the live tree: what the R host's memberships and an agent read. */
   gating: GatingDerived;
+  /**
+   * Under the file's own tree, keyed by the live tree, when the file is gated under a copy (its
+   * own or its group's): what the plot, the pooled counts and the population tree show.
+   */
+  display?: GatingDerived;
+}
+
+/** The tree's version of a gate no pooled file is gated with: its dashed outline is this grey. */
+const UNUSED_TREE_GATE_COLOUR = "#9aa1ab";
+
+/** What a file shows: its own tree's gating where it has one, else the live tree's. */
+function displayGatingOf(cached: CachedSampleGating): GatingDerived {
+  return cached.display ?? cached.gating;
 }
 
 /** Save data to a file the user downloads (local blob; user-initiated). */
@@ -813,6 +878,23 @@ function downloadBlob(filename: string, blob: Blob) {
 }
 const downloadText = (filename: string, text: string, mime: string) =>
   downloadBlob(filename, new Blob([text], { type: mime }));
+
+/** Where the FlowJo 11 export last said the FCS files are, kept for the next export in this browser. */
+const FLOWJO11_FOLDER_STORAGE_KEY = "gatelab.flowjo11Export.fcsFolder";
+function rememberedFlowJo11Folder(): string {
+  try {
+    return globalThis.localStorage?.getItem(FLOWJO11_FOLDER_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+function rememberFlowJo11Folder(folder: string): void {
+  try {
+    globalThis.localStorage?.setItem(FLOWJO11_FOLDER_STORAGE_KEY, folder);
+  } catch {
+    // Kept for this export only.
+  }
+}
 
 const makeWorkspaceId = (): string =>
   globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -848,9 +930,19 @@ class WorkspaceUnwritableError extends Error {}
 const DRAW_TOOLS: { id: DrawMode; Icon: () => React.ReactElement; title: string }[] = [
   { id: "navigate", Icon: NavigateIcon, title: "Navigate (pan / zoom)" },
   { id: "draw-rect", Icon: RectIcon, title: "Rectangle gate — drag a box" },
-  { id: "draw-poly", Icon: PolyIcon, title: "Polygon gate — click vertices, double-click to close" },
+  { id: "draw-poly", Icon: PolyIcon, title: "Polygon gate — click vertices; click the first vertex again to close. Backspace removes the last vertex; Escape cancels" },
   { id: "draw-ellipse", Icon: EllipseIcon, title: "Ellipse gate — drag from the centre outward" },
   { id: "draw-quadrant", Icon: QuadIcon, title: "Quadrant gate — click the crosshair centre" },
+];
+
+/**
+ * The tools of the histogram view. A range gate is a rectangle with the channel on both axes, so it
+ * is drawn here and nowhere else; the scatter tools have no meaning on one axis.
+ */
+const HISTOGRAM_TOOLS: typeof DRAW_TOOLS = [
+  DRAW_TOOLS[0],
+  { id: "draw-range", Icon: RangeIcon, title: "Range gate — drag along the axis" },
+  { id: "draw-bisector", Icon: BisectorIcon, title: "Bisector — click where two ranges should meet" },
 ];
 
 /**
@@ -873,10 +965,10 @@ export const CYTOF_OWNED_TARGETS = ".saved-gate, .gate-label, .cytof-xlabel, .cy
 /** What to do instead of merging a sample's trees, under a per-file import onto loaded files. */
 const MERGED_TREES_ADVICE_LOADED = "To import one of them alone, import the workspace onto the viewed file again and choose that tree.";
 
-const MODES: { id: DisplayMode; label: string }[] = [
-  { id: "pseudocolor", label: "Pseudocolor" },
-  { id: "dots", label: "Dots" },
-  { id: "contour", label: "Contour" },
+const MODES: { id: DisplayMode; label: string; short: string }[] = [
+  { id: "pseudocolor", label: "Pseudocolor", short: "Pseudo" },
+  { id: "dots", label: "Dots", short: "Dots" },
+  { id: "contour", label: "Contour", short: "Contour" },
 ];
 
 // Center-column tabs, mirroring GateLabR's tabsetPanel. The left (samples/import/export)
@@ -1138,14 +1230,18 @@ function plotInteractionTokenFor(
   ]);
 }
 
+/** The main plot's point opacity and mark radius (px) for a new workspace (David, 2026-10-23). */
+const DEFAULT_POINT_ALPHA = 0.75;
+const DEFAULT_POINT_SIZE = 1;
+
 /** Point-mark settings restored from a workspace, clamped to the ranges the UI offers. */
 function restoredPointAlpha(value: unknown): number {
   const v = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(v) ? Math.max(0.05, Math.min(1, v)) : 0.4;
+  return Number.isFinite(v) ? Math.max(0.05, Math.min(1, v)) : DEFAULT_POINT_ALPHA;
 }
 function restoredPointSize(value: unknown): number {
   const v = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(v) ? Math.max(0.5, Math.min(2, v)) : 1.5;
+  return Number.isFinite(v) ? Math.max(0.5, Math.min(2, v)) : DEFAULT_POINT_SIZE;
 }
 
 /** A categorical colData column as fetched from the host: level names and per-sample codes. */
@@ -1170,11 +1266,16 @@ function categoricalPalette(column: HostCategoricalValues, palette: PaletteName)
   return column.colors ?? paletteColors(palette, column.levels.length);
 }
 
-export default function App() {
+export default function App({ hostProposals = null }: {
+  /** Where the host's strategy proposals arrive (proposals/hostProposals.ts); none in the browser. */
+  hostProposals?: HostProposalChannel | null;
+} = {}) {
   const providedHost = useOptionalGateLabHost();
   const fallbackBrowserHost = useMemo(() => createBrowserHost(), []);
   const host = providedHost ?? fallbackBrowserHost;
   const isSceHost = host.kind === "r-sce";
+  /** Where the Help menu sends a bug report or a reader of the release notes. */
+  const repositoryUrl = isSceHost ? "https://github.com/david-priest/GateLabR" : "https://github.com/david-priest/GateLab";
   const hostBuild = host.build;
   /** The commit the embedded core was built from, short, where the host states it. */
   const coreBuild = hostBuild?.coreCommit ? hostBuild.coreCommit.slice(0, 7) : "";
@@ -1253,9 +1354,23 @@ export default function App() {
   // moves with the state, for the checks made from effects and timers.
   const [driveTarget, setDriveTargetState] = useState<DriveTarget | null>(null);
   const driveTargetRef = useRef<DriveTarget | null>(null);
+  /** The edit revision last written to the lab Drive, so an autosave queued behind a Save writes nothing new. */
+  const driveSavedEditRevisionRef = useRef(-1);
+  /**
+   * Why the Drive autosave stopped (a conflict, a sign-in that ran out, a refusal), until a save,
+   * a reconnect, or another workspace lets it go on. It never asks anything itself.
+   */
+  const [driveAutosaveStop, setDriveAutosaveStop] = useState<{ reason: "auth" | "conflict" | "error"; message: string } | null>(null);
+  /** Bumped to wait a whole autosave interval again: after no answer from Drive, or while an open is under way. */
+  const [driveAutosaveRetry, setDriveAutosaveRetry] = useState(0);
   const setDriveTarget = useCallback((next: DriveTarget | null) => {
+    const previous = driveTargetRef.current;
     driveTargetRef.current = next;
     setDriveTargetState(next);
+    if (next?.fileId !== previous?.fileId || next?.folderId !== previous?.folderId) {
+      setDriveAutosaveStop(null);
+      driveSavedEditRevisionRef.current = -1;
+    }
   }, []);
   /** Set while a Drive workspace is being opened, before it is the current workspace. */
   const driveOpeningRef = useRef(false);
@@ -1272,6 +1387,8 @@ export default function App() {
   const [driveFolderGrant, setDriveFolderGrant] = useState<{ request: DriveSaveRequest; folderId: string } | null>(null);
   /** Save As to the lab Drive: the dialog asking for a copy beside the workspace or a new experiment, and its name. */
   const [driveSaveAs, setDriveSaveAs] = useState<"copy" | "experiment" | null>(null);
+  /** A Drive action waiting for a reconnect, the sign-in having run out; `resume` goes on with it. */
+  const [driveReconnect, setDriveReconnect] = useState<{ action: DriveReconnectAction; resume: () => void } | null>(null);
   /** A new experiment being uploaded to the lab Drive, with its progress and its Cancel. */
   const [driveUpload, setDriveUpload] = useState<{
     experiment: string;
@@ -1447,8 +1564,14 @@ export default function App() {
   const [sampleManagerSelection, setSampleManagerSelection] = useState<string[]>([]);
   const [sampleImportProgress, setSampleImportProgress] = useState<SampleImportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** What a list of notes in the header came from: an export says so; everything else is an import's. */
+  const [errorKind, setErrorKind] = useState<"import" | "export">("import");
+  useEffect(() => { if (!error) setErrorKind("import"); }, [error]);
   const [pending, setPending] = useState<PendingNewGate | null>(null);
+  const [pendingBisector, setPendingBisector] = useState<PendingBisector | null>(null);
   const [drawMode, setDrawMode] = useState<DrawMode>("navigate");
+  /** The Gating tab shows the X channel alone, as a histogram with its range gates. */
+  const [histogramView, setHistogramView] = useState(false);
   const [scalesVersion, setScalesVersion] = useState(0);
   // Set when a workspace finishes loading; consumed once the sample, gates and automatic
   // ranges exist, which is later than the load handler itself.
@@ -1463,9 +1586,38 @@ export default function App() {
   const fittedAxisPairs = useRef(new Set<string>());
   const [panelVersion, setPanelVersion] = useState(0); // bumps when a channel display label changes
   const [crud, setCrud] = useState<CrudModal | null>(null);
-  const [importMsg, setImportMsg] = useState<string | null>(null);
+  // The status line at the foot of the left pane, and its tooltip when the line is a short form.
+  const [importMsg, setImportMsgState] = useState<string | null>(null);
+  const [importMsgTitle, setImportMsgTitle] = useState<string | null>(null);
+  // A message set with setImportMsg is the result of an action, shown for a moment near it at the
+  // top of the centre pane too (ActionNote); setStatusLine changes the foot line alone: progress,
+  // autosaves, what is open (David, 2026-10-23: "User shouldn't have to x out of 'opened gatelab
+  // workspace ...'").
+  const [noteMsg, setNoteMsg] = useState<string | null>(null);
+  const [importMsgSeq, setImportMsgSeq] = useState(0);
+  const setImportMsg = useCallback((message: SetStateAction<string | null>) => {
+    setImportMsgState(message);
+    setImportMsgTitle(null);
+    if (typeof message === "function") return;
+    setNoteMsg(message);
+    setImportMsgSeq((seq) => seq + 1);
+  }, []);
+  const setStatusLine = useCallback((message: SetStateAction<string | null>, title: string | null = null) => {
+    setImportMsgState(message);
+    // An update that keeps the line as it is (msg => msg) keeps its tooltip too.
+    if (typeof message !== "function") setImportMsgTitle(title);
+  }, []);
   /** The menu a right-click on a polygon's vertex or edge opens: remove that vertex, or add one there. */
   const [plotMenu, setPlotMenu] = useState<ContextMenuState | null>(null);
+  /** A gate's colour popover, opened from its menu at the pointer. */
+  const [gateColourPick, setGateColourPick] = useState<{ gateId: string; at: [number, number] } | null>(null);
+  /** Where the pointer last went down: a menu item's popover opens there. */
+  const lastPointer = useRef<[number, number]>([200, 200]);
+  useEffect(() => {
+    const note = (event: MouseEvent) => { lastPointer.current = [event.clientX, event.clientY]; };
+    document.addEventListener("mousedown", note, true);
+    return () => document.removeEventListener("mousedown", note, true);
+  }, []);
   /**
    * A gate being fitted to its events from its menu: the settings, where the panel opens, and the
    * fit at those settings, which the plot draws in the gate's place until Apply or Cancel. The
@@ -1482,7 +1634,18 @@ export default function App() {
     populationId: string | null;
     gateVersion: number;
   } | null>(null);
-  const [leftWidth, setLeftWidth] = useState(INITIAL_LEFT_PANE_WIDTH);
+  // The left pane's width, shared by every tab's left pane (--gl-left-pane-width) and kept for the viewer.
+  const [leftWidth, setLeftWidth] = useState(() => {
+    try {
+      const saved = Number(localStorage.getItem("gatelab.leftPaneWidth"));
+      return Number.isFinite(saved) && saved >= 180 ? saved : INITIAL_LEFT_PANE_WIDTH;
+    } catch {
+      return INITIAL_LEFT_PANE_WIDTH;
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("gatelab.leftPaneWidth", String(leftWidth)); } catch { /* storage unavailable: the width lasts the session */ }
+  }, [leftWidth]);
   const [sideWidth, setSideWidth] = useState(INITIAL_RIGHT_PANE_WIDTH);
   usePopoverDismissal();
   const [autoSizePopulations, setAutoSizePopulations] = useState(true);
@@ -1498,6 +1661,8 @@ export default function App() {
     if (maxEvents > 0) lastMaxEvents.current = maxEvents;
   }, [maxEvents]);
   const [activeTab, setActiveTab] = useState<TabId>("gating");
+  // A context menu belongs to the tab it was opened on: a tab switch, by click, key or tour, closes it.
+  useEffect(() => { window.dispatchEvent(new Event(DISMISS_MENUS_EVENT)); }, [activeTab]);
   // The walkthrough tutorial: it reads the app through readTourContext (declared below, called
   // only after a render) and moves on when a step's check says the user has done it.
   const tour = useTour(readTourContext, arriveForTour);
@@ -1529,8 +1694,8 @@ export default function App() {
   }, [activeTab, compensationTabStateKey]);
   const compensationTabMounted = activeTab === "compensation" ||
     mountedCompensationStateKey === compensationTabStateKey;
-  const [pointAlpha, setPointAlpha] = useState(0.4); // main-plot point opacity (cytof point_alpha)
-  const [pointSize, setPointSize] = useState(1.5); // main-plot mark radius in px (cytof point_size)
+  const [pointAlpha, setPointAlpha] = useState(DEFAULT_POINT_ALPHA); // main-plot point opacity (cytof point_alpha)
+  const [pointSize, setPointSize] = useState(DEFAULT_POINT_SIZE); // main-plot mark radius in px (cytof point_size)
   const [densityColorPower, setDensityColorPower] = useState(DEFAULT_DENSITY_COLOR_POWER);
   const changeDensityColorPower = useCallback((value: number) => {
     setDensityColorPower(normalizeDensityColorPower(value));
@@ -1553,19 +1718,29 @@ export default function App() {
   /** Revert workspace…: the checkpoints kept for this workspace, while they are read and once listed. */
   const [historyPicker, setHistoryPicker] = useState<{ checkpoints: WorkspaceCheckpoint[]; loading: boolean } | null>(null);
   const [promoteConfirmOpen, setPromoteConfirmOpen] = useState(false);
+  /** A tailored gate whose coordinates the tree is about to take, waiting on the confirmation. */
+  const [tailoredUse, setTailoredUse] = useState<{ gateId: string } | null>(null);
+  /** A tailoring switch turned off on a gate whose own coordinates differ, waiting on the confirmation. */
+  const [tailoredOff, setTailoredOff] = useState<{ gateId: string } | null>(null);
   const [clearGatingConfirmOpen, setClearGatingConfirmOpen] = useState(false);
   const [hierarchyCopyDraft, setHierarchyCopyDraft] = useState<{ sourceId: string; fileIds: string[]; revert?: boolean } | null>(null);
-  const [hierarchyActionMessage, setHierarchyActionMessage] = useState<string | null>(null);
-  /** Where edits go, chosen by the user and held until they choose again: the tree, the viewed file's group, or the file alone. */
-  const [editMode, setEditMode] = useState<EditTarget>("tree");
+  /**
+   * Group tailoring the user has asked for and not yet dragged: "Tailor for {group}" on a gate the
+   * viewed file takes from the tree, by file and the gate's canonical id. The next drag of that
+   * gate on that file goes to the group's copy; from then on the gate is tailored by its
+   * coordinates. Session state only. (A file's own tailoring is the gate row's switch, stored on
+   * the file's copy: setGateTailored.)
+   */
+  const [pendingScopes, setPendingScopes] = useState<Readonly<Record<string, "file" | "group">>>({});
   /** The group dialog: naming a new group of the selected files, renaming or deleting one. */
-  const [groupModal, setGroupModal] = useState<{ mode: "new" | "rename" | "delete" | "fromMetadata"; groupId?: string } | null>(null);
+  // `fileIds`: the files a "new" group is made from, when not the checked files (a right-click on a row).
+  const [groupModal, setGroupModal] = useState<{ mode: "new" | "rename" | "delete" | "fromMetadata"; groupId?: string; fileIds?: readonly string[] } | null>(null);
   const [pendingGatingMlImport, setPendingGatingMlImport] = useState<PendingGatingMLImport | null>(null);
   // One import at a time. The confirmation's Import button stayed live while the import ran, so a
   // double-click applied it twice and every hierarchy of a per-file workspace appeared doubled.
   const gatingImportBusyRef = useRef(false);
   const [gatingImportBusy, setGatingImportBusy] = useState(false);
-  /** "Evaluate gates as FlowJo does" was changed in the import dialog; the workspace is being read again. */
+  /** "Evaluate gates on the recorded grid" was changed in the import dialog; the workspace is being read again. */
   const [flowJoGridRedoing, setFlowJoGridRedoing] = useState(false);
   const [barcodeImport, setBarcodeImport] = useState<BarcodeImportDraft | null>(null);
   const [barcodeSave, setBarcodeSave] = useState<{
@@ -1633,7 +1808,7 @@ export default function App() {
       byChoice?: readonly Readonly<{ name: string; sample: string }>[];
       pairingNote?: string | null;
       loadNotes?: readonly string[];
-      /** "Evaluate gates as FlowJo does", as the open chose it; the tree imported instead keeps it. */
+      /** "Evaluate gates on the recorded grid", as the open chose it; the tree imported instead keeps it. */
       flowJoGrid?: boolean;
       /** Not asked yet: the import dialog asks it (a workspace imported onto the loaded files). */
       flowJoGridInDialog?: boolean;
@@ -1772,7 +1947,7 @@ export default function App() {
       /** Which spillover matrix to gate under, answered here rather than in a second dialog. */
       matrixChoice: "workspace" | "file";
       /**
-       * "Evaluate gates as FlowJo does": polygons on FlowJo's 256-channel grid and rectangles under
+       * "Evaluate gates on the recorded grid": polygons on FlowJo's 256-channel grid and rectangles under
        * FlowJo's axis rules (flowjoWorkspace.ts, FlowJoImportOptions). It holds for the whole open:
        * every file of a per-file import, and a tree chosen again after one failed.
        */
@@ -2007,7 +2182,7 @@ export default function App() {
       matrixChoice?: "workspace" | "file";
       /** The files this open loaded, removed again if the strategy question is cancelled. */
       openedSampleIds?: readonly string[];
-      /** "Evaluate gates as FlowJo does", as the open dialog left it. */
+      /** "Evaluate gates on the recorded grid", as the open dialog left it. */
       flowJoGrid?: boolean;
       /** Not asked yet: the import dialog asks it (a workspace imported onto the loaded files). */
       flowJoGridInDialog?: boolean;
@@ -2044,6 +2219,14 @@ export default function App() {
 
   // A dragged or drawn vertex snaps to another gate's vertex or edge, so adjacent gates meet
   // without a gap or an overlap; a preference of the machine. Alt held while dragging skips it.
+  // The tailoring view on the plot: the dashed outlines of the versions a gate is not drawn in and
+  // the mark on a tailored gate's label. Per viewer; hiding it changes nothing drawn solid or edited.
+  const [showTailoring, setShowTailoring] = useState(() => {
+    try { return localStorage.getItem("gatelab.showTailoring") !== "0"; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("gatelab.showTailoring", showTailoring ? "1" : "0"); } catch { /* private mode */ }
+  }, [showTailoring]);
   const [snapToGates, setSnapToGates] = useState(() => {
     try { return localStorage.getItem("gatelab.snapToGates") !== "0"; } catch { return true; }
   });
@@ -2076,6 +2259,7 @@ export default function App() {
   };
   const [gatingMlExportOpen, setGatingMlExportOpen] = useState(false);
   const [flowJoExportOpen, setFlowJoExportOpen] = useState(false);
+  const [flowJo11ExportOpen, setFlowJo11ExportOpen] = useState(false);
   const [contourThreshold, setContourThreshold] = useState(5); // outer contour % of peak
   const [contourLevels, setContourLevels] = useState(10);
   const [instrumentMode, setInstrumentMode] = useState<"auto" | "flow" | "cytof">("auto"); // active sample's instrument override
@@ -2098,9 +2282,34 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem("gatelab.gatesCollapsed", gatesCollapsed ? "1" : "0"); } catch { /* private mode */ }
   }, [gatesCollapsed]);
+  // The gate list's height, set by dragging the divider between it and the population tree; kept
+  // per viewer. Double-clicking the divider returns it to 200 px.
+  const [gateListHeight, setGateListHeight] = useState(() => {
+    try {
+      const stored = Number(localStorage.getItem("gatelab.gateListHeight"));
+      return Number.isFinite(stored) && stored >= MIN_GATE_LIST_HEIGHT ? stored : DEFAULT_GATE_LIST_HEIGHT;
+    } catch { return DEFAULT_GATE_LIST_HEIGHT; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("gatelab.gateListHeight", String(gateListHeight)); } catch { /* private mode */ }
+  }, [gateListHeight]);
   // Gates owned by no population belong to no branch, so branch scoping can only hide them by
   // accident. On (the default) they stay visible regardless of the displayed branch.
   const [showUnownedGates, setShowUnownedGates] = useState(true);
+  // How gates are drawn everywhere (gateInk.ts): in their own colours or all in black (the
+  // default), at what line width, and black labels on what white backing. Display only; saved with
+  // the workspace's display settings, and given to every tab through GateInkContext.
+  const [colouredGates, setColouredGates] = useState(false);
+  const [gateLineWidth, setGateLineWidth] = useState(DEFAULT_GATE_LINE_WIDTH);
+  const [gateLabelBackground, setGateLabelBackground] = useState(DEFAULT_GATE_LABEL_BACKGROUND);
+  const gateInk = useMemo<GateInk>(() => ({
+    coloured: colouredGates,
+    lineWidth: gateLineWidth,
+    labelBackground: gateLabelBackground,
+    setColoured: setColouredGates,
+    setLineWidth: (next) => setGateLineWidth(restoredGateLineWidth(next)),
+    setLabelBackground: (next) => setGateLabelBackground(restoredGateLabelBackground(next)),
+  }), [colouredGates, gateLineWidth, gateLabelBackground]);
   // The population list's gate badges in one column after the longest name, or each after its own
   // name. A preference of the machine, kept across workspaces.
   const [alignPopulationGates, setAlignPopulationGates] = useState(() => {
@@ -2187,6 +2396,8 @@ export default function App() {
     effectiveYRange: null,
     gates: pzRef.current.gates, snapToGates,
   };
+  /** dispatchGateEdit of the latest render, for handlers bound once. */
+  const dispatchGateEditRef = useRef<(edit: GateEditAction) => void>(() => {});
 
   const activeXChannelKey = sample?.channels[xIdx]?.key ?? null;
   const activeYChannelKey = sample?.channels[yIdx]?.key ?? null;
@@ -2267,6 +2478,12 @@ export default function App() {
     };
     const queue = (nx: [number, number], ny: [number, number]) => {
       if (!valid(nx) || !valid(ny)) return; // never write a degenerate range
+      // A biex axis stays within its table: a pan stops at an end (axisWindow.ts).
+      const s = pzRef.current.sample;
+      if (s) {
+        nx = clampToAxisWindow(nx, axisWindowBounds(s, pzRef.current.xIdx));
+        ny = clampToAxisWindow(ny, axisWindowBounds(s, pzRef.current.yIdx));
+      }
       pX = nx;
       pY = ny;
       // Contour rebuilds the KDE on every range change (~0.5s) — doing that per frame is
@@ -2299,7 +2516,7 @@ export default function App() {
             xKey: p.sample.channels[p.xIdx].key, yKey: p.sample.channels[p.yIdx].key,
             xRange: fx, yRange: fy, widthPx: r.width, heightPx: r.height,
           });
-          if (edits.length) dispatch({ type: "editGates", edits });
+          if (edits.length) dispatchGateEditRef.current({ type: "editGates", edits });
         }
       }
     };
@@ -2318,6 +2535,9 @@ export default function App() {
       // The plot's own floating controls (the fit panel, a menu) sit inside the plot area: a
       // press on a slider there is not a pan, and preventDefault here would stop the slider.
       if (t.closest?.(".gl-fit-panel, .gl-menu-popover")) return;
+      // The histogram view takes its own gestures (drawing and dragging ranges); this pan moves
+      // both axes, and the histogram has only one.
+      if (t.closest?.(".gl-histogram")) return;
       const rr = ranges();
       if (!rr) return;
       const r = rect();
@@ -2424,14 +2644,39 @@ export default function App() {
   }, [applyViewStep]);
   /** Which tree each file is gated under; in the store so Undo restores it with the copies. */
   const fileHierarchies = state.file_hierarchies;
+  /** Drags the divider between the gate list and the population tree; the tree keeps 200 px. */
+  const startGateListResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const aside = (e.currentTarget as HTMLElement).closest(".gl-side");
+    const list = aside?.querySelector<HTMLElement>(".gate-list-panel");
+    const tree = aside?.querySelector<HTMLElement>(".population-tree-panel");
+    if (!list) return;
+    const fromY = e.clientY;
+    const fromHeight = list.getBoundingClientRect().height;
+    const room = fromHeight + (tree ? tree.getBoundingClientRect().height - 200 : 0);
+    const move = (ev: MouseEvent) => {
+      setGateListHeight(Math.round(Math.max(MIN_GATE_LIST_HEIGHT, Math.min(room, fromHeight + ev.clientY - fromY))));
+    };
+    document.body.classList.add("gl-row-resizing");
+    const up = () => {
+      document.body.classList.remove("gl-row-resizing");
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
   const startResize = (e: React.MouseEvent) => {
     e.preventDefault();
     setAutoSizePopulations(false);
     const move = (ev: MouseEvent) => {
       const w = window.innerWidth - ev.clientX;
-      setSideWidth(Math.max(320, Math.min(w, 900)));
+      setSideWidth(clampSidePaneWidth(w, window.innerWidth, leftWidth));
     };
+    // The resize cursor stays put for the whole drag, whatever the pointer crosses.
+    document.body.classList.add("gl-col-resizing");
     const up = () => {
+      document.body.classList.remove("gl-col-resizing");
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
     };
@@ -2450,7 +2695,7 @@ export default function App() {
         const gateWidth = Math.max(0, ...population.gate_refs.map(ref => context.measureText(state.gates[ref.gate_id]?.name ?? "").width + 28));
         return Math.ceil(context.measureText(population.name).width + gateWidth + depth * 16 + 205);
       }));
-      const target = Math.max(320, Math.min(wanted, 900, window.innerWidth - leftWidth - 420));
+      const target = Math.max(320, Math.min(wanted, 900, window.innerWidth - leftWidth - CENTRE_RESERVE));
       // Rounded up to a step, and never narrower than it is: a longer name may widen the pane
       // once, but drawing, renaming and reordering do not move it back and forth. The handle's
       // double-click and a window resize fit it exactly.
@@ -2473,7 +2718,9 @@ export default function App() {
       // cap chosen here would allow, and the plot beside it simply takes what is left.
       setLeftWidth(Math.max(180, ev.clientX - left));
     };
+    document.body.classList.add("gl-col-resizing");
     const up = () => {
+      document.body.classList.remove("gl-col-resizing");
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
     };
@@ -2593,15 +2840,6 @@ export default function App() {
       ? { gates: h.gates, gate_order: h.gate_order, populations: h.populations, root_population_id: h.root_population_id }
       : null;
   }, [state.active_hierarchy_id, state.gates, state.gate_order, state.populations, state.root_population_id, state.stored_hierarchies]);
-  /** The live copy's gates whose coordinates differ from its template's: shown as tailored. */
-  const activeTailoredGateIds = useMemo<ReadonlySet<string>>(() => {
-    const live = state.hierarchies.find((h) => h.id === state.active_hierarchy_id);
-    if (!live?.owner_sample_id || !live.source_hierarchy_id || !state.root_population_id) return new Set();
-    return tailoredGateIds(
-      { ...live, gates: state.gates, gate_order: state.gate_order, populations: state.populations, root_population_id: state.root_population_id, active_population_id: state.active_population_id, selected_pop_ids: state.selected_pop_ids },
-      treeOf(live.source_hierarchy_id),
-    );
-  }, [state.hierarchies, state.active_hierarchy_id, state.gates, state.gate_order, state.populations, state.root_population_id, state.active_population_id, state.selected_pop_ids, treeOf]);
   /** Each file's tailored gates, by name: the badge on its row, and what Revert all acts on. */
   const tailoredGatesOfFile = useMemo(() => {
     const out = new Map<string, string[]>();
@@ -2609,7 +2847,7 @@ export default function App() {
       if (!ref.owner_sample_id || !ref.source_hierarchy_id) continue;
       const copy = storedTreeOf(ref.id);
       if (!copy) continue;
-      const names = [...tailoredGateIds(copy, treeOf(ref.source_hierarchy_id))].map((id) => copy.gates[id]?.name ?? id);
+      const names = [...tailoredInCopy(copy, storedTreeOf(ref.source_hierarchy_id))].map((id) => copy.gates[id]?.name ?? id);
       if (names.length) out.set(ref.owner_sample_id, names);
     }
     return out;
@@ -2626,7 +2864,7 @@ export default function App() {
     ...(tailoredGatesOfFile.has(entry.id) ? { tailored: tailoredGatesOfFile.get(entry.id) } : {}),
     ...(state.file_groups[entry.id] ? (() => {
       const index = state.groups.findIndex((g) => g.id === state.file_groups[entry.id]);
-      return index >= 0 ? { group: state.groups[index].name, groupColour: hierarchyColour(index) } : {};
+      return index >= 0 ? { group: state.groups[index].name, groupColour: groupColour(state.groups, index) } : {};
     })() : {}),
     ...(metadata[entry.id] ? { metadata: metadata[entry.id] } : {}),
   })), [samples, sampleDataRevisionKey, tailoredGatesOfFile, metadata, state.file_groups, state.groups]);
@@ -2871,7 +3109,7 @@ export default function App() {
         ? (state.root_population_id ? { ...copy, gates: state.gates, gate_order: state.gate_order, populations: state.populations, root_population_id: state.root_population_id, active_population_id: state.active_population_id, selected_pop_ids: state.selected_pop_ids } : null)
         : state.stored_hierarchies[copy.id] ?? null;
       if (!own) return null;
-      return tailoredGateIds(own, treeOf(copy.source_hierarchy_id)).size > 0;
+      return tailoredInCopy(own, storedTreeOf(copy.source_hierarchy_id)).size > 0;
     }),
     [state.hierarchies, samples, fileHierarchies, state.active_hierarchy_id, state.gates, state.gate_order, state.populations, state.root_population_id, state.active_population_id, state.selected_pop_ids, state.stored_hierarchies, treeOf],
   );
@@ -2882,9 +3120,21 @@ export default function App() {
     if (!group || !group.members.length) return "";
     const count = group.members.length;
     const tailored = group.members.filter((m) => m.tailored).length;
+    // Files that follow a group whose tree tailors a gate: tailored too, by the group.
+    const tailoringGroups = new Set(state.groups.filter((g) => {
+      const ref = state.hierarchies.find((h) => h.owner_group_id === g.id);
+      const own = ref ? storedTreeOf(ref.id) : null;
+      return !!own && !!ref?.source_hierarchy_id && tailoredInCopy(own, storedTreeOf(ref.source_hierarchy_id)).size > 0;
+    }).map((g) => g.id));
+    const grouped = group.members.filter((m) => !m.tailored && tailoringGroups.has(state.file_groups[m.fileId])).length;
     // One file: "1 files · all following" said it of a crowd.
-    if (count === 1) return tailored ? t("1 file · tailored") : t("1 file · following");
-    if (!tailored) return t("{count} files · all following", { count });
+    if (count === 1) return tailored || grouped ? t("1 file · tailored") : t("1 file · following");
+    if (!tailored && !grouped) return t("{count} files · all following", { count });
+    if (grouped) {
+      return tailored
+        ? t("{count} files · {tailored} tailored, {grouped} by groups", { count, tailored, grouped })
+        : t("{count} files · {grouped} tailored by groups", { count, grouped });
+    }
     // Every file on a copy, every copy tailored, and every copy the same as the first: the case
     // after copying one file's gates to the rest, when the template is the odd one out.
     const copies = group.members.map((m) => (m.copy ? storedTreeOf(m.copy.id) : null));
@@ -2901,29 +3151,8 @@ export default function App() {
     return t("{count} files · {tailored} tailored", { count, tailored });
     // storedTreeOf reads the store directly; its inputs are listed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hierarchyGroups, state.active_hierarchy_id, state.hierarchies, state.stored_hierarchies, state.gates, t]);
+  }, [hierarchyGroups, state.active_hierarchy_id, state.hierarchies, state.stored_hierarchies, state.gates, state.groups, state.file_groups, t]);
   /** On the tree: which files have tailored each of its gates, by the tree's gate id. */
-  const templateTailoredInFiles = useMemo(() => {
-    const out = new Map<string, string[]>();
-    const live = state.hierarchies.find((h) => h.id === state.active_hierarchy_id);
-    if (!live || live.owner_sample_id || !state.root_population_id) return out;
-    const template = { gates: state.gates, gate_order: state.gate_order, populations: state.populations, root_population_id: state.root_population_id };
-    for (const ref of state.hierarchies) {
-      if (ref.source_hierarchy_id !== live.id || !(ref.owner_sample_id || ref.owner_group_id)) continue;
-      const copy = storedTreeOf(ref.id);
-      if (!copy) continue;
-      const name = ref.owner_group_id
-        ? (state.groups.find((g) => g.id === ref.owner_group_id)?.name ?? ref.name)
-        : samples.find((entry) => entry.id === ref.owner_sample_id)?.name ?? ref.name;
-      for (const own of tailoredGateIds(copy, template)) {
-        const source = copy.source_gate_ids?.[own];
-        if (!source) continue;
-        out.set(source, [...(out.get(source) ?? []), name]);
-      }
-    }
-    return out;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.hierarchies, state.active_hierarchy_id, state.gates, state.gate_order, state.populations, state.root_population_id, state.stored_hierarchies, samples]);
   // The chip rows the samples panel offers, and the full column list behind its columns control.
   const sampleFacets = useMemo(
     () => facetColumns(metadata, metadataColumns, facetColumnChoice),
@@ -3006,6 +3235,32 @@ export default function App() {
     });
   }
 
+  // Cmd-S and Cmd-O do what the Workspace menu's Save and Open Workspace… do, when those are
+  // enabled; the R host saves to its object from its own menu, and has neither.
+  const workspaceShortcut = useRef<(action: WorkspaceShortcutAction) => boolean>(() => false);
+  workspaceShortcut.current = (action) => {
+    if (isSceHost) return false;
+    if (action === "save") {
+      if (!sample) return false;
+      void saveWorkspace();
+      return true;
+    }
+    if (busy || compensationApplyStatus !== null) return false;
+    void openWorkspace();
+    return true;
+  };
+  useEffect(() => {
+    const onWorkspaceShortcut = (event: KeyboardEvent) => {
+      const action = workspaceShortcutAction(event);
+      if (!action) return;
+      // The browser's Save Page and Open File are never what is meant here, even when the action is unavailable.
+      event.preventDefault();
+      workspaceShortcut.current(action);
+    };
+    window.addEventListener("keydown", onWorkspaceShortcut);
+    return () => window.removeEventListener("keydown", onWorkspaceShortcut);
+  }, []);
+
   useEffect(() => {
     const onHistoryShortcut = (event: KeyboardEvent) => {
       const action = historyShortcutAction(event);
@@ -3017,6 +3272,28 @@ export default function App() {
     window.addEventListener("keydown", onHistoryShortcut);
     return () => window.removeEventListener("keydown", onHistoryShortcut);
   }, [state.undo.length, state.redo.length]);
+
+  // Delete or Backspace on the Gating tab deletes what the gate toolbar's trash button would, the
+  // way its confirmation does (a checkpoint, then deleteGates) but without asking: Undo restores
+  // the gates and the populations that went with them, and the message says so.
+  useEffect(() => {
+    if (activeTab !== "gating") return;
+    const onDeleteKey = (event: KeyboardEvent) => {
+      if (!isDeleteShortcut(event) || document.querySelector(".gl-modal-backdrop")) return;
+      const gateIds = gateIdsToDelete(state);
+      if (gateIds.length === 0) return;
+      event.preventDefault();
+      const deleted = gateIds.length === 1
+        ? t("Deleted gate {name}. Undo restores it.", { name: state.gates[gateIds[0]]?.name ?? gateIds[0] })
+        : t("Deleted {count} gates. Undo restores them.", { count: gateIds.length });
+      void checkpointCurrentWorkspace("before-gate-delete").then(() => {
+        dispatch({ type: "deleteGates", gateIds });
+        setImportMsg(deleted);
+      });
+    };
+    window.addEventListener("keydown", onDeleteKey);
+    return () => window.removeEventListener("keydown", onDeleteKey);
+  }, [activeTab, state]);
 
   // Presentation-only population edits (rename / sibling reorder) must not invalidate
   // masks for every checked FCS file. Hold the last scientific gating graph until its
@@ -3124,7 +3401,7 @@ export default function App() {
     setActiveSampleId(null);
     setExcludedSampleIds(new Set());
     setPoolSelection(false);
-    setEditMode("tree");
+    setPendingScopes({});
     setSampleManagerOpen(false);
     setSampleManagerSelection([]);
     setPendingFolderImport(null);
@@ -3145,7 +3422,8 @@ export default function App() {
     setMode("pseudocolor");
     setMaxEvents(50000);
     setContourThreshold(5);
-    setPointAlpha(0.4);
+    setPointAlpha(DEFAULT_POINT_ALPHA);
+    setPointSize(DEFAULT_POINT_SIZE);
     setDensityColorPower(DEFAULT_DENSITY_COLOR_POWER);
     setGatingFontSizes({ ...DEFAULT_GATING_FONT_SIZES });
     setDrawMode("navigate");
@@ -3164,6 +3442,9 @@ export default function App() {
     setOverlayBy("none");
     setOverlayChannelKey(null);
     setOverlayPalette("default");
+    setColouredGates(false);
+    setGateLineWidth(DEFAULT_GATE_LINE_WIDTH);
+    setGateLabelBackground(DEFAULT_GATE_LABEL_BACKGROUND);
 
     illustConfigRef.current = null;
     strategyConfigRef.current = null;
@@ -3209,14 +3490,14 @@ export default function App() {
   }, [checkpointRequest]);
 
   useEffect(() => {
-    if (!dirty || !wsHandle || wsStorage === "bundle") return;
+    if (!dirty || !wsHandle || wsStorage === "bundle" || handleWritesRefused()) return;
     const t = setTimeout(async () => {
       const ws = buildWsRef.current();
       if (!ws) return;
       try {
         await writeHandle(wsHandle, packReferenceWorkspace(ws) as BlobPart);
         setDirty(false);
-        setImportMsg(`Autosaved · ${wsName}`);
+        setStatusLine(`Autosaved · ${wsName}`);
       } catch {
         /* autosave is best-effort — a manual Save still works */
       }
@@ -3246,11 +3527,27 @@ export default function App() {
       : samples.find((entry) => entry.id === activeHierarchy?.owner_sample_id)?.name ?? "this file";
     return t("{what} was added to the tree, for every file. Move it here to tailor it for {target}.", { what, target });
   };
-  /** The tree row above the gate list: the one tree, where edits go, and the ways back. */
+  // What a tree action did, said in the panel's status line below the file list.
+  const setHierarchyActionMessage = (message: string | null) => { if (message) setImportMsg(message); };
+  /** The tree row above the gate list: the one tree, how its files stand, and the ways back. */
   const viewedGroup = activeSampleId ? state.groups.find((g) => g.id === state.file_groups[activeSampleId]) ?? null : null;
   const viewedGroupCopy = viewedGroup ? state.hierarchies.find((h) => h.owner_group_id === viewedGroup.id) ?? null : null;
+  /** The viewed file's group's colour, as the file list shows it: the switch and the Gates header use it too. */
+  const viewedGroupColour = viewedGroup ? groupColour(state.groups, state.groups.findIndex((g) => g.id === viewedGroup.id)) : null;
   const viewedGroupTailored = !!viewedGroupCopy && viewedGroupCopy.source_hierarchy_id !== undefined
-    && (() => { const own = storedTreeOf(viewedGroupCopy.id); return !!own && tailoredGateIds(own, treeOf(viewedGroupCopy.source_hierarchy_id!)).size > 0; })();
+    && (() => { const own = storedTreeOf(viewedGroupCopy.id); return !!own && tailoredInCopy(own, storedTreeOf(viewedGroupCopy.source_hierarchy_id!)).size > 0; })();
+  /**
+   * The copy whose coordinates "Use … gates for the tree" gives what it follows: the viewed file's
+   * own copy when it tailors a gate, else its group's when the group does. The tree stays live, so
+   * this is no longer the live tree.
+   */
+  const promoteCopy: HierarchyRef | null = (() => {
+    if (!activeSampleId) return null;
+    const own = state.hierarchies.find((h) => h.id === hierarchyOfFile(activeSampleId));
+    if (own?.owner_sample_id === activeSampleId && own.source_hierarchy_id && tailoredGatesOfFile.has(activeSampleId)) return own;
+    return viewedGroupTailored ? viewedGroupCopy : null;
+  })();
+
   /** Names every quadrant gate's four populations by the scheme, as the Create quadrant gate dialog would. */
   const nameQuadrantPopulations = (scheme: QuadrantNaming) => {
     if (!sample) return;
@@ -3274,15 +3571,12 @@ export default function App() {
 
   const treeControls: TreeControlsProps = {
     fileName: fileName || null,
-    // A pool edits the tree it draws; the mode held for one file returns with it.
-    editMode: plotPool ? "tree" : viewedGroup ? editMode : editMode === "group" ? "tree" : editMode,
     groupName: viewedGroup?.name ?? null,
-    groupColour: viewedGroup ? hierarchyColour(state.groups.findIndex((g) => g.id === viewedGroup.id)) : null,
+    groupColour: viewedGroup ? groupColour(state.groups, state.groups.findIndex((g) => g.id === viewedGroup.id)) : null,
     groupFiles: viewedGroup ? Object.values(state.file_groups).filter((gid) => gid === viewedGroup.id).length : 0,
     groupTailored: viewedGroupTailored,
     sourceLabel: viewedGroup?.name ?? t("the tree"),
     fileTailored: activeSampleId !== null && tailoredGatesOfFile.has(activeSampleId),
-    onEditTarget: setEditTarget,
     onRename: () => setHierarchyModal("rename"),
     onNameQuadrants: nameQuadrantPopulations,
     onSwitchTree: switchHierarchyForFile,
@@ -3293,9 +3587,10 @@ export default function App() {
     onRevertGroup: revertViewedGroup,
     onRevertChecked: revertCheckedFilesToActiveGroup,
     onRevertAll: revertAllFiles,
-    onPromote: promoteActiveCopyToGroup,
+    onPromote: promoteCopy ? promoteActiveCopyToGroup : undefined,
+    promoteFrom: promoteCopy ? (promoteCopy.owner_group_id ? viewedGroup?.name ?? promoteCopy.name : fileName) : null,
+    promoteTo: promoteCopy?.source_hierarchy_id && promoteCopy.source_hierarchy_id === viewedGroupCopy?.id ? viewedGroup?.name ?? t("the tree") : t("the tree"),
     summary: groupSummary,
-    message: hierarchyActionMessage,
   };
 
   useEffect(() => {
@@ -3375,16 +3670,6 @@ export default function App() {
     setImportMsg("Gates, populations and hierarchies cleared; the files, scales and metadata are kept. Undo brings them back.");
   }
 
-  /** The tree a viewed file shows: its own copy while it has tailored gates, else the tree itself. */
-  /** A file's copy with nothing tailored in it goes, and the file follows the tree; not an undo entry. */
-  function dropCopyIfUntailored(fileId: string) {
-    const ref = state.hierarchies.find((h) => h.id === hierarchyOfFile(fileId));
-    if (!ref?.owner_sample_id || ref.owner_sample_id !== fileId || tailoredGatesOfFile.has(fileId)) return;
-    const source = sourceOfFile(fileId);
-    if (!source || source.id === ref.id) return;
-    dispatch({ type: "assignFileHierarchies", assignments: { [fileId]: source.id }, silent: true });
-  }
-
   /** What a file follows: its group's tree when it is in a group, else the tree itself. */
   function sourceOfFile(fileId: string): HierarchyRef | null {
     const groupId = state.file_groups[fileId];
@@ -3395,17 +3680,102 @@ export default function App() {
   /** The Groups menu in the file list: everything acts on the selected files, or names a group. */
   function runGroupAction(action: GroupAction) {
     setHierarchyActionMessage(null);
-    const fileIds = checkedSamples.map((entry) => entry.id);
-    if (action.kind === "new") { setGroupModal({ mode: "new" }); return; }
+    if (action.kind === "new") { setGroupModal({ mode: "new", ...(action.fileIds ? { fileIds: action.fileIds } : {}) }); return; }
     if (action.kind === "fromMetadata") { setGroupModal({ mode: "fromMetadata" }); return; }
+    if (action.kind === "rename" && action.name !== undefined) {
+      // Renamed in place, on the file list's header.
+      const group = state.groups.find((g) => g.id === action.groupId);
+      const name = action.name.trim();
+      if (!group || !name || name === group.name) return;
+      if (state.groups.some((g) => g.name === name)) {
+        setHierarchyActionMessage(`Another group is already called "${name}"; "${group.name}" keeps its name.`);
+        return;
+      }
+      dispatch({ type: "renameGroup", id: action.groupId, name });
+      markWorkspaceDirty();
+      setHierarchyActionMessage(`"${group.name}" is now "${name}". Undo is available.`);
+      return;
+    }
     if (action.kind === "rename" || action.kind === "delete") { setGroupModal({ mode: action.kind, groupId: action.groupId }); return; }
+    if (action.kind === "colour") {
+      dispatch({ type: "setGroupColour", id: action.groupId, colour: action.colour });
+      markWorkspaceDirty();
+      return;
+    }
+    if (action.kind === "reorder") {
+      dispatch({ type: "reorderGroups", ids: [...action.ids] });
+      markWorkspaceDirty();
+      return;
+    }
+    const fileIds = [...(action.fileIds ?? checkedSamples.map((entry) => entry.id))];
     if (!fileIds.length) return;
-    dispatch({ type: "setFileGroup", fileIds, groupId: action.kind === "assign" ? action.groupId : null });
+    const groupId = action.kind === "assign" ? action.groupId : null;
+    // Files already where they are going are left out, so the message names only what moved.
+    const moving = fileIds.filter((id) => (state.file_groups[id] ?? null) !== groupId);
+    if (!moving.length) return;
+    dispatch({ type: "setFileGroup", fileIds: moving, groupId });
     markWorkspaceDirty();
-    const group = action.kind === "assign" ? state.groups.find((g) => g.id === action.groupId) : null;
+    const group = groupId ? state.groups.find((g) => g.id === groupId) : null;
+    const names = moving.map((id) => samples.find((entry) => entry.id === id)?.name ?? id);
+    const who = names.length <= 3 ? names.join(", ") : `${names.length} files`;
+    const one = moving.length === 1;
+    const kept = moving.filter((id) => tailoredGatesOfFile.has(id)).length;
+    const keep = !kept ? "" : kept === moving.length ? (one ? "; its own tailoring is kept" : "; their own tailoring is kept") : `; ${kept} keep their own tailoring`;
     setHierarchyActionMessage(group
-      ? `${fileIds.length} file${fileIds.length === 1 ? "" : "s"} now in "${group.name}". Undo is available.`
-      : `${fileIds.length} file${fileIds.length === 1 ? "" : "s"} out of their group; they follow the tree. Undo is available.`);
+      ? `${who} now in "${group.name}"; ${one ? "it follows" : "they follow"} the group's gates${keep}. Undo is available.`
+      : `${who} out of ${one ? "its" : "their"} group; ${one ? "it follows" : "they follow"} the tree${keep}. Undo is available.`);
+  }
+
+  /** The right-click menu of a file row, or of the checked files when the row is one of them. */
+  function fileRowMenu(fileIds: readonly string[]): MenuEntry[] {
+    if (!fileIds.length) return [];
+    const one = fileIds.length === 1;
+    const groupsOf = new Set<string | null>(fileIds.map((id) => state.file_groups[id] ?? null));
+    const tailored = fileIds.filter((id) => tailoredGatesOfFile.has(id));
+    const sources = new Set(tailored.map((id) => sourceOfFile(id)?.id ?? ""));
+    const source = tailored.length && sources.size === 1 ? sourceOfFile(tailored[0]) : null;
+    const target = source?.owner_group_id ? source.name : t("the tree");
+    return [
+      { label: one ? t("New group from this file…") : t("New group from the {count} selected…", { count: fileIds.length }), className: "gl-file-menu-new-group", onClick: () => runGroupAction({ kind: "new", fileIds }) },
+      ...(state.groups.length ? ["separator" as const] : []),
+      ...state.groups.map((g) => ({
+        label: t("Add to {name}", { name: g.name }),
+        className: "gl-file-menu-assign",
+        disabled: groupsOf.size === 1 && groupsOf.has(g.id),
+        onClick: () => runGroupAction({ kind: "assign", groupId: g.id, fileIds }),
+      })),
+      ...(state.groups.length ? [{
+        label: t("Remove from group"),
+        className: "gl-file-menu-remove",
+        disabled: groupsOf.size === 1 && groupsOf.has(null),
+        onClick: () => runGroupAction({ kind: "remove", fileIds }),
+      }] : []),
+      ...(tailored.length ? [
+        "separator" as const,
+        {
+          label: source ? t("Revert to {target}", { target }) : t("Revert {count} files to what they follow", { count: tailored.length }),
+          className: "gl-file-menu-revert",
+          title: t("Drop the tailoring of {names}: every gate takes the coordinates it follows again.", { names: tailored.map((id) => samples.find((entry) => entry.id === id)?.name ?? id).join(", ") }),
+          onClick: () => revertFilesToSource(tailored),
+        },
+      ] : []),
+    ];
+  }
+
+  /** Tailored files follow what they follow again, as one undo entry. */
+  function revertFilesToSource(fileIds: readonly string[]) {
+    const assignments: Record<string, string> = {};
+    for (const id of fileIds) {
+      const ref = state.hierarchies.find((h) => h.id === hierarchyOfFile(id));
+      const source = sourceOfFile(id);
+      if (ref?.owner_sample_id && source && source.id !== ref.id) assignments[id] = source.id;
+    }
+    const ids = Object.keys(assignments);
+    if (!ids.length) return;
+    dispatch({ type: "followSourceAgain", assignments });
+    markWorkspaceDirty();
+    const names = ids.map((id) => samples.find((entry) => entry.id === id)?.name ?? id);
+    setHierarchyActionMessage(`${names.length <= 3 ? names.join(", ") : `${names.length} files`} ${ids.length === 1 ? "follows" : "follow"} what ${ids.length === 1 ? "it follows" : "they follow"} again; the tailoring is dropped. Undo is available.`);
   }
 
   /** What "Groups from a metadata column" would make of a column: one group per value, over every file. */
@@ -3445,11 +3815,11 @@ export default function App() {
     const modal = groupModal;
     setGroupModal(null);
     if (modal.mode === "new") {
-      const fileIds = checkedSamples.map((entry) => entry.id);
+      const fileIds = [...(modal.fileIds ?? checkedSamples.map((entry) => entry.id))];
       const id = newHierarchyId();
       dispatch({ type: "addGroup", id, name, fileIds });
       markWorkspaceDirty();
-      setHierarchyActionMessage(`Group "${name}" made with ${fileIds.length} file${fileIds.length === 1 ? "" : "s"}. Choose it as the edit target to tailor gates for the group.`);
+      setHierarchyActionMessage(`Group "${name}" made with ${fileIds.length} file${fileIds.length === 1 ? "" : "s"}. To tailor a gate for the group, choose Tailor for "${name}" from the gate's menu.`);
     } else if (modal.mode === "rename" && modal.groupId) {
       dispatch({ type: "renameGroup", id: modal.groupId, name });
       markWorkspaceDirty();
@@ -3457,7 +3827,6 @@ export default function App() {
       const group = state.groups.find((g) => g.id === modal.groupId);
       dispatch({ type: "deleteGroup", id: modal.groupId });
       markWorkspaceDirty();
-      if (editMode === "group") setEditMode("tree");
       setHierarchyActionMessage(`Group "${group?.name ?? ""}" deleted; its files follow the tree. Undo is available.`);
     }
   }
@@ -3470,53 +3839,25 @@ export default function App() {
     setHierarchyActionMessage(`"${viewedGroup?.name ?? ""}" follows the tree again; its tailoring is dropped. Undo is available.`);
   }
 
-  /** Where edits go: the tree, for every file, or the viewed file alone. Held until chosen again. */
-  function setEditTarget(target: EditTarget) {
-    // A file or a group is edited on its own, so choosing either leaves a pool for the viewed file.
-    if (target !== "tree") setPoolSelection(false);
-    setEditMode(target);
-  }
-
-  // The mode holds whatever the viewed file, an undo or an import did to the live tree. This
-  // puts the right tree live again: in "this file only" mode the viewed file's own copy, made
-  // now, quietly, if it has none; otherwise the tree itself. A copy left behind with nothing
-  // tailored in it goes. None of this is an undo entry: it is navigation, not an edit. A pooled
-  // view is left alone, since it edits the tree by construction.
+  // The live tree is the tree: a gate's scope decides where an edit goes (dispatchGateEdit), not
+  // which tree is live. A workspace saved, an import made or an undo taken with a file's or a
+  // group's copy live goes back to the tree it follows, quietly: navigation, not an edit.
   useEffect(() => {
-    if (!activeSampleId || plotPool) return;
     const live = state.hierarchies.find((h) => h.id === state.active_hierarchy_id);
-    if (editMode === "file") {
-      if (live?.owner_sample_id === activeSampleId) return;
-      if (live?.owner_sample_id && !tailoredGatesOfFile.has(live.owner_sample_id)) {
-        dropCopyIfUntailored(live.owner_sample_id); // the source goes live; this runs again for the new copy
-        return;
-      }
-      const copyId = ensureCopyForFile(activeSampleId, { silent: true });
-      if (copyId && copyId !== state.active_hierarchy_id) dispatch({ type: "switchHierarchy", id: copyId, silent: true });
-      return;
-    }
-    // The tree, or the viewed file's group when it is in one and the group is chosen.
-    const groupId = state.file_groups[activeSampleId];
-    const groupCopy = editMode === "group" && groupId ? state.hierarchies.find((h) => h.owner_group_id === groupId) : undefined;
-    const wanted = groupCopy ?? (live ? templateOf(live.id, state.hierarchies) : null);
-    if (!wanted || wanted.id === state.active_hierarchy_id) return;
-    if (live?.owner_sample_id && !tailoredGatesOfFile.has(live.owner_sample_id)) {
-      dropCopyIfUntailored(live.owner_sample_id); // its source goes live; this runs again if that is not the one wanted
-      return;
-    }
-    dispatch({ type: "switchHierarchy", id: wanted.id, silent: true });
-    // ensureCopyForFile and dropCopyIfUntailored read the store directly; their inputs are listed.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, activeSampleId, plotPool, state.active_hierarchy_id, state.hierarchies, state.file_hierarchies, tailoredGatesOfFile]);
+    if (!live || !isCopyRef(live) || !live.structure_locked || !live.source_hierarchy_id) return;
+    const tree = templateOf(live.id, state.hierarchies);
+    if (tree && tree.id !== live.id) dispatch({ type: "switchHierarchy", id: tree.id, silent: true });
+  }, [state.active_hierarchy_id, state.hierarchies]);
 
   /** Ask before the viewed file's coordinates become the tree's; the reducer's promoteCopyToTemplate does the rest. */
   function promoteActiveCopyToGroup() {
-    if (!activeHierarchy || !(activeHierarchy.owner_sample_id || activeHierarchy.owner_group_id) || !activeHierarchy.source_hierarchy_id) return;
+    if (!promoteCopy) return;
     setPromoteConfirmOpen(true);
   }
 
   function confirmPromote() {
     setPromoteConfirmOpen(false);
+    const activeHierarchy = promoteCopy;
     if (!activeHierarchy || !(activeHierarchy.owner_sample_id || activeHierarchy.owner_group_id)) return;
     const source = state.hierarchies.find((h) => h.id === activeHierarchy.source_hierarchy_id);
     const target = source?.owner_group_id ? `The group "${source.name}"` : `The tree "${source?.name ?? ""}"`;
@@ -3525,7 +3866,7 @@ export default function App() {
     const refusal = promoteRefusal(state, activeHierarchy.id);
     if (refusal) {
       setHierarchyActionMessage(refusal === "other-structure"
-        ? `${target} was left as it is: ${from} draws a gate as another kind or holds other populations, so its tree is not the same tree. Apply to the tree takes its gates one at a time.`
+        ? `${target} was left as it is: ${from} draws a gate as another kind or holds other populations, so its tree is not the same tree. Use for the tree, on a gate's menu, takes its gates one at a time.`
         : `${target} was left as it is: ${from}'s tree does not follow it directly.`);
       return;
     }
@@ -3576,7 +3917,7 @@ export default function App() {
    * gated under, which then follows its template until the file tailors a gate. Returns the
    * copy's id, existing or new, and makes a new one the live tree.
    */
-  function ensureCopyForFile(fileId: string, options?: { silent?: boolean }): string | null {
+  function ensureCopyForFile(fileId: string, options?: { silent?: boolean; keepLive?: boolean }): string | null {
     const currentId = hierarchyOfFile(fileId);
     const ref = state.hierarchies.find((h) => h.id === currentId);
     const entry = samples.find((s0) => s0.id === fileId);
@@ -3586,7 +3927,8 @@ export default function App() {
     if (!source || !source.root_population_id) return null;
     const built = buildPerFileHierarchyCopies(ref, source, [entry], state.hierarchies);
     if (!built.copies.length) return null;
-    dispatch({ type: "addHierarchyCopies", copies: built.copies, activeHierarchyId: built.assignments[fileId], keepBrowsingPosition: true, assignments: built.assignments, ...(options?.silent ? { silent: true } : {}) });
+    // keepLive: the copy is made for a gate's tailoring, and the tree stays the live one.
+    dispatch({ type: "addHierarchyCopies", copies: built.copies, activeHierarchyId: options?.keepLive ? state.active_hierarchy_id : built.assignments[fileId], keepBrowsingPosition: true, assignments: built.assignments, ...(options?.silent ? { silent: true } : {}) });
     setPopulationMetadata((current) => {
       const next = { ...current };
       for (const idMap of built.populationIdMaps) {
@@ -4347,7 +4689,11 @@ export default function App() {
         return;
       }
 
-      const text = await file.text();
+      // A FlowJo 11 workbench is a zip of JSON, read as the FlowJo workspace it is rewritten into
+      // (flowjo11Workbench.ts); from there it takes the .wsp path below.
+      const text = isFlowJo11WorkbenchName(file.name)
+        ? flowJo11WorkbenchToWorkspace(readFlowJo11Workbench(new Uint8Array(await file.arrayBuffer())))
+        : await file.text();
 
       // A BD FACSDiva experiment export is rewritten into Gating-ML the same way a FlowJo
       // workspace is, so the ordinary import path handles both. Diva is the record BEFORE
@@ -5006,7 +5352,7 @@ export default function App() {
         unpaired.push({ name: calledAs(u.fileKey, u.fileName), entryId: u.fileKey, why: describeUnpaired(u, label, calledAs) });
       }
     }
-    // No dialog has asked "Evaluate gates as FlowJo does" yet: the import dialog asks it, on as in
+    // No dialog has asked "Evaluate gates on the recorded grid" yet: the import dialog asks it, on as in
     // the dialog that opens a workspace, and changing it there reads the workspace again. A tree
     // chosen by hand, or chosen again, comes to the same dialog.
     const flowJoGrid = true;
@@ -5071,7 +5417,7 @@ export default function App() {
       /** Files chosen for the open that could not be loaded, shown and counted with the notes. */
       loadNotes?: readonly string[];
       /**
-       * "Evaluate gates as FlowJo does" for this import: the open dialog's answer, carried to
+       * "Evaluate gates on the recorded grid" for this import: the open dialog's answer, carried to
        * every file and to a tree chosen again; FlowJo's rule, the default, where none was given.
        */
       flowJoGrid?: boolean;
@@ -5177,7 +5523,7 @@ export default function App() {
           // The dialog's matrix answer was about the file that failed; the new primary's is asked.
           openedSampleIds,
           triedPrimaries: tried,
-          // "Evaluate gates as FlowJo does" was answered for the whole import, or is still asked.
+          // "Evaluate gates on the recorded grid" was answered for the whole import, or is still asked.
           flowJoGrid,
           flowJoGridInDialog: extra.flowJoGridInDialog,
         });
@@ -5302,8 +5648,8 @@ export default function App() {
           // How the gates are evaluated, as the dialog that opened the workspace or the import
           // dialog chose it: said with the result, which outlasts either dialog.
           (flowJoGrid
-            ? ` · ${t("evaluated as FlowJo does ({count} polygon(s) on FlowJo's grid)", { count: converted.gridPolygons + siblingGridPolygons })}`
-            : ` · ${t("evaluated continuously, not on FlowJo's grid")}`) +
+            ? ` · ${t("evaluated on the recorded grid ({count} polygon(s))", { count: converted.gridPolygons + siblingGridPolygons })}`
+            : ` · ${t("evaluated continuously, not on the recorded grid")}`) +
           // Polygons GateLab wrote come back as it held them whichever way the option is set.
           (converted.gateLabPolygons + siblingGateLabPolygons
             ? ` · ${t("{count} polygon(s) GateLab wrote read as GateLab held them", { count: converted.gateLabPolygons + siblingGateLabPolygons })}`
@@ -6059,9 +6405,8 @@ export default function App() {
           return entry ? [{ fileId: id, fileName: entry.name, tree: res }] : [];
         });
         const tailoring = tailorFilesToTree({ id: activeId, name: activeHierarchy?.name ?? "", tree: current }, files, state.hierarchies, new Set(targetIds));
-        const viewedCopy = activeSampleId ? tailoring.copies.find((copy) => copy.owner_sample_id === activeSampleId)?.id : undefined;
-        if (viewedCopy) setEditMode("file"); // the user asked for this file's tailoring: show it
-        if (tailoring.copies.length) dispatch({ type: "addHierarchyCopies", copies: tailoring.copies, activeHierarchyId: viewedCopy ?? activeId, assignments: tailoring.assignments });
+        // The tree stays live: the viewed file's tailoring shows on its gates (viewedGates).
+        if (tailoring.copies.length) dispatch({ type: "addHierarchyCopies", copies: tailoring.copies, activeHierarchyId: activeId, assignments: tailoring.assignments });
         else if (Object.keys(tailoring.assignments).length) dispatch({ type: "assignFileHierarchies", assignments: tailoring.assignments });
         tailoredCount = tailoring.copies.length;
       } else {
@@ -6200,6 +6545,10 @@ export default function App() {
   function exportGating(format: GatingMLFormat) {
     if (!sample || !state.root_population_id) return;
     try {
+      // What the file left out, by name: the export modal names the curved quadrants and OR
+      // branches beforehand, and a straight quadrant region can be left out only once the
+      // events are seen (exportGatingML, leaveRegionOut).
+      const warnings: string[] = [];
       const xml = exportGatingML({
         gates: state.gates,
         gate_order: state.gate_order,
@@ -6209,10 +6558,12 @@ export default function App() {
         globalScales,
         format,
         allowQuadrantOmission: true, // the export modal explicitly reports the omitted branches
+        warnings,
       });
       const base = sanitizeFilePart((fileName || "gates").replace(/\.[^.]+$/, ""));
       downloadText(`${base}_gatingml_${format}.xml`, xml, "application/xml");
-      setError(null);
+      if (warnings.length) setErrorKind("export");
+      setError(warnings.length ? warnings.join("\n") : null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -6285,6 +6636,28 @@ export default function App() {
   }
 
   /**
+   * The files as a FlowJo 11 workbench (.flowjo), downloaded as the single-file FlowJo workspace
+   * export is. FlowJo 11 finds each FCS file by its absolute path, in the folder the dialog asked
+   * for; what the export approximated the dialog listed from a dry run.
+   */
+  function exportFlowJo11(scope: FlowJoExportScope, fcsFolder: string) {
+    try {
+      const wanted = flowJoExportSamples(scope);
+      const stem = flowJoExportStem(wanted.map((w) => w.fileName));
+      const result = exportFlowJo11Workbench({ samples: wanted, fcsFolder, name: stem });
+      rememberFlowJo11Folder(fcsFolder);
+      downloadBlob(`${stem}.flowjo`, new Blob([result.bytes as BlobPart], { type: "application/zip" }));
+      setImportMsg(
+        `Saved ${stem}.flowjo: ${wanted.length} sample${wanted.length === 1 ? "" : "s"}, naming the FCS files in ${fcsFolder}` +
+          (result.warnings.length ? ` · ${result.warnings.length} note${result.warnings.length === 1 ? "" : "s"}, as the dialog listed` : ""),
+      );
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /**
    * The viewed file's tree written back into the FACSChorus experiment it came from (or one the
    * user picks), as a new .cef for Chorus to import as an experiment. The source is replaced only
    * in its live gates; the digest is copied, Chorus being the judge of it.
@@ -6314,7 +6687,7 @@ export default function App() {
       downloadBlob(name, new Blob([result.bytes as BlobPart], { type: "application/zip" }));
       const left = result.skipped.length ? ` · ${result.skipped.length} population${result.skipped.length === 1 ? "" : "s"} left out` : "";
       setImportMsg(`Saved ${name}: ${result.written} gate${result.written === 1 ? "" : "s"} written into the experiment${left}. Import it in FACSChorus as an experiment.`);
-      if (result.warnings.length) setError(result.warnings.join("\n"));
+      if (result.warnings.length) { setErrorKind("export"); setError(result.warnings.join("\n")); }
     } catch (cause) {
       setError(`FACSChorus export failed: ${cause instanceof Error ? cause.message : String(cause)}`);
     }
@@ -6336,13 +6709,14 @@ export default function App() {
     if (plan.files.length !== wanted.length) throw new Error("The files to export changed while the export was being prepared; export again.");
     // Asked for first, while the click still counts as the user's: evaluating every population
     // of every file below can outlast the time a browser allows a picker to open after a click.
-    const directory = supportsDirectoryAccess();
+    // A browser that has refused a write in this session gets the .zip without the folder dialog.
+    const directory = supportsDirectoryAccess() && !handleWritesRefused();
     const parent = directory ? await pickWritableDirectory() : null;
     if (directory && !parent) return;
     setBusy(true);
     setError(null);
     try {
-      setImportMsg(`Writing ${stem} · evaluating the workspace`);
+      setStatusLine(`Writing ${stem} · evaluating the workspace`);
       // Let the message paint before the evaluation holds the thread.
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
       const { xml } = exportFlowJoWorkspace({
@@ -6356,19 +6730,28 @@ export default function App() {
       const notes =
         (renamed ? ` · ${renamed} written under another name, as the dialog listed` : "") +
         (missing.length ? ` · not in it, GateLab holding no bytes for ${missing.length === 1 ? "it" : "them"}: ${missing.join(", ")}` : "");
+      // Where the folder could not be written, the reason (which says what the folder holds) goes
+      // on the error line and the same export is downloaded as the .zip below.
+      let folderFailed = false;
       if (parent) {
-        const { folder } = await writeFlowJoFolder(parent, stem, plan, xml, {
-          onProgress: (n, total, path) => setImportMsg(`Writing ${stem} · FCS file ${n} of ${total} · ${path}`),
-        });
-        // The next picker starts in the new folder, where the user last saved, as every picker
-        // does. The folder the user granted for their data is left as it was: GateLab reads it
-        // again without asking to find the FCS a .wsp from there names (lastGrantedDirectory).
-        rememberPickerLocation(folder);
-        setImportMsg(
-          `Wrote ${folder.name} in ${parent.name}: ${plan.workspaceName} and ${written} FCS file${written === 1 ? "" : "s"}, ` +
-            `${formatByteSize(plan.fcsBytes)}${notes}`,
-        );
-      } else {
+        try {
+          const { folder } = await writeFlowJoFolder(parent, stem, plan, xml, {
+            onProgress: (n, total, path) => setImportMsg(`Writing ${stem} · FCS file ${n} of ${total} · ${path}`),
+          });
+          // The next picker starts in the new folder, where the user last saved, as every picker
+          // does. The folder the user granted for their data is left as it was: GateLab reads it
+          // again without asking to find the FCS a .wsp from there names (lastGrantedDirectory).
+          rememberPickerLocation(folder);
+          setImportMsg(
+            `Wrote ${folder.name} in ${parent.name}: ${plan.workspaceName} and ${written} FCS file${written === 1 ? "" : "s"}, ` +
+              `${formatByteSize(plan.fcsBytes)}${notes}`,
+          );
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+          folderFailed = true;
+        }
+      }
+      if (!parent || folderFailed) {
         // Views of the bytes GateLab holds and fflate's headers: the Blob is the archive's one copy.
         const parts: Uint8Array[] = [];
         let size = 0;
@@ -6376,11 +6759,12 @@ export default function App() {
           parts.push(chunk);
           size += chunk.byteLength;
         }, ({ writtenPayloadBytes, totalPayloadBytes }) => {
-          setImportMsg(`Writing ${stem}.zip · ${totalPayloadBytes === 0 ? 100 : Math.round(writtenPayloadBytes / totalPayloadBytes * 100)}%`);
+          setStatusLine(`Writing ${stem}.zip · ${totalPayloadBytes === 0 ? 100 : Math.round(writtenPayloadBytes / totalPayloadBytes * 100)}%`);
         });
         downloadBlob(`${stem}.zip`, new Blob(parts as BlobPart[], { type: "application/zip" }));
         setImportMsg(
-          `Saved ${stem}.zip, stored uncompressed: ${plan.workspaceName} and ${written} FCS file${written === 1 ? "" : "s"}, ` +
+          (folderFailed ? `GateLab could not write the folder in ${parent!.name}, so the export was downloaded instead. ` : "") +
+            `Saved ${stem}.zip, stored uncompressed: ${plan.workspaceName} and ${written} FCS file${written === 1 ? "" : "s"}, ` +
             `${formatByteSize(size)}${notes}`,
         );
       }
@@ -6540,7 +6924,7 @@ export default function App() {
       return;
     }
     setBusy(true);
-    setImportMsg(t("Drawing {assay}…", { assay: assay.id }));
+    setStatusLine(t("Drawing {assay}…", { assay: assay.id }));
     try {
       await checkpointCurrentWorkspace("before-hosted-assay-change");
       const hostedSamples = await loadHostedDataset(host.datasets, hostDatasetDescriptor, undefined, assay.id);
@@ -6566,7 +6950,7 @@ export default function App() {
         }
         if (to.hostedAssaySpace !== "display") {
           to.applyFluorArcsinhKeys(from.fluorArcsinhKeys());
-          to.applyFluorBiex(from.fluorBiexEntries());
+          to.applyFluorBiex(from.fluorBiexEntries(), from.fluorBiexRecordedEntries());
           to.setCytofCofactor(from.arcsinhCofactor);
         }
         const status = from.compensatedLayerStatus();
@@ -6675,11 +7059,15 @@ export default function App() {
     }
     manager.invalidateProfile(profileId);
     const baselineId = record?.baselineProfileId ?? profileId;
-    setWorkspaceCompensation((current) => ({
-      ...current,
-      lineages: current.lineages.filter(({ baselineProfileId, records }) =>
-        baselineProfileId !== baselineId && !records.some((candidate) => candidate.profileId === profileId)),
-    }));
+    setWorkspaceCompensation((current) => {
+      const lineages = current.lineages.filter(({ baselineProfileId, records }) =>
+        baselineProfileId !== baselineId && !records.some((candidate) => candidate.profileId === profileId));
+      // The active marker goes with its lineage: it never names a profile the workspace lacks.
+      const { activeProfileId, ...rest } = current;
+      const keep = activeProfileId !== undefined &&
+        lineages.some(({ records }) => records.some((candidate) => candidate.profileId === activeProfileId));
+      return { ...rest, lineages, ...(keep ? { activeProfileId } : {}) };
+    });
     setXRange(null);
     setYRange(null);
     setError(null);
@@ -6695,6 +7083,11 @@ export default function App() {
       label: string;
       revision: number;
     }>,
+    /**
+     * "workspace": every file, as the Matrices list's "Use for the workspace…" asks. Otherwise a
+     * flow matrix goes on the viewed file and a CyTOF one on the checked files, as before.
+     */
+    scope: "viewed" | "workspace" = "viewed",
   ): Promise<void> {
     if (!sample) throw new Error(t("No active sample is available for compensation."));
     // The solver reads the linear counts, and a compensated layer belongs beside them: the linear
@@ -6721,11 +7114,13 @@ export default function App() {
         throw new Error(t("The compensation revision cannot be applied because its parent profile is missing from this workspace."));
       }
     }
-    const targetEntries = profile.scientific.kind === "cytof-spillover"
-      ? checkedSamples
-      : activeEntry
-        ? [activeEntry]
-        : [];
+    const targetEntries = scope === "workspace"
+      ? samples
+      : profile.scientific.kind === "cytof-spillover"
+        ? checkedSamples
+        : activeEntry
+          ? [activeEntry]
+          : [];
     if (targetEntries.length === 0) {
       const message = t("Check at least one FCS file in Samples before applying CyTOF compensation.");
       setError(message);
@@ -6758,6 +7153,33 @@ export default function App() {
         throw new Error(message);
       }
     }
+    if (scope === "workspace" && profile.scientific.kind === "flow-spillover") {
+      // One matrix for every file: a file it cannot compensate refuses the switch by name, and
+      // is never left uncompensated beside the others.
+      const flowMatrix = profile.scientific.matrix;
+      const uncovered = targetEntries.flatMap((entry) => {
+        if (entry.sample.instrument !== "flow") return [t("{name}: not a flow cytometry file", { name: entry.name })];
+        const compatibility = reportMatrixCompatibility({
+          kind: "flow-spillover",
+          matrix: flowMatrix,
+          sampleChannels: entry.sample.channels,
+        });
+        return compatibility.canApply
+          ? []
+          : [t("{name}: {reason}", {
+              name: entry.name,
+              reason: compatibility.blockers.map(({ message }) => message).join(" "),
+            })];
+      });
+      if (uncovered.length > 0) {
+        const message = t(
+          "The matrix was not used for the workspace. Every file must be one it can compensate: {files}",
+          { files: uncovered.join("; ") },
+        );
+        setError(message);
+        throw new Error(message);
+      }
+    }
     const targetTotalEvents = targetEntries.reduce(
       (total, entry) => total + entry.sample.fcs.nEvents,
       0,
@@ -6773,7 +7195,14 @@ export default function App() {
       targetFileCount: targetEntries.length,
     });
     try {
-      await checkpointCurrentWorkspace("before-compensation-apply");
+      try {
+        await checkpointCurrentWorkspace("before-compensation-apply");
+      } catch (cause) {
+        // A matrix stored in the list (imported, or a copy) beside files still on their own
+        // embedded matrix is a workspace no format writes, so there is no checkpoint to take of
+        // it. The Apply goes ahead: it ends with no file on an embedded matrix, which is written.
+        if (!(cause instanceof WorkspaceUnwritableError)) throw cause;
+      }
       const progressHandler = (progress: CompensationApplyProgress) => {
         const progressEntry = targetEntries[progress.sampleIndex];
         setCompensationApplyStatus({
@@ -6787,7 +7216,7 @@ export default function App() {
           targetFileCount: progress.sampleCount,
           ...(progressEntry ? { targetFileName: progressEntry.name } : {}),
         });
-        setImportMsg(progress.sampleCount > 1 && progressEntry
+        setStatusLine(progress.sampleCount > 1 && progressEntry
           ? t("Compensation · file {current} of {count}: {name} · {percent}% · {processed} / {total} events", {
               current: progress.sampleIndex + 1,
               count: progress.sampleCount,
@@ -6968,7 +7397,9 @@ export default function App() {
         }
       })();
       const appliedProfile = result.profile;
-      setWorkspaceCompensation((current) => {
+      setWorkspaceCompensation((previous) => {
+        // The matrix just applied is the workspace's active one (the Matrices list's Active).
+        const current = { ...previous, activeProfileId: appliedProfile.profileId };
         const exists = current.lineages.some(({ records }) =>
           records.some(({ profileId }) => profileId === appliedProfile.profileId)
         );
@@ -7375,6 +7806,17 @@ export default function App() {
     });
   };
 
+  // A biex axis keeps the range it is shown over while its parameters change. Its display is
+  // FlowJo's channels (0 to the declared length) whatever the parameters, so the range still means
+  // the same stretch of the axis. Left as an automatic fit, every change re-keyed the channel, the
+  // fit was discarded and redone on the next pass, and each step drew twice, re-centred on the
+  // data: a slider that moves the data (extra negative decades) appeared to do nothing but jitter.
+  // Held as a pan holds it; Fit data + gates refits.
+  const holdBiexAxisRange = (idx: number) => {
+    const key = sample?.channels[idx]?.key;
+    if (key && activeAxisScaleContextKey) autoFittedScales.current.delete(autoFittedScaleKey(activeAxisScaleContextKey, key));
+  };
+
   const setGlobalScale = useCallback((key: string, range: [number, number] | null) => {
     if (activeAxisScaleContextKey) {
       // An edit in the range strip or Scales tab pins this channel in the current scope. The old
@@ -7395,13 +7837,16 @@ export default function App() {
         }
       }
     }
+    // Every committed range -- a pan or stretch, the zoom buttons, Fit, the range strip, the
+    // Scales tab -- stays within a biex axis's table (axisWindow.ts).
+    const bounded = range && sample ? clampToAxisWindow(range, axisWindowBounds(sample, sample.index(key))) : range;
     setGlobalScales((prev) => {
       const next = { ...prev };
-      if (range) next[key] = range;
+      if (bounded) next[key] = bounded;
       else delete next[key];
       return next;
     });
-  }, [activeAxisScaleContextKey, setGlobalScales]);
+  }, [activeAxisScaleContextKey, setGlobalScales, sample]);
 
   const toggleScaleLock = useCallback(() => {
     const nextLocked = !lockScalesBetweenFiles;
@@ -7893,7 +8338,7 @@ export default function App() {
     hostedDatasetLoadStartedRef.current = true;
     const controller = new AbortController();
     setBusy(true);
-    setImportMsg(hostWords("Connecting to the SingleCellExperiment host…"));
+    setStatusLine(hostWords("Connecting to the SingleCellExperiment host…"));
 
     void (async () => {
       try {
@@ -8046,7 +8491,10 @@ export default function App() {
                 hostedCompensationBindingsRef.current = new Map();
                 await restoreSavedWorkspaceCompensation(workspace, entries);
               }
-              setWorkspaceCompensation(workspace.compensation);
+              setWorkspaceCompensation(withDerivedActiveProfile(
+                workspace.compensation,
+                workspace.samples.map(({ assay }) => assay.compensatedLayer?.profileId ?? null),
+              ));
             } else {
               setWorkspaceCompensation(newEmptyWorkspaceCompensationState());
             }
@@ -8074,6 +8522,9 @@ export default function App() {
               (workspace.display as { branchGatesOnly?: boolean }).branchGatesOnly !== false);
             setShowUnownedGates(
               (workspace.display as { showUnownedGates?: boolean }).showUnownedGates !== false);
+            setColouredGates(restoredColouredGates((workspace.display as { colouredGates?: unknown }).colouredGates));
+            setGateLineWidth(restoredGateLineWidth((workspace.display as { gateLineWidth?: unknown }).gateLineWidth));
+            setGateLabelBackground(restoredGateLabelBackground((workspace.display as { gateLabelBackground?: unknown }).gateLabelBackground));
             setPointAlpha(restoredPointAlpha(workspace.display.pointAlpha));
             setPointSize(restoredPointSize(workspace.display.pointSize));
             setGatingFontSizes({
@@ -8164,6 +8615,12 @@ export default function App() {
   /** A plain click replaces the selection; a pool follows it, and otherwise the file is viewed. */
   function selectOnlySample(id: string): void {
     if (!samples.some((s) => s.id === id)) return;
+    // Pooled, a click on a pooled file makes it the one the plot draws solid and a drag edits;
+    // the pool and the selection stay as they are.
+    if (plotPool?.ids.includes(id)) {
+      selectSample(id, { keepTree: true });
+      return;
+    }
     setExcludedSampleIds(new Set(samples.filter((e) => e.id !== id).map((e) => e.id)));
     if (!poolSelection) inspectSample(id);
   }
@@ -8176,8 +8633,8 @@ export default function App() {
     // Set when they would not, it lingered until the next real edit, which then went unmarked.
     if (nx !== xIdx || ny !== yIdx || entry.sample.instrumentMode !== instrumentMode) skipDirtyRef.current = true;
     setActiveSampleId(id);
-    // The live tree follows the file according to the edit mode, in the effect beside
-    // setEditTarget; keepTree is honoured there too, since a pooled view is left alone.
+    // The live tree stays the tree whichever file is viewed; keepTree is kept for the callers that
+    // say so.
     void options;
     setXIdx(nx);
     setYIdx(ny);
@@ -8212,6 +8669,9 @@ export default function App() {
     if (maxEvents !== sheetStyle.maxEvents) own.maxEvents = maxEvents;
     if (contourThreshold !== sheetStyle.contourThreshold) own.contourThreshold = contourThreshold;
     if (contourLevels !== sheetStyle.contourLevels) own.contourLevels = contourLevels;
+    // Gates without colour are the sheet's publication style: black outlines and labels.
+    if (!colouredGates !== sheetStyle.pubStyle) own.pubStyle = !colouredGates;
+    if (gateLineWidth !== sheetStyle.gateLineWidth) own.gateLineWidth = gateLineWidth;
     addPlotsToLayout([{
       kind: "biplot",
       sampleId: activeSampleId,
@@ -8871,6 +9331,8 @@ export default function App() {
         scatterLinear: e.sample.scatterLinearKeys(),
         fluorArcsinh: e.sample.fluorArcsinhKeys(),
         fluorBiex: e.sample.fluorBiexEntries(),
+        // Only where a biex axis was adjusted, so that a reset after reopening finds its origin.
+        ...(Object.keys(e.sample.fluorBiexRecordedEntries()).length ? { fluorBiexRecorded: e.sample.fluorBiexRecordedEntries() } : {}),
         cytofCofactor: e.sample.arcsinhCofactor,
         compensationOn: e.sample.compensationEnabled ||
           (e.sample.spillover === null && compensationPendingRef.current.has(e.id)),
@@ -8923,6 +9385,7 @@ export default function App() {
           ...(h.source_hierarchy_id ? { source_hierarchy_id: h.source_hierarchy_id } : {}),
           ...(h.source_gate_ids ? { source_gate_ids: h.source_gate_ids } : {}),
           ...(h.source_population_ids ? { source_population_ids: h.source_population_ids } : {}),
+          ...(switchedOnGateIds(h).length ? { tailored_gate_ids: [...switchedOnGateIds(h)] } : {}),
           // Its own geometry travels with it. Without this a parked hierarchy would come back
           // pointing at gates that belong to whichever hierarchy happened to be active.
           gates: h.gates,
@@ -8952,6 +9415,8 @@ export default function App() {
         fontSizes: gatingFontSizes,
         branchGatesOnly,
         showUnownedGates,
+        // Not in the engine's display type (src/engine is frozen); read back by cast, as above.
+        ...({ colouredGates, gateLineWidth, gateLabelBackground } as Record<string, unknown>),
         paneWidths: { left: leftWidth, right: sideWidth },
       },
       illustration: illustConfigRef.current ?? undefined,
@@ -9207,7 +9672,7 @@ export default function App() {
     }
   }
   async function preparePortableBundle(ws: WorkspaceFileV3) {
-    setImportMsg("Preparing portable workspace · hashing source data");
+    setStatusLine("Preparing portable workspace · hashing source data");
     return createPortableWorkspaceV3ArchivePlan(
       ws,
       currentPortableSources(ws),
@@ -9215,7 +9680,7 @@ export default function App() {
       {
         onProgress: ({ phase, processedBytes, totalBytes }) => {
           const percent = totalBytes === 0 ? 100 : Math.round(processedBytes / totalBytes * 100);
-          setImportMsg(
+          setStatusLine(
             `Preparing portable workspace · ${phase === "hashing-fcs" ? "source FCS" : "compensated assay"} · ${percent}%`,
           );
         },
@@ -9230,17 +9695,22 @@ export default function App() {
    * one the first is still writing.
    */
   function saveToDrive(request: DriveSaveRequest = { kind: "save" }): Promise<void> {
-    if (request.kind === "experiment") return saveAsNewExperimentToDrive(request.name);
+    if (request.kind === "experiment") return saveAsNewExperimentToDrive(request);
     const mode = request.kind;
     const run = driveSaveChainRef.current.then(async () => {
       const target = driveTargetRef.current;
       if (!drive || !target) return;
+      // The sign-in has run out: nothing is written until a reconnect, and the workspace stays as it is.
+      if (!drive.module.tokenLive(drive.session.auth)) {
+        askDriveReconnect(mode, () => void driveActionsRef.current.saveToDrive(request));
+        return;
+      }
       const ws = buildWorkspaceFile();
       if (!ws) return;
       const editRevision = workspaceEditRevisionRef.current;
       setBusy(true);
       setError(null);
-      setImportMsg(`Saving to the lab Drive · ${target.name}`);
+      setStatusLine(`Saving to the lab Drive · ${target.name}`);
       try {
         const bytes = packReferenceWorkspace(ws);
         const sources = samples.map((entry) => ({ name: entry.name, sourcePath: entry.sourcePath ?? null }));
@@ -9256,11 +9726,16 @@ export default function App() {
         if (driveTargetRef.current?.folderId !== target.folderId || driveTargetRef.current.fileId !== target.fileId) return;
         setDriveTarget(result.target);
         setWsName(result.target.name);
+        driveSavedEditRevisionRef.current = editRevision;
         if (workspaceEditRevisionRef.current === editRevision) setDirty(false);
         setImportMsg(
           `${mode === "copy" ? "Saved a copy to the lab Drive" : "Saved to the lab Drive"} · ${result.target.experiment}/${result.target.name}` +
             (result.keepNote ? ` · ${result.keepNote}` : ""),
         );
+        // A save lets a stopped autosave go on, unless another save overtook this one.
+        setDriveAutosaveStop(result.overtakenBy
+          ? { reason: "conflict", message: `Autosave to the lab Drive stopped · ${describeDriveWriter(result.overtakenBy)} saved ${result.target.name} after this tab` }
+          : null);
         if (result.overtakenBy) {
           setError(
             `Saved, but ${describeDriveWriter(result.overtakenBy)} saved ${result.target.name} in the lab Drive right after, and theirs is ` +
@@ -9274,6 +9749,12 @@ export default function App() {
           setImportMsg(null);
           return;
         }
+        // The sign-in ran out part way, or Drive refused the token: nothing changed here.
+        if (cause instanceof drive.module.DriveAuthError) {
+          setImportMsg(null);
+          askDriveReconnect(mode, () => void driveActionsRef.current.saveToDrive(request));
+          return;
+        }
         setError(cause instanceof Error ? cause.message : String(cause));
         setImportMsg(null);
       } finally {
@@ -9284,6 +9765,151 @@ export default function App() {
     return run;
   }
 
+  /** A Drive action stopped because the sign-in ran out: "Reconnect to lab Drive", then `resume`. */
+  const askDriveReconnect = (action: DriveReconnectAction, resume: () => void) => setDriveReconnect({ action, resume });
+
+  /** Choose a folder in the picker so GateLab may create a file in it, then save. */
+  function grantDriveFolder(request: DriveSaveRequest, folderId: string): void {
+    if (!drive) return;
+    void drive.session.grantFolder(folderId).then((granted) => {
+      if (granted) return driveActionsRef.current.saveToDrive(request);
+    }).catch((cause) => {
+      if (cause instanceof drive.module.DriveAuthError && drive.session.auth.account()) {
+        askDriveReconnect("folder", () => driveActionsRef.current.grantDriveFolder(request, folderId));
+        return;
+      }
+      setError(cause instanceof Error ? cause.message : String(cause));
+    });
+  }
+
+  /**
+   * The Drive autosave: the workspace written back in place through the same queue and the same
+   * revision check as Save, without keeping the revision forever, and without asking anything. A
+   * conflict, a sign-in that ran out or a refusal stops it with a line in the status bar until a
+   * Save, a reconnect or another workspace; no answer from Drive waits a whole interval and tries
+   * again. It writes only over a workspace file the lab Drive holds already: a workspace opened
+   * from FCS alone is first written by a Save.
+   */
+  function autosaveToDrive(fileId: string): Promise<void> {
+    const stop = (reason: "auth" | "conflict" | "error", message: string) => {
+      setDriveAutosaveStop({ reason, message });
+      setImportMsg(message);
+    };
+    const run = driveSaveChainRef.current.then(async () => {
+      const target = driveTargetRef.current;
+      if (!drive || !target || target.fileId !== fileId) return;
+      // Saved by a Save queued ahead of this, with no change since: wait a whole interval again.
+      if (workspaceEditRevisionRef.current === driveSavedEditRevisionRef.current) {
+        setDriveAutosaveRetry((count) => count + 1);
+        return;
+      }
+      if (!drive.module.tokenLive(drive.session.auth)) {
+        stop("auth", `Autosave to the lab Drive stopped · the sign-in has run out · Save reconnects and saves ${target.name}`);
+        return;
+      }
+      // Another experiment is being opened over this one: wait a whole interval.
+      if (drive.session.opening() || driveOpeningRef.current) {
+        setDriveAutosaveRetry((count) => count + 1);
+        return;
+      }
+      const editRevision = workspaceEditRevisionRef.current;
+      try {
+        const ws = buildWorkspaceFile();
+        if (!ws) return;
+        const sources = samplesRef.current.map((entry) => ({ name: entry.name, sourcePath: entry.sourcePath ?? null }));
+        const result = await drive.session.save(target, packReferenceWorkspace(ws), sources, { keepForever: false });
+        if (result.kind === "conflict") {
+          stop("conflict", `Autosave to the lab Drive stopped · ${describeDriveWriter(result.by)} saved ${target.name} there after it was opened here · Save to choose what to do`);
+          return;
+        }
+        // Closed, or replaced by another workspace, while saving: what was saved is not reinstated.
+        if (driveTargetRef.current?.folderId !== target.folderId || driveTargetRef.current.fileId !== target.fileId) return;
+        setDriveTarget(result.target);
+        driveSavedEditRevisionRef.current = editRevision;
+        if (workspaceEditRevisionRef.current === editRevision) setDirty(false);
+        if (result.overtakenBy) {
+          stop("conflict", `Autosaved, but ${describeDriveWriter(result.overtakenBy)} saved ${target.name} in the lab Drive right after · autosave stopped · Save to choose what to do`);
+          return;
+        }
+        setStatusLine(`Autosaved to the lab Drive · ${result.target.experiment}/${result.target.name}`);
+      } catch (cause) {
+        if (cause instanceof drive.module.DriveAuthError) {
+          stop("auth", `Autosave to the lab Drive stopped · the sign-in has run out · Save reconnects and saves ${target.name}`);
+          return;
+        }
+        if (cause instanceof drive.module.DriveNetworkError) {
+          setImportMsg(`Autosave to the lab Drive got no answer · it tries again in ${Math.round(drive.module.DRIVE_AUTOSAVE_MS / 60_000)} minutes · ${target.name} is not saved`);
+          setDriveAutosaveRetry((count) => count + 1);
+          return;
+        }
+        stop("error", `Autosave to the lab Drive stopped · ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+    });
+    driveSaveChainRef.current = run.catch(() => undefined);
+    return run;
+  }
+
+  /** The latest of these, for a reconnect or a timer that calls them after the render that set them up. */
+  const driveActionsRef = useRef({ saveToDrive, autosaveToDrive, grantDriveFolder });
+  driveActionsRef.current = { saveToDrive, autosaveToDrive, grantDriveFolder };
+
+  // The Drive autosave, at most once every DRIVE_AUTOSAVE_MS while a Drive workspace has unsaved
+  // changes. The wait starts at the first change after a save and further changes do not restart
+  // it, so steady editing is still saved. Nothing is scheduled while a dialog waits on the member,
+  // while another operation runs, or once the autosave has stopped.
+  useEffect(() => {
+    if (!__GATELAB_DRIVE__ || !drive || !driveTarget?.fileId || !dirty || driveAutosaveStop || busy ||
+      driveReconnect || driveConflict || driveSaveAs || driveUpload || driveFolderGrant) return;
+    const fileId = driveTarget.fileId;
+    const timer = window.setTimeout(() => void driveActionsRef.current.autosaveToDrive(fileId), drive.module.DRIVE_AUTOSAVE_MS);
+    return () => window.clearTimeout(timer);
+  }, [drive, driveTarget?.fileId, dirty, driveAutosaveStop, busy, driveReconnect, driveConflict, driveSaveAs, driveUpload, driveFolderGrant, driveAutosaveRetry]);
+
+  // A reconnect lets an autosave stopped by the sign-in running out go on.
+  useEffect(() => {
+    if (!drive) return;
+    return drive.session.auth.subscribe(() => {
+      if (drive.module.tokenLive(drive.session.auth)) setDriveAutosaveStop((stop) => (stop?.reason === "auth" ? null : stop));
+    });
+  }, [drive]);
+
+  // GateLab keeps no copy of a Drive workspace in this browser: leaving the page with changes not
+  // saved to the lab Drive, or with a new experiment still uploading, asks first.
+  useEffect(() => {
+    if (!__GATELAB_DRIVE__ || !((driveTarget && dirty) || driveUpload)) return;
+    const ask = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", ask);
+    return () => window.removeEventListener("beforeunload", ask);
+  }, [driveTarget, dirty, driveUpload]);
+
+  // The lab site's login (Cloudflare Access) lasts 24 hours and can lapse with this tab open; a
+  // code chunk fetched after that fails, and lazyChunk would reload the page, taking a Drive
+  // workspace's unsaved changes with it. While there are any, the reload is held and the member is
+  // told to save first: saving goes to Google, not to the lab site, so it still works.
+  const driveUnsavedRef = useRef(false);
+  driveUnsavedRef.current = (driveTarget !== null && dirty) || driveUpload !== null;
+  useEffect(() => {
+    if (!__GATELAB_DRIVE__) return;
+    setChunkReloadGuard(() => {
+      if (!driveUnsavedRef.current) return null;
+      const message = "Part of GateLab could not be loaded from the lab site: its login has probably expired (it lasts 24 hours), " +
+        "or a new version was deployed. Nothing was lost. Save to the lab Drive first (saving still works), then reload the page and log in again.";
+      setError(message);
+      return message;
+    });
+    return () => setChunkReloadGuard(null);
+  }, []);
+
+  // The lab build loads every part it would otherwise fetch on first use soon after start-up, so a
+  // tab left open past the lab site's login needs nothing more from the site (src/labPreload.ts).
+  useEffect(() => {
+    if (!__GATELAB_DRIVE__ || isSceHost) return;
+    void import("./labPreload").then((module) => module.preloadLabChunksSoon()).catch(() => undefined);
+  }, [isSceHost]);
+
   /** The samples as a new experiment uploads them: each FCS, and the whole file of a data set where it is held. */
   const driveExperimentSamples = () => samples.map((entry) => ({
     id: entry.id,
@@ -9293,12 +9919,19 @@ export default function App() {
   }));
 
   /**
-   * Save the workspace open as a new experiment in the lab Drive: its folder, its FCS uploaded,
-   * then the workspace file. From then on it is that experiment's workspace, in Drive mode.
+   * Save the workspace open as a new experiment in the lab Drive, in the lab folder or the folder
+   * inside it the request names: its folder, its FCS uploaded, then the workspace file. From then
+   * on it is that experiment's workspace, in Drive mode.
    */
-  function saveAsNewExperimentToDrive(name: string): Promise<void> {
+  function saveAsNewExperimentToDrive(request: DriveSaveAsRequest): Promise<void> {
+    const { name } = request;
+    const location = request.location ?? null;
     const run = driveSaveChainRef.current.then(async () => {
       if (!drive) return;
+      if (drive.session.auth.account() && !drive.module.tokenLive(drive.session.auth)) {
+        askDriveReconnect("experiment", () => void driveActionsRef.current.saveToDrive(request));
+        return;
+      }
       const ws = buildWorkspaceFile();
       if (!ws) return;
       const editRevision = workspaceEditRevisionRef.current;
@@ -9308,10 +9941,10 @@ export default function App() {
       setDriveUpload({ experiment, progress: null, controller, cancelling: false });
       setBusy(true);
       setError(null);
-      setImportMsg(`Saving to the lab Drive as new experiment · ${experiment}`);
+      setStatusLine(`Saving to the lab Drive as new experiment · ${experiment}`);
       try {
         const result = await drive.session.saveAsNewExperiment(
-          { name, samples: driveExperimentSamples(), workspace: packReferenceWorkspace(ws) },
+          { name, samples: driveExperimentSamples(), workspace: packReferenceWorkspace(ws), location },
           {
             signal: controller.signal,
             onProgress: (progress) => setDriveUpload((current) => (current?.controller === controller ? { ...current, progress } : current)),
@@ -9328,9 +9961,11 @@ export default function App() {
           const sourcePath = result.sourcePaths.get(entry.id);
           return sourcePath && sourcePath !== entry.sourcePath ? { ...entry, sourcePath } : entry;
         }));
+        driveSavedEditRevisionRef.current = editRevision;
         if (workspaceEditRevisionRef.current === editRevision) setDirty(false);
         setImportMsg(
-          `Saved as new experiment · ${result.target.experiment}/${result.target.name} · ` +
+          `Saved as new experiment · ${result.target.experiment}/${result.target.name}` +
+            (location && location.path.length > 0 ? ` in ${drive.module.locationText(location)}` : "") + " · " +
             `${result.uploaded} FCS file${result.uploaded === 1 ? "" : "s"} uploaded` +
             (result.already ? `, ${result.already} already in the folder` : "") +
             (result.keepNote ? ` · ${result.keepNote}` : "") +
@@ -9339,12 +9974,20 @@ export default function App() {
         tourSignals.current.workspaceSaves++;
       } catch (cause) {
         if (cause instanceof drive.module.DriveFolderAccessError) {
-          setDriveFolderGrant({ request: { kind: "experiment", name }, folderId: cause.folderId });
+          setDriveFolderGrant({ request, folderId: cause.folderId });
           setImportMsg(null);
           return;
         }
         if (cause instanceof drive.module.DriveExperimentStoppedError && cause.cancelled) {
           setImportMsg(cause.message);
+          return;
+        }
+        // The sign-in ran out, before the folder was made or between files: after a reconnect the
+        // save goes on in the folder, with the files already there not sent again.
+        const stopped = cause instanceof drive.module.DriveExperimentStoppedError;
+        if ((stopped ? cause.reason : cause) instanceof drive.module.DriveAuthError && drive.session.auth.account()) {
+          setImportMsg(stopped ? cause.message : null);
+          askDriveReconnect("experiment", () => void driveActionsRef.current.saveToDrive(request));
           return;
         }
         setError(cause instanceof Error ? cause.message : String(cause));
@@ -9370,23 +10013,33 @@ export default function App() {
     setBusy(true);
     try {
       if (supportsFileSystemAccess() && wsHandle) {
+        let outcome;
         if (wsStorage === "bundle" && ws.version === WORKSPACE_VERSION_3) {
           const plan = await preparePortableBundle(ws);
-          await writeHandleStream(wsHandle, async (write) => {
-            await writePortableWorkspaceV3Archive(plan, write, {
-              onProgress: ({ writtenPayloadBytes, totalPayloadBytes }) => {
-                const percent = totalPayloadBytes === 0
-                  ? 100
-                  : Math.round(writtenPayloadBytes / totalPayloadBytes * 100);
-                setImportMsg(`Saving portable workspace · ${percent}%`);
-              },
-            });
-          });
+          outcome = await saveToOpenFile(wsHandle, {
+            produce: async (write) => {
+              await writePortableWorkspaceV3Archive(plan, write, {
+                onProgress: ({ writtenPayloadBytes, totalPayloadBytes }) => {
+                  const percent = totalPayloadBytes === 0
+                    ? 100
+                    : Math.round(writtenPayloadBytes / totalPayloadBytes * 100);
+                  setImportMsg(`Saving portable workspace · ${percent}%`);
+                },
+              });
+            },
+          }, "application/zip", downloadBlob);
         } else {
           const data = ws.version === WORKSPACE_VERSION_3
             ? packWorkspaceV3Reference(ws)
             : packWorkspaceForStorage(ws, currentFcsByPath(ws), wsStorage, bundleGatingML());
-          await writeHandle(wsHandle, data as BlobPart);
+          outcome = await saveToOpenFile(wsHandle, { data: data as BlobPart }, "application/octet-stream", downloadBlob);
+        }
+        if (outcome.kind === "downloaded") {
+          // Not saved: the handle is let go, so the next Save asks where rather than trying it again.
+          setWsHandle(null);
+          setImportMsg(`${outcome.message} The workspace is not marked saved.`);
+          tourSignals.current.workspaceSaves++;
+          return;
         }
         await rememberAllHandles();
         setDirty(false);
@@ -9409,13 +10062,24 @@ export default function App() {
     try {
       const data = packReferenceWorkspace(ws);
       if (supportsFileSystemAccess()) {
-        const h = await saveAsHandle(
-          `${base}.${WORKSPACE_EXT}`,
-          { "application/octet-stream": [`.${WORKSPACE_EXT}`] },
-          "GateLab workspace",
-          data as BlobPart,
+        const outcome = await saveToNewFile(
+          {
+            suggestedName: `${base}.${WORKSPACE_EXT}`,
+            accept: { "application/octet-stream": [`.${WORKSPACE_EXT}`] },
+            description: "GateLab workspace",
+            mime: "application/octet-stream",
+          },
+          { data: data as BlobPart },
+          downloadBlob,
         );
-        if (h) {
+        if (outcome.kind === "downloaded") {
+          // Nothing of the chosen file is kept: no handle, no recent entry, not marked saved.
+          setImportMsg(`${outcome.message}${driveTargetRef.current ? "" : " The workspace is not marked saved."}`);
+          tourSignals.current.workspaceSaves++;
+          return;
+        }
+        if (outcome.kind === "written") {
+          const h = outcome.handle;
           const f = await h.getFile();
           // A copy on this computer of a lab Drive workspace: the workspace open stays the Drive's,
           // and nothing of it is remembered in this browser.
@@ -9453,6 +10117,12 @@ export default function App() {
       // The name the file was saved under: the one chosen in the save dialog, which need not be
       // the one suggested, or the suggested one for a download.
       let savedName = `${base}-bundle.${WORKSPACE_EXT}`;
+      const portableTarget = {
+        suggestedName: savedName,
+        accept: { "application/zip": [`.${WORKSPACE_EXT}`] },
+        description: "GateLab workspace (self-contained)",
+        mime: "application/zip",
+      };
       if (ws.version === WORKSPACE_VERSION_3) {
         const plan = await preparePortableBundle(ws);
         const progress = ({ writtenPayloadBytes, totalPayloadBytes }: {
@@ -9462,17 +10132,19 @@ export default function App() {
           const percent = totalPayloadBytes === 0
             ? 100
             : Math.round(writtenPayloadBytes / totalPayloadBytes * 100);
-          setImportMsg(`Saving portable workspace · ${percent}%`);
+          setStatusLine(`Saving portable workspace · ${percent}%`);
         };
         if (supportsFileSystemAccess()) {
-          const handle = await saveAsHandleStream(
-            `${base}-bundle.${WORKSPACE_EXT}`,
-            { "application/zip": [`.${WORKSPACE_EXT}`] },
-            "GateLab workspace (self-contained)",
-            async (write) => writePortableWorkspaceV3Archive(plan, write, { onProgress: progress }),
+          const outcome = await saveToNewFile(
+            portableTarget,
+            { produce: async (write) => writePortableWorkspaceV3Archive(plan, write, { onProgress: progress }) },
+            downloadBlob,
           );
-          if (!handle) return;
-          savedName = handle.name;
+          if (outcome.kind !== "written") {
+            if (outcome.kind === "downloaded") setImportMsg(outcome.message);
+            return;
+          }
+          savedName = outcome.handle.name;
         } else {
           const parts: BlobPart[] = [];
           await writePortableWorkspaceV3Archive(plan, async (chunk) => {
@@ -9486,14 +10158,12 @@ export default function App() {
       } else {
         const zip = packWorkspace(ws, currentFcsByPath(ws), bundleGatingML());
         if (supportsFileSystemAccess()) {
-          const handle = await saveAsHandle(
-            `${base}-bundle.${WORKSPACE_EXT}`,
-            { "application/zip": [`.${WORKSPACE_EXT}`] },
-            "GateLab workspace (self-contained)",
-            zip as BlobPart,
-          );
-          if (!handle) return;
-          savedName = handle.name;
+          const outcome = await saveToNewFile(portableTarget, { data: zip as BlobPart }, downloadBlob);
+          if (outcome.kind !== "written") {
+            if (outcome.kind === "downloaded") setImportMsg(outcome.message);
+            return;
+          }
+          savedName = outcome.handle.name;
         } else {
           downloadBlob(`${base}-bundle.${WORKSPACE_EXT}`, new Blob([zip as BlobPart], { type: "application/zip" }));
         }
@@ -9541,11 +10211,12 @@ export default function App() {
         setImportMsg(`${recent.name} · access not granted`);
         return;
       }
-      const file = await recent.handle.getFile();
+      const file = await readPickedFile(recent.handle);
       await openWorkspaceFromFile(file, recent.handle, file.name);
     } catch (e) {
-      // The file is gone or moved: out of the list, and said.
-      await forgetRecentWorkspace(recent.name).catch(() => undefined);
+      // The file is gone or moved: out of the list, and said. A browser that refuses to read it
+      // (READ_REFUSED_MESSAGE) has not lost it, so it stays in the list.
+      if (!(e instanceof Error && e.message === READ_REFUSED_MESSAGE)) await forgetRecentWorkspace(recent.name).catch(() => undefined);
       refreshRecentWorkspaces();
       setError(`${recent.name} could not be opened: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -9690,9 +10361,16 @@ export default function App() {
       sourceName = "selected files";
       sources = picked;
     } else {
-      throw new Error(
-        "This browser cannot select a folder for linked FCS recovery. Open GateLab in a Chromium-based browser or use a portable workspace.",
+      // A browser that gives GateLab no file handles (Firefox, Safari, the Claude app's pane)
+      // still has its ordinary chooser; the files are matched as any others are, and the
+      // workspace asks for them again next time it is opened.
+      setImportMsg(
+        `Select the ${remaining.length} required FCS file${remaining.length === 1 ? "" : "s"}`,
       );
+      const picked = await pickFilesWithChooser([".fcs", ".cvw"]);
+      if (!picked) return null;
+      sourceName = "selected files";
+      sources = picked;
     }
 
     // The waveform files beside the FCS files travel with them; only the FCS files are matched.
@@ -10057,7 +10735,7 @@ export default function App() {
       for (let index = 0; index < tasks.length; index++) {
         const task = tasks[index];
         assertNotCancelled();
-        setImportMsg(t("Restoring saved compensation · checking local cache {current} of {total}", {
+        setStatusLine(t("Restoring saved compensation · checking local cache {current} of {total}", {
           current: index + 1,
           total: tasks.length,
         }));
@@ -10105,7 +10783,7 @@ export default function App() {
         assertNotCancelled();
         const groupStart = completedEvents;
         const profile = misses[0].task.profile;
-        setImportMsg(t("Restoring saved compensation · recomputing {name}", { name: profile.name }));
+        setStatusLine(t("Restoring saved compensation · recomputing {name}", { name: profile.name }));
         const result = await manager.apply({
           profile,
           targets: misses.map(({ task }) => ({
@@ -10115,7 +10793,7 @@ export default function App() {
           onProgress: (progress) => {
             const restoredEvents = groupStart + progress.processedEvents;
             setRestoreStatus("applying", restoredEvents);
-            setImportMsg(t("Restoring saved compensation · {percent}% · {processed} / {total} events", {
+            setStatusLine(t("Restoring saved compensation · {percent}% · {processed} / {total} events", {
               percent: Math.round(restoredEvents / totalEvents * 100),
               processed: restoredEvents.toLocaleString(),
               total: totalEvents.toLocaleString(),
@@ -10156,7 +10834,7 @@ export default function App() {
     // refused here (a FlowJo 7 workspace, a file that is none) left "reading workspace" standing
     // beside its error.
     const reading = `Opening ${wsFileName} · reading workspace`;
-    setImportMsg(reading);
+    setStatusLine(reading);
     try {
       // "Workspace" includes a .gatelab bundle and gate-only FlowJo/FACSChorus files. Point at
       // the right control rather than failing on the zip header.
@@ -10178,8 +10856,12 @@ export default function App() {
       // A .wsp holds gates and the names of the files they were drawn on, but no data. Opening
       // one therefore means gathering its FCS first -- from what is already loaded, plus
       // whatever the user can point at -- rather than refusing until a file happens to be open.
-      if (/\.wsp$/i.test(wsFileName)) {
-        const text = await file.text();
+      if (/\.wsp$/i.test(wsFileName) || isFlowJo11WorkbenchName(wsFileName)) {
+        // A FlowJo 11 workbench is read as the FlowJo workspace it is rewritten into
+        // (flowjo11Workbench.ts), and from there opens as a .wsp does.
+        const text = isFlowJo11WorkbenchName(wsFileName)
+          ? flowJo11WorkbenchToWorkspace(readFlowJo11Workbench(new Uint8Array(await file.arrayBuffer())))
+          : await file.text();
         if (!isFlowJoWorkspace(text)) {
           throw new Error(`"${wsFileName}" is not a FlowJo workspace GateLab can read.`);
         }
@@ -10225,7 +10907,7 @@ export default function App() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setImportMsg((msg) => (msg === reading ? null : msg));
+      setStatusLine((msg) => (msg === reading ? null : msg));
       setBusy(false);
     }
   }
@@ -10471,6 +11153,7 @@ export default function App() {
           ...(wss.scatterLinear ?? []),
           ...(wss.fluorArcsinh ?? []),
           ...Object.keys(wss.fluorBiex ?? {}),
+          ...Object.keys(wss.fluorBiexRecorded ?? {}),
           ...Object.keys(wss.labels ?? {}),
         ]),
       ]);
@@ -10508,7 +11191,7 @@ export default function App() {
         // After the W overrides above, so a channel restored to arcsinh still carries the W the
         // user set for its logicle and switching back gives them the axis they saved.
         entry.sample.applyFluorArcsinhKeys((wss.fluorArcsinh ?? []).map(currentKey));
-        entry.sample.applyFluorBiex(currentKeys(wss.fluorBiex ?? {}));
+        entry.sample.applyFluorBiex(currentKeys(wss.fluorBiex ?? {}), currentKeys(wss.fluorBiexRecorded ?? {}));
         entry.sample.applyLabelOverrides(currentKeys(wss.labels ?? {}));
         if (wss.metadata && Object.keys(wss.metadata).length) nextMetadata[entry.id] = wss.metadata;
         if (wss.hierarchyId) nextFileHierarchies[entry.id] = wss.hierarchyId;
@@ -10596,7 +11279,7 @@ export default function App() {
                       totalEvents: totalCompensatedEvents,
                     });
                   }
-                  setImportMsg(
+                  setStatusLine(
                     `${hasEmbeddedCompensation ? "Restoring embedded compensation" : "Checking portable workspace data"}` +
                       ` · ${Math.round(fraction * 100)}%`,
                   );
@@ -10651,7 +11334,7 @@ export default function App() {
       setPoolSelection(false);
       setWorkspaceCompensation(
         ws.version === WORKSPACE_VERSION_3
-          ? ws.compensation
+          ? withDerivedActiveProfile(ws.compensation, ws.samples.map(({ assay }) => assay.compensatedLayer?.profileId ?? null))
           : newEmptyWorkspaceCompensationState(),
       );
       setActiveSampleId(entries[activeIdx].id);
@@ -10681,13 +11364,16 @@ export default function App() {
         (ws.display as { branchGatesOnly?: boolean } | undefined)?.branchGatesOnly !== false);
       setShowUnownedGates(
         (ws.display as { showUnownedGates?: boolean } | undefined)?.showUnownedGates !== false);
+      setColouredGates(restoredColouredGates((ws.display as { colouredGates?: unknown } | undefined)?.colouredGates));
+      setGateLineWidth(restoredGateLineWidth((ws.display as { gateLineWidth?: unknown } | undefined)?.gateLineWidth));
+      setGateLabelBackground(restoredGateLabelBackground((ws.display as { gateLabelBackground?: unknown } | undefined)?.gateLabelBackground));
       setPointAlpha(restoredPointAlpha(ws.display?.pointAlpha));
       setPointSize(restoredPointSize(ws.display?.pointSize));
       setGatingFontSizes({ ...DEFAULT_GATING_FONT_SIZES, ...ws.display?.fontSizes });
       // The panes as the user left them; a saved right width is theirs, so the auto-fit stands down.
       const panes = ws.display?.paneWidths;
       if (panes?.left && Number.isFinite(panes.left)) setLeftWidth(Math.max(200, Math.min(900, panes.left)));
-      if (panes?.right && Number.isFinite(panes.right)) { setSideWidth(Math.max(320, Math.min(900, panes.right))); setAutoSizePopulations(false); }
+      if (panes?.right && Number.isFinite(panes.right)) { setSideWidth(restoredSidePaneWidth(panes.right)); setAutoSizePopulations(false); }
       const [dx, dy] = active.defaultChannelIndices();
       setXIdx(active.index(currentKey(ws.display?.xChannel ?? "")) ?? dx);
       setYIdx(active.index(currentKey(ws.display?.yChannel ?? "")) ?? dy);
@@ -10725,35 +11411,46 @@ export default function App() {
       const unconfirmed = referenceRequirements
         .filter((r) => !r.identity || !Object.values(r.identity).some((v) => v?.trim()))
         .map((r) => r.fileName);
-      setImportMsg(
+      // What the user must know about this open goes to the header's notes chip; the open itself
+      // is said by the header's file line and, in short, by the status line, its whole in the tooltip.
+      const openNotes = [
+        ...dataSetNotes,
+        ...(restated.length
+          ? [`${restated.length === 1 ? "A channel GateLab now names differently keeps its" : `${restated.length} channels GateLab now names differently keep their`}` +
+            ` gates and settings, each the same FCS parameter: ${restated.join(", ")}`]
+          : []),
+        // Relinked to a file that records another acquisition only because the user chose so.
+        ...(relinkedByChoiceRef.current.length
+          ? [`Relinked by choice to files that record another acquisition: ${relinkedByChoiceRef.current
+              .map((r) => `${r.path} as ${r.fileName}`).join(", ")}`]
+          : []),
+        ...(unconfirmed.length
+          ? [`Relinked by name alone, unconfirmed: the workspace was saved without the acquisition keywords of ` +
+            `${unconfirmed.length === 1 ? "this file" : `these ${unconfirmed.length} files`}, so nothing confirms ` +
+            `${unconfirmed.length === 1 ? "it is the file" : "they are the files"} it was saved with: ${namesInBrief(unconfirmed)}`]
+          : []),
+        // Taken over another file of its name, which it fits better, but not confirmed by what it
+        // was saved with.
+        ...(relinkedUnconfirmedRef.current.length
+          ? [`Relinked without confirmation: ${relinkedUnconfirmedRef.current.map((r) =>
+              `${r.path} as ${r.fileName}, chosen over ${r.setAside.join(", ")}: ` +
+              (r.agree.length
+                ? `it agrees with what it was saved with on ${r.agree.join(", ")} only, which does not confirm it`
+                : "its keywords could not be compared with what it was saved with")).join("; ")}`]
+          : []),
+      ];
+      setStatusLine(
+        `Opened ${wsFileName || "workspace"} · ${nS} file${nS > 1 ? "s" : ""}`,
         `Opened ${wsFileName || "workspace"} · ${nS} sample${nS > 1 ? "s" : ""}` +
           ` · ${storage === "bundle" ? "self-contained bundle" : "linked FCS"}` +
           ` · saved ${new Date(ws.savedAt).toLocaleString()}` +
-          dataSetNotes.map((note) => ` · ${note}`).join("") +
-          (restated.length
-            ? ` · ${restated.length === 1 ? "a channel GateLab now names differently keeps its" : `${restated.length} channels GateLab now names differently keep their`}` +
-              ` gates and settings, each the same FCS parameter: ${restated.join(", ")}`
-            : "") +
-          // Relinked to a file that records another acquisition only because the user chose so.
-          (relinkedByChoiceRef.current.length
-            ? ` · relinked by choice to files that record another acquisition: ${relinkedByChoiceRef.current
-                .map((r) => `${r.path} as ${r.fileName}`).join(", ")}`
-            : "") +
-          (unconfirmed.length
-            ? ` · relinked by name alone, unconfirmed: the workspace was saved without the acquisition keywords of ` +
-              `${unconfirmed.length === 1 ? "this file" : `these ${unconfirmed.length} files`}, so nothing confirms ` +
-              `${unconfirmed.length === 1 ? "it is the file" : "they are the files"} it was saved with: ${namesInBrief(unconfirmed)}`
-            : "") +
-          // Taken over another file of its name, which it fits better, but not confirmed by what it
-          // was saved with.
-          (relinkedUnconfirmedRef.current.length
-            ? ` · relinked without confirmation: ${relinkedUnconfirmedRef.current.map((r) =>
-                `${r.path} as ${r.fileName}, chosen over ${r.setAside.join(", ")}: ` +
-                (r.agree.length
-                  ? `it agrees with what it was saved with on ${r.agree.join(", ")} only, which does not confirm it`
-                  : "its keywords could not be compared with what it was saved with")).join("; ")}`
-            : ""),
+          openNotes.map((note) => ` · ${note}`).join(""),
       );
+      if (openNotes.length) {
+        setErrorKind("import");
+        // One note is said on its own; two or more open from the "⚠ N import notes" chip.
+        setError(openNotes.length === 1 ? openNotes[0] : openNotes.join("\n"));
+      }
       relinkedByChoiceRef.current = [];
       relinkedUnconfirmedRef.current = [];
       // As when a file is added to the workspace (addSampleEntries): a gate on a channel a file
@@ -10888,17 +11585,17 @@ export default function App() {
 
   /**
    * The tree the viewed file is gated under, when it is not the live one but of its family: the
-   * file's own copy (or its group's) while edits go to the tree or the group. A pooled view edits
-   * the tree by construction and is left to it. The stored tree itself, so it changes only when
-   * that tree does, not with every edit to the live one.
+   * file's own copy (or its group's) while edits go to the tree or the group, or while the pool
+   * draws and edits the tree, where each pooled file is still counted under its own gates. The
+   * stored tree itself, so it changes only when that tree does, not with every edit to the live one.
    */
   const viewedOwnTreeId = useMemo((): string | null => {
-    if (!activeSampleId || plotPool) return null;
+    if (!activeSampleId) return null;
     const hid = hierarchyOfFile(activeSampleId);
     if (hid === state.active_hierarchy_id) return null;
     if (templateOf(hid, state.hierarchies)?.id !== templateOf(state.active_hierarchy_id, state.hierarchies)?.id) return null;
     return state.stored_hierarchies[hid]?.root_population_id ? hid : null;
-  }, [activeSampleId, plotPool, hierarchyOfFile, state.active_hierarchy_id, state.hierarchies, state.stored_hierarchies]);
+  }, [activeSampleId, hierarchyOfFile, state.active_hierarchy_id, state.hierarchies, state.stored_hierarchies]);
   const viewedOwnTree = viewedOwnTreeId ? state.stored_hierarchies[viewedOwnTreeId] ?? null : null;
 
   // Gate geometry and population membership are expensive over large FCS files, but neither
@@ -10924,15 +11621,21 @@ export default function App() {
     [sample, viewedOwnTree, activeDataRevision, instrumentMode],
   );
 
-  // The viewed file under its own gates, keyed by the live tree's populations: the plot, the
-  // population tree and the gate counts show what the file's own tree selects while the tree's
-  // gates are drawn and edited. With the live tree's gates instead, a tailored file viewed with
-  // "the tree · all files" showed the tree's gating, and none on a channel it labels differently.
+  // The viewed file under its own gates, keyed by the live tree's populations and gates: the plot,
+  // the population tree and the gate counts show what the file's own tree selects, and the plot
+  // draws the file's own version of each gate (viewedGates). With the live tree's gates instead, a
+  // tailored file viewed with "The tree · all files" showed the tree's gating, and none on a
+  // channel it labels differently; with only the populations keyed, the plot counted the tree's
+  // gate within the file's own populations, and a gate read 791 events where the tree read 819.
   const viewGating = useMemo(
     () => ownTreeGating && viewedOwnTree?.root_population_id && activeSampleId
-      ? gatingKeyedByLiveTree(sample, gatingState, ownTreeGating, viewedOwnTree.root_population_id, (popId) => populationIdInFileTree(activeSampleId, popId))
+      ? withOwnGateMasks(
+        gatingKeyedByLiveTree(sample, gatingState, ownTreeGating, viewedOwnTree.root_population_id, (popId) => populationIdInFileTree(activeSampleId, popId)),
+        ownTreeGating,
+        liveGateIdsInFileTree(state, viewedOwnTree.id),
+      )
       : gatingDerived ?? recomputeGating(sample, gatingState),
-    // populationIdInFileTree reads the store; the trees it reads are listed.
+    // populationIdInFileTree and liveGateIdsInFileTree read the store; the trees they read are listed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [gatingDerived, ownTreeGating, viewedOwnTree, sample, gatingState, activeSampleId, activeDataRevision, instrumentMode],
   );
@@ -10983,7 +11686,25 @@ export default function App() {
   // with. The adapter below is what it reads and does; it closes over this render's values and is
   // re-made each render, so a request always sees the app as it is.
   const [agentStatus, setAgentStatus] = useState<AgentLinkStatus>({ state: "idle" });
+  const [agentGatingTask, setAgentGatingTask] = useState<AgentGatingTask | null>(null);
+  // A Strategy selection an agent asked for, held until the Strategy tab takes it (it opens with
+  // it, or takes it while open) and then dropped, so the tab's next remount restores the user's
+  // controls from strategyConfigRef. The pending nonce is a ref so a waiting request sees it move.
+  const [agentStrategyRequest, setAgentStrategyRequest] = useState<StrategyRequest | null>(null);
+  const agentStrategyNonceRef = useRef(0);
+  const agentStrategyPendingRef = useRef<number | null>(null);
+  const takeAgentStrategyRequest = (nonce: number) => {
+    if (agentStrategyPendingRef.current === nonce) agentStrategyPendingRef.current = null;
+    setAgentStrategyRequest((current) => (current?.nonce === nonce ? null : current));
+  };
   const agentSettledRef = useRef<(() => void)[]>([]);
+  const [, setAgentCommit] = useState(0);
+  const agentSettled = () => new Promise<void>((resolve) => {
+    agentSettledRef.current.push(resolve);
+    // Unchanged view setters (including clearing an already clear pan) may not commit.
+    // Give every waiter a commit to observe, batched with any actual requested changes.
+    setAgentCommit((version) => version + 1);
+  });
   useEffect(() => {
     // After every commit: whoever dispatched and waits for the state to be readable can go on.
     const waiting = agentSettledRef.current;
@@ -10992,7 +11713,16 @@ export default function App() {
   });
   const agentAdapterRef = useRef<AgentAdapter>(null!);
   agentAdapterRef.current = {
+    gatingTask: () => agentGatingTask,
+    setGatingTask: async (task) => { setAgentGatingTask(task); await agentSettled(); },
     info: () => ({ app: isSceHost ? "GateLabR" : "GateLab", version: pkg.version, host: isSceHost ? "sce" : "browser", workspaceName: wsName || null }),
+    context: () => ({
+      assay: { id: isSceHost ? hostDrawnAssayId : null, space: sample?.hostedAssaySpace ?? null },
+      plot: { pooled: !!poolSelection, sampleIds: includedSamples.map((entry) => entry.id) },
+      gateVisibility: { branchOnly: branchGatesOnly, showUnowned: showUnownedGates, selectedGateId: state.selected_gate_id, checkedGateIds: state.selected_gate_ids ?? [] },
+      populationCountScope: "all-loaded-samples",
+      gateCountScope: "geometry-within-active-population",
+    }),
     state: () => state,
     samples: (): AgentSampleView[] => {
       const trees = workspaceHierarchyTrees(state);
@@ -11015,15 +11745,20 @@ export default function App() {
       });
     },
     dispatch,
-    settled: () => new Promise<void>((resolve) => { agentSettledRef.current.push(resolve); }),
+    settled: agentSettled,
     view: (): AgentViewState => {
       const xKey = sample?.channels[xIdx]?.key ?? null, yKey = sample?.channels[yIdx]?.key ?? null;
       // The ranges as the plot takes them: the pan, else the held scale, else the automatic one.
       const shown = (own: [number, number] | null, key: string | null, auto: [number, number] | undefined): [number, number] | null =>
         own ?? (key ? globalScales[key] ?? null : null) ?? auto ?? null;
+      // The Strategy tab's controls as it last held them (it mirrors them after every render).
+      const strategy = strategyConfigRef.current;
       return {
         populationId: state.active_population_id, sampleId: activeSampleId, x: xKey, y: yKey, tab: activeTab,
         ranges: { x: shown(xRange, xKey, workspaceAutomaticRanges?.xRange), y: shown(yRange, yKey, workspaceAutomaticRanges?.yRange) },
+        strategy: strategy
+          ? { mode: strategy.mode, populationIds: strategy.mode === "multi" ? [...strategy.multiPops] : strategy.popId ? [strategy.popId] : [], fullPath: strategy.fullPath }
+          : null,
       };
     },
     setView: async (params: AgentViewParams) => {
@@ -11036,14 +11771,40 @@ export default function App() {
         if (xi !== undefined) setXIdx(xi);
         if (yi !== undefined) setYIdx(yi);
       }
-      setActiveTab("gating");
-      await new Promise<void>((resolve) => { agentSettledRef.current.push(resolve); });
+      const strategy = params.strategy;
+      const nonce = strategy ? ++agentStrategyNonceRef.current : null;
+      if (strategy && nonce !== null) {
+        agentStrategyPendingRef.current = nonce;
+        setAgentStrategyRequest({
+          nonce, mode: strategy.mode ?? (strategy.populationIds.length === 1 ? "single" : "multi"), populationIds: [...strategy.populationIds],
+          ...(strategy.fullPath === undefined ? {} : { fullPath: strategy.fullPath }),
+        });
+      }
+      setActiveTab(params.tab === "strategy" ? "strategy" : "gating");
+      await agentSettled();
+      if (nonce === null) return;
+      // The tab takes the request in the render that opens or updates it and says so in that
+      // commit's effects, before this one's; a commit that resolved the wait before the request was
+      // rendered is waited past. A tab that cannot open never takes it: the request is withdrawn
+      // then, so it is not taken later over the user's own choice.
+      for (let i = 0; i < 4 && agentStrategyPendingRef.current === nonce; i++) await agentSettled();
+      if (agentStrategyPendingRef.current === nonce) {
+        agentStrategyPendingRef.current = null;
+        setAgentStrategyRequest(null);
+        await agentSettled();
+        throw new Error("The Strategy tab did not open.");
+      }
     },
     fit: () => fitDataAndGates(),
     setAxisRange: (channel, range) => setGlobalScale(channel, range),
     clearPan: () => { setXRange(null); setYRange(null); },
     reload: () => window.location.reload(),
     render: async (params) => {
+      if (activeTab === "strategy") {
+        const container = document.getElementById("strategy-grid-container");
+        if (!container) throw new Error("The Strategy tab is not on screen.");
+        return renderGridPng(container, STRATEGY_GRID_ID, params);
+      }
       const area = plotAreaRef.current;
       if (!area) throw new Error("The Gating tab's plot is not on screen.");
       return renderPlotPng(area, params);
@@ -11054,9 +11815,13 @@ export default function App() {
     },
   };
   const agentLinkRef = useRef<AgentLink | null>(null);
+  const agentHandlerRef = useRef<(AgentHandler & StrategyReviewer) | null>(null);
   if (!agentLinkRef.current) {
     const handler = createAgentHandler({
+      gatingTask: () => agentAdapterRef.current.gatingTask!(),
+      setGatingTask: (task) => agentAdapterRef.current.setGatingTask!(task),
       info: () => agentAdapterRef.current.info(),
+      context: () => agentAdapterRef.current.context!(),
       state: () => agentAdapterRef.current.state(),
       samples: () => agentAdapterRef.current.samples(),
       dispatch: (action) => agentAdapterRef.current.dispatch(action),
@@ -11070,6 +11835,7 @@ export default function App() {
       clearPan: () => agentAdapterRef.current.clearPan(),
       reload: () => agentAdapterRef.current.reload(),
     });
+    agentHandlerRef.current = handler;
     agentLinkRef.current = new AgentLink({ handler, info: () => agentAdapterRef.current.info(), onStatus: setAgentStatus });
   }
   useEffect(() => {
@@ -11081,6 +11847,70 @@ export default function App() {
     if (fromUrl && parseAgentUrl(fromUrl)) agentLinkRef.current?.connect(parseAgentUrl(fromUrl)!.toString());
     return () => agentLinkRef.current?.disconnect("closed");
   }, []);
+
+  // A strategy proposal from the host (a strategy GateLabR sends from R): replayed on a
+  // copy of the gating with the checks an agent's proposal gets, shown for review, and applied only
+  // when the user accepts it, as one undo step (proposals/strategyProposal.ts). One at a time: a
+  // newer proposal replaces the one under review. R is told what became of each.
+  type HostReview = { proposal: HostStrategyProposal; review: StrategyReview; note: string | null; busy: boolean; refused: boolean };
+  const [hostReview, setHostReview] = useState<HostReview | null>(null);
+  const hostReviewRef = useRef<HostReview | null>(null);
+  const showHostReview = (next: HostReview | null) => { hostReviewRef.current = next; setHostReview(next); };
+  const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  const receiveHostProposal = (message: unknown) => {
+    if (!hostProposals) return;
+    let proposal: HostStrategyProposal, review: StrategyReview;
+    try {
+      proposal = parseHostProposal(message);
+      review = agentHandlerRef.current!.previewStrategy(proposal);
+    } catch (error) {
+      hostProposals.reply({ proposalId: hostProposalId(message), status: "refused", message: errorText(error) });
+      return;
+    }
+    const replaced = hostReviewRef.current;
+    if (replaced && !replaced.refused) hostProposals.reply({ proposalId: replaced.proposal.proposalId, status: "superseded" });
+    showHostReview({ proposal, review, note: null, busy: false, refused: false });
+    hostProposals.reply({ proposalId: proposal.proposalId, status: "review", steps: Array.isArray(proposal.steps) ? proposal.steps.length : 0, sampleIds: review.sampleIds });
+  };
+  const receiveHostProposalRef = useRef(receiveHostProposal);
+  receiveHostProposalRef.current = receiveHostProposal;
+  // Proposals wait in the channel until there is data to count them on.
+  const hostProposalsReady = samples.length > 0;
+  useEffect(() => {
+    if (!hostProposals || !hostProposalsReady) return;
+    return hostProposals.listen((message) => receiveHostProposalRef.current(message));
+  }, [hostProposals, hostProposalsReady]);
+  const acceptHostReview = async () => {
+    const current = hostReviewRef.current;
+    if (!current || current.busy || current.refused || !hostProposals) return;
+    const { proposalId } = current.proposal;
+    showHostReview({ ...current, busy: true });
+    try {
+      const applied = await agentHandlerRef.current!.applyStrategy(current.review);
+      showHostReview(null);
+      hostProposals.reply({ proposalId, status: "accepted", ...applied });
+    } catch (error) {
+      if (!(error instanceof StrategyMovedError)) {
+        showHostReview({ ...current, busy: false, note: errorText(error) });
+        return;
+      }
+      // The gating moved under the review: previewed again on the gating as it is now, for the
+      // user to decide again; a proposal that no longer replays is refused and can only be closed.
+      try {
+        const review = agentHandlerRef.current!.previewStrategy(current.proposal);
+        showHostReview({ ...current, review, busy: false, note: t("The gating changed after the proposal was previewed. It has been previewed again on the gating as it is now; check it before applying it.") });
+      } catch (again) {
+        showHostReview({ ...current, busy: false, refused: true, note: errorText(again) });
+        hostProposals.reply({ proposalId, status: "refused", message: errorText(again) });
+      }
+    }
+  };
+  const rejectHostReview = () => {
+    const current = hostReviewRef.current;
+    if (!current || current.busy) return;
+    showHostReview(null);
+    if (!current.refused) hostProposals?.reply({ proposalId: current.proposal.proposalId, status: "rejected" });
+  };
 
   useEffect(() => {
     const generation = ++inactiveGatingGenerationRef.current;
@@ -11132,13 +11962,30 @@ export default function App() {
         do {
           const entry = targets[targetIndex++];
           try {
-            const gating = recomputeGating(entry.sample, gatingState);
+            // A file gated under a copy is shown under it, keyed by the live tree as the viewed
+            // file is (viewGating); the live tree's gating of it is made only when read.
+            const treeId = hierarchyOfFile(entry.id);
+            const own = treeId !== state.active_hierarchy_id ? state.stored_hierarchies[treeId] : undefined;
+            const ownGateIds = own?.root_population_id ? liveGateIdsInFileTree(state, treeId) : new Map<string, string>();
+            let display: GatingDerived | undefined;
+            if (own?.root_population_id && ownGateIds.size) {
+              const ownGating = recomputeOwnTreeGating(entry.sample, own);
+              display = withOwnGateMasks(
+                gatingKeyedByLiveTree(entry.sample, gatingState, ownGating, own.root_population_id, (popId) => populationIdInFileTree(entry.id, popId)),
+                ownGating,
+                ownGateIds,
+              );
+            }
             if (generation !== inactiveGatingGenerationRef.current) return;
+            let gating = display ? null : recomputeGating(entry.sample, gatingState);
+            const liveSample = entry.sample;
+            const liveGatingState = gatingState;
             inactiveGatingCacheRef.current.set(entry.id, {
               sample: entry.sample,
               dataRevision: entry.sample.dataRevision,
               gateVersion: state.gate_version,
-              gating,
+              get gating() { return gating ??= recomputeGating(liveSample, liveGatingState); },
+              ...(display ? { display } : {}),
             });
             done.push(entry.id);
           } catch (cause) {
@@ -11198,7 +12045,7 @@ export default function App() {
         cached.dataRevision !== entry.sample.dataRevision ||
         cached.gateVersion !== state.gate_version
       ) return null;
-      results.push(cached.gating);
+      results.push(displayGatingOf(cached));
     }
     return results;
   }, [
@@ -11361,12 +12208,12 @@ export default function App() {
         },
       }];
     }
-    const gating = entry.id === activeSampleId
-      ? viewGating
-      : inactiveGatingCacheRef.current.get(entry.id)?.gating;
     const cached = entry.id === activeSampleId
       ? null
       : inactiveGatingCacheRef.current.get(entry.id);
+    const gating = entry.id === activeSampleId
+      ? viewGating
+      : cached ? displayGatingOf(cached) : undefined;
     if (
       !gating ||
       (cached && (
@@ -11413,6 +12260,135 @@ export default function App() {
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.populations, state.root_population_id, state.gate_version, derived]);
+  // The Compensation tab's Matrices list (vault note "GateLab — Compensation Matrices panel
+  // (2026-10-23)"): each flow file's embedded matrix, read and hashed once per Sample.
+  const embeddedMatrixCacheRef = useRef(new WeakMap<Sample, Promise<EmbeddedFlowMatrix | null>>());
+  const [embeddedMatrices, setEmbeddedMatrices] = useState<ReadonlyMap<string, EmbeddedFlowMatrix>>(() => new Map());
+  useEffect(() => {
+    let cancelled = false;
+    const cache = embeddedMatrixCacheRef.current;
+    void Promise.all(samples.map(async (entry) => {
+      let pending = cache.get(entry.sample);
+      if (!pending) {
+        pending = embeddedFlowMatrixOf(entry.sample, entry.name).catch(() => null);
+        cache.set(entry.sample, pending);
+      }
+      return [entry.id, await pending] as const;
+    })).then((pairs) => {
+      if (cancelled) return;
+      setEmbeddedMatrices(new Map(pairs.flatMap(([id, matrix]) => (matrix ? [[id, matrix] as const] : []))));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [samples]);
+  const matrixRows: MatrixLibraryRow[] = activeTab === "compensation"
+    ? buildMatrixLibrary(
+        workspaceCompensation,
+        [...embeddedMatrices.values()],
+        samples.map((entry): FileCompensationUse => {
+          const status = entry.sample.compensatedLayerStatus();
+          if (status.state === "missing") return null;
+          return status.metadata.runtimeIdentity === "profile"
+            ? { kind: "profile", profileId: status.metadata.profileId }
+            : { kind: "embedded", key: embeddedMatrices.get(entry.id)?.key ?? null };
+        }),
+      )
+    : [];
+
+  function addMatrixLineage(profile: CompensationProfileRecord): void {
+    setWorkspaceCompensation((current) => ({
+      ...current,
+      lineages: [...current.lineages, { baselineProfileId: profile.baselineProfileId, records: [profile] }],
+    }));
+    markWorkspaceDirty();
+  }
+
+  // Stored matrices and files on their own embedded matrix cannot be saved together
+  // (buildWorkspaceFile refuses the mix): the list says so, and names the files.
+  const embeddedBesideStored = workspaceCompensation.lineages.length > 0
+    ? embeddedLayerEntries().map(({ name }) => name)
+    : [];
+  const compensationMatrices: CompensationMatricesProps = {
+    rows: matrixRows,
+    fileCount: samples.length,
+    unsavedEmbeddedFiles: embeddedBesideStored,
+    busy: compensationApplyStatus !== null,
+    // The list offers no switch to a matrix GateLab cannot store (row.matrix null): every file
+    // is then named as one it cannot compensate.
+    planSwitch: (row) => row.matrix
+      ? planMatrixSwitch(
+          row.matrix,
+          row.compensationKind,
+          samples.map(({ name, sample: fileSample }) => ({ name, sample: fileSample })),
+          sample,
+          state.gates,
+          state.populations,
+          state.root_population_id ?? null,
+        )
+      : {
+          fileCount: samples.length,
+          uncovered: samples.map(({ name }) => ({ name, wrongInstrument: false, missingChannels: [], message: row.unusable })),
+          leavingEmbedded: [],
+          gateCount: 0,
+          populationCount: 0,
+        },
+    // A hosted SCE's compensated assays are made in R, one Apply at a time.
+    onUse: isSceHost ? undefined : async (row) => {
+      const profile = row.profile ?? (row.embedded ? await baselineFromEmbedded(row.embedded, row.name) : null);
+      if (!profile) throw new Error(t("This matrix cannot be used."));
+      await applyCompensationProfile(profile, undefined, undefined, "workspace");
+      setImportMsg(t("{name} is used for the workspace · {count} files compensated", { name: row.name, count: samples.length }));
+    },
+    onRename: (row, name) => {
+      if (row.baselineProfileId === null) return;
+      const next = name.trim().normalize("NFC").slice(0, 200);
+      setWorkspaceCompensation((current) => ({
+        ...current,
+        lineages: current.lineages.map((lineage) => {
+          if (lineage.baselineProfileId !== row.baselineProfileId) return lineage;
+          const { name: _previous, ...unnamed } = lineage;
+          return next ? { ...unnamed, name: next } : unnamed;
+        }),
+      }));
+      markWorkspaceDirty();
+    },
+    onDuplicate: async (row) => {
+      addMatrixLineage(await duplicateOfRow(row, copyName(row.name, new Set(matrixRows.map(({ name }) => name)))));
+    },
+    onDelete: (row) => {
+      if (row.baselineProfileId === null || !row.canDelete) return;
+      setWorkspaceCompensation((current) => ({
+        ...current,
+        lineages: current.lineages.filter(({ baselineProfileId }) => baselineProfileId !== row.baselineProfileId),
+      }));
+      markWorkspaceDirty();
+    },
+    onImport: async (file) => {
+      const pnns = new Set(samples
+        .filter((entry) => entry.sample.instrument === "flow")
+        .flatMap((entry) => entry.sample.channels.map(({ pnn }) => pnn.trim().normalize("NFC"))));
+      let imported: Awaited<ReturnType<typeof importedFlowMatrix>>;
+      try {
+        imported = await importedFlowMatrix(await file.text(), file.name, pnns);
+      } catch (cause) {
+        throw new Error(t("{file} could not be imported: {reason}", {
+          file: file.name,
+          reason: cause instanceof Error ? cause.message : String(cause),
+        }));
+      }
+      const same = matrixRows.find(({ matrixHash }) => matrixHash === imported.profile.matrixHash);
+      if (same) return t("{file} holds the same matrix as {name}, which is already in the list.", { file: file.name, name: same.name });
+      addMatrixLineage(imported.profile);
+      return imported.unmatched.length > 0
+        ? t("Added {name}, not in use. Not a channel of any file in the workspace: {channels}.", {
+            name: imported.profile.name,
+            channels: imported.unmatched.join(", "),
+          })
+        : t("Added {name}, not in use.", { name: imported.profile.name });
+    },
+  };
+
   const compensationReviewPopulations = useMemo(() => {
     const rootId = state.root_population_id ?? "";
     return populationTreeOrder(state.populations, rootId)
@@ -11435,6 +12411,13 @@ export default function App() {
         if (gx !== undefined && gy !== undefined && (gx !== xIdx || gy !== yIdx)) {
           setXIdx(gx);
           setYIdx(gy);
+        }
+        // A range (a rectangle with one channel on both axes) is drawn on the histogram view, and
+        // every other gate on the scatter plot.
+        const isRange = g.gate_type === "rectangle" && g.x_channel === g.y_channel;
+        if (isRange !== histogramView) {
+          setHistogramView(isRange);
+          setDrawMode("navigate");
         }
       }
     }
@@ -11751,7 +12734,13 @@ export default function App() {
   );
 
 
+  // While a biex slider is held, the automatic frame is not recomputed: the axis keeps the range
+  // it is shown over (holdBiexAxisRange), so nothing reads the frame, and on 74,000 events its
+  // quantiles were 40 ms of every step of the drag. Recomputed once on release.
+  const biexDragging = useRef(false);
+  const lastAutomaticRanges = useRef<ReturnType<typeof buildWorkspaceAxisRanges> | null>(null);
   const workspaceAutomaticRanges = useMemo(() => {
+    if (biexDragging.current && lastAutomaticRanges.current) return lastAutomaticRanges.current;
     if (
       !sample ||
       !activeXChannelKey ||
@@ -11771,7 +12760,8 @@ export default function App() {
       yIndex,
       mask: null,
     }];
-    return buildWorkspaceAxisRanges(inputs);
+    lastAutomaticRanges.current = buildWorkspaceAxisRanges(inputs);
+    return lastAutomaticRanges.current;
   }, [
     sample,
     activeSampleId,
@@ -11814,8 +12804,9 @@ export default function App() {
     const inputs: PooledGateCountInput[] = [];
     for (const entry of contributors) {
       let gating: GatingDerived | undefined;
+      // Each file under its own gates: the viewed file as the plot shows it, the others as cached.
       if (entry.id === activeSampleId) {
-        gating = gatingDerived ?? undefined;
+        gating = viewGating;
       } else {
         const cached = inactiveGatingCacheRef.current.get(entry.id);
         if (
@@ -11823,7 +12814,7 @@ export default function App() {
           cached.sample === entry.sample &&
           cached.dataRevision === entry.sample.dataRevision &&
           cached.gateVersion === state.gate_version
-        ) gating = cached.gating;
+        ) gating = displayGatingOf(cached);
       }
       // Still being gated in the background: report the scope as the blue file until it lands.
       if (!gating) return { counts: null, fileCount: contributors.length };
@@ -11838,7 +12829,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     sample, poolSelection, includedSamples, xIdx, yIdx, activeWorkspaceScaleContextKey, panelKeyOf,
-    primaryPanelKey, activeSampleId, gatingDerived, inactiveGatingCacheVersion,
+    primaryPanelKey, activeSampleId, viewGating, inactiveGatingCacheVersion,
     state.gate_version, state.gates, state.active_population_id, state.selected_pop_ids,
     state.root_population_id,
   ]);
@@ -11858,12 +12849,40 @@ export default function App() {
         };
   }, [pooledGateCounts, t]);
   const labelGateCounts = pooledGateCounts?.counts ?? derived.gateCounts;
-  // While a gate is being fitted to its events, the plot draws the fit in its place, labelled
-  // with the fit's own count; the stored gate is untouched until Apply.
-  const plottedGates = useMemo(
-    () => (fitGate?.result ? { ...state.gates, [fitGate.gateId]: fitGate.result.gate } : state.gates),
-    [state.gates, fitGate],
+  /**
+   * The viewed (in a pool, the clicked) file's version of each gate, where the plot draws
+   * something other than the tree's gate: the file's own coordinates or its group's. Drawn solid,
+   * and what a drag edits; a pool draws the other versions dashed.
+   */
+  const viewedGates = useMemo<ReadonlyMap<string, DrawnGate>>(
+    () => viewedFileGates(state, !activeSampleId ? null : hierarchyOfFile(activeSampleId)),
+    // viewedFileGates reads only the trees, the groups and which tree is live.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeSampleId, hierarchyOfFile, state.gates, state.gate_order, state.populations, state.root_population_id,
+      state.hierarchies, state.stored_hierarchies, state.active_hierarchy_id, state.groups],
   );
+  /** The live gates the viewed file tailors, or its group does: tagged on the plot and in the lists. */
+  const viewedTailoredGateIds = useMemo<ReadonlySet<string>>(
+    () => new Set([...viewedGates].filter(([, drawn]) => drawn.tailored).map(([gid]) => gid)),
+    [viewedGates],
+  );
+  /** The tag a tailored gate carries: "this file", or the name of the group whose version it is. */
+  const tailoredTagOf = useCallback((gateId: string): string | null => {
+    const tailored = viewedGates.get(gateId)?.tailored;
+    if (!tailored) return null;
+    return tailored.owner.kind === "file" ? t("this file") : tailored.owner.name;
+  }, [viewedGates, t]);
+  // While a gate is being fitted to its events, the plot draws the fit in its place, labelled
+  // with the fit's own count; the stored gate is untouched until Apply. Every other gate is drawn
+  // as the viewed file has it.
+  const plottedGates = useMemo(() => {
+    let gates = state.gates;
+    if (viewedGates.size) {
+      gates = { ...gates };
+      for (const [gid, drawn] of viewedGates) if (gates[gid]) gates[gid] = drawn.gate;
+    }
+    return fitGate?.result ? { ...gates, [fitGate.gateId]: fitGate.result.gate } : gates;
+  }, [state.gates, viewedGates, fitGate]);
   const plottedGateCounts = useMemo(() => {
     if (!fitGate?.result) return labelGateCounts;
     const r = fitGate.result;
@@ -11877,11 +12896,48 @@ export default function App() {
     [derived, pooledGateCounts],
   );
 
+  /**
+   * Whether a gate's space badge is shown, in the gate list and on its plot label: only when it is
+   * unusual. That is a star (the gate was drawn under another transform than the one shown), or a
+   * raw-space gate on a transformed axis, where its straight edges bow. Otherwise it is in the
+   * name's tooltip.
+   */
+  const spaceBadgeShown = (gate: Gate, badge: GateSpaceBadge | null): boolean => {
+    if (!badge || !sample) return false;
+    if (badge.text.includes("*")) return true;
+    const bows = (key: string) => {
+      try { return sample.index(key) !== undefined && sample.transformSpec(key).kind !== "identity"; } catch { return false; }
+    };
+    return (badge.text[0] === "R" && bows(gate.x_channel)) || (badge.text[1] === "R" && bows(gate.y_channel));
+  };
+  /** Pooled: the versions of each gate the pooled files use instead of the tree's, one per version. */
+  const pooledTailoredVersions = useMemo(
+    () => plotPool
+      ? pooledVersions(state, plotPool.ids.map((fileId) => ({ fileId, treeId: hierarchyOfFile(fileId) })))
+      : new Map<string, PooledVersion[]>(),
+    // pooledVersions reads only the trees, the groups and which tree is live.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [plotPool, hierarchyOfFile, state.gates, state.hierarchies, state.stored_hierarchies, state.active_hierarchy_id, state.root_population_id, state.groups],
+  );
+  /** Every file's versions of each gate other than the tree's: what a gate's "N files" chip counts. */
+  const allFileVersions = useMemo(
+    () => pooledVersions(state, samples.map((entry) => ({ fileId: entry.id, treeId: hierarchyOfFile(entry.id) }))),
+    // pooledVersions reads only the trees, the groups and which tree is live.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [samples, hierarchyOfFile, state.gates, state.hierarchies, state.stored_hierarchies, state.active_hierarchy_id, state.root_population_id, state.groups],
+  );
+  /** Pooled: the tree's gates no pooled file is gated with, drawn dashed grey: an edit to one changes no count here. */
+  const poolUnusedGateIds = useMemo(() => {
+    const out = new Set<string>();
+    if (!plotPool) return out;
+    for (const [gid, versions] of pooledTailoredVersions) if (noFileFollowsTree(versions, plotPool.ids)) out.add(gid);
+    return out;
+  }, [plotPool, pooledTailoredVersions]);
   const mainPlotGates = useMemo(() => {
     if (!sample) return [];
     const xKey = sample.channels[xIdx].key;
     const yKey = sample.channels[yIdx].key;
-    return buildPlotGates(
+    const built = buildPlotGates(
       sample,
       plottedGates,
       branchGateOrder,
@@ -11896,13 +12952,541 @@ export default function App() {
         yRange ?? globalScales[yKey] ?? workspaceAutomaticRanges?.yRange ?? null,
       ],
     );
+    // No space badge line under a plot label, starred or not: the gate list shows it where it is
+    // unusual, and the label's tooltip keeps the full description (space_hint).
+    const quiet = built.map((plotted) => ((plotted as { space_badge?: string }).space_badge
+      ? { ...plotted, space_badge: undefined }
+      : plotted));
+    if (!viewedTailoredGateIds.size || !showTailoring) return quiet;
+    return quiet.map((plotted) => {
+      const tailored = viewedGates.get(plotted.gate_id)?.tailored;
+      if (!tailored) return plotted;
+      return {
+        ...plotted,
+        tailored_tag: tailoredTagOf(plotted.gate_id) ?? undefined,
+        tailored_tag_hint: tailored.owner.kind === "file"
+          ? t("This file's own coordinates for the gate; what it follows is dashed. Click to revert them or use them for the tree.")
+          : t("{group}'s own coordinates for the gate; what it follows is dashed. Click to revert them or use them for the tree.", { group: tailored.owner.name }),
+      };
+    });
     // activeDisplayContextKey and scalesVersion are load-bearing: buildPlotGates converts
     // each gate out of raw space with the CURRENT transform, so without them the gate keeps
     // display coordinates computed under the previous scatter cofactor or scale while the
     // event cloud and the axis both move to the new one. The gate then appears to slide off
     // its own events even though membership, evaluated in raw space, never changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample, plottedGates, branchGateOrder, plottedGateCounts, gateCountScope, xIdx, yIdx, activeDisplayContextKey, scalesVersion, xRange, yRange, globalScales, workspaceAutomaticRanges]);
+  }, [sample, plottedGates, branchGateOrder, plottedGateCounts, gateCountScope, xIdx, yIdx, activeDisplayContextKey, scalesVersion, xRange, yRange, globalScales, workspaceAutomaticRanges, viewedGates, viewedTailoredGateIds, tailoredTagOf, t, showTailoring]);
+
+  /** Each pooled file's colour: the one Colour by Sample gives it, in the pool's order. */
+  const poolFileColours = useMemo(() => {
+    const colours = new Map<string, string>();
+    if (!plotPool || !sample) return colours;
+    const xKey = sample.channels[xIdx].key;
+    const yKey = sample.channels[yIdx].key;
+    const pooled = includedSamples.filter((entry) =>
+      entry.sample.workspaceScaleContextKey === activeWorkspaceScaleContextKey &&
+      panelKeyOf(entry.sample) === primaryPanelKey &&
+      entry.sample.index(xKey) !== undefined && entry.sample.index(yKey) !== undefined);
+    const palette = paletteColors(overlayPalette, pooled.length);
+    pooled.forEach((entry, index) => colours.set(entry.id, palette[index]));
+    return colours;
+  }, [plotPool, sample, xIdx, yIdx, includedSamples, activeWorkspaceScaleContextKey, panelKeyOf, primaryPanelKey, overlayPalette]);
+  /** A pooled version's colour: its file's pool colour, or its group's colour from the file list. */
+  const poolVersionColour = useCallback((version: PooledVersion): string => version.owner.kind === "file"
+    ? poolFileColours.get(version.owner.fileId) ?? "#888888"
+    : groupColour(state.groups, state.groups.findIndex((g) => g.id === (version.owner as { groupId: string }).groupId)),
+  [poolFileColours, state.groups]);
+  /** A pooled version as the note and the status line name it: the file, or "Group A (5 files)". */
+  const poolVersionLabel = useCallback((version: PooledVersion): string => version.owner.kind === "file"
+    ? samples.find((entry) => entry.id === (version.owner as { fileId: string }).fileId)?.name ?? ""
+    : version.fileIds.length === 1
+      ? t("{name} (1 file)", { name: version.owner.name })
+      : t("{name} ({count} files)", { name: version.owner.name, count: version.fileIds.length }),
+  [samples, t]);
+  /** Pooled versions in the order the note and the status line name them: groups first, in the file list's order, then files. */
+  const inNoteOrder = useCallback((versions: readonly PooledVersion[]): PooledVersion[] => {
+    const rank = (v: PooledVersion) => (v.owner.kind === "group" ? state.groups.findIndex((g) => g.id === (v.owner as { groupId: string }).groupId) : state.groups.length);
+    return [...versions].sort((a, b) => rank(a) - rank(b));
+  }, [state.groups]);
+  /**
+   * Pooled: the versions of a gate drawn dashed, one per version: every version the pooled files
+   * use other than the one the clicked file uses (drawn solid), and the tree's when the clicked
+   * file does not use it, grey when no pooled file does. In the note's order.
+   */
+  const poolDashedOf = (gateId: string): { key: string; label: string; colour: string; gate: Gate }[] => {
+    if (!plotPool || !state.gates[gateId]) return [];
+    const viewedKey = viewedGates.get(gateId)?.tailored?.hierarchyId ?? null;
+    const out = inNoteOrder(pooledTailoredVersions.get(gateId) ?? [])
+      .filter((version) => version.hierarchyId !== viewedKey)
+      .map((version) => ({ key: version.hierarchyId, label: poolVersionLabel(version), colour: poolVersionColour(version), gate: version.gate }));
+    if (viewedKey !== null) {
+      const tree = state.gates[gateId];
+      out.push({ key: "tree", label: t("the tree"), colour: poolUnusedGateIds.has(gateId) ? UNUSED_TREE_GATE_COLOUR : tree.color, gate: tree });
+    }
+    return out;
+  };
+  /**
+   * The faint dashed outlines beside the gates: on one file, the version a tailored gate reverts
+   * to (its group's for a file of a group that tailors it too, else the tree's); pooled, every
+   * other version among the pooled files (poolDashedOf), in its group's or its file's colour.
+   * Never edited, selected or counted, and hidden with the tailoring view.
+   */
+  const gateReferences = useMemo((): PlotGate[] => {
+    if (!sample || !showTailoring) return [];
+    const gates: Record<string, Gate> = {};
+    if (plotPool) {
+      for (const gid of Object.keys(state.gates)) {
+        for (const version of poolDashedOf(gid)) {
+          const id = `${gid}::${version.key}`;
+          gates[id] = { ...version.gate, gate_id: id, color: version.colour };
+        }
+      }
+    } else {
+      for (const [gid, drawn] of viewedGates) {
+        const reference = drawn.tailored?.reference;
+        if (reference) gates[`${gid}::reference`] = { ...reference, gate_id: `${gid}::reference`, color: drawn.gate.color };
+      }
+    }
+    const ids = Object.keys(gates);
+    if (!ids.length) return [];
+    const xKey = sample.channels[xIdx].key;
+    const yKey = sample.channels[yIdx].key;
+    return buildPlotGates(sample, gates, ids, {}, xKey, yKey, null, [
+      xRange ?? globalScales[xKey] ?? workspaceAutomaticRanges?.xRange ?? null,
+      yRange ?? globalScales[yKey] ?? workspaceAutomaticRanges?.yRange ?? null,
+    ]);
+    // activeDisplayContextKey and scalesVersion: see mainPlotGates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sample, showTailoring, plotPool, pooledTailoredVersions, poolVersionColour, poolVersionLabel, poolUnusedGateIds, inNoteOrder, viewedGates, state.gates, xIdx, yIdx, activeDisplayContextKey, scalesVersion, xRange, yRange, globalScales, workspaceAutomaticRanges]);
+  /** Pooled: the dashed versions of the gates on these axes, for the plot's note, one entry per version. */
+  const poolTailoredVersionsShown = (() => {
+    if (!plotPool || !showTailoring) return [];
+    const seen = new Map<string, { key: string; label: string; colour: string }>();
+    for (const plotted of mainPlotGates) {
+      for (const version of poolDashedOf(plotted.gate_id)) if (!seen.has(version.key)) seen.set(version.key, version);
+    }
+    return [...seen.values()];
+  })();
+  /** Pooled: the names of the tree's gates on these axes no pooled file follows. */
+  const poolUnusedNames = useMemo(
+    () => mainPlotGates.filter((plotted) => poolUnusedGateIds.has(plotted.gate_id)).map((plotted) => plotted.name),
+    [mainPlotGates, poolUnusedGateIds],
+  );
+
+  /** A gate as the plot draws it on the viewed file: the coordinates its edits start from. */
+  const drawnGateOf = (gateId: string): Gate | undefined => viewedGates.get(gateId)?.gate ?? state.gates[gateId];
+  /** A pending scope's key: the file, and the gate's id at the root of the copy chain. */
+  const scopeKey = (fileId: string, gateId: string): string => {
+    const trees = workspaceTrees(state);
+    const live = trees[state.active_hierarchy_id];
+    return `${fileId}::${live ? canonicalGateId(gateId, live, trees) : gateId}`;
+  };
+  /** The scope the user asked for a gate on the viewed file and has not dragged yet; none pooled. */
+  const pendingScopeOf = (gateId: string): "file" | "group" | null =>
+    activeSampleId ? pendingScopes[scopeKey(activeSampleId, gateId)] ?? null : null;
+  /**
+   * Where a pending scope sends the next drag of a gate: the viewed file's copy, or its group's,
+   * unless the gate is tailored there already, when the drag goes to that version anyway.
+   */
+  const pendingTargetOf = (gateId: string): { hierarchyId: string; gateId: string } | null => {
+    const scope = pendingScopeOf(gateId);
+    if (!scope || !activeSampleId) return null;
+    const tailored = viewedGates.get(gateId)?.tailored;
+    if (tailored && (tailored.owner.kind === "file" || scope === "group")) return null;
+    const targetId = scope === "file" ? hierarchyOfFile(activeSampleId) : viewedGroupCopy?.id;
+    const ref = targetId ? state.hierarchies.find((h) => h.id === targetId) : undefined;
+    if (!targetId || !ref || (scope === "file" ? ref.owner_sample_id !== activeSampleId : !ref.owner_group_id)) return null;
+    const trees = workspaceTrees(state);
+    const live = trees[state.active_hierarchy_id];
+    const gid = live && trees[targetId] ? correspondingHierarchyId(live, gateId, trees[targetId], trees, "gate") : null;
+    return gid ? { hierarchyId: targetId, gateId: gid } : null;
+  };
+  /**
+   * An edit made on the plot goes to the version of the gate in scope on the viewed file: a gate
+   * it tailors (or its group does) to that version, in the tree that holds it (editGateIn); a gate
+   * the user chose "Tailor for…" on to the file's copy or the group's, once; every other gate to
+   * the tree, which every file and group not tailoring it follows. A pooled view edits the tree.
+   */
+  const dispatchGateEdit = (edit: GateEditAction) => {
+    const usedPending: string[] = [];
+    const elsewhere = (gateId: string): { hierarchyId: string; gateId: string } | null => {
+      const pending = pendingTargetOf(gateId);
+      if (pending) {
+        if (activeSampleId) usedPending.push(scopeKey(activeSampleId, gateId));
+        return pending;
+      }
+      const tailored = viewedGates.get(gateId)?.tailored;
+      return tailored && tailored.hierarchyId !== state.active_hierarchy_id ? tailored : null;
+    };
+    if (edit.type !== "editGates") {
+      const target = elsewhere(edit.gateId);
+      dispatch(target ? { type: "editGateIn", hierarchyId: target.hierarchyId, edit: { ...edit, gateId: target.gateId } } : edit);
+    } else {
+      const live = edit.edits.filter((one) => !elsewhere(one.gateId));
+      if (live.length) dispatch({ type: "editGates", edits: live });
+      for (const one of edit.edits) {
+        const target = elsewhere(one.gateId);
+        if (target) dispatch({ type: "editGateIn", hierarchyId: target.hierarchyId, edit: { type: "editGates", edits: [{ ...one, gateId: target.gateId }] } });
+      }
+    }
+    // A pending scope is used by the drag it was asked for; the gate is tailored from then on.
+    if (usedPending.length) {
+      const gateId = edit.type === "editGates" ? edit.edits[0]?.gateId : edit.gateId;
+      const scope = gateId ? pendingScopeOf(gateId) : null;
+      setHierarchyActionMessage(t("{gate} has coordinates of its own for {owner} now. Undo is available.", {
+        gate: (gateId && state.gates[gateId]?.name) || "", owner: scope === "group" ? viewedGroup?.name ?? "" : fileName || t("this file"),
+      }));
+      setPendingScopes((current) => {
+        const next = { ...current };
+        for (const key of usedPending) delete next[key];
+        return next;
+      });
+    }
+  };
+  dispatchGateEditRef.current = dispatchGateEdit;
+
+  /** What a tailored version goes back to, and what Use for gives it to: the tree, or the viewed file's group. */
+  const tailoredTargetOf = (tailored: TailoredVersion): string => {
+    const ref = state.hierarchies.find((h) => h.id === tailored.hierarchyId);
+    const source = ref?.source_hierarchy_id ? state.hierarchies.find((h) => h.id === ref.source_hierarchy_id) : undefined;
+    return source?.owner_group_id ? state.groups.find((g) => g.id === source.owner_group_id)?.name ?? t("the tree") : t("the tree");
+  };
+  /** A message that may open with "the tree", as a sentence. */
+  const asSentence = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
+  /** Who holds a tailored version, for the messages: the viewed file, or its group. */
+  const tailoredOwnerOf = (tailored: TailoredVersion): string =>
+    tailored.owner.kind === "file" ? fileName || t("this file") : tailored.owner.name;
+  /** The tailored gate takes the coordinates it follows again; nothing else changes. One undo entry. */
+  function revertTailoredGate(gateId: string) {
+    const tailored = viewedGates.get(gateId)?.tailored;
+    if (!tailored) return;
+    if (tailored.owner.kind === "file" && activeSampleId) dispatch({ type: "setGateTailored", fileId: activeSampleId, gateId, on: false });
+    else dispatch({ type: "editGateIn", hierarchyId: tailored.hierarchyId, edit: { type: "revertGateToGroup", gateId: tailored.gateId } });
+    markWorkspaceDirty();
+    setHierarchyActionMessage(t("{gate} on {owner} follows {target} again. Undo is available.", {
+      gate: state.gates[gateId]?.name ?? "", owner: tailoredOwnerOf(tailored), target: tailoredTargetOf(tailored),
+    }));
+  }
+  /** The tree (or the group) takes the tailored version's coordinates, after confirmation; one undo entry. */
+  function giveTailoredGateToTree(gateId: string) {
+    setTailoredUse(null);
+    const tailored = viewedGates.get(gateId)?.tailored;
+    if (!tailored) return;
+    // The file's own version: given to what it follows, and the gate's switch goes off.
+    if (tailored.owner.kind === "file" && activeSampleId) dispatch({ type: "setGateTailored", fileId: activeSampleId, gateId, on: false, share: true });
+    else dispatch({ type: "editGateIn", hierarchyId: tailored.hierarchyId, edit: { type: "applyGateToGroup", gateId: tailored.gateId } });
+    markWorkspaceDirty();
+    setHierarchyActionMessage(asSentence(t("{target} takes {owner}'s {gate}; the files that followed it follow the new coordinates. Undo is available.", {
+      gate: state.gates[gateId]?.name ?? "", owner: tailoredOwnerOf(tailored), target: tailoredTargetOf(tailored),
+    })));
+  }
+  /**
+   * In the top strip, for the selected gate only: which version of it is drawn and what a drag of
+   * it changes, in a few words. Nothing without a selected gate; the switches say the rest.
+   */
+  const gateStatus = ((): string | null => {
+    // Said only for the selected gate, in short: whose version is drawn and what a drag changes.
+    const gid = sample && state.selected_gate_id && state.gates[state.selected_gate_id] ? state.selected_gate_id : null;
+    if (!gid) return null;
+    const gate = state.gates[gid].name;
+    const tailored = viewedGates.get(gid)?.tailored;
+    const pending = pendingScopeOf(gid);
+    if (tailored && !(pending === "file" && tailored.owner.kind === "group")) {
+      return tailored.owner.kind === "file"
+        ? t("{gate} · this file's version · a drag changes this file", { gate })
+        : t("{gate} · {group}'s version · a drag changes {group}'s files", { gate, group: tailored.owner.name });
+    }
+    if (pending === "file") return t("{gate} · the next drag tailors it for this file", { gate });
+    if (pending === "group" && viewedGroup) return t("{gate} · the next drag tailors it for {group}", { gate, group: viewedGroup.name });
+    return t("{gate} · the tree's version · a drag changes every file following it", { gate });
+  })();
+  /**
+   * "Tailor for {file}" or "Tailor for {group}": the next drag of this gate on the viewed file
+   * goes to the file's copy (made now, the tree staying live) or to the group's. Not an undo entry:
+   * nothing is tailored until the drag.
+   */
+  function tailorGate(gateId: string, scope: "file" | "group") {
+    if (!activeSampleId) return;
+    if (scope === "file") ensureCopyForFile(activeSampleId, { silent: true, keepLive: true });
+    setPendingScopes((current) => ({ ...current, [scopeKey(activeSampleId, gateId)]: scope }));
+    setHierarchyActionMessage(t("The next drag of {gate} tailors it for {owner}; the other files keep theirs.", {
+      gate: state.gates[gateId]?.name ?? "", owner: scope === "file" ? fileName || t("this file") : viewedGroup?.name ?? "",
+    }));
+  }
+  /** Withdraws a "Tailor for…" not dragged yet: the next drag goes where it went before. */
+  function cancelPendingScope(gateId: string) {
+    if (!activeSampleId) return;
+    const key = scopeKey(activeSampleId, gateId);
+    setPendingScopes((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }
+  /**
+   * A gate's scope menu, for the viewed file: tailor it for the file or the file's group, withdraw
+   * that before the drag, or revert and share a version tailored already. Empty pooled: a pool
+   * edits the tree.
+   */
+  function scopeMenuItems(gateId: string): MenuItem[] {
+    if (!activeSampleId || !state.gates[gateId]) return [];
+    const tailored = viewedGates.get(gateId)?.tailored ?? null;
+    const pending = pendingScopeOf(gateId);
+    const file = fileName || t("this file");
+    const items: MenuItem[] = [];
+    const tailorFor = (scope: "file" | "group", name: string) => (pending === scope
+      ? { label: t("Keep following {source}", { source: scope === "file" && viewedGroup && viewedGroupTailored && tailored ? viewedGroup.name : t("the tree") }), title: t("Withdraw the tailoring asked for: the next drag goes where it went before."), className: "scope-menu-cancel", onClick: () => cancelPendingScope(gateId) }
+      : { label: t("Tailor for {name}", { name }), title: t("The next drag of this gate changes {name} only; the tree and the other files keep theirs.", { name }), className: `scope-menu-tailor-${scope}`, onClick: () => tailorGate(gateId, scope) });
+    // For a file in a group, both scopes are offered here and in the switch's ▾; the switch itself is the file's.
+    if (viewedGroup && viewedGroupCopy && tailored?.owner.kind !== "file") {
+      items.push({
+        label: t("Tailor for this file"),
+        title: t("{file} takes a version of its own: a drag changes {file} only.", { file }),
+        className: "scope-menu-tailor-file",
+        onClick: () => switchTailoring(gateId, true),
+      });
+    }
+    if (!tailored && viewedGroup && viewedGroupCopy) items.push(tailorFor("group", viewedGroup.name));
+    if (tailored) {
+      const target = tailoredTargetOf(tailored);
+      const owner = tailored.owner.kind === "group" ? tailored.owner.name : null;
+      items.push(
+        {
+          label: owner ? t("Revert {name} to {target}", { name: owner, target }) : t("Revert to {target}", { target }),
+          title: t("This gate takes the coordinates it follows again; other tailored gates stay unchanged. Undo is available."),
+          className: "tailored-menu-revert",
+          // A gate whose source is gone has nothing to go back to.
+          disabled: !tailored.reference,
+          onClick: () => revertTailoredGate(gateId),
+        },
+        {
+          label: owner ? t("Use {name}'s for {target}\u2026", { name: owner, target }) : t("Use for {target}\u2026", { target }),
+          title: t("{target} takes this gate's coordinates, and every file that followed its gate follows the new ones. Undo is available.", { target }),
+          className: "tailored-menu-use",
+          disabled: !tailored.reference,
+          onClick: () => setTailoredUse({ gateId }),
+        },
+      );
+    }
+    return items;
+  }
+  /** The scope menu, from a gate's scope chip, its plot label's mark or its row. */
+  /** The Gates header's ⋯ menu: what the unicode buttons above the list did, but Undo and Redo (the plot toolbar and keys have them). */
+  const gatesStructureLocked = state.hierarchies.some((h) => h.id === state.active_hierarchy_id && h.structure_locked === true);
+  const gatesPaneMenu: MenuEntry[] = [
+    { label: t("Sort A→Z"), className: "gl-gates-sort", title: t("Sort gates alphabetically"), disabled: state.gate_order.length < 2, onClick: () => dispatch({ type: "sortGatesAlpha" }) },
+    {
+      label: t("Rename selected gate…"), className: "gl-gates-rename",
+      title: gatesStructureLocked ? t("Unlock structure to rename gates") : t("Rename selected gate"),
+      disabled: !state.selected_gate_id || gatesStructureLocked,
+      onClick: () => { const g = state.selected_gate_id && state.gates[state.selected_gate_id]; if (g) setCrud({ kind: "renameGate", id: g.gate_id, initial: g.name }); },
+    },
+    { label: t("Clear selection"), className: "gl-gates-clear", title: t("Keep only the selected gate highlighted"), disabled: state.selected_gate_ids.length === 0, onClick: () => dispatch({ type: "clearGateSelection" }) },
+    "separator",
+    {
+      label: state.selected_gate_ids.length ? t("Delete {count} selected…", { count: state.selected_gate_ids.length }) : t("Delete selected gate…"),
+      className: "gl-gates-delete",
+      danger: true,
+      title: gatesStructureLocked ? t("Unlock structure to delete gates") : t("Delete the highlighted gates"),
+      disabled: gateIdsToDelete(state).length === 0,
+      onClick: () => {
+        const ids = gateIdsToDelete(state);
+        if (ids.length) setCrud({ kind: "confirmDelete", what: "gates", ids });
+      },
+    },
+  ];
+  /** The Populations header's ⋯ menu: the population tree's former buttons, and how its gate badges line up. */
+  const activePopulation = state.active_population_id && state.active_population_id !== state.root_population_id ? state.populations[state.active_population_id] : undefined;
+  const populationsPaneMenu: MenuEntry[] = [
+    { label: t("Sort A→Z"), className: "gl-pops-sort", title: t("Sort populations alphabetically"), disabled: Object.keys(state.populations).length < 3, onClick: () => dispatch({ type: "sortPopulationsAlpha" }) },
+    { label: t("Edit active population…"), className: "gl-pops-edit", title: t("Edit active population (name, parent, gates)"), disabled: !activePopulation || gatesStructureLocked, onClick: () => { if (activePopulation) setCrud({ kind: "editPop", id: activePopulation.population_id }); } },
+    { label: t("Duplicate {count} selected", { count: highlightedPopIds(state).length }), className: "gl-pops-duplicate", title: t("Duplicate the highlighted populations"), disabled: highlightedPopIds(state).length === 0 || gatesStructureLocked, onClick: () => dispatch({ type: "duplicateSelectedPopulations", popIds: highlightedPopIds(state) }) },
+    { label: t("Bulk edit via CSV…"), className: "gl-pops-bulk", title: t("Bulk-edit population names and gate definitions via CSV"), disabled: Object.keys(state.populations).length < 2 || gatesStructureLocked, onClick: () => setCrud({ kind: "bulkRename" }) },
+    "separator",
+    { label: t("Align gates"), className: "gl-pops-align", checked: alignPopulationGates, title: t("Line the gate badges up in one column after the longest population name. Unchecked, each row's badges follow its own name."), onClick: () => setAlignPopulationGates((on) => !on) },
+    // The tree has no row of its own: its rename, quadrant naming, ways back and legacy entries.
+    "separator",
+    ...treeMenuItems(state, treeControls, t),
+    "separator",
+    { label: t("Delete {count} selected…", { count: highlightedPopIds(state).length }), className: "gl-pops-delete", danger: true, title: t("Delete the highlighted populations"), disabled: highlightedPopIds(state).length === 0 || gatesStructureLocked, onClick: () => setCrud({ kind: "confirmDelete", what: "pops", ids: highlightedPopIds(state) }) },
+  ];
+  /** A gate row's ⋯ menu: its tailoring (as the scope menu has it), then Rename and Delete. */
+  /**
+   * A gate's own actions, in its right-click menu on the plot and its row's ⋯ alike: rename,
+   * colour, the edge tools (once on the strip above the plot), delete. The edge tools act on the
+   * plot's axes, so they wait for a gate drawn there.
+   */
+  const gateActionItems = (gateId: string, at?: [number, number]): MenuEntry[] => {
+    const gate = state.gates[gateId];
+    if (!gate) return [];
+    const shaped = (g: Gate | undefined) => !!g && (g.gate_type === "polygon" || g.gate_type === "rectangle");
+    const drawn = new Set(mainPlotGates.map((plotted) => plotted.gate_id));
+    const onPlot = drawn.has(gateId) && shaped(gate);
+    const neighbours = [...drawn].filter((id) => id !== gateId && shaped(state.gates[id])).length;
+    const checked = state.selected_gate_ids.filter((id) => drawn.has(id) && shaped(state.gates[id]));
+    const notHere = t("Acts on this plot's axes: show {gate}'s channels to use it", { gate: gate.name });
+    return [
+      { label: t("Rename…"), className: "gate-row-rename", disabled: gatesStructureLocked, onClick: () => setCrud({ kind: "renameGate", id: gate.gate_id, initial: gate.name }) },
+      {
+        label: t("Colour…"), className: "gate-row-colour",
+        // The stored colour is still the gate's own; say why it is not seen.
+        title: colouredGates ? undefined : t("The gate's own colour, kept with it; gates are drawn in black while Coloured gates (Display) is off"),
+        onClick: () => setGateColourPick({ gateId, at: at ?? lastPointer.current }),
+      },
+      "separator",
+      {
+        label: t("Extend to edges"),
+        className: "gate-row-extend",
+        disabled: !onPlot,
+        title: onPlot ? t("Each side of the gate moves outward until it meets another gate's edge, landing on it, or reaches the plot's edge where nothing is in the way, so nothing at the edges is missed") : notHere,
+        onClick: () => { if (!gatingPlotActions.current?.extendSelectedGateToEdges(gateId)) setImportMsg(t("{gate} already touches its neighbours and the plot's edges.", { gate: gate.name })); },
+      },
+      {
+        label: t("Close gaps with neighbours"),
+        className: "gate-row-close-gaps",
+        disabled: !onPlot || neighbours === 0,
+        title: onPlot ? t("Move the facing edges of this gate and its neighbours onto one shared line, so they touch with no gap and no overlap") : notHere,
+        onClick: () => { if (!gatingPlotActions.current?.closeGateGaps(undefined, gateId)) setImportMsg(t("No neighbouring gate edges were close enough to join.")); },
+      },
+      {
+        label: t("Close gaps between the selected gates"),
+        className: "gate-row-close-checked",
+        disabled: checked.length < 2,
+        title: t("Move the facing edges of the highlighted gates onto shared lines, so they touch with no gap and no overlap"),
+        onClick: () => { if (!gatingPlotActions.current?.closeGateGaps(checked)) setImportMsg(t("No neighbouring gate edges were close enough to join.")); },
+      },
+      "separator",
+      { label: t("Delete…"), className: "gate-row-delete", danger: true, disabled: gatesStructureLocked, onClick: () => setCrud({ kind: "confirmDelete", what: "gates", ids: [gate.gate_id] }) },
+    ];
+  };
+  /** A gate row's ⋯ menu: its tailoring (as the scope menu has it), then the gate's own actions. */
+  const gateRowMenu = (gateId: string): MenuEntry[] => {
+    if (!state.gates[gateId]) return [];
+    return [...tailoringSection(gateId), ...gateActionItems(gateId)];
+  };
+  /** A gate's tailoring choices under their label, then a separator: first in its row's ⋯ and its right-click menu alike (David, 2026-10-23). */
+  function tailoringSection(gateId: string): MenuEntry[] {
+    const scope = scopeMenuItems(gateId);
+    return scope.length ? [{ section: t("Tailoring") }, ...scope, "separator"] : [];
+  }
+  function openScopeMenu(gateId: string, client: [number, number]) {
+    const items = scopeMenuItems(gateId);
+    if (!items.length) return;
+    setPlotMenu({ x: client[0], y: client[1], label: state.gates[gateId]?.name ?? "", items });
+  }
+  /**
+   * A gate's tailoring switch for the viewed (in a pool, the clicked) file: on while the file holds
+   * a version of its own, which a drag changes; off while it follows the tree, or its group, whose
+   * name the switch then gives ("follows Group A").
+   */
+  const tailorSwitchOf = (gateId: string): TailorSwitch | null => {
+    if (!activeSampleId || !state.gates[gateId]) return null;
+    const tailored = viewedGates.get(gateId)?.tailored ?? null;
+    const own = tailored?.owner.kind === "file";
+    const byGroup = tailored?.owner.kind === "group" ? tailored.owner : null;
+    // A group tailoring asked for and not dragged yet: the switch in the group's colour, dashed.
+    const pending = !tailored && pendingScopeOf(gateId) === "group" && !!viewedGroup;
+    const file = fileName || t("this file");
+    const gate = state.gates[gateId].name;
+    const elsewhere = (allFileVersions.get(gateId) ?? []).filter((v) => !(v.owner.kind === "file" && v.owner.fileId === activeSampleId));
+    return {
+      // On while the file uses a version of its own or its group's; its colour says whose.
+      on: own || !!byGroup,
+      // The switch itself always means this file: a click on a group's version tailors the file.
+      next: !own,
+      colour: byGroup ? viewedGroupColour : pending ? viewedGroupColour : null,
+      pending,
+      label: own ? t("this file") : byGroup ? byGroup.name : pending ? viewedGroup!.name : null,
+      title: (own
+        ? t("{gate} is tailored for {file}: a drag changes {file} only. Switch off to take {target}'s coordinates again.", { gate, file, target: tailoredTargetOf(tailored!) })
+        : byGroup
+          ? t("{gate} uses {group}'s version: a drag changes every file in {group}. Click to tailor it for {file} alone.", { gate, group: byGroup.name, file })
+          : pending
+            ? t("The next drag of {gate} tailors it for {group}. Click to tailor it for {file} alone instead.", { gate, group: viewedGroup!.name, file })
+            : t("Switch on to tailor {gate} for {file}: its next drag changes {file} only.", { gate, file }))
+        // What other files do with the gate, said here rather than in a chip on the row.
+        + (elsewhere.length ? `\n${t("Tailored in {names}.", { names: elsewhere.map(poolVersionLabel).join(", ") })}` : ""),
+    };
+  };
+  /** Whether a tailored version's coordinates differ from what it follows: switching it off then drops them. */
+  const ownCoordinatesDiffer = (gateId: string): boolean => {
+    const drawn = viewedGates.get(gateId);
+    const reference = drawn?.tailored?.reference;
+    return !!drawn && !!reference && !gateGeometryEquals(drawn.gate, withGeometryOf(drawn.gate, reference));
+  };
+  /** The gate list's switch: on makes the file's copy (the tree staying live) and the gate the file's own; off asks first when that drops coordinates. */
+  function switchTailoring(gateId: string, on: boolean) {
+    if (!activeSampleId) return;
+    const gate = state.gates[gateId]?.name ?? "";
+    const file = fileName || t("this file");
+    if (on) {
+      ensureCopyForFile(activeSampleId, { silent: true, keepLive: true });
+      // Tailoring for the file takes the place of a group tailoring asked for and not dragged.
+      if (pendingScopeOf(gateId)) cancelPendingScope(gateId);
+      dispatch({ type: "setGateTailored", fileId: activeSampleId, gateId, on: true });
+      markWorkspaceDirty();
+      setHierarchyActionMessage(t("{gate} is tailored for {file}: a drag changes {file} only. Undo is available.", { gate, file }));
+      return;
+    }
+    if (ownCoordinatesDiffer(gateId)) {
+      setTailoredOff({ gateId });
+      return;
+    }
+    switchTailoringOff(gateId);
+  }
+  function switchTailoringOff(gateId: string) {
+    setTailoredOff(null);
+    const tailored = viewedGates.get(gateId)?.tailored;
+    if (!activeSampleId || !tailored) return;
+    dispatch({ type: "setGateTailored", fileId: activeSampleId, gateId, on: false });
+    markWorkspaceDirty();
+    setHierarchyActionMessage(t("{gate} on {owner} follows {target} again. Undo is available.", {
+      gate: state.gates[gateId]?.name ?? "", owner: tailoredOwnerOf(tailored), target: tailoredTargetOf(tailored),
+    }));
+  }
+  /**
+   * A gate's scope chip in the gate list, kept to what the row's switch does not say: in a pool,
+   * how many other versions are dashed; on one file, a group tailoring asked for and not dragged
+   * yet. Null otherwise, and always for a gate the viewed file takes from the tree.
+   */
+  const scopeChipOf = (gateId: string): { label: string; title: string; pending?: boolean; menu: boolean } | null => {
+    if (plotPool) {
+      // The clicked file's version is the row's switch; the chip counts the others, dashed.
+      const dashed = poolDashedOf(gateId);
+      if (!dashed.length) return null;
+      return {
+        label: dashed.length === 1 ? t("+1 version") : t("+{count} versions", { count: dashed.length }),
+        title: dashed.map((version) => version.label).join(", "),
+        menu: false,
+      };
+    }
+    // On one file the row's switch says whose version is used, a pending group tailoring
+    // included; a gate the file takes from the tree carries no chip.
+    return null;
+  };
+
+  /**
+   * The range gates the histogram view draws: rectangles with the X channel on both axes, which is
+   * how GateLab holds a range (gatingml.ts, flowjoExport.ts), through the same conversion and the
+   * same counts as the scatter plot's gates. Built only while the view is open.
+   */
+  const histogramGates = useMemo(() => {
+    if (!sample || !histogramView) return [];
+    const xKey = sample.channels[xIdx].key;
+    const frame = xRange ?? globalScales[xKey] ?? workspaceAutomaticRanges?.xRange ?? null;
+    return buildPlotGates(
+      sample,
+      plottedGates,
+      branchGateOrder,
+      plottedGateCounts,
+      xKey,
+      xKey,
+      gateCountScope && { text: gateCountScope.text, hint: gateCountScope.hint },
+      [frame, frame],
+    ).filter((gate) => gate.gate_type === "rectangle");
+    // As mainPlotGates: the display context and scales version are load-bearing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sample, histogramView, plottedGates, branchGateOrder, plottedGateCounts, gateCountScope, xIdx, activeDisplayContextKey, scalesVersion, xRange, globalScales, workspaceAutomaticRanges]);
 
   /**
    * The Gating tab's axis range for every channel of the viewed file: its explicit workspace
@@ -12157,10 +13741,13 @@ export default function App() {
     if (!sample) return null;
     const xName = sample.channels[xIdx].key;
     const yName = sample.channels[yIdx].key;
+    // A biex axis is drawn within its table whatever range was stored (axisWindow.ts).
+    const windowed = (range: [number, number] | null, idx: number) =>
+      range ? clampToAxisWindow(range, axisWindowBounds(sample, idx)) : null;
     const effectiveXRange =
-      xRange ?? globalScales[xName] ?? workspaceAutomaticRanges?.xRange ?? null;
+      windowed(xRange ?? globalScales[xName] ?? workspaceAutomaticRanges?.xRange ?? null, xIdx);
     const effectiveYRange =
-      yRange ?? globalScales[yName] ?? workspaceAutomaticRanges?.yRange ?? null;
+      windowed(yRange ?? globalScales[yName] ?? workspaceAutomaticRanges?.yRange ?? null, yIdx);
     const base = sample.plotPayload(
       xIdx,
       yIdx,
@@ -12393,7 +13980,8 @@ export default function App() {
     sample, xIdx, yIdx, xRange, yRange, drawMode, mode, globalScales,
     effectiveXRange: payload?.x_range ?? null,
     effectiveYRange: payload?.y_range ?? null,
-    gates: state.gates, snapToGates,
+    // The gates as drawn, so a border snap moves the version on screen.
+    gates: plottedGates, snapToGates,
   };
 
   // Swap channel identity keys → Panel display labels for what cytof_plot.js SHOWS (axis labels,
@@ -12488,11 +14076,11 @@ export default function App() {
       if (globalScales[key] && (lockScalesBetweenFiles || !autoFittedScales.current.has(fittedKey))) continue;
       const binding = bindingKeyFor(key);
       if (binding) autoFittedScales.current.set(fittedKey, binding);
-      const range = includePlotGatesInAxisRange(
+      const range = clampToAxisWindow(includePlotGatesInAxisRange(
         auto ?? sample.displayRange(idx),
         mainPlotGates,
         axis,
-      );
+      ), axisWindowBounds(sample, idx));
       setGlobalScales((previous) => ({ ...previous, [key]: range }));
     }
   }, [
@@ -12539,26 +14127,27 @@ export default function App() {
     {
       label: t("Swap X and Y"),
       title: t("Show the Y channel on X and the X channel on Y; the gates stay as they are"),
-      disabled: xIdx === yIdx,
+      disabled: xIdx === yIdx || histogramView,
       onClick: () => { setXIdx(yIdx); setYIdx(xIdx); },
     },
     "separator",
-    ...DRAW_TOOLS.filter((tool) => tool.id !== "navigate").map((tool) => ({
+    ...(histogramView ? HISTOGRAM_TOOLS : DRAW_TOOLS).filter((tool) => tool.id !== "navigate").map((tool) => ({
       label: t(tool.title.split(" — ")[0]),
       title: drawingBlocked ? t("This tree follows its group's template — add gates there, or unlink it from its group") : t(tool.title),
       disabled: drawingBlocked,
-      className: drawMode === tool.id ? "is-active" : undefined,
+      checked: drawMode === tool.id,
       onClick: () => setDrawMode(tool.id),
     })),
   ];
   /** The fit of a gate at the given settings, on the active file's events of the plotted population. */
   const computeGateFit = useCallback((gateId: string, settings: FitGateSettings): FitGateResult | null => {
-    const gate = state.gates[gateId];
+    // The gate as the viewed file has it, whose events the fit is of.
+    const gate = viewedGates.get(gateId)?.gate ?? state.gates[gateId];
     if (!sample || !gate) return null;
     return fitGateToEvents(gate, sample, derived.activeMask, settings);
-  }, [sample, state.gates, derived.activeMask]);
+  }, [sample, state.gates, viewedGates, derived.activeMask]);
   const openFitGate = (gateId: string, at: [number, number], box?: [number, number, number, number]) => {
-    const gate = state.gates[gateId];
+    const gate = drawnGateOf(gateId);
     if (!sample || !activeSampleId || !gate) return;
     // A polygon opens at its own vertex count, so the fit changes where the gate sits, not
     // what kind of shape it is; the slider is there for more or fewer.
@@ -12599,9 +14188,9 @@ export default function App() {
     if (!fitted) return;
     // Through the edits a drag makes: one Undo step, membership recomputed, the label updated.
     if (fitted.gate_type === "ellipse") {
-      dispatch({ type: "reshapeEllipse", gateId: fitted.gate_id, mean: fitted.mean, covariance: fitted.covariance });
+      dispatchGateEdit({ type: "reshapeEllipse", gateId: fitted.gate_id, mean: fitted.mean, covariance: fitted.covariance });
     } else if (fitted.gate_type !== "quadrant") {
-      dispatch({ type: "editGate", gateId: fitted.gate_id, vertices: fitted.vertices });
+      dispatchGateEdit({ type: "editGate", gateId: fitted.gate_id, vertices: fitted.vertices });
     }
   };
   // The fit is of one file's events within one population, at one state of the gates: a change
@@ -12617,13 +14206,44 @@ export default function App() {
     const xKey = sample.channels[xIdx]?.key;
     const yKey = sample.channels[yIdx]?.key;
     if (!xKey || !yKey) return;
+    if (histogramView) {
+      // The histogram has one axis: X fits its data and the ranges drawn on it; Y is not touched.
+      // Only the ranges' geometry counts. Their label offsets are the scatter plot's (the
+      // histogram places its labels in its own terms), and for a range with an open end they lie
+      // far out along the axis.
+      setGlobalScale(xKey, includePlotGatesInAxisRange(
+        workspaceAutomaticRanges?.xRange ?? sample.displayRange(xIdx),
+        histogramGates.map((gate) => ({ ...gate, label_offset: null })), "x"));
+      setXRange(null);
+      return;
+    }
     setGlobalScale(xKey, includePlotGatesInAxisRange(
       workspaceAutomaticRanges?.xRange ?? sample.displayRange(xIdx), mainPlotGates, "x"));
     setGlobalScale(yKey, includePlotGatesInAxisRange(
       workspaceAutomaticRanges?.yRange ?? sample.displayRange(yIdx), mainPlotGates, "y"));
     setXRange(null);
     setYRange(null);
-  }, [sample, xIdx, yIdx, workspaceAutomaticRanges, mainPlotGates, setGlobalScale]);
+  }, [sample, xIdx, yIdx, workspaceAutomaticRanges, mainPlotGates, histogramView, histogramGates, setGlobalScale]);
+
+  /**
+   * The zoom buttons: one step on each axis the plot shows, the bottom-left corner held where it
+   * is, as the Shift-drag stretch holds it. Committed to the shared per-channel scale, as a drag
+   * is on release, so the other tabs follow. The histogram shows one axis, so Y is not touched.
+   */
+  const zoomPlot = useCallback((direction: "in" | "out") => {
+    const p = pzRef.current;
+    if (!p.sample) return;
+    const axes = [{ idx: p.xIdx, view: p.xRange, effective: p.effectiveXRange }];
+    if (!histogramView) axes.push({ idx: p.yIdx, view: p.yRange, effective: p.effectiveYRange });
+    for (const { idx, view, effective } of axes) {
+      const key = p.sample.channels[idx]?.key;
+      if (!key) continue;
+      const next = zoomAnchored(view ?? p.globalScales[key] ?? effective ?? p.sample.displayRange(idx), direction);
+      if (Number.isFinite(next[0]) && Number.isFinite(next[1]) && next[1] - next[0] > 1e-6) setGlobalScale(key, next);
+    }
+    setXRange(null);
+    if (!histogramView) setYRange(null);
+  }, [histogramView, setGlobalScale]);
 
   /**
    * Fit a set of CHANNELS to their data plus the gates drawn on them.
@@ -12653,8 +14273,9 @@ export default function App() {
         for (const axis of ["x", "y"] as const) {
           const channel = axis === "x" ? gate.x_channel : gate.y_channel;
           if (channel !== key) continue;
+          // A spider quadrant reaches its arms' ends, where its handles are.
           const points = gate.gate_type === "quadrant"
-            ? [gate.center]
+            ? (gate.arms ? [gate.center, gate.arms.down, gate.arms.right, gate.arms.up, gate.arms.left] : [gate.center])
             : gate.gate_type === "ellipse"
               ? ellipseBoundary(gate, 16)
               : (gate.vertices as [number, number][]);
@@ -12748,16 +14369,31 @@ export default function App() {
       x_label: lbl(payload.x_label),
       y_label: lbl(payload.y_label),
       channels: payload.channels.map(lbl),
-      gates: (payload.gates as PlotGate[]).map((g) => ({
+      gates: inkedForDisplay(payload.gates as PlotGate[], colouredGates, GATE_INK).map((g) => ({
         ...g,
         x_channel: lbl(g.x_channel),
         y_channel: lbl(g.y_channel),
       })),
+      // Drawn as faint dashed outlines under the gates, never edited (loadPlots: gate references).
+      gate_references: inkedForDisplay(gateReferences, colouredGates, GATE_REFERENCE_INK).map((g) => ({
+        ...g,
+        x_channel: lbl(g.x_channel),
+        y_channel: lbl(g.y_channel),
+      })),
+      gate_line_width: gateLineWidth, // loadPlots: patchGateLineWidth
+      // Black labels on a white backing for gates without colour, as mini_plot reads it (loadPlots: patchGateInk).
+      gate_style: { pub_style: !colouredGates, label_background: gateLabelBackground },
     };
     lastDisplayed.current = out;
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [payload, sample, panelVersion, pointAlpha, pointSize, contourLevels, densityColorPower, gateEdgeMode, snapToGates]);
+  }, [payload, sample, panelVersion, pointAlpha, pointSize, contourLevels, densityColorPower, gateEdgeMode, snapToGates, gateReferences, colouredGates, gateLineWidth, gateLabelBackground]);
+
+  /** The X values of the points the scatter plot draws, for the histogram view: same pool, same cap. */
+  const histogramValues = useMemo(() => {
+    const x = (payload as { x_b64?: string } | null)?.x_b64;
+    return histogramView && x ? decodeFloat32Base64(x) : null;
+  }, [payload, histogramView]);
 
   // Colour-by overlay legend (population / division / sample) rendered OUTSIDE the plot.
   const overlayLegend = useMemo(() => {
@@ -12791,15 +14427,31 @@ export default function App() {
       panelVersion,
     );
 
+  /** The header's file line: the viewed file (or the pooled files) and its events and channels. */
+  const headerFileLine = !sample
+    ? ""
+    : `${poolSelection && includedSamples.length !== 1
+        // With several files checked the plot is pooled, so naming one of them and its own event
+        // count describes something that is not on screen. Say what is pooled, and name the active
+        // file as what it actually still decides: the axes and the gates.
+        ? `${t("{count} files pooled", { count: includedSamples.length })} — ${t("{count} events", {
+            count: includedSamples.reduce((total, entry) => total + entry.sample.fcs.nEvents, 0).toLocaleString(),
+          })} · ${t("axes from {name}", { name: fileName })}`
+        : `${fileName} — ${t("{count} events", { count: sample.fcs.nEvents.toLocaleString() })}`} · ${sample.channels.length < sample.fcs.channels.length
+        ? t("{shown} of {total} channels", { shown: sample.channels.length, total: sample.fcs.channels.length })
+        : t("{count} channels", { count: sample.channels.length })}`;
+
   return (
-    <div className="gl-app">
+    // Every tab reads the gates' look from here (gateInk.ts).
+    <GateInkContext.Provider value={gateInk}>
+    <div className="gl-app" style={{ "--gl-left-pane-width": `${leftWidth}px` } as React.CSSProperties}>
       <header className="gl-header">
         {/* Hovering the name explains what the app is and, more usefully, the one design choice
             that makes its numbers differ from FlowJo's. That divergence is deliberate and worth
             stating where someone comparing two tools will actually find it. Focusable so it is
             reachable from the keyboard, not only on hover. */}
         <span className="gl-brand" tabIndex={0}>
-          {/* The logo: the three plots as the mark, then the wordmark, both cut from the artwork.
+          {/* The logo: the mark's three plots, then the wordmark, both cut from the artwork.
               GateLabR has its own wordmark and logo, the same plots with an orange R. */}
           <img className="gl-brand-mark" src={brandMark} alt="" />
           {isSceHost
@@ -12823,7 +14475,7 @@ export default function App() {
             </p>
             <p>
               <b>{t("Gates live in raw channel values.")}</b>{" "}
-              {t("A display scale is chosen per channel: linear or arcsinh for scatter, logicle or arcsinh for fluorescence, arcsinh at cofactor 5 for mass cytometry. Gates are stored and evaluated in raw values regardless, so nothing done to an axis can move an event in or out of a gate; a gate drawn straight in raw values looks bowed on a transformed axis, which the gate-edge control shows rather than hides. FlowJo and Gating-ML 2.0 take the other view, a polygon straight in the space the axis shows, and the exports write the gate as each of them expects it.")}
+              {t("A display scale is chosen per channel: linear or arcsinh for scatter, logicle or arcsinh for fluorescence, arcsinh at cofactor 5 for mass cytometry. Gates are stored and evaluated in raw values regardless, so nothing done to an axis can move an event in or out of a gate; a gate drawn straight in raw values looks bowed on a transformed axis, which the gate-edge control shows rather than hides. FlowJo workspaces and Gating-ML 2.0 take the other view, a polygon straight in the space the axis shows, and the exports write the gate as each of them expects it.")}
             </p>
             <p>
               <b>{t("One tree, tailored per file.")}</b>{" "}
@@ -12835,7 +14487,7 @@ export default function App() {
             </p>
             <p>
               <b>{t("Interchange.")}</b>{" "}
-              {t("FlowJo workspaces (.wsp) and Gating-ML 2.0 import and export, checked against FlowJo, Cytobank and CytoML on real files; a FACSDiva or FACSChorus experiment imports, and a FACSChorus .cef exports with the tree written back for the sorter. Cytobank reads only linear, log and arcsinh scales, so a logicle gate is traced for it and the export dialog says what was traced. Check an exported file rather than trusting it, and please report anything that does not survive a round trip.")}
+              {t("FlowJo workspaces (.wsp) and Gating-ML 2.0 import and export, checked on real files against recorded counts, Cytobank and CytoML; a FACSDiva or FACSChorus experiment imports, and a FACSChorus .cef exports with the tree written back for the sorter. Cytobank reads only linear, log and arcsinh scales, so a logicle gate is traced for it and the export dialog says what was traced. Check an exported file rather than trusting it, and please report anything that does not survive a round trip.")}
             </p>
             <p>
               <b>{t("Getting started.")}</b>{" "}
@@ -12856,7 +14508,7 @@ export default function App() {
             disabled={viewHistoryLength === 0}
             onClick={goBack}
           >
-            ←
+            <ArrowLeftIcon />
           </button>
           <button
             type="button"
@@ -12866,7 +14518,7 @@ export default function App() {
             disabled={viewForwardLength === 0}
             onClick={goForward}
           >
-            →
+            <ArrowRightIcon />
           </button>
         </span>
         <nav className="gl-header-menus" aria-label={t("Workspace, import and export")}>
@@ -12903,19 +14555,11 @@ export default function App() {
                 },
                 {
                   label: t("Open Workspace…"),
-                  title: "Open a saved .gatelab workspace, a FlowJo .wsp, or a FACSChorus .cef. FlowJo and FACSChorus files hold gates rather than event data, so GateLab will ask for the corresponding FCS.",
+                  title: "Open a saved .gatelab workspace, a FlowJo .wsp, or a FACSChorus .cef. The .wsp and .cef files hold gates rather than event data, so GateLab will ask for the corresponding FCS.",
                   disabled: busy || compensationApplyStatus !== null,
+                  shortcut: "⌘O",
                   onClick: openWorkspace,
                 },
-                // The workspaces opened or saved lately, from the browser's store of file handles;
-                // the browser asks for the file again on reopening.
-                ...recentWorkspaces.slice(0, 5).map((recent) => ({
-                  label: t("Recent: {name}", { name: recent.name }),
-                  title: t("Reopen {name}, last used {when}; the browser will ask to allow the file again", { name: recent.name, when: new Date(recent.at).toLocaleString() }),
-                  className: "gl-menu-recent",
-                  disabled: busy || compensationApplyStatus !== null,
-                  onClick: () => void openRecentWorkspace(recent),
-                })),
                 {
                   label: t("Open the demo workspace"),
                   className: "gl-open-demo",
@@ -12923,6 +14567,17 @@ export default function App() {
                   disabled: busy || compensationApplyStatus !== null,
                   onClick: () => void openDemoWorkspace(),
                 },
+                // The workspaces opened or saved lately, from the browser's store of file handles;
+                // the browser asks for the file again on reopening.
+                ...(recentWorkspaces.length ? [{ section: t("Recent") }] : []),
+                ...recentWorkspaces.slice(0, 5).map((recent) => ({
+                  label: t("Recent: {name}", { name: recent.name }),
+                  title: t("Reopen {name}, last used {when}; the browser will ask to allow the file again", { name: recent.name, when: new Date(recent.at).toLocaleString() }),
+                  className: "gl-menu-recent",
+                  disabled: busy || compensationApplyStatus !== null,
+                  onClick: () => void openRecentWorkspace(recent),
+                })),
+                "separator",
                 {
                   label: wsHandle || driveTarget ? `${t("Save")}${dirty ? " ●" : ""}` : t("Save Workspace…"),
                   title: driveTarget
@@ -12933,6 +14588,7 @@ export default function App() {
                       : "Save gates/populations/scales/compensation back to the linked workspace file (in place)"
                     : "Choose a location and save the workspace",
                   disabled: !sample,
+                  shortcut: "⌘S",
                   onClick: saveWorkspace,
                 },
                 {
@@ -12970,6 +14626,7 @@ export default function App() {
                 {
                   label: t("Clear gates and populations…"),
                   className: "gl-clear-gating",
+                  danger: true,
                   title: "Remove every gate, population and hierarchy and start gating again on the same files. Scales, compensation and metadata are kept, and Undo brings the gating back.",
                   disabled: !sample || (Object.keys(state.gates).length === 0 && state.hierarchies.length < 2 && Object.keys(state.populations).length < 2),
                   onClick: () => setClearGatingConfirmOpen(true),
@@ -12981,9 +14638,10 @@ export default function App() {
             label={t("Import")}
             disabled={!sample}
             items={[
+              { section: t("Gating") },
               {
                 label: t("Import gating (GatingML / FlowJo / FACSChorus)…"),
-                title: "Import Gating-ML 2.0 (.xml), a FlowJo workspace (.wsp) or a FACSChorus experiment (.cef), then choose whether to merge into the current hierarchy or replace the current strategy. A workspace carries population names, which FlowJo's own Gating-ML export omits; a Chorus experiment carries the gates as they are now and a snapshot per sort.",
+                title: "Import Gating-ML 2.0 (.xml), a FlowJo workspace (.wsp) or a FACSChorus experiment (.cef), then choose whether to merge into the current hierarchy or replace the current strategy. A workspace carries population names, which a Gating-ML export of the same workspace omits; a Chorus experiment carries the gates as they are now and a snapshot per sort.",
                 onClick: () => void pickFilesOrInput(xmlRef.current, GATING_IMPORT_ACCEPT, "Gating-ML or FlowJo workspace").then((files) => { if (files?.[0]) prepareGatingImport(files[0]); }),
               },
               {
@@ -12998,15 +14656,16 @@ export default function App() {
                 onClick: () => void pickFilesOrInput(barcodeRef.current, TABLE_FILE_ACCEPT, "Barcode scheme table").then((files) => { if (files?.[0]) void prepareBarcodeImport(files[0]); }),
               },
               "separator",
+              { section: t("Cell images") },
               {
                 label: activeEntry?.images ? t("Replace cell images (.cvw)…") : t("Attach cell images (.cvw)…"),
-                title: "Attach the waveform file (.cvw) a BD FACSDiscover S8 exports beside this FCS when images were recorded. Each event's image is decoded from it on demand. A folder opened with “+ Folder…”, or an FCS dropped or picked together with its .cvw, attaches it by itself.",
+                title: "Attach the waveform file (.cvw) a BD FACSDiscover S8 exports beside this FCS when images were recorded. Each event's image is decoded from it on demand. A folder opened with “Add folder…”, or an FCS dropped or picked together with its .cvw, attaches it by itself.",
                 disabled: !activeEntry || isSceHost,
                 onClick: () => void attachImagesToActive(),
               },
               {
                 label: activeEntry?.images?.kind === "tiff-folder" ? t("Replace cell images (folder of TIFFs)…") : t("Attach cell images (folder of TIFFs)…"),
-                title: "A folder written by the BD CellView Image Extractor or FlowJo: one TIFF per imaged event, named <tube>_<event number>.tiff, in folders of ten thousand.",
+                title: "A folder of TIFF images: one per imaged event, named <tube>_<event number>.tiff, in folders of ten thousand.",
                 onClick: () => void attachTiffFolderToActive(),
               },
               ...(activeEntry?.images
@@ -13017,14 +14676,15 @@ export default function App() {
                   }]
                 : []),
               "separator",
+              { section: t("Compare counts") },
               {
                 label: t("Compare with FACSChorus statistics…"),
                 title: "Open the statistics FACSChorus exports beside an experiment (<experiment>_Statistics.csv): its event count for every population of every recording, set beside GateLab's count on the loaded file of the same name, with the reason for each difference.",
                 onClick: () => void pickFilesOrInput(chorusStatsRef.current, TABLE_FILE_ACCEPT, "FACSChorus statistics export").then((files) => { if (files?.[0]) void openChorusStatistics(files[0]); }),
               },
               {
-                label: t("Compare with FlowJo's counts…"),
-                title: "After a FlowJo workspace has been imported: the event count FlowJo recorded for every population, set beside GateLab's count of the same population on the same file, with each difference classed as arising at its own gate or inherited from a population above it.",
+                label: t("Compare with the recorded counts…"),
+                title: "After a FlowJo workspace has been imported: the event count the workspace recorded for every population, set beside GateLab's count of the same population on the same file, with each difference classed as arising at its own gate or inherited from a population above it.",
                 disabled: !flowJoReferences.length,
                 onClick: () => setFlowJoCheckOpen(true),
               },
@@ -13034,6 +14694,7 @@ export default function App() {
             label={t("Export")}
             disabled={!sample}
             items={[
+              { section: t("Gating") },
               {
                 label: t("Export GatingML…"),
                 title: "Open the GatingML export dialog: choose standard GateLab/GateLabR or Cytobank-compatible format and review fidelity warnings.",
@@ -13042,9 +14703,15 @@ export default function App() {
               },
               {
                 label: t("Export FlowJo workspace…"),
-                title: "Write the loaded files and their gating trees as a FlowJo workspace (.wsp), in the layout FlowJo 10.10 writes, which FlowJo opens and BD FACSChorus imports sort gates from.",
+                title: "Write the loaded files and their gating trees as a FlowJo workspace (.wsp) in the version 10.10 layout, from which BD FACSChorus imports sort gates.",
                 disabled: Object.keys(state.gates).length === 0,
                 onClick: () => setFlowJoExportOpen(true),
+              },
+              {
+                label: t("Export FlowJo 11 workbench (.flowjo)…"),
+                title: "Write the loaded files and their gating trees as a FlowJo 11 workbench (.flowjo), naming each FCS file by its path in a folder you give, with GateLab's counts stored as its results.",
+                disabled: Object.keys(state.gates).length === 0,
+                onClick: () => setFlowJo11ExportOpen(true),
               },
               {
                 label: t("Export FACSChorus experiment…"),
@@ -13059,6 +14726,7 @@ export default function App() {
                 onClick: openBarcodeSave,
               },
               "separator",
+              { section: t("Events") },
               {
                 label: t("Export FCS…"),
                 title: "Open the FCS export dialog: choose populations, original/compensated/transformed values, and sample scope.",
@@ -13067,46 +14735,62 @@ export default function App() {
             ]}
           />
         </nav>
+        {/* The file line has its slot from the start, empty until a file is open, and takes what
+            room is left, so nothing after it moves when a file opens (David, 2026-10-23). */}
+        <span className="gl-meta" title={headerFileLine || undefined}>{headerFileLine}</span>
         {sample && (
-          <span className="gl-meta">
-            {/* With several files checked the plot is pooled, so naming one of them and its own
-                event count describes something that is not on screen. Say what is pooled, and
-                name the active file as what it actually still decides: the axes and the gates. */}
-            {poolSelection && includedSamples.length !== 1
-              ? <>
-                  {t("{count} files pooled", { count: includedSamples.length })} —{" "}
-                  {t("{count} events", {
-                    count: includedSamples
-                      .reduce((total, entry) => total + entry.sample.fcs.nEvents, 0)
-                      .toLocaleString(),
-                  })} · {t("axes from {name}", { name: fileName })} ·{" "}
-                </>
-              : <>{fileName} — {t("{count} events", { count: sample.fcs.nEvents.toLocaleString() })} ·{" "}</>}
-            {sample.channels.length < sample.fcs.channels.length
-              ? t("{shown} of {total} channels", {
-                  shown: sample.channels.length,
-                  total: sample.fcs.channels.length,
-                })
-              : t("{count} channels", { count: sample.channels.length })} ·{" "}
-            <select
-              title={t("Instrument mode — Auto uses channel-name detection; override if a file is mis-detected. Switch before gating (the gating space flips with it).")}
-              value={instrumentMode}
-              onChange={(e) => changeInstrumentMode(e.target.value as "auto" | "flow" | "cytof")}
-              style={{ fontSize: "inherit", padding: "0 2px", background: "transparent", border: "1px solid var(--gl-border, #ccc)", borderRadius: 3 }}
-            >
-              <option value="auto">{t("auto ({instrument})", { instrument: sample.detectedInstrument })}</option>
-              <option value="cytof">CyTOF</option>
-              <option value="flow">{t("flow")}</option>
-            </select>
-          </span>
+          // How the file's channels are read, set rarely: a menu in the header's style.
+          <MenuButton
+            label={instrumentMode === "auto"
+              ? t("{instrument} (auto)", { instrument: sample.detectedInstrument === "cytof" ? "CyTOF" : t("Flow") })
+              : instrumentMode === "cytof" ? "CyTOF" : t("Flow")}
+            className="gl-instrument-menu"
+            title={t("Instrument mode — Auto uses channel-name detection; override if a file is mis-detected. Switch before gating (the gating space flips with it).")}
+            items={[
+              { label: t("Auto ({instrument})", { instrument: sample.detectedInstrument === "cytof" ? "CyTOF" : t("Flow") }), checked: instrumentMode === "auto", onClick: () => changeInstrumentMode("auto") },
+              { label: "CyTOF", checked: instrumentMode === "cytof", onClick: () => changeInstrumentMode("cytof") },
+              { label: t("Flow"), checked: instrumentMode === "flow", onClick: () => changeInstrumentMode("flow") },
+            ]}
+          />
         )}
-        {sample && (
+        {sample && !(isSceHost && hostDatasetDescriptor) && (
+          // Two layers, so both are shown and one click switches: Original | Compensated.
+          <div
+            className="gl-segmented gl-header-assay-switch"
+            role="radiogroup"
+            aria-label={t("Active assay layer for all tabs")}
+            title={t("Active assay layer for every GateLab tab. Switching layers keeps gates but recomputes their memberships in the selected coordinate system.")}
+          >
+            <button
+              type="button"
+              role="radio"
+              aria-checked={!compensationOn}
+              className={compensationOn ? undefined : "is-selected"}
+              disabled={compensationApplyStatus !== null}
+              onClick={() => { if (compensationOn) toggleCompensation(false); }}
+            >
+              {t("Original")}
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={compensationOn}
+              className={compensationOn ? "is-selected" : undefined}
+              disabled={compensationApplyStatus !== null || !canUseCompensatedAssay}
+              title={activeCompensatedStatus?.state === "stale" ? t("Compensated (unavailable)") : undefined}
+              onClick={() => { if (!compensationOn) toggleCompensation(true); }}
+            >
+              {t("Compensated")}
+            </button>
+          </div>
+        )}
+        {sample && isSceHost && hostDatasetDescriptor && (
           <label
             className="gl-header-assay"
             title={t("Active assay layer for every GateLab tab. Switching layers keeps gates but recomputes their memberships in the selected coordinate system.")}
           >
             <span>{t("Assay")}</span>
-            {isSceHost && hostDatasetDescriptor ? (
+            {(
               // The SCE's assays by name: the samples are drawn from the chosen one. A compensated
               // layer this session installed is a further choice, as in the browser app.
               <select
@@ -13136,57 +14820,30 @@ export default function App() {
                   <option value="compensated">{t("Compensated · this session")}</option>
                 )}
               </select>
-            ) : (
-              <select
-                aria-label={t("Active assay layer for all tabs")}
-                value={compensationOn ? "compensated" : "original"}
-                disabled={compensationApplyStatus !== null}
-                onChange={(event) => toggleCompensation(event.currentTarget.value === "compensated")}
-              >
-                <option value="original">{t("Original")}</option>
-                <option value="compensated" disabled={!canUseCompensatedAssay}>
-                  {activeCompensatedStatus?.state === "stale" ? t("Compensated (unavailable)") : t("Compensated")}
-                </option>
-              </select>
             )}
           </label>
         )}
-        {error && (
-          // One line per note, in a box that scrolls: a per-file import says every file's notes,
-          // each group under its file's name, and joined into one run of text they read as a
-          // single paragraph while the header grew with every file.
+        {error && error.includes("\n") ? (
+          // A list of notes (an import's, or an export's) is a chip that opens them, one line per
+          // note in a box that scrolls, so the header no longer grows with every file.
+          <details key={error} className="gl-error gl-header-notes">
+            <summary title={t("Show the notes")}>
+              ⚠ {errorKind === "export"
+                ? t("{count} export notes", { count: error.split("\n").length })
+                : t("{count} import notes", { count: error.split("\n").length })}
+            </summary>
+            <div className="gl-header-notes-body">
+              {error.split("\n").map((line, i) => (
+                <span key={i} className="gl-error-line">{i === 0 ? "⚠ " : "\n"}{t(line)}</span>
+              ))}
+              <button type="button" className="gl-mini-btn gl-header-notes-dismiss" onClick={() => setError(null)}>{t("Dismiss")}</button>
+            </div>
+          </details>
+        ) : error && (
           <span className="gl-error">
-            {error.split("\n").map((line, i) => (
-              <span key={i} className="gl-error-line">{i === 0 ? "⚠ " : "\n"}{t(line)}</span>
-            ))}
+            <span className="gl-error-line">⚠ {t(error)}</span>
           </span>
         )}
-        <span
-          className="gl-header-meta"
-          style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap" }}
-          title={
-            isSceHost
-              ? "GateLabR — SingleCellExperiment host using the shared GateLab React core."
-              : "GateLab — MIT-licensed, © 2026 David G. Priest."
-          }
-        >
-          {/* The core's commit tells one embed from the next: the version is the same across them. */}
-          {isSceHost ? `GateLab core v${pkg.version}${coreBuild ? ` · ${coreBuild}` : ""}` : `GateLab v${pkg.version}${__GATELAB_LAB_BUILD__ ? ` · lab build ${__GATELAB_LAB_BUILD__}` : ""} · MIT`} ·{" "}
-          {t("Questions or bugs?")}{" "}
-          {/* Link straight to the issue tracker rather than the repo root: the
-              point is to invite feedback, so land people where they can file it. */}
-          <a
-            href={isSceHost
-              ? "https://github.com/david-priest/GateLabR/issues"
-              : "https://github.com/david-priest/GateLab/issues"}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: "inherit", textDecoration: "underline" }}
-            data-tour="issues-link"
-          >
-            {t("please leave an issue at the repo")}
-          </a>
-        </span>
         {drive && (
           <drive.module.DriveMenu
             session={drive.session}
@@ -13199,11 +14856,48 @@ export default function App() {
             onSignedOut={closeDriveWorkspaceOnSignOut}
             onStatus={setImportMsg}
             onError={setError}
+            onReconnectNeeded={askDriveReconnect}
+            autosaveNote={driveAutosaveStop?.message ?? null}
           />
         )}
         {/* The agent link is off while a lab Drive workspace is open. */}
-        {!driveTarget && <AgentMenu status={agentStatus} onConnect={(url) => agentLinkRef.current?.connect(url)} onDisconnect={() => agentLinkRef.current?.disconnect()} />}
-        {!isSceHost && <TourMenu progress={tour.progress} onStart={tour.start} onResume={tour.resume} />}
+        {!driveTarget && <AgentMenu status={agentStatus} task={agentGatingTask} onEndSearch={() => setAgentGatingTask((task) => task ? { ...task, status: "cancelled", message: "Search ended by the user. Live gates are unchanged." } : null)} onConnect={(url) => agentLinkRef.current?.connect(url)} onDisconnect={() => agentLinkRef.current?.disconnect()} />}
+        {/* One Help menu: the tutorial, the guide, the source, where to report a problem, and the
+            version line, kept out of the header's row (David, 2026-10-23). */}
+        <HelpMenu
+          tour={isSceHost ? null : { progress: tour.progress, onStart: tour.start, onResume: tour.resume }}
+          links={[
+            {
+              label: t("User guide"),
+              className: "gl-help-guide",
+              title: t("Open the user guide on GitHub"),
+              onClick: () => window.open(`${repositoryUrl}#readme`, "_blank", "noopener,noreferrer"),
+            },
+            {
+              label: t("Source code on GitHub"),
+              className: "gl-help-source",
+              onClick: () => window.open(repositoryUrl, "_blank", "noopener,noreferrer"),
+            },
+            {
+              label: t("Report a bug or ask a question…"),
+              className: "gl-help-issues",
+              title: t("Open the issue tracker on GitHub"),
+              onClick: () => window.open(`${repositoryUrl}/issues`, "_blank", "noopener,noreferrer"),
+            },
+            "separator",
+            {
+              // The core's commit tells one embed from the next: the version is the same across them.
+              label: isSceHost
+                ? `GateLab core v${pkg.version}${coreBuild ? ` · ${coreBuild}` : ""} · ${t("MIT licence")}`
+                : `GateLab v${pkg.version}${__GATELAB_LAB_BUILD__ ? ` · lab build ${__GATELAB_LAB_BUILD__}` : ""} · ${t("MIT licence")}`,
+              className: "gl-help-version",
+              title: isSceHost
+                ? `GateLabR — SingleCellExperiment host using the shared GateLab React core. ${t("Open the release notes on GitHub")}`
+                : `GateLab — MIT-licensed, © 2026 David G. Priest. ${t("Open the release notes on GitHub")}`,
+              onClick: () => window.open(`${repositoryUrl}/releases`, "_blank", "noopener,noreferrer"),
+            },
+          ]}
+        />
         <label className="gl-header-language">
           <span>{t("Language")}</span>
           <select
@@ -13300,10 +14994,20 @@ export default function App() {
       )}
 
       <div className="gl-body">
-        <aside className="gl-left" style={{ width: leftWidth, display: ["illustration", "layout", "proportions", "statistics", "compensation"].includes(activeTab) ? "none" : undefined }} aria-label="Samples and workspace">
+        {/* A tab with a left pane of its own resizes it here, at the shared width's edge. */}
+        {sample && ["illustration", "layout", "proportions", "statistics", "compensation", "strategy", "division"].includes(activeTab) && (
+          <div
+            className="gl-left-resize gl-tab-left-resize"
+            style={{ left: leftWidth - 8 }}
+            onMouseDown={startLeftResize}
+            title={t("Drag to resize the left pane")}
+          />
+        )}
+        <aside className="gl-left" style={{ width: leftWidth, display: ["illustration", "layout", "proportions", "statistics", "compensation", "strategy", "division"].includes(activeTab) ? "none" : undefined }} aria-label="Samples and workspace">
           <div className="gl-left-resize" onMouseDown={startLeftResize} title="Drag to resize samples panel" />
           <SampleNavigator
             items={sampleListItems}
+            treeSummary={groupSummary || null}
             activeId={plotPool ? null : activeSampleId}
             excludedIds={excludedSampleIds}
             busy={busy}
@@ -13331,6 +15035,21 @@ export default function App() {
             onIncludeAll={includeAllSamples}
             onIncludeNone={includeNoSamples}
             onInvertIncluded={invertIncludedSamples}
+            pool={{
+              on: !!poolSelection,
+              count: checkedSamples.length,
+              disabled: !poolSelection && checkedSamples.length < 2,
+              // The tooltip of the choice not taken: Single's while pooled, Pooled's otherwise, saying why it is off.
+              title: poolSelection
+                ? (isSceHost ? t("View the one sample again") : t("View the one file again"))
+                : checkedSamples.length < 2
+                  ? (isSceHost ? t("Select two or more samples to pool them") : t("Select two or more files to pool them"))
+                  : (isSceHost ? t("Pool the {count} selected samples in one plot", { count: checkedSamples.length }) : t("Pool the {count} selected files in one plot", { count: checkedSamples.length })),
+              onToggle: () => {
+                if (poolSelection) { if (activeSampleId) inspectSample(activeSampleId); }
+                else poolSelectedFiles();
+              },
+            }}
             facets={shownFacets}
             facetColumnNames={metadataColumnNames}
             facetPartialColumns={partialMetadataColumns}
@@ -13340,15 +15059,16 @@ export default function App() {
             onToggleFacetLock={toggleSampleFacetLock}
             onToggleFacet={toggleSampleFacet}
             onSetFacetColumns={setFacetColumnChoice}
-            groups={state.groups}
+            groups={state.groups.map((g, index) => ({ ...g, colour: groupColour(state.groups, index) }))}
             onGroupAction={runGroupAction}
+            fileMenuOf={fileRowMenu}
             onDropFiles={isSceHost ? undefined : (dropped, directoryCount) => {
-              // Same ingestion as "+ Files…": the drop is only another way to pick the files,
+              // Same ingestion as "Add files…": the drop is only another way to pick the files,
               // and a .cvw dropped with its FCS is attached as it would be from a folder.
               const candidates = candidatesWithSidecars(dropped.map((file) => ({ name: file.name, file, handle: null })));
               if (candidates.length === 0) {
                 setError(directoryCount > 0
-                  ? "Folders are not read here — use “+ Folder…” to add a folder of FCS files."
+                  ? "Folders are not read here — use “Add folder…” in the file list's ＋ menu to add a folder of FCS files."
                   : "Only .fcs files can be dropped here (a .cvw is read beside the FCS of the same name).");
                 return;
               }
@@ -13469,7 +15189,7 @@ export default function App() {
           <input
             ref={wsRef}
             type="file"
-            accept={`.${WORKSPACE_EXT},.wsp,.cef`}
+            accept={`.${WORKSPACE_EXT},.wsp,.flowjo,.cef`}
             style={{ display: "none" }}
             onChange={async (e) => {
               const f = e.target.files?.[0];
@@ -13482,7 +15202,7 @@ export default function App() {
               <input
                 ref={xmlRef}
                 type="file"
-                accept=".xml,.wsp,.cef"
+                accept=".xml,.wsp,.flowjo,.cef"
                 style={{ display: "none" }}
                 onChange={(e) => {
                   const f = e.target.files?.[0];
@@ -13544,16 +15264,16 @@ export default function App() {
                 </button>
               </div>
             )}
-            {importMsg && <div className="gl-hint" title={t(importMsg)}>{t(importMsg)}</div>}
+            {importMsg && <div className="gl-hint gl-status-line" title={t(importMsgTitle ?? importMsg)}>{t(importMsg)}</div>}
             {flowJoCheckAtImport && flowJoCheckAtImport.compared > 0 && (() => {
               const said = flowJoCheckAtImport.exact === flowJoCheckAtImport.compared
-                ? t("At import, all {compared} populations compared counted exactly as FlowJo recorded.", { compared: flowJoCheckAtImport.compared })
-                : t("At import, {exact} of {compared} populations compared counted exactly as FlowJo recorded.", { exact: flowJoCheckAtImport.exact, compared: flowJoCheckAtImport.compared });
+                ? t("At import, all {compared} populations compared counted exactly as the workspace recorded.", { compared: flowJoCheckAtImport.compared })
+                : t("At import, {exact} of {compared} populations compared counted exactly as the workspace recorded.", { exact: flowJoCheckAtImport.exact, compared: flowJoCheckAtImport.compared });
               // The line is cut to the panel's width, as the import's own is; the button is not.
               return (
                 <div className="gl-side-status-row gl-flowjo-check-line">
                   <div className="gl-hint" title={said}>{said}</div>
-                  <button className="gl-mini-btn" title={t("The count FlowJo recorded for every population, beside GateLab's")} onClick={() => setFlowJoCheckOpen(true)}>{t("FlowJo counts…")}</button>
+                  <button className="gl-mini-btn" title={t("The count the workspace recorded for every population, beside GateLab's")} onClick={() => setFlowJoCheckOpen(true)}>{t("Recorded counts…")}</button>
                 </div>
               );
             })()}
@@ -13562,6 +15282,7 @@ export default function App() {
 
         {sample ? (
           <div className="gl-center" role="main" aria-label={t("Plot and analysis tabs")}>
+            <ActionNote message={noteMsg} seq={importMsgSeq} />
             {/* Gating tab stays mounted (hidden) so the plot + pan/zoom listeners survive
                 tab switches without a re-decode. A render error here is contained to the
                 gating view rather than white-screening the whole app. */}
@@ -13586,23 +15307,39 @@ export default function App() {
                     : includedSamples.length === 1
                       ? t("Pooled view · 1 file")
                       : t("Pooled view · {count} files", { count: includedSamples.length })}</strong>
-              {poolSelection ? <>
-                <button type="button" onClick={() => activeSampleId && inspectSample(activeSampleId)}>
-                  {isSceHost ? t("Return to single sample") : t("Return to single file")}
-                </button>
-                <small>{t("Editing the tree · every file follows, tailored gates excepted")}. {t("The tree's gates apply to every pooled file; these are not per-file tailored counts.")}</small>
-              </> : <>
-                <button type="button" disabled={checkedSamples.length < 2} onClick={poolSelectedFiles}>
-                  {isSceHost
-                    ? t("Pool selected samples ({count})", { count: checkedSamples.length })
-                    : t("Pool selected files ({count})", { count: checkedSamples.length })}
-                </button>
-                <small>{activeHierarchy?.owner_sample_id
-                  ? t("Editing {name} only · its tailored gates", { name: fileName })
-                  : activeHierarchy?.owner_group_id
-                    ? t("Editing {name} · its files follow, tailored gates excepted", { name: activeHierarchy.name })
-                    : t("Editing the tree · every file follows, tailored gates excepted")}</small>
-              </>}
+              {/* Pooling is switched in the file list ("Pool N", after All · None · Invert); this
+                  strip only says what the plot shows (David, 2026-10-23). */}
+              {/* What is plotted, in a few muted words; the files by name are in the tooltip. */}
+              <span
+                className={"gl-view-info" + (panelMismatchNames.length > 0 || layerMismatchNames.length > 0 ? " is-warning" : "") + (pendingIncludedGatingIds.size > 0 ? " is-pending" : "")}
+                title={[
+                  panelMismatchNames.length > 0
+                    ? t("Files whose panel differs from {name} are not pooled with it: the same channel name can carry a different marker between panels, so a shared name is not a shared measurement. Uncheck them, or check them alone.", { name: fileName })
+                    : layerMismatchNames.length > 0
+                      ? t("Files on another assay layer than {name} are not pooled with it: their values are in another space. Put them on the same layer, or select them alone.", { name: fileName })
+                      : t("The viewed file supplies the axes. Pooled, the plot follows the selection; Enter shows a file alone."),
+                  ...includedSamples.map((entry) => entry.name),
+                  ...(pendingIncludedGatingIds.size === 0 && includedSamples.length > 1
+                    ? [t("Selected display contributors: {files}", { files: contributingSampleNames.length ? contributingSampleNames.join(", ") : t("None") })]
+                    : []),
+                ].join("\n")}
+              >
+                {panelMismatchNames.length > 0
+                  ? `⚠ ${t("{count} checked file(s) not pooled — different panel", { count: panelMismatchNames.length })}`
+                  : layerMismatchNames.length > 0
+                    ? `⚠ ${t("{count} checked file(s) not pooled — different assay layer", { count: layerMismatchNames.length })}`
+                    : pendingIncludedGatingIds.size > 0
+                      ? t("preparing {count} population masks…", { count: pendingIncludedGatingIds.size })
+                      : !payload
+                        ? ""
+                        : includedSamples.length > 1
+                          ? t("{count} events · {contributing} of {checked} files contribute · axes from {name}", {
+                              count: payload.n_events.toLocaleString(), contributing: contributingSampleCount, checked: includedSamples.length, name: fileName,
+                            })
+                          : t("{count} events", { count: payload.n_events.toLocaleString() })}
+              </span>
+              {/* Which version of the selected gate is drawn and where a drag of it goes; nothing without a selected gate. */}
+              {gateStatus && <span className="gl-gate-status" title={gateStatus} aria-live="polite">{asSentence(gateStatus)}</span>}
               <span className="gl-pool-toolbar-right">
                 {/* Mounted always, hidden when there is nothing to say, so the buttons beside it stay put. */}
                 <span className={"gl-display-pops-banner" + (derived.displayPopCount > 1 ? "" : " is-idle")} aria-hidden={derived.displayPopCount <= 1}>
@@ -13616,10 +15353,17 @@ export default function App() {
                 >
                   {t("Fit data + gates")}
                 </button>
-
+                <button className="gl-tool" title={t("Zoom in, the bottom-left corner of the plot held in place")}
+                  aria-label={t("Zoom in")}
+                  data-zoom="in"
+                  onClick={() => zoomPlot("in")}><ZoomInIcon /></button>
+                <button className="gl-tool" title={t("Zoom out, the bottom-left corner of the plot held in place")}
+                  aria-label={t("Zoom out")}
+                  data-zoom="out"
+                  onClick={() => zoomPlot("out")}><ZoomOutIcon /></button>
                 <button className="gl-tool" title={t("Reset X/Y to auto range in the current scale mode")}
                   aria-label={t("Reset X and Y ranges to auto")}
-                  onClick={resetAxisRanges}>⟲</button>
+                  onClick={resetAxisRanges}><ResetIcon /></button>
                 <button
                   type="button"
                   className={`gl-scale-lock-button${lockScalesBetweenFiles ? " active" : ""}`}
@@ -13631,12 +15375,32 @@ export default function App() {
                 >
                   {t("Lock scales between files")}
                 </button>
-                <span className="gl-hint-icon" role="img" aria-label={t("Plot hints")} title={t("drag the margin to pan · shift-drag it to stretch · click an axis label to change its channel · shift while dragging a vertex holds 45°")}>?</span>
+                <HelpHint topic={t("Plot hints")} text={t("drag the margin to pan · shift-drag it to stretch · click an axis label to change its channel · shift while dragging a vertex holds 45°")} />
               </span>
             </div>
             <div className="gl-controls">
+              {/* One channel or two: the histogram shows the X channel, with its range gates. First in
+                  the strip, so it stays put while the tools after it change with the view. */}
+              <div className="gl-history-tools gl-plot-view-tools" role="group" aria-label={t("Plot view")}>
+                <button
+                  type="button"
+                  className={"gl-icon-chip" + (histogramView ? " active" : "")}
+                  aria-pressed={histogramView}
+                  title={t(histogramView
+                    ? "Histogram of the X channel, with its range gates. Click to return to the scatter plot."
+                    : "Show the X channel as a histogram, to draw and edit range gates")}
+                  aria-label={t("Histogram view")}
+                  data-tool="histogram"
+                  onClick={() => {
+                    setHistogramView((on) => !on);
+                    setDrawMode("navigate");
+                  }}
+                >
+                  <HistogramIcon />
+                </button>
+              </div>
               <div className="gl-draw-tools">
-                {DRAW_TOOLS.map((tool) => {
+                {(histogramView ? HISTOGRAM_TOOLS : DRAW_TOOLS).map((tool) => {
                   const disabled = drawingBlocked && tool.id !== "navigate";
                   const title = disabled
                     ? t("This tree follows its group's template — add gates there, or unlink it from its group")
@@ -13669,7 +15433,7 @@ export default function App() {
                   disabled={state.undo.length === 0}
                   onClick={() => dispatch({ type: "undo" })}
                 >
-                  ↶
+                  <UndoIcon />
                 </button>
                 <button
                   type="button"
@@ -13679,13 +15443,34 @@ export default function App() {
                   disabled={state.redo.length === 0}
                   onClick={() => dispatch({ type: "redo" })}
                 >
-                  ↷
+                  <RedoIcon />
                 </button>
+              </div>
+              {/* The plot type is used often, so it sits at the top level as a segmented control of named
+                  choices: icons did not read (David, 2026-10-23). */}
+              <div className="gl-segmented gl-plot-types" role="group" aria-label={t("Plot type")}>
+                {MODES.map((m) => {
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      className={"gl-plot-type" + (mode === m.id ? " active is-selected" : "")}
+                      data-mode={m.id}
+                      aria-pressed={mode === m.id}
+                      title={t(m.label)}
+                      aria-label={t(m.label)}
+                      onClick={() => setMode(m.id)}
+                    >
+                      {t(m.short)}
+                    </button>
+                  );
+                })}
               </div>
               {/* Set once per session, so they live behind one button that says what is set. */}
               <details className="gl-display-popover gl-popover">
-                <summary title={t("Point opacity and size, density colour, how many events to draw, the plot mode, and the plot's font sizes")}>
-                  {t("Display")} · <span className="gl-display-summary-mode">{t(MODES.find((m) => m.id === mode)?.label ?? mode)}</span> · <span className="gl-display-summary-events">{maxEvents ? t("{count} events", { count: maxEvents.toLocaleString() }) : t("all events")}</span>
+                <summary title={t("Point opacity and size, density colour, how many events to draw, colouring, and the plot's font sizes")}>
+                  {t("Display")} · <span className="gl-display-summary-events">{maxEvents ? t("{count} events", { count: maxEvents.toLocaleString() }) : t("all events")}</span>
+                  {overlayBy !== "none" && <> · <span className="gl-display-summary-colour">{t("coloured")}</span></>}
                 </summary>
                 <div className="gl-display-popover-body">
               <label className="gl-alpha" title={t("Point opacity")} style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -13699,6 +15484,7 @@ export default function App() {
                   onChange={(e) => setPointAlpha(+e.target.value)}
                   style={{ width: 72 }}
                 />
+                <output className="gl-tabular-nums">{pointAlpha.toFixed(2)}</output>
               </label>
               <label className="gl-alpha" title={t("Point size")} style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 ◦
@@ -13712,6 +15498,7 @@ export default function App() {
                   onChange={(e) => setPointSize(+e.target.value)}
                   style={{ width: 72 }}
                 />
+                <output className="gl-tabular-nums">{pointSize.toFixed(1)}</output>
               </label>
               <DensityColourControl value={densityColorPower} onChange={changeDensityColorPower} disabled={mode !== "pseudocolor"} />
                 <label className="gl-field-inline" title="Downsample the points drawn on the plot. Empty, 0 or All events = plot every event (no downsampling). Counts/percentages always use every event.">
@@ -13754,122 +15541,8 @@ export default function App() {
                       ))}
                     </select>
                   </label>
-                {MODES.map((m) => (
-                  <button
-                    key={m.id}
-                    className={"gl-chip" + (mode === m.id ? " active" : "")}
-                    onClick={() => setMode(m.id)}
-                  >
-                    {t(m.label)}
-                  </button>
-                ))}
-                <div className="gl-display-popover-fonts" role="group" aria-label={t("Gating plot font sizes")}>
-                  <span className="gl-scales-label">{t("Fonts")}</span>
-              {([
-                ["Tick", "tick", 6, 24],
-                ["Axis", "axis", 6, 28],
-                ["Title", "title", 6, 28],
-                ["Gate", "gate", 6, 28],
-              ] as const).map(([label, key, min, max]) => (
-                <label key={key} className="gl-field-inline">
-                  {t(label)}
-                  <input
-                    type="number"
-                    min={min}
-                    max={max}
-                    step={1}
-                    value={gatingFontSizes[key]}
-                    onChange={(e) => {
-                      const requested = Number.parseInt(e.target.value, 10);
-                      const next = Number.isFinite(requested)
-                        ? Math.max(min, Math.min(max, requested))
-                        : DEFAULT_GATING_FONT_SIZES[key];
-                      setGatingFontSizes((current) => ({ ...current, [key]: next }));
-                    }}
-                  />
-                </label>
-              ))}
-                </div>
-                </div>
-              </details>
-              {LAYOUT_TAB_AVAILABLE && (
-                <button
-                  type="button"
-                  className="gl-mini-btn"
-                  title={t("Put this plot, of this file and population, on the Layout tab, where it can be drawn once per file or once per population")}
-                  onClick={addCurrentPlotToLayout}
-                >
-                  {t("Add to Layout")}
-                </button>
-              )}
-              <div className="gl-modes">
-                {sample.instrument !== "cytof" && (
-                  <label
-                    className="gl-field-inline"
-                    title={
-                      newGateSpace === "raw"
-                        ? "New gates are straight in RAW values. Their membership can never change when you move a display control, and their edges bow on a transformed axis."
-                        : "New gates are straight in the CURRENT display space, and record the transform they were drawn under. Their edges stay straight as drawn, and their membership still cannot change later — unlike FlowJo, which re-reads whatever scale is on screen."
-                    }
-                  >
-                    {t("New gates in")}
-                    <select
-                      value={newGateSpace}
-                      onChange={(e) => setNewGateSpace(e.target.value as GateSpace)}
-                    >
-                      <option value="raw">{t("Raw space")}</option>
-                      <option value="display">{t("Display space")}</option>
-                    </select>
-                  </label>
-                )}
-                <label className="gl-field-inline" title={GATE_EDGE_MODES.find((m) => m.id === gateEdgeMode)?.hint}>
-                  {t("Gate edges")}
-                  <select
-                    value={gateEdgeMode}
-                    onChange={(e) => setGateEdgeMode(e.target.value as GateEdgeMode)}
-                  >
-                    {GATE_EDGE_MODES.map((m) => (
-                      <option key={m.id} value={m.id}>{t(m.label)}</option>
-                    ))}
-                  </select>
-                </label>
-                <label
-                  className="gl-field-inline gl-check"
-                  title={t("A dragged or drawn vertex lands on another gate's vertex within 8 px, or on its edge or the plot's edge within 6 px; a moved gate's nearest vertex lands on a neighbour; and after a pan or stretch a gate side left within 6 px of a plot edge lands on it. Adjacent gates meet without a gap or an overlap; hold Alt while dragging to place a point freely, and Shift holds the vertex's angle instead of snapping")}
-                >
-                  <input
-                    type="checkbox"
-                    checked={snapToGates}
-                    onChange={(e) => setSnapToGates(e.target.checked)}
-                  />
-                  {t("Snap to other gates")}
-                </label>
-                <button
-                  type="button"
-                  className="gl-mini-btn"
-                  disabled={Object.values(state.gates).filter((g) => g.gate_type === "polygon" || g.gate_type === "rectangle").length < 2}
-                  title={t("Move the facing edges of neighbouring gates onto one shared line, so they touch with no gap and no overlap. Acts on the checked gates when two or more are checked, else on every gate of the plot.")}
-                  onClick={() => {
-                    const ids = state.selected_gate_ids.length >= 2 ? state.selected_gate_ids : undefined;
-                    if (!gatingPlotActions.current?.closeGateGaps(ids)) setImportMsg(t("No neighbouring gate edges were close enough to join."));
-                  }}
-                >
-                  {t("Close gaps")}
-                </button>
-                <button
-                  type="button"
-                  className="gl-mini-btn"
-                  disabled={!state.selected_gate_id || !["polygon", "rectangle"].includes(state.gates[state.selected_gate_id]?.gate_type ?? "")}
-                  title={t("Each side of the selected gate moves outward until it meets another gate's edge, landing on it, or reaches the plot's edge where nothing is in the way, so nothing at the edges is missed")}
-                  onClick={() => { if (!gatingPlotActions.current?.extendSelectedGateToEdges()) setImportMsg(t("The selected gate already touches its neighbours and the plot's edges.")); }}
-                >
-                  {t("Extend to edges")}
-                </button>
-              </div>
-            </div>
-            {/* What the points look like: colour, palette, size, the imaging plots and the thumbnails; the gating controls stay on the row above (David, 2026-10-14). */}
-            <div className="gl-controls gl-appearance">
-              <div className="gl-modes gl-appearance-modes">
+                {/* What the points are coloured and sized by (the third strip until 2026-10-23). */}
+                <div className="gl-display-popover-colour" role="group" aria-label={t("Colouring")}>
                 <span className="gl-field-inline">
                   {t("Colour by")}
                   <SearchableSelect
@@ -13968,205 +15641,312 @@ export default function App() {
                     )}
                   </label>
                 )}
+                </div>
+                {/* How gates are drawn in every tab (gateInk.ts): their colours or black, the line width, and black labels' backing. */}
+                <div className="gl-display-popover-gates" role="group" aria-label={t("Gates on the plot")}>
+                  <span className="gl-scales-label">{t("Gates")}</span>
+                  <label className="gl-check" title={t("Draw each gate in its own colour, in every tab and list. Off, the default, draws every gate and its label in black, as for print; the gates keep their colours, and turning this on shows them again.")}>
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      className="gl-coloured-gates"
+                      checked={colouredGates}
+                      onChange={(e) => setColouredGates(e.target.checked)}
+                    />
+                    {t("Coloured gates")}
+                  </label>
+                  <label className="gl-field-inline gl-gate-line-width" title={t("The width of every gate's outline; a selected gate is drawn 1 px thicker")}>
+                    {t("Gate line width")}
+                    <input
+                      type="range"
+                      min={MIN_GATE_LINE_WIDTH}
+                      max={MAX_GATE_LINE_WIDTH}
+                      step={0.2}
+                      aria-label={t("Gate line width")}
+                      value={gateLineWidth}
+                      onChange={(e) => setGateLineWidth(restoredGateLineWidth(Math.round(+e.target.value * 5) / 5))}
+                      style={{ width: 72 }}
+                    />
+                    <output className="gl-tabular-nums">{gateLineWidth.toFixed(1)}</output>
+                  </label>
+                  <button
+                    type="button"
+                    className="gl-tool gl-gate-line-width-reset"
+                    disabled={gateLineWidth === DEFAULT_GATE_LINE_WIDTH}
+                    title={t("Gate line width back to {width} px", { width: DEFAULT_GATE_LINE_WIDTH.toFixed(1) })}
+                    aria-label={t("Gate line width back to {width} px", { width: DEFAULT_GATE_LINE_WIDTH.toFixed(1) })}
+                    onClick={() => setGateLineWidth(DEFAULT_GATE_LINE_WIDTH)}
+                  ><ResetIcon /></button>
+                  {/* Black labels sit on a white backing; coloured ones keep their chips. */}
+                  {!colouredGates && (
+                    <>
+                      <label className="gl-field-inline gl-gate-label-background" title={t("The opacity of the white backing under each black gate label; 0% draws the text alone")}>
+                        {t("Label background")}
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={5}
+                          aria-label={t("Label background")}
+                          value={Math.round(gateLabelBackground * 100)}
+                          onChange={(e) => setGateLabelBackground(restoredGateLabelBackground(+e.target.value / 100))}
+                          style={{ width: 72 }}
+                        />
+                        <output className="gl-tabular-nums">{Math.round(gateLabelBackground * 100)}%</output>
+                      </label>
+                      <button
+                        type="button"
+                        className="gl-tool gl-gate-label-background-reset"
+                        disabled={gateLabelBackground === DEFAULT_GATE_LABEL_BACKGROUND}
+                        title={t("Label background back to {percent}%", { percent: Math.round(DEFAULT_GATE_LABEL_BACKGROUND * 100) })}
+                        aria-label={t("Label background back to {percent}%", { percent: Math.round(DEFAULT_GATE_LABEL_BACKGROUND * 100) })}
+                        onClick={() => setGateLabelBackground(DEFAULT_GATE_LABEL_BACKGROUND)}
+                      ><ResetIcon /></button>
+                    </>
+                  )}
+                </div>
+                <div className="gl-display-popover-fonts" role="group" aria-label={t("Gating plot font sizes")}>
+                  <span className="gl-scales-label">{t("Fonts")}</span>
+              {([
+                ["Tick", "tick", 6, 24],
+                ["Axis", "axis", 6, 28],
+                ["Title", "title", 6, 28],
+                ["Gate", "gate", 6, 28],
+              ] as const).map(([label, key, min, max]) => (
+                <label key={key} className="gl-field-inline">
+                  {t(label)}
+                  <input
+                    type="number"
+                    min={min}
+                    max={max}
+                    step={1}
+                    value={gatingFontSizes[key]}
+                    onChange={(e) => {
+                      const requested = Number.parseInt(e.target.value, 10);
+                      const next = Number.isFinite(requested)
+                        ? Math.max(min, Math.min(max, requested))
+                        : DEFAULT_GATING_FONT_SIZES[key];
+                      setGatingFontSizes((current) => ({ ...current, [key]: next }));
+                    }}
+                  />
+                </label>
+              ))}
+                </div>
+                </div>
+              </details>
+              {LAYOUT_TAB_AVAILABLE && (
+                <button
+                  type="button"
+                  className="gl-mini-btn"
+                  title={t("Put this plot, of this file and population, on the Layout tab, where it can be drawn once per file or once per population")}
+                  onClick={addCurrentPlotToLayout}
+                >
+                  {t("Add to Layout")}
+                </button>
+              )}
+              {/* How new gates are made and edited, and what the plot draws: set rarely, so behind one button. */}
+              <details className="gl-gate-settings gl-popover">
+                <summary title={t("Where new gates are drawn, how gate edges are drawn, snapping, and which gates the plot shows")}>
+                  {t("Gate settings")}
+                </summary>
+                <div className="gl-gate-settings-body">
+                {sample.instrument !== "cytof" && (
+                  <label
+                    className="gl-field-inline"
+                    title={
+                      newGateSpace === "raw"
+                        ? "New gates are straight in RAW values. Their membership can never change when you move a display control, and their edges bow on a transformed axis."
+                        : "New gates are straight in the CURRENT display space, and record the transform they were drawn under. Their edges stay straight as drawn, and their membership still cannot change later: a gate does not re-read whatever scale is on screen."
+                    }
+                  >
+                    {t("New gates in")}
+                    <select
+                      value={newGateSpace}
+                      onChange={(e) => setNewGateSpace(e.target.value as GateSpace)}
+                    >
+                      <option value="raw">{t("Raw space")}</option>
+                      <option value="display">{t("Display space")}</option>
+                    </select>
+                  </label>
+                )}
+                <label className="gl-field-inline" title={GATE_EDGE_MODES.find((m) => m.id === gateEdgeMode)?.hint}>
+                  {t("Gate edges")}
+                  <select
+                    value={gateEdgeMode}
+                    onChange={(e) => setGateEdgeMode(e.target.value as GateEdgeMode)}
+                  >
+                    {GATE_EDGE_MODES.map((m) => (
+                      <option key={m.id} value={m.id}>{t(m.label)}</option>
+                    ))}
+                  </select>
+                </label>
+                <label
+                  className="gl-field-inline gl-check"
+                  title={t("A dragged or drawn vertex lands on another gate's vertex within 8 px, or on its edge or the plot's edge within 6 px; a moved gate's nearest vertex lands on a neighbour; and after a pan or stretch a gate side left within 6 px of a plot edge lands on it. Adjacent gates meet without a gap or an overlap; hold Alt while dragging to place a point freely, and Shift holds the vertex's angle instead of snapping")}
+                >
+                  <input
+                    type="checkbox"
+                    checked={snapToGates}
+                    onChange={(e) => setSnapToGates(e.target.checked)}
+                  />
+                  {t("Snap to other gates")}
+                </label>
+                {/* What the plot draws: a plot setting, not the population list's. */}
+                <span className="gl-field-inline gl-plot-shows" role="group" aria-label={t("Plot shows")}>
+                  <span className="gl-plot-shows-label">{t("Plot shows:")}</span>
+                  <label
+                    className="gl-check"
+                    title={t("Draw only the gates belonging to the displayed branch — the gates on the current population and its descendants, or, once a gate is selected, that gate's own sub-branch. Unchecked draws every gate sharing the plot's channels, which is how thresholds set on different branches are compared.")}
+                  >
+                    <input type="checkbox" className="gl-plot-shows-branch" checked={branchGatesOnly} onChange={(e) => setBranchGatesOnly(e.target.checked)} />
+                    {t("branch gates")}
+                  </label>
+                  <label
+                    className="gl-check"
+                    title={t("Always draw gates that belong to no population. Such a gate is in no branch, so branch scoping would otherwise hide it whenever it is not selected or ticked.")}
+                  >
+                    <input type="checkbox" className="gl-plot-shows-unowned" disabled={!branchGatesOnly} checked={showUnownedGates} onChange={(e) => setShowUnownedGates(e.target.checked)} />
+                    {t("unowned gates")}
+                  </label>
+                </span>
+                </div>
+              </details>
                 {activeEntry && (imagingPresets.length > 0 || (activeEntry.images && thumbnailClassLabels.length > 0)) && (
-                  <details className="gl-separating gl-popover">
-                    <summary title={t("Biplots worth drawing on this file's image features, and the channel pair whose biplot best separates two classes of the colouring")}>
-                      {t("Imaging plots")}
-                    </summary>
-                    <div className="gl-separating-body">
-                      {imagingPresets.length > 0 && (
-                        <div className="gl-separating-group">
-                          <div className="gl-separating-heading">{t("Suggested plots")}</div>
-                          <ul className="gl-separating-list gl-separating-presets">
-                            {imagingPresets.map((p) => (
-                              <li key={p.id}>
-                                <button type="button" className="gl-chip" title={t(p.note, p.vars)} onClick={() => showBiplot(p.x, p.y)}>
-                                  {t(p.title, p.vars)}
+                <details className="gl-separating gl-popover">
+                  <summary title={t("Biplots worth drawing on this file's image features, and the channel pair whose biplot best separates two classes of the colouring")}>
+                    {t("Imaging plots")}
+                  </summary>
+                  <div className="gl-separating-body">
+                    {imagingPresets.length > 0 && (
+                      <div className="gl-separating-group">
+                        <div className="gl-separating-heading">{t("Suggested plots")}</div>
+                        <ul className="gl-separating-list gl-separating-presets">
+                          {imagingPresets.map((p) => (
+                            <li key={p.id}>
+                              <button type="button" className="gl-chip" title={t(p.note, p.vars)} onClick={() => showBiplot(p.x, p.y)}>
+                                {t(p.title, p.vars)}
+                              </button>
+                              <span className="gl-muted"> {activeEntry.sample.channelLabel(p.x)} × {activeEntry.sample.channelLabel(p.y)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {activeEntry.images && thumbnailClassLabels.length > 0 && (
+                      <>
+                    <div className="gl-separating-heading" title={t("The channel pair whose biplot best separates two classes of this colouring, ranked by the area under the curve of its best dividing line")}>{t("Separating plot")}</div>
+                    <div className="gl-separating-row">
+                      <label>
+                        {t("Separate")}
+                        <select value={separation.a} aria-label={t("Separate")} onChange={(e) => setSeparation((p) => ({ ...p, a: e.target.value, results: null }))}>
+                          {thumbnailClassLabels.map((label, i) => <option key={label} value={String(i)}>{label}</option>)}
+                        </select>
+                      </label>
+                      <label>
+                        {t("from")}
+                        <select value={separation.b} aria-label={t("from")} onChange={(e) => setSeparation((p) => ({ ...p, b: e.target.value, results: null }))}>
+                          {thumbnailClassLabels.map((label, i) => <option key={label} value={String(i)}>{label}</option>)}
+                        </select>
+                      </label>
+                      <button type="button" className="gl-chip" onClick={rankSeparation} disabled={separationBusy || separation.a === separation.b}>
+                        {separationBusy ? t("Ranking…") : t("Rank channel pairs")}
+                      </button>
+                    </div>
+                    {separation.results && (separation.results.all.length === 0 ? (
+                      <div className="gl-muted">{t("Too few events in a class to rank")}</div>
+                    ) : (
+                      [
+                        { heading: t("Any channels"), pairs: separation.results.all },
+                        { heading: t("Detectors only"), pairs: separation.results.detectors },
+                      ].map(({ heading, pairs }) => (
+                        <div key={heading} className="gl-separating-group">
+                          <div className="gl-separating-heading">{heading}</div>
+                          <ol className="gl-separating-list">
+                            {pairs.map((p) => (
+                              <li key={`${p.i}-${p.j}`}>
+                                <button type="button" className="gl-chip" title={t("Show this biplot")} onClick={() => showBiplot(p.i, p.j)}>
+                                  {activeEntry.sample.channelLabel(p.i)} × {activeEntry.sample.channelLabel(p.j)}
                                 </button>
-                                <span className="gl-muted"> {activeEntry.sample.channelLabel(p.x)} × {activeEntry.sample.channelLabel(p.y)}</span>
+                                <span className="gl-muted"> {t("AUC {auc} · alone {a} / {b}", { auc: p.auc.toFixed(3), a: p.aucI.toFixed(2), b: p.aucJ.toFixed(2) })}</span>
                               </li>
                             ))}
-                          </ul>
+                          </ol>
                         </div>
-                      )}
-                      {activeEntry.images && thumbnailClassLabels.length > 0 && (
-                        <>
-                      <div className="gl-separating-heading" title={t("The channel pair whose biplot best separates two classes of this colouring, ranked by the area under the curve of its best dividing line")}>{t("Separating plot")}</div>
-                      <div className="gl-separating-row">
-                        <label>
-                          {t("Separate")}
-                          <select value={separation.a} aria-label={t("Separate")} onChange={(e) => setSeparation((p) => ({ ...p, a: e.target.value, results: null }))}>
-                            {thumbnailClassLabels.map((label, i) => <option key={label} value={String(i)}>{label}</option>)}
-                          </select>
-                        </label>
-                        <label>
-                          {t("from")}
-                          <select value={separation.b} aria-label={t("from")} onChange={(e) => setSeparation((p) => ({ ...p, b: e.target.value, results: null }))}>
-                            {thumbnailClassLabels.map((label, i) => <option key={label} value={String(i)}>{label}</option>)}
-                          </select>
-                        </label>
-                        <button type="button" className="gl-chip" onClick={rankSeparation} disabled={separationBusy || separation.a === separation.b}>
-                          {separationBusy ? t("Ranking…") : t("Rank channel pairs")}
-                        </button>
-                      </div>
-                      {separation.results && (separation.results.all.length === 0 ? (
-                        <div className="gl-muted">{t("Too few events in a class to rank")}</div>
-                      ) : (
-                        [
-                          { heading: t("Any channels"), pairs: separation.results.all },
-                          { heading: t("Detectors only"), pairs: separation.results.detectors },
-                        ].map(({ heading, pairs }) => (
-                          <div key={heading} className="gl-separating-group">
-                            <div className="gl-separating-heading">{heading}</div>
-                            <ol className="gl-separating-list">
-                              {pairs.map((p) => (
-                                <li key={`${p.i}-${p.j}`}>
-                                  <button type="button" className="gl-chip" title={t("Show this biplot")} onClick={() => showBiplot(p.i, p.j)}>
-                                    {activeEntry.sample.channelLabel(p.i)} × {activeEntry.sample.channelLabel(p.j)}
-                                  </button>
-                                  <span className="gl-muted"> {t("AUC {auc} · alone {a} / {b}", { auc: p.auc.toFixed(3), a: p.aucI.toFixed(2), b: p.aucJ.toFixed(2) })}</span>
-                                </li>
-                              ))}
-                            </ol>
-                          </div>
-                        ))
-                      ))}
-                        </>
-                      )}
-                    </div>
-                  </details>
-                )}
+                      ))
+                    ))}
+                      </>
+                    )}
+                  </div>
+                </details>
+              )}
                 {workspaceHasImages && activeEntry?.images && (
-                  <details className="gl-thumbs-popover gl-popover">
-                    <summary title={t("Lay a spread of cell images over the plot, at their events' positions")}>
-                      {t("Thumbnails")} · {thumbnailsOn ? thumbnailCount.toLocaleString() : t("off")}
-                    </summary>
-                    <div className="gl-thumbs-popover-body">
-                      <label className="gl-field-inline gl-thumbs-field" title={t("Lay a spread of cell images over the plot, at their events' positions")}>
-                        <input type="checkbox" checked={thumbnailsOn} onChange={(e) => setThumbnailsOn(e.target.checked)} />
-                        {t("Thumbnails")}
+                <details className="gl-thumbs-popover gl-popover">
+                  <summary title={t("Lay a spread of cell images over the plot, at their events' positions")}>
+                    {t("Thumbnails")} · {thumbnailsOn ? thumbnailCount.toLocaleString() : t("off")}
+                  </summary>
+                  <div className="gl-thumbs-popover-body">
+                    <label className="gl-field-inline gl-thumbs-field" title={t("Lay a spread of cell images over the plot, at their events' positions")}>
+                      <input type="checkbox" checked={thumbnailsOn} onChange={(e) => setThumbnailsOn(e.target.checked)} />
+                      {t("Thumbnails")}
+                      <input
+                        type="number"
+                        min={1}
+                        max={400}
+                        value={thumbnailCount}
+                        disabled={!thumbnailsOn}
+                        aria-label={t("How many thumbnails")}
+                        onChange={(e) => setThumbnailCount(Math.max(1, Math.min(400, Math.round(Number(e.target.value) || 1))))}
+                      />
+                      <input
+                        type="range"
+                        min={24}
+                        max={96}
+                        step={4}
+                        value={thumbnailSize}
+                        disabled={!thumbnailsOn}
+                        aria-label={t("Thumbnail size")}
+                        onChange={(e) => setThumbnailSize(Number(e.target.value))}
+                      />
+                      <span className="gl-thumbs-seed" title={t("The seed that picks which cells are shown: the same seed shows the same cells")}>
+                        {t("Seed")}
                         <input
                           type="number"
                           min={1}
-                          max={400}
-                          value={thumbnailCount}
+                          max={99999}
+                          value={thumbnailSeed}
                           disabled={!thumbnailsOn}
-                          aria-label={t("How many thumbnails")}
-                          onChange={(e) => setThumbnailCount(Math.max(1, Math.min(400, Math.round(Number(e.target.value) || 1))))}
+                          aria-label={t("Seed")}
+                          onChange={(e) => setThumbnailSeed(Math.max(1, Math.min(99999, Math.round(Number(e.target.value) || 1))))}
                         />
-                        <input
-                          type="range"
-                          min={24}
-                          max={96}
-                          step={4}
-                          value={thumbnailSize}
+                        <button
+                          type="button"
+                          className="gl-chip"
                           disabled={!thumbnailsOn}
-                          aria-label={t("Thumbnail size")}
-                          onChange={(e) => setThumbnailSize(Number(e.target.value))}
-                        />
-                        <span className="gl-thumbs-seed" title={t("The seed that picks which cells are shown: the same seed shows the same cells")}>
-                          {t("Seed")}
-                          <input
-                            type="number"
-                            min={1}
-                            max={99999}
-                            value={thumbnailSeed}
-                            disabled={!thumbnailsOn}
-                            aria-label={t("Seed")}
-                            onChange={(e) => setThumbnailSeed(Math.max(1, Math.min(99999, Math.round(Number(e.target.value) || 1))))}
-                          />
-                          <button
-                            type="button"
-                            className="gl-chip"
-                            disabled={!thumbnailsOn}
-                            title={t("Pick a new seed")}
-                            aria-label={t("Pick a new seed")}
-                            onClick={() => setThumbnailSeed(1 + Math.floor(Math.random() * 99999))}
-                          >
-                            ⟳
-                          </button>
-                        </span>
-                        {thumbnailClassLabels.length > 0 && (
-                          <select
-                            className="gl-thumbs-class"
-                            value={thumbnailClass}
-                            disabled={!thumbnailsOn}
-                            aria-label={t("Thumbnails of")}
-                            title={t("Show thumbnails of one class only")}
-                            onChange={(e) => setThumbnailClass(e.target.value)}
-                          >
-                            <option value="all">{t("all cells")}</option>
-                            {thumbnailClassLabels.map((label, i) => <option key={label} value={String(i)}>{label}</option>)}
-                          </select>
-                        )}
-                      </label>
-                
-                    </div>
-                  </details>
-                )}
-                <span className="gl-appearance-right">
-                <span
-                  className={`gl-sample-scope-badge${pendingIncludedGatingIds.size > 0 ? " is-pending" : ""}`}
-                  title={[
-                    t("The plot shows the viewed file, or the selected files when pooled."),
-                    ...(activeHierarchy?.owner_sample_id ? [t("Editing {name} only", { name: fileName })] : []),
-                    ...includedSamples.map((entry) => entry.name),
-                    ...(pendingIncludedGatingIds.size === 0
-                      ? [
-                          t("Selected display contributors: {files}", {
-                            files: contributingSampleNames.length
-                              ? contributingSampleNames.join(", ")
-                              : t("None"),
-                          }),
-                        ]
-                      : []),
-                  ].join("\n")}
-                >
-                  <strong>
-                    {includedSamples.length > 1
-                      ? t("Pooled display")
-                      : includedSamples.length === 1
-                        ? t("Single-file display")
-                        : t("No plotted files")}
-                  </strong>
-                  {activeHierarchy?.owner_sample_id && ` · ${t("{name} only", { name: fileName })}`}
-                  {includedSamples.length > 0 &&
-                    ` · ${t("{count} plotted files", { count: includedSamples.length })}`}
-                  {pendingIncludedGatingIds.size > 0
-                    ? ` · ${t("preparing {count} population masks…", {
-                        count: pendingIncludedGatingIds.size,
-                      })}`
-                    : payload
-                      ? ` · ${t("{count} events", {
-                          count: payload.n_events.toLocaleString(),
-                        })}${includedSamples.length > 1
-                          ? ` · ${t("{contributing} of {checked} files contribute", {
-                              contributing: contributingSampleCount,
-                              checked: includedSamples.length,
-                            })}`
-                          : ""}`
-                      : ""}
-                </span>
-                <span
-                  className="gl-active-sample-key"
-                  title={panelMismatchNames.length > 0
-                    ? t("Files whose panel differs from {name} are not pooled with it: the same channel name can carry a different marker between panels, so a shared name is not a shared measurement. Uncheck them, or check them alone.", { name: fileName })
-                    : layerMismatchNames.length > 0
-                      ? t("Files on another assay layer than {name} are not pooled with it: their values are in another space. Put them on the same layer, or select them alone.", { name: fileName })
-                      : t("The viewed file supplies the axes. Pooled, the plot follows the selection; Enter shows a file alone.")}
-                >
-                  {panelMismatchNames.length > 0
-                    ? `⚠ ${t("{count} checked file(s) not pooled — different panel", {
-                        count: panelMismatchNames.length,
-                      })}`
-                    : layerMismatchNames.length > 0
-                      ? `⚠ ${t("{count} checked file(s) not pooled — different assay layer", {
-                          count: layerMismatchNames.length,
-                        })}`
-                      : t("Axes from: {name}", { name: fileName })}
-                </span>
-                </span>
-              </div>
+                          title={t("Pick a new seed")}
+                          aria-label={t("Pick a new seed")}
+                          onClick={() => setThumbnailSeed(1 + Math.floor(Math.random() * 99999))}
+                        >
+                          <RefreshIcon size={14} />
+                        </button>
+                      </span>
+                      {thumbnailClassLabels.length > 0 && (
+                        <select
+                          className="gl-thumbs-class"
+                          value={thumbnailClass}
+                          disabled={!thumbnailsOn}
+                          aria-label={t("Thumbnails of")}
+                          title={t("Show thumbnails of one class only")}
+                          onChange={(e) => setThumbnailClass(e.target.value)}
+                        >
+                          <option value="all">{t("all cells")}</option>
+                          {thumbnailClassLabels.map((label, i) => <option key={label} value={String(i)}>{label}</option>)}
+                        </select>
+                      )}
+                    </label>
+              
+                  </div>
+                </details>
+              )}
             </div>
             {/* Fluorescence scale — logicle (default) or arcsinh 150. Keyed on the channel's
                 CLASS, not on what it currently shows, so the control stays put after switching
@@ -14195,7 +15975,7 @@ export default function App() {
                         <select
                                                 className="gl-scatter-scale"
                                                 aria-label={`${axis} scatter scale`}
-                                                title={t("Arcsinh (cofactor 150) renders near-zero and negative scatter that a linear axis cannot. Linear matches how FlowJo and Cytobank display scatter.")}
+                                                title={t("Arcsinh (cofactor 150) renders near-zero and negative scatter that a linear axis cannot. Linear is the usual display for scatter.")}
                                                 value={sample.scatterScale(idx) === "linear" ? "linear" : "arcsinh"}
                                                 onChange={(e) => {
                                                   sample.setScatterScale(idx, e.target.value === "linear" ? "linear" : "arcsinh");
@@ -14235,8 +16015,8 @@ export default function App() {
                                               >
                                                 <option value="logicle">{t("Logicle")}</option>
                                                 <option value="arcsinh">{t("Arcsinh")}</option>
-                                                {sample.recordedBiex(idx) && (
-                                                  <option value="biex">{t("FlowJo biexponential")}</option>
+                                                {sample.biexOffered(idx) && (
+                                                  <option value="biex">{t("Biexponential")}</option>
                                                 )}
                                               </select>
                       ) : (
@@ -14272,16 +16052,32 @@ export default function App() {
                             A
                           </button>
                         </>
-                      ) : sample.fluorScale(idx) === "biex" ? (
-                        <span
-                          className="gl-scale-val"
-                          title={t("FlowJo's biexponential at the parameters the object or file declares: positive decades, negative decades, width basis and the axis maximum. It has no slider.")}
-                        >
-                          {(() => {
-                            const biex = sample.fluorBiexParams(idx);
-                            return biex ? `pos ${biex.pos} · neg ${biex.neg} · width ${biex.widthBasis} · max ${biex.maxValue.toLocaleString()}` : "";
-                          })()}
-                        </span>
+                      ) : sample.fluorScale(idx) === "biex" && sample.fluorBiexParams(idx) ? (
+                        <BiexAxisControl
+                          axis={axis}
+                          params={sample.fluorBiexParams(idx)!}
+                          recorded={sample.recordedBiex(idx)}
+                          defaults={sample.defaultBiex(idx)}
+                          onChange={(params) => {
+                            const applied = sample.setFluorBiexParams(idx, params);
+                            if (applied) {
+                              holdBiexAxisRange(idx);
+                              bumpScales();
+                            }
+                            return applied;
+                          }}
+                          onReset={() => {
+                            holdBiexAxisRange(idx);
+                            sample.resetFluorBiex(idx);
+                            bumpScales();
+                          }}
+                          onDragStart={() => { biexDragging.current = true; }}
+                          onDragEnd={() => {
+                            if (!biexDragging.current) return;
+                            biexDragging.current = false;
+                            bumpScales();
+                          }}
+                        />
                       ) : (
                         <>
                           <input
@@ -14335,7 +16131,7 @@ export default function App() {
             <div
               className="gl-plot-area"
               ref={plotAreaRef}
-              style={{ cursor: drawMode === "navigate" ? "grab" : "crosshair" }}
+              style={{ cursor: histogramView ? "default" : drawMode === "navigate" ? "grab" : "crosshair" }}
               onContextMenu={(event) => {
                 // A vertex or an edge stops the event before it gets here, with its own menu.
                 if (!sample) return;
@@ -14357,7 +16153,7 @@ export default function App() {
                   {mainPlotGates.some((plotted) => {
                     const gate = state.gates[plotted.gate_id];
                     return !!gate && isFlowJoGridGate(gate);
-                  }) && ` ${t("A gate on FlowJo's grid (F on its badge) is tested on that grid's channels, as FlowJo tests it, so the events it takes step along the curve by up to one channel.")}`}
+                  }) && ` ${t("A gate on a workspace's grid (F on its badge) is tested on that grid's channels, so the events it takes step along the curve by up to one channel.")}`}
                 </span>
                 <button
                   className="gl-chip"
@@ -14370,7 +16166,35 @@ export default function App() {
                 </button>
               </div>
             )}
-              {imageService && workspaceHasImages && activeTab === "gating" && (
+            {/* A pooled view draws the clicked file's version of each gate solid, which a drag edits,
+                and the pooled files' other versions dashed, each in its group's or file's colour. */}
+            {(poolTailoredVersionsShown.length > 0 || poolUnusedNames.length > 0) && (
+              <div
+                className="gl-hint gl-plot-note gl-plot-note-pool"
+                style={!gateEdgeNoteHidden && gateEdgeMode !== "straight" && mainPlotGates.some((g) => g.outline) ? { top: 30 } : undefined}
+              >
+                <span>
+                  {poolTailoredVersionsShown.length > 0 && <>
+                    {t("Solid: {file}'s version, which a drag edits; dashed:", { file: fileName || t("this file") })}{" "}
+                    {poolTailoredVersionsShown.map((version, index) => (
+                      <span key={version.key}>
+                        {index > 0 ? ", " : ""}
+                        <span className="gl-plot-note-swatch" style={{ borderColor: version.colour }} />
+                        {version.label}
+                      </span>
+                    ))}
+                    {"."}
+                  </>}
+                  {poolUnusedNames.length > 0 && <>
+                    {poolTailoredVersionsShown.length > 0 ? " " : ""}
+                    <span className="gl-plot-note-unused">
+                      {t("No pooled file follows the tree's {gates} (grey).", { gates: poolUnusedNames.join(", ") })}
+                    </span>
+                  </>}
+                </span>
+              </div>
+            )}
+              {imageService && workspaceHasImages && activeTab === "gating" && !histogramView && (
                 <Suspense fallback={null}>
                   <CellHoverProbe
                     plotAreaRef={plotAreaRef}
@@ -14415,8 +16239,9 @@ export default function App() {
               <GatingPlot
                 payload={displayed}
                 actions={gatingPlotActions}
-                mode={drawMode}
-                visible={activeTab === "gating"}
+                mode={drawMode === "draw-range" || drawMode === "draw-bisector" ? "navigate" : drawMode}
+                visible={activeTab === "gating" && !histogramView}
+                hidden={histogramView}
                 interactionToken={plotInteractionToken ?? undefined}
                 fontSizes={gatingFontSizes}
                 onNewGate={(g) => {
@@ -14441,8 +16266,8 @@ export default function App() {
                 onGateEdit={(e) => {
                   if (!plotInteractionIsCurrent()) return;
                   // Dragged poly/rect vertices come back in DISPLAY space on the current axes;
-                  // convert to gating space via the gate's stored channel keys, then persist.
-                  const g = state.gates[e.gate_id];
+                  // convert to gating space via the drawn gate's channel keys, then persist.
+                  const g = drawnGateOf(e.gate_id);
                   if (!g || g.gate_type === "quadrant") return;
                   if (g.gate_type === "ellipse") {
                     // The plot presents an ellipse as its sampled boundary; a body drag is a
@@ -14452,22 +16277,22 @@ export default function App() {
                     // into the gate's own space.
                     const cx = e.vertices.reduce((a, v) => a + v[0], 0) / e.vertices.length;
                     const cy = e.vertices.reduce((a, v) => a + v[1], 0) / e.vertices.length;
-                    dispatch({
+                    dispatchGateEdit({
                       type: "moveEllipse",
                       gateId: e.gate_id,
                       mean: [sample.displayToGate(g, g.x_channel, cx), sample.displayToGate(g, g.y_channel, cy)],
                     });
                     return;
                   }
-                  const verts = e.vertices.map(
+                  const verts = keepOpenSides(sample, g, e.vertices.map(
                     ([vx, vy]) =>
                       [sample.displayToGate(g, g.x_channel, vx), sample.displayToGate(g, g.y_channel, vy)] as [number, number],
-                  );
-                  dispatch({ type: "editGate", gateId: e.gate_id, vertices: verts });
+                  ));
+                  dispatchGateEdit({ type: "editGate", gateId: e.gate_id, vertices: verts });
                 }}
                 onEllipseEdit={(e) => {
                   if (!plotInteractionIsCurrent()) return;
-                  const g = state.gates[e.gate_id];
+                  const g = drawnGateOf(e.gate_id);
                   if (!g || g.gate_type !== "ellipse") return;
                   // The handles worked in DISPLAY coordinates; the gate stores its covariance in
                   // its own space. Handles are only offered when the gate→display map is affine
@@ -14485,7 +16310,7 @@ export default function App() {
                   const kx = slope(g.x_channel, e.mean[0], e.major);
                   const ky = slope(g.y_channel, e.mean[1], e.major);
                   const covD = covarianceFromAxes(e.major, e.minor, e.angle, g.distance_square);
-                  dispatch({
+                  dispatchGateEdit({
                     type: "reshapeEllipse",
                     gateId: e.gate_id,
                     mean,
@@ -14497,9 +16322,9 @@ export default function App() {
                 }}
                 onQuadrantMove={(e) => {
                   if (!plotInteractionIsCurrent()) return;
-                  const g = state.gates[e.gate_id];
+                  const g = drawnGateOf(e.gate_id);
                   if (!g || g.gate_type !== "quadrant") return;
-                  dispatch({
+                  dispatchGateEdit({
                     type: "moveQuadrantCenter",
                     gateId: e.gate_id,
                     center: [sample.displayToGate(g, g.x_channel, e.center[0]), sample.displayToGate(g, g.y_channel, e.center[1])],
@@ -14507,7 +16332,7 @@ export default function App() {
                 }}
                 onQuadrantCurl={(e) => {
                   if (!plotInteractionIsCurrent()) return;
-                  const g = state.gates[e.gate_id];
+                  const g = drawnGateOf(e.gate_id);
                   if (!g || g.gate_type !== "quadrant" || !g.curl) return;
                   // The handle sits at the end of the arm; where it was dropped, in the gate's
                   // own space, fixes that arm's coefficient: the bend there must equal k · d^p.
@@ -14528,7 +16353,20 @@ export default function App() {
                     next.ky = (at[0] - cx) / Math.pow(d, p);
                   }
                   if (!Number.isFinite(next.kx) || !Number.isFinite(next.ky)) return;
-                  dispatch({ type: "setQuadrantCurl", gateId: e.gate_id, curl: next });
+                  dispatchGateEdit({ type: "setQuadrantCurl", gateId: e.gate_id, curl: next });
+                }}
+                onQuadrantArm={(e) => {
+                  if (!plotInteractionIsCurrent()) return;
+                  const g = state.gates[e.gate_id];
+                  if (!g || g.gate_type !== "quadrant" || !g.arms) return;
+                  // Where the handle was dropped, in the gate's own space, is the arm's new end; the
+                  // store refuses an end that would put the arms out of order.
+                  const end: [number, number] = [
+                    sample.displayToGate(g, g.x_channel, e.at[0]),
+                    sample.displayToGate(g, g.y_channel, e.at[1]),
+                  ];
+                  if (!Number.isFinite(end[0]) || !Number.isFinite(end[1])) return;
+                  dispatch({ type: "setQuadrantArm", gateId: e.gate_id, arm: e.arm, end });
                 }}
                 onGateSelect={(id) => {
                   if (!plotInteractionIsCurrent()) return;
@@ -14543,6 +16381,7 @@ export default function App() {
                   // interaction context of the drag that performs it.
                   dispatch({ type: "selectGate", gateId: id });
                 }}
+                onGateDeselect={() => dispatch({ type: "selectGate", gateId: null })}
                 onAxisLabelClick={(e) => {
                   if (!plotInteractionIsCurrent()) return;
                   const idx = sample.index(sample.keyForLabel(e.selected));
@@ -14567,67 +16406,163 @@ export default function App() {
                   if (!plotInteractionIsCurrent()) return;
                   dispatch({ type: "moveGateLabel", gateId: e.gate_id, labelOffset: e.label_offset, ...(e.quadrant !== undefined ? { quadrant: e.quadrant } : {}) });
                 }}
+                onTailoredTag={(e) => {
+                  if (!plotInteractionIsCurrent()) return;
+                  openScopeMenu(e.gate_id, e.client);
+                }}
                 onVertexMenu={(e) => {
                   if (!plotInteractionIsCurrent()) return;
-                  const g = state.gates[e.gate_id];
+                  const g = drawnGateOf(e.gate_id);
                   if (!g || g.gate_type === "quadrant") return;
-                  if (e.body) {
-                    // The gate's own menu, with the plot's actions after it, since a large gate
-                    // covers much of the plot.
-                    setPlotMenu({
-                      x: e.client[0],
-                      y: e.client[1],
-                      label: g.name,
-                      items: [
-                        {
-                          label: t("Fit to its events\u2026"),
-                          title: t("Redraw the gate around the events it holds on this file, as tight as you choose; the plot shows the fit while you set it"),
-                          disabled: !activeSampleId,
-                          onClick: () => openFitGate(g.gate_id, e.client, e.box),
-                        },
-                        "separator",
-                        ...plotContextItems(),
-                      ],
-                    });
-                    return;
-                  }
-                  if (g.gate_type !== "polygon") return;
-                  // Both go through the edit a dragged vertex makes: one Undo step, membership
-                  // recomputed, the label's percentage updated. A polygon keeps three vertices.
-                  if (e.vertex !== undefined) {
+                  // A polygon's vertex or edge leads with its own item; both go through the edit a
+                  // dragged vertex makes: one Undo step, membership recomputed, the label's
+                  // percentage updated. A polygon keeps three vertices.
+                  const shapeItems: MenuEntry[] = [];
+                  if (!e.body && g.gate_type === "polygon" && e.vertex !== undefined) {
                     const index = e.vertex;
-                    setPlotMenu({
-                      x: e.client[0],
-                      y: e.client[1],
-                      label: t("Vertex"),
-                      items: [{
-                        label: t("Delete vertex"),
-                        disabled: g.vertices.length <= 3,
-                        title: g.vertices.length <= 3 ? t("A polygon keeps at least three vertices") : t("Remove this vertex; the gate keeps its others"),
-                        onClick: () => dispatch({ type: "editGate", gateId: g.gate_id, vertices: g.vertices.filter((_, i) => i !== index) }),
-                      }],
+                    shapeItems.push({
+                      label: t("Delete vertex"),
+                      danger: true,
+                      disabled: g.vertices.length <= 3,
+                      title: g.vertices.length <= 3 ? t("A polygon keeps at least three vertices") : t("Remove this vertex; the gate keeps its others"),
+                      onClick: () => dispatchGateEdit({ type: "editGate", gateId: g.gate_id, vertices: g.vertices.filter((_, i) => i !== index) }),
                     });
-                    return;
-                  }
-                  if (e.edge === undefined || !e.point) return;
-                  const edge = e.edge, point = e.point;
-                  setPlotMenu({
-                    x: e.client[0],
-                    y: e.client[1],
-                    label: t("Edge"),
-                    items: [{
+                  } else if (!e.body && g.gate_type === "polygon" && e.edge !== undefined && e.point) {
+                    const edge = e.edge, point = e.point;
+                    shapeItems.push({
                       label: t("Add vertex here"),
                       title: t("A new vertex on this edge, at the point clicked, between its two ends"),
                       onClick: () => {
                         const vertices = [...g.vertices];
                         vertices.splice(edge + 1, 0, [sample.displayToGate(g, g.x_channel, point[0]), sample.displayToGate(g, g.y_channel, point[1])]);
-                        dispatch({ type: "editGate", gateId: g.gate_id, vertices });
+                        dispatchGateEdit({ type: "editGate", gateId: g.gate_id, vertices });
                       },
-                    }],
+                    });
+                  }
+                  // Then the gate's own menu, wherever on the gate the click was; the plot's is on its
+                  // margins and background.
+                  setPlotMenu({
+                    x: e.client[0],
+                    y: e.client[1],
+                    label: g.name,
+                    items: [
+                      ...(shapeItems.length ? [...shapeItems, "separator" as const] : []),
+                      // Its tailoring on the viewed file first, as in the row's ⋯: tailor, revert, use for.
+                      ...tailoringSection(g.gate_id),
+                      {
+                        label: t("Fit to its events\u2026"),
+                        title: t("Redraw the gate around the events it holds on this file, as tight as you choose; the plot shows the fit while you set it"),
+                        disabled: !activeSampleId,
+                        onClick: () => openFitGate(g.gate_id, e.client, e.box),
+                      },
+                      "separator",
+                      // The gate's own actions, the edge tools among them.
+                      ...gateActionItems(g.gate_id, e.client),
+                    ],
                   });
                 }}
               />
+              {histogramView && displayed && (
+                <HistogramPlot
+                  values={histogramValues}
+                  xRange={(displayed as { x_range: [number, number] }).x_range}
+                  ticks={(displayed as { x_logicle_ticks?: AxisTicks | null }).x_logicle_ticks ?? null}
+                  channel={sample.channels[xIdx].key}
+                  channelOptions={sample.channels.map((channel, i) => ({ value: channel.key, label: sample.channelLabel(i) }))}
+                  onChannelChange={(key) => {
+                    const idx = sample.index(key);
+                    if (idx !== undefined) setXIdx(idx);
+                  }}
+                  gates={histogramGates}
+                  labelOffsets={Object.fromEntries(histogramGates.map((g) => [g.gate_id, state.gates[g.gate_id]?.label_offset ?? null]))}
+                  onRangeChange={(range) => {
+                    // Committed as the scatter plot's own pan commits: to the channel's shared scale.
+                    if (!plotInteractionIsCurrent()) return;
+                    if (!(range[1] > range[0]) || !range.every(Number.isFinite)) return;
+                    setGlobalScale(sample.channels[xIdx].key, range);
+                    setXRange(null);
+                  }}
+                  onLabelMove={(gateId, offset) => {
+                    if (!plotInteractionIsCurrent()) return;
+                    // A range's label offset is held in the histogram's terms (HistogramPlot), and
+                    // saved with the gate as any label's is; the gate itself does not move.
+                    dispatch({ type: "moveGateLabel", gateId, labelOffset: offset });
+                  }}
+                  selectedGateId={state.selected_gate_id ?? null}
+                  mode={drawMode === "draw-range" || drawMode === "draw-bisector" ? drawMode : "navigate"}
+                  fontSizes={gatingFontSizes}
+                  onNewRange={(lo, hi) => {
+                    if (!plotInteractionIsCurrent() || !activeSampleId) return;
+                    // A range is a rectangle with the channel on both axes; from here it is named
+                    // and converted into its own space exactly as a drawn rectangle is.
+                    const key = sample.channels[xIdx].key;
+                    const binding = sample.displayCoordinateBindingKey(key);
+                    setPending({
+                      gate: { gate_type: "rectangle", vertices: [[lo, lo], [hi, lo], [hi, hi], [lo, hi]], x_channel: key, y_channel: key },
+                      sampleId: activeSampleId,
+                      dataRevision: sample.dataRevision,
+                      coordinateBindingKeys: [binding, binding],
+                    });
+                    setDrawMode("navigate");
+                  }}
+                  onNewBisector={(at) => {
+                    if (!plotInteractionIsCurrent() || !activeSampleId) return;
+                    const key = sample.channels[xIdx].key;
+                    setPendingBisector({
+                      channel: key,
+                      split: at,
+                      sampleId: activeSampleId,
+                      dataRevision: sample.dataRevision,
+                      coordinateBindingKey: sample.displayCoordinateBindingKey(key),
+                    });
+                    setDrawMode("navigate");
+                  }}
+                  onRangeEdit={(edits: RangeEdit[]) => {
+                    if (!plotInteractionIsCurrent()) return;
+                    // Every range the drag moved (the one dragged, and any sharing a moved end) in
+                    // one edit, one Undo step.
+                    const out = edits.flatMap((e) => {
+                      const g = state.gates[e.gate_id];
+                      if (!g || g.gate_type !== "rectangle" || g.x_channel !== g.y_channel) return [];
+                      // The interval the gate holds, in its own space (both axes, as the mask reads
+                      // them); an end the drag did not move keeps its stored value, so an end with
+                      // no bound stays unbounded.
+                      const ch = g.x_channel;
+                      const xs = g.vertices.map((v) => v[0]);
+                      const ys = g.vertices.map((v) => v[1]);
+                      let lo = Math.max(Math.min(...xs), Math.min(...ys));
+                      let hi = Math.min(Math.max(...xs), Math.max(...ys));
+                      if (e.lo !== undefined) lo = sample.displayToGate(g, ch, e.lo);
+                      if (e.hi !== undefined) hi = sample.displayToGate(g, ch, e.hi);
+                      if (lo > hi) [lo, hi] = [hi, lo];
+                      return [{ gateId: g.gate_id, vertices: [[lo, lo], [hi, lo], [hi, hi], [lo, hi]] as [number, number][] }];
+                    });
+                    if (out.length) dispatch({ type: "editGates", edits: out });
+                  }}
+                  onGateSelect={(id) => {
+                    if (!plotInteractionIsCurrent()) return;
+                    dispatch({ type: "selectGate", gateId: id });
+                  }}
+                />
+              )}
               <ContextMenu menu={plotMenu} onClose={() => setPlotMenu(null)} />
+              {gateColourPick && state.gates[gateColourPick.gateId] && (
+                <ColourPopover
+                  x={gateColourPick.at[0]}
+                  y={gateColourPick.at[1]}
+                  label={colouredGates
+                    ? t("Colour of {name}", { name: state.gates[gateColourPick.gateId].name })
+                    : t("Colour of {name} (gates are drawn in black while Coloured gates is off)", { name: state.gates[gateColourPick.gateId].name })}
+                  value={state.gates[gateColourPick.gateId].color}
+                  palette={GATE_COLORS}
+                  onPick={(colour, close) => {
+                    dispatch({ type: "setGateColour", gateId: gateColourPick.gateId, colour });
+                    markWorkspaceDirty();
+                    if (close) setGateColourPick(null);
+                  }}
+                  onClose={() => setGateColourPick(null)}
+                />
+              )}
               {fitGate && sample && state.gates[fitGate.gateId] && state.gates[fitGate.gateId].gate_type !== "quadrant" && (
                 <FitGatePanel
                   at={fitGate.at}
@@ -14711,6 +16646,9 @@ export default function App() {
                 onWriteToHost={isSceHost && host.colData ? writeHostedDivisions : undefined}
                 hostWriteBusy={hostAdapterWriteBusy}
                 dataRevision={activeDataRevision}
+                files={samples.map((entry) => ({ id: entry.id, name: entry.name }))}
+                activeFileId={activeSampleId}
+                onChooseFile={(id) => selectSample(id)}
               />
             )}
             {activeTab === "metadata" && (
@@ -14734,6 +16672,8 @@ export default function App() {
                   isSceHost && host.colData ? writeHostedSampleMetadata : undefined
                 }
                 hostWriteBusy={hostAdapterWriteBusy}
+                groups={state.groups}
+                fileGroups={state.file_groups}
               />
             )}
             {activeTab === "panel" && (
@@ -14774,10 +16714,9 @@ export default function App() {
                 onDensityColorPowerChange={changeDensityColorPower}
                 files={samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id), metadata: metadata[entry.id] }))}
                 poolIds={poolSelection ? (plotPool?.ids ?? []) : null}
-                poolNote={poolLeftOutNote || undefined}
-                poolable={checkedSamples.length >= 2}
+                checkedSampleIds={checkedSamples.map(entry => entry.id)}
                 isSceHost={isSceHost}
-                onPoolChange={(pooled) => { if (pooled) poolSelectedFiles(); else if (activeSampleId) inspectSample(activeSampleId); }}
+                onViewFile={inspectSample}
                 activeSampleId={activeSampleId}
                 onAddToLayout={LAYOUT_TAB_AVAILABLE ? addStrategyToLayout : undefined}
                 onOpenStep={openStrategyStepInGating}
@@ -14785,6 +16724,8 @@ export default function App() {
                   dispatch({ type: "moveGateLabel", hierarchyId, gateId, labelOffset: offset, ...(quadrant !== undefined ? { quadrant } : {}) });
                 }}
                 onScaleChange={setGlobalScale}
+                request={agentStrategyRequest}
+                onRequestTaken={takeAgentStrategyRequest}
               />
             )}
             {activeTab === "illustration" && (
@@ -14867,7 +16808,7 @@ export default function App() {
                     entry={activeEntry ? { id: activeEntry.id, name: activeEntry.name, images: activeEntry.images ?? null, sample: activeEntry.sample } : null}
                     mask={derived.displayMask ?? derived.activeMask}
                     populationLabel={derived.displayPopCount > 0
-                      ? t("the checked populations")
+                      ? t("the selected populations")
                       : (state.active_population_id && state.populations[state.active_population_id]?.name) || t("all events")}
                     view={activeEntry ? imageView[activeEntry.id] : undefined}
                     onViewChange={onCellViewChange}
@@ -14932,6 +16873,7 @@ export default function App() {
                   densityColorPower={densityColorPower}
                   onDensityColorPowerChange={changeDensityColorPower}
                   channelLabelMode={channelLabelMode}
+                  matrices={compensationMatrices}
                 />
               </Suspense>
             </ErrorBoundary>}
@@ -14964,94 +16906,89 @@ export default function App() {
         )}
         <aside
           className="gl-side"
-          style={{ width: sideWidth, display: ["compensation", "illustration", "layout", "proportions", "statistics"].includes(activeTab) ? "none" : undefined }}
+          style={{ "--gl-gate-list-height": `${gateListHeight}px`, width: sideWidth, minWidth: MIN_SIDE_PANE_WIDTH, maxWidth: sidePaneMaxWidthCss(leftWidth), display: ["compensation", "division", "illustration", "layout", "metadata", "panel", "proportions", "scales", "statistics", "strategy"].includes(activeTab) ? "none" : undefined } as React.CSSProperties}
           aria-label={t("Gates and populations")}
         >
           <div className="gl-side-resize" onMouseDown={startResize} onDoubleClick={() => { setAutoSizePopulations(true); setSideFitTick((n) => n + 1); }} title="Drag to resize; double-click to fit content" />
-          <div className="gl-side-section gl-hierarchy-section">
-            <HierarchyControls state={state} perFile={treeControls} />
-          </div>
-          <div className={"gl-side-section" + (gatesCollapsed ? " gl-side-collapsed" : "")}>
-            <div className="gl-side-head">
+          <Pane
+            id="gates"
+            title={t("Gates")}
+            summary={gatesCollapsed ? String(Object.keys(state.gates).length) : null}
+            collapsed={gatesCollapsed}
+            onToggleCollapsed={() => setGatesCollapsed((collapsed) => !collapsed)}
+            collapseTitle={gatesCollapsed ? t("Show the gate list") : t("Hide the gate list, so the populations take the space")}
+            menu={gatesPaneMenu}
+            actions={<>
+              {viewedGroup && fileName && (
+                <button
+                  type="button"
+                  className="gl-gates-viewed-group"
+                  style={viewedGroupColour ? ({ "--gl-group-colour": viewedGroupColour } as React.CSSProperties) : undefined}
+                  title={t("Select the files of {group}", { group: viewedGroup.name })}
+                  onClick={() => {
+                    const members = new Set(Object.entries(state.file_groups).filter(([, gid]) => gid === viewedGroup.id).map(([id]) => id));
+                    setExcludedSampleIds(new Set(samples.filter((entry) => !members.has(entry.id)).map((entry) => entry.id)));
+                  }}
+                >
+                  {t("{file} · in {group}", { file: fileName, group: viewedGroup.name })}
+                </button>
+              )}
+              <label
+                className="gl-check gl-pane-show-tailoring"
+                title={t("Show the dashed outline of the version a tailored gate would revert to, or of the versions pooled files use instead of the tree's, and the mark on a tailored gate's label. Hiding them changes nothing that is drawn solid, counted or edited.")}
+              >
+                <input
+                  type="checkbox"
+                  className="gl-show-tailoring"
+                  checked={showTailoring}
+                  onChange={(e) => setShowTailoring(e.target.checked)}
+                />
+                {t("Show tailoring")}
+              </label>
+            </>}
+          >
+            <GateList state={state} derived={gateListDerived} dispatch={uiDispatch}
+              labelForKey={(k) => sample?.labelForKey(k) ?? k}
+              badgeFor={(g) => (sample ? gateSpaceBadge(sample, g) : null)}
+              badgeShown={spaceBadgeShown}
+              countScope={gateCountScope?.listText ?? null}
+              countHeader={state.populations[state.active_population_id ?? ""]?.name ?? null}
+              scopeChipOf={scopeChipOf}
+              tailorSwitchOf={tailorSwitchOf}
+              onTailorSwitch={switchTailoring}
+              onScopeMenu={openScopeMenu}
+              rowMenuOf={gateRowMenu} />
+          </Pane>
+          {!gatesCollapsed && (
+            <div
+              className="gl-side-split"
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label={t("Gate list height")}
+              title={t("Drag to resize the gate list; double-click for 200 px")}
+              onMouseDown={startGateListResize}
+              onDoubleClick={() => setGateListHeight(DEFAULT_GATE_LIST_HEIGHT)}
+            />
+          )}
+          <Pane
+            id="populations"
+            title={t("Populations")}
+            summary={legacyTreeNote(state, t)}
+            grow
+            menu={populationsPaneMenu}
+            actions={<>
               <button
                 type="button"
-                className="gl-side-disclosure"
-                aria-expanded={!gatesCollapsed}
-                title={gatesCollapsed ? t("Show the gate list") : t("Hide the gate list, so the populations take the space")}
-                onClick={() => setGatesCollapsed((collapsed) => !collapsed)}
+                className="gl-mini-btn gl-pane-add-population"
+                title={t("Create population")}
+                disabled={Object.keys(state.gates).length === 0}
+                onClick={() => setCrud({ kind: "createPop" })}
               >
-                <span className="gl-side-disclosure-mark" aria-hidden="true">{gatesCollapsed ? "▸" : "▾"}</span>
-                <span className="gl-side-title">{t("Gates")}{gatesCollapsed ? ` · ${Object.keys(state.gates).length}` : ""}</span>
+                <PlusIcon /> {t("Population")}
               </button>
-              <GateToolbar
-                state={state}
-                dispatch={dispatch}
-                onRename={() => {
-                  const g = state.selected_gate_id && state.gates[state.selected_gate_id];
-                  if (g) setCrud({ kind: "renameGate", id: g.gate_id, initial: g.name });
-                }}
-                onDelete={(ids) => ids.length && setCrud({ kind: "confirmDelete", what: "gates", ids })}
-              />
-            </div>
-            {!gatesCollapsed && (
-              <GateList state={state} derived={gateListDerived} dispatch={uiDispatch}
-                labelForKey={(k) => sample?.labelForKey(k) ?? k}
-                badgeFor={(g) => (sample ? gateSpaceBadge(sample, g) : null)}
-                countScope={gateCountScope?.listText ?? null}
-                tailoredGateIds={activeTailoredGateIds}
-                tailoredInFiles={templateTailoredInFiles} />
-            )}
-          </div>
-          <div className="gl-side-section gl-side-grow">
-            <div className="gl-side-head">
-              <div className="gl-side-title">{t("Populations")}</div>
-              <label
-                className="gl-branch-gates-toggle"
-                title={t("Draw only the gates belonging to the displayed branch — the gates on the current population and its descendants, or, once a gate is selected, that gate's own sub-branch. Unchecked draws every gate sharing the plot's channels, which is how thresholds set on different branches are compared.")}
-              >
-                <input
-                  type="checkbox"
-                  checked={branchGatesOnly}
-                  onChange={(e) => setBranchGatesOnly(e.target.checked)}
-                />
-                {t("Branch gates")}
-              </label>
-              <label
-                className="gl-branch-gates-toggle"
-                title={t("Always draw gates that belong to no population. Such a gate is in no branch, so branch scoping would otherwise hide it whenever it is not selected or ticked.")}
-              >
-                <input
-                  type="checkbox"
-                  disabled={!branchGatesOnly}
-                  checked={showUnownedGates}
-                  onChange={(e) => setShowUnownedGates(e.target.checked)}
-                />
-                {t("Unowned gates")}
-              </label>
-              <label
-                className="gl-branch-gates-toggle"
-                title={t("Line the gate badges up in one column after the longest population name. Unchecked, each row's badges follow its own name.")}
-              >
-                <input
-                  type="checkbox"
-                  checked={alignPopulationGates}
-                  onChange={(e) => setAlignPopulationGates(e.target.checked)}
-                />
-                {t("Align gates")}
-              </label>
-              <PopToolbar
-                state={state}
-                dispatch={dispatch}
-                onAdd={() => setCrud({ kind: "createPop" })}
-                onRename={() => {
-                  const p = state.active_population_id && state.populations[state.active_population_id];
-                  if (p) setCrud({ kind: "editPop", id: p.population_id });
-                }}
-                onDelete={(ids) => ids.length && setCrud({ kind: "confirmDelete", what: "pops", ids })}
-                onDuplicate={(ids) => ids.length && dispatch({ type: "duplicateSelectedPopulations", popIds: ids })}
-                onBulkRename={() => setCrud({ kind: "bulkRename" })}
-              />
-            </div>
+              <HelpHint topic={t("Populations")} text={t(POPULATION_TREE_HINT)} />
+            </>}
+          >
             <div
               id="population_tree_container"
               tabIndex={0}
@@ -15074,7 +17011,7 @@ export default function App() {
                 state={state}
                 derived={populationTreeDerived}
                 dispatch={uiDispatch}
-                tailoredGateIds={activeTailoredGateIds}
+                tailoredGateIds={viewedTailoredGateIds}
                 showHierarchyControls={false}
                 alignGates={alignPopulationGates}
                 perFile={treeControls}
@@ -15088,7 +17025,7 @@ export default function App() {
                 }
               />
             </div>
-          </div>
+          </Pane>
           {imageService && workspaceHasImages && activeTab === "gating" && cellInspectorDock === "pane" && (
             <Suspense fallback={null}>
               <CellInspector
@@ -15111,6 +17048,11 @@ export default function App() {
           )}
         </aside>
       </div>
+
+      {hostReview && (
+        <StrategyProposalReview review={hostReview.review} note={hostReview.note} busy={hostReview.busy} refused={hostReview.refused}
+          onAccept={() => void acceptHostReview()} onReject={rejectHostReview} />
+      )}
 
       {pendingWorkspaceRelink && (
         <WorkspaceRelinkModal
@@ -15198,6 +17140,33 @@ export default function App() {
         />
       )}
 
+      {pendingBisector && sample && state.root_population_id && (
+        <BisectorModal
+          channel={pendingBisector.channel}
+          split={pendingBisector.split}
+          sample={sample}
+          populations={state.populations}
+          activePopId={state.active_population_id}
+          rootPopId={state.root_population_id}
+          gateSpace={sample.instrument === "cytof" ? null : newGateSpace}
+          onCancel={() => setPendingBisector(null)}
+          onConfirm={(a) => {
+            if (
+              pendingBisector.sampleId !== activeSampleId ||
+              pendingBisector.dataRevision !== sample.dataRevision ||
+              pendingBisector.coordinateBindingKey !== sample.displayCoordinateBindingKey(pendingBisector.channel)
+            ) {
+              setPendingBisector(null);
+              setError("The data layer or display transform changed while the gate dialog was open. Please draw the gate again.");
+              return;
+            }
+            uiDispatch(a);
+            setPendingBisector(null);
+            if (additionsRouted) setHierarchyActionMessage(routedAdditionMessage("The bisector"));
+          }}
+        />
+      )}
+
       {crud?.kind === "createPop" && (
         <CreatePopModal
           state={state}
@@ -15269,6 +17238,7 @@ export default function App() {
             initial={driveSaveAs}
             suggestedExperiment={driveTarget ? `${driveTarget.experiment} copy` : wsName.replace(/\.gatelab$/i, "")}
             uploads={uploads}
+            chooseLocation={(askFolder) => drive.session.chooseLocation({ askFolder })}
             onCancel={() => setDriveSaveAs(null)}
             onSave={(request) => {
               setDriveSaveAs(null);
@@ -15288,24 +17258,43 @@ export default function App() {
           }}
         />
       )}
+      {driveReconnect && drive && (
+        <drive.module.DriveReconnectDialog
+          auth={drive.session.auth}
+          action={driveReconnect.action}
+          workspace={driveTarget && dirty ? driveTarget.name : null}
+          onCancel={() => {
+            setDriveReconnect(null);
+            setImportMsg(driveReconnect.action === "open"
+              ? "Nothing was opened · the current workspace is unchanged"
+              : "Not saved to the lab Drive · the sign-in has run out; nothing open here was changed");
+          }}
+          onReconnected={() => {
+            setDriveReconnect(null);
+            driveReconnect.resume();
+          }}
+        />
+      )}
       {driveFolderGrant && drive && (() => {
         const lab = driveFolderGrant.folderId === drive.session.config.rootFolderId;
+        const place = !lab && driveFolderGrant.request.kind === "experiment";
         return (
           <ConfirmModal
-            title={lab ? "Choose the lab folder" : "Choose the experiment folder"}
+            title={lab ? "Choose the lab folder" : place ? "Choose the folder for the new experiment" : "Choose the experiment folder"}
             message={lab
               ? "GateLab may make a new experiment folder in the lab folder only once the lab folder has been chosen in Google's file picker. " +
                 "Choose the lab folder, the one that holds the experiment folders; the save then goes ahead."
-              : "GateLab may create the workspace file in this experiment folder only once the folder has been chosen in Google's file picker. " +
-                "Choose the folder that holds the experiment's FCS files; the save then goes ahead."}
+              : place
+                ? "GateLab may make the new experiment's folder in the folder chosen for it only once that folder has been chosen in Google's file picker. " +
+                  "Choose it again; the save then goes ahead."
+                : "GateLab may create the workspace file in this experiment folder only once the folder has been chosen in Google's file picker. " +
+                  "Choose the folder that holds the experiment's FCS files; the save then goes ahead."}
             confirmLabel={lab ? "Choose the lab folder…" : "Choose the folder…"}
             onCancel={() => setDriveFolderGrant(null)}
             onConfirm={() => {
               const { request, folderId } = driveFolderGrant;
               setDriveFolderGrant(null);
-              void drive.session.grantFolder(folderId).then((granted) => {
-                if (granted) return saveToDrive(request);
-              }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+              grantDriveFolder(request, folderId);
             }}
           />
         );
@@ -15388,6 +17377,7 @@ export default function App() {
         const unreadable = (tree: FlowJoTreeSummary) => tree.gateCount === 0;
         return (
         <div className="gl-modal-backdrop" onClick={cancelTreePicker}>
+          <ModalEscape onClose={cancelTreePicker} />
           <div
             className="gl-modal gl-wsp-picker"
             role="dialog"
@@ -15417,7 +17407,7 @@ export default function App() {
               </>
             ) : (
               <div className="gl-modal-note">
-                {t("This sample holds several independent strategies. GateLab holds one at a time, so importing them together would merge trees FlowJo kept apart.")}
+                {t("This sample holds several independent strategies. GateLab holds one at a time, so importing them together would merge trees the workspace keeps apart.")}
               </div>
             )}
             {treePicker.crossTo && (
@@ -15645,6 +17635,7 @@ export default function App() {
           (u.rivals ?? []).map((name, i) => called(u.rivalKeys?.[i] ?? "", name)).join(", ");
         return (
           <div className="gl-modal-backdrop" onClick={() => setFlowJoOpen(null)}>
+            <ModalEscape onClose={() => setFlowJoOpen(null)} />
             <div
               className="gl-modal gl-wsp-picker"
               role="dialog"
@@ -15669,7 +17660,7 @@ export default function App() {
                     ? t("One shared hierarchy will be imported, so choose the sample whose strategy it should use.")
                     : t("The strategy below will be imported.")}
                 {" "}
-                {t("A file is paired with its sample by name, and the acquisition keywords FlowJo recorded for that sample ($TOT, $DATE, $BTIM, $ETIM, GUID) must agree with the file's.")}
+                {t("A file is paired with its sample by name, and the acquisition keywords the workspace recorded for that sample ($TOT, $DATE, $BTIM, $ETIM, GUID) must agree with the file's.")}
               </div>
 
               <div className="gl-wsp-list">
@@ -15945,6 +17936,7 @@ export default function App() {
 
       {wspPicker && (
         <div className="gl-modal-backdrop" onClick={cancelWspPicker}>
+          <ModalEscape onClose={cancelWspPicker} />
           <div
             className="gl-modal gl-wsp-picker"
             role="dialog"
@@ -16052,6 +18044,7 @@ export default function App() {
         };
         return (
           <div className="gl-modal-backdrop" onClick={() => setLoadedContest(null)}>
+            <ModalEscape onClose={() => setLoadedContest(null)} />
             <div className="gl-modal gl-wsp-picker" role="dialog" aria-label="Which loaded file is each sample" onClick={(e) => e.stopPropagation()}>
               <div className="gl-modal-title">{t("Which loaded file is each sample?")}</div>
               {ask.contested.length > 0 && (
@@ -16141,6 +18134,7 @@ export default function App() {
         };
         return (
           <div className="gl-modal-backdrop" onClick={() => setCytobankAsk(null)}>
+            <ModalEscape onClose={() => setCytobankAsk(null)} />
             <div className="gl-modal gl-wsp-picker" role="dialog" aria-label="Which file Cytobank tailored gates for" onClick={(e) => e.stopPropagation()}>
               <div className="gl-modal-title">{t("Which file are these gates tailored for?")}</div>
               <div className="gl-modal-note">
@@ -16172,6 +18166,7 @@ export default function App() {
       })()}
       {divaPicker && (
         <div className="gl-modal-backdrop" onClick={() => setDivaPicker(null)}>
+          <ModalEscape onClose={() => setDivaPicker(null)} />
           <div
             className="gl-modal gl-wsp-picker"
             role="dialog"
@@ -16285,6 +18280,7 @@ export default function App() {
       )}
       {hierarchyCopyDraft && (
         <div className="gl-modal-backdrop" onClick={() => setHierarchyCopyDraft(null)}>
+          <ModalEscape onClose={() => setHierarchyCopyDraft(null)} />
           <div className="gl-modal" role="dialog" aria-label={t("Revert files to the tree")} aria-modal="true" onClick={(event) => event.stopPropagation()}
             onKeyDown={(event) => {
               event.stopPropagation();
@@ -16307,15 +18303,44 @@ export default function App() {
           </div>
         </div>
       )}
-      {promoteConfirmOpen && activeHierarchy && (activeHierarchy.owner_sample_id || activeHierarchy.owner_group_id) && (
+      {promoteConfirmOpen && promoteCopy && (
         <ConfirmModal
-          title={activeHierarchy.owner_group_id ? "Use this group's gates for the tree?" : viewedGroup && activeHierarchy.source_hierarchy_id === viewedGroupCopy?.id ? `Use this file's gates for ${viewedGroup.name}?` : "Use this file's gates for the tree?"}
-          message={`${activeHierarchy.owner_group_id ? "The tree" : viewedGroup && activeHierarchy.source_hierarchy_id === viewedGroupCopy?.id ? `The group "${viewedGroup.name}"` : "The tree"} takes ${activeHierarchy.owner_group_id ? `"${activeHierarchy.name}"` : samples.find((entry) => entry.id === activeHierarchy.owner_sample_id)?.name ?? "this file"}'s gate coordinates, and every file following it follows again; any tailoring they had is dropped. Populations and gate names are unchanged. Undo brings everything back.`}
-          confirmLabel={activeHierarchy.owner_group_id ? "Use for the tree" : viewedGroup && activeHierarchy.source_hierarchy_id === viewedGroupCopy?.id ? `Use for ${viewedGroup.name}` : "Use for the tree"}
+          title={promoteCopy.owner_group_id ? "Use this group's gates for the tree?" : viewedGroup && promoteCopy.source_hierarchy_id === viewedGroupCopy?.id ? `Use this file's gates for ${viewedGroup.name}?` : "Use this file's gates for the tree?"}
+          message={`${promoteCopy.owner_group_id ? "The tree" : viewedGroup && promoteCopy.source_hierarchy_id === viewedGroupCopy?.id ? `The group "${viewedGroup.name}"` : "The tree"} takes ${promoteCopy.owner_group_id ? `"${promoteCopy.name}"` : samples.find((entry) => entry.id === promoteCopy.owner_sample_id)?.name ?? "this file"}'s gate coordinates, and every file following it follows again; any tailoring they had is dropped. Populations and gate names are unchanged. Undo brings everything back.`}
+          confirmLabel={promoteCopy.owner_group_id ? "Use for the tree" : viewedGroup && promoteCopy.source_hierarchy_id === viewedGroupCopy?.id ? `Use for ${viewedGroup.name}` : "Use for the tree"}
           onCancel={() => setPromoteConfirmOpen(false)}
           onConfirm={confirmPromote}
         />
       )}
+      {tailoredOff && viewedGates.get(tailoredOff.gateId)?.tailored && (() => {
+        const tailored = viewedGates.get(tailoredOff.gateId)!.tailored!;
+        return (
+          <ConfirmModal
+            title="Switch off this gate's tailoring?"
+            message={t("{gate} on {owner} takes {target}'s coordinates again; its own are dropped. Undo brings them back.", {
+              gate: state.gates[tailoredOff.gateId]?.name ?? "", owner: tailoredOwnerOf(tailored), target: tailoredTargetOf(tailored),
+            })}
+            confirmLabel="Switch off"
+            onCancel={() => setTailoredOff(null)}
+            onConfirm={() => switchTailoringOff(tailoredOff.gateId)}
+          />
+        );
+      })()}
+      {tailoredUse && viewedGates.get(tailoredUse.gateId)?.tailored && (() => {
+        const tailored = viewedGates.get(tailoredUse.gateId)!.tailored!;
+        const toGroup = tailoredTargetOf(tailored) !== t("the tree");
+        return (
+          <ConfirmModal
+            title={toGroup ? "Use these coordinates for the group?" : "Use these coordinates for the tree?"}
+            message={asSentence(t("{target} takes {owner}'s coordinates for {gate}, and every file that followed its {gate} follows the new ones. Files that tailor {gate} keep their own. Undo brings it back.", {
+              target: tailoredTargetOf(tailored), owner: tailoredOwnerOf(tailored), gate: state.gates[tailoredUse.gateId]?.name ?? "",
+            }))}
+            confirmLabel={toGroup ? "Use for the group" : "Use for the tree"}
+            onCancel={() => setTailoredUse(null)}
+            onConfirm={() => giveTailoredGateToTree(tailoredUse.gateId)}
+          />
+        );
+      })()}
       {barcodeSave && (
         <BarcodeSaveModal
           summary={barcodeSave.summary}
@@ -16578,6 +18603,32 @@ export default function App() {
           }}
         />
       )}
+      {flowJo11ExportOpen && sample && (
+        <FlowJo11ExportModal
+          files={samples.map((e) => ({
+            id: e.id,
+            name: e.name,
+            hierarchy: state.hierarchies.find((h) => h.id === hierarchyOfFile(e.id))?.name ?? "",
+            checked: checkedSamples.some((c) => c.id === e.id),
+          }))}
+          plan={(scope) => {
+            try {
+              const wanted = flowJoExportSamples(scope);
+              // The folder changes the paths written, not the notes.
+              const dry = exportFlowJo11Workbench({ samples: wanted, fcsFolder: "/FCS", name: "dry-run" });
+              return { warnings: dry.warnings, sampleCount: wanted.length, populationCount: dry.counts.reduce((n, c, i) => n + Object.keys(c).filter((id) => id !== wanted[i].root_population_id).length, 0) };
+            } catch (e) {
+              return { error: e instanceof Error ? e.message : String(e) };
+            }
+          }}
+          initialFolder={rememberedFlowJo11Folder()}
+          onCancel={() => setFlowJo11ExportOpen(false)}
+          onExport={(scope, fcsFolder) => {
+            exportFlowJo11(scope, fcsFolder);
+            setFlowJo11ExportOpen(false);
+          }}
+        />
+      )}
       {tour.step && !isSceHost && (
         <TourOverlay
           step={tour.step}
@@ -16595,6 +18646,7 @@ export default function App() {
         />
       )}
     </div>
+    </GateInkContext.Provider>
   );
 
   /** The app as the tutorial sees it. Read on demand, so the tabs' own state is current. */

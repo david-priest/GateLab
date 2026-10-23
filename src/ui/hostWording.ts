@@ -83,7 +83,7 @@ const SENTENCES: Readonly<Record<string, Readonly<{ en: string; ja?: string }>>>
   "Files / samples": { en: "Samples", ja: "サンプル" },
   "files / samples": { en: "samples", ja: "サンプル" },
   "Order files / samples": { en: "Order samples" },
-  "Find file / sample…": { en: "Find sample…" },
+  "Find file / sample…": { en: "Find sample…", ja: "サンプルを検索…" },
   "Find figure files or samples": { en: "Find figure samples" },
   "Loaded FCS samples": { en: "Loaded samples", ja: "読み込み済みサンプル" },
   "File (filename)": { en: "Sample", ja: "サンプル" },
@@ -111,6 +111,12 @@ const SENTENCES: Readonly<Record<string, Readonly<{ en: string; ja?: string }>>>
   },
   // Gates an FCS file carries from its instrument: about files, and never on offer for an object.
   "Import gates recorded in the loaded files…": { en: "Import gates recorded in the loaded files…" },
+  // The count check compares the counts a workspace recorded for its files: about files.
+  "The recorded numbers are the counts stored in the workspace file when it was last saved; GateLab's are counted now, under the gates and compensation as they stand, so a gate edited since the import shows here as a difference. A difference at a population's own gate (every population above it exact) is usually events on the gate's edge, a gate drawn on a biexponential axis evaluated off the recorded grid, or a compensation matrix other than the one the recorded counts were made with. A population within one that differs inherits its difference. A population in the workspace's record and not in the tree was not imported, or has been renamed or removed since.": {
+    en: "The recorded numbers are the counts stored in the workspace file when it was last saved; GateLab's are counted now, under the gates and compensation as they stand, so a gate edited since the import shows here as a difference. A difference at a population's own gate (every population above it exact) is usually events on the gate's edge, a gate drawn on a biexponential axis evaluated off the recorded grid, or a compensation matrix other than the one the recorded counts were made with. A population within one that differs inherits its difference. A population in the workspace's record and not in the tree was not imported, or has been renamed or removed since.",
+  },
+  "this file is not the one the recorded counts are for": { en: "this file is not the one the recorded counts are for" },
+  "Every population of this file counts exactly as the workspace recorded.": { en: "Every population of this file counts exactly as the workspace recorded." },
   // The FCS export writes files; what it reads them from are the samples.
   "Export {count} files": { en: "Export {count} files" },
   "Events are concatenated into one file. Source-file identity is not retained.": { en: "Events are concatenated into one file. Source-sample identity is not retained." },

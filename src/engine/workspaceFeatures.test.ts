@@ -40,6 +40,12 @@ function workspace(transforms?: Record<string, TransformSpec>): WorkspaceFile {
 const written = (ws: WorkspaceFile): Record<string, unknown> => JSON.parse(strFromU8(packWorkspaceReference(ws)));
 
 describe("a saved workspace names what it needs of the GateLab that opens it", () => {
+  it("requires Hyperlog support and preserves its parameters through a saved workspace", () => {
+    const h: TransformSpec = { kind: "hyperlog", T: 1000, W: 1, M: 4, A: -.5 };
+    const ws = workspace({ "FSC-A": h, "B-A": h });
+    expect(written(ws)).toMatchObject({ version: 4, requiredFeatures: ["hyperlog"] });
+    expect(readWorkspaceBytes(packWorkspaceReference(ws)).ws.gating.gates.g1).toEqual(ws.gating.gates.g1);
+  });
   it("writes one holding a gate on FlowJo's grid as version 4 with the feature, and reads it back unchanged", () => {
     const ws = workspace({ "FSC-A": GRID, "B-A": GRID });
     const file = written(ws);

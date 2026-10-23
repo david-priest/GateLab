@@ -161,21 +161,13 @@ async function loadAndImport(files: File[], viewed: string, strategy: File): Pro
   const row = [...host.querySelectorAll<HTMLElement>('[role="option"]')].find((r) => r.textContent?.includes(viewed))!;
   await act(async () => { row.click(); });
   await settle();
-  await feed('input[accept=".xml,.wsp,.cef"]', [strategy]);
+  await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', [strategy]);
 }
-/**
- * A loaded file's populations and their counts, as its own tree shows them: viewed, with the edit
- * target on the file, or on the tree (`target`), where a tailored file shows its own counts too.
- */
-async function countsOf(name: string, target: "file" | "tree" = "file"): Promise<Record<string, number>> {
+/** A loaded file's populations and their counts, as its own tree shows them, viewed. */
+async function countsOf(name: string): Promise<Record<string, number>> {
   const row = [...host.querySelectorAll<HTMLElement>(".gl-sample-row")].find((r) => r.textContent?.includes(name))!;
   await act(async () => { row.click(); });
   for (let i = 0; i < 3; i++) await settle();
-  const targetButton = host.querySelector<HTMLButtonElement>(target === "file" ? ".population-tree-edit-file" : ".population-tree-edit-tree");
-  if (targetButton && targetButton.getAttribute("aria-pressed") !== "true" && !targetButton.disabled) {
-    await act(async () => { targetButton.click(); });
-    for (let i = 0; i < 3; i++) await settle();
-  }
   const out: Record<string, number> = {};
   for (const r of host.querySelectorAll(".pop-row")) {
     const m = /^(.*?)\1\+([\d,]+)\(/.exec((r.textContent ?? "").replace(/\s+/g, " ").trim());
@@ -200,21 +192,19 @@ describe("a per-file import where two files label a detector differently", () =>
     expect((await countsOf("D1.fcs"))["live cells"]).toBe(2);
   });
 
-  // Viewed with "the tree · all files", D2 was shown under the tree's gate, which is on a channel
-  // D2 labels differently, and counted no event; it is shown under its own gate, as its own copy
-  // and the FCS export count it. D1 follows the tree and is unchanged.
-  it("shows the second file under its own gate when edits go to the tree", async () => {
+  // Viewed with the tree live, D2 was shown under the tree's gate, which is on a channel D2 labels
+  // differently, and counted no event; it is shown under its own gate, as its own copy and the FCS
+  // export count it. D1 follows the tree and is unchanged.
+  it("shows the second file under its own gate while the tree is live", async () => {
     await loadAndImport([fcs("D1.fcs", 1), fcs("D2.fcs", 2)], "D1.fcs", fileOf("experiment.wsp", wsp(
       sample("D1.fcs", "D1.fcs", IDENTITY[1], pop("live cells", "a1", 25, "V525-A")),
       sample("D2.fcs", "D2.fcs", IDENTITY[2], pop("Live cells", "b1", 15, "V525-A")),
     )));
     await confirmImport();
-    expect((await countsOf("D2.fcs", "tree"))["live cells"]).toBe(1);
-    expect(host.querySelector(".population-tree-edit-tree")!.getAttribute("aria-pressed")).toBe("true");
-    expect((await countsOf("D1.fcs", "tree"))["live cells"]).toBe(2);
-    // And the same after the file's own tree is live and the tree is chosen again.
-    expect((await countsOf("D2.fcs", "file"))["live cells"]).toBe(1);
-    expect((await countsOf("D2.fcs", "tree"))["live cells"]).toBe(1);
+    expect((await countsOf("D2.fcs"))["live cells"]).toBe(1);
+    expect((await countsOf("D1.fcs"))["live cells"]).toBe(2);
+    // And the same on coming back to it.
+    expect((await countsOf("D2.fcs"))["live cells"]).toBe(1);
   });
 
   // "Revert D2.fcs to the tree" put D2 on the tree, whose gate names D1's channel for the detector:
@@ -231,8 +221,8 @@ describe("a per-file import where two files label a detector differently", () =>
     for (let i = 0; i < 3; i++) await settle();
     const said = page();
     expect((await countsOf("D2.fcs"))["live cells"]).toBe(2);
-    expect((await countsOf("D2.fcs", "tree"))["live cells"]).toBe(2);
-    expect((await countsOf("D1.fcs", "tree"))["live cells"]).toBe(2);
+    expect((await countsOf("D2.fcs"))["live cells"]).toBe(2);
+    expect((await countsOf("D1.fcs"))["live cells"]).toBe(2);
     expect(said).toContain("D2.fcs takes the tree's gate coordinates again. D2.fcs labels a detector differently from the tree's file, so it keeps a copy of its own, with the tree's coordinates on its own channels; edits to the tree do not reach that file. Undo is available.");
   });
 
@@ -250,7 +240,7 @@ describe("a per-file import where two files label a detector differently", () =>
     for (let i = 0; i < 3; i++) await settle();
     const said = page();
     expect((await countsOf("D2.fcs"))["live cells"]).toBe(2);
-    expect((await countsOf("D1.fcs", "tree"))["live cells"]).toBe(2);
+    expect((await countsOf("D1.fcs"))["live cells"]).toBe(2);
     expect(said).toContain("1 file follows the tree again; its tailoring is dropped. D2.fcs labels a detector differently from the tree's file, so it keeps a copy of its own, with the tree's coordinates on its own channels; edits to the tree do not reach that file. Undo is available.");
   });
 
@@ -269,7 +259,7 @@ describe("a per-file import where two files label a detector differently", () =>
     await act(async () => { [...host.querySelectorAll<HTMLButtonElement>(".gl-modal button")].find((b) => b.textContent === "Use for the tree")!.click(); });
     for (let i = 0; i < 3; i++) await settle();
     const said = page();
-    expect((await countsOf("D1.fcs", "tree"))["live cells"]).toBe(1);
+    expect((await countsOf("D1.fcs"))["live cells"]).toBe(1);
     expect((await countsOf("D2.fcs"))["live cells"]).toBe(1);
     expect(said).toContain(`now has D2.fcs's gate coordinates, and every file following it follows again. D2.fcs labels a detector differently from the tree's file, so it keeps a copy of its own, with the tree's coordinates on its own channels; edits to the tree do not reach that file. Undo is available.`);
   });
@@ -296,8 +286,8 @@ describe("a per-file import where two files label a detector differently", () =>
     await act(async () => { [...host.querySelectorAll<HTMLButtonElement>(".gl-modal button")].find((b) => b.textContent === "Use for the tree")!.click(); });
     for (let i = 0; i < 3; i++) await settle();
     expect(page()).not.toContain("now has D2.fcs's gate coordinates");
-    expect(page()).toContain(`was left as it is: D2.fcs draws a gate as another kind or holds other populations, so its tree is not the same tree. Apply to the tree takes its gates one at a time.`);
-    expect((await countsOf("D1.fcs", "tree"))["live cells"]).toBe(2);
+    expect(page()).toContain(`was left as it is: D2.fcs draws a gate as another kind or holds other populations, so its tree is not the same tree. Use for the tree, on a gate's menu, takes its gates one at a time.`);
+    expect((await countsOf("D1.fcs"))["live cells"]).toBe(2);
   });
 });
 
@@ -325,7 +315,7 @@ describe("a .wsp imported onto the viewed file, with a loaded file no sample is"
     const row = [...host.querySelectorAll<HTMLElement>('[role="option"]')].find((r) => r.textContent?.includes("D1.fcs"))!;
     await act(async () => { row.click(); });
     await settle();
-    await feed('input[accept=".xml,.wsp,.cef"]', [fileOf("experiment.wsp", wsp(
+    await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', [fileOf("experiment.wsp", wsp(
       sample("D1.fcs", "D1.fcs", IDENTITY[1], pop("lymphocytes", "a1", 25)),
       sample("D2.fcs", "D2.fcs", IDENTITY[2], pop("lymphocytes", "a1", 12)),
     ))]);
@@ -399,14 +389,14 @@ describe("a merge after a per-file import", () => {
       sample("D2.fcs", "D2.fcs", IDENTITY[2], pop("lymphocytes", "a1", 12)),
     )));
     await confirmImport();
-    expect(host.querySelector(".population-tree-hierarchy-count")?.textContent).toBe("2 files · 1 tailored");
+    expect(host.querySelector(".gl-sample-tree-summary")?.getAttribute("title") ?? undefined).toBe("2 files · 1 tailored");
     // A further tree, merged.
     const more = `<?xml version="1.0"?><gating:Gating-ML xmlns:gating="${G}" xmlns:data-type="${D}">
       <gating:RectangleGate gating:id="s1" gating:name="Singlets">
         <gating:dimension gating:min="0" gating:max="100000"><data-type:fcs-dimension data-type:name="FSC-A"/></gating:dimension>
         <gating:dimension gating:min="0" gating:max="100000"><data-type:fcs-dimension data-type:name="SSC-A"/></gating:dimension>
       </gating:RectangleGate></gating:Gating-ML>`;
-    await feed('input[accept=".xml,.wsp,.cef"]', [fileOf("more.xml", more)]);
+    await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', [fileOf("more.xml", more)]);
     // Its structure differs from the tree's, so Replace is the default (2026-09-29); merge, chosen.
     const merge = host.querySelector<HTMLInputElement>('input[name="gatingml-import-mode"][value="merge"]')!;
     expect(merge.checked).toBe(false);
@@ -414,7 +404,7 @@ describe("a merge after a per-file import", () => {
     expect(modals()).toContain("the one with tailored gates of its own keeps them");
     await confirmImport();
     expect(hint()).toContain("merged into the tree all 2 files follow; the file tailored to it keeps its tailoring");
-    expect(host.querySelector(".population-tree-hierarchy-count")?.textContent).toBe("2 files · 1 tailored");
+    expect(host.querySelector(".gl-sample-tree-summary")?.getAttribute("title") ?? undefined).toBe("2 files · 1 tailored");
     expect((await countsOf("D2.fcs")).lymphocytes).toBe(1);
   });
 });
@@ -552,7 +542,7 @@ describe("the open dialog, one file two samples of one name could be", () => {
   // D1.fcs", which said nothing about which.
   it("says by position which of the two it was chosen as", async () => {
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", wsp(
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", wsp(
       sample("D1.fcs", "D1.fcs", IDENTITY[1], pop("lymphocytes", "a1", 25)),
       sample("D1.fcs", "D1.fcs", IDENTITY[1], pop("lymphocytes", "a1", 12)),
     ))]);
@@ -574,7 +564,7 @@ describe("two loaded files of one name, each its own sample", () => {
     const row = [...host.querySelectorAll<HTMLElement>('[role="option"]')].find((r) => r.textContent?.includes("Specimen_001_Tube_001.fcs"))!;
     await act(async () => { row.click(); });
     await settle();
-    await feed('input[accept=".xml,.wsp,.cef"]', [fileOf("experiment.wsp", wsp(
+    await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', [fileOf("experiment.wsp", wsp(
       sample("Specimen_001_Tube_001.fcs", "Specimen_001_Tube_001.fcs", IDENTITY[1], pop("lymphocytes", "a1", 25), "Experiment 1"),
       sample("Specimen_001_Tube_001.fcs", "Specimen_001_Tube_001.fcs", IDENTITY[2], pop("lymphocytes", "a1", 12), "Experiment 2"),
     ))]);
@@ -588,7 +578,7 @@ describe("the open dialog, with a file already loaded that no sample is", () => 
   it("names that file too, and counts it", async () => {
     act(() => root.render(<App />));
     await feed('input[type=file][accept=".fcs"][multiple]', [fcs("X.fcs", 4)]);
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", wsp(
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", wsp(
       sample("D1.fcs", "D1.fcs", IDENTITY[1], pop("lymphocytes", "a1", 25)),
       sample("D2.fcs", "D2.fcs", IDENTITY[2], pop("lymphocytes", "a1", 12)),
     ))]);
@@ -609,7 +599,7 @@ describe("the open dialog, a renamed file whose same-named sample records nothin
   // renamed.fcs · confirmed by $TOT, $DATE" and sample 1 "not found".
   it("pairs the file with the sample its keywords confirm, and says why the other is not it", async () => {
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", wsp(
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", wsp(
       sample("D2.fcs", "D2.fcs", IDENTITY[2], pop("D2_lymphocytes", "b1", 12)),
       sample("renamed.fcs", "renamed.fcs", { $TOT: "3", $DATE: "02-FEB-2024" }, pop("Renamed_lymphocytes", "r1", 25)),
     ))]);
@@ -651,7 +641,7 @@ describe("the open dialog, a file and a copy of it under another name", () => {
   // be this sample or , and the keywords cannot tell", and clicking it only disabled Import.
   it("gives both files their own sample's tree, and says the copy is the same acquisition", async () => {
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", wsp(
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", wsp(
       sample("D1.fcs", "D1.fcs", IDENTITY[1], pop("lymphocytes", "a1", 25)),
       sample("D2.fcs", "D2.fcs", IDENTITY[2], pop("lymphocytes", "a1", 12)),
     ))]);
@@ -666,7 +656,8 @@ describe("the open dialog, a file and a copy of it under another name", () => {
     for (let i = 0; i < 8; i++) await settle();
     expect(modals()).toContain("Each of these 3 files gets its own sample's tree");
     await confirmImport();
-    expect(hint()).toMatch(/from D2\.fcs for 3 files/);
+    // D1.fcs and its copy hold the same coordinates, so they lead the tree and D2.fcs is tailored.
+    expect(hint()).toMatch(/from D1\.fcs for 3 files: 2 follow it as in the workspace, 1 tailored/);
     expect((await countsOf("D1.fcs")).lymphocytes).toBe(2);
     expect((await countsOf("copy.fcs")).lymphocytes).toBe(2);
     expect((await countsOf("D2.fcs")).lymphocytes).toBe(1);
@@ -678,7 +669,7 @@ describe("the open dialog, two files that could each be one sample", () => {
   // the two are different acquisitions. Nothing tells which is the sample, so the user says, once.
   it("asks which file it is, and gives that file its tree", async () => {
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", wsp(
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", wsp(
       sample("D1.fcs", "D1.fcs", {}, pop("lymphocytes", "a1", 25)),
       sample("D2.fcs", "D2.fcs", IDENTITY[2], pop("lymphocytes", "a1", 12)),
     ))]);
@@ -714,7 +705,7 @@ describe("the open dialog, a file whose own sample carries no gates", () => {
   // tree, and the result said "for 2 files" and never named it.
   it("counts and names that file with the files that follow the tree", async () => {
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", wsp(
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", wsp(
       sample("D1.fcs", "D1.fcs", IDENTITY[1], pop("lymphocytes", "a1", 25)),
       sample("D2.fcs", "D2.fcs", IDENTITY[2], pop("lymphocytes", "a1", 12)),
       sample("control.fcs", "control.fcs", IDENTITY[4], ""),
@@ -728,7 +719,7 @@ describe("the open dialog, a file whose own sample carries no gates", () => {
     expect(hint()).toMatch(/from D1\.fcs for 3 files: 2 follow it, 1 tailored/);
     expect(hint()).toContain("control.fcs");
     expect(hint()).toContain('it is sample 3 "control.fcs", which carries no gates');
-    expect(host.querySelector(".population-tree-hierarchy-count")?.textContent).toBe("3 files · 1 tailored");
+    expect(host.querySelector(".gl-sample-tree-summary")?.getAttribute("title") ?? undefined).toBe("3 files · 1 tailored");
   });
 });
 
@@ -800,7 +791,7 @@ describe("the open dialog, a file, a copy of it, and another acquisition of the 
   // the copy followed D2's tree, uncompensated, as a file of no sample.
   it("asks once per acquisition, and gives the chosen file's copy its tree too", async () => {
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", wsp(
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", wsp(
       sample("D1.fcs", "D1.fcs", {}, pop("lymphocytes", "a1", 25)),
       sample("D2.fcs", "D2.fcs", IDENTITY[2], pop("lymphocytes", "a1", 12)),
     ))]);
@@ -823,7 +814,8 @@ describe("the open dialog, a file, a copy of it, and another acquisition of the 
     await act(async () => { importButton.click(); });
     for (let i = 0; i < 8; i++) await settle();
     await confirmImport();
-    expect(hint()).toMatch(/from D2\.fcs for 4 files: 2 follow it, 2 tailored/);
+    // The chosen D1.fcs and its copy hold the same coordinates, so they lead the tree.
+    expect(hint()).toMatch(/from D1\.fcs \([^)]*\) for 4 files: 3 follow it, 1 tailored/);
     expect((await countsOf("copy.fcs")).lymphocytes).toBe(2);
     expect((await countsOf("D2.fcs")).lymphocytes).toBe(1);
   });
@@ -836,7 +828,7 @@ describe("the open dialog, two files of one name that could each be one sample",
   // those that follow it, and the result read "D1.fcs (D1.fcs is sample 1 ...)".
   it("says which file each is, by its event count and when it was recorded, in the question, the row and the result", async () => {
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", wsp(
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", wsp(
       sample("D1.fcs", "D1.fcs", {}, pop("lymphocytes", "a1", 25)),
       sample("D2.fcs", "D2.fcs", IDENTITY[2], pop("lymphocytes", "a1", 12)),
     ))]);
@@ -870,7 +862,7 @@ describe("the open dialog, a chosen file of the name of a file already open", ()
   it("names the file it did not hold, in the dialog and in the result", async () => {
     act(() => root.render(<App />));
     await feed('input[type=file][accept=".fcs"][multiple]', [fcs("D2.fcs", 2)]);
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", wsp(
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", wsp(
       sample("D1.fcs", "D1.fcs", IDENTITY[1], pop("lymphocytes", "a1", 25)),
       sample("D2.fcs", "D2.fcs", IDENTITY[2], pop("lymphocytes", "a1", 12)),
     ))]);
@@ -1077,7 +1069,7 @@ describe("one tree imported onto a file and a copy of it, the gates compensated"
 
   it("compensates the copy too, from the open dialog with the file and its copy", async () => {
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", wsp(d2))]);
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", wsp(d2))]);
     await feed('input[data-role="flowjo-workspace-fcs"]', [fcs("D2.fcs", 13), fcs("copy.fcs", 13)]);
     await importFromDialog();
     expect(hint()).toContain("FCS compensation enabled");
@@ -1088,7 +1080,7 @@ describe("one tree imported onto a file and a copy of it, the gates compensated"
 
   it("compensates the copy with \"One hierarchy per file\" cleared, and names a file that follows uncompensated", async () => {
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", wsp(
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", wsp(
       d2,
       sample("D1.fcs", "D1.fcs", IDENTITY[1], pop("CD4_positive", "a1", 25)),
     ))]);

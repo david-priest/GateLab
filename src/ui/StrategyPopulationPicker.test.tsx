@@ -97,6 +97,31 @@ describe("StrategyPopulationPicker", () => {
     expect(onChange).toHaveBeenLastCalledWith([]);
   });
 
+  it("compact, lists a long tree in one column, without the Gating tab's ticks unless given them", () => {
+    // Twenty leaves under Lymphocytes: across the page they take two columns.
+    const many: PopulationMap = { ...populations };
+    const manyRows = [rows[0]];
+    for (let i = 0; i < 20; i++) {
+      many[`p${i}`] = { ...newPopulation(`Population ${i} with a long name`, [], "lymph"), population_id: `p${i}` };
+      manyRows.push({ popId: `p${i}`, depth: 2, isLastPath: [true, i === 19] });
+    }
+    const render = (compact: boolean) => act(() => {
+      reactRoot.render(
+        <I18nProvider>
+          <StrategyPopulationPicker rows={manyRows} populations={many} gates={{}} counts={{}} selected={[]} onChange={vi.fn()} compact={compact} />
+        </I18nProvider>,
+      );
+    });
+    render(false);
+    expect(host.querySelectorAll(".gl-strategy-pops-column").length).toBeGreaterThan(1);
+    render(true);
+    expect(host.querySelector(".gl-strategy-pops")!.classList.contains("is-compact")).toBe(true);
+    expect(host.querySelectorAll(".gl-strategy-pops-column")).toHaveLength(1);
+    expect(host.querySelectorAll(".gl-strategy-pop-row")).toHaveLength(21);
+    expect(rowByTitle("Population 7 with a long name")).not.toBeNull();
+    expect(Array.from(host.querySelectorAll("button")).some((el) => el.textContent === "Use checked")).toBe(false);
+  });
+
   it("folds away to its heading, count and actions, and back", () => {
     act(() => {
       reactRoot.render(

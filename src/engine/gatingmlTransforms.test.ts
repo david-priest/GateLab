@@ -513,6 +513,7 @@ describe("a FlowJo workspace gate on a fluorescence parameter without Comp- (ope
     expect(res.warnings).toEqual([
       expect.stringMatching(/^"As stored" declares uncompensated values on BV786-A, APC-A, which the file's other gates compensate/),
     ]);
+    expect(res.warnings[0]).toContain("Comp-BV786-A, Comp-APC-A in the workspace");
   });
 
   it("keeps a gate on a detector the workspace's matrix leaves out, where the FCS file's own matrix covers it (verifier, FR-FCM-Z2TQ)", () => {
@@ -1381,7 +1382,7 @@ describe("the Cytobank format's flattened chains (a tester finding)", () => {
 
 describe("a Cytobank-format file with every population left out (verifier)", () => {
   it("reads back no population, where it read each geometric gate as one", () => {
-    // Every population of this tree uses a quadrant, which the format leaves out with what uses it;
+    // Every population uses a curved quadrant, which is explicitly omitted with what uses it;
     // the rectangle beside it is still written. With no Boolean gate in the file it was read by
     // Gating-ML 2.0's model, in which every gate is a population, and "g" came back as a population
     // the user never had. The same happens with CYTOBANK_OMITS_CONTRADICTIONS and a tree whose
@@ -1394,6 +1395,7 @@ describe("a Cytobank-format file with every population left out (verifier)", () 
     const q: Gate = {
       gate_id: "q", name: "q", gate_type: "quadrant", x_channel: "PE-A", y_channel: "FITC-A",
       center: [2, 2], space: "raw", color: "#000", label_offset: null,
+      curl: { power: 1.5, kx: 0.01, ky: 0.01 },
     };
     const root = newRootPopulation();
     const pop = newPopulation("Q and g", [newGateRef("q", true, 1), newGateRef("g", true)], root.population_id);

@@ -5,7 +5,9 @@ import { describe, expect, it } from "vitest";
 import { Sample } from "../engine/sample";
 import type { FcsFile } from "../engine/fcs";
 import { coreReducer, initialCoreState, recomputeGating, type Action, type CoreState } from "../store";
-import { createAgentHandler, valleysOf, type AgentAdapter, type AgentSampleView } from "./handler";
+import { newRootPopulation } from "../engine/models";
+import { createAgentHandler, DEFAULT_PROPOSAL_STEP_LIMIT, valleysOf, type AgentAdapter, type AgentHandlerOptions, type AgentSampleView } from "./handler";
+import { StrategyMovedError, provenanceSource, type StrategyProposal } from "../proposals/strategyProposal";
 import type { AgentApplied, AgentDescribe, AgentDistribution, AgentMemberships, AgentPreview, AgentRequest, AgentResponse, AgentStats, AgentView } from "./protocol";
 
 function flowSample(values: Record<string, number[]>): Sample {
@@ -23,7 +25,7 @@ function flowSample(values: Record<string, number[]>): Sample {
 }
 
 /** D1: FSC-A 0, 10, 20 … 190 (200 events); SSC-A the same reversed. D2: 100 events, FSC-A 0 … 99. */
-function fixture() {
+function fixture(options: AgentHandlerOptions = {}) {
   const d1 = flowSample({ "FSC-A": Array.from({ length: 200 }, (_, i) => i * 10), "SSC-A": Array.from({ length: 200 }, (_, i) => (199 - i) * 10), "FL1-A": Array.from({ length: 200 }, (_, i) => i * 100) });
   const d2 = flowSample({ "FSC-A": Array.from({ length: 100 }, (_, i) => i), "SSC-A": Array.from({ length: 100 }, () => 500), "FL1-A": Array.from({ length: 100 }, (_, i) => 1000 + i) });
   let state: CoreState = coreReducer(initialCoreState(), { type: "loadSample", nEvents: 200 });
@@ -40,7 +42,7 @@ function fixture() {
       ...entry, hierarchyId: state.active_hierarchy_id,
       gating: () => recomputeGating(entry.sample, state),
     })),
-    dispatch: (action: Action) => { state = coreReducer(state, action); },
+    dispatch: (action: Action) => { dispatched.push(action.type); state = coreReducer(state, action); },
     settled: async () => {},
     view: () => ({ ...view, populationId: state.active_population_id ?? view.populationId, ranges: { x: view.x ? held[view.x] ?? null : null, y: view.y ? held[view.y] ?? null : null } }),
     setView: async (params) => { const { fit: _fit, xRange: _x, yRange: _y, ...rest } = params; Object.assign(view, rest); },
@@ -52,7 +54,8 @@ function fixture() {
     reload: () => { reloads++; },
   };
   let fits = 0, reloads = 0, pans = 0;
-  const handler = createAgentHandler(adapter);
+  const dispatched: string[] = [];
+  const handler = createAgentHandler(adapter, options);
   handler.setWriter("test-agent");
   let n = 0;
   const call = async <T,>(method: AgentRequest["method"], params?: unknown): Promise<T> => {
@@ -64,7 +67,7 @@ function fixture() {
     const response = await handler.handle({ kind: "request", id: `r${++n}`, method, params });
     return response.error;
   };
-  return { call, refusal, handler, getState: () => state, d1, d2, fits: () => fits, reloads: () => reloads, pans: () => pans };
+  return { call, refusal, handler, adapter, getState: () => state, dispatched, d1, d2, fits: () => fits, reloads: () => reloads, pans: () => pans };
 }
 
 describe("the agent handler", () => {
@@ -134,6 +137,34 @@ describe("the agent handler", () => {
     expect(preview.gates.filter((g) => g.isNew)).toHaveLength(1);
     expect(getState()).toBe(before);
     expect((await call<AgentDescribe>("describe")).gates).toEqual([]);
+  });
+
+  it("previews a proposal up to its step limit without changing the state, and refuses one step more naming the limit", async () => {
+    // n nested ranges, each keeping FSC-A >= 10 * its index: the last keeps D1's FSC-A >= 10 * (n - 1) (200 - (n - 1) events)
+    // and D2's events from FSC-A 10 * (n - 1) to 99 (none once n > 10).
+    const chain = (root: string, n: number) => Array.from({ length: n }, (_, i) => ({
+      key: `g${i}`,
+      command: { type: "createRange", name: `CD4_positive ${i}`, parentId: i ? `@g${i - 1}.population` : root, x: "FSC-A", y: "SSC-A", space: "display", xBounds: [10 * i, null], yBounds: [null, null] },
+    }));
+    const propose = (root: string, n: number, expectedRevision: number) => ({ expectedRevision, steps: chain(root, n), populationIds: [`@g${n - 1}.population`], sampleIds: ["D1", "D2"] });
+    expect(DEFAULT_PROPOSAL_STEP_LIMIT).toBe(128);
+
+    const { call, refusal, getState } = fixture();
+    const root = getState().root_population_id!;
+    const before = getState();
+    // 65 steps: more than the former fixed limit of 64.
+    const result = await call<{ populationIds: string[]; describe: AgentDescribe }>("proposal", propose(root, 65, 1));
+    expect(result.describe.populations.find((p) => p.id === result.populationIds[0])?.pooled.n).toBe(200 - 64);
+    expect(getState()).toBe(before);
+    expect((await refusal("proposal", propose(root, DEFAULT_PROPOSAL_STEP_LIMIT + 1, 1)))?.message).toBe(`A proposal needs at most ${DEFAULT_PROPOSAL_STEP_LIMIT} steps.`);
+
+    // A host may set a lower limit; the refusal names the limit in force.
+    const small = fixture({ proposalStepLimit: 10 });
+    const smallRoot = small.getState().root_population_id!;
+    const ten = await small.call<{ populationIds: string[]; describe: AgentDescribe }>("proposal", propose(smallRoot, 10, 1));
+    expect(ten.describe.populations.find((p) => p.id === ten.populationIds[0])?.pooled.n).toBe(200 - 9 + 10);
+    expect((await small.refusal("proposal", propose(smallRoot, 11, 1)))?.message).toBe("A proposal needs at most 10 steps.");
+    expect(() => fixture({ proposalStepLimit: 0 })).toThrow("positive integer");
   });
 
   it("refuses what it cannot do, with a reason, and reports a moved revision as a conflict", async () => {
@@ -256,5 +287,168 @@ describe("the agent handler", () => {
     expect(reloads()).toBe(1);
     const workspace = await call<{ json: string }>("workspace");
     expect(JSON.parse(workspace.json).gating.gate_order).toEqual(applied.created.gateIds);
+  });
+
+  it("opens the Strategy tab on populations of the active tree, without a dispatch, and refuses what it cannot draw", async () => {
+    const { call, refusal, adapter, getState, dispatched } = fixture();
+    const root = getState().root_population_id!;
+    const range = (name: string, parentId: string, low: number) => call<AgentApplied>("apply", {
+      command: { type: "createRange", name, parentId, x: "FSC-A", y: "SSC-A", space: "display", xBounds: [low, null], yBounds: [null, null] },
+      rationale: "A threshold.",
+    });
+    const parent = (await range("CD4_positive", root, 500)).created.populationIds[0];
+    const child = (await range("CD4_high", parent, 1500)).created.populationIds[0];
+    const before = await call<AgentDescribe>("describe");
+    dispatched.length = 0;
+
+    // Several ids: the multi-population grid, on the Strategy tab, the reply what the tab holds.
+    const multi = await call<AgentView>("view", { strategy: { populationIds: [child, parent] } });
+    expect(multi.tab).toBe("strategy");
+    expect(multi.strategy).toEqual({ mode: "multi", populationIds: [child, parent] });
+    // One id: that population's path, with fullPath as asked.
+    const single = await call<AgentView>("view", { tab: "strategy", strategy: { populationIds: [child], fullPath: true } });
+    expect(single.strategy).toEqual({ mode: "single", populationIds: [child], fullPath: true });
+    expect(dispatched).toEqual([]);
+    const after = await call<AgentDescribe>("describe");
+    expect(after.revision).toBe(before.revision);
+    expect(after.populations).toEqual(before.populations);
+    expect(after.gates).toEqual(before.gates);
+
+    // What the tab cannot draw is refused, and nothing moves.
+    const refused = async (params: unknown) => (await refusal("view", params))?.message ?? "";
+    expect(await refused({ strategy: { populationIds: [] } })).toContain("at least one population");
+    expect(await refused({ strategy: { populationIds: [parent, parent] } })).toContain("twice");
+    expect(await refused({ strategy: { populationIds: ["P404"] } })).toContain("Unknown population “P404”");
+    expect(await refused({ strategy: { populationIds: [root] } })).toContain("root");
+    expect(await refused({ strategy: { populationIds: [child, parent], mode: "single" } })).toContain('mode "multi"');
+    expect(await refused({ strategy: { populationIds: [child], mode: "both" } })).toContain("strategy.mode");
+    expect(await refused({ strategy: { populationIds: [child, parent], fullPath: true } })).toContain("single strategy");
+    expect(await refused({ strategy: { populationIds: [child], fullPath: "yes" } })).toContain("fullPath must be");
+    expect(await refused({ tab: "gating", strategy: { populationIds: [child] } })).toContain('tab "strategy"');
+    expect(await refused({ tab: "statistics" })).toContain("tab must be");
+    expect(await refused({ strategy: { populationIds: [child] }, x: "FSC-A" })).toContain("Gating plot");
+    expect(await refused({ tab: "strategy", fit: "data" })).toContain("Gating plot");
+
+    // A population of another tree: refused by name, since the tab draws the active tree.
+    const other = newRootPopulation();
+    adapter.dispatch({ type: "addHierarchy", id: "tree-2", name: "Second", populations: { [other.population_id]: other }, root_population_id: other.population_id });
+    expect(await refused({ strategy: { populationIds: [child] } })).toContain("in the tree “Main”, not the active one");
+
+    // A tab that does not take the selection (it still holds the single strategy of the child)
+    // is a failure, not a reply.
+    adapter.dispatch({ type: "switchHierarchy", id: getState().hierarchies[0].id });
+    const deaf = createAgentHandler({ ...adapter, setView: async () => {} });
+    const missed = await deaf.handle({ kind: "request", id: "deaf", method: "view", params: { strategy: { populationIds: [parent] } } });
+    expect(missed.error).toMatchObject({ code: "failed", message: "The Strategy tab did not take the selection." });
+  });
+});
+
+// A proposal from a source other than the relay (a host here): the same replay and
+// checks as an agent's proposal, counted for the user on a copy, then applied as one undo step.
+describe("strategy proposals from other sources", () => {
+  // FSC high: D1's FSC-A >= 1000 (100 events), none of D2. Under it, SSC low: SSC-A <= 500, D1's
+  // last 51 events; and its complement within FSC high, 49.
+  const strategy = (overrides: Partial<StrategyProposal> = {}): StrategyProposal => ({
+    source: "host", by: "GateLabR", rationale: "Sent from R.",
+    steps: [
+      { key: "high", command: { type: "createRange", name: "FSC high", parentId: "@root", x: "FSC-A", y: "SSC-A", space: "display", xBounds: [1000, null], yBounds: [null, null] } },
+      { key: "low", command: { type: "createRange", name: "SSC low", parentId: "@high.population", x: "FSC-A", y: "SSC-A", space: "display", xBounds: [null, null], yBounds: [null, 500] } },
+      { key: "rest", command: { type: "definePopulation", name: "FSC high, not SSC low", parentId: "@high.population", gates: [{ gateId: "@low.gate", include: false }] } },
+    ],
+    targets: { CD4_positive: "@low.population", CD4_negative: "@rest.population" },
+    ...overrides,
+  });
+
+  it("previews a proposal on a copy, with its counts, targets and the provenance it will carry", () => {
+    const { handler, getState } = fixture();
+    const before = getState();
+    const review = handler.previewStrategy(strategy());
+    expect(getState()).toBe(before);
+    expect(review.base).toBe(before);
+    expect(review.sampleIds).toEqual(["D1", "D2"]);
+    expect(review.changes).toMatchObject({ changedGateIds: [], changedPopulationIds: [], removedGateIds: [], removedPopulationIds: [] });
+    expect(review.changes.createdGateIds).toHaveLength(2);
+    expect(review.changes.createdPopulationIds).toHaveLength(3);
+    const byName = Object.fromEntries(review.populations.map((p) => [p.name, p]));
+    expect(byName["FSC high"]).toMatchObject({ isNew: true, isTarget: false, pooled: { n: 100, parentN: 300 } });
+    expect(byName["SSC low"]).toMatchObject({ isNew: true, isTarget: true, pooled: { n: 51, parentN: 100 } });
+    expect(byName["FSC high, not SSC low"]).toMatchObject({ isNew: true, isTarget: true, pooled: { n: 49, parentN: 100 } });
+    expect(review.targets).toEqual({ CD4_positive: byName["SSC low"].id, CD4_negative: byName["FSC high, not SSC low"].id });
+    for (const id of review.changes.createdGateIds) {
+      expect(review.next.gates[id].provenance).toMatchObject({ by: "GateLabR", rationale: "Sent from R.", source: "host" });
+      expect(provenanceSource(review.next.gates[id].provenance)).toBe("host");
+    }
+    // Counted on the samples it names only.
+    expect(handler.previewStrategy(strategy({ sampleIds: ["D2"] })).populations.find((p) => p.name === "FSC high")?.pooled.n).toBe(0);
+  });
+
+  it("applies the previewed state when accepted: the same gates and ids, one undo step", async () => {
+    const { handler, getState, dispatched, call } = fixture();
+    const review = handler.previewStrategy(strategy());
+    const applied = await handler.applyStrategy(review);
+    expect(dispatched).toEqual(["adoptStrategy"]);
+    expect(getState().gates).toBe(review.next.gates);
+    expect(getState().populations).toBe(review.next.populations);
+    expect(applied).toMatchObject({ targets: review.targets, aliases: review.aliases, createdGateIds: review.changes.createdGateIds, createdPopulationIds: review.changes.createdPopulationIds });
+    const described = await call<AgentDescribe>("describe");
+    expect(applied.revision).toBe(described.revision);
+    expect(described.gates.map((g) => g.provenance)).toEqual(review.changes.createdGateIds.map(() => expect.objectContaining({ source: "host", by: "GateLabR" })));
+    // Undo takes the whole proposal back at once.
+    const undone = await call<AgentApplied>("apply", { command: { type: "undo" }, rationale: "Not this one." });
+    expect(undone.gates).toEqual([]);
+    expect(undone.populations).toHaveLength(1);
+  });
+
+  it("refuses an invalid proposal with the agent's reasons and limits, changing nothing", () => {
+    const { handler, getState } = fixture();
+    const before = getState();
+    const steps = strategy().steps as { key: string; command: Record<string, unknown> }[];
+    const refusedWith = (proposal: StrategyProposal) => {
+      let message = "";
+      try { handler.previewStrategy(proposal); } catch (error) { message = (error as Error).message; }
+      return message;
+    };
+    const many = Array.from({ length: DEFAULT_PROPOSAL_STEP_LIMIT + 1 }, (_, i) => ({ key: `g${i}`, command: { ...steps[0].command, name: `g${i}` } }));
+    expect(refusedWith(strategy({ steps: many }))).toBe(`A proposal needs at most ${DEFAULT_PROPOSAL_STEP_LIMIT} steps.`);
+    expect(refusedWith(strategy({ steps: [steps[0], { ...steps[1], command: { ...steps[1].command, parentId: "@nope.population" } }] }))).toBe("Unknown proposal reference @nope.population.");
+    expect(refusedWith(strategy({ steps: [steps[0], { key: "back", command: { type: "undo" } }] }))).toBe("Proposal steps cannot undo or redo live history.");
+    expect(refusedWith(strategy({ steps: [steps[0], { ...steps[1], key: "high" }] }))).toBe("Proposal step keys must be unique identifiers.");
+    expect(refusedWith(strategy({ steps: [{ key: "x", command: { type: "createGate", shape: "polygon", name: "x", parentId: "@root", x: "FSC-A", y: "SSC-A", space: "display", vertices: [[0, 0], [1, 1], [1, 0], [0, 1]] } }], targets: { x: "@x.population" } }))).toContain("cross itself");
+    expect(refusedWith(strategy({ targets: {} }))).toBe("A proposal needs 1–128 target populations.");
+    expect(refusedWith(strategy({ targets: { CD4_positive: "@high.gate" } }))).toMatch(/^Unknown proposal population /);
+    expect(refusedWith(strategy({ sampleIds: ["D9"] }))).toBe("Unknown sample in proposal.");
+    expect(getState()).toBe(before);
+  });
+
+  it("does not apply over gating that moved after the preview", async () => {
+    const { handler, getState, call } = fixture();
+    const review = handler.previewStrategy(strategy());
+    await call<AgentApplied>("apply", {
+      command: { type: "createRange", name: "Mine", parentId: getState().root_population_id, x: "FSC-A", y: "SSC-A", space: "display", xBounds: [10, null], yBounds: [null, null] },
+      rationale: "The user's own gate, made meanwhile.",
+    });
+    const moved = getState();
+    await expect(handler.applyStrategy(review)).rejects.toBeInstanceOf(StrategyMovedError);
+    expect(getState()).toBe(moved);
+    // Previewed again on the gating as it is now, it applies beside the new gate.
+    const again = handler.previewStrategy(strategy());
+    await handler.applyStrategy(again);
+    expect(Object.values(getState().gates).map((g) => g.name).sort()).toEqual(["FSC high", "Mine", "SSC low"]);
+  });
+
+  it("records the agent as the source of an agent's gates, and resolves @root in its proposals", async () => {
+    const { call, getState } = fixture();
+    const applied = await call<AgentApplied>("apply", {
+      command: { type: "createRange", name: "FSC high", parentId: getState().root_population_id, x: "FSC-A", y: "SSC-A", space: "display", xBounds: [1000, null], yBounds: [null, null] },
+      rationale: "FSC-A is bimodal with the valley at 1000.", expectedRevision: 1,
+    });
+    expect(applied.gates[0].provenance).toMatchObject({ by: "test-agent", source: "agent" });
+    const read = await call<{ populationIds: string[]; describe: AgentDescribe }>("proposal", {
+      expectedRevision: 2, sampleIds: ["D1", "D2"], populationIds: ["@low.population"],
+      steps: [{ key: "low", command: { type: "createRange", name: "SSC low", parentId: "@root", x: "FSC-A", y: "SSC-A", space: "display", xBounds: [null, null], yBounds: [null, 500] } }],
+    });
+    // D1's SSC-A <= 500: its last 51 events; D2's SSC-A is 500 throughout.
+    expect(read.describe.populations.find((p) => p.id === read.populationIds[0])?.pooled.n).toBe(51 + 100);
+    expect((await call<AgentDescribe>("describe")).gates).toHaveLength(1);
   });
 });

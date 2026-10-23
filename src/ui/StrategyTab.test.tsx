@@ -49,8 +49,8 @@ describe("Strategy preview lifecycle", () => {
       onFitChannels: vi.fn(),
       files: [],
       poolIds: null,
-      poolable: false,
-      onPoolChange: vi.fn(),
+      checkedSampleIds: [],
+      onViewFile: vi.fn(),
     };
     const svg = () =>
       [...host.querySelectorAll("button")].find(

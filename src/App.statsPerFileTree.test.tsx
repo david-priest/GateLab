@@ -45,7 +45,17 @@ async function settle(ms = 40): Promise<void> { await act(async () => { await ne
 const buttons = () => [...container.querySelectorAll<HTMLButtonElement>("button")];
 const fileRow = (name: string) => [...container.querySelectorAll<HTMLElement>(".gl-sample-row")].find((r) => r.textContent?.includes(name))!;
 async function view(name: string) { act(() => fileRow(name).dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }))); await settle(); }
-async function edit(mode: "tree" | "file") { act(() => container.querySelector<HTMLButtonElement>(`.population-tree-edit-${mode}`)!.click()); await settle(); }
+/** Switches on, for the viewed file, the tailoring of the gates named (the first gate when none are): each row's switch. */
+async function switchOn(...names: string[]) {
+  const cards = () => [...container.querySelectorAll<HTMLElement>(".gate-card")];
+  const wanted = names.length ? cards().filter((c) => names.some((n) => c.textContent?.startsWith(n))) : cards().slice(0, 1);
+  if (!wanted.length) throw new Error(`No gate rows for ${names.join(", ") || "the first gate"}`);
+  for (const card of wanted) {
+    const input = card.querySelector<HTMLInputElement>(".gate-tailor-switch input")!;
+    if (!input.checked) act(() => input.click());
+    await settle();
+  }
+}
 async function tab(label: string) { act(() => buttons().find((b) => b.getAttribute("role") === "tab" && b.textContent === label)!.click()); await settle(); }
 /** The count the Gating tab's population tree shows for `name`, for the viewed file under the edit target. */
 const treeCount = (name: string) => {
@@ -93,7 +103,7 @@ describe.runIf(bcrxlAvailable())("Statistics under each file's own tree (public 
     expect(treeCount("T cells")).toBe(1995);
 
     // Tailor the viewed file: B cells need more CD20, T cells more CD3.
-    await edit("file");
+    await switchOn("B cells: CD20+/CD3-low", "T cells: CD3+/CD20-low");
     tailor("B cells: CD20+/CD3-low", (v) => {
       const lo = Math.min(...v.map((p) => p[1]));
       return v.map(([x, y]) => [x, y === lo ? 3.2 : y] as [number, number]);
@@ -108,9 +118,8 @@ describe.runIf(bcrxlAvailable())("Statistics under each file's own tree (public 
     const own = { "B cells": treeCount("B cells"), "T cells": treeCount("T cells") };
     expect(own).toEqual({ "B cells": 120, "T cells": 1685 });
 
-    // The tree live again: the Gating tab shows the viewed file under its own tree, as Statistics
-    // does (#349's 9bcf408; until then it showed the edit target's tree, 130).
-    await edit("tree");
+    // The Gating tab shows the viewed file under its own tree, as Statistics does (#349's 9bcf408;
+    // until then it showed the edit target's tree, 130).
     expect(treeCount("B cells")).toBe(own["B cells"]);
     await view(reference);
     const referenceUnderTree = { "B cells": treeCount("B cells"), "T cells": treeCount("T cells") };

@@ -32,7 +32,7 @@ export const MARKER_PALETTES: { value: PaletteName; label: string }[] = [
   { value: "inferno", label: "Inferno" },
   { value: "cividis", label: "Cividis (colour-blind safe)" },
   { value: "turbo", label: "Turbo" },
-  { value: "jet", label: "Jet (FlowJo-like)" },
+  { value: "jet", label: "Jet" },
   { value: "greys", label: "Greys" },
 ];
 

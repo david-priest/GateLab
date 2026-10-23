@@ -753,13 +753,14 @@ describe("GatingML positive-AND import policy", () => {
     expect(exportGatingML({ ...ws, sample, format: "standard" })).toContain("Beneath the OR");
   });
 
-  it("requires explicit quadrant omission and prunes the entire dependent branch", () => {
+  it("requires explicit curved-quadrant omission and prunes the entire dependent branch", () => {
     const ws = buildWorkspace(sample);
     const quadrant: Gate = {
       gate_id: "quadrant-1", name: "CD4 CD8 quadrants", gate_type: "quadrant",
       x_channel: ws.gates[ws.gate_order[0]].x_channel,
       y_channel: ws.gates[ws.gate_order[0]].y_channel,
       center: [40000, 40000], color: "#984ea3", label_offset: null,
+      curl: { power: 1.5, kx: 0.01, ky: 0.01 },
     };
     ws.gates[quadrant.gate_id] = quadrant;
     ws.gate_order.push(quadrant.gate_id);

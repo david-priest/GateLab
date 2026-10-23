@@ -6,7 +6,7 @@
 // so an agent's gate is an ordinary gate with its provenance on it.
 
 import type { Action, CoreState } from "../store";
-import { isUnbounded, type GateProvenance, type GateSpace, type GateTransforms, type Vertex } from "../engine/models";
+import { isUnbounded, validArms, type GateProvenance, type GateSpace, type GateTransforms, type Vertex } from "../engine/models";
 
 export const AGENT_COMMAND_VERSION = 1 as const;
 
@@ -302,7 +302,9 @@ export function commandToAction(command: AgentCommand, ctx: CommandContext): Act
     case "moveQuadrantCenter": {
       const gate = checkGate(ctx, command.gateId);
       if (gate.gate_type !== "quadrant") refuse(`“${gate.name}” is not a quadrant gate.`);
-      return { type: "moveQuadrantCenter", gateId: gate.gate_id, center: finitePoint(command.center, "center") };
+      const center = finitePoint(command.center, "center");
+      if (gate.gate_type === "quadrant" && gate.arms && !validArms(center, gate.arms)) refuse(`“${gate.name}” is a spider quadrant, and its centre must stay inside the box its arms' ends span.`);
+      return { type: "moveQuadrantCenter", gateId: gate.gate_id, center };
     }
     case "renameGate": {
       const gate = checkGate(ctx, command.gateId);

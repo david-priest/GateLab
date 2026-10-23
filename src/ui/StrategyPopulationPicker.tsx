@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
+import { ChevronIcon } from "./icons";
 import type { Gate, PopulationMap } from "../engine/models";
 import { useI18n } from "./i18n";
+import { useGateInk, useGateSwatch } from "../plots/gateInk";
 import { SEG, TreeConnectors } from "./TreeConnectors";
 
 export interface StrategyPickerRow {
@@ -39,7 +41,8 @@ export function packColumns<T extends { depth: number }>(rows: readonly T[], lim
  * The Strategy tab's population picker: the tree as the Gating tab draws it (connectors, the
  * gate's colour, the event count), in columns that break only between top-level branches, so
  * a branch is read whole; a search field; and the Gating tab's ticks, every population, none,
- * or the leaves, as on the Illustration tab.
+ * or the leaves, as on the Illustration tab. Compact, it is one indented column for a side pane,
+ * long names shortened with the whole name as the row's tooltip.
  */
 export function StrategyPopulationPicker({
   rows,
@@ -49,6 +52,7 @@ export function StrategyPopulationPicker({
   selected,
   onChange,
   checkedIds,
+  compact = false,
 }: {
   /** The populations in tree order, without the root. */
   rows: readonly StrategyPickerRow[];
@@ -59,8 +63,12 @@ export function StrategyPopulationPicker({
   onChange: (ids: string[]) => void;
   /** The populations ticked on the Gating tab, offered as a selection. */
   checkedIds?: readonly string[];
+  /** One column, for a side pane, rather than columns across the page. */
+  compact?: boolean;
 }) {
   const { t } = useI18n();
+  const gateSwatch = useGateSwatch();
+  const { coloured } = useGateInk();
   const [search, setSearch] = useState("");
   // Folded away, the picker is its heading, the count and the actions: room for the strategy.
   const [expanded, setExpanded] = useState(true);
@@ -73,16 +81,16 @@ export function StrategyPopulationPicker({
   const query = search.trim().toLowerCase();
   const shown = query ? rows.filter((row) => (populations[row.popId]?.name ?? "").toLowerCase().includes(query)) : rows;
   const minDepth = rows.length ? Math.min(...rows.map((row) => row.depth)) : 1;
-  const columns = query ? [[...shown]] : packColumns(shown, ROWS_PER_COLUMN);
+  const columns = query || compact ? [[...shown]] : packColumns(shown, ROWS_PER_COLUMN);
   const toggle = (popId: string) => onChange(chosen.has(popId) ? selected.filter((id) => id !== popId) : [...selected, popId]);
   const swatchOf = (popId: string): string | null => {
     const ref = populations[popId]?.gate_refs?.[0];
     const gate = ref ? gates[ref.gate_id] : undefined;
-    return gate?.color ?? null;
+    return gate ? gateSwatch(gate.color) : null;
   };
 
   return (
-    <div className="gl-strategy-pops" role="group" aria-label={t("Strategy populations")}>
+    <div className={`gl-strategy-pops${compact ? " is-compact" : ""}`} role="group" aria-label={t("Strategy populations")}>
       <div className={`gl-strategy-pops-head${expanded ? "" : " is-collapsed"}`}>
         <button
           type="button"
@@ -92,7 +100,7 @@ export function StrategyPopulationPicker({
           title={t(expanded ? "Hide {label}" : "Show {label}", { label: t("Populations") })}
           onClick={() => setExpanded((current) => !current)}
         >
-          <span className="gl-picker-chevron" aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+          <span className="gl-picker-chevron" aria-hidden="true"><ChevronIcon open={expanded} size={12} /></span>
           <span className="gl-stats-opt-label">{t("Populations")}</span>
         </button>
         <span className="gl-picker-summary">{t("{selected} of {total} selected", { selected: selected.length, total: rows.length })}</span>
@@ -110,7 +118,7 @@ export function StrategyPopulationPicker({
               type="button"
               className="gl-mini-btn"
               disabled={!checkedIds.length}
-              title={t("The populations ticked on the Gating tab")}
+              title={t("The populations highlighted on the Gating tab")}
               onClick={() => onChange(rows.map((row) => row.popId).filter((id) => checkedIds.includes(id)))}
             >
               {t("Use checked")}
@@ -152,7 +160,8 @@ export function StrategyPopulationPicker({
                 >
                   {!query && <TreeConnectors depth={depth} isLastPath={row.isLastPath.slice(top)} />}
                   <input type="checkbox" checked={chosen.has(row.popId)} onChange={() => toggle(row.popId)} />
-                  <span className="gl-strategy-pop-swatch" style={swatch ? { backgroundColor: swatch } : { visibility: "hidden" }} aria-hidden="true" />
+                  {/* No dots at all with black gates; with colour, a row without a gate keeps the dot's space. */}
+                  {coloured && <span className="gl-strategy-pop-swatch" style={swatch ? { backgroundColor: swatch } : { visibility: "hidden" }} aria-hidden="true" />}
                   <span className="gl-strategy-pop-name">{pop.name}</span>
                   {typeof count === "number" && <span className="gl-strategy-pop-count">{count.toLocaleString()}</span>}
                 </label>

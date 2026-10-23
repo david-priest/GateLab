@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { it } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
-const BASE = "/Users/davidpriest/My Drive (davidpriest@cider.osaka-u.ac.jp)/Wing Lab/Large Projects/GateLab Paper/GateLab-2026-08-15-B flowjo-and-cytobank-concordance/data/bass12-priest2024-s6/source";
+import { S6_SOURCE_DIR as BASE } from "../testFixtures";
 const DIVA = `${BASE}/diva-experiment/B cell assay 12.xml`;
 const WSP = `${BASE}/flowjo-workspace/25-Sep-2023.wsp`;
 it.runIf(existsSync(DIVA) && existsSync(WSP))("pairs", { timeout: 60000 }, () => {

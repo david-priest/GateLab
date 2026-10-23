@@ -10,9 +10,10 @@ interface CapturedPlotProps {
   payload: {
     x_range: [number, number];
     y_range: [number, number];
-    gates: Array<{ gate_id: string; gate_type: string; vertices?: [number, number][] }>;
+    gates: Array<{ gate_id: string; gate_type: string; vertices?: [number, number][]; color?: string; space_badge?: string }>;
     gates_only?: boolean;
     gate_edge_mode?: string;
+    display_mode?: string;
     snap_to_gates?: boolean;
     x_b64: string;
     y_b64: string;
@@ -98,7 +99,7 @@ function testFile(): File {
 }
 
 function button(label: string): HTMLButtonElement {
-  const match = [...host.querySelectorAll<HTMLButtonElement>("button")]
+  const match = [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")]
     .find((candidate) => candidate.textContent?.trim() === label);
   if (!match) throw new Error(`Missing button: ${label}`);
   return match;
@@ -285,12 +286,12 @@ describe("App gating viewport invariant", () => {
     const snap = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
       .find((el) => el.closest("label")?.textContent?.includes("Snap to other gates"))!;
     expect(snap).toBeTruthy();
+    // It lives in the Gate settings popover, with the edges and where new gates are drawn.
+    expect(snap.closest("details.gl-gate-settings")).not.toBeNull();
     act(() => snap.click());
     expect(plotHarness.props!.payload.snap_to_gates).toBe(false);
-    // Close gaps needs two polygons or rectangles to join; a fresh file has none, so it waits.
-    const closeGaps = [...host.querySelectorAll<HTMLButtonElement>("button")].find((el) => el.textContent === "Close gaps")!;
-    expect(closeGaps).toBeTruthy();
-    expect(closeGaps.disabled).toBe(true);
+    // Close gaps and Extend to edges left the strip for each gate's own menu.
+    expect([...host.querySelectorAll<HTMLButtonElement>(".gl-controls button")].some((el) => /^(Close gaps|Extend to edges)$/.test(el.textContent ?? ""))).toBe(false);
   });
 
   it("removes or adds a polygon vertex from the plot's right-click menu, keeping three at least", async () => {
@@ -314,6 +315,9 @@ describe("App gating viewport invariant", () => {
     // A right-click on the second handle: Delete vertex takes that one out.
     act(() => plotHarness.props!.onVertexMenu({ gate_id: polygonId, gate_type: "polygon", vertex: 1, client: [40, 40] }));
     expect(menuItem("Delete vertex")!.disabled).toBe(false);
+    // The gate's own menu follows the vertex's item, as it does on the body (David, 2026-10-23).
+    expect(menuItem("Fit to its events\u2026")).toBeDefined();
+    expect(menuItem("Extend to edges")).toBeDefined();
     act(() => menuItem("Delete vertex")!.click());
     expect(vertices()).toHaveLength(3);
     expect(menuItem("Delete vertex")).toBeUndefined(); // the menu closed
@@ -324,6 +328,7 @@ describe("App gating viewport invariant", () => {
     // A right-click on the first edge: Add vertex here puts the point between its ends.
     const before = vertices().map((v) => [...v]);
     act(() => plotHarness.props!.onVertexMenu({ gate_id: polygonId, gate_type: "polygon", edge: 0, point: [12, 10], client: [40, 40] }));
+    expect(menuItem("Fit to its events\u2026")).toBeDefined();
     act(() => menuItem("Add vertex here")!.click());
     const after = vertices();
     expect(after).toHaveLength(4);
@@ -342,7 +347,7 @@ describe("App gating viewport invariant", () => {
       fcsInput.dispatchEvent(new Event("change", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    const menuItems = () => [...host.querySelectorAll<HTMLButtonElement>('[role="menu"][aria-label="Plot"] [role="menuitem"]')];
+    const menuItems = () => [...host.querySelectorAll<HTMLButtonElement>('[role="menu"][aria-label="Plot"] [role^="menuitem"]')];
     const menuItem = (label: string) => menuItems().find((b) => b.textContent === label);
     const area = host.querySelector<HTMLElement>(".gl-plot-area")!;
     const open = () => act(() => { area.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 40 })); });
@@ -361,7 +366,9 @@ describe("App gating viewport invariant", () => {
     act(() => menuItem("Polygon gate")!.click());
     expect(host.querySelector('.gl-draw-tools button[aria-label^="Polygon gate"]')!.classList.contains("active")).toBe(true);
     open();
-    expect(menuItem("Polygon gate")!.classList.contains("is-active")).toBe(true);
+    // The tool in use is ticked, as every switch in a menu is.
+    expect(menuItem("Polygon gate")!.getAttribute("aria-checked")).toBe("true");
+    expect(menuItem("Rectangle gate")!.getAttribute("aria-checked")).toBe("false");
     act(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
     // Fit and reset act on the ranges as the toolbar buttons do.
     const auto = ranges();
@@ -370,5 +377,75 @@ describe("App gating viewport invariant", () => {
     open();
     act(() => menuItem("Reset axis ranges")!.click());
     expect(ranges()).toEqual(auto);
+  });
+
+  it("keeps the plot two strips below the header: plot types at the top level, colouring and gate settings in popovers", async () => {
+    act(() => root.render(<App />));
+    const fcsInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(fcsInput, "files", { configurable: true, value: [testFile()] });
+    await act(async () => {
+      fcsInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // The top strip and the controls strip; no third strip of appearance controls.
+    expect(host.querySelector(".gl-pool-toolbar")).not.toBeNull();
+    expect(host.querySelectorAll(".gl-center .gl-controls, .gl-controls")).toHaveLength(1);
+    expect(host.querySelector(".gl-appearance")).toBeNull();
+    // What is plotted, in muted words in the top strip; no stale "Editing the tree" line.
+    expect(host.querySelector(".gl-pool-toolbar .gl-view-info")?.textContent).toBe("4 events");
+    expect(host.textContent).not.toContain("Editing the tree");
+    // The plot type, an icon segmented control at the top level.
+    const types = [...host.querySelectorAll<HTMLButtonElement>(".gl-controls .gl-plot-types .gl-plot-type")];
+    expect(types.map((b) => b.getAttribute("aria-label"))).toEqual(["Pseudocolor", "Dots", "Contour"]);
+    act(() => types[2].click());
+    expect(plotHarness.props!.payload.display_mode).toBe("contour");
+    expect(types[2].getAttribute("aria-pressed")).toBe("true");
+    // Colour by is in the Display popover; New gates in, Gate edges, Snap and Plot shows in Gate settings.
+    expect(host.querySelector('details.gl-display-popover button[aria-label="Colour by"]')).not.toBeNull();
+    const settings = host.querySelector("details.gl-gate-settings")!;
+    for (const words of ["Gate edges", "Snap to other gates", "Plot shows:"]) expect(settings.textContent).toContain(words);
+    expect(host.querySelector("details.gl-display-popover")!.textContent).not.toContain("Pseudocolor");
+  });
+
+  it("gives a gate's right-click menu and its row's ⋯ the same actions: rename, colour, the edge tools, delete", async () => {
+    act(() => root.render(<App />));
+    const fcsInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(fcsInput, "files", { configurable: true, value: [testFile()] });
+    await act(async () => {
+      fcsInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const first = await createGate({ gate_type: "polygon", vertices: [[10, 10], [14, 10], [14, 14], [10, 14]], x_channel: "FSC-A", y_channel: "SSC-A" }, "Create");
+    const menuLabels = (root: ParentNode) => [...root.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].map((b) => b.textContent);
+    // One gate: nothing to close a gap with yet.
+    act(() => plotHarness.props!.onVertexMenu({ gate_id: first, gate_type: "polygon", body: true, client: [40, 40] } as never));
+    const plotMenu = host.querySelector(".gl-context-menu")!;
+    expect(menuLabels(plotMenu)).toEqual(expect.arrayContaining(["Fit to its events…", "Rename…", "Colour…", "Extend to edges", "Close gaps with neighbours", "Close gaps between the selected gates", "Delete…"]));
+    const item = (root: ParentNode, label: string) => [...root.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent === label)!;
+    // The gate's menu alone: the plot's own (Fit data + gates, the draw tools) is on its margins and background.
+    expect(menuLabels(plotMenu)).not.toContain("Fit data + gates");
+    expect(menuLabels(plotMenu)).not.toContain("Rectangle gate");
+    expect(item(plotMenu, "Extend to edges").disabled).toBe(false);
+    expect(item(plotMenu, "Close gaps with neighbours").disabled).toBe(true);
+    expect(item(plotMenu, "Close gaps between the selected gates").disabled).toBe(true);
+    // Colour… opens a palette at the pointer; a swatch recolours the gate as one undo step. Gates
+    // open black, so they are shown in colour to read the new one off the plot.
+    act(() => host.querySelector<HTMLInputElement>(".gl-coloured-gates")!.click());
+    act(() => item(plotMenu, "Colour…").click());
+    const pop = host.querySelector('[role="dialog"][aria-label^="Colour of"]')!;
+    expect(pop).not.toBeNull();
+    act(() => pop.querySelector<HTMLButtonElement>('button[aria-label="#4daf4a"]')!.click());
+    expect(plotHarness.props!.payload.gates.find((g) => g.gate_id === first)!.color).toBe("#4daf4a");
+    expect(host.querySelector('[role="dialog"][aria-label^="Colour of"]')).toBeNull();
+    act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true })); });
+    expect(plotHarness.props!.payload.gates.find((g) => g.gate_id === first)!.color).not.toBe("#4daf4a");
+    // The row's ⋯ carries the same actions.
+    const row = host.querySelector(".gate-card .gate-row-menu")!;
+    expect(menuLabels(row)).toEqual(["Rename…", "Colour…", "Extend to edges", "Close gaps with neighbours", "Close gaps between the selected gates", "Delete…"]);
+    // A second gate on these axes is a neighbour to close a gap with.
+    await createGate({ gate_type: "polygon", vertices: [[20, 10], [24, 10], [24, 14], [20, 14]], x_channel: "FSC-A", y_channel: "SSC-A" }, "Create");
+    expect(item(host.querySelector(".gate-card .gate-row-menu")!, "Close gaps with neighbours").disabled).toBe(false);
   });
 });

@@ -279,6 +279,18 @@ describe("polygon, ellipse and quadrant boundaries (Gating-ML 2.0 sections 5.2-5
 });
 
 describe("gateMaskQuadrant", () => {
+  it.each([undefined, { power: 1, kx: 0.25, ky: 0.25 }])("excludes undefined coordinates without discarding infinite open-side values (curl %j)", (curl) => {
+    const x = [NaN, NaN, -1, 1, 0, NaN, -Infinity, Infinity, -Infinity, Infinity, 0];
+    const y = [-1, 1, NaN, NaN, NaN, NaN, Infinity, Infinity, -Infinity, -Infinity, 0];
+    const quad = (q: number) => Array.from(gateMaskQuadrant(x, y, [0, 0], q, curl));
+    // NaN has no position on either side of a divider. Infinity is different: an open
+    // side can hold it, as a rectangle with an absent bound does for flog(0) = -Infinity.
+    expect(quad(1)).toEqual([0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
+    expect(quad(2)).toEqual([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1]);
+    expect(quad(3)).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+    expect(quad(4)).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
+  });
+
   const center: [number, number] = [0, 0];
   const x = [-1, 1, 1, -1, 0]; // Q1, Q2, Q3, Q4, crosshair
   const y = [1, 1, -1, -1, 0];

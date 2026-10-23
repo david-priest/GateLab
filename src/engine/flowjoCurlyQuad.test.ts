@@ -23,7 +23,7 @@ const WSP = join(DIR, "workspace_fc022-a_190923.wsp");
 const FCS = join(DIR, "specimen_001_016_b05_005.fcs");
 
 // The bend was fitted against counts whose parents were evaluated continuously, and it is checked
-// the way it was fitted: with the import's "Evaluate gates as FlowJo does" off. On FlowJo's grid
+// the way it was fitted: with the import's "Evaluate gates on the recorded grid" off. On FlowJo's grid
 // the quadrants' parent "live", a polygon, takes FlowJo's channels, and moves by the events near
 // its edges; its own parent, a rectangle on Time (a rule not established), is 1.3% above FlowJo's
 // count in either mode, so the parent does not become FlowJo's and Q1 moves from 3.6% to 5.5% of

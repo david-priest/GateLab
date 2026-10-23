@@ -21,19 +21,19 @@ const OUTCOMES: Record<string, string[]> = {
   "match": [
     "1/And1", "1/And2", "1/And3", "1/And4", "1/Ellipse1", "1/Not1", "1/ParAnd2", "1/ParAnd3", "1/Polygon1",
     "1/Polygon2", "1/Polygon3NS", "1/Polygon4", "1/Range1", "1/Range2", "1/Rectangle1", "1/Rectangle2",
-    "1/Rectangle3", "1/Rectangle4", "1/Rectangle5", "1/ScaleRange1", "1/ScaleRange1Bound",
-    "1/ScaleRange1c", "1/ScaleRange3", "1/ScaleRange3Bound", "1/ScaleRange3c", "1/ScaleRange4",
+    "1/Rectangle3", "1/Rectangle4", "1/Rectangle5", "1/ScalePar1", "1/ScaleRange1", "1/ScaleRange1Bound",
+    "1/ScaleRange1c", "1/ScaleRange2", "1/ScaleRange2Bound", "1/ScaleRange2c", "1/ScaleRange2cBound", "1/ScaleRange3", "1/ScaleRange3Bound", "1/ScaleRange3c", "1/ScaleRange4",
     "1/ScaleRange4Bound", "1/ScaleRange4c", "1/ScaleRange5", "1/ScaleRange5c", "1/ScaleRange6",
-    "1/ScaleRange6Bound", "1/ScaleRange6c", "1/ScaleRange8c", "1/ScaleRect1", "1/ScaleRect1Bound",
-    "1/ScaleRect1Bound2", "2/Ellipseca", "2/Ellipsecl", "2/Ellipseclb", "2/Ellipseua",
+    "1/ScaleRange6Bound", "1/ScaleRange6c", "1/ScaleRange7c", "1/ScaleRange8c", "1/ScaleRect1", "1/ScaleRect1Bound",
+    "1/ScaleRect1Bound2", "2/Ellipseca", "2/Ellipsech", "2/Ellipsecl", "2/Ellipseclb", "2/Ellipseua", "2/Ellipseuh",
     "2/Ellipseul", "2/Ellipseulb", "2/Ellipseulb2", "2/NotRectcl", "2/Poly1c", "2/Poly1ca",
-    "2/Poly1cab", "2/Poly1cl", "2/Poly1clb", "2/Poly1u", "2/Poly1ua", "2/Poly1uab", "2/Poly1uab2",
-    "2/Poly1ul", "2/Poly1ulb", "2/RectMix1", "2/Rectcl", "2/RectclAgain", "2/Rectul",
+    "2/Poly1cab", "2/Poly1ch", "2/Poly1chb", "2/Poly1cl", "2/Poly1clb", "2/Poly1u", "2/Poly1ua", "2/Poly1uab", "2/Poly1uab2", "2/Poly1uh", "2/Poly1uhb",
+    "2/Poly1ul", "2/Poly1ulb", "2/RectMix1", "2/Rectch", "2/RectchAndNotRectcl", "2/RectchAndNotRectcl2", "2/Rectcl", "2/RectclAgain", "2/RectclAndRectch", "2/Rectuh", "2/Rectul",
     "3/myEllipseGate", "3/myPolygonGate", "3/myPolygonGate2ArcSinHLin", "3/myPolygonGate3LogLin",
     "3/myPolygonGateWithCustomSpillover", "3/myPolygonGateWithFCSSpillover",
     "3/myPolygonGateWithSpilloverSameAsFCS", "3/myPolygonGateWithoutSpillover", "3/myRangeGate1",
-    "3/myRangeGate2", "3/myRectangleGate", "3/myRectangleGate2Logicle",
-    "3/myRectangleGate3LogicleArcSinH", "5/myAnd1", "5/myAnd2", "5/myAnd3", "5/myAnd4",
+    "3/myRangeGate2", "3/myRectangleGate", "3/myRectangleGate2Logicle", "3/myRectangleGate2bHyperlog",
+    "3/myRectangleGate3LogicleArcSinH", "3/myRectangleGate3bHyperlogArcSinH", "5/myAnd1", "5/myAnd2", "5/myAnd3", "5/myAnd4",
     "5/myNotNot", "5/myPolygon1", "5/myPolygon2",
   ],
   "left out: ratio": [
@@ -41,7 +41,7 @@ const OUTCOMES: Record<string, string[]> = {
     "4/myRange1", "4/myRange2", "4/myRange3", "4/myRange4", "4/myRange5",
   ],
   "left out: OR": [
-    "1/Or1", "5/myOr1", "5/myOr2", "5/myOr3", "5/myOr4",
+    "1/Or1", "2/RectclOrRectch", "5/myOr1", "5/myOr2", "5/myOr3", "5/myOr4",
   ],
   "refused: quadrant": [
     "1/FL2N-FL4N", "1/FL2N-FL4P", "1/FL2P-FL4N", "1/FL2P-FL4P", "1/FSCD-FL1P", "1/FSCD-SSCN-FL1N",
@@ -53,13 +53,6 @@ const OUTCOMES: Record<string, string[]> = {
     "4/myQuadrant3_NN", "4/myQuadrant3_NP", "4/myQuadrant3_PN", "4/myQuadrant3_PP",
     "4/myQuadrant4_NN", "4/myQuadrant4_NP", "4/myQuadrant4_PN", "4/myQuadrant4_PP",
     "4/myQuadrant_NN", "4/myQuadrant_NP", "4/myQuadrant_PN", "4/myQuadrant_PP",
-  ],
-  "refused: hyperlog": [
-    "1/ScalePar1", "1/ScaleRange2", "1/ScaleRange2Bound", "1/ScaleRange2c", "1/ScaleRange2cBound",
-    "1/ScaleRange7c", "2/Ellipsech", "2/Ellipseuh", "2/Poly1ch", "2/Poly1chb", "2/Poly1uh",
-    "2/Poly1uhb", "2/Rectch", "2/RectchAndNotRectcl", "2/RectchAndNotRectcl2", "2/RectclAndRectch",
-    "2/RectclOrRectch", "2/Rectuh", "3/myRectangleGate2bHyperlog",
-    "3/myRectangleGate3bHyperlogArcSinH",
   ],
   "refused: more than two dimensions": [
     "1/Ellipsoid3D", "2/Cube3Du", "2/Cube3DuP", "2/Cube3DuPAsBool", "2/Cube3Dul", "2/HyperCube1",
@@ -93,7 +86,6 @@ function run(): { outcomes: Record<string, IsacOutcome>; lists: Record<string, s
         : outcome.kind === "left out"
           ? (/has the ratio dimension/.test(why) ? "left out: ratio" : /combines its references with OR/.test(why) ? "left out: OR" : "unexpected")
           : /QuadrantGate \S+ is not supported/.test(why) ? "refused: quadrant"
-          : /unsupported or missing transformation \S*[Hh]yperlog/.test(why) ? "refused: hyperlog"
           : /has [34] dimensions|EllipsoidGate \S+ could not be parsed/.test(why) ? "refused: more than two dimensions"
           : "unexpected";
       (lists[list] ??= []).push(key);
@@ -113,6 +105,11 @@ describe("the ISAC Gating-ML 2.0 compliance suite", () => {
 
   it("matches the suite's truth event for event wherever GateLab imports the gate", () => {
     for (const key of OUTCOMES.match) expect(outcomes[key], key).toMatchObject({ kind: "match" });
+  });
+
+  it("keeps Hyperlog gate columns in double precision at the standard ellipse boundary", () => {
+    // Rounding Hyperlog's coordinates to float32 lost event 9150 of this unmodified fixture.
+    expect(outcomes["2/Ellipseuh"]).toEqual({ kind: "match", events: 4589 });
   });
 
   it("reads a range half-open, leaving out the events on its upper edge as the suite does", () => {

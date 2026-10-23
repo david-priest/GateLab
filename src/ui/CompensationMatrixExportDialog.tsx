@@ -1,4 +1,4 @@
-import { useMemo, useState, type KeyboardEvent } from "react";
+import { useMemo, useState } from "react";
 import type { CompensationMatrixInput } from "../engine/compensationProfile";
 import {
   compensationMatrixCsvFileName,
@@ -7,6 +7,7 @@ import {
   type CompensationMatrixExportVariant,
 } from "../engine/compensationMatrixExport";
 import { useI18n } from "./i18n";
+import { ModalEscape } from "./useModalEscape";
 
 interface Props {
   readonly profileLabel: string;
@@ -67,12 +68,9 @@ export function CompensationMatrixExportDialog({
     }
   };
 
-  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape") onClose();
-  };
-
   return (
-    <div className="gl-modal-backdrop" onKeyDown={handleKeyDown}>
+    <div className="gl-modal-backdrop">
+      <ModalEscape onClose={onClose} />
       <div
         className="gl-modal gl-comp-export-modal"
         role="dialog"

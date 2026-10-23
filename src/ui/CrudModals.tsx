@@ -15,6 +15,7 @@ import {
   type FcsExportAssay,
 } from "../engine/fcsExport";
 import { CYTOBANK_OMITS_CONTRADICTIONS, analyzeCytobankContradictions, analyzeCytobankOrOmissions, analyzeGatingMLQuadrantOmissions, type GatingMLFormat } from "../engine/gatingmlExport";
+import { isCurvedQuadrant } from "../engine/gatingmlQuadrants";
 import type { GatingImportMode, GatingImportTarget } from "../engine/gatingMerge";
 import {
   parsePopulationEditTable,
@@ -23,14 +24,17 @@ import {
   type PopulationBulkEditUpdate,
 } from "../engine/populationTable";
 import { useI18n } from "./i18n";
+import { ModalEscape } from "./useModalEscape";
 import { gateRefLabel, EXCLUDE_HINT } from "./gateRefLabel";
 import { FlowJoGridOption } from "./FlowJoGridOption";
+import { useGateColour, useGateSwatch } from "../plots/gateInk";
 import { fitsInZip, formatByteSize, ZIP_MAX_BYTES, type FlowJoFolderPreview, type FlowJoNameProblem } from "../engine/flowjoExportFolder";
 
-function ModalShell({ title, children }: { title: string; children: React.ReactNode }) {
+function ModalShell({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   const { t } = useI18n();
   return (
     <div className="gl-modal-backdrop">
+      <ModalEscape onClose={onClose} />
       <div className="gl-modal">
         <div className="gl-modal-title">{t(title)}</div>
         {children}
@@ -143,7 +147,7 @@ export function GatingMlImportModal({
   onSupplyMatrix?: (file: File) => void;
   onUseFcsMatrix?: (useFcs: boolean) => void;
   /**
-   * "Evaluate gates as FlowJo does", for a FlowJo workspace imported onto the loaded files, which
+   * "Evaluate gates on the recorded grid", for a FlowJo workspace imported onto the loaded files, which
    * no earlier dialog asked. Changing it reads the workspace again (`busy` meanwhile). Null where
    * the dialog that opened the workspace asked it.
    */
@@ -169,7 +173,7 @@ export function GatingMlImportModal({
   const askTarget = !!files && files.total > 1 && !perFile;
 
   return (
-    <ModalShell title={t(IMPORT_TITLES[sourceKind])}>
+    <ModalShell title={t(IMPORT_TITLES[sourceKind])} onClose={onCancel}>
       <div className="gl-modal-note">{t("Parsed {gates} gates and {populations} populations from {source}.", { gates: nGates, populations: nPopulations, source: t(sourceLabel) })}</div>
       {flowJoGrid && onFlowJoGrid && (
         <FlowJoGridOption checked={flowJoGrid.value} disabled={flowJoGrid.busy || busy} onChange={onFlowJoGrid} />
@@ -431,9 +435,9 @@ export function FlowJoExportModal({
   const zipTooLarge = !!folderPreview && !("error" in folderPreview) && folder?.writes === "zip" && !fitsInZip(folderPreview);
   const blocked = "error" in preview || (!!folderPreview && "error" in folderPreview) || zipTooLarge;
   return (
-    <ModalShell title="Export FlowJo workspace">
+    <ModalShell title="Export FlowJo workspace" onClose={onCancel}>
       <div className="gl-modal-note">
-        {t("Written in the layout of a FlowJo 10.10 workspace: one sample per file, holding the tree that file is gated under, gate vertices in raw values, and each parameter's axis declared as FlowJo declares it (linear, biexponential, log, or arcsinh for mass cytometry). FlowJo opens it, and BD FACSChorus reads it with Import from FlowJo.")}
+        {t("Written as a FlowJo workspace in the version 10.10 layout: one sample per file, holding the tree that file is gated under, gate vertices in raw values, and each parameter's axis declared as that layout declares it (linear, biexponential, log, or arcsinh for mass cytometry). BD FACSChorus imports sort gates from it.")}
       </div>
       <div className="gl-modal-field">
         <span>{t("Files")}</span>
@@ -462,7 +466,7 @@ export function FlowJoExportModal({
             <input type="checkbox" name="flowjo-export-folder" checked={asFolder} onChange={(e) => setAsFolder(e.target.checked)} />
             <span>
               <strong>{t("Save the FCS files with it, in a self-contained folder")}</strong><br />
-              <span className="gl-modal-note">{t("Each file is written as GateLab loaded it, byte for byte, beside the workspace and under its own name, and the workspace names it there, so FlowJo, FlowKit, CytoML and GateLab find the files wherever the folder is moved.")}</span>
+              <span className="gl-modal-note">{t("Each file is written as GateLab loaded it, byte for byte, beside the workspace and under its own name, and the workspace names it there, so programs that read the workspace find the files wherever the folder is moved.")}</span>
             </span>
           </label>
           {folderPreview && ("error" in folderPreview ? (
@@ -489,7 +493,7 @@ export function FlowJoExportModal({
               )}
               {folderPreview.renamed.length > 0 && (
                 <div className="gl-modal-note">
-                  {t("Chrome will not write these names as they are, so each file is written under the name shown. The workspace names it by that name, and its bytes are unchanged, keywords and $FIL included, so FlowJo, FlowKit, CytoML and GateLab still pair it with its sample:")}
+                  {t("Chrome will not write these names as they are, so each file is written under the name shown. The workspace names it by that name, and its bytes are unchanged, keywords and $FIL included, so programs that read the workspace still pair it with its sample:")}
                   <ul className="gl-modal-list">
                     {folderPreview.renamed.map((r) => (
                       <li key={r.path}>{r.name} → {r.path}: {r.problems.map((p) => nameProblemText(p, t)).join("; ")}</li>
@@ -507,7 +511,7 @@ export function FlowJoExportModal({
               )}
               {folderPreview.missing.length > 0 && (
                 <div className="gl-modal-warning" role="alert">
-                  {t("GateLab does not hold the bytes of these files, so the folder will not have them; the workspace still names each, and FlowJo will look for it beside the workspace:")}
+                  {t("GateLab does not hold the bytes of these files, so the folder will not have them; the workspace still names each, to be looked for beside it:")}
                   <ul>
                     {folderPreview.missing.map((name, i) => <li key={i}>{name}</li>)}
                   </ul>
@@ -541,6 +545,94 @@ export function FlowJoExportModal({
   );
 }
 
+/** Whether a folder is an absolute path, as FlowJo 11 stores each sample's (flowjo11Export.ts). */
+const isAbsoluteFolder = (folder: string): boolean => folder.startsWith("/") || /^[A-Za-z]:[\\/]/.test(folder);
+
+/**
+ * FlowJo 11 workbench export: which files, the folder FlowJo 11 will find them in, and what was
+ * approximated. FlowJo 11 stores each sample by its absolute path, which a browser cannot know, so
+ * the folder is asked for. The notes come from a dry run of the export, as the FlowJo workspace
+ * export's do.
+ */
+export function FlowJo11ExportModal({
+  files,
+  plan,
+  initialFolder,
+  onCancel,
+  onExport,
+}: {
+  files: FlowJoExportFile[];
+  plan: (scope: FlowJoExportScope) => { warnings: string[]; sampleCount: number; populationCount: number } | { error: string };
+  initialFolder: string;
+  onCancel: () => void;
+  onExport: (scope: FlowJoExportScope, fcsFolder: string) => void;
+}) {
+  const { t } = useI18n();
+  const checked = files.filter((f) => f.checked);
+  const [scope, setScope] = useState<FlowJoExportScope>(checked.length ? "checked" : "all");
+  const [folder, setFolder] = useState(initialFolder);
+  const listed = scope === "checked" ? checked : files;
+  // A dry run evaluates every population of every file, so it runs once per scope, not on every
+  // render of the app behind the dialog; the files cannot change while it is open.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const preview = useMemo(() => plan(scope), [scope]);
+  const folderOk = isAbsoluteFolder(folder.trim());
+  return (
+    <ModalShell title="Export FlowJo 11 workbench" onClose={onCancel}>
+      <div className="gl-modal-note">
+        {t("Written as a FlowJo 11 workbench (.flowjo): one sample per file, holding the tree that file is gated under, each gate on the axis the workbench declares for it, with GateLab's counts stored as the workbench's results until they are recounted.")}
+      </div>
+      <div className="gl-modal-field">
+        <span>{t("Files")}</span>
+        <label className="gl-radio-row">
+          <input type="radio" name="flowjo11-export-scope" checked={scope === "checked"} disabled={!checked.length} onChange={() => setScope("checked")} />
+          <span>{t("Checked files ({count})", { count: checked.length })}</span>
+        </label>
+        <label className="gl-radio-row">
+          <input type="radio" name="flowjo11-export-scope" checked={scope === "all"} onChange={() => setScope("all")} />
+          <span>{t("All loaded files ({count})", { count: files.length })}</span>
+        </label>
+      </div>
+      <ul className="gl-modal-list">
+        {listed.map((f) => {
+          const own = f.hierarchy.startsWith(`${f.name} · `) ? f.hierarchy.slice(f.name.length + 3) : null;
+          return (
+            <li key={f.id}>{f.name} <span className="gl-muted">· {own !== null ? t("{tree}, this file's own copy", { tree: own }) : f.hierarchy}</span></li>
+          );
+        })}
+      </ul>
+      <label className="gl-modal-field">
+        <span>{t("Folder of the FCS files")}</span>
+        <input type="text" name="flowjo11-export-folder" value={folder} spellCheck={false} placeholder="/Users/…/FCS" onChange={(e) => setFolder(e.target.value)} />
+        <span className="gl-modal-note">{t("The absolute path of the folder holding these FCS files on the computer that will open the workbench. The workbench names each file by its path there, and a file not found there is asked for when the workbench is opened.")}</span>
+      </label>
+      {!folderOk && folder.trim() !== "" && (
+        <div className="gl-modal-warning" role="alert">{t("The folder must be an absolute path, such as /Users/name/Data or C:\\Data.")}</div>
+      )}
+      {"error" in preview ? (
+        <div className="gl-modal-warning" role="alert">{preview.error}</div>
+      ) : (
+        <>
+          <div className="gl-modal-note">
+            {t("{populations} population(s) across {samples} sample(s).", { populations: preview.populationCount, samples: preview.sampleCount })}
+          </div>
+          {preview.warnings.length > 0 && (
+            <div className="gl-modal-warning" role="alert">
+              <ul>
+                {preview.warnings.map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+      <div className="gl-modal-actions">
+        <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
+        <button className="gl-btn" disabled={"error" in preview || !folderOk || listed.length === 0} onClick={() => onExport(scope, folder.trim())}>{t("Export")}</button>
+      </div>
+    </ModalShell>
+  );
+}
+
 /** Gating-ML export options plus explicit warnings for formats that cannot be lossless. */
 export function GatingMlExportModal({
   state,
@@ -554,6 +646,7 @@ export function GatingMlExportModal({
   const { t } = useI18n();
   const [format, setFormat] = useState<GatingMLFormat>("standard");
   const quadrantOmissions = analyzeGatingMLQuadrantOmissions(state.gates, state.populations);
+  const straightQuadrants = Object.values(state.gates).filter((g) => g.gate_type === "quadrant" && !isCurvedQuadrant(g)).length;
   // Beneath an OR population the Cytobank format leaves everything out, by name; an OR population
   // there is left out with the rest rather than blocking the export.
   const orOmissions = state.root_population_id
@@ -575,7 +668,7 @@ export function GatingMlExportModal({
     : { populationIds: [], names: [], warnings: [] };
 
   return (
-    <ModalShell title="Export GatingML">
+    <ModalShell title="Export GatingML" onClose={onCancel}>
       <label className="gl-modal-field">
         <span>{t("Format")}</span>
         <select value={format} onChange={(e) => setFormat(e.target.value as GatingMLFormat)}>
@@ -590,10 +683,16 @@ export function GatingMlExportModal({
       </div>
       {quadrantOmissions.gateIds.length > 0 && (
         <div className="gl-modal-warning" role="alert">
-          This workspace contains {quadrantOmissions.gateIds.length} quadrant gate{quadrantOmissions.gateIds.length === 1 ? "" : "s"}.
-          Quadrant gates and {quadrantOmissions.populationIds.length} dependent population{quadrantOmissions.populationIds.length === 1 ? "" : "s"},
+          This workspace contains {quadrantOmissions.gateIds.length} curved or spider quadrant gate{quadrantOmissions.gateIds.length === 1 ? "" : "s"}.
+          Curved and spider quadrant gates and {quadrantOmissions.populationIds.length} dependent population{quadrantOmissions.populationIds.length === 1 ? "" : "s"},
           including all descendants, will not be included in this GatingML file.
           The saved .gatelab workspace remains complete.
+        </div>
+      )}
+      {straightQuadrants > 0 && (
+        <div className="gl-modal-note">
+          Each straight quadrant gate is written as four regions, named after the gate with Q1 to Q4, which other programs and GateLab read back as four gates.
+          A region whose divider the file cannot place between the events on either side of it (closer together than its numbers can separate, or at an infinite value) is left out with the populations that use it, and named once the file is written.
         </div>
       )}
       {format === "cytobank" && orOmissions.names.length > 0 && (
@@ -717,7 +816,7 @@ export function FcsExportModal({
   }, [splitCombinations]);
   if (confirmingSplitExport) {
     return (
-      <ModalShell title="Confirm separate FCS export">
+      <ModalShell title="Confirm separate FCS export" onClose={() => setConfirmingSplitExport(false)}>
         <div className="gl-fcs-export-confirm-summary">
           <strong>
             {t("FCS outputs to write: {written}", {
@@ -766,7 +865,7 @@ export function FcsExportModal({
     );
   }
   return (
-    <ModalShell title="Export FCS">
+    <ModalShell title="Export FCS" onClose={onCancel}>
       {hierarchy && hierarchy.count > 1 && (
         <div className="gl-modal-note">
           {t("The populations listed are the viewed tree's. A file that follows a tailored or group copy of the tree is exported under that copy.")}
@@ -782,7 +881,7 @@ export function FcsExportModal({
         <div style={{ maxHeight: 260, overflow: "auto", border: "1px solid var(--gl-border, #ccc)", borderRadius: 4, padding: "4px 6px" }}>
           {allIds.length === 0 && <em style={{ opacity: 0.6 }}>{t("No populations.")}</em>}
           {order.map(({ popId, depth }) => (
-            <label key={popId} style={{ display: "flex", alignItems: "center", gap: 6, paddingLeft: depth * 14, cursor: "pointer" }}>
+            <label key={popId} style={{ display: "flex", alignItems: "center", gap: 6, paddingLeft: depth * 14, cursor: "default" }}>
               <input type="checkbox" checked={checked.has(popId)} onChange={() => toggle(popId)} />
               {state.populations[popId]?.name ?? popId}
             </label>
@@ -997,7 +1096,7 @@ export function BulkRenameModal({
     }
   };
   return (
-    <ModalShell title="Bulk-edit populations">
+    <ModalShell title="Bulk-edit populations" onClose={onCancel}>
       <p style={{ fontSize: 12, color: "#555", margin: "2px 0 12px", lineHeight: 1.4 }}>
         {t("Download the template, edit new_population and gate_names, then upload it. Gate names are a comma-separated positive AND list; quadrant references use Gate name [Q1]. Population IDs keep rows unambiguous.")}
       </p>
@@ -1055,7 +1154,7 @@ export function ConfirmModal({
 }) {
   const { t } = useI18n();
   return (
-    <ModalShell title={t(title)}>
+    <ModalShell title={t(title)} onClose={onCancel}>
       <p style={{ fontSize: 13, color: "#555", margin: "2px 0 14px", lineHeight: 1.4 }}>{message}</p>
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
@@ -1087,7 +1186,7 @@ export function GroupsFromMetadataModal({
   const [column, setColumn] = useState(columns[0] ?? "");
   const shown = column ? preview(column) : { groups: [], unassigned: 0 };
   return (
-    <ModalShell title={t("Groups from a metadata column")}>
+    <ModalShell title={t("Groups from a metadata column")} onClose={onCancel}>
       <label className="gl-modal-field">
         {t("Column:")}
         <select autoFocus value={column} onChange={(e) => setColumn(e.target.value)}>
@@ -1134,7 +1233,7 @@ export function RenameModal({
     if (name.trim()) onConfirm(name.trim());
   };
   return (
-    <ModalShell title={t(title)}>
+    <ModalShell title={t(title)} onClose={onCancel}>
       <label className="gl-modal-field">
         {t("New name:")}
         <input
@@ -1170,6 +1269,8 @@ export function EditPopModal({
   onCancel: () => void;
 }) {
   const { t } = useI18n();
+  const gateColour = useGateColour();
+  const gateSwatch = useGateSwatch();
   const pop = state.populations[popId];
   const orderedGateIds = state.gate_order.length ? state.gate_order : Object.keys(state.gates);
   const gateIds = orderedGateIds.filter((gid) => state.gates[gid]?.gate_type !== "quadrant");
@@ -1222,7 +1323,7 @@ export function EditPopModal({
   };
 
   return (
-    <ModalShell title={t("Edit Population")}>
+    <ModalShell title={t("Edit Population")} onClose={onCancel}>
       <label className="gl-modal-field">
         {t("Name:")}
         <input autoFocus value={name} onChange={(e) => setName(e.target.value)} />
@@ -1249,7 +1350,7 @@ export function EditPopModal({
                 <span
                   key={i}
                   className={"gate-ref-badge" + (ir.include ? "" : " exclude")}
-                  style={{ background: g.color, opacity: 0.75 }}
+                  style={{ background: gateColour(g.color), opacity: 0.75 }}
                 >
                   {gateRefLabel(g.name, ir.include) + " ← " + ir.from}
                 </span>
@@ -1259,14 +1360,14 @@ export function EditPopModal({
         </div>
       )}
 
-      <div className="gl-modal-field" style={{ gap: 6 }}>
+      <div className="gl-modal-field gl-modal-grow" style={{ gap: 6 }}>
         {t("Gates for this population:")}
         {lockedQuadrantRefs.length > 0 && (
           <div className="gl-inherited">
             {lockedQuadrantRefs.map((ref) => {
               const gate = state.gates[ref.gate_id];
               return (
-                <span key={`${ref.gate_id}:${ref.quadrant}`} className="gate-ref-badge" style={{ background: gate.color, opacity: 0.75 }}>
+                <span key={`${ref.gate_id}:${ref.quadrant}`} className="gate-ref-badge" style={{ background: gateColour(gate.color), opacity: 0.75 }}>
                   {gate.name} · quadrant {ref.quadrant} (locked)
                 </span>
               );
@@ -1298,7 +1399,7 @@ export function EditPopModal({
                       }
                     }}
                   />
-                  <span className="gate-color-swatch" style={{ background: g.color, width: 10, height: 10 }} />
+                  {gateSwatch(g.color) && <span className="gate-color-swatch" style={{ background: gateSwatch(g.color)!, width: 10, height: 10 }} />}
                   <span>{g.name}</span>
                 </label>
                 <label
@@ -1346,6 +1447,7 @@ export function CreatePopModal({
   onCancel: () => void;
 }) {
   const { t } = useI18n();
+  const gateSwatch = useGateSwatch();
   const parentChoices = useMemo(
     () => Object.keys(state.populations).map((id) => ({ id, name: state.populations[id].name })),
     [state.populations],
@@ -1368,7 +1470,7 @@ export function CreatePopModal({
   };
 
   return (
-    <ModalShell title={t("Create Population")}>
+    <ModalShell title={t("Create Population")} onClose={onCancel}>
       <label className="gl-modal-field">
         {t("Population name:")}
         <input autoFocus value={name} onChange={(e) => setName(e.target.value)} />
@@ -1383,7 +1485,7 @@ export function CreatePopModal({
           ))}
         </select>
       </label>
-      <div className="gl-modal-field" style={{ gap: 6 }}>
+      <div className="gl-modal-field gl-modal-grow" style={{ gap: 6 }}>
         {t("Gate references (AND logic; tick NOT to exclude):")}
         <div className="gl-gateref-list">
           {ids.length === 0 && <em style={{ color: "var(--muted)" }}>{t("No gates yet.")}</em>}
@@ -1410,7 +1512,7 @@ export function CreatePopModal({
                       }
                     }}
                   />
-                  <span className="gate-color-swatch" style={{ background: g.color, width: 10, height: 10 }} />
+                  {gateSwatch(g.color) && <span className="gate-color-swatch" style={{ background: gateSwatch(g.color)!, width: 10, height: 10 }} />}
                   <span>{g.name}</span>
                 </label>
                 <label

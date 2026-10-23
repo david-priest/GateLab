@@ -10,9 +10,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const remembered = vi.hoisted(() => new Map<string, FileSystemFileHandle>());
 
+const plotHarness = vi.hoisted(() => ({ props: null as Record<string, any> | null }));
 vi.mock("./plots/GatingPlot", () => ({
   DEFAULT_GATING_FONT_SIZES: { tick: 9, axis: 12, title: 12, gate: 10 },
-  GatingPlot: () => <div data-testid="gating-plot" />,
+  GatingPlot: (props: Record<string, any>) => { plotHarness.props = props; return <div data-testid="gating-plot" />; },
 }));
 vi.mock("./engine/workspaceHistory", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./engine/workspaceHistory")>();
@@ -39,6 +40,9 @@ import { extractFcsDataSet, parseFcs } from "./engine/fcs";
 import { exportFlowJoWorkspace } from "./engine/flowjoExport";
 import { linkChildToParent, newGateRef, newPopulation, newRootPopulation, type Gate, type PopulationMap } from "./engine/models";
 import { Sample } from "./engine/sample";
+
+/** What the page says, the status line's whole text (its tooltip) included. */
+const shown = (root: ParentNode): string => `${root.textContent ?? ""} ${root.querySelector(".gl-status-line")?.getAttribute("title") ?? ""}`;
 
 let root: Root;
 let host: HTMLDivElement;
@@ -167,7 +171,7 @@ async function settle(): Promise<void> {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
 }
 const button = (label: string) =>
-  [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label);
+  [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")].find((b) => b.textContent?.trim() === label);
 async function click(label: string): Promise<void> {
   const target = button(label);
   if (!target) throw new Error(`No button "${label}"`);
@@ -188,11 +192,7 @@ async function countsBySample(names: readonly string[] = PLATE_SAMPLES): Promise
     if (!row) throw new Error(`No sample row for ${name}`);
     await act(async () => { row.click(); });
     await settle();
-    const own = host.querySelector<HTMLButtonElement>(".population-tree-edit-file");
-    if (own && !own.disabled && own.getAttribute("aria-pressed") !== "true") {
-      await act(async () => { own.click(); });
-      await settle();
-    }
+    // The population tree counts the viewed file under the tree it is gated under, its own copy included.
     out[name] = /R1\+(\d+)\(/.exec(gateRow() ?? "")?.[1] ?? "none";
   }
   return out;
@@ -210,7 +210,7 @@ const GATES = `<?xml version="1.0" encoding="UTF-8"?>
 </gating:Gating-ML>`;
 
 async function importXml(name: string, text: string): Promise<void> {
-  const input = host.querySelector<HTMLInputElement>('input[accept=".xml,.wsp,.cef"]')!;
+  const input = host.querySelector<HTMLInputElement>('input[accept=".xml,.wsp,.flowjo,.cef"]')!;
   Object.defineProperty(input, "files", { configurable: true, value: [fileOf(name, text)] });
   await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
   await settle();
@@ -223,7 +223,7 @@ async function openPlateAndGate(): Promise<void> {
   const plate = fileHandle("plate.fcs", plateBytes());
   stubPickers(() => [plate]);
   act(() => root.render(<App />));
-  await click("+ Files…");
+  await click("Add files…");
   expect(host.textContent).toContain("plate.fcs holds 2 data sets and opened as 2 samples");
   await importXml("gates.xml", GATES);
   expect(await countsBySample()).toEqual(EXPECTED);
@@ -256,9 +256,85 @@ describe("data-set samples through a saved workspace", () => {
     rerender();
     remembered.clear();
     await openSaved(bundle);
-    expect(host.textContent).toContain("2 samples");
+    expect(shown(host)).toContain("2 samples");
     for (const name of PLATE_SAMPLES) expect(host.textContent).toContain(name);
     expect(await countsBySample()).toEqual(EXPECTED);
+  });
+
+  // The switch is stored on the file's copy, not read from its coordinates: on with no drag yet, it
+  // must come back on, and a dragged gate must come back with its own count.
+  it("keeps each gate's tailoring switch through a saved and reopened workspace, dragged or not", async () => {
+    await openPlateAndGate();
+    const [a01, a02] = PLATE_SAMPLES;
+    const view = async (name: string) => {
+      await act(async () => { [...host.querySelectorAll<HTMLElement>(".gl-sample-row")].find((r) => r.textContent?.includes(name))!.click(); });
+      await settle();
+    };
+    const r1Switch = () => [...host.querySelectorAll<HTMLElement>(".gate-card")].find((c) => c.textContent?.startsWith("R1"))!.querySelector<HTMLInputElement>(".gate-tailor-switch input")!;
+    await view(a01);
+    act(() => r1Switch().click()); await settle();
+    expect(r1Switch().checked).toBe(true);
+    await view(a02);
+    act(() => r1Switch().click()); await settle();
+    const r1 = plotHarness.props!.payload.gates.find((g: { name: string }) => g.name === "R1");
+    act(() => plotHarness.props!.onGateEdit({ gate_id: r1.gate_id, vertices: [[0, 0], [1, 1]] }));
+    await settle();
+    const before = await countsBySample();
+    expect(before[a01]).toBe(EXPECTED[a01 as keyof typeof EXPECTED]);
+    expect(before[a02]).not.toBe(EXPECTED[a02 as keyof typeof EXPECTED]);
+    expect(host.querySelector(".gl-sample-tree-summary")?.getAttribute("title") ?? undefined).toBe("2 files · 2 tailored");
+
+    await click("Save Portable Copy…");
+    const bundle = [...saved.keys()].find((k) => k.endsWith("-bundle.gatelab"))!;
+    rerender();
+    remembered.clear();
+    await openSaved(bundle);
+    expect(await countsBySample()).toEqual(before);
+    expect(host.querySelector(".gl-sample-tree-summary")?.getAttribute("title") ?? undefined).toBe("2 files · 2 tailored");
+    await view(a01);
+    expect(r1Switch().checked).toBe(true);
+    await view(a02);
+    expect(r1Switch().checked).toBe(true);
+  });
+
+  it("keeps the groups' order and chosen colours through a saved and reopened workspace", async () => {
+    await openPlateAndGate();
+    const [a01, a02] = PLATE_SAMPLES;
+    const rowOf = (name: string) => [...host.querySelectorAll<HTMLElement>(".gl-sample-row")].find((r) => r.textContent?.includes(name))!;
+    const fromMenu = async (name: string, label: string) => {
+      act(() => rowOf(name).dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })));
+      await settle();
+      act(() => [...document.querySelectorAll<HTMLButtonElement>(".gl-context-menu [role='menuitem']")].find((b) => b.textContent === label)!.click());
+      await settle();
+    };
+    const newGroup = async (name: string, groupName: string) => {
+      await act(async () => { rowOf(name).click(); }); await settle();
+      await fromMenu(name, "New group from this file…");
+      const input = host.querySelector<HTMLInputElement>(".gl-modal input")!;
+      act(() => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, groupName); input.dispatchEvent(new Event("input", { bubbles: true })); });
+      await click("Create");
+    };
+    await newGroup(a01, "B1");
+    await newGroup(a02, "B2");
+    // B2 gets a colour of its own, then goes first.
+    act(() => host.querySelector<HTMLButtonElement>('.gl-sample-group-section[aria-label="B2"] .gl-group-menu-colour')!.click()); await settle();
+    act(() => host.querySelector<HTMLButtonElement>('.gl-group-colour-swatch[aria-label="#00838f"]')!.click()); await settle();
+    const headers = () => [...host.querySelectorAll<HTMLElement>(".gl-sample-group-section")].filter((s) => s.getAttribute("aria-label") !== "No group")
+      .map((s) => [s.getAttribute("aria-label"), s.style.getPropertyValue("--gl-group-colour")]);
+    const b1Colour = headers()[0][1];
+    const drag = (el: Element, type: string) => act(() => { el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true })); });
+    drag(host.querySelector('.gl-sample-group-section[aria-label="B2"] .gl-sample-group-headrow')!, "dragstart");
+    drag(host.querySelector('.gl-sample-group-section[aria-label="B1"]')!, "dragover");
+    drag(host.querySelector('.gl-sample-group-section[aria-label="B1"]')!, "drop");
+    await settle();
+    expect(headers()).toEqual([["B2", "#00838f"], ["B1", b1Colour]]);
+
+    await click("Save Portable Copy…");
+    const bundle = [...saved.keys()].find((k) => k.endsWith("-bundle.gatelab"))!;
+    rerender();
+    remembered.clear();
+    await openSaved(bundle);
+    expect(headers()).toEqual([["B2", "#00838f"], ["B1", b1Colour]]);
   });
 
   it("reopen from a linked workspace through the remembered handle of the plate file", async () => {
@@ -328,7 +404,7 @@ async function openPlate(): Promise<void> {
   const plate = fileHandle("plate.fcs", plateBytes());
   stubPickers(() => [plate]);
   act(() => root.render(<App />));
-  await click("+ Files…");
+  await click("Add files…");
   expect(host.textContent).toContain("plate.fcs holds 2 data sets and opened as 2 samples");
 }
 
@@ -409,7 +485,7 @@ describe("a FlowJo .wsp strategy on data-set samples", () => {
     await settle();
   };
   const importWsp = async (wsp: string) => {
-    const input = host.querySelector<HTMLInputElement>('input[accept=".xml,.wsp,.cef"]')!;
+    const input = host.querySelector<HTMLInputElement>('input[accept=".xml,.wsp,.flowjo,.cef"]')!;
     Object.defineProperty(input, "files", { configurable: true, value: [fileOf("plate.wsp", wsp)] });
     await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
     await settle();
@@ -505,7 +581,7 @@ describe("a FlowJo .wsp strategy on data-set samples", () => {
     ], "acq_run1.fcs"));
     stubPickers(() => [plate]);
     act(() => root.render(<App />));
-    await click("+ Files…");
+    await click("Add files…");
     await importWsp(wspOf(wspSample(1, 3, rectPop(50, 150, 3), "acq_run1.fcs")));
     expect(host.textContent).toContain("Choose a sample from the workspace");
     expect(host.textContent).toMatch(/1 sample in this workspace could be plate \(data set \d of 2\)\.fcs: recorded under plate\.fcs with its 3 events, as plate \(data set \d of 2\)\.fcs has/);
@@ -557,7 +633,7 @@ describe("a FlowJo .wsp strategy on data-set samples", () => {
   it("imports onto a data set the sample of its count, where every data set carries its well label", async () => {
     stubPickers(() => [tubePlate()]);
     act(() => root.render(<App />));
-    await click("+ Files…");
+    await click("Add files…");
     // Opened last, the second data set is viewed; the sample of its three events is its own.
     await importWsp(tubeWsp);
     expect(host.textContent).not.toContain("Choose a sample from the workspace");
@@ -578,9 +654,9 @@ describe("a FlowJo .wsp strategy on data-set samples", () => {
       [[[300, 310], [301, 311], [302, 312]], null],
     ]))]);
     act(() => root.render(<App />));
-    await click("+ Files…");
+    await click("Add files…");
     // The third data set is removed; the first, with its count, is viewed.
-    await click("Manage…");
+    await click("Manage files…");
     await act(async () => { host.querySelector<HTMLInputElement>(`input[aria-label="Select ${three[2]} for management"]`)!.click(); });
     await click("Remove selected…");
     await click("Remove");
@@ -597,7 +673,7 @@ describe("a FlowJo .wsp strategy on data-set samples", () => {
     const plate = tiedPlate();
     stubPickers(() => [plate]);
     act(() => root.render(<I18nProvider><App /></I18nProvider>));
-    await click("+ Files…");
+    await click("Add files…");
     stubPickers(() => [fileHandle("plate.wsp", new TextEncoder().encode(tiedWsp))]);
     await click("Open Workspace…");
     expect(host.textContent).toContain("Open FlowJo workspace");

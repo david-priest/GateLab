@@ -116,7 +116,7 @@ async function feed(selector: string, file: File | File[]): Promise<void> {
   await settle(); await settle(); await settle();
 }
 const button = (label: string, within: ParentNode = host) =>
-  [...within.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label);
+  [...within.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")].find((b) => b.textContent?.trim() === label);
 const openDialog = () => host.querySelector<HTMLElement>('[aria-label="Open a FlowJo workspace"]');
 const popRows = () => [...host.querySelectorAll(".pop-row")].map((r) => r.textContent?.replace(/\s+/g, " ").trim() ?? "");
 const fileRow = (name: string) => [...host.querySelectorAll<HTMLElement>(".gl-sample-row")].find((row) => row.textContent?.includes(name))!;
@@ -160,7 +160,7 @@ async function drawRectangle(name: string, vertices: [number, number][], x: stri
 }
 /** Open a .wsp with Open Workspace…, supply its FCS, and press the open dialog's Import. */
 async function openWsp(wsp: string, fcs: [string, number][]): Promise<void> {
-  await feed('input[accept=".gatelab,.wsp,.cef"]', fileOf("strategy.wsp", wsp));
+  await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', fileOf("strategy.wsp", wsp));
   expect(openDialog()).not.toBeNull();
   await feed('input[data-role="flowjo-workspace-fcs"]', fcs.map(([name, byte]) => fileOf(name, Uint8Array.from([byte]))));
   await act(async () => { button("Import", openDialog()!)!.click(); });
@@ -198,7 +198,7 @@ describe("opening a FlowJo workspace over a workspace whose tree differs", () =>
     act(() => root.render(<App />));
     await loadFcs("C1.fcs", 1);
     await drawRectangle("DNA", [[0, 0], [3, 3]], "Ir191Di", "Pt195Di");
-    expect(popRows().map((row) => row.slice(0, 3))).toEqual(["▾Al", "DNA"]);
+    expect(popRows().map((row) => row.slice(0, 3))).toEqual(["All", "DNA"]);
 
     await openWsp(WSP, [["D2.fcs", 2]]);
     expect(modalTitle()).toBe("Import FlowJo workspace");
@@ -215,11 +215,11 @@ describe("opening a FlowJo workspace over a workspace whose tree differs", () =>
     await confirmImport();
     expect(host.querySelector(".gl-modal")).toBeNull();
     expect(host.textContent).toContain("current strategy replaced");
-    expect(popRows().map((row) => row.slice(0, 5))).toEqual(["▾All ", "Cells"]);
+    expect(popRows().map((row) => row.slice(0, 5))).toEqual(["All E", "Cells"]);
 
     // The same FlowJo tree again, from the Import menu onto the loaded files: its structure is the
     // workspace's now, and Merge stays the default and the recommendation.
-    await feed('input[accept=".xml,.wsp,.cef"]', fileOf("strategy.wsp", WSP));
+    await feed('input[accept=".xml,.wsp,.flowjo,.cef"]', fileOf("strategy.wsp", WSP));
     expect(modalTitle()).toBe("Import FlowJo workspace");
     expect(target("viewed")!.disabled).toBe(false);
     expect(mode("merge")!.checked).toBe(true);
@@ -253,11 +253,9 @@ describe("Gating-ML export of a gate drawn after an import, before any save", ()
     act(() => root.render(<App />));
     await openWsp(PER_FILE, [["D2.fcs", 2], ["D3.fcs", 3]]);
     if (host.querySelector(".gl-modal")) await confirmImport();
-    expect(host.querySelector(".population-tree-hierarchy-count")?.textContent).toBe("2 files · 1 tailored");
+    expect(host.querySelector(".gl-sample-tree-summary")?.getAttribute("title") ?? undefined).toBe("2 files · 1 tailored");
+    // Drawn while D3, which tailors a gate, is viewed: a new gate goes into the tree, for every file.
     await view("D3.fcs");
-    act(() => host.querySelector<HTMLButtonElement>(".population-tree-edit-file")!.click());
-    await settle();
-    expect(host.querySelector(".population-tree-edit-file")!.getAttribute("aria-pressed")).toBe("true");
     await drawRectangle("Lymph", [[4.9, 4.9], [5.9, 5.9]], "FSC-A", "SSC-A");
     for (const viewed of ["D3.fcs", "D2.fcs"]) {
       await view(viewed);
@@ -267,12 +265,9 @@ describe("Gating-ML export of a gate drawn after an import, before any save", ()
     }
   });
 
-  // A GateLab quadrant gate has no Gating-ML element, and the export leaves out every population
-  // that references one, with everything beneath it (its dialog names them "dependent
-  // populations"). A gate drawn beneath such a population is still written; only its population
-  // is left out. So a quadrant above the rectangle explains a missing population, not a missing
-  // RectangleGate.
-  it("writes a rectangle drawn beneath a quadrant population, and leaves out only its population", async () => {
+  // Straight quadrants become rectangles in standard GML and explicit polygons in Cytobank.
+  // A newly drawn descendant must keep its geometry and population beneath that branch.
+  it("writes a rectangle drawn beneath a straight quadrant and preserves both populations", async () => {
     act(() => root.render(<App />));
     await openWsp(WSP, [["D2.fcs", 2]]);
     if (host.querySelector(".gl-modal")) await confirmImport();
@@ -283,11 +278,11 @@ describe("Gating-ML export of a gate drawn after an import, before any save", ()
     expect(popRows().some((row) => row.startsWith("Lymph"))).toBe(true);
     for (const format of ["standard", "cytobank"] as const) {
       const xml = await exportGatingMl(format);
-      expect(count(xml, "PolygonGate")).toBe(1);
-      expect(count(xml, "RectangleGate")).toBe(1);
+      expect(count(xml, "PolygonGate")).toBe(format === "cytobank" ? 5 : 1);
+      expect(count(xml, "RectangleGate")).toBe(format === "cytobank" ? 1 : 5);
       expect(namesIn(xml)).toEqual(expect.arrayContaining(["Cells", "Lymph gate"]));
-      expect(namesIn(xml)).not.toContain("Lymph");
-      expect(namesIn(xml)).not.toContain("DP");
+      expect(namesIn(xml)).toContain("Lymph");
+      expect(namesIn(xml)).toContain("DP");
     }
   });
 });

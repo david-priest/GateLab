@@ -1,8 +1,11 @@
 // ScalesTab.tsx — per-channel display axis ranges for the active file or locked comparison frame.
-// Compensation has its own tab so transforms and assay-layer changes stay separate.
+// The ranges are a file's own unless the scale lock is on; the display transform is the channel's,
+// the same in every file. Compensation has its own tab so transforms and assay-layer changes stay
+// separate.
 
 import type { Sample } from "../engine/sample";
 import { useI18n } from "./i18n";
+import { TabIntro, TabIntroToggle, useTabIntro } from "./TabIntro";
 
 interface Props {
   sample: Sample;
@@ -13,20 +16,22 @@ interface Props {
 
 export function ScalesTab({ sample, globalScales, onSetGlobalScale, lockedBetweenFiles }: Props) {
   const { t } = useI18n();
+  const intro = useTabIntro("scales");
   return (
     <div className="gl-tab-panel gl-tab-fill">
       <h2 className="gl-tab-title">{t("Scales")}</h2>
 
       <section className="gl-scales-section gl-scales-section-grow">
         <div className="gl-section-header">
-          {t(lockedBetweenFiles ? "Locked Channel Scales" : "Per-file Channel Scales")}
+          {t(lockedBetweenFiles ? "Axis ranges · shared by all files" : "Axis ranges · this file")}
+          <TabIntroToggle intro={intro} />
         </div>
-        <p className="gl-hint" style={{ marginBottom: 8 }}>
+        <TabIntro intro={intro} className="gl-scales-intro">
           {t(lockedBetweenFiles
-            ? "These ranges are shared while the scale lock is on. Switching files keeps the same frame for direct comparison. Min/Max are display (transformed) units; blank means auto. Pan/zoom on the Gating tab writes here too."
-            : "These ranges belong to the selected file. Switching files loads that file's own fitted or edited frame. Min/Max are display (transformed) units; blank means auto. Pan/zoom on the Gating tab writes here too.")}
-        </p>
-        <div className="gl-stats-scroll gl-grow-scroll" style={{ maxWidth: 460 }}>
+            ? "The scale lock is on, so these ranges are shared by every file and switching files keeps the same frame. The display transform (linear, logicle, arcsinh) belongs to the channel and is the same in every file whether or not the lock is on. Min and Max are in display (transformed) units; blank means automatic. Panning and zooming on the Gating tab write here too."
+            : "Each file keeps its own axis ranges: switching files loads that file's fitted or edited range. The display transform (linear, logicle, arcsinh) belongs to the channel and is the same in every file. Min and Max are in display (transformed) units; blank means automatic. Panning and zooming on the Gating tab write here too.")}
+        </TabIntro>
+        <div className="gl-stats-scroll gl-grow-scroll" style={{ maxWidth: 560 }}>
           <table className="gl-scales-table">
             <thead>
               <tr>

@@ -31,16 +31,23 @@ const FOLDER = "EXPERIMENT_FOLDER_1";
 const drive = new FakeDrive();
 const picker = new FakePicker();
 const auth = fakeAuth();
+/** The Drive autosave's wait: an hour, so it never fires, except in the test of it. */
+let autosaveMs = 3600_000;
 vi.mock("./drive", async () => {
   const actual = await vi.importActual<typeof import("./drive")>("./drive");
   return {
     ...actual,
+    get DRIVE_AUTOSAVE_MS() { return autosaveMs; },
     readDriveConfig: () => FAKE_CONFIG,
     createDriveSession: (config: typeof FAKE_CONFIG) => actual.createDriveSession(config, { auth, api: drive, picker, writerId: "tab-1" }),
   };
 });
 
+vi.mock("./labPreload", () => ({ preloadLabChunksSoon: vi.fn() }));
+
 import App from "./App";
+import { preloadLabChunksSoon } from "./labPreload";
+import { ChunkReloadHeldError, lazyChunk } from "./ui/lazyChunk";
 import { requestPersistentWorkspaceHistory, saveWorkspaceCheckpoint } from "./engine/workspaceHistory";
 
 const gatingMl = (name: string) => `<?xml version="1.0"?>
@@ -93,7 +100,7 @@ async function clickText(text: RegExp): Promise<void> {
   await settle();
 }
 async function importGates(name: string): Promise<void> {
-  const input = host.querySelector<HTMLInputElement>('input[accept=".xml,.wsp,.cef"]')!;
+  const input = host.querySelector<HTMLInputElement>('input[accept=".xml,.wsp,.flowjo,.cef"]')!;
   const file = new File([gatingMl(name)], `${name}.xml`);
   Object.defineProperty(file, "text", { value: async () => gatingMl(name) });
   Object.defineProperty(input, "files", { configurable: true, value: [file] });
@@ -152,9 +159,11 @@ function twoDataSetFcs(): Uint8Array {
 
 describe("a lab Drive workspace", () => {
   it("opens from Drive, saves back, reopens, and refuses to write over another member's save", async () => {
+    // An experiment folder in the lab folder, one this member chose before.
+    drive.addFolder(FOLDER, FAKE_CONFIG.rootFolderId, "Experiment 1", { reachable: true });
     const d1 = drive.addOutside(FOLDER, "D1_treated.fcs", syntheticFcs({ btim: "10:00:00" }));
     const d2 = drive.addOutside(FOLDER, "D2_control.fcs", syntheticFcs({ btim: "11:00:00" }));
-    // The folder itself was not picked, but GateLab may create a file in it.
+    // GateLab may create a file in it.
     drive.writableFolders.add(FOLDER);
 
     act(() => root.render(<App />));
@@ -330,4 +339,210 @@ describe("a lab Drive workspace", () => {
     expect(host.textContent).toContain("plate (data set 2 of 2, A02).fcs");
     expect(host.textContent).toContain("CD4_positive");
   }, 60_000);
+
+  it("asks to reconnect once the sign-in has run out, autosaves without asking, and asks before the page is left unsaved", async () => {
+    const folder = drive.addFolder("EXPERIMENT_FOLDER_4", FAKE_CONFIG.rootFolderId, "Experiment 4", { reachable: true });
+    auth.signedIn = true;
+    auth.expired = false;
+    const d1 = drive.addOutside(folder, "D1_treated.fcs", syntheticFcs({ btim: "10:00:00" }));
+    const d2 = drive.addOutside(folder, "D2_control.fcs", syntheticFcs({ btim: "11:00:00" }));
+    drive.writableFolders.add(folder);
+    const leave = () => {
+      const event = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    const gatesIn = (id: string) => Object.values((JSON.parse(drive.text(id)) as { gating: { gates: Record<string, { name: string }> } }).gating.gates)
+      .map((gate) => gate.name);
+    const workspaceFile = () => drive.inFolder(folder).find((file) => file.name === "Experiment 4.gatelab")!;
+
+    act(() => root.render(<App />));
+    await until(() => host.querySelector(".gl-drive-menu") !== null, "the Lab Drive menu");
+    picker.queue.push(() => drive.pick(d1, d2));
+    await click(".gl-drive-open");
+    await until(() => document.querySelector(".gl-drive-name-ok") !== null, "the new-workspace name");
+    await typeInto(".gl-modal-field input", "Experiment 4");
+    await click(".gl-drive-name-ok");
+    await until(shows("D2_control.fcs"), "the FCS opened from Drive");
+    await importGates("CD4_positive");
+    await until(shows("CD4_positive"), "the imported gate");
+    // Unsaved changes to a Drive workspace: leaving the page asks first.
+    expect(leave()).toBe(true);
+
+    // The sign-in runs out. Save asks to reconnect, writes nothing until then, and goes on after it.
+    auth.expire();
+    await click(".gl-side-save");
+    await until(() => document.querySelector(".gl-drive-reconnect-dialog") !== null, "the reconnect prompt");
+    expect(document.body.textContent).toContain("Reconnect to lab Drive");
+    expect(document.body.textContent).toContain("Experiment 4.gatelab stays as it is, with its unsaved changes");
+    expect(drive.byName("Experiment 4.gatelab")).toEqual([]);
+    expect(host.textContent).toContain("CD4_positive");
+    await click(".gl-drive-reconnect-ok");
+    await until(shows("Saved to the lab Drive · Experiment 4/Experiment 4.gatelab"), "the save after the reconnect");
+    expect(auth.reconnects).toBe(1);
+    expect(document.querySelector(".gl-drive-reconnect-dialog")).toBeNull();
+    expect(gatesIn(workspaceFile().id)).toEqual(["CD4_positive"]);
+    // An explicit save keeps its revision forever.
+    expect(drive.kept).toContain(workspaceFile().headRevisionId);
+    expect(leave()).toBe(false);
+
+    // Autosave: a change is written back once the wait is over, through the revision check, and
+    // its revision is not kept forever.
+    autosaveMs = 300;
+    await importGates("CD8_positive");
+    await until(shows("Autosaved to the lab Drive · Experiment 4/Experiment 4.gatelab"), "the autosave");
+    expect(gatesIn(workspaceFile().id)).toEqual(["CD8_positive"]);
+    expect(drive.kept).not.toContain(workspaceFile().headRevisionId);
+    expect(leave()).toBe(false);
+
+    // Another member saves: the autosave stops with a line in the status bar, asks nothing, and
+    // writes nothing over theirs.
+    const theirs = drive.text(workspaceFile().id);
+    drive.externalWrite(workspaceFile().id, new TextEncoder().encode(theirs));
+    await importGates("CD19_positive");
+    await until(shows("Autosave to the lab Drive stopped · Member Two"), "the autosave stopped by the conflict");
+    expect(document.querySelector(".gl-modal")).toBeNull();
+    expect(drive.text(workspaceFile().id)).toBe(theirs);
+    expect(host.querySelector(".gl-drive-autosave-note")?.textContent).toContain("Autosave to the lab Drive stopped");
+    expect(leave()).toBe(true);
+
+    // Saved as a copy, the autosave goes on with the copy; then the sign-in runs out, and it stops
+    // with a line in the status bar instead of asking.
+    await click(".gl-side-save");
+    await until(shows("Not saved: the workspace changed in the lab Drive"), "the refusal");
+    await clickText(/Save as a copy/);
+    await until(() => document.querySelector(".gl-drive-save-as-ok") !== null, "the Save As dialog");
+    await typeInto(".gl-drive-save-as .gl-modal-field input", "Experiment 4 mine");
+    await click(".gl-drive-save-as-ok");
+    await until(shows("Saved a copy to the lab Drive · Experiment 4/Experiment 4 mine.gatelab"), "the copy");
+    expect(host.querySelector(".gl-drive-autosave-note")).toBeNull();
+    auth.expire();
+    await importGates("CD56_positive");
+    await until(shows("Autosave to the lab Drive stopped · the sign-in has run out"), "the autosave stopped by the sign-in");
+    expect(document.querySelector(".gl-drive-reconnect-dialog")).toBeNull();
+    const copy = drive.inFolder(folder).find((file) => file.name === "Experiment 4 mine.gatelab")!;
+    expect(gatesIn(copy.id)).not.toContain("CD56_positive");
+
+    // Open experiment asks to reconnect too, and the picker opens once reconnected; cancelled there,
+    // the workspace open is unchanged.
+    const opened = picker.opened.length;
+    await click(".gl-drive-open");
+    await until(() => document.querySelector(".gl-drive-reconnect-dialog") !== null, "the reconnect prompt for Open");
+    expect(document.body.textContent).toContain("Open experiment goes on");
+    expect(picker.opened.length).toBe(opened);
+    await click(".gl-drive-reconnect-ok");
+    await until(() => document.querySelector(".gl-drive-discard") !== null, "the unsaved-changes question");
+    await click(".gl-drive-discard");
+    await until(() => picker.opened.length === opened + 1, "the picker");
+    await until(shows("Open experiment cancelled"), "the cancelled open");
+    expect(host.textContent).toContain("CD56_positive");
+    // The reconnect let the autosave go on: the copy is written back.
+    await until(shows("Autosaved to the lab Drive · Experiment 4/Experiment 4 mine.gatelab"), "the autosave after the reconnect");
+    expect(gatesIn(copy.id)).toContain("CD56_positive");
+    autosaveMs = 3600_000;
+  }, 60_000);
+
+  it("opens a colleague's experiment once its folder is chosen, and refuses files from outside the lab folder", async () => {
+    auth.signedIn = true;
+    auth.expired = false;
+    // Made by another member's GateLab: this member's cannot read the folder until it is chosen.
+    const folder = drive.addFolder("EXPERIMENT_FOLDER_5", FAKE_CONFIG.rootFolderId, "Experiment 5");
+    const d1 = drive.addOutside(folder, "D1_treated.fcs", syntheticFcs({ btim: "10:00:00" }));
+    // A folder of the member's own, outside the lab folder.
+    const elsewhere = drive.addFolder("OWN_FOLDER_0001", "", "Elsewhere", { reachable: true });
+    const outside = drive.addOutside(elsewhere, "D2_control.fcs", syntheticFcs({ btim: "11:00:00" }));
+
+    act(() => root.render(<App />));
+    await until(() => host.querySelector(".gl-drive-menu") !== null, "the Lab Drive menu");
+    picker.queue.push(() => drive.pick(outside));
+    await click(".gl-drive-open");
+    await until(shows("The files picked are not in the lab folder"), "the refusal");
+    expect(host.textContent).not.toContain("D2_control.fcs");
+
+    picker.queue.push(() => drive.pick(d1));
+    picker.folder = { id: folder, name: "Experiment 5", mimeType: "application/vnd.google-apps.folder" };
+    picker.onFolderPicked = (chosen) => { drive.pick(chosen.id); };
+    await click(".gl-drive-open");
+    await until(() => document.querySelector(".gl-drive-pick-folder") !== null, "the request to choose the folder");
+    expect(document.body.textContent).toContain("D1_treated.fcs");
+    await click(".gl-drive-pick-folder");
+    await until(() => document.querySelector(".gl-drive-name-ok") !== null, "the new-workspace name");
+    expect(document.querySelector<HTMLInputElement>(".gl-modal-field input")!.value).toBe("Experiment 5");
+    await click(".gl-drive-name-ok");
+    await until(shows("D1_treated.fcs"), "the FCS opened from Drive");
+  }, 30_000);
+
+  it("preloads the app's parts, and holds a chunk's reload while a Drive workspace has unsaved changes", async () => {
+    auth.signedIn = true;
+    auth.expired = false;
+    const folder = drive.addFolder("EXPERIMENT_FOLDER_6", FAKE_CONFIG.rootFolderId, "Experiment 6", { reachable: true });
+    const d1 = drive.addOutside(folder, "D1_treated.fcs", syntheticFcs({ btim: "10:00:00" }));
+    const reload = vi.fn();
+    const location = window.location;
+    Object.defineProperty(window, "location", { value: { ...location, reload }, writable: true, configurable: true });
+    try {
+      act(() => root.render(<App />));
+      await until(() => host.querySelector(".gl-drive-menu") !== null, "the Lab Drive menu");
+      await until(() => vi.mocked(preloadLabChunksSoon).mock.calls.length > 0, "the preload");
+
+      picker.queue.push(() => drive.pick(d1));
+      await click(".gl-drive-open");
+      await until(() => document.querySelector(".gl-drive-name-ok") !== null, "the new-workspace name");
+      await click(".gl-drive-name-ok");
+      await until(shows("D1_treated.fcs"), "the FCS opened from Drive");
+      await importGates("CD4_positive");
+      await until(shows("CD4_positive"), "the imported gate");
+
+      // A chunk fetched after the lab site's login lapsed fails as a stale chunk would.
+      const failing = lazyChunk("CompensationTab", async () => {
+        throw new TypeError("Failed to fetch dynamically imported module: https://lab.example.org/assets/CompensationTab-abc.js");
+      });
+      let held: unknown = null;
+      await act(async () => { held = await failing().catch((error: unknown) => error); });
+      expect(held).toBeInstanceOf(ChunkReloadHeldError);
+      expect(reload).not.toHaveBeenCalled();
+      await until(shows("Part of GateLab could not be loaded from the lab site"), "the message");
+      expect(host.textContent).toContain("CD4_positive");
+    } finally {
+      Object.defineProperty(window, "location", { value: location, writable: true, configurable: true });
+    }
+  }, 30_000);
+
+  it("saves a new experiment into a folder several folders inside the lab folder", async () => {
+    auth.signedIn = true;
+    auth.expired = false;
+    const ROOT = FAKE_CONFIG.rootFolderId;
+    drive.writableFolders.add(ROOT);
+    drive.addFolder("DAVID_FOLDER_0001", ROOT, "David");
+    drive.addFolder("TESTING_FOLDER_01", "DAVID_FOLDER_0001", "For testing");
+    const folder = "application/vnd.google-apps.folder";
+    picker.folders.push(
+      { id: "TESTING_FOLDER_01", name: "For testing", mimeType: folder },
+      { id: "DAVID_FOLDER_0001", name: "David", mimeType: folder },
+    );
+    picker.onFolderPicked = (chosen) => {
+      drive.pick(chosen.id);
+      drive.writableFolders.add(chosen.id);
+    };
+    act(() => root.render(<App />));
+    await until(() => host.querySelector(".gl-drive-menu") !== null, "the Lab Drive menu");
+    await openHere([fileOf("D1_treated.fcs", syntheticFcs({ btim: "08:30:00" }))]);
+    await until(shows("D1_treated.fcs"), "the FCS opened on this computer");
+
+    await click(".gl-drive-save-new");
+    await until(() => document.querySelector(".gl-drive-location-choose") !== null, "the location");
+    expect(document.querySelector(".gl-drive-location-path")?.textContent).toBe("Lab folder");
+    await typeInto(".gl-drive-save-as .gl-modal-field input", "Experiment 7");
+    await click(".gl-drive-location-choose");
+    await until(() => document.querySelector(".gl-drive-location-above") !== null, "the question about the folder above");
+    expect(document.body.textContent).toContain("Choose the folder that holds \"For testing\"");
+    await click(".gl-drive-location-above");
+    await until(() => document.querySelector(".gl-drive-location-path")?.textContent === "Lab folder / David / For testing", "the location chosen");
+    expect(document.body.textContent).toContain("A new folder in Lab folder / David / For testing holds the workspace");
+    await click(".gl-drive-save-as-ok");
+    await until(shows("Saved as new experiment · Experiment 7/Experiment 7.gatelab in Lab folder / David / For testing"), "the new experiment");
+    const [made] = drive.folders("TESTING_FOLDER_01", "Experiment 7");
+    expect(drive.inFolder(made.id).map((file) => file.name)).toEqual(["D1_treated.fcs", "Experiment 7.gatelab"]);
+    expect(drive.folders(ROOT, "Experiment 7")).toEqual([]);
+  }, 30_000);
 });

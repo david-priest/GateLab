@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// A FlowJo workspace GateLab writes, read back with "Evaluate gates as FlowJo does" on (the
+// A FlowJo workspace GateLab writes, read back with "Evaluate gates on the recorded grid" on (the
 // default) and off. What GateLab evaluates continuously comes back as it was, whichever answer the
 // import is given: its polygons carry GateLab's record (polygonRecord.ts), as its rectangles do.
 // What GateLab evaluates by FlowJo's rule goes back as FlowJo saved it, and the import's answer
@@ -565,7 +565,7 @@ describe("FlowJo rectangles on one channel saved on different axes, through a Fl
     for (const name of ["Wide", "Upto"]) {
       expect(differ(flowJoRule(xml, sample, name), before.get(name)!), name).toBe(0);
     }
-    expect(warnings.join(" ")).toContain(`"Wide" was saved by FlowJo on an axis this file declares differently (FSC-A: saved on a linear axis from 0 to 262144, written against the declared linear axis from 0 to 1048576, where FlowJo's clamp keeps GateLab's events)`);
+    expect(warnings.join(" ")).toContain(`"Wide" was saved on an axis this file declares differently (FSC-A: saved on a linear axis from 0 to 262144, written against the declared linear axis from 0 to 1048576, where the axis's clamp keeps GateLab's events)`);
     expect(warnings.join(" ")).not.toContain(`"Upto" was saved`);
     // Read back by FlowJo's rule, the answer the two were imported under, both give GateLab's events.
     expect(moved(before, masksByName(new Sample(wideFile()), importXml(xml, new Sample(wideFile()), { flowJoGrid: true })))).toEqual({ Wide: 0, Upto: 0 });
@@ -578,7 +578,7 @@ describe("FlowJo rectangles on one channel saved on different axes, through a Fl
     const tree = treeOf([gateOf(a, "Cells"), gateOf(b, "Upto")]);
     const { xml, warnings } = exportFlowJoWorkspace({ samples: [{ sample, fileName: "D1.fcs", ...tree }], now: new Date("2026-09-25T00:00:00Z") });
     expect(linearAxis(xml, "FSC-A")).toEqual([0, 262144]);
-    expect(warnings.join(" ")).toContain(`"Upto" was saved by FlowJo on an axis this file declares differently (FSC-A: saved on a linear axis from 0 to 1048576, written against the declared linear axis from 0 to 262144, where FlowJo moves the 3 events of this file above 500000 onto the axis's edge and counts them inside it, as GateLab does not)`);
+    expect(warnings.join(" ")).toContain(`"Upto" was saved on an axis this file declares differently (FSC-A: saved on a linear axis from 0 to 1048576, written against the declared linear axis from 0 to 262144, where the 3 events of this file above 500000 are moved onto the axis's edge and counted inside it, as GateLab does not)`);
   });
 
   // The grid polygon's axis whatever comes first in gate order. A rectangle saved on another axis
@@ -596,7 +596,7 @@ describe("FlowJo rectangles on one channel saved on different axes, through a Fl
     for (const name of ["Wide", "Upto"]) {
       expect(differ(flowJoRule(xml, sample, name), before.get(name)!), name).toBe(0);
     }
-    expect(warnings.join(" ")).toContain(`"Wide" was saved by FlowJo on an axis this file declares differently (FSC-A: saved on a linear axis from 0 to 262144, written against the declared linear axis from 0 to 1048576, where FlowJo's clamp keeps GateLab's events)`);
+    expect(warnings.join(" ")).toContain(`"Wide" was saved on an axis this file declares differently (FSC-A: saved on a linear axis from 0 to 262144, written against the declared linear axis from 0 to 1048576, where the axis's clamp keeps GateLab's events)`);
     expect(warnings.join(" ")).not.toContain(`"Upto" was saved`);
     // Read back by FlowJo's rule: every gate, the polygon on its own grid included, holds GateLab's events.
     expect(moved(before, masksByName(new Sample(wideFile()), importXml(xml, new Sample(wideFile()), { flowJoGrid: true })))).toEqual({ Wide: 0, Upto: 0, Cells: 0 });

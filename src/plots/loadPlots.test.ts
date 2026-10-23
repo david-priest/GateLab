@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import cytofSrc from "../../vendor/GateLabR/inst/app/www/cytof_plot.js?raw";
 import miniSrc from "../../vendor/GateLabR/inst/app/www/mini_plot.js?raw";
-import { ELLIPSE_PIXEL_GEOMETRY_SRC, patchCytofForGateLab, patchMiniPlot, patchOverlayDrawOrder, patchPointSizes } from "./loadPlots";
+import { ELLIPSE_PIXEL_GEOMETRY_SRC, patchCytofForGateLab, patchMiniPlot, patchOverlayDrawOrder, patchPointSizes, patchPolygonDraftKeys, patchTailoredGates } from "./loadPlots";
 
 describe("GateLab cytof point sizes", () => {
   it("decodes per-point radii from the payload and draws dots and overlay points at their own size", () => {
@@ -65,6 +65,16 @@ describe("GateLab cytof interaction patches", () => {
     expect(warn).not.toHaveBeenCalled();
     expect(patched.match(/var hAng = Math\.round\(Math\.atan2\(py - hy, px - hx\) \/ \(Math\.PI \/ 4\)\) \* \(Math\.PI \/ 4\);/g) ?? []).toHaveLength(1);
     expect(patched).toContain("event.sourceEvent.shiftKey && gate.vertices.length > 1");
+    expect(() => new Function(patched)).not.toThrow();
+    expect(patchCytofForGateLab(patched)).toBe(patched);
+    warn.mockRestore();
+  });
+
+  it("clips a rectangle with an open side to the plot, and leaves closed gates unclipped", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const patched = patchCytofForGateLab(cytofSrc);
+    expect(warn).not.toHaveBeenCalled();
+    expect(patched.match(/if \(gate\.unbounded\) gg\.attr\('clip-path', 'url\(#cytof-clip\)'\);/g) ?? []).toHaveLength(1);
     expect(() => new Function(patched)).not.toThrow();
     expect(patchCytofForGateLab(patched)).toBe(patched);
     warn.mockRestore();
@@ -719,6 +729,30 @@ describe("GateLab mini-plot density patches", () => {
   });
 });
 
+describe("tailored gate patches", () => {
+  it("draws the references dashed under the gates and tags a tailored gate's label, on every return of the patch set", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const patched = patchCytofForGateLab(cytofSrc);
+    expect(warning).not.toHaveBeenCalled();
+    // The references, never reachable by the pointer, drawn before the gates so they sit under them.
+    expect(patched).toContain("(_plotData.gate_references || []).forEach(function (ref) {");
+    expect(patched).toContain("rg = gl.append('g').attr('class', 'gate-reference').style('pointer-events', 'none')");
+    expect(patched.indexOf("_plotData.gate_references")).toBeLessThan(patched.indexOf("orderedGates.forEach(function (gate) {"));
+    // The tag after a gate's label and beside a quadrant's crosshair, reporting its click.
+    expect(patched).toContain("function _tailoredMark(parent, gate, x, cy, backed)");
+    expect(patched).toContain("_tailoredMark(labelG, gate, bb.x + bb.width + 4, bb.y + bb.height / 2, false);");
+    expect(patched).toContain("bg.attr('width', bb.width + 6 + 13);");
+    expect(patched).toContain("if (gate.tailored_tag) _tailoredMark(gg, gate,");
+    expect(patched).toContain("_shinyInput('gate_tailored_tag', { gate_id: gate.gate_id, client: [event.clientX, event.clientY] });");
+    // The full set reaches it on the early return this renderer takes (it piles off-scale events
+    // itself); it patches a renderer without that too, and only once.
+    expect(cytofSrc).toContain("function _offscalePts()");
+    expect(patchTailoredGates(cytofSrc.replace("function _offscalePts()", "function _offscalePtsOld()"))).toContain("function _tailoredMark(");
+    expect(patchTailoredGates(patched)).toBe(patched);
+    warning.mockRestore();
+  });
+});
+
 describe("ellipse draw patches", () => {
   it("lands all three surgical patches in the vendored source", () => {
     const out = patchCytofForGateLab(cytofSrc);
@@ -802,5 +836,48 @@ describe("ellipse handle geometry in pixel space", () => {
     expect(out.startsWith("var _glEll = ")).toBe(true);
     expect(patchCytofForGateLab(out).split("var _glEll = ").length).toBe(2);
     expect(out).toContain("_glEll.handlePx(_ehC(zx2, zy2)");
+  });
+});
+
+describe("GateLab spider quadrants in the renderers", () => {
+  it("patches the gating plot and the small plots with no needle missed, and the result parses", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cytof = patchCytofForGateLab(cytofSrc);
+    const mini = patchMiniPlot(miniSrc);
+    expect(warn.mock.calls.filter((c) => /spider|curly|quadrant/i.test(String(c[0])))).toEqual([]);
+    // Four arms and the box, cut at the frame; end handles that slide along their edges and are
+    // pinned to the frame when the end lies past it; arms selectable along their length; labels
+    // at the payload's places, held inside the frame.
+    for (const piece of [
+      "q-arm-l", "q-spider-box", "url(#cytof-clip)", "q-spider-handle", "data-pinned",
+      "gate_quadrant_arm", "qAnchors", "if (pt.anchor) pos = [", "lg.attr('transform', 'translate(' + pos[0]",
+    ]) expect(cytof).toContain(piece);
+    expect(mini).toContain("qSpider");
+    expect(mini).toContain("quadrant_anchors");
+    expect(() => new Function(cytof)).not.toThrow();
+    expect(() => new Function(mini)).not.toThrow();
+    warn.mockRestore();
+  });
+});
+
+describe("GateLab cytof polygon draft", () => {
+  it("adds calls that cancel a polygon being drawn and take back its last vertex", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const patched = patchPolygonDraftKeys(cytofSrc);
+    expect(warn).not.toHaveBeenCalled();
+    expect(patched).toContain("function _glCancelPolygonDraft()");
+    expect(patched).toContain("function _glUndoPolygonVertex()");
+    expect(patched).toContain("        cancelPolygonDraft: _glCancelPolygonDraft,\n        undoPolygonVertex: _glUndoPolygonVertex,\n");
+    // Both act only on a polygon under way, and redraw from the renderer's own preview.
+    expect(patched.match(/if \(_mode !== 'draw-poly' \|\| _polyVerts\.length === 0\) return false;/g) ?? []).toHaveLength(2);
+    expect(patched).toContain("_polyVerts.pop();");
+    // Idempotent, part of the full patch set, and the full set still parses.
+    expect(patchPolygonDraftKeys(patched)).toBe(patched);
+    const full = patchCytofForGateLab(cytofSrc);
+    expect(full).toContain("undoPolygonVertex: _glUndoPolygonVertex,");
+    expect(full).toContain("closeGateGaps: _closeGateGaps");
+    expect(() => new Function(full)).not.toThrow();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

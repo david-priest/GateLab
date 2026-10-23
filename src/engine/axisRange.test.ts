@@ -40,6 +40,21 @@ describe("robustAxisRange", () => {
 });
 
 describe("includePlotGatesInAxisRange", () => {
+  it("reaches a spider quadrant's arm ends, where its handles are", () => {
+    const spider = {
+      gate_type: "quadrant", center: [5, 5],
+      arms: { spider: true, h: [[5, 5], [14, 6]], v: [[5, 5], [4, 12]], l: [[5, 5], [-3, 5]], d: [[5, 5], [6, -2]] },
+    };
+    const [xlo, xhi] = includePlotGatesInAxisRange([0, 10], [spider], "x");
+    const [ylo, yhi] = includePlotGatesInAxisRange([0, 10], [spider], "y");
+    expect(xlo).toBeLessThan(-3);
+    expect(xhi).toBeGreaterThan(14);
+    expect(ylo).toBeLessThan(-2);
+    expect(yhi).toBeGreaterThan(12);
+    // A curly quadrant's arms run to the plot's edge already; they do not move it.
+    expect(includePlotGatesInAxisRange([0, 10], [{ ...spider, arms: { ...spider.arms, spider: undefined } }], "x")).toEqual([0, 10]);
+  });
+
   it("leaves an auto range unchanged when all gate geometry is already visible", () => {
     const range: [number, number] = [0, 10];
     expect(includePlotGatesInAxisRange(range, [{

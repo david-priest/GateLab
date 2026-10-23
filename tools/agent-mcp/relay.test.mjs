@@ -106,7 +106,7 @@ describe("the MCP server", () => {
       await until(2);
       expect(lines[0]).toMatchObject({ id: 1, result: { protocolVersion: "2025-03-26", serverInfo: { name: "gatelab" }, instructions: "hi", capabilities: { tools: {} } } });
       const names = lines[1].result.tools.map((tool) => tool.name);
-      expect(names).toEqual(["gatelab_guide", "gatelab_status", "gatelab_describe", "gatelab_distribution", "gatelab_stats", "gatelab_preview", "gatelab_apply", "gatelab_view", "gatelab_render", "gatelab_wait_for_change", "gatelab_reload", "gatelab_export"]);
+      expect(names).toEqual(["gatelab_fit_start", "gatelab_fit_candidate", "gatelab_fit_finish", "gatelab_fit_cancel", "gatelab_guide", "gatelab_status", "gatelab_describe", "gatelab_context", "gatelab_evaluate", "gatelab_distribution", "gatelab_stats", "gatelab_preview", "gatelab_apply", "gatelab_view", "gatelab_render", "gatelab_wait_for_change", "gatelab_reload", "gatelab_export"]);
       expect(lines[1].result.tools.every((tool) => tool.inputSchema.type === "object" && tool.description.length > 40)).toBe(true);
       // Status before a tab: not connected, with the address to give the user.
       send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "gatelab_status", arguments: {} } });
@@ -147,6 +147,38 @@ describe("the MCP server", () => {
       expect(byId[8].result).toEqual({});
       tab.close();
     } finally {
+      await relay.close();
+    }
+  });
+});
+
+describe("gatelab_view on the Strategy tab", () => {
+  it("passes the selection through, and refuses a core that answers on the Gating tab", async () => {
+    const relay = await startRelay({ port: 0, writer: "claude" });
+    let strategyCore = true;
+    const tab = fakeTab(relay.url, {
+      answer: (ws, message) => ws.send(JSON.stringify({ kind: "response", id: message.id, result: strategyCore
+        ? { tab: "strategy", strategy: { mode: "multi", populationIds: message.params.strategy.populationIds, fullPath: false }, asked: message.params }
+        // An older core ignores strategy and puts the Gating plot up.
+        : { tab: "gating", populationId: "P1" } })),
+    });
+    try {
+      await tab.open;
+      await relay.waitForTab(2000);
+      const view = gatelabTools(relay).find((tool) => tool.name === "gatelab_view");
+      const params = { strategy: { populationIds: ["P1", "P2"] } };
+      const ok = await view.run(params);
+      expect(ok.isError).toBeUndefined();
+      expect(JSON.parse(ok.content[0].text)).toMatchObject({ tab: "strategy", strategy: { populationIds: ["P1", "P2"] }, asked: params });
+      strategyCore = false;
+      const old = await view.run(params);
+      expect(old.isError).toBe(true);
+      expect(old.content[0].text).toContain("predates");
+      expect((await view.run({ tab: "strategy" })).isError).toBe(true);
+      // Without the Strategy tab the reply is passed on as before.
+      expect((await view.run({ populationId: "P1" })).isError).toBeUndefined();
+    } finally {
+      tab.close();
       await relay.close();
     }
   });

@@ -150,7 +150,17 @@ async function settle(): Promise<void> { await act(async () => { await new Promi
 const button = (label: string) => [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim().startsWith(label))!;
 const fileRow = (name: string) => [...container.querySelectorAll<HTMLElement>(".gl-sample-row")].find((r) => r.textContent?.includes(name))!;
 async function view(name: string) { act(() => fileRow(name).dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }))); await settle(); }
-async function edit(mode: "tree" | "file") { act(() => container.querySelector<HTMLButtonElement>(`.population-tree-edit-${mode}`)!.click()); await settle(); }
+/** Switches on, for the viewed file, the tailoring of the gates named (the first gate when none are): each row's switch. */
+async function switchOn(...names: string[]) {
+  const cards = () => [...container.querySelectorAll<HTMLElement>(".gate-card")];
+  const wanted = names.length ? cards().filter((c) => names.some((n) => c.textContent?.startsWith(n))) : cards().slice(0, 1);
+  if (!wanted.length) throw new Error(`No gate rows for ${names.join(", ") || "the first gate"}`);
+  for (const card of wanted) {
+    const input = card.querySelector<HTMLInputElement>(".gate-tailor-switch input")!;
+    if (!input.checked) act(() => input.click());
+    await settle();
+  }
+}
 async function saveToSce() { act(() => button("Save to SCE").click()); await settle(); }
 
 /** Each hierarchy's "CD3 pos" as R receives it: sample id → membership bits, plus the gate names. */
@@ -174,22 +184,21 @@ describe("SCE memberships under per-file trees", () => {
     await settle();
     expect(container.textContent).toContain("CD3 pos");
 
-    // D2 tailors the tree's gate: its own copy becomes live while it is viewed in "this file only".
+    // D2 tailors the tree's gate (its switch on, then a drag): its own copy holds it; the tree stays live.
     await view("D2");
-    await edit("file");
+    await switchOn();
     const gateId = plotHarness.props!.payload.gates[0].gate_id;
     act(() => plotHarness.props!.onGateEdit({ gate_id: gateId, vertices: TAILORED_GATE }));
     await settle();
     expect(fileRow("D2").querySelector(".gl-sample-tailored")).not.toBeNull();
 
-    // Saved with D2's copy live and the tree parked.
+    // Saved while D2 is viewed under its own copy.
     await saveToSce();
-    const copyLive = writes.filter((w) => w.reason === "explicit").at(-1)!.memberships!;
-    expect(copyLive.hierarchies).toHaveLength(2);
-    expect(positives(copyLive)).toEqual({ live: EVERY_SAMPLE_UNDER_ITS_OWN_TREE, parked: EVERY_SAMPLE_UNDER_ITS_OWN_TREE });
+    const viewedSave = writes.filter((w) => w.reason === "explicit").at(-1)!.memberships!;
+    expect(viewedSave.hierarchies).toHaveLength(2);
+    expect(positives(viewedSave)).toEqual({ live: EVERY_SAMPLE_UNDER_ITS_OWN_TREE, parked: EVERY_SAMPLE_UNDER_ITS_OWN_TREE });
 
-    // Saved with the tree live and D2's copy parked.
-    await edit("tree");
+    // Saved again, unchanged: the tree live and D2's copy parked, as every save now is.
     await saveToSce();
     const treeLive = writes.filter((w) => w.reason === "explicit").at(-1)!.memberships!;
     expect(treeLive.hierarchies).toHaveLength(2);
@@ -206,9 +215,9 @@ describe("SCE memberships under per-file trees", () => {
     expect(Object.fromEntries(column.sampleMasks.map((m) => [m.sampleId, bitsOf(m.membershipBitsBase64, m.eventCount)])))
       .toEqual({ "sample-0": TREE_BITS, "sample-1": TAILORED_BITS });
 
-    // And from D2's copy, live again: D1's column comes from the tree.
+    // And again with D2 viewed: D1's column comes from the tree, D2's from its copy.
     await view("D2");
-    await edit("file");
+    // The switch stays on for D2: nothing to choose before the export.
     act(() => button("Export populations to colData").click());
     await settle();
     act(() => [...container.querySelectorAll<HTMLButtonElement>(".gl-sce-coldata-toolbar button")].find((b) => b.textContent === "All")!.click());

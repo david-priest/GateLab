@@ -4,6 +4,7 @@
 
 import { useState } from "react";
 import { useI18n } from "./i18n";
+import { ModalEscape } from "./useModalEscape";
 
 export type HierarchyModalMode = "new" | "duplicate" | "rename" | "delete";
 
@@ -39,6 +40,7 @@ export function HierarchyModal({
   const canConfirm = mode === "delete" || (trimmed.length > 0 && !clash);
   return (
     <div className="gl-modal-backdrop">
+      <ModalEscape onClose={onCancel} />
       <div className="gl-modal" style={{ maxWidth: 460 }}>
         <div className="gl-modal-title">{title}</div>
         {mode === "delete" ? (
@@ -51,7 +53,7 @@ export function HierarchyModal({
           <>
             <div className="gl-modal-note">
               {kind === "group" && mode === "new"
-                ? t("The selected files join it. Its gates start as the tree's; edit with the group chosen to tailor them for every file in it.")
+                ? t("The selected files join it and follow the tree's gates. To tailor a gate for every file in the group, choose Tailor for the group from the gate's ⋯ menu, then drag it.")
                 : mode === "new"
                 ? t("A new hierarchy starts with only All Events and no gates of its own.")
                 : mode === "duplicate"
@@ -66,7 +68,6 @@ export function HierarchyModal({
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && canConfirm) onConfirm(trimmed);
-                  if (e.key === "Escape") onCancel();
                 }}
               />
             </label>

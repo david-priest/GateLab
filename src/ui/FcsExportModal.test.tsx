@@ -81,7 +81,7 @@ describe("FCS export source scope", () => {
     expect(host.textContent).toContain("FCS outputs to write: 1");
     expect(host.textContent).toContain("skipped: 1 (≤ 2 events)");
 
-    const review = [...host.querySelectorAll<HTMLButtonElement>("button")]
+    const review = [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")]
       .find((button) => button.textContent?.trim() === "Review export")!;
     act(() => review.click());
     expect(host.textContent).toContain("Confirm separate FCS export");
@@ -90,7 +90,7 @@ describe("FCS export source scope", () => {
     expect(host.textContent).toContain("donor-b.fcs");
     expect(host.textContent).toContain("Write");
 
-    const confirm = [...host.querySelectorAll<HTMLButtonElement>("button")]
+    const confirm = [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")]
       .find((button) => button.textContent?.trim() === "Export 1 FCS")!;
     act(() => confirm.click());
     expect(onExport).toHaveBeenCalledWith([rootPopulationId], "original", "split", 2);

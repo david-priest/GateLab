@@ -101,7 +101,7 @@ async function settle(): Promise<void> {
 }
 
 function buttonWithText(text: string): HTMLButtonElement | undefined {
-  return [...host.querySelectorAll<HTMLButtonElement>("button")]
+  return [...host.querySelectorAll<HTMLButtonElement>("button:not(.gl-menu-trigger)")]
     .find((button) => button.textContent?.trim() === text);
 }
 

@@ -147,7 +147,7 @@ async function bytesOf(blob: Blob): Promise<Uint8Array<ArrayBuffer>> {
 describe("a portable copy of a compensated FlowJo import", () => {
   it("reopens with the workspace's matrix the gates were drawn under, not the file's own", async () => {
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", WSP)]);
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", WSP)]);
     await feed('input[data-role="flowjo-workspace-fcs"]', [fileOf("D1.fcs", Uint8Array.from([1, 2, 3]))]);
     const dialog = host.querySelector<HTMLElement>('[aria-label="Open a FlowJo workspace"]')!;
     // The two matrices differ; the answer defaults to the workspace's.
@@ -163,7 +163,7 @@ describe("a portable copy of a compensated FlowJo import", () => {
     expect(workspace.version).toBe(4);
     expect(workspace.requiredFeatures).toContain("external-spillover");
     expect(workspace.samples[0].externalSpillover).toEqual({ label: "Matrix_A", channels: ["BV786-A", "APC-A", "PE-A"], matrix: [[1, 0.25, 0], [0.05, 1, 0], [0.1, 0, 1]] });
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy-bundle.gatelab", bundle)]);
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy-bundle.gatelab", bundle)]);
     expect(host.textContent).toContain("Opened strategy-bundle.gatelab");
     // Under the file's own matrix the gate holds one event.
     expect(countOf("CD8_positive")).toBe("2");
@@ -174,7 +174,7 @@ describe("a portable copy of a compensated FlowJo import", () => {
   // left out on its file, so the open is refused and says why.
   it("is refused on reopening where the saved matrix would leave out a parameter it compensated", async () => {
     act(() => root.render(<App />));
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("strategy.wsp", WSP)]);
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy.wsp", WSP)]);
     await feed('input[data-role="flowjo-workspace-fcs"]', [fileOf("D1.fcs", Uint8Array.from([1, 2, 3]))]);
     await clickButton("Import", host.querySelector<HTMLElement>('[aria-label="Open a FlowJo workspace"]')!);
     await clickButton("Save Portable Copy…");
@@ -182,7 +182,7 @@ describe("a portable copy of a compensated FlowJo import", () => {
     const workspace = JSON.parse(strFromU8(entries["workspace.json"]));
     workspace.samples[0].externalSpillover.channels = ["BV786-A", "APC-X", "PE-A"];
     const edited = zipSync({ ...entries, "workspace.json": strToU8(JSON.stringify(workspace)) });
-    await feed('input[accept=".gatelab,.wsp,.cef"]', [fileOf("edited-bundle.gatelab", edited as Uint8Array<ArrayBuffer>)]);
+    await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("edited-bundle.gatelab", edited as Uint8Array<ArrayBuffer>)]);
     expect(host.textContent).toContain(`was compensated with the spillover matrix "Matrix_A", saved with the workspace, which cannot be applied to it: "Matrix_A" no longer applies to this file as it did when the workspace was saved: APC-X is not a fluorescence parameter of this file.`);
     expect(host.textContent).toContain("The current workspace was not changed.");
     expect(host.textContent).not.toContain("Opened edited-bundle.gatelab");

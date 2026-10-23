@@ -1,5 +1,6 @@
 import type { FigureSpec } from "./figure";
 import { parseFlowJoGridSpec } from "./flowjoGrid";
+import { parseTransformSpec } from "./rectangleRecord";
 const record = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === "object" && !Array.isArray(v);
 const strings = (v: unknown): v is string[] =>
@@ -94,6 +95,7 @@ export function isFigureSpec(v: unknown): v is FigureSpec {
     if (!record(spec)) return false;
     if (spec.kind === "identity") return true;
     if (spec.kind === "asinh") return positive(spec.cofactor);
+    if (spec.kind === "hyperlog") return parseTransformSpec(spec) !== null;
     if (spec.kind === "logicle")
       return (
         positive(spec.T) &&

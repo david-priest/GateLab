@@ -10,6 +10,8 @@ import type { MetadataColumn } from "../engine/metadata";
 import { SAMPLE_ID_FIELD, sampleDisplayId } from "../engine/metadata";
 import { EditableMetaTable, type MetaRow } from "./EditableMetaTable";
 import { useI18n } from "./i18n";
+import { TabIntro, useTabIntro } from "./TabIntro";
+import type { WorkspaceGroup } from "../store";
 
 interface SampleRef {
   id: string;
@@ -36,14 +38,25 @@ interface Props {
   onDeletePopColumn: (name: string) => void;
   onWriteSampleMetadataToHost?: () => void;
   hostWriteBusy?: boolean;
+  /** The file groups, shown read-only beside the files; they are edited in the file list. */
+  groups?: readonly WorkspaceGroup[];
+  fileGroups?: Readonly<Record<string, string>>;
 }
 
 export function MetadataTab({
   samples, metadata, columns, onSetCell, onAddColumn, onRenameColumn, onDeleteColumn, onImport,
   populationRows, populationMetadata, populationColumns, onSetPopCell, onAddPopColumn, onRenamePopColumn, onDeletePopColumn,
-  onWriteSampleMetadataToHost, hostWriteBusy = false,
+  onWriteSampleMetadataToHost, hostWriteBusy = false, groups = [], fileGroups = {},
 }: Props) {
   const { t } = useI18n();
+  const intro = useTabIntro("metadata");
+  const groupNames = new Map(groups.map((group) => [group.id, group.name]));
+  const groupColumn = groups.length > 0
+    ? [{
+        header: t("Group"),
+        values: Object.fromEntries(samples.map((file) => [file.id, groupNames.get(fileGroups[file.id] ?? "") ?? ""])),
+      }]
+    : [];
   const sampleRows: MetaRow[] = samples.map((s) => ({
     id: s.id,
     name: s.name,
@@ -56,9 +69,9 @@ export function MetadataTab({
         <div className="gl-tab-head">
           <div>
             <h2 className="gl-tab-title">{t("SingleCellExperiment metadata")}</h2>
-            <p className="gl-hint gl-panel-hint">
+            <TabIntro intro={intro} className="gl-panel-hint">
               {t("Write the sample-level fields below across the corresponding events in SCE colData. Existing columns require explicit overwrite confirmation.")}
-            </p>
+            </TabIntro>
           </div>
           <button
             type="button"
@@ -77,6 +90,9 @@ export function MetadataTab({
         rows={sampleRows}
         columns={[{ name: SAMPLE_ID_FIELD }, ...columns.filter(column => column.name !== SAMPLE_ID_FIELD)]}
         protectedColumns={[SAMPLE_ID_FIELD]}
+        wideColumns={[SAMPLE_ID_FIELD]}
+        textColumns={groupColumn}
+        intro={intro}
         values={Object.fromEntries(samples.map(file => [file.id, { ...metadata[file.id], [SAMPLE_ID_FIELD]: sampleDisplayId(file.name, metadata[file.id]) }]))}
         onSetCell={onSetCell}
         onAddColumn={onAddColumn}
@@ -102,6 +118,8 @@ export function MetadataTab({
         onDeleteColumn={onDeletePopColumn}
         templateFilename="population_metadata_template.csv"
         templateKeyHeader="population"
+        intro={intro}
+        introToggle={false}
         hint={t("Annotate each gated population (e.g. lineage, class, note). Values are keyed to the population, so they persist through renames. Derived Parent / Count / % Parent are read-only.")}
         emptyMessage={t("Draw a gate to create populations, then annotate them here.")}
       />

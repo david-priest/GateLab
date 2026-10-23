@@ -115,7 +115,7 @@ describe("attaching cell images", () => {
     const aCvw = handleOf("D1.cvw", cvwBytes(3));
     installPickers([[fcsHandle("D1.fcs"), aCvw, fcsHandle("D2.fcs"), handleOf("D2.cvw", cvwBytes(5))]]);
     act(() => root.render(<App />));
-    await click("+ Files…");
+    await click("Add files…");
     expect(rows().map((r) => r.textContent?.includes("D1.fcs") || r.textContent?.includes("D2.fcs"))).toEqual([true, true]);
     const [d1, d2] = rows();
     expect(badgeIn(d1)).toBeTruthy();
@@ -124,7 +124,7 @@ describe("attaching cell images", () => {
     expect(host.textContent).toContain("Cell images attached to 1.");
     expect(host.textContent).toContain("D2.cvw holds 5 events but the FCS has 3");
     // The first images in the workspace show themselves: dots, coloured by whether an event has one.
-    expect(host.textContent).toContain("Display · Dots");
+    expect(host.querySelector('.gl-plot-type[data-mode="dots"]')?.getAttribute("aria-pressed")).toBe("true");
     expect(host.querySelector('button[aria-label="Colour by"]')?.textContent).toContain("Has an image");
     expect(remembered.calls.some(([key, handle]) => key === "cvw:D1.fcs" && handle === aCvw)).toBe(true);
   });
@@ -132,9 +132,9 @@ describe("attaching cell images", () => {
   it("attaches and detaches from the Import menu for the viewed sample", async () => {
     const picker = installPickers([[fcsHandle("D1.fcs")], [handleOf("D1.cvw", cvwBytes(3))]]);
     act(() => root.render(<App />));
-    await click("+ Files…");
+    await click("Add files…");
     expect(badgeIn(rows()[0])).toBeNull();
-    expect(host.textContent).toContain("Display · Pseudocolor");
+    expect(host.querySelector('.gl-plot-type[data-mode="pseudocolor"]')?.getAttribute("aria-pressed")).toBe("true");
     // Choosing any colouring under pseudocolour shows dots, where the colouring can be seen.
     await act(async () => { host.querySelector<HTMLButtonElement>('button[aria-label="Colour by"]')!.click(); });
     const list = host.querySelector<HTMLSelectElement>(".gl-searchable-select-panel select")!;
@@ -144,14 +144,14 @@ describe("attaching cell images", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
     await settle();
-    expect(host.textContent).toContain("Display · Dots");
+    expect(host.querySelector('.gl-plot-type[data-mode="dots"]')?.getAttribute("aria-pressed")).toBe("true");
     const detachBefore = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Detach cell images");
     expect(detachBefore).toBeUndefined();
     await click("Attach cell images (.cvw)…");
     expect(picker).toHaveBeenCalledTimes(2);
     expect(badgeIn(rows()[0])).toBeTruthy();
     expect(host.textContent).toContain("Cell images attached to D1.fcs: D1.cvw, 3 events.");
-    expect(host.textContent).toContain("Display · Dots");
+    expect(host.querySelector('.gl-plot-type[data-mode="dots"]')?.getAttribute("aria-pressed")).toBe("true");
     expect(host.querySelector('button[aria-label="Colour by"]')?.textContent).toContain("Has an image");
     const replace = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Replace cell images (.cvw)…");
     expect(replace).toBeTruthy();
@@ -166,7 +166,7 @@ describe("attaching cell images", () => {
     await click("Open Workspace…");
     expect(host.textContent).toContain("D1.cvw holds a file's cell images, not a workspace");
     expect(rows()).toHaveLength(0);
-    await click("+ Files…");
+    await click("Add files…");
     expect(badgeIn(rows()[0])).toBeNull();
     await click("Open Workspace…");
     expect(badgeIn(rows()[0])).toBeTruthy();
@@ -176,7 +176,7 @@ describe("attaching cell images", () => {
   it("refuses a file that is not a waveform file, by name", async () => {
     installPickers([[fcsHandle("D1.fcs")], [handleOf("notes.cvw", new TextEncoder().encode("nothing here"))]]);
     act(() => root.render(<App />));
-    await click("+ Files…");
+    await click("Add files…");
     await click("Attach cell images (.cvw)…");
     expect(badgeIn(rows()[0])).toBeNull();
     expect(host.textContent).toContain("Cell images not attached: notes.cvw: ");
@@ -196,7 +196,7 @@ describe("attaching cell images", () => {
     installPickers([[fcsHandle("D1.fcs"), handleOf("D1.cvw", cvwBytes(3, "rec-xyz"))]]);
     Object.defineProperty(window, "showSaveFilePicker", { configurable: true, value: vi.fn(async () => saveHandle) });
     act(() => root.render(<App />));
-    await click("+ Files…");
+    await click("Add files…");
     expect(badgeIn(rows()[0])).toBeTruthy();
     await click("Save Portable Copy…");
     for (let i = 0; i < 4; i++) await settle();

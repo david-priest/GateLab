@@ -77,3 +77,25 @@ export interface DriveWriter {
   /** ISO time of the revision. */
   readonly at: string | null;
 }
+
+/**
+ * What waits for a reconnect to the lab Drive once the sign-in has run out: Save, Save As a copy,
+ * Save as new experiment, Open experiment, or choosing a folder in the picker.
+ */
+export type DriveReconnectAction = "save" | "copy" | "experiment" | "open" | "folder";
+
+/** Where a new experiment folder is made: the lab folder, or a folder inside it at any depth. */
+export interface DriveLocation {
+  readonly folderId: string;
+  /** The folders' names from just inside the lab folder down to it; [] for the lab folder itself. */
+  readonly path: readonly string[];
+}
+
+/**
+ * A folder GateLab cannot read yet under drive.file, to be chosen once in the picker so that it
+ * can see where the folder is: the folder of the files picked, or the folder that holds a folder
+ * it has read.
+ */
+export type DriveFolderRequest =
+  | { readonly kind: "experiment"; readonly files: readonly string[] }
+  | { readonly kind: "above"; readonly child: string };
