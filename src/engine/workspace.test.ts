@@ -267,6 +267,8 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
       n: 3,
       colName: "division",
       coordinateBindingKey: "[\"original\",\"flow\",\"PE-A\"]",
+      populationId: "pop-lymphocytes",
+      hierarchyId: "default",
     };
     expect(validateWorkspace(bound)).toBe(true);
     expect(readWorkspaceBytes(packWorkspaceReference(bound)).ws.samples[0].division)
@@ -298,6 +300,8 @@ describe("workspace pack/read round-trip (multi-sample)", () => {
     ["a boundary count inconsistent with n", { channelKey: "PE-A", boundaries: [1], n: 2, colName: "div" }],
     ["a blank coordinate binding", { channelKey: "PE-A", boundaries: [1], n: 1, colName: "div", coordinateBindingKey: "  " }],
     ["a non-string coordinate binding", { channelKey: "PE-A", boundaries: [1], n: 1, colName: "div", coordinateBindingKey: 42 }],
+    ["a blank population", { channelKey: "PE-A", boundaries: [1], n: 1, colName: "div", populationId: " " }],
+    ["a non-string hierarchy", { channelKey: "PE-A", boundaries: [1], n: 1, colName: "div", hierarchyId: 7 }],
   ] as const)("rejects division profiles with %s", (_label, division) => {
     const corrupt = cloneWs(ws);
     (corrupt.samples[0] as unknown as Record<string, unknown>).division = division;

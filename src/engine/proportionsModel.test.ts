@@ -9,6 +9,7 @@ import type { FcsFile } from "./fcs";
 import { initialCoreState, type CoreState } from "../store";
 import {
   buildProportionsModel,
+  defaultProportionsParent,
   defaultProportionsSettings,
   proportionsCategoryColors,
   proportionsSelection,
@@ -59,6 +60,32 @@ describe("proportions settings", () => {
       plotType: "stacked",
       height: 280,
     });
+  });
+
+  it("opens on the first population with two or more children, with its children ticked", () => {
+    // All Events → Cells → Singlets → {CD4_positive, CD8_positive → {Naive, Memory}}
+    const rootPop = newRootPopulation();
+    const cells = newPopulation("Cells", [], rootPop.population_id);
+    const singlets = newPopulation("Singlets", [], cells.population_id);
+    const cd4 = newPopulation("CD4_positive", [], singlets.population_id);
+    const cd8 = newPopulation("CD8_positive", [], singlets.population_id);
+    const naive = newPopulation("Naive", [], cd8.population_id);
+    const memory = newPopulation("Memory", [], cd8.population_id);
+    rootPop.children = [cells.population_id];
+    cells.children = [singlets.population_id];
+    singlets.children = [cd4.population_id, cd8.population_id];
+    cd8.children = [naive.population_id, memory.population_id];
+    const populations = Object.fromEntries([rootPop, cells, singlets, cd4, cd8, naive, memory].map((pop) => [pop.population_id, pop]));
+    const state = { ...initialCoreState(), populations, root_population_id: rootPop.population_id, active_population_id: rootPop.population_id } as CoreState;
+    expect(defaultProportionsParent(populations, rootPop.population_id)).toBe(singlets.population_id);
+    expect(defaultProportionsSettings([], state, [])).toMatchObject({
+      parent: singlets.population_id,
+      selectedPops: [cd4.population_id, cd8.population_id],
+    });
+    // A chain with no split opens on the root, with its one child ticked.
+    singlets.children = [];
+    expect(defaultProportionsParent(populations, rootPop.population_id)).toBe(rootPop.population_id);
+    expect(defaultProportionsSettings([], state, []).selectedPops).toEqual([cells.population_id]);
   });
 
   it("keeps known fields within range over the defaults and drops the rest", () => {

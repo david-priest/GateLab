@@ -21,6 +21,21 @@ export function assignDivisionLevel(x: number, bounds: number[]): number {
   return bounds.length - count;
 }
 
+/** The code a categorical colData column holds for an event with no value (NA). */
+export const DIVISION_NA_CODE = 255;
+
+/**
+ * Per-event division codes for a categorical column: each event's level, or NA for an event
+ * outside `within` (the population the boundaries were fitted in); every event when `within` is null.
+ */
+export function divisionEventCodes(values: ArrayLike<number>, bounds: number[], within: Uint8Array | null): Uint8Array {
+  const codes = new Uint8Array(values.length);
+  for (let index = 0; index < values.length; index += 1) {
+    codes[index] = within && !within[index] ? DIVISION_NA_CODE : assignDivisionLevel(values[index], bounds);
+  }
+  return codes;
+}
+
 /** Per-level event counts (length N+1) for a value array. */
 export function divisionLevelCounts(values: ArrayLike<number>, bounds: number[]): number[] {
   const sorted = [...bounds].sort((a, b) => a - b);

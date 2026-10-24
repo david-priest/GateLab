@@ -17,7 +17,7 @@ import {
   type ProportionsSettings,
 } from "../engine/proportionsModel";
 import type { CoreState } from "../store";
-import { ProportionsChart, proportionPanelLayout } from "./ProportionsTab";
+import { divisionWithinName, ProportionsChart, proportionPanelLayout, proportionsFactorTitle, proportionsValueTitle } from "./ProportionsTab";
 
 /** The workspace's files as the Plotting model reads them: by id, file name and tree. */
 export function proportionsSampleRefs(samples: readonly FigureSample[]): ProportionsSampleRef[] {
@@ -36,13 +36,17 @@ export function proportionsBlockFrame(
   const box = pageContentBox(sheet);
   const facets = model.hasFacet ? Math.max(1, new Set(model.perSample.map((row) => row.facet ?? "")).size) : 1;
   const groups = [...new Set(model.perSample.map((row) => row.group))];
-  const labels = settings.plotType === "stacked" ? groups : model.catLevels;
-  const panel = proportionPanelLayout(settings.plotType, labels, Math.max(1, groups.length), settings.fontTick);
+  // A stacked bar is a panel per facet; a boxplot a panel per facet and category, a box per group.
+  const panels = facets * (settings.plotType === "box" ? Math.max(1, model.catLevels.length) : 1);
+  const panel = proportionPanelLayout(settings.plotType, groups, Math.max(1, groups.length), settings.fontTick);
   const legendCount = settings.plotType === "stacked" ? model.catLevels.length : groups.length;
   const columns = Math.min(4, Math.max(1, Math.ceil(legendCount / 10)));
   const rows = Math.max(1, Math.ceil(legendCount / columns));
-  const width = Math.max(360, columns * 145, facets * panel.width + (facets - 1) * 12) + 24;
-  const height = panel.height - 240 + settings.height + (settings.legend ? 22 + rows * (settings.fontLegend + 9) : 0) + 24;
+  // Boxplot panels wrap five to a row, as the chart lays them out.
+  const perRow = Math.min(panels, settings.plotType === "box" ? 5 : panels);
+  const panelRows = Math.ceil(panels / perRow);
+  const width = Math.max(360, columns * 145, perRow * panel.width + (perRow - 1) * 12) + 24;
+  const height = panelRows * (panel.height - 240 + settings.height) + (panelRows - 1) * 12 + (settings.legend ? 22 + rows * (settings.fontLegend + 9) : 0) + 24;
   return { width: Math.round(Math.min(width, box.width)), height: Math.round(Math.min(height, box.height)) };
 }
 
@@ -115,11 +119,15 @@ export function LayoutProportionsSurface({
           palette={settings.palette}
           averagePerUnit={settings.averagePerUnit}
           populations={populations}
+          valueTitle={proportionsValueTitle(settings.categoryKind, settings.categoryKind === "division" ? divisionWithinName(model.divisionWithin) : populations[settings.parent]?.parent_id ? populations[settings.parent].name : null, settings.includeUngated)}
+          groupTitle={proportionsFactorTitle(settings.groupSel)}
+          facetTitle={proportionsFactorTitle(settings.facetSel)}
           fonts={{ tick: settings.fontTick, axis: settings.fontAxis, legend: settings.fontLegend }}
           appearance={{
             height: settings.height,
             showGrid: settings.grid,
             showPoints: settings.points,
+            paired: settings.paired,
             showLegend: settings.legend,
             pointRadius: settings.pointRadius,
           }}

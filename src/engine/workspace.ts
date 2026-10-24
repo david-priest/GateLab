@@ -110,7 +110,7 @@ export interface WorkspaceSample {
   instrumentMode?: "auto" | "flow" | "cytof"; // per-sample instrument override ('auto' = detected)
   labels?: Record<string, string>; // Panel-tab channel display names, keyed by identity key
   metadata?: Record<string, string>; // per-sample metadata fields (Metadata tab)
-  division?: { channelKey: string; boundaries: number[]; n: number; colName: string; coordinateBindingKey?: string }; // Division profile
+  division?: { channelKey: string; boundaries: number[]; n: number; colName: string; coordinateBindingKey?: string; populationId?: string; hierarchyId?: string }; // Division profile; populationId/hierarchyId: where it was fitted
   /** Channels GateLab computed for the file (engine/derivedChannels.ts), by value, so reopening needs no recount. */
   derived?: DerivedChannelRecord[];
   /**
@@ -458,6 +458,8 @@ const DIVISION_PROFILE_KEYS = new Set([
   "n",
   "colName",
   "coordinateBindingKey",
+  "populationId",
+  "hierarchyId",
 ]);
 
 function validateDivisionProfile(value: unknown, sampleIndex: number): void {
@@ -495,6 +497,11 @@ function validateDivisionProfile(value: unknown, sampleIndex: number): void {
   if (value.coordinateBindingKey !== undefined &&
       (typeof value.coordinateBindingKey !== "string" || value.coordinateBindingKey.trim().length === 0)) {
     invalidWorkspace(`${label} has an invalid coordinateBindingKey.`);
+  }
+  for (const key of ["populationId", "hierarchyId"] as const) {
+    if (value[key] !== undefined && (typeof value[key] !== "string" || (value[key] as string).trim().length === 0)) {
+      invalidWorkspace(`${label} has an invalid ${key}.`);
+    }
   }
 }
 

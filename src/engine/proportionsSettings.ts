@@ -30,6 +30,8 @@ export interface ProportionsSettings {
   height: number;
   grid: boolean;
   points: boolean;
+  /** Join each replicate unit's points across the groups of a boxplot, for paired designs. */
+  paired: boolean;
   legend: boolean;
   pointRadius: number;
 }
@@ -62,6 +64,7 @@ export const BASE_PROPORTIONS_SETTINGS: ProportionsSettings = {
   height: 280,
   grid: true,
   points: true,
+  paired: false,
   legend: true,
   pointRadius: 2,
 };
@@ -81,7 +84,7 @@ export function normalizeProportionsSettings(value: unknown, defaults: Proportio
   if (candidate.categoryKind === "population" || candidate.categoryKind === "division") out.categoryKind = candidate.categoryKind;
   if (candidate.plotType === "stacked" || candidate.plotType === "box") out.plotType = candidate.plotType;
   if (OVERLAY_PALETTES.some((palette) => palette.value === candidate.palette)) out.palette = candidate.palette as PaletteName;
-  for (const key of ["includeUngated", "averagePerUnit", "grid", "points", "legend"] as const) {
+  for (const key of ["includeUngated", "averagePerUnit", "grid", "points", "paired", "legend"] as const) {
     if (typeof candidate[key] === "boolean") out[key] = candidate[key] as boolean;
   }
   for (const [key, [min, max]] of Object.entries(PROPORTIONS_NUMERIC_RANGES)) {

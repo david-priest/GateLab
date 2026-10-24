@@ -30,6 +30,23 @@
   opacity: 0.48;
   cursor: default;
 }
+/* The menus opened in the workspace, such as a panel's right-click menu, keep the look of the
+   app's other menus (styles.css .gl-menu-item): the rules above are for the workspace's buttons. */
+.gl-figure-workspace .gl-menu-item {
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  padding: 5px 10px;
+  font-size: var(--gl-font-size-secondary);
+}
+.gl-figure-workspace .gl-menu-item:hover:not(:disabled),
+.gl-figure-workspace .gl-menu-item:focus-visible {
+  background: var(--hover);
+}
+.gl-figure-workspace .gl-menu-item:disabled {
+  opacity: 0.45;
+}
 .gl-figure-workspace input:not([type="checkbox"]):not([type="range"]),
 .gl-figure-workspace select {
   border: 1px solid #d5dde8;

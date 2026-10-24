@@ -27,7 +27,7 @@ import { orderedQuantileSample, robustAxisRange, robustAxisRangeOfSorted } from 
 import { DEFAULT_DENSITY_COLOR_POWER } from "./pseudocolor";
 import { biexIdentity, type ChannelScales } from "./channelScales";
 import type { RawPrecision } from "./float32Bounds";
-import { logicleTicks, scatterTicks, linearScatterTicks, type AxisTicks } from "./ticks";
+import { logicleTicks, scatterTicks, linearScatterTicks, withoutPiledTicks, type AxisTicks } from "./ticks";
 import {
   extractDisplaySpillover,
   type DisplaySpillover,
@@ -3122,9 +3122,10 @@ export class Sample {
       return logicleTicks(fwd, inv, axisRange, this.logicleT(idx));
     }
     // Flow signal on FlowJo's biexponential: decade labels as a logicle axis gets them, the
-    // object's maxValue bounding the decades as T does there.
+    // object's maxValue bounding the decades as T does there. The table pins every value beyond
+    // its ends to the end channels, so the ticks beyond an end are dropped (withoutPiledTicks).
     const biex = this.instrument === "flow" ? this.fluorBiexParams(idx) : null;
-    if (biex) return logicleTicks(fwd, inv, axisRange, biex.maxValue);
+    if (biex) return withoutPiledTicks(logicleTicks(fwd, inv, axisRange, biex.maxValue));
     // Flow signal on arcsinh -- either chosen, or the unhealthy-logicle fallback. scatterTicks
     // is not scatter-specific: it lays out raw-unit decades over the visible range and is what
     // any asinh axis needs. Without it the axis fell through to D3's linear ticks and was

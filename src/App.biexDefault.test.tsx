@@ -141,7 +141,7 @@ describe("FlowJo biexponential in the Transforms row", () => {
   });
 });
 
-describe("the view window of a biex axis", () => {
+describe("moving and stretching a biex axis", () => {
   async function onBiexX(): Promise<void> {
     await mount();
     const select = host.querySelector<HTMLSelectElement>('select[aria-label="X signal scale"]')!;
@@ -151,18 +151,28 @@ describe("the view window of a biex axis", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
   }
-  const view = () => ({ x: [...plotHarness.props!.payload.x_range], y: [...plotHarness.props!.payload.y_range] });
+  const view = (): { x: [number, number]; y: [number, number] } => {
+    const { x_range, y_range } = plotHarness.props!.payload;
+    return { x: [x_range[0], x_range[1]], y: [y_range[0], y_range[1]] };
+  };
   /** The renderer reporting where a pan or stretch of its own ended, as it does on release. */
   const commit = (x: [number, number], y: [number, number]) => act(() => plotHarness.props!.onRangeChange({ x_range: x, y_range: y }));
+  const gateRow = () => [...host.querySelectorAll(".pop-row")][1]?.textContent ?? "";
 
-  it("stops a pan at the table's ends, leaves a zoom in alone, and leaves the logicle axis free; no gate moves", async () => {
+  it("goes past either end of the table as a logicle axis does, and no gate or count moves", async () => {
     await onBiexX();
-    // A rectangle with a population, drawn inside the view on FL1 (biex) × FL2 (logicle).
+    // A rectangle around the 384 events with a positive FL1-A (events 128 onward): on X, between
+    // the highest negative event and the lowest positive one, up to above the highest; on Y, well
+    // beyond the data both ways.
+    const x = plottedX();
+    const negTop = Math.max(...x.slice(0, N_EVENTS / 4));
+    const posBottom = Math.min(...x.slice(N_EVENTS / 4));
+    expect(negTop).toBeLessThan(posBottom);
     const { y } = view();
     const ySpan = y[1] - y[0];
     act(() => plotHarness.props!.onNewGate({
       gate_type: "rectangle", x_channel: "FL1-A", y_channel: "FL2-A",
-      vertices: [[60, y[0] + 0.3 * ySpan], [150, y[0] + 0.7 * ySpan]],
+      vertices: [[(negTop + posBottom) / 2, y[0] - ySpan], [Math.max(...x) + 1, y[1] + ySpan]],
     }));
     const also = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
       .find((c) => c.parentElement?.textContent?.includes("Also create a population"));
@@ -172,29 +182,31 @@ describe("the view window of a biex axis", () => {
       create.click();
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
+    const counted = /(?:^|\D)384\s*\(/;
+    expect(gateRow()).toMatch(counted);
     const gateBefore = JSON.stringify(plotHarness.props!.payload.gates.map((g) => g.vertices));
-    const rows = () => [...host.querySelectorAll(".pop-row")].map((r) => r.textContent);
-    const rowsBefore = rows();
-    expect(rowsBefore.length).toBe(2);
+    const rowsBefore = [...host.querySelectorAll(".pop-row")].map((r) => r.textContent);
 
-    // Panned right past the table's bottom: the window stops at channel 0, its width kept. The
-    // logicle Y axis panned past its data stays where it was put.
-    const yPast: [number, number] = [y[0] - ySpan, y[1] - ySpan];
-    commit([-40, 200], yPast);
-    expect(view().x).toEqual([0, 240]);
-    expect(view().y).toEqual(yPast);
-    // Past the top, likewise.
-    commit([100, 300], yPast);
-    expect(view().x).toEqual([56, 256]);
-    // A stretch that zooms in is untouched.
-    commit([20, 120], yPast);
-    expect(view().x).toEqual([20, 120]);
-    // Zooming out stops at the full table.
-    commit([-100, 400], yPast);
-    expect(view().x).toEqual([0, 256]);
+    // Panned right past channel 0 and left past the table's top: the view is where it was put.
+    commit([-40, 200], y);
+    expect(view().x).toEqual([-40, 200]);
+    commit([100, 300], y);
+    expect(view().x).toEqual([100, 300]);
+    // A stretch out keeps its minimum, beyond the top as anywhere else.
+    commit([100, 420], y);
+    expect(view().x).toEqual([100, 420]);
+    // The zoom buttons, likewise: the minimum held, the span divided or multiplied.
+    const zoom = (label: string) => act(() => host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!.click());
+    zoom("Zoom out");
+    expect(view().x[0]).toBe(100);
+    expect(view().x[1]).toBeCloseTo(100 + 320 * Math.sqrt(1.5), 9);
+    zoom("Zoom in");
+    expect(view().x[0]).toBe(100);
+    expect(view().x[1]).toBeCloseTo(420, 9);
 
     // Display only: the gate's vertices and every count are as they were.
     expect(JSON.stringify(plotHarness.props!.payload.gates.map((g) => g.vertices))).toBe(gateBefore);
-    expect(rows()).toEqual(rowsBefore);
+    expect([...host.querySelectorAll(".pop-row")].map((r) => r.textContent)).toEqual(rowsBefore);
+    expect(gateRow()).toMatch(counted);
   });
 });

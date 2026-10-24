@@ -36,7 +36,20 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// The legend's entries in category order (B cells, T cells); the stacked legend lists them top to
+// bottom as the stack draws them, which is the reverse.
+const legendByCategory = () =>
+  ["B cells", "T cells"].map((label) =>
+    [...host.querySelectorAll<HTMLButtonElement>(".gl-prop-legend-item")].find((item) => item.textContent === label)!);
+
 describe("Proportions legend interaction", () => {
+  it("lists a stacked bar's categories top to bottom as the stack draws them", () => {
+    expect([...host.querySelectorAll(".gl-prop-legend-item")].map((item) => item.textContent)).toEqual(["T cells", "B cells"]);
+    const rects = [...host.querySelectorAll<SVGRectElement>("rect.gl-prop-mark")];
+    const top = (name: string) => Number(rects.find((rect) => rect.querySelector("title")?.textContent?.startsWith(name))!.getAttribute("y"));
+    expect(top("T cells")).toBeLessThan(top("B cells"));
+  });
+
   it("includes the HTML legend in a self-contained export SVG", () => {
     const composed = composeProportionsChartSvg("gl-prop-svg");
 
@@ -75,7 +88,7 @@ describe("Proportions legend interaction", () => {
   });
 
   it("links hover and pinned legend states to the matching chart marks", () => {
-    const legend = [...host.querySelectorAll<HTMLButtonElement>(".gl-prop-legend-item")];
+    const legend = legendByCategory();
     const marks = [...host.querySelectorAll<SVGRectElement>(".gl-prop-mark")];
     expect(legend).toHaveLength(2);
     expect(marks).toHaveLength(2);
@@ -94,7 +107,7 @@ describe("Proportions legend interaction", () => {
   });
 
   it("says when a legend entry is pinned, and a click on the chart, Show all or Escape clears it", () => {
-    const legend = [...host.querySelectorAll<HTMLButtonElement>(".gl-prop-legend-item")];
+    const legend = legendByCategory();
     const marks = () => [...host.querySelectorAll<SVGRectElement>(".gl-prop-mark")].map((mark) => mark.getAttribute("opacity"));
     expect(host.querySelector(".gl-prop-highlight-note")).toBeNull();
 
@@ -119,7 +132,7 @@ describe("Proportions legend interaction", () => {
   });
 
   it("drops a stale highlight when the legend changes under it", () => {
-    const legend = [...host.querySelectorAll<HTMLButtonElement>(".gl-prop-legend-item")];
+    const legend = legendByCategory();
     act(() => legend[1].click());
     expect(host.querySelector(".gl-prop-highlight-note")).not.toBeNull();
     act(() => root.render(

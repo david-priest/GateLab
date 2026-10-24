@@ -14,6 +14,8 @@ export interface PlotTitleContext {
   /** The plot's own name where it came from, e.g. an Illustration plot's; the channels otherwise. */
   plot?: string;
   count?: number;
+  /** The workspace group the file belongs to, what {group} says. */
+  group?: string;
   metadata?: Readonly<Record<string, string>>;
   populationMetadata?: Readonly<Record<string, string>>;
 }
@@ -39,7 +41,7 @@ export const TITLE_PRESETS: readonly TitlePreset[] = [
   { id: "none", label: "No title", template: NO_TITLE },
 ];
 
-export const TITLE_PLACEHOLDERS = "{population}, {file}, {sample}, {x}, {y}, {plot}, {count}, {meta:column}, {popmeta:field}";
+export const TITLE_PLACEHOLDERS = "{population}, {file}, {sample}, {group}, {x}, {y}, {plot}, {count}, {n}, {N}, {meta:column}, {popmeta:field}";
 
 /** A field the title builder offers: its placeholder, what the chip says, and what it belongs to. */
 export interface TitleField {
@@ -94,7 +96,7 @@ export function fieldsFromTemplate(template: string): { tokens: string[]; separa
 /** What a plot's placeholders read, from the plot's recipe and what the app knows of its file and population. */
 export function plotTitleContext(
   recipe: { xChannel?: string; yChannel?: string | null; label?: string },
-  file: { name: string; fileName?: string; metadata?: Readonly<Record<string, string>> } | null,
+  file: { name: string; fileName?: string; groupName?: string; metadata?: Readonly<Record<string, string>> } | null,
   population: { id: string; name: string } | null,
   count?: number,
   populationMetadata?: Readonly<Record<string, Readonly<Record<string, string>>>>,
@@ -107,6 +109,7 @@ export function plotTitleContext(
     y: recipe.yChannel ?? "",
     ...(recipe.label ? { plot: recipe.label } : {}),
     ...(typeof count === "number" ? { count } : {}),
+    ...(file?.groupName ? { group: file.groupName } : {}),
     ...(file?.metadata ? { metadata: file.metadata } : {}),
     ...(population && populationMetadata?.[population.id] ? { populationMetadata: populationMetadata[population.id] } : {}),
   };
@@ -115,26 +118,34 @@ export function plotTitleContext(
 /** A title from a template: placeholders filled, empty parts and their separators dropped. */
 export function plotTitle(template: string, context: PlotTitleContext): string {
   if (template.trim() === NO_TITLE) return "";
-  const filled = template.replace(/\{(population|file|sample|x|y|plot|count|meta:[^}]+|popmeta:[^}]+)\}/g, (whole, key: string) => {
-    switch (key) {
-      case "population": return context.population;
-      case "file": return context.file;
-      case "sample": return context.sample;
-      case "x": return context.x;
-      case "y": return context.y;
-      case "plot": return context.plot ?? (context.y ? `${context.x} vs ${context.y}` : context.x);
-      case "count": return typeof context.count === "number" ? context.count.toLocaleString() : "";
-    }
-    if (key.startsWith("meta:")) return context.metadata?.[key.slice(5)] ?? "";
-    if (key.startsWith("popmeta:")) return context.populationMetadata?.[key.slice(8)] ?? "";
-    return whole;
-  });
+  // A built title drops an empty field with its separator, whichever separator it uses.
+  const built = fieldsFromTemplate(template);
+  if (built) return built.tokens.map((token) => fillTitleFields(token, context).trim()).filter(Boolean).join(built.separator).trim();
+  const filled = fillTitleFields(template, context);
   // A part that came out empty takes its separator with it: "Naive · " reads as "Naive".
   return filled
     .replace(/(\s*·\s*)+/g, " · ")
     .replace(/^\s*·\s*/, "")
     .replace(/\s*·\s*$/, "")
     .trim();
+}
+
+function fillTitleFields(template: string, context: PlotTitleContext): string {
+  return template.replace(/\{(population|file|sample|group|x|y|plot|count|meta:[^}]+|popmeta:[^}]+)\}/g, (whole, key: string) => {
+    switch (key) {
+      case "population": return context.population;
+      case "file": return context.file;
+      case "sample": return context.sample;
+      case "group": return context.group ?? "";
+      case "x": return context.x;
+      case "y": return context.y;
+      case "plot": return context.plot ?? (context.y ? `${context.x} vs ${context.y}` : context.x);
+      case "count": return typeof context.count === "number" ? context.count.toLocaleString() : "";
+    }
+    if (key.startsWith("meta:")) return context.metadata?.[key.slice(5).trim()] ?? "";
+    if (key.startsWith("popmeta:")) return context.populationMetadata?.[key.slice(8).trim()] ?? "";
+    return whole;
+  });
 }
 
 /**

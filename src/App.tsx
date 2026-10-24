@@ -7,7 +7,8 @@ import { usePopoverDismissal } from "./ui/usePopoverDismissal";
 import { BiexAxisControl } from "./ui/BiexAxisControl";
 import { figureBlockFrame } from "./ui/LayoutFigure";
 import { proportionsBlockFrame } from "./ui/LayoutProportions";
-import { buildProportionsModel, defaultProportionsSettings, type ProportionsSettings } from "./engine/proportionsModel";
+import { followSheetIteration } from "./ui/layoutFollow";
+import { buildProportionsModel, defaultProportionsSettings, divisionFittedPopulation, type ProportionsSettings } from "./engine/proportionsModel";
 import pkg from "../package.json";
 import brandMark from "./assets/brand/gatelab-mark.png";
 import brandWordmark from "./assets/brand/gatelab-wordmark.png";
@@ -20,7 +21,6 @@ import { ModalEscape } from "./ui/useModalEscape";
 import { ActionNote } from "./ui/ActionNote";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type GatingPlotActions, type NewGate } from "./plots/GatingPlot";
 import { startPanSession, zoomAnchored } from "./plots/panGesture";
-import { axisWindowBounds, clampToAxisWindow } from "./plots/axisWindow";
 import { buildPlotGates, keepOpenSides, type PlotGate } from "./plots/gatePayload";
 import { HistogramPlot, type RangeEdit } from "./plots/HistogramPlot";
 import type { AxisTicks } from "./engine/ticks";
@@ -92,7 +92,7 @@ import {
   markerColourScale,
   type MarkerColourScale,
 } from "./engine/markerColour";
-import { assignDivisionLevel, divisionPalette } from "./engine/division";
+import { assignDivisionLevel, divisionEventCodes, divisionPalette, DIVISION_NA_CODE } from "./engine/division";
 import { decodeFloat32Base64, decodeUint8Base64, encodeFloat32Base64, encodeUint8Base64 } from "./engine/encode";
 import {
   aggregateGateCounts,
@@ -1710,6 +1710,9 @@ export default function App({ hostProposals = null }: {
   const [layoutWorkspace, setLayoutWorkspace] = useState<LayoutWorkspace>(
     () => createDefaultLayoutWorkspace(),
   );
+  // Bumped when a workspace is opened or a new one begun: the Layout tab is mounted afresh, so its
+  // undo history and selection never carry one workspace's sheets into another.
+  const [layoutEpoch, setLayoutEpoch] = useState(0);
   const [fcsAssay, setFcsAssay] = useState<FcsExportAssay>("original");
   const [fcsScope, setFcsScope] = useState<"active" | "combined" | "split">("split");
   const [fcsMinimumEvents, setFcsMinimumEvents] = useState(0);
@@ -2478,12 +2481,6 @@ export default function App({ hostProposals = null }: {
     };
     const queue = (nx: [number, number], ny: [number, number]) => {
       if (!valid(nx) || !valid(ny)) return; // never write a degenerate range
-      // A biex axis stays within its table: a pan stops at an end (axisWindow.ts).
-      const s = pzRef.current.sample;
-      if (s) {
-        nx = clampToAxisWindow(nx, axisWindowBounds(s, pzRef.current.xIdx));
-        ny = clampToAxisWindow(ny, axisWindowBounds(s, pzRef.current.yIdx));
-      }
       pX = nx;
       pY = ny;
       // Contour rebuilds the KDE on every range change (~0.5s) — doing that per frame is
@@ -3451,6 +3448,7 @@ export default function App({ hostProposals = null }: {
     setIllustrationPresets([]);
     setIllustVersion((version) => version + 1);
     setLayoutWorkspace(createDefaultLayoutWorkspace());
+    setLayoutEpoch((epoch) => epoch + 1);
     setMetadata({});
     setMetadataColumns([]);
     setPopulationMetadata({});
@@ -7837,16 +7835,13 @@ export default function App({ hostProposals = null }: {
         }
       }
     }
-    // Every committed range -- a pan or stretch, the zoom buttons, Fit, the range strip, the
-    // Scales tab -- stays within a biex axis's table (axisWindow.ts).
-    const bounded = range && sample ? clampToAxisWindow(range, axisWindowBounds(sample, sample.index(key))) : range;
     setGlobalScales((prev) => {
       const next = { ...prev };
-      if (bounded) next[key] = bounded;
+      if (range) next[key] = range;
       else delete next[key];
       return next;
     });
-  }, [activeAxisScaleContextKey, setGlobalScales, sample]);
+  }, [activeAxisScaleContextKey, setGlobalScales]);
 
   const toggleScaleLock = useCallback(() => {
     const nextLocked = !lockScalesBetweenFiles;
@@ -8065,11 +8060,23 @@ export default function App({ hostProposals = null }: {
     markWorkspaceDirty();
   };
 
+  // The Division tab fits within the active population; a profile records it, so a chart of the
+  // profile counts within it and colData calls outside it are NA.
+  const withFittedPopulation = (profile: DivisionProfile): DivisionProfile => {
+    const populationId = (state.active_population_id && state.populations[state.active_population_id]
+      ? state.active_population_id
+      : state.root_population_id) ?? undefined;
+    return { ...profile, populationId, hierarchyId: state.active_hierarchy_id };
+  };
+
   const applyDivision = (profile: DivisionProfile) => {
     if (!activeSampleId) return;
-    setDivisionProfiles((m) => ({ ...m, [activeSampleId]: profile }));
+    const fitted = withFittedPopulation(profile);
+    const populationId = fitted.populationId;
+    setDivisionProfiles((m) => ({ ...m, [activeSampleId]: fitted }));
     markWorkspaceDirty();
-    setImportMsg(`Division applied to ${fileName}: ${profile.n} boundaries on ${profile.channelKey} → ${profile.colName}`);
+    const within = populationId && state.populations[populationId]?.parent_id ? ` within ${state.populations[populationId].name}` : "";
+    setImportMsg(`Division applied to ${fileName}${within}: ${profile.n} boundaries on ${profile.channelKey} → ${profile.colName}`);
   };
 
   async function writeHostedDivisions(profile: DivisionProfile): Promise<void> {
@@ -8088,7 +8095,7 @@ export default function App({ hostProposals = null }: {
       hostWords("SCE colData already contains '{column}'. Replace that column with the current division calls?").replace("{column}", columnName),
     )) return;
 
-    const profiles = { ...divisionProfiles, [activeSampleId]: profile };
+    const profiles = { ...divisionProfiles, [activeSampleId]: withFittedPopulation(profile) };
     const eligibleProfiles = samples.map((entry) => {
       const candidate = profiles[entry.id];
       if (!candidate || candidate.colName !== columnName) return null;
@@ -8124,11 +8131,16 @@ export default function App({ hostProposals = null }: {
           throw new Error(`Sample '${entry.name}' is not mapped to this SCE.`);
         }
         const candidate = eligibleProfiles[sampleIndex];
-        if (!candidate) {
+        // Calls only within the population the profile was fitted in; NA outside it, and NA for
+        // a file whose tree no longer holds that population.
+        const fitted = candidate
+          ? divisionFittedPopulation({ ...entry, hierarchyId: hierarchyOfFile(entry.id) }, candidate, state)
+          : "excluded";
+        if (!candidate || fitted === "excluded") {
           return {
             sampleId: source.sampleId,
             eventCount: source.eventIndex.length,
-            constantCode: 255,
+            constantCode: DIVISION_NA_CODE,
           };
         }
         const channelIndex = entry.sample.index(candidate.channelKey);
@@ -8137,11 +8149,7 @@ export default function App({ hostProposals = null }: {
             `Division channel '${candidate.channelKey}' is unavailable in '${entry.name}'.`,
           );
         }
-        const values = entry.sample.displayColumn(channelIndex);
-        const codes = new Uint8Array(values.length);
-        for (let index = 0; index < values.length; index += 1) {
-          codes[index] = assignDivisionLevel(values[index], candidate.boundaries);
-        }
+        const codes = divisionEventCodes(entry.sample.displayColumn(channelIndex), candidate.boundaries, fitted.mask);
         return {
           sampleId: source.sampleId,
           eventCount: codes.length,
@@ -8160,7 +8168,7 @@ export default function App({ hostProposals = null }: {
       setImportMsg(
         hostWords("Wrote division calls to SCE colData '{column}'").replace("{column}", columnName) +
           (written?.missingCount
-            ? ` · ${written.missingCount.toLocaleString()} events had no compatible profile`
+            ? ` · ${written.missingCount.toLocaleString()} events are NA (outside the population the division was fitted in, or no compatible profile)`
             : ""),
       );
     } catch (cause) {
@@ -8701,7 +8709,7 @@ export default function App({ hostProposals = null }: {
       // arrives as it was made; the sheet grows to show it, and its frame can be dragged smaller,
       // which scales the block as a whole.
       const frame = nextLayoutItemPosition(sheet, size?.width ?? 600, size?.height ?? 320);
-      sheet.items.push({ id: crypto.randomUUID(), ...frame, recipe });
+      sheet.items.push({ id: crypto.randomUUID(), ...frame, recipe: followSheetIteration(sheet, [recipe])[0] });
       sheet.width = Math.max(sheet.width, frame.x + frame.width + 48);
       sheet.height = Math.max(sheet.height, frame.y + frame.height + 48);
       return next;
@@ -8861,7 +8869,7 @@ export default function App({ hostProposals = null }: {
       const sideRoom = frames && headings?.rows.length ? 150 : 0;
       if (frames) for (const frame of frames) { frame.y += headRoom; frame.x += sideRoom; }
       const ids: string[] = [];
-      recipes.forEach((recipe, index) => {
+      followSheetIteration(sheet, recipes).forEach((recipe, index) => {
         const frame = frames ? frames[index] : nextLayoutItemPosition(sheet);
         const id = crypto.randomUUID();
         ids.push(id);
@@ -11349,6 +11357,7 @@ export default function App({ hostProposals = null }: {
       setIllustrationPresets(ws.illustrationPresets ?? []);
       setIllustVersion((v) => v + 1); // remount the Illustration and Strategy tabs so they re-read the restored configs
       setLayoutWorkspace(normalizeLayoutWorkspace(ws.layout));
+      setLayoutEpoch((epoch) => epoch + 1);
       clearPersistedTabState(); // drop old selections so a new workspace's tabs start clean
       restorePlottingState(ws.plotting);
       setDivisionProfiles(nextDivision);
@@ -13741,13 +13750,10 @@ export default function App({ hostProposals = null }: {
     if (!sample) return null;
     const xName = sample.channels[xIdx].key;
     const yName = sample.channels[yIdx].key;
-    // A biex axis is drawn within its table whatever range was stored (axisWindow.ts).
-    const windowed = (range: [number, number] | null, idx: number) =>
-      range ? clampToAxisWindow(range, axisWindowBounds(sample, idx)) : null;
     const effectiveXRange =
-      windowed(xRange ?? globalScales[xName] ?? workspaceAutomaticRanges?.xRange ?? null, xIdx);
+      xRange ?? globalScales[xName] ?? workspaceAutomaticRanges?.xRange ?? null;
     const effectiveYRange =
-      windowed(yRange ?? globalScales[yName] ?? workspaceAutomaticRanges?.yRange ?? null, yIdx);
+      yRange ?? globalScales[yName] ?? workspaceAutomaticRanges?.yRange ?? null;
     const base = sample.plotPayload(
       xIdx,
       yIdx,
@@ -14076,11 +14082,11 @@ export default function App({ hostProposals = null }: {
       if (globalScales[key] && (lockScalesBetweenFiles || !autoFittedScales.current.has(fittedKey))) continue;
       const binding = bindingKeyFor(key);
       if (binding) autoFittedScales.current.set(fittedKey, binding);
-      const range = clampToAxisWindow(includePlotGatesInAxisRange(
+      const range = includePlotGatesInAxisRange(
         auto ?? sample.displayRange(idx),
         mainPlotGates,
         axis,
-      ), axisWindowBounds(sample, idx));
+      );
       setGlobalScales((previous) => ({ ...previous, [key]: range }));
     }
   }, [
@@ -16622,6 +16628,7 @@ export default function App({ hostProposals = null }: {
             )}
             {activeTab === "proportions" && (
               <ProportionsTab
+                key={illustVersion}
                 samples={samples.map(entry => ({ ...entry, hierarchyId: hierarchyOfFile(entry.id) }))}
                 activeSampleId={activeSampleId}
                 state={state}
@@ -16759,6 +16766,7 @@ export default function App({ hostProposals = null }: {
             {activeTab === "layout" && (
               <Suspense fallback={<div className="gl-empty">{t("Loading Layout editor…")}</div>}>
                 <LayoutTab
+                  key={layoutEpoch}
                   workspace={layoutWorkspace}
                   onChange={setLayoutWorkspace}
                   imageService={imageService}

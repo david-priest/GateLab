@@ -33,6 +33,15 @@ describe("plotTitle", () => {
     expect(plotTitle(NO_TITLE, context)).toBe("");
     expect(plotTitle("  ", context)).toBe("");
   });
+
+  it("drops an empty field with whichever separator the builder put, and reads the file's group", () => {
+    expect(plotTitle("{population}, {meta:missing}", context)).toBe("CD4_positive");
+    expect(plotTitle("{meta:missing} / {population} / {file}", context)).toBe("CD4_positive / D1.fcs");
+    expect(plotTitle("{group} – {population}", { ...context, group: "treated" })).toBe("treated – CD4_positive");
+    expect(plotTitle("{group} – {population}", context)).toBe("CD4_positive");
+    expect(plotTitle("{meta: day}", context)).toBe("7");
+    expect(plotTitleContext({}, { name: "D1", groupName: "treated" }, null).group).toBe("treated");
+  });
 });
 
 describe("automaticTitleTemplate", () => {
