@@ -43,6 +43,7 @@ const REWORDED: readonly (readonly [string, string])[] = [
   ["Mixed-file panels omit gate outlines. Percentages in single-file panels are relative to the displayed population.", "Mixed-sample panels omit gate outlines. Percentages in single-sample panels are relative to the displayed population."],
   ["Events pooled · event-count weighting · gates and percentages pooled where the files' gates agree", "Events pooled · event-count weighting · gates and percentages pooled where the samples' gates agree"],
   ["Each entry is an FCS file, not necessarily one biological sample. The figure's selection is independent of the Gating tab's.", "Each entry is a sample of the object. The figure's selection is independent of the Gating tab's."],
+  ["Group sets the bars of a stacked bar and the box colours of a boxplot. Facet draws a panel per value. A replicate unit is one observation in each group it has files in: a boxplot draws one point per unit, every unit drawn; its box spans the quartiles, and each whisker reaches the furthest unit within 1.5 × the interquartile range of its quartile (Tukey).", "Group sets the bars of a stacked bar and the box colours of a boxplot. Facet draws a panel per value. A replicate unit is one observation in each group it has samples in: a boxplot draws one point per unit, every unit drawn; its box spans the quartiles, and each whisker reaches the furthest unit within 1.5 × the interquartile range of its quartile (Tukey)."],
   ["Loaded FCS samples", "Loaded samples"],
   ["Channel ($PnN)", "Channel"],
   ["Marker ($PnS)", "Marker"],
