@@ -106,6 +106,47 @@ export function populationColor(name: PaletteName, slot: number | undefined): st
   return ramp[((s % POP_COLOR_SLOTS) + POP_COLOR_SLOTS) % POP_COLOR_SLOTS];
 }
 
+// The Plotting chart's colours past the twelve population slots. Paired's twelve run on through
+// colours none of its own are near (Tableau 20's pinks, cyans, olives, browns and two of its dark
+// shades, its grey last, as the rest of the parent is grey); Tableau runs on through its own last eight and four dark shades. Any other palette runs
+// on through the midpoints of its twelve, then a darker last colour.
+const PLOTTING_EXTRA: Partial<Record<PaletteName, string[]>> = {
+  paired: ["#e377c2", "#17becf", "#bcbd22", "#8c564b", "#9467bd", "#393b79",
+    "#f7b6d2", "#9edae5", "#dbdb8d", "#c49c94", "#637939", "#7f7f7f"],
+  default: [...TABLEAU.slice(12), "#393b79", "#637939", "#8c6d31", "#843c39"],
+};
+
+/** The number of colours the Plotting chart gives population categories before any repeats. */
+export const PLOTTING_COLOR_COUNT = POP_COLOR_SLOTS * 2;
+
+function plottingPalette(name: PaletteName): string[] {
+  const base = paletteColors(name, POP_COLOR_SLOTS);
+  const extra = PLOTTING_EXTRA[name] ?? [
+    ...base.slice(0, -1).map((color, i) => sampleRamp([color, base[i + 1]], 3)[1]),
+    sampleRamp([base[base.length - 1], "#000000"], 4)[1],
+  ];
+  return [...base, ...extra];
+}
+
+/**
+ * The Plotting chart's population colours, one per category in order. Each takes its population's
+ * slot, so slots 0 to 11 are the colours every other view gives them; a slot past 11 takes the
+ * chart's own colours beyond the twelve, and a category whose colour is already in the chart takes
+ * the next one it does not hold. Two categories share a colour only past PLOTTING_COLOR_COUNT.
+ */
+export function plottingPopulationColors(name: PaletteName, slots: readonly (number | undefined)[]): string[] {
+  const palette = plottingPalette(name);
+  const n = palette.length;
+  const taken = new Set<number>();
+  return slots.map((slot) => {
+    const start = (((typeof slot === "number" ? slot : 0) % n) + n) % n;
+    let index = start;
+    for (let step = 0; step < n && taken.has(index); step++) index = (start + step + 1) % n;
+    taken.add(index);
+    return palette[index];
+  });
+}
+
 /** k colours for a named palette (port of overlay_color_palette). */
 export function paletteColors(name: PaletteName, k: number): string[] {
   const n = Math.max(1, Math.floor(k));

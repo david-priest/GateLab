@@ -206,6 +206,37 @@ function mount(fx: ReturnType<typeof fixture>, globalScales: Record<string, [num
 const items = (changes: LayoutWorkspace[]) => changes.at(-1)!.sheets[0].items;
 
 describe("LayoutTab sheets", () => {
+  it("keeps a heading reading its own plot when the sheet or the pair is duplicated, and frees it when the plot goes", async () => {
+    const changes = mount(fixture());
+    await flush();
+    act(() => button("+ Biplot").click());
+    act(() => button("+ Text").click());
+    await flush();
+    const [plot, note] = items(changes);
+    select(note.id);
+    const readsFrom = host.querySelector<HTMLSelectElement>('select[aria-label="Reads from"]')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(readsFrom, plot.id);
+      readsFrom.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(items(changes)[1].recipe).toMatchObject({ readsFrom: plot.id });
+    // The pair duplicated: the copied heading reads the copied plot.
+    select(plot.id, note.id);
+    key({ key: "d", metaKey: true });
+    const [, , plotCopy, noteCopy] = items(changes);
+    expect(noteCopy.recipe).toMatchObject({ kind: "text", readsFrom: plotCopy.id });
+    // The sheet duplicated: every heading reads its own sheet's plot.
+    act(() => button("Duplicate sheet").click());
+    const copy = changes.at(-1)!.sheets[1];
+    const copyIds = new Set(copy.items.map((item) => item.id));
+    for (const item of copy.items) if (item.recipe.kind === "text") expect(copyIds.has(item.recipe.readsFrom!)).toBe(true);
+    // A plot removed: the heading that read it becomes plain text.
+    act(() => host.querySelector<HTMLButtonElement>(".gl-layout-sheet-tab")!.click());
+    select(plot.id);
+    key({ key: "Delete" });
+    expect(items(changes).find((item) => item.id === note.id)?.recipe).not.toHaveProperty("readsFrom");
+  });
+
   it("adds text blocks, creates sheets, and renames a sheet inline", () => {
     const changes = mount(fixture());
     expect(host.textContent).toContain("Blank layout");
@@ -305,6 +336,18 @@ describe("LayoutTab plots", () => {
     expect([...chart.querySelectorAll(".gl-layout-chart-groups > g > text")].map((t) => t.textContent)).toEqual(["D1", "D2"]);
     expect(chart.querySelector(".gl-layout-chart-test")).toBeNull();
     expect(chart.querySelectorAll("rect").length).toBeGreaterThanOrEqual(3); // the background and a bar per group
+  });
+
+  it("draws a file without a value in the grouping column as Unassigned, and says so in the inspector", async () => {
+    const fx = fixture();
+    fx.samples[1].metadata = { day: "0" };
+    mount(fx);
+    await flush();
+    act(() => button("+ Chart").click());
+    await flush();
+    const chart = host.querySelector(".gl-layout-chart svg")!;
+    expect([...chart.querySelectorAll(".gl-layout-chart-groups > g > text")].map((t) => t.textContent)).toEqual(["D1", "Unassigned"]);
+    expect(host.textContent).toContain("Files without a value in the column are drawn as Unassigned and left out of the test.");
   });
 
   it("draws the sheet's style, and an item's own values over it", async () => {
@@ -1105,6 +1148,77 @@ describe("LayoutTab iteration", () => {
     el.dispatchEvent(new Event("change", { bubbles: true }));
   });
 
+  it("draws a strategy strip for each file, titled by the sheet's template as the plots are", async () => {
+    const fx = gatedFixture();
+    const changes = mount(fx, { "FSC-A": [5, 40], "SSC-A": [5, 40] }, null, { activePopulationId: fx.childId });
+    await flush();
+    act(() => button("Iterate").click());
+    change(selectField("Draw the sheet"), "files");
+    // Added after the iteration was switched on, the strategy follows it as a toolbar plot does.
+    act(() => button("+ Gating strategy").click());
+    await flush();
+    const [strategy] = items(changes);
+    expect(strategy.recipe).toMatchObject({ kind: "strategy", sampleId: "D1", iterated: true });
+    const title = () => (draws.strategies.at(-1)?.payload as { strategy_context_title?: string }).strategy_context_title;
+    expect(title()).toBe("D1.fcs");
+    draws.strategies = [];
+    act(() => host.querySelector<HTMLButtonElement>('button[aria-label="Next page"]')!.click());
+    await flush();
+    expect(title()).toBe("D2.fcs");
+    // "No title" on the sheet reaches the strategy too.
+    act(() => button("Style").click());
+    change(host.querySelector<HTMLSelectElement>('select[aria-label="Plot titles"]')!, "none");
+    await flush();
+    expect(title()).toBe("");
+  });
+
+  it("marks a plot as pending until it has drawn, which the export waits for", async () => {
+    mount(fixture());
+    await flush();
+    act(() => button("+ Biplot").click());
+    expect(host.querySelector(".gl-layout-plot-host")?.hasAttribute("data-layout-pending")).toBe(true);
+    await flush();
+    expect(draws.plots.length).toBeGreaterThan(0);
+    expect(host.querySelector("[data-layout-pending]")).toBeNull();
+  });
+
+  it("starts tiles at as many as fit the paper, and says when a grid asked for runs off it", async () => {
+    const changes = mount(fixture());
+    await flush();
+    act(() => button("+ Biplot").click());
+    await flush();
+    act(() => button("Iterate").click());
+    change(selectField("Draw the sheet"), "files");
+    change(selectField("Arrangement"), "tiles");
+    // A4 landscape, a 260 × 280 plot at the margin, a 24 px gap: 3 across and 2 down fit.
+    expect(changes.at(-1)!.sheets[0].iteration?.arrangement).toMatchObject({ kind: "tiles", columns: 3, rows: 2 });
+    expect(host.querySelector(".gl-layout-warning")).toBeNull();
+    const across = host.querySelector<HTMLInputElement>('input[aria-label="Tiles across"]')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(across, "1");
+      across.dispatchEvent(new Event("input", { bubbles: true }));
+      across.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+    // Two files on one row of one tile each: still on the paper.
+    expect(host.querySelector(".gl-layout-warning")).toBeNull();
+    // The plot widened past the paper's half: its second tile runs off the sheet.
+    act(() => button("Items").click());
+    select(items(changes)[0].id);
+    const width = host.querySelector<HTMLInputElement>('input[aria-label="Item width"]')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(width, "700");
+      width.dispatchEvent(new Event("input", { bubbles: true }));
+      width.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+    act(() => button("Iterate").click());
+    change(host.querySelector<HTMLInputElement>('input[aria-label="Tiles across"]')!, "2");
+    act(() => host.querySelector<HTMLInputElement>('input[aria-label="Tiles across"]')!.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
+    expect(host.querySelector(".gl-layout-warning")?.textContent).toContain("1 of 2 items on this page reach beyond the paper");
+    act(() => button("Fit the tiles to the page").click());
+    expect(changes.at(-1)!.sheets[0].iteration?.arrangement).toMatchObject({ columns: 1 });
+    expect(host.querySelector(".gl-layout-warning")).toBeNull();
+  });
+
   it("draws the sheet once per file, with placeholders filled, and exports every page", async () => {
     const changes = mount(fixture(), { "FSC-A": [5, 40], "SSC-A": [5, 40] });
     await flush();
@@ -1134,8 +1248,9 @@ describe("LayoutTab iteration", () => {
     expect(host.textContent).toContain("Page 2 of 2");
     expect(element(note.id).querySelector(".gl-layout-text-surface")?.textContent).toBe("Donor D2.fcs, day 0 (2/2)");
     await flush();
-    // On page 2 the plot is drawn for D2. Unticked, it would show D1 on every page.
-    expect(draws.plots.at(-1)?.config.title).toBe("All Events · D2.fcs");
+    // On page 2 the plot is drawn for D2. Unticked, it would show D1 on every page. The automatic
+    // title looks across the pages: one population, a file per page, so the file names it.
+    expect(draws.plots.at(-1)?.config.title).toBe("D2.fcs");
     select(plot.id);
     act(() => button("Items").click());
     const follows = [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.includes("Follows the iteration"))!.querySelector("input")!;

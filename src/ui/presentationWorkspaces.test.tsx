@@ -61,7 +61,7 @@ describe("presentation workspaces", () => {
     act(() => root.render(<ProportionsTab samples={f.files} activeSampleId="D1" state={f.state} derived={recompute(f.files[0].sample, f.state)} metadata={{ D1: { condition: "control" }, D2: { condition: "treated" } }} metadataColumns={[]} divisionProfiles={{}} dataRevisionKey="0" />));
     expect(host.querySelectorAll("svg.gl-prop-panel")).toHaveLength(2);
     const titles = [...host.querySelectorAll(".gl-prop-mark title")].map(node => node.textContent);
-    expect(titles).toContain("CD4_positive: 66.7%"); expect(titles).toContain("CD4_positive: 33.3%");
+    expect(titles).toContain("CD4_positive: 66.7% (1 replicate unit)"); expect(titles).toContain("CD4_positive: 33.3% (1 replicate unit)");
     expect(savedPlottingState()["prop.facetSel"]).toBe("__sample__");
   });
   it("scales all figure fonts only when requested and forwards contour count", () => {

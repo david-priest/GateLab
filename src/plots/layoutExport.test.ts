@@ -27,6 +27,11 @@ vi.mock("jspdf", () => ({
   },
 }));
 vi.mock("svg2pdf.js", () => ({ svg2pdf: (...args: unknown[]) => pdfSpy.svg(...args) }));
+const zipSpy = vi.hoisted(() => ({ names: [] as string[] }));
+vi.mock("fflate", async (original) => {
+  const real = await original<typeof import("fflate")>();
+  return { ...real, zipSync: (files: Record<string, Uint8Array>) => { zipSpy.names = Object.keys(files); return real.zipSync(files); } };
+});
 
 /** jsdom has no layout; every element reports the rectangle it is told to. */
 function rect(el: Element, left: number, top: number, width: number, height: number) {
@@ -220,5 +225,16 @@ describe("composeLayoutSVG on a grid of pages", () => {
     expect(second.root.querySelector("image")).toBeNull();
     const texts = [...second.root.querySelectorAll("text")].map((t) => [t.textContent, t.getAttribute("x")]);
     expect(texts).toEqual([["Donor D1", "102"], ["day 7", "102"]]);
+  });
+});
+
+describe("writeComposedPages as a zip", () => {
+  it("names each page of an iteration by what it is drawn for", async () => {
+    const svgNs = "http://www.w3.org/2000/svg";
+    vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: () => "blob:x", revokeObjectURL: () => {} }));
+    const page = (label?: string) => ({ root: document.createElementNS(svgNs, "svg") as SVGSVGElement, width: 10, height: 10, widthMm: 3, heightMm: 3, ...(label ? { label } : {}) });
+    await writeComposedPages([page("D1.fcs"), page("day 7 / D2"), page()], createLayoutSheet("Figure 1"), "svg");
+    expect(zipSpy.names).toEqual(["Figure_1-p1-D1.fcs.svg", "Figure_1-p2-day_7___D2.svg", "Figure_1-p3.svg"]);
+    vi.unstubAllGlobals();
   });
 });

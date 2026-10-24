@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_LAYOUT_STYLE,
+  copyLayoutItems,
+  dropStaleReadsFrom,
+  createLayoutSheet,
   applyLayoutPage,
   cloneLayoutWorkspace,
   createDefaultLayoutWorkspace,
@@ -351,5 +354,31 @@ describe("groups in a saved layout", () => {
     raw.sheets[0].items[1].group = "  ";
     const items = normalizeLayoutWorkspace(raw).sheets[0].items;
     expect(items.map((item) => item.group)).toEqual(["g1", undefined]);
+  });
+});
+
+describe("copyLayoutItems", () => {
+  const plot = { id: "a", x: 0, y: 40, width: 200, height: 200, z: 0, group: "g", recipe: { kind: "biplot" as const, sampleId: "D1", populationId: "p", xChannel: "FSC-A", yChannel: "SSC-A", displayMode: "pseudocolor" as const, pool: { sampleIds: ["D1", "D2"] } } };
+  const heading = { id: "h", x: 0, y: 0, width: 200, height: 28, z: 1, group: "g", recipe: { kind: "text" as const, text: "{file}", fontSize: 14, readsFrom: "a" } };
+  let n = 0;
+  const ids = () => `new${++n}`;
+  it("gives new ids, a new group, and points a copied heading at the copied plot", () => {
+    const { copies, idMap } = copyLayoutItems([plot, heading], ids);
+    expect(copies.map((item) => item.id)).toEqual([idMap.get("a"), idMap.get("h")]);
+    expect(copies[0].group).toBe(copies[1].group);
+    expect(copies[0].group).not.toBe("g");
+    expect(copies[1].recipe).toMatchObject({ readsFrom: idMap.get("a") });
+    // The pool is the copy's own list.
+    expect(copies[0].recipe).toMatchObject({ pool: { sampleIds: ["D1", "D2"] } });
+    expect((copies[0].recipe as typeof plot.recipe).pool).not.toBe(plot.recipe.pool);
+  });
+  it("leaves a heading copied alone reading the original plot", () => {
+    expect(copyLayoutItems([heading], ids).copies[0].recipe).toMatchObject({ readsFrom: "a" });
+  });
+  it("makes a heading whose plot is gone plain text", () => {
+    const sheet = createLayoutSheet("S");
+    sheet.items = [{ ...heading }];
+    dropStaleReadsFrom(sheet);
+    expect(sheet.items[0].recipe).not.toHaveProperty("readsFrom");
   });
 });

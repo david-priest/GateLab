@@ -851,6 +851,36 @@ export function layoutGridFrames(
   });
 }
 
+/**
+ * Copies of items with new ids, as Duplicate and Duplicate sheet make them: the members of a
+ * copied group form a group of their own, and a text block that reads from a plot copied with it
+ * reads the copy, so a heading duplicated with its plot names the copy's file.
+ */
+export function copyLayoutItems(items: readonly LayoutItem[], newId: () => string = () => crypto.randomUUID()): { copies: LayoutItem[]; idMap: Map<string, string> } {
+  const idMap = new Map(items.map((item) => [item.id, newId()]));
+  const groupMap = new Map<string, string>();
+  const copies = items.map((item) => {
+    const group = item.group ? (groupMap.get(item.group) ?? groupMap.set(item.group, newId()).get(item.group)) : undefined;
+    const recipe = { ...item.recipe };
+    if ("pool" in recipe && recipe.pool) recipe.pool = { sampleIds: [...recipe.pool.sampleIds] };
+    if (recipe.kind === "strategy" && recipe.populationIds) recipe.populationIds = [...recipe.populationIds];
+    if (recipe.kind === "text" && recipe.readsFrom && idMap.has(recipe.readsFrom)) recipe.readsFrom = idMap.get(recipe.readsFrom);
+    return { ...item, id: idMap.get(item.id)!, recipe, ...(group ? { group } : {}) } as LayoutItem;
+  });
+  return { copies, idMap };
+}
+
+/** Text blocks that read from a plot no longer on the sheet become plain text, so "Reads from" says what they do. */
+export function dropStaleReadsFrom(sheet: LayoutSheet): void {
+  const ids = new Set(sheet.items.map((item) => item.id));
+  for (const item of sheet.items) {
+    if (item.recipe.kind === "text" && item.recipe.readsFrom && !ids.has(item.recipe.readsFrom)) {
+      const { readsFrom: _gone, ...rest } = item.recipe;
+      item.recipe = rest;
+    }
+  }
+}
+
 export function cloneLayoutWorkspace(workspace: LayoutWorkspace): LayoutWorkspace {
   return {
     version: LAYOUT_WORKSPACE_VERSION,

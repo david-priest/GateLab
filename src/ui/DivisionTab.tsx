@@ -24,6 +24,9 @@ export interface DivisionProfile {
   colName: string;
   /** Exact assay + channel display-coordinate system in which boundaries were fitted. */
   coordinateBindingKey: string;
+  /** The population the boundaries were fitted in, and its hierarchy; App records them on Apply. */
+  populationId?: string;
+  hierarchyId?: string;
 }
 interface Props {
   sample: Sample;

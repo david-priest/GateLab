@@ -706,9 +706,9 @@ export function StrategyTab({
           </label>
           {pooled && (
             <div className="gl-figure-actions gl-figure-list-actions">
-              <button type="button" onClick={() => setPoolTicks([...checkedSampleIds])}>{t("Use checked files")}</button>
-              <button type="button" onClick={() => setPoolTicks(files.map((file) => file.id))}>{t("All")}</button>
-              <button type="button" onClick={() => setPoolTicks([])}>{t("None")}</button>
+              <button type="button" className="gl-mini-btn" onClick={() => setPoolTicks([...checkedSampleIds])}>{t("Use checked files")}</button>
+              <button type="button" className="gl-mini-btn" onClick={() => setPoolTicks(files.map((file) => file.id))}>{t("All")}</button>
+              <button type="button" className="gl-mini-btn" onClick={() => setPoolTicks([])}>{t("None")}</button>
             </div>
           )}
           {files.length > 6 && (

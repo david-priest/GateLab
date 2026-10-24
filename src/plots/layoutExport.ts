@@ -298,6 +298,8 @@ export interface ComposedPage {
   /** Its physical size. */
   widthMm: number;
   heightMm: number;
+  /** What the page is drawn for on an iterated sheet (a file, population or value), for its file name in a zip. */
+  label?: string;
 }
 
 export interface ComposeOptions {
@@ -313,6 +315,12 @@ export function composeSheetPages(canvas: HTMLElement, sheet: LayoutSheet, optio
 
 const PT_PER_MM = 72 / 25.4;
 
+/** A page's name in a zip: its number, and on an iterated sheet what it is drawn for. */
+function pageFileName(filename: string, page: ComposedPage, index: number, extension: string): string {
+  const label = page.label ? sanitizeFilePart(page.label) : "";
+  return `${filename}-p${index + 1}${label ? `-${label}` : ""}.${extension}`;
+}
+
 /**
  * Write composed pages as the chosen format; the file is named after the sheet. One page is one
  * file; several are one PDF with a page each, or a zip of one SVG or PNG each.
@@ -327,7 +335,7 @@ export async function writeComposedPages(composed: readonly ComposedPage[], shee
       return;
     }
     const files: Record<string, Uint8Array> = {};
-    composed.forEach((page, index) => { files[`${filename}-p${index + 1}.svg`] = strToU8(serialize(page.root)); });
+    composed.forEach((page, index) => { files[pageFileName(filename, page, index, "svg")] = strToU8(serialize(page.root)); });
     downloadBlob(new Blob([zipSync(files) as BlobPart], { type: "application/zip" }), `${filename}.zip`);
     return;
   }
@@ -341,7 +349,7 @@ export async function writeComposedPages(composed: readonly ComposedPage[], shee
     const files: Record<string, Uint8Array> = {};
     for (const [index, page] of composed.entries()) {
       const raster = await rasterizeSvg(page, dpi);
-      files[`${filename}-p${index + 1}.png`] = new Uint8Array(await (await pngBlob(raster, dpi)).arrayBuffer());
+      files[pageFileName(filename, composed[index], index, "png")] = new Uint8Array(await (await pngBlob(raster, dpi)).arrayBuffer());
       await nextTurn();
     }
     downloadBlob(new Blob([zipSync(files) as BlobPart], { type: "application/zip" }), `${filename}.zip`);

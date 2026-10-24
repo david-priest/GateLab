@@ -16,10 +16,15 @@ describe("Proportions chart layout", () => {
     expect(layout.width - layout.margin.left - layout.margin.right).toBe(6 * 72);
   });
 
-  it("gives category-heavy boxplots enough horizontal room", () => {
-    const layout = proportionPanelLayout("box", Array.from({ length: 35 }, (_, i) => String(i + 1)), 2, 9);
-
-    expect(layout.width - layout.margin.left - layout.margin.right).toBe(35 * 54);
+  it("gives a boxplot panel, one population, a slot per group", () => {
+    const groups = (n: number) => Array.from({ length: n }, (_, i) => String(i + 1));
+    const inner = (n: number) => {
+      const layout = proportionPanelLayout("box", groups(n), n, 9);
+      return layout.width - layout.margin.left - layout.margin.right;
+    };
+    expect(inner(35)).toBe(35 * 34);
+    // Two groups still leave room for the panel's title and axis.
+    expect(inner(2)).toBe(90);
   });
 
   it("reserves extra bottom space for genuinely crowded labels", () => {

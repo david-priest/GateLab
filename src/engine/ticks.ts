@@ -121,6 +121,40 @@ export function logicleTicks(
 }
 
 /**
+ * Ticks that land on one another, dropped.
+ *
+ * A biexponential axis is a table with ends: a raw value below its first entry is drawn on
+ * channel 0 and one above its last on the last channel (biex.ts). The decade ticks are laid out in
+ * raw units over the visible range, so every decade and minor tick beyond an end was drawn on that
+ * end: on a default axis −10K and −2K … −9K all sat on channel 0, a stack of overlapping labels,
+ * and the same at the top, whenever a view reached an end. FlowJo's log and Gating-ML's flog pin
+ * their bottom the same way.
+ *
+ * On a transform that increases strictly no two ticks share a position, so a shared position means
+ * the transform has run out of axis there. Every tick at such a position is dropped: none of them
+ * is where its label says. Labels only; no gate, count or exported value is involved.
+ */
+export function withoutPiledTicks<T extends AxisTicks | null | undefined>(ticks: T): T {
+  if (!ticks) return ticks;
+  const all = [...ticks.major_pos, ...ticks.minor_pos].sort((a, b) => a - b);
+  const span = all.length > 1 ? all[all.length - 1] - all[0] : 0;
+  const eps = Math.max(1e-9, span * 1e-9);
+  const piled: number[] = [];
+  for (let i = 1; i < all.length; i++) {
+    if (all[i] - all[i - 1] <= eps) piled.push(all[i - 1], all[i]);
+  }
+  if (piled.length === 0) return ticks;
+  const isPiled = (pos: number) => piled.some((p) => Math.abs(p - pos) <= eps);
+  const keep = ticks.major_pos.map((pos) => !isPiled(pos));
+  return {
+    ...ticks,
+    major_pos: ticks.major_pos.filter((_, i) => keep[i]),
+    major_labels: ticks.major_labels.filter((_, i) => keep[i]),
+    minor_pos: ticks.minor_pos.filter((pos) => !isPiled(pos)),
+  } as T;
+}
+
+/**
  * Scatter (FSC/SSC) axis ticks — displayed in asinh(raw/cofactor) space, labelled with
  * canonical log decades in raw units (1K, 10K, 100K). Majors at 10^n, minors at 2–9×10^n.
  */

@@ -4,7 +4,7 @@
 // a pure function from the template and the units to concrete pages, so the tab renders one page
 // and the export writes them all.
 
-import { DEFAULT_ITERATION, isPlotLikeRecipe, type LayoutItem, type LayoutIteration, type LayoutPlotRecipe, type LayoutSheet, type LayoutStrategyRecipe } from "./layout";
+import { DEFAULT_ITERATION, isPlotLikeRecipe, mmToPx, type LayoutItem, type LayoutIteration, type LayoutPlotRecipe, type LayoutSheet, type LayoutStrategyRecipe } from "./layout";
 import { contentBounds } from "./layoutArrange";
 import { plotTitle, type PlotTitleContext } from "./layoutTitle";
 import { compareMetadataValues } from "./metadata";
@@ -50,6 +50,8 @@ export interface LayoutPageItem extends LayoutItem {
   templateSampleId?: string;
   /** The tile's offset from the template's position, to map an edit back. */
   offset: { x: number; y: number };
+  /** The unit's place in the iteration, 1-based, and how many units there are: what {n} and {N} say. */
+  position: { n: number; total: number };
 }
 
 export interface LayoutPage {
@@ -93,8 +95,10 @@ function bindItem(item: LayoutItem, unit: LayoutUnit | null, n: number, total: n
   if (recipe.kind === "text") recipe.text = fillPlaceholders(recipe.text, recipe.readsFrom ? null : unit, n, total);
   else {
     if (follows && unit && unit.populationId) {
-      // A population unit: the same file, drawn for this population.
+      // A population unit: the same file, drawn for this population. A multi-population
+      // strategy grid is drawn as the steps to this one population.
       if ("populationId" in recipe) recipe.populationId = unit.populationId;
+      if (recipe.kind === "strategy" && recipe.populationIds?.length) recipe.populationIds = [unit.populationId];
     } else if (follows && unit && unit.sampleIds) {
       // A metadata unit: its files pooled on a plot; a strategy, which cannot pool, is drawn
       // for the first of them. The template file stays the reference while it is among them.
@@ -104,11 +108,18 @@ function bindItem(item: LayoutItem, unit: LayoutUnit | null, n: number, total: n
         templateSampleId = recipe.sampleId;
         recipe.sampleId = unit.sampleIds[0];
       }
-    } else if (follows && unit && "sampleId" in recipe && recipe.sampleId !== unit.id) {
-      templateSampleId = recipe.sampleId;
-      recipe.sampleId = unit.id;
+    } else if (follows && unit && "sampleId" in recipe) {
+      // A file unit: the plot is drawn for that file alone, so a pooled plot that follows
+      // draws its page's file rather than the file with the pool beside it.
+      if ("pool" in recipe) delete recipe.pool;
+      if (recipe.sampleId !== unit.id) {
+        templateSampleId = recipe.sampleId;
+        recipe.sampleId = unit.id;
+      }
     }
-    if (recipe.title) recipe.title = fillPlaceholders(recipe.title, unit, n, total);
+    // A plot's placeholders describe the plot: the unit fills them only for a plot drawn for it,
+    // and a fixed plot's {file} or {sample} is left for its own file to fill.
+    if (recipe.title) recipe.title = fillPlaceholders(recipe.title, follows ? unit : null, n, total);
   }
   return {
     ...item,
@@ -119,6 +130,7 @@ function bindItem(item: LayoutItem, unit: LayoutUnit | null, n: number, total: n
     x: item.x + offset.x,
     y: item.y + offset.y,
     offset,
+    position: { n, total },
     recipe,
   };
 }
@@ -264,7 +276,9 @@ export function metadataUnits(
       name: value,
       fileName: `${members.length} files`,
       ...(groupNames.size === 1 && [...groupNames][0] ? { groupName: [...groupNames][0] } : {}),
-      metadata: sharedMetadataFields(members.map((file) => file.metadata)),
+      // What the files share, and the value itself, so {meta:column} names the page, the files
+      // without a value included.
+      metadata: { ...sharedMetadataFields(members.map((file) => file.metadata)), [column]: value },
       sampleIds: members.map((file) => file.id),
     };
   };
@@ -281,7 +295,7 @@ export function metadataUnits(
 export function populationUnits(
   iteration: LayoutIteration,
   tree: { populations: PopulationMap; root_population_id: string | null },
-  file: { id: string; name: string; fileName?: string },
+  file: { id: string; name: string; fileName?: string; metadata?: Readonly<Record<string, string>>; groupName?: string },
 ): LayoutUnit[] {
   const root = tree.root_population_id;
   const branch = iteration.populations?.kind === "branch" ? iteration.populations.populationId : null;
@@ -301,8 +315,31 @@ export function populationUnits(
       name: tree.populations[popId]?.name ?? popId,
       fileName: file.fileName ?? file.name,
       sampleName: file.name,
+      // The page is one file's, so {meta:column} and {group} read that file.
+      ...(file.groupName ? { groupName: file.groupName } : {}),
+      ...(file.metadata ? { metadata: file.metadata } : {}),
       populationId: popId,
     }));
+}
+
+/**
+ * How many tiles of the template fit across and down the sheet, inside the margin, where the
+ * tiles start (the template's own position) and step by its extent plus the gap: what Tiles
+ * across and Tiles down can be without a tile running off the paper. At least one each way.
+ */
+export function tilesThatFit(sheet: Pick<LayoutSheet, "items" | "width" | "height" | "page">, gap: number): { columns: number; rows: number } {
+  const bounds = contentBounds(sheet.items);
+  if (!bounds) return { columns: 1, rows: 1 };
+  const margin = mmToPx(sheet.page.marginMm);
+  const fit = (start: number, extent: number, limit: number) =>
+    Math.max(1, Math.min(MAX_TILES, Math.floor((limit - margin - start + gap) / Math.max(1, extent + gap))));
+  return { columns: fit(bounds.x, bounds.width, sheet.width), rows: fit(bounds.y, bounds.height, sheet.height) };
+}
+const MAX_TILES = 12;
+
+/** The items of a page that reach beyond the sheet's paper: what an export cuts off or leaves out. */
+export function itemsBeyondPaper(items: readonly { x: number; y: number; width: number; height: number }[], sheet: Pick<LayoutSheet, "width" | "height">): number {
+  return items.filter((item) => item.x + item.width > sheet.width + 0.5 || item.y + item.height > sheet.height + 0.5 || item.x < -0.5 || item.y < -0.5).length;
 }
 
 /** The template item and the tile offset a page item's id and frame refer to. */

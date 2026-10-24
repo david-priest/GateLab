@@ -3,7 +3,7 @@ import { recomputeGating } from "../store";
 import { canonicalGateId, storeHierarchy, type StoredHierarchy } from "./hierarchies";
 import { drawnRaw, type TransformSpec } from "./models";
 import { transformFromSpec, type Sample } from "./sample";
-import { linearScatterTicks, logicleTicks, scatterTicks } from "./ticks";
+import { linearScatterTicks, logicleTicks, scatterTicks, withoutPiledTicks } from "./ticks";
 import { populationTreeOrder } from "./populations";
 import {
   buildIllustrationPayload,
@@ -457,12 +457,22 @@ export function figureDisplaySample(
         range,
         spec.T,
       );
-    return scatterTicks(
+    // A fixed biex axis is labelled as the live one is (Sample.channelTicks): logicle decades
+    // bounded by its maxValue. Its table, like FlowJo's log and flog, pins values beyond its ends,
+    // so ticks piled on an end are dropped (withoutPiledTicks).
+    if (spec.kind === "biex")
+      return withoutPiledTicks(logicleTicks(
+        (v) => t.forward(v),
+        (v) => t.inverse(v),
+        range,
+        spec.maxValue,
+      ));
+    return withoutPiledTicks(scatterTicks(
       (v) => t.forward(v),
       (v) => t.inverse(v),
       range,
       spec.kind === "asinh" ? spec.cofactor : 1,
-    );
+    ));
   };
   // Gating always uses the original assay and the gate's recorded coordinate space.
   projected.gateAssayData = () => sample.gateAssayData();

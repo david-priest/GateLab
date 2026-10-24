@@ -111,6 +111,13 @@ export interface DivisionProfileLike {
   n: number;
   /** Optional only for legacy callers; App filters profiles against the active Sample binding. */
   coordinateBindingKey?: string;
+  /**
+   * The population the boundaries were fitted in, and its hierarchy: the Division tab fits and
+   * counts within the active population, so a chart counts within it too. Absent on a profile
+   * saved before it was recorded, which counts every event.
+   */
+  populationId?: string;
+  hierarchyId?: string;
 }
 
 /** Div0..DivN level names for the given max N. */
@@ -118,13 +125,23 @@ export function divisionLevels(maxN: number): string[] {
   return Array.from({ length: Math.max(0, maxN) + 1 }, (_, i) => `Div${i}`);
 }
 
-/** Per-level counts for one sample's whole-sample events, padded to Div0..DivMaxN (0s if no profile). */
-export function divisionCountsFor(sample: Sample, profile: DivisionProfileLike | undefined, maxN: number): number[] {
+/**
+ * Per-level counts for one sample's events, padded to Div0..DivMaxN (0s if no profile): the
+ * events in `within` when given (the population the profile was fitted in), else every event.
+ */
+export function divisionCountsFor(sample: Sample, profile: DivisionProfileLike | undefined, maxN: number, within: Uint8Array | null = null): number[] {
   const out = new Array(maxN + 1).fill(0);
   if (!profile) return out;
   const idx = sample.index(profile.channelKey);
   if (idx === undefined) return out;
-  const c = divisionLevelCounts(sample.displayColumn(idx), profile.boundaries);
+  const column = sample.displayColumn(idx);
+  let values: ArrayLike<number> = column;
+  if (within) {
+    const kept: number[] = [];
+    for (let e = 0; e < column.length; e++) if (within[e]) kept.push(column[e]);
+    values = kept;
+  }
+  const c = divisionLevelCounts(values, profile.boundaries);
   for (let i = 0; i < c.length && i <= maxN; i++) out[i] = c[i];
   return out;
 }

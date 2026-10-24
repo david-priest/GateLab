@@ -136,7 +136,7 @@ export function BiexAxisControl({ axis, params, recorded, defaults = null, onCha
   const labels: Record<BiexField, [string, string]> = {
     widthBasis: [t("Width basis"), t("Width basis (negative): the width of the linear region around zero. The further it is from zero, the wider that region and the more the values around zero are compressed.")],
     pos: [t("Positive decades"), t("Positive decades: how many decades the axis shows above the linear region.")],
-    neg: [t("Extra negative decades"), `${t("Extra negative decades: room below zero. Raising it moves zero up the axis and every value with it, with little change in shape.")} ${t("The view stays within the axis's own range; room below zero comes from the extra negative decades, not from panning.")}`],
+    neg: [t("Extra negative decades"), `${t("Extra negative decades: room below zero. Raising it moves zero up the axis and every value with it, with little change in shape.")} ${t("A pan past either end of the axis shows space no event can fill, because an event beyond an end is drawn on it; room below zero for the data comes from the extra negative decades.")}`],
     maxValue: [t("Top of scale"), t("Top of scale: the raw value at the top of the axis.")],
   };
   const full = [
@@ -185,7 +185,7 @@ export function BiexAxisControl({ axis, params, recorded, defaults = null, onCha
       <details className="gl-biex-popover gl-popover">
         <summary
           className={"gl-tool" + (adjusted ? " gl-biex-adjusted" : "")}
-          title={`${full}\n${t("The other biexponential parameters. Display only: gates are held in raw values, so no gate moves and no count changes.")}\n${t("The view stays within the axis's own range; room below zero comes from the extra negative decades, not from panning.")}`}
+          title={`${full}\n${t("The other biexponential parameters. Display only: gates are held in raw values, so no gate moves and no count changes.")}`}
           aria-label={`${axis} biex parameters`}
         >
           {"\u22ef"}

@@ -5,8 +5,8 @@
 // Facet come from per-sample metadata (or the sample name). Rendered as a custom SVG stacked bar
 // (composition per Group) or boxplot (per-unit fraction per Category, dodged by Group).
 
-import { useEffect, useMemo, useState } from "react";
-import { finishExportSvg, pngBlob } from "../plots/exportSvg";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { finishExportSvg, pdfVectorPage, pngBlob } from "../plots/exportSvg";
 import { usePersistedTabState } from "./tabState";
 import type { CoreState, Derived } from "../store";
 import type { Sample } from "../engine/sample";
@@ -26,6 +26,7 @@ import type { MetadataColumn } from "../engine/metadata";
 import { SAMPLE_ID_FIELD } from "../engine/metadata";
 import { useI18n } from "./i18n";
 import { TabIntro, TabIntroToggle, useTabIntro } from "./TabIntro";
+import { NumberField } from "./NumberField";
 import { figureHierarchies } from "../engine/figure";
 import {
   buildProportionsModel,
@@ -81,6 +82,15 @@ export function ProportionsTab({
   // from there before this tab has been opened is the chart this tab would show.
   const [defaults] = useState(() => defaultProportionsSettings(files, activeState, metadataColumns));
   const [selectedFiles, setSelectedFiles] = usePersistedTabState<string[]>("prop.files", () => defaults.files);
+  // A file added to the workspace while the tab is in use is drawn too, as it would be had it been
+  // there when the tab opened; a file the user unticked stays unticked.
+  const knownFiles = useRef(new Set(files.map((file) => file.id)));
+  useEffect(() => {
+    const added = files.map((file) => file.id).filter((id) => !knownFiles.current.has(id));
+    if (!added.length) return;
+    added.forEach((id) => knownFiles.current.add(id));
+    setSelectedFiles((ids) => [...ids, ...added.filter((id) => !ids.includes(id))]);
+  }, [files, setSelectedFiles]);
   // One tree per workspace: the files' copies follow it by provenance, so there is no tree to pick.
   const [hierarchyId] = usePersistedTabState("prop.hierarchy", defaults.hierarchy);
   const trees = figureHierarchies(activeState);
@@ -90,6 +100,7 @@ export function ProportionsTab({
   const [chartHeight, setChartHeight] = usePersistedTabState("prop.height", defaults.height);
   const [showGrid, setShowGrid] = usePersistedTabState("prop.grid", defaults.grid);
   const [showPoints, setShowPoints] = usePersistedTabState("prop.points", defaults.points);
+  const [pairedLines, setPairedLines] = usePersistedTabState("prop.paired", defaults.paired);
   const [showLegend, setShowLegend] = usePersistedTabState("prop.legend", defaults.legend);
   const [pointRadius, setPointRadius] = usePersistedTabState("prop.pointRadius", defaults.pointRadius);
   const rootId = state.root_population_id ?? "";
@@ -146,11 +157,18 @@ export function ProportionsTab({
   const [fontTick, setFontTick] = usePersistedTabState("prop.fontTick", defaults.fontTick);
   const [fontAxis, setFontAxis] = usePersistedTabState("prop.fontAxis", defaults.fontAxis);
   const [fontLegend, setFontLegend] = usePersistedTabState("prop.fontLegend", defaults.fontLegend);
+  // A change marks the workspace unsaved; opening the tab, or a workspace opening under it, does not.
+  const configMounted = useRef(false);
   useEffect(() => {
+    if (!configMounted.current) {
+      configMounted.current = true;
+      return;
+    }
     onConfigChange?.();
   }, [
     selectedFiles,
     hierarchyId,
+    parentSel,
     categoryKind,
     plotType,
     selectedPops,
@@ -166,6 +184,7 @@ export function ProportionsTab({
     chartHeight,
     showGrid,
     showPoints,
+    pairedLines,
     showLegend,
     pointRadius,
   ]);
@@ -215,8 +234,8 @@ export function ProportionsTab({
   const catColors = proportionsCategoryColors(model, { palette, includeUngated }, state.populations);
   const toggle = <T,>(arr: T[], v: T) =>
     arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v];
-  const exportSvg = (kind: "svg" | "png") =>
-    downloadChart("gl-prop-svg", "proportions", kind);
+  const exportChart = (kind: "svg" | "png" | "pdf") =>
+    void downloadChart("gl-prop-svg", "proportions", kind);
   const addToLayout = () =>
     onAddToLayout?.({
       ...modelSettings,
@@ -229,6 +248,7 @@ export function ProportionsTab({
       height: chartHeight,
       grid: showGrid,
       points: showPoints,
+      paired: pairedLines,
       legend: showLegend,
       pointRadius,
     });
@@ -354,7 +374,7 @@ export function ProportionsTab({
             aria-labelledby="prop-data-heading"
           >
             <span id="prop-data-heading" className="gl-control-section-label">
-              {t("Data")}
+              {t("Grouping")}
             </span>
             <div className="gl-control-section-body">
               <label className="gl-field-inline">
@@ -366,10 +386,14 @@ export function ProportionsTab({
                   {factorOptions}
                 </select>
               </label>
-              <label className="gl-field-inline">
+              <label
+                className="gl-field-inline"
+                title={plotType === "stacked" && !averagePerUnit ? t("A pooled stacked bar has no replicate units; tick Average per unit or draw a boxplot") : undefined}
+              >
                 {t("Replicate unit")}
                 <select
                   value={unitSel}
+                  disabled={plotType === "stacked" && !averagePerUnit}
                   onChange={(e) => setUnitSel(e.target.value)}
                 >
                   {factorOptions}
@@ -386,17 +410,23 @@ export function ProportionsTab({
                 </select>
               </label>
               <TabIntro intro={intro}>
-                Group controls the bars or box colours. Facet creates separate
-                panels. Each boxplot observation represents one replicate unit,
-                not one event.
+                Group sets the bars of a stacked bar and the box colours of a
+                boxplot. Facet draws a panel per value. A replicate unit is one
+                observation in each group it has files in: a boxplot draws one
+                point per unit, every unit drawn; its box spans the quartiles,
+                and each whisker reaches the furthest unit within 1.5 × the
+                interquartile range of its quartile (Tukey).
               </TabIntro>
               <label
                 className="gl-check"
-                title="Normalise within each unit before averaging across units"
+                title={plotType === "stacked"
+                  ? t("Each bar the mean of its replicate units' compositions, each unit weighted equally; off, the bar pools the group's events")
+                  : t("A boxplot always takes one value per replicate unit")}
               >
                 <input
                   type="checkbox"
                   checked={averagePerUnit}
+                  disabled={plotType !== "stacked"}
                   onChange={(e) => setAveragePerUnit(e.target.checked)}
                 />
                 {t("Average per unit")}
@@ -440,57 +470,19 @@ export function ProportionsTab({
               <span className="gl-ctl-sep" />
               <label className="gl-field-inline">
                 {t("Tick")}
-                <input
-                  type="number"
-                  min={5}
-                  max={20}
-                  value={fontTick}
-                  onChange={(e) =>
-                    setFontTick(Math.max(5, Math.min(20, +e.target.value || 9)))
-                  }
-                />
+                <NumberField value={fontTick} min={5} max={20} integer onCommit={setFontTick} />
               </label>
               <label className="gl-field-inline">
                 {t("Axis")}
-                <input
-                  type="number"
-                  min={5}
-                  max={24}
-                  value={fontAxis}
-                  onChange={(e) =>
-                    setFontAxis(
-                      Math.max(5, Math.min(24, +e.target.value || 10)),
-                    )
-                  }
-                />
+                <NumberField value={fontAxis} min={5} max={24} integer onCommit={setFontAxis} />
               </label>
               <label className="gl-field-inline">
                 {t("Legend")}
-                <input
-                  type="number"
-                  min={5}
-                  max={20}
-                  value={fontLegend}
-                  onChange={(e) =>
-                    setFontLegend(
-                      Math.max(5, Math.min(20, +e.target.value || 11)),
-                    )
-                  }
-                />
+                <NumberField value={fontLegend} min={5} max={20} integer onCommit={setFontLegend} />
               </label>
               <label className="gl-field-inline">
-                Plot height
-                <input
-                  type="number"
-                  min={140}
-                  max={800}
-                  value={chartHeight}
-                  onChange={(event) =>
-                    setChartHeight(
-                      Math.max(140, Math.min(800, +event.target.value || 280)),
-                    )
-                  }
-                />
+                {t("Plot height")}
+                <NumberField value={chartHeight} min={140} max={800} integer onCommit={setChartHeight} />
               </label>
               <label className="gl-check">
                 <input
@@ -508,22 +500,33 @@ export function ProportionsTab({
                 />
                 Show legend
               </label>
-              <label className="gl-check">
+              <label className="gl-check" title={plotType === "box" ? undefined : t("A boxplot draws one point per replicate unit; a stacked bar has none")}>
                 <input
                   type="checkbox"
                   checked={showPoints}
+                  disabled={plotType !== "box"}
                   onChange={(event) => setShowPoints(event.target.checked)}
                 />
-                Show replicate points
+                {t("Show replicate points")}
+              </label>
+              <label className="gl-check" title={plotType !== "box" ? t("Lines join a unit's points across a boxplot's groups") : unitSel === SAMPLE_OPT ? t("Each file is its own unit, so no unit sits in two groups; choose a Replicate unit such as donor") : t("Join each replicate unit's points across the groups, for a design with each unit in every group")}>
+                <input
+                  type="checkbox"
+                  checked={pairedLines}
+                  disabled={plotType !== "box" || unitSel === SAMPLE_OPT}
+                  onChange={(event) => setPairedLines(event.target.checked)}
+                />
+                {t("Join each unit across groups")}
               </label>
               <label className="gl-field-inline">
-                Point size
+                {t("Point size")}
                 <input
                   type="range"
                   min={0.5}
                   max={5}
                   step={0.5}
                   value={pointRadius}
+                  disabled={plotType !== "box" || !showPoints}
                   onChange={(event) => setPointRadius(+event.target.value)}
                 />
               </label>
@@ -540,17 +543,24 @@ export function ProportionsTab({
             <div className="gl-control-section-body">
               <button
                 className="gl-mini-btn"
-                title="Export the current Proportions chart as PNG"
-                onClick={() => exportSvg("png")}
+                title={t("The chart and its legend as a PNG at 300 dpi")}
+                onClick={() => exportChart("png")}
               >
                 PNG
               </button>
               <button
                 className="gl-mini-btn"
-                title="Export the current Proportions chart as SVG"
-                onClick={() => exportSvg("svg")}
+                title={t("The chart and its legend as an SVG: shapes and text stay editable")}
+                onClick={() => exportChart("svg")}
               >
                 SVG
+              </button>
+              <button
+                className="gl-mini-btn"
+                title={t("The chart and its legend as a vector PDF")}
+                onClick={() => exportChart("pdf")}
+              >
+                PDF
               </button>
             </div>
           </section>
@@ -560,9 +570,15 @@ export function ProportionsTab({
         <div className="gl-prop-chart-scroll">
           {model.excluded?.length ? (
             <p className="gl-plotting-warning" role="status">
-              {model.excluded.length} files excluded: selected populations are
+              {model.excluded.length} files excluded:{" "}
+              {categoryKind === "division" ? "the population the division was fitted in is" : "selected populations are"}{" "}
               missing, ambiguous, or structurally changed.{" "}
               {model.excluded.join(", ")}
+            </p>
+          ) : null}
+          {plotType === "stacked" && model.overlapping?.length ? (
+            <p className="gl-plotting-warning" role="status">
+              {t("{names} share events with another selected population that is not nested in them. A stacked bar draws each event once, in the first population in tree order, so these are drawn smaller than they are; the boxplot shows each population whole.", { names: model.overlapping.join(", ") })}
             </p>
           ) : null}
           {categoryKind === "division" &&
@@ -575,9 +591,15 @@ export function ProportionsTab({
                 excluded.
               </div>
             )}
-          {samples.length === 0 || nCat === 0 ? (
+          {samples.length === 0 || nCat === 0 || model.perSample.length === 0 ? (
             <div className="gl-tab-empty">
-              Select at least one population, and load samples with metadata.
+              {files.length === 0
+                ? t("Open files or a workspace to plot.")
+                : samples.length === 0
+                  ? t("No file is ticked. Tick the files to draw under Data.")
+                  : nCat === 0
+                    ? t("No population is ticked. Tick the populations to draw in the Populations pane under Data.")
+                    : t("None of the ticked files can be drawn; the note above says why.")}
             </div>
           ) : (
             <ProportionsChart
@@ -587,11 +609,15 @@ export function ProportionsTab({
               palette={palette}
               averagePerUnit={averagePerUnit}
               populations={state.populations}
+              valueTitle={proportionsValueTitle(categoryKind, categoryKind === "division" ? divisionWithinName(model.divisionWithin) : parentId === rootId ? null : (state.populations[parentId]?.name ?? null), includeUngated)}
+              groupTitle={proportionsFactorTitle(groupSel)}
+              facetTitle={proportionsFactorTitle(facetSel)}
               fonts={{ tick: fontTick, axis: fontAxis, legend: fontLegend }}
               appearance={{
                 height: chartHeight,
                 showGrid,
                 showPoints,
+                paired: pairedLines,
                 showLegend,
                 pointRadius,
               }}
@@ -680,11 +706,44 @@ interface ChartProps {
     height: number;
     showGrid: boolean;
     showPoints: boolean;
+    /** Join each replicate unit's points across the groups of a boxplot. */
+    paired?: boolean;
     showLegend: boolean;
     pointRadius: number;
   };
   /** The card's element id, which the export composer finds it by; each chart on a page needs its own. */
   containerId?: string;
+  /** The value axis's title, naming what a percentage is of. */
+  valueTitle?: string;
+  /** What the groups are, for the stacked bar's category axis and the boxplot's legend. */
+  groupTitle?: string;
+  /** What the facets are, before each panel's value. */
+  facetTitle?: string;
+}
+
+/** What the chart's percentages are of, for its value axis; for division, `parentName` is the population fitted in. */
+export function proportionsValueTitle(
+  categoryKind: "population" | "division",
+  parentName: string | null,
+  includeRest: boolean,
+): string {
+  if (categoryKind === "division") return parentName ? `% of ${parentName}` : "% of all events";
+  if (!includeRest) return parentName ? `% of the populations shown in ${parentName}` : "% of the populations shown";
+  return parentName ? `% of ${parentName}` : "% of all events";
+}
+
+/** The population a division chart counts within, for its value axis: one name, null for all events, or a phrase when files differ. */
+export function divisionWithinName(within: (string | null)[] | undefined): string | null {
+  if (!within || within.length === 0) return null;
+  return within.length === 1 ? within[0] : "the population each file's division was fitted in";
+}
+
+/** A Group, Replicate unit or Facet picker's value as a title: the file, the sample id or the metadata column. */
+export function proportionsFactorTitle(value: string): string | undefined {
+  if (value === PROPORTIONS_NO_FACTOR) return undefined;
+  if (value === PROPORTIONS_SAMPLE_FACTOR) return "File";
+  if (value === SAMPLE_ID_FIELD) return "Sample ID";
+  return value;
 }
 
 export interface ProportionPanelLayout {
@@ -702,9 +761,10 @@ export function proportionPanelLayout(
   tickFont: number,
 ): ProportionPanelLayout {
   const margin = { top: 22, right: 20, bottom: 46, left: 60 };
-  const slotWidth =
-    plotType === "box" ? Math.max(52, groupCount * 18 + 18) : 72;
-  const innerWidth = Math.max(280, labels.length * slotWidth);
+  // A boxplot panel is one population with a box per group; a stacked bar, a bar per group.
+  void groupCount;
+  const slotWidth = plotType === "box" ? 34 : 72;
+  const innerWidth = Math.max(plotType === "box" ? 90 : 280, labels.length * slotWidth);
   const step = labels.length ? innerWidth / labels.length : innerWidth;
   const longestLabelPx = Math.max(
     0,
@@ -727,6 +787,27 @@ export function proportionPanelLayout(
   };
 }
 
+const FULL_AXIS = { max: 1, ticks: [0, 0.25, 0.5, 0.75, 1] };
+
+/** A value axis from 0 to a round number just above `highest` (a fraction), with three to five ticks. */
+export function fittedValueAxis(highest: number): { max: number; ticks: number[] } {
+  if (!(highest > 0)) return FULL_AXIS;
+  const target = Math.min(1, highest * 1.05);
+  const raw = target / 4;
+  const magnitude = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map((f) => f * magnitude).find((candidate) => candidate >= raw)!;
+  const max = Math.min(1, Math.ceil(target / step - 1e-9) * step);
+  const ticks: number[] = [];
+  for (let i = 0; i * step <= max + step * 1e-6; i++) ticks.push(Number((i * step).toPrecision(12)));
+  return { max, ticks };
+}
+
+/** A tick as a percentage with the decimals the axis's ticks need (2.5%, 0.25%), and no more. */
+function formatPercentTick(value: number, ticks: readonly number[]): string {
+  const decimals = [0, 1, 2, 3].find((d) => ticks.every((tick) => Math.abs(Number((tick * 100).toFixed(d)) - tick * 100) < 1e-9)) ?? 3;
+  return `${(value * 100).toFixed(decimals)}%`;
+}
+
 export function compactChartLabel(label: string, maxLength = 30): string {
   if (label.length <= maxLength) return label;
   const tail = Math.max(8, Math.floor(maxLength * 0.35));
@@ -743,6 +824,9 @@ export function ProportionsChart({
   fonts,
   appearance,
   containerId = "gl-prop-svg",
+  valueTitle,
+  groupTitle,
+  facetTitle,
 }: ChartProps) {
   const { catLevels, perSample, hasFacet, levels } = model;
   const { t } = useI18n();
@@ -757,10 +841,15 @@ export function ProportionsChart({
   // Legend entities: categories for stacked, groups for box.
   const groups = [...new Set(perSample.map((s) => s.group))].sort(compareLabels);
   const groupColors = paletteColors(palette, Math.max(1, groups.length));
+  // `index` is the category or group a legend entry stands for, which the marks' highlight reads.
+  // A stacked bar's legend reads as its stack does, top to bottom: the stack draws the first
+  // category at the bottom and nests each population's daughters above its own events, so the
+  // stack from the top is the categories in reverse tree order, the rest of the parent first.
   const legend =
     plotType === "stacked"
-      ? catLevels.map((l, i) => ({ label: l, color: catColors[i] }))
-      : groups.map((g, i) => ({ label: g, color: groupColors[i] }));
+      ? catLevels.map((l, i) => ({ index: i, label: l, color: catColors[i] })).reverse()
+      : groups.map((g, i) => ({ index: i, label: g, color: groupColors[i] }));
+  const pinnedEntry = pinnedLegend === null ? undefined : legend.find((entry) => entry.index === pinnedLegend);
 
   // Keep large category sets compact: at most ten rows, up to four columns. The chart card
   // expands horizontally rather than becoming a mostly-empty page-height legend column.
@@ -779,7 +868,22 @@ export function ProportionsChart({
     setPinnedLegend(null);
   }, [plotType, legend.length]);
 
-  const renderPanel = (facet: string | null, key: string) => {
+  // A boxplot draws one panel per category, each with a value axis of its own, fitted to the
+  // category's highest unit across every facet, so a population at 0.5% fills its panel.
+  const boxAxes = useMemo(() => {
+    if (plotType !== "box") return [];
+    const units = perUnitProps(perSample, nCat);
+    return catLevels.map((_, ci) => fittedValueAxis(Math.max(0, ...computeBoxes(units, nCat, false).filter((box) => box.cat === ci).flatMap((box) => box.values))));
+  }, [plotType, perSample, nCat, catLevels]);
+
+  // Boxplot panels wrap five to a row (12 px apart, as .gl-prop-panels spaces them).
+  const BOX_PANELS_PER_ROW = 5;
+  const boxPanelCount = plotType === "box" ? facets.length * nCat : 0;
+  const boxRowWidth = boxPanelCount > BOX_PANELS_PER_ROW
+    ? BOX_PANELS_PER_ROW * proportionPanelLayout("box", groups, groups.length, fonts.tick).width + (BOX_PANELS_PER_ROW - 1) * 12
+    : undefined;
+
+  const renderPanel = (facet: string | null, key: string, boxCat?: number) => {
     const sub = hasFacet
       ? perSample.filter((s) => (s.facet ?? "") === facet)
       : perSample;
@@ -793,25 +897,40 @@ export function ProportionsChart({
         : null;
     const xLabels = stackedBars
       ? stackedBars.map((bar) => bar.group)
-      : catLevels;
+      : groups;
     const layout = proportionPanelLayout(
       plotType,
       xLabels,
       groups.length,
       fonts.tick,
     );
-    const PW = layout.width,
-      PH = layout.height - 240 + (appearance?.height ?? 240),
-      M = layout.margin;
-    const iw = PW - M.left - M.right,
+    const M = layout.margin;
+    const iw = layout.width - M.left - M.right,
       ih = appearance?.height ?? 240;
     const plotBottom = M.top + ih;
-    const y = (v: number) => M.top + ih * (1 - v); // v in [0,1]
+    // The stacked bar's category axis is the groups, titled under its labels: below the
+    // margin rotated labels take, else just under the labels' one line.
+    const xTitleY = stackedBars && groupTitle
+      ? layout.rotateLabels
+        ? plotBottom + M.bottom + fonts.axis
+        : plotBottom + 18 + fonts.tick + fonts.axis
+      : null;
+    const PW = layout.width,
+      PH = Math.max(plotBottom + M.bottom, xTitleY === null ? 0 : xTitleY + 6);
+    const axis = boxCat === undefined ? FULL_AXIS : boxAxes[boxCat] ?? FULL_AXIS;
+    const y = (v: number) => M.top + ih * (1 - v / axis.max); // v in [0,1]
     let body: JSX.Element[] = [];
     let xTicks: { x: number; label: string }[] = [];
 
     if (stackedBars) {
       const bars = stackedBars;
+      // What each bar stands on: its replicate units when averaged, else its events.
+      const units = averagePerUnit ? perUnitProps(sub, nCat) : [];
+      const basis = (group: string, total: number) => {
+        if (!averagePerUnit) return `${Math.round(total).toLocaleString("en-US")} events`;
+        const n = units.filter((unit) => unit.group === group).length;
+        return n === 1 ? "1 replicate unit" : `mean of ${n} replicate units`;
+      };
       const bw = bars.length ? Math.min(64, (iw / bars.length) * 0.7) : 0;
       const step = bars.length ? iw / bars.length : 0;
       bars.forEach((bar, bi) => {
@@ -842,7 +961,7 @@ export function ProportionsChart({
                 strokeWidth={0.4}
                 opacity={markOpacity(node.cat)}
               >
-                <title>{`${catLevels[node.cat]}: ${((node.y1 - node.y0) * 100).toFixed(1)}%`}</title>
+                <title>{`${catLevels[node.cat]}: ${((node.y1 - node.y0) * 100).toFixed(1)}% (${basis(bar.group, bar.total)})`}</title>
               </rect>,
             );
           });
@@ -866,7 +985,7 @@ export function ProportionsChart({
                 strokeWidth={0.4}
                 opacity={markOpacity(levels.length)}
               >
-                <title>{`ungated: ${(ungated * 100).toFixed(1)}%`}</title>
+                <title>{`${catLevels[levels.length]}: ${(ungated * 100).toFixed(1)}%`}</title>
               </rect>,
             );
           }
@@ -890,79 +1009,94 @@ export function ProportionsChart({
               strokeWidth={0.2}
               opacity={markOpacity(seg.cat)}
             >
-              <title>{`${catLevels[seg.cat]}: ${(seg.value * 100).toFixed(1)}%`}</title>
+              <title>{`${catLevels[seg.cat]}: ${(seg.value * 100).toFixed(1)}% (${basis(bar.group, bar.total)})`}</title>
             </rect>,
           );
           acc += seg.value;
         });
       });
     } else {
-      const units = perUnitProps(sub, nCat);
-      const boxes = computeBoxes(units, nCat, false);
-      const bw = 14;
-      const catStep = nCat ? iw / nCat : 0;
-      catLevels.forEach((_, ci) => {
-        const cxCat = M.left + catStep * (ci + 0.5);
-        xTicks.push({ x: cxCat, label: catLevels[ci] });
-        const catBoxes = boxes.filter((b) => b.cat === ci);
-        const ng = groups.length || 1;
-        catBoxes.sort((a, b) => compareLabels(a.group, b.group));
-        catBoxes.forEach((box) => {
-          const gi = groups.indexOf(box.group);
-          const dodge = (gi - (ng - 1) / 2) * (bw + 3);
-          const cx = cxCat + dodge;
-          const col = groupColors[gi] ?? "#888";
-          const { q1, med, q3, min, max } = box.stats;
-          body.push(
-            <g
-              key={`b-${ci}-${box.group}`}
-              className="gl-prop-mark-group"
-              opacity={markOpacity(gi)}
-            >
-              <line
-                x1={cx}
-                x2={cx}
-                y1={y(max)}
-                y2={y(min)}
-                stroke="#555"
-                strokeWidth={0.8}
-              />
-              <rect
-                className="gl-prop-mark"
-                x={cx - bw / 2}
-                y={y(q3)}
-                width={bw}
-                height={Math.max(0.5, y(q1) - y(q3))}
-                fill={col}
-                fillOpacity={0.85}
-                stroke="#333"
-                strokeWidth={0.5}
-              >
-                <title>{`${catLevels[ci]} · ${box.group}: median ${(med * 100).toFixed(1)}%`}</title>
-              </rect>
-              <line
-                x1={cx - bw / 2}
-                x2={cx + bw / 2}
-                y1={y(med)}
-                y2={y(med)}
-                stroke="#111"
-                strokeWidth={1}
-              />
-              {appearance?.showPoints !== false &&
-                box.values.map((v, vi) => (
-                  <circle
-                    key={vi}
-                    cx={cx + ((vi % 5) - 2) * 2.1}
-                    cy={y(v)}
-                    r={appearance?.pointRadius ?? 1.5}
-                    fill="#222"
-                    fillOpacity={0.65}
-                  />
-                ))}
-            </g>,
-          );
+      const ci = boxCat ?? 0;
+      const boxes = computeBoxes(perUnitProps(sub, nCat), nCat, false).filter((box) => box.cat === ci);
+      const step = groups.length ? iw / groups.length : iw;
+      const bw = Math.min(18, step * 0.6);
+      const showPoints = appearance?.showPoints !== false;
+      // A point's place in its box, spread over up to five columns so close values stay visible.
+      const pointX = (cx: number, count: number, vi: number) =>
+        showPoints ? cx + ((vi % Math.min(5, count)) - (Math.min(5, count) - 1) / 2) * 2.1 : cx;
+      // Where each unit is drawn in each group, in group order, for the paired lines.
+      const unitPath = new Map<string, { x: number; y: number }[]>();
+      groups.forEach((group, gi) => {
+        const cx = M.left + step * (gi + 0.5);
+        xTicks.push({ x: cx, label: group });
+        const box = boxes.find((candidate) => candidate.group === group);
+        if (!box) return;
+        const col = groupColors[gi] ?? "#888";
+        const { q1, med, q3, lo, hi } = box.stats;
+        box.units.forEach((unit, vi) => {
+          const at = { x: pointX(cx, box.values.length, vi), y: y(box.values[vi]) };
+          unitPath.set(unit, [...(unitPath.get(unit) ?? []), at]);
         });
+        body.push(
+          <g
+            key={`b-${ci}-${box.group}`}
+            className="gl-prop-mark-group"
+            opacity={markOpacity(gi)}
+          >
+            <line
+              x1={cx}
+              x2={cx}
+              y1={y(hi)}
+              y2={y(lo)}
+              stroke="#555"
+              strokeWidth={0.8}
+            />
+            <rect
+              className="gl-prop-mark"
+              x={cx - bw / 2}
+              y={y(q3)}
+              width={bw}
+              height={Math.max(0.5, y(q1) - y(q3))}
+              fill={col}
+              fillOpacity={0.85}
+              stroke="#333"
+              strokeWidth={0.5}
+            >
+              <title>{`${catLevels[ci]} · ${box.group}: median ${(med * 100).toFixed(1)}%, n = ${box.values.length}`}</title>
+            </rect>
+            <line
+              x1={cx - bw / 2}
+              x2={cx + bw / 2}
+              y1={y(med)}
+              y2={y(med)}
+              stroke="#111"
+              strokeWidth={1}
+            />
+            {showPoints &&
+              box.values.map((v, vi) => (
+                <circle
+                  key={vi}
+                  cx={pointX(cx, box.values.length, vi)}
+                  cy={y(v)}
+                  r={appearance?.pointRadius ?? 1.5}
+                  fill="#222"
+                  fillOpacity={0.65}
+                />
+              ))}
+          </g>,
+        );
       });
+      if (appearance?.paired) {
+        body.push(
+          <g key={`paired-${ci}`} className="gl-prop-paired" fill="none" stroke="#666" strokeWidth={0.6} strokeOpacity={0.7}>
+            {[...unitPath].filter(([, path]) => path.length > 1).map(([unit, path]) => (
+              <polyline key={unit} points={path.map((p) => `${p.x},${p.y}`).join(" ")}>
+                <title>{unit}</title>
+              </polyline>
+            ))}
+          </g>,
+        );
+      }
     }
 
     return (
@@ -973,7 +1107,7 @@ export function ProportionsChart({
         viewBox={`0 0 ${PW} ${PH}`}
         className="gl-prop-panel"
       >
-        {hasFacet && (
+        {(hasFacet || boxCat !== undefined) && (
           <text
             x={PW / 2}
             y={14}
@@ -982,11 +1116,14 @@ export function ProportionsChart({
             fontWeight={600}
             fill="#334155"
           >
-            {facet || "(NA)"}
+            {[
+              boxCat !== undefined ? catLevels[boxCat] : null,
+              hasFacet ? (facetTitle ? `${facetTitle}: ${facet || "(NA)"}` : facet || "(NA)") : null,
+            ].filter(Boolean).join(" · ")}
           </text>
         )}
         {/* y grid + axis (percent) */}
-        {[0, 0.25, 0.5, 0.75, 1].map((t) => (
+        {axis.ticks.map((t) => (
           <g key={t}>
             {appearance?.showGrid !== false && (
               <line
@@ -1004,7 +1141,7 @@ export function ProportionsChart({
               fontSize={fonts.tick}
               fill="#666"
             >
-              {Math.round(t * 100)}%
+              {formatPercentTick(t, axis.ticks)}
             </text>
           </g>
         ))}
@@ -1030,9 +1167,20 @@ export function ProportionsChart({
           fill="#475569"
           transform={`rotate(-90 16 ${M.top + ih / 2})`}
         >
-          {plotType === "stacked" ? "Composition (%)" : "Events (%)"}
+          {valueTitle ?? (plotType === "stacked" ? "Composition (%)" : "Events (%)")}
         </text>
         {body}
+        {xTitleY !== null && (
+          <text
+            x={M.left + iw / 2}
+            y={xTitleY}
+            textAnchor="middle"
+            fontSize={fonts.axis}
+            fill="#475569"
+          >
+            {groupTitle}
+          </text>
+        )}
         {xTicks.map((t, i) => (
           <text
             key={i}
@@ -1069,14 +1217,17 @@ export function ProportionsChart({
     >
       <div
         className="gl-prop-panels"
+        style={boxRowWidth ? { width: boxRowWidth } : undefined}
         onClick={pinnedLegend === null ? undefined : clearHighlight}
         title={pinnedLegend === null ? undefined : t("Click to show every category again")}
       >
-        {facets.map((f, i) => renderPanel(f, `p${i}`))}
+        {plotType === "box"
+          ? facets.flatMap((f, i) => catLevels.map((_, ci) => renderPanel(f, `p${i}-${ci}`, ci)))
+          : facets.map((f, i) => renderPanel(f, `p${i}`))}
       </div>
-      {pinnedLegend !== null && legend[pinnedLegend] && (
+      {pinnedEntry && (
         <p className="gl-prop-highlight-note" role="status">
-          {t("Highlighting {label}; the rest is faded. Click it again, the chart or Show all to clear.", { label: legend[pinnedLegend].label })}
+          {t("Highlighting {label}; the rest is faded. Click it again, the chart or Show all to clear.", { label: pinnedEntry.label })}
           <button type="button" className="gl-mini-btn" onClick={clearHighlight}>{t("Show all")}</button>
         </p>
       )}
@@ -1090,7 +1241,8 @@ export function ProportionsChart({
           gridTemplateColumns: `repeat(${legendColumns}, minmax(0, 1fr))`,
         }}
       >
-        {legend.map((l, i) => (
+        {plotType === "box" && groupTitle && <span className="gl-prop-legend-title">{groupTitle}</span>}
+        {legend.map(({ index: i, ...l }) => (
           <button
             type="button"
             key={i}
@@ -1184,8 +1336,9 @@ export function composeProportionsChartSvg(
   );
   const fallbackLegendTop = padding + fallbackPanelsHeight + 10;
   const fallbackWidth = fallbackInnerWidth + padding * 2;
+  const legendTitleRows = legendItems.length && legend?.querySelector(".gl-prop-legend-title") ? 1 : 0;
   const fallbackHeight =
-    fallbackLegendTop + 10 + legendRows * legendRowHeight + padding;
+    fallbackLegendTop + 10 + (legendRows + legendTitleRows) * legendRowHeight + padding;
   const width = Math.max(
     1,
     Math.ceil(hasLiveLayout ? containerRect.width * k : fallbackWidth),
@@ -1221,6 +1374,8 @@ export function composeProportionsChartSvg(
       `translate(${Math.round(x)},${Math.round(y)})`,
     );
     const clone = panel.cloneNode(true) as SVGSVGElement;
+    // A legend highlight is a way of looking at the chart, not part of it.
+    clone.querySelectorAll(".gl-prop-mark, .gl-prop-mark-group").forEach((mark) => mark.removeAttribute("opacity"));
     clone.setAttribute("x", "0");
     clone.setAttribute("y", "0");
     group.appendChild(clone);
@@ -1249,6 +1404,21 @@ export function composeProportionsChartSvg(
     divider.setAttribute("stroke-width", "1");
     root.appendChild(divider);
 
+    const title = legend.querySelector<HTMLElement>(".gl-prop-legend-title");
+    const titleRect = title?.getBoundingClientRect();
+    const titleRow = title ? legendRowHeight : 0;
+    if (title) {
+      const useTitleRect = useLegendRect && !!titleRect && titleRect.height > 0;
+      const exportTitle = document.createElementNS(SVG_NS, "text");
+      exportTitle.setAttribute("x", String(Math.round(useTitleRect ? (titleRect!.left - containerRect.left) * k : legendX)));
+      exportTitle.setAttribute("y", String(Math.round(useTitleRect ? (titleRect!.top - containerRect.top + titleRect!.height / 2) * k : legendTop + 10 + legendRowHeight / 2)));
+      exportTitle.setAttribute("dy", "0.35em");
+      exportTitle.setAttribute("font-size", String(legendFontSize));
+      exportTitle.setAttribute("font-weight", "bold");
+      exportTitle.setAttribute("fill", "#334155");
+      exportTitle.textContent = title.textContent ?? "";
+      root.appendChild(exportTitle);
+    }
     const fallbackColumnWidth = legendWidth / legendColumns;
     legendItems.forEach((item, index) => {
       const itemRect = item.getBoundingClientRect();
@@ -1261,7 +1431,7 @@ export function composeProportionsChartSvg(
         : legendX + column * fallbackColumnWidth;
       const itemY = useItemRect
         ? (itemRect.top - containerRect.top) * k
-        : legendTop + 10 + row * legendRowHeight;
+        : legendTop + 10 + titleRow + row * legendRowHeight;
       const itemHeight = useItemRect ? itemRect.height * k : legendRowHeight;
       const swatch = item.querySelector<HTMLElement>(".gl-prop-swatch");
       const label =
@@ -1303,12 +1473,20 @@ export function composeProportionsChartSvg(
   return { root, width, height };
 }
 
-// Serialize the complete chart for download (PNG via canvas, SVG direct).
-function downloadChart(containerId: string, name: string, kind: "svg" | "png") {
+// Serialize the complete chart for download: SVG direct, PDF as vector art, PNG at 300 dpi via canvas.
+async function downloadChart(containerId: string, name: string, kind: "svg" | "png" | "pdf") {
   const composed = composeProportionsChartSvg(containerId);
   if (!composed) return;
   const { root, width, height } = composed;
   finishExportSvg(root, { widthPx: width, heightPx: height });
+  if (kind === "pdf") {
+    // CSS pixels are 1/96 inch; PDF points are 1/72 inch.
+    const w = width * 72 / 96, h = height * 72 / 96;
+    const { jsPDF } = await import("jspdf");
+    const pdf = new jsPDF({ orientation: w >= h ? "landscape" : "portrait", unit: "pt", format: [w, h], compress: true });
+    if (await pdfVectorPage(pdf, root, { width: w, height: h })) pdf.save(`${name}.pdf`);
+    return;
+  }
   const xml = new XMLSerializer().serializeToString(root);
   const blob = new Blob([`<?xml version="1.0"?>\n${xml}`], {
     type: "image/svg+xml",
@@ -1320,17 +1498,17 @@ function downloadChart(containerId: string, name: string, kind: "svg" | "png") {
   const url = URL.createObjectURL(blob);
   const img = new Image();
   img.onload = () => {
-    const scale = 2;
+    const scale = 300 / 96;
     const canvas = document.createElement("canvas");
-    canvas.width = width * scale;
-    canvas.height = height * scale;
+    canvas.width = Math.round(width * scale);
+    canvas.height = Math.round(height * scale);
     const ctx = canvas.getContext("2d")!;
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.scale(scale, scale);
     ctx.drawImage(img, 0, 0, width, height);
     URL.revokeObjectURL(url);
-    void pngBlob(canvas, 96 * scale).then((b) => triggerDownload(URL.createObjectURL(b), `${name}.png`), () => undefined);
+    void pngBlob(canvas, 300).then((b) => triggerDownload(URL.createObjectURL(b), `${name}.png`), () => undefined);
   };
   img.onerror = () => URL.revokeObjectURL(url);
   img.src = url;

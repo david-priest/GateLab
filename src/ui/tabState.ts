@@ -94,6 +94,7 @@ export function restorePlottingState(value: unknown): void {
         "averagePerUnit",
         "grid",
         "points",
+        "paired",
         "legend",
       ].includes(field) &&
         typeof item === "boolean") ||

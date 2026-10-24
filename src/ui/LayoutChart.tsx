@@ -10,6 +10,7 @@ import type { LayoutChartRecipe, LayoutPlotStyle } from "../engine/layout";
 import { axisTicks, groupPoints, testGroups, type ChartGroup, type ChartPoint, type ChartTest } from "../engine/layoutChart";
 import type { StoredHierarchy } from "../engine/hierarchies";
 import type { Sample } from "../engine/sample";
+import { UNASSIGNED_METADATA_VALUE } from "../engine/layoutBatch";
 import type { CoreState, GatingDerived } from "../store";
 
 /** What a chart reads from a file: the file, its gating, and its tree. */
@@ -31,7 +32,12 @@ export interface ChartData {
   axis: string;
   /** Files the population could not be found on. */
   missing: string[];
+  /** Files without the median's channel. */
+  noChannel: string[];
 }
+
+/** How a median is drawn on the axis: the display scale its values are in. */
+const SCALE_NAMES: Record<string, string> = { identity: "linear", asinh: "arcsinh", logicle: "logicle" };
 
 export const CHART_STATISTIC_LABELS: Record<LayoutChartRecipe["statistic"], string> = {
   percent_of_parent: "% of parent",
@@ -43,7 +49,9 @@ export const CHART_STATISTIC_LABELS: Record<LayoutChartRecipe["statistic"], stri
 /**
  * The chart's values: the statistic of the population on each file drawn, the population followed
  * through provenance into each file's tree as the plots do, grouped by the metadata column or,
- * with none, one group per file.
+ * with none, one group per file. A median is taken of the values as displayed (the channel's
+ * scale on each file), which the axis names. Files without a value in the column form an
+ * "Unassigned" group that the rank test leaves out.
  */
 export function chartData(
   recipe: LayoutChartRecipe,
@@ -57,6 +65,8 @@ export function chartData(
   const drawn = recipe.files === "all" ? sources : sources.filter((s) => checkedSampleIds.includes(s.id));
   const points: ChartPoint[] = [];
   const missing: string[] = [];
+  const noChannel: string[] = [];
+  const scales = new Set<string>();
   for (const source of drawn) {
     let populationId = recipe.populationId;
     if (template && template.tree.id !== source.tree.id) {
@@ -75,23 +85,36 @@ export function chartData(
     if (recipe.statistic === "median") {
       const index = recipe.channel ? source.sample.index(recipe.channel) : undefined;
       const mask = source.derived.masks[populationId];
-      if (index === undefined || !mask) value = null;
-      else {
-        const column = source.sample.displayColumn(index);
-        const values: number[] = [];
-        for (let i = 0; i < column.length; i++) if (mask[i] && Number.isFinite(column[i])) values.push(column[i]);
-        value = values.length ? exactMedian(values) : null;
+      if (index === undefined) {
+        noChannel.push(source.name);
+        continue;
       }
+      if (!mask) {
+        missing.push(source.name);
+        continue;
+      }
+      scales.add(SCALE_NAMES[source.sample.transformKind(index)] ?? source.sample.transformKind(index));
+      const column = source.sample.displayColumn(index);
+      const values: number[] = [];
+      for (let i = 0; i < column.length; i++) if (mask[i] && Number.isFinite(column[i])) values.push(column[i]);
+      value = values.length ? exactMedian(values) : null;
     } else {
       value = source.derived.stats[recipe.statistic === "count" ? "event_count" : recipe.statistic][populationId];
+      if (value === undefined) {
+        missing.push(source.name);
+        continue;
+      }
     }
     if (typeof value !== "number" || !Number.isFinite(value)) continue;
-    const group = recipe.groupBy ? (metadataById[source.id]?.[recipe.groupBy] ?? "") : source.name;
+    const group = recipe.groupBy ? metadataById[source.id]?.[recipe.groupBy]?.trim() || UNASSIGNED_METADATA_VALUE : source.name;
     points.push({ sampleId: source.id, name: source.name, group, value });
   }
   const groups = groupPoints(points);
-  const axis = recipe.statistic === "median" ? `Median ${recipe.channel ?? ""}`.trim() : CHART_STATISTIC_LABELS[recipe.statistic];
-  return { points, groups, test: recipe.test && recipe.groupBy ? testGroups(groups) : null, population: populationName, axis, missing };
+  const channelLabel = recipe.channel ? (template?.sample ?? drawn[0]?.sample)?.labelForKey(recipe.channel) ?? recipe.channel : "";
+  const scale = scales.size ? ` (${[...scales].join(", ")})` : "";
+  const axis = recipe.statistic === "median" ? `Median ${channelLabel}`.trim() + scale : CHART_STATISTIC_LABELS[recipe.statistic];
+  const tested = recipe.groupBy ? groups.filter((g) => g.label !== UNASSIGNED_METADATA_VALUE) : [];
+  return { points, groups, test: recipe.test && recipe.groupBy ? testGroups(tested) : null, population: populationName, axis, missing, noChannel };
 }
 
 const format = (v: number): string => (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : String(Number(v.toPrecision(3))));

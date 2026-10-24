@@ -45,6 +45,8 @@ import {
   MAX_PAGE_GRID,
   mmToPx,
   nextLayoutItemPosition,
+  copyLayoutItems,
+  dropStaleReadsFrom,
   layoutItemMinimum,
   pageForPreset,
   pageOrigins,
@@ -102,7 +104,9 @@ import { drawStrategyArrows, reserveArrowGutters, strategyArrowGap, strategyArro
 import { populationTreeOrder } from "../engine/populations";
 import { loadMiniPlots } from "../plots/loadPlots";
 import { composeSheetPages, writeComposedPages, type ComposedPage, type LayoutExportFormat } from "../plots/layoutExport";
-import { DEFAULT_ITERATION, expandLayoutSheet, followsIteration, iterationUnits, metadataUnits, populationUnits, sharedMetadataFields, templateFrame, type DescribeBoundPlot, type LayoutIteration, type LayoutPage as ExpandedPage, type LayoutPageItem } from "../engine/layoutBatch";
+import { DEFAULT_ITERATION, expandLayoutSheet, fillPlaceholders, followsIteration, itemsBeyondPaper, tilesThatFit, iterationUnits, metadataUnits, populationUnits, sharedMetadataFields, templateFrame, type DescribeBoundPlot, type LayoutIteration, type LayoutPage as ExpandedPage, type LayoutPageItem } from "../engine/layoutBatch";
+import { UNASSIGNED_METADATA_VALUE } from "../engine/layoutBatch";
+import { followSheetIteration } from "./layoutFollow";
 import { automaticTitleTemplate, fieldsFromTemplate, plotTitle, plotTitleContext, templateFromFields, titleFields, TITLE_PLACEHOLDERS, TITLE_PRESETS, TITLE_SEPARATORS } from "../engine/layoutTitle";
 import { alignItems, arrangeUnits, distributeItems, fitContentToPage, fitPageToContent, groupItems, ungroupItems, type AlignHow, type DistributeHow } from "../engine/layoutArrange";
 import { useI18n } from "./i18n";
@@ -473,13 +477,15 @@ function LayoutPlotSurface({
   // changes, and not when the tab renders for a selection.
   const boundContext = recipe.kind === "text" ? null : describe({ ...recipe, populationId }, undefined, item.unitId);
   const fillTitle = (template: string) => (boundContext ? plotTitle(template, boundContext) : template);
-  const drawnTitle = recipe.kind === "strategy" ? fillTitle(recipe.title?.trim() || "{population}") : fillTitle(titleTemplate);
+  const drawnTitle = fillTitle(titleTemplate);
   const recipeKey = JSON.stringify(recipe);
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host || recipe.kind === "text") return;
-    const timer = window.setTimeout(() => {
+    // Marked until drawn, so an export waits for the page's plots rather than for a fixed time.
+    host.dataset.layoutPending = "1";
+    const paint = () => {
       host.innerHTML = "";
       if (!source) {
         host.textContent =
@@ -488,7 +494,10 @@ function LayoutPlotSurface({
         return;
       }
       const population = state.populations[populationId];
-      if (missingPopulationName || !population) {
+      // A multi-population grid draws whichever of its populations the file has, and says so
+      // when it has none; its first population alone missing is no reason to draw nothing.
+      const grid = recipe.kind === "strategy" && !!recipe.populationIds?.length;
+      if (!grid && (missingPopulationName || !population)) {
         host.textContent = missingPopulationName
           ? `${source.name} has no population corresponding to ${missingPopulationName}.`
           : "The referenced population is unavailable.";
@@ -717,6 +726,13 @@ function LayoutPlotSurface({
         return;
       }
       draw(plot, payload.gate_overlays?.[key] ?? []);
+    };
+    const timer = window.setTimeout(() => {
+      try {
+        paint();
+      } finally {
+        delete host.dataset.layoutPending;
+      }
     }, 80);
     return () => window.clearTimeout(timer);
   }, [
@@ -1221,7 +1237,10 @@ export function LayoutTab({
     () =>
       iteration.mode === "populations"
         ? iterationSource
-          ? populationUnits(iteration, iterationSource.tree, files.find(({ id }) => id === iterationSource.id) ?? iterationSource)
+          ? populationUnits(iteration, iterationSource.tree, {
+              ...(files.find(({ id }) => id === iterationSource.id) ?? iterationSource),
+              groupName: groups.find((group) => group.id === fileGroups[iterationSource.id])?.name,
+            })
           : []
         : iteration.mode === "metadata"
           ? metadataUnits(iteration, files, checkedSampleIds, groups, fileGroups, metadataLevels?.[iteration.column ?? ""])
@@ -1232,13 +1251,13 @@ export function LayoutTab({
   const describePlot: DescribeBoundPlot = useCallback((recipe, templateSampleId, unitId) => {
     const file = files.find(({ id }) => id === recipe.sampleId) ?? null;
     const view = samples.find(({ id }) => id === recipe.sampleId) ?? null;
+    // The population followed into the file's tree as the plot itself follows it, so the title
+    // names what the plot draws, a population iteration's id from another tree included.
     let populationId = recipe.populationId;
-    if (view && templateSampleId && templateSampleId !== recipe.sampleId) {
-      const templateView = samples.find(({ id }) => id === templateSampleId);
-      if (templateView && templateView.tree.id !== view.tree.id) {
-        const resolved = resolveFigurePopulation({ hierarchyId: templateView.tree.id, populationId: recipe.populationId, label: "" }, view.tree, figureHierarchies(state));
-        if (resolved.id) populationId = resolved.id;
-      }
+    if (view) {
+      const templateTreeId = templateSampleId && templateSampleId !== recipe.sampleId ? samples.find(({ id }) => id === templateSampleId)?.tree.id : undefined;
+      const resolved = resolvePopulationInTree(recipe.populationId, view.tree, trees, templateTreeId);
+      if (!resolved.missing) populationId = resolved.id;
     }
     const population = view?.tree.populations[populationId];
     const pool = poolOf(recipe);
@@ -1251,21 +1270,22 @@ export function LayoutTab({
       const unit = unitId ? units.find((candidate) => candidate.id === unitId) : undefined;
       return plotTitleContext(
         recipe,
-        { name: unit?.sampleIds ? unit.name : `${pool.length} files`, fileName: `${pool.length} files`, metadata: sharedMetadataFields(pool.map((id) => metadataById[id])) },
+        { name: unit?.sampleIds ? unit.name : `${pool.length} files`, fileName: `${pool.length} files`, metadata: unit?.sampleIds ? unit.metadata : sharedMetadataFields(pool.map((id) => metadataById[id])) },
         population ? { id: populationId, name: population.name } : null,
         members.length ? pooledCount : undefined,
         populationMetadata,
       );
     }
     const count = view?.derived.stats.event_count[populationId];
+    const groupName = file ? groups.find((group) => group.id === fileGroups[file.id])?.name : undefined;
     return plotTitleContext(
       recipe.kind === "strategy" ? {} : recipe,
-      file ? { name: file.name, fileName: file.fileName ?? file.name, metadata: file.metadata } : null,
+      file ? { name: file.name, fileName: file.fileName ?? file.name, groupName, metadata: file.metadata } : null,
       population ? { id: populationId, name: population.name } : null,
       typeof count === "number" ? count : undefined,
       populationMetadata,
     );
-  }, [files, samples, state, populationMetadata, trees, metadataById, units]);
+  }, [files, samples, state, populationMetadata, trees, metadataById, units, groups, fileGroups]);
   const pages: ExpandedPage[] = useMemo(
     () => (activeSheet ? expandLayoutSheet(activeSheet, units, describePlot) : []),
     [activeSheet, units, describePlot],
@@ -1282,9 +1302,10 @@ export function LayoutTab({
   const builderFields = useMemo(() => titleFields(metadataColumns, populationMetadataFields), [metadataColumns, populationMetadataFields]);
   const currentPageIndex = Math.min(pageIndex, Math.max(0, pages.length - 1));
   const currentPage: ExpandedPage = pages[currentPageIndex] ?? EMPTY_PAGE;
-  // What the page's plots are titled: the sheet's template, else what differs across the page.
+  // What the page's plots are titled: the sheet's template, else what differs across the pages,
+  // taken over every page of an iteration so each page is titled alike and names its unit.
   const sheetTitleTemplate = activeSheet?.titleTemplate?.trim() || automaticTitleTemplate(
-    currentPage.items.flatMap((item) => isPlotLikeRecipe(item.recipe)
+    pages.flatMap((page) => page.items).flatMap((item) => isPlotLikeRecipe(item.recipe)
       // A pool counts as a file of its own, so two pools of one reference file still differ by file.
       ? [{ sampleId: poolOf(item.recipe)?.join(",") ?? item.recipe.sampleId, populationId: item.recipe.populationId, label: item.recipe.kind === "strategy" ? undefined : item.recipe.label }]
       : []),
@@ -1300,6 +1321,14 @@ export function LayoutTab({
   const selectedItems = activeSheet?.items.filter(({ id }) => selectedTemplateIds.includes(id)) ?? [];
   const selectedItem = selectedItems.length === 1 ? selectedItems[0] : null;
   const selectedPageItem = selectedItem ? currentPage.items.find((item) => item.templateId === selectedItem.id) ?? null : null;
+  const selectedChartRecipe = selectedItem?.recipe.kind === "chart" ? selectedItem.recipe : null;
+  /** The files a selected chart draws no point for, and why, for the inspector. */
+  const selectedChartSkips = useMemo(() => {
+    if (!selectedChartRecipe) return null;
+    const { missing, noChannel, groups } = chartData(selectedChartRecipe, samples, metadataById, checkedSampleIds, state);
+    const unassigned = !!selectedChartRecipe.groupBy && groups.some((group) => group.label === UNASSIGNED_METADATA_VALUE);
+    return missing.length || noChannel.length || unassigned ? { missing, noChannel, unassigned } : null;
+  }, [selectedChartRecipe, samples, metadataById, checkedSampleIds, state]);
   /** The tile a page id carries, so a group on a tiled page is taken within its tile. */
   const tileOf = (id: string) => id.split("::")[1] ?? "";
   const groupOfPageId = (id: string) => currentPage.items.find((item) => item.id === id)?.group;
@@ -1687,6 +1716,7 @@ export function LayoutTab({
       return;
     }
     mutateActiveSheet((sheet) => {
+      const recipes: LayoutPlotRecipe[] = [];
       for (const combination of accepted) {
         const source = sourceById.get(combination.sampleId);
         if (!source) continue;
@@ -1695,22 +1725,25 @@ export function LayoutTab({
           (illustrationConfig.plotType === "histogram"
             ? "histogram"
             : "biplot");
+        recipes.push({
+          kind,
+          sampleId: combination.sampleId,
+          populationId: combination.populationId,
+          xChannel: combination.xChannel,
+          yChannel:
+            kind === "histogram"
+              ? null
+              : (combination.yChannel ?? illustrationConfig.yChannel),
+          displayMode: (illustrationConfig.displayMode === "dots"
+            ? "scatter"
+            : illustrationConfig.displayMode) as LayoutDisplayMode,
+        });
+      }
+      for (const recipe of followSheetIteration(sheet, recipes)) {
         sheet.items.push({
           id: crypto.randomUUID(),
           ...nextLayoutItemPosition(sheet),
-          recipe: {
-            kind,
-            sampleId: combination.sampleId,
-            populationId: combination.populationId,
-            xChannel: combination.xChannel,
-            yChannel:
-              kind === "histogram"
-                ? null
-                : (combination.yChannel ?? illustrationConfig.yChannel),
-            displayMode: (illustrationConfig.displayMode === "dots"
-              ? "scatter"
-              : illustrationConfig.displayMode) as LayoutDisplayMode,
-          },
+          recipe,
         });
       }
     });
@@ -1782,10 +1815,27 @@ export function LayoutTab({
       : [];
     return { pooled: members.length, total: recipe.pool.sampleIds.length, leftOut, omittedGates };
   }, [selectedItem, selectedPageItem, samples, trees]);
+  /** What the selected item draws on the page shown, when it follows the iteration: the inspector edits the template, and this says what the page made of it. */
+  const selectedPageNote = useMemo<string | null>(() => {
+    const recipe = selectedPageItem?.recipe;
+    if (!recipe || !isPlotLikeRecipe(recipe) || !selectedPageItem?.unitId) return null;
+    const unit = units.find((candidate) => candidate.id === selectedPageItem.unitId);
+    if (!unit) return null;
+    if (unit.populationId) return t("This page draws {name}; the population chosen here is the template's.", { name: unit.name });
+    if (!unit.sampleIds) return t("This page draws {name}; the file chosen here is the template's.", { name: unit.name });
+    const fileName = (id: string) => files.find((file) => file.id === id)?.name ?? id;
+    if (recipe.kind === "strategy") return t("This page is {value}: a strategy is drawn for one file, {file}, not pooled.", { value: unit.name, file: fileName(recipe.sampleId) });
+    if (!recipe.pool) return t("This page is {value}: {file} alone.", { value: unit.name, file: fileName(recipe.sampleId) });
+    const templateTreeId = selectedPageItem.templateSampleId ? samples.find(({ id }) => id === selectedPageItem.templateSampleId)?.tree.id : undefined;
+    const { members, leftOut } = resolvePoolMembers(recipe, samples, trees, templateTreeId);
+    return t("This page is {value}: {n} of {m} files pooled", { value: unit.name, n: members.length, m: recipe.pool.sampleIds.length })
+      + (leftOut.length ? ` · ${t("Not pooled: {files}", { files: leftOut.map((entry) => `${entry.name} (${entry.reason})`).join(", ") })}` : "");
+  }, [selectedPageItem, units, files, samples, trees, t]);
 
   const removeItems = (ids: readonly string[]) => {
     mutateActiveSheet((sheet) => {
       sheet.items = sheet.items.filter((item) => !ids.includes(item.id));
+      dropStaleReadsFrom(sheet);
     });
     setSelectedIds((current) => current.filter((id) => !ids.includes(id)));
   };
@@ -1794,18 +1844,15 @@ export function LayoutTab({
     const created: string[] = [];
     mutateActiveSheet((sheet) => {
       let z = Math.max(0, ...sheet.items.map((item) => item.z));
-      // Copies of a group's members make a group of their own.
-      const copiedGroups = new Map<string, string>();
-      for (const id of ids) {
-        const source = sheet.items.find((item) => item.id === id);
-        if (!source) continue;
-        const copyId = crypto.randomUUID();
-        created.push(copyId);
-        const frame = frames?.[id] ?? { x: source.x + 20, y: source.y + 20, width: source.width, height: source.height };
-        const group = source.group ? copiedGroups.get(source.group) ?? crypto.randomUUID() : undefined;
-        if (source.group && group) copiedGroups.set(source.group, group);
-        sheet.items.push({ ...source, ...frame, id: copyId, locked: false, z: ++z, recipe: { ...source.recipe }, ...(group ? { group } : {}) });
-      }
+      // Copies of a group's members make a group of their own, and a heading copied with its plot reads the copy.
+      const sources = ids.flatMap((id) => sheet.items.filter((item) => item.id === id));
+      const { copies } = copyLayoutItems(sources);
+      copies.forEach((copy, index) => {
+        const source = sources[index];
+        created.push(copy.id);
+        const frame = frames?.[source.id] ?? { x: source.x + 20, y: source.y + 20, width: source.width, height: source.height };
+        sheet.items.push({ ...copy, ...frame, locked: false, z: ++z });
+      });
     });
     if (created.length) selectMany(created);
     return created;
@@ -2125,11 +2172,20 @@ export function LayoutTab({
       : [...ZOOM_STEPS].reverse().find((step) => step < zoom - 0.001);
     if (next) setZoom(next);
   };
-  /** The plots of a page draw shortly after it is shown; the export waits for them. */
-  const settleRender = () =>
-    new Promise<void>((resolve) => {
-      window.setTimeout(() => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())), 450);
-    });
+  /**
+   * The plots of a page draw shortly after it is shown; the export waits until every plot on it
+   * has drawn (a large pool or strategy takes longer than any fixed wait), up to 20 s.
+   */
+  const settleRender = async () => {
+    const frame = () => new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 150));
+    const started = Date.now();
+    while (pageRef.current?.querySelector("[data-layout-pending]") && Date.now() - started < 20000) {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+    }
+    await frame();
+    await frame();
+  };
   const exportSheet = async () => {
     const canvas = pageRef.current;
     if (!canvas || !activeSheet || exporting) return;
@@ -2142,7 +2198,9 @@ export function LayoutTab({
           setPageIndex(index);
           await settleRender();
         }
-        composed.push(...composeSheetPages(canvas, activeSheet, { zoom, crop: exportCrop ? { paddingMm: exportPaddingMm } : undefined }));
+        // A page of an iteration is named, in a zip, by what it is drawn for.
+        const label = pages[index]?.units.length === 1 ? pages[index].units[0].name : undefined;
+        composed.push(...composeSheetPages(canvas, activeSheet, { zoom, crop: exportCrop ? { paddingMm: exportPaddingMm } : undefined }).map((page) => (label ? { ...page, label } : page)));
       }
       await writeComposedPages(composed, activeSheet, exportFormat);
       onExported?.();
@@ -2475,12 +2533,10 @@ export function LayoutTab({
                 ...activeSheet,
                 id: crypto.randomUUID(),
                 page: { ...activeSheet.page },
+                ...(activeSheet.iteration ? { iteration: structuredClone(activeSheet.iteration) } : {}),
                 name: `${activeSheet.name} copy`,
-                items: activeSheet.items.map((item) => ({
-                  ...item,
-                  id: crypto.randomUUID(),
-                  recipe: { ...item.recipe },
-                })),
+                // Headings that read from a plot read the copy's plot, not the original sheet's.
+                items: copyLayoutItems(activeSheet.items).copies,
               };
               mutate((draft) => {
                 draft.sheets.push(copy);
@@ -2952,6 +3008,18 @@ export function LayoutTab({
                         />
                         {t("Test between groups")}
                       </label>
+                      {selectedChartSkips && (selectedChartSkips.missing.length > 0 || selectedChartSkips.noChannel.length > 0) && (
+                        <p className="gl-hint gl-layout-warning">
+                          {selectedChartSkips.missing.length > 0 &&
+                            t("No point for {files}: the population is not on these files.", { files: selectedChartSkips.missing.join(", ") })}
+                          {selectedChartSkips.missing.length > 0 && selectedChartSkips.noChannel.length > 0 && " "}
+                          {selectedChartSkips.noChannel.length > 0 &&
+                            t("No point for {files}: the channel is not on these files.", { files: selectedChartSkips.noChannel.join(", ") })}
+                        </p>
+                      )}
+                      {selectedChartSkips?.unassigned && (
+                        <p className="gl-hint">{t(selectedItem.recipe.test ? "Files without a value in the column are drawn as Unassigned and left out of the test." : "Files without a value in the column are drawn as Unassigned.")}</p>
+                      )}
                       <label className="gl-field-inline gl-layout-title-field">
                         {t("Title")}
                         <input
@@ -3210,6 +3278,7 @@ export function LayoutTab({
                           {t("Follows the iteration")}
                         </label>
                       )}
+                      {selectedPageNote && <p className="gl-hint">{selectedPageNote}</p>}
                       <label className="gl-field-inline gl-layout-title-field" title={t("Empty: the sheet's title template, under Style. Placeholders: {list}", { list: TITLE_PLACEHOLDERS })}>
                         {t("Title")}
                         <input
@@ -3472,8 +3541,9 @@ export function LayoutTab({
                       onChange={(event) =>
                         setIteration({
                           ...iteration,
+                          // Tiles start at as many as fit the paper, so none is cut off by default.
                           arrangement: event.target.value === "tiles"
-                            ? { kind: "tiles", rows: 2, columns: 2, order: "row-major", gap: 24 }
+                            ? { kind: "tiles", ...tilesThatFit(activeSheet, 24), order: "row-major", gap: 24 }
                             : { kind: "page-per-unit" },
                         })
                       }
@@ -3513,6 +3583,25 @@ export function LayoutTab({
                           <option value="column-major">{t("Down, then across")}</option>
                         </select>
                       </label>
+                      {(() => {
+                        // Tiles step by the template's extent whatever the page size, so a grid
+                        // asked for can run off the paper, and the export cuts those tiles off.
+                        const beyond = itemsBeyondPaper(currentPage.items, activeSheet);
+                        if (!beyond || iteration.arrangement.kind !== "tiles") return null;
+                        const fits = tilesThatFit(activeSheet, iteration.arrangement.gap);
+                        return (
+                          <p className="gl-hint gl-layout-warning" role="status">
+                            {t("{n} of {m} items on this page reach beyond the paper; the export cuts them off. {across} across × {down} down fit.", { n: beyond, m: currentPage.items.length, across: fits.columns, down: fits.rows })}{" "}
+                            <button
+                              type="button"
+                              className="gl-mini-btn"
+                              onClick={() => iteration.arrangement.kind === "tiles" && setIteration({ ...iteration, arrangement: { ...iteration.arrangement, ...fits } })}
+                            >
+                              {t("Fit the tiles to the page")}
+                            </button>
+                          </p>
+                        );
+                      })()}
                       <label className="gl-field-inline">
                         {t("Gap between tiles (px)")}
                         <NumberField
@@ -3527,6 +3616,13 @@ export function LayoutTab({
                         />
                       </label>
                     </>
+                  )}
+                  {units.length === 0 && (
+                    <p className="gl-hint gl-layout-warning" role="status">
+                      {iteration.mode === "populations"
+                        ? t("No populations to draw: the file has none under this choice. The sheet is shown once, with its placeholders unfilled.")
+                        : t("No files to draw: the source names none (are any files checked in the Samples pane?). The sheet is shown once, with its placeholders unfilled.")}
+                    </p>
                   )}
                   <p className="gl-hint">
                     {iteration.mode === "populations"
@@ -3657,7 +3753,7 @@ export function LayoutTab({
                   </div>
                 );
               })()}
-              <p className="gl-hint">{t("What every plot is called unless it has a title of its own under Items. Placeholders: {list}. \"What differs across the page\" names the population when the page is one file's populations, the file when it is one population's files, both otherwise.", { list: TITLE_PLACEHOLDERS })}</p>
+              <p className="gl-hint">{t("What every plot is called unless it has a title of its own under Items. Placeholders: {list}. \"What differs across the page\" names the population when the page is one file's populations, the file when it is one population's files, both otherwise; on an iterated sheet it looks across every page, so each page is titled alike and names what it is drawn for.", { list: TITLE_PLACEHOLDERS })}</p>
               <LayoutStyleFields
                 effective={effectiveLayoutStyle(activeSheet)}
                 own={activeSheet.style ?? {}}
@@ -3747,7 +3843,7 @@ export function LayoutTab({
                 dataRevision={dataRevision}
                 densityColorPower={densityColorPower}
                 style={effectiveLayoutStyle(activeSheet, item.recipe)}
-                titleTemplate={ownTitleOf(item, item.templateSampleId) || sheetTitleTemplate}
+                titleTemplate={fillPlaceholders(ownTitleOf(item, item.templateSampleId) || sheetTitleTemplate, (item.unitId && units.find((unit) => unit.id === item.unitId)) || null, item.position.n, item.position.total)}
                 describe={describePlot}
                 checkedSampleIds={checkedSampleIds}
                 metadataById={metadataById}

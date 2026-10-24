@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createLayoutSheet, type LayoutItem } from "./layout";
-import { expandLayoutSheet, fillPlaceholders, iterationUnits, metadataUnits, normalizeIteration, populationUnits, templateFrame, type LayoutIteration, type LayoutUnit } from "./layoutBatch";
+import { expandLayoutSheet, fillPlaceholders, itemsBeyondPaper, iterationUnits, tilesThatFit, metadataUnits, normalizeIteration, populationUnits, templateFrame, type LayoutIteration, type LayoutUnit } from "./layoutBatch";
 
 const units: LayoutUnit[] = [
   { id: "f1", name: "D1", fileName: "D1.fcs", groupName: "treated", metadata: { donor: "D1", day: "7" } },
@@ -67,7 +67,9 @@ describe("expandLayoutSheet", () => {
     const second = pages[1];
     expect(second.items.map((i) => [i.id, i.templateId, i.unitId])).toEqual([["a", "a", "f2"], ["control", "control", undefined], ["t", "t", undefined]]);
     expect(second.items[0].recipe).toMatchObject({ sampleId: "f2", title: "D2 · 2/3" });
-    expect(second.items[1].recipe).toMatchObject({ sampleId: "f1", title: "D2 · 2/3" }); // fixed file, page's placeholders
+    // A fixed plot's placeholders describe the plot: its own file fills them later, the page only its number.
+    expect(second.items[1].recipe).toMatchObject({ sampleId: "f1", title: "{sample} · 2/3" });
+    expect(second.items[1].position).toEqual({ n: 2, total: 3 });
     expect(second.items[2].recipe).toMatchObject({ text: "Donor D2, day 7" });
     expect(second.items[0]).toMatchObject({ x: 57, y: 57, offset: { x: 0, y: 0 } });
   });
@@ -199,5 +201,82 @@ describe("metadataUnits", () => {
     expect(normalizeIteration({ mode: "metadata", column: "day", source: { kind: "all" } })).toMatchObject({ mode: "metadata", column: "day", source: { kind: "all" } });
     expect(normalizeIteration({ mode: "metadata", source: { kind: "all" } })).toMatchObject({ mode: "off" });
     expect(normalizeIteration({ mode: "files", column: "day" })).not.toHaveProperty("column");
+  });
+});
+
+describe("iteration of pooled plots and strategies", () => {
+  const pooled = (iterated: boolean): LayoutItem => ({
+    id: "pool", x: 57, y: 57, width: 200, height: 200, z: 0,
+    recipe: { kind: "biplot", sampleId: "f1", populationId: "p", xChannel: "FSC-A", yChannel: "SSC-A", displayMode: "pseudocolor", iterated, pool: { sampleIds: ["f1", "f2"] } },
+  });
+  it("draws a pooled plot that follows a file iteration for the page's file alone", () => {
+    const sheet = createLayoutSheet("S");
+    sheet.iteration = { mode: "files", source: { kind: "all" }, arrangement: { kind: "page-per-unit" } };
+    sheet.items = [pooled(true), { ...pooled(false), id: "fixed" }];
+    const pages = expandLayoutSheet(sheet, units);
+    expect(pages[2].items[0].recipe).toMatchObject({ sampleId: "f3" });
+    expect(pages[2].items[0].recipe).not.toHaveProperty("pool");
+    expect(pages[0].items[0].recipe).not.toHaveProperty("pool");
+    // A pooled plot that does not follow keeps its pool on every page.
+    expect(pages[2].items[1].recipe).toMatchObject({ sampleId: "f1", pool: { sampleIds: ["f1", "f2"] } });
+  });
+  it("keeps the pool of a plot that follows a population iteration, drawn for each population", () => {
+    const sheet = createLayoutSheet("S");
+    sheet.iteration = { mode: "populations", source: { kind: "checked" }, arrangement: { kind: "page-per-unit" } };
+    sheet.items = [pooled(true)];
+    const unit: LayoutUnit = { id: "q", name: "P2", fileName: "D1.fcs", sampleName: "D1", populationId: "q" };
+    const [page] = expandLayoutSheet(sheet, [unit]);
+    expect(page.items[0].recipe).toMatchObject({ sampleId: "f1", populationId: "q", pool: { sampleIds: ["f1", "f2"] } });
+  });
+  it("draws a multi-population strategy that follows a population iteration as the steps to the page's population", () => {
+    const sheet = createLayoutSheet("S");
+    sheet.iteration = { mode: "populations", source: { kind: "checked" }, arrangement: { kind: "page-per-unit" } };
+    sheet.items = [{ id: "s", x: 0, y: 0, width: 400, height: 300, z: 0, recipe: { kind: "strategy", sampleId: "f1", populationId: "a", populationIds: ["a", "b"], fullPath: true, displayMode: "pseudocolor", iterated: true } }];
+    const unit: LayoutUnit = { id: "c", name: "P3", fileName: "D1.fcs", sampleName: "D1", populationId: "c" };
+    expect(expandLayoutSheet(sheet, [unit])[0].items[0].recipe).toMatchObject({ populationId: "c", populationIds: ["c"] });
+  });
+  it("draws a strategy that follows a file iteration for each file", () => {
+    const sheet = createLayoutSheet("S");
+    sheet.iteration = { mode: "files", source: { kind: "all" }, arrangement: { kind: "page-per-unit" } };
+    sheet.items = [{ id: "s", x: 0, y: 0, width: 400, height: 300, z: 0, recipe: { kind: "strategy", sampleId: "f1", populationId: "a", fullPath: true, displayMode: "pseudocolor", iterated: true } }];
+    const pages = expandLayoutSheet(sheet, units);
+    expect(pages.map((page) => page.items[0].recipe)).toMatchObject([{ sampleId: "f1" }, { sampleId: "f2" }, { sampleId: "f3" }]);
+    expect(pages[1].items[0].templateSampleId).toBe("f1");
+  });
+});
+
+describe("units carry what the placeholders read", () => {
+  it("gives a population unit its file's metadata and group", () => {
+    const populations = {
+      root: { population_id: "root", name: "All Events", parent_id: null, children: ["a"], gate_refs: [], gate_logic: "and", event_count: null, percent_of_parent: null },
+      a: { population_id: "a", name: "P1", parent_id: "root", children: [], gate_refs: [], gate_logic: "and", event_count: null, percent_of_parent: null },
+    } as never;
+    const [unit] = populationUnits({ mode: "populations", source: { kind: "checked" }, arrangement: { kind: "page-per-unit" } }, { populations, root_population_id: "root" }, { id: "f1", name: "D1", fileName: "D1.fcs", metadata: { day: "7" }, groupName: "treated" });
+    expect(fillPlaceholders("{population} {meta:day} {group}", unit, 1, 1)).toBe("P1 7 treated");
+  });
+  it("gives a metadata unit its own value, the files without one included", () => {
+    const files: { id: string; name: string; metadata: Record<string, string> }[] = [{ id: "f1", name: "D1", metadata: { day: "7" } }, { id: "f2", name: "D2", metadata: {} }];
+    const byDay = metadataUnits({ mode: "metadata", column: "day", source: { kind: "all" }, arrangement: { kind: "page-per-unit" } }, files, [], [], {});
+    expect(byDay.map((unit) => fillPlaceholders("{meta:day}", unit, 1, 2))).toEqual(["7", "Unassigned"]);
+  });
+});
+
+describe("tiles and the paper", () => {
+  it("counts the tiles of the template that fit the sheet inside its margin", () => {
+    const sheet = createLayoutSheet("S"); // A4 landscape: 1123 × 794 px, 15 mm (57 px) margin
+    sheet.items = [plot("a", 57, 57, true)]; // 200 × 200
+    // Across: 57 + n·220 − 20 ≤ 1123 − 57, so 4; down: 57 + n·220 − 20 ≤ 794 − 57, so 3.
+    expect(tilesThatFit(sheet, 20)).toEqual({ columns: 4, rows: 3 });
+    sheet.items = [plot("a", 57, 57, true), text("t", 600, 500, "{sample}")]; // extent 703 × 475
+    expect(tilesThatFit(sheet, 24)).toEqual({ columns: 1, rows: 1 });
+    expect(tilesThatFit({ ...sheet, items: [] }, 24)).toEqual({ columns: 1, rows: 1 });
+  });
+  it("finds the page items that reach beyond the paper", () => {
+    const sheet = createLayoutSheet("S");
+    sheet.items = [plot("a", 57, 57, true)];
+    sheet.iteration = { mode: "files", source: { kind: "all" }, arrangement: { kind: "tiles", rows: 1, columns: 6, order: "row-major", gap: 20 } };
+    const [page] = expandLayoutSheet(sheet, [...units, ...units.map((unit) => ({ ...unit, id: `${unit.id}b` }))]);
+    // Tiles start at 57, 277, 497, 717, 937 and 1157: the fifth runs past 1123, the sixth starts beyond it.
+    expect(itemsBeyondPaper(page.items, sheet)).toBe(2);
   });
 });

@@ -2267,6 +2267,7 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
   color: #1e3a5f; background: #eaf2fd; border: 1px solid #b9d4fb; border-radius: 4px;
 }
 .gl-prop-legend-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-prop-legend-title { grid-column: 1 / -1; font-weight: 600; color: #334155; }
 .gl-prop-swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.2); flex: none; }
 .gl-prop-mark, .gl-prop-mark-group { transition: filter 80ms ease, opacity 120ms ease, stroke-width 80ms ease; }
 .gl-prop-mark:hover { filter: brightness(0.94); stroke: #334155; stroke-width: 1; }
@@ -2308,6 +2309,11 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
 #cytof-plot-container .y-axis .tick text {
   font-size: var(--gl-gating-font-tick) !important;
 }
+/* Every plot's axes are d3's, which writes font-family="sans-serif" on each axis group. A generic
+   family is resolved by the page's language, so with the interface in Japanese (lang="ja") the
+   tick labels drew in a Japanese face, wider than in English. Named here, they draw in one face in
+   both languages: the one English already resolved sans-serif to. */
+svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 #cytof-plot-container .cytof-xlabel,
 #cytof-plot-container .cytof-ylabel {
   font-size: var(--gl-gating-font-axis) !important;
@@ -3297,6 +3303,7 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
 .gl-layout-performance-note {
   margin-left: auto; color: #64748b; font-size: var(--gl-font-size-caption); white-space: nowrap;
 }
+.gl-hint.gl-layout-warning { color: #7a3e00; }
 .gl-layout-message {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 5px 11px; color: #334155;
@@ -3641,7 +3648,9 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
 .gate-scope-chip:disabled { cursor: default; opacity: 0.85; }
 .gate-scope-chip.is-pending { border-style: dashed; }
 /* The space badge, shown only when unusual (a star, or raw edges on a transformed axis). */
-.gate-space-badge { margin-left: 6px; font-size: var(--gl-font-size-caption); letter-spacing: 0.09em; opacity: 0.65; border: 1px solid currentColor; border-radius: 3px; padding: 0 3px; vertical-align: middle; white-space: nowrap; }
+/* An inline-block 12 px line: as a plain inline span its bordered box was the font's full height,
+   taller than the name's line, and the name's overflow: hidden cut off its bottom edge. */
+.gate-space-badge { display: inline-block; margin-left: 6px; font-size: var(--gl-font-size-caption); line-height: 12px; letter-spacing: 0.09em; opacity: 0.65; border: 1px solid currentColor; border-radius: 3px; padding: 0 3px; vertical-align: middle; white-space: nowrap; }
 .gate-card-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gate-card-menu { flex: 0 0 auto; margin-left: 4px; }
 /* The headings over the gate rows: the rows' own cells (GateList.tsx), set as captions. */
@@ -3672,6 +3681,12 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
   border: 0; border-radius: var(--gl-radius-round); background: none; color: var(--gl-color-text-secondary); cursor: default;
 }
 .gl-help-hint:hover, .gl-help-hint[aria-expanded="true"] { background: var(--gl-color-hover); color: var(--gl-color-text); }
+/* In the plot toolbar, whose buttons are bordered, padded and 24 px tall, the "?" keeps the same
+   ghost look: the toolbar's 8 px padding left its 14 px icon 2 px wide, drawn as a dot. */
+.gl-pool-toolbar .gl-help-hint {
+  height: 20px; padding: 0; border: 0; border-radius: var(--gl-radius-round); background: none; color: var(--gl-color-text-secondary);
+}
+.gl-pool-toolbar .gl-help-hint:hover, .gl-pool-toolbar .gl-help-hint[aria-expanded="true"] { background: var(--gl-color-hover); color: var(--gl-color-text); }
 /* max-content: sized by its text, not by the room left between the "?" and the window's edge. */
 .gl-help-hint-popover {
   z-index: 80; width: max-content; max-width: min(380px, calc(100vw - 16px)); padding: var(--gl-space-2) var(--gl-space-3); border: 1px solid var(--gl-color-divider);
