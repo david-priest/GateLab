@@ -301,7 +301,12 @@ export function exportChorusExperiment(input: ChorusExportInput): ChorusExportRe
     const gateId = sourceGate?.gateId ?? String(nextGateId++);
     const popId = existing ?? `${gateId}-1`;
     chorusPopId.set(pop.population_id, popId);
-    const parameters = pnns.map((p) => parameterFor(p, known, fluorochromeIds, template, display));
+    const parameters = pnns.map((p, axis) => {
+      // One channel can use different scales on different Chorus gates. The first parameter
+      // found for that channel is not a template for an unchanged matched gate's own axis.
+      const own = sourceGate?.parameters[axis];
+      return own && nameOf(own) === p ? own : parameterFor(p, known, fluorochromeIds, template, display);
+    });
     const chorusGate: ChorusJsonGate = {
       children: [{ name: writtenName, color: chorusColor(gate.color), populationId: popId }],
       inputPopulationIds: null,

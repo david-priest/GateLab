@@ -2401,6 +2401,11 @@ export default function App({ hostProposals = null }: {
   };
   /** dispatchGateEdit of the latest render, for handlers bound once. */
   const dispatchGateEditRef = useRef<(edit: GateEditAction) => void>(() => {});
+  const agentEditingRef = useRef<{
+    geometry: NonNullable<AgentAdapter["commandGeometry"]>;
+    prepare: NonNullable<AgentAdapter["prepareAction"]>;
+    key: () => string;
+  }>({ geometry: (next) => ({ gates: next.gates, editing: {} }), prepare: (_next, action) => ({ action }), key: () => "" });
 
   const activeXChannelKey = sample?.channels[xIdx]?.key ?? null;
   const activeYChannelKey = sample?.channels[yIdx]?.key ?? null;
@@ -11754,6 +11759,9 @@ export default function App({ hostProposals = null }: {
       });
     },
     dispatch,
+    commandGeometry: (next) => agentEditingRef.current.geometry(next),
+    prepareAction: (next, action) => agentEditingRef.current.prepare(next, action),
+    editTargetKey: () => agentEditingRef.current.key(),
     settled: agentSettled,
     view: (): AgentViewState => {
       const xKey = sample?.channels[xIdx]?.key ?? null, yKey = sample?.channels[yIdx]?.key ?? null;
@@ -11831,6 +11839,9 @@ export default function App({ hostProposals = null }: {
       setGatingTask: (task) => agentAdapterRef.current.setGatingTask!(task),
       info: () => agentAdapterRef.current.info(),
       context: () => agentAdapterRef.current.context!(),
+      commandGeometry: (next) => agentAdapterRef.current.commandGeometry!(next),
+      prepareAction: (next, action) => agentAdapterRef.current.prepareAction!(next, action),
+      editTargetKey: () => agentAdapterRef.current.editTargetKey!(),
       state: () => agentAdapterRef.current.state(),
       samples: () => agentAdapterRef.current.samples(),
       dispatch: (action) => agentAdapterRef.current.dispatch(action),
@@ -11849,7 +11860,7 @@ export default function App({ hostProposals = null }: {
   }
   useEffect(() => {
     agentLinkRef.current?.notifyChanged();
-  }, [state]);
+  }, [state, activeSampleId, pendingScopes]);
   useEffect(() => {
     // A launcher can name the relay on the URL, so GateLabR opens connected.
     const fromUrl = new URLSearchParams(window.location.search).get("agent");
@@ -13084,29 +13095,33 @@ export default function App({ hostProposals = null }: {
 
   /** A gate as the plot draws it on the viewed file: the coordinates its edits start from. */
   const drawnGateOf = (gateId: string): Gate | undefined => viewedGates.get(gateId)?.gate ?? state.gates[gateId];
+  const drawnGatesIn = (next: CoreState) => next === state ? viewedGates
+    : viewedFileGates(next, activeSampleId ? fileHierarchyId(next.file_hierarchies[activeSampleId], next.hierarchies) : null);
   /** A pending scope's key: the file, and the gate's id at the root of the copy chain. */
-  const scopeKey = (fileId: string, gateId: string): string => {
-    const trees = workspaceTrees(state);
-    const live = trees[state.active_hierarchy_id];
+  const scopeKey = (fileId: string, gateId: string, next = state): string => {
+    const trees = workspaceTrees(next);
+    const live = trees[next.active_hierarchy_id];
     return `${fileId}::${live ? canonicalGateId(gateId, live, trees) : gateId}`;
   };
-  /** The scope the user asked for a gate on the viewed file and has not dragged yet; none pooled. */
-  const pendingScopeOf = (gateId: string): "file" | "group" | null =>
-    activeSampleId ? pendingScopes[scopeKey(activeSampleId, gateId)] ?? null : null;
+  /** The scope the user asked for a gate on the viewed file and has not edited yet. */
+  const pendingScopeOf = (gateId: string, next = state): "file" | "group" | null =>
+    activeSampleId ? pendingScopes[scopeKey(activeSampleId, gateId, next)] ?? null : null;
   /**
    * Where a pending scope sends the next drag of a gate: the viewed file's copy, or its group's,
    * unless the gate is tailored there already, when the drag goes to that version anyway.
    */
-  const pendingTargetOf = (gateId: string): { hierarchyId: string; gateId: string } | null => {
-    const scope = pendingScopeOf(gateId);
+  const pendingTargetOf = (gateId: string, next = state): { hierarchyId: string; gateId: string } | null => {
+    const scope = pendingScopeOf(gateId, next);
     if (!scope || !activeSampleId) return null;
-    const tailored = viewedGates.get(gateId)?.tailored;
+    const fileTreeId = fileHierarchyId(next.file_hierarchies[activeSampleId], next.hierarchies);
+    const tailored = drawnGatesIn(next).get(gateId)?.tailored;
     if (tailored && (tailored.owner.kind === "file" || scope === "group")) return null;
-    const targetId = scope === "file" ? hierarchyOfFile(activeSampleId) : viewedGroupCopy?.id;
-    const ref = targetId ? state.hierarchies.find((h) => h.id === targetId) : undefined;
+    const groupId = next.file_groups[activeSampleId];
+    const targetId = scope === "file" ? fileTreeId : next.hierarchies.find((h) => h.owner_group_id === groupId && !!groupId)?.id;
+    const ref = targetId ? next.hierarchies.find((h) => h.id === targetId) : undefined;
     if (!targetId || !ref || (scope === "file" ? ref.owner_sample_id !== activeSampleId : !ref.owner_group_id)) return null;
-    const trees = workspaceTrees(state);
-    const live = trees[state.active_hierarchy_id];
+    const trees = workspaceTrees(next);
+    const live = trees[next.active_hierarchy_id];
     const gid = live && trees[targetId] ? correspondingHierarchyId(live, gateId, trees[targetId], trees, "gate") : null;
     return gid ? { hierarchyId: targetId, gateId: gid } : null;
   };
@@ -13114,45 +13129,85 @@ export default function App({ hostProposals = null }: {
    * An edit made on the plot goes to the version of the gate in scope on the viewed file: a gate
    * it tailors (or its group does) to that version, in the tree that holds it (editGateIn); a gate
    * the user chose "Tailor for…" on to the file's copy or the group's, once; every other gate to
-   * the tree, which every file and group not tailoring it follows. A pooled view edits the tree.
+   * the tree, which every file and group not tailoring it follows. A pool edits its clicked file's solid version.
    */
-  const dispatchGateEdit = (edit: GateEditAction) => {
+  const prepareGateEdit = (next: CoreState, edit: GateEditAction): { action: Action; applied?: () => void } => {
     const usedPending: string[] = [];
+    const drawn = drawnGatesIn(next);
     const elsewhere = (gateId: string): { hierarchyId: string; gateId: string } | null => {
-      const pending = pendingTargetOf(gateId);
+      const pending = pendingTargetOf(gateId, next);
       if (pending) {
-        if (activeSampleId) usedPending.push(scopeKey(activeSampleId, gateId));
+        if (activeSampleId) usedPending.push(scopeKey(activeSampleId, gateId, next));
         return pending;
       }
-      const tailored = viewedGates.get(gateId)?.tailored;
-      return tailored && tailored.hierarchyId !== state.active_hierarchy_id ? tailored : null;
+      const tailored = drawn.get(gateId)?.tailored;
+      return tailored && tailored.hierarchyId !== next.active_hierarchy_id ? tailored : null;
     };
+    let action: Action = edit;
     if (edit.type !== "editGates") {
       const target = elsewhere(edit.gateId);
-      dispatch(target ? { type: "editGateIn", hierarchyId: target.hierarchyId, edit: { ...edit, gateId: target.gateId } } : edit);
+      action = target ? { type: "editGateIn", hierarchyId: target.hierarchyId, edit: { ...edit, gateId: target.gateId } } : edit;
     } else {
-      const live = edit.edits.filter((one) => !elsewhere(one.gateId));
-      if (live.length) dispatch({ type: "editGates", edits: live });
+      const groups = new Map<string, { gateId: string; vertices: [number, number][] }[]>();
       for (const one of edit.edits) {
         const target = elsewhere(one.gateId);
-        if (target) dispatch({ type: "editGateIn", hierarchyId: target.hierarchyId, edit: { type: "editGates", edits: [{ ...one, gateId: target.gateId }] } });
+        const hierarchyId = target?.hierarchyId ?? next.active_hierarchy_id;
+        const edits = groups.get(hierarchyId) ?? [];
+        edits.push({ ...one, gateId: target?.gateId ?? one.gateId });
+        groups.set(hierarchyId, edits);
       }
+      if (groups.size) action = { type: "editGatesIn", groups: [...groups].map(([hierarchyId, edits]) => ({ hierarchyId, edits })) };
     }
     // A pending scope is used by the drag it was asked for; the gate is tailored from then on.
-    if (usedPending.length) {
+    const applied = usedPending.length ? () => {
       const gateId = edit.type === "editGates" ? edit.edits[0]?.gateId : edit.gateId;
-      const scope = gateId ? pendingScopeOf(gateId) : null;
+      const scope = gateId ? pendingScopeOf(gateId, next) : null;
       setHierarchyActionMessage(t("{gate} has coordinates of its own for {owner} now. Undo is available.", {
-        gate: (gateId && state.gates[gateId]?.name) || "", owner: scope === "group" ? viewedGroup?.name ?? "" : fileName || t("this file"),
+        gate: (gateId && next.gates[gateId]?.name) || "", owner: scope === "group" ? viewedGroup?.name ?? "" : fileName || t("this file"),
       }));
       setPendingScopes((current) => {
         const next = { ...current };
         for (const key of usedPending) delete next[key];
         return next;
       });
-    }
+    } : undefined;
+    return { action, applied };
+  };
+  const dispatchGateEdit = (edit: GateEditAction) => {
+    const prepared = prepareGateEdit(state, edit);
+    dispatch(prepared.action);
+    prepared.applied?.();
   };
   dispatchGateEditRef.current = dispatchGateEdit;
+  let liveAgentGeometry: ReturnType<NonNullable<AgentAdapter["commandGeometry"]>> | undefined;
+  let liveAgentTargetKey: string | undefined;
+  const agentGeometry: NonNullable<AgentAdapter["commandGeometry"]> = (next) => {
+    if (next === state && liveAgentGeometry) return liveAgentGeometry;
+    const drawn = drawnGatesIn(next);
+    const gates = { ...next.gates };
+    const editing: ReturnType<NonNullable<AgentAdapter["commandGeometry"]>>["editing"] = {};
+    const ownerOf = (hierarchyId: string, gateId: string) => {
+      const ref = next.hierarchies.find((h) => h.id === hierarchyId);
+      return { hierarchyId, gateId, kind: ref?.owner_sample_id ? "file" as const : ref?.owner_group_id ? "group" as const : "tree" as const,
+        ...(ref?.owner_sample_id ? { name: samples.find((s) => s.id === ref.owner_sample_id)?.name } : ref?.owner_group_id ? { name: next.groups.find((g) => g.id === ref.owner_group_id)?.name } : {}) };
+    };
+    for (const id of Object.keys(gates)) {
+      const version = drawn.get(id);
+      if (version) gates[id] = version.gate;
+      const owner = version?.tailored ? ownerOf(version.tailored.hierarchyId, version.tailored.gateId) : ownerOf(next.active_hierarchy_id, id);
+      const pending = pendingTargetOf(id, next);
+      editing[id] = { owner, target: pending ? ownerOf(pending.hierarchyId, pending.gateId) : owner, pending: !!pending };
+    }
+    const geometry = { gates, editing };
+    if (next === state) liveAgentGeometry = geometry;
+    return geometry;
+  };
+  agentEditingRef.current = {
+    geometry: agentGeometry,
+    prepare: (next, action) => ["editGate", "editGates", "moveEllipse", "moveQuadrantCenter", "setQuadrantCurl", "reshapeEllipse"].includes(action.type)
+      ? prepareGateEdit(next, action as GateEditAction) : { action },
+    key: () => liveAgentTargetKey ??= JSON.stringify(agentGeometry(state).editing),
+  };
 
   /** What a tailored version goes back to, and what Use for gives it to: the tree, or the viewed file's group. */
   const tailoredTargetOf = (tailored: TailoredVersion): string => {
@@ -16528,7 +16583,7 @@ export default function App({ hostProposals = null }: {
                     // Every range the drag moved (the one dragged, and any sharing a moved end) in
                     // one edit, one Undo step.
                     const out = edits.flatMap((e) => {
-                      const g = state.gates[e.gate_id];
+                      const g = drawnGateOf(e.gate_id);
                       if (!g || g.gate_type !== "rectangle" || g.x_channel !== g.y_channel) return [];
                       // The interval the gate holds, in its own space (both axes, as the mask reads
                       // them); an end the drag did not move keeps its stored value, so an end with
@@ -16543,7 +16598,7 @@ export default function App({ hostProposals = null }: {
                       if (lo > hi) [lo, hi] = [hi, lo];
                       return [{ gateId: g.gate_id, vertices: [[lo, lo], [hi, lo], [hi, hi], [lo, hi]] as [number, number][] }];
                     });
-                    if (out.length) dispatch({ type: "editGates", edits: out });
+                    if (out.length) dispatchGateEdit({ type: "editGates", edits: out });
                   }}
                   onGateSelect={(id) => {
                     if (!plotInteractionIsCurrent()) return;

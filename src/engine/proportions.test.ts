@@ -56,6 +56,19 @@ describe("a unit with no events in the parent", () => {
 });
 
 describe("computeStackedBars", () => {
+  it("keeps an equal-unit average distinct from pooled events when file sizes differ", () => {
+    const samples: SampleComposition[] = [
+      { unit: "D1", group: "control", facet: null, catCounts: [2, 8] },
+      { unit: "D2", group: "control", facet: null, catCounts: [80, 20] },
+    ];
+    const average = computeStackedBars(samples, 2, { averagePerUnit: true, hasUnit: true, hasFacet: false })[0];
+    const pooled = computeStackedBars(samples, 2, { averagePerUnit: false, hasUnit: true, hasFacet: false })[0];
+    expect(average.segments.map((s) => s.value)).toEqual([0.5, 0.5]);
+    expect(pooled.segments.map((s) => s.value)).toEqual([82 / 110, 28 / 110]);
+    expect(pooled.total).toBe(110);
+    expect(perUnitProps(samples, 2).map((u) => u.nEvents)).toEqual([10, 100]);
+  });
+
   it("pooled: sums counts per group then normalises within the group", () => {
     const bars = computeStackedBars(S, 2, { averagePerUnit: false, hasUnit: true, hasFacet: false });
     const stim = bars.find((b) => b.group === "stim")!;
