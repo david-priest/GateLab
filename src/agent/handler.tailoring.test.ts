@@ -69,10 +69,20 @@ it("reads another sample through its population correspondence while a file's co
   const applied = await call<AgentApplied>("apply", { command: edit, rationale: "D1's two high-scatter events; D2 retains its original gate." });
   expect(applied.populations.find((p) => p.id === populationId)!.counts.map((c) => c.n)).toEqual([2, 2]);
   const membership = async () => {
-    const m = await call<AgentMemberships>("memberships", { populationIds: [populationId] });
+    const currentId = (await call<AgentDescribe>("describe")).populations.find((p) => p.name === "Selected")!.id;
+    const m = await call<AgentMemberships>("memberships", { populationIds: [currentId] });
     return m.populations[0].sampleMasks.map((mask) => [...Buffer.from(mask.membershipBitsBase64, "base64")]);
   };
   // D1: events 1 and 2. D2: events 0 and 1. These exact masks must survive the readout fix.
+  expect(await membership()).toEqual([[6], [3]]);
+  // Undo previews must resolve the file assignments in the hypothetical state, not the current
+  // sample view: D1 will return to its high-scatter copy while D2 stays on the shared low gate.
+  state = coreReducer(state, { type: "assignFileHierarchies", assignments: { D1: source } });
+  expect(await membership()).toEqual([[1], [3]]);
+  const assignmentPreview = await call<AgentPreview>("preview", { command: { type: "undo" } });
+  expect(assignmentPreview.populations.find((p) => p.name === "Selected")!.counts.map((c) => c.n)).toEqual([2, 2]);
+  expect(await membership()).toEqual([[1], [3]]);
+  await call("apply", { command: { type: "undo" }, rationale: "Restore D1's file assignment." });
   expect(await membership()).toEqual([[6], [3]]);
   await call("apply", { command: { type: "undo" }, rationale: "Restore D1's original membership." });
   expect(await membership()).toEqual([[1], [3]]);

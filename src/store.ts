@@ -435,6 +435,8 @@ export type Action =
    * it follows; the live tree, the selection and the edit target stay. One undo entry.
    */
   | { type: "editGateIn"; hierarchyId: string; edit: GateEditAction }
+  /** One drag may move linked ranges in different scopes; all owner edits share one undo entry. */
+  | { type: "editGatesIn"; groups: { hierarchyId: string; edits: { gateId: string; vertices: [number, number][] }[] }[] }
   /**
    * A gate's tailoring switch for one file. On: the gate is the file's own from now, in its copy
    * (made beforehand), whether or not it has moved yet. Off: it takes the coordinates it follows
@@ -1912,6 +1914,14 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       const after: StoredHierarchy = { ...template, gates: { ...template.gates, [sourceId]: withGeometryOf(source, own) } };
       const next = withTrees(state, resyncGroup(all, template, after), state.active_hierarchy_id);
       return { ...next, ...pushUndo(state), gate_version: state.gate_version + 1, tree_version: state.tree_version + 1 };
+    }
+
+    case "editGatesIn": {
+      let next = state;
+      for (const group of action.groups) {
+        next = coreReducer(next, { type: "editGateIn", hierarchyId: group.hierarchyId, edit: { type: "editGates", edits: group.edits } });
+      }
+      return next === state ? state : withOneUndoEntry(state, next);
     }
 
     case "editGateIn": {

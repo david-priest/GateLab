@@ -4,12 +4,14 @@
 // experiment runs through the last block with GATELAB_CEF_FIXTURE and GATELAB_CEF_FCS set.
 import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
-import { strFromU8, unzipSync } from "fflate";
+import { strFromU8, unzipSync, zipSync, strToU8 } from "fflate";
 import { cefBytes } from "./chorusExperiment.test";
-import { chorusToGatingML, listChorusTrees, readChorusExperiment } from "./chorusExperiment";
+import { chorusToGatingML, listChorusTrees, readChorusExperiment, readChorusRecording } from "./chorusExperiment";
 import { exportChorusExperiment, findJsonValueSpan, formatChorusJson, jsonStyleAt, type ChorusExportChannel } from "./chorusExport";
 import { importGatingML, type GatingMLResult } from "./gatingml";
 import { readFcsKeywords } from "./fcs";
+import { getGateMask } from "./gates";
+import { transformFromSpec } from "./sample";
 import type { Gate, PolyRectGate, PopulationMap } from "./models";
 
 const CHANNELS = ["Time", "FSC-A", "FSC-H", "FSC-W", "SSC (Imaging)-A", "SSC (Imaging)-H", "BUV805-A", "BV421-A", "PE-A", "BV711-A", "Max Intensity (SSC (Imaging))"];
@@ -138,7 +140,75 @@ describe("the .cef export", () => {
     const back = after.find((g) => g.children[0]?.name === "CD19+CD3-")!;
     expect(back.vertices.length).toBe(gatesOf(source).find((g) => g.children[0]?.name === "CD19+CD3-")!.vertices.length);
   });
+
+  it("preserves an explicitly approximated Log-axis gate as a raw outline on export", () => {
+    const files = unzipSync(cefBytes());
+    const doc = JSON.parse(strFromU8(files["experiment.json"]));
+    const gate = doc.experiment.panels[0].analysis.gates.find((g: { name: string }) => g.name === "Bright");
+    const control = doc.experiment.panels[0].analysis.gates.find((g: { gateId: string }) => g.gateId === "3");
+    gate.parameters[1] = structuredClone(control.parameters[0]);
+    files["experiment.json"] = strToU8(JSON.stringify(doc));
+    const source = zipSync(files);
+    const kw = keywords();
+    const conv = chorusToGatingML(readChorusExperiment(source), 0, { keywords: kw });
+    expect(conv.record.gates.find((g) => g.name === "Bright")?.approximated).toBe(true);
+    const tree = importTree(source, kw);
+    const raw = Object.values(tree.gates).find((g) => g.name === "Bright")!;
+    expect(raw.space).not.toBe("display");
+    const exported = exportChorusExperiment({ source, channels, keywords: kw, gates: tree.gates,
+      populations: tree.populations, root_population_id: tree.root_population_id });
+    const drawn = gatesOf(exported.bytes).find((g) => g.name === "Bright")!;
+    expect(drawn.vertices).toHaveLength(gate.vertices.length * 12);
+    expectRawOutline(gate.vertices, drawn.vertices);
+    const carried = gatesOf(exported.bytes).find((g) => g.gateId === control.gateId)!;
+    expect(carried.vertices).toEqual(control.vertices);
+  });
+
+  it("keeps each matched gate's axis scale when another gate uses the same channel differently", () => {
+    const files = unzipSync(cefBytes());
+    const doc = JSON.parse(strFromU8(files["experiment.json"]));
+    const gates = doc.experiment.panels[0].analysis.gates;
+    const control = gates.find((g: { gateId: string }) => g.gateId === "3");
+    const first = gates.find((g: { gateId: string }) => g.gateId === "1");
+    first.parameters[0] = { ...structuredClone(control.parameters[0]), scale: "Log" };
+    files["experiment.json"] = strToU8(JSON.stringify(doc));
+    const source = zipSync(files), kw = keywords(), tree = importTree(source, kw);
+    const result = exportChorusExperiment({ source, channels, keywords: kw, gates: tree.gates,
+      populations: tree.populations, root_population_id: tree.root_population_id });
+    const back = gatesOf(result.bytes).find((g) => g.gateId === "3")!;
+    expect(back.parameters).toEqual(control.parameters);
+    expect(back.vertices).toEqual(control.vertices);
+    // The drawn Biexponential gate holds the same two known events after export and import,
+    // even though the first parameter for that channel in the experiment uses Log.
+    const points = [[0, 1000], [-200, 1000], [60000, 1000], [25000, 20000]];
+    for (const current of [tree, importTree(result.bytes, kw)]) {
+      const gate = Object.values(current.gates).find((g) => g.name === "CD19+CD3-")!;
+      const mask = getGateMask(gate, { n: points.length, column(channel: string) {
+        const axis = channel === gate.x_channel ? 0 : 1;
+        const spec = gate.space === "display" ? gate.transforms?.[channel] : undefined;
+        return Float32Array.from(points, (p) => spec ? transformFromSpec(spec).forward(p[axis]) : p[axis]);
+      } });
+      expect(Array.from(mask)).toEqual([1, 0, 0, 1]);
+      expect(Array.from(mask).reduce((a, b) => a + b, 0)).toBe(2);
+    }
+  });
 });
+
+// Compare the analytical raw-straight edges, including each original corner, independently of
+// the exporter's chosen number of subdivisions. The synthetic test also fixes that density.
+function expectRawOutline(before: { x: number; y: number }[], after: { x: number; y: number }[]) {
+  const perEdge = after.length / before.length;
+  expect(Number.isInteger(perEdge)).toBe(true);
+  expect(perEdge).toBeGreaterThanOrEqual(1);
+  after.forEach((p, i) => {
+    const edge = Math.floor(i / perEdge), t = (i % perEdge) / perEdge;
+    const a = before[edge], b = before[(edge + 1) % before.length];
+    for (const axis of ["x", "y"] as const) {
+      const expected = a[axis] + (b[axis] - a[axis]) * t;
+      expect(Math.abs(p[axis] - expected)).toBeLessThanOrEqual(Math.abs(expected) * 1e-9 + 1e-6);
+    }
+  });
+}
 
 function AUTOMATIC(kind: string): boolean {
   return kind === "Saturated" || kind === "Unsaturated";
@@ -148,12 +218,16 @@ const REAL = process.env.GATELAB_CEF_FIXTURE ?? "";
 const REAL_FCS = process.env.GATELAB_CEF_FCS ?? "";
 
 describe.runIf(REAL && existsSync(REAL) && REAL_FCS && existsSync(REAL_FCS))("a real FACSChorus experiment, exported back (GATELAB_CEF_FIXTURE, GATELAB_CEF_FCS)", () => {
-  it("round-trips every gate of the current tree to the vertices Chorus wrote", async () => {
+  it("preserves carried vertices and explicitly approximated raw outlines of the current tree", async () => {
     const source = new Uint8Array(readFileSync(REAL));
     const exp = readChorusExperiment(source);
     const tree = listChorusTrees(exp).find((t) => t.kind === "current")!;
     const b = readFileSync(REAL_FCS);
     const kw = readFcsKeywords(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength))!;
+    const recording = readChorusRecording(kw);
+    expect(recording?.experimentId, "The FCS must record its Chorus association").toBeTruthy();
+    expect([exp.id, exp.panels[0]?.id].filter(Boolean), "The CEF and FCS fixture must name the same experiment or panel")
+      .toContain(recording!.experimentId);
     const n = Number(kw["$PAR"]);
     const names = Array.from({ length: n }, (_, i) => kw[`$P${i + 1}N`]);
     const conv = chorusToGatingML(exp, tree.index, { keywords: kw });
@@ -161,13 +235,34 @@ describe.runIf(REAL && existsSync(REAL) && REAL_FCS && existsSync(REAL_FCS))("a 
     const result = exportChorusExperiment({ source, channels: names.map((c) => ({ key: c, pnn: c })), keywords: kw, gates: res.gates, populations: res.populations, root_population_id: res.root_population_id });
     const before = gatesOf(source).filter((g) => g.gateKind === "Polygon" || g.gateKind === "Rectangle");
     const after = new Map(gatesOf(result.bytes).map((g) => [g.gateId, g]));
+    const gml = new DOMParser().parseFromString(conv.gatingMl, "text/xml");
     let compared = 0;
     for (const g of before) {
       const a = after.get(g.gateId);
       if (!a) continue;
       compared++;
       expect(a.parentPopulationId).toBe(g.parentPopulationId);
+      const { vertices: _beforeVertices, gateKind: _beforeKind, ...beforeFields } = g;
+      const { vertices: _afterVertices, gateKind: _afterKind, ...afterFields } = a;
+      expect(afterFields).toEqual(beforeFields);
+      expect(a.gateKind).toBe("Polygon");
+      const element = Array.from(gml.getElementsByTagName("*")).find((e) => e.getAttribute("gating:id") === `chorus_gate_${g.gateId}`)!;
+      const report = conv.record.gates.find((r) => r.name === element.getAttribute("gating:name"));
+      expect(report).toBeDefined();
+      if (g.gateKind === "Polygon" && report!.approximated) {
+        expectRawOutline(g.vertices, a.vertices);
+        continue;
+      }
       expect(a.vertices.length).toBe(g.gateKind === "Rectangle" ? 4 : g.vertices.length);
+      if (g.gateKind === "Rectangle") {
+        const xmin = Math.min(...g.vertices.map((p) => p.x)), xmax = Math.max(...g.vertices.map((p) => p.x));
+        const ymin = Math.min(...g.vertices.map((p) => p.y)), ymax = Math.max(...g.vertices.map((p) => p.y));
+        const corners = [{ x: xmin, y: ymin }, { x: xmax, y: ymin }, { x: xmax, y: ymax }, { x: xmin, y: ymax }];
+        a.vertices.forEach((p, i) => {
+          for (const axis of ["x", "y"] as const)
+            expect(Math.abs(p[axis] - corners[i][axis])).toBeLessThanOrEqual(Math.abs(corners[i][axis]) * 1e-9 + 1e-6);
+        });
+      }
       if (g.gateKind === "Polygon") for (let i = 0; i < g.vertices.length; i++) {
         expect(Math.abs(a.vertices[i].x - g.vertices[i].x)).toBeLessThanOrEqual(Math.abs(g.vertices[i].x) * 1e-9 + 1e-6);
         expect(Math.abs(a.vertices[i].y - g.vertices[i].y)).toBeLessThanOrEqual(Math.abs(g.vertices[i].y) * 1e-9 + 1e-6);
@@ -175,15 +270,18 @@ describe.runIf(REAL && existsSync(REAL) && REAL_FCS && existsSync(REAL_FCS))("a 
     }
     expect(compared).toBe(before.length);
     expect(result.skipped).toEqual([]);
-    // An unchanged tree gives back the file Chorus wrote, byte for byte: the gates are spliced
-    // into the source text in Chorus's own layout, nothing re-serialised. (The logicle's inverse
-    // returns each vertex within floating-point noise; a vertex that does not come back to the
-    // same shortest decimal is a difference, so this is the strictest check there is.)
+    // Preserve experiment metadata in every case. Whole-text identity additionally applies
+    // where no explicit approximation or Rectangle-to-Polygon normalization changed the tree.
     const srcText = strFromU8(unzipSync(source)["experiment.json"]);
     const outText = strFromU8(unzipSync(result.bytes)["experiment.json"]);
-    const differing = [...srcText].filter((c, i) => c !== outText[i]).length;
-    expect(outText.length).toBe(srcText.length);
-    expect(differing).toBe(0);
+    const srcDoc = JSON.parse(srcText), outDoc = JSON.parse(outText);
+    srcDoc.experiment.panels[0].analysis.gates = [];
+    outDoc.experiment.panels[0].analysis.gates = [];
+    expect(outDoc).toEqual(srcDoc);
+    if (conv.record.gates.every((g) => !g.approximated) && before.every((g) => g.gateKind === "Polygon"))
+      expect(outText).toBe(srcText);
+    const srcFiles = unzipSync(source), outFiles = unzipSync(result.bytes);
+    for (const name of Object.keys(srcFiles)) if (name !== "experiment.json") expect(outFiles[name]).toEqual(srcFiles[name]);
   });
 });
 

@@ -137,6 +137,14 @@ export interface AgentGate {
   ellipse?: { mean: Vertex; covariance: [[number, number], [number, number]]; distanceSquare: number };
   color: string;
   provenance?: GateProvenance;
+  /** The solid geometry on the viewed file and where its next geometry edit goes. */
+  editing?: AgentGateEditing;
+}
+
+export interface AgentGateEditing {
+  owner: { kind: "tree" | "file" | "group"; hierarchyId: string; gateId: string; name?: string };
+  target: { kind: "tree" | "file" | "group"; hierarchyId: string; gateId: string; name?: string };
+  pending: boolean;
 }
 
 export interface AgentView {

@@ -28,7 +28,13 @@ export function StrategyProposalReview({ review, note, busy, refused, onAccept, 
   for (const [label, id] of Object.entries(review.targets)) labelsOf.set(id, [...(labelsOf.get(id) ?? []), label]);
   const shown = review.populations.filter((p) => p.isNew || p.isTarget);
   const named = (ids: string[], names: (id: string) => string | undefined) => ids.map((id) => names(id) ?? id).join(", ");
-  const gateName = (id: string) => base.gates[id]?.name;
+  const gateName = (id: string) => {
+    const scopes = changes.scopedGateChanges.filter((g) => g.canonicalGateId === id);
+    const name = base.gates[id]?.name;
+    const shared = JSON.stringify(base.gates[id]) !== JSON.stringify(review.next.gates[id]);
+    const labels = [...(shared ? [t("tree")] : []), ...scopes.map((g) => `${t(g.scope)}: ${g.ownerName}`)];
+    return scopes.length ? `${name ?? id} (${labels.join(", ")})` : name;
+  };
   const populationName = (id: string) => base.populations[id]?.name;
   const edited = changes.changedGateIds.length + changes.changedPopulationIds.length;
   const removed = changes.removedGateIds.length + changes.removedPopulationIds.length;

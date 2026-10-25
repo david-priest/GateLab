@@ -410,12 +410,7 @@ export function ProportionsTab({
                 </select>
               </label>
               <TabIntro intro={intro}>
-                Group sets the bars of a stacked bar and the box colours of a
-                boxplot. Facet draws a panel per value. A replicate unit is one
-                observation in each group it has files in: a boxplot draws one
-                point per unit, every unit drawn; its box spans the quartiles,
-                and each whisker reaches the furthest unit within 1.5 × the
-                interquartile range of its quartile (Tukey).
+                {t("Group sets the bars of a stacked bar and the box colours of a boxplot. Facet draws a panel per value. A replicate unit is one observation in each group it has files in: a boxplot draws one point per unit, every unit drawn; its box spans the quartiles, and each whisker reaches the furthest unit within 1.5 × the interquartile range of its quartile (Tukey).")}
               </TabIntro>
               <label
                 className="gl-check"

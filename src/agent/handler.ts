@@ -8,6 +8,7 @@
 
 import { coreReducer, recomputeGating, sameGatingStructure, type Action, type CoreState, type GatingDerived } from "../store";
 import { populationTreeOrder } from "../engine/populations";
+import { fileHierarchyId } from "../engine/hierarchies";
 import type { Gate, GateProvenance, GateTransforms, Vertex } from "../engine/models";
 import { cloneArms } from "../engine/models";
 import type { Sample } from "../engine/sample";
@@ -24,7 +25,7 @@ import {
   type AgentHostInfo, type AgentMemberships, type AgentMembershipsParams, type AgentPopulation, type AgentPopulationStats,
   type AgentPreview, type AgentPreviewParams, type AgentRender, type AgentRenderParams, type AgentRequest, type AgentResponse,
   type AgentSampleInfo, type AgentSeriesSelection, type AgentStats, type AgentStatsParams, type AgentView, type AgentViewParams,
-  type AgentWorkspace, type AgentDataContext, type AgentGatingTask, type StrategyProposalParams,
+  type AgentWorkspace, type AgentDataContext, type AgentGatingTask, type StrategyProposalParams, type AgentGateEditing,
 } from "./protocol";
 
 /** One loaded file or SCE sample, as the app holds it. */
@@ -56,6 +57,12 @@ export interface AgentAdapter {
   workspaceJson(): string | null;
   /** Actual assay and plot pooling, distinct from checked files and all-sample population counts. */
   context?(): AgentDataContext;
+  /** Effective geometry for validation/readout only; never the reducer's base state. */
+  commandGeometry?(state: CoreState): { gates: Record<string, Gate>; editing: Record<string, AgentGateEditing> };
+  /** Pure routing onto existing owners; applied consumes pending UI scope only after dispatch. */
+  prepareAction?(state: CoreState, action: Action): { action: Action; applied?: () => void };
+  /** Changes only when an edit's owner/target changes, not for ordinary shared-tree navigation. */
+  editTargetKey?(): string;
   gatingTask?(): AgentGatingTask | null;
   setGatingTask?(task: AgentGatingTask): Promise<void>;
   /** Fit the Gating plot's axes to the data and the gates on them, as the Fit button does. */
@@ -260,17 +267,25 @@ export function createAgentHandler(adapter: AgentAdapter, options: AgentHandlerO
   const stepLimit = options.proposalStepLimit ?? DEFAULT_PROPOSAL_STEP_LIMIT;
   if (!Number.isSafeInteger(stepLimit) || stepLimit < 1) throw new Error("proposalStepLimit must be a positive integer.");
   let lastState: CoreState | null = null;
+  let lastEditTarget: string | undefined;
   let rev = 0;
   const revision = () => {
     const state = adapter.state();
-    if (state !== lastState) { lastState = state; rev++; }
+    const editTarget = adapter.editTargetKey?.();
+    if (state !== lastState || editTarget !== lastEditTarget) { lastState = state; lastEditTarget = editTarget; rev++; }
     return rev;
   };
 
   const loaded = () => withActivePopulationIds(adapter.state(), adapter.samples().map((view) => ({ view, gating: view.gating(), events: view.sample.fcs.nEvents })));
   const sampleInfo = (s: ReturnType<typeof loaded>[number]): AgentSampleInfo => ({ id: s.view.id, name: s.view.name, events: s.events, viewed: s.view.viewed, checked: s.view.checked, metadata: { ...s.view.metadata } });
   const populationsOf = (state: CoreState, all: ReturnType<typeof loaded>) => populationViews(state, all.map((s) => ({ id: s.view.id, gating: s.gating, events: s.events, notEvaluated: s.notEvaluated })));
-  const gatesOf = (state: CoreState) => (state.gate_order.length ? state.gate_order : Object.keys(state.gates)).map((id) => state.gates[id]).filter(Boolean).map(gateView);
+  const gatesOf = (state: CoreState) => {
+    const geometry = adapter.commandGeometry?.(state);
+    return (state.gate_order.length ? state.gate_order : Object.keys(state.gates)).flatMap((id) => {
+      const gate = geometry?.gates[id] ?? state.gates[id];
+      return gate ? [{ ...gateView(gate), ...(geometry?.editing[id] ? { editing: geometry.editing[id] } : {}) }] : [];
+    });
+  };
 
   /** The notes of a series' samples the population is not evaluated for; their events are not read. */
   const notEvaluatedIn = (parts: ReturnType<typeof loaded>, populationId: string) => {
@@ -313,16 +328,18 @@ export function createAgentHandler(adapter: AgentAdapter, options: AgentHandlerO
       const pad = Math.max(hi - lo, 1) * 0.02;
       return [lo - pad, hi + pad];
     };
-    return { state, channels, transformsFor, dataEdge, provenance };
+    const geometry = adapter.commandGeometry?.(state);
+    return { state: geometry ? { ...state, gates: geometry.gates } : state, channels, transformsFor, dataEdge, provenance };
   };
 
   /** The gating of every sample under a state other than the app's: a preview. */
   const gatingUnder = (next: CoreState, all: ReturnType<typeof loaded>) => {
     const trees = workspaceHierarchyTrees(next);
     return withActivePopulationIds(next, all.map((s) => {
-      const tree = trees.find((t) => t.id === s.view.hierarchyId) ?? trees.find((t) => t.active) ?? null;
+      const hierarchyId = fileHierarchyId(next.file_hierarchies[s.view.id], next.hierarchies);
+      const tree = trees.find((t) => t.id === hierarchyId) ?? trees.find((t) => t.active) ?? null;
       const gating = tree && !tree.active ? recomputeGating(s.view.sample, gatingStateForTree(next, tree)) : recomputeGating(s.view.sample, next);
-      return { ...s, gating };
+      return { ...s, view: { ...s.view, hierarchyId }, gating };
     }));
   };
 
@@ -498,7 +515,8 @@ export function createAgentHandler(adapter: AgentAdapter, options: AgentHandlerO
     const state = adapter.state();
     const all = loaded();
     const action = commandToAction(params.command as AgentCommand, commandContext(state, all, provenanceFor("preview")));
-    const next = coreReducer(state, action);
+    const prepared = adapter.prepareAction?.(state, action) ?? { action };
+    const next = coreReducer(state, prepared.action);
     const after = gatingUnder(next, all);
     return {
       revision: revision(),
@@ -517,7 +535,9 @@ export function createAgentHandler(adapter: AgentAdapter, options: AgentHandlerO
     const state = adapter.state();
     const all = loaded();
     const action = commandToAction(params.command as AgentCommand, commandContext(state, all, provenanceFor(params.rationale.trim())));
-    adapter.dispatch(action);
+    const prepared = adapter.prepareAction?.(state, action) ?? { action };
+    adapter.dispatch(prepared.action);
+    prepared.applied?.();
     await adapter.settled();
     const next = adapter.state();
     const after = loaded();
@@ -672,7 +692,7 @@ export function createAgentHandler(adapter: AgentAdapter, options: AgentHandlerO
     const before = describe();
     const selected = loaded().filter((s) => ids.includes(s.view.id));
     if (selected.length !== ids.length) throw new AgentCommandError("Unknown sample in proposal.");
-    const { next, aliases, resolve } = replayStrategy(adapter.state(), params.steps, stepLimit, (state) => commandContext(state, selected, provenanceFor("Read-only candidate")));
+    const { next, aliases, resolve } = replayStrategy(adapter.state(), params.steps, stepLimit, (state) => commandContext(state, selected, provenanceFor("Read-only candidate")), (state, action) => adapter.prepareAction?.(state, action).action ?? action);
     const { populationIds, wanted } = strategyTargets(next, targets, resolve);
     const after = gatingUnder(next, selected);
     return {
@@ -686,6 +706,7 @@ export function createAgentHandler(adapter: AgentAdapter, options: AgentHandlerO
   // provenance it will carry when accepted. Its gates are made over every loaded sample, as an
   // applied command's are, so an open edge of a range does not depend on what is counted; the
   // counts are over the samples it names, or every loaded one.
+  const strategyApplied = new WeakMap<StrategyReview, (() => void)[]>();
   const previewStrategy = (proposal: StrategyProposal): StrategyReview => {
     const base = adapter.state();
     const all = loaded();
@@ -697,17 +718,24 @@ export function createAgentHandler(adapter: AgentAdapter, options: AgentHandlerO
     if (ids && counted.length !== ids.length) throw new AgentCommandError("Unknown sample in proposal.");
     if (!counted.length) throw new AgentCommandError("No data is loaded.");
     const provenance = strategyProvenance(proposal.by, proposal.rationale, proposal.source);
-    const { next, aliases, resolve } = replayStrategy(base, proposal.steps, stepLimit, (state) => commandContext(state, all, provenance));
+    const applied: (() => void)[] = [];
+    const { next, aliases, resolve } = replayStrategy(base, proposal.steps, stepLimit, (state) => commandContext(state, all, provenance), (state, action) => {
+      const prepared = adapter.prepareAction?.(state, action) ?? { action };
+      if (prepared.applied) applied.push(prepared.applied);
+      return prepared.action;
+    });
     const { populationIds } = strategyTargets(next, labels.map((label) => proposal.targets[label]), resolve);
     const targetIds = new Set(populationIds);
     const after = gatingUnder(next, counted);
-    return {
+    const review: StrategyReview = {
       proposal, base, next, aliases,
       targets: Object.fromEntries(labels.map((label, i) => [label, populationIds[i]])),
       sampleIds: counted.map((s) => s.view.id),
       populations: populationsOf(next, after).map((p) => ({ ...p, isNew: !base.populations[p.id], isTarget: targetIds.has(p.id) })),
       changes: strategyChanges(base, next),
     };
+    strategyApplied.set(review, applied);
+    return review;
   };
 
   // The state the user previewed, installed as one undo step, while the gating is still the one it
@@ -716,6 +744,7 @@ export function createAgentHandler(adapter: AgentAdapter, options: AgentHandlerO
     const live = adapter.state();
     if (!sameGatingStructure(live, review.base)) throw new StrategyMovedError();
     adapter.dispatch({ type: "adoptStrategy", base: live, next: review.next });
+    for (const applied of strategyApplied.get(review) ?? []) applied();
     await adapter.settled();
     if (adapter.state() === live) throw new StrategyMovedError();
     return {

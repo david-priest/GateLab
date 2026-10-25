@@ -81,14 +81,17 @@ async function settle(): Promise<void> {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
 }
 
-async function loadFile(): Promise<void> {
+async function loadFile(names = ["D1.fcs"]): Promise<void> {
   act(() => root.render(<App />));
   const input = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
     .find((candidate) => !candidate.hasAttribute("webkitdirectory"))!;
   const bytes = Uint8Array.from([1]);
-  const fcs = new File([bytes], "D1.fcs");
-  Object.defineProperty(fcs, "arrayBuffer", { value: async () => bytes.buffer.slice(0) });
-  Object.defineProperty(input, "files", { configurable: true, value: [fcs] });
+  const files = names.map((name) => {
+    const fcs = new File([bytes], name);
+    Object.defineProperty(fcs, "arrayBuffer", { value: async () => bytes.buffer.slice(0) });
+    return fcs;
+  });
+  Object.defineProperty(input, "files", { configurable: true, value: files });
   await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
   await settle();
 }
@@ -141,6 +144,97 @@ function drag(target: Element, svg: SVGSVGElement, fromPx: number, toPx: number)
 }
 
 describe("range gates on the histogram view", () => {
+  it.each([true, false])("keeps a shared bisector edit in one Undo step when both ranges tailored is %s", async (both) => {
+    await loadFile(["D1.fcs", "D2.fcs"]);
+    const view = async (name: string) => {
+      const row = [...host.querySelectorAll<HTMLElement>(".gl-sample-row")].find((r) => r.textContent?.includes(name))!;
+      act(() => row.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" })));await settle();
+    };
+    const rootPopulation = async () => {
+      act(() => [...host.querySelectorAll<HTMLElement>(".pop-row")].find((r) => r.querySelector(".pop-row-name")?.textContent === "All Events")!.click());await settle();
+    };
+    const members = async (file: string, name: string, wanted: number[]) => {
+      await view(file);
+      act(() => [...host.querySelectorAll<HTMLElement>(".pop-row")].find((r) => r.querySelector(".pop-row-name")?.textContent === name)!.click());await settle();
+      expect(sortedDisplay()).toEqual(wanted);
+    };
+    await view("D1.fcs");await rootPopulation();
+    act(() => host.querySelector<HTMLButtonElement>('button[data-tool="histogram"]')!.click());await settle();
+    let h = histogram();act(() => host.querySelector<HTMLButtonElement>('button[data-tool="draw-bisector"]')!.click());
+    act(() => h.svg.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, clientX: h.px(550), button: 0 })));
+    act(() => h.svg.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, cancelable: true, clientX: h.px(550), button: 0 })));await settle();
+    act(() => button("Create 2 ranges")!.click());await settle();await rootPopulation();
+    for (const name of both ? ["FSC-A- gate", "FSC-A+ gate"] : ["FSC-A- gate"]) {
+      const row = [...host.querySelectorAll<HTMLElement>(".gate-card")].find((r) => r.querySelector(".gate-card-name")?.textContent?.trim() === name)!;
+      act(() => row.querySelector<HTMLInputElement>(".gate-tailor-switch input")!.click());await settle();
+    }
+    h = histogram();const lower = [...host.querySelectorAll(".gl-range-label")].find((g) => g.textContent?.startsWith("FSC-A- gate"))!.getAttribute("data-gate-id");
+    drag(host.querySelector(`.gl-range-hi[data-gate-id="${lower}"]`)!, h.svg, h.px(550), h.px(750));await settle();
+    await members("D1.fcs", "FSC-A-", [100, 200, 300, 400, 500, 600, 700]);
+    await members("D1.fcs", "FSC-A+", [800, 900, 1000]);
+    await members("D2.fcs", "FSC-A-", [100, 200, 300, 400, 500]);
+    await members("D2.fcs", "FSC-A+", both ? [600, 700, 800, 900, 1000] : [800, 900, 1000]);
+    act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true })));await settle();
+    for (const file of ["D1.fcs", "D2.fcs"]) {
+      await members(file, "FSC-A-", [100, 200, 300, 400, 500]);
+      await members(file, "FSC-A+", [600, 700, 800, 900, 1000]);
+    }
+    act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, shiftKey: true, bubbles: true, cancelable: true })));await settle();
+    await members("D1.fcs", "FSC-A-", [100, 200, 300, 400, 500, 600, 700]);
+    await members("D1.fcs", "FSC-A+", [800, 900, 1000]);
+    await members("D2.fcs", "FSC-A-", [100, 200, 300, 400, 500]);
+    await members("D2.fcs", "FSC-A+", both ? [600, 700, 800, 900, 1000] : [800, 900, 1000]);
+  });
+
+  it("edits only the viewed file's tailored range, retaining its other end, with Undo and Redo", async () => {
+    await loadFile(["D1.fcs", "D2.fcs"]);
+    const view = async (name: string) => {
+      const row = [...host.querySelectorAll<HTMLElement>(".gl-sample-row")].find((r) => r.textContent?.includes(name))!;
+      act(() => row.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" })));
+      await settle();
+    };
+    const rootPopulation = async () => {
+      act(() => [...host.querySelectorAll<HTMLElement>(".pop-row")].find((r) => r.querySelector(".pop-row-name")?.textContent === "All Events")!.click());
+      await settle();
+    };
+    const members = async (file: string, wanted: number[]) => {
+      await view(file);
+      act(() => [...host.querySelectorAll<HTMLElement>(".pop-row")].find((r) => r.querySelector(".pop-row-name")?.textContent === "R1")!.click());
+      await settle();
+      expect(sortedDisplay()).toEqual(wanted);
+      expect(popRow("R1")).toContain(`${wanted.length}(${wanted.length * 10}% pnt`);
+    };
+    await view("D1.fcs");await rootPopulation();
+    act(() => host.querySelector<HTMLButtonElement>('button[data-tool="histogram"]')!.click());await settle();
+    let h = histogram();
+    act(() => host.querySelector<HTMLButtonElement>('button[data-tool="draw-range"]')!.click());
+    drag(h.svg, h.svg, h.px(450), h.px(950));await settle();
+    const name = host.querySelector<HTMLInputElement>(".gl-modal input:not([type=checkbox])")!;
+    act(() => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name, "R1");name.dispatchEvent(new Event("input", { bubbles: true })); });
+    const population = [...host.querySelectorAll<HTMLInputElement>('.gl-modal input[type=checkbox]')].find(i => i.parentElement?.textContent?.includes("Also create a population"))!;
+    if (!population.checked) act(() => population.click());
+    act(() => button("Create")!.click());await settle();await rootPopulation();
+    expect(popRow("R1")).toContain("5(50% pnt");
+    act(() => host.querySelector<HTMLInputElement>(".gate-card .gate-tailor-switch input")!.click());
+    await settle();
+    h = histogram();
+    drag(host.querySelector(".gl-range-lo")!, h.svg, h.px(450), h.px(750));await settle();
+    await members("D1.fcs", [800, 900]);
+    await members("D2.fcs", [500, 600, 700, 800, 900]);
+    await view("D1.fcs");await rootPopulation();h = histogram();
+    // The untouched lower end must come from the file's 750, rather than the tree's 450.
+    drag(host.querySelector(".gl-range-hi")!, h.svg, h.px(950), h.px(850));await settle();
+    await members("D1.fcs", [800]);
+    await members("D2.fcs", [500, 600, 700, 800, 900]);
+    const history = async (shiftKey: boolean) => {
+      act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, shiftKey, bubbles: true, cancelable: true })));
+      await settle();
+    };
+    await history(false);await members("D1.fcs", [800, 900]);
+    await history(true);await members("D1.fcs", [800]);
+    await members("D2.fcs", [500, 600, 700, 800, 900]);
+  });
+
   it("counts the events a drawn range holds on a logicle axis, recounts when an end is dragged, and Undo restores it", async () => {
     await loadFile();
     act(() => plotHarness.props!.onAxisLabelClick({ axis: "x", selected: "FITC-A" }));

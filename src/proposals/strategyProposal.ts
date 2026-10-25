@@ -5,10 +5,11 @@
 // checked and counted before anything changes; the app applies it only when the user accepts, as
 // one undo step, with its source on every gate it made.
 
-import { coreReducer, type CoreState } from "../store";
+import { coreReducer, type Action, type CoreState } from "../store";
 import type { GateProvenance } from "../engine/models";
 import { AgentCommandError, commandToAction, type AgentCommand, type CommandContext } from "../agent/commands";
 import type { AgentPopulation } from "../agent/protocol";
+import { correspondingHierarchyId, storeHierarchy } from "../engine/hierarchies";
 
 /** Where a proposal came from: the agent relay, a host (autogate or host, as the host names it), or a file. */
 export type StrategyProposalSource = "agent" | "autogate" | "host" | "file";
@@ -85,7 +86,7 @@ export interface ReplayedStrategy {
  * `contextFor` gives for the state it applies to; undo and redo are refused, keys must be unique
  * identifiers, and a step that made exactly one population or gate can be named by later ones.
  */
-export function replayStrategy(base: CoreState, steps: unknown, stepLimit: number, contextFor: (state: CoreState) => CommandContext): ReplayedStrategy {
+export function replayStrategy(base: CoreState, steps: unknown, stepLimit: number, contextFor: (state: CoreState) => CommandContext, route: (state: CoreState, action: Action) => Action = (_state, action) => action): ReplayedStrategy {
   if (!Array.isArray(steps) || steps.length > stepLimit) throw new AgentCommandError(`A proposal needs at most ${stepLimit} steps.`);
   let next = base;
   const aliases: Record<string, string> = {};
@@ -107,7 +108,7 @@ export function replayStrategy(base: CoreState, steps: unknown, stepLimit: numbe
       return { ...gate, gateId: resolve(gate.gateId) };
     });
     const previous = next;
-    next = coreReducer(next, commandToAction(command as AgentCommand, contextFor(next)));
+    next = coreReducer(next, route(next, commandToAction(command as AgentCommand, contextFor(next))));
     const populations = Object.keys(next.populations).filter((id) => !previous.populations[id]);
     const gates = Object.keys(next.gates).filter((id) => !previous.gates[id]);
     if (populations.length === 1) aliases[`@${step.key}.population`] = populations[0];
@@ -133,10 +134,25 @@ export function strategyChanges(base: CoreState, next: CoreState) {
   const made = <T,>(from: Record<string, T>, to: Record<string, T>) => Object.keys(to).filter((id) => !from[id]);
   const changed = <T,>(from: Record<string, T>, to: Record<string, T>) => Object.keys(from).filter((id) => to[id] && to[id] !== from[id]);
   const removed = <T,>(from: Record<string, T>, to: Record<string, T>) => Object.keys(from).filter((id) => !to[id]);
+  const live = base.hierarchies.find((h) => h.id === base.active_hierarchy_id);
+  const trees = { ...base.stored_hierarchies, ...(live ? { [live.id]: storeHierarchy(live, base) } : {}) };
+  const scopedGateChanges = Object.entries(base.stored_hierarchies).flatMap(([hierarchyId, before]) => {
+    const after = next.stored_hierarchies[hierarchyId];
+    const ref = base.hierarchies.find((h) => h.id === hierarchyId);
+    if (!after || !ref || hierarchyId === base.active_hierarchy_id) return [];
+    return changed(before.gates, after.gates).filter((gateId) => JSON.stringify(before.gates[gateId]) !== JSON.stringify(after.gates[gateId])).map((gateId) => ({
+      hierarchyId, gateId,
+      canonicalGateId: live ? correspondingHierarchyId(before, gateId, trees[live.id], trees, "gate") : null,
+      name: before.gates[gateId].name,
+      scope: ref.owner_sample_id ? "file" as const : ref.owner_group_id ? "group" as const : "tree" as const,
+      ownerName: ref.owner_group_id ? base.groups.find((g) => g.id === ref.owner_group_id)?.name ?? ref.name : ref.name,
+    }));
+  });
   return {
     createdGateIds: made(base.gates, next.gates),
     createdPopulationIds: made(base.populations, next.populations),
-    changedGateIds: changed(base.gates, next.gates),
+    changedGateIds: [...new Set([...changed(base.gates, next.gates), ...scopedGateChanges.flatMap((g) => g.canonicalGateId ? [g.canonicalGateId] : [])])],
+    scopedGateChanges,
     // A population whose child was added is not itself changed; what defines it is compared.
     changedPopulationIds: changed(base.populations, next.populations).filter((id) => {
       const a = base.populations[id], b = next.populations[id];
