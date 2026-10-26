@@ -53,6 +53,11 @@ import { compareChorusStatistics, parseChorusStatistics, type ChorusImportRecord
 import { ChorusStatisticsModal } from "./ui/ChorusStatisticsModal";
 import { checkAgainstFlowJo, flowJoCountCheckCsv, type FlowJoCountCheck, type FlowJoReference } from "./engine/flowjoCountCheck";
 import { FlowJoCountCheckModal } from "./ui/FlowJoCountCheckModal";
+import { MiflowcytReportModal, type ReportScope } from "./ui/MiflowcytReportModal";
+import { MembershipExportModal, type MembershipExportResult } from "./ui/MembershipModals";
+import { buildMiflowcytReport, renderMiflowcytHtml, renderMiflowcytMarkdown, type MiflowcytAuthorInput, type MiflowcytFileInput } from "./reports/miflowcytReport";
+import { isEmptyMiflowcytAuthor, MIFLOWCYT_AUTHOR_FIELD, readMiflowcytAuthor } from "./reports/miflowcytAuthor";
+import { exportMemberships, populationKeys } from "./reports/membershipExport";
 import { EmptyState } from "./ui/EmptyState";
 import { MenuButton, type MenuEntry, type MenuItem } from "./ui/MenuButton";
 import { ContextMenu, DISMISS_MENUS_EVENT, type ContextMenuState } from "./ui/ContextMenu";
@@ -133,7 +138,7 @@ import {
   sanitizeFilePart,
   type FcsExportAssay,
 } from "./engine/fcsExport";
-import { zipSync } from "fflate";
+import { strToU8, zipSync } from "fflate";
 import {
   packWorkspace,
   packWorkspaceForStorage,
@@ -279,6 +284,9 @@ import { FlowJoGridOption } from "./ui/FlowJoGridOption";
 import { stampHostedWorkspace } from "./engine/workspaceFeatures";
 import { RenameModal, CreatePopModal, EditPopModal, ConfirmModal, BulkRenameModal, FcsExportModal, GatingMlImportModal, GatingMlExportModal, FlowJoExportModal, FlowJo11ExportModal, GroupsFromMetadataModal, type FlowJoExportScope, type MetadataGroupsPreview } from "./ui/CrudModals";
 import { StatsTab } from "./ui/StatsTab";
+import { MIN_EVENTS_FIELD, readMinEvents, siblingOverlaps } from "./reports/populationChecks";
+import { TailoredGatesModal } from "./ui/TailoredGatesModal";
+import { readTailoringReasons, savedTailoringReasons, tailoredFileIds, tailoringCsv, tailoringReport, TAILORING_REASONS_FIELD, type NamedTailoredGate, type TailoringReasons } from "./reports/tailoringReport";
 import { PanelTab } from "./ui/PanelTab";
 import { MetadataTab } from "./ui/MetadataTab";
 import type { MetaRow } from "./ui/EditableMetaTable";
@@ -493,6 +501,15 @@ const CVW_FILE_ACCEPT = { "application/octet-stream": [".cvw"] };
 const GATING_IMPORT_ACCEPT = { "application/xml": [".xml", ".wsp"], "application/zip": [".cef", ".flowjo"] };
 const TABLE_FILE_ACCEPT = { "text/csv": [".csv", ".tsv", ".txt"] };
 
+
+/** A JSON text parsed, or null when it is not JSON: a hosted workspace's top-level fields its validated form does not carry. */
+function parsedJsonOrNull(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Arcsinh-cofactor slider bounds, as log10 of the cofactor.
@@ -1891,6 +1908,19 @@ export default function App({ hostProposals = null }: {
   /** That check as it stood once the import was applied; the dialog counts again when opened. */
   const [flowJoCheckAtImport, setFlowJoCheckAtImport] = useState<FlowJoCountCheck | null>(null);
   const [flowJoCheckOpen, setFlowJoCheckOpen] = useState(false);
+  /** The MIFlowCyt items only the author can supply: saved with the workspace (miflowcytAuthor.ts). */
+  const [miflowcytAuthor, setMiflowcytAuthor] = useState<MiflowcytAuthorInput>({});
+  const [miflowcytOpen, setMiflowcytOpen] = useState(false);
+  const [membershipExportOpen, setMembershipExportOpen] = useState(false);
+  /** Counts below this are greyed in Statistics and the population tree; saved with the workspace. */
+  const [minEvents, setMinEvents] = useState<number | null>(null);
+  /** Why each tailored gate was tailored, as the user gave it: saved with the workspace (tailoringReport.ts). */
+  const [tailoringReasons, setTailoringReasons] = useState<TailoringReasons>({});
+  const [tailoredGatesOpen, setTailoredGatesOpen] = useState(false);
+  /** The file drawn in grey beneath the plot, as a control to place gates against (Display → Control beneath). */
+  const [controlFileId, setControlFileId] = useState<string | null>(null);
+  /** The control's opacity (loadPlots: underlay_alpha); for the session, as the control is. */
+  const [controlAlpha, setControlAlpha] = useState(0.3);
   /** This render's per-file counts, for the check made just after an import is applied. */
   const fileCountsRef = useRef<() => FileCounts[]>(() => []);
   useEffect(() => {
@@ -2224,6 +2254,13 @@ export default function App({ hostProposals = null }: {
   // without a gap or an overlap; a preference of the machine. Alt held while dragging skips it.
   // The tailoring view on the plot: the dashed outlines of the versions a gate is not drawn in and
   // the mark on a tailored gate's label. Per viewer; hiding it changes nothing drawn solid or edited.
+  // Off unless switched on (Populations ⋯): the overlap of every pair of siblings is counted per render.
+  const [showSiblingOverlap, setShowSiblingOverlap] = useState(() => {
+    try { return localStorage.getItem("gatelab.showSiblingOverlap") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("gatelab.showSiblingOverlap", showSiblingOverlap ? "1" : "0"); } catch { /* private mode */ }
+  }, [showSiblingOverlap]);
   const [showTailoring, setShowTailoring] = useState(() => {
     try { return localStorage.getItem("gatelab.showTailoring") !== "0"; } catch { return true; }
   });
@@ -2732,6 +2769,11 @@ export default function App({ hostProposals = null }: {
   const hierarchyOfFile = useCallback(
     (id: string) => fileHierarchyId(fileHierarchies[id], state.hierarchies),
     [fileHierarchies, state.hierarchies],
+  );
+  /** Every tailored gate a loaded file is gated with: the tailoring table, and the Gating-ML export's notice. */
+  const tailoredGates = useMemo(
+    () => tailoringReport(state, samples.map((entry) => ({ fileId: entry.id, treeId: hierarchyOfFile(entry.id) }))),
+    [state, samples, hierarchyOfFile],
   );
   /** The checked files, before hierarchy narrowing: what Copy to selected acts on. */
   const checkedSamples = useMemo(
@@ -3409,6 +3451,8 @@ export default function App({ hostProposals = null }: {
     setPendingFolderImport(null);
     setSampleImportProgress(null);
     setWorkspaceId(nextWorkspaceId);
+    setMinEvents(null);
+    setTailoringReasons({});
     setWorkspaceCompensation(newEmptyWorkspaceCompensationState());
     compensationApplyGuardRef.current = false;
     setCompensationApplyStatus(null);
@@ -3459,6 +3503,7 @@ export default function App({ hostProposals = null }: {
     setPopulationMetadata({});
     setPopulationMetaColumns([]);
     setDivisionProfiles({});
+    setMiflowcytAuthor({});
 
     setPending(null);
     setPendingGatingMlImport(null);
@@ -8446,6 +8491,9 @@ export default function App({ hostProposals = null }: {
           drawnAssayNote;
 
         const initialHostRevision = workspaceEnvelope?.revision ?? 0;
+        setMiflowcytAuthor(workspaceEnvelope ? readMiflowcytAuthor(parsedJsonOrNull(workspaceEnvelope.workspaceJson)) : {});
+        setMinEvents(workspaceEnvelope ? readMinEvents(parsedJsonOrNull(workspaceEnvelope.workspaceJson)) : null);
+        setTailoringReasons(workspaceEnvelope ? readTailoringReasons(parsedJsonOrNull(workspaceEnvelope.workspaceJson)) : {});
         setHostWorkspaceRevision(initialHostRevision);
         hostWorkspaceRevisionRef.current = initialHostRevision;
         setHostWorkspaceStatus(workspaceEnvelope ? "saved" : "unsaved");
@@ -9329,7 +9377,11 @@ export default function App({ hostProposals = null }: {
       version: 2,
       workspaceId,
       savedAt: new Date().toISOString(),
-      app: "GateLab",
+      // The version that wrote the file, so a saved workspace says which GateLab evaluated it.
+      // Nothing reads this field back as a fixed string.
+      app: `GateLab ${pkg.version}`,
+      // The MIFlowCyt items the author typed, when there are any (reports/miflowcytAuthor.ts).
+      ...(isEmptyMiflowcytAuthor(miflowcytAuthor) ? {} : { [MIFLOWCYT_AUTHOR_FIELD]: miflowcytAuthor }),
       ...(isSceHost && hostDrawnAssayId ? {
         hostedAssayId: hostDrawnAssayId,
         // The axes as drawn, for R to keep on the object (rowData(sce)$gatelab_transform).
@@ -9440,6 +9492,11 @@ export default function App({ hostProposals = null }: {
       metadataColumns: [{ name: SAMPLE_ID_FIELD }, ...metadataColumns.filter(column => column.name !== SAMPLE_ID_FIELD)],
       populationMetadata,
       populationMetaColumns,
+      ...(minEvents === null ? {} : { [MIN_EVENTS_FIELD]: minEvents }),
+      ...(() => {
+        const reasons = savedTailoringReasons(tailoringReasons, workspaceTrees(state));
+        return Object.keys(reasons).length ? { [TAILORING_REASONS_FIELD]: reasons } : {};
+      })(),
     };
     const needsV3 = workspaceCompensation.lineages.length > 0 || hostedCompensationBindingsRef.current.size > 0 || samples.some(({ sample: candidate }) => {
       const status = candidate.compensatedLayerStatus();
@@ -9498,6 +9555,98 @@ export default function App({ hostProposals = null }: {
     };
   }
   buildWsRef.current = buildWorkspaceFile; // keep the autosave builder fresh each render
+
+  /**
+   * One file under the tree it is gated under (the tree, its group's copy or its own), with its
+   * masks and counts, and the gates that tree holds as its own: what the MIFlowCyt report and the
+   * membership export read. Every population of that tree is evaluated, so none is left out as
+   * "not evaluated" the way a file read under the live tree can be. Null when the tree has no root.
+   */
+  function fileUnderOwnTree(entry: SampleEntry): { tree: HierarchyTree & { root_population_id: string }; gating: GatingDerived; tailored: Set<string> } | null {
+    const id = hierarchyOfFile(entry.id) ?? state.active_hierarchy_id;
+    const tree = workspaceHierarchyTrees(state).find((candidate) => candidate.id === id);
+    if (!tree || !tree.root_population_id) return null;
+    const gating = !tree.active
+      ? recomputeGating(entry.sample, gatingStateForTree(gatingState, tree))
+      : entry.id === activeSampleId ? liveTreeGatingOfViewed() : recomputeGating(entry.sample, gatingState);
+    const ref = state.hierarchies.find((h) => h.id === tree.id);
+    const copy = ref?.source_hierarchy_id ? storedTreeOf(tree.id) : null;
+    const tailored = copy ? tailoredInCopy(copy, storedTreeOf(ref!.source_hierarchy_id!)) : new Set<string>();
+    return { tree: tree as HierarchyTree & { root_population_id: string }, gating, tailored };
+  }
+
+  /** The files a report or export covers: the viewed one, the checked ones, or all. */
+  function filesInScope(scope: ReportScope): SampleEntry[] {
+    if (scope === "viewed") return samples.filter((entry) => entry.id === activeSampleId);
+    return scope === "checked" ? checkedSamples : samples;
+  }
+
+  function downloadMiflowcytReport(format: "html" | "md", scope: ReportScope, minEvents: number | null): void {
+    try {
+      const files: MiflowcytFileInput[] = [];
+      for (const entry of filesInScope(scope)) {
+        const own = fileUnderOwnTree(entry);
+        if (!own) continue;
+        files.push({
+          fileName: entry.name,
+          sample: entry.sample,
+          gates: own.tree.gates,
+          populations: own.tree.populations,
+          rootId: own.tree.root_population_id,
+          counts: own.gating.stats.event_count,
+          tailoredGateIds: [...own.tailored],
+        });
+      }
+      if (!files.length) {
+        setError("None of these files has a gating tree to report.");
+        return;
+      }
+      const report = buildMiflowcytReport({
+        files,
+        software: { name: isSceHost ? "GateLab core" : "GateLab", version: pkg.version },
+        generatedAt: new Date().toISOString(),
+        author: miflowcytAuthor,
+        ...(minEvents !== null ? { minEvents } : {}),
+      });
+      const stamp = new Date().toISOString().slice(0, 10);
+      if (format === "html") downloadText(`gatelab_miflowcyt_${stamp}.html`, renderMiflowcytHtml(report), "text/html;charset=utf-8");
+      else downloadText(`gatelab_miflowcyt_${stamp}.md`, renderMiflowcytMarkdown(report), "text/markdown;charset=utf-8");
+    } catch (e) {
+      setError(`The MIFlowCyt report could not be made: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async function exportMembershipFiles(scope: ReportScope): Promise<MembershipExportResult> {
+    try {
+      const outputs: Record<string, Uint8Array> = {};
+      const written: string[] = [];
+      const notes: string[] = [];
+      for (const entry of filesInScope(scope)) {
+        const own = fileUnderOwnTree(entry);
+        if (!own) {
+          notes.push(`${entry.name}: no gating tree, so nothing was written for it.`);
+          continue;
+        }
+        const gating = { populations: own.tree.populations, rootPopulationId: own.tree.root_population_id, masks: own.gating.masks };
+        const { csv, manifest } = exportMemberships(gating, { fileName: entry.name, keywords: entry.sample.fcs.keywords });
+        for (const key of populationKeys(own.tree.populations, own.tree.root_population_id)) {
+          if (key.renamedFrom) notes.push(`${entry.name}: a second population named "${key.renamedFrom}" under one parent is the column "${key.path}".`);
+        }
+        // Two loaded files of one name still get a pair of entries each.
+        let base = entry.name.replace(/\.fcs$/i, "");
+        for (let k = 2; outputs[`${base}.memberships.csv`]; k++) base = `${entry.name.replace(/\.fcs$/i, "")} (${k})`;
+        outputs[`${base}.memberships.csv`] = strToU8(csv);
+        outputs[`${base}.manifest.json`] = strToU8(JSON.stringify(manifest, null, 2));
+        written.push(entry.name);
+      }
+      if (!written.length) return { error: "None of these files has a gating tree, so nothing was written." };
+      const stamp = new Date().toISOString().slice(0, 10);
+      downloadBlob(`gatelab_memberships_${stamp}.zip`, new Blob([zipSync(outputs, { level: 6 })], { type: "application/zip" }));
+      return { written, notes };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : String(e) };
+    }
+  }
 
   /**
    * Every SCE sample, with the tree it is gated under, gated under any hierarchy on demand. The
@@ -11398,6 +11547,9 @@ export default function App({ hostProposals = null }: {
       setWsName(wsFileName);
       setWsStorage(storage);
       setWorkspaceId(nextWorkspaceId);
+      setMiflowcytAuthor(readMiflowcytAuthor(raw));
+      setMinEvents(readMinEvents(raw));
+      setTailoringReasons(readTailoringReasons(raw));
       setDirty(false);
       noteRecentWorkspace(wsH, wsFileName);
       dispatch({
@@ -12208,6 +12360,18 @@ export default function App({ hostProposals = null }: {
       state.root_population_id,
     ],
   );
+  /** Each population's siblings that share events with it in the viewed file, while the marker is on. */
+  const populationSiblingOverlaps = useMemo(() => {
+    if (!showSiblingOverlap) return undefined;
+    const out = new Map<string, { name: string; shared: number }[]>();
+    for (const o of siblingOverlaps(state.populations, derived.masks)) {
+      const add = (id: string, other: string) =>
+        out.set(id, [...(out.get(id) ?? []), { name: state.populations[other]?.name ?? other, shared: o.shared }]);
+      add(o.a, o.b);
+      add(o.b, o.a);
+    }
+    return out;
+  }, [showSiblingOverlap, state.populations, derived.masks]);
   const populationTreeDerived = useMemo<Derived>(
     () => pooledPopulationStats ? { ...derived, stats: pooledPopulationStats } : derived,
     [derived, pooledPopulationStats],
@@ -12259,6 +12423,19 @@ export default function App({ hostProposals = null }: {
       state.root_population_id,
       state.gate_version,
     ],
+  );
+
+  /**
+   * The control file's events in the population the plot shows, gated under the tree drawn now,
+   * so the grey underlay is the control taken through the same gates. Not for the viewed file.
+   */
+  const controlEntry = controlFileId && controlFileId !== activeSampleId
+    ? samples.find((entry) => entry.id === controlFileId) ?? null
+    : null;
+  const controlSelection = useMemo(
+    () => controlEntry ? derivePopulationDisplaySelection(controlEntry.sample, state, recomputeGating(controlEntry.sample, state)) : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [controlEntry, controlEntry?.sample.dataRevision, state.gates, state.populations, state.gate_version, state.active_population_id, state.selected_pop_ids, state.root_population_id],
   );
 
   // Rows for the Population metadata table (Metadata tab): every gated population (root excluded),
@@ -13368,6 +13545,7 @@ export default function App({ hostProposals = null }: {
     { label: t("Bulk edit via CSV…"), className: "gl-pops-bulk", title: t("Bulk-edit population names and gate definitions via CSV"), disabled: Object.keys(state.populations).length < 2 || gatesStructureLocked, onClick: () => setCrud({ kind: "bulkRename" }) },
     "separator",
     { label: t("Align gates"), className: "gl-pops-align", checked: alignPopulationGates, title: t("Line the gate badges up in one column after the longest population name. Unchecked, each row's badges follow its own name."), onClick: () => setAlignPopulationGates((on) => !on) },
+    { label: t("Mark siblings that share events"), className: "gl-pops-overlap", checked: showSiblingOverlap, title: t("Mark populations under one parent that hold some of the same events, as two gates drawn on separate plots can, with the number shared in the viewed file."), onClick: () => setShowSiblingOverlap((on) => !on) },
     // The tree has no row of its own: its rename, quadrant naming, ways back and legacy entries.
     "separator",
     ...treeMenuItems(state, treeControls, t),
@@ -13824,6 +14002,30 @@ export default function App({ hostProposals = null }: {
       { plotted: true, sizes: pointSizes },
     );
 
+    // The control, in grey beneath (loadPlots: patchControlUnderlay), when its coordinates are this
+    // plot's: the same scale context as pooling requires, and both channels present. Unlike
+    // pooling, another panel is drawn: an FMO control differs from the full panel by design, and
+    // the user chose this file to look at, not to count with.
+    const underlay = (() => {
+      if (!controlEntry || !controlSelection) return {};
+      const xIndex = controlEntry.sample.index(xName);
+      const yIndex = controlEntry.sample.index(yName);
+      if (
+        controlEntry.sample.workspaceScaleContextKey !== activeWorkspaceScaleContextKey ||
+        xIndex === undefined || yIndex === undefined
+      ) return { underlay_refused: controlEntry.name };
+      const cloud = buildCombinedSamplePointCloud(
+        [{ id: controlEntry.id, name: controlEntry.name, sample: controlEntry.sample, xIndex, yIndex, mask: controlSelection.displayMask }],
+        maxEvents <= 0 ? Infinity : maxEvents,
+      );
+      return {
+        underlay_x_b64: encodeFloat32Base64(cloud.x),
+        underlay_y_b64: encodeFloat32Base64(cloud.y),
+        underlay_n: cloud.eventCount,
+        underlay_name: controlEntry.name,
+      };
+    })();
+
     const activeOnly =
       includedDisplaySelections.length === 1 &&
       includedDisplaySelections[0].entry.id === activeSampleId &&
@@ -13831,6 +14033,7 @@ export default function App({ hostProposals = null }: {
     if (activeOnly) {
       return {
         ...base,
+        ...underlay,
         sample_scope_count: 1,
         sample_contributor_count: base.n_events > 0 ? 1 : 0,
         sample_contributor_names: base.n_events > 0 ? [fileName] : [],
@@ -13987,6 +14190,7 @@ export default function App({ hostProposals = null }: {
     };
     return {
       ...base,
+      ...underlay,
       plotted,
       x_b64: encodeFloat32Base64(cloud.x),
       y_b64: encodeFloat32Base64(cloud.y),
@@ -14030,6 +14234,8 @@ export default function App({ hostProposals = null }: {
     compatibleDivisionProfiles,
     overlayColDataValues,
     fileName,
+    controlEntry,
+    controlSelection,
   ]);
 
   const contributingSampleCount = payload?.sample_contributor_count ?? 0;
@@ -14387,7 +14593,7 @@ export default function App({ hostProposals = null }: {
    * gate. The events are provably unchanged when their encoded bytes are, so that is what decides
    * it rather than a guess at which inputs matter.
    */
-  const lastSentPayload = useRef<{ x: string; y: string; sig: string } | null>(null);
+  const lastSentPayload = useRef<{ x: string; y: string; u: string | undefined; sig: string } | null>(null);
 
   /**
    * The last frame actually handed to the renderer, so a known-bad one can be skipped.
@@ -14410,13 +14616,14 @@ export default function App({ hostProposals = null }: {
       payload.x_label, payload.y_label, payload.x_range, payload.y_range,
       payload.display_mode, payload.n_events, payload.contour_threshold,
       payload.x_binding ?? null, payload.y_binding ?? null,
-      pointAlpha, pointSize, contourLevels, densityColorPower,
+      pointAlpha, pointSize, contourLevels, densityColorPower, controlAlpha,
     ]);
     const prev = lastSentPayload.current;
+    const underlayX = (payload as { underlay_x_b64?: string }).underlay_x_b64;
     const gatesOnly =
       prev !== null && prev.sig === sig &&
-      prev.x === payload.x_b64 && prev.y === payload.y_b64;
-    lastSentPayload.current = { x: payload.x_b64, y: payload.y_b64, sig };
+      prev.x === payload.x_b64 && prev.y === payload.y_b64 && prev.u === underlayX;
+    lastSentPayload.current = { x: payload.x_b64, y: payload.y_b64, u: underlayX, sig };
     const out = {
       ...(gatesOnly ? { gates_only: true } : {}),
       gate_edge_mode: gateEdgeMode,
@@ -14424,6 +14631,7 @@ export default function App({ hostProposals = null }: {
       ...payload,
       point_alpha: pointAlpha, // user-adjustable opacity (was frozen at the payload's 0.4)
       point_size: pointSize, // mark radius only; density colouring is computed on a fixed grid
+      underlay_alpha: controlAlpha, // the control's opacity (loadPlots: patchControlUnderlay)
       contour_levels: contourLevels,
       density_color_power: densityColorPower,
       color_labels: undefined, // suppress cytof's in-canvas legend — we render it below the plot
@@ -14448,7 +14656,7 @@ export default function App({ hostProposals = null }: {
     lastDisplayed.current = out;
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [payload, sample, panelVersion, pointAlpha, pointSize, contourLevels, densityColorPower, gateEdgeMode, snapToGates, gateReferences, colouredGates, gateLineWidth, gateLabelBackground]);
+  }, [payload, sample, panelVersion, pointAlpha, pointSize, contourLevels, densityColorPower, controlAlpha, gateEdgeMode, snapToGates, gateReferences, colouredGates, gateLineWidth, gateLabelBackground]);
 
   /** The X values of the points the scatter plot draws, for the histogram view: same pool, same cap. */
   const histogramValues = useMemo(() => {
@@ -14793,6 +15001,20 @@ export default function App({ hostProposals = null }: {
                 title: "Open the FCS export dialog: choose populations, original/compensated/transformed values, and sample scope.",
                 onClick: () => setFcsExportOpen(true),
               },
+              {
+                label: t("Export event memberships (CSV)…"),
+                title: "For each file, a CSV with one row per event and one 0/1 column per population, named by its path in the tree, and a manifest with the file's identity and the GateLab version; another program's memberships can then be compared event by event.",
+                disabled: Object.keys(state.gates).length === 0,
+                onClick: () => setMembershipExportOpen(true),
+              },
+              "separator",
+              { section: t("Reports") },
+              {
+                label: t("MIFlowCyt report…"),
+                title: "A report organised as MIFlowCyt 1.0: the instrument and parameter keywords the data carry, the compensation applied with its matrix, every gate's boundary in the space it is evaluated in, and each population's count with its denominator named. The author's own items (purpose, specimen, data availability) are typed in the dialog and saved with the workspace.",
+                disabled: Object.keys(state.gates).length === 0,
+                onClick: () => setMiflowcytOpen(true),
+              },
             ]}
           />
         </nav>
@@ -15122,6 +15344,7 @@ export default function App({ hostProposals = null }: {
             onSetFacetColumns={setFacetColumnChoice}
             groups={state.groups.map((g, index) => ({ ...g, colour: groupColour(state.groups, index) }))}
             onGroupAction={runGroupAction}
+            onTailoredGates={tailoredGates.length ? () => setTailoredGatesOpen(true) : undefined}
             fileMenuOf={fileRowMenu}
             onDropFiles={isSceHost ? undefined : (dropped, directoryCount) => {
               // Same ingestion as "Add files…": the drop is only another way to pick the files,
@@ -15399,6 +15622,16 @@ export default function App({ hostProposals = null }: {
                             })
                           : t("{count} events", { count: payload.n_events.toLocaleString() })}
               </span>
+              {payload && "underlay_name" in payload && payload.underlay_name && (
+                <span className="gl-underlay-note" title={t("Drawn in grey beneath the plot, through the same gates, to place gates against. Display → Control beneath to change or stop.")}>
+                  {t("Control in grey: {name}, {count} events", { name: payload.underlay_name, count: (payload.underlay_n ?? 0).toLocaleString() })}
+                </span>
+              )}
+              {payload && "underlay_refused" in payload && payload.underlay_refused && (
+                <span className="gl-underlay-note">
+                  {`⚠ ${t("Control {name} not drawn: another assay layer, or not these channels", { name: payload.underlay_refused })}`}
+                </span>
+              )}
               {/* Which version of the selected gate is drawn and where a drag of it goes; nothing without a selected gate. */}
               {gateStatus && <span className="gl-gate-status" title={gateStatus} aria-live="polite">{asSentence(gateStatus)}</span>}
               <span className="gl-pool-toolbar-right">
@@ -15532,12 +15765,17 @@ export default function App({ hostProposals = null }: {
                 <summary title={t("Point opacity and size, density colour, how many events to draw, colouring, and the plot's font sizes")}>
                   {t("Display")} · <span className="gl-display-summary-events">{maxEvents ? t("{count} events", { count: maxEvents.toLocaleString() }) : t("all events")}</span>
                   {overlayBy !== "none" && <> · <span className="gl-display-summary-colour">{t("coloured")}</span></>}
+                  {controlEntry && <> · <span className="gl-display-summary-control">{t("control")}</span></>}
                 </summary>
                 <div className="gl-display-popover-body">
+                {/* Labelled rows, as Gates and Fonts below: the points, how many are drawn, contours, and a control beneath. */}
+                <div className="gl-display-popover-row gl-display-popover-points" role="group" aria-label={t("Points on the plot")}>
+                  <span className="gl-scales-label">{t("Points")}</span>
               <label className="gl-alpha" title={t("Point opacity")} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                α
+                {t("Opacity")}
                 <input
                   type="range"
+                  aria-label={t("Point opacity")}
                   min={0.05}
                   max={1}
                   step={0.05}
@@ -15548,7 +15786,7 @@ export default function App({ hostProposals = null }: {
                 <output className="gl-tabular-nums">{pointAlpha.toFixed(2)}</output>
               </label>
               <label className="gl-alpha" title={t("Point size")} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                ◦
+                {t("Size")}
                 <input
                   type="range"
                   min={0.5}
@@ -15562,6 +15800,9 @@ export default function App({ hostProposals = null }: {
                 <output className="gl-tabular-nums">{pointSize.toFixed(1)}</output>
               </label>
               <DensityColourControl value={densityColorPower} onChange={changeDensityColorPower} disabled={mode !== "pseudocolor"} />
+                </div>
+                <div className="gl-display-popover-row gl-display-popover-events" role="group" aria-label={t("Events drawn")}>
+                  <span className="gl-scales-label">{t("Events")}</span>
                 <label className="gl-field-inline" title="Downsample the points drawn on the plot. Empty, 0 or All events = plot every event (no downsampling). Counts/percentages always use every event.">
                   {t("Max events")}
                   <input
@@ -15587,7 +15828,10 @@ export default function App({ hostProposals = null }: {
                   />
                   {t("All events")}
                 </label>
-                <label className="gl-field-inline">Contours<select disabled={mode !== "contour"} value={contourLevels} onChange={event => setContourLevels(+event.target.value)}>{[4, 6, 8, 10, 12, 18, 24, 30].map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+                </div>
+                <div className="gl-display-popover-row gl-display-popover-contours" role="group" aria-label={t("Contour lines")}>
+                  <span className="gl-scales-label">{t("Contour")}</span>
+                <label className="gl-field-inline" title={t("Contour levels drawn, from the outer contour to the peak")}>{t("Levels")}<select disabled={mode !== "contour"} value={contourLevels} onChange={event => setContourLevels(+event.target.value)}>{[4, 6, 8, 10, 12, 18, 24, 30].map(value => <option key={value} value={value}>{value}</option>)}</select></label>
                   <label className="gl-contour-outer" title="Outer contour = this % of the peak density">
                     {t("Outer")}
                     <select
@@ -15602,6 +15846,32 @@ export default function App({ hostProposals = null }: {
                       ))}
                     </select>
                   </label>
+                </div>
+                <div className="gl-display-popover-row gl-display-popover-control" role="group" aria-label={t("Control beneath")}>
+                  <span className="gl-scales-label">{t("Control")}</span>
+                {/* Another file's events in grey beneath the plot, through the same gates: a control to place gates against. */}
+                <label className="gl-field-inline gl-control-file" title={t("This file's events, through the same gates, drawn in grey beneath every other file's plot: an unstimulated or FMO control to place gates against.")}>
+                  <select aria-label={t("Control beneath")} value={controlFileId ?? ""} onChange={(e) => setControlFileId(e.target.value || null)}>
+                    <option value="">{t("None")}</option>
+                    {samples.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
+                  </select>
+                </label>
+                <label className="gl-alpha" title={t("Control opacity")} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  {t("Opacity")}
+                  <input
+                    type="range"
+                    aria-label={t("Control opacity")}
+                    min={0.05}
+                    max={1}
+                    step={0.05}
+                    disabled={!controlEntry}
+                    value={controlAlpha}
+                    onChange={(e) => setControlAlpha(+e.target.value)}
+                    style={{ width: 72 }}
+                  />
+                  <output className="gl-tabular-nums">{controlAlpha.toFixed(2)}</output>
+                </label>
+                </div>
                 {/* What the points are coloured and sized by (the third strip until 2026-10-23). */}
                 <div className="gl-display-popover-colour" role="group" aria-label={t("Colouring")}>
                 <span className="gl-field-inline">
@@ -15717,7 +15987,7 @@ export default function App({ hostProposals = null }: {
                     {t("Coloured gates")}
                   </label>
                   <label className="gl-field-inline gl-gate-line-width" title={t("The width of every gate's outline; a selected gate is drawn 1 px thicker")}>
-                    {t("Gate line width")}
+                    {t("Line width")}
                     <input
                       type="range"
                       min={MIN_GATE_LINE_WIDTH}
@@ -16679,6 +16949,8 @@ export default function App({ hostProposals = null }: {
                 defaultChannels={[sample.channels[xIdx].key, sample.channels[yIdx].key]}
                 dataRevisionKey={sampleDataRevisionKey}
                 nominalLinearFrom={sample.hostedAssaySpace === "display" ? sample.hostedAssayId : null}
+                minEvents={minEvents}
+                onMinEventsChange={(next) => { setMinEvents(next); markWorkspaceDirty(); }}
               />
             )}
             {activeTab === "proportions" && (
@@ -17080,6 +17352,9 @@ export default function App({ hostProposals = null }: {
                 perFile={treeControls}
                 statsPending={populationStatsPending}
                 statsSampleCount={includedSamples.length}
+                minEvents={minEvents}
+                siblingOverlaps={populationSiblingOverlaps}
+                overlapFileName={samples.find((entry) => entry.id === activeSampleId)?.name}
                 displayContributorCount={
                   pendingIncludedGatingIds.size === 0 ? contributingSampleCount : undefined
                 }
@@ -17548,6 +17823,28 @@ export default function App({ hostProposals = null }: {
           comparison={compareChorusStatistics(chorusStats, chorusFileCounts(), chorusImport)}
           record={chorusImport}
           onClose={() => setChorusStats(null)}
+        />
+      )}
+
+      {miflowcytOpen && (
+        <MiflowcytReportModal
+          author={miflowcytAuthor}
+          onAuthorChange={(next) => { setMiflowcytAuthor(next); markWorkspaceDirty(); }}
+          viewedName={activeEntry?.name ?? null}
+          checkedCount={checkedSamples.length}
+          allCount={samples.length}
+          onDownload={downloadMiflowcytReport}
+          onClose={() => setMiflowcytOpen(false)}
+        />
+      )}
+
+      {membershipExportOpen && (
+        <MembershipExportModal
+          viewedName={activeEntry?.name ?? null}
+          checkedCount={checkedSamples.length}
+          allCount={samples.length}
+          onExport={exportMembershipFiles}
+          onClose={() => setMembershipExportOpen(false)}
         />
       )}
 
@@ -18616,9 +18913,41 @@ export default function App({ hostProposals = null }: {
           }}
         />
       )}
+      {tailoredGatesOpen && (() => {
+        const nameOf = (id: string) => samples.find((entry) => entry.id === id)?.name ?? id;
+        const rows: NamedTailoredGate[] = tailoredGates.map((row) => ({
+          ...row,
+          ownerName: row.owner.kind === "group" ? row.owner.name : nameOf(row.owner.fileId),
+          fileNames: row.fileIds.map(nameOf),
+          reason: tailoringReasons[row.treeId]?.[row.gateId] ?? "",
+        }));
+        const labelOf = (channel: string) => sample?.labelForKey(channel) ?? channel;
+        return (
+          <TailoredGatesModal
+            rows={rows}
+            labelOf={labelOf}
+            onReasonChange={(treeId, gateId, reason) => {
+              setTailoringReasons((was) => ({ ...was, [treeId]: { ...was[treeId], [gateId]: reason } }));
+              markWorkspaceDirty();
+            }}
+            onExportCsv={() => downloadText(
+              `gatelab_tailored_gates_${new Date().toISOString().slice(0, 10)}.csv`,
+              tailoringCsv(rows, labelOf),
+              "text/csv;charset=utf-8",
+            )}
+            onClose={() => setTailoredGatesOpen(false)}
+          />
+        );
+      })()}
       {gatingMlExportOpen && sample && (
         <GatingMlExportModal
           state={state}
+          tailoring={{
+            treeName: state.hierarchies.find((h) => h.id === state.active_hierarchy_id)?.name ?? "",
+            fileNames: tailoredFileIds(tailoredGates, samples.map((entry) => ({ fileId: entry.id })))
+              .map((id) => samples.find((entry) => entry.id === id)?.name ?? id),
+          }}
+          sample={sample}
           onCancel={() => setGatingMlExportOpen(false)}
           onExport={(format) => {
             exportGating(format);

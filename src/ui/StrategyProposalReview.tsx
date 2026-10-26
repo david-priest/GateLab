@@ -3,7 +3,7 @@ import { useI18n } from "./i18n";
 
 /** The word a gate's badge and the review use for where a proposal came from. */
 export function proposalSourceLabel(source: StrategyProposalSource | null): string {
-  return source === "autogate" ? "autogate" : source === "host" ? "host" : source === "file" ? "file" : "agent";
+  return source === "host" ? "host" : source === "file" ? "file" : "agent";
 }
 
 /**

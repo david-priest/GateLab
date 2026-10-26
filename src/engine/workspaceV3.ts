@@ -154,6 +154,15 @@ const WORKSPACE_V3_ALLOWED_KEYS = [
   // workspace with a compensation lineage was refused on reopening and then overwritten.
   "hostedAssayId",
   "hostedChannelTransforms",
+  // The MIFlowCyt items only the author can supply (reports/miflowcytAuthor.ts). Report text
+  // only: nothing in gating reads it.
+  "miflowcytAuthor",
+  // The count below which Statistics and the population tree grey a population
+  // (reports/populationChecks.ts). Display only: nothing in gating reads it.
+  "minEvents",
+  // Why each tailored gate was tailored, as the user gave it (reports/tailoringReport.ts). Text
+  // only: nothing in gating reads it.
+  "tailoringReasons",
 ] as const;
 
 const SAMPLE_V3_REQUIRED_KEYS = ["fileName", "dataPath", "logicleW", "assay"] as const;

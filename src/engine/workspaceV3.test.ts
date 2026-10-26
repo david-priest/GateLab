@@ -642,6 +642,27 @@ describe("uncompensated v3 validation", () => {
     expect((validated as unknown as { hostedAssayId?: string }).hostedAssayId).toBe("exprs");
   });
 
+  it("accepts and preserves the MIFlowCyt author items the app saves", async () => {
+    const candidate = clone(migrateWorkspaceV2ToV3(workspaceV2())) as unknown as Record<string, unknown>;
+    candidate.miflowcytAuthor = { purpose: "Compare D1 and D2", keywords: ["B cells"] };
+    const validated = await validateWorkspaceV3(candidate);
+    expect((validated as unknown as { miflowcytAuthor?: unknown }).miflowcytAuthor).toEqual({ purpose: "Compare D1 and D2", keywords: ["B cells"] });
+  });
+
+  it("accepts and preserves the minimum event count the app saves", async () => {
+    const candidate = clone(migrateWorkspaceV2ToV3(workspaceV2())) as unknown as Record<string, unknown>;
+    candidate.minEvents = 100;
+    const validated = await validateWorkspaceV3(candidate);
+    expect((validated as unknown as { minEvents?: number }).minEvents).toBe(100);
+  });
+
+  it("accepts and preserves the tailoring reasons the app saves", async () => {
+    const candidate = clone(migrateWorkspaceV2ToV3(workspaceV2())) as unknown as Record<string, unknown>;
+    candidate.tailoringReasons = { c1: { g1: "Shifted after stimulation" } };
+    const validated = await validateWorkspaceV3(candidate);
+    expect((validated as unknown as { tailoringReasons?: unknown }).tailoringReasons).toEqual({ c1: { g1: "Shifted after stimulation" } });
+  });
+
   // Regression for a workspace saved by 0.7.0 or later: the saver writes per-sample display
   // scale lists that this validator did not list, so every such file refused to reopen.
   it("accepts and preserves the per-sample scale lists the app saves", async () => {

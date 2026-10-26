@@ -882,3 +882,20 @@ describe("the tree row", () => {
     expect(others.every((el) => !el.className.includes("is-tailored"))).toBe(true);
   });
 });
+
+describe("PopulationTree sibling overlap marker", () => {
+  it("marks each sibling that shares events, with the count, and nothing while the marker is off", () => {
+    const { state, derived } = makeInteractionFixture();
+    const render = (siblingOverlaps?: ReadonlyMap<string, readonly { name: string; shared: number }[]>) => act(() => root.render(
+      <PopulationTree state={state} derived={derived} dispatch={() => {}} siblingOverlaps={siblingOverlaps} overlapFileName="D1.fcs" />,
+    ));
+    const marks = () => [...host.querySelectorAll(".pop-row-overlap")].map((el) => [el.closest(".pop-row")?.getAttribute("data-pop-id"), el.getAttribute("title")]);
+    render(undefined);
+    expect(marks()).toEqual([]);
+    render(new Map([["pop-b", [{ name: "Alpha", shared: 1200 }]], ["pop-a", [{ name: "Zulu", shared: 1200 }]]]));
+    expect(marks()).toEqual([
+      ["pop-b", "Shares 1,200 events with Alpha in D1.fcs"],
+      ["pop-a", "Shares 1,200 events with Zulu in D1.fcs"],
+    ]);
+  });
+});

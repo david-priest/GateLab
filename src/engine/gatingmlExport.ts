@@ -54,7 +54,7 @@ const LOG10E = Math.log10(Math.E); // GatingML fasinh M
  * the price of a representation Cytobank can read, and Cytobank's own documentation makes the
  * same trade.
  */
-const CYTOBANK_FLOW_COFACTOR = 150;
+export const CYTOBANK_FLOW_COFACTOR = 150;
 
 export type GatingMLFormat = "cytobank" | "standard";
 
@@ -284,6 +284,61 @@ export function analyzeCytobankContradictions(
   };
   visit(rootId, new Map(), false);
   return { populationIds, names, warnings };
+}
+
+export interface GatingMLRewrittenGates {
+  gateIds: string[];
+  names: string[];
+}
+
+/**
+ * The gates a format writes other than as drawn, which the export dialog names before the file is
+ * written. Read off the export's own plan (buildGateExportPlan) and the gate loop's own tests, so
+ * it cannot drift from what exportGatingML writes, and it writes nothing:
+ *   • `arcsinh`: on a logicle or Hyperlog axis, which the Cytobank format re-expresses as arcsinh
+ *     (CYTOBANK_FLOW_COFACTOR). A rectangle keeps its edges' raw values; a polygon's or ellipse's
+ *     edges are densified. The standard format declares logicle and Hyperlog, so it has none.
+ *   • `densified`: polygons and ellipses written in raw units with added vertices, both formats: on
+ *     a FlowJo biex axis, on a channel-table axis paired with another kind, or reaching a log floor.
+ *     A rectangle is written in raw units exactly and is not named.
+ *   • `gridCells`: polygons on FlowJo's channel table on both axes, written as the outline of the
+ *     cells they select (exportGridPolygon). These select the same events as drawn, so the dialog
+ *     does not name them; they are kept apart here so they are not counted as densified.
+ * Throws where buildGateExportPlan does (a bound in the Cytobank format, Time on a FlowJo axis in
+ * the standard format), as the export itself would.
+ */
+export function analyzeGatingMLRewrites(
+  opts: Pick<GatingMLExportOpts, "gates" | "gate_order" | "populations" | "sample" | "format">,
+): { arcsinh: GatingMLRewrittenGates; densified: GatingMLRewrittenGates; gridCells: GatingMLRewrittenGates } {
+  const { sample } = opts;
+  const { gates, gate_order } = projectStraightQuadrants(opts.gates, opts.gate_order, opts.populations);
+  const quadrantRectangles = new Set(gate_order.filter((id) => !opts.gates[id]));
+  const cytobankMode = (opts.format ?? "cytobank") === "cytobank";
+  const gains: ReadonlyMap<string, number> = cytobankMode ? new Map() : gatingMlGains(sample);
+  const exportPlan = buildGateExportPlan(sample, gates, gate_order, cytobankMode, gains, quadrantRectangles);
+  const out = {
+    arcsinh: { gateIds: [] as string[], names: [] as string[] },
+    densified: { gateIds: [] as string[], names: [] as string[] },
+    gridCells: { gateIds: [] as string[], names: [] as string[] },
+  };
+  const add = (group: GatingMLRewrittenGates, g: Gate) => { group.gateIds.push(g.gate_id); group.names.push(g.name); };
+  for (const gid of gate_order) {
+    const g = gates[gid];
+    if (!g || g.gate_type === "quadrant") continue;
+    const x = exportPlan.axis(gid, g.x_channel);
+    const y = exportPlan.axis(gid, g.y_channel);
+    if (reexpressed(x) || reexpressed(y)) add(out.arcsinh, g);
+    const asPolygon = g.gate_type === "polygon" || (g.gate_type === "ellipse" && ellipseAsBoundary(g, x, y));
+    if (!asPolygon) continue;
+    // An ellipse on the grid goes out as its boundary on the grid, as a polygon there does.
+    if (x.grid && y.grid) { add(out.gridCells, g); continue; }
+    // The axes the polygon is written on, as the gate loop takes them (polygonAxis on its extent).
+    const ext = g.gate_type === "ellipse" ? ellipseExtent(g)
+      : [0, 1].map((k) => [Math.min(...g.vertices.map((v) => v[k])), Math.max(...g.vertices.map((v) => v[k]))]);
+    const written = [polygonAxis(x, ext[0]), polygonAxis(y, ext[1])];
+    if (written.some((a) => a.needsDensify && !reexpressed(a))) add(out.densified, g);
+  }
+  return out;
 }
 
 // ── Low-level formatting ─────────────────────────────────────────────────────
@@ -2431,6 +2486,21 @@ function polygonAxis(a: GateAxisExport, [lo, hi]: number[]): GateAxisExport {
 }
 
 /**
+ * Whether an ellipse goes out as its sampled boundary, a polygon, rather than as an EllipsoidGate:
+ * on an axis that converts nonlinearly into the export space, or reaching a log floor (see the gate
+ * loop in exportGatingML).
+ */
+function ellipseAsBoundary(g: EllipseGate, x: GateAxisExport, y: GateAxisExport): boolean {
+  const [ex, ey] = ellipseExtent(g);
+  return !!(x.needsDensify || y.needsDensify) || polygonAxis(x, ex) !== x || polygonAxis(y, ey) !== y;
+}
+
+/** An axis re-expressed in a transform the gate was not drawn on: logicle or Hyperlog as arcsinh, for Cytobank. */
+function reexpressed(a: GateAxisExport): boolean {
+  return !!a.needsDensify && a.trId !== null;
+}
+
+/**
  * A strip's end on one axis, for a strip beyond the other axis's clamp on side `strip`. For a lone
  * vertex on the clamp (`alone`), NaN when GateLab holds nothing beyond the clamp there.
  */
@@ -3621,7 +3691,7 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
           }
         : undefined;
       // Re-expressed in a declared transform (logicle as arcsinh, for Cytobank): REEXPRESS_TOLERANCE.
-      const tol = [ax, ay].some((a) => a.needsDensify && a.trId !== null) ? REEXPRESS_TOLERANCE : DENSIFY_TOLERANCE;
+      const tol = [ax, ay].some(reexpressed) ? REEXPRESS_TOLERANCE : DENSIFY_TOLERANCE;
       const dense = densifyForExport(curve, toOut, (p) => [bx(p[0]), by(p[1])], tol, check);
       return { ...g, vertices: skirted([...dense, dense[0]]) };
     }
@@ -3774,9 +3844,7 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     // in raw space, skirted like a polygon on the floor, it keeps them (polygonAxis, skirtRing).
     const gAxes = { x: exportPlan.axis(gid, gOrig.x_channel), y: exportPlan.axis(gid, gOrig.y_channel) };
     const ellExtent = gOrig.gate_type === "ellipse" ? ellipseExtent(gOrig) : null;
-    const reachesFloor = !!ellExtent &&
-      (polygonAxis(gAxes.x, ellExtent[0]) !== gAxes.x || polygonAxis(gAxes.y, ellExtent[1]) !== gAxes.y);
-    const g: Gate = gOrig.gate_type === "ellipse" && (gAxes.x.needsDensify || gAxes.y.needsDensify || reachesFloor)
+    const g: Gate = gOrig.gate_type === "ellipse" && ellipseAsBoundary(gOrig, gAxes.x, gAxes.y)
       ? { ...gOrig, gate_type: "polygon", vertices: ellipseBoundary(gOrig) } as unknown as Gate
       : gOrig;
     if (g.gate_type === "ellipse") {
