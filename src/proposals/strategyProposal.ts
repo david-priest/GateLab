@@ -11,10 +11,10 @@ import { AgentCommandError, commandToAction, type AgentCommand, type CommandCont
 import type { AgentPopulation } from "../agent/protocol";
 import { correspondingHierarchyId, storeHierarchy } from "../engine/hierarchies";
 
-/** Where a proposal came from: the agent relay, a host (autogate or host, as the host names it), or a file. */
-export type StrategyProposalSource = "agent" | "autogate" | "host" | "file";
+/** Where a proposal came from: the agent relay, a host, or a file. */
+export type StrategyProposalSource = "agent" | "host" | "file";
 
-export const STRATEGY_PROPOSAL_SOURCES: readonly StrategyProposalSource[] = ["agent", "autogate", "host", "file"];
+export const STRATEGY_PROPOSAL_SOURCES: readonly StrategyProposalSource[] = ["agent", "host", "file"];
 
 /** The most steps one proposal may carry when the host sets no other limit. */
 export const DEFAULT_PROPOSAL_STEP_LIMIT = 128;

@@ -14,7 +14,11 @@ import {
   passesPopulationFcsExportThreshold,
   type FcsExportAssay,
 } from "../engine/fcsExport";
-import { CYTOBANK_OMITS_CONTRADICTIONS, analyzeCytobankContradictions, analyzeCytobankOrOmissions, analyzeGatingMLQuadrantOmissions, type GatingMLFormat } from "../engine/gatingmlExport";
+import {
+  CYTOBANK_FLOW_COFACTOR, CYTOBANK_OMITS_CONTRADICTIONS, analyzeCytobankContradictions, analyzeCytobankOrOmissions, analyzeGatingMLQuadrantOmissions,
+  analyzeGatingMLRewrites, type GatingMLFormat,
+} from "../engine/gatingmlExport";
+import type { Sample } from "../engine/sample";
 import { isCurvedQuadrant } from "../engine/gatingmlQuadrants";
 import type { GatingImportMode, GatingImportTarget } from "../engine/gatingMerge";
 import {
@@ -636,12 +640,18 @@ export function FlowJo11ExportModal({
 /** Gating-ML export options plus explicit warnings for formats that cannot be lossless. */
 export function GatingMlExportModal({
   state,
+  sample,
   onCancel,
   onExport,
+  tailoring,
 }: {
   state: CoreState;
+  /** The file the export writes the gates for, whose axes decide which gates are rewritten. */
+  sample?: Sample;
   onCancel: () => void;
   onExport: (format: GatingMLFormat) => void;
+  /** The tree written (the live one) and the files gated with tailored gates, whose own coordinates the file cannot hold. */
+  tailoring?: { treeName: string; fileNames: readonly string[] };
 }) {
   const { t } = useI18n();
   const [format, setFormat] = useState<GatingMLFormat>("standard");
@@ -666,6 +676,17 @@ export function GatingMlExportModal({
   const contradictions = format === "cytobank" && CYTOBANK_OMITS_CONTRADICTIONS && state.root_population_id
     ? analyzeCytobankContradictions(state.gates, state.populations, state.root_population_id)
     : { populationIds: [], names: [], warnings: [] };
+  // Gates the format writes other than as drawn (analyzeGatingMLRewrites). A workspace the format
+  // refuses outright names nothing here; the export reports why.
+  const rewrites = useMemo(() => {
+    if (!sample) return null;
+    try {
+      return analyzeGatingMLRewrites({ gates: state.gates, gate_order: state.gate_order, populations: state.populations, sample, format });
+    } catch {
+      return null;
+    }
+  }, [state.gates, state.gate_order, state.populations, sample, format]);
+  const listed = (names: string[]) => `${names.length} gate${names.length === 1 ? "" : "s"} (${names.join(", ")})`;
 
   return (
     <ModalShell title="Export GatingML" onClose={onCancel}>
@@ -681,6 +702,17 @@ export function GatingMlExportModal({
           ? t("Preserves the population hierarchy for GateLab and GateLabR; OR populations are written for other Gating-ML readers and left out when GateLab imports the file.")
           : t("Uses Cytobank channel names and Boolean-gate metadata for Cytobank import.")}
       </div>
+      {tailoring && tailoring.fileNames.length > 0 && (
+        <div className="gl-modal-warning" role="alert">
+          {t("Gating-ML holds one set of gates: those of the tree drawn now, {tree}. {count} file(s) are gated with tailored gates, their own or their group's, and those coordinates are not written: {names}. A program that reads this file, GateLab included, gates every file with the tree's gates. A FlowJo workspace export (.wsp) writes each file's own gates.", {
+            tree: tailoring.treeName,
+            count: tailoring.fileNames.length,
+            names: tailoring.fileNames.length > 6
+              ? `${tailoring.fileNames.slice(0, 5).join(", ")} ${t("and {count} more", { count: tailoring.fileNames.length - 5 })}`
+              : tailoring.fileNames.join(", "),
+          })}
+        </div>
+      )}
       {quadrantOmissions.gateIds.length > 0 && (
         <div className="gl-modal-warning" role="alert">
           This workspace contains {quadrantOmissions.gateIds.length} curved or spider quadrant gate{quadrantOmissions.gateIds.length === 1 ? "" : "s"}.
@@ -705,6 +737,19 @@ export function GatingMlExportModal({
         <div className="gl-modal-warning" role="alert">
           The Cytobank-compatible format cannot hold a population that excludes a gate a population above it includes, or includes one it excludes; such a population holds no events: {contradictions.names.join(", ")}, and {contradictions.populationIds.length} population{contradictions.populationIds.length === 1 ? "" : "s"} in all, will not be included.
           The standard format writes them; the .gatelab workspace keeps them.
+        </div>
+      )}
+      {rewrites && rewrites.arcsinh.names.length > 0 && (
+        <div className="gl-modal-warning" role="alert">
+          The Cytobank-compatible format has no logicle or Hyperlog transform: {listed(rewrites.arcsinh.names)} drawn on logicle or Hyperlog axes {rewrites.arcsinh.names.length === 1 ? "is" : "are"} written on arcsinh axes (cofactor {CYTOBANK_FLOW_COFACTOR}).
+          A rectangle keeps its edges' raw values; a polygon's or ellipse's edges, curved on arcsinh axes, are written as straight pieces between added vertices, held to this file's events, so another file's events very near an edge may fall on the other side.
+          The standard format keeps logicle and Hyperlog.
+        </div>
+      )}
+      {rewrites && rewrites.densified.names.length > 0 && (
+        <div className="gl-modal-warning" role="alert">
+          {listed(rewrites.densified.names)} {rewrites.densified.names.length === 1 ? "is" : "are"} written in raw units, being drawn on FlowJo biex or channel-table axes, which Gating-ML cannot declare, or reaching a log axis's floor, which it cannot hold.
+          Their edges, curved in raw units, are written as straight pieces between added vertices, and an ellipse as a polygon.
         </div>
       )}
       {cytobankBlocked && (

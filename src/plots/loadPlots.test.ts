@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import cytofSrc from "../../vendor/GateLabR/inst/app/www/cytof_plot.js?raw";
 import miniSrc from "../../vendor/GateLabR/inst/app/www/mini_plot.js?raw";
-import { ELLIPSE_PIXEL_GEOMETRY_SRC, patchCytofForGateLab, patchMiniPlot, patchOverlayDrawOrder, patchPointSizes, patchPolygonDraftKeys, patchTailoredGates } from "./loadPlots";
+import { ELLIPSE_PIXEL_GEOMETRY_SRC, patchControlUnderlay, patchCytofForGateLab, patchMiniPlot, patchOverlayDrawOrder, patchPointSizes, patchPolygonDraftKeys, patchTailoredGates } from "./loadPlots";
 
 describe("GateLab cytof point sizes", () => {
   it("decodes per-point radii from the payload and draws dots and overlay points at their own size", () => {
@@ -15,6 +15,31 @@ describe("GateLab cytof point sizes", () => {
     // Idempotent, and part of the full patch set.
     expect(patchPointSizes(patched)).toBe(patched);
     expect(patchCytofForGateLab(cytofSrc)).toContain("function _pointRadiusAt(i)");
+    warn.mockRestore();
+  });
+});
+
+describe("GateLab cytof control underlay", () => {
+  it("decodes a control file's events and draws them first on the canvas, before the plot's own", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const patched = patchControlUnderlay(cytofSrc);
+    expect(warn).not.toHaveBeenCalled();
+    expect(patched).toContain("decoded.underlay_x = _decodeFloats(plotData.underlay_x_b64);");
+    expect(patched).toContain("function _glDrawUnderlay(zx, zy)");
+    // Drawn straight after the canvas is cleared, before the plot returns early for no events
+    // and before any of its own layers.
+    const draw = patched.indexOf("function _drawCanvas(zx, zy) {");
+    const call = patched.indexOf("if (_plotData) _glDrawUnderlay(zx, zy);", draw);
+    expect(call).toBeGreaterThan(draw);
+    expect(call).toBeLessThan(patched.indexOf("if (!_plotData || !_plotData.x || !_plotData.x.length) return;", draw));
+    // Opacity from the payload, 0.3 when absent or out of range; contours at 8/3 of it.
+    expect(patched).toContain("var ua = Number(_plotData.underlay_alpha);");
+    expect(patched).toContain("if (!(ua >= 0 && ua <= 1)) ua = 0.3;");
+    expect(patched).toContain("_ctx.globalAlpha = Math.min(1, ua * 8 / 3);");
+    // Idempotent, and part of the full patch set.
+    expect(patchControlUnderlay(patched)).toBe(patched);
+    expect(patchCytofForGateLab(cytofSrc)).toContain("function _glDrawUnderlay(zx, zy)");
+    expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
   });
 });

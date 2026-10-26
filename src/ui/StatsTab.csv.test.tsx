@@ -140,6 +140,9 @@ describe("Statistics CSV", () => {
     expect(records[0].slice(0, 4)).toEqual(["Population", "Count", "% Parent", "% Total"]);
     expect(records.slice(1).map((r) => r[0])).toEqual(["All Events", ...POPULATION_NAMES]);
     expect(records[1][1]).toBe("4");
+    // Path and Parent last: the root has neither; a population under it is its own path.
+    expect(records[0].slice(-2)).toEqual(["Path", "Parent"]);
+    expect(records.slice(1).map((r) => r.slice(-2))).toEqual([["", ""], ...POPULATION_NAMES.map((name) => [name, "All Events"])]);
   });
 
   it("writes the all-samples comparison as RFC 4180, sample names intact", async () => {
@@ -151,10 +154,40 @@ describe("Statistics CSV", () => {
     });
     const csv = await copiedCsv();
     const records = parseRfc4180(csv);
-    expect(records[0]).toEqual(["Population", ...SAMPLE_NAMES]);
+    expect(records[0]).toEqual(["Population", ...SAMPLE_NAMES, "Path"]);
     // Quoted, or R's read.csv strips the spaces from the header it reads the sample names from.
     expect(csv.split("\r\n")[0]).toContain('," D2.fcs "');
     expect(records.slice(1).map((r) => r[0])).toEqual(["All Events", ...POPULATION_NAMES]);
-    expect(records.every((r) => r.length === SAMPLE_NAMES.length + 1)).toBe(true);
+    expect(records.every((r) => r.length === SAMPLE_NAMES.length + 2)).toBe(true);
+    expect(records.slice(1).map((r) => r.at(-1))).toEqual(["", ...POPULATION_NAMES]);
+  });
+
+  it("writes each population's path from below the root, escaping a slash or backslash in a name", async () => {
+    const nested = {
+      ...state,
+      populations: {
+        root: population("root", "All Events", null, ["p1"]),
+        p1: population("p1", "Lymphocytes", "root", ["p2"]),
+        p2: population("p2", "CD4/CD8 DP", "p1", ["p3"]),
+        p3: population("p3", "a\\b", "p2", []),
+      },
+    };
+    act(() => root.render(
+      <StatsTab
+        samples={samples}
+        activeSampleId="s0"
+        state={nested}
+        derived={recompute(samples[0].sample, nested)}
+        defaultChannels={[samples[0].sample.channels[1].key]}
+        dataRevisionKey="0"
+      />,
+    ));
+    const records = parseRfc4180(await copiedCsv());
+    expect(records.slice(1).map((r) => r.slice(-2))).toEqual([
+      ["", ""],
+      ["Lymphocytes", "All Events"],
+      ["Lymphocytes/CD4\\/CD8 DP", "Lymphocytes"],
+      ["Lymphocytes/CD4\\/CD8 DP/a\\\\b", "CD4/CD8 DP"],
+    ]);
   });
 });

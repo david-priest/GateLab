@@ -2341,6 +2341,10 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 }
 
 /* The gates' ink and line width, in a row of their own above the fonts. */
+/* The Display popover's labelled rows (points, events, contours, control); labels share one width so the controls line up. */
+.gl-display-popover-row { flex-basis: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.gl-display-popover-body > div > .gl-scales-label { min-width: 64px; }
+.gl-display-popover-control .gl-control-file select { max-width: 280px; }
 .gl-display-popover-gates { flex-basis: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding-top: 8px; border-top: 1px solid var(--line); }
 .gl-display-popover-gates .gl-gate-line-width output { min-width: 2.5em; }
 .gl-display-popover-fonts { flex-basis: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 2px; padding-top: 8px; border-top: 1px solid var(--line); }
@@ -3635,7 +3639,7 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 .pop-tree-gate-badge { display: inline-flex; align-items: center; gap: 2px; max-width: 16ch; }
 .pop-tree-gate-badge-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pop-tree-gate-badge > svg { flex: 0 0 auto; }
-/* A gate a strategy proposal made (an agent, autogating, a host or a file): the same badge in its own colour, the rationale in its tooltip. */
+/* A gate a strategy proposal made (an agent, a host or a file): the same badge in its own colour, the rationale in its tooltip. */
 /* A gate's tailoring scope on the viewed file: one neutral outline with a branch mark, reading
    "this file", a group's name or "3 files"; a click opens Tailor, Revert and Use for. Dashed while
    a tailoring is asked for and not yet dragged. */
@@ -3857,7 +3861,7 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 .gl-display-popover > summary::-webkit-details-marker { display: none; }
 .gl-display-popover > summary::after { content: " ▾"; color: var(--muted); }
 .gl-display-popover[open] > summary { background: var(--active); border-color: var(--accent); }
-.gl-display-popover-body { position: absolute; z-index: 30; top: calc(100% + 4px); left: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; min-width: 620px; max-width: 720px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); box-shadow: 0 6px 20px rgba(0,0,0,.12); }
+.gl-display-popover-body { position: absolute; z-index: 30; top: calc(100% + 4px); left: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; min-width: 700px; max-width: 720px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); box-shadow: 0 6px 20px rgba(0,0,0,.12); }
 .gl-pool-toolbar-right { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .gl-pool-toolbar-right .gl-hint { white-space: nowrap; }
 
@@ -4638,3 +4642,27 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
 .gl-panel-table input:not([type="checkbox"]), .gl-scales-table input:not([type="checkbox"]),
 .gl-panel-table select, .gl-scales-table select { min-height: var(--gl-control-height-compact) !important; height: var(--gl-control-height-compact); font-size: var(--gl-font-size-secondary); }
 
+
+/* MIFlowCyt report and membership dialogs: the author's items in three fieldsets, two columns
+   where the window allows, the file scope on one line beneath. */
+.gl-miflowcyt { width: min(820px, calc(100vw - 32px)); max-height: calc(100vh - 48px); display: flex; flex-direction: column; }
+.gl-miflowcyt-fields { overflow: auto; flex: 1 1 auto; min-height: 0; }
+.gl-miflowcyt-section { border: 1px solid var(--line); border-radius: 6px; margin: 0 0 10px; padding: 6px 10px 8px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 6px 14px; }
+.gl-miflowcyt-section legend { font-size: var(--gl-font-size-secondary); font-weight: 600; padding: 0 4px; }
+.gl-miflowcyt-field { display: flex; flex-direction: column; gap: 2px; font-size: var(--gl-font-size-caption); color: var(--muted); }
+.gl-miflowcyt-field input, .gl-miflowcyt-field textarea { font: inherit; font-size: var(--gl-font-size-secondary); color: var(--text); resize: vertical; }
+.gl-miflowcyt-options { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; font-size: var(--gl-font-size-secondary); margin: 6px 0 10px; }
+.gl-membership-export { width: min(560px, calc(100vw - 32px)); }
+/* Counts below the workspace's minimum events (Statistics, population tree): greyed, still legible. */
+.gl-stats-table tr.gl-stats-low td.gl-stats-num,
+.gl-stats-table td.gl-stats-num.gl-stats-low { color: var(--muted); opacity: 0.6; }
+.pop-row-count.pop-row-low,
+.pop-row-pct.pop-row-low,
+.pop-row-pct-short.pop-row-low { opacity: 0.45; }
+/* A population that shares events with a sibling (Populations ⋯ → Mark siblings that share events). */
+.pop-row-overlap { margin-left: 4px; color: #a15c00; font-weight: 600; }
+/* The tailored-gates table (file list ⋯ → Tailored gates…): a reason field fills its column. */
+.gl-tailored-gates { width: min(1000px, calc(100vw - 32px)); }
+.gl-tailored-gates .gl-tailored-reason { width: 100%; min-width: 180px; box-sizing: border-box; }
+/* The control drawn in grey beneath the plot (Display → Control beneath). */
+.gl-underlay-note { margin-left: 10px; color: var(--muted); font-size: var(--gl-font-size-caption); white-space: nowrap; }

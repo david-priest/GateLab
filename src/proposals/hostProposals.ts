@@ -21,7 +21,7 @@ export const HOST_PROPOSAL_MESSAGE = "gatelabr-strategy-proposal";
 export const HOST_PROPOSAL_RESULT_INPUT = "gatelabr_strategy_proposal_result";
 
 /** The sources a host may name; "agent" is the relay's. */
-export const HOST_PROPOSAL_SOURCES: readonly StrategyProposalSource[] = ["autogate", "host", "file"];
+export const HOST_PROPOSAL_SOURCES: readonly StrategyProposalSource[] = ["host", "file"];
 
 export interface HostStrategyProposal extends StrategyProposal {
   /** R's own name for the proposal, returned with every result. */

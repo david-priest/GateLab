@@ -83,6 +83,14 @@ interface Props {
   tailoredGateIds?: ReadonlySet<string>;
   /** Line the gate badges up in one column after the longest name; off, each row's follow its own name. */
   alignGates?: boolean;
+  /** Counts below this are greyed; null marks none (the Statistics tab's "Minimum events"). */
+  minEvents?: number | null;
+  /**
+   * The siblings each population shares events with, and how many, in `overlapFileName`: marked
+   * on the row. Absent while the marker is off (the Populations ⋯ menu).
+   */
+  siblingOverlaps?: ReadonlyMap<string, readonly { name: string; shared: number }[]>;
+  overlapFileName?: string;
 }
 
 function focusTreeContainer() {
@@ -312,7 +320,7 @@ export function PopulationTree({
   displayContributorCount,
   displayContributorNames,
   perFile,
-  showHierarchyControls = true, tailoredGateIds, alignGates = true }: Props) {
+  showHierarchyControls = true, tailoredGateIds, alignGates = true, minEvents = null, siblingOverlaps, overlapFileName }: Props) {
   const { t } = useI18n();
   const gateColour = useGateColour();
   const gateSwatch = useGateSwatch();
@@ -621,6 +629,8 @@ export function PopulationTree({
       : countVal != null
         ? countVal.toLocaleString()
         : "?";
+    const low = !isRoot && !statsPending && minEvents !== null && countVal != null && countVal < minEvents;
+    const lowClass = low ? " pop-row-low" : "";
     let pctText = "";
     if (!isRoot && !statsPending) {
       const parts: string[] = [];
@@ -790,6 +800,14 @@ export function PopulationTree({
               {pop.name}
             </span>
           )}
+          {siblingOverlaps?.get(popId)?.length ? (
+            <span
+              className="pop-row-overlap"
+              title={siblingOverlaps.get(popId)!
+                .map((o) => t("Shares {count} events with {name} in {file}", { count: o.shared.toLocaleString(), name: o.name, file: overlapFileName ?? "" }))
+                .join("\n")}
+            >∩</span>
+          ) : null}
         </span>
         <span className="pop-row-gates-col">
           <span className="pop-row-gates">
@@ -838,10 +856,10 @@ export function PopulationTree({
             )}
           </span>
         </span>
-        <span className="pop-row-count">{countText}</span>
-        <span className="pop-row-pct">{pctText}</span>
+        <span className={"pop-row-count" + lowClass} title={low ? t("Fewer than {min} events", { min: minEvents!.toLocaleString() }) : undefined}>{countText}</span>
+        <span className={"pop-row-pct" + lowClass}>{pctText}</span>
         {/* In a narrow pane the percentage of the parent alone, the full line in the tooltip (styles.css). */}
-        {pctText && <span className="pop-row-pct-short" title={pctText}>{stats.percent_of_parent[popId] ?? pop.percent_of_parent}%</span>}
+        {pctText && <span className={"pop-row-pct-short" + lowClass} title={pctText}>{stats.percent_of_parent[popId] ?? pop.percent_of_parent}%</span>}
       </div>,
     );
 

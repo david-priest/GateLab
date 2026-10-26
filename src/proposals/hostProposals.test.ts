@@ -39,7 +39,7 @@ describe("parseHostProposal", () => {
   it("refuses an envelope it cannot read, naming what is wrong", () => {
     expect(refusal(message({ contractVersion: 2 }))).toBe("Unsupported strategy proposal contract 2; expected 1.");
     expect(refusal(message({ proposalId: "" }))).toBe("proposalId must be a string of 1 to 128 characters.");
-    expect(refusal(message({ source: "agent" }))).toBe("source must be one of autogate, host, file.");
+    expect(refusal(message({ source: "agent" }))).toBe("source must be one of host, file.");
     expect(refusal(message({ by: " " }))).toBe("by must be a name of 1 to 80 characters.");
     expect(refusal(message({ rationale: "  " }))).toBe("A rationale is required.");
     expect(refusal(message({ targets: ["@a.population"] }))).toBe("targets must name each target's population id or @key.population alias.");

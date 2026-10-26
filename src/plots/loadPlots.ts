@@ -417,12 +417,116 @@ export function patchGateInk(src: string): string {
   return out;
 }
 
+/**
+ * GateLab's control underlay: the payload may carry `underlay_x_b64` / `underlay_y_b64`, another
+ * file's events (an unstimulated or FMO control, say) in the plot's display coordinates, drawn in
+ * grey beneath everything else on the canvas so a gate can be placed against them. Grey dots, or
+ * in contour mode grey contours (the plot's own density recipe, cached apart from the plot's).
+ * `underlay_alpha` (0 to 1, default 0.3) is the dots' opacity; contours, thin lines, are drawn
+ * at 8/3 of it, capped at 1, so the default draws them at 0.8.
+ * Nothing about the plotted events, their counts or the gates changes.
+ */
+export function patchControlUnderlay(src: string): string {
+  let out = src;
+  if (out.includes("function _glDrawUnderlay(")) return out;
+  const decodeNeedle =
+    "            plotData = Object.assign({}, plotData, decoded);\n";
+  const decodePatch =
+    "            // GateLab: a control file's events drawn beneath the plot (patchControlUnderlay).\n" +
+    "            if (plotData.underlay_x_b64 && plotData.underlay_y_b64) {\n" +
+    "                decoded.underlay_x = _decodeFloats(plotData.underlay_x_b64);\n" +
+    "                decoded.underlay_y = _decodeFloats(plotData.underlay_y_b64);\n" +
+    "            }\n" +
+    decodeNeedle;
+  const drawNeedle =
+    "    function _drawCanvas(zx, zy) {\n" +
+    "        _ctx.clearRect(0, 0, PLOT_W, PLOT_H);\n";
+  const drawPatch =
+    "    // GateLab: the control underlay, grey and beneath everything else (patchControlUnderlay).\n" +
+    "    var _glUnderlayCache = null;\n" +
+    "    function _glDrawUnderlay(zx, zy) {\n" +
+    "        var ux = _plotData && _plotData.underlay_x, uy = _plotData && _plotData.underlay_y;\n" +
+    "        if (!ux || !uy || !ux.length) return;\n" +
+    "        var n = Math.min(ux.length, uy.length);\n" +
+    "        var ua = Number(_plotData.underlay_alpha);\n" +
+    "        if (!(ua >= 0 && ua <= 1)) ua = 0.3;\n" +
+    "        _ctx.save();\n" +
+    "        _ctx.beginPath();\n" +
+    "        _ctx.rect(M.left, M.top, W, H);\n" +
+    "        _ctx.clip();\n" +
+    "        if (_plotData.display_mode !== 'contour' || _panActive) {\n" +
+    "            _ctx.fillStyle = '#8c8c8c';\n" +
+    "            _ctx.globalAlpha = ua;\n" +
+    "            var r = _pointRadius();\n" +
+    "            for (var i = 0; i < n; i++) {\n" +
+    "                _ctx.beginPath();\n" +
+    "                _ctx.arc(_clampPointX(zx, ux[i]), _clampPointY(zy, uy[i]), r, 0, 6.2832);\n" +
+    "                _ctx.fill();\n" +
+    "            }\n" +
+    "            _ctx.restore();\n" +
+    "            return;\n" +
+    "        }\n" +
+    "        // Contours in base-scale pixels, as the plot's own: rebuilt when the points or the base\n" +
+    "        // domain change, drawn through the zoom transform.\n" +
+    "        var key = [n, ux[0], uy[0], ux[n - 1], uy[n - 1], _xBase.domain().join(','), _yBase.domain().join(','),\n" +
+    "                   _plotData.contour_threshold || 5, _plotData.contour_levels || 18, _plotData.kde_bandwidth || 0].join('|');\n" +
+    "        if (!_glUnderlayCache || _glUnderlayCache.key !== key) {\n" +
+    "            var pts = [];\n" +
+    "            for (var j = 0; j < n; j++) {\n" +
+    "                var bx = _xBase(ux[j]), by = _yBase(uy[j]);\n" +
+    "                if (bx >= 0 && bx <= W && by >= 0 && by <= H) pts.push([bx, by]);\n" +
+    "            }\n" +
+    "            var contours = [];\n" +
+    "            if (pts.length) {\n" +
+    "                var kde = d3.contourDensity().x(function (d) { return d[0]; }).y(function (d) { return d[1]; })\n" +
+    "                    .size([W, H]).bandwidth(_computeBandwidth(pts));\n" +
+    "                var coarse = kde.thresholds(20)(pts);\n" +
+    "                var peak = coarse.length ? coarse[coarse.length - 1].value : 0;\n" +
+    "                if (peak) {\n" +
+    "                    var outer = Math.max(peak * ((_plotData.contour_threshold || 5) / 100), peak * 0.005);\n" +
+    "                    var levels = Math.max(2, Math.min(30, Math.round(Number(_plotData.contour_levels) || 18)));\n" +
+    "                    contours = kde.thresholds(d3.range(levels).map(function (k) {\n" +
+    "                        return Math.exp(Math.log(outer) + (Math.log(peak) - Math.log(outer)) * k / (levels - 1));\n" +
+    "                    }))(pts);\n" +
+    "                }\n" +
+    "            }\n" +
+    "            _glUnderlayCache = { key: key, contours: contours };\n" +
+    "        }\n" +
+    "        _ctx.translate(M.left + _zt.x, M.top + _zt.y);\n" +
+    "        _ctx.scale(_zt.k, _zt.k);\n" +
+    "        _ctx.strokeStyle = '#9a9a9a';\n" +
+    "        _ctx.lineWidth = 1.0 / _zt.k;\n" +
+    "        _ctx.globalAlpha = Math.min(1, ua * 8 / 3);\n" +
+    "        _glUnderlayCache.contours.forEach(function (contour) {\n" +
+    "            contour.coordinates.forEach(function (polygon) {\n" +
+    "                polygon.forEach(function (ring) {\n" +
+    "                    _ctx.beginPath();\n" +
+    "                    ring.forEach(function (pt, k) { if (k === 0) _ctx.moveTo(pt[0], pt[1]); else _ctx.lineTo(pt[0], pt[1]); });\n" +
+    "                    _ctx.closePath();\n" +
+    "                    _ctx.stroke();\n" +
+    "                });\n" +
+    "            });\n" +
+    "        });\n" +
+    "        _ctx.restore();\n" +
+    "    }\n\n" +
+    drawNeedle +
+    "        if (_plotData) _glDrawUnderlay(zx, zy);\n";
+  if (out.includes(decodeNeedle) && out.includes(drawNeedle)) {
+    out = out.replace(decodeNeedle, decodePatch);
+    out = out.replace(drawNeedle, drawPatch);
+  } else {
+    console.warn("[GateLab] cytof control-underlay patch did not match — a control file cannot be drawn beneath the plot.");
+  }
+  return out;
+}
+
 export function patchCytofForGateLab(src: string): string {
   let out = src;
   if (!out.includes("var _glEll = ")) out = ELLIPSE_PIXEL_GEOMETRY_SRC + out;
   out = patchPointSizes(out);
   out = patchOverlayDrawOrder(out);
   out = patchPolygonDraftKeys(out);
+  out = patchControlUnderlay(out);
 
   // In Shiny the plot bundle boots itself after a short delay, because the container may
   // appear after the script. GateLab's React wrapper instead calls render() as soon as the

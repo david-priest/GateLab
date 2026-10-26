@@ -146,6 +146,7 @@ export function SampleNavigator({
   onDropFiles,
   groups,
   onGroupAction,
+  onTailoredGates,
   fileMenuOf,
   treeSummary = null,
 }: {
@@ -177,6 +178,8 @@ export function SampleNavigator({
   /** The workspace's groups, in order, with their colours: the Groups menu and the list's headers. */
   groups?: readonly { id: string; name: string; colour?: string }[];
   onGroupAction?: (action: GroupAction) => void;
+  /** Open the table of tailored gates; absent when no file is gated with one. */
+  onTailoredGates?: () => void;
   /** A right-click on a file row: the menu for these files (the checked files, when the row is one of them). */
   fileMenuOf?: (fileIds: readonly string[]) => MenuEntry[];
   facets?: readonly FacetColumn[];
@@ -327,6 +330,17 @@ export function SampleNavigator({
                 )),
               ]
             : []),
+        ]
+      : []),
+    ...(onTailoredGates
+      ? [
+          { section: t("Tailoring") },
+          {
+            label: t("Tailored gates…"),
+            className: "gl-sample-tailored-gates",
+            title: t("The gates files are gated with at coordinates of their own or their group's, each with its shift and a reason"),
+            onClick: onTailoredGates,
+          },
         ]
       : []),
     ...(items.length > 0

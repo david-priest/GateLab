@@ -2,7 +2,7 @@
 // row per population with Count / % Parent / % Total + per-channel MFIs). Multi-sample adds a
 // sample selector and an "All samples" compare view (populations × samples for one metric).
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { usePersistedTabState } from "./tabState";
 import { recomputeGating, type CoreState, type Derived, type TreeStats } from "../store";
 import type { Sample } from "../engine/sample";
@@ -43,6 +43,9 @@ interface Props {
   nominalLinearFrom?: string | null;
   /** Called when the CSV was written, for whoever counts that (the tutorial). */
   onDownload?: () => void;
+  /** Counts below this are greyed; null marks none. The workspace's, shared with the population tree. */
+  minEvents?: number | null;
+  onMinEventsChange?: (next: number | null) => void;
 }
 
 const BASE_STATS: { key: StatType; label: string }[] = [
@@ -73,6 +76,23 @@ function csvText(records: readonly (readonly (string | number)[])[]): string {
   return records.map((record) => record.map(field).join(",") + "\r\n").join("");
 }
 
+/**
+ * A population's names from below the root down to it, joined by "/", with a "/" or "\" in a name
+ * escaped by a backslash; empty for the root. A table that sorts or filters its rows keeps each
+ * population's place in the tree, which its name alone does not say.
+ */
+function populationPath(populations: CoreState["populations"], rootId: string, popId: string): string {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  let cur: CoreState["populations"][string] | undefined = populations[popId];
+  while (cur && cur.population_id !== rootId && !seen.has(cur.population_id)) {
+    seen.add(cur.population_id);
+    names.unshift(cur.name.replace(/[\\/]/g, (c) => `\\${c}`));
+    cur = cur.parent_id ? populations[cur.parent_id] : undefined;
+  }
+  return names.join("/");
+}
+
 /** "12350" → "12,350"; a fraction, an exponent or a short number is left as it is. */
 function groupThousands(text: string): string {
   const match = /^(-?)(\d+)(\.\d+)?$/.exec(text);
@@ -80,8 +100,24 @@ function groupThousands(text: string): string {
   return match[1] + match[2].replace(/\B(?=(\d{3})+(?!\d))/g, ",") + (match[3] ?? "");
 }
 
-export function StatsTab({ samples, activeSampleId, state, derived, defaultChannels, dataRevisionKey, nominalLinearFrom = null, onDownload }: Props) {
+export function StatsTab({ samples, activeSampleId, state, derived, defaultChannels, dataRevisionKey, nominalLinearFrom = null, onDownload, minEvents = null, onMinEventsChange }: Props) {
   const { t } = useI18n();
+  // The field as typed: a value that is not a positive whole number is shown but not applied.
+  const [minText, setMinText] = useState(minEvents === null ? "" : String(minEvents));
+  const minValid = minText.trim() === "" || (Number.isInteger(Number(minText)) && Number(minText) > 0);
+  const changeMin = (text: string) => {
+    setMinText(text);
+    if (text.trim() === "") onMinEventsChange?.(null);
+    else if (Number.isInteger(Number(text)) && Number(text) > 0) onMinEventsChange?.(Number(text));
+  };
+  // A workspace opened while the tab is showing brings its own value: show it, unless the field
+  // already says it.
+  useEffect(() => {
+    const shown = minText.trim() === "" ? null : Number(minText);
+    if (shown !== minEvents) setMinText(minEvents === null ? "" : String(minEvents));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [minEvents]);
+  const isLow = (count: number | null | undefined) => minEvents !== null && count != null && count < minEvents;
   const [viewSampleId, setViewSampleId] = useState<string>(() => activeSampleId ?? samples[0]?.id ?? "");
   const [statTypes, setStatTypes] = usePersistedTabState<Set<StatType>>(
     "stats.statTypes",
@@ -164,7 +200,7 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
     for (const row of stats.rows) {
       if (view.notEvaluated.has(row.popId)) for (const key of Object.keys(row.cells)) row.cells[key] = null;
     }
-    return { ...stats, notes: view.notes };
+    return { ...stats, notes: view.notes, counts: view.stats.event_count };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isCompare, viewEntry, activeSampleId, derived, state.populations, state.gate_version, state.hierarchies, state.stored_hierarchies, state.active_hierarchy_id, root, channels, statTypes, valueSpace, anyMfi, dataRevisionKey]);
 
@@ -178,6 +214,7 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
       depth,
       isLastPath,
       name: state.populations[popId]?.name ?? popId,
+      counts: views.map((view) => (view.notEvaluated.has(popId) ? null : view.stats.event_count[popId] ?? null)),
       cells: views.map((view) => {
         if (view.notEvaluated.has(popId)) return null;
         if (compareMetric === "count") return view.stats.event_count[popId] ?? null;
@@ -189,6 +226,9 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isCompare, samples, activeSampleId, derived, state.populations, state.gate_version, state.hierarchies, state.stored_hierarchies, state.active_hierarchy_id, compareMetric, dataRevisionKey]);
   const notes = (isCompare ? compare?.notes : table?.notes) ?? [];
+  const anyLow = isCompare
+    ? !!compare?.rows.some((r) => r.counts.some(isLow))
+    : !!table?.rows.some((r) => isLow(table.counts[r.popId]));
 
   const toggleStat = (k: StatType) =>
     setStatTypes((prev) => {
@@ -214,14 +254,16 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
 
   const buildCsv = (): string => {
     if (isCompare && compare) {
+      // Path last, so a script that reads the columns by position still finds the samples where they were.
       return csvText([
-        ["Population", ...compare.sampleNames],
-        ...compare.rows.map((r) => [r.name, ...r.cells.map((c) => c ?? "")]),
+        ["Population", ...compare.sampleNames, "Path"],
+        ...compare.rows.map((r) => [r.name, ...r.cells.map((c) => c ?? ""), populationPath(state.populations, root, r.popId)]),
       ]);
     }
     if (table) {
+      // Path and Parent last, so a script that reads the columns by position still finds them where they were.
       return csvText([
-        ["Population", ...table.columns.map((c) => c.label)],
+        ["Population", ...table.columns.map((c) => c.label), "Path", "Parent"],
         ...table.rows.map((r) => [
           r.name,
           ...table.columns.map((c) => {
@@ -231,6 +273,8 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
             // by something else, and full float noise (0.48391827364) helps nobody either.
             return isMfiColumn(c.key) ? significantNumber(v, 6) : v;
           }),
+          populationPath(state.populations, root, r.popId),
+          r.popId === root ? "" : state.populations[state.populations[r.popId]?.parent_id ?? ""]?.name ?? "",
         ]),
       ]);
     }
@@ -253,7 +297,8 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
     const a = document.createElement("a");
     a.href = url;
-    a.download = `gatelab_stats_${stamp}.csv`;
+    // The all-samples table holds one metric and its header cannot say which, so the name does.
+    a.download = isCompare ? `gatelab_stats_${compareMetric}_${stamp}.csv` : `gatelab_stats_${stamp}.csv`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -287,6 +332,23 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
             ))}
             {samples.length > 1 && <option value={COMPARE}>{t("All samples (compare)")}</option>}
           </select>
+        </section>
+        <section className="gl-stats-opt-group">
+          <h3>{t("Minimum events")}</h3>
+          <input
+            type="number"
+            min={1}
+            step={1}
+            aria-label={t("Minimum events")}
+            placeholder={t("None")}
+            value={minText}
+            onChange={(e) => changeMin(e.target.value)}
+            aria-invalid={!minValid}
+            style={{ width: 100 }}
+          />
+          <p className="gl-hint">{minValid
+            ? t("Counts below this are greyed here and in the population tree, with the percentages and MFIs computed from them. Saved with the workspace.")
+            : t("A whole number of events above 0.")}</p>
         </section>
         {isCompare ? (
           <section className="gl-stats-opt-group">
@@ -372,7 +434,11 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
                     </span>
                   </td>
                   {r.cells.map((c, i) => (
-                    <td key={i} className="gl-stats-num">{fmtCell(compareMetric, c)}</td>
+                    <td
+                      key={i}
+                      className={"gl-stats-num" + (isLow(r.counts[i]) ? " gl-stats-low" : "")}
+                      title={isLow(r.counts[i]) ? t("Count {count}, below the minimum of {min}", { count: r.counts[i]!.toLocaleString(), min: minEvents!.toLocaleString() }) : undefined}
+                    >{fmtCell(compareMetric, c)}</td>
                   ))}
                 </tr>
               ))}
@@ -390,7 +456,11 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
             </thead>
             <tbody>
               {table.rows.map((r) => (
-                <tr key={r.popId} className={r.popId === state.active_population_id ? "active" : ""}>
+                <tr
+                  key={r.popId}
+                  className={(r.popId === state.active_population_id ? "active" : "") + (isLow(table.counts[r.popId]) ? " gl-stats-low" : "")}
+                  title={isLow(table.counts[r.popId]) ? t("Count {count}, below the minimum of {min}", { count: table.counts[r.popId]!.toLocaleString(), min: minEvents!.toLocaleString() }) : undefined}
+                >
                   <td className="gl-stats-name">
                     <span className="gl-stats-tree-cell">
                       <TreeConnectors depth={r.depth} isLastPath={r.isLastPath} fill />
@@ -411,6 +481,9 @@ export function StatsTab({ samples, activeSampleId, state, derived, defaultChann
             </tbody>
           </table>
         ) : null}
+        {anyLow && (
+          <p className="gl-stats-note">— {t("Greyed: fewer than {min} events.", { min: minEvents!.toLocaleString() })}</p>
+        )}
         {notes.length > 0 && (
           <p className="gl-stats-note">— {notes.join(" ")}</p>
         )}
