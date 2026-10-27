@@ -4630,6 +4630,12 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
 .gl-app textarea, .gl-app [contenteditable="true"], .gl-app [contenteditable=""] { cursor: text; }
 .gl-header, .gl-tabs, .gl-side-head, .gl-presentation-tabs, .gl-figure-inspector nav, .gl-menu-popover,
 .gl-app button, .gl-app label, .gl-app summary, .gl-segmented { user-select: none; -webkit-user-select: none; }
+/* No text is selectable by default (David, 2026-10-27): labels, counts, axis ticks and names on
+   the plots are chrome, and a drag that misses its target painted a selection over them. Text
+   that is typed, a statistics table's values and an error stay selectable, to edit or copy. */
+.gl-app { user-select: none; -webkit-user-select: none; }
+.gl-app input, .gl-app textarea, .gl-app [contenteditable="true"], .gl-app [contenteditable=""],
+.gl-app .gl-stats-table td, .gl-app [role="alert"] { user-select: text; -webkit-user-select: text; }
 /* The grey around the plot keeps the arrow: App still writes a grab or crosshair here, which
    differed from the plot's own and flipped as the pointer crossed the card's edge. */
 .gl-plot-area { cursor: default !important; }
