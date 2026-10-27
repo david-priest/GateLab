@@ -147,6 +147,9 @@ describe("coloured gates, gate line width and label background", () => {
     expect(host.querySelectorAll(".gate-card").length).toBeGreaterThan(0);
     expect(pills().length).toBeGreaterThan(0);
     expect(new Set(pills())).toEqual(new Set(["#4a5361"]));
+    // Off, the pills are the neutral tint; on, each is solid in its gate's colour.
+    const pillClasses = () => [...host.querySelectorAll<HTMLElement>(".pop-tree-gate-badge")].map((p) => p.classList.contains("is-coloured"));
+    expect(pillClasses().every((c) => !c)).toBe(true);
 
     act(() => colouredSwitch().click()); await settle();
     const own = gateColours();
@@ -157,6 +160,7 @@ describe("coloured gates, gate line width and label background", () => {
     // The list and the pills show the same colours the plot does.
     expect(new Set(swatches())).toEqual(new Set(own.map(rgb)));
     expect(new Set(pills()).has("#4a5361")).toBe(false);
+    expect(pillClasses().every(Boolean)).toBe(true);
     // Off again: the gates kept their colours throughout.
     act(() => colouredSwitch().click()); await settle();
     act(() => colouredSwitch().click()); await settle();

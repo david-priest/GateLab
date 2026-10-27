@@ -2714,6 +2714,19 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 .pop-tree-gate-badge.exclude { background: var(--bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--gate-colour) 60%, transparent); }
 .pop-tree-gate-badge.selected-gate,
 .pop-tree-gate-badge.selected-gate:hover { box-shadow: inset 0 0 0 2px var(--gl-color-accent); }
+/* With Coloured gates on, a pill is its gate's colour, solid, with white text, as before the
+   design pass: the tint read as faded once the pills carry the gates' own colours (David,
+   2026-10-27). With it off the pills stay the neutral tint above. A NOT reference keeps
+   .gate-ref-badge's white inner edge, and the selected gate the accent ring inside a white one. */
+.pop-tree-gate-badge.is-coloured,
+.pop-tree-gate-badge.is-coloured:hover,
+.pop-tree-gate-badge.is-coloured.exclude { background: var(--gate-colour); color: #fff; box-shadow: none; }
+.pop-tree-gate-badge.is-coloured:hover { box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25); }
+.pop-tree-gate-badge.is-coloured.exclude { box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.9); }
+/* No pill is bold, the selected gate's included (David, 2026-10-27); the ring marks it. */
+.pop-tree-gate-badge.selected-gate { font-weight: 400; }
+.pop-tree-gate-badge.is-coloured.selected-gate,
+.pop-tree-gate-badge.is-coloured.selected-gate:hover { box-shadow: inset 0 0 0 2px var(--gl-color-accent), inset 0 0 0 3px rgba(255, 255, 255, 0.9); }
 .pop-tree-gate-add {
   /* A row action at the pills' height: a dashed square with its +. */
   display: inline-flex; align-items: center; justify-content: center;
@@ -3916,6 +3929,8 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 
 /* Notes and legends have their own room. */
 .gl-plot-area { position: relative; }
+/* Swap X and Y, in the plot card's empty bottom-left corner. */
+.gl-plot-swap { position: absolute; z-index: 2; transform: translate(2px, calc(-100% - 2px)); padding: 0; }
 .gl-plot-note {
   position: absolute; top: 4px; left: 32px; right: 32px; z-index: 2;
   display: flex; align-items: center; gap: 6px; padding: 1px 6px;
@@ -4615,6 +4630,12 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
 .gl-app textarea, .gl-app [contenteditable="true"], .gl-app [contenteditable=""] { cursor: text; }
 .gl-header, .gl-tabs, .gl-side-head, .gl-presentation-tabs, .gl-figure-inspector nav, .gl-menu-popover,
 .gl-app button, .gl-app label, .gl-app summary, .gl-segmented { user-select: none; -webkit-user-select: none; }
+/* No text is selectable by default (David, 2026-10-27): labels, counts, axis ticks and names on
+   the plots are chrome, and a drag that misses its target painted a selection over them. Text
+   that is typed, a statistics table's values and an error stay selectable, to edit or copy. */
+.gl-app { user-select: none; -webkit-user-select: none; }
+.gl-app input, .gl-app textarea, .gl-app [contenteditable="true"], .gl-app [contenteditable=""],
+.gl-app .gl-stats-table td, .gl-app [role="alert"] { user-select: text; -webkit-user-select: text; }
 /* The grey around the plot keeps the arrow: App still writes a grab or crosshair here, which
    differed from the plot's own and flipped as the pointer crossed the card's edge. */
 .gl-plot-area { cursor: default !important; }

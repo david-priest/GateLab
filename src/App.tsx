@@ -2,7 +2,7 @@
 // GateLabR) with live counts. Drawing a gate opens the name/population modal; the plot
 // shows the active population's events plus its gates (display space).
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState, type SetStateAction } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type SetStateAction } from "react";
 import { usePopoverDismissal } from "./ui/usePopoverDismissal";
 import { BiexAxisControl } from "./ui/BiexAxisControl";
 import { figureBlockFrame } from "./ui/LayoutFigure";
@@ -336,7 +336,7 @@ import {
 import { WorkspaceRelinkModal } from "./ui/WorkspaceRelinkModal";
 import { forgetRecentWorkspace, listRecentWorkspaces, rememberRecentWorkspace, type RecentWorkspace } from "./engine/recentWorkspaces";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
-import { NavigateIcon, RectIcon, PolyIcon, EllipseIcon, QuadIcon, RangeIcon, BisectorIcon, HistogramIcon, ZoomInIcon, ZoomOutIcon } from "./ui/icons";
+import { NavigateIcon, RectIcon, PolyIcon, EllipseIcon, QuadIcon, RangeIcon, BisectorIcon, HistogramIcon, SwapAxesIcon, ZoomInIcon, ZoomOutIcon } from "./ui/icons";
 import { useSampleDataRevisionKey } from "./ui/useSampleDataRevisions";
 import { useContextualGlobalScales, type GlobalScales } from "./ui/useContextualGlobalScales";
 import {
@@ -14369,6 +14369,23 @@ export default function App({ hostProposals = null }: {
    * answers with its own: the plot's actions, otherwise spread over the toolbars above and
    * below it, at the pointer.
    */
+  const swapAxes = () => { setXIdx(yIdx); setYIdx(xIdx); };
+  // Where the plot card's bottom-left corner sits in the plot area, for the swap button there: left
+  // of the X axis's ticks and below the Y axis's, where nothing else is drawn. The renderer sizes the
+  // card, so it is measured, and again whenever the card or the area changes size.
+  const [plotCorner, setPlotCorner] = useState<{ left: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    const area = plotAreaRef.current;
+    const plot = area?.querySelector<HTMLElement>(".gl-plot");
+    if (!area || !plot) return;
+    const measure = () => setPlotCorner(plot.offsetHeight > 0 ? { left: plot.offsetLeft, top: plot.offsetTop + plot.offsetHeight } : null);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(area);
+    observer.observe(plot);
+    return () => observer.disconnect();
+  }, [activeTab, histogramView, sample]);
   const plotContextItems = (): MenuEntry[] => [
     ...(LAYOUT_TAB_AVAILABLE
       ? [
@@ -14395,7 +14412,7 @@ export default function App({ hostProposals = null }: {
       label: t("Swap X and Y"),
       title: t("Show the Y channel on X and the X channel on Y; the gates stay as they are"),
       disabled: xIdx === yIdx || histogramView,
-      onClick: () => { setXIdx(yIdx); setYIdx(xIdx); },
+      onClick: swapAxes,
     },
     "separator",
     ...(histogramView ? HISTOGRAM_TOOLS : DRAW_TOOLS).filter((tool) => tool.id !== "navigate").map((tool) => ({
@@ -16566,6 +16583,19 @@ export default function App({ hostProposals = null }: {
                     />
                   )}
                 </Suspense>
+              )}
+              {activeTab === "gating" && !histogramView && plotCorner && (
+                <button
+                  type="button"
+                  className="gl-tool gl-plot-swap"
+                  style={{ left: plotCorner.left, top: plotCorner.top }}
+                  aria-label={t("Swap X and Y")}
+                  title={t("Show the Y channel on X and the X channel on Y; the gates stay as they are")}
+                  disabled={xIdx === yIdx}
+                  onClick={swapAxes}
+                >
+                  <SwapAxesIcon />
+                </button>
               )}
               <GatingPlot
                 payload={displayed}
