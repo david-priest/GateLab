@@ -255,6 +255,16 @@ export function BisectorIcon() {
   );
 }
 
+/** Swap X and Y — a curved arrow from the X axis to the Y axis, headed at both ends; as light as Zoom in. */
+export function SwapAxesIcon() {
+  return (
+    <svg {...base} width={15} height={15} strokeWidth={1.15} className="gl-icon-light">
+      <path d="M12.5 11.5C7 11.5 4.5 9 4.5 3.5" />
+      <path d="M2.8 5.3L4.5 3.5l1.7 1.8M10.7 9.8l1.8 1.7-1.8 1.7" />
+    </svg>
+  );
+}
+
 /** Zoom in — a magnifier with a plus; light, 15 px at a 1.15 stroke ("too heavy", David 2026-10-23). */
 export function ZoomInIcon() {
   return (

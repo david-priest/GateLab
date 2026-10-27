@@ -37,7 +37,8 @@ vi.mock("./plots/GatingPlot", () => ({
   DEFAULT_GATING_FONT_SIZES: { tick: 9, axis: 12, title: 12, gate: 10 },
   GatingPlot: (props: CapturedPlotProps) => {
     plotHarness.props = props;
-    return <div data-testid="gating-plot" />;
+    // The renderer's card, as the plot area finds it for the swap button in its corner.
+    return <div data-testid="gating-plot" className="gl-plot" />;
   },
 }));
 
@@ -377,6 +378,32 @@ describe("App gating viewport invariant", () => {
     open();
     act(() => menuItem("Reset axis ranges")!.click());
     expect(ranges()).toEqual(auto);
+  });
+
+  it("swaps X and Y from a button in the plot card's bottom-left corner", async () => {
+    // jsdom lays nothing out: the card is given a place and a size.
+    const card = (el: Element) => el.classList.contains("gl-plot");
+    const real = (name: "offsetLeft" | "offsetTop" | "offsetHeight") => Object.getOwnPropertyDescriptor(HTMLElement.prototype, name)!.get!;
+    const [left, top, height] = [real("offsetLeft"), real("offsetTop"), real("offsetHeight")];
+    vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockImplementation(function (this: HTMLElement) { return card(this) ? 150 : left.call(this); });
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) { return card(this) ? 70 : top.call(this); });
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) { return card(this) ? 600 : height.call(this); });
+    act(() => root.render(<App />));
+    const fcsInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(fcsInput, "files", { configurable: true, value: [testFile()] });
+    await act(async () => {
+      fcsInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const swap = host.querySelector<HTMLButtonElement>('.gl-plot-area > button.gl-plot-swap[aria-label="Swap X and Y"]')!;
+    expect(swap).not.toBeNull();
+    expect([swap.style.left, swap.style.top]).toEqual(["150px", "670px"]);
+    expect([plotHarness.props!.payload.x_label, plotHarness.props!.payload.y_label]).toEqual(["FSC-A", "SSC-A"]);
+    act(() => swap.click());
+    expect([plotHarness.props!.payload.x_label, plotHarness.props!.payload.y_label]).toEqual(["SSC-A", "FSC-A"]);
+    act(() => swap.click());
+    expect([plotHarness.props!.payload.x_label, plotHarness.props!.payload.y_label]).toEqual(["FSC-A", "SSC-A"]);
   });
 
   it("keeps the plot two strips below the header: plot types at the top level, colouring and gate settings in popovers", async () => {

@@ -3916,6 +3916,8 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 
 /* Notes and legends have their own room. */
 .gl-plot-area { position: relative; }
+/* Swap X and Y, in the plot card's empty bottom-left corner. */
+.gl-plot-swap { position: absolute; z-index: 2; transform: translate(2px, calc(-100% - 2px)); padding: 0; }
 .gl-plot-note {
   position: absolute; top: 4px; left: 32px; right: 32px; z-index: 2;
   display: flex; align-items: center; gap: 6px; padding: 1px 6px;
