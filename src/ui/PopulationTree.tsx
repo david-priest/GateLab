@@ -23,7 +23,7 @@ import type { QuadrantNaming } from "../engine/quadrantNames";
 import { gateRefLabel, EXCLUDE_HINT } from "./gateRefLabel";
 import { isCopyRef, type HierarchyRef } from "../engine/hierarchies";
 import { BranchIcon, ChevronIcon } from "./icons";
-import { useGateColour, useGateSwatch } from "../plots/gateInk";
+import { useGateColour, useGateInk, useGateSwatch } from "../plots/gateInk";
 
 /**
  * The tree row: its name, how its files stand, and the ways back. Where an edit goes is each
@@ -323,6 +323,7 @@ export function PopulationTree({
   showHierarchyControls = true, tailoredGateIds, alignGates = true, minEvents = null, siblingOverlaps, overlapFileName }: Props) {
   const { t } = useI18n();
   const gateColour = useGateColour();
+  const { coloured: colouredGates } = useGateInk();
   const gateSwatch = useGateSwatch();
   const { populations, root_population_id, active_population_id, selected_gate_id, selected_pop_ids, gates } = state;
   const structureLocked = state.hierarchies.some(
@@ -819,7 +820,8 @@ export function PopulationTree({
                 "gate-ref-badge pop-tree-gate-badge" +
                 (tailoredGateIds?.has(ref.gate_id) ? " is-tailored" : "") +
                 (!ref.include ? " exclude" : "") +
-                (isSelGate ? " selected-gate" : "");
+                (isSelGate ? " selected-gate" : "") +
+                (colouredGates ? " is-coloured" : "");
               return (
                 <span
                   key={i}
