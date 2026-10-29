@@ -48,7 +48,7 @@ function transformXml(axis: FixtureAxis, param: string): string {
 }
 
 /** A one-polygon workspace in FlowJo's shape, on channels X and Y. */
-function workspaceOf(x: FixtureAxis, y: FixtureAxis, vertices: Vertex[], extra = "", flowJoVersion?: string): string {
+function workspaceOf(x: FixtureAxis, y: FixtureAxis, vertices: Vertex[], extra = "", flowJoVersion?: string, resolution = 256): string {
   const v = vertices.map(([a, b]) => `<gating:vertex><gating:coordinate data-type:value="${a}"/><gating:coordinate data-type:value="${b}"/></gating:vertex>`).join("");
   const version = flowJoVersion ? ` flowJoVersion="${flowJoVersion}"` : "";
   return `<Workspace xmlns:transforms="${T}" xmlns:data-type="${D}" xmlns:gating="${G}"${version}><SampleList><Sample>
@@ -56,7 +56,7 @@ function workspaceOf(x: FixtureAxis, y: FixtureAxis, vertices: Vertex[], extra =
     <Transformations>${transformXml(x, "X")}${transformXml(y, "Y")}</Transformations>
     <SampleNode name="D1.fcs" count="1"><Subpopulations>
       <Population name="Grid_gate" count="1"><Gate>
-        <gating:PolygonGate eventsInside="1" quadId="-1" gateResolution="256" gating:id="g1"${extra}>
+        <gating:PolygonGate eventsInside="1" quadId="-1" gateResolution="${resolution}" gating:id="g1"${extra}>
           <gating:dimension><data-type:fcs-dimension data-type:name="X"/></gating:dimension>
           <gating:dimension><data-type:fcs-dimension data-type:name="Y"/></gating:dimension>
           ${v}
@@ -324,6 +324,95 @@ describe("a mixed grid", () => {
     expect(inside(bx.centre(99), ly.centre(70))).toBe(false);
     expect(inside(bx.centre(140), ly.centre(90))).toBe(true); // the far corner, closed
     expect(inside(bx.centre(141), ly.centre(90))).toBe(false);
+  });
+});
+
+// ── gateResolution 1024 ──────────────────────────────────────────────────────────────────────
+//
+// FlowJo's HyperFinder writes its polygons at gateResolution="1024", and the rule with N = 1024
+// gave FlowJo's saved count for 172 of 174 of them (flowjoGrid.ts). A synthetic polygon here, on
+// two linear axes: X over [-64, 960], one raw unit a channel at 1024 (four at 256), and Y over
+// [0, 262144], 256 a channel. Its five vertices make a convex polygon, anticlockwise, one of them
+// six channels below the X axis.
+
+describe("FlowJo's grid at gateResolution 1024", () => {
+  const xAxis: FixtureAxis = { kind: "linear", minRange: -64, maxRange: 960 };
+  const yAxis: FixtureAxis = { kind: "linear", minRange: 0, maxRange: 262144 };
+  const channels: Vertex[] = [[100, 100], [300, 120], [340, 400], [120, 380], [-6, 250]];
+  // Each vertex 0.3 channel right of and 0.4 below its channel's middle, which rounds onto it.
+  const drawn: Vertex[] = channels.map(([cx, cy]) => [cx - 64 + 0.3, (cy - 0.4) * 256]);
+
+  it("rounds half up to the nearest of 1024 channels, clamps events to 0 and 1023, and leaves vertices where they fall", () => {
+    const s = flowJoGridScale(grid({ kind: "linear", minRange: -64, maxRange: 960 }, 1024));
+    expect(s.cells).toBe(1024);
+    expect(s.eventCell(36.49)).toBe(100);
+    expect(s.eventCell(36.5)).toBe(101); // exactly half a channel rounds up
+    expect(s.eventCell(-200)).toBe(0);
+    expect(s.eventCell(959.5)).toBe(1023); // 1023.5 rounds to 1024, clamped
+    expect(s.eventCell(5000)).toBe(1023);
+    expect(s.vertexCell(-70)).toBe(-6);
+    expect(s.vertexCell(970)).toBe(1034);
+    for (const c of [-6, 0, 1, 512, 1023, 1030]) expect(s.vertexCell(s.centre(c))).toBe(c);
+  });
+
+  // One event in every channel pair from 3 channels left of the X axis to beyond the polygon, at
+  // one of the four corners of its cell in turn: on the lower edge of a channel (which rounds up
+  // onto it) or 0.49 above its middle. Events left of the axis are on channel 0.
+  const cells: Vertex[] = [];
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (let cy = 90; cy <= 410; cy++) {
+    for (let cx = -3; cx <= 350; cx++) {
+      const k = (cx + 3 + cy) % 4;
+      const fx = k & 1 ? 0.49 : -0.5;
+      const fy = k & 2 ? 0.49 : -0.5;
+      cells.push([Math.max(cx, 0), cy]);
+      xs.push(cx - 64 + fx);
+      ys.push((cy + fy) * 256);
+    }
+  }
+  const ex = Float32Array.from(xs);
+  const ey = Float32Array.from(ys);
+  /** Inside a convex anticlockwise polygon on the integers, or on its boundary. */
+  const expected = Uint8Array.from(cells, ([px, py]) => (channels.every((a, i) => {
+    const b = channels[(i + 1) % channels.length];
+    return (b[0] - a[0]) * (py - a[1]) - (b[1] - a[1]) * (px - a[0]) >= 0;
+  }) ? 1 : 0));
+
+  it("holds every event of a polygon declaring 1024 as the rule does, on its own 1024 channels", () => {
+    const xml = workspaceOf(xAxis, yAxis, drawn, "", undefined, 1024);
+    const conv = flowJoWorkspaceToGatingML(xml, 0);
+    const gate = Object.values(importGatingML(conv.gatingMl, ["X", "Y"], {}, "flow").gates)[0];
+    expect(gate.gate_type === "polygon" ? gate.vertices : null).toEqual(channels);
+    const { mask, gridPolygons } = importAndGate(xml, ex, ey, true);
+    expect(gridPolygons).toBe(1);
+    let wrong = 0;
+    for (let i = 0; i < expected.length; i++) if (mask[i] !== expected[i]) wrong++;
+    expect(wrong, `${wrong} of ${expected.length} events differ`).toBe(0);
+    const inside = expected.reduce((s, v) => s + v, 0);
+    expect(inside).toBeGreaterThan(50000);
+    // The vertex below the axis holds the events left of it, on channel 0.
+    expect(cells.some(([px], i) => px === 0 && mask[i] === 1)).toBe(true);
+  });
+
+  // An event on a vertex of the rounded polygon is held, boundary included, as FlowJo holds the
+  // 91 such events of its per-event memberships at 256 and four of five at 1024 (flowjoGrid.ts:
+  // the fifth is not explained).
+  it("holds an event on each vertex inside the axis", () => {
+    const { mask } = importAndGate(workspaceOf(xAxis, yAxis, drawn, "", undefined, 1024), ex, ey, true);
+    const onVertex = cells.flatMap(([px, py], i) => (channels.some(([vx, vy]) => vx === px && vy === py) ? [i] : []));
+    expect(onVertex).toHaveLength(4);
+    for (const i of onVertex) expect(mask[i], `${cells[i]}`).toBe(1);
+  });
+
+  it("is another grid from the same polygon at 256, and from the polygon tested continuously", () => {
+    const moved = (a: Uint8Array) => a.reduce((d, v, i) => d + (v !== expected[i] ? 1 : 0), 0);
+    const at256 = importAndGate(workspaceOf(xAxis, yAxis, drawn), ex, ey, true);
+    expect(at256.gridPolygons).toBe(1);
+    expect(moved(at256.mask)).toBeGreaterThan(500);
+    const continuous = importAndGate(workspaceOf(xAxis, yAxis, drawn, "", undefined, 1024), ex, ey, false);
+    expect(continuous.gridPolygons).toBe(0);
+    expect(moved(continuous.mask)).toBeGreaterThan(100);
   });
 });
 

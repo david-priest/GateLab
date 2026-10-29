@@ -77,3 +77,42 @@ export function branchScopedGateOrder(
   const filtered = ids.filter((id) => visible.has(id));
   return filtered.length ? filtered : ids;
 }
+
+/**
+ * The gates on a figure panel of one population: the gates drawn on it and on its descendants,
+ * in canonical order, plus any gate that defines no population.
+ *
+ * A figure panel matches gates by channel pair like the Gating tab's plot, so a CD27 x CD11c panel
+ * of one IgD branch otherwise draws the CD27 x CD11c gates of its sibling branches too: they
+ * overlap, and their percentages were never computed on these events. Unlike
+ * branchScopedGateOrder there is no fallback to every gate when nothing matches: a panel of a leaf
+ * population has no gates drawn on it, and the rest of the tree's gates are exactly what must not
+ * appear there. A gate owned by no population is in no branch and is kept, as the Gating tab's
+ * "unowned gates" keeps it by default.
+ */
+export function populationBranchGateOrder(
+  populations: PopulationMap,
+  gates: Record<string, Gate>,
+  gateOrder: string[],
+  populationId: string,
+): string[] {
+  const owned = new Set<string>();
+  for (const pop of Object.values(populations)) {
+    for (const ref of pop.gate_refs) owned.add(ref.gate_id);
+  }
+  const visible = new Set<string>();
+  const stack = [populationId];
+  const seen = new Set<string>();
+  while (stack.length) {
+    const id = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const pop of Object.values(populations)) {
+      if (pop.parent_id !== id) continue;
+      for (const ref of pop.gate_refs) visible.add(ref.gate_id);
+      stack.push(pop.population_id);
+    }
+  }
+  const ids = gateOrder.length ? gateOrder : Object.keys(gates);
+  return ids.filter((id) => visible.has(id) || !owned.has(id));
+}

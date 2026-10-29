@@ -14,6 +14,7 @@ import {
   validateAndCanonicalizeCompensationMatrix,
   type CanonicalCompensationMatrix,
   type CompensationMatrixInput,
+  type MatrixValidationResult,
   type Sha256Digest,
 } from "../engine/compensationProfile";
 import { parseCompensationMatrixTable } from "../engine/compensationMatrixImport";
@@ -26,6 +27,54 @@ import { DEFAULT_FLOW_SOLVER_SETTINGS, FLOW_SOLVER_VERSION } from "../engine/flo
 import type { Gate, PopulationMap } from "../engine/models";
 import type { Sample } from "../engine/sample";
 import type { WorkspaceCompensationState } from "../engine/workspaceCompensation";
+
+/**
+ * How far a coefficient may sit from 0 or 1 and still be read as exactly 0 or 1 when a flow matrix
+ * is stored. BD FACSDiva writes its matrices with single-precision noise (coefficients of -5e-9, a
+ * diagonal of 1.000002), which the stored-profile rules (no negative coefficient, a diagonal of
+ * exactly 1) refuse; the matrix could then be applied to its own file but never copied, edited or
+ * used for the workspace. A value this close changes a compensated value by at most 1e-5 of the
+ * source signal.
+ */
+export const FLOW_MATRIX_NOISE_TOLERANCE = 1e-5;
+
+/** A flow matrix as GateLab stores it, and how many coefficients were set to exactly 0 or 1 for that. */
+export interface StorableFlowMatrix {
+  readonly validation: MatrixValidationResult;
+  /** Negative coefficients set to 0 and diagonals set to 1, each within FLOW_MATRIX_NOISE_TOLERANCE. */
+  readonly roundedCoefficients: number;
+}
+
+/**
+ * Validates a flow matrix for storing. Where the only objections are negative coefficients and
+ * diagonals other than 1, every one of them within FLOW_MATRIX_NOISE_TOLERANCE, exactly those
+ * coefficients are set to 0 and 1 and the result validated again; any other objection, or one a
+ * larger value raises, is returned as it stands. No coefficient the validator accepts changes.
+ */
+export function storableFlowMatrix(input: CompensationMatrixInput): StorableFlowMatrix {
+  const validation = validateAndCanonicalizeCompensationMatrix(input, "flow-spillover");
+  if (validation.ok || !Array.isArray(input.matrix)) return { validation, roundedCoefficients: 0 };
+  const replacements = new Map<string, number>();
+  for (const { code, row, column } of validation.errors) {
+    const value = row === undefined || column === undefined ? undefined : input.matrix[row]?.[column];
+    const target = code === "negative-coefficient" ? 0 : code === "non-unit-diagonal" ? 1 : null;
+    if (typeof value !== "number" || target === null || Math.abs(value - target) > FLOW_MATRIX_NOISE_TOLERANCE) {
+      return { validation, roundedCoefficients: 0 };
+    }
+    replacements.set(`${row}:${column}`, target);
+  }
+  const matrix = input.matrix.map((values: readonly number[], row) =>
+    values.map((value, column) => replacements.get(`${row}:${column}`) ?? value));
+  const cleaned = validateAndCanonicalizeCompensationMatrix({ ...input, matrix }, "flow-spillover");
+  return cleaned.ok ? { validation: cleaned, roundedCoefficients: replacements.size } : { validation, roundedCoefficients: 0 };
+}
+
+/** The provenance line for a stored matrix: exact, or which coefficients were set to 0 or 1. */
+export function storedCoefficientsNote(prefix: string, roundedCoefficients: number): string {
+  return roundedCoefficients === 0
+    ? `${prefix}; coefficients preserved exactly`
+    : `${prefix}; ${roundedCoefficients} coefficient${roundedCoefficients === 1 ? "" : "s"} within ${FLOW_MATRIX_NOISE_TOLERANCE} of 0 or 1 set to exactly 0 or 1, all others preserved exactly`;
+}
 
 /** A file's embedded flow spillover matrix, read exactly as "Enable matrix editing" reads it. */
 export interface EmbeddedFlowMatrix {
@@ -43,6 +92,8 @@ export interface EmbeddedFlowMatrix {
    * still applies it to its own file, so it is listed, but not offered.
    */
   readonly problem: string | null;
+  /** Coefficients set to exactly 0 or 1 for the matrix to be stored (storableFlowMatrix). */
+  readonly roundedCoefficients: number;
   readonly keyword?: "$SPILLOVER" | "$SPILL" | "SPILL";
   /**
    * Set where the file's active matrix is not its own but one an imported FlowJo or Gating-ML
@@ -86,6 +137,83 @@ export interface MatrixLibraryRow {
   readonly active: boolean;
   readonly canRename: boolean;
   readonly canDelete: boolean;
+  /**
+   * What the row's number is kept under in MatrixNumbers: `lineage:<baselineProfileId>`, or
+   * `embedded:<key>` for a file's matrix and for the stored form that stands in for it.
+   */
+  readonly numberKey: string;
+  /** M1, M2, … as a number: given once, never reused; null until given. */
+  readonly number: number | null;
+  /** The matrix in use when the data came in (MatrixNumbers.primary). */
+  readonly primary: boolean;
+}
+
+/**
+ * The short names of the workspace's matrices, M1, M2, …: each matrix is given the next number the
+ * first time it is listed, keeps it, and no number is given twice, even after a matrix is deleted.
+ * The primary matrix is the one in use when the data came in (the files' own, or one an imported
+ * workspace applied), or where none was, the first file's own; it is decided once.
+ * Display only: saved in the workspace's `display` section, where a GateLab without it ignores it,
+ * and read by nothing that computes.
+ */
+export interface MatrixNumbers {
+  /** The number the next matrix is given. */
+  readonly next: number;
+  readonly byKey: Readonly<Record<string, number>>;
+  /** The primary matrix's numberKey; null where the data came in with no matrix; absent until decided. */
+  readonly primary?: string | null;
+}
+
+const MAX_MATRIX_NUMBER = 100_000;
+const MAX_NUMBER_KEY_LENGTH = 300;
+
+/** The numbers a saved workspace carries, or null where it carries none or they do not hold together. */
+export function restoredMatrixNumbers(value: unknown): MatrixNumbers | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { next, byKey, primary } = value as Record<string, unknown>;
+  if (!Number.isInteger(next) || (next as number) < 1 || (next as number) > MAX_MATRIX_NUMBER) return null;
+  if (typeof byKey !== "object" || byKey === null || Array.isArray(byKey)) return null;
+  const seen = new Set<number>();
+  const numbers: Record<string, number> = {};
+  for (const [key, number] of Object.entries(byKey)) {
+    if (key.length === 0 || key.length > MAX_NUMBER_KEY_LENGTH) return null;
+    if (!Number.isInteger(number) || (number as number) < 1 || (number as number) >= (next as number)) return null;
+    if (seen.has(number as number)) return null;
+    seen.add(number as number);
+    numbers[key] = number as number;
+  }
+  if (primary !== undefined && primary !== null && (typeof primary !== "string" || !(primary in numbers))) return null;
+  return { next: next as number, byKey: numbers, ...(primary !== undefined ? { primary } : {}) };
+}
+
+/**
+ * Gives every row without a number the next one, and decides the primary matrix once: the active
+ * row, else the first file's own matrix, else none. The primary is numbered first, so a workspace's
+ * own matrix is M1. Returns `numbers` itself where nothing changes.
+ */
+export function numberMatrices(
+  numbers: MatrixNumbers | null,
+  rows: readonly MatrixLibraryRow[],
+): MatrixNumbers | null {
+  if (rows.length === 0) return numbers;
+  const byKey: Record<string, number> = { ...(numbers?.byKey ?? {}) };
+  let next = numbers?.next ?? 1;
+  let primary = numbers?.primary;
+  if (primary === undefined) {
+    primary = (rows.find(({ active }) => active) ?? rows.find(({ kind }) => kind === "embedded"))?.numberKey ?? null;
+  }
+  let changed = primary !== numbers?.primary;
+  for (const key of [...(primary ? [primary] : []), ...rows.map(({ numberKey }) => numberKey)]) {
+    if (key in byKey) continue;
+    byKey[key] = next++;
+    changed = true;
+  }
+  return changed ? { next, byKey, primary } : numbers;
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /** What one file is compensated with now: a stored profile, its own embedded matrix, or nothing. */
@@ -120,21 +248,24 @@ export async function embeddedFlowMatrixOf(
   };
   const axis = pnns.map((pnn, index) => pnn ?? spill.channels[index]);
   const input: CompensationMatrixInput = { sourceChannels: axis, receiverChannels: axis, matrix: spill.matrix };
+  // Keyed by a digest of its values, short enough to keep its number under (MatrixNumbers).
+  const valuesKey = `values:${await sha256Hex(JSON.stringify([axis, spill.matrix]))}`;
   const unstored = (problem: string): EmbeddedFlowMatrix => ({
     ...common,
-    key: `values:${JSON.stringify([axis, spill.matrix])}`,
+    key: valuesKey,
     input,
     matrix: null,
     matrixHash: null,
     problem,
+    roundedCoefficients: 0,
   });
   if (pnns.some((pnn) => pnn === null)) {
     return unstored("The embedded matrix could not be mapped back to exact FCS channel identities.");
   }
-  const validation = validateAndCanonicalizeCompensationMatrix(input, "flow-spillover");
+  const { validation, roundedCoefficients } = storableFlowMatrix(input);
   if (!validation.ok) return unstored(validation.errors.map(({ message }) => message).join(" "));
   const matrixHash = await hashCompensationMatrix(validation.value);
-  return { ...common, key: matrixHash, input, matrix: validation.value, matrixHash, problem: null };
+  return { ...common, key: matrixHash, input, matrix: validation.value, matrixHash, problem: null, roundedCoefficients };
 }
 
 function sourceOf(
@@ -158,16 +289,28 @@ function channelCountOf(record: CompensationProfileRecord): number {
 
 /**
  * The list's rows, lineages first in the order the workspace stores them, then each distinct
- * embedded matrix no lineage already shows. A lineage is always listed (a Duplicate is meant to
- * be a second copy); an embedded matrix is listed once, whatever number of files carry it.
+ * embedded matrix no lineage already stores as that file's matrix. A lineage is always listed (a
+ * Duplicate is meant to be a second copy, and does not hide the row it copies); an embedded matrix
+ * is listed once, whatever number of files carry it.
  */
 export function buildMatrixLibrary(
   compensation: WorkspaceCompensationState,
   embedded: readonly EmbeddedFlowMatrix[],
   uses: readonly FileCompensationUse[],
   kind: "flow-spillover" | "cytof-spillover" = "flow-spillover",
+  numbers: MatrixNumbers | null = null,
 ): MatrixLibraryRow[] {
   const rows: MatrixLibraryRow[] = [];
+  const numbered = (numberKey: string) => ({
+    numberKey,
+    number: numbers?.byKey[numberKey] ?? null,
+    primary: numbers?.primary === numberKey,
+  });
+  const rowName = (matrix: EmbeddedFlowMatrix) => `${baseFileName(matrix.fileName)} spillover`;
+  // The embedded matrix a lineage stores as that file's matrix, by the storedAs identity below.
+  const embeddedStoredAs = new Map(kind === "flow-spillover"
+    ? embedded.map((matrix) => [`${matrix.key}\n${rowName(matrix)}`, matrix.key] as const)
+    : []);
   const activeId = compensation.activeProfileId ?? null;
   const profileUses = new Map<string, number>();
   const embeddedUses = new Map<string, number>();
@@ -177,6 +320,12 @@ export function buildMatrixLibrary(
       embeddedUses.set(use.key, (embeddedUses.get(use.key) ?? 0) + 1);
     }
   }
+  /**
+   * A file's matrix as a lineage stores it (Use for the workspace, Enable matrix editing): its hash
+   * and the name the baseline was given, the file's own row name. A copy is named otherwise and
+   * does not stand in for the file's row, so the row it was copied from stays listed.
+   */
+  const storedAs = new Set<string>();
   const activeIsStored = activeId !== null &&
     compensation.lineages.some(({ records }) => records.some(({ profileId }) => profileId === activeId));
 
@@ -190,7 +339,12 @@ export function buildMatrixLibrary(
     const lineageInUse = lineage.records.some(({ profileId }) => (profileUses.get(profileId) ?? 0) > 0);
     const active = record.profileId === activeId;
     const source = sourceOf(record, baseline, lineage.name ?? baseline.name);
+    storedAs.add(`${record.matrixHash}\n${baseline.name}`);
+    // The stored form of a file's matrix stands in for its row, so it shows that matrix's number;
+    // once edited it is another matrix, and the file's row returns with the number.
+    const standsFor = embeddedStoredAs.get(`${record.matrixHash}\n${baseline.name}`);
     rows.push({
+      ...numbered(standsFor !== undefined ? `embedded:${standsFor}` : `lineage:${lineage.baselineProfileId}`),
       id: `lineage:${lineage.baselineProfileId}`,
       kind: "lineage",
       name,
@@ -215,15 +369,20 @@ export function buildMatrixLibrary(
   }
 
   if (kind === "flow-spillover") {
-    const listed = new Set<string>(rows.flatMap(({ matrixHash }) => (matrixHash ? [matrixHash] : [])));
+    // Stored as any one carrying file's matrix, it is stored for all of them.
+    const listed = new Set<string>(embedded
+      .filter((matrix) => storedAs.has(`${matrix.key}\n${rowName(matrix)}`))
+      .map(({ key }) => key));
     for (const matrix of embedded) {
       if (listed.has(matrix.key)) continue;
       listed.add(matrix.key);
+      const name = rowName(matrix);
       const filesUsing = embeddedUses.get(matrix.key) ?? 0;
       rows.push({
+        ...numbered(`embedded:${matrix.key}`),
         id: `embedded:${matrix.matrixHash ?? matrix.fileName}`,
         kind: "embedded",
-        name: `${baseFileName(matrix.fileName)} spillover`,
+        name,
         named: false,
         source: matrix.externalLabel !== undefined
           ? { type: "external", label: matrix.externalLabel }
@@ -417,9 +576,10 @@ export function baselineFromEmbedded(
         sourceDescription: embedded.externalLabel !== undefined
           ? `Spillover matrix supplied by an imported workspace (${embedded.externalLabel})`
           : "Spillover matrix embedded in the source FCS file",
-        estimationMethod: embedded.externalLabel !== undefined
-          ? "Imported with the workspace; coefficients preserved exactly"
-          : "Imported from FCS; coefficients preserved exactly",
+        estimationMethod: storedCoefficientsNote(
+          embedded.externalLabel !== undefined ? "Imported with the workspace" : "Imported from FCS",
+          embedded.roundedCoefficients,
+        ),
       },
     },
   );
@@ -467,6 +627,8 @@ export interface ImportedFlowMatrix {
   readonly profile: BaselineCompensationProfileRecord;
   /** The matrix's channels that are no $PnN of any file in the workspace. */
   readonly unmatched: readonly string[];
+  /** Coefficients set to exactly 0 or 1 for the matrix to be stored (storableFlowMatrix). */
+  readonly roundedCoefficients: number;
 }
 
 export class MatrixImportError extends Error {}
@@ -482,7 +644,7 @@ export async function importedFlowMatrix(
   workspacePnns: ReadonlySet<string>,
 ): Promise<ImportedFlowMatrix> {
   const parsed = parseCompensationMatrixTable(text);
-  const validated = validateAndCanonicalizeCompensationMatrix(parsed.input, "flow-spillover");
+  const { validation: validated, roundedCoefficients } = storableFlowMatrix(parsed.input);
   if (!validated.ok) {
     throw new MatrixImportError(validated.errors.map(({ message }) => message).join(" "));
   }
@@ -511,9 +673,9 @@ export async function importedFlowMatrix(
       },
       provenance: {
         sourceDescription: "User-imported flow spillover matrix",
-        estimationMethod: "Imported; coefficients preserved exactly",
+        estimationMethod: storedCoefficientsNote("Imported", roundedCoefficients),
       },
     },
   );
-  return { profile, unmatched };
+  return { profile, unmatched, roundedCoefficients };
 }

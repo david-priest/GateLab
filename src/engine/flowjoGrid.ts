@@ -57,7 +57,25 @@
 // curly quadrants, the panels of a quadrant gate (a PolygonGate with quadId 0 to 3; below),
 // polygons with no gateResolution, and polygons on a Time axis, a linear axis with a gain other
 // than 1, or a FlowJo ArcSinh or Logicle axis (untested). A gateResolution other than 256 is taken
-// at its word, N channels, and named by the import: no corpus polygon declares one.
+// at its word, N channels, and named by the import.
+//
+// No polygon of the FlowRepository corpus or of the per-event data declares another resolution;
+// those FlowJo 10.10.0's HyperFinder draws declare 1024. 174 of them, which FlowJo saved on
+// unit-gain linear axes in two data sets of an unpublished benchmark (2026-10-27), are the evidence
+// at 1024: the rule with N = 1024 gives FlowJo's saved count for 172. Testing the raw values
+// instead leaves 41 of one data set's 48 off, by up to 57 events; java.awt.Polygon's insideness on
+// the channels leaves 63 of the 174 off; vertices left unrounded leave 108 off, vertices floored
+// 142, and channels scaled by N − 1 rather than N, 138. The two misses are one event, in a gate and
+// the gate beneath it, lying on a vertex of the rounded polygon inside the axis: the rule holds it
+// and FlowJo does not. No rule of vertices explains it. FlowJo holds every other event on a vertex
+// that has been measured: four at 1024, each on a convex vertex as the fifth is, and 91 at 256 in
+// its own per-event memberships (the three datasets above and FR-FCM-ZYY6's population export; 20
+// vertices, 18 convex and 2 reflex, in 9 populations). So excluding every vertex, or every convex
+// one, gives FlowJo's count for 168 of the 174, and excluding reflex vertices changes nothing at
+// 1024, where no event lies on one. Neither the vertex nor the event is at a rounding tie (0.05 and
+// 0.14 channel from one). What sets the fifth apart is a neighbouring vertex beyond the axis, as
+// six of its polygon's nine are; no on-vertex event of the per-event data has such a neighbour, so
+// they do not decide it, and the rule keeps the vertex, as the other 95 say.
 //
 // A quadrant panel is tested continuously because neither reading is FlowJo's rule. Surveyed on
 // 2026-09-26 over every quadId polygon in the trees the FlowRepository count oracle compares (219
@@ -91,7 +109,10 @@
 import type { FlowJoGridAxis, TransformSpec, Vertex } from "./models";
 import { FLOWJO_BIEX_TABLE_CHANNELS, biexBreakpoints } from "./biex";
 
-/** FlowJo's gateResolution: every corpus polygon that declares one declares 256. */
+/**
+ * FlowJo's gateResolution: every polygon of the corpus and the per-event data that declares one
+ * declares 256 (HyperFinder's declare 1024; see the header).
+ */
 export const FLOWJO_GATE_RESOLUTION = 256;
 
 /**

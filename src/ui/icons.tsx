@@ -308,6 +308,16 @@ export function MoreIcon({ size = 14 }: { size?: number }) {
   );
 }
 
+/** A compensation matrix: a small grid, beside the matrix's M-number. */
+export function MatrixIcon({ size = 12 }: { size?: number }) {
+  return (
+    <UiIcon size={size}>
+      <rect x="2" y="2" width="12" height="12" rx="1.5" />
+      <path d="M6 2v12M10 2v12M2 6h12M2 10h12" />
+    </UiIcon>
+  );
+}
+
 /** Plot type: pseudocolour, a cloud whose middle is hot. */
 export function PseudocolorIcon({ size = 14 }: { size?: number }) {
   return (

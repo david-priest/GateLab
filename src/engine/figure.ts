@@ -5,6 +5,7 @@ import { drawnRaw, type TransformSpec } from "./models";
 import { transformFromSpec, type Sample } from "./sample";
 import { linearScatterTicks, logicleTicks, scatterTicks, withoutPiledTicks } from "./ticks";
 import { populationTreeOrder } from "./populations";
+import { populationBranchGateOrder } from "./branchGates";
 import {
   buildIllustrationPayload,
   type GateOverlay,
@@ -61,6 +62,11 @@ export interface FigureSpec {
   scalePolicyChosen?: boolean;
   transforms: Record<string, TransformSpec>;
   showGates: boolean;
+  /**
+   * Draw on each panel only the gates of its population's branch: those drawn on it and on its
+   * descendants. Absent means on; false draws every gate sharing the panel's channels.
+   */
+  branchGatesOnly?: boolean;
   panelSize: number;
   overlayPopulations?: boolean;
   /** The figure's data selection is independent of the gating sidebar. */
@@ -1019,7 +1025,9 @@ export function buildFigurePanel(
     const result = buildIllustrationPayload(
       source.sample,
       source.tree.gates,
-      source.tree.gate_order,
+      figure.branchGatesOnly === false
+        ? source.tree.gate_order
+        : populationBranchGateOrder(source.tree.populations, source.tree.gates, source.tree.gate_order, resolved.id),
       source.tree.populations,
       source.gating.masks,
       source.gating.stats.event_count,

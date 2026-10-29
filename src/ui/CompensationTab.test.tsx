@@ -211,6 +211,10 @@ function renderTab(
       profile: CompensationProfileRecord,
       onProgress?: (progress: CompensationApplyProgress) => void,
     ) => Promise<void>;
+    onApplyRevision?: (
+      profile: CompensationProfileRecord,
+      onProgress?: (progress: CompensationApplyProgress) => void,
+    ) => Promise<void>;
     existingHostAssays?: readonly ExistingHostCompensatedAssay[];
     onAdoptExistingAssay?: (
       profile: CompensationProfileRecord,
@@ -250,6 +254,7 @@ function renderTab(
         compensationOn={options.compensationOn ?? false}
         hostedCompensationMatrix={options.hostedCompensationMatrix}
         onApplyProfile={options.onApplyProfile}
+        onApplyRevision={options.onApplyRevision}
         existingHostAssays={options.existingHostAssays}
         onAdoptExistingAssay={options.onAdoptExistingAssay}
         onCancelApply={options.onCancelApply}
@@ -524,6 +529,93 @@ describe("CompensationTab common path", () => {
       keyword: "$SPILLOVER",
     });
     expect(host.textContent).toContain("exact embedded matrix is retained as the baseline");
+  });
+
+  it("stores a matrix with single-precision noise, setting only those coefficients to 0 and 1, and says so", async () => {
+    stubDeterministicCrypto();
+    // As FACSDiva writes them: a -5e-9 coefficient and a diagonal of 1.000002.
+    const sample = flowSample({ matrix: [[1.000002, 0.07125], [-5e-9, 1]] });
+    const applied = vi.fn(async (_profile: CompensationProfileRecord) => undefined);
+    renderTab(sample, { stateKey: "workspace-a:flow-noise", onApplyProfile: applied });
+
+    expect(host.querySelector(".gl-comp-pane-problem")).toBeNull();
+    const enable = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Enable matrix editing")!;
+    await act(async () => {
+      enable.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(applied).toHaveBeenCalledTimes(1);
+    const profile = applied.mock.calls[0][0];
+    expect(profile.scientific.matrix.matrix).toEqual([[1, 0.07125], [0, 1]]);
+    expect(profile.provenance?.estimationMethod).toBe(
+      "Imported from FCS; 2 coefficients within 0.00001 of 0 or 1 set to exactly 0 or 1, all others preserved exactly",
+    );
+    expect(host.textContent).toContain("2 coefficients within 0.001% of 0 or 100% were set to exactly 0 or 100% to store the matrix");
+    expect(host.textContent).not.toContain("exact embedded matrix is retained");
+  });
+
+  it("refuses a negative coefficient larger than noise, as before", () => {
+    renderTab(flowSample({ matrix: [[1, 0.07125], [-0.0001, 1]] }), { onApplyProfile: vi.fn(async () => undefined) });
+    expect(host.querySelector(".gl-comp-pane-problem span")?.textContent).toBe("Not editable: negative coefficients");
+  });
+
+  it("applies a revised flow matrix to every file, and only after the user agrees that membership may change", async () => {
+    stubDeterministicCrypto();
+    vi.stubGlobal("requestAnimationFrame", () => 1);
+    vi.stubGlobal("cancelAnimationFrame", () => undefined);
+    const sample = flowSample({ coefficient: 0.05 });
+    let profile: CompensationProfileRecord | null = null;
+    const captureProfile = vi.fn(async (candidate: CompensationProfileRecord) => {
+      profile = candidate;
+    });
+    renderTab(sample, { stateKey: "workspace-a:flow-revision-setup", onApplyProfile: captureProfile });
+    await act(async () => {
+      [...host.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Enable matrix editing")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const installedProfile = profile!;
+    installProfileLayer(sample, installedProfile);
+    const viewedOnly = vi.fn(async (_profile: CompensationProfileRecord) => undefined);
+    const everyFile = vi.fn(async (_profile: CompensationProfileRecord) => undefined);
+    renderTab(sample, {
+      stateKey: "workspace-a:flow-revision",
+      compensationOn: true,
+      hasExistingGates: true,
+      installedProfile,
+      installedBaselineProfile: installedProfile,
+      onApplyProfile: viewedOnly,
+      onApplyRevision: everyFile,
+    });
+
+    const editable = host.querySelector<HTMLInputElement>(
+      'input.gl-comp-cell-input[data-source-index="0"][data-receiver-index="1"]',
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(editable, "6.5");
+      editable.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const apply = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Apply revised matrix")!;
+    const agreement = host.querySelector<HTMLInputElement>(".gl-comp-revision-agreement input[type=\"checkbox\"]")!;
+    expect(agreement.closest("label")?.textContent).toBe("I agree that gate membership may change.");
+    expect(apply.disabled).toBe(true);
+    act(() => agreement.click());
+    expect(apply.disabled).toBe(false);
+    await act(async () => {
+      apply.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(viewedOnly).not.toHaveBeenCalled();
+    expect(everyFile).toHaveBeenCalledTimes(1);
+    const revision = everyFile.mock.calls[0][0];
+    expect(revision.recordType).toBe("revision");
+    expect(revision.scientific.matrix.matrix).toEqual([[1, 0.065], [0.02, 1]]);
+    // The next edit asks again.
+    expect(host.querySelector(".gl-comp-revision-agreement")).toBeNull();
   });
 
   it("labels an SCE-hosted Flow matrix truthfully while preserving its exact baseline", async () => {
@@ -1627,6 +1719,10 @@ describe("CompensationTab CyTOF import path", () => {
 
     const applyRevision = [...host.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Apply revised matrix")!;
+    // Not until the user agrees that gate membership may change.
+    expect(applyRevision.disabled).toBe(true);
+    act(() => host.querySelector<HTMLInputElement>(".gl-comp-revision-agreement input[type=\"checkbox\"]")!.click());
+    expect(applyRevision.disabled).toBe(false);
     await act(async () => {
       applyRevision.click();
       await new Promise((resolve) => setTimeout(resolve, 0));

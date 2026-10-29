@@ -575,3 +575,49 @@ describe("pooled panels", () => {
     expect((data.config?.gates as { percent_of_parent: number }[])[0].percent_of_parent).toBe(50);
   });
 });
+
+describe("branch gates on a figure panel", () => {
+  /**
+   * Two branches under All Events on the same FSC-A × SSC-A pair: Singlets (the fixture's
+   * [0,0]–[150,150] rectangle) with a child Mid ([50,50]–[150,150]), and a sibling Large
+   * ([150,150]–[300,300]). A panel of Singlets in D1 holds (10,10) and (100,100).
+   */
+  function branchedPanel(branchGatesOnly?: boolean) {
+    const f = figureFixture();
+    const large = newGate("Large", "rectangle", "FSC-A", "SSC-A", [[150, 150], [300, 300]]);
+    const mid = newGate("Mid", "rectangle", "FSC-A", "SSC-A", [[50, 50], [150, 150]]);
+    const largePop = newPopulation("Large", [{ gate_id: large.gate_id, include: true }], f.root.population_id);
+    const midPop = newPopulation("Mid", [{ gate_id: mid.gate_id, include: true }], f.pop.population_id);
+    f.root.children.push(largePop.population_id);
+    f.pop.children = [midPop.population_id];
+    Object.assign(f.state.gates, { [large.gate_id]: large, [mid.gate_id]: mid });
+    f.state.gate_order.push(large.gate_id, mid.gate_id);
+    Object.assign(f.state.populations, { [largePop.population_id]: largePop, [midPop.population_id]: midPop });
+    const trees = figureHierarchies(f.state);
+    const figure: FigureSpec = {
+      ...f.figure,
+      ...(branchGatesOnly === undefined ? {} : { branchGatesOnly }),
+      populations: [{ hierarchyId: "main", populationId: f.pop.population_id, label: "Singlets" }],
+    };
+    const source = prepareFigureSource(f.samples[0], trees.main, f.state);
+    const panel = layoutFigure(figure, f.samples)[0].panels.find((p) => p.samples[0] === "D1")!;
+    const data = buildFigurePanel(panel, figure, [source], trees, figureStyle(defaultIllustrationConfig()), {});
+    return (data.config?.gates as { name: string; event_count: number; percent_of_parent: number }[])
+      .map((gate) => [gate.name, gate.event_count, gate.percent_of_parent]);
+  }
+
+  it("draws only the gates on the panel's population and its descendants, counted on its events", () => {
+    expect(branchedPanel()).toEqual([["Mid", 1, 50]]);
+    expect(branchedPanel(true)).toEqual([["Mid", 1, 50]]);
+  });
+
+  it("draws every gate on the panel's channels when branch gates is off", () => {
+    expect(branchedPanel(false).map(([name]) => name)).toEqual(["CD4_positive", "Large", "Mid"]);
+  });
+
+  it("accepts the setting in a saved figure and refuses a malformed one", () => {
+    const f = figureFixture();
+    expect(isFigureSpec({ ...f.figure, branchGatesOnly: false })).toBe(true);
+    expect(isFigureSpec({ ...f.figure, branchGatesOnly: "no" })).toBe(false);
+  });
+});

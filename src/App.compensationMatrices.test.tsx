@@ -45,7 +45,23 @@ vi.mock("./engine/fcs", async (importOriginal) => {
   return { ...actual, parseFcs: () => parsedQueue.shift() ?? flowFcs() };
 });
 
+vi.mock("./engine/workspace", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./engine/workspace")>();
+  return { ...actual, readWorkspaceEnvelopeFromFile: vi.fn() };
+});
+vi.mock("./engine/workspaceHistory", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./engine/workspaceHistory")>();
+  return {
+    ...actual,
+    listWorkspaceCheckpoints: vi.fn(async () => []),
+    saveWorkspaceCheckpoint: vi.fn(async () => "saved"),
+    requestPersistentWorkspaceHistory: vi.fn(async () => null),
+  };
+});
+
 import App from "./App";
+import { readWorkspaceEnvelopeFromFile, type WorkspaceFile } from "./engine/workspace";
+import { saveWorkspaceCheckpoint } from "./engine/workspaceHistory";
 
 const otherMatrix = [
   "channel,FL1-A,FL2-A",
@@ -149,7 +165,7 @@ describe("Compensation Matrices list", () => {
     await openWorkspace([testFcsFile("D1.fcs"), testFcsFile("D2.fcs")]);
 
     expect(rows().map((row) => row.querySelector(".gl-comp-lib-name")?.textContent)).toEqual(["D1 spillover"]);
-    expect(rows()[0].querySelector(".gl-comp-lib-meta")?.textContent).toBe("Embedded · D1.fcs · 2 channels");
+    expect(rows()[0].querySelector(".gl-comp-lib-meta")?.textContent).toBe("Primary · Embedded · D1.fcs · 2 channels");
 
     await importMatrix(otherMatrix, "treated.csv");
 
@@ -193,7 +209,7 @@ describe("Compensation Matrices list", () => {
 
     act(() => rowNamed("treated")!.querySelector<HTMLButtonElement>(".gl-comp-lib-use")!.click());
     const open = dialog()!;
-    expect(open.textContent).toContain("Use treated for the workspace");
+    expect(open.textContent).toContain("Use M2 treated for the workspace");
     expect(open.textContent).toContain("Every file in the workspace (2) is compensated with treated.");
     expect(open.querySelector('[role="alert"]')).toBeNull();
     const use = button(open, "Use for the workspace")!;
@@ -218,6 +234,73 @@ describe("Compensation Matrices list", () => {
     expect(rowNamed("treated")!.querySelector(".gl-comp-lib-active")?.textContent).toBe("Active");
     // The active matrix cannot be deleted.
     expect(rowNamed("treated")!.querySelector(".gl-comp-lib-delete")).toBeNull();
+  });
+
+  it("downloads the matrix in use from beside Import, once one is in use", async () => {
+    captureApply();
+    await openWorkspace([testFcsFile("D1.fcs"), testFcsFile("D2.fcs")]);
+    await importMatrix(otherMatrix, "treated.csv");
+    const exportActive = () => host.querySelector<HTMLButtonElement>(".gl-comp-lib-export-active")!;
+    expect(exportActive().textContent).toBe("Export CSV…");
+    expect(exportActive().disabled).toBe(true);
+
+    act(() => rowNamed("treated")!.querySelector<HTMLButtonElement>(".gl-comp-lib-use")!.click());
+    act(() => dialog()!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+    await act(async () => {
+      button(dialog()!, "Use for the workspace")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    expect(exportActive().disabled).toBe(false);
+    act(() => exportActive().click());
+    const exportDialog = host.querySelector<HTMLElement>('[aria-labelledby="comp-export-title"]')!;
+    expect(exportDialog.textContent).toContain("treated_spill_matrix.csv");
+  });
+
+  it("duplicates a matrix and edits the copy, used for every file once the user agrees; the original stays", async () => {
+    const requests = captureApply();
+    await openWorkspace([testFcsFile("D1.fcs"), testFcsFile("D2.fcs")]);
+    await importMatrix(otherMatrix, "treated.csv");
+
+    act(() => rowNamed("treated")!.querySelector<HTMLButtonElement>(".gl-comp-lib-edit")!.click());
+    const open = dialog()!;
+    expect(open.textContent).toContain("Duplicate and edit M2 treated");
+    expect(open.querySelector(".gl-comp-lib-copy")?.textContent).toContain(
+      "GateLab stores a copy, treated copy, and compensates every file in the workspace (2) with it",
+    );
+    expect(open.textContent).toContain("Edited coefficients change no file until you choose Apply revised matrix, which asks again.");
+    const make = button(open, "Make the copy and edit")!;
+    expect(make.disabled).toBe(true);
+    act(() => open.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+    await act(async () => {
+      make.click();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0].targets).toHaveLength(2);
+    expect(requests[0].profile.name).toBe("treated copy");
+    expect(requests[0].profile.recordType).toBe("baseline");
+    expect(requests[0].profile.scientific.matrix.matrix).toEqual([[1, 0.2], [0.03, 1]]);
+    expect(dialog()).toBeNull();
+    expect(rowNamed("treated copy")!.classList.contains("is-active")).toBe(true);
+    expect(rowNamed("treated")!.classList.contains("is-active")).toBe(false);
+    expect(host.textContent).toContain("Editing treated copy");
+  });
+
+  it("offers Duplicate and edit for a file's matrix that carries single-precision noise", async () => {
+    const noisy = (): FcsFile => ({
+      ...flowFcs(),
+      keywords: { $SPILLOVER: "2,FL1-A,FL2-A,1.000002,0.1,-5e-9,1" },
+      spillover: { channels: ["FL1-A", "FL2-A"], matrix: [[1.000002, 0.1], [-5e-9, 1]] },
+    });
+    parsedQueue = [noisy()];
+    await openWorkspace([testFcsFile("D1.fcs")]);
+
+    const row = rowNamed("D1 spillover")!;
+    expect(row.querySelector(".gl-comp-lib-unusable")).toBeNull();
+    expect(row.querySelector<HTMLButtonElement>(".gl-comp-lib-edit")!.disabled).toBe(false);
+    expect(row.querySelector<HTMLButtonElement>(".gl-comp-lib-duplicate")!.disabled).toBe(false);
   });
 
   it("refuses the switch by name when a file lacks a channel the matrix compensates", async () => {
@@ -267,5 +350,82 @@ describe("Compensation Matrices list", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0].targets).toHaveLength(2);
     expect(dialog()).toBeNull();
+  });
+});
+
+describe("matrix numbers", () => {
+  const tagOf = (name: string) => rowNamed(name)?.querySelector(".gl-comp-lib-tag");
+  const otherMatrix2 = ["channel,FL1-A,FL2-A", "FL1-A,1,0.3", "FL2-A,0.04,1"].join("\n");
+
+  it("gives each matrix the next number once, marks the files' own as primary, and keeps them through a saved workspace", async () => {
+    vi.mocked(saveWorkspaceCheckpoint).mockClear();
+    captureApply();
+    await openWorkspace([testFcsFile("D1.fcs"), testFcsFile("D2.fcs")]);
+    // The files came in on their own matrix: it is M1 and the primary one.
+    expect(tagOf("D1 spillover")?.textContent).toBe("M1");
+    expect(tagOf("D1 spillover")?.classList.contains("is-primary")).toBe(true);
+
+    await importMatrix(otherMatrix, "treated.csv");
+    expect(tagOf("treated")?.textContent).toBe("M2");
+    expect(tagOf("treated")?.classList.contains("is-primary")).toBe(false);
+
+    // Deleted, its number is not given again.
+    act(() => rowNamed("treated")!.querySelector<HTMLButtonElement>(".gl-comp-lib-delete")!.click());
+    act(() => button(host.querySelector('[aria-labelledby="comp-matrix-delete-title"]')!, "Delete")!.click());
+    await importMatrix(otherMatrix2, "control.csv");
+    expect(tagOf("control")?.textContent).toBe("M3");
+
+    // Saved with the workspace: the checkpoint taken before Use for the workspace carries them.
+    act(() => rowNamed("control")!.querySelector<HTMLButtonElement>(".gl-comp-lib-use")!.click());
+    expect(dialog()!.textContent).toContain("Use M3 control for the workspace");
+    act(() => dialog()!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+    await act(async () => {
+      button(dialog()!, "Use for the workspace")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    const call = vi.mocked(saveWorkspaceCheckpoint).mock.calls.find((c) => c[2] === "before-compensation-apply");
+    expect(call).toBeDefined();
+    const saved = call![1] as WorkspaceFile;
+    const numbers = (saved.display as { matrixNumbers?: { next: number; byKey: Record<string, number>; primary?: string | null } }).matrixNumbers!;
+    expect(numbers.next).toBe(4);
+    expect(Object.values(numbers.byKey).sort()).toEqual([1, 2, 3]);
+    expect(numbers.byKey[numbers.primary!]).toBe(1);
+
+    // Reopened, the numbers are the saved ones, not given afresh (which would make control M2).
+    vi.mocked(readWorkspaceEnvelopeFromFile).mockResolvedValue({
+      raw: saved,
+      fcsByPath: Object.fromEntries(saved.samples.map(({ dataPath }) => [dataPath, Uint8Array.from([70, 67, 83])])),
+      storage: "bundle",
+      portableAssays: null,
+    } as never);
+    const file = new File([Uint8Array.from([80, 75])], "analysis.gatelab");
+    const handle = { kind: "file", name: "analysis.gatelab", getFile: vi.fn().mockResolvedValue(file) } as unknown as FileSystemFileHandle;
+    Object.defineProperty(window, "showOpenFilePicker", { configurable: true, value: vi.fn().mockResolvedValue([handle]) });
+    const open = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Open Workspace…")!;
+    await act(async () => { open.click(); await new Promise((resolve) => setTimeout(resolve, 20)); });
+    const tab = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Compensation")!;
+    act(() => tab.click());
+    await settle(20);
+    expect(tagOf("control")?.textContent).toBe("M3");
+    expect(tagOf("D1 spillover")?.textContent).toBe("M1");
+    expect(tagOf("D1 spillover")?.classList.contains("is-primary")).toBe(true);
+  });
+
+  it("makes the matrix in use when the data came in the primary one", async () => {
+    const requests = captureApply();
+    await openWorkspace([testFcsFile("D1.fcs")]);
+    // Decided once: using another matrix later does not move it.
+    await importMatrix(otherMatrix, "treated.csv");
+    act(() => rowNamed("treated")!.querySelector<HTMLButtonElement>(".gl-comp-lib-use")!.click());
+    act(() => dialog()!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+    await act(async () => {
+      button(dialog()!, "Use for the workspace")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(requests).toHaveLength(1);
+    expect(rowNamed("treated")!.classList.contains("is-active")).toBe(true);
+    expect(tagOf("treated")?.classList.contains("is-primary")).toBe(false);
+    expect(tagOf("D1 spillover")?.classList.contains("is-primary")).toBe(true);
+    expect(rowNamed("D1 spillover")!.querySelector(".gl-comp-lib-meta")?.textContent).toMatch(/^Primary · /);
   });
 });

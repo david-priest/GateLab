@@ -76,7 +76,8 @@ import {
 } from "../plots/compensationComparisonExport";
 import { CompensationComparisonExportDialog } from "./CompensationComparisonExportDialog";
 import { CompensationMatrixExportDialog } from "./CompensationMatrixExportDialog";
-import { CompensationMatrices, type CompensationMatricesProps } from "./CompensationMatrices";
+import { CompensationMatrices, MatrixTag, type CompensationMatricesProps } from "./CompensationMatrices";
+import { storableFlowMatrix, storedCoefficientsNote } from "./compensationLibrary";
 import { usePersistedTabState } from "./tabState";
 import { DensityColourControl } from "./DensityColourControl";
 import { useI18n } from "./i18n";
@@ -163,6 +164,14 @@ interface Props {
   onDensityColorPowerChange?: (value: number) => void;
   /** The Matrices list at the head of the left pane, for a flow file; absent, no list is shown. */
   matrices?: CompensationMatricesProps;
+  /**
+   * Apply revised matrix for a flow matrix: the revision compensates every file, since one matrix
+   * is active for the workspace. Absent (a hosted SCE), onApplyProfile applies it as before.
+   */
+  onApplyRevision?: (
+    profile: CompensationProfileRecord,
+    onProgress?: (progress: CompensationApplyProgress) => void,
+  ) => Promise<void>;
 }
 
 export interface ExistingHostCompensatedAssay {
@@ -620,6 +629,7 @@ function CompensationTabImpl({
   channelLabelMode = "marker",
   onDensityColorPowerChange = () => undefined,
   matrices,
+  onApplyRevision,
 }: Props) {
   const { t } = useI18n();
   const intro = useTabIntro("compensation");
@@ -734,6 +744,8 @@ function CompensationTabImpl({
   const sweepGenerationRef = useRef(0);
   const candidatePreviewGenerationRef = useRef(0);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  /** Apply revised matrix waits for this: the user agrees that gate membership may change. */
+  const [revisionAgreed, setRevisionAgreed] = useState(false);
   const [actionIsError, setActionIsError] = useState(false);
   const [cytofDraft, setCytofDraft] = useState<CytofMatrixDraft | null>(
     () => initialHostedCytofDraft.draft,
@@ -843,13 +855,16 @@ function CompensationTabImpl({
         validation: null,
         error: "The embedded matrix could not be mapped back to exact FCS channel identities.",
         keyword: undefined,
+        roundedCoefficients: 0,
       } as const;
     }
-    const validation = validateAndCanonicalizeCompensationMatrix({
+    // Single-precision noise (a -5e-9 coefficient, a 1.000002 diagonal) is set to 0 and 1, as the
+    // Matrices list stores the same matrix.
+    const { validation, roundedCoefficients } = storableFlowMatrix({
       sourceChannels: pnnChannels as string[],
       receiverChannels: pnnChannels as string[],
       matrix: spill.matrix,
-    }, "flow-spillover");
+    });
     const keyword = (["$SPILLOVER", "$SPILL", "SPILL"] as const)
       .find((candidate) => typeof sample.fcs.keywords[candidate] === "string");
     return {
@@ -858,6 +873,7 @@ function CompensationTabImpl({
         ? null
         : `The embedded compensation matrix cannot be applied or edited. ${validation.errors.map(({ message }) => message).join(" ")}`,
       keyword,
+      roundedCoefficients,
     } as const;
   }, [sample, spill]);
   const activeReviewPopulation = reviewPopulationId === "all"
@@ -2063,17 +2079,24 @@ function CompensationTabImpl({
             sourceDescription: hostedFlowMatrix
               ? "Flow spillover matrix from metadata(sce)$spillover_matrix"
               : "Spillover matrix embedded in the source FCS file",
-            estimationMethod: hostedFlowMatrix
-              ? "Imported from SCE metadata; coefficients preserved exactly"
-              : "Imported from FCS; coefficients preserved exactly",
+            estimationMethod: storedCoefficientsNote(
+              hostedFlowMatrix ? "Imported from SCE metadata" : "Imported from FCS",
+              embeddedFlowProfileMatrix.roundedCoefficients,
+            ),
           },
         },
       );
       await onApplyProfile(profile, setApplyProgress);
       setGateRecomputeAcknowledged(false);
-      setActionMessage(t(hostedFlowMatrix
+      const ready = t(hostedFlowMatrix
         ? "Flow matrix editing is ready. The exact hosted matrix is retained as the baseline, and Original measurements remain available."
-        : "Flow matrix editing is ready. The exact embedded matrix is retained as the baseline, and Original measurements remain available."));
+        : "Flow matrix editing is ready. The exact embedded matrix is retained as the baseline, and Original measurements remain available.");
+      // Not "exact" where floating-point noise was set to 0 or 1 to store it: say so instead.
+      setActionMessage(embeddedFlowProfileMatrix.roundedCoefficients > 0
+        ? t("Flow matrix editing is ready. {count} coefficients within 0.001% of 0 or 100% were set to exactly 0 or 100% to store the matrix; all others are as the file carries them. Original measurements remain available.", {
+            count: embeddedFlowProfileMatrix.roundedCoefficients,
+          })
+        : ready);
     } catch (cause) {
       setActionIsError(true);
       setActionMessage(cause instanceof Error ? cause.message : String(cause));
@@ -2360,6 +2383,41 @@ function CompensationTabImpl({
     }
   };
 
+  /**
+   * What Apply revised matrix does, said before it does it, and the user's agreement that gate
+   * membership may change (David, 2026-10-27, as "Use for the workspace…" asks it).
+   */
+  const renderRevisionAgreement = () => {
+    const workspaceWide = profileRecord?.scientific.kind === "flow-spillover" && Boolean(onApplyRevision);
+    const activeRow = workspaceWide ? matrices?.rows.find(({ active, profile }) => active && profile !== null) ?? null : null;
+    const plan = activeRow && matrices ? matrices.planSwitch(activeRow) : null;
+    return (
+      <div className="gl-comp-revision-agreement">
+        {plan && (
+          <p>
+            {t("Every file in the workspace ({count}) is compensated with the revised matrix.", { count: plan.fileCount })}
+            {" "}
+            {plan.gateCount > 0
+              ? t("Membership is recomputed for {gates} gates and {populations} populations drawn on channels this matrix compensates.", {
+                  gates: plan.gateCount,
+                  populations: plan.populationCount,
+                })
+              : t("No gate is drawn on a channel this matrix compensates.")}
+          </p>
+        )}
+        <label className="gl-comp-gate-acknowledgement is-compact">
+          <input
+            type="checkbox"
+            checked={revisionAgreed}
+            disabled={applyBusy}
+            onChange={(event) => setRevisionAgreed(event.currentTarget.checked)}
+          />
+          <span>{t("I agree that gate membership may change.")}</span>
+        </label>
+      </div>
+    );
+  };
+
   const cancelExactSweeps = () => {
     sweepGenerationRef.current++;
     onCancelCompensationSweep?.();
@@ -2370,6 +2428,11 @@ function CompensationTabImpl({
 
   const applyStagedMatrix = async () => {
     if (!profileRecord || !workingProfileMatrix || !onApplyProfile || Object.keys(stagedCoefficients).length === 0) return;
+    if (!revisionAgreed) return;
+    // One matrix is active for the workspace: a flow revision compensates every file.
+    const applyRevision = profileRecord.scientific.kind === "flow-spillover" && onApplyRevision
+      ? onApplyRevision
+      : onApplyProfile;
     const revisionName = `${compensationProfileBaseName(profileRecord.name)} · edited`;
     setActionMessage(null);
     setActionIsError(false);
@@ -2392,7 +2455,8 @@ function CompensationTabImpl({
             scientificCandidate(profileRecord, workingProfileMatrix),
             metadata,
           );
-      await onApplyProfile(revised, setApplyProgress);
+      await applyRevision(revised, setApplyProgress);
+      setRevisionAgreed(false);
       setStagedCoefficients({});
       setMatrixCellDraftPercents({});
       setSweepResults({});
@@ -2910,6 +2974,11 @@ function CompensationTabImpl({
             <span className="gl-sr-only">{t("{kind} compensation installed. Installed compensation profile.", {
               kind: profileMetadata.kind === "cytof-spillover" ? "CyTOF" : "Flow",
             })} </span>
+            {(() => {
+              // The installed matrix's M-number, as the Matrices list shows it.
+              const row = matrices?.rows.find(({ profile }) => profile?.profileId === profileMetadata.profileId);
+              return row ? <MatrixTag row={row} /> : null;
+            })()}
             <strong>{compactProfileSource}</strong>
             <span>{t("{method} · {count} ch · {status}", {
               method: displayMethod,
@@ -2984,7 +3053,16 @@ function CompensationTabImpl({
           ))}
         </nav>
         <div className="gl-comp-pane-section gl-comp-pane-matrices">
-        {matrices && sample.instrument === "flow" && <CompensationMatrices {...matrices} />}
+        {matrices && sample.instrument === "flow" && (
+          <CompensationMatrices
+            {...matrices}
+            onEditStarted={(name) => {
+              setWorkspaceView("matrix");
+              setActionIsError(false);
+              setActionMessage(t("Editing {name}: type a percentage in the matrix, or select a pair to see its plots. Apply revised matrix compensates every file with the changes.", { name }));
+            }}
+          />
+        )}
         {sample.instrument === "flow" && !profileMetadata && (
           <section className="gl-comp-pane-matrix">
             <h3>{t("Edit coefficients")}</h3>
@@ -3103,6 +3181,8 @@ function CompensationTabImpl({
               <p className="gl-comp-pane-line">{t("Select a pair in the matrix to change its coefficient.")}</p>
             )}
             {matrixView && Object.keys(stagedCoefficients).length > 0 && (
+              <>
+                {renderRevisionAgreement()}
                 <div className="gl-comp-staged-actions">
                   <span>
                     {t("{count} pending edits", { count: Object.keys(stagedCoefficients).length })}
@@ -3117,6 +3197,7 @@ function CompensationTabImpl({
                     onClick={() => {
                       setStagedCoefficients({});
                       setMatrixCellDraftPercents({});
+                      setRevisionAgreed(false);
                       setActionMessage(null);
                     }}
                   >
@@ -3127,6 +3208,7 @@ function CompensationTabImpl({
                     className="gl-btn"
                     disabled={
                       applyBusy ||
+                      !revisionAgreed ||
                       sweepProgress !== null ||
                       boundsPreviewPairKey !== null ||
                       !onApplyProfile ||
@@ -3137,6 +3219,7 @@ function CompensationTabImpl({
                     {t("Apply revised matrix")}
                   </button>
                 </div>
+              </>
             )}
           </section>
         )}
