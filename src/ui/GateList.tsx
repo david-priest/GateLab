@@ -93,7 +93,7 @@ export function GateList({ state, derived, dispatch, labelForKey = (k) => k, bad
   if (ids.length === 0) {
     return (
       <div className="gate-list-panel">
-        <em style={{ color: "#999", fontSize: 12 }}>{t("No gates. Draw one using the toolbar.")}</em>
+        <em style={{ display: "block", padding: "6px var(--gl-pane-padding)", color: "#999", fontSize: 12 }}>{t("No gates. Draw one using the toolbar.")}</em>
       </div>
     );
   }

@@ -3459,7 +3459,7 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 .gl-comp-inspector-left > section { margin-bottom: 14px; }
 /* The Matrices list (CompensationMatrices.tsx): one row per matrix, the active one marked. */
 .gl-comp-matrices-head { display: flex; align-items: center; justify-content: space-between; gap: var(--gl-space-2); }
-.gl-comp-matrices-head h3 { margin: 0; }
+.gl-comp-matrices-head h3 { margin: 0 auto 0 0; }
 .gl-comp-matrices > .gl-comp-matrices-head { margin-bottom: var(--gl-space-2); }
 .gl-comp-lib-list { list-style: none; margin: 0 calc(-1 * var(--gl-pane-padding)); padding: 0; border-top: 1px solid var(--line); }
 .gl-comp-lib-row {
@@ -3470,6 +3470,15 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 .gl-comp-lib-row.is-active { background: var(--gl-color-selected); box-shadow: inset 2px 0 0 var(--gl-color-accent); }
 .gl-comp-lib-text { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
 .gl-comp-lib-name { font-size: var(--gl-font-size-body); color: var(--gl-color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* M1, M2, …: the matrix icon and number before the name (MatrixTag); the primary matrix's is filled. */
+.gl-comp-lib-title { display: flex; align-items: center; gap: var(--gl-space-1); min-width: 0; }
+.gl-comp-lib-tag {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; padding: 0 4px; border-radius: 3px;
+  font-size: var(--gl-font-size-caption); font-weight: var(--gl-font-weight-semibold); font-variant-numeric: tabular-nums; line-height: 16px;
+  color: var(--gl-color-text-secondary); box-shadow: inset 0 0 0 1px var(--line);
+}
+.gl-comp-lib-tag.is-primary { color: #fff; background: var(--gl-color-accent); box-shadow: none; }
+.gl-comp-profile-pill .gl-comp-lib-tag { margin-right: 2px; }
 .gl-comp-lib-name-input { font: inherit; font-size: var(--gl-font-size-body); height: var(--gl-control-height-compact); min-width: 0; }
 .gl-comp-lib-meta { font-size: var(--gl-font-size-caption); color: var(--gl-color-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gl-comp-lib-unusable { font-size: var(--gl-font-size-caption); color: var(--gl-color-text-tertiary); }
@@ -3519,6 +3528,10 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 .gl-comp-inspector-left .gl-comp-flow-enable > div:first-child { min-width: 0; }
 .gl-comp-inspector-left .gl-comp-flow-enable > div:first-child span { white-space: normal; line-height: 1.35; }
 .gl-comp-inspector-left .gl-comp-flow-enable .gl-comp-gate-acknowledgement.is-compact { flex: none; align-items: flex-start; white-space: normal; }
+/* Apply revised matrix: what it does, and the agreement it waits for, above Discard and Apply. */
+.gl-comp-revision-agreement { display: grid; gap: var(--gl-space-1); margin-bottom: var(--gl-space-2); }
+.gl-comp-revision-agreement p { margin: 0; font-size: 12px; color: var(--muted); }
+.gl-comp-inspector-left .gl-comp-revision-agreement .gl-comp-gate-acknowledgement.is-compact { flex: none; align-items: flex-start; white-space: normal; }
 .gl-comp-inspector-left .gl-comp-flow-enable .gl-btn, .gl-comp-inspector-left .gl-comp-flow-enable .gl-comp-flow-enable-progress { width: 100%; justify-content: center; }
 .gl-comp-inspector-left > section { min-width: 0; }
 .gl-comp-inspector-left .gl-comp-staged-actions { flex-direction: column; align-items: stretch; gap: 6px; margin-top: 6px; }

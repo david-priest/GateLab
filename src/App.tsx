@@ -307,11 +307,14 @@ import {
   duplicateOfRow,
   embeddedFlowMatrixOf,
   importedFlowMatrix,
+  numberMatrices,
   planMatrixSwitch,
+  restoredMatrixNumbers,
   withDerivedActiveProfile,
   type EmbeddedFlowMatrix,
   type FileCompensationUse,
   type MatrixLibraryRow,
+  type MatrixNumbers,
 } from "./ui/compensationLibrary";
 import { GRID_ID as STRATEGY_GRID_ID, StrategyTab, type StrategyConfig, type StrategyRequest } from "./ui/StrategyTab";
 import { FigureWorkspace } from "./ui/FigureWorkspace";
@@ -3454,6 +3457,7 @@ export default function App({ hostProposals = null }: {
     setMinEvents(null);
     setTailoringReasons({});
     setWorkspaceCompensation(newEmptyWorkspaceCompensationState());
+    setMatrixNumbers(null);
     compensationApplyGuardRef.current = false;
     setCompensationApplyStatus(null);
     setWsHandle(null);
@@ -8586,6 +8590,7 @@ export default function App({ hostProposals = null }: {
             setColouredGates(restoredColouredGates((workspace.display as { colouredGates?: unknown }).colouredGates));
             setGateLineWidth(restoredGateLineWidth((workspace.display as { gateLineWidth?: unknown }).gateLineWidth));
             setGateLabelBackground(restoredGateLabelBackground((workspace.display as { gateLabelBackground?: unknown }).gateLabelBackground));
+            setMatrixNumbers(restoredMatrixNumbers((workspace.display as { matrixNumbers?: unknown }).matrixNumbers));
             setPointAlpha(restoredPointAlpha(workspace.display.pointAlpha));
             setPointSize(restoredPointSize(workspace.display.pointSize));
             setGatingFontSizes({
@@ -9481,7 +9486,13 @@ export default function App({ hostProposals = null }: {
         branchGatesOnly,
         showUnownedGates,
         // Not in the engine's display type (src/engine is frozen); read back by cast, as above.
-        ...({ colouredGates, gateLineWidth, gateLabelBackground } as Record<string, unknown>),
+        ...({
+          colouredGates,
+          gateLineWidth,
+          gateLabelBackground,
+          // The Compensation list's M1, M2, … (compensationLibrary.ts MatrixNumbers).
+          ...(matrixNumbers ? { matrixNumbers } : {}),
+        } as Record<string, unknown>),
         paneWidths: { left: leftWidth, right: sideWidth },
       },
       illustration: illustConfigRef.current ?? undefined,
@@ -11530,6 +11541,7 @@ export default function App({ hostProposals = null }: {
       setColouredGates(restoredColouredGates((ws.display as { colouredGates?: unknown } | undefined)?.colouredGates));
       setGateLineWidth(restoredGateLineWidth((ws.display as { gateLineWidth?: unknown } | undefined)?.gateLineWidth));
       setGateLabelBackground(restoredGateLabelBackground((ws.display as { gateLabelBackground?: unknown } | undefined)?.gateLabelBackground));
+      setMatrixNumbers(restoredMatrixNumbers((ws.display as { matrixNumbers?: unknown } | undefined)?.matrixNumbers));
       setPointAlpha(restoredPointAlpha(ws.display?.pointAlpha));
       setPointSize(restoredPointSize(ws.display?.pointSize));
       setGatingFontSizes({ ...DEFAULT_GATING_FONT_SIZES, ...ws.display?.fontSizes });
@@ -12461,6 +12473,9 @@ export default function App({ hostProposals = null }: {
   // (2026-10-23)"): each flow file's embedded matrix, read and hashed once per Sample.
   const embeddedMatrixCacheRef = useRef(new WeakMap<Sample, Promise<EmbeddedFlowMatrix | null>>());
   const [embeddedMatrices, setEmbeddedMatrices] = useState<ReadonlyMap<string, EmbeddedFlowMatrix>>(() => new Map());
+  /** The file list embeddedMatrices was read for: a file whose matrix could not be read has no entry. */
+  const [embeddedMatricesFor, setEmbeddedMatricesFor] = useState<readonly unknown[] | null>(null);
+  const [matrixNumbers, setMatrixNumbers] = useState<MatrixNumbers | null>(null);
   useEffect(() => {
     let cancelled = false;
     const cache = embeddedMatrixCacheRef.current;
@@ -12474,24 +12489,36 @@ export default function App({ hostProposals = null }: {
     })).then((pairs) => {
       if (cancelled) return;
       setEmbeddedMatrices(new Map(pairs.flatMap(([id, matrix]) => (matrix ? [[id, matrix] as const] : []))));
+      setEmbeddedMatricesFor(samples);
     });
     return () => {
       cancelled = true;
     };
   }, [samples]);
-  const matrixRows: MatrixLibraryRow[] = activeTab === "compensation"
-    ? buildMatrixLibrary(
-        workspaceCompensation,
-        [...embeddedMatrices.values()],
-        samples.map((entry): FileCompensationUse => {
-          const status = entry.sample.compensatedLayerStatus();
-          if (status.state === "missing") return null;
-          return status.metadata.runtimeIdentity === "profile"
-            ? { kind: "profile", profileId: status.metadata.profileId }
-            : { kind: "embedded", key: embeddedMatrices.get(entry.id)?.key ?? null };
-        }),
-      )
-    : [];
+  const libraryRows = (numbers: MatrixNumbers | null): MatrixLibraryRow[] => buildMatrixLibrary(
+    workspaceCompensation,
+    [...embeddedMatrices.values()],
+    samples.map((entry): FileCompensationUse => {
+      const status = entry.sample.compensatedLayerStatus();
+      if (status.state === "missing") return null;
+      return status.metadata.runtimeIdentity === "profile"
+        ? { kind: "profile", profileId: status.metadata.profileId }
+        : { kind: "embedded", key: embeddedMatrices.get(entry.id)?.key ?? null };
+    }),
+    "flow-spillover",
+    numbers,
+  );
+  const matrixRows: MatrixLibraryRow[] = activeTab === "compensation" ? libraryRows(matrixNumbers) : [];
+  // Each matrix's M-number, given the first time it is listed, and the primary one decided when the
+  // data come in: so this runs whatever tab is open, once the open files' own matrices have been
+  // read (embeddedMatricesFor), never on the last workspace's.
+  useEffect(() => {
+    if (samples.length === 0 || embeddedMatricesFor !== samples) return;
+    const next = numberMatrices(matrixNumbers, libraryRows(matrixNumbers));
+    if (next !== matrixNumbers) setMatrixNumbers(next);
+    // libraryRows reads only the dependencies listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [samples, embeddedMatrices, embeddedMatricesFor, workspaceCompensation, matrixNumbers]);
 
   function addMatrixLineage(profile: CompensationProfileRecord): void {
     setWorkspaceCompensation((current) => ({
@@ -12553,6 +12580,12 @@ export default function App({ hostProposals = null }: {
     onDuplicate: async (row) => {
       addMatrixLineage(await duplicateOfRow(row, copyName(row.name, new Set(matrixRows.map(({ name }) => name)))));
     },
+    // The copy goes through Apply as a new baseline, which stores its lineage and makes it active;
+    // the row it was copied from is not touched.
+    onDuplicateAndEdit: isSceHost ? undefined : async (row, name) => {
+      await applyCompensationProfile(await duplicateOfRow(row, name), undefined, undefined, "workspace");
+      setImportMsg(t("{name} is used for the workspace · {count} files compensated", { name, count: samples.length }));
+    },
     onDelete: (row) => {
       if (row.baselineProfileId === null || !row.canDelete) return;
       setWorkspaceCompensation((current) => ({
@@ -12577,12 +12610,15 @@ export default function App({ hostProposals = null }: {
       const same = matrixRows.find(({ matrixHash }) => matrixHash === imported.profile.matrixHash);
       if (same) return t("{file} holds the same matrix as {name}, which is already in the list.", { file: file.name, name: same.name });
       addMatrixLineage(imported.profile);
-      return imported.unmatched.length > 0
+      const added = imported.unmatched.length > 0
         ? t("Added {name}, not in use. Not a channel of any file in the workspace: {channels}.", {
             name: imported.profile.name,
             channels: imported.unmatched.join(", "),
           })
         : t("Added {name}, not in use.", { name: imported.profile.name });
+      return imported.roundedCoefficients > 0
+        ? `${added} ${t("{count} coefficients within 0.001% of 0 or 100% were set to exactly 0 or 100% so it could be stored.", { count: imported.roundedCoefficients })}`
+        : added;
     },
   };
 
@@ -17239,6 +17275,9 @@ export default function App({ hostProposals = null }: {
                   onDensityColorPowerChange={changeDensityColorPower}
                   channelLabelMode={channelLabelMode}
                   matrices={compensationMatrices}
+                  onApplyRevision={isSceHost
+                    ? undefined
+                    : (profile, onProgress) => applyCompensationProfile(profile, onProgress, undefined, "workspace")}
                 />
               </Suspense>
             </ErrorBoundary>}

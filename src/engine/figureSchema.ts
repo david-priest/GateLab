@@ -52,6 +52,7 @@ export function isFigureSpec(v: unknown): v is FigureSpec {
   )
     return false;
   if (v.scalePolicyChosen !== undefined && typeof v.scalePolicyChosen !== "boolean") return false;
+  if (v.branchGatesOnly !== undefined && typeof v.branchGatesOnly !== "boolean") return false;
   if (v.labelOffsets !== undefined) {
     if (!record(v.labelOffsets)) return false;
     for (const offset of Object.values(v.labelOffsets as Record<string, unknown>))

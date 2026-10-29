@@ -428,7 +428,7 @@ export function PopulationTree({
   if (!root_population_id || Object.keys(populations).length === 0) {
     return (
       <div className="population-tree-panel">
-        <em style={{ color: "#999", fontSize: 12 }}>{t("No data loaded.")}</em>
+        <em style={{ display: "block", padding: "6px var(--gl-pane-padding)", color: "#999", fontSize: 12 }}>{t("No data loaded.")}</em>
       </div>
     );
   }

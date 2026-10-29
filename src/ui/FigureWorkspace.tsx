@@ -1896,6 +1896,16 @@ export function FigureWorkspace({
                 />
                 {t("Show each file’s gates")}
               </label>
+              <label title={t("Draw on each panel only the gates on its population and its descendants. Unchecked draws every gate sharing the panel's channels, wherever it is in the tree.")}>
+                <input
+                  type="checkbox"
+                  className="gl-figure-branch-gates"
+                  disabled={!figure.showGates}
+                  checked={figure.branchGatesOnly !== false}
+                  onChange={(e) => editFigure({ branchGatesOnly: e.target.checked })}
+                />
+                {t("Only the panel's branch")}
+              </label>
               <p>
                 {t("Mixed-file panels omit gate outlines. Percentages in single-file panels are relative to the displayed population.")}
               </p>

@@ -90,6 +90,7 @@ export function useFigurePanels(
     figure.composition,
     figure.overlayPopulations,
     figure.scalePolicy,
+    figure.branchGatesOnly,
     figure.samplePopulations,
     figure.populationOverrides,
     maxEvents,

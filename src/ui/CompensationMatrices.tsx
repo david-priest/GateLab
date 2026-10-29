@@ -4,10 +4,10 @@
 
 import { useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
 import { pickFilesOrInput } from "../engine/fsAccess";
-import type { MatrixLibraryRow, MatrixSource, MatrixSwitchPlan } from "./compensationLibrary";
+import { copyName, type MatrixLibraryRow, type MatrixSource, type MatrixSwitchPlan } from "./compensationLibrary";
 import { CompensationMatrixExportDialog } from "./CompensationMatrixExportDialog";
 import { useI18n } from "./i18n";
-import { MoreIcon } from "./icons";
+import { MatrixIcon, MoreIcon } from "./icons";
 import { MenuButton, type MenuEntry } from "./MenuButton";
 
 export interface CompensationMatricesProps {
@@ -25,6 +25,14 @@ export interface CompensationMatricesProps {
   readonly onUse?: (row: MatrixLibraryRow) => Promise<void>;
   readonly onRename: (row: MatrixLibraryRow, name: string) => void;
   readonly onDuplicate: (row: MatrixLibraryRow) => Promise<void>;
+  /**
+   * "Duplicate and edit…": stores a copy of the row's matrix under `name` and uses it for every file,
+   * so the coefficient editor and its plots work on the copy and the row stays as it was. Absent
+   * where the active matrix cannot be switched here (a hosted SCE).
+   */
+  readonly onDuplicateAndEdit?: (row: MatrixLibraryRow, name: string) => Promise<void>;
+  /** Set by the Compensation tab: the copy is active, so the tab shows its coefficient editor. */
+  readonly onEditStarted?: (name: string) => void;
   readonly onDelete: (row: MatrixLibraryRow) => void;
   /** Adds the file's matrix to the list without using it; resolves to what to tell the user. */
   readonly onImport: (file: File) => Promise<string>;
@@ -39,6 +47,27 @@ function sourceText(source: MatrixSource, t: ReturnType<typeof useI18n>["t"]): s
   return t("Preset · {name}", { name: source.presetId });
 }
 
+/** A matrix's short name, M1, M2, …, with the matrix icon; the primary matrix's is filled. */
+export function MatrixTag({ row }: { row: Pick<MatrixLibraryRow, "number" | "primary"> }) {
+  const { t } = useI18n();
+  if (row.number === null) return null;
+  const tag = `M${row.number}`;
+  return (
+    <span
+      className={"gl-comp-lib-tag" + (row.primary ? " is-primary" : "")}
+      title={row.primary ? t("{tag}, the primary matrix: the one in use when the data came in", { tag }) : tag}
+    >
+      <MatrixIcon size={12} />
+      {tag}
+    </span>
+  );
+}
+
+/** A row's name with its M-number in front, for dialogs and messages. */
+export function matrixLabel(row: Pick<MatrixLibraryRow, "number" | "name">): string {
+  return row.number === null ? row.name : `M${row.number} ${row.name}`;
+}
+
 export function CompensationMatrices({
   rows,
   fileCount,
@@ -48,6 +77,8 @@ export function CompensationMatrices({
   onUse,
   onRename,
   onDuplicate,
+  onDuplicateAndEdit,
+  onEditStarted,
   onDelete,
   onImport,
 }: CompensationMatricesProps) {
@@ -55,6 +86,8 @@ export function CompensationMatrices({
   const fileRef = useRef<HTMLInputElement>(null);
   const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null);
   const [switching, setSwitching] = useState<MatrixLibraryRow | null>(null);
+  /** The row "Duplicate and edit…" copies, and the copy's name. */
+  const [editing, setEditing] = useState<{ row: MatrixLibraryRow; copy: string } | null>(null);
   const [deleting, setDeleting] = useState<MatrixLibraryRow | null>(null);
   const [exporting, setExporting] = useState<MatrixLibraryRow | null>(null);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
@@ -116,6 +149,17 @@ export function CompensationMatrices({
           onClick: () => setRenaming({ id: row.id, draft: row.name }),
         }]
       : []),
+    {
+      label: t("Duplicate and edit…"),
+      className: "gl-comp-lib-edit",
+      disabled: busy || !onDuplicateAndEdit || row.unusable !== null,
+      title: !onDuplicateAndEdit
+        ? t("The matrix of a hosted SCE is chosen in R.")
+        : row.unusable !== null
+          ? t("GateLab cannot store this matrix, so only its own file uses it: {reason}", { reason: row.unusable })
+          : t("Copy this matrix, use the copy for every file and edit its coefficients beside the plots. This matrix stays as it is."),
+      onClick: () => setEditing({ row, copy: copyName(row.name, new Set(rows.map(({ name }) => name))) }),
+    },
     { label: t("Duplicate"), className: "gl-comp-lib-duplicate", disabled: busy || row.unusable !== null, onClick: () => void duplicate(row) },
     { label: t("Export CSV…"), className: "gl-comp-lib-export", onClick: () => setExporting(row) },
     ...(row.canDelete
@@ -123,12 +167,26 @@ export function CompensationMatrices({
       : []),
   ];
 
+  // The matrix the files are compensated with now, for the Export button beside Import.
+  const activeRow = rows.find(({ active }) => active) ?? null;
+
   return (
     <section className="gl-comp-matrices" aria-labelledby="comp-matrices-heading">
       <div className="gl-comp-matrices-head">
         <h3 id="comp-matrices-heading">{t("Matrices")}</h3>
         <button type="button" className="gl-mini-btn" disabled={busy} onClick={chooseFile}>
           {t("Import CSV/TSV…")}
+        </button>
+        <button
+          type="button"
+          className="gl-mini-btn gl-comp-lib-export-active"
+          disabled={!activeRow}
+          title={activeRow
+            ? t("Download {name}, the matrix in use, as a CSV table that Import CSV/TSV… reads back.", { name: activeRow.name })
+            : t("No matrix is in use.")}
+          onClick={() => activeRow && setExporting(activeRow)}
+        >
+          {t("Export CSV…")}
         </button>
       </div>
       <input
@@ -161,9 +219,13 @@ export function CompensationMatrices({
                     }}
                   />
                 ) : (
-                  <span className="gl-comp-lib-name" title={row.name}>{row.name}</span>
+                  <span className="gl-comp-lib-title">
+                    <MatrixTag row={row} />
+                    <span className="gl-comp-lib-name" title={row.name}>{row.name}</span>
+                  </span>
                 )}
                 <span className="gl-comp-lib-meta">
+                  {row.primary ? `${t("Primary")} · ` : ""}
                   {sourceText(row.source, t)}
                   {" · "}
                   {t("{count} channels", { count: row.channelCount })}
@@ -198,6 +260,21 @@ export function CompensationMatrices({
           {message.text}
         </div>
       )}
+      {editing && onDuplicateAndEdit && (
+        <MatrixSwitchDialog
+          row={editing.row}
+          copy={editing.copy}
+          plan={planSwitch(editing.row)}
+          revertible={unsavedEmbeddedFiles.length === 0}
+          busy={busy}
+          onUse={async (row) => {
+            await onDuplicateAndEdit(row, editing.copy);
+            setMessage(null);
+            onEditStarted?.(editing.copy);
+          }}
+          onClose={() => setEditing(null)}
+        />
+      )}
       {switching && onUse && (
         <MatrixSwitchDialog
           row={switching}
@@ -215,7 +292,7 @@ export function CompensationMatrices({
       {deleting && (
         <div className="gl-modal-backdrop" onKeyDown={(event) => { if (event.key === "Escape") setDeleting(null); }}>
           <div className="gl-modal gl-comp-lib-dialog" role="dialog" aria-modal="true" aria-labelledby="comp-matrix-delete-title">
-            <div className="gl-modal-title" id="comp-matrix-delete-title">{t("Delete {name}?", { name: deleting.name })}</div>
+            <div className="gl-modal-title" id="comp-matrix-delete-title">{t("Delete {name}?", { name: matrixLabel(deleting) })}</div>
             <p>{t("It leaves the workspace's list of matrices. No file is compensated with it.")}</p>
             <div className="gl-modal-actions">
               <button type="button" className="gl-btn-ghost" autoFocus onClick={() => setDeleting(null)}>{t("Cancel")}</button>
@@ -249,6 +326,7 @@ export function CompensationMatrices({
  */
 function MatrixSwitchDialog({
   row,
+  copy,
   plan,
   revertible,
   busy,
@@ -256,6 +334,8 @@ function MatrixSwitchDialog({
   onClose,
 }: {
   row: MatrixLibraryRow;
+  /** "Duplicate and edit…": the copy's name. The copy, not the row, is used for the workspace. */
+  copy?: string;
   plan: MatrixSwitchPlan;
   /** False where the workspace as it stands cannot be written, so Revert workspace cannot return to it. */
   revertible: boolean;
@@ -285,8 +365,23 @@ function MatrixSwitchDialog({
   return (
     <div className="gl-modal-backdrop" onKeyDown={(event) => { if (event.key === "Escape" && !running) onClose(); }}>
       <div className="gl-modal gl-comp-lib-dialog gl-comp-lib-switch" role="dialog" aria-modal="true" aria-labelledby="comp-matrix-switch-title">
-        <div className="gl-modal-title" id="comp-matrix-switch-title">{t("Use {name} for the workspace", { name: row.name })}</div>
-        <p>{t("Every file in the workspace ({count}) is compensated with {name}.", { count: plan.fileCount, name: row.name })}</p>
+        <div className="gl-modal-title" id="comp-matrix-switch-title">
+          {copy === undefined ? t("Use {name} for the workspace", { name: matrixLabel(row) }) : t("Duplicate and edit {name}", { name: matrixLabel(row) })}
+        </div>
+        {copy === undefined ? (
+          <p>{t("Every file in the workspace ({count}) is compensated with {name}.", { count: plan.fileCount, name: row.name })}</p>
+        ) : (
+          <>
+            <p className="gl-comp-lib-copy">
+              {t("GateLab stores a copy, {copy}, and compensates every file in the workspace ({count}) with it, so the plots show each coefficient you change. {name} stays in the list as it is; use it again to go back.", {
+                copy,
+                count: plan.fileCount,
+                name: row.name,
+              })}
+            </p>
+            <p>{t("Edited coefficients change no file until you choose Apply revised matrix, which asks again.")}</p>
+          </>
+        )}
         <p>
           {plan.gateCount > 0
             ? t("Membership is recomputed for {gates} gates and {populations} populations drawn on channels this matrix compensates.", {
@@ -342,7 +437,7 @@ function MatrixSwitchDialog({
             disabled={refused || !agreed || running || busy}
             onClick={() => void confirm()}
           >
-            {running ? t("Compensating…") : t("Use for the workspace")}
+            {running ? t("Compensating…") : copy === undefined ? t("Use for the workspace") : t("Make the copy and edit")}
           </button>
         </div>
       </div>
