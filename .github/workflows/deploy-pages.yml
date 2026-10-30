@@ -38,6 +38,18 @@ jobs:
       - name: Build for GitHub Pages
         run: npm run build -- --base=/GateLab/
 
+      - name: Record the public source commit
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          node --input-type=module <<'JS'
+          import { writeFileSync } from 'node:fs';
+          writeFileSync('dist/source.json', JSON.stringify({
+            repository: 'https://github.com/david-priest/GateLab',
+            commit: process.env.SOURCE_SHA,
+          }, null, 2) + '\n');
+          JS
+
       - name: Configure GitHub Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
 
@@ -49,3 +61,31 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+
+  deploy-primary-site:
+    name: Trigger gate-lab.github.io
+    needs: deploy
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Create a hosting-repository Actions token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.GATELAB_PAGES_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GATELAB_PAGES_APP_PRIVATE_KEY }}
+          owner: gate-lab
+          repositories: gate-lab.github.io
+          permission-actions: write
+
+      - name: Deploy the same public commit at the primary URL
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          gh workflow run deploy-pages.yml \
+            --repo gate-lab/gate-lab.github.io --ref main \
+            -f source_sha="$SOURCE_SHA"
+          printf 'Requested https://gate-lab.github.io/ for public commit %s.\n' "$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"

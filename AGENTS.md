@@ -1,7 +1,7 @@
 # Agent instructions — GateLab public release
 
 Read `../AGENTS.md` before editing. This checkout publishes `david-priest/GateLab` and
-`https://david-priest.github.io/GateLab/`. It is a **release target**, not the canonical runtime
+`https://gate-lab.github.io/` (primary) and `https://david-priest.github.io/GateLab/` (transitional). It is a **release target**, not the canonical runtime
 development repository. Canonical development occurs in the private sibling checkout
 `../GateLab` (`david-priest/GateLab-dev`).
 
@@ -74,12 +74,14 @@ React payload/repaint. When relevant, cover both workspace-loaded and newly crea
 5. Inspect the complete public diff, push the release branch, open a PR to public `master`, and
    merge only when the change is exactly the already-reviewed development delta plus any explicit
    public-only release documentation.
-6. Watch the Pages workflow to completion and verify the live page serves the new hashed assets.
+6. Watch this repository's Pages workflow and the automatically triggered `gate-lab/gate-lab.github.io` Pages workflow to completion. Both sites must serve the same public commit in `source.json`: `https://gate-lab.github.io/source.json` and `https://david-priest.github.io/GateLab/source.json`. The primary URL is the address to advertise. Keep deploying the transitional URL until David explicitly authorizes its retirement.
 7. Perform a real deployed-app smoke test. A build, asset HTTP 200, or static screenshot is not
    sufficient. For gate changes, test existing and newly created rectangle, polygon, and quadrant
    gates; after dragging, force another render/population change and verify the gate remains moved.
 8. Test with a hard refresh or cache-busting query, then return this checkout to a clean public
    `master` synchronized with `origin/master`.
+
+The `deploy-primary-site` job runs only after the transitional deployment succeeds on public `master`. It dispatches the hosting workflow with the exact public SHA, using a GitHub App installed only on `gate-lab/gate-lab.github.io` with Actions write permission and mandatory metadata read access. Its client ID is repository variable `GATELAB_PAGES_APP_CLIENT_ID`; its private key is Actions secret `GATELAB_PAGES_APP_PRIVATE_KEY`. Do not put either credential in code, use a broad personal token, or add scheduled builds. For recovery, rerun this workflow on public `master`, or manually dispatch the hosting workflow with the current public `master` SHA. Stale notifications are ignored by the hosting workflow.
 
 ## Drift diagnosis
 
