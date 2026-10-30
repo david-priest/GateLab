@@ -16,11 +16,11 @@
 </p>
 
 <p align="center">
-  <a href="https://david-priest.github.io/GateLab/"><img src="https://img.shields.io/badge/Launch_GateLab-in_your_browser_%E2%86%92-ed4e19?style=for-the-badge&labelColor=ed4e19" alt="Launch GateLab in your browser"></a>
+  <a href="https://gate-lab.github.io/"><img src="https://img.shields.io/badge/Launch_GateLab-in_your_browser_%E2%86%92-ed4e19?style=for-the-badge&labelColor=ed4e19" alt="Launch GateLab in your browser"></a>
 </p>
 
 <p align="center">
-  <a href="https://david-priest.github.io/GateLab/"><b>GateLab in your browser</b></a> · <a href="#using-gatelab">Using GateLab</a> · <a href="https://github.com/david-priest/GateLabR">GateLabR for R</a>
+  <a href="https://gate-lab.github.io/"><b>GateLab in your browser</b></a> · <a href="#using-gatelab">Using GateLab</a> · <a href="https://github.com/david-priest/GateLabR">GateLabR for R</a>
 </p>
 
 GateLab is a manual gating application for flow cytometry, mass cytometry (CyTOF) and the imaging flow cytometry of the BD FACSDiscover S8, and it runs in a web browser. It does five things.
@@ -37,7 +37,7 @@ The gating exports in the formats other programs read: a FlowJo workspace, which
 
 It exists so that a gating strategy does not depend on one program or one computer. The hosted app opens from a link, with nothing to install and no account, and FCS files and workspaces are processed in the browser tab and are not uploaded. A strategy drawn in FlowJo or Cytobank can be continued here, and one drawn here can be opened in either.
 
-To try it, open the [hosted app](https://david-priest.github.io/GateLab/) and choose **Tutorial ▸ Start the tutorial**, which loads a demo workspace and walks through every tab. GateLab can also be [run locally](#local-installation).
+To try it, open the [hosted app](https://gate-lab.github.io/) and choose **Tutorial ▸ Start the tutorial**, which loads a demo workspace and walks through every tab. GateLab can also be [run locally](#local-installation).
 
 
 ## GateLab in action
