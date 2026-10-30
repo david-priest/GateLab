@@ -350,9 +350,12 @@ describe("FigureWorkspace", () => {
     expect(onAddToLayout).toHaveBeenCalledTimes(1);
     const [recipes, cells, headings] = onAddToLayout.mock.calls[0];
     expect(recipes).toHaveLength(2);
-    // Two rows of one column: the row headings go along, as text that reads each row's plot.
-    expect(headings.columns).toEqual([]);
+    // Two rows of one column: every heading drawn here goes along, the lone column's included,
+    // as text that reads its row's or column's plot.
+    expect(headings.columns).toEqual([{ text: "FSC-A", template: "{plot}" }]);
     expect(headings.rows).toHaveLength(2);
+    // The headings name the plots, so the plots go untitled, as they are here.
+    expect(recipes.every((recipe: { title?: string }) => recipe.title === "{none}")).toBe(true);
     expect(headings.rows.every((heading: { text: string; template?: string }) => heading.text.length > 0 && heading.template)).toBe(true);
     // The fixture's panels are one column, so the two chosen sit one below the other, closed up to
     // the block they span.
@@ -566,9 +569,11 @@ describe("FigureWorkspace", () => {
     expect(recipes).toHaveLength(17);
     expect(recipes[0]).toMatchObject({ kind: "biplot", sampleId: "D1", xChannel: "FSC-A", yChannel: "SSC-A" });
     expect(["pseudocolor", "scatter", "contour"]).toContain(recipes[0].displayMode);
-    // Titled by the sheet's template on the Layout tab, not here; a named plot would carry its name as label.
-    expect(recipes[0].title).toBeUndefined();
-    expect(recipes[0].label).toBeUndefined();
+    // Untitled there as here, since the headings name it; it carries its name here for {plot}, and
+    // this figure's style as its own.
+    expect(recipes[0].title).toBe("{none}");
+    expect(recipes[0].label).toBe("FSC-A");
+    expect(recipes[0].style).toMatchObject({ pubStyle: props.configRef.current!.pubStyle, pointSize: props.configRef.current!.pointSize });
     expect(recipes[0].populationId).toBe(props.state.stored_hierarchies["copy-0"].root_population_id);
   });
 

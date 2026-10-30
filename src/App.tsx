@@ -346,7 +346,10 @@ import {
   DEFAULT_DENSITY_COLOR_POWER,
   normalizeDensityColorPower,
 } from "./engine/pseudocolor";
-import { createDefaultLayoutWorkspace, effectiveLayoutStyle, layoutGridFrames, normalizeLayoutWorkspace, type LayoutGridCell, type LayoutPlotRecipe, type LayoutPlotStyle, type LayoutStrategyRecipe, type LayoutWorkspace, cloneLayoutWorkspace, nextLayoutItemPosition, type LayoutGridHeading, type LayoutGridHeadings } from "./engine/layout";
+import { fitLayoutText } from "./ui/layoutTextFit";
+import { placeBlockOnPage, styleBeyondSheet } from "./ui/layoutPlacement";
+import { plotTitle, plotTitleContext } from "./engine/layoutTitle";
+import { createDefaultLayoutWorkspace, effectiveLayoutStyle, layoutGridFrames, normalizeLayoutStyle, normalizeLayoutWorkspace, type LayoutGridCell, type LayoutPlotRecipe, type LayoutPlotStyle, type LayoutStrategyRecipe, type LayoutWorkspace, cloneLayoutWorkspace, nextLayoutItemPosition, type LayoutGridHeading, type LayoutGridHeadings } from "./engine/layout";
 import { ArrowLeftIcon, ArrowRightIcon, RedoIcon, RefreshIcon, ResetIcon, UndoIcon } from "./ui/icons";
 import { workspaceShortcutAction, type WorkspaceShortcutAction } from "./ui/historyShortcuts";
 import { DensityColourControl } from "./ui/DensityColourControl";
@@ -1727,6 +1730,16 @@ export default function App({ hostProposals = null }: {
   const strategyConfigRef = useRef<StrategyConfig | null>(null); // Strategy controls, survive tab switches
   const [illustrationPresets, setIllustrationPresets] = useState<IllustrationPreset[]>([]);
   const [illustVersion, setIllustVersion] = useState(0); // bump to remount IllustrationTab on workspace load
+  /**
+   * The layout as it was before another tab last added to it. The Layout tab is mounted afresh
+   * when an add opens it, with no history of its own; it takes this as its first Undo step, once.
+   */
+  const layoutUndoSeedRef = useRef<LayoutWorkspace | null>(null);
+  const takeLayoutUndoSeed = useCallback(() => {
+    const seed = layoutUndoSeedRef.current;
+    layoutUndoSeedRef.current = null;
+    return seed;
+  }, []);
   const [layoutWorkspace, setLayoutWorkspace] = useState<LayoutWorkspace>(
     () => createDefaultLayoutWorkspace(),
   );
@@ -3502,6 +3515,7 @@ export default function App({ hostProposals = null }: {
     setIllustVersion((version) => version + 1);
     setLayoutWorkspace(createDefaultLayoutWorkspace());
     setLayoutEpoch((epoch) => epoch + 1);
+    layoutUndoSeedRef.current = null;
     setMetadata({});
     setMetadataColumns([]);
     setPopulationMetadata({});
@@ -8760,6 +8774,7 @@ export default function App({ hostProposals = null }: {
       return;
     }
     setLayoutWorkspace((current) => {
+      layoutUndoSeedRef.current = current;
       const next = cloneLayoutWorkspace(current);
       const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
       if (!sheet) return current;
@@ -8791,6 +8806,7 @@ export default function App({ hostProposals = null }: {
   /** An image wall from the Images tab as one Layout block, at its natural size, and the Layout tab shown. */
   function addImageWallToLayout(recipe: LayoutImageWallRecipe): void {
     setLayoutWorkspace((current) => {
+      layoutUndoSeedRef.current = current;
       const next = cloneLayoutWorkspace(current);
       const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
       if (!sheet) return current;
@@ -8810,6 +8826,7 @@ export default function App({ hostProposals = null }: {
   function addCellPanelToLayout(recipe: LayoutCellPanelRecipe): void {
     const id = crypto.randomUUID();
     setLayoutWorkspace((current) => {
+      layoutUndoSeedRef.current = current;
       const next = cloneLayoutWorkspace(current);
       const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
       if (!sheet) return current;
@@ -8839,6 +8856,7 @@ export default function App({ hostProposals = null }: {
     const panelThere = !!lastId && layoutWorkspace.sheets.some((sheet) => sheet.items.some((it) => it.id === lastId && it.recipe.kind === "cellpanel"));
     if (panelThere) {
       setLayoutWorkspace((current) => {
+        layoutUndoSeedRef.current = current;
         const next = cloneLayoutWorkspace(current);
         for (const sheet of next.sheets) {
           const item = sheet.items.find((it) => it.id === lastId);
@@ -8875,15 +8893,18 @@ export default function App({ hostProposals = null }: {
   /** The Illustration tab's figure as one Layout block, and the Layout tab shown. */
   function addFigureToLayout(config: IllustrationConfig): void {
     setLayoutWorkspace((current) => {
+      layoutUndoSeedRef.current = current;
       const next = cloneLayoutWorkspace(current);
       const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
       if (!sheet) return current;
       const files = samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id), metadata: metadata[entry.id] }));
       const size = figureBlockFrame(config, files, state, sheet);
       const frame = nextLayoutItemPosition(sheet, size.width, size.height);
-      sheet.items.push({ id: crypto.randomUUID(), ...frame, recipe: { kind: "figure", illustration: config, page: 0 } });
-      sheet.width = Math.max(sheet.width, frame.x + frame.width + 48);
-      sheet.height = Math.max(sheet.height, frame.y + frame.height + 48);
+      const item = { id: crypto.randomUUID(), ...frame, recipe: { kind: "figure" as const, illustration: config, page: 0 } };
+      sheet.items.push(item);
+      placeBlockOnPage(sheet, [item]);
+      sheet.width = Math.max(sheet.width, item.x + item.width + 48);
+      sheet.height = Math.max(sheet.height, item.y + item.height + 48);
       return next;
     });
     markWorkspaceDirty();
@@ -8895,6 +8916,7 @@ export default function App({ hostProposals = null }: {
     const files = samples.map((entry) => ({ id: entry.id, name: entry.name, sample: entry.sample, hierarchyId: hierarchyOfFile(entry.id) }));
     const model = buildProportionsModel(settings, files, state, metadata, compatibleDivisionProfiles);
     setLayoutWorkspace((current) => {
+      layoutUndoSeedRef.current = current;
       const next = cloneLayoutWorkspace(current);
       const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
       if (!sheet) return current;
@@ -8914,48 +8936,81 @@ export default function App({ hostProposals = null }: {
    * arrangement they had where they came from, as a grid below what the sheet holds; without,
    * each takes the next free place on the page.
    */
-  function addPlotsToLayout(recipes: LayoutPlotRecipe[], cells?: readonly LayoutGridCell[], headings?: LayoutGridHeadings): void {
+  function addPlotsToLayout(recipes: LayoutPlotRecipe[], cells?: readonly LayoutGridCell[], headings?: LayoutGridHeadings, panelSize?: number): void {
     if (!recipes.length) return;
     setLayoutWorkspace((current) => {
+      layoutUndoSeedRef.current = current;
       const next = cloneLayoutWorkspace(current);
       const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
       if (!sheet) return current;
-      const frames = cells && cells.length === recipes.length ? layoutGridFrames(sheet, cells) : null;
+      // A grid from the Illustration tab keeps its panels' size: the frame holds the plot drawn at
+      // that size inside the plot host's 8 px inset.
+      const cellSize = panelSize && panelSize > 0 ? panelSize + 8 : null;
+      const frames = cells && cells.length === recipes.length
+        ? (cellSize ? layoutGridFrames(sheet, cells, cellSize, cellSize) : layoutGridFrames(sheet, cells))
+        : null;
+      const firstIn = (pick: (cell: LayoutGridCell) => boolean, order: (cell: LayoutGridCell) => number): number => {
+        let best = -1;
+        cells?.forEach((cell, index) => { if (pick(cell) && (best < 0 || order(cell) < order(cells[best]))) best = index; });
+        return best;
+      };
       // Headings sit above the columns and left of the rows, so the grid moves down and right to
-      // leave them room; each reads the first plot of its column or row.
-      const headRoom = frames && headings?.columns.length ? 34 : 0;
-      const sideRoom = frames && headings?.rows.length ? 150 : 0;
+      // leave them room; each reads the first plot of its column or row. Each heading's frame is
+      // sized to the text the Layout tab will draw in it (its template filled from that plot), so
+      // none arrives clipped: a row heading takes its text's width, wrapping past 320 px, and a
+      // column heading wraps within its column and grows down.
+      const headingFontSize = 14;
+      const drawnHeading = (heading: LayoutGridHeading, index: number): string => {
+        const recipe = recipes[index];
+        const entry = recipe && samples.find(({ id }) => id === recipe.sampleId);
+        if (!heading.template || !entry) return heading.text;
+        const population = treeOf(hierarchyOfFile(entry.id))?.populations[recipe.populationId];
+        const file = { name: sampleDisplayId(entry.name, metadata[entry.id]), fileName: entry.name, metadata: metadata[entry.id] };
+        return plotTitle(heading.template, plotTitleContext(recipe, file, population ? { id: recipe.populationId, name: population.name } : null, undefined, populationMetadata)) || heading.text;
+      };
+      const columnFirst = (headings?.columns ?? []).map((_, column) => firstIn((cell) => cell.column === column, (cell) => cell.row));
+      const rowFirst = (headings?.rows ?? []).map((_, row) => firstIn((cell) => cell.row === row, (cell) => cell.column));
+      const columnFits = frames ? (headings?.columns ?? []).map((heading, column) => fitLayoutText(drawnHeading(heading, columnFirst[column]), headingFontSize, frames[0].width)) : [];
+      const rowFits = frames ? (headings?.rows ?? []).map((heading, row) => fitLayoutText(drawnHeading(heading, rowFirst[row]), headingFontSize, 320)) : [];
+      const columnHeight = Math.max(28, ...columnFits.map((fit) => fit?.height ?? 0));
+      const rowWidth = rowFits.every(Boolean) ? Math.max(0, ...rowFits.map((fit) => fit!.width)) : 138;
+      const headRoom = frames && headings?.columns.length ? columnHeight + 6 : 0;
+      const sideRoom = frames && headings?.rows.length ? rowWidth + 12 : 0;
       if (frames) for (const frame of frames) { frame.y += headRoom; frame.x += sideRoom; }
       const ids: string[] = [];
+      const firstAdded = sheet.items.length;
       followSheetIteration(sheet, recipes).forEach((recipe, index) => {
         const frame = frames ? frames[index] : nextLayoutItemPosition(sheet);
         const id = crypto.randomUUID();
         ids.push(id);
-        sheet.items.push({ id, ...frame, recipe });
-        sheet.width = Math.max(sheet.width, frame.x + frame.width + 48);
-        sheet.height = Math.max(sheet.height, frame.y + frame.height + 48);
+        const style = styleBeyondSheet(sheet, recipe.style && normalizeLayoutStyle(recipe.style));
+        const { style: _given, ...rest } = recipe;
+        const item = { id, ...frame, recipe: style ? { ...rest, style } : rest };
+        sheet.items.push(item);
+        // A plot placed alone goes onto a page; a grid goes as one block, below.
+        if (!frames) placeBlockOnPage(sheet, [item]);
       });
       if (frames && cells && headings) {
         let z = Math.max(0, ...sheet.items.map((item) => item.z));
-        const firstIn = (pick: (cell: LayoutGridCell) => boolean, order: (cell: LayoutGridCell) => number): number => {
-          let best = -1;
-          cells.forEach((cell, index) => { if (pick(cell) && (best < 0 || order(cell) < order(cells[best]))) best = index; });
-          return best;
-        };
         const label = (heading: LayoutGridHeading, index: number, frame: { x: number; y: number; width: number; height: number }) => {
           sheet.items.push({
             id: crypto.randomUUID(), ...frame, z: ++z,
-            recipe: { kind: "text", text: heading.template ?? heading.text, fontSize: 14, ...(heading.template ? { readsFrom: ids[index] } : {}) },
+            recipe: { kind: "text", text: heading.template ?? heading.text, fontSize: headingFontSize, ...(heading.template ? { readsFrom: ids[index] } : {}) },
           });
         };
         headings.columns.forEach((heading, column) => {
-          const index = firstIn((cell) => cell.column === column, (cell) => cell.row);
-          if (index >= 0) label(heading, index, { x: frames[index].x, y: frames[index].y - headRoom, width: frames[index].width, height: 28 });
+          const index = columnFirst[column];
+          if (index >= 0) label(heading, index, { x: frames[index].x, y: frames[index].y - headRoom, width: Math.max(frames[index].width, columnFits[column]?.width ?? 0), height: columnFits[column]?.height ?? 28 });
         });
         headings.rows.forEach((heading, row) => {
-          const index = firstIn((cell) => cell.row === row, (cell) => cell.column);
-          if (index >= 0) label(heading, index, { x: frames[index].x - sideRoom, y: frames[index].y, width: sideRoom - 12, height: 28 });
+          const index = rowFirst[row];
+          if (index >= 0) label(heading, index, { x: frames[index].x - sideRoom, y: frames[index].y, width: sideRoom - 12, height: Math.max(28, rowFits[row]?.height ?? 0) });
         });
+      }
+      if (frames) placeBlockOnPage(sheet, sheet.items.slice(firstAdded));
+      for (const item of sheet.items.slice(firstAdded)) {
+        sheet.width = Math.max(sheet.width, item.x + item.width + 48);
+        sheet.height = Math.max(sheet.height, item.y + item.height + 48);
       }
       return next;
     });
@@ -11523,6 +11578,7 @@ export default function App({ hostProposals = null }: {
       setIllustVersion((v) => v + 1); // remount the Illustration and Strategy tabs so they re-read the restored configs
       setLayoutWorkspace(normalizeLayoutWorkspace(ws.layout));
       setLayoutEpoch((epoch) => epoch + 1);
+      layoutUndoSeedRef.current = null;
       clearPersistedTabState(); // drop old selections so a new workspace's tabs start clean
       restorePlottingState(ws.plotting);
       setDivisionProfiles(nextDivision);
@@ -17162,6 +17218,7 @@ export default function App({ hostProposals = null }: {
                   key={layoutEpoch}
                   workspace={layoutWorkspace}
                   onChange={setLayoutWorkspace}
+                  takeUndoSeed={takeLayoutUndoSeed}
                   imageService={imageService}
                   samples={samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id), metadata: metadata[entry.id] }))}
                   checkedSampleIds={samples.filter((entry) => !excludedSampleIds.has(entry.id)).map((entry) => entry.id)}

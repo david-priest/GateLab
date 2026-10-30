@@ -3361,11 +3361,15 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 .gl-layout-tab { --gl-select: #2f80ed; }
 .gl-layout-item {
   position: absolute; display: flex; flex-direction: column;
-  min-width: 140px; min-height: 140px; overflow: visible;
-  border: 1px solid transparent; border-radius: 0; background: transparent;
+  min-width: 24px; min-height: 24px; overflow: visible;
+  /* One screen pixel at any zoom: the canvas is scaled, so its hairline is 1/zoom (--gl-hair). */
+  border: var(--gl-hair, 1px) solid transparent; border-radius: 0; background: transparent;
 }
 .gl-layout-item:hover { border-color: #94a3b8; }
 .gl-layout-item.is-selected { border-color: var(--gl-select); }
+/* Moveable draws a selected item's frame; the item's own edge under it would double the line. A
+   locked item has no Moveable frame and keeps its edge. */
+.gl-layout-item.is-selected:not(.is-locked) { border-color: transparent; }
 .gl-layout-plot-host {
   display: grid; flex: 1 1 auto; min-width: 0; min-height: 0;
   place-items: start center; overflow: auto; padding: 4px;
@@ -3424,7 +3428,7 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 .gl-layout-dimensions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .gl-layout-dimensions label { display: grid; gap: 4px; }
 .gl-layout-item.is-text { min-width: 24px; min-height: 20px; }
-.gl-layout-item.has-frame { border-color: #94a3b8; }
+.gl-layout-item.has-frame { border-color: #94a3b8; border-width: 1px; }
 .gl-layout-text-surface { display: block; width: 100%; height: 100%; padding: 2px; margin: 0; border: 0; outline: none; resize: none; background: transparent; font-family: Arial, Helvetica, sans-serif; box-sizing: border-box; }
 /* As placed, the words are static and the block is taken by its body; the editor opens on a double-click or Enter. */
 .gl-layout-text-surface.is-static { user-select: none; cursor: default; overflow: hidden; }
@@ -4177,6 +4181,21 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
 }
 .gl-layout-item-style {
   margin: 6px 0;
+}
+/* The selection's fonts, near the top: four fields two by two. */
+.gl-layout-font-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 8px;
+  margin: 8px 0;
+  padding: 6px 8px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.gl-layout-font-fields > legend {
+  padding: 0 4px;
+  font-size: var(--gl-font-size-secondary);
+  color: #475569;
 }
 .gl-layout-item-style > summary {
   cursor: default;

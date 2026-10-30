@@ -366,7 +366,8 @@ describe("LayoutTab plots", () => {
     await flush();
     expect(changes.at(-1)?.sheets[0].style).toEqual({ pointSize: 3 });
     expect(draws.plots.at(-1)?.config.point_size).toBe(3);
-    // The item's own value wins, and a later change to the sheet leaves it alone.
+    // The item's own value wins over the sheet's, until the sheet sets that field again: a field
+    // set on the sheet reaches every plot on it.
     const id = items(changes)[0].id;
     act(() => button("Items").click());
     select(id);
@@ -374,18 +375,21 @@ describe("LayoutTab plots", () => {
     await flush();
     expect(items(changes)[0].recipe).toMatchObject({ style: { contourLevels: 4 } });
     expect(draws.plots.at(-1)?.config).toMatchObject({ point_size: 3, contour_levels: 4 });
+    set("Point opacity", "0.8");
+    await flush();
     act(() => button("Style").click());
     set("Contour levels", "20");
     await flush();
     expect(changes.at(-1)?.sheets[0].style).toEqual({ pointSize: 3, contourLevels: 20 });
-    expect(draws.plots.at(-1)?.config).toMatchObject({ point_size: 3, contour_levels: 4 });
+    expect(items(changes)[0].recipe).toMatchObject({ style: { pointAlpha: 0.8 } });
+    expect(draws.plots.at(-1)?.config).toMatchObject({ point_size: 3, contour_levels: 20, point_alpha: 0.8 });
     // Dropping the item's own values puts it back on the sheet's style.
     act(() => button("Items").click());
     select(id);
     act(() => button("Follow the sheet").click());
     await flush();
     expect("style" in items(changes)[0].recipe).toBe(false);
-    expect(draws.plots.at(-1)?.config.contour_levels).toBe(20);
+    expect(draws.plots.at(-1)?.config).toMatchObject({ contour_levels: 20, point_alpha: 0.4 });
   });
 
   it("draws a plot on the Gating tab's range, sized to the frame, once the files are prepared", async () => {
@@ -689,6 +693,78 @@ describe("LayoutTab moving, copying and arranging", () => {
     expect([element(a.id).style.left, element(b.id).style.left]).toEqual([`${a.x}px`, `${b.x}px`]);
     act(() => { draws.moveable!.onDragEnd({ target: element(a.id), isDrag: true, datas, lastEvent: { dist: [80, 80] } }); });
     expect(items(changes).map(({ x }) => x)).toEqual([a.x, b.x]);
+  });
+
+  it("sets a style field on every selected plot at once, and puts them all back on the sheet's style", async () => {
+    const changes = mount(fixture());
+    await flush();
+    act(() => button("+ Biplot").click());
+    act(() => button("+ Biplot").click());
+    await flush();
+    key({ key: "a", metaKey: true });
+    expect(host.textContent).toContain("Style of the 2 selected plots");
+    act(() => {
+      const input = host.querySelector<HTMLInputElement>('input[aria-label="Contour levels"]')!;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "4");
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await flush();
+    expect(items(changes).map((item) => item.recipe)).toEqual([
+      expect.objectContaining({ style: { contourLevels: 4 } }),
+      expect.objectContaining({ style: { contourLevels: 4 } }),
+    ]);
+    act(() => button("Follow the sheet").click());
+    expect(items(changes).every((item) => !("style" in item.recipe))).toBe(true);
+  });
+
+  it("shows the selected plots' own fonts near the top, marks a size they differ in, and sets it on all of them", async () => {
+    const changes = mount(fixture());
+    await flush();
+    act(() => button("+ Biplot").click());
+    act(() => button("+ Biplot").click());
+    await flush();
+    const [a, b] = items(changes).map((item) => item.id);
+    const set = (label: string, value: string) => act(() => {
+      const input = host.querySelector<HTMLInputElement>(`.gl-layout-font-fields input[aria-label="${label}"]`)!;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    select(a);
+    set("Axis font", "16");
+    await flush();
+    expect(items(changes)[0].recipe).toMatchObject({ style: { fontAxis: 16 } });
+    // The long Style list leaves the fonts to the group above it.
+    expect(host.querySelector('.gl-layout-item-style input[aria-label="Axis font"]')).toBeNull();
+    select(a, b);
+    expect(host.querySelector(".gl-layout-font-fields")!.textContent).toContain("Axis (mixed)");
+    set("Axis font", "14");
+    await flush();
+    expect(items(changes).map((item) => item.recipe)).toEqual([
+      expect.objectContaining({ style: { fontAxis: 14 } }),
+      expect.objectContaining({ style: { fontAxis: 14 } }),
+    ]);
+    // The sheet's fonts report the plots' and reach every one of them.
+    key({ key: "Escape" });
+    act(() => button("Style").click());
+    expect(host.querySelector<HTMLInputElement>('.gl-layout-font-fields input[aria-label="Axis font"]')!.value).toBe("14");
+    set("Axis font", "18");
+    await flush();
+    expect(items(changes).every((item) => !("style" in item.recipe))).toBe(true);
+    expect(changes.at(-1)!.sheets[0].style).toMatchObject({ fontAxis: 18 });
+  });
+
+  it("undoes an add another tab made, taking the layout as it was before as its first step", () => {
+    const before = createDefaultLayoutWorkspace();
+    before.sheets[0].items.push({ id: "kept", x: 57, y: 57, width: 160, height: 32, z: 1, recipe: { kind: "text", text: "Kept", fontSize: 18 } });
+    // Handed over once, as App hands it after an add, then gone.
+    const takeUndoSeed = vi.fn().mockReturnValueOnce(before).mockReturnValue(null);
+    const changes = mount(fixture(), {}, null, { takeUndoSeed });
+    expect(takeUndoSeed).toHaveBeenCalled();
+    expect(button("Undo").disabled).toBe(false);
+    act(() => button("Undo").click());
+    expect(items(changes).map((item) => item.id)).toEqual(["kept"]);
+    expect(button("Undo").disabled).toBe(true);
+    expect(button("Redo").disabled).toBe(false);
   });
 
   it("undoes and redoes the layout from anywhere on the window while the tab is shown, leaving a field's own undo alone", () => {
@@ -1446,8 +1522,10 @@ const setInput = (el: HTMLInputElement, value: string) => act(() => {
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(el, value);
   el.dispatchEvent(new Event("input", { bubbles: true }));
 });
-const labelled = <T extends HTMLElement>(text: string, selector: string) =>
-  [...host.querySelectorAll<HTMLLabelElement>("label")].find((label) => label.textContent?.startsWith(text))!.querySelector<T>(selector)!;
+const labelled = <T extends HTMLElement>(text: string, selector: string) => {
+  const labels = [...host.querySelectorAll<HTMLLabelElement>("label")];
+  return (labels.find((label) => label.textContent?.trim() === text) ?? labels.find((label) => label.textContent?.startsWith(text)))!.querySelector<T>(selector)!;
+};
 
 describe("LayoutTab titles, bound text and zoom", () => {
   it("titles plots by the sheet's template, the automatic one naming what differs", async () => {
