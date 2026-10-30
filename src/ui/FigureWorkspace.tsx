@@ -43,6 +43,7 @@ import { useFigureSources } from "./useFigureSources";
 import { treeLabelMove } from "../engine/illustration";
 import { facetColumns, groupCheckedCount, toggleGroupChecked } from "../engine/sampleFacets";
 import type { LayoutDisplayMode, LayoutGridCell, LayoutGridHeading, LayoutGridHeadings, LayoutPlotRecipe } from "../engine/layout";
+import { NO_TITLE } from "../engine/layoutTitle";
 
 /** The placeholder a Layout text block reads for a figure dimension's heading, or null for one it cannot (a page). */
 function headingTemplate(dimension: FigureDimension): string | null {
@@ -90,7 +91,8 @@ interface Props {
   onFitChannels?: (keys: readonly string[]) => void;
   /** Put the figure's plots, one per file and plot, on the Layout tab. */
   /** Plots for the Layout tab; with `cells`, one per recipe, they keep their arrangement there. */
-  onAddToLayout?: (recipes: LayoutPlotRecipe[], cells?: readonly LayoutGridCell[], headings?: LayoutGridHeadings) => void;
+  /** With cells, the grid's headings and the panels' size here, so each plot arrives drawn at that size. */
+  onAddToLayout?: (recipes: LayoutPlotRecipe[], cells?: readonly LayoutGridCell[], headings?: LayoutGridHeadings, panelSize?: number) => void;
   /** Put the whole figure, as it is, on the Layout tab as one block. */
   onAddFigureToLayout?: (config: IllustrationConfig) => void;
   /** Show a panel's file, population and channels on the Gating tab. */
@@ -377,28 +379,32 @@ export function FigureWorkspace({
     const columns = [...new Set(targets.map((p) => p.column))].sort((a, b) => a - b);
     const recipes: LayoutPlotRecipe[] = [];
     const cells: LayoutGridCell[] = [];
+    // The panels here have no title of their own: their headings name them. They go untitled,
+    // and the headings go with them.
     for (const panel of targets) {
       for (const recipe of layoutRecipesFor([panel])) {
-        recipes.push(recipe);
+        recipes.push({ ...recipe, title: NO_TITLE });
         cells.push({ row: rows.indexOf(panel.row), column: columns.indexOf(panel.column) });
       }
     }
     // The figure's headings go along as text that reads the first plot of its row or column,
     // so a column headed by a file's condition still reads it there; a heading with no
-    // placeholder (a page) is carried as written. One row or one column needs no heading.
+    // placeholder (a page) is carried as written. Every heading drawn here goes, a lone row's or
+    // column's included, since the plots carry no title to name them instead.
     const headingOf = (values: readonly FigureValue[]): LayoutGridHeading => {
       const templates = values.map((value) => headingTemplate(value.dimension));
       return { text: values.map((value) => value.label).join(" · "), ...(templates.every(Boolean) ? { template: templates.join(" · ") } : {}) };
     };
+    const shown = (values: readonly FigureValue[] | undefined) => !!values?.some((value) => value.label);
     const headings: LayoutGridHeadings = {
-      columns: columns.length > 1 && page ? columns.map((column) => headingOf(page.columns[column] ?? [])) : [],
-      rows: rows.length > 1 && page ? rows.map((row) => headingOf(page.rows[row] ?? [])) : [],
+      columns: page && columns.some((column) => shown(page.columns[column])) ? columns.map((column) => headingOf(page.columns[column] ?? [])) : [],
+      rows: page && rows.some((row) => shown(page.rows[row])) ? rows.map((row) => headingOf(page.rows[row] ?? [])) : [],
     };
     return { recipes, cells, headings };
   };
   const addPanelsToLayout = (targets: readonly FigurePanel[]) => {
     const placed = placedRecipesFor(targets);
-    if (placed.recipes.length) onAddToLayout?.(placed.recipes, placed.cells, placed.headings);
+    if (placed.recipes.length) onAddToLayout?.(placed.recipes, placed.cells, placed.headings, figure.panelSize);
   };
   const selectedPanels = page ? page.panels.filter((p) => selectedPanelKeys.has(p.key)) : [];
   const onPanelClick = (panel: FigurePanel, event: ReactMouseEvent<HTMLElement>) => {
@@ -499,6 +505,7 @@ export function FigureWorkspace({
   };
   const layoutRecipesFor = (targets: readonly FigurePanel[]): LayoutPlotRecipe[] => {
     const recipes: LayoutPlotRecipe[] = [];
+    const layoutFontScale = config.scaleFontsWithPlot ? figure.panelSize / 280 : 1;
     for (const panel of targets) {
       if (panel.plot.type === "heatmap") continue;
       const perFile: { sampleId: string; populationId: string }[] = [];
@@ -518,8 +525,31 @@ export function FigureWorkspace({
         xChannel: panel.plot.x,
         yChannel: panel.plot.type === "histogram" ? null : panel.plot.y,
         displayMode: (figure.composition === "overlay" ? "scatter" : config.displayMode) as LayoutDisplayMode,
-        // Titled by the sheet's template there; a plot named by the user carries its name for {plot}.
-        ...(panel.plot.name && panel.plot.name !== panel.plot.x ? { label: panel.plot.name } : {}),
+        // Titled by the sheet's template there; the plot carries its name here for {plot}, so a
+        // heading reads there as it does here.
+        ...(panel.plot.name ? { label: panel.plot.name } : {}),
+        // Drawn there as here: this figure's style, as the plot's own. Fields the sheet already
+        // has are dropped when it is placed, so the sheet's Style still reaches the rest.
+        style: {
+          pointSize: config.pointSize,
+          pointAlpha: config.pointAlpha,
+          maxEvents: config.allEvents ? 0 : config.maxEvents,
+          contourThreshold: config.contourThreshold,
+          ...(config.contourLevels !== undefined ? { contourLevels: config.contourLevels } : {}),
+          kdeBandwidth: config.kdeBandwidth,
+          gateLineWidth: config.gateLineWidth,
+          pubStyle: config.pubStyle,
+          gateLabels: config.gateLabelFormat ?? "name-percent",
+          histLineWidth: config.histLineWidth,
+          histFill: config.histFill,
+          histFillAlpha: config.histFillAlpha,
+          // The sizes the panels are drawn with here (styledFigurePlot): scaled with the panel when
+          // the figure scales its fonts, since the Layout plot draws its fonts as given.
+          fontTick: config.fontTick * layoutFontScale,
+          fontAxis: config.fontAxis * layoutFontScale,
+          fontTitle: config.fontTitle * layoutFontScale,
+          fontGate: config.fontGate * layoutFontScale,
+        },
       });
       // A pooled panel is one pooled plot there, its first file the reference; otherwise one
       // plot per file.

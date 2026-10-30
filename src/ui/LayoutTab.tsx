@@ -69,6 +69,7 @@ import {
   type LayoutProportionsRecipe,
   isPlotLikeRecipe,
   layoutItemZoom,
+  zoomField,
   type LayoutRecipe,
   type LayoutSheet,
   type LayoutStrategyRecipe,
@@ -76,6 +77,7 @@ import {
 } from "../engine/layout";
 import type { IllustrationConfig } from "../engine/workspace";
 import { buildIllustrationPayload, type IllustrationOptions } from "../engine/illustration";
+import { populationBranchGateOrder } from "../engine/branchGates";
 import { buildPooledPlotPayload, poolCompatibility, pooledGateAgreement, type PooledMember } from "../engine/pooledPlot";
 import { facetColumns, groupCheckedCount, toggleGroupChecked } from "../engine/sampleFacets";
 import type { CSSProperties } from "react";
@@ -107,7 +109,7 @@ import { composeSheetPages, writeComposedPages, type ComposedPage, type LayoutEx
 import { DEFAULT_ITERATION, expandLayoutSheet, fillPlaceholders, followsIteration, itemsBeyondPaper, tilesThatFit, iterationUnits, metadataUnits, populationUnits, sharedMetadataFields, templateFrame, type DescribeBoundPlot, type LayoutIteration, type LayoutPage as ExpandedPage, type LayoutPageItem } from "../engine/layoutBatch";
 import { UNASSIGNED_METADATA_VALUE } from "../engine/layoutBatch";
 import { followSheetIteration } from "./layoutFollow";
-import { automaticTitleTemplate, fieldsFromTemplate, plotTitle, plotTitleContext, templateFromFields, titleFields, TITLE_PLACEHOLDERS, TITLE_PRESETS, TITLE_SEPARATORS } from "../engine/layoutTitle";
+import { automaticTitleTemplate, fieldsFromTemplate, NO_TITLE, plotTitle, plotTitleContext, templateFromFields, titleFields, TITLE_PLACEHOLDERS, TITLE_PRESETS, TITLE_SEPARATORS } from "../engine/layoutTitle";
 import { alignItems, arrangeUnits, distributeItems, fitContentToPage, fitPageToContent, groupItems, ungroupItems, type AlignHow, type DistributeHow } from "../engine/layoutArrange";
 import { useI18n } from "./i18n";
 import { TabIntro, TabIntroToggle, useTabIntro } from "./TabIntro";
@@ -133,6 +135,12 @@ export interface LayoutSampleView {
 interface Props {
   workspace: LayoutWorkspace;
   onChange: (workspace: LayoutWorkspace) => void;
+  /**
+   * The layout as it was before another tab added to it, handed over once and then cleared: the
+   * tab takes it as an Undo step, so an add sent from the Illustration, Strategy or Plotting tab
+   * is undone here like an edit made here.
+   */
+  takeUndoSeed?: () => LayoutWorkspace | null;
   samples: readonly FigureSample[];
   /** The files checked in the Samples pane, the workspace's groups and their membership, and the metadata columns: what an iteration draws from. */
   checkedSampleIds?: readonly string[];
@@ -223,6 +231,20 @@ export function isBakedTitle(title: string, population: string, fileNames: reado
   return fileNames.some((file) => !!file && (title === `${population} · ${file}` || title.startsWith(`${population} · ${file} · `)));
 }
 
+/** The smallest frame side a plot is drawn at (the plot's 120 px floor inside the host's inset). */
+const SMALLEST_DRAWN_PLOT = 128;
+
+/**
+ * An item's zoom once resized to a frame. The zoom is kept, so a plot is drawn again to fill the
+ * frame with its fonts the size they look; but a plot is never drawn smaller than it can be, so
+ * one made smaller than that is drawn at that size and shown scaled to the frame.
+ */
+function resizedFrame(item: LayoutItem, width: number, height: number): { zoom?: number } {
+  const zoom = layoutItemZoom(item);
+  if (item.recipe.kind !== "biplot" && item.recipe.kind !== "histogram") return zoomField(zoom);
+  return zoomField(Math.min(zoom, Math.min(width, height) / SMALLEST_DRAWN_PLOT));
+}
+
 function itemTitle(
   item: LayoutItem,
   samples: readonly LayoutSampleView[],
@@ -230,7 +252,7 @@ function itemTitle(
 ): string {
   const recipe = item.recipe;
   if (recipe.kind === "text") return recipe.text.split("\n")[0] || "Text";
-  if (recipe.title?.trim()) return recipe.title.trim();
+  if (recipe.title?.trim() && recipe.title.trim() !== NO_TITLE) return recipe.title.trim();
   if (recipe.kind === "figure") return recipe.illustration.figure?.name?.trim() || "Figure";
   if (recipe.kind === "proportions") return recipe.settings.plotType === "box" ? "Boxplot" : "Composition";
   if (recipe.kind === "imagewall") return `${recipe.populationName || "Population"} · ${recipe.fileName || "images"}`;
@@ -661,6 +683,9 @@ function LayoutPlotSurface({
         gateLabelFormat: style.gateLabels,
         fontSizes: fontSizesOf(style),
         scaleFontsWithPlot: true,
+        // A population with no events is drawn as its axes and gates, as the Illustration tab
+        // draws it, rather than replaced by a message.
+        includeEmpty: true,
       };
       const draw = (plot: Record<string, unknown>, gates: unknown[]) =>
         loadMiniPlots().renderMiniPlot(host, {
@@ -703,7 +728,9 @@ function LayoutPlotSurface({
       const payload = buildIllustrationPayload(
         source.sample,
         state.gates,
-        state.gate_order,
+        // Only the plot's branch, as the Illustration and Gating tabs draw it: the gates drawn on
+        // this population and its descendants, not every gate sharing these channels.
+        populationBranchGateOrder(state.populations, state.gates, state.gate_order, populationId),
         state.populations,
         source.derived.masks,
         source.derived.stats.event_count,
@@ -957,19 +984,89 @@ const LAYOUT_STYLE_NUMBERS: readonly { key: LayoutStyleNumber; label: string; st
  * The style fields, showing the effective value of each; a field the record sets itself is
  * marked. Used for the sheet's style and, under Items, for an item's own values over it.
  */
+const LAYOUT_FONT_KEYS = ["fontTick", "fontAxis", "fontTitle", "fontGate"] as const;
+/** The Fonts group's short names; "Plot title", so it is not taken for the plot's Title field. */
+const FONT_FIELD_NAMES: Record<string, string> = { fontTick: "Tick", fontAxis: "Axis", fontTitle: "Plot title", fontGate: "Gate label" };
+
+/**
+ * The fonts of what is selected, read from the items themselves: each plot keeps its own sizes
+ * and each text block its own, so a size that differs among them is marked, and a size set here is
+ * set on every one of them. A plot's title size shows only where a plot draws a title: one sent
+ * from the Illustration tab has none, its heading being a text block.
+ */
+function LayoutFontFields({
+  styles,
+  showTitle = true,
+  texts = [],
+  onChange,
+  onTextChange,
+}: Readonly<{
+  /** Each selected plot's style as it is drawn. */
+  styles: readonly LayoutPlotStyle[];
+  /** Whether any of the plots draws a title. */
+  showTitle?: boolean;
+  /** Each selected text block's font. */
+  texts?: readonly { fontSize: number; bold: boolean }[];
+  onChange: (patch: Partial<LayoutPlotStyle>) => void;
+  onTextChange?: (patch: { fontSize?: number; bold?: boolean }) => void;
+}>) {
+  const { t } = useI18n();
+  if (!styles.length && !texts.length) return null;
+  const mixed = (count: number) => (count > 1 ? ` (${t("mixed")})` : "");
+  const textSizes = [...new Set(texts.map((text) => text.fontSize))];
+  return (
+    <fieldset className="gl-layout-font-fields">
+      <legend>{t("Fonts (px)")}</legend>
+      {styles.length > 0 && LAYOUT_STYLE_NUMBERS
+        .filter(({ key }) => (LAYOUT_FONT_KEYS as readonly string[]).includes(key) && (showTitle || key !== "fontTitle"))
+        .map(({ key, label, step }) => {
+          const values = [...new Set(styles.map((style) => style[key]))];
+          return (
+            <label key={key} className="gl-field-inline" title={values.length > 1 ? t("The selected plots differ: {values}", { values: values.join(", ") }) : undefined}>
+              {t(FONT_FIELD_NAMES[key])}{mixed(values.length)}
+              <NumberField
+                aria-label={t(label)}
+                value={values[0]}
+                min={LAYOUT_STYLE_RANGES[key][0]}
+                max={LAYOUT_STYLE_RANGES[key][1]}
+                step={step}
+                onCommit={(value) => onChange({ [key]: value })}
+              />
+            </label>
+          );
+        })}
+      {texts.length > 0 && onTextChange && (
+        <>
+          <label className="gl-field-inline" title={textSizes.length > 1 ? t("The selected text blocks differ: {values}", { values: textSizes.join(", ") }) : undefined}>
+            {t("Text box")}{mixed(textSizes.length)}
+            <NumberField aria-label={t("Text font")} min={8} max={72} integer value={textSizes[0]} onCommit={(fontSize) => onTextChange({ fontSize })} />
+          </label>
+          <label className="gl-check">
+            <input type="checkbox" checked={texts.every((text) => text.bold)} onChange={(event) => onTextChange({ bold: event.target.checked })} />
+            {t("Bold")}
+          </label>
+        </>
+      )}
+    </fieldset>
+  );
+}
+
 function LayoutStyleFields({
   effective,
   own,
   onChange,
+  omit = [],
 }: Readonly<{
   effective: LayoutPlotStyle;
   own: Partial<LayoutPlotStyle>;
   onChange: (patch: Partial<LayoutPlotStyle>) => void;
+  /** Fields shown elsewhere, as a selection's fonts are. */
+  omit?: readonly (keyof LayoutPlotStyle)[];
 }>) {
   const { t } = useI18n();
   return (
     <div className="gl-layout-style-fields">
-      {LAYOUT_STYLE_NUMBERS.map(({ key, label, step, integer }) => (
+      {LAYOUT_STYLE_NUMBERS.filter(({ key }) => !omit.includes(key)).map(({ key, label, step, integer }) => (
         <Fragment key={key}>
           <label className={"gl-field-inline" + (key in own ? " is-own" : "")}>
             {t(label)}
@@ -1114,6 +1211,7 @@ function LayoutTextEditor({
 export function LayoutTab({
   workspace,
   onChange,
+  takeUndoSeed,
   samples: files,
   checkedSampleIds = [],
   groups = [],
@@ -1222,6 +1320,16 @@ export function LayoutTab({
   const ready = files.length === 0 || (sourceResult.current && sourceResult.pending === 0);
   const undoRef = useRef<LayoutWorkspace[]>([]);
   const redoRef = useRef<LayoutWorkspace[]>([]);
+  // An add from another tab arrives as a new workspace from outside; what it replaced becomes an
+  // Undo step. Read on mount (an add opens this tab) and on every change while it is open.
+  const [, setSeedTaken] = useState(0);
+  useEffect(() => {
+    const seed = takeUndoSeed?.();
+    if (!seed) return;
+    undoRef.current = [seed, ...undoRef.current].slice(0, 30);
+    redoRef.current = [];
+    setSeedTaken((count) => count + 1);
+  }, [workspace, takeUndoSeed]);
   const activeSheet =
     workspace.sheets.find(({ id }) => id === workspace.activeSheetId) ??
     workspace.sheets[0];
@@ -1311,6 +1419,9 @@ export function LayoutTab({
       : []),
     iteration.mode === "metadata" ? { metadataColumn: iteration.column } : undefined,
   );
+  /** Whether an item is a plot that draws a title: its own, else the sheet's template, is not "No title". */
+  const drawsTitle = (item: LayoutItem): boolean =>
+    isPlotLikeRecipe(item.recipe) && (item.recipe.title?.trim() || sheetTitleTemplate).trim() !== NO_TITLE;
   useEffect(() => {
     if (pageIndex !== currentPageIndex) setPageIndex(currentPageIndex);
   }, [pageIndex, currentPageIndex]);
@@ -1320,6 +1431,43 @@ export function LayoutTab({
   const selectedTemplateIds = [...new Set(selectedIds.map(templateIdOf))];
   const selectedItems = activeSheet?.items.filter(({ id }) => selectedTemplateIds.includes(id)) ?? [];
   const selectedItem = selectedItems.length === 1 ? selectedItems[0] : null;
+  /** The selected items that take a plot's style. */
+  const selectedPlots = selectedItems.filter((item): item is LayoutItem & { recipe: Extract<LayoutRecipe, { style?: Partial<LayoutPlotStyle> }> } => isPlotLikeRecipe(item.recipe));
+  /** A style field set on the sheet: it reaches every plot on the sheet. */
+  const setSheetStyle = (patch: Partial<LayoutPlotStyle>) =>
+    mutateActiveSheet((sheet) => {
+      sheet.style = normalizeLayoutStyle({ ...sheet.style, ...patch });
+      // Set here, a field reaches every plot on the sheet: a plot's own value for it, as one sent
+      // from the Illustration tab carries, gives way.
+      for (const item of sheet.items) {
+        if (!isPlotLikeRecipe(item.recipe) || !item.recipe.style) continue;
+        const own = { ...item.recipe.style };
+        for (const key of Object.keys(patch)) delete own[key as keyof LayoutPlotStyle];
+        const { style: _old, ...rest } = item.recipe;
+        item.recipe = (Object.keys(own).length ? { ...rest, style: own } : rest) as typeof item.recipe;
+      }
+    });
+  /** The selected text blocks' fonts. */
+  const selectedTexts = selectedItems.flatMap((item) => (item.recipe.kind === "text" ? [{ fontSize: item.recipe.fontSize, bold: item.recipe.bold === true }] : []));
+  /** A font size or weight set on every selected text block. */
+  const setSelectedTextFont = (patch: { fontSize?: number; bold?: boolean }) =>
+    mutateActiveSheet((sheet) => {
+      for (const item of sheet.items) {
+        if (!selectedTemplateIds.includes(item.id) || item.recipe.kind !== "text") continue;
+        const next = { ...item.recipe, ...(patch.fontSize !== undefined ? { fontSize: patch.fontSize } : {}) };
+        if (patch.bold === true) next.bold = true;
+        else if (patch.bold === false) delete next.bold;
+        item.recipe = next;
+      }
+    });
+  /** A style field set on every selected plot, as its own. */
+  const setSelectedPlotsStyle = (patch: Partial<LayoutPlotStyle>) =>
+    mutateActiveSheet((sheet) => {
+      for (const item of sheet.items) {
+        if (!selectedTemplateIds.includes(item.id) || !isPlotLikeRecipe(item.recipe)) continue;
+        item.recipe = { ...item.recipe, style: normalizeLayoutStyle({ ...item.recipe.style, ...patch }) };
+      }
+    });
   const selectedPageItem = selectedItem ? currentPage.items.find((item) => item.templateId === selectedItem.id) ?? null : null;
   const selectedChartRecipe = selectedItem?.recipe.kind === "chart" ? selectedItem.recipe : null;
   /** The files a selected chart draws no point for, and why, for the inspector. */
@@ -1940,7 +2088,14 @@ export function LayoutTab({
       return;
     }
     mutateActiveSheet((sheet) => {
-      for (const item of sheet.items) if (frames[item.id]) Object.assign(item, frames[item.id]);
+      for (const item of sheet.items) {
+        const frame = frames[item.id];
+        if (!frame) continue;
+        Object.assign(item, frame);
+        const { zoom } = resizedFrame(item, frame.width, frame.height);
+        if (zoom === undefined) delete item.zoom;
+        else item.zoom = zoom;
+      }
     });
   };
   /**
@@ -2045,6 +2200,17 @@ export function LayoutTab({
     e.target.style.height = `${e.height}px`;
     e.target.style.left = `${e.drag.left}px`;
     e.target.style.top = `${e.drag.top}px`;
+    // A zoomed item keeps its zoom, so its fonts stay the size they look; its drawing area
+    // follows the frame while it is dragged, and the plot is drawn again to fill it on release.
+    // Below the smallest a plot is drawn, it is shown scaled instead (resizedFrame).
+    const target = e.target as HTMLElement;
+    const item = currentPage.items.find((candidate) => candidate.id === target.dataset.itemId);
+    const body = target.querySelector<HTMLElement>(":scope > .gl-layout-item-body");
+    if (!item || !body) return;
+    const zoom = resizedFrame(item, e.width, e.height).zoom ?? 1;
+    Object.assign(body.style, zoom === 1 && !target.dataset.zoom
+      ? { zoom: "", width: "", height: "" }
+      : { zoom: String(zoom), width: `${Math.round(e.width / zoom)}px`, height: `${Math.round(e.height / zoom)}px` });
   };
   /**
    * A drag that starts inside the selection belongs to Moveable, not to the marquee. A single
@@ -2647,6 +2813,44 @@ export function LayoutTab({
                     <button type="button" className="gl-mini-btn" onClick={() => removeItems(selectedTemplateIds)} title={t("Remove the selected items (Delete)")}>{t("Remove")}</button>
                   </div>
                   <p className="gl-hint">{t("Align and distribute them with the toolbar; drag any of them to move them together; Cmd-G makes them one group.")}</p>
+                  <LayoutFontFields
+                    styles={selectedPlots.map((item) => effectiveLayoutStyle(activeSheet, item.recipe))}
+                    showTitle={selectedPlots.some(drawsTitle)}
+                    texts={selectedTexts}
+                    onChange={setSelectedPlotsStyle}
+                    onTextChange={setSelectedTextFont}
+                  />
+                  {selectedPlots.length > 0 && (
+                    // A field set here is set on every selected plot, so a grid sent from the
+                    // Illustration tab is tuned together, not one plot at a time.
+                    <details className="gl-layout-item-style">
+                      <summary>{t("Style of the {count} selected plots", { count: selectedPlots.length })}</summary>
+                      <LayoutStyleFields
+                        effective={effectiveLayoutStyle(activeSheet, selectedPlots[0].recipe)}
+                        own={selectedPlots[0].recipe.style ?? {}}
+                        omit={LAYOUT_FONT_KEYS}
+                        onChange={setSelectedPlotsStyle}
+                      />
+                      {selectedPlots.some((item) => Object.keys(item.recipe.style ?? {}).length > 0) && (
+                        <button
+                          type="button"
+                          className="gl-mini-btn"
+                          title={t("Drop the selected plots' own values; they then follow the sheet's style")}
+                          onClick={() =>
+                            mutateActiveSheet((sheet) => {
+                              for (const item of sheet.items) {
+                                if (!selectedTemplateIds.includes(item.id) || !isPlotLikeRecipe(item.recipe)) continue;
+                                const { style: _own, ...rest } = item.recipe;
+                                item.recipe = rest as typeof item.recipe;
+                              }
+                            })
+                          }
+                        >
+                          {t("Follow the sheet")}
+                        </button>
+                      )}
+                    </details>
+                  )}
                 </div>
               )}
               {!selectedItems.length && (
@@ -2663,6 +2867,13 @@ export function LayoutTab({
                   aria-label={t("Selected layout item")}
                 >
                   <strong>{t("Selected")}</strong>
+                  <LayoutFontFields
+                    styles={selectedPlots.map((item) => effectiveLayoutStyle(activeSheet, item.recipe))}
+                    showTitle={selectedPlots.some(drawsTitle)}
+                    texts={selectedTexts}
+                    onChange={setSelectedPlotsStyle}
+                    onTextChange={setSelectedTextFont}
+                  />
                   <label className="gl-check">
                     <input
                       type="checkbox"
@@ -2758,36 +2969,6 @@ export function LayoutTab({
                       {selectedItem.recipe.readsFrom && (
                         <p className="gl-hint">{t("The placeholders read that plot: {list}. On an iterated sheet they follow it from tile to tile.", { list: TITLE_PLACEHOLDERS })}</p>
                       )}
-                      <label className="gl-field-inline">
-                        {t("Font")}
-                        <NumberField
-                          min={8}
-                          max={72}
-                          integer
-                          value={selectedItem.recipe.fontSize}
-                          onCommit={(fontSize) =>
-                            updateSelectedRecipe((recipe) =>
-                              recipe.kind === "text" ? { ...recipe, fontSize } : recipe,
-                            )
-                          }
-                        />
-                      </label>
-                      <label className="gl-check">
-                        <input
-                          type="checkbox"
-                          checked={selectedItem.recipe.bold === true}
-                          onChange={(event) =>
-                            updateSelectedRecipe((recipe) => {
-                              if (recipe.kind !== "text") return recipe;
-                              const next = { ...recipe };
-                              if (event.target.checked) next.bold = true;
-                              else delete next.bold;
-                              return next;
-                            })
-                          }
-                        />
-                        {t("Bold")}
-                      </label>
                     </>
                   ) : selectedItem.recipe.kind === "figure" ? (
                     <>
@@ -3301,6 +3482,7 @@ export function LayoutTab({
                         <LayoutStyleFields
                           effective={effectiveLayoutStyle(activeSheet, selectedItem.recipe)}
                           own={selectedItem.recipe.style ?? {}}
+                          omit={LAYOUT_FONT_KEYS}
                           onChange={(patch) =>
                             updateSelectedRecipe((recipe) =>
                               !isPlotLikeRecipe(recipe)
@@ -3754,14 +3936,19 @@ export function LayoutTab({
                 );
               })()}
               <p className="gl-hint">{t("What every plot is called unless it has a title of its own under Items. Placeholders: {list}. \"What differs across the page\" names the population when the page is one file's populations, the file when it is one population's files, both otherwise; on an iterated sheet it looks across every page, so each page is titled alike and names what it is drawn for.", { list: TITLE_PLACEHOLDERS })}</p>
+              <LayoutFontFields
+                styles={(() => {
+                  const plots = activeSheet.items.filter((item) => isPlotLikeRecipe(item.recipe));
+                  return plots.length ? plots.map((item) => effectiveLayoutStyle(activeSheet, item.recipe)) : [effectiveLayoutStyle(activeSheet)];
+                })()}
+                showTitle={!activeSheet.items.some((item) => isPlotLikeRecipe(item.recipe)) || activeSheet.items.some(drawsTitle)}
+                onChange={setSheetStyle}
+              />
               <LayoutStyleFields
                 effective={effectiveLayoutStyle(activeSheet)}
                 own={activeSheet.style ?? {}}
-                onChange={(patch) =>
-                  mutateActiveSheet((sheet) => {
-                    sheet.style = normalizeLayoutStyle({ ...sheet.style, ...patch });
-                  })
-                }
+                omit={LAYOUT_FONT_KEYS}
+                onChange={setSheetStyle}
               />
               {Object.keys(activeSheet.style ?? {}).length > 0 && (
                 <button
@@ -3810,7 +3997,15 @@ export function LayoutTab({
             className="gl-layout-canvas"
             aria-label={activeSheet.name}
             onContextMenu={openCanvasMenu}
-            style={{ width: activeSheet.width, height: activeSheet.height, transform: `scale(${zoom})` }}
+            // The grid's lines are drawn 1/zoom thick, so the scale leaves them one screen pixel
+            // at any zoom while their spacing, the page's, scales with it.
+            style={{
+              width: activeSheet.width,
+              height: activeSheet.height,
+              transform: `scale(${zoom})`,
+              ["--gl-hair" as string]: `${1 / zoom}px`,
+              backgroundImage: `linear-gradient(#eef2f7 ${1 / zoom}px, transparent ${1 / zoom}px), linear-gradient(90deg, #eef2f7 ${1 / zoom}px, transparent ${1 / zoom}px)`,
+            }}
           >
             {pageOrigins(activeSheet.page).map((origin) => {
               const one = pageSizePx(activeSheet.page);
