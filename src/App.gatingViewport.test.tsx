@@ -10,7 +10,8 @@ interface CapturedPlotProps {
   payload: {
     x_range: [number, number];
     y_range: [number, number];
-    gates: Array<{ gate_id: string; gate_type: string; vertices?: [number, number][]; color?: string; space_badge?: string }>;
+    gates: Array<{ gate_id: string; gate_type: string; x_channel?: string; y_channel?: string; vertices?: [number, number][]; color?: string; space_badge?: string }>;
+    selected_gate_id?: string | null;
     gates_only?: boolean;
     gate_edge_mode?: string;
     display_mode?: string;
@@ -404,6 +405,37 @@ describe("App gating viewport invariant", () => {
     expect([plotHarness.props!.payload.x_label, plotHarness.props!.payload.y_label]).toEqual(["SSC-A", "FSC-A"]);
     act(() => swap.click());
     expect([plotHarness.props!.payload.x_label, plotHarness.props!.payload.y_label]).toEqual(["FSC-A", "SSC-A"]);
+  });
+
+  it("keeps a gate on the plot when the axes are swapped, and selecting it leaves them swapped", async () => {
+    act(() => root.render(<App />));
+    const fcsInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(fcsInput, "files", { configurable: true, value: [testFile()] });
+    await act(async () => {
+      fcsInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // With its population, so the tree shows the gate's pill.
+    act(() => plotHarness.props!.onNewGate({ gate_type: "polygon", vertices: [[10, 10], [14, 10], [14, 14], [10, 20]], x_channel: "FSC-A", y_channel: "SSC-A" }));
+    const createPop = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((i) => i.parentElement?.textContent?.includes("Also create a population"))!;
+    if (!createPop.checked) act(() => createPop.click());
+    act(() => button("Create").click());
+    const id = plotHarness.props!.payload.gates[0].gate_id;
+    const drawn = () => plotHarness.props!.payload.gates.find((gate) => gate.gate_id === id);
+    const before = drawn()!.vertices;
+    const area = host.querySelector<HTMLElement>(".gl-plot-area")!;
+    act(() => { area.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 40 })); });
+    act(() => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent === "Swap X and Y")!.click());
+    expect([plotHarness.props!.payload.x_label, plotHarness.props!.payload.y_label]).toEqual(["SSC-A", "FSC-A"]);
+    // Still drawn, in its own orientation: the renderer transposes it on screen.
+    expect(drawn()).toBeDefined();
+    expect([drawn()!.x_channel, drawn()!.y_channel]).toEqual(["FSC-A", "SSC-A"]);
+    expect(drawn()!.vertices).toEqual(before);
+    // Selecting it in the population tree does not turn the plot back.
+    act(() => host.querySelector<HTMLElement>(".pop-tree-gate-badge")!.click());
+    expect(plotHarness.props!.payload.selected_gate_id).toBe(id);
+    expect([plotHarness.props!.payload.x_label, plotHarness.props!.payload.y_label]).toEqual(["SSC-A", "FSC-A"]);
   });
 
   it("keeps the plot two strips below the header: plot types at the top level, colouring and gate settings in popovers", async () => {

@@ -21,7 +21,7 @@ import { ModalEscape } from "./ui/useModalEscape";
 import { ActionNote } from "./ui/ActionNote";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type GatingPlotActions, type NewGate } from "./plots/GatingPlot";
 import { startPanSession, zoomAnchored } from "./plots/panGesture";
-import { buildPlotGates, keepOpenSides, type PlotGate } from "./plots/gatePayload";
+import { buildPlotGates, keepOpenSides, plotGatesInPlotOrientation, type PlotGate } from "./plots/gatePayload";
 import { HistogramPlot, type RangeEdit } from "./plots/HistogramPlot";
 import type { AxisTicks } from "./engine/ticks";
 import { liveGateIdsInFileTree, noFileFollowsTree, pooledVersions, tailoredInCopy, viewedFileGates, withOwnGateMasks, workspaceTrees, type DrawnGate, type PooledVersion, type TailoredVersion } from "./plots/tailoredGates";
@@ -12697,7 +12697,9 @@ export default function App({ hostProposals = null }: {
       if (g) {
         const gx = sample.index(g.x_channel);
         const gy = sample.index(g.y_channel);
-        if (gx !== undefined && gy !== undefined && (gx !== xIdx || gy !== yIdx)) {
+        // A gate already on the plot, either way round, leaves the axes as they are.
+        const onPlot = (gx === xIdx && gy === yIdx) || (gx === yIdx && gy === xIdx);
+        if (gx !== undefined && gy !== undefined && !onPlot) {
           setXIdx(gx);
           setYIdx(gy);
         }
@@ -14437,7 +14439,7 @@ export default function App({ hostProposals = null }: {
       if (binding) autoFittedScales.current.set(fittedKey, binding);
       const range = includePlotGatesInAxisRange(
         auto ?? sample.displayRange(idx),
-        mainPlotGates,
+        plotGatesInPlotOrientation(mainPlotGates),
         axis,
       );
       setGlobalScales((previous) => ({ ...previous, [key]: range }));
@@ -14593,10 +14595,11 @@ export default function App({ hostProposals = null }: {
       setXRange(null);
       return;
     }
+    const onAxes = plotGatesInPlotOrientation(mainPlotGates);
     setGlobalScale(xKey, includePlotGatesInAxisRange(
-      workspaceAutomaticRanges?.xRange ?? sample.displayRange(xIdx), mainPlotGates, "x"));
+      workspaceAutomaticRanges?.xRange ?? sample.displayRange(xIdx), onAxes, "x"));
     setGlobalScale(yKey, includePlotGatesInAxisRange(
-      workspaceAutomaticRanges?.yRange ?? sample.displayRange(yIdx), mainPlotGates, "y"));
+      workspaceAutomaticRanges?.yRange ?? sample.displayRange(yIdx), onAxes, "y"));
     setXRange(null);
     setYRange(null);
   }, [sample, xIdx, yIdx, workspaceAutomaticRanges, mainPlotGates, histogramView, histogramGates, setGlobalScale]);

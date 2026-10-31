@@ -73,6 +73,8 @@ export interface PlotGate {
   quadrant_anchors?: [number, number][];
   quadrant_counts?: number[];
   quadrant_pcts?: number[];
+  /** Drawn with the plot's axes the other way round, and given in its own orientation (buildPlotGates). */
+  flipped?: boolean;
 }
 
 /** The scope a gate count was taken over, when it is not simply the plotted file's own. */
@@ -302,7 +304,14 @@ export function keepOpenSides(sample: Sample, gate: Gate, edited: [number, numbe
   });
 }
 
-/** Gates drawn on (xChannel, yChannel) in normal orientation, in display space. */
+/**
+ * Gates drawn on (xChannel, yChannel), in display space, in gate order: those drawn with these
+ * axes, and those drawn with them the other way round (after Swap X and Y). A reversed gate is
+ * given in its own orientation, its x_channel the plot's Y, as though the plot were drawn its
+ * way; the renderer transposes it on screen, and its drags and label moves come back in the
+ * gate's own terms. `flipped` marks it for code that reads the payload in the plot's terms
+ * (plotGatesInPlotOrientation).
+ */
 export function buildPlotGates(
   sample: Sample,
   gates: Record<string, Gate>,
@@ -316,6 +325,54 @@ export function buildPlotGates(
    * on screen. Labels keep judging themselves against the data's own extent (axisFrames).
    */
   viewFrames: AxisFrames = [null, null],
+): PlotGate[] {
+  const normal = buildOrientedPlotGates(sample, gates, gateOrder, gateCounts, xChannel, yChannel, countScope, viewFrames);
+  // One channel on both axes (a range, the histogram) has no other orientation.
+  if (xChannel === yChannel) return normal;
+  const reversed = buildOrientedPlotGates(sample, gates, gateOrder, gateCounts, yChannel, xChannel, countScope, [viewFrames[1], viewFrames[0]]);
+  if (!reversed.length) return normal;
+  const byId = new Map<string, PlotGate>(normal.map((gate) => [gate.gate_id, gate]));
+  for (const gate of reversed) byId.set(gate.gate_id, { ...gate, flipped: true });
+  const ids = gateOrder.length ? gateOrder : Object.keys(gates);
+  return ids.flatMap((id) => byId.get(id) ?? []);
+}
+
+/**
+ * The payload's gates in the plot's terms, [X, Y], for code that reads coordinates by axis (the
+ * axis fit): a reversed gate's points, offsets and open sides are swapped back.
+ */
+export function plotGatesInPlotOrientation(gates: readonly PlotGate[]): PlotGate[] {
+  const swap = (p: [number, number]): [number, number] => [p[1], p[0]];
+  const swapAll = (pts: [number, number][]) => pts.map(swap);
+  return gates.map((gate) => {
+    if (!gate.flipped) return gate;
+    return {
+      ...gate,
+      x_channel: gate.y_channel,
+      y_channel: gate.x_channel,
+      label_offset: gate.label_offset && swap(gate.label_offset),
+      ...(gate.vertices ? { vertices: swapAll(gate.vertices) } : {}),
+      ...(gate.outline ? { outline: swapAll(gate.outline) } : {}),
+      ...(gate.unbounded ? { unbounded: { x: gate.unbounded.y, y: gate.unbounded.x } } : {}),
+      ...(gate.center ? { center: swap(gate.center) } : {}),
+      ...(gate.arms
+        ? { arms: Object.fromEntries(Object.entries(gate.arms).map(([key, value]) => [key, Array.isArray(value) ? swapAll(value as [number, number][]) : value])) as PlotGate["arms"] }
+        : {}),
+      flipped: false,
+    };
+  });
+}
+
+/** Gates drawn on (xChannel, yChannel) in that orientation, in display space. */
+function buildOrientedPlotGates(
+  sample: Sample,
+  gates: Record<string, Gate>,
+  gateOrder: string[],
+  gateCounts: Record<string, GateCount>,
+  xChannel: string,
+  yChannel: string,
+  countScope: GateCountScope | null,
+  viewFrames: AxisFrames,
 ): PlotGate[] {
   const out: PlotGate[] = [];
   // The display extent of the DATA on each axis — the frame a label has to land inside.
