@@ -225,6 +225,29 @@ describe("SampleNavigator", () => {
     expect(JSON.parse(localStorage.getItem("gatelab.fileList.foldedGroups") ?? "null")).toEqual([]);
   });
 
+  it("keeps a folded group's header when every file is in it", () => {
+    localStorage.removeItem("gatelab.fileList.foldedGroups");
+    const all: SampleListItem[] = [
+      { id: "D1", name: "D1.fcs", eventCount: 100, channelCount: 2, group: "Treated", groupColour: "#e6820e" },
+      { id: "D2", name: "D2.fcs", eventCount: 100, channelCount: 2, group: "Treated", groupColour: "#e6820e" },
+    ];
+    act(() => root.render(
+      <SampleNavigator items={all} activeId="D1" excludedIds={new Set()} busy={false} importProgress={null}
+        groups={[{ id: "g1", name: "Treated" }]}
+        onOpenFiles={vi.fn()} onOpenFolder={vi.fn()} onManage={vi.fn()} onManageSample={vi.fn()}
+        onActivate={vi.fn()} onToggleIncluded={vi.fn()}
+        onIncludeAll={vi.fn()} onIncludeNone={vi.fn()} onInvertIncluded={vi.fn()} />,
+    ));
+    const head = () => host.querySelector<HTMLButtonElement>(".gl-sample-group-head");
+    act(() => head()!.click());
+    expect(host.querySelectorAll(".gl-sample-row")).toHaveLength(0);
+    expect(host.textContent).not.toContain("No samples match");
+    expect(head()!.getAttribute("aria-expanded")).toBe("false");
+    expect(head()!.textContent).toBe("Treated2");
+    act(() => head()!.click());
+    expect(host.querySelectorAll(".gl-sample-row")).toHaveLength(2);
+  });
+
   it("shows no badge and no key while nothing is tailored", () => {
     act(() => root.render(
       <SampleNavigator

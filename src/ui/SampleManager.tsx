@@ -874,7 +874,8 @@ export function SampleNavigator({
           ) : (
             <em className="gl-hint">{t("No files loaded.")}</em>
           )
-        ) : visible.length === 0 ? (
+        ) : query && visible.length === 0 ? (
+          // Only a search empties the list: with every file in folded groups, the headers stay.
           <em className="gl-hint">{t("No samples match “{query}”.", { query })}</em>
         ) : sections ? sections.map((section) => {
           const folded = isFolded(section.key);
