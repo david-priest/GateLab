@@ -103,9 +103,8 @@ input[type="number"]::-webkit-outer-spin-button {
    the card; the header itself must not clip it, so the card is fixed-width and left-aligned to
    the wrapper rather than centred (the name sits hard against the left edge of the window). */
 .gl-brand { position: relative; display: inline-flex; align-items: center; gap: 10px; flex: none; cursor: default; }
-/* The logo's mark (the three plots) and wordmark are PNGs cut from the artwork at four times these
-   sizes, with the paper knocked out, so they sit on the header's own colour at any pixel density.
-   The header shows all three plots (David, 2026-10-23). */
+/* The hand-and-gate mark and wordmarks use transparent PNGs exported from the approved
+   navy/electric-blue artwork, at several times the displayed size. */
 .gl-brand-mark { display: block; height: 26px; width: auto; }
 .gl-brand-wordmark { display: block; height: 22px; width: auto; }
 .gl-brand:focus-visible { outline: 2px solid var(--gl-color-focus-ring); outline-offset: 2px; border-radius: 3px; }
