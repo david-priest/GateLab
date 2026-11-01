@@ -8,15 +8,15 @@
 
 <p align="center">
   <a href="https://doi.org/10.5281/zenodo.22787965"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.22787965.svg" alt="DOI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1b2027" alt="License: MIT"></a>
-  <img src="https://img.shields.io/badge/runs_in-your_browser-1b2027" alt="Runs in your browser">
-  <img src="https://img.shields.io/badge/exchanges-FlowJo_.wsp_%C2%B7_Gating--ML_2.0-1b2027" alt="Exchanges FlowJo .wsp and Gating-ML 2.0">
-  <img src="https://img.shields.io/badge/imaging-BD_FACSDiscover_S8_cell_images-1b2027" alt="Reads BD FACSDiscover S8 cell images">
-  <img src="https://img.shields.io/badge/interface-English_%C2%B7_%E6%97%A5%E6%9C%AC%E8%AA%9E-1b2027" alt="Interface in English and Japanese">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-08264c" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/runs_in-your_browser-08264c" alt="Runs in your browser">
+  <img src="https://img.shields.io/badge/exchanges-FlowJo_.wsp_%C2%B7_Gating--ML_2.0-08264c" alt="Exchanges FlowJo .wsp and Gating-ML 2.0">
+  <img src="https://img.shields.io/badge/imaging-BD_FACSDiscover_S8_cell_images-08264c" alt="Reads BD FACSDiscover S8 cell images">
+  <img src="https://img.shields.io/badge/interface-English_%C2%B7_%E6%97%A5%E6%9C%AC%E8%AA%9E-08264c" alt="Interface in English and Japanese">
 </p>
 
 <p align="center">
-  <a href="https://gate-lab.github.io/"><img src="https://img.shields.io/badge/Launch_GateLab-in_your_browser_%E2%86%92-ed4e19?style=for-the-badge&labelColor=ed4e19" alt="Launch GateLab in your browser"></a>
+  <a href="https://gate-lab.github.io/"><img src="https://img.shields.io/badge/Launch_GateLab-in_your_browser_%E2%86%92-0866ff?style=for-the-badge&labelColor=0866ff" alt="Launch GateLab in your browser"></a>
 </p>
 
 <p align="center">

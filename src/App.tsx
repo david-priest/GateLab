@@ -10,7 +10,6 @@ import { proportionsBlockFrame } from "./ui/LayoutProportions";
 import { followSheetIteration } from "./ui/layoutFollow";
 import { buildProportionsModel, defaultProportionsSettings, divisionFittedPopulation, type ProportionsSettings } from "./engine/proportionsModel";
 import pkg from "../package.json";
-import brandMark from "./assets/brand/gatelab-mark.png";
 import brandWordmark from "./assets/brand/gatelab-wordmark.png";
 import brandLogo from "./assets/brand/gatelab-logo.jpg";
 import brandWordmarkR from "./assets/brand/gatelabr-wordmark.png";
@@ -14832,9 +14831,7 @@ export default function App({ hostProposals = null }: {
             stating where someone comparing two tools will actually find it. Focusable so it is
             reachable from the keyboard, not only on hover. */}
         <span className="gl-brand" tabIndex={0}>
-          {/* The logo: the mark's three plots, then the wordmark, both cut from the artwork.
-              GateLabR has its own wordmark and logo, the same plots with an orange R. */}
-          <img className="gl-brand-mark" src={brandMark} alt="" />
+          {/* The header uses the wordmark; the full hand-and-gate logo stays in the card. */}
           {isSceHost
             ? <img className="gl-brand-wordmark" src={brandWordmarkR} alt="GateLabR" />
             : <img className="gl-brand-wordmark" src={brandWordmark} alt="GateLab" />}
