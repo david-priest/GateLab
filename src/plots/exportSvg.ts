@@ -7,6 +7,7 @@
 // resolution chunk that image tools read a physical size from.
 
 import type { jsPDF } from "jspdf";
+import { pdfTextInSvg } from "./pdfText";
 import { SCREEN_PX_PER_MM } from "../engine/layout";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -226,6 +227,8 @@ export async function pngBlob(canvas: HTMLCanvasElement, dpi: number): Promise<B
  */
 export async function pdfVectorPage(pdf: jsPDF, root: SVGSVGElement, size: { width: number; height: number }): Promise<boolean> {
   const { svg2pdf } = await import("svg2pdf.js");
+  // The PDF's fonts set WinAnsi only; a name with a Unicode minus came out letter-spaced.
+  pdfTextInSvg(root);
   const holder = document.createElement("div");
   holder.style.cssText = "position:fixed;left:-100000px;top:0;visibility:hidden";
   holder.appendChild(root);

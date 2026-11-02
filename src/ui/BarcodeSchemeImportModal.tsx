@@ -100,7 +100,7 @@ export function BarcodeSchemeImportModal({
   return (
     <div className="gl-modal-backdrop">
       <ModalEscape onClose={onCancel} />
-      <div className="gl-modal" style={{ maxWidth: 720 }}>
+      <div className="gl-modal" role="dialog" aria-modal="true" aria-label={t("Import hierarchy")} style={{ maxWidth: 720 }}>
         <div className="gl-modal-title">{t("Import hierarchy")}</div>
         <div className="gl-modal-note">
           {hierarchyOnly

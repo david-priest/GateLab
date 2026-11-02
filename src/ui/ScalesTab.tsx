@@ -1,20 +1,24 @@
-// ScalesTab.tsx — per-channel display axis ranges for the active file or locked comparison frame.
-// The ranges are a file's own unless the scale lock is on; the display transform is the channel's,
-// the same in every file. Compensation has its own tab so transforms and assay-layer changes stay
+// ScalesTab.tsx — every channel's display transform and axis range, for the active file or locked
+// comparison frame. The ranges are a file's own unless the scale lock is on; the display transform
+// is the channel's, the same in every file, and is set here for any channel as on the Gating tab
+// for the plotted two. Compensation has its own tab so transforms and assay-layer changes stay
 // separate.
 
 import type { Sample } from "../engine/sample";
 import { useI18n } from "./i18n";
 import { TabIntro, TabIntroToggle, useTabIntro } from "./TabIntro";
+import { ChannelTransformSelect } from "./ChannelTransformSelect";
 
 interface Props {
   sample: Sample;
   globalScales: Record<string, [number, number]>;
   onSetGlobalScale: (key: string, range: [number, number] | null) => void;
   lockedBetweenFiles: boolean;
+  /** A channel's transform changed: its range, in the old transform's units, is fitted again. */
+  onTransformChanged: (key: string) => void;
 }
 
-export function ScalesTab({ sample, globalScales, onSetGlobalScale, lockedBetweenFiles }: Props) {
+export function ScalesTab({ sample, globalScales, onSetGlobalScale, lockedBetweenFiles, onTransformChanged }: Props) {
   const { t } = useI18n();
   const intro = useTabIntro("scales");
   return (
@@ -28,14 +32,15 @@ export function ScalesTab({ sample, globalScales, onSetGlobalScale, lockedBetwee
         </div>
         <TabIntro intro={intro} className="gl-scales-intro">
           {t(lockedBetweenFiles
-            ? "The scale lock is on, so these ranges are shared by every file and switching files keeps the same frame. The display transform (linear, logicle, arcsinh) belongs to the channel and is the same in every file whether or not the lock is on. Min and Max are in display (transformed) units; blank means automatic. Panning and zooming on the Gating tab write here too."
-            : "Each file keeps its own axis ranges: switching files loads that file's fitted or edited range. The display transform (linear, logicle, arcsinh) belongs to the channel and is the same in every file. Min and Max are in display (transformed) units; blank means automatic. Panning and zooming on the Gating tab write here too.")}
+            ? "The scale lock is on, so these ranges are shared by every file and switching files keeps the same frame. The display transform (linear, logicle, arcsinh) belongs to the channel and is the same in every file whether or not the lock is on; changing it fits the channel's range again. Min and Max are in display (transformed) units; blank means automatic. Panning and zooming on the Gating tab write here too."
+            : "Each file keeps its own axis ranges: switching files loads that file's fitted or edited range. The display transform (linear, logicle, arcsinh) belongs to the channel and is the same in every file; changing it fits the channel's range again. Min and Max are in display (transformed) units; blank means automatic. Panning and zooming on the Gating tab write here too.")}
         </TabIntro>
-        <div className="gl-stats-scroll gl-grow-scroll" style={{ maxWidth: 560 }}>
+        <div className="gl-stats-scroll gl-grow-scroll" style={{ maxWidth: 720 }}>
           <table className="gl-scales-table">
             <thead>
               <tr>
                 <th className="gl-stats-name">{t("Channel")}</th>
+                <th className="gl-stats-name">{t("Transform")}</th>
                 <th className="gl-stats-num">{t("Min")}</th>
                 <th className="gl-stats-num">{t("Max")}</th>
                 <th></th>
@@ -52,6 +57,9 @@ export function ScalesTab({ sample, globalScales, onSetGlobalScale, lockedBetwee
                 return (
                   <tr key={c.key} className={gs ? "active" : ""}>
                     <td className="gl-stats-name">{sample.channelLabel(i)}</td>
+                    <td className="gl-stats-name">
+                      <ChannelTransformSelect sample={sample} idx={i} label={sample.channelLabel(i)} onChanged={() => onTransformChanged(c.key)} />
+                    </td>
                     <td className="gl-stats-num">
                       <input
                         type="number"

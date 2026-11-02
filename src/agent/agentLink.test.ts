@@ -99,6 +99,24 @@ describe("AgentLink", () => {
     expect(handled).toEqual(["describe", "apply"]);
   });
 
+  it("names a relay file offer or save slot on the relay it is connected to, with its token, and nothing else", () => {
+    const { link, socket } = harness();
+    expect(link.relayHttpUrl("/file/abc")).toBeNull();
+    link.connect("ws://127.0.0.1:48123/?token=t0k");
+    expect(link.relayHttpUrl("/file/abc")).toBeNull();
+    socket().open();
+    expect(link.relayHttpUrl("/file/abc_D-1")).toBe("http://127.0.0.1:48123/file/abc_D-1?token=t0k");
+    expect(link.relayHttpUrl("/save/xyz")).toBe("http://127.0.0.1:48123/save/xyz?token=t0k");
+    // Only an offer's path: never another path, a host or a scheme a request could slip in.
+    expect(link.relayHttpUrl("/")).toBeNull();
+    expect(link.relayHttpUrl("/file/../etc")).toBeNull();
+    expect(link.relayHttpUrl("//example.org/file/x")).toBeNull();
+    expect(link.relayHttpUrl("http://example.org/file/x")).toBeNull();
+    expect(link.relayHttpUrl("/file/x?token=other")).toBeNull();
+    link.disconnect();
+    expect(link.relayHttpUrl("/file/abc")).toBeNull();
+  });
+
   it("reports a dropped connection and a disconnect by the user, and replaces a link on reconnect", () => {
     const { link, statuses, socket } = harness();
     link.connect("ws://127.0.0.1:1/");

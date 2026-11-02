@@ -23,6 +23,7 @@ import {
   type PopulationCount,
 } from "./headless";
 import { openWorkspace } from "./workspace";
+import { saveWorkspace } from "./saveWorkspace";
 import { flowJo11WorkbenchToWorkspace, isFlowJo11WorkbenchBytes, readFlowJo11Workbench } from "../engine/flowjo11Workbench";
 import { strategyFigure, figureSvg, figurePdf } from "./strategyFigure";
 import type { FcsExportAssay } from "../engine/fcsExport";
@@ -55,11 +56,22 @@ Options:
   --fcs-assay ASSAY       original (default), compensated or display values in exported FCS
   --strategy SELECTOR     draw the gates from the root to the population (repeatable)
   --figure-format F       svg (default), pdf or both
+  --save-workspace PATH   also write the files and the tree as a GateLab workspace the app
+                          opens: one tree, with a tailored copy for each file whose own
+                          coordinates differ, as the app's per-file import lays it out.
+                          PATH must not exist. Not for a .gatelab tree, which is one already.
+  --portable              with --save-workspace: put the FCS files in it (default: linked,
+                          finding them by name and recorded acquisition when opened)
+  --tree-name NAME        with --save-workspace: the tree's name
+  --rename OLD=NEW        with --save-workspace: rename a population in the saved tree and
+                          its copies; OLD is a SELECTOR (repeatable). counts.csv keeps the
+                          imported names, which FlowJo's counts are matched by.
   --help                  this text
 
 A SELECTOR is a population's path ("Cells > B1") or a name only one population carries.
 
-Outputs: counts.csv, counts.json, report.json; membership/, fcs/ and strategy/ when asked.
+Outputs: counts.csv, counts.json, report.json; membership/, fcs/ and strategy/ when asked; the
+workspace at the --save-workspace path.
 Exit status: 0 done; 1 an error, which report.json records; 2 the import left something out
 and --allow-partial was not given, in which case nothing is counted and report.json names it.`;
 
@@ -75,12 +87,17 @@ export interface CliOptions {
   fcsAssay: FcsExportAssay;
   strategy: string[];
   figureFormat: "svg" | "pdf" | "both";
+  saveWorkspace: string | null;
+  portable: boolean;
+  treeName: string | null;
+  renames: { from: string; to: string }[];
 }
 
 export function parseArgs(argv: readonly string[]): CliOptions | "help" {
   const o: CliOptions = {
     gating: "", out: "", fcs: [], open: {}, import: {}, allowPartial: false, membership: null,
     exportFcs: [], fcsAssay: "original", strategy: [], figureFormat: "svg",
+    saveWorkspace: null, portable: false, treeName: null, renames: [],
   };
   const value = (i: number, flag: string): string => {
     const v = argv[i + 1];
@@ -114,6 +131,16 @@ export function parseArgs(argv: readonly string[]): CliOptions | "help" {
       case "--fcs-assay": o.fcsAssay = oneOf(value(i, a), a, ["original", "compensated", "display"] as const); i++; break;
       case "--strategy": o.strategy.push(value(i, a)); i++; break;
       case "--figure-format": o.figureFormat = oneOf(value(i, a), a, ["svg", "pdf", "both"] as const); i++; break;
+      case "--save-workspace": o.saveWorkspace = value(i, a); i++; break;
+      case "--portable": o.portable = true; break;
+      case "--tree-name": o.treeName = value(i, a); i++; break;
+      case "--rename": {
+        const v = value(i, a); i++;
+        const at = v.indexOf("=");
+        if (at <= 0) throw new HeadlessError(`--rename takes OLD=NEW; got "${v}".`);
+        o.renames.push({ from: v.slice(0, at), to: v.slice(at + 1) });
+        break;
+      }
       default:
         if (a.startsWith("-")) throw new HeadlessError(`Unknown option ${a}.`);
         o.fcs.push(a);
@@ -121,6 +148,10 @@ export function parseArgs(argv: readonly string[]): CliOptions | "help" {
   }
   if (!o.gating) throw new HeadlessError("--gating is required: a Gating-ML file, a FlowJo workspace or a .gatelab workspace.");
   if (!o.out) throw new HeadlessError("--out is required.");
+  if (!o.saveWorkspace) {
+    const without = [o.portable && "--portable", o.treeName !== null && "--tree-name", o.renames.length && "--rename"].filter(Boolean);
+    if (without.length) throw new HeadlessError(`${without.join(", ")} ${without.length === 1 ? "applies" : "apply"} only with --save-workspace.`);
+  }
   return o;
 }
 
@@ -225,6 +256,11 @@ export async function main(argv: readonly string[], info: RunInfo = {}): Promise
     warn(`gatelab-headless: ${out} is not empty; give a new or empty directory, so no output from an earlier run is mistaken for this one's.`);
     return 1;
   }
+  const savePath = o.saveWorkspace ? resolve(o.saveWorkspace) : null;
+  if (savePath && existsSync(savePath)) {
+    warn(`gatelab-headless: ${savePath} exists already; give a new path for the workspace.`);
+    return 1;
+  }
   mkdirSync(out, { recursive: true });
 
   const report: Record<string, unknown> = {
@@ -247,8 +283,11 @@ export async function main(argv: readonly string[], info: RunInfo = {}): Promise
     // onto FCS files is put on one file at a time, and the files are gone through twice (every
     // file checked, then counted), so that only one file's events are held at once.
     let gatedFiles: () => Iterable<GatedFile>;
+    // A workspace to save holds every file at once, so the files are gated once and kept.
+    let toSave: { gated: GatedFile; bytes: Uint8Array }[] | null = null;
     const flowJo11 = isFlowJo11WorkbenchBytes(treeBytes);
     if (!flowJo11 && treeKind(treeBytes) === "workspace") {
+      if (savePath) throw new HeadlessError("--save-workspace takes a FlowJo workspace or a Gating-ML file imported onto FCS files; the tree given is a GateLab workspace already.");
       const inputs = opts.fcs.map((p) => {
         const bytes = new Uint8Array(readFileSync(p));
         fcsInputs.push({ path: p, sha256: sha256(bytes) });
@@ -260,7 +299,15 @@ export async function main(argv: readonly string[], info: RunInfo = {}): Promise
       if (!opts.fcs.length) throw new HeadlessError("No FCS files were given to put the tree on.");
       // A FlowJo 11 workbench is read as the FlowJo workspace it is rewritten into (flowjo11Workbench.ts).
       const text = flowJo11 ? flowJo11WorkbenchToWorkspace(readFlowJo11Workbench(treeBytes)) : new TextDecoder().decode(treeBytes);
-      gatedFiles = function* () {
+      if (savePath) {
+        const kept = opts.fcs.map((p) => {
+          const bytes = new Uint8Array(readFileSync(p));
+          fcsInputs.push({ path: p, sha256: sha256(bytes) });
+          return { gated: importGatingOnto(openFcs(bytes, basename(p), opts.open), basename(p), text, opts.gating, opts.import), bytes: opts.portable ? bytes : new Uint8Array(0) };
+        });
+        toSave = kept;
+        gatedFiles = () => kept.map((k) => k.gated);
+      } else gatedFiles = function* () {
         for (const p of opts.fcs) {
           const bytes = new Uint8Array(readFileSync(p));
           if (fcsInputs.length < opts.fcs.length) fcsInputs.push({ path: p, sha256: sha256(bytes) });
@@ -362,6 +409,17 @@ export async function main(argv: readonly string[], info: RunInfo = {}): Promise
     if (opts.membership === "bits") {
       writeFileSync(join(out, "membership.json"), JSON.stringify({ format: "gatelab-headless-membership", version: 1, bitOrder: "lsb-first", eventOrder: "as-stored", files: bits }) + "\n");
       written.push(join(out, "membership.json"));
+    }
+    if (savePath && toSave) {
+      const saved = saveWorkspace(toSave, { portable: opts.portable, treeName: opts.treeName ?? undefined, renames: opts.renames, app: `GateLab ${info.version ?? "headless"}` });
+      writeFileSync(savePath, saved.bytes, { flag: "wx" });
+      report.workspace = {
+        path: savePath, kind: opts.portable ? "portable" : "linked", bytes: saved.bytes.length, sha256: sha256(saved.bytes),
+        tree: saved.tree, lead: saved.lead, tailored: saved.tailored, ...(saved.differing ? { differing: saved.differing } : {}),
+      };
+      log(`Wrote ${opts.portable ? "a portable" : "a linked"} workspace ${savePath}: one tree, "${saved.tree}", from ${saved.lead}; ` +
+        `${saved.tailored.length ? `tailored for ${saved.tailored.join(", ")}` : "no file tailored"}.`);
+      if (saved.differing) warn(`gatelab-headless: files carrying a different tree: ${saved.differing}.`);
     }
     report.outputs = ["counts.csv", "counts.json", ...written.map((p) => p.slice(out.length + 1))];
     report.status = refused ? "partial" : "done";

@@ -258,7 +258,6 @@ import {
   recomputeOwnTreeGating,
   gatingKeyedByLiveTree,
   promoteRefusal,
-  switchedOnGateIds,
   groupColour,
   type Action,
   type Derived,
@@ -292,7 +291,9 @@ import type { MetaRow } from "./ui/EditableMetaTable";
 import { ProportionsTab } from "./ui/ProportionsTab";
 import { DivisionTab, type DivisionProfile } from "./ui/DivisionTab";
 import { parseMetadataTable, lookupMetadataRow, sampleDisplayId, SAMPLE_ID_FIELD, type MetadataColumn } from "./engine/metadata";
+import { DEFAULT_CONTOUR_THRESHOLD, DEFAULT_DISPLAY_MODE, DEFAULT_MAX_EVENTS, workspaceGatingRecord, workspaceSampleRecord } from "./workspaceRecords";
 import { ScalesTab } from "./ui/ScalesTab";
+import { ChannelTransformSelect, channelTransformKind } from "./ui/ChannelTransformSelect";
 import type {
   CompensationApplyUiStatus,
   CompensationCandidatePreviewSolver,
@@ -411,7 +412,9 @@ import { hostProposalId, parseHostProposal, type HostProposalChannel, type HostS
 import { StrategyProposalReview } from "./ui/StrategyProposalReview";
 import { AgentMenu } from "./agent/AgentMenu";
 import { renderGridPng, renderPlotPng } from "./agent/renderPlot";
-import type { AgentView as AgentViewState, AgentViewParams, AgentGatingTask } from "./agent/protocol";
+import type { AgentView as AgentViewState, AgentViewParams, AgentGatingTask, AgentOfferedFile, AgentSaveParams, AgentSaved } from "./agent/protocol";
+import { AgentSaveConfirm } from "./agent/AgentSaveConfirm";
+import { AgentCommandError } from "./agent/commands";
 import {
   GATELAB_HOST_COLDATA_CONTRACT_VERSION,
   type GateLabHostCategoricalColumn,
@@ -442,7 +445,7 @@ import { rankSeparatingPairs, type PairScore, type SeparationColumn } from "./en
 import { imagingPlotPresets } from "./engine/imagingPresets";
 import {
   DERIVED_CELL_CLASS, DERIVED_MASK_FEATURES, DERIVED_OBJECT_AREA, DERIVED_OBJECT_COUNT,
-  countFromDerivedChannels, decodeDerivedChannel, encodeDerivedChannel,
+  countFromDerivedChannels, decodeDerivedChannel,
 } from "./engine/derivedChannels";
 
 /** One place the user has been in the app: the view, not the data (the Back button). */
@@ -1575,7 +1578,7 @@ export default function App({ hostProposals = null }: {
   if (hostWriterIdRef.current === null) hostWriterIdRef.current = crypto.randomUUID();
   const [xIdx, setXIdx] = useState(0);
   const [yIdx, setYIdx] = useState(1);
-  const [mode, setMode] = useState<DisplayMode>("pseudocolor");
+  const [mode, setMode] = useState<DisplayMode>(DEFAULT_DISPLAY_MODE);
   // While a pan or stretch is under way in contour mode the plot is drawn as dots: the contours
   // rebuild their density on every range change, and holding the range until release froze the
   // view instead, so the drag could not be judged. Cleared when the drag commits.
@@ -1676,7 +1679,7 @@ export default function App({ hostProposals = null }: {
   const sideFitApplied = useRef(0);
   const [xRange, setXRange] = useState<[number, number] | null>(null);
   const [yRange, setYRange] = useState<[number, number] | null>(null);
-  const [maxEvents, setMaxEvents] = useState(50000); // 0 = all (no downsampling)
+  const [maxEvents, setMaxEvents] = useState(DEFAULT_MAX_EVENTS); // 0 = all (no downsampling)
   /** The cap "All events" goes back to when switched off: the last one set above zero. */
   const lastMaxEvents = useRef(50000);
   useEffect(() => {
@@ -1771,6 +1774,12 @@ export default function App({ hostProposals = null }: {
   // `fileIds`: the files a "new" group is made from, when not the checked files (a right-click on a row).
   const [groupModal, setGroupModal] = useState<{ mode: "new" | "rename" | "delete" | "fromMetadata"; groupId?: string; fileIds?: readonly string[] } | null>(null);
   const [pendingGatingMlImport, setPendingGatingMlImport] = useState<PendingGatingMLImport | null>(null);
+  /** Steps of a gating import now running; an agent's import waits until none is (see importGating). */
+  const gatingImportStepsRef = useRef(0);
+  const trackGatingImportStep = <T,>(step: Promise<T>): Promise<T> => {
+    gatingImportStepsRef.current++;
+    return step.finally(() => { gatingImportStepsRef.current--; });
+  };
   // One import at a time. The confirmation's Import button stayed live while the import ran, so a
   // double-click applied it twice and every hierarchy of a per-file workspace appeared doubled.
   const gatingImportBusyRef = useRef(false);
@@ -2315,7 +2324,7 @@ export default function App({ hostProposals = null }: {
   const [gatingMlExportOpen, setGatingMlExportOpen] = useState(false);
   const [flowJoExportOpen, setFlowJoExportOpen] = useState(false);
   const [flowJo11ExportOpen, setFlowJo11ExportOpen] = useState(false);
-  const [contourThreshold, setContourThreshold] = useState(5); // outer contour % of peak
+  const [contourThreshold, setContourThreshold] = useState(DEFAULT_CONTOUR_THRESHOLD); // outer contour % of peak
   const [contourLevels, setContourLevels] = useState(10);
   const [instrumentMode, setInstrumentMode] = useState<"auto" | "flow" | "cytof">("auto"); // active sample's instrument override
   // Colour-by-factor overlay on the main plot (population partition / division level).
@@ -4647,7 +4656,11 @@ export default function App({ hostProposals = null }: {
    * `crossTo` is set when the user chose to import it onto a file that is not its tube, and the
    * result says so.
    */
-  async function importDivaTree(
+  // Counted while it runs, so an agent's import waits through every step (trackGatingImportStep).
+  function importDivaTree(...args: Parameters<typeof importDivaTreeSteps>) {
+    return trackGatingImportStep(importDivaTreeSteps(...args));
+  }
+  async function importDivaTreeSteps(
     text: string,
     tree: DivaGateTreeSummary,
     tubeHint: number | null,
@@ -5327,7 +5340,11 @@ export default function App({ hostProposals = null }: {
    * Loaded files with no tree of their own follow the tree and are named, with why.
    * `crossTo` is set when `choice` is not the viewed file's sample and the user chose it.
    */
-  async function importOntoLoadedFiles(
+  // Counted while it runs, so an agent's import waits through every step (trackGatingImportStep).
+  function importOntoLoadedFiles(...args: Parameters<typeof importOntoLoadedFilesSteps>) {
+    return trackGatingImportStep(importOntoLoadedFilesSteps(...args));
+  }
+  async function importOntoLoadedFilesSteps(
     text: string,
     wsSamples: readonly FlowJoSampleSummary[],
     choice: FlowJoSampleSummary,
@@ -5440,7 +5457,11 @@ export default function App({ hostProposals = null }: {
     await importFlowJoSample(text, choice, matchedOn, choice.trees.length === 1 ? 0 : null, [], null, [], [], extra);
   }
 
-  async function importFlowJoSample(
+  // Counted while it runs, so an agent's import waits through every step (trackGatingImportStep).
+  function importFlowJoSample(...args: Parameters<typeof importFlowJoSampleSteps>) {
+    return trackGatingImportStep(importFlowJoSampleSteps(...args));
+  }
+  async function importFlowJoSampleSteps(
     text: string,
     choice: FlowJoSampleSummary,
     matchedOn: FlowJoSampleMatchKey | null = null,
@@ -5800,7 +5821,11 @@ export default function App({ hostProposals = null }: {
     }
   }
 
-  async function prepareGatingImportFromGatingML(
+  // Counted while it runs, so an agent's import waits through every step (trackGatingImportStep).
+  function prepareGatingImportFromGatingML(...args: Parameters<typeof prepareGatingImportFromGatingMLSteps>) {
+    return trackGatingImportStep(prepareGatingImportFromGatingMLSteps(...args));
+  }
+  async function prepareGatingImportFromGatingMLSteps(
     text: string,
     wspNote: string,
     workspaceSpillover: FlowJoSpillover | null = null,
@@ -6167,7 +6192,11 @@ export default function App({ hostProposals = null }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingGatingMlImport]);
 
-  async function applyGatingImport(mode: GatingImportMode, target: GatingImportTarget = "all") {
+  // Counted while it runs, so an agent's import waits through every step (trackGatingImportStep).
+  function applyGatingImport(...args: Parameters<typeof applyGatingImportSteps>) {
+    return trackGatingImportStep(applyGatingImportSteps(...args));
+  }
+  async function applyGatingImportSteps(mode: GatingImportMode, target: GatingImportTarget = "all") {
     const pendingImport = pendingGatingMlImport;
     if (!sample || !pendingImport || pendingImport.sampleId !== activeSampleId) {
       setPendingGatingMlImport(null);
@@ -9417,9 +9446,6 @@ export default function App({ hostProposals = null }: {
     }
   }
 
-  const sampleDataPath = (name: string, i: number) =>
-    `data/${i}_${(name || "sample.fcs").replace(/[^A-Za-z0-9._-]/g, "_")}`;
-
   function buildWorkspaceFile(): LiveWorkspaceFile | null {
     if (samples.length === 0 || !sample) return null;
     const perSampleGlobalScales = Object.fromEntries(samples.map((entry) => {
@@ -9446,81 +9472,15 @@ export default function App({ hostProposals = null }: {
         // The axes as drawn, for R to keep on the object (rowData(sce)$gatelab_transform).
         hostedChannelTransforms: Object.fromEntries(sample.channels.map((channel) => [channel.key, sample.transformSpec(channel.key)])),
       } : {}),
-      samples: samples.map((e, i) => ({
-        sampleId: e.id,
-        fileName: e.name,
-        dataPath: sampleDataPath(e.name, i),
-        logicleW: e.sample.logicleWOverrides(),
-        scatterCofactor: e.sample.scatterCofactorOverrides(),
-        scatterLinear: e.sample.scatterLinearKeys(),
-        fluorArcsinh: e.sample.fluorArcsinhKeys(),
-        fluorBiex: e.sample.fluorBiexEntries(),
-        // Only where a biex axis was adjusted, so that a reset after reopening finds its origin.
-        ...(Object.keys(e.sample.fluorBiexRecordedEntries()).length ? { fluorBiexRecorded: e.sample.fluorBiexRecordedEntries() } : {}),
-        cytofCofactor: e.sample.arcsinhCofactor,
-        compensationOn: e.sample.compensationEnabled ||
-          (e.sample.spillover === null && compensationPendingRef.current.has(e.id)),
-        instrumentMode: e.sample.instrumentMode,
-        labels: e.sample.labelOverrides(),
-        metadata: { ...metadata[e.id], [SAMPLE_ID_FIELD]: sampleDisplayId(e.name, metadata[e.id]) },
+      samples: samples.map((e, i) => workspaceSampleRecord(e, i, {
+        metadata: metadata[e.id],
         division: divisionProfiles[e.id],
-        // Channels GateLab computed for the file, by value, so reopening needs no recount.
-        ...(e.sample.derivedChannels().length ? { derived: e.sample.derivedChannels().map(encodeDerivedChannel) } : {}),
-        ...(fileHierarchies[e.id] ? { hierarchyId: fileHierarchies[e.id] } : {}),
-        ...(state.file_groups[e.id] ? { groupId: state.file_groups[e.id] } : {}),
-        // What the file recorded about its acquisition, so relinking finds this file and not
-        // another experiment's file of the same name.
-        ...(Object.keys(identityKeywords(e.sample.fcs.keywords)).length
-          ? { identity: identityKeywords(e.sample.fcs.keywords) }
-          : {}),
-        // A matrix that is not the file's own (a FlowJo workspace's) goes with the file, so the
-        // reopened file is compensated with the matrix its gates were drawn under.
-        ...(e.sample.externalSpillover ? { externalSpillover: e.sample.externalSpillover } : {}),
-        // Attached cell images are linked by name and identity, never copied: the file stays
-        // where the instrument exported it and is found again beside the FCS on reopening.
-        ...(e.images
-          ? {
-              images: [
-                e.images.kind === "tiff-folder"
-                  ? { kind: "tiff-folder" as const, fileName: e.images.fileName, eventCount: e.images.eventCount, naming: { ...e.images.naming } }
-                  : { kind: "cvw" as const, fileName: e.images.fileName, eventCount: e.images.eventCount, ...(e.images.recordingId ? { recordingId: e.images.recordingId } : {}) },
-              ],
-            }
-          : {}),
+        hierarchyId: fileHierarchies[e.id],
+        groupId: state.file_groups[e.id],
+        compensationPending: compensationPendingRef.current.has(e.id),
       })),
       activeSample: Math.max(0, samples.findIndex((e) => e.id === activeSampleId)),
-      gating: {
-        gates: state.gates,
-        gate_order: state.gate_order,
-        populations: state.populations,
-        root_population_id: state.root_population_id,
-        active_population_id: state.active_population_id,
-        selected_gate_id: state.selected_gate_id && state.gates[state.selected_gate_id]
-          ? state.selected_gate_id
-          : null,
-        hierarchies: state.hierarchies.map((h) => ({ ...h })),
-        ...(state.groups.length ? { groups: state.groups.map((g) => ({ ...g })) } : {}),
-        active_hierarchy_id: state.active_hierarchy_id,
-        stored_hierarchies: Object.values(state.stored_hierarchies).map((h) => ({
-          id: h.id,
-          name: h.name,
-          ...(h.owner_sample_id ? { owner_sample_id: h.owner_sample_id } : {}),
-          ...(h.structure_locked !== undefined ? { structure_locked: h.structure_locked } : {}),
-          ...(h.source_hierarchy_id ? { source_hierarchy_id: h.source_hierarchy_id } : {}),
-          ...(h.source_gate_ids ? { source_gate_ids: h.source_gate_ids } : {}),
-          ...(h.source_population_ids ? { source_population_ids: h.source_population_ids } : {}),
-          ...(switchedOnGateIds(h).length ? { tailored_gate_ids: [...switchedOnGateIds(h)] } : {}),
-          // Its own geometry travels with it. Without this a parked hierarchy would come back
-          // pointing at gates that belong to whichever hierarchy happened to be active.
-          gates: h.gates,
-          gate_order: h.gate_order,
-          populations: h.populations,
-          root_population_id: h.root_population_id,
-          active_population_id: h.active_population_id,
-        })),
-        // Every file is in a group, so the assignments always mean what they say.
-        perFileHierarchies: true,
-      },
+      gating: workspaceGatingRecord(state),
       scales: {
         globalScales,
         lockBetweenFiles: lockScalesBetweenFiles,
@@ -11944,6 +11904,66 @@ export default function App({ hostProposals = null }: {
     agentSettledRef.current = [];
     for (const resolve of waiting) resolve();
   });
+  // An agent's import waits on the import as the user sees it: while one of its dialogs is open or
+  // one of its steps is running (gatingImportStepsRef, kept by trackGatingImportStep). A dialog's
+  // button closes the dialog and starts the next step in the same handler, so between the two the
+  // count is already up. The status line, the error and the FlowJo check are read through refs,
+  // because the waiting call holds the render it started in.
+  const gatingImportAsksRef = useRef(false);
+  gatingImportAsksRef.current = !!(pendingGatingMlImport || wspPicker || treePicker || cytobankAsk || divaPicker || chorusPicker || pendingChorusImport || pendingFlowJoStrategy);
+  const importMsgRef = useRef(importMsg);
+  importMsgRef.current = importMsg;
+  const errorRef = useRef(error);
+  errorRef.current = error;
+  const flowJoCheckRef = useRef(flowJoCheckAtImport);
+  flowJoCheckRef.current = flowJoCheckAtImport;
+  /** A file the relay offered, fetched from the relay this tab is connected to. */
+  const fetchOfferedFile = async (offered: AgentOfferedFile): Promise<File> => {
+    const url = agentLinkRef.current?.relayHttpUrl(offered.path);
+    if (!url) throw new Error(`No relay to fetch ${offered.name} from: the tab is not connected to an agent.`);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`The relay did not serve ${offered.name} (HTTP ${response.status}).`);
+    return new File([await response.blob()], offered.name);
+  };
+  // An agent's save waits here for the user: the request is held until they answer the dialog.
+  const [agentSave, setAgentSave] = useState<{
+    params: AgentSaveParams; busy: boolean;
+    resolve: (result: { outcome: AgentSaved["outcome"] }) => void; reject: (error: Error) => void;
+  } | null>(null);
+  const agentSaveRef = useRef(agentSave);
+  agentSaveRef.current = agentSave;
+  const agentWriter = (agentStatus.state === "connected" ? agentStatus.writer : null) ?? "agent";
+  /** The copy an agent asked for, packed as Save As (linked) or Save Portable Copy (portable) packs it. */
+  async function agentSaveBlob(kind: AgentSaveParams["kind"]): Promise<Blob> {
+    const ws = buildWorkspaceFile();
+    if (!ws) throw new Error("This workspace cannot be written as it stands.");
+    if (kind === "linked") return new Blob([packReferenceWorkspace(ws) as BlobPart], { type: "application/octet-stream" });
+    if (ws.version === WORKSPACE_VERSION_3) {
+      const plan = await preparePortableBundle(ws);
+      const parts: BlobPart[] = [];
+      await writePortableWorkspaceV3Archive(plan, async (chunk) => { parts.push(chunk as BlobPart); });
+      return new Blob(parts, { type: "application/zip" });
+    }
+    return new Blob([packWorkspace(ws, currentFcsByPath(ws), bundleGatingML()) as BlobPart], { type: "application/zip" });
+  }
+  async function writeAgentSave(request: NonNullable<typeof agentSave>) {
+    setAgentSave({ ...request, busy: true });
+    try {
+      const url = agentLinkRef.current?.relayHttpUrl(request.params.upload);
+      if (!url) throw new Error("The agent disconnected before the copy could be saved.");
+      const response = await fetch(url, { method: "POST", body: await agentSaveBlob(request.params.kind) });
+      if (!response.ok) throw new Error((await response.text()).trim() || `The relay refused the copy (HTTP ${response.status}).`);
+      setImportMsg(`Saved a copy for ${agentWriter} · ${request.params.target}`);
+      request.resolve({ outcome: "saved" });
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      setError(why);
+      request.reject(new Error(why));
+    } finally {
+      agentSaveRef.current = null;
+      setAgentSave(null);
+    }
+  }
   const agentAdapterRef = useRef<AgentAdapter>(null!);
   agentAdapterRef.current = {
     gatingTask: () => agentGatingTask,
@@ -12049,6 +12069,60 @@ export default function App({ hostProposals = null }: {
       const ws = buildWorkspaceFile();
       return ws ? JSON.stringify(ws) : null;
     },
+    ...(isSceHost ? {} : {
+      openFiles: async (offered: AgentOfferedFile[]) => {
+        const fetched: { name: string; file: File; handle: null }[] = [];
+        for (const one of offered) fetched.push({ name: one.name, file: await fetchOfferedFile(one), handle: null });
+        const candidates = candidatesWithSidecars(fetched);
+        if (candidates.length === 0) throw new Error("None of the files is an .fcs file; a .cvw is opened beside the FCS of the same name.");
+        const byCandidate = new Map<string, SampleEntry>();
+        const failedCandidates = new Map<string, string>();
+        await importFcsCandidates(candidates, byCandidate, failedCandidates);
+        return {
+          added: candidates.flatMap((candidate) => {
+            const entry = byCandidate.get(candidate.id);
+            return entry ? [{ id: entry.id, name: entry.name, events: entry.sample.fcs.nEvents }] : [];
+          }),
+          failed: candidates.flatMap((candidate) => {
+            const reason = failedCandidates.get(candidate.id);
+            return reason === undefined ? [] : [{ name: candidate.name, reason }];
+          }),
+        };
+      },
+    }),
+    saveCopy: (params: AgentSaveParams) => {
+      // One question at a time: a second request while the first is open is refused.
+      if (agentSaveRef.current) return Promise.reject(new AgentCommandError("A save is already waiting for the user's answer."));
+      return new Promise((resolve, reject) => {
+        const request = { params, busy: false, resolve, reject };
+        agentSaveRef.current = request;
+        setAgentSave(request);
+      });
+    },
+    importGating: async (offered: AgentOfferedFile) => {
+      const file = await fetchOfferedFile(offered);
+      const stateBefore = agentAdapterRef.current.state();
+      const errorBefore = errorRef.current;
+      const checkBefore = flowJoCheckRef.current;
+      await trackGatingImportStep(prepareGatingImport(file));
+      await agentSettled();
+      while (gatingImportStepsRef.current > 0 || gatingImportAsksRef.current) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        await agentSettled();
+      }
+      if (agentAdapterRef.current.state() === stateBefore) {
+        const why = errorRef.current !== errorBefore ? errorRef.current : null;
+        return why ? { outcome: "failed" as const, message: why } : { outcome: "cancelled" as const, message: importMsgRef.current };
+      }
+      // The check against FlowJo's recorded counts lands just after the render holding the tree.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      await agentSettled();
+      const check = flowJoCheckRef.current !== checkBefore ? flowJoCheckRef.current : null;
+      return {
+        outcome: "applied" as const, message: importMsgRef.current,
+        ...(check && check.compared > 0 ? { flowJoCheck: { compared: check.compared, exact: check.exact, flowJoOnly: check.flowJoOnly, unmatched: [...check.unmatched] } } : {}),
+      };
+    },
   };
   const agentLinkRef = useRef<AgentLink | null>(null);
   const agentHandlerRef = useRef<(AgentHandler & StrategyReviewer) | null>(null);
@@ -12073,6 +12147,14 @@ export default function App({ hostProposals = null }: {
       setAxisRange: (channel, range) => agentAdapterRef.current.setAxisRange(channel, range),
       clearPan: () => agentAdapterRef.current.clearPan(),
       reload: () => agentAdapterRef.current.reload(),
+      // Read at call time: the adapter offers openFiles only while the page holds FCS files.
+      openFiles: (files) => {
+        const open = agentAdapterRef.current.openFiles;
+        if (!open) throw new AgentCommandError("This host serves its own data; files cannot be added to it.");
+        return open(files);
+      },
+      importGating: (file) => agentAdapterRef.current.importGating!(file),
+      saveCopy: (params) => agentAdapterRef.current.saveCopy!(params),
     });
     agentHandlerRef.current = handler;
     agentLinkRef.current = new AgentLink({ handler, info: () => agentAdapterRef.current.info(), onStatus: setAgentStatus });
@@ -16405,65 +16487,16 @@ export default function App({ hostProposals = null }: {
                   ["X", xIdx],
                   ["Y", yIdx],
                 ] as const).map(([axis, idx]) => {
-                  const kind = sample.isFluorChannel(idx) ? "fluor" : sample.isScatterAxis(idx) ? "scatter" : sample.isImagingFeatureAxis(idx) ? "imaging" : null;
+                  const kind = channelTransformKind(sample, idx);
                   return (
                     <div className="gl-scale-row gl-scale-slot" key={axis}>
                       <span className="gl-scale-axis" title={sample.channelLabel(idx)}>
                         {axis} · {sample.channelLabel(idx)}
                       </span>
-                      {kind === "scatter" ? (
-                        <select
-                                                className="gl-scatter-scale"
-                                                aria-label={`${axis} scatter scale`}
-                                                title={t("Arcsinh (cofactor 150) renders near-zero and negative scatter that a linear axis cannot. Linear is the usual display for scatter.")}
-                                                value={sample.scatterScale(idx) === "linear" ? "linear" : "arcsinh"}
-                                                onChange={(e) => {
-                                                  sample.setScatterScale(idx, e.target.value === "linear" ? "linear" : "arcsinh");
-                                                  pendingScaleRefit.current = true;
-                                                  bumpScales();
-                                                }}
-                                              >
-                                                <option value="linear">{t("Linear")}</option>
-                                                <option value="arcsinh">{t("Arcsinh")}</option>
-                                              </select>
-                      ) : kind === "imaging" ? (
-                        <select
-                                                className="gl-scatter-scale"
-                                                aria-label={`${axis} imaging scale`}
-                                                title={t("A shape or position feature the instrument derived from the cell's image. Linear is how FACSChorus shows it; arcsinh (cofactor 150) spreads the values near zero. Gates live in raw space, so neither moves an event in or out of a gate.")}
-                                                value={sample.featureScale(idx)}
-                                                onChange={(e) => {
-                                                  sample.setFeatureScale(idx, e.target.value === "arcsinh" ? "arcsinh" : "linear");
-                                                  pendingScaleRefit.current = true;
-                                                  bumpScales();
-                                                }}
-                                              >
-                                                <option value="linear">{t("Linear")}</option>
-                                                <option value="arcsinh">{t("Arcsinh")}</option>
-                                              </select>
-                      ) : kind === "fluor" ? (
-                        <select
-                                                className="gl-scatter-scale"
-                                                aria-label={`${axis} signal scale`}
-                                                title={t("Logicle is estimated per channel and shaped by W. Arcsinh is shaped by its cofactor, which sets where the linear region around zero gives way to log. Gates live in raw space, so neither moves an event in or out of a gate.")}
-                                                value={sample.fluorScale(idx)}
-                                                onChange={(e) => {
-                                                  sample.setFluorScale(idx, e.target.value === "arcsinh" ? "arcsinh" : e.target.value === "biex" ? "biex" : "logicle");
-                                                  pendingScaleRefit.current = true;
-                                                  bumpScales();
-                                                }}
-                                              >
-                                                <option value="logicle">{t("Logicle")}</option>
-                                                <option value="arcsinh">{t("Arcsinh")}</option>
-                                                {sample.biexOffered(idx) && (
-                                                  <option value="biex">{t("Biexponential")}</option>
-                                                )}
-                                              </select>
-                      ) : (
-                        <select className="gl-scatter-scale" aria-label={`${axis} scale`} disabled value="fixed" title={t("This axis has one scale.")}>
-                          <option value="fixed">{t("Linear")}</option>
-                        </select>
-                      )}
+                      <ChannelTransformSelect sample={sample} idx={idx} label={axis} onChanged={() => {
+                        pendingScaleRefit.current = true;
+                        bumpScales();
+                      }} />
                       <span className="gl-scale-params">
                         {kind === "fluor" && (sample.fluorScale(idx) === "logicle" ? (
                         <>
@@ -17153,6 +17186,13 @@ export default function App({ hostProposals = null }: {
                 globalScales={globalScales}
                 onSetGlobalScale={setGlobalScale}
                 lockedBetweenFiles={lockScalesBetweenFiles}
+                onTransformChanged={(key) => {
+                  // A plotted axis is fitted again as the Transforms row fits it; another channel's
+                  // range, in the old transform's units, is cleared and fitted when next drawn.
+                  if (key === activeXChannelKey || key === activeYChannelKey) pendingScaleRefit.current = true;
+                  else if (globalScales[key]) setGlobalScale(key, null);
+                  bumpScales();
+                }}
               />
             )}
             {activeTab === "strategy" && (
@@ -18832,6 +18872,15 @@ export default function App({ hostProposals = null }: {
           summary={barcodeSave.summary}
           onSave={applyBarcodeSave}
           onCancel={() => setBarcodeSave(null)}
+        />
+      )}
+      {agentSave && (
+        <AgentSaveConfirm
+          request={agentSave.params}
+          writer={agentWriter}
+          busy={agentSave.busy}
+          onSave={() => void writeAgentSave(agentSave)}
+          onCancel={() => { agentSave.resolve({ outcome: "cancelled" }); agentSaveRef.current = null; setAgentSave(null); }}
         />
       )}
       {pendingGatingMlImport && gatingImportNeedsDecision(pendingGatingMlImport, state, samples.length) && (

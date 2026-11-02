@@ -26,6 +26,7 @@ import {
   type AgentPreview, type AgentPreviewParams, type AgentRender, type AgentRenderParams, type AgentRequest, type AgentResponse,
   type AgentSampleInfo, type AgentSeriesSelection, type AgentStats, type AgentStatsParams, type AgentView, type AgentViewParams,
   type AgentWorkspace, type AgentDataContext, type AgentGatingTask, type StrategyProposalParams, type AgentGateEditing,
+  type AgentImportedGating, type AgentOfferedFile, type AgentOpenedFiles, type AgentSaveParams, type AgentSaved,
 } from "./protocol";
 
 /** One loaded file or SCE sample, as the app holds it. */
@@ -73,6 +74,21 @@ export interface AgentAdapter {
   clearPan(): void;
   /** Reload the page: the same URL, so a tab opened with ?agent= reconnects. */
   reload(): void;
+  /**
+   * Fetch files the relay offered and open them as the Add files button does. Absent on a host
+   * that serves its own data (GateLabR's SCE), where the agent cannot add files.
+   */
+  openFiles?(files: AgentOfferedFile[]): Promise<{ added: { id: string; name: string; events: number }[]; failed: { name: string; reason: string }[] }>;
+  /**
+   * Fetch a gating file the relay offered and import it as Import gating does: directly when the
+   * app has nothing to ask, else through its import dialog, resolving once the user has answered.
+   */
+  importGating?(file: AgentOfferedFile): Promise<Omit<AgentImportedGating, "revision">>;
+  /**
+   * Ask the user, in the tab, to confirm saving a copy of the workspace where the agent asks;
+   * on their yes, write it through the relay. Resolves with what the user chose.
+   */
+  saveCopy?(params: AgentSaveParams): Promise<{ outcome: AgentSaved["outcome"] }>;
 }
 
 export interface AgentHandler {
@@ -765,11 +781,50 @@ export function createAgentHandler(adapter: AgentAdapter, options: AgentHandlerO
 
   const workspace = (): AgentWorkspace => ({ revision: revision(), json: adapter.workspaceJson() });
 
+  const offeredFile = (raw: unknown): AgentOfferedFile => {
+    const file = record(raw);
+    if (typeof file.name !== "string" || !file.name || typeof file.path !== "string" || !/^\/file\/[A-Za-z0-9_-]+$/.test(file.path) || typeof file.size !== "number") {
+      throw new AgentCommandError("A file must be one the relay offered: {name, size, path: \"/file/<id>\"}.");
+    }
+    return { name: file.name, size: file.size, path: file.path };
+  };
+
+  const openFiles = async (raw: unknown): Promise<AgentOpenedFiles> => {
+    if (!adapter.openFiles) throw new AgentCommandError("This host serves its own data; files cannot be added to it.");
+    const files = record(raw).files;
+    if (!Array.isArray(files) || files.length === 0) throw new AgentCommandError("files must be a nonempty list.");
+    const result = await adapter.openFiles(files.map(offeredFile));
+    await adapter.settled();
+    const samples = adapter.samples().map((view): AgentSampleInfo => ({
+      id: view.id, name: view.name, events: view.sample.fcs.nEvents, viewed: view.viewed, checked: view.checked, metadata: { ...view.metadata },
+    }));
+    return { revision: revision(), ...result, samples };
+  };
+
+  const importGating = async (raw: unknown): Promise<AgentImportedGating> => {
+    if (!adapter.importGating) throw new AgentCommandError("This core cannot import a gating file for an agent; update it.");
+    if (adapter.samples().length === 0) throw new AgentCommandError("No file is open: a gating file is imported onto the loaded FCS files, so open them first.");
+    const result = await adapter.importGating(offeredFile(record(raw).file));
+    await adapter.settled();
+    return { revision: revision(), ...result };
+  };
+
   const reload = (): { reloading: true } => {
     // After the reply has gone out: the tab comes back with the core now installed under it, and
     // the gating as the host last autosaved it, and reconnects through the address on its URL.
     setTimeout(() => adapter.reload(), 200);
     return { reloading: true };
+  };
+
+  const save = async (raw: unknown): Promise<AgentSaved> => {
+    if (!adapter.saveCopy) throw new AgentCommandError("This core cannot save a copy for an agent; update it.");
+    const params = record(raw);
+    if (params.kind !== "linked" && params.kind !== "portable") throw new AgentCommandError("kind must be \"linked\" or \"portable\".");
+    if (typeof params.target !== "string" || !params.target) throw new AgentCommandError("target must be the path the copy is saved to.");
+    if (typeof params.upload !== "string" || !/^\/save\/[A-Za-z0-9_-]+$/.test(params.upload)) throw new AgentCommandError("upload must be a save slot the relay opened: \"/save/<id>\".");
+    if (adapter.samples().length === 0) throw new AgentCommandError("Nothing is open to save.");
+    const result = await adapter.saveCopy({ kind: params.kind, target: params.target, overwrite: params.overwrite === true, upload: params.upload });
+    return { revision: revision(), outcome: result.outcome };
   };
 
   return {
@@ -794,6 +849,9 @@ export function createAgentHandler(adapter: AgentAdapter, options: AgentHandlerO
           case "memberships": return reply(memberships(request.params));
           case "workspace": return reply(workspace());
           case "reload": return reply(reload());
+          case "openFiles": return reply(await openFiles(request.params));
+          case "importGating": return reply(await importGating(request.params));
+          case "save": return reply(await save(request.params));
           default: return refused(fail("unknown-method", `Unknown method “${String((request as { method?: unknown }).method)}”.`));
         }
       } catch (error) {

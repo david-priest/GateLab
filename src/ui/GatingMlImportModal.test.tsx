@@ -44,6 +44,21 @@ function renderModal(mergeBlockedReason: string | null, onImport = vi.fn(), stru
 }
 
 describe("GatingMlImportModal", () => {
+  it("is a dialog named by its title, so its Import button is found inside it by name", () => {
+    act(() => root.render(
+      <GatingMlImportModal
+        nGates={3} nPopulations={2} sourceLabel="a FlowJo workspace" sourceKind="flowjo" currentRootName="All Events"
+        hasExistingStrategy={false} structureMatches mergeBlockedReason={null}
+        compensationNote={null} compensationNeedsConfirmation={false} matrixChoice={null}
+        onMatrixChoice={vi.fn()} onCancel={vi.fn()} onImport={vi.fn()}
+      />,
+    ));
+    const dialog = host.querySelector('[role="dialog"]')!;
+    expect(dialog.getAttribute("aria-label")).toBe("Import FlowJo workspace");
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect([...dialog.querySelectorAll("button")].some((b) => b.textContent === "Import")).toBe(true);
+  });
+
   it("defaults to the non-destructive merge option for a tree of the workspace's structure and can explicitly select replacement", () => {
     const onImport = renderModal(null);
     const merge = host.querySelector<HTMLInputElement>('input[value="merge"]')!;

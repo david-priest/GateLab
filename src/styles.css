@@ -25,6 +25,10 @@ body {
   background: var(--bg);
   color: var(--text);
   font: var(--gl-font-size-body)/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  /* Safari on an iPhone turned sideways enlarges text it judges to be reading text, a few rows of
+     the app at a time; the sizes here are the sizes drawn. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 button, input, select { font: inherit; }
@@ -88,8 +92,11 @@ input[type="number"]::-webkit-outer-spin-button {
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   display: flex;
+  /* Below about 1080px (an iPad in landscape) the menus do not fit on one line; they wrap onto a
+     second rather than run past the window, which also made a phone lay the page out 1077px wide. */
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 6px 12px;
 }
 /* The file line: a slot from the start, taking the room left; cut short, it fades out at its end
    (its tooltip has the whole line), and with no room it shows nothing rather than a letter's sliver. */
@@ -2017,8 +2024,10 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
 .gl-plot-area {
   flex: 1;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  /* `safe`: a plot wider or taller than the area starts at its edge and scrolls, rather than
+     being centred with its left and top cut off out of scroll's reach. */
+  justify-content: safe center;
+  align-items: safe center;
   /* Less headroom than sides: the control strip already separates the plot from the chrome
      above it, while the 28px flanks keep the axis labels off the pane edges. The reclaimed
      space matters at the BOTTOM, where the X-axis label and its channel picker live. */
@@ -4716,3 +4725,67 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
 .gl-tailored-gates .gl-tailored-reason { width: 100%; min-width: 180px; box-sizing: border-box; }
 /* The control drawn in grey beneath the plot (Display → Control beneath). */
 .gl-underlay-note { margin-left: 10px; color: var(--muted); font-size: var(--gl-font-size-caption); white-space: nowrap; }
+
+/* ── Tablets and narrow windows ──────────────────────────────────────────────────
+   Last in the file, with the phone rules after it, so each wins over the rule it narrows. An iPad
+   in portrait leaves the centre about 490 px beside the files pane. */
+@media (max-width: 1200px) {
+  /* The file-scope toolbar is one row on a wide screen, so nothing in it moves as the work goes
+     on; its 700 px of buttons wrap here rather than run out of the centre pane. */
+  .gl-pool-toolbar, .gl-pool-toolbar-right { flex-wrap: wrap; }
+  .gl-pool-toolbar-right { flex: 1 1 auto; min-width: 0; }
+  /* Plotting's populations pane drops under the other two: as a third column it left the chart
+     2 px at 820 px. */
+  .gl-plotting-workspace.pane-populations { grid-template-columns: var(--gl-left-pane-width, 290px) minmax(0, 1fr); }
+  .gl-plotting-workspace.pane-populations .gl-plotting-inspector-right {
+    grid-column: 1 / -1; max-height: 40vh; border-left: 0; border-top: 1px solid var(--line);
+  }
+}
+
+/* ── Phones: every pane on its own full-width row ─────────────────────────────────
+   At 375px the samples pane kept its 330px and left the plot 45 pixels. Below 760px the panes
+   stack in reading order (files, plot, gates and populations) and the page scrolls. The files
+   pane takes the height of its list, capped so the plot starts within the first screen; a longer
+   list scrolls inside it. */
+@media (max-width: 760px) {
+  .gl-left {
+    width: 100% !important;
+    flex: 1 1 100%;
+    min-height: 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .gl-left .gl-sample-navigator { flex: none; min-height: 0; }
+  .gl-left .gl-sample-list { flex: none; min-height: 0; max-height: 30vh; }
+  .gl-left-resize { display: none; }
+  .gl-center { flex: 1 1 100%; min-height: 70vh; }
+  /* The axis labels need less room than the 28px flanks give them on a wide screen. */
+  .gl-plot-area { padding: 8px 6px 16px; }
+  .gl-tabs { padding: 0 6px; }
+  .gl-header { padding: 6px 8px; gap: 6px 8px; }
+  .gl-header-language > span { display: none; }
+  .gl-display-popover .gl-display-popover-body { min-width: 0; width: calc(100vw - 24px); }
+  /* The banner's slot, kept empty while idle, gives its room back to the toolbar's buttons. */
+  .gl-pool-toolbar-right { margin-left: 0; }
+  .gl-display-pops-banner.is-idle { display: none; }
+  /* Each transform row takes the line, its axis name narrower than the 130 px it has beside a plot. */
+  .gl-transforms .gl-scale-row { flex: 1 1 100%; flex-wrap: wrap; min-width: 0; }
+  .gl-transforms .gl-scale-axis { width: 96px; min-width: 96px; }
+  /* Strategy, Plotting, Statistics, Compensation and Division: the settings pane above the content
+     rather than beside it, where it left the content 45 px. The settings scroll inside a capped
+     pane so the plots begin on the first screen; the page scrolls past both. */
+  .gl-plotting-workspace, .gl-plotting-workspace.pane-populations {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 46px;
+    grid-auto-rows: auto;
+    overflow: visible;
+  }
+  .gl-tab-panel.gl-tab-fill.gl-plotting-workspace { overflow: visible; }
+  .gl-plotting-inspector { max-height: 45vh; border-right: 0; border-bottom: 1px solid var(--line); }
+  .gl-plotting-workspace.pane-populations .gl-plotting-inspector-right { max-height: 60vh; }
+  .gl-plotting-workspace .gl-prop-body { padding: 12px; }
+  /* Layout: the same, its controls above the page. */
+  .gl-layout-workspace { flex-direction: column; }
+  .gl-layout-controls { width: 100%; flex: none; max-height: 45vh; overflow: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+  .gl-layout-canvas-scroll { min-height: 60vh; padding: 8px; }
+}

@@ -66,6 +66,22 @@ export class AgentLink {
     return this.#status.state === "connected";
   }
 
+  /**
+   * The HTTP address of a path on the relay this tab is connected to, with its token: where the
+   * tab fetches a file the relay offered, or posts a save the user confirmed. Null when not
+   * connected or for a path that is neither, so a request can never point the tab anywhere but
+   * its own relay.
+   */
+  relayHttpUrl(path: string): string | null {
+    if (this.#status.state !== "connected" || !/^\/(file|save)\/[A-Za-z0-9_-]+$/.test(path)) return null;
+    const relay = parseAgentUrl(this.#status.url);
+    if (!relay) return null;
+    const url = new URL(path, `${relay.protocol === "wss:" ? "https:" : "http:"}//${relay.host}`);
+    const token = relay.searchParams.get("token");
+    if (token) url.searchParams.set("token", token);
+    return url.toString();
+  }
+
   connect(url: string): void {
     this.disconnect("replaced");
     const open = this.options.openSocket ?? ((target: string) => new WebSocket(target) as unknown as LinkSocket);
