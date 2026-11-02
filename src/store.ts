@@ -2088,13 +2088,23 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       const name = action.name.trim();
       const ref = state.hierarchies.find((h) => h.id === action.id);
       if (!ref || !name || ref.name === name) return state;
-      const hierarchies = state.hierarchies.map((h) => (h.id === action.id ? { ...h, name } : h));
-      const stored = state.stored_hierarchies[action.id];
+      // Its copies are named after it ("D2.fcs · <tree>", "D2.fcs · copy of <tree>", with a number
+      // where two would clash); a copy still so named takes the new name, and one the user named
+      // otherwise keeps it. The copies of an imported tree went on carrying the import's name.
+      const renamed = new Map<string, string>([[action.id, name]]);
+      const named = new RegExp(`^(.+ · (?:copy of )?)${ref.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}( \\d+)?$`);
+      for (const h of state.hierarchies) {
+        const m = h.source_hierarchy_id === action.id ? named.exec(h.name) : null;
+        if (m) renamed.set(h.id, `${m[1]}${name}${m[2] ?? ""}`);
+      }
+      const hierarchies = state.hierarchies.map((h) => (renamed.has(h.id) ? { ...h, name: renamed.get(h.id)! } : h));
+      const stored_hierarchies = { ...state.stored_hierarchies };
+      for (const [id, newName] of renamed) if (stored_hierarchies[id]) stored_hierarchies[id] = { ...stored_hierarchies[id], name: newName };
       return {
         ...state,
         ...pushUndo(state, false),
         hierarchies,
-        stored_hierarchies: stored ? { ...state.stored_hierarchies, [action.id]: { ...stored, name } } : state.stored_hierarchies,
+        stored_hierarchies,
         tree_version: state.tree_version + 1,
       };
     }

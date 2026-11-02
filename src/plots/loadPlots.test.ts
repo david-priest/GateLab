@@ -1,7 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 import cytofSrc from "../../vendor/GateLabR/inst/app/www/cytof_plot.js?raw";
 import miniSrc from "../../vendor/GateLabR/inst/app/www/mini_plot.js?raw";
-import { ELLIPSE_PIXEL_GEOMETRY_SRC, patchControlUnderlay, patchCytofForGateLab, patchMiniPlot, patchOverlayDrawOrder, patchPointSizes, patchPolygonDraftKeys, patchTailoredGates } from "./loadPlots";
+import { ELLIPSE_PIXEL_GEOMETRY_SRC, patchControlUnderlay, patchCytofForGateLab, patchMiniPlot, patchOverlayDrawOrder, patchPlotWidthFloor, patchPointSizes, patchPolygonDraftKeys, patchTailoredGates } from "./loadPlots";
+
+describe("GateLab cytof plot width", () => {
+  it("lets the plot shrink to 300 px so it fits a phone's width", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const patched = patchPlotWidthFloor(cytofSrc);
+    expect(warn).not.toHaveBeenCalled();
+    expect(patched).toContain("PLOT_W = Math.min(Math.max(300, _availW - 32), 630);");
+    expect(patched).not.toContain("Math.max(380, _availW - 32)");
+    // Idempotent, and part of the full patch set.
+    expect(patchPlotWidthFloor(patched)).toBe(patched);
+    expect(patchCytofForGateLab(cytofSrc)).toContain("Math.max(300, _availW - 32)");
+    warn.mockRestore();
+  });
+});
 
 describe("GateLab cytof point sizes", () => {
   it("decodes per-point radii from the payload and draws dots and overlay points at their own size", () => {

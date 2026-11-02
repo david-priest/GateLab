@@ -99,6 +99,8 @@ export interface GatedFile {
   compensation: { enabled: boolean; resolution: string };
   /** FlowJo's own count per population name, for a workspace import. */
   flowJoCounts?: Record<string, number>;
+  /** The FlowJo group the sample's tree belongs to, which names the tree when every file shares it. */
+  origin?: string;
 }
 
 /** One population of one file. */
@@ -240,6 +242,7 @@ export function importGatingOnto(sample: Sample, fileName: string, text: string,
   let gatingMl: string;
   let workspaceSpillover: FlowJoSpillover | null = null;
   let flowJoCounts: Record<string, number> | undefined;
+  let origin: string | undefined;
   const kind: "gatingml" | "flowjo" = gatingTextKind(text);
   let detail: string;
 
@@ -253,6 +256,7 @@ export function importGatingOnto(sample: Sample, fileName: string, text: string,
     gatingMl = conv.gatingMl;
     workspaceSpillover = conv.spillover ?? null;
     flowJoCounts = conv.flowJoCounts;
+    if (chosen.owningGroup) origin = chosen.owningGroup;
     detail = `FlowJo workspace ${sourcePath}, sample ${chosen.index + 1} "${chosen.name}"`;
   } else {
     // A Cytobank file can carry gates tailored per FCS file; the file's own go onto it, and no
@@ -331,6 +335,7 @@ export function importGatingOnto(sample: Sample, fileName: string, text: string,
     refusals,
     compensation: { enabled: sample.compensationEnabled, resolution: describeCompensation(comp) },
     ...(flowJoCounts ? { flowJoCounts } : {}),
+    ...(origin ? { origin } : {}),
   };
 }
 

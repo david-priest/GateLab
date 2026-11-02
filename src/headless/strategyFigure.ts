@@ -9,6 +9,7 @@
 // counts. It is for checking a strategy and for a record, not a replacement for the tab's export.
 
 import { jsPDF } from "jspdf";
+import { pdfText } from "../plots/pdfText";
 import { computeGatingStrategy, buildStrategyPayload, type StrategyPayloadOptions } from "../engine/strategy";
 import { densityColorFraction, DEFAULT_DENSITY_COLOR_POWER } from "../engine/pseudocolor";
 import type { AxisTicks } from "../engine/ticks";
@@ -241,8 +242,10 @@ export function figurePdf(f: StrategyFigure): Uint8Array {
       const align = s.anchor === "start" ? "left" : s.anchor === "middle" ? "center" : "right";
       // jsPDF applies `align` along the page's x axis even to rotated text, so a rotated label is
       // centred by hand: it runs up from its start, half its width below the centre.
-      if (s.rotate) doc.text(s.text, s.x + s.size / 3, s.y + doc.getTextWidth(s.text) / 2, { angle: 90 });
-      else doc.text(s.text, s.x, s.y, { align });
+      // The standard fonts set WinAnsi only (plots/pdfText.ts).
+      const text = pdfText(s.text);
+      if (s.rotate) doc.text(text, s.x + s.size / 3, s.y + doc.getTextWidth(text) / 2, { angle: 90 });
+      else doc.text(text, s.x, s.y, { align });
     }
   }
   return new Uint8Array(doc.output("arraybuffer"));

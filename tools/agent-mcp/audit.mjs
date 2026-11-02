@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { sha256 } from "./feedback.mjs";
 
-export const MCP_VERSION = "0.3.0";
+export const MCP_VERSION = "0.4.0";
 /**
  * Tools that run beside the queue: they read nothing a mutation could change halfway (status,
  * guide) or wait on the user rather than the tab (wait_for_change, up to 600 s). Queued, every

@@ -135,7 +135,7 @@ export function AgentMenu({ status, task, onEndSearch, onConnect, onDisconnect }
           <ModalEscape onClose={() => setDialog(false)} />
           <div className="gl-modal gl-agent-dialog" role="dialog" aria-modal="true" aria-label={t("Connect to an agent")}>
             <div className="gl-modal-title">{t("Connect to an agent")}</div>
-            <p>{t("An agent is an AI assistant on this computer (Claude Code, or anything that speaks MCP) that reads the gating in this tab and proposes gates. They appear in the plot and the tree with a badge and the agent's reason; you adjust or undo them as any other, and saving stays yours.")}</p>
+            <p>{t("An agent is an AI assistant on this computer (Claude Code, or anything that speaks MCP) that reads the gating in this tab and proposes gates. They appear in the plot and the tree with a badge and the agent's reason; you adjust or undo them as any other. It saves only a copy you confirm, here, and never your own workspace file.")}</p>
             <p className="gl-agent-setup-head">{t("Setting one up, once:")}</p>
             <ol className="gl-agent-setup">
               <li>

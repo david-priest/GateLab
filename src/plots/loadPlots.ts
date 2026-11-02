@@ -520,6 +520,23 @@ export function patchControlUnderlay(src: string): string {
   return out;
 }
 
+/**
+ * The plot's side follows the width of the area it sits in, between 380 and 630 px. On a phone
+ * the area is about 360 px, so a 380 px plot ran past the right edge and the page scrolled
+ * sideways. The floor is 300 px, which keeps 230 px of data between the axes. Gate coordinates
+ * are in data units, so nothing but the drawn size changes.
+ */
+export function patchPlotWidthFloor(src: string): string {
+  const needle = "PLOT_W = Math.min(Math.max(380, _availW - 32), 630);";
+  const patched = "PLOT_W = Math.min(Math.max(300, _availW - 32), 630); // GateLab: 300 px floor, for phones";
+  if (src.includes(patched)) return src;
+  if (src.split(needle).length !== 2) {
+    console.warn("[GateLab] cytof plot-width patch did not match — the plot is at least 380 px wide.");
+    return src;
+  }
+  return src.replace(needle, patched);
+}
+
 export function patchCytofForGateLab(src: string): string {
   let out = src;
   if (!out.includes("var _glEll = ")) out = ELLIPSE_PIXEL_GEOMETRY_SRC + out;
@@ -527,6 +544,7 @@ export function patchCytofForGateLab(src: string): string {
   out = patchOverlayDrawOrder(out);
   out = patchPolygonDraftKeys(out);
   out = patchControlUnderlay(out);
+  out = patchPlotWidthFloor(out);
 
   // In Shiny the plot bundle boots itself after a short delay, because the container may
   // appear after the script. GateLab's React wrapper instead calls render() as soon as the

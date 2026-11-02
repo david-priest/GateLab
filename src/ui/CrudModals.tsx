@@ -36,10 +36,12 @@ import { fitsInZip, formatByteSize, ZIP_MAX_BYTES, type FlowJoFolderPreview, typ
 
 function ModalShell({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   const { t } = useI18n();
+  // Named by its title, so a screen reader announces it and a test or an agent finds its buttons
+  // inside it; the import dialogs had no role, and their Import button had to be found by position.
   return (
     <div className="gl-modal-backdrop">
       <ModalEscape onClose={onClose} />
-      <div className="gl-modal">
+      <div className="gl-modal" role="dialog" aria-modal="true" aria-label={t(title)}>
         <div className="gl-modal-title">{t(title)}</div>
         {children}
       </div>

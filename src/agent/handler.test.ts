@@ -452,3 +452,67 @@ describe("strategy proposals from other sources", () => {
     expect((await call<AgentDescribe>("describe")).gates).toHaveLength(1);
   });
 });
+
+describe("files an agent opens and gating it imports", () => {
+  const offered = { name: "D3.fcs", size: 12, path: "/file/abc" };
+
+  it("passes the relay's offers to the app and reports the samples now loaded", async () => {
+    const { call, adapter } = fixture();
+    const seen: unknown[] = [];
+    adapter.openFiles = async (files) => {
+      seen.push(files);
+      return { added: [{ id: "D3", name: "D3.fcs", events: 7 }], failed: [{ name: "D4.fcs", reason: "not an FCS file" }] };
+    };
+    const opened = await call<{ added: unknown[]; failed: unknown[]; samples: { id: string; events: number }[] }>("openFiles", { files: [offered] });
+    expect(seen).toEqual([[offered]]);
+    expect(opened.added).toEqual([{ id: "D3", name: "D3.fcs", events: 7 }]);
+    expect(opened.failed).toEqual([{ name: "D4.fcs", reason: "not an FCS file" }]);
+    expect(opened.samples.map((s) => [s.id, s.events])).toEqual([["D1", 200], ["D2", 100]]);
+  });
+
+  it("refuses files that are not relay offers, and a host that serves its own data", async () => {
+    const { refusal, adapter } = fixture();
+    expect(await refusal("openFiles", { files: [{ name: "x.fcs", size: 1, path: "/file/abc" }] })).toMatchObject({ code: "refused", message: expect.stringMatching(/serves its own data/) });
+    adapter.openFiles = async () => ({ added: [], failed: [] });
+    expect(await refusal("openFiles", { files: [] })).toMatchObject({ code: "refused" });
+    expect(await refusal("openFiles", { files: [{ name: "x.fcs", size: 1, path: "http://example.org/x.fcs" }] })).toMatchObject({ code: "refused", message: expect.stringMatching(/relay offered/) });
+    expect(await refusal("openFiles", { files: [{ name: "x.fcs", size: 1, path: "/file/../x" }] })).toMatchObject({ code: "refused" });
+  });
+
+  it("imports a gating file through the app and reports its outcome; refuses with no file open", async () => {
+    const { call, refusal, adapter } = fixture();
+    expect(await refusal("importGating", { file: offered })).toMatchObject({ code: "refused", message: expect.stringMatching(/update it/) });
+    adapter.importGating = async (file) => ({ outcome: "applied", message: `imported ${file.name}` });
+    expect(await call("importGating", { file: offered })).toMatchObject({ outcome: "applied", message: "imported D3.fcs" });
+    adapter.samples = () => [];
+    expect(await refusal("importGating", { file: offered })).toMatchObject({ code: "refused", message: expect.stringMatching(/open them first/) });
+  });
+});
+
+describe("a copy an agent asks to save", () => {
+  const params = { kind: "linked", target: "/tmp/D1.gatelab", overwrite: false, upload: "/save/abc" };
+
+  it("passes the request to the app and reports the user's answer", async () => {
+    const { call, refusal, adapter } = fixture();
+    expect(await refusal("save", params)).toMatchObject({ code: "refused", message: expect.stringMatching(/update it/) });
+    const asked: unknown[] = [];
+    adapter.saveCopy = async (request) => { asked.push(request); return { outcome: asked.length === 1 ? "saved" : "cancelled" }; };
+    expect(await call("save", params)).toMatchObject({ outcome: "saved" });
+    expect(await call("save", { ...params, kind: "portable", overwrite: true })).toMatchObject({ outcome: "cancelled" });
+    expect(asked).toEqual([params, { ...params, kind: "portable", overwrite: true }]);
+  });
+
+  it("refuses a malformed request before asking the user", async () => {
+    const { refusal, adapter } = fixture();
+    let asked = 0;
+    adapter.saveCopy = async () => { asked++; return { outcome: "saved" }; };
+    expect(await refusal("save", { ...params, kind: "zip" })).toMatchObject({ code: "refused" });
+    expect(await refusal("save", { ...params, target: "" })).toMatchObject({ code: "refused" });
+    expect(await refusal("save", { ...params, upload: "http://example.org/save/x" })).toMatchObject({ code: "refused" });
+    expect(await refusal("save", { ...params, upload: "/file/abc" })).toMatchObject({ code: "refused" });
+    adapter.samples = () => [];
+    expect(await refusal("save", params)).toMatchObject({ code: "refused", message: expect.stringMatching(/Nothing is open/) });
+    expect(asked).toBe(0);
+  });
+});
+

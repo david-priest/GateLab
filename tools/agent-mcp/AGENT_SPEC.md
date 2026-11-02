@@ -6,7 +6,7 @@ This is the manual for an agent that gates through a GateLab tab. The `gatelab_g
 
 GateLab is a gating tool for flow and mass cytometry. The gating engine is the open tab: it holds the events, evaluates gates, and draws. An agent does not get a copy of the data. It sends requests to the tab through a relay on the user's computer, and the tab answers from its own state and applies changes through its own reducer. So every gate the agent makes appears in the user's tab at once, as an ordinary gate with a badge saying who made it and a tooltip with the rationale; the user can move, rename, edit or undo it like any other, and the agent sees the user's own changes the next time it asks.
 
-The agent cannot save. "Save to SCE" in GateLabR and the workspace save in the browser app are the user's. `gatelab_export` writes a file of the current gating for another process to read; it is not a save.
+The agent saves only a copy the user confirms in the tab (`gatelab_save`, section 6b). "Save to SCE" in GateLabR and the save of the user's own workspace file in the browser app stay the user's. `gatelab_export` writes a file of the current gating for another process to read; it is not a save.
 
 ## 2. Connecting
 
@@ -14,7 +14,7 @@ The agent cannot save. "Save to SCE" in GateLabR and the workspace save in the b
 - The relay writes its address to `~/.gatelab/agent-relay.json` (`{token, port, url, savedAt}`) when it starts, so a launcher can find it and so the address stays the same from one session to the next.
 - The browser app connects through the header's **Agent** menu: *Connect to an agent…*, paste the address (`gatelab_status` returns it). The menu then shows "Agent · connected" and counts requests; *Disconnect* cuts the agent off. A page opened with `?agent=<URL-encoded address>` connects on load.
 - GateLabR connects on launch: `launchGatingApp(sce, agent = TRUE)` reads the relay file and opens the tab with `?agent=`; `agent = "ws://…"` gives the address directly.
-- `gatelab_status` says whether a tab is connected, which app and host it is (`{app, version, host: "browser" | "sce", workspaceName}`) and the current revision. Call it first; every other tool fails with `failed: no tab` until a tab is connected.
+- `gatelab_status` says whether a tab is connected, which app and host it is (`{app, version, host: "browser" | "sce", workspaceName}`) and the current revision. Call it first; every other tool fails with `failed: no tab` until a tab is connected. With `appUrl` (where GateLab is served, such as `http://localhost:5173/`) it also returns `launchUrl`, that address with `?agent=` set: a browser opened on it connects on load, so the user need not paste anything.
 
 ## 3. The gating as the agent sees it
 
@@ -89,12 +89,26 @@ Conventions that are not checked but matter:
 - **Names.** Name a population for what it holds (`CD45RO+CD62L+`, `EOMES+ T-bet−`), add a short suffix that marks it as yours when it sits beside the user's version of the same gate, and never rename or delete the user's gates and populations; make yours beside theirs and say in the rationale how they differ.
 - **Parents.** A gate's population lives under `parentId` and counts against it; nest a threshold under the population it refines rather than redrawing the parent's cut.
 
+## 6a. Opening files and importing gating
+
+In the browser app the agent can start from files on its own computer, as the user would with **Add files…** and **Import gating…**. Under GateLabR, which serves its own data, `gatelab_open_files` is refused.
+
+- **`gatelab_open_files {paths}`** — absolute paths of `.fcs` files, and of any `.cvw` cell images beside them (paired by name as a drop pairs them). Each file becomes a sample exactly as the button would make it. Returns `{revision, added: [{id, name, events}], failed: [{name, reason}], samples}`.
+- **`gatelab_import_gating {path}`** — a Gating-ML 2.0 file (`.xml`), a FlowJo workspace (`.wsp`, `.flowjo`) or a FACSChorus experiment (`.cef`), imported onto the FCS files already open. A FlowJo workspace pairs each open file with its own workspace sample by name and recorded acquisition; samples gated differently there become one tree tailored per file. Whenever the app has a question, the user answers it in the import dialog (an existing strategy to merge into or replace, which compensation matrix to use, whether to evaluate on FlowJo's grid): the call waits, up to 10 minutes, and returns `{revision, outcome, message}` with `outcome` `applied`, `cancelled` (the user closed the dialog) or `failed`, and `message` the app's own report. For a FlowJo workspace that report says whether every population counted as the workspace recorded; read it.
+- How the files travel: the relay offers each at a one-time path on its HTTP side (`http://127.0.0.1:<port>/file/<id>`), the request names that path, and the tab fetches it with the relay's token. Each offer is served once and lapses after 10 minutes. The tab fetches from no other address. No file passes through the agent's model provider; the counts and reports it reads do.
+
+## 6b. Saving a copy
+
+- **`gatelab_save {path, kind?, overwrite?}`** — asks the user, in the tab, to confirm saving a copy of the workspace to `path`, an absolute path on the agent's computer whose folder exists. The dialog names the kind, the path and the agent; nothing is written unless the user presses **Save**, and Cancel, Escape or a click outside declines. `kind` `linked` (the default) is the workspace file alone, as **Save As** writes it, finding its FCS files by name and recorded acquisition when opened; `portable` is one archive holding the workspace and every FCS file, as **Save Portable Copy** writes it, for sending to someone (refused under GateLabR, which holds no FCS files). A file already at `path` is refused unless `overwrite: true`, and the dialog then says it will be replaced. The call waits for the user, up to 10 minutes, and returns `{outcome: "saved", path, bytes, sha256, kind, revision}` or `{outcome: "cancelled", path, revision}`; a write that fails is an error with the reason, also shown in the app's error line.
+- It writes a copy: the user's own workspace file, its unsaved changes and any SCE are untouched, and the tab's Save still writes where it did.
+- How the bytes travel: the relay opens a one-time upload slot (`http://127.0.0.1:<port>/save/<id>`, with the token), the tab posts the copy there once the user confirms, and the relay writes it to a temporary file outside the target's folder before copying it into place, so a synced folder never sees a partial file. One save waits at a time.
+
 ## 7. What the user sees and does
 
 - Every gate the agent makes carries `provenance {by, rationale, at, source: "agent"}`; the tab shows a badge naming the source on the gate card, `by` (the relay's `--writer` name) and the rationale in its tooltip, and the whole record under the badge.
 - The user may edit, move, rename, undo or delete anything, including the agent's gates, at any time. The tab sends a `changed` event with the new revision after every change, the user's or the agent's; the relay keeps the latest revision (`gatelab_status`) and `gatelab_wait_for_change` returns when it moves. After a change, call `gatelab_describe` again before building on ids or counts.
 - `gatelab_view` moves the user's plot, or opens their Strategy tab. Use it to show them what you are looking at, and put it back on their population when you are done. The Strategy tab's controls stay as you left them until the user changes them, and are written with the workspace at its next save (in GateLabR, its next autosave).
-- The user alone saves. In GateLabR an autosave keeps the gates in the SCE after every change, but the memberships the R readers need are stored only by the user's "Save to SCE"; say so when a result is ready to be read in R.
+- The user saves their own workspace; an agent's `gatelab_save` writes a copy elsewhere only after the user presses Save in its dialog. In GateLabR an autosave keeps the gates in the SCE after every change, but the memberships the R readers need are stored only by the user's "Save to SCE"; say so when a result is ready to be read in R.
 
 ## 8. Rules of good gating with these tools
 
@@ -120,7 +134,7 @@ Conventions that are not checked but matter:
 ## 10. Errors and limits
 
 - Errors come back as `code: message`. `refused`: the command failed a check, nothing changed. `conflict`: `expectedRevision` is behind; the message carries the current revision — describe again. `failed`: the tab could not do it (no tab connected, a render that did not finish). `unknown-method`: the tab's core predates the method; reload it.
-- One tab; one request at a time per tab (the relay queues them). A polygon has at most 128 vertices. Bins are 2 to 256 per axis. Stats over 200,000 events are sampled. A render is at most 4000 px wide.
+- One tab; one request at a time per tab (the relay queues them). A request waits at most 120 s for the tab, except `gatelab_open_files`, `gatelab_import_gating` and `gatelab_save`, which wait 10 minutes because they move large files or wait on the user. A polygon has at most 128 vertices. Bins are 2 to 256 per axis. Stats over 200,000 events are sampled. A render is at most 4000 px wide.
 - Counts in `describe` are exact; `n` in distributions and stats excludes events not finite on the axes read.
 
 ## 11. The export file

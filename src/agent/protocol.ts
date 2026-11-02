@@ -44,7 +44,10 @@ export type AgentMethod =
   | "render"
   | "memberships"
   | "workspace"
-  | "reload";
+  | "reload"
+  | "openFiles"
+  | "importGating"
+  | "save";
 
 export interface AgentRequest {
   kind: "request";
@@ -409,6 +412,81 @@ export interface AgentWorkspace {
   revision: number;
   /** The workspace as the app saves it, without the data files. */
   json: string | null;
+}
+
+// ── openFiles, importGating ─────────────────────────────────────────────────────────────────────
+
+/**
+ * A file on the agent's computer, offered by the relay at a one-time path on its HTTP side. The
+ * tab fetches it from the relay it is connected to, with the relay's token; it never fetches from
+ * anywhere else.
+ */
+export interface AgentOfferedFile {
+  name: string;
+  size: number;
+  /** "/file/<id>" on the relay. */
+  path: string;
+}
+
+export interface AgentOpenFilesParams {
+  /** FCS files, and any .cvw cell images beside them (paired by name as a drop pairs them). */
+  files: AgentOfferedFile[];
+}
+
+export interface AgentOpenedFiles {
+  revision: number;
+  /** The samples the files became, in the order given. */
+  added: { id: string; name: string; events: number }[];
+  /** Files that could not be opened, each with the reason the app gave. */
+  failed: { name: string; reason: string }[];
+  /** Every sample now loaded. */
+  samples: AgentSampleInfo[];
+}
+
+export interface AgentImportGatingParams {
+  /** Gating-ML (.xml), a FlowJo workspace (.wsp, .flowjo) or a FACSChorus experiment (.cef). */
+  file: AgentOfferedFile;
+}
+
+export interface AgentImportedGating {
+  revision: number;
+  /**
+   * "applied": the gating was imported, directly when the app had nothing to ask or after the
+   * user confirmed its import dialog. "cancelled": the user closed the dialog. "failed": the app
+   * refused the file; `message` says why.
+   */
+  outcome: "applied" | "cancelled" | "failed";
+  /** The app's own report of the import, as its status line shows it. */
+  message: string | null;
+  /**
+   * For a FlowJo workspace that recorded counts: how many of the populations compared counted
+   * exactly as the workspace recorded, as the line under the status line says.
+   */
+  flowJoCheck?: { compared: number; exact: number; flowJoOnly: number; unmatched: string[] };
+}
+
+// ── save ────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A copy of the workspace saved where the agent asks, once the user has confirmed it in the tab.
+ * "linked": the workspace file alone, which finds its FCS files by name and recorded acquisition.
+ * "portable": one archive holding the workspace and every FCS file. The user's own workspace
+ * file, its unsaved state and an SCE are untouched: this writes a copy.
+ */
+export interface AgentSaveParams {
+  kind: "linked" | "portable";
+  /** The absolute path on the agent's computer, shown to the user in the confirmation. */
+  target: string;
+  /** Whether a file at the target is replaced; the confirmation says so. */
+  overwrite: boolean;
+  /** "/save/<id>" on the relay: where the tab posts the bytes once the user has confirmed. */
+  upload: string;
+}
+
+export interface AgentSaved {
+  revision: number;
+  /** "saved": written to the target. "cancelled": the user declined in the tab. */
+  outcome: "saved" | "cancelled";
 }
 
 export const QUANTILES = [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99] as const;

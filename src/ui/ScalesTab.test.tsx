@@ -10,10 +10,21 @@ import { ScalesTab } from "./ScalesTab";
 let root: Root;
 let host: HTMLDivElement;
 
+const setFluorScale = vi.fn();
+const setScatterScale = vi.fn();
 const sample = {
-  channels: [{ key: "FSC-A" }, { key: "CD3" }],
-  channelLabel: (index: number) => ["FSC-A", "CD3"][index],
+  channels: [{ key: "FSC-A" }, { key: "CD3" }, { key: "Time" }],
+  channelLabel: (index: number) => ["FSC-A", "CD3", "Time"][index],
   displayRange: () => [0, 4.5] as [number, number],
+  isScatterAxis: (index: number) => index === 0,
+  isFluorChannel: (index: number) => index === 1,
+  isImagingFeatureAxis: () => false,
+  scatterScale: () => "linear",
+  fluorScale: () => "logicle",
+  biexOffered: () => false,
+  transformSpec: () => ({ kind: "identity" }),
+  setFluorScale,
+  setScatterScale,
 } as unknown as Sample;
 
 beforeEach(() => {
@@ -29,8 +40,8 @@ afterEach(() => {
   localStorage.clear();
 });
 
-const render = (locked: boolean) => act(() => root.render(
-  <ScalesTab sample={sample} globalScales={{ CD3: [0.5, 4] }} onSetGlobalScale={vi.fn()} lockedBetweenFiles={locked} />,
+const render = (locked: boolean, onTransformChanged = vi.fn()) => act(() => root.render(
+  <ScalesTab sample={sample} globalScales={{ CD3: [0.5, 4] }} onSetGlobalScale={vi.fn()} lockedBetweenFiles={locked} onTransformChanged={onTransformChanged} />,
 ));
 const title = () => host.querySelector(".gl-section-header")!.textContent;
 
@@ -39,7 +50,7 @@ describe("ScalesTab", () => {
     render(false);
     expect(title()).toBe("Axis ranges · this file");
     expect(host.textContent).toContain("Each file keeps its own axis ranges");
-    expect(host.textContent).toContain("The display transform (linear, logicle, arcsinh) belongs to the channel and is the same in every file.");
+    expect(host.textContent).toContain("The display transform (linear, logicle, arcsinh) belongs to the channel and is the same in every file; changing it fits the channel's range again.");
     expect(host.textContent).not.toContain("Per-file Channel Scales");
   });
 
@@ -64,9 +75,36 @@ describe("ScalesTab", () => {
   it("gives Min and Max inputs room for a full value", () => {
     render(false);
     const inputs = [...host.querySelectorAll<HTMLInputElement>(".gl-scale-input")];
-    expect(inputs.map((input) => input.value)).toEqual(["", "", "0.5", "4"]);
+    expect(inputs.map((input) => input.value)).toEqual(["", "", "0.5", "4", "", ""]);
     const css = readFileSync(join(process.cwd(), "src", "styles.css"), "utf8");
     const width = Number(/\.gl-scale-input \{\s*width: (\d+)px/.exec(css)?.[1]);
     expect(width).toBeGreaterThanOrEqual(100);
+  });
+
+  it("sets any channel's display transform, not only the plotted two, and says which changed", () => {
+    const onTransformChanged = vi.fn();
+    render(false, onTransformChanged);
+    expect(host.querySelector("thead")!.textContent).toContain("Transform");
+    const scatter = host.querySelector<HTMLSelectElement>('select[aria-label="FSC-A scatter scale"]')!;
+    const signal = host.querySelector<HTMLSelectElement>('select[aria-label="CD3 signal scale"]')!;
+    expect(scatter.value).toBe("linear");
+    expect(signal.value).toBe("logicle");
+    expect([...signal.options].map((o) => o.value)).toEqual(["logicle", "arcsinh"]);
+    act(() => {
+      signal.value = "arcsinh";
+      signal.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(setFluorScale).toHaveBeenCalledWith(1, "arcsinh");
+    expect(onTransformChanged).toHaveBeenCalledWith("CD3");
+    act(() => {
+      scatter.value = "arcsinh";
+      scatter.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(setScatterScale).toHaveBeenCalledWith(0, "arcsinh");
+    expect(onTransformChanged).toHaveBeenLastCalledWith("FSC-A");
+    // A channel with one scale names it and offers nothing to choose.
+    const time = host.querySelector<HTMLSelectElement>('select[aria-label="Time scale"]')!;
+    expect(time.disabled).toBe(true);
+    expect(time.textContent).toBe("Linear");
   });
 });
