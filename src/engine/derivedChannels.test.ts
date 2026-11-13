@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { FcsFile } from "./fcs";
 import { gateMaskRectangle } from "./gates";
 import { Sample } from "./sample";
-import { DERIVED_OBJECT_AREA, DERIVED_OBJECT_COUNT, countFromDerivedChannels, decodeDerivedChannel, encodeDerivedChannel, isDerivedChannelRecord } from "./derivedChannels";
+import { DERIVED_LIGHT_LOSS_MICRONS, DERIVED_MASK_FEATURES, DERIVED_OBJECT_AREA, DERIVED_OBJECT_COUNT, countFromDerivedChannels, decodeDerivedChannel, encodeDerivedChannel, isDerivedChannelRecord } from "./derivedChannels";
 import { WORKSPACE_FEATURES, requiredWorkspaceFeatures } from "./workspaceFeatures";
 
 function flowFile(): FcsFile {
@@ -86,5 +86,49 @@ describe("countFromDerivedChannels", () => {
     // A channel of the file by the same name (not derived) does not count.
     const other = new Sample({ ...flowFile(), channels: [...flowFile().channels, { index: 4, name: DERIVED_OBJECT_COUNT, marker: null, bits: 32, range: 8 }], columns: [...flowFile().columns, new Float32Array(6)] });
     expect(countFromDerivedChannels(other, null)).toBeNull();
+  });
+});
+
+describe("the LightLoss outline as channels", () => {
+  const nameOf = (key: string) => DERIVED_MASK_FEATURES.find(([k]) => k === key)![1];
+
+  it("names the outline's measures and their micrometre copies, one copy per length", () => {
+    expect(DERIVED_MASK_FEATURES.filter(([key]) => key.startsWith("ll")).map(([, name]) => name)).toEqual([
+      "Diameter (GateLab light loss)", "Major axis (GateLab light loss)", "Minor axis (GateLab light loss)",
+      "Circularity (GateLab light loss)", "Light lost (GateLab light loss)",
+    ]);
+    expect(DERIVED_LIGHT_LOSS_MICRONS.map(([key]) => key)).toEqual(["llDiameter", "llMajorAxis", "llMinorAxis"]);
+    // Every name is distinct from the file's own channels and from each other.
+    const names = [...DERIVED_MASK_FEATURES.map(([, n]) => n), ...DERIVED_LIGHT_LOSS_MICRONS.map(([, n]) => n)];
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("gates on the outline's diameter, in pixels and in micrometres, and counts the events inside", () => {
+    const s = new Sample(flowFile());
+    // Diameters in pixels; event 3 had no outline (0).
+    const px = Float32Array.from([8, 22, 25, 0, 31, 12]);
+    const pxIdx = s.addDerivedChannel({ name: nameOf("llDiameter"), feature: "LightLossDiameter", range: 32, values: px });
+    // A rectangle on 20..30 px against FSC-A keeps events 1 and 2: the blasts, not the small cells or the empty one.
+    const inPx = gateMaskRectangle(s.gatingColumn(pxIdx), s.gatingColumn(0), [[20, 0], [30, 1000]]);
+    expect(Array.from(inPx)).toEqual([0, 1, 1, 0, 0, 0]);
+    expect(inPx.reduce((n, v) => n + v, 0)).toBe(2);
+    // At 0.4 µm per pixel the same cells sit between 8 and 12 µm.
+    const um = Float32Array.from(px, (v) => v * 0.4);
+    const umIdx = s.addDerivedChannel({ name: DERIVED_LIGHT_LOSS_MICRONS[0][1], feature: DERIVED_LIGHT_LOSS_MICRONS[0][2], range: 14, values: um });
+    const inUm = gateMaskRectangle(s.gatingColumn(umIdx), s.gatingColumn(0), [[8, 0], [12, 1000]]);
+    expect(Array.from(inUm)).toEqual(Array.from(inPx));
+    // The workspace keeps both by value.
+    expect(s.derivedChannels().map((d) => d.name)).toEqual([nameOf("llDiameter"), DERIVED_LIGHT_LOSS_MICRONS[0][1]]);
+  });
+
+  it("is restored with the count from a reopened file's channels", () => {
+    const s = new Sample(flowFile());
+    s.addDerivedChannel({ name: DERIVED_OBJECT_COUNT, feature: "ObjectCount", range: 8, values: Uint8Array.from([1, 1, 1, 0, 2, 1]) });
+    s.addDerivedChannel({ name: DERIVED_OBJECT_AREA, feature: "ObjectArea", range: 400, values: Uint32Array.from([120, 200, 300, 0, 390, 110]) });
+    s.addDerivedChannel({ name: nameOf("llDiameter"), feature: "LightLossDiameter", range: 32, values: Float32Array.from([8, 22, 25, 0, 31, 12]) });
+    s.addDerivedChannel({ name: nameOf("llLightLost"), feature: "LightLossIntegral", range: 100, values: Float32Array.from([5, 40, 52, 0, 80, 9]) });
+    const count = countFromDerivedChannels(s, null)!;
+    expect(Object.keys(count.features!)).toEqual(["llDiameter", "llLightLost"]);
+    expect(Array.from(count.features!.llDiameter)).toEqual([8, 22, 25, 0, 31, 12]);
   });
 });

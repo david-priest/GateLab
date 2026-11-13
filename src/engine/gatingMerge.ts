@@ -45,7 +45,8 @@ function importedId(sourceId: string, used: Set<string>): string {
  */
 function gateIdentity(gate: Gate): string {
   const shape =
-    gate.gate_type === "quadrant" ? { center: gate.center, ...(gate.arms ? { arms: gate.arms } : {}) }
+    // A curled quadrant and a straight one on the same crosshair are two gates (models.ts, curl).
+    gate.gate_type === "quadrant" ? { center: gate.center, ...(gate.curl ? { curl: gate.curl } : {}), ...(gate.arms ? { arms: gate.arms } : {}) }
       : gate.gate_type === "ellipse"
         ? { mean: gate.mean, covariance: gate.covariance, distance_square: gate.distance_square }
         : { vertices: gate.vertices, ...(gate.gate_type === "rectangle" ? { bounds: rectangleRule(gate) } : {}) };

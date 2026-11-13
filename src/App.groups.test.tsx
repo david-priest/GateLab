@@ -112,7 +112,9 @@ describe("groups", () => {
     act(() => viewedIn.click()); await settle();
     expect(checkedRows()).toEqual(["D1.fcs", "D2.fcs"]);
     await gateMenu();
-    expect([...host.querySelectorAll(".gl-context-menu [role='menuitem']")].map((b) => b.textContent)).toEqual(["Tailor for this file", "Tailor for Treated"]);
+    // The right-click menu is the row's whole menu (2026-11-10), its tailoring first.
+    expect([...host.querySelectorAll(".gl-context-menu [role='menuitem']")].slice(0, 2).map((b) => b.textContent)).toEqual(["Tailor for this file", "Tailor for Treated"]);
+    expect(host.querySelector(".gl-context-menu .gate-row-delete")).not.toBeNull();
     // The row's ⋯ menu opens with the same choices, under Tailoring; the switch has no ▾ beside it.
     const rowMenu = host.querySelector(".gate-card .gate-row-menu")!;
     expect(rowMenu.querySelector(".gl-menu-section")?.textContent).toBe("Tailoring");

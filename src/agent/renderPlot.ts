@@ -3,7 +3,7 @@
 // having the computed values of a few properties written onto each element before it is drawn.
 // The Strategy tab's grid is drawn as its exports compose it.
 
-import { composeGridSVG, rasterizeSvg } from "../plots/gridExport";
+import { composeGridSVG, gridSvgFile, rasterizeSvg } from "../plots/gridExport";
 
 const INLINED = ["stroke", "stroke-width", "stroke-opacity", "stroke-dasharray", "stroke-linejoin", "fill", "fill-opacity", "opacity", "font-size", "font-family", "font-weight", "text-anchor", "visibility"] as const;
 
@@ -71,14 +71,12 @@ export async function renderPlotPng(area: HTMLElement, options: { width?: number
 }
 
 /**
- * A mini-plot grid (the Strategy tab's) as a PNG, composed as its SVG and PDF exports compose it:
- * each panel's events under its vector axes and gates, with the arrows and the title. `container`
- * carries the tab's drawing state in data-state; this waits while it is "drawing" or "preparing"
- * (a pooled strategy prepares its files first), up to `timeoutMs`, and refuses an empty grid with
- * the tab's own status line.
+ * The Strategy grid once the tab has finished drawing it. `container` carries the tab's drawing
+ * state in data-state; this waits while it is "drawing" or "preparing" (a pooled strategy prepares
+ * its files first), up to `timeoutMs`, and refuses an empty grid with the tab's own status line.
  */
-export async function renderGridPng(container: HTMLElement, gridId: string, options: { width?: number; height?: number; timeoutMs?: number } = {}): Promise<PlotImage> {
-  const deadline = Date.now() + (options.timeoutMs ?? 15_000);
+async function drawnGrid(container: HTMLElement, gridId: string, timeoutMs = 15_000): Promise<HTMLElement> {
+  const deadline = Date.now() + timeoutMs;
   const busy = () => ["drawing", "preparing"].includes(container.dataset.state ?? "");
   while (busy()) {
     if (Date.now() > deadline) throw new Error("The Strategy grid is still being drawn; try the render again.");
@@ -89,6 +87,16 @@ export async function renderGridPng(container: HTMLElement, gridId: string, opti
   if (container.dataset.state !== "drawn") throw new Error(`The Strategy grid has nothing drawn: ${note("alert") || note("status") || "no panels"}`);
   const grid = document.getElementById(gridId);
   if (!grid) throw new Error("The Strategy grid has nothing drawn.");
+  return grid;
+}
+
+/**
+ * A mini-plot grid (the Strategy tab's) as a PNG, composed as its SVG and PDF exports compose it:
+ * each panel's events under its vector axes and gates, with the arrows and the title, once the
+ * tab has finished drawing it.
+ */
+export async function renderGridPng(container: HTMLElement, gridId: string, options: { width?: number; height?: number; timeoutMs?: number } = {}): Promise<PlotImage> {
+  const grid = await drawnGrid(container, gridId, options.timeoutMs);
   // The size the composition takes: the grid's box, as composeGridSVG measures it.
   const box = grid.getBoundingClientRect();
   const gridWidth = Math.ceil(box.width), gridHeight = Math.ceil(box.height);
@@ -108,4 +116,16 @@ export async function renderGridPng(container: HTMLElement, gridId: string, opti
   if (!ctx) throw new Error("No 2-D context for the render.");
   ctx.drawImage(raster, 0, 0, width, height);
   return { png: out.toDataURL("image/png"), width, height };
+}
+
+/**
+ * The Strategy grid as the file the tab's SVG export writes (gridSvgFile): vector axes, gates,
+ * arrows and title over each panel's events drawn as an image at `dpi`, once the tab has finished
+ * drawing it.
+ */
+export async function renderGridSvg(container: HTMLElement, gridId: string, options: { dpi: number; timeoutMs?: number }): Promise<{ xml: string; width: number; height: number }> {
+  await drawnGrid(container, gridId, options.timeoutMs);
+  const file = gridSvgFile(gridId, options.dpi);
+  if (!file) throw new Error("The Strategy grid has nothing drawn.");
+  return file;
 }

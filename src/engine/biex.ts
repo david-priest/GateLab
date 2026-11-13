@@ -329,7 +329,8 @@ export function biexBreakpoints(p: BiexParams): { raw: Float64Array; display: Fl
 /** Linear interpolation over a monotonic table, clamped at both ends. */
 function interp(xs: Float64Array, ys: Float64Array, v: number): number {
   const n = xs.length;
-  if (!Number.isFinite(v)) return NaN;
+  // An infinite value is beyond an end and is held there like any other; only NaN has no place.
+  if (Number.isNaN(v)) return NaN;
   if (v <= xs[0]) return ys[0];
   if (v >= xs[n - 1]) return ys[n - 1];
   let lo = 0;

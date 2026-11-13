@@ -21,7 +21,8 @@ export interface ImageWorkerLike {
   terminate(): void;
 }
 
-export type ImageWorkerFactory = (lane: RenderLane) => ImageWorkerLike;
+/** Makes a worker for a lane, or for the pool that counts objects ("count"). */
+export type ImageWorkerFactory = (lane: RenderLane | "count") => ImageWorkerLike;
 
 export interface SourceInfo {
   readonly eventCount: number;
@@ -71,6 +72,33 @@ export interface ImageServiceOptions {
   readonly bitmapBudgetBytes?: number;
   /** A request older than this is answered with a retryable error; 10 s by default. 0 disables. */
   readonly timeoutMs?: number;
+  /**
+   * Workers that count a file's objects together, each a range of its events; 1 counts on the
+   * batch lane alone. By default the machine's cores less two, at most six.
+   */
+  readonly countWorkers?: number;
+}
+
+function defaultCountWorkers(): number {
+  const cores = typeof navigator !== "undefined" && typeof navigator.hardwareConcurrency === "number" ? navigator.hardwareConcurrency : 2;
+  return Math.max(1, Math.min(6, cores - 2));
+}
+
+/** A worker of the counting pool: the files it has open, and who waits for one to open. */
+interface CountLane {
+  readonly worker: ImageWorkerLike;
+  readonly opened: Map<string, Promise<void>>;
+  readonly waiting: Set<(response: CvwWorkerResponse) => void>;
+}
+
+/** One worker's share of a file's count. */
+interface CountPart {
+  readonly requestId: string;
+  readonly lane: CountLane;
+  readonly start: number;
+  readonly end: number;
+  done: number;
+  result: (CvwWorkerResponse & { type: "classified" }) | null;
 }
 
 interface Waiter {
@@ -105,7 +133,7 @@ interface Lane {
 const DEFAULT_BITMAP_BUDGET = 128 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 10_000;
 
-function defaultWorkerFactory(lane: RenderLane): ImageWorkerLike {
+function defaultWorkerFactory(lane: RenderLane | "count"): ImageWorkerLike {
   return new Worker(new URL("./cvw.worker.ts", import.meta.url), { type: "module", name: `gatelab-images-${lane}` }) as ImageWorkerLike;
 }
 
@@ -152,7 +180,11 @@ export class ImageService {
     resolve: (c: Classification) => void;
     reject: (e: Error) => void;
     readonly listeners: Set<(done: number, total: number) => void>;
+    /** The pool's shares of the count, when it is split; absent when it runs on the batch lane. */
+    parts?: CountPart[];
   }>();
+  private readonly countWorkerCount: number;
+  private readonly countLanes: CountLane[] = [];
   private readonly cache = new Map<string, CachedImage>();
   private cacheHeld = 0;
   private hoverSeq = 0;
@@ -163,6 +195,7 @@ export class ImageService {
     this.factory = options.workerFactory ?? defaultWorkerFactory;
     this.bitmapBudget = options.bitmapBudgetBytes ?? DEFAULT_BITMAP_BUDGET;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.countWorkerCount = Math.max(1, Math.floor(options.countWorkers ?? defaultCountWorkers()));
   }
 
   /** Register a sample's source; the workers open it when a lane first needs it. */
@@ -185,6 +218,10 @@ export class ImageService {
     for (const lane of Object.values(this.lanes)) {
       lane.opened.delete(fileKey);
       lane.worker?.postMessage({ protocol: CVW_WORKER_PROTOCOL, type: "drop-source", fileKey } satisfies CvwWorkerRequest);
+    }
+    for (const lane of this.countLanes) {
+      if (!lane.opened.delete(fileKey)) continue;
+      lane.worker.postMessage({ protocol: CVW_WORKER_PROTOCOL, type: "drop-source", fileKey } satisfies CvwWorkerRequest);
     }
     for (const key of [...this.cache.keys()]) {
       if (key.startsWith(`${fileKey}:`)) this.evict(key);
@@ -230,19 +267,46 @@ export class ImageService {
       run = { requestId, promise, resolve, reject, listeners: new Set() };
       this.classifying.set(fileKey, run);
       const started = run;
-      void this.ensureOpen("batch", fileKey).then(() => {
+      void this.ensureOpen("batch", fileKey).then(async (info) => {
         if (this.classifying.get(fileKey) !== started) return;
         const mask = this.sources.get(fileKey)?.mask ?? null;
         // The batch lane opens without measuring once the file is known, so the scale travels with the request.
         const scale = this.sourceInfo.get(fileKey)?.scale;
         const options = { ...(mask ? { slot: mask.slot, fraction: mask.fraction } : {}), ...(scale ? { scale } : {}) };
-        this.lane("batch").worker!.postMessage({
-          protocol: CVW_WORKER_PROTOCOL,
-          type: "classify",
-          requestId,
-          fileKey,
-          ...(Object.keys(options).length ? { options } : {}),
-        } satisfies CvwWorkerRequest);
+        const shares = Math.min(this.countWorkerCount, Math.max(1, Math.ceil(info.eventCount / 256)));
+        if (shares <= 1) {
+          this.lane("batch").worker!.postMessage({
+            protocol: CVW_WORKER_PROTOCOL,
+            type: "classify",
+            requestId,
+            fileKey,
+            ...(Object.keys(options).length ? { options } : {}),
+          } satisfies CvwWorkerRequest);
+          return;
+        }
+        // Split: each worker of the pool counts a range of the events, and the shares are joined
+        // when the last one answers. The pool leaves the batch lane to the wall and the thumbnails.
+        const lanes = this.countPool(shares);
+        await Promise.all(lanes.map((lane) => this.openOnCountLane(lane, fileKey)));
+        if (this.classifying.get(fileKey) !== started) return;
+        const n = info.eventCount;
+        started.parts = lanes.map((lane, k) => ({
+          requestId: `${requestId}#${k}`,
+          lane,
+          start: Math.floor((k * n) / lanes.length),
+          end: Math.floor(((k + 1) * n) / lanes.length),
+          done: 0,
+          result: null,
+        }));
+        for (const part of started.parts) {
+          part.lane.worker.postMessage({
+            protocol: CVW_WORKER_PROTOCOL,
+            type: "classify",
+            requestId: part.requestId,
+            fileKey,
+            options: { ...options, range: { start: part.start, end: part.end } },
+          } satisfies CvwWorkerRequest);
+        }
       }).catch((error: unknown) => {
         if (this.classifying.get(fileKey) !== started) return;
         this.classifying.delete(fileKey);
@@ -260,7 +324,7 @@ export class ImageService {
         if (onProgress) active.listeners.delete(onProgress);
         if (active.listeners.size > 0 || this.classifying.get(fileKey) !== active) return;
         this.classifying.delete(fileKey);
-        this.lanes.batch.worker?.postMessage({ protocol: CVW_WORKER_PROTOCOL, type: "cancel", requestIds: [active.requestId] } satisfies CvwWorkerRequest);
+        this.cancelCount(active);
         active.reject(new RenderCancelled());
       },
     };
@@ -341,6 +405,8 @@ export class ImageService {
       lane.held.length = 0;
     }
     for (const key of [...this.cache.keys()]) this.evict(key);
+    for (const lane of this.countLanes) lane.worker.terminate();
+    this.countLanes.length = 0;
     for (const run of this.classifying.values()) run.reject(new RenderCancelled());
     this.classifying.clear();
     this.classifications.clear();
@@ -379,6 +445,102 @@ export class ImageService {
     return `${fileKey}:${eventIndex}:${renderKey(spec, spec.hop)}|${extras}`;
   }
 
+  /** The counting pool, grown to `size` workers on first need and kept for the next file. */
+  private countPool(size: number): CountLane[] {
+    if (this.disposed) throw new Error("the image service has been disposed");
+    while (this.countLanes.length < size) {
+      const worker = this.factory("count");
+      const lane: CountLane = { worker, opened: new Map(), waiting: new Set() };
+      // A pool worker's "source-ready" answers only its own open; everything else is the service's.
+      worker.onmessage = (event) => {
+        const response = event.data as CvwWorkerResponse;
+        if (response && response.protocol === CVW_WORKER_PROTOCOL && (response.type === "source-ready" || response.type === "source-error")) {
+          for (const waiter of [...lane.waiting]) waiter(response);
+          return;
+        }
+        this.receive(event.data);
+      };
+      worker.onerror = (event) => {
+        for (const [fileKey, run] of [...this.classifying.entries()]) {
+          if (!run.parts?.some((part) => part.lane === lane)) continue;
+          this.classifying.delete(fileKey);
+          this.cancelCount(run);
+          run.reject(new Error(`an image worker failed${event?.message ? `: ${event.message}` : ""}; reload the page if this persists`));
+        }
+      };
+      this.countLanes.push(lane);
+    }
+    return this.countLanes.slice(0, size);
+  }
+
+  /** Open a file on a pool worker, without measuring it again: the scale travels with the count. */
+  private openOnCountLane(lane: CountLane, fileKey: string): Promise<void> {
+    const known = lane.opened.get(fileKey);
+    if (known) return known;
+    const source = this.sources.get(fileKey);
+    if (!source) return Promise.reject(new Error("no cell images are attached to this file"));
+    let spec: ImageSourceSpec;
+    if (source.kind === "tiff-folder") {
+      if (source.handle) spec = { kind: "tiff-folder", handle: source.handle, naming: source.naming };
+      else if (source.files) spec = { kind: "tiff-files", files: source.files };
+      else return Promise.reject(new Error(`the cell images folder ${source.fileName} has not been found`));
+    } else {
+      if (!source.file) return Promise.reject(new Error(`the cell images file ${source.fileName} has not been found`));
+      spec = { kind: "file", file: source.file };
+    }
+    const promise = new Promise<void>((resolve, reject) => {
+      const waiter = (response: CvwWorkerResponse) => {
+        if (response.type === "source-ready" && response.fileKey === fileKey) {
+          lane.waiting.delete(waiter);
+          resolve();
+        } else if (response.type === "source-error" && response.fileKey === fileKey) {
+          lane.waiting.delete(waiter);
+          lane.opened.delete(fileKey);
+          reject(new Error(response.message));
+        }
+      };
+      lane.waiting.add(waiter);
+      lane.worker.postMessage({
+        protocol: CVW_WORKER_PROTOCOL,
+        type: "open-source",
+        fileKey,
+        source: spec,
+        eventCount: source.eventCount,
+        scaleSample: 0,
+      } satisfies CvwWorkerRequest);
+    });
+    lane.opened.set(fileKey, promise);
+    return promise;
+  }
+
+  /** Tell every worker doing a share of this count to stop. */
+  private cancelCount(run: { readonly requestId: string; parts?: CountPart[] }): void {
+    if (!run.parts) {
+      this.lanes.batch.worker?.postMessage({ protocol: CVW_WORKER_PROTOCOL, type: "cancel", requestIds: [run.requestId] } satisfies CvwWorkerRequest);
+      return;
+    }
+    for (const part of run.parts) {
+      if (part.result) continue;
+      part.lane.worker.postMessage({ protocol: CVW_WORKER_PROTOCOL, type: "cancel", requestIds: [part.requestId] } satisfies CvwWorkerRequest);
+    }
+  }
+
+  /** The shares of a split count joined into one answer: each event from the share that counted it. */
+  private joinParts(parts: readonly CountPart[]): Classification {
+    const first = parts[0].result!;
+    const objectCount = first.objectCount.slice();
+    const objectArea = first.objectArea.slice();
+    const features: Record<string, Float32Array> = {};
+    for (const [key, values] of Object.entries(first.features)) features[key] = values.slice();
+    for (const part of parts.slice(1)) {
+      const r = part.result!;
+      objectCount.set(r.objectCount.subarray(part.start, part.end), part.start);
+      objectArea.set(r.objectArea.subarray(part.start, part.end), part.start);
+      for (const [key, values] of Object.entries(r.features)) features[key]?.set(values.subarray(part.start, part.end), part.start);
+    }
+    return { objectCount, objectArea, features };
+  }
+
   private lane(lane: RenderLane): Lane {
     const target = this.lanes[lane];
     if (!target.worker) {
@@ -413,7 +575,11 @@ export class ImageService {
     }
     const promise = new Promise<SourceInfo>((resolve, reject) => {
       const listener = (response: CvwWorkerResponse) => {
-        if (response.type === "source-ready" && response.fileKey === fileKey) {
+        if ((response.type === "source-ready" || response.type === "source-error") && response.fileKey === fileKey && this.sources.get(fileKey) !== source) {
+          // This open's source was detached or replaced: the answer is for the file's next open.
+          this.sourceListeners.delete(listener);
+          reject(new RenderCancelled());
+        } else if (response.type === "source-ready" && response.fileKey === fileKey) {
           this.sourceListeners.delete(listener);
           const info = infoOf(response);
           // The scale is measured once, by whichever lane opened the file first.
@@ -449,7 +615,26 @@ export class ImageService {
     }
     if (response.type === "classify-progress" || response.type === "classified") {
       const run = this.classifying.get(response.fileKey);
-      if (!run || run.requestId !== response.requestId) return;
+      if (!run) return;
+      const part = run.parts?.find((p) => p.requestId === response.requestId);
+      if (part) {
+        if (response.type === "classify-progress") {
+          part.done = Math.max(0, Math.min(part.end, response.done) - part.start);
+          const done = run.parts!.reduce((sum, p) => sum + (p.result ? p.end - p.start : p.done), 0);
+          for (const listener of [...run.listeners]) listener(done, response.total);
+          return;
+        }
+        part.result = response;
+        if (run.parts!.some((p) => !p.result)) return;
+        const joined = this.joinParts(run.parts!);
+        this.classifications.set(response.fileKey, joined);
+        this.classifying.delete(response.fileKey);
+        const total = joined.objectCount.length;
+        for (const listener of [...run.listeners]) listener(total, total);
+        run.resolve(joined);
+        return;
+      }
+      if (run.requestId !== response.requestId) return;
       if (response.type === "classify-progress") {
         for (const listener of [...run.listeners]) listener(response.done, response.total);
         return;
@@ -460,10 +645,12 @@ export class ImageService {
       run.resolve(result);
       return;
     }
-    const classifyRun = [...this.classifying.entries()].find(([, run]) => run.requestId === response.requestId);
+    const classifyRun = [...this.classifying.entries()].find(([, run]) => run.requestId === response.requestId || run.parts?.some((p) => p.requestId === response.requestId));
     if (classifyRun) {
       const [fileKey, run] = classifyRun;
       this.classifying.delete(fileKey);
+      // One share failing fails the count: the others stop.
+      if (run.parts) this.cancelCount(run);
       run.reject(response.type === "cancelled" ? new RenderCancelled() : new Error(response.type === "error" ? response.message : "classification failed"));
       return;
     }

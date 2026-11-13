@@ -6,6 +6,7 @@
 import type { Sample } from "./sample";
 import type { PopulationMap } from "./models";
 import { populationTreeOrder } from "./populations";
+import { geometricMean, mean, median, sampleSd as stddev } from "./summaryStats";
 
 export type StatType = "count" | "pct_parent" | "pct_total" | "median" | "mean" | "geomean" | "sd" | "cv";
 export type ValueSpace = "raw" | "transformed";
@@ -40,32 +41,8 @@ const round = (x: number, d: number): number => {
   return Math.round(x * f) / f;
 };
 
-/** Stats over a finite-filtered numeric sample (mirrors R median/mean/geomean/sd/cv). */
-function median(v: number[]): number {
-  const s = [...v].sort((a, b) => a - b);
-  const n = s.length;
-  if (n === 0) return NaN;
-  const m = Math.floor(n / 2);
-  return n % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-}
-function mean(v: number[]): number {
-  return v.length ? v.reduce((s, x) => s + x, 0) / v.length : NaN;
-}
-function stddev(v: number[]): number {
-  const n = v.length;
-  if (n < 2) return NaN;
-  const m = mean(v);
-  let s = 0;
-  for (const x of v) s += (x - m) * (x - m);
-  return Math.sqrt(s / (n - 1)); // sample SD, matches R sd()
-}
-function geomean(v: number[]): number {
-  const pos = v.filter((x) => x > 0);
-  if (pos.length === 0) return NaN;
-  let s = 0;
-  for (const x of pos) s += Math.log(x);
-  return Math.exp(s / pos.length);
-}
+/** Stats over a finite-filtered numeric sample (mirrors R median/mean/geomean/sd/cv); see summaryStats.ts. */
+const geomean = (v: number[]): number => geometricMean(v).value;
 
 export function computePopulationStats(
   sample: Sample,

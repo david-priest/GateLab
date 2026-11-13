@@ -57,6 +57,73 @@ export interface ImagesTabProps {
   readonly classes?: readonly { label: string; colour: string }[];
   /** What the classes are: the colouring's name. */
   readonly classTitle?: string;
+  /** The object count and what it finds, run and read from this tab rather than through the plot's Colour by. */
+  readonly measure?: ImagesMeasure;
+}
+
+/** Which of the count's results classes the wall: none, the objects in each image, or the single-cell class. */
+export type ImagesClassBy = "none" | "objects" | "cellclass";
+
+/** The viewed file's object count, as the Images tab starts, follows and reads it. */
+export interface ImagesMeasure {
+  /**
+   * Where measuring the workspace stands. It covers every file with images, one after another: a
+   * channel only some files have cannot be gated across them.
+   */
+  readonly state:
+    | { readonly kind: "idle"; readonly measured: number; readonly fileCount: number }
+    | {
+      readonly kind: "running"; readonly percent: number; readonly cancellable: boolean;
+      readonly fileName: string; readonly fileIndex: number; readonly fileCount: number;
+    }
+    | { readonly kind: "done"; readonly fileCount: number };
+  /** Files whose count failed, with why; they are retried when measuring is started again. */
+  readonly failures?: readonly { readonly fileName: string; readonly message: string }[];
+  readonly onStart: () => void;
+  readonly onCancel: () => void;
+  readonly classBy: ImagesClassBy;
+  readonly onClassBy: (by: ImagesClassBy) => void;
+  /** Robust standard deviations a one-object cell may sit from the typical one and still be single. */
+  readonly strictness: number;
+  readonly onStrictness: (value: number) => void;
+  /**
+   * Cell size as the count measured it on each event's own SSC picture (GateLab's mask), in image
+   * pixels (the carrier-row pitch; columns are scaled by the pixel aspect), with the channel key to
+   * sort the wall by. Empty until the file is counted.
+   */
+  readonly sizes: readonly { readonly key: string; readonly label: string; readonly values: ArrayLike<number> }[];
+  /** Objects counted per event (255 where unknown); the sizes are read over the one-object cells. */
+  readonly objectCount: Uint8Array | null;
+  /** Which outline the sizes come from: the LightLoss picture's (the cell's edge) or, for a file counted before it, the SSC mask's. */
+  readonly sizeSource?: "lightloss" | "ssc";
+  /** The workspace's micrometres per image pixel, once set from beads; the sizes then read in micrometres. */
+  readonly micronsPerPixel?: number | null;
+  /** How the scale was set in this session, for saying so. */
+  readonly calibration?: { readonly beadMicrons: number; readonly fileName: string; readonly axisRatio: number | null } | null;
+  /** Set the scale from beads of `beadMicrons` whose median outline diameter on the wall is `medianPixels`. */
+  readonly onCalibrate?: (beadMicrons: number, medianPixels: number, axisRatio: number | null) => void;
+}
+
+/** The value at fraction `q` of sorted `values` (linear between neighbours). */
+function quantileOf(sorted: Float64Array, q: number): number {
+  if (sorted.length === 0) return NaN;
+  const at = q * (sorted.length - 1);
+  const lo = Math.floor(at);
+  const hi = Math.min(sorted.length - 1, lo + 1);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (at - lo);
+}
+
+/** Median and quartiles of `values` over the `events` that have exactly one object. */
+export function sizeSummary(values: ArrayLike<number>, events: ArrayLike<number>, objectCount: Uint8Array | null): { n: number; q1: number; median: number; q3: number } {
+  const picked: number[] = [];
+  for (let k = 0; k < events.length; k++) {
+    const e = events[k];
+    if (objectCount && objectCount[e] !== 1) continue;
+    const v = values[e];
+    if (Number.isFinite(v) && v > 0) picked.push(v);
+  }
+  const sorted = Float64Array.from(picked).sort();
+  return { n: sorted.length, q1: quantileOf(sorted, 0.25), median: quantileOf(sorted, 0.5), q3: quantileOf(sorted, 0.75) };
 }
 
 /** The sort key that orders the wall by class. */
@@ -146,7 +213,7 @@ const WallTile = memo(function WallTile({ service, fileKey, sampleId, eventIndex
 function ImagesTabImpl({
   visible, service, entry, mask, populationLabel, view, onViewChange, pinned, onPin, onShowOnPlot,
   populationId = null, populations, onChoosePopulation, excludedMask = null, parentName = null, onSendToLayout,
-  classOf, classes, classTitle, onMakePopulation, onFindSimilar, onSendCellPanel,
+  classOf, classes, classTitle, onMakePopulation, onFindSimilar, onSendCellPanel, measure,
 }: ImagesTabProps) {
   const { t } = useI18n();
   // The tiles are memoised, so the handlers they get keep one identity and read the latest through refs.
@@ -190,6 +257,13 @@ function ImagesTabImpl({
   // Under a class colouring, the wall can be limited to one class and ordered by class.
   const classed = !!classes && !!classOf;
   const [wallClass, setWallClass] = usePersistedTabState<string>("images.wallClass", "all");
+  // A class index means another thing under another classing: start again from every class.
+  const classTitleRef = useRef(classTitle);
+  useEffect(() => {
+    if (classTitleRef.current === classTitle) return;
+    classTitleRef.current = classTitle;
+    setWallClass("all");
+  }, [classTitle, setWallClass]);
   const colourOf = (eventIndex: number): string | null => {
     if (!classes || !classOf) return null;
     const c = classOf(eventIndex);
@@ -266,6 +340,29 @@ function ImagesTabImpl({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entry, sourceInfo, wallMask, sortKey, sortDesc, classed, classOf, wallClass, sortColumn, histColumn, activeRange?.[0], activeRange?.[1]]);
   const histogram = useMemo(() => (histColumn ? wallHistogram(histColumn, all) : null), [histColumn, all]);
+  // The count's results for the wall's population: cells in each class (every imaged cell of the
+  // population, whatever class or range the wall is limited to), and the size of the one-object
+  // cells the wall shows.
+  const classCounts = useMemo(() => {
+    if (!measure || !classed || !entry || !sourceInfo) return null;
+    const n = entry.sample.fcs.nEvents;
+    const flags = sourceInfo.hasImage;
+    const counts = new Array<number>(classes!.length).fill(0);
+    let total = 0;
+    for (let e = 0; e < n; e++) {
+      if ((wallMask && !wallMask[e]) || !flags[e]) continue;
+      const c = classOf!(e);
+      if (c === null || c < 0 || c >= counts.length) continue;
+      counts[c]++;
+      total++;
+    }
+    return { counts, total };
+  }, [measure, classed, classes, classOf, entry, sourceInfo, wallMask]);
+  const [beadMicrons, setBeadMicrons] = useState("");
+  const sizeStats = useMemo(() => {
+    if (!measure || measure.sizes.length === 0) return [];
+    return measure.sizes.map((size) => ({ ...size, ...sizeSummary(size.values, events, measure.objectCount) }));
+  }, [measure, events]);
 
   const pick = (eventIndex: number, mode: PickMode) => {
     // Read the last click now: the updater runs later, after the ref has moved on to this one.
@@ -689,7 +786,164 @@ function ImagesTabImpl({
               </span>
             )}
           </div>
-          {classed && (
+          {measure && (
+            <div className="gl-images-measure" role="group" aria-label={t("Measure cells")}>
+              <span className="gl-images-control">
+                {measure.state.kind === "running" ? (
+                  <>
+                    <span className="gl-muted">
+                      {measure.state.fileCount > 1
+                        ? t("Measuring {file} ({index} of {count})… {percent}%", {
+                          file: measure.state.fileName, index: measure.state.fileIndex, count: measure.state.fileCount, percent: measure.state.percent,
+                        })
+                        : t("Counting objects… {percent}%", { percent: measure.state.percent })}
+                    </span>
+                    {measure.state.cancellable && (
+                      <button type="button" className="gl-mini-btn" onClick={measure.onCancel} title={t("Stop measuring; the files already measured keep their results")}>{t("Cancel")}</button>
+                    )}
+                  </>
+                ) : measure.state.kind === "done" ? (
+                  <span className="gl-muted" title={t("Every imaged cell of every file with images has its objects counted and measured on its own pictures; the results are channels of each file")}>
+                    {measure.state.fileCount > 1 ? t("Cells measured in all {count} files", { count: measure.state.fileCount }) : t("Cells measured")}
+                  </span>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className="gl-mini-btn"
+                      onClick={measure.onStart}
+                      title={t("Count the objects in every imaged cell of every file with images, one file after another, and measure them on their own pictures; the results become channels of each file, so a gate on them applies to every file")}
+                    >
+                      {measure.state.fileCount > 1 ? t("Measure cells in all {count} files", { count: measure.state.fileCount }) : t("Measure cells")}
+                    </button>
+                    {measure.state.measured > 0 && (
+                      <span className="gl-muted">{t("{measured} of {count} measured", { measured: measure.state.measured, count: measure.state.fileCount })}</span>
+                    )}
+                  </>
+                )}
+                {(measure.failures ?? []).map((f) => (
+                  <span key={f.fileName} className="gl-error-inline">{t("{file}: {message}", { file: f.fileName, message: f.message })}</span>
+                ))}
+              </span>
+              <label className="gl-images-control">
+                <span>{t("Classes")}</span>
+                <select value={measure.classBy} aria-label={t("Classes")} onChange={(event) => measure.onClassBy(event.target.value as ImagesClassBy)}>
+                  <option value="none">{t("none")}</option>
+                  <option value="objects">{t("Objects in image")}</option>
+                  <option value="cellclass">{t("Single cells")}</option>
+                </select>
+              </label>
+              {measure.classBy === "cellclass" && (
+                <label
+                  className="gl-images-control"
+                  title={t("How far from the typical single cell, in robust standard deviations, a one-object event may sit and still count as single")}
+                >
+                  <span>{t("Strictness")}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={10}
+                    step={0.5}
+                    value={measure.strictness}
+                    aria-label={t("Strictness")}
+                    onChange={(event) => measure.onStrictness(Math.max(1, Math.min(10, Number(event.target.value) || 3)))}
+                  />
+                </label>
+              )}
+              {classCounts && (
+                <span className="gl-images-control gl-images-class-counts" role="group" aria-label={classTitle ?? t("Class")}>
+                  {classes!.map((c, i) => (
+                    <button
+                      key={c.label}
+                      type="button"
+                      className="gl-chip"
+                      aria-pressed={wallClass === String(i)}
+                      title={t("Show only this class on the wall; click again to show every class")}
+                      onClick={() => setWallClass(wallClass === String(i) ? "all" : String(i))}
+                    >
+                      <span className="gl-cell-chip" style={{ background: c.colour }} />
+                      {t("{label} {count} ({percent}%)", {
+                        label: c.label,
+                        count: classCounts.counts[i].toLocaleString(),
+                        percent: classCounts.total > 0 ? ((100 * classCounts.counts[i]) / classCounts.total).toFixed(1) : "0",
+                      })}
+                    </button>
+                  ))}
+                </span>
+              )}
+              {sizeStats.length > 0 && (() => {
+                const scale = measure.micronsPerPixel ?? null;
+                const unit = scale ?? 1;
+                const fromLightLoss = (measure.sizeSource ?? "lightloss") === "lightloss";
+                const axisRatio = sizeStats.length >= 3 && sizeStats[2].median > 0 ? sizeStats[1].median / sizeStats[2].median : null;
+                const bead = Number(beadMicrons);
+                return (
+                  <span
+                    className="gl-images-control gl-images-sizes"
+                    role="group"
+                    aria-label={t("Cell size")}
+                    title={fromLightLoss
+                      ? t("Measured by GateLab on each cell's own LightLoss picture: the outline of the dark ring a cell makes in the beam, over the one-object cells now on the wall. Median, with the middle half of the cells in brackets. Click one to sort the wall by it.")
+                      : t("Measured by GateLab on each cell's own SSC picture: the outline of the counted object, in image pixels (the spacing of the picture's rows), over the one-object cells now on the wall. Median, with the middle half of the cells in brackets. Click one to sort the wall by it.")}
+                  >
+                    <span>{fromLightLoss
+                      ? (scale ? t("Cell size (LightLoss outline), µm") : t("Cell size (LightLoss outline), px"))
+                      : t("Cell size (SSC mask), px")}</span>
+                    {sizeStats.map((s) => (
+                      <button
+                        key={s.key}
+                        type="button"
+                        className="gl-chip"
+                        aria-pressed={sortKey === s.key}
+                        onClick={() => { setSortKey(s.key); setWallRange(null); }}
+                      >
+                        {s.n > 0
+                          ? t("{measure} {median} ({q1}–{q3})", { measure: s.label, median: (s.median * unit).toFixed(1), q1: (s.q1 * unit).toFixed(1), q3: (s.q3 * unit).toFixed(1) })
+                          : t("{measure} –", { measure: s.label })}
+                      </button>
+                    ))}
+                    <span className="gl-muted">{t("n = {count}", { count: (sizeStats[0]?.n ?? 0).toLocaleString() })}</span>
+                    {measure.onCalibrate && (
+                      <span
+                        className="gl-images-control gl-images-calibrate"
+                        title={t("Run beads of a known diameter and show them on the wall (gate the single beads first): their median outline diameter sets the micrometres per pixel for every file of the workspace, and the sizes are written as micrometre channels saved with it")}
+                      >
+                        <input
+                          type="number"
+                          min={0.5}
+                          max={100}
+                          step={0.1}
+                          value={beadMicrons}
+                          placeholder={t("bead µm")}
+                          aria-label={t("Bead diameter in micrometres")}
+                          onChange={(event) => setBeadMicrons(event.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="gl-mini-btn"
+                          disabled={!(bead > 0) || !(sizeStats[0]?.n > 0)}
+                          onClick={() => measure.onCalibrate!(bead, sizeStats[0].median, axisRatio)}
+                        >
+                          {t("Set scale from beads")}
+                        </button>
+                      </span>
+                    )}
+                    {scale && (
+                      <span className="gl-muted gl-images-scale">
+                        {measure.calibration
+                          ? t("{scale} µm per px, from {bead} µm beads in {file}", { scale: scale.toFixed(3), bead: String(measure.calibration.beadMicrons), file: measure.calibration.fileName })
+                          : t("{scale} µm per px, saved with the workspace", { scale: scale.toFixed(3) })}
+                        {measure.calibration?.axisRatio && measure.calibration.axisRatio > 1.05
+                          ? t("; the beads read {ratio}× longer one way than the other, so one image axis is off by about that much", { ratio: measure.calibration.axisRatio.toFixed(2) })
+                          : ""}
+                      </span>
+                    )}
+                  </span>
+                );
+              })()}
+            </div>
+          )}
+          {classed && !measure && (
             <div className="gl-images-legend" aria-label={classTitle ?? t("Class")}>
               {classes!.map((c) => (
                 <span key={c.label} className="gl-images-legend-item">

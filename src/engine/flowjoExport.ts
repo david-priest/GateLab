@@ -3188,12 +3188,30 @@ function sampleBlock(entry: FlowJoExportSample, sampleId: number, opts: FlowJoEx
 
 // ── Main ────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * A file on an uploaded or edited compensation profile is gated on that profile's values, and the
+ * writers here take the matrix from the file's own or an installed one (Sample.spillover), which
+ * is not the profile's. Written anyway, the workspace carried no matrix and no "Comp-" names, and
+ * its gates held other events on reading ([0,1,0,0] where GateLab held [0,0,1,0]). Such an export
+ * is refused by name, as the Gating-ML export refuses it (gatingmlExport.ts).
+ */
+export function refuseCompensationProfile(samples: readonly { sample: Sample; fileName: string }[], what: string): void {
+  const onProfile = samples.filter((s) => s.sample.compensationEnabled && !s.sample.embeddedCompensationEnabled).map((s) => s.fileName);
+  if (!onProfile.length) return;
+  const one = onProfile.length === 1;
+  throw new Error(
+    `A ${what} cannot yet carry an uploaded or edited compensation profile, and ${onProfile.join(", ")} ${one ? "is" : "are"} ` +
+    `compensated with one. Switch ${one ? "it" : "them"} to Original, or to the file's own matrix, before exporting.`,
+  );
+}
+
 export function exportFlowJoWorkspace(opts: FlowJoExportOpts): FlowJoExportResult {
   const { samples } = opts;
   if (!samples.length) throw new Error("No samples to export.");
   if (!samples.some((s) => Object.keys(s.gates).length && s.populations[s.root_population_id]?.children.length)) {
     throw new Error("No gates to export.");
   }
+  refuseCompensationProfile(samples, "FlowJo workspace");
   const now = opts.now ?? new Date();
   const warnings: string[] = [];
   const counters: SampleContext["counters"] = { gates: 0, densified: 0, ellipses: 0, quadrants: 0, helpers: 0 };

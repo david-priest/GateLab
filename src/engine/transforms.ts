@@ -175,7 +175,23 @@ export class Logicle {
       if (Math.abs(delta) < tolerance) return negative ? 2 * this.x1 - x : x;
     }
 
-    return -1;
+    // Halley's method did not settle: with W = 0 the start for a value near zero is far below the
+    // axis, and with W near M / 2 isolated values oscillate. The scale is monotone above x1, so
+    // the value is found by bisection on the inverse. Returning -1 here put such a value on the
+    // caller's fallback scale, between neighbours that are on this one.
+    if (!Number.isFinite(value)) return -1;
+    let lo = this.x1;
+    let hi = this.x1 + 1;
+    for (let i = 0; i < 64 && this.inverse(hi) < value; ++i) hi = this.x1 + (hi - this.x1) * 2;
+    if (!(this.inverse(hi) >= value)) return -1;
+    for (let i = 0; i < 200; ++i) {
+      const mid = (lo + hi) / 2;
+      if (mid === lo || mid === hi) break;
+      if (this.inverse(mid) < value) lo = mid;
+      else hi = mid;
+    }
+    const found = (lo + hi) / 2;
+    return negative ? 2 * this.x1 - found : found;
   }
 
   /** Inverse: display coordinate → raw data value. */

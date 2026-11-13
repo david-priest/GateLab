@@ -6,7 +6,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentHandler } from "./agent/handler";
-import type { AgentApplied, AgentDescribe, AgentResponse, AgentView, AgentViewParams } from "./agent/protocol";
+import type { AgentApplied, AgentDescribe, AgentRenderedSvg, AgentResponse, AgentView, AgentViewParams } from "./agent/protocol";
 import type { FcsFile } from "./engine/fcs";
 
 const agent = vi.hoisted(() => ({ handler: null as AgentHandler | null }));
@@ -18,6 +18,7 @@ vi.mock("./agent/agentLink", async (original) => ({
     constructor(options: { handler: AgentHandler }) { agent.handler = options.handler; }
     notifyChanged() {}
     disconnect() {}
+    relayHttpUrl(path: string) { return `http://127.0.0.1:48123${path}?token=t`; }
   },
 }));
 // Every action the App's reducer is handed, so "no dispatch" is observed rather than inferred.
@@ -47,7 +48,7 @@ let root: Root;
 let container: HTMLDivElement;
 let uuid = 0;
 const settle = async (ms = 20) => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, ms)); }); };
-const request = async <T,>(method: "describe" | "apply" | "view", params: unknown): Promise<AgentResponse & { result?: T }> => {
+const request = async <T,>(method: "describe" | "apply" | "view" | "render", params: unknown): Promise<AgentResponse & { result?: T }> => {
   let response: AgentResponse | undefined;
   // Not awaited inside act: React must be free to commit what the request waits for.
   act(() => { void agent.handler!.handle({ kind: "request", id: method, method, params }).then((r) => { response = r; }); });
@@ -75,6 +76,8 @@ const view = async (params: AgentViewParams) => {
   }
 };
 
+/** The layout controls as a tab opened for the first time holds them, which every reply reports. */
+const TAB_DEFAULTS = { layout: "tree", columns: 4, showArrows: true, arrowWidth: 1.5, arrowAnchor: "label" };
 const tab = (label: string) => [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((el) => el.textContent === label)!;
 const radio = (label: string) => [...container.querySelectorAll<HTMLLabelElement>("label.gl-check")].find((el) => el.textContent === label)!.querySelector("input")!;
 const picked = () => [...container.querySelectorAll<HTMLLabelElement>(".gl-strategy-pops label[title]")].filter((el) => el.querySelector("input")!.checked).map((el) => el.title);
@@ -135,7 +138,7 @@ describe("an agent opening the Strategy tab", () => {
 
     // Open already: one population, its whole path from the root.
     const single = await view({ strategy: { populationIds: [child], fullPath: true } });
-    expect(single.strategy).toEqual({ mode: "single", populationIds: [child], fullPath: true });
+    expect(single.strategy).toEqual({ mode: "single", populationIds: [child], fullPath: true, ...TAB_DEFAULTS });
     await settle(250);
     expect(radio("Single").checked).toBe(true);
     expect(container.querySelector<HTMLSelectElement>(".gl-strategy-inspector select")!.value).toBe(child);
@@ -165,12 +168,69 @@ describe("an agent opening the Strategy tab", () => {
     act(() => { tab("Gating").click(); });
     await settle();
     reducer.actions.length = 0;
-    expect((await view({ strategy: { populationIds: [parent], fullPath: false } })).strategy).toEqual({ mode: "single", populationIds: [parent], fullPath: false });
+    expect((await view({ strategy: { populationIds: [parent], fullPath: false } })).strategy).toEqual({ mode: "single", populationIds: [parent], fullPath: false, ...TAB_DEFAULTS });
     await settle(250);
     expect(container.querySelector<HTMLSelectElement>(".gl-strategy-inspector select")!.value).toBe(parent);
-    expect((await describeApp()).view.strategy).toEqual({ mode: "single", populationIds: [parent], fullPath: false });
+    expect((await describeApp()).view.strategy).toEqual({ mode: "single", populationIds: [parent], fullPath: false, ...TAB_DEFAULTS });
     expect(after.view.populationId).not.toBe(parent);
     expect(reducer.actions).toEqual([]);
+  });
+
+  it("sets the layout controls as the user would, and posts the tab's SVG export to the relay", async () => {
+    const start = await describeApp();
+    const range = async (name: string, parentId: string, x: string, low: number) => {
+      const applied = await request<AgentApplied>("apply", {
+        command: { type: "createRange", name, parentId, x, y: x === "CD4" ? "FSC-A" : "SSC-A", space: "raw", xBounds: [low, null], yBounds: [null, null] },
+        rationale: "Synthetic threshold.",
+      });
+      return applied.result!.created.populationIds[0];
+    };
+    const parent = await range("CD4_positive", start.rootPopulationId!, "CD4", 302);
+    const child = await range("CD4_high", parent, "FSC-A", 103);
+    await settle();
+    reducer.actions.length = 0;
+    // The renderer is a stand-in: it leaves one panel and an arrow overlay where the real one and
+    // drawStrategyArrows would (jsdom lays nothing out, so the real arrows cannot be routed here).
+    plots.renderMultiStrategyGrid.mockImplementation((id: string) => {
+      document.getElementById(id)!.innerHTML = '<div id="strategy-grid-container-grid"><div class="mini-plot-cell"><svg width="200" height="200"><text>CD4</text></svg></div>'
+        + '<svg class="gl-strategy-arrows"><path d="M0 0L10 10"/></svg></div>';
+    });
+
+    const controls = { layout: "flow", columns: 1, showArrows: true, arrowWidth: 2.5, arrowAnchor: "gate" } as const;
+    const shown = await view({ strategy: { populationIds: [parent, child], ...controls } });
+    expect(shown.strategy).toEqual({ mode: "multi", populationIds: [parent, child], fullPath: false, ...controls });
+    await settle(250);
+    const field = (label: string) => [...container.querySelectorAll<HTMLLabelElement>("label.gl-field-inline")].find((el) => el.textContent!.startsWith(label))!.querySelector<HTMLInputElement | HTMLSelectElement>("input, select")!;
+    expect(field("Layout").value).toBe("flow");
+    expect(field("Columns").value).toBe("1");
+    expect(radio("Arrows").checked).toBe(true);
+    expect(field("Arrow width").value).toBe("2.5");
+    expect(field("Arrows from").value).toBe("gate");
+    // Wrapped into one column: every panel in column 0, one row each, with gutters for the arrows.
+    const payload = plots.renderMultiStrategyGrid.mock.lastCall![1] as { nodes: { row: number; col: number }[]; grid_gap?: number };
+    expect(payload.nodes.map((node) => node.col)).toEqual(payload.nodes.map(() => 0));
+    expect(payload.nodes.length).toBeGreaterThan(1);
+    expect(payload.grid_gap).toBeGreaterThan(0);
+
+    // The SVG: composed as the Export section's SVG button composes it, posted to the slot named.
+    const posted: { url: string; body: string }[] = [];
+    vi.stubGlobal("fetch", async (url: string, init: { body: Blob }) => { posted.push({ url, body: await init.body.text() }); return new Response("{}", { status: 200 }); });
+    const rendered = await request<AgentRenderedSvg>("render", { format: "svg", dpi: 150, upload: "/save/slot-1" });
+    expect(rendered.error).toBeUndefined();
+    expect(rendered.result).toMatchObject({ format: "svg", dpi: 150, view: { tab: "strategy" } });
+    expect(posted).toHaveLength(1);
+    expect(posted[0].url).toBe("http://127.0.0.1:48123/save/slot-1?token=t");
+    expect(posted[0].body.startsWith('<?xml version="1.0" encoding="UTF-8"?>')).toBe(true);
+    expect(posted[0].body).toContain("strategy-arrows");
+    expect(posted[0].body).toContain("M0 0L10 10");
+    // The tab's own DPI when the agent names none.
+    expect((await request<AgentRenderedSvg>("render", { format: "svg", upload: "/save/slot-2" })).result!.dpi).toBe(300);
+    expect(reducer.actions).toEqual([]);
+
+    // Off the Strategy tab there is no grid to write.
+    await view({ tab: "gating" });
+    expect((await request("render", { format: "svg", upload: "/save/slot-3" })).error?.message).toContain("open the Strategy tab first");
+    expect(posted).toHaveLength(2);
   });
 
   it("refuses a population the tree does not hold, leaving the tab where it was", async () => {

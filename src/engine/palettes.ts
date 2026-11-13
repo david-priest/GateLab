@@ -106,6 +106,40 @@ export function populationColor(name: PaletteName, slot: number | undefined): st
   return ramp[((s % POP_COLOR_SLOTS) + POP_COLOR_SLOTS) % POP_COLOR_SLOTS];
 }
 
+/** Whether a value is a "#rrggbb" colour, the form a population's own colour is kept in. */
+export function isHexColor(value: unknown): value is string {
+  return typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value);
+}
+
+/** The colour the user picked for a population, or undefined when it has none (or a malformed one). */
+export function ownPopulationColor(pop: { color?: string } | undefined): string | undefined {
+  return isHexColor(pop?.color) ? pop!.color : undefined;
+}
+
+/**
+ * A population's colour in every view: the colour the user picked for it, else its slot's colour
+ * among the default palette's 24 population colours (the twelve slot colours, then the twelve the
+ * Plotting chart runs on through), so the first 24 populations of a tree each have a colour of
+ * their own and a population past the twelfth is not drawn in an earlier one's. Undefined for a
+ * population with neither (the root).
+ */
+export function populationColorOf(pop: { color?: string; colorSlot?: number } | undefined): string | undefined {
+  const own = ownPopulationColor(pop);
+  if (own || pop?.colorSlot === undefined) return own;
+  const palette = plottingPalette("default");
+  return palette[((pop.colorSlot % palette.length) + palette.length) % palette.length];
+}
+
+/**
+ * A population's colour in the Gating tab's overlay by population: under the default palette, its
+ * colour in every view (populationColorOf); under another palette, the colour the user picked for
+ * it, else its slot's in that palette.
+ */
+export function populationOverlayColor(name: PaletteName, pop: { color?: string; colorSlot?: number } | undefined): string {
+  if (name === "default") return populationColorOf(pop) ?? populationColor(name, undefined);
+  return ownPopulationColor(pop) ?? populationColor(name, pop?.colorSlot);
+}
+
 // The Plotting chart's colours past the twelve population slots. Paired's twelve run on through
 // colours none of its own are near (Tableau 20's pinks, cyans, olives, browns and two of its dark
 // shades, its grey last, as the rest of the parent is grey); Tableau runs on through its own last eight and four dark shades. Any other palette runs
@@ -133,12 +167,23 @@ function plottingPalette(name: PaletteName): string[] {
  * slot, so slots 0 to 11 are the colours every other view gives them; a slot past 11 takes the
  * chart's own colours beyond the twelve, and a category whose colour is already in the chart takes
  * the next one it does not hold. Two categories share a colour only past PLOTTING_COLOR_COUNT.
+ * A category with a colour of its own in `own` (a population's hand-picked colour) keeps it, and
+ * the others pass over the chart's colours equal to one of those.
  */
-export function plottingPopulationColors(name: PaletteName, slots: readonly (number | undefined)[]): string[] {
+export function plottingPopulationColors(
+  name: PaletteName,
+  slots: readonly (number | undefined)[],
+  own: readonly (string | undefined)[] = [],
+): string[] {
   const palette = plottingPalette(name);
   const n = palette.length;
   const taken = new Set<number>();
-  return slots.map((slot) => {
+  const picked = new Set(own.filter(isHexColor).map((color) => color.toLowerCase()));
+  palette.forEach((color, index) => {
+    if (picked.has(color.toLowerCase())) taken.add(index);
+  });
+  return slots.map((slot, i) => {
+    if (isHexColor(own[i])) return own[i]!;
     const start = (((typeof slot === "number" ? slot : 0) % n) + n) % n;
     let index = start;
     for (let step = 0; step < n && taken.has(index); step++) index = (start + step + 1) % n;

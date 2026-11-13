@@ -1,0 +1,31 @@
+/* The Items tab's "Objects" fold: the sheet's items in stacking order, top first. */
+.gl-layout-objects { width: 100%; }
+.gl-layout-objects-list { list-style: none; margin: 4px 0 0; padding: 0; max-height: 260px; overflow-y: auto; }
+.gl-layout-objects-list .gl-layout-objects-list { max-height: none; overflow: visible; margin: 0; padding-left: 16px; }
+.gl-layout-object {
+  display: flex; align-items: center; gap: 4px; padding: 1px 2px; border-radius: 3px;
+  border-top: 2px solid transparent; border-bottom: 2px solid transparent;
+  font-size: var(--gl-font-size-caption); color: #334155;
+}
+.gl-layout-object.is-selected { background: #dbeafe; }
+.gl-layout-object.is-hidden > .gl-layout-object-kind,
+.gl-layout-object.is-hidden > .gl-layout-object-name { opacity: .5; }
+.gl-layout-object.is-drop-before { border-top-color: #2563eb; }
+.gl-layout-object.is-drop-after { border-bottom-color: #2563eb; }
+.gl-layout-object-kind { flex: 0 0 auto; min-width: 54px; color: #64748b; }
+.gl-layout-object-name {
+  flex: 1 1 auto; min-width: 0; padding: 2px 4px; border: 0; background: none; color: inherit; font: inherit;
+  text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gl-layout-object-name:focus-visible,
+.gl-layout-object-toggle:focus-visible,
+.gl-layout-object-fold:focus-visible { outline: 2px solid #2563eb; outline-offset: -1px; }
+.gl-layout-object-toggle,
+.gl-layout-object-fold {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0; border: 0; border-radius: 3px; background: none; color: #475569;
+}
+.gl-layout-object-toggle.is-off { color: #cbd5e1; }
+.gl-layout-object-rename { flex: 1 1 auto; min-width: 0; font: inherit; padding: 1px 4px; }
+.gl-layout-object-menu { flex: 0 0 auto; }
+.gl-layout-object-group { margin: 0; }

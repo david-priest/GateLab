@@ -50,14 +50,24 @@ function fmtLogicleLabel(v: number): string {
   return s + trimNum(a);
 }
 
-// generate_scatter_ticks fmt_label: signif-rounded K/M abbreviation.
-function fmtScatterLabel(v: number): string {
+// generate_scatter_ticks fmt_label: signif-rounded K/M abbreviation. Given the step of a linear
+// axis, the label instead carries the decimals that step needs in its K/M unit, so neighbouring
+// ticks of a zoomed axis (100.1K, 100.2K) do not round to one label.
+function fmtScatterLabel(v: number, step?: number): string {
   const a = Math.abs(v);
   const s = v < 0 ? "-" : "";
   if (a < 1e-9) return "0";
+  if (step !== undefined) {
+    const [div, unit] = a >= 1e6 ? [1e6, "M"] : a >= 1e3 ? [1e3, "K"] : [1, ""];
+    const decimals = Math.max(0, Math.ceil(-Math.log10(step / div) - 1e-9));
+    return s + String(Number((a / div).toFixed(decimals))) + unit;
+  }
   if (a >= 1e6) return s + signif(a / 1e6, 3) + "M";
   if (a >= 1e3) return s + signif(a / 1e3, 3) + "K";
-  if (a >= 1) return s + String(Math.round(a));
+  // Three significant figures, which leaves a whole number as it is. Rounded to a whole number,
+  // the linear ticks 0.5, 1.5, 2.5 of a short axis were labelled "1", "2", "3" beside the ticks
+  // that are 1, 2 and 3.
+  if (a >= 1) return s + signif(a, 3);
   return s + signif(a, 2);
 }
 
@@ -230,7 +240,7 @@ export function scatterTicks(
 
     return {
       major_pos: majorRaw.map(forward),
-      major_labels: majorRaw.map(fmtScatterLabel),
+      major_labels: majorRaw.map((v) => fmtScatterLabel(v)),
       minor_pos: minorRaw.map(forward),
       tick_mode: "scatter_log10",
     };
@@ -265,7 +275,7 @@ export function linearScatterTicks(axisRange: [number, number]): AxisTicks | nul
   if (major.length < 2) return null;
   return {
     major_pos: major,
-    major_labels: major.map(fmtScatterLabel),
+    major_labels: major.map((v) => fmtScatterLabel(v, step)),
     minor_pos: [],
     // Linear ticks are evenly spaced and cannot crowd, so the renderer must not
     // run its compressed-label hiding pass over them.

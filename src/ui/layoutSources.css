@@ -1,0 +1,18 @@
+/* A Layout block's data: the inspector's "Data" list, the note shown over the sheet, and the legend block's mark. */
+.gl-layout-source { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.gl-layout-source > strong {
+  color: #475569; font-size: var(--gl-font-size-caption); letter-spacing: .06em; text-transform: uppercase;
+}
+.gl-layout-source-list {
+  display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 10px; margin: 0;
+  font-size: var(--gl-font-size-caption); color: #334155;
+}
+.gl-layout-source-list dt { color: #64748b; }
+.gl-layout-source-list dd { margin: 0; overflow-wrap: anywhere; }
+.gl-layout-source-placeholders code { font-size: var(--gl-font-size-caption); }
+.gl-layout-source-tip {
+  position: fixed; z-index: 1000; padding: 7px 9px; pointer-events: none;
+  border: 1px solid #cbd5e1; border-radius: 4px; background: #fff; box-shadow: 0 4px 14px rgba(15, 23, 42, .14);
+}
+.gl-layout-legend-mark { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: var(--gl-font-size-caption); color: #475569; }
+.gl-layout-legend-mark > .gl-hint { flex-basis: 100%; margin: 0; }

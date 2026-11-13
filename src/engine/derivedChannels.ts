@@ -81,6 +81,23 @@ export const DERIVED_MASK_FEATURES: readonly [key: string, name: string, feature
   ["diameter", "Diameter (GateLab mask)", "MaskDiameter"],
   ["meanIntensity", "Mean intensity (GateLab mask)", "MaskMeanIntensity"],
   ["sdIntensity", "SD intensity (GateLab mask)", "MaskSdIntensity"],
+  // The cell's outline on its LightLoss (transmitted light) picture (imaging/lightLossMask.ts): its
+  // size whatever it scatters, and the light it takes from the beam.
+  ["llDiameter", "Diameter (GateLab light loss)", "LightLossDiameter"],
+  ["llMajorAxis", "Major axis (GateLab light loss)", "LightLossMajorAxis"],
+  ["llMinorAxis", "Minor axis (GateLab light loss)", "LightLossMinorAxis"],
+  ["llCircularity", "Circularity (GateLab light loss)", "LightLossCircularity"],
+  ["llLightLost", "Light lost (GateLab light loss)", "LightLossIntegral"],
+];
+/**
+ * The LightLoss outline's lengths in micrometres, once a bead tube has set the scale: the pixel
+ * channel's key, the channel's name, its $PnFEATURE tag. They are the pixel values times one
+ * workspace-wide factor, so a reopened workspace reads the factor back from them.
+ */
+export const DERIVED_LIGHT_LOSS_MICRONS: readonly [key: string, name: string, feature: string][] = [
+  ["llDiameter", "Diameter (GateLab light loss, um)", "LightLossDiameterMicrons"],
+  ["llMajorAxis", "Major axis (GateLab light loss, um)", "LightLossMajorAxisMicrons"],
+  ["llMinorAxis", "Minor axis (GateLab light loss, um)", "LightLossMinorAxisMicrons"],
 ];
 
 /** The worker's count as App holds it (imaging/imageService.ts Classification), rebuilt from the channels. */

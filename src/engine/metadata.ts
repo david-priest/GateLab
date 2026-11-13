@@ -59,11 +59,46 @@ function splitLine(line: string, delim: string): string[] {
 }
 
 /**
+ * Split the table text into records at line breaks outside a quoted cell, so a quoted cell that
+ * holds a line break (a spreadsheet cell with Alt-Enter) stays inside its row. A cell is quoted
+ * only when the quote opens it; a quote further into a cell (5" dish) does not join the rows after.
+ */
+function splitRecords(text: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let inQuotes = false;
+  let cellStart = true;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"' && text[i + 1] === '"') {
+        cur += '""';
+        i++;
+      } else {
+        if (c === '"') inQuotes = false;
+        cur += c;
+      }
+    } else if (c === "\r" || c === "\n") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      out.push(cur);
+      cur = "";
+      cellStart = true;
+    } else {
+      if (c === '"' && cellStart) inQuotes = true;
+      cellStart = c === "," || c === "\t" || (cellStart && c === " ");
+      cur += c;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+/**
  * Parse a CSV or TSV metadata table. First column = FCS file name (the join key); the remaining
  * columns are metadata fields. Delimiter auto-detected (tab if the header has more tabs than commas).
  */
 export function parseMetadataTable(text: string): ParsedMetadata {
-  const lines = text.split(/\r\n|\r|\n/).filter((l) => l.trim().length > 0);
+  const lines = splitRecords(text).filter((l) => l.trim().length > 0);
   if (lines.length === 0) throw new Error("Metadata file is empty.");
   const header0 = lines[0];
   const delim = (header0.match(/\t/g)?.length ?? 0) > (header0.match(/,/g)?.length ?? 0) ? "\t" : ",";
@@ -87,9 +122,13 @@ export function parseMetadataTable(text: string): ParsedMetadata {
   return { fileNameColumn, columns, byFileName, rowCount };
 }
 
-/** Strip a trailing .fcs (or any) extension and lowercase, for tolerant filename matching. */
+/**
+ * Strip a trailing .fcs and lowercase, for tolerant filename matching. Only that extension: with
+ * whatever followed the last dot removed, a row named "S1.d7" lost its ".d7", matched the file
+ * S1.fcs and missed S1.d7.fcs.
+ */
 function normName(s: string): string {
-  return s.replace(/\.[^.]+$/, "").trim().toLowerCase();
+  return s.trim().replace(/\.fcs$/i, "").trim().toLowerCase();
 }
 
 /**

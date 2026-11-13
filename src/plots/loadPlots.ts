@@ -1778,12 +1778,15 @@ ${badgeNeedle}`;
     "                        .attr('cx', hx).attr('cy', hy).attr('r', VRAD)\n" +
     "                        .attr('fill', 'white').attr('stroke', color).attr('stroke-width', 2)\n" +
     "                        .attr('stroke-dasharray', pinned ? '2,2' : null)\n" +
-    "                        .style('cursor', slideX ? 'ew-resize' : 'ns-resize').style('pointer-events', 'all');\n" +
+    "                        .style('cursor', pinned ? (slideX ? 'ew-resize' : 'ns-resize') : 'move').style('pointer-events', 'all');\n" +
     "                    armHandleSel.push(h);\n" +
-    "                    // Where the arm through the handle meets the end's own edge: the end it sets.\n" +
+    "                    // Where the arm through the handle meets the end's own edge: the end it sets. A\n" +
+    "                    // handle in view and dragged past its edge is the end itself, the edge going out\n" +
+    "                    // with it, so the box grows (2026-11-10).\n" +
     "                    var reach = function () {\n" +
     "                        var c0 = gate.center, cpx = isFlipped ? [zx(c0[1]), zy(c0[0])] : [zx(c0[0]), zy(c0[1])];\n" +
     "                        var to = [hx, hy];\n" +
+    "                        if (!pinned && (slideX ? hy !== end[1] : hx !== end[0])) return { from: cpx, to: to };\n" +
     "                        if (alongX && hy !== cpx[1]) to = [cpx[0] + (hx - cpx[0]) * (end[1] - cpx[1]) / (hy - cpx[1]), end[1]];\n" +
     "                        if (!alongX && hx !== cpx[0]) to = [end[0], cpx[1] + (hy - cpx[1]) * (end[0] - cpx[0]) / (hx - cpx[0])];\n" +
     "                        return { from: cpx, to: to };\n" +
@@ -1794,6 +1797,14 @@ ${badgeNeedle}`;
     "                            var p = _ptr(event); moved = true;\n" +
     "                            if (slideX) hx = Math.max(Math.max(_bx0, 0), Math.min(Math.min(_bx1, W), p[0]));\n" +
     "                            else hy = Math.max(Math.max(_by0, 0), Math.min(Math.min(_by1, H), p[1]));\n" +
+    "                            // Away from the centre past its edge, in view, the handle follows: never inward.\n" +
+    "                            if (!pinned) {\n" +
+    "                                var _c = gate.center, _cp = isFlipped ? [zx(_c[1]), zy(_c[0])] : [zx(_c[0]), zy(_c[1])];\n" +
+    "                                var _k = slideX ? 1 : 0, _out = end[_k] >= _cp[_k] ? 1 : -1;\n" +
+    "                                var _lim = slideX ? H : W, _q = Math.max(0, Math.min(_lim, p[_k]));\n" +
+    "                                var _v = (_q - end[_k]) * _out > 0 ? _q : end[_k];\n" +
+    "                                if (slideX) hy = _v; else hx = _v;\n" +
+    "                            }\n" +
     "                            h.attr('cx', hx).attr('cy', hy);\n" +
     "                            var r = reach();\n" +
     "                            pathSel.attr('d', _armPath([r.from, r.to]));\n" +

@@ -3,7 +3,7 @@
 // exactly where the view put it, and a side that was on the border before the drag follows the
 // data, not the border. Sides facing another gate cannot be that close to a border in between.
 
-import type { Gate, PolyRectGate } from "./models";
+import { isUnbounded, type Gate, type PolyRectGate } from "./models";
 
 export interface BorderSnapSample {
   gateToDisplay(gate: PolyRectGate, channel: string, v: number): number;
@@ -65,9 +65,18 @@ export function snapGatesToBorders(
       snapped = display.map(([a, b]) => [snapValue(a, rangeA, pxA, tolPx), snapValue(b, rangeB, pxB, tolPx)]);
     }
     if (snapped.every((p, i) => p[0] === display[i][0] && p[1] === display[i][1])) continue;
+    // Only a coordinate the snap moved is brought back from the display. One it left alone keeps
+    // the gate's own value: through the display and back, a side with no bound came out as a
+    // bound at the 1e12 it is drawn at, or as -Infinity on a log axis, which a saved workspace
+    // cannot hold and refused to reopen with.
+    const back = (channel: string, own: number, shown: number, moved: number): number =>
+      isUnbounded(own) || moved === shown ? own : sample.displayToGate(gate, channel, moved);
     edits.push({
       gateId: gate.gate_id,
-      vertices: snapped.map(([a, b]) => [sample.displayToGate(gate, gate.x_channel, a), sample.displayToGate(gate, gate.y_channel, b)] as [number, number]),
+      vertices: snapped.map(([a, b], i) => [
+        back(gate.x_channel, gate.vertices[i][0], display[i][0], a),
+        back(gate.y_channel, gate.vertices[i][1], display[i][1], b),
+      ] as [number, number]),
     });
   }
   return edits;

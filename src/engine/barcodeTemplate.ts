@@ -319,13 +319,14 @@ export function learnBarcodeTemplate(
   const byPlane = new Map<string, PolyRectGate[]>();
   for (const g of gates) {
     if (g.gate_type !== "polygon" && g.gate_type !== "rectangle") continue;
-    const key = `${g.x_channel} ${g.y_channel}`;
+    // A channel key can hold a space ("115In CD4"), so the two are joined by a character none has.
+    const key = `${g.x_channel}\u0000${g.y_channel}`;
     byPlane.set(key, [...(byPlane.get(key) ?? []), g]);
   }
   const learned: { plane: LearnedBarcodePlane; shapes: BarcodePlaneShapes; boxSize: number; gateIds: string[] }[] = [];
   for (const [key, planeGates] of byPlane) {
     if (planeGates.length !== 4) continue;
-    const [x, y] = key.split(" ");
+    const [x, y] = key.split("\u0000");
     const verts = planeGates.map((g) => asinhVertices(g, cofactor, context));
     const cs = verts.map(centroid);
     const mx = cs.reduce((s, c) => s + c[0], 0) / 4;

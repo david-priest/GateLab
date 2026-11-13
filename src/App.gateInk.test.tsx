@@ -234,6 +234,8 @@ describe("coloured gates, gate line width and label background", () => {
     act(() => colouredSwitch().click());
     setRange(widthSlider(), "1"); await settle();
     await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("copy.gatelab", bundle)]);
+    // The changes made since the copy was saved are asked about first.
+    act(() => button("Open Without Saving")!.click());
     await settle(4);
     expect(colouredSwitch().checked).toBe(true);
     expect(widthSlider().value).toBe("2.4");

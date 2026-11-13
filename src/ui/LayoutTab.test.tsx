@@ -7,7 +7,7 @@
 import { act, useImperativeHandle, useState, forwardRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDefaultLayoutWorkspace, normalizeLayoutStyle, type LayoutWorkspace } from "../engine/layout";
+import { createDefaultLayoutWorkspace, DEFAULT_ITERATION, normalizeLayoutStyle, normalizeLayoutWorkspace, type LayoutChartRecipe, type LayoutIteration, type LayoutWorkspace } from "../engine/layout";
 import { DEFAULT_HIERARCHY_ID } from "../engine/hierarchies";
 import { newGate, newPopulation, newRootPopulation } from "../engine/models";
 import { Sample } from "../engine/sample";
@@ -173,10 +173,10 @@ function gatedFixture(third = false) {
   return fx;
 }
 
-function mount(fx: ReturnType<typeof fixture>, globalScales: Record<string, [number, number]> = {}, illustrationConfig: IllustrationConfig | null = null, extra: Record<string, unknown> = {}) {
+function mount(fx: ReturnType<typeof fixture>, globalScales: Record<string, [number, number]> = {}, illustrationConfig: IllustrationConfig | null = null, extra: Record<string, unknown> = {}, initial?: LayoutWorkspace) {
   const changes: LayoutWorkspace[] = [];
   function Harness() {
-    const [workspace, setWorkspace] = useState(createDefaultLayoutWorkspace);
+    const [workspace, setWorkspace] = useState(() => initial ?? createDefaultLayoutWorkspace());
     return (
       <I18nProvider>
         <LayoutTab
@@ -204,6 +204,28 @@ function mount(fx: ReturnType<typeof fixture>, globalScales: Record<string, [num
   return changes;
 }
 const items = (changes: LayoutWorkspace[]) => changes.at(-1)!.sheets[0].items;
+
+/** A sheet saved before "+ Chart" made Plotting charts: one summary chart block, as the old button made it. */
+function olderSheetWithChart(fx: ReturnType<typeof fixture>, chart: Partial<LayoutChartRecipe> = {}): LayoutWorkspace {
+  const workspace = createDefaultLayoutWorkspace();
+  const saved = JSON.parse(JSON.stringify(workspace));
+  saved.sheets[0].items = [{
+    id: "chart-1", x: 80, y: 90, width: 320, height: 240, z: 0,
+    recipe: { kind: "chart", sampleId: "D1", populationId: fx.rootId, statistic: "percent_of_parent", files: "checked", groupBy: "donor", chartType: "bars", showPoints: true, test: true, ...chart },
+  }];
+  return normalizeLayoutWorkspace(saved);
+}
+
+/**
+ * A sheet saved while the Layout tab could still start an iteration: empty, drawn once per
+ * checked file unless told otherwise. Iteration is retired from Layout, so only such a sheet
+ * shows the Iterate tab.
+ */
+function iteratingSheet(iteration: Partial<LayoutIteration> = {}): LayoutWorkspace {
+  const saved = JSON.parse(JSON.stringify(createDefaultLayoutWorkspace()));
+  saved.sheets[0].iteration = { ...DEFAULT_ITERATION, mode: "files", ...iteration };
+  return normalizeLayoutWorkspace(saved);
+}
 
 describe("LayoutTab sheets", () => {
   it("keeps a heading reading its own plot when the sheet or the pair is duplicated, and frees it when the plot goes", async () => {
@@ -289,7 +311,7 @@ describe("LayoutTab plots", () => {
     act(() => menuItem("Duplicate").click());
     await flush();
     expect(items(changes)).toHaveLength(2);
-    expect(host.querySelector('[role="menu"]')).toBeNull(); // closed by the choice
+    expect(host.querySelector('.gl-context-menu')).toBeNull(); // closed by the choice
     // Empty page: the menu adds where the pointer was, in page coordinates.
     const canvas = host.querySelector<HTMLElement>(".gl-layout-canvas")!;
     act(() => { canvas.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 300, clientY: 250 })); });
@@ -323,12 +345,13 @@ describe("LayoutTab plots", () => {
     expect(draws.plots.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("adds a summary chart of a population across the files, grouped by a metadata column", async () => {
-    const changes = mount(fixture());
+  it("draws a summary chart saved on an older sheet, of a population across the files, grouped by a metadata column", async () => {
+    const fx = fixture();
+    const changes = mount(fx, {}, null, {}, olderSheetWithChart(fx));
     await flush();
-    act(() => button("+ Chart").click());
-    await flush();
-    expect(items(changes)[0].recipe).toMatchObject({ kind: "chart", statistic: "percent_of_parent", files: "checked", groupBy: "donor", chartType: "bars", test: true });
+    select("chart-1");
+    // Nothing is converted on loading: the block is the summary chart it was.
+    expect(changes).toHaveLength(0);
     const chart = host.querySelector(".gl-layout-chart svg")!;
     expect(chart).not.toBeNull();
     // Two files, one per donor: a bar and a point for each, and no test with one file per group.
@@ -341,10 +364,9 @@ describe("LayoutTab plots", () => {
   it("draws a file without a value in the grouping column as Unassigned, and says so in the inspector", async () => {
     const fx = fixture();
     fx.samples[1].metadata = { day: "0" };
-    mount(fx);
+    mount(fx, {}, null, {}, olderSheetWithChart(fx));
     await flush();
-    act(() => button("+ Chart").click());
-    await flush();
+    select("chart-1");
     const chart = host.querySelector(".gl-layout-chart svg")!;
     expect([...chart.querySelectorAll(".gl-layout-chart-groups > g > text")].map((t) => t.textContent)).toEqual(["D1", "Unassigned"]);
     expect(host.textContent).toContain("Files without a value in the column are drawn as Unassigned and left out of the test.");
@@ -1226,11 +1248,11 @@ describe("LayoutTab iteration", () => {
 
   it("draws a strategy strip for each file, titled by the sheet's template as the plots are", async () => {
     const fx = gatedFixture();
-    const changes = mount(fx, { "FSC-A": [5, 40], "SSC-A": [5, 40] }, null, { activePopulationId: fx.childId });
+    const changes = mount(fx, { "FSC-A": [5, 40], "SSC-A": [5, 40] }, null, { activePopulationId: fx.childId }, iteratingSheet());
     await flush();
     act(() => button("Iterate").click());
-    change(selectField("Draw the sheet"), "files");
-    // Added after the iteration was switched on, the strategy follows it as a toolbar plot does.
+    expect(selectField("Draw the sheet").value).toBe("files");
+    // Added to a sheet that iterates, the strategy follows it as a toolbar plot does.
     act(() => button("+ Gating strategy").click());
     await flush();
     const [strategy] = items(changes);
@@ -1259,12 +1281,11 @@ describe("LayoutTab iteration", () => {
   });
 
   it("starts tiles at as many as fit the paper, and says when a grid asked for runs off it", async () => {
-    const changes = mount(fixture());
+    const changes = mount(fixture(), {}, null, {}, iteratingSheet());
     await flush();
     act(() => button("+ Biplot").click());
     await flush();
     act(() => button("Iterate").click());
-    change(selectField("Draw the sheet"), "files");
     change(selectField("Arrangement"), "tiles");
     // A4 landscape, a 260 × 280 plot at the margin, a 24 px gap: 3 across and 2 down fit.
     expect(changes.at(-1)!.sheets[0].iteration?.arrangement).toMatchObject({ kind: "tiles", columns: 3, rows: 2 });
@@ -1280,6 +1301,8 @@ describe("LayoutTab iteration", () => {
     // The plot widened past the paper's half: its second tile runs off the sheet.
     act(() => button("Items").click());
     select(items(changes)[0].id);
+    // The item's fields show mm by default; this width is in px.
+    act(() => button("px").click());
     const width = host.querySelector<HTMLInputElement>('input[aria-label="Item width"]')!;
     act(() => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(width, "700");
@@ -1296,7 +1319,7 @@ describe("LayoutTab iteration", () => {
   });
 
   it("draws the sheet once per file, with placeholders filled, and exports every page", async () => {
-    const changes = mount(fixture(), { "FSC-A": [5, 40], "SSC-A": [5, 40] });
+    const changes = mount(fixture(), { "FSC-A": [5, 40], "SSC-A": [5, 40] }, null, {}, iteratingSheet());
     await flush();
     act(() => button("+ Biplot").click());
     act(() => button("+ Text").click());
@@ -1312,9 +1335,8 @@ describe("LayoutTab iteration", () => {
     expect(items(changes)[1].recipe).toMatchObject({ text: "Donor {sample}, day {meta:day} ({n}/{N})" });
 
     act(() => button("Iterate").click());
-    change(selectField("Draw the sheet"), "files");
     expect(changes.at(-1)?.sheets[0].iteration).toMatchObject({ mode: "files", source: { kind: "checked" } });
-    // Nothing followed the iteration when it was switched on, so the plot follows it from then.
+    // Added to a sheet that iterates, the plot follows the iteration.
     expect(items(changes)[0].recipe).toMatchObject({ iterated: true });
     expect(host.textContent).toContain("Page 1 of 2");
     expect(host.textContent).toContain("2 files → 2 pages");
@@ -1356,6 +1378,60 @@ describe("LayoutTab iteration", () => {
     act(() => button("Page").click());
     await act(async () => { button("Export sheet").click(); await vi.runAllTimersAsync(); });
     expect(draws.exports.at(-1)).toEqual({ name: "Layout 1", format: "pdf", pages: 2 });
+  });
+
+  const menuItems = () => [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].map((entry) => entry.textContent);
+  const openMenu = (id: string) => act(() => { element(id).dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 200, clientY: 150 })); });
+  const followBox = () => [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.includes("Follows the iteration"));
+
+  it("offers no iteration on a sheet that does not iterate, and leaves the plots added to it unmarked", async () => {
+    const changes = mount(fixture());
+    await flush();
+    act(() => button("+ Biplot").click());
+    act(() => button("+ Gating strategy").click());
+    await flush();
+    const [plot, strategy] = items(changes);
+    expect(plot.recipe).not.toHaveProperty("iterated");
+    expect(strategy.recipe).not.toHaveProperty("iterated");
+    expect(button("Iterate")).toBeUndefined();
+    expect(host.querySelector('[aria-label="Pages of the iteration"]')).toBeNull();
+    expect(button("Export PDF").title).not.toContain("iteration");
+    select(plot.id);
+    act(() => button("Items").click());
+    expect(followBox()).toBeUndefined();
+    openMenu(plot.id);
+    expect(menuItems()).not.toContain("Follow the iteration");
+    expect(menuItems()).not.toContain("Stop following the iteration");
+  });
+
+  it("keeps a saved iteration with its controls, and Once removes the Iterate tab until undone", async () => {
+    const changes = mount(fixture(), {}, null, {}, iteratingSheet());
+    await flush();
+    act(() => button("+ Biplot").click());
+    await flush();
+    const [plot] = items(changes);
+    expect(plot.recipe).toMatchObject({ iterated: true });
+    expect(host.querySelector('[aria-label="Pages of the iteration"]')).not.toBeNull();
+    expect(host.textContent).toContain("Page 1 of 2");
+    expect(button("Export PDF").title).toContain("iteration");
+    select(plot.id);
+    act(() => button("Items").click());
+    expect(followBox()).toBeDefined();
+    openMenu(plot.id);
+    expect(menuItems()).toContain("Stop following the iteration");
+    act(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    act(() => button("Iterate").click());
+    expect(host.textContent).toContain("Iteration is being retired from Layout");
+    change(selectField("Draw the sheet"), "off");
+    expect(changes.at(-1)!.sheets[0]).not.toHaveProperty("iteration");
+    // The tab goes, and the inspector shows Items.
+    expect(button("Iterate")).toBeUndefined();
+    expect(button("Items").getAttribute("aria-pressed")).toBe("true");
+    expect(host.querySelector('[aria-label="Pages of the iteration"]')).toBeNull();
+    act(() => button("Undo").click());
+    expect(changes.at(-1)!.sheets[0].iteration).toMatchObject({ mode: "files" });
+    expect(button("Iterate")).toBeDefined();
+    expect(host.textContent).toContain("Page 1 of 2");
   });
 });
 
@@ -1423,7 +1499,7 @@ describe("pooled Layout plots", () => {
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(el, value);
       el.dispatchEvent(new Event("change", { bubbles: true }));
     });
-    const changes = mount(gatedFixture(true), { "FSC-A": [0, 40], "SSC-A": [0, 40] }, null, { checkedSampleIds: ["D1", "D2", "D3"] });
+    const changes = mount(gatedFixture(true), { "FSC-A": [0, 40], "SSC-A": [0, 40] }, null, { checkedSampleIds: ["D1", "D2", "D3"] }, iteratingSheet());
     await flush();
     act(() => button("+ Biplot").click());
     act(() => button("+ Text").click());
@@ -1500,7 +1576,8 @@ describe("Plotting chart block", () => {
     const onOpenInPlotting = vi.fn();
     const changes = mount(fx, {}, null, { plottingSettings: () => settings, onOpenInPlotting });
     await flush();
-    act(() => button("+ Plotting chart").click());
+    act(() => button("+ Chart").click());
+    act(() => button("Take the Plotting tab's chart").click());
     await flush();
     expect(items(changes)[0].recipe).toMatchObject({ kind: "proportions", settings: { files: ["D1", "D2"], selectedPops: [fx.childId], groupSel: "day" } });
     const chart = host.querySelector(".gl-layout-proportions-host .gl-prop-chart")!;
@@ -1510,7 +1587,90 @@ describe("Plotting chart block", () => {
     expect(chart.querySelectorAll(".gl-prop-legend-item")).toHaveLength(2);
     // The new block is selected; its inspector hands the settings back to the Plotting tab.
     act(() => button("Edit in Plotting").click());
-    expect(onOpenInPlotting).toHaveBeenCalledWith(expect.objectContaining({ selectedPops: [fx.childId], groupSel: "day" }));
+    // A block without a title of its own (none, or the "{none}" a grid's blocks carry) is opened as
+    // a new chart named as the objects list names the block.
+    expect(onOpenInPlotting).toHaveBeenCalledWith(expect.objectContaining({ selectedPops: [fx.childId], groupSel: "day" }), "Composition");
+  });
+
+  // A click on a legend entry of a sheet's chart kept the entry highlighted, as on the Plotting
+  // tab, and wrote the highlight's note inside the block, which then no longer fitted (2026-11-12).
+  it("draws the chart's legend as a key: its entries are not buttons and a click highlights nothing", async () => {
+    const fx = fixture();
+    const settings = { ...BASE_PROPORTIONS_SETTINGS, files: ["D1", "D2"], hierarchy: DEFAULT_HIERARCHY_ID, parent: fx.rootId, selectedPops: [fx.childId], groupSel: "day" };
+    mount(fx, {}, null, { plottingSettings: () => settings });
+    await flush();
+    act(() => button("+ Chart").click());
+    act(() => button("Take the Plotting tab's chart").click());
+    await flush();
+    const block = host.querySelector(".gl-layout-proportions-host")!;
+    const entries = [...block.querySelectorAll<HTMLElement>(".gl-prop-legend-item")];
+    expect(entries).toHaveLength(2);
+    expect(entries.map((entry) => entry.tagName)).toEqual(["SPAN", "SPAN"]);
+    expect(block.querySelector("button")).toBeNull();
+    act(() => {
+      entries[0].dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      entries[0].click();
+    });
+    expect(block.querySelector(".gl-prop-highlight-note")).toBeNull();
+    expect(block.querySelector("[aria-pressed]")).toBeNull();
+    expect(block.querySelector('[opacity="0.16"]')).toBeNull();
+  });
+});
+
+describe("One chart kind on a Layout sheet", () => {
+  it("offers one + Chart in the toolbar, whose quick start makes a Plotting chart block of a population, statistic and grouping", async () => {
+    const fx = fixture();
+    const changes = mount(fx, {}, null, { plottingSettings: () => ({ ...BASE_PROPORTIONS_SETTINGS }) });
+    await flush();
+    const toolbar = host.querySelector(".gl-layout-toolbar")!;
+    expect([...toolbar.querySelectorAll("button")].filter((b) => b.textContent === "+ Chart")).toHaveLength(1);
+    expect([...toolbar.querySelectorAll("button")].some((b) => b.textContent === "+ Plotting chart")).toBe(false);
+    act(() => button("+ Chart").click());
+    const dialog = host.querySelector<HTMLElement>('[role="dialog"].gl-layout-chart-start')!;
+    expect(dialog).not.toBeNull();
+    const selects = [...dialog.querySelectorAll("select")];
+    expect(selects.map((el) => el.getAttribute("aria-label"))).toEqual(["Population", "Statistic", "Group by"]);
+    // The root is not offered: a chart of all events in all events says nothing.
+    expect([...selects[0].options].map((o) => o.value)).toEqual([fx.childId]);
+    setSelect(selects[1], "count");
+    setSelect(selects[2], "day");
+    act(() => button("Add").click());
+    await flush();
+    expect(host.querySelector(".gl-layout-chart-start")).toBeNull();
+    expect(items(changes)).toHaveLength(1);
+    expect(items(changes)[0].recipe).toMatchObject({
+      kind: "proportions",
+      settings: { files: ["D1", "D2"], parent: fx.rootId, selectedPops: [fx.childId], valueKind: "proportion", proportionValue: "count", plotType: "bar", groupSel: "day", unitSel: "__sample__", test: true },
+    });
+    const chart = host.querySelector(".gl-layout-proportions-host .gl-prop-chart")!;
+    expect(chart).not.toBeNull();
+    // Lymphocytes holds each file's three events: a bar per day, each on an axis of events.
+    expect(chart.querySelectorAll("svg.gl-prop-panel rect.gl-prop-mark")).toHaveLength(2);
+    expect(chart.textContent).toContain("Events");
+  });
+
+  it("converts a saved summary chart to a Plotting chart in the same frame, as one undo step", async () => {
+    const fx = fixture();
+    const changes = mount(fx, {}, null, {}, olderSheetWithChart(fx, { populationId: fx.childId, statistic: "percent_of_total", chartType: "box", title: "Lymphocytes per donor" }));
+    await flush();
+    select("chart-1");
+    act(() => button("Convert to a Plotting chart").click());
+    await flush();
+    expect(items(changes)).toHaveLength(1);
+    expect(items(changes)[0]).toMatchObject({
+      id: "chart-1", x: 80, y: 90, width: 320, height: 240,
+      recipe: {
+        kind: "proportions",
+        title: "Lymphocytes per donor",
+        settings: { files: ["D1", "D2"], parent: fx.rootId, selectedPops: [fx.childId], proportionValue: "total", plotType: "box", groupSel: "donor", test: true, legend: false },
+      },
+    });
+    expect(host.querySelector(".gl-layout-chart svg")).toBeNull();
+    expect(host.querySelector(".gl-layout-proportions-host .gl-prop-chart")).not.toBeNull();
+    act(() => button("Undo").click());
+    await flush();
+    expect(items(changes)[0].recipe).toMatchObject({ kind: "chart", statistic: "percent_of_total", chartType: "box" });
+    expect(host.querySelector(".gl-layout-chart svg")).not.toBeNull();
   });
 });
 
@@ -1669,5 +1829,72 @@ describe("LayoutTab titles, bound text and zoom", () => {
     expect(Math.round(parseFloat(body.style.width) * plot.zoom!)).toBeCloseTo(plot.width, -1);
     // The plot is still drawn at the size it had; the zoom scales the drawing.
     expect(draws.plots.at(-1)!.config.plot_size).toBeGreaterThan(240);
+  });
+});
+
+describe("LayoutTab sources and legends", () => {
+  const typeText = (value: string) => act(() => {
+    const label = [...host.querySelectorAll<HTMLLabelElement>(".gl-layout-inspector label.gl-field-inline")].find((l) => l.firstChild?.textContent === "Text")!;
+    const input = label.querySelector("input")!;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+
+  it("shows a block's data under Data, and fills the source placeholders of a text block that reads from a chart", async () => {
+    const fx = gatedFixture();
+    const changes = mount(fx, {}, null, {}, olderSheetWithChart(fx));
+    await flush();
+    act(() => button("+ Text").click());
+    await flush();
+    const [chart, note] = items(changes);
+    select(chart.id);
+    const data = host.querySelector(".gl-layout-source")!;
+    expect(data.textContent).toContain("Files (2)");
+    expect(data.textContent).toContain("D1.fcs, D2.fcs");
+    // One file per donor, so each group's n is one file.
+    expect(data.textContent).toContain("D1, n = 1 file; D2, n = 1 file");
+    select(note.id);
+    const readsFrom = host.querySelector<HTMLSelectElement>('select[aria-label="Reads from"]')!;
+    expect([...readsFrom.options].map((option) => option.value)).toContain(chart.id);
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(readsFrom, chart.id);
+      readsFrom.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    typeText("{files} · {sizes} · {other}");
+    await flush();
+    expect(items(changes)[1].recipe).toMatchObject({ text: "{files} · {sizes} · {other}", readsFrom: chart.id });
+    expect(element(note.id).querySelector(".gl-layout-text-surface")!.textContent).toBe("D1.fcs, D2.fcs · D1, n = 1 file; D2, n = 1 file · {other}");
+  });
+
+  it("writes a legend as a new text block under the content each time, and regenerates one only when confirmed", async () => {
+    const fx = gatedFixture();
+    const saved = olderSheetWithChart(fx);
+    const changes = mount(fx, {}, null, {}, saved);
+    await flush();
+    const chart = saved.sheets[0].items[0];
+    act(() => button("Write legend").click());
+    const legend = items(changes)[1];
+    expect(legend.recipe).toMatchObject({ kind: "text", fontSize: 10, legendGenerated: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) });
+    // The chart takes the active population, All Events; one file per donor, so no test.
+    expect((legend.recipe as { text: string }).text).toBe(
+      "Panel 1. % of parent of All Events per file, grouped by donor (D1, n = 1 file; D2, n = 1 file). Bars show the mean and error bars the standard deviation. " +
+      "No test was made: each group needs two or more values, and there must be two or more groups.",
+    );
+    expect(legend.y).toBeGreaterThanOrEqual(chart.y + chart.height);
+    expect(legend.x).toBe(chart.x);
+    act(() => button("Write legend").click());
+    expect(items(changes)).toHaveLength(3);
+    expect(items(changes)[1].recipe).toEqual(legend.recipe);
+
+    select(legend.id);
+    typeText("Edited by hand");
+    expect(host.textContent).toContain(`Legend written ${(legend.recipe as { legendGenerated: string }).legendGenerated}`);
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
+    act(() => button("Regenerate").click());
+    expect(items(changes)[1].recipe).toMatchObject({ text: "Edited by hand" });
+    confirm.mockReturnValue(true);
+    act(() => button("Regenerate").click());
+    expect((items(changes)[1].recipe as { text: string }).text).toBe((legend.recipe as { text: string }).text);
   });
 });

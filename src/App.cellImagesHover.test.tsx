@@ -43,7 +43,8 @@ const syntheticFcs: FcsFile = {
 
 vi.mock("./engine/fcs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./engine/fcs")>();
-  return { ...actual, parseFcs: () => syntheticFcs };
+  // A fresh copy per open: the count adds its channels to the file it reads, and one test's must not reach the next.
+  return { ...actual, parseFcs: () => ({ ...syntheticFcs, channels: syntheticFcs.channels.map((c) => ({ ...c })), columns: [...syntheticFcs.columns] }) };
 });
 
 vi.mock("./engine/fsAccess", async (importOriginal) => {
@@ -57,6 +58,10 @@ const fake = vi.hoisted(() => ({
   attached: [] as string[],
   classified: [] as string[],
   classification: null as null | { objectCount: Uint8Array; objectArea: Uint32Array; features?: Record<string, Float32Array> },
+  /** Each file's count, as the service keeps it. */
+  byFile: {} as Record<string, unknown>,
+  /** Mask measures a test adds to the fake count's answer. */
+  extraFeatures: null as null | Record<string, Float32Array>,
 }));
 vi.mock("./imaging/imageService", () => {
   class RenderCancelled extends Error {}
@@ -88,12 +93,13 @@ vi.mock("./imaging/imageService", () => {
       // Event 1 was not imaged; the others hold one and two objects.
       const result = {
         objectCount: Uint8Array.from([1, 255, 2]), objectArea: Uint32Array.from([120, 0, 300]),
-        features: { perimeter: Float32Array.from([40, 0, 70]), circularity: Float32Array.from([0.9, 0, 0.5]) },
+        features: { perimeter: Float32Array.from([40, 0, 70]), circularity: Float32Array.from([0.9, 0, 0.5]), ...(fake.extraFeatures ?? {}) },
       };
       fake.classification = result;
+      fake.byFile[fileKey] = result;
       return { promise: Promise.resolve(result), cancel: () => undefined };
     }
-    classification() { return fake.classification; }
+    classification(fileKey: string) { return fake.byFile[fileKey] ?? null; }
   }
   return { ImageService, RenderCancelled, sharedImageService: () => new ImageService(), resetSharedImageService: () => undefined };
 });
@@ -120,6 +126,8 @@ beforeEach(() => {
   fake.attached.length = 0;
   fake.classified.length = 0;
   fake.classification = null;
+  fake.byFile = {};
+  fake.extraFeatures = null;
   plotCapture.payload = null;
   // The data area and the plot area share one box here, so pixel (100 + fx·400, 50 + fy·400)
   // is the display point (fx, fy) of the ranges.
@@ -153,9 +161,9 @@ async function settle(ms = 30): Promise<void> {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, ms)); });
 }
 
-async function openFiles(withImages: boolean): Promise<void> {
-  const handles = [handleOf("D1.fcs", Uint8Array.from([70, 67, 83]))];
-  if (withImages) handles.push(handleOf("D1.cvw", cvwBytes));
+async function openFiles(withImages: boolean, names: readonly string[] = ["D1"]): Promise<void> {
+  const handles = names.map((name) => handleOf(`${name}.fcs`, Uint8Array.from([70, 67, 83])));
+  if (withImages) for (const name of names) handles.push(handleOf(`${name}.cvw`, cvwBytes));
   Object.defineProperty(window, "showOpenFilePicker", { configurable: true, value: vi.fn().mockResolvedValue(handles) });
   Object.defineProperty(window, "showSaveFilePicker", { configurable: true, value: vi.fn() });
   act(() => root.render(<App />));
@@ -279,6 +287,90 @@ describe("hovering a cell", () => {
     for (let i = 0; i < 3; i++) await settle(40);
     expect(host.textContent).toContain("Event 2 of D1.fcs");
     expect(host.querySelector(".gl-cell-objects")?.textContent).toBe("2 objects");
+  });
+
+  it("measures cells from the Images tab without the plot's Colour by, and shows the classes and the measured size there", async () => {
+    fake.extraFeatures = { diameter: Float32Array.from([12, 0, 30]), majorAxis: Float32Array.from([14, 0, 40]), minorAxis: Float32Array.from([10, 0, 20]) };
+    await openFiles(true);
+    const imagesTab = [...host.querySelectorAll<HTMLButtonElement>('button[role="tab"]')].find((b) => b.textContent === "Images")!;
+    await act(async () => { imagesTab.click(); });
+    for (let i = 0; i < 4; i++) await settle(40);
+    expect(fake.classified).toHaveLength(0);
+    const measure = [...host.querySelectorAll<HTMLButtonElement>(".gl-images-measure button")].find((b) => b.textContent === "Measure cells")!;
+    await act(async () => { measure.click(); });
+    for (let i = 0; i < 4; i++) await settle(40);
+    expect(fake.classified).toEqual([fake.attached[0]]);
+    expect(host.querySelector(".gl-images-measure")!.textContent).toContain("Cells measured");
+    // Classed by single cells by default: event 0 is single, event 2 holds two objects, event 1 has no image.
+    const chips = [...host.querySelectorAll<HTMLButtonElement>(".gl-images-class-counts button")].map((b) => b.textContent);
+    expect(chips).toEqual(["single 1 (50.0%)", "single, irregular 0 (0.0%)", "multiple objects 1 (50.0%)", "no object 0 (0.0%)"]);
+    // The sizes are the GateLab mask's, over the one-object cells: event 0 only.
+    const sizes = [...host.querySelectorAll<HTMLButtonElement>(".gl-images-sizes button")].map((b) => b.textContent);
+    expect(sizes).toEqual(["Diameter 12.0 (12.0–12.0)", "Major axis 14.0 (14.0–14.0)", "Minor axis 10.0 (10.0–10.0)"]);
+    // Classed by objects instead.
+    const classBy = host.querySelector<HTMLSelectElement>('.gl-images-measure select[aria-label="Classes"]')!;
+    await act(async () => { classBy.value = "objects"; classBy.dispatchEvent(new Event("change", { bubbles: true })); });
+    await settle(40);
+    expect([...host.querySelectorAll<HTMLButtonElement>(".gl-images-class-counts button")].map((b) => b.textContent))
+      .toEqual(["no object 0 (0.0%)", "one object 1 (50.0%)", "two objects 1 (50.0%)", "three or more 0 (0.0%)"]);
+    // The plot keeps the colouring it opened with (has an image), not the count's classes.
+    const gating = [...host.querySelectorAll<HTMLButtonElement>('button[role="tab"]')].find((b) => b.textContent === "Gating")!;
+    await act(async () => { gating.click(); });
+    for (let i = 0; i < 2; i++) await settle(40);
+    const payload = plotCapture.payload as (ScatterPayload & { color_b64?: string }) | null;
+    expect(Array.from(Uint8Array.from(atob(payload!.color_b64!), (c) => c.charCodeAt(0)))).toEqual([0, 1, 0]);
+  });
+
+  it("reads cell size from the LightLoss outline, and a bead scale writes micrometre channels of the file", async () => {
+    fake.extraFeatures = {
+      diameter: Float32Array.from([9, 0, 30]), majorAxis: Float32Array.from([10, 0, 40]), minorAxis: Float32Array.from([8, 0, 20]),
+      llDiameter: Float32Array.from([20, 0, 44]), llMajorAxis: Float32Array.from([24, 0, 50]), llMinorAxis: Float32Array.from([18, 0, 36]),
+      llCircularity: Float32Array.from([0.9, 0, 0.6]), llLightLost: Float32Array.from([30, 0, 90]),
+    };
+    await openFiles(true);
+    const imagesTab = [...host.querySelectorAll<HTMLButtonElement>('button[role="tab"]')].find((b) => b.textContent === "Images")!;
+    await act(async () => { imagesTab.click(); });
+    for (let i = 0; i < 4; i++) await settle(40);
+    const measure = [...host.querySelectorAll<HTMLButtonElement>(".gl-images-measure button")].find((b) => b.textContent === "Measure cells")!;
+    await act(async () => { measure.click(); });
+    for (let i = 0; i < 4; i++) await settle(40);
+    const row = () => host.querySelector(".gl-images-sizes")!;
+    // The outline, not the SSC mask, over the one-object cell (event 0).
+    expect(row().textContent).toContain("Cell size (LightLoss outline), px");
+    expect([...row().querySelectorAll("button.gl-chip")].map((b) => b.textContent)).toEqual(["Diameter 20.0 (20.0–20.0)", "Major axis 24.0 (24.0–24.0)", "Minor axis 18.0 (18.0–18.0)"]);
+    const input = row().querySelector<HTMLInputElement>('input[aria-label="Bead diameter in micrometres"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "10");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const set = [...row().querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Set scale from beads")!;
+    await act(async () => { set.click(); });
+    for (let i = 0; i < 3; i++) await settle(40);
+    // 10 µm over 20 px: 0.5 µm per pixel, and the cell now reads 10 µm.
+    expect(row().textContent).toContain("Cell size (LightLoss outline), µm");
+    expect(row().querySelector("button.gl-chip")!.textContent).toBe("Diameter 10.0 (10.0–10.0)");
+    expect(row().textContent).toContain("0.500 µm per px, from 10 µm beads in D1.fcs");
+    // The micrometre lengths are channels of the file now, offered wherever channels are.
+    const gating = [...host.querySelectorAll<HTMLButtonElement>('button[role="tab"]')].find((b) => b.textContent === "Gating")!;
+    await act(async () => { gating.click(); });
+    for (let i = 0; i < 2; i++) await settle(40);
+    await act(async () => { host.querySelector<HTMLButtonElement>('button[aria-label="Size by"]')!.click(); });
+    const sizeOptions = [...host.querySelector<HTMLSelectElement>(".gl-searchable-select-panel select")!.options].map((o) => o.textContent);
+    expect(sizeOptions).toEqual(expect.arrayContaining(["Diameter (GateLab light loss)", "Light lost (GateLab light loss)", "Diameter (GateLab light loss, um)", "Minor axis (GateLab light loss, um)"]));
+  });
+
+  it("measures every file with images from one button, so a gate on the measures applies to all of them", async () => {
+    await openFiles(true, ["D1", "D2"]);
+    const imagesTab = [...host.querySelectorAll<HTMLButtonElement>('button[role="tab"]')].find((b) => b.textContent === "Images")!;
+    await act(async () => { imagesTab.click(); });
+    for (let i = 0; i < 4; i++) await settle(40);
+    expect(fake.attached).toHaveLength(2);
+    const measure = [...host.querySelectorAll<HTMLButtonElement>(".gl-images-measure button")].find((b) => b.textContent === "Measure cells in all 2 files")!;
+    await act(async () => { measure.click(); });
+    for (let i = 0; i < 6; i++) await settle(40);
+    // Both files counted, the viewed one first, each once.
+    expect([...fake.classified].sort()).toEqual([...new Set(fake.attached)].sort());
+    expect(host.querySelector(".gl-images-measure")!.textContent).toContain("Cells measured in all 2 files");
   });
 
   it("colours the plot by single cells, filters the thumbnails by class, and names the class in the panel", async () => {

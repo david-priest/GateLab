@@ -4,7 +4,7 @@
 // patches): where its end handles sit when an end lies past the plotted range, and where its
 // labels go. Synthetic gate and ranges.
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadPlots } from "./loadPlots";
 
 beforeEach(() => {
@@ -58,5 +58,45 @@ describe("a spider quadrant's handles on the gating plot", () => {
     expect(Number(up.getAttribute("cx")) / W).toBeCloseTo(0.6, 2);
     // An end in view is not pinned.
     expect(el.querySelector('circle.q-spider-handle[data-arm="down"]')!.getAttribute("data-pinned")).toBeNull();
+  });
+  describe("dragging an end in view", () => {
+    let sent: { name: string; value: { arm: string; at: [number, number] } }[];
+    beforeEach(() => {
+      sent = [];
+      (window as unknown as { Shiny: unknown }).Shiny = { setInputValue: (name: string, value: never) => sent.push({ name, value }) };
+    });
+    afterEach(() => { delete (window as unknown as { Shiny?: unknown }).Shiny; vi.restoreAllMocks(); });
+
+    /** Drag the up handle by (dx, dy) pixels; jsdom's pointer is the client point, the plot group at 0, 0. */
+    const dragUp = (dx: number, dy: number) => {
+      const el = render(gate, [-10, 110], [-10, 110]);
+      const h = el.querySelector<SVGCircleElement>('circle.q-spider-handle[data-arm="up"]')!;
+      expect(h.getAttribute("data-pinned")).toBeNull();
+      const x = Number(h.getAttribute("cx")), y = Number(h.getAttribute("cy"));
+      // d3-drag listens for the move and the release on the press's view, which jsdom will not take in the init.
+      const ev = (type: string, cx: number, cy: number) => {
+        const e = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 0 });
+        Object.defineProperty(e, "view", { value: window });
+        return e;
+      };
+      h.dispatchEvent(ev("mousedown", x, y));
+      window.dispatchEvent(ev("mousemove", x + dx, y + dy));
+      window.dispatchEvent(ev("mouseup", x + dx, y + dy));
+      const arm = sent.filter((m) => m.name === "gate_quadrant_arm");
+      expect(arm).toHaveLength(1);
+      return arm[0].value.at;
+    };
+
+    it("takes the top edge up with it past the box (David, 2026-11-10)", () => {
+      // Up is towards y 0 on screen: 15 px above the top edge (y 100) is past the box.
+      const [x, y] = dragUp(20, -15);
+      expect(y).toBeGreaterThan(100);
+      expect(x).toBeGreaterThan(70);
+    });
+
+    it("keeps the end on its edge when dragged inside the box", () => {
+      const [, y] = dragUp(-20, 30);
+      expect(y).toBeCloseTo(100, 6);
+    });
   });
 });

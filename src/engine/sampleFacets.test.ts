@@ -59,9 +59,10 @@ describe("choosing which columns become chips", () => {
     ]);
   });
 
-  it("takes a declared level order, ignoring levels no sample has", () => {
+  it("takes a declared level order, ignoring levels no sample has, the values it does not name after it", () => {
     const values = facetValues(META, { name: "donor", levels: ["D3", "D1", "D9"] });
-    expect(values.map((entry) => entry.value)).toEqual(["D3", "D1"]);
+    expect(values.map((entry) => entry.value)).toEqual(["D3", "D1", "D2"]);
+    expect(values[2].sampleIds).toEqual(["s3", "s4"]);
   });
 });
 

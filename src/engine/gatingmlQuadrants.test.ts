@@ -8,7 +8,7 @@ import { describe, it, expect } from "vitest";
 import { exportGatingML, type GatingMLFormat } from "./gatingmlExport";
 import { importGatingML } from "./gatingml";
 import { applyGatingStrategy } from "./populations";
-import { Sample } from "./sample";
+import { Sample, transformFromSpec } from "./sample";
 import type { FcsFile } from "./fcs";
 import {
   linkChildToParent, newGateRef, newPopulation, newRootPopulation,
@@ -116,5 +116,71 @@ describe("straight quadrant regions the format cannot write", () => {
     }
     expect(back.has("not Q1")).toBe(false);
     expect(back.get("control")).toEqual([1, 1, 1, 1]);
+  });
+});
+
+describe("a straight quadrant gate comes back from GateLab's own Gating-ML as one gate (David, 2026-11-10)", () => {
+  // Events on each side of the centre (3, 3), two on its lines; owners are the quadrants they are in.
+  const xs = [1, 5, 5, 1, 3, 1, 3, 1e30];
+  const ys = [5, 5, 1, 1, 3, 3, 1, 1e30];
+  const owners = [1, 2, 3, 4, 2, 1, 3, 2];
+  const imported = (xml: string, sample: Sample) =>
+    importGatingML(xml, sample.channels.map((c) => c.key), Object.fromEntries(sample.channels.map((c) => [c.pnn, c.key])));
+
+  it.each([
+    ["in raw values", null],
+    ["on a logicle display", { kind: "logicle", T: 262144, W: 0.5, M: 4.5, A: 0 } as TransformSpec],
+  ])("%s: one quadrant gate, its populations on its quadrants, every event where it was", (_label, transform) => {
+    const sample = sampleOf(xs, ys, true);
+    // On the logicle display the centre is raw 3 carried there, so the same events lie on each side.
+    const at3 = transform ? transformFromSpec(transform).forward(3) : 3;
+    const tree = treeOf([at3, at3], transform);
+    const xml = exportGatingML({ ...tree, sample, format: "standard" });
+    // Another reader sees the four rectangles.
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    expect(doc.getElementsByTagName("gating:RectangleGate").length).toBe(5);
+    const res = imported(xml, sample);
+    const quadrants = Object.values(res.gates).filter((g) => g.gate_type === "quadrant");
+    expect(quadrants).toHaveLength(1);
+    const q = quadrants[0];
+    expect(q.name).toBe("CD4_CD8");
+    expect(q.gate_type === "quadrant" && q.center).toEqual(tree.gates.q.gate_type === "quadrant" ? tree.gates.q.center : null);
+    expect(q.space ?? "raw").toBe(tree.gates.q.space ?? "raw");
+    expect(Object.values(res.gates).map((g) => g.name).sort()).toEqual(["CD4_CD8", "control"]);
+    expect(res.gate_order).toEqual([q.gate_id, Object.values(res.gates).find((g) => g.name === "control")!.gate_id]);
+    const byName = Object.fromEntries(Object.values(res.populations).map((p) => [p.name, p]));
+    for (const n of [1, 2, 3, 4]) expect(byName[`Q${n}`].gate_refs).toEqual([{ gate_id: q.gate_id, include: true, quadrant: n }]);
+    expect(byName["not Q1"].gate_refs).toEqual([{ gate_id: q.gate_id, include: false, quadrant: 1 }]);
+    // Drawn and counted: each population holds what GateLab's own quadrant held, and on raw axes
+    // that is the hand-placed owners (the 1e30 event is outside "control", "not Q1"'s parent).
+    const back = readBack(xml, sample);
+    const { masks } = applyGatingStrategy(tree.gates, tree.populations, tree.root_population_id, sample.gateAssayData());
+    for (const pop of Object.values(tree.populations)) expect(back.get(pop.name), pop.name).toEqual(Array.from(masks[pop.population_id]));
+    if (!transform) {
+      for (const n of [1, 2, 3, 4]) expect(back.get(`Q${n}`), `Q${n}`).toEqual(owners.map((o) => Number(o === n)));
+      expect(back.get("not Q1")).toEqual(owners.map((o, i) => Number(o !== 1 && i !== 7)));
+    } else {
+      // Every quadrant holds some event on the logicle display too.
+      for (const n of [1, 2, 3, 4]) expect(back.get(`Q${n}`)!.some(Boolean), `Q${n}`).toBe(true);
+    }
+  });
+
+  it("keeps the rectangles of a file edited elsewhere so that they no longer meet at one centre", () => {
+    const sample = sampleOf(xs, ys, true);
+    const xml = exportGatingML({ ...treeOf([3, 3], null), sample, format: "standard" });
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    const q2 = [...doc.getElementsByTagName("gating:RectangleGate")].find((el) => el.getElementsByTagName("name")[0]?.textContent === "CD4_CD8 Q2")!;
+    const dim = q2.getElementsByTagName("gating:dimension")[0];
+    dim.setAttribute("gating:min", "4");
+    const edited = new XMLSerializer().serializeToString(doc);
+    const res = imported(edited, sample);
+    expect(Object.values(res.gates).some((g) => g.gate_type === "quadrant")).toBe(false);
+    expect(Object.values(res.gates).filter((g) => /CD4_CD8 Q\d/.test(g.name))).toHaveLength(4);
+  });
+
+  it("writes no record in the Cytobank format, whose regions are polygons", () => {
+    const sample = sampleOf(xs, ys, true);
+    const xml = exportGatingML({ ...treeOf([3, 3], null), sample, format: "cytobank" });
+    expect(xml).not.toContain("gatelab_quadrants");
   });
 });

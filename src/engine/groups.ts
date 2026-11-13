@@ -56,7 +56,9 @@ export function groupsOf(
   const groups: HierarchyGroup[] = [];
   const groupByTemplate = new Map<string, HierarchyGroup>();
   hierarchies.forEach((h, i) => {
-    if (isCopyRef(h)) return;
+    // A copy whose source tree is gone has no template but itself, and heads its own group: it
+    // headed none, and its file was in no group at all.
+    if (isCopyRef(h) && templateOf(h.id, hierarchies)?.id !== h.id) return;
     const g: HierarchyGroup = { template: h, index: i + 1, members: [], orphanCopies: [] };
     groups.push(g);
     groupByTemplate.set(h.id, g);
@@ -76,7 +78,7 @@ export function groupsOf(
     if (!h.owner_sample_id || owned.has(h.id)) continue;
     const template = templateOf(h.id, hierarchies);
     const g = template ? groupByTemplate.get(template.id) : undefined;
-    if (g) g.orphanCopies.push(h);
+    if (g && g.template.id !== h.id) g.orphanCopies.push(h);
   }
   return groups;
 }

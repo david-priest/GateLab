@@ -416,7 +416,7 @@ function QuadrantModal({
       </label>
       {armStyle === "spider" && (
         <div className="gl-modal-note">
-          {t("Four straight arms run from the centre to the edges of a box around the data. Drag an arm's end along its edge to lean it, or the centre to move it. Each quadrant lies between two neighbouring arms, inside the box.")}
+          {t("Four straight arms run from the centre to the edges of a box around the data. Drag an arm's end along its edge to lean it, past the edge to take the edge out with it, or the centre to move it. Each quadrant lies between two neighbouring arms, inside the box; Extend to edges grows the box to cover the plot.")}
         </div>
       )}
       <div className="gl-modal-actions">

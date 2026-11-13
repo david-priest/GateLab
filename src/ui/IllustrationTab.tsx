@@ -1,1002 +1,2559 @@
-// IllustrationTab.tsx — a structured figure editor for biplots, histograms and summary heatmaps.
-// Files, populations and channels can be rearranged between rows, columns and overlays without
-// turning the tab into a free-form canvas. It shares GateLab's transforms and static plot renderer.
-
-import { useEffect, useRef, useState, type MutableRefObject } from "react";
-import type { CoreState, Derived } from "../store";
-import type { Sample } from "../engine/sample";
-import type { IllustrationConfig, IllustrationPreset } from "../engine/workspace";
-import { loadMiniPlots } from "../plots/loadPlots";
-import { GATE_EDGE_MODES, type GateEdgeMode } from "./gateEdgeModes";
-import { exportGridPNG, exportGridSVG, exportGridPDF } from "../plots/gridExport";
-import {
-  buildMultiSampleIllustrationPayload,
-  type IllustrationSampleSource,
-} from "../engine/illustration";
-import {
-  buildIllustrationLayoutPayload,
-  legacyIllustrationLayout,
-  moveIllustrationDimension,
-  normalizeIllustrationLayout,
-  type IllustrationDimensionLayout,
-} from "../engine/illustrationLayout";
-import { populationColor } from "../engine/palettes";
-import {
-  buildMultiSampleHeatmapPayload,
-  heatmapScaleNeedsPopulationComparison,
-  type HeatmapPalette,
-  type HeatmapScaleMode,
-  type HeatmapSummaryStat,
-} from "../engine/heatmap";
-import { MultiColumnChecklist } from "./MultiColumnChecklist";
-import { CollapsiblePicker } from "./CollapsiblePicker";
-import { DensityColourControl } from "./DensityColourControl";
-import { IllustrationSelectionMatrix } from "./IllustrationSelectionMatrix";
+import { useEffect, useMemo, useRef, useState, type MutableRefObject, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { platformKeys } from "./platformKeys";
 import { useI18n } from "./i18n";
-import { illustrationPickerPopulations } from "./illustrationPopulations";
-import { IllustrationLayoutBuilder } from "./IllustrationLayoutBuilder";
-import { renderIllustrationLayout } from "../plots/illustrationLayoutRender";
+import { FoldSummary } from "./FoldSummary";
+import { ContextMenu, type ContextMenuState } from "./ContextMenu";
+import type { MenuEntry } from "./MenuButton";
+import { SearchableSelect } from "./SearchableSelect";
+import { DimensionShelves } from "./DimensionShelves";
+import { renderToStaticMarkup } from "react-dom/server";
+import type { CoreState } from "../store";
+import type {
+  IllustrationConfig,
+  IllustrationPreset,
+} from "../engine/workspace";
+import {
+  buildFigurePanel,
+  canonicalGateId,
+  canonicalPopulation,
+  figureLabelKey,
+  captureFigureTransforms,
+  figureHierarchies,
+  figurePopulationOptions,
+  figurePopulationApplies,
+  layoutFigure,
+  migrateFigure,
+  panelsBetween,
+  resolveFigurePopulation,
+  type FigureDimension,
+  type FigurePanel,
+  type FigureChart,
+  type FigurePlot,
+  type FigurePopulation,
+  type FigureSample,
+  type FigureSpec,
+  type FigurePage,
+  type FigurePanelData, type FigureValue } from "../engine/figure";
+import {
+  defaultIllustrationConfig,
+  figureStyle,
+} from "../engine/figureDefaults";
+import {
+  FigureGrid,
+  styledFigurePlot,
+  colourFigureSummaries,
+} from "./FigureGrid";
+import { useFigureSources } from "./useFigureSources";
+import { buildFigureChartPanel, type FigureChartData } from "./figureChartData";
+import { applyFigureChartStyle, figureStatisticAxes } from "./FigureChartPanel";
+import { defaultCellChannel } from "./PlottingTab";
+import { treeLabelMove } from "../engine/illustration";
+import { FileChecklist } from "./FileChecklist";
+import { lastPaths, PopulationChecklist, type PopulationChecklistRow } from "./PopulationChecklist";
+import { populationColorOf } from "../engine/palettes";
+import type { LayoutGridCell, LayoutGridHeading, LayoutGridHeadings, LayoutPlotRecipe, LayoutProportionsRecipe } from "../engine/layout";
+import type { HandoffGridCell } from "./layoutHandoff/shared";
+import type { PanelPage } from "./layoutHandoff/everyPage";
+import { useEveryPageMenu } from "./layoutHandoff/useEveryPageMenu";
+import { NO_TITLE } from "../engine/layoutTitle";
+import { figureChartRecipe, figureLayoutRecipes } from "./figureLayoutRecipes";
+import { headOverlaidPopulations } from "./overlayHeading";
 
-// The figure editor's matrix (FigureHeatmap) scales by percentiles and defaults to RdYlBu; this
-// older tab draws the nearest it has when a workspace carries those settings.
-const legacyHeatmapScale = (scale: string | undefined): HeatmapScaleMode =>
-  !scale || scale === "column_quantile" ? "column_minmax" : (scale as HeatmapScaleMode);
-const legacyHeatmapPalette = (palette: string | undefined): HeatmapPalette =>
-  !palette || palette === "rdylbu" ? "blue_white_yellow_red" : (palette as HeatmapPalette);
+/** The placeholder a Layout text block reads for a figure dimension's heading, or null for one it cannot (a page). */
+function headingTemplate(dimension: FigureDimension): string | null {
+  if (dimension === "samples") return "{sample}";
+  if (dimension === "populations") return "{population}";
+  if (dimension === "plots") return "{plot}";
+  if (dimension.startsWith("metadata:")) return `{meta:${dimension.slice("metadata:".length)}}`;
+  if (dimension.startsWith("popmeta:")) return `{popmeta:${dimension.slice("popmeta:".length)}}`;
+  return null;
+}
+import { useFigurePanels } from "./useFigurePanels";
+import { OrderList } from "./OrderList";
+import { populationTreeOrder } from "../engine/populations";
+import { fileListOrder } from "../engine/levelOrder";
+import { figureChartOwnSettings } from "../engine/proportionsSettings";
+import {
+  exportGridPDF,
+  exportGridPNG,
+  exportGridSVG,
+} from "../plots/gridExport";
+import { drawFigurePlot } from "../plots/figurePlot";
+import { sanitizeFilePart } from "../engine/fcsExport";
+import { GATE_EDGE_MODES, type GateEdgeMode } from "./gateEdgeModes";
+import "./figure.css";
+import { NumberField } from "./NumberField";
+import { FigureStyleFollow, useFigureStyle } from "./figureStyle";
+import { useGateInk } from "../plots/gateInk";
+import { highlightedPopIds } from "./gateSelection";
 
 interface Props {
-  sample: Sample;
-  sampleViews: readonly Readonly<{
-    id: string;
-    name: string;
-    sample: Sample;
-    derived: Derived;
-  }>[];
-  activeSampleId: string | null;
-  checkedSampleCount: number;
-  pendingSampleCount: number;
-  hierarchyScope?: Readonly<{
-    index: number;
-    name: string;
-    excludedCheckedCount: number;
-  }>;
+  samples: readonly FigureSample[];
+  checkedSampleIds: string[];
   state: CoreState;
-  derived: Derived;
-  globalScales: Record<string, [number, number]>;
   defaultX: string;
   defaultY: string;
-  /** App-held config ref: null until this tab first mounts, then the live illustration settings.
-   *  App reads it to persist the config + save presets; it survives tab unmount/remount. */
+  /** How a figure made from nothing composes its files: pooled when the Gating tab is pooled. A saved figure keeps its own. */
+  defaultComposition?: FigureSpec["composition"];
   configRef: MutableRefObject<IllustrationConfig | null>;
   presets: IllustrationPreset[];
   onSavePreset: (name: string) => void;
   onDeletePreset: (name: string) => void;
   onConfigChange: () => void;
-  /** Fit these channels to their data plus the gates drawn on them. */
-  onFitChannels: (keys: readonly string[]) => void;
-  dataRevision: number;
-  densityColorPower: number;
-  onDensityColorPowerChange: (value: number) => void;
+  onOpenGating: () => void;
+  dataRevision: string | number;
+  /** The Gating tab's per-channel ranges, for the "As on the Gating tab" axis policy. */
+  globalScales?: Record<string, [number, number]>;
+  /** Fit these channels to their data and gates on the Gating tab's own range map. */
+  onFitChannels?: (keys: readonly string[]) => void;
+  /** Put the figure's plots, one per file and plot, on the Layout tab. */
+  /** Plots for the Layout tab; with `cells`, one per recipe, they keep their arrangement there. */
+  /** With cells, the grid's headings and the panels' size here, so each plot arrives drawn at that size. */
+  /** A chart panel goes as a Plotting chart block of one panel, in its cell of the grid. */
+  onAddToLayout?: (recipes: (LayoutPlotRecipe | LayoutProportionsRecipe)[], cells?: readonly LayoutGridCell[], headings?: LayoutGridHeadings, panelSize?: number) => void;
+  /** Put the whole figure, as it is, on the Layout tab as one block, drawing the page given (0-based). */
+  onAddFigureToLayout?: (config: IllustrationConfig, page?: number) => void;
+  /** Every page of the figure on the Layout tab, a new sheet per page named by its label, each holding a figure block of that page. */
+  onAddFigurePagesToLayout?: (config: IllustrationConfig, labels: readonly string[]) => void;
+  /** Every page's panels on the Layout tab, a new sheet per page, each holding that page's panels as the grid with headings. */
+  onAddPanelPagesToLayout?: (pages: readonly PanelPage[], panelSize?: number) => void;
+  /** Show a panel's file, population and channels on the Gating tab. */
+  onOpenInGating?: (recipe: LayoutPlotRecipe) => void;
+  /** The Metadata tab's population table, by population id: groupings the Arrange tab can offer. */
+  populationMetadata?: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  /** The metadata columns' own orders of their values (the Metadata tab's), for rows, columns, pages and chips. */
+  metadataLevels?: Readonly<Record<string, readonly string[]>>;
+  /**
+   * A gate label was dragged: place it in the store, for the gate named in the tree named, in
+   * the gate's own orientation. The store carries it to every tree the gate is drawn in, so the
+   * Gating and Layout tabs show the same placement. Without this the figure keeps the placement.
+   */
+  onGateLabelMove?: (hierarchyId: string, gateId: string, offset: [number, number], quadrant?: number) => void;
+  /** A panel panned or stretched: the channel's new range for the workspace's scales; the figure must follow the Gating tab's axes for it to show. */
+  onScaleChange?: (channelKey: string, range: [number, number]) => void;
 }
-
-function snapshotConfig(config: IllustrationConfig): IllustrationConfig {
-  return {
-    ...config,
-    popIds: [...config.popIds],
-    xChannels: [...config.xChannels],
-    popColors: { ...config.popColors },
-    dimensionLayout: config.dimensionLayout ? {
-      rows: [...config.dimensionLayout.rows],
-      columns: [...config.dimensionLayout.columns],
-      overlay: [...config.dimensionLayout.overlay],
-    } : undefined,
-    selectedPopulationsBySample: config.selectedPopulationsBySample
-      ? Object.fromEntries(
-          Object.entries(config.selectedPopulationsBySample)
-            .map(([sampleId, popIds]) => [sampleId, [...popIds]]),
-        )
-      : undefined,
-  };
-}
-
-function configsMatch(a: IllustrationConfig, b: IllustrationConfig): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+/** The Population picker's value for a plot that overlays populations of its own. */
+const OVERLAY_CHOSEN = "__overlay__";
+/** The Populations picker's value for a plot that draws the figure's populations together. */
+const TOGETHER = "__together__";
+const refKey = (ref: FigurePopulation) =>
+  JSON.stringify([ref.hierarchyId, ref.populationId]);
+const dimensionLabel = (dimension: FigureDimension) =>
+  dimension === "samples"
+    ? "files / samples"
+    : dimension.startsWith("popmeta:")
+      ? `populations by ${dimension.slice(8)}`
+      : dimension.replace("metadata:", "");
+function move<T>(items: T[], index: number, offset: number) {
+  const result = [...items],
+    target = index + offset;
+  if (target >= 0 && target < items.length)
+    [result[index], result[target]] = [result[target], result[index]];
+  return result;
 }
 
 export function IllustrationTab({
-  onFitChannels,
-  sample,
-  sampleViews,
-  activeSampleId,
-  checkedSampleCount,
-  pendingSampleCount,
-  hierarchyScope,
+  samples,
+  checkedSampleIds,
   state,
-  derived,
-  globalScales,
+  populationMetadata,
+  metadataLevels,
   defaultX,
   defaultY,
+  defaultComposition,
   configRef,
   presets,
   onSavePreset,
   onDeletePreset,
   onConfigChange,
+  onOpenGating,
   dataRevision,
-  densityColorPower,
-  onDensityColorPowerChange,
+  globalScales,
+  onFitChannels,
+  onAddToLayout,
+  onAddFigureToLayout,
+  onAddFigurePagesToLayout,
+  onAddPanelPagesToLayout,
+  onOpenInGating,
+  onGateLabelMove,
+  onScaleChange,
 }: Props) {
+  // The tab's text is English only; it goes through t() so that a host whose samples are not
+  // files (GateLabR) is shown its own words for them.
   const { t } = useI18n();
-  const rootId = state.root_population_id ?? "";
-  const { order, defaultSelection } = illustrationPickerPopulations(state.populations, rootId);
-  const allChannels = sample.channels.map((c) => c.key);
-
-  // Restore from the App-held config on (re)mount; null = first-ever mount → prop-derived defaults.
-  const c0 = configRef.current;
-  const initialPlotType = c0?.plotType ?? (c0?.yChannel === "" ? "histogram" : "biplot");
-  const [plotType, setPlotType] = useState<"biplot" | "histogram" | "heatmap">(initialPlotType);
-  const [dimensionLayout, setDimensionLayout] = useState<IllustrationDimensionLayout>(() =>
-    normalizeIllustrationLayout(
-      c0?.dimensionLayout,
-      legacyIllustrationLayout(c0?.combineSamples ?? false, c0?.overlayPops ?? false),
-    ));
-  const combineSamples = dimensionLayout.overlay.includes("files");
-  const overlayPops = dimensionLayout.overlay.includes("populations");
-  const [selectionMode, setSelectionMode] = useState<"uniform" | "matrix">(
-    c0?.selectionMode ?? "uniform",
-  );
-  const [selectedPopulationsBySample, setSelectedPopulationsBySample] = useState<
-    Record<string, string[]>
-  >(() => c0?.selectedPopulationsBySample
-    ? Object.fromEntries(
-        Object.entries(c0.selectedPopulationsBySample)
-          .map(([sampleId, popIds]) => [sampleId, [...popIds]]),
-      )
-    : {});
-  const [popIds, setPopIds] = useState<string[]>(() => (c0 ? c0.popIds : defaultSelection));
-  const [xChannels, setXChannels] = useState<string[]>(() => (c0 ? c0.xChannels : [defaultX]));
-  const [yChannel, setYChannel] = useState(c0?.yChannel || defaultY);
-  const [displayMode, setDisplayMode] = useState(c0?.displayMode ?? "pseudocolor");
-  const [plotSize, setPlotSize] = useState(c0?.plotSize ?? 200);
-  const [nColumns, setNColumns] = useState(c0?.nColumns ?? 4);
-  const [fitToColumns, setFitToColumns] = useState(c0?.fitToColumns ?? true);
-  const [maxEvents, setMaxEvents] = useState(c0?.maxEvents ?? 10000);
-  const [allEvents, setAllEvents] = useState(c0?.allEvents ?? false);
-  // Population colouring
-  const [colorByPop, setColorByPop] = useState(c0?.colorByPop ?? false);
-  const [popColors, setPopColors] = useState<Record<string, string>>(c0?.popColors ?? {});
-  // Biplot points / style
-  const [pointSize, setPointSize] = useState(c0?.pointSize ?? 1.2);
-  const [pointAlpha, setPointAlpha] = useState(c0?.pointAlpha ?? 0.35);
-  const [contourThreshold, setContourThreshold] = useState(c0?.contourThreshold ?? 5);
-  const [kdeBandwidth, setKdeBandwidth] = useState(c0?.kdeBandwidth ?? 0);
-  const manualKdeBandwidth = useRef(c0?.kdeBandwidth && c0.kdeBandwidth > 0 ? c0.kdeBandwidth : 4);
-  const [pubStyle, setPubStyle] = useState(c0?.pubStyle ?? false);
-  const [gateLineWidth, setGateLineWidth] = useState(c0?.gateLineWidth ?? 1.5);
-  const [gateEdgeMode, setGateEdgeMode] = useState<GateEdgeMode>(c0?.gateEdgeMode ?? "straight-bow");
-  // Histogram / ridgeline
-  const [histLineWidth, setHistLineWidth] = useState(c0?.histLineWidth ?? 1.8);
-  const [histFill, setHistFill] = useState(c0?.histFill ?? false);
-  const [histFillAlpha, setHistFillAlpha] = useState(c0?.histFillAlpha ?? 0.22);
-  const [histOverlayMode, setHistOverlayMode] = useState(c0?.histOverlayMode ?? "front_opaque");
-  const [histLayout, setHistLayout] = useState(c0?.histLayout ?? "grid");
-  const [ridgeOverlap, setRidgeOverlap] = useState(c0?.ridgeOverlap ?? 0.7);
-  const [ridgeColGap, setRidgeColGap] = useState(c0?.ridgeColGap ?? 8);
-  const [ridgeGradient, setRidgeGradient] = useState(c0?.ridgeGradient ?? true);
-  // Heatmap summary / scaling
-  const [heatmapStat, setHeatmapStat] = useState<HeatmapSummaryStat>(c0?.heatmapStat ?? "median");
-  const [heatmapScale, setHeatmapScale] = useState<HeatmapScaleMode>(legacyHeatmapScale(c0?.heatmapScale));
-  const [heatmapPalette, setHeatmapPalette] = useState<HeatmapPalette>(legacyHeatmapPalette(c0?.heatmapPalette));
-  const [heatmapCellSize, setHeatmapCellSize] = useState(c0?.heatmapCellSize ?? 30);
-  const [heatmapShowValues, setHeatmapShowValues] = useState(c0?.heatmapShowValues ?? false);
-  // Fonts
-  const [fontTick, setFontTick] = useState(c0?.fontTick ?? 12);
-  const [fontAxis, setFontAxis] = useState(c0?.fontAxis ?? 12);
-  const [fontTitle, setFontTitle] = useState(c0?.fontTitle ?? 12);
-  const [fontGate, setFontGate] = useState(c0?.fontGate ?? 12);
-  const [scaleFontsWithPlot, setScaleFontsWithPlot] = useState(c0?.scaleFontsWithPlot ?? true);
-
-  const [selectedPreset, setSelectedPreset] = useState("");
-  const [exportDpi, setExportDpi] = useState(300); // SVG/PDF export resolution (72–1200)
-  const containerRef = useRef<HTMLDivElement>(null);
-  const isHistogram = plotType === "histogram";
-  const isHeatmap = plotType === "heatmap";
-  const isContour = plotType === "biplot" && displayMode === "contour";
-  const sampleScopeReady =
-    checkedSampleCount > 0 &&
-    sampleViews.length === checkedSampleCount &&
-    pendingSampleCount === 0;
-  const orderedPopulationIds = order.map(({ popId }) => popId);
-  const effectivePopulationIds = selectionMode === "matrix"
-    ? orderedPopulationIds.filter((popId) =>
-        sampleViews.some(({ id }) => (selectedPopulationsBySample[id] ?? []).includes(popId)))
-    : popIds;
-  const selectedCombinationCount = selectionMode === "matrix"
-    ? sampleViews.reduce(
-        (total, { id }) =>
-          total + effectivePopulationIds.reduce(
-            (sampleTotal, popId) =>
-              sampleTotal + Number((selectedPopulationsBySample[id] ?? []).includes(popId)),
-            0,
-          ),
-        0,
-      )
-    : popIds.length * Math.max(1, sampleViews.length);
-  // Per-channel scaling (min-max or z-score) needs ≥2 populations to have a within-channel range;
-  // with one population every cell collapses to a single flat value (minmax → 0.5, z-score → 0).
-  const heatmapDegenerate =
-    isHeatmap &&
-    heatmapScaleNeedsPopulationComparison(
-      heatmapScale,
-      combineSamples ? effectivePopulationIds.length : selectedCombinationCount,
-    );
-  const isRidgeline = isHistogram && histLayout === "ridgeline";
-
-  // Default colour = the population's STABLE slot (frozen: adding/removing a population never
-  // reshuffles the others); a hand-picked popColors[popId] override still wins.
-  const defaultColorFor = (popId: string) =>
-    populationColor("default", state.populations[popId]?.colorSlot ?? Math.max(0, popIds.indexOf(popId)));
-  const colorFor = (popId: string) => popColors[popId] ?? defaultColorFor(popId);
-
-  // Assemble the live config and mirror it into the App-held ref after every render, so the
-  // settings survive a tab unmount (persist across tab switches) and App can save them.
-  const currentConfig: IllustrationConfig = {
-    plotType, combineSamples, selectionMode, selectedPopulationsBySample, dimensionLayout,
-    popIds, xChannels, yChannel, displayMode, plotSize, nColumns,
-    fitToColumns, maxEvents, allEvents,
-    colorByPop, overlayPops, popColors, pointSize, pointAlpha, contourThreshold, kdeBandwidth, pubStyle,
-    densityColorPower,
-    gateLineWidth, gateEdgeMode, histLineWidth, histFill, histFillAlpha, histOverlayMode, histLayout, ridgeOverlap,
-    ridgeColGap, ridgeGradient, heatmapStat, heatmapScale, heatmapPalette, heatmapCellSize,
-    heatmapShowValues, fontTick, fontAxis, fontTitle, fontGate, scaleFontsWithPlot,
+  const trees = figureHierarchies(state);
+  // The inspector's width is the user's: dragged, kept for the session.
+  const [inspectorWidth, setInspectorWidthState] = useState(() => {
+    const saved = Number(configRef.current?.inspectorWidth);
+    return Number.isFinite(saved) && saved > 0 ? Math.max(220, Math.min(600, saved)) : 290;
+  });
+  // The width is the user's, so it saves with the figure.
+  const setInspectorWidth = (next: number | ((current: number) => number)) => {
+    const value = typeof next === "function" ? next(inspectorWidth) : next;
+    setInspectorWidthState(value);
+    change({ ...(configRef.current ?? config), inspectorWidth: value });
   };
-  const [renderedConfig, setRenderedConfig] = useState<IllustrationConfig>(() => snapshotConfig(currentConfig));
-  const renderPending = !configsMatch(currentConfig, renderedConfig);
-  const previousConfigJsonRef = useRef(JSON.stringify(snapshotConfig(currentConfig)));
+  const inspectorDrag = useRef<{ x: number; w: number } | null>(null);
+  const [storedConfig, setConfig] = useState<IllustrationConfig>(() => {
+    const legacy = configRef.current,
+      initial = samples.filter((s) => checkedSampleIds.includes(s.id));
+    return {
+      ...defaultIllustrationConfig(),
+      ...legacy,
+      figure: migrateFigure(
+        legacy,
+        initial.length ? initial : samples,
+        trees,
+        state.active_hierarchy_id,
+        defaultX,
+        defaultY,
+        // Named in this host's words: "Sample comparison" where the samples are not files.
+        { composition: defaultComposition, name: t("File / sample comparison") },
+      ),
+      scaleFontsWithPlot: legacy?.scaleFontsWithPlot ?? false,
+      // A new figure uses the workspace's figure style; one saved before it keeps its own sizes.
+      ...(legacy ? {} : { followFigureStyle: true }),
+    };
+  });
+  // The gates' look is the workspace's (gateInk.ts), set here or in any tab: the figure's own
+  // pubStyle, gateLineWidth and labelBackground are still saved but give way to it.
+  const ink = useGateInk();
+  // Following the workspace's figure style, its text sizes and histogram line width give way to it.
+  const { style: figureStyleShared } = useFigureStyle();
+  const config = useMemo<IllustrationConfig>(
+    () => ({
+      ...storedConfig,
+      pubStyle: !ink.coloured,
+      gateLineWidth: ink.lineWidth,
+      labelBackground: ink.labelBackground,
+      ...(storedConfig.followFigureStyle
+        ? { fontTick: figureStyleShared.fontTick, fontAxis: figureStyleShared.fontAxis, fontTitle: figureStyleShared.fontTitle, fontGate: figureStyleShared.fontGate, histLineWidth: figureStyleShared.histLineWidth }
+        : {}),
+    }),
+    [storedConfig, ink.coloured, ink.lineWidth, ink.labelBackground, figureStyleShared],
+  );
+  const figure = config.figure!;
+  const [section, setSection] = useState("data");
+  const [panelMenu, setPanelMenu] = useState<ContextMenuState | null>(null);
+  // Panels chosen by clicking them: what "Add selected panels to the Layout tab" takes. A plain
+  // click chooses one; Cmd-click (Ctrl on Windows) adds one or takes it out; Shift-click takes the
+  // block between the panel last clicked without Shift and this one, as a file browser or a
+  // spreadsheet reads the keys and as the ordering lists here do; Cmd-A takes every panel on the
+  // page; Escape clears. The anchor remembers the block its last Shift-click took, so a second
+  // Shift-click from the same anchor resizes that block rather than piling another on it.
+  const [selectedPanelKeys, setSelectedPanelKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const selectionAnchor = useRef<{ key: string; block: ReadonlySet<string> } | null>(null);
+  const [pageIndex, setPageIndex] = useState(0),
+    [zoom, setZoom] = useState("fit"),
+    [previewWidth, setPreviewWidth] = useState(800);
+  const [paperWidth, setPaperWidth] = useState(0);
+  const paper = useRef<HTMLDivElement>(null);
+  const [exportFormat, setExportFormat] = useState("svg"),
+    [exportDpi, setExportDpi] = useState(300),
+    [exportAll, setExportAll] = useState(true);
+  const [exporting, setExporting] = useState(false),
+    [exportError, setExportError] = useState("");
+  const [presetName, setPresetName] = useState(""),
+    [preset, setPreset] = useState("");
+  const [history, setHistory] = useState<IllustrationConfig[]>([]),
+    [future, setFuture] = useState<IllustrationConfig[]>([]);
+  const viewport = useRef<HTMLDivElement>(null),
+    alive = useRef(true);
   useEffect(() => {
-    configRef.current = currentConfig;
-    const next = JSON.stringify(snapshotConfig(currentConfig));
-    if (next !== previousConfigJsonRef.current) {
-      previousConfigJsonRef.current = next;
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  function change(next: IllustrationConfig) {
+    setHistory((h) => [...h.slice(-29), config]);
+    setFuture([]);
+    setConfig(next);
+    setExportError("");
+  }
+  function editFigure(patch: Partial<FigureSpec>) {
+    change({
+      ...config,
+      figure: captureFigureTransforms({ ...figure, ...patch }, samples),
+    });
+  }
+  function style(patch: Partial<IllustrationConfig>) {
+    change({ ...config, ...patch });
+  }
+  // A figure saved before placements were the gates' own kept them for itself; they move into
+  // the store once, under the gate they descend from, so the Gating tab shows them too and
+  // every tab agrees from then on. A placement whose gate is gone has nowhere to go.
+  const legacyPlacementsMoved = useRef(false);
+  useEffect(() => {
+    const offsets = figure.labelOffsets;
+    if (legacyPlacementsMoved.current || !onGateLabelMove || !offsets || !Object.keys(offsets).length) return;
+    legacyPlacementsMoved.current = true;
+    for (const [key, offset] of Object.entries(offsets)) {
+      const [canonical, q] = key.split("#q");
+      const quadrant = q === undefined ? undefined : Number(q);
+      // The tree holding the original itself, else any tree with a copy of it.
+      const all = Object.values(trees);
+      const home = all.find((tree) => tree.gates[canonical] && canonicalGateId(canonical, tree, trees) === canonical);
+      const found = home
+        ? { tree: home, gateId: canonical }
+        : all.flatMap((tree) => Object.keys(tree.gates).filter((id) => canonicalGateId(id, tree, trees) === canonical).map((gateId) => ({ tree, gateId })))[0];
+      if (found) onGateLabelMove(found.tree.id, found.gateId, offset, quadrant);
+    }
+    editFigure({ labelOffsets: undefined });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [figure.labelOffsets, onGateLabelMove]);
+  const lastConfig = useRef(configRef.current);
+  useEffect(() => {
+    configRef.current = config;
+    if (lastConfig.current !== config) {
+      lastConfig.current = config;
       onConfigChange();
     }
-  });
-
-  // Apply a full config bundle (preset load).
-  const applyConfig = (c: IllustrationConfig) => {
-    setPlotType(c.plotType ?? (c.yChannel === "" ? "histogram" : "biplot"));
-    setDimensionLayout(normalizeIllustrationLayout(
-      c.dimensionLayout,
-      legacyIllustrationLayout(c.combineSamples ?? false, c.overlayPops ?? false),
-    ));
-    setSelectionMode(c.selectionMode ?? "uniform");
-    setSelectedPopulationsBySample(c.selectedPopulationsBySample
-      ? Object.fromEntries(
-          Object.entries(c.selectedPopulationsBySample)
-            .map(([sampleId, popIds]) => [sampleId, [...popIds]]),
-        )
-      : {});
-    setPopIds(c.popIds); setXChannels(c.xChannels); setYChannel(c.yChannel);
-    setDisplayMode(c.displayMode); setPlotSize(c.plotSize); setNColumns(c.nColumns);
-    setFitToColumns(c.fitToColumns); setMaxEvents(c.maxEvents); setAllEvents(c.allEvents);
-    setColorByPop(c.colorByPop); setPopColors(c.popColors);
-    setPointSize(c.pointSize); setPointAlpha(c.pointAlpha); setContourThreshold(c.contourThreshold);
-    if (c.densityColorPower !== undefined) onDensityColorPowerChange(c.densityColorPower);
-    if (c.kdeBandwidth > 0) manualKdeBandwidth.current = c.kdeBandwidth;
-    setKdeBandwidth(c.kdeBandwidth); setPubStyle(c.pubStyle); setGateLineWidth(c.gateLineWidth);
-    setGateEdgeMode(c.gateEdgeMode ?? "straight-bow");
-    setHistLineWidth(c.histLineWidth); setHistFill(c.histFill); setHistFillAlpha(c.histFillAlpha);
-    setHistOverlayMode(c.histOverlayMode); setHistLayout(c.histLayout); setRidgeOverlap(c.ridgeOverlap);
-    setRidgeColGap(c.ridgeColGap); setRidgeGradient(c.ridgeGradient);
-    setHeatmapStat(c.heatmapStat ?? "median"); setHeatmapScale(legacyHeatmapScale(c.heatmapScale));
-    setHeatmapPalette(legacyHeatmapPalette(c.heatmapPalette));
-    setHeatmapCellSize(c.heatmapCellSize ?? 30); setHeatmapShowValues(c.heatmapShowValues ?? false);
-    setFontTick(c.fontTick); setFontAxis(c.fontAxis); setFontTitle(c.fontTitle); setFontGate(c.fontGate);
-    setScaleFontsWithPlot(c.scaleFontsWithPlot ?? true);
-  };
-
+  }, [config, configRef, onConfigChange]);
   useEffect(() => {
-    if (!containerRef.current) return;
-    // Never render a misleading partial checked-file result. Inactive masks are prepared
-    // between paints; retaining the previous illustration also avoids rebuilding the grid once
-    // per arriving FCS in a large workspace.
-    if (!sampleScopeReady) return;
-    const c = renderedConfig;
-    const renderedPlotType = c.plotType ?? (c.yChannel === "" ? "histogram" : "biplot");
-    const renderedSelectionMode = c.selectionMode ?? "uniform";
-    const renderedSelection = renderedSelectionMode === "matrix"
-      ? (c.selectedPopulationsBySample ?? {})
-      : undefined;
-    const renderedPopIds = renderedSelectionMode === "matrix"
-      ? orderedPopulationIds.filter((popId) =>
-          sampleViews.some(({ id }) => (renderedSelection?.[id] ?? []).includes(popId)))
-      : c.popIds;
-    const cap = c.allEvents ? Infinity : c.maxEvents;
-    const cols = c.nColumns || c.xChannels.length || 1;
-    const renderedColorFor = (popId: string) =>
-      c.popColors[popId] ?? populationColor(
-        "default",
-        state.populations[popId]?.colorSlot ?? Math.max(0, c.popIds.indexOf(popId)),
-      );
-
-    const illustrationSources: IllustrationSampleSource[] = sampleViews.map((view) => ({
-      id: view.id,
-      name: view.name,
-      sample: view.sample,
-      masks: view.derived.masks,
-      eventCount: view.derived.stats.event_count,
-    }));
-
-    if (renderedPlotType === "heatmap") {
-      const heatmap = buildMultiSampleHeatmapPayload(
-        illustrationSources,
-        state.populations,
-        renderedPopIds,
-        c.xChannels,
-        c.combineSamples ?? false,
-        {
-          summaryStat: c.heatmapStat ?? "median",
-          scaleMode: legacyHeatmapScale(c.heatmapScale),
-          palette: legacyHeatmapPalette(c.heatmapPalette),
-          cellSize: c.heatmapCellSize ?? 30,
-          showValues: c.heatmapShowValues ?? false,
-        },
-        renderedSelection,
-      );
-      loadMiniPlots().renderIllustrationGrid("illustration-grid-container", {
-        containerId: "illustration-grid-container",
-        plot_type: "heatmap",
-        heatmap,
-        font_sizes: { tick: c.fontTick, axis_label: c.fontAxis, gate_label: c.fontGate, title: c.fontTitle },
-        scale_fonts_with_plot: c.scaleFontsWithPlot ?? true,
+    if (!viewport.current || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) =>
+      setPreviewWidth(entries[0].contentRect.width),
+    );
+    observer.observe(viewport.current);
+    return () => observer.disconnect();
+  }, []);
+  // Refresh rebuilds every panel from the current gates, files and the Gating tab's axes.
+  const [refreshTick, setRefreshTick] = useState(0);
+  const prepared = useFigureSources(
+    samples,
+    figure.sampleIds,
+    state,
+    `${dataRevision}|${refreshTick}`,
+  );
+  const layoutKey = JSON.stringify([
+    figure.sampleIds,
+    figure.populations,
+    figure.plots,
+    figure.rows,
+    figure.columns,
+    figure.pages,
+    figure.composition,
+    figure.overlayPopulations,
+    figure.populationOverrides,
+    samples.map((s) => [s.id, s.name, s.metadata, s.hierarchyId]),
+    metadataLevels,
+    Object.values(trees).map((t) => [
+      t.id,
+      t.owner_sample_id,
+      t.source_hierarchy_id,
+      t.source_population_ids,
+      Object.keys(t.populations),
+    ]),
+  ]);
+  const layout = useMemo(() => {
+    try {
+      const pages = layoutFigure(figure, samples, trees, populationMetadata, metadataLevels).map(headOverlaidPopulations);
+      if (pages.some((page) => page.panels.length > 256))
+        throw new Error(
+          t("This page has more than 256 panels. Move Files / samples or Populations to Pages in Arrange, or select fewer items."),
+        );
+      return {
+        pages,
+        error: "",
+      };
+    } catch (error) {
+      return {
+        pages: [],
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }, [layoutKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pages = layout.pages;
+  const currentPage = Math.min(pageIndex, Math.max(0, pages.length - 1)),
+    page = pages[currentPage];
+  const built = useFigurePanels(
+    page,
+    figure,
+    prepared.sources,
+    trees,
+    prepared.pending > 0 || !prepared.current,
+    // All events: every event within the page budget, which useFigurePanels shares out.
+    config.allEvents ? Infinity : config.maxEvents,
+    config.heatmapStat,
+    globalScales ?? {},
+    refreshTick,
+    state,
+  );
+  const panelData = useMemo(
+    () => (page ? colourFigureSummaries(page, built.data, config) : built.data),
+    [page, built.data, config.heatmapScale, config.heatmapPalette],
+  ); // eslint-disable-line react-hooks/exhaustive-deps
+  const pending = prepared.pending > 0 || built.pending;
+  // The last figure drawn in full stays on screen while a rebuild is pending, so an edit to a
+  // plot does not blank its cells until the new panels land: a panel whose key changed had no
+  // data yet and showed its placeholder, a white flash on every edit. The dim that marks the
+  // wait is held back until the rebuild has run long enough to notice, for the same reason.
+  const lastComplete = useRef<{ page: FigurePage; panels: Record<string, FigurePanelData> } | null>(null);
+  useEffect(() => {
+    if (!pending && page) lastComplete.current = { page, panels: panelData };
+  }, [pending, page, panelData]);
+  const shown = pending && page && lastComplete.current ? lastComplete.current : page ? { page, panels: panelData } : null;
+  const [settling, setSettling] = useState(false);
+  useEffect(() => {
+    if (!pending) {
+      setSettling(false);
+      return;
+    }
+    const timer = setTimeout(() => setSettling(true), 400);
+    return () => clearTimeout(timer);
+  }, [pending]);
+  useEffect(() => {
+    if (!paper.current || typeof ResizeObserver === "undefined") return;
+    const element = paper.current;
+    const observer = new ResizeObserver(() =>
+      setPaperWidth(element.offsetWidth),
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [page?.key, pending]);
+  /** Layout plots for these panels: one per file and plot of each, the population followed into the file's tree. */
+  /**
+   * The Layout recipes for panels, with the cell each takes in a grid that keeps the panels'
+   * arrangement: rows and columns as here, closed up to the block they span.
+   */
+  const placedRecipesFor = (chosen: readonly FigurePanel[], on: FigurePage | undefined = page): { recipes: (LayoutPlotRecipe | LayoutProportionsRecipe)[]; cells: HandoffGridCell[]; headings: LayoutGridHeadings } => {
+    // A cell a summary panel covers goes as that panel, which takes every row and column it spans.
+    const targets = [...new Set(chosen.map((p) => (p.coveredBy ? on?.panels.find((q) => q.key === p.coveredBy) : p)))].filter((p): p is FigurePanel => !!p && !p.coveredBy);
+    const spanned = (from: number, n = 1) => Array.from({ length: n }, (_, i) => from + i);
+    const rows = [...new Set(targets.flatMap((p) => spanned(p.row, p.span?.rows)))].sort((a, b) => a - b);
+    const columns = [...new Set(targets.flatMap((p) => spanned(p.column, p.span?.columns)))].sort((a, b) => a - b);
+    const recipes: (LayoutPlotRecipe | LayoutProportionsRecipe)[] = [];
+    const cells: HandoffGridCell[] = [];
+    // The panels here have no title of their own: their headings name them. They go untitled,
+    // and the headings go with them.
+    for (const panel of targets) {
+      for (const recipe of panel.plot.type === "chart" ? chartRecipesFor(panel) : layoutRecipesFor([panel])) {
+        recipes.push({ ...recipe, title: NO_TITLE });
+        cells.push({ row: rows.indexOf(panel.row), column: columns.indexOf(panel.column), ...(panel.span ? { span: panel.span } : {}) });
+      }
+    }
+    // The figure's headings go along as text that reads the first plot of its row or column,
+    // so a column headed by a file's condition still reads it there; a heading with no
+    // placeholder (a page) is carried as written. Every heading drawn here goes, a lone row's or
+    // column's included, since the plots carry no title to name them instead.
+    const headingOf = (values: readonly FigureValue[]): LayoutGridHeading => {
+      const templates = values.map((value) => headingTemplate(value.dimension));
+      return { text: values.map((value) => value.label).join(" · "), ...(templates.every(Boolean) ? { template: templates.join(" · ") } : {}) };
+    };
+    const shown = (values: readonly FigureValue[] | undefined) => !!values?.some((value) => value.label);
+    const headings: LayoutGridHeadings = {
+      columns: on && columns.some((column) => shown(on.columns[column])) ? columns.map((column) => headingOf(on.columns[column] ?? [])) : [],
+      rows: on && rows.some((row) => shown(on.rows[row])) ? rows.map((row) => headingOf(on.rows[row] ?? [])) : [],
+    };
+    return { recipes, cells, headings };
+  };
+  const addPanelsToLayout = (targets: readonly FigurePanel[]) => {
+    const placed = placedRecipesFor(targets);
+    if (placed.recipes.length) onAddToLayout?.(placed.recipes, placed.cells, placed.headings, figure.panelSize);
+  };
+  /** Every page's panels, as "Add panels to Layout" places one page's, a sheet each; a page with none is left out. */
+  const addPanelPagesToLayout = () => {
+    const placed = pages.map((each) => ({ label: each.label, ...placedRecipesFor(each.panels.filter((panel) => panel.plot.type !== "heatmap"), each) })).filter((each) => each.recipes.length);
+    if (placed.length) onAddPanelPagesToLayout?.(placed, figure.panelSize);
+  };
+  const pagesMenu = useEveryPageMenu();
+  const selectedPanels = page ? page.panels.filter((p) => selectedPanelKeys.has(p.key)) : [];
+  const onPanelClick = (panel: FigurePanel, event: ReactMouseEvent<HTMLElement>) => {
+    const key = panel.key;
+    if (event.shiftKey && page) {
+      // With no anchor, or one from a page since left, the block starts here.
+      const anchor = page.panels.find((p) => p.key === selectionAnchor.current?.key) ?? panel;
+      const block = new Set(panelsBetween(page.panels, anchor, panel).map((p) => p.key));
+      const previous = selectionAnchor.current?.key === anchor.key ? selectionAnchor.current.block : new Set<string>();
+      selectionAnchor.current = { key: anchor.key, block };
+      setSelectedPanelKeys((current) => {
+        const next = new Set([...current].filter((k) => !previous.has(k)));
+        for (const k of block) next.add(k);
+        return next;
       });
       return;
     }
-
-    const renderedYChannel = renderedPlotType === "biplot"
-      ? (c.yChannel || defaultY || sample.channels[0]?.key || null)
-      : null;
-    const illustrationOptions = {
-      displayMode: c.displayMode,
-      maxEvents: cap,
-      nColumns: cols,
-      plotSize: c.plotSize,
-      fitToColumns: c.fitToColumns,
-      contourThreshold: c.contourThreshold,
-      pointAlpha: c.pointAlpha,
-      densityColorPower: c.densityColorPower ?? densityColorPower,
-      pointSize: c.pointSize,
-      kdeBandwidth: c.kdeBandwidth,
-      colorByPop: c.colorByPop,
-      overlayPops: c.overlayPops,
-      populationColors: Object.fromEntries(renderedPopIds.map((id) => [
-        id,
-        c.colorByPop || c.overlayPops ? renderedColorFor(id) : "#444444",
-      ])),
-      histLineWidth: c.histLineWidth,
-      histFill: c.histFill,
-      histFillAlpha: c.histFillAlpha,
-      histOverlayMode: c.histOverlayMode,
-      histLayout: c.histLayout,
-      ridgeOverlap: c.ridgeOverlap,
-      ridgeColGap: c.ridgeColGap,
-      ridgeGradient: c.ridgeGradient,
-      pubStyle: c.pubStyle,
-      gateLineWidth: c.gateLineWidth,
-      gateEdgeMode: c.gateEdgeMode ?? "straight-bow",
-      fontSizes: { tick: c.fontTick, axis_label: c.fontAxis, gate_label: c.fontGate, title: c.fontTitle },
-      scaleFontsWithPlot: c.scaleFontsWithPlot ?? true,
-    };
-    // Ridgelines have their own stacked-density renderer. Keep it intact while the structured
-    // grid owns biplots and ordinary histograms; its Files/Populations overlay choices still
-    // come from the same dimension shelf.
-    if (renderedPlotType === "histogram" && c.histLayout === "ridgeline") {
-      const ridgePayload = buildMultiSampleIllustrationPayload(
-        illustrationSources,
-        activeSampleId,
-        state.gates,
-        state.gate_order,
-        state.populations,
-        renderedPopIds,
-        c.xChannels,
-        null,
-        globalScales,
-        illustrationOptions,
-        c.combineSamples ?? false,
-        renderedSelection,
-      );
-      loadMiniPlots().renderIllustrationGrid("illustration-grid-container", ridgePayload);
-      return;
-    }
-    const payload = buildIllustrationLayoutPayload(
-      illustrationSources,
-      activeSampleId,
-      state.gates,
-      state.gate_order,
-      state.populations,
-      renderedPopIds,
-      c.xChannels,
-      renderedYChannel,
-      globalScales,
-      illustrationOptions,
-      normalizeIllustrationLayout(
-        c.dimensionLayout,
-        legacyIllustrationLayout(c.combineSamples ?? false, c.overlayPops ?? false),
-      ),
-      renderedSelection,
-    );
-    renderIllustrationLayout("illustration-grid-container", payload);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    sample, sampleViews, activeSampleId, renderedConfig, state.gates, state.gate_order,
-    state.populations, state.gate_version, globalScales, derived, dataRevision, sampleScopeReady,
-  ]);
-
-  const toggle = <T,>(arr: T[], v: T): T[] => (arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);
-  const num = (setter: (n: number) => void, fallback: number) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = parseFloat(e.target.value);
-    setter(Number.isFinite(v) ? v : fallback);
+    selectionAnchor.current = { key, block: new Set() };
+    setSelectedPanelKeys((current) => {
+      const next = new Set(current);
+      if (event.metaKey || event.ctrlKey) {
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+      }
+      next.clear();
+      next.add(key);
+      return next;
+    });
   };
-
+  useEffect(() => {
+    // Another page is other panels.
+    setSelectedPanelKeys(new Set());
+    selectionAnchor.current = null;
+  }, [page?.key]);
+  useEffect(() => {
+    if (!page) return;
+    const panelKeys = page.panels.map((p) => p.key);
+    const onKey = (event: KeyboardEvent) => {
+      // The keys are the page's, not a field's: typing in the inspector is left alone.
+      if ((event.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable='true']")) return;
+      if (event.key === "Escape") setSelectedPanelKeys((current) => (current.size ? new Set() : current));
+      else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        setSelectedPanelKeys(new Set(panelKeys));
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [page]);
+  // Drag across the page to select the panels the band crosses. A press on a gate label is the
+  // label's own drag (it stops the mousedown), and a press on a control is the control's. The
+  // band replaces the selection, or adds to it with Cmd, Ctrl or Shift; a press that does not move
+  // is left to the panel's click, and on blank paper it clears.
+  const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const startMarquee = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const vp = viewport.current;
+    if (event.button !== 0 || !page || !vp) return;
+    const target = event.target as HTMLElement;
+    if (target.closest("button, input, select, textarea, a, [contenteditable='true']")) return;
+    event.preventDefault();
+    const onPanel = !!target.closest("td[data-figure-panel]");
+    const additive = event.metaKey || event.ctrlKey || event.shiftKey;
+    const before: ReadonlySet<string> = additive ? new Set(selectedPanelKeys) : new Set();
+    const keys = new Set(page.panels.map((p) => p.key));
+    const start = vp.getBoundingClientRect();
+    // The origin is kept in the viewport's content coordinates, so scrolling mid-drag holds it.
+    const origin = [event.clientX - start.left + vp.scrollLeft, event.clientY - start.top + vp.scrollTop];
+    let active = false;
+    const onMove = (move: MouseEvent) => {
+      const bounds = vp.getBoundingClientRect();
+      const originClient = [origin[0] + bounds.left - vp.scrollLeft, origin[1] + bounds.top - vp.scrollTop];
+      if (!active && Math.hypot(move.clientX - originClient[0], move.clientY - originClient[1]) < 4) return;
+      active = true;
+      move.preventDefault();
+      const band = {
+        left: Math.min(originClient[0], move.clientX), top: Math.min(originClient[1], move.clientY),
+        right: Math.max(originClient[0], move.clientX), bottom: Math.max(originClient[1], move.clientY),
+      };
+      setMarquee({ left: band.left - bounds.left + vp.scrollLeft, top: band.top - bounds.top + vp.scrollTop, width: band.right - band.left, height: band.bottom - band.top });
+      const next = new Set(before);
+      for (const cell of vp.querySelectorAll<HTMLElement>("td[data-figure-panel]")) {
+        const key = cell.dataset.figurePanel ?? "";
+        if (!keys.has(key)) continue;
+        const r = cell.getBoundingClientRect();
+        if (r.left < band.right && r.right > band.left && r.top < band.bottom && r.bottom > band.top) next.add(key);
+      }
+      setSelectedPanelKeys(next);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      setMarquee(null);
+      if (!active && !onPanel && !additive) setSelectedPanelKeys(new Set());
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+  const layoutRecipesFor = (targets: readonly FigurePanel[]): LayoutPlotRecipe[] =>
+    figureLayoutRecipes(
+      targets,
+      figure,
+      config,
+      (sampleId) => (samples.some((s) => s.id === sampleId) ? prepared.sources.find((entry) => entry.id === sampleId) : undefined),
+      trees,
+    );
+  /**
+   * The value axis a chart panel is drawn on here, in measured units, while the figure's axes are
+   * shared: a statistic plot's axis over its panels, or a per-cell chart's shared channel range.
+   * Unset when the panel fits its own.
+   */
+  const chartValueRange = (panel: FigurePanel): [number, number] | undefined => {
+    const statistic = page ? figureStatisticAxes(page.panels, panelData, config).get(panel.key) : undefined;
+    if (statistic) return statistic.range;
+    const chart = panelData[panel.key]?.config?.chart as FigureChartData | undefined;
+    const source = chart?.cells?.axisSource;
+    if (!chart?.range || !source) return undefined;
+    // Drawn on the channel's display scale here; the block's limits are measured values.
+    const key = source.sample.channels[source.index].key;
+    return [source.sample.displayToRaw(key, chart.range[0]), source.sample.displayToRaw(key, chart.range[1])];
+  };
+  /** A chart panel as a Plotting chart block of one panel, on the value axis it has here; none for a panel with no file at hand. */
+  const chartRecipesFor = (panel: FigurePanel): LayoutProportionsRecipe[] => {
+    const recipe = figureChartRecipe(panel, figure, config, (sampleId) => samples.some((s) => s.id === sampleId), trees, chartValueRange(panel));
+    return recipe ? [recipe] : [];
+  };
+  /** The menu a right-click on a panel opens: the panel, its row or its column to the Layout tab; the Gating tab; the figure's data. */
+  const openPanelMenu = (panel: FigurePanel, event: ReactMouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    // A right-click on a panel outside the selection selects that panel, as it does on the
+    // Layout tab and in the vector editors; inside it, the menu acts on the selection.
+    const chosen = selectedPanelKeys.has(panel.key) ? selectedPanels : [panel];
+    if (!selectedPanelKeys.has(panel.key)) {
+      setSelectedPanelKeys(new Set([panel.key]));
+      selectionAnchor.current = { key: panel.key, block: new Set() };
+    }
+    const rowPanels = page ? page.panels.filter((p) => p.row === panel.row) : [panel];
+    const columnPanels = page ? page.panels.filter((p) => p.column === panel.column) : [panel];
+    const own = layoutRecipesFor([panel]);
+    const heatmap = panel.plot.type === "heatmap";
+    const items: MenuEntry[] = [
+      ...(chosen.length > 1
+        ? [{
+            label: `Add the ${chosen.length} selected panels to the Layout tab`,
+            title: "As arranged here: rows stay rows and columns stay columns, however wide the page",
+            disabled: !onAddToLayout,
+            onClick: () => addPanelsToLayout(chosen),
+          } satisfies MenuEntry]
+        : []),
+      {
+        label: heatmap ? "Add the figure to the Layout tab" : "Add this panel to the Layout tab",
+        title: heatmap ? "A heatmap goes to the Layout tab as the whole figure, drawn there as it is here" : t("One Layout plot of this file, population and channels"),
+        disabled: heatmap ? !onAddFigureToLayout : !onAddToLayout || !(panel.plot.type === "chart" ? chartRecipesFor(panel) : own).length,
+        onClick: () => (heatmap ? onAddFigureToLayout?.(structuredClone(config)) : addPanelsToLayout([panel])),
+      },
+      { label: "Add this row to the Layout tab", title: "The row's panels side by side, as here", disabled: !onAddToLayout, onClick: () => addPanelsToLayout(rowPanels) },
+      { label: "Add this column to the Layout tab", title: "The column's panels one below another, as here", disabled: !onAddToLayout, onClick: () => addPanelsToLayout(columnPanels) },
+      "separator",
+      {
+        label: "Open in Gating",
+        title: own.length > 1
+          ? t("An overlaid panel has no single file to open")
+          : own[0]?.pool
+            ? t("These files pooled, this population and these channels on the Gating tab")
+            : t("This file, population and channels on the Gating tab"),
+        disabled: !onOpenInGating || own.length !== 1,
+        onClick: () => { if (own.length === 1) onOpenInGating?.(own[0]); },
+      },
+      "separator",
+      {
+        label: "Remove this population from the figure",
+        disabled: figure.populations.length <= 1,
+        onClick: () => editFigure({ populations: figure.populations.filter((p) => refKey(p) !== refKey(panel.population)) }),
+      },
+      {
+        label: panel.samples.length > 1 ? t("Remove these files from the figure") : t("Remove this file from the figure"),
+        disabled: figure.sampleIds.length <= panel.samples.length,
+        onClick: () => editFigure({ sampleIds: figure.sampleIds.filter((id) => !panel.samples.includes(id)) }),
+      },
+    ];
+    setPanelMenu({ x: event.clientX, y: event.clientY, items, label: `${panel.population.label} panel` });
+  };
+  /**
+   * The heatmap matrix's menu: the heatmap goes to the Layout tab on its own or with the whole
+   * figure, and its clustering and its place in the figure are switched here.
+   */
+  const openMatrixMenu = (event: ReactMouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    const heatmapAlone = (): IllustrationConfig => {
+      const copy = structuredClone(config);
+      if (copy.figure) copy.figure = { ...copy.figure, plots: copy.figure.plots.filter((p) => p.type === "heatmap") };
+      return copy;
+    };
+    const items: MenuEntry[] = [
+      {
+        label: "Add the heatmap to the Layout tab",
+        title: "One block of the heatmap alone, drawn there as it is here",
+        disabled: !onAddFigureToLayout,
+        onClick: () => onAddFigureToLayout?.(heatmapAlone()),
+      },
+      {
+        label: "Add the whole figure to the Layout tab",
+        title: "One block of every panel and the heatmap, drawn there as it is here",
+        disabled: !onAddFigureToLayout,
+        onClick: () => onAddFigureToLayout?.(structuredClone(config)),
+      },
+      "separator",
+      {
+        label: config.heatmapClusterRows === true ? "Stop clustering rows" : "Cluster rows",
+        title: "Average-linkage clustering with a dendrogram; off, rows follow the population order under Arrange",
+        onClick: () => style({ heatmapClusterRows: config.heatmapClusterRows !== true }),
+      },
+      {
+        label: config.heatmapClusterColumns === true ? "Stop clustering channels" : "Cluster channels",
+        title: "Average-linkage clustering with a dendrogram; off, channels follow the plot order under Plots",
+        onClick: () => style({ heatmapClusterColumns: config.heatmapClusterColumns !== true }),
+      },
+      "separator",
+      {
+        label: "Remove the heatmap from the figure",
+        title: "The figure keeps its other plots",
+        disabled: figure.plots.every((p) => p.type === "heatmap"),
+        onClick: () => editFigure({ plots: figure.plots.filter((p) => p.type !== "heatmap") }),
+      },
+    ];
+    setPanelMenu({ x: event.clientX, y: event.clientY, items, label: "Heatmap" });
+  };
+  const problems = Object.values(built.data).filter((p) => p.problem),
+    validPanels = Object.values(built.data).filter((p) => p.config).length;
+  const populationOptions = figurePopulationOptions(trees);
+  // Tree depth per option, so the list indents like the population tree. Keyed by the
+  // canonical reference, as the options are.
+  const populationDepths = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const tree of Object.values(trees))
+      for (const { popId, depth } of populationTreeOrder(tree.populations, tree.root_population_id ?? "")) {
+        const key = refKey(canonicalPopulation({ hierarchyId: tree.id, populationId: popId, label: "" }, trees));
+        if (!out.has(key)) out.set(key, depth);
+      }
+    return out;
+  }, [trees]);
+  /** Figure populations as the shared population picker's rows, in the order given, each with its colour. */
+  const figurePopulationRows = (refs: readonly FigurePopulation[], meta: (ref: FigurePopulation) => ReactNode): PopulationChecklistRow[] => {
+    const depths = refs.map((ref) => populationDepths.get(refKey(ref)) ?? 0);
+    const paths = lastPaths(depths);
+    return refs.map((ref, i) => ({
+      key: refKey(ref),
+      name: ref.label,
+      depth: depths[i],
+      isLastPath: paths[i],
+      color: populationColorOf(trees[ref.hierarchyId]?.populations[ref.populationId]),
+      meta: meta(ref),
+    }));
+  };
+  const figureChannels = useMemo(() => [...new Set(figure.plots.flatMap((plot) => (plot.type === "histogram" || plot.type === "chart" ? [plot.x] : [plot.x, plot.y])).filter(Boolean))], [figure.plots]);
+  const selectedSamples = figure.sampleIds
+    .map((id) => samples.find((s) => s.id === id))
+    .filter((s): s is FigureSample => !!s);
+  /** Whether any file needs a say in which of its populations a figure population is. */
+  const mappingNeedsAttention = useMemo(
+    () => selectedSamples.some((s) => figure.populations.some((p) =>
+      !!figure.populationOverrides?.[s.id]?.[refKey(p)]
+      || !trees[s.hierarchyId]
+      || resolveFigurePopulation(p, trees[s.hierarchyId], trees).status !== "matched")),
+    [selectedSamples, figure.populations, figure.populationOverrides, trees],
+  );
+  /** A population with nothing beneath it in its tree. */
+  const isLeafPopulation = (ref: FigurePopulation) => {
+    const tree = trees[ref.hierarchyId];
+    return !!tree && !(tree.populations[ref.populationId]?.children ?? []).some((id) => tree.populations[id]);
+  };
+  const applicableFiles = (ref: FigurePopulation) =>
+    selectedSamples.filter((s) =>
+      figurePopulationApplies(ref, s, trees, figure),
+    );
+  const unassignedSelections = figure.populations.filter(
+    (ref) => !applicableFiles(ref).length,
+  );
+  /** The populations the list shows: those a selected file has, and any already in the figure. */
+  const listedPopulationOptions = populationOptions.filter(
+    (ref) => applicableFiles(ref).length || figure.populations.some((p) => refKey(p) === refKey(ref)),
+  );
+  // The options are references into the tree the copies descend from, so with one tree they all
+  // name it; its name is shown only when the listed options come from more than one.
+  const optionsSpanTrees = new Set(listedPopulationOptions.map((ref) => ref.hierarchyId)).size > 1;
+  /** The plot editor's Type value: the plot's type, or the kind of chart a chart plot draws. */
+  const plotTypeValue = (plot: FigurePlot): string =>
+    plot.type === "chart" && plot.chart
+      ? `chart:${plot.chart.valueKind === "cells" ? plot.chart.plotType : plot.chart.valueKind}`
+      : plot.type;
+  /** A plot switched to a Type value: a chart keeps the options it had that still apply. */
+  const withPlotType = (plot: FigurePlot, value: string): FigurePlot => {
+    if (!value.startsWith("chart:")) {
+      const { chart: _chart, ...rest } = plot;
+      return { ...rest, type: value as FigurePlot["type"] };
+    }
+    const kind = value.slice(6);
+    const chart: FigureChart =
+      kind === "statistic"
+        ? { valueKind: "statistic", plotType: "box" }
+        : kind === "proportion"
+          ? { valueKind: "proportion", plotType: "stacked" }
+          : { valueKind: "cells", plotType: kind === "box" ? "box" : "violin" };
+    const kept = plot.chart;
+    // A chart of a channel starts on the plot's channel where it is a measured one, else on the
+    // channel the Plotting tab opens a per-cell chart on, Time left out.
+    const measured = (key: string) => !/^time$/i.test(key) && channels.some(([channel]) => channel === key);
+    const hadChannel = plot.type === "chart" && plot.chart?.valueKind !== "proportion";
+    const x = kind !== "proportion" && !hadChannel && !measured(plot.x)
+      ? defaultCellChannel(channels.filter(([key]) => measured(key)).map(([key]) => ({ key }))) || plot.x
+      : plot.x;
+    return {
+      ...plot,
+      x,
+      type: "chart",
+      chart: {
+        // The Plotting settings the chart carries are kept, as the figure draws it with them.
+        ...figureChartOwnSettings(kept),
+        ...chart,
+        ...(kept?.statistic && kind === "statistic" ? { statistic: kept.statistic } : {}),
+        ...(kept?.violinBox !== undefined && kind === "violin" ? { violinBox: kept.violinBox } : {}),
+        ...(kept?.populationLabels !== undefined ? { populationLabels: kept.populationLabels } : {}),
+        ...(kept?.summary !== undefined ? { summary: kept.summary } : {}),
+        ...(kept?.fileLabels !== undefined ? { fileLabels: kept.fileLabels } : {}),
+      },
+    };
+  };
+  // A summary spans the columns when the files (or a metadata column of them) are on the columns alone.
+  const spreadsFiles = (dims: readonly string[]) =>
+    dims.some((d) => (d === "samples" && figure.composition === "separate") || d.startsWith("metadata:"));
+  const filesAlongColumns = spreadsFiles(figure.columns) && !spreadsFiles(figure.rows);
+  const editChart = (plot: FigurePlot, patch: Partial<FigureChart>) =>
+    editFigure({ plots: figure.plots.map((p) => (p.id === plot.id && p.chart ? { ...p, chart: { ...p.chart, ...patch } } : p)) });
+  /**
+   * The populations a plot overlays when it is first switched to overlaying: its fixed population
+   * (or the figure's first) and that population's siblings, in tree order, as the four quadrants
+   * of a quadrant gate are siblings.
+   */
+  const overlayStart = (plot: FigurePlot): FigurePopulation[] => {
+    const base = plot.population ?? figure.populations[0];
+    const tree = base ? trees[base.hierarchyId] : undefined;
+    const parentId = base && tree ? tree.populations[base.populationId]?.parent_id : null;
+    const siblings = parentId && tree ? new Set(tree.populations[parentId]?.children ?? []) : new Set<string>();
+    if (!base) return [];
+    const chosen = listedPopulationOptions.filter((ref) => ref.hierarchyId === base.hierarchyId && siblings.has(ref.populationId));
+    return chosen.length ? chosen : [base];
+  };
+  /**
+   * The populations a plot's overlay checklist shows: the listed ones and the plot's own ticked
+   * ones, in tree order, then any it ticks that are no longer in the workspace, so a ticked
+   * population can always be seen and unticked.
+   */
+  const overlayOptions = (plot: FigurePlot): FigurePopulation[] => {
+    const ticked = plot.populations ?? [];
+    const isTicked = (ref: FigurePopulation) => ticked.some((p) => refKey(p) === refKey(ref));
+    return [
+      ...populationOptions.filter((ref) => isTicked(ref) || listedPopulationOptions.some((o) => refKey(o) === refKey(ref))),
+      ...ticked.filter((ref) => !populationOptions.some((o) => refKey(o) === refKey(ref))),
+    ];
+  };
+  /** The Gating tab's highlighted populations, as figure references, where the list has them. */
+  const checkedPopulationOptions = highlightedPopIds(state)
+    .map((popId) => refKey(canonicalPopulation({ hierarchyId: state.active_hierarchy_id, populationId: popId, label: "" }, trees)))
+    .flatMap((key) => listedPopulationOptions.filter((ref) => refKey(ref) === key));
+  const channels = [
+    ...new Map(
+      selectedSamples.flatMap((s) =>
+        s.sample.channels.map(
+          (c) => [c.key, s.sample.labelForKey(c.key)] as const,
+        ),
+      ),
+    ).entries(),
+  ];
+  const desiredWidth =
+    (page?.columns.length ?? 1) * (figure.panelSize + 16) +
+    (page?.rows[0]?.length ?? 0) * 115 +
+    40;
+  const scale =
+    zoom === "fit"
+      ? Math.min(
+          1,
+          Math.max(0.5, (previewWidth - 28) / (paperWidth || desiredWidth)),
+        )
+      : Number(zoom);
+  const scaleRef = useRef(scale);
+  scaleRef.current = scale;
+  // Option-scroll, Shift-scroll or a trackpad pinch (Ctrl-wheel) zooms the figure about the
+  // pointer; the select then shows the value it landed on. A DOM listener, since React's wheel
+  // listeners are passive and cannot cancel the scroll.
+  useEffect(() => {
+    const scroller = viewport.current;
+    if (!scroller) return;
+    const onWheel = (event: WheelEvent) => {
+      if (!(event.altKey || event.shiftKey || event.ctrlKey)) return;
+      const delta = event.deltaY || event.deltaX;
+      if (!delta) return;
+      event.preventDefault();
+      const current = scaleRef.current;
+      const next = Math.max(0.25, Math.min(4, Math.round(current * Math.exp(-delta * 0.0025) * 100) / 100));
+      if (next === current) return;
+      scaleRef.current = next;
+      setZoom(String(next));
+      const rect = scroller.getBoundingClientRect();
+      const px = event.clientX - rect.left;
+      const py = event.clientY - rect.top;
+      const ratio = next / current;
+      const left = (scroller.scrollLeft + px) * ratio - px;
+      const top = (scroller.scrollTop + py) * ratio - py;
+      requestAnimationFrame(() => {
+        scroller.scrollLeft = left;
+        scroller.scrollTop = top;
+      });
+    };
+    scroller.addEventListener("wheel", onWheel, { passive: false });
+    return () => scroller.removeEventListener("wheel", onWheel);
+  }, []);
+  const metadataFields = [
+    ...new Set(samples.flatMap((s) => Object.keys(s.metadata ?? {}))),
+  ];
+  /** The population table's fields that any of the figure's populations has a value in. */
+  const populationMetadataFields = [
+    ...new Set(figure.populations.flatMap((p) => Object.keys(populationMetadata?.[p.populationId] ?? {}))),
+  ].filter((field) => figure.populations.some((p) => (populationMetadata?.[p.populationId]?.[field] ?? "").trim()));
+  const placedDimensions: FigureDimension[] = [...figure.rows, ...figure.columns, ...figure.pages];
+  function place(
+    dimension: FigureDimension,
+    location: "rows" | "columns" | "pages",
+  ) {
+    const patch = {
+      rows: figure.rows.filter((d) => d !== dimension),
+      columns: figure.columns.filter((d) => d !== dimension),
+      pages: figure.pages.filter((d) => d !== dimension),
+    };
+    patch[location].push(dimension);
+    editFigure(patch);
+  }
+  async function exportPage() {
+    if (!page || pending || problems.length || exporting) return;
+    setExporting(true);
+    setExportError("");
+    const snapshot = structuredClone(config),
+      spec = snapshot.figure!;
+    const host = document.createElement("div");
+    host.style.cssText =
+      "position:fixed;left:-100000px;top:0;background:white;width:max-content;pointer-events:none;";
+    host.className = "gl-figure-export";
+    document.body.appendChild(host);
+    try {
+      const data: typeof built.data = {};
+      for (const panel of page.panels) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (!alive.current) return;
+        data[panel.key] = panel.plot.type === "chart"
+          ? buildFigureChartPanel(panel, spec, built.projected, trees, { ...figureStyle(snapshot, exportAll), state, gatingSources: prepared.sources }, built.ranges)
+          : buildFigurePanel(
+          panel,
+          { ...spec, showGates: true },
+          built.projected,
+          trees,
+          figureStyle(snapshot, exportAll),
+          built.ranges,
+          exportAll,
+        );
+        if (data[panel.key].problem) throw new Error(data[panel.key].problem);
+      }
+      const id = `figure-export-${crypto.randomUUID()}`;
+      const coloured = colourFigureSummaries(page, data, snapshot);
+      host.innerHTML = renderToStaticMarkup(
+        <FigureGrid
+          id={id}
+          page={page}
+          panels={coloured}
+          config={snapshot}
+          size={spec.panelSize}
+          showGates={spec.showGates}
+        />,
+      );
+      const cells = [
+        ...host.querySelectorAll<HTMLElement>("[data-figure-panel]"),
+      ];
+      page.panels.forEach((panel) => {
+        const node = cells
+          .find((cell) => cell.dataset.figurePanel === panel.key)
+          ?.querySelector<HTMLElement>(".mini-plot-cell");
+        if (node && coloured[panel.key].config)
+          drawFigurePlot(
+            node,
+            styledFigurePlot(
+              coloured[panel.key].config!,
+              snapshot,
+              panel.plot.type === "heatmap"
+                ? Math.max(50, snapshot.heatmapCellSize ?? 80)
+                : spec.panelSize,
+              spec.showGates,
+            ),
+          );
+      });
+      // The chart panels take the publication style as they do on screen.
+      applyFigureChartStyle(host, snapshot);
+      const filename = `${sanitizeFilePart(spec.name)}-${currentPage + 1}`;
+      if (exportFormat === "svg") exportGridSVG(id, filename, exportDpi);
+      else if (exportFormat === "png")
+        await exportGridPNG(id, filename, exportDpi);
+      else await exportGridPDF(id, filename, exportDpi);
+    } catch (error) {
+      if (alive.current)
+        setExportError(error instanceof Error ? error.message : String(error));
+    } finally {
+      host.remove();
+      if (alive.current) setExporting(false);
+    }
+  }
   return (
-    <div className="gl-tab-panel gl-tab-fill">
-      <div className="gl-illust-controls">
-        <div className="gl-illust-row gl-illust-top-actions">
-          <button
-            className={`gl-btn gl-illust-render${renderPending ? " pending" : ""}`}
-            title="Apply the current controls and rebuild the illustration"
-            disabled={!sampleScopeReady}
-            onClick={() => setRenderedConfig(snapshotConfig(currentConfig))}
-          >
-            {t("Render Illustration")}
-          </button>
-          <button
-            type="button"
-            className="gl-mini-btn"
-            title={t("Fit every plot shown here to its data and the gates on it")}
-            disabled={!sampleScopeReady}
-            onClick={() => onFitChannels([...xChannels, ...(yChannel ? [yChannel] : [])])}
-          >{t("Fit data + gates")}</button>
-          {renderPending && <span className="gl-illust-pending">{t("Changes pending")}</span>}
-          <span className="gl-illust-sample-status">
-            {hierarchyScope
-              ? t("{ready} of {checked} active-hierarchy FCS ready", {
-                  ready: sampleViews.length,
-                  checked: checkedSampleCount,
-                })
-              : t("{ready} of {checked} checked FCS ready", {
-                  ready: sampleViews.length,
-                  checked: checkedSampleCount,
-                })}
-            {hierarchyScope
-              ? ` · ${t("hierarchy {index}: {name}", {
-                  index: hierarchyScope.index,
-                  name: hierarchyScope.name,
-                })}`
-              : ""}
-            {hierarchyScope && hierarchyScope.excludedCheckedCount > 0
-              ? ` · ${t("{count} checked excluded (different hierarchies)", {
-                  count: hierarchyScope.excludedCheckedCount,
-                })}`
-              : ""}
-            {pendingSampleCount > 0
-              ? ` · ${t("preparing {count} population masks…", { count: pendingSampleCount })}`
-              : ""}
-          </span>
-        </div>
-        {/* Named presets — save / load / delete the whole illustration config */}
-        <div className="gl-illust-row">
-          <label className="gl-field-inline">
-            {t("Presets")}
-            <select value={selectedPreset} onChange={(e) => setSelectedPreset(e.target.value)}>
-              <option value="">{t("— select —")}</option>
-              {presets.map((p) => (
-                <option key={p.name} value={p.name}>{p.name}</option>
-              ))}
-            </select>
-          </label>
-          <button
-            className="gl-mini-btn"
-            disabled={!selectedPreset}
-            onClick={() => {
-              const p = presets.find((pr) => pr.name === selectedPreset);
-              if (p) applyConfig(p.config);
-            }}
-          >
-            {t("Load")}
-          </button>
-          <button
-            className="gl-mini-btn"
-            onClick={() => {
-              const name = window.prompt("Save current illustration settings as preset:")?.trim();
-              if (name) {
-                onSavePreset(name);
-                setSelectedPreset(name);
-              }
-            }}
-          >
-            {t("Save…")}
-          </button>
-          <button
-            className="gl-mini-btn"
-            disabled={!selectedPreset}
-            onClick={() => {
-              onDeletePreset(selectedPreset);
-              setSelectedPreset("");
-            }}
-          >
-            {t("Delete")}
-          </button>
-        </div>
-        <div className="gl-illust-row gl-illust-sample-selection">
-          <span className="gl-stats-opt-label">{t("FCS files")}</span>
-          <label className="gl-check">
-            <input
-              type="radio"
-              name="illust-fcs-population-selection"
-              checked={selectionMode === "uniform"}
-              onChange={() => setSelectionMode("uniform")}
-            />
-            {t("Same populations for every FCS")}
-          </label>
-          <label className="gl-check">
-            <input
-              type="radio"
-              name="illust-fcs-population-selection"
-              checked={selectionMode === "matrix"}
-              onChange={() => {
-                setSelectedPopulationsBySample((previous) => {
-                  const next = Object.fromEntries(
-                    Object.entries(previous).map(([sampleId, ids]) => [sampleId, [...ids]]),
-                  ) as Record<string, string[]>;
-                  for (const view of sampleViews) {
-                    if (next[view.id] === undefined) next[view.id] = [...popIds];
-                  }
-                  return next;
-                });
-                setSelectionMode("matrix");
-              }}
-            />
-            {t("Choose by FCS")}
-          </label>
-          {isHeatmap ? (
-            <label className="gl-check" title={t("Unchecked files in the Samples panel are excluded.")}>
-              <input
-                type="checkbox"
-                checked={combineSamples}
-                disabled={checkedSampleCount < 2}
-                onChange={(event) => setDimensionLayout((previous) =>
-                  moveIllustrationDimension(
-                    previous,
-                    "files",
-                    event.target.checked ? "overlay" : "rows",
-                    0,
-                  ))}
-              />
-              {t("Pool checked FCS files")}
-            </label>
-          ) : null}
-          <span className="gl-hint">
-            {combineSamples
-              ? t("FCS files are pooled")
-              : t("FCS files remain separate")}
-            {selectionMode === "matrix"
-              ? ` · ${t("{count} selected combinations", { count: selectedCombinationCount })}`
-              : ""}
-          </span>
-        </div>
-        {!isHeatmap ? (
-          <>
-            <IllustrationLayoutBuilder value={dimensionLayout} onChange={setDimensionLayout} />
-            {isRidgeline ? (
-              <div className="gl-hint">
-                {t("Ridgeline stacks populations within each channel. Row and column placement takes effect in Grid layout; file and population overlays still apply here.")}
-              </div>
-            ) : null}
-          </>
-        ) : null}
-        {/* Plot type + display + contour smoothing */}
-        <div className="gl-illust-row">
-          {/* Explicit plot-type toggle — histograms used to be reachable only by picking a "no Y"
-              option buried in the Y-channel dropdown, which was undiscoverable. */}
-          <div className="gl-illust-group">
-          <span className="gl-stats-opt-label">{t("Plot")}</span>
-          {[
-            { v: "biplot", l: "Biplot" },
-            { v: "histogram", l: "Histogram" },
-            { v: "heatmap", l: "Heatmap" },
-          ].map((pt) => (
-            <label key={pt.v} className="gl-check">
-              <input
-                type="radio"
-                name="illust-plot-type"
-                checked={plotType === pt.v}
-                onChange={() => {
-                  const next = pt.v as "biplot" | "histogram" | "heatmap";
-                  setPlotType(next);
-                  if (next === "biplot" && !yChannel) setYChannel(defaultY || allChannels[0] || "");
-                }}
-              />
-              {t(pt.l)}
-            </label>
-          ))}
-          </div>
-          {plotType === "biplot" && (
-            <>
-              <span className="gl-ctl-sep" />
-              <label className="gl-field-inline">
-                {t("Y channel")}
-                <select value={yChannel} onChange={(e) => setYChannel(e.target.value)}>
-                  {allChannels.map((c) => (
-                    <option key={c} value={c}>{sample.labelForKey(c)}</option>
-                  ))}
-                </select>
-              </label>
-            </>
-          )}
-          {plotType === "biplot" && (
-            <>
-              <span className="gl-ctl-sep" />
-              <div className="gl-illust-group">
-                <span className="gl-stats-opt-label">{t("Display")}</span>
-                {[{ v: "scatter", l: "Scatter" }, { v: "pseudocolor", l: "Pseudo" }, { v: "contour", l: "Contour" }].map((m) => (
-                  <label key={m.v} className="gl-check">
-                    <input type="radio" name="illust-mode" checked={displayMode === m.v} onChange={() => setDisplayMode(m.v)} />
-                    {t(m.l)}
-                  </label>
-                ))}
-              </div>
-            </>
-          )}
-          {isContour && (
-            <>
-              <label className="gl-check" title="Choose a bandwidth automatically from the event count and panel size">
-                <input
-                  type="checkbox"
-                  checked={kdeBandwidth === 0}
-                  onChange={(e) => {
-                    if (e.target.checked) {
-                      if (kdeBandwidth > 0) manualKdeBandwidth.current = kdeBandwidth;
-                      setKdeBandwidth(0);
-                    } else {
-                      setKdeBandwidth(manualKdeBandwidth.current);
-                    }
-                  }}
-                />
-                {t("Auto smoothing")}
-              </label>
-              {/* Always shown, disabled while automatic. Hiding it left the one control that
-                  explains a contour's smoothness invisible until you found the checkbox, and the
-                  automatic value is chosen from the plotted event count and the panel size -- so
-                  the same population can look quite different here and in the gating plot, which
-                  caps events differently and offers no bandwidth control of its own. */}
-              <label
-                className="gl-field-inline"
-                title={kdeBandwidth > 0
-                  ? t("Higher bandwidth gives stronger contour smoothing")
-                  : t("Automatic: chosen from the plotted event count and panel size. Turn off Auto smoothing to set it, and to match another plot's smoothing exactly.")}
+    <div className="gl-figure-workspace">
+      <header className="gl-figure-toolbar">
+        <input
+          aria-label="Figure name"
+          value={figure.name}
+          disabled={exporting}
+          onChange={(e) => editFigure({ name: e.target.value })}
+        />
+        <span className="gl-figure-subtle">Stored in workspace</span>
+        <button
+          disabled={!history.length || exporting}
+          onClick={() => {
+            setFuture((f) => [config, ...f]);
+            setConfig(history.at(-1)!);
+            setHistory((h) => h.slice(0, -1));
+          }}
+        >
+          Undo
+        </button>
+        <button
+          disabled={!future.length || exporting}
+          onClick={() => {
+            setHistory((h) => [...h, config]);
+            setConfig(future[0]);
+            setFuture((f) => f.slice(1));
+          }}
+        >
+          Redo
+        </button>
+        <span className="gl-figure-flex" />
+        <button onClick={onOpenGating}>Edit gates</button>
+        <button onClick={() => setSection("export")}>Export…</button>
+        {(onAddFigureToLayout || onAddToLayout) && (
+          <div className="gl-plotting-head-actions">
+            {onAddFigureToLayout && (
+              <button
+                type="button"
+                disabled={exporting || !figure.sampleIds.length || !figure.populations.length || !figure.plots.length}
+                title={t("One block on the Layout tab, drawn there as it is here, heatmaps and style included")}
+                onClick={(event) => pagesMenu.open(event, pages.length, () => onAddFigureToLayout(structuredClone(config), currentPage), onAddFigurePagesToLayout && (() => onAddFigurePagesToLayout(structuredClone(config), pages.map((each) => each.label))))}
               >
-                {t("Bandwidth")}
-                <input
-                  type="range"
-                  min={0.2}
-                  max={14}
-                  step={0.2}
-                  disabled={kdeBandwidth === 0}
-                  value={kdeBandwidth > 0 ? kdeBandwidth : manualKdeBandwidth.current}
-                  onChange={(e) => {
-                    const next = Math.max(0.2, Number(e.target.value) || 4);
-                    manualKdeBandwidth.current = next;
-                    setKdeBandwidth(next);
-                  }}
-                />
-                <span className="gl-num-badge">
-                  {kdeBandwidth > 0 ? kdeBandwidth.toFixed(1) : t("auto")}
-                </span>
-              </label>
-            </>
-          )}
-        </div>
-
-        {/* Layout + sampling */}
-        {!isHeatmap && <div className="gl-illust-row">
-          <label className="gl-field-inline">
-            {t(fitToColumns ? "Maximum plot size" : "Plot size")}
-            <input
-              className="gl-size-slider"
-              type="range" min={150} max={500} step={25} value={plotSize}
-              title="Maximum rendered panel size; Fit to columns may shrink it to prevent overflow"
-              onChange={(e) => setPlotSize(Math.max(150, Math.min(500, +e.target.value || 200)))}
-            />
-            <span className="gl-num-badge">{plotSize}px</span>
-          </label>
-          <label className="gl-check">
-            <input type="checkbox" checked={fitToColumns} onChange={(e) => setFitToColumns(e.target.checked)} />
-            {t("Fit columns to width")}
-          </label>
-          <label className="gl-field-inline">
-            {t("Max events")}
-            <input type="number" min={0} step={1000} value={maxEvents} disabled={allEvents} onChange={(e) => setMaxEvents(Math.max(0, Math.floor(+e.target.value) || 0))} />
-          </label>
-          <label className="gl-check">
-            <input type="checkbox" checked={allEvents} onChange={(e) => setAllEvents(e.target.checked)} />
-            {t("All events")}
-          </label>
-        </div>}
-
-        {/* Population colouring */}
-        {!isHeatmap && <div className="gl-illust-row">
-          <label className="gl-check">
-            <input type="checkbox" checked={colorByPop} onChange={(e) => setColorByPop(e.target.checked)} />
-            Colour each population
-          </label>
-          {overlayPops ? <span className="gl-hint">{t("Population overlay uses these colours")}</span> : null}
-        </div>}
-
-        {/* Plot-family-specific appearance */}
-        {plotType === "biplot" ? (
-          <div className="gl-illust-row">
-            <label className="gl-field-inline">
-              {t("Point size")}
-              <input type="number" min={0.1} max={5} step={0.1} value={pointSize} onChange={num(setPointSize, 1.2)} />
-            </label>
-            <label className="gl-field-inline">
-              {t("Opacity")}
-              <input type="range" min={0.05} max={1} step={0.05} value={pointAlpha} onChange={num(setPointAlpha, 0.35)} />
-              <span className="gl-num-badge">{pointAlpha.toFixed(2)}</span>
-            </label>
-            {displayMode === "pseudocolor" && (
-              <DensityColourControl value={densityColorPower} onChange={onDensityColorPowerChange} />
+                {t("Add to Layout")}
+              </button>
             )}
-            <label className="gl-field-inline">
-              {t("Contour %")}
-              <input type="number" min={0} max={50} step={1} value={contourThreshold} onChange={num(setContourThreshold, 5)} />
-            </label>
-            <span className="gl-ctl-sep" />
-            <label className="gl-check">
-              <input type="checkbox" checked={pubStyle} onChange={(e) => setPubStyle(e.target.checked)} />
-              {t("Publication style")}
-            </label>
-            <label className="gl-field-inline">
-              {t("Gate line")}
-              <input type="number" min={0.5} max={5} step={0.25} value={gateLineWidth} onChange={num(setGateLineWidth, 1.5)} />
-            </label>
-            <label className="gl-field-inline" title={GATE_EDGE_MODES.find((m) => m.id === gateEdgeMode)?.hint}>
-              {t("Gate edges")}
-              <select value={gateEdgeMode} onChange={(e) => setGateEdgeMode(e.target.value as GateEdgeMode)}>
-                {GATE_EDGE_MODES.map((m) => (
-                  <option key={m.id} value={m.id}>{t(m.label)}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-        ) : plotType === "histogram" ? (
-          <>
-            <div className="gl-illust-row">
-              <label className="gl-field-inline">
-                Line width
-                <input type="number" min={0.5} max={6} step={0.1} value={histLineWidth} onChange={num(setHistLineWidth, 1.8)} />
-              </label>
-              <label className="gl-check">
-                <input type="checkbox" checked={histFill} onChange={(e) => setHistFill(e.target.checked)} />
-                Fill area
-              </label>
-              <label className="gl-field-inline">
-                Fill opacity
-                <input type="range" min={0} max={1} step={0.05} value={histFillAlpha} onChange={num(setHistFillAlpha, 0.22)} />
-                <span className="gl-num-badge">{histFillAlpha.toFixed(2)}</span>
-              </label>
-              <label className="gl-field-inline">
-                Overlay fill
-                <select value={histOverlayMode} onChange={(e) => setHistOverlayMode(e.target.value)}>
-                  <option value="front_opaque">Front opaque</option>
-                  <option value="blend">Blend fills</option>
-                </select>
-              </label>
-              <label className="gl-field-inline">
-                Layout
-                <select value={histLayout} onChange={(e) => setHistLayout(e.target.value)}>
-                  <option value="grid">Grid (one panel / pop)</option>
-                  <option value="ridgeline">Ridgeline (stacked)</option>
-                </select>
-              </label>
-            </div>
-            {isRidgeline && (
-              <div className="gl-illust-row">
-                <label className="gl-field-inline">
-                  Ridge overlap
-                  <input type="range" min={0} max={0.95} step={0.05} value={ridgeOverlap} onChange={num(setRidgeOverlap, 0.7)} />
-                  <span className="gl-num-badge">{ridgeOverlap.toFixed(2)}</span>
-                </label>
-                <label className="gl-field-inline">
-                  Column gap
-                  <input type="number" min={0} max={60} step={2} value={ridgeColGap} onChange={num(setRidgeColGap, 8)} />
-                </label>
-                <label className="gl-check">
-                  <input type="checkbox" checked={ridgeGradient} onChange={(e) => setRidgeGradient(e.target.checked)} />
-                  Heat gradient fill
-                </label>
-              </div>
+            {onAddToLayout && (
+              <button
+                type="button"
+                disabled={exporting || !page || !page.panels.some((panel) => panel.plot.type !== "heatmap")}
+                title={t("One Layout plot per panel of this page, arranged on the Layout tab's current sheet as here")}
+                onClick={(event) => pagesMenu.open(event, pages.length, () => {
+                  if (page) addPanelsToLayout(page.panels.filter((panel) => panel.plot.type !== "heatmap"));
+                }, onAddPanelPagesToLayout && addPanelPagesToLayout)}
+              >
+                {t("Add panels to Layout")}
+              </button>
             )}
-          </>
-        ) : (
-          <div className="gl-illust-row">
-            <label className="gl-field-inline">
-              {t("Summary")}
-              <select value={heatmapStat} onChange={(e) => setHeatmapStat(e.target.value as HeatmapSummaryStat)}>
-                <option value="median">{t("Median")}</option>
-                <option value="mean">{t("Mean")}</option>
-              </select>
-            </label>
-            <label className="gl-field-inline">
-              {t("Scale")}
-              <select value={heatmapScale} onChange={(e) => setHeatmapScale(e.target.value as HeatmapScaleMode)}>
-                <option value="column_minmax">{t("Per channel (0–1)")}</option>
-                <option value="row_minmax">{t("Per population (0–1)")}</option>
-                <option value="column_zscore">{t("Per-channel z-score")}</option>
-                <option value="none">{t("None (transformed expression)")}</option>
-              </select>
-            </label>
-            <label className="gl-field-inline">
-              {t("Palette")}
-              <select value={heatmapPalette} onChange={(e) => setHeatmapPalette(e.target.value as HeatmapPalette)}>
-                <option value="heat">Histogram heat (black→yellow)</option>
-                <option value="viridis">Viridis</option>
-                <option value="blue_white_yellow_red">RColorBrewer RdYlBu (blue→yellow→red)</option>
-              </select>
-            </label>
-            <label className="gl-field-inline">
-              {t("Plot size")}
-              <input
-                className="gl-size-slider"
-                type="range" min={16} max={72} step={2} value={heatmapCellSize}
-                title={t("Heatmap cell size; click Render Illustration to apply")}
-                onChange={(e) => setHeatmapCellSize(Math.max(16, Math.min(72, Math.round(+e.target.value) || 30)))}
-              />
-              <span className="gl-num-badge">{heatmapCellSize}px</span>
-            </label>
-            <label className="gl-check">
-              <input type="checkbox" checked={heatmapShowValues} onChange={(e) => setHeatmapShowValues(e.target.checked)} />
-              {t("Show values")}
-            </label>
-            <span className="gl-illust-pending" style={{ color: "#64748b" }}>
-              {t("Uses all events; empty populations are grey.")}
-            </span>
-            {heatmapDegenerate && (
-              <div className="gl-comp-warning" role="status">
-                <span>
-                  {t(
-                    "{scale} needs at least two populations to have a within-channel range. With one population every cell collapses to a single flat value, giving an uninformative row. Switch to unscaled transformed expression, or add another population.",
-                    {
-                      scale: t(heatmapScale === "column_zscore"
-                        ? "Per-channel z-score"
-                        : "Per channel (0–1)"),
-                    },
-                  )}
-                </span>
-                <button
-                  type="button"
-                  className="gl-mini-btn"
-                  onClick={() => setHeatmapScale("none")}
-                >
-                  {t("Use transformed expression")}
-                </button>
-              </div>
-            )}
+            {pagesMenu.menu}
           </div>
         )}
-
-        {/* Fonts + export */}
-        <div className="gl-illust-row">
-          {/* The eyebrow and the sizes it names wrap as one unit; loose in the row, "Fonts" ended
-              up a line above its own inputs. */}
-          <div className="gl-illust-group">
-            <span className="gl-stats-opt-label">{t("Fonts")}</span>
-            <label className="gl-field-inline">{t("Tick")}<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 9)} /></label>
-            <label className="gl-field-inline">{t("Axis")}<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 12)} /></label>
-            <label className="gl-field-inline">{t("Title")}<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 12)} /></label>
-            <label className="gl-field-inline">{t("Gate")}<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 10)} /></label>
-            <label className="gl-check" title="Scale these base font sizes with the rendered plot or heatmap cell size">
-              <input type="checkbox" checked={scaleFontsWithPlot} onChange={(e) => setScaleFontsWithPlot(e.target.checked)} />
-              Scale with plot
+      </header>
+      <div className="gl-figure-body">
+        <aside className="gl-figure-inspector" aria-label="Figure inspector" style={{ width: "var(--gl-left-pane-width, 290px)", flex: "0 0 var(--gl-left-pane-width, 290px)" }}>
+          <nav role="tablist" aria-label="Figure settings">
+            {["data", "plots", "arrange", "style", "export"].map((id) => (
+              <button
+                key={id}
+                role="tab"
+                tabIndex={section === id ? 0 : -1}
+                onKeyDown={(event) => {
+                  const ids = ["data", "plots", "arrange", "style", "export"];
+                  const offset =
+                    event.key === "ArrowRight"
+                      ? 1
+                      : event.key === "ArrowLeft"
+                        ? -1
+                        : 0;
+                  if (offset) {
+                    event.preventDefault();
+                    const next =
+                      ids[(ids.indexOf(id) + offset + ids.length) % ids.length];
+                    setSection(next);
+                    document.getElementById(`figure-tab-${next}`)?.focus();
+                  }
+                }}
+                id={`figure-tab-${id}`}
+                aria-controls={`figure-section-${id}`}
+                aria-selected={section === id}
+                onClick={() => setSection(id)}
+              >
+                {
+                  {
+                    data: "Data",
+                    plots: "Plots",
+                    arrange: "Arrange",
+                    style: "Style",
+                    export: "Export",
+                  }[id]
+                }
+              </button>
+            ))}
+          </nav>
+          <fieldset disabled={exporting} className="gl-figure-fields">
+            <section
+              hidden={section !== "data"}
+              id="figure-section-data"
+              role="tabpanel"
+              aria-labelledby="figure-tab-data"
+            >
+              <h3 title={t("Each entry is an FCS file, not necessarily one biological sample. The figure's selection is independent of the Gating tab's.")}>
+                {t("Files / samples")} <span>{figure.sampleIds.length} selected</span>
+              </h3>
+              <FileChecklist
+                files={samples}
+                selected={figure.sampleIds}
+                onChange={(sampleIds) => editFigure({ sampleIds })}
+                checkedIds={checkedSampleIds}
+                columns={placedDimensions.filter((d) => d.startsWith("metadata:")).map((d) => d.slice("metadata:".length))}
+                levels={metadataLevels}
+                searchLabel={t("Find figure files or samples")}
+              />
+              {figure.sampleIds.some(
+                (id) => !samples.some((s) => s.id === id),
+              ) && (
+                <p role="alert">
+                  {t("A saved file is missing. Restore it or use the current checked files.")}
+                </p>
+              )}
+              <h3 title={t("A population applies to the files whose tree has it. Correspondence is by provenance, not by name.")}>
+                Populations <span>{figure.populations.length} selected</span>
+              </h3>
+              <small className="gl-figure-plot-overlay-note">
+                {t("Ticked populations are drawn by every plot set to follow them (Plots → Populations).")}
+              </small>
+              <PopulationChecklist
+                compact
+                heading={false}
+                className="gl-figure-populations"
+                label={t("Populations")}
+                searchLabel="Find figure populations"
+                rows={figurePopulationRows(listedPopulationOptions, (ref) => (<>
+                  {optionsSpanTrees && (
+                    <small className="gl-figure-row-meta">{trees[ref.hierarchyId]?.name}</small>
+                  )}
+                  {applicableFiles(ref).length < selectedSamples.length && (
+                    <small
+                      className="gl-figure-row-meta"
+                      title={t("{count} of {selected} selected files have this population", { count: applicableFiles(ref).length, selected: selectedSamples.length })}
+                    >
+                      {applicableFiles(ref).length}/{selectedSamples.length}
+                    </small>
+                  )}
+                </>)).map((row, i) => ({ ...row, searchText: `${row.name} ${trees[listedPopulationOptions[i].hierarchyId]?.name ?? ""}` }))}
+                selected={figure.populations.map(refKey)}
+                onToggle={(key) => {
+                  const ref = listedPopulationOptions.find((option) => refKey(option) === key)!;
+                  editFigure({
+                    populations: figure.populations.some(
+                      (p) => refKey(p) === key,
+                    )
+                      ? figure.populations.filter(
+                          (p) => refKey(p) !== key,
+                        )
+                      : [...figure.populations, ref],
+                  });
+                }}
+                actions={<>
+                  <button
+                    type="button"
+                    className="gl-mini-btn"
+                    disabled={!checkedPopulationOptions.length}
+                    title={t("The populations highlighted on the Gating tab")}
+                    onClick={() => editFigure({ populations: checkedPopulationOptions })}
+                  >
+                    {t("Use highlighted populations")}
+                  </button>
+                  <button type="button" className="gl-mini-btn" onClick={() => editFigure({ populations: listedPopulationOptions })}>All</button>
+                  <button type="button" className="gl-mini-btn" onClick={() => editFigure({ populations: [] })}>None</button>
+                  <button
+                    type="button"
+                    className="gl-mini-btn"
+                    title="The populations with nothing beneath them"
+                    onClick={() => editFigure({ populations: listedPopulationOptions.filter(isLeafPopulation) })}
+                  >
+                    Leaves
+                  </button>
+                </>}
+              />
+              {unassignedSelections.length > 0 && (
+                <div className="gl-figure-note" role="status">
+                  {unassignedSelections
+                    .map(
+                      (ref) => `${ref.label} (${trees[ref.hierarchyId]?.name})`,
+                    )
+                    .join(", ")}
+                  {t(": no selected files use this hierarchy. No panels are added for these selections.")}
+                  <button
+                    onClick={() =>
+                      editFigure({
+                        populations: figure.populations.filter(
+                          (ref) => !unassignedSelections.includes(ref),
+                        ),
+                      })
+                    }
+                  >
+                    Remove unused selections
+                  </button>
+                </div>
+              )}
+              {figure.populations
+                .filter(
+                  (ref) =>
+                    !populationOptions.some((p) => refKey(p) === refKey(ref)),
+                )
+                .map((ref) => (
+                  <div key={refKey(ref)} className="gl-figure-warning">
+                    {ref.label}
+                    <button
+                      onClick={() =>
+                        editFigure({
+                          populations: figure.populations.filter(
+                            (p) => p !== ref,
+                          ),
+                        })
+                      }
+                    >
+                      Remove unavailable selection
+                    </button>
+                  </div>
+                ))}
+              {figure.samplePopulations && (
+                <div className="gl-figure-warning">
+                  {t("This saved figure has per-file population selections.")}
+                  <button
+                    onClick={() => editFigure({ samplePopulations: undefined })}
+                  >
+                    {t("Use selected populations for every file")}
+                  </button>
+                </div>
+              )}
+              {/* Under one tree per workspace every population matches by provenance; the mapping
+                  controls only appear when something does not, or an explicit choice was made. */}
+              {mappingNeedsAttention ? (
+              <details open>
+                <FoldSummary>Hierarchy mapping</FoldSummary>
+                <p>
+                  Automatic correspondence uses provenance, not names. An
+                  explicit choice below acknowledges a different population
+                  definition.
+                </p>
+                {selectedSamples.map((s) => (
+                  <div key={s.id} className="gl-figure-mapping">
+                    <strong>{s.name}</strong>
+                    <small>
+                      {trees[s.hierarchyId]?.name ?? "Missing hierarchy"}
+                    </small>
+                    {figure.populations.map((p) => (
+                      <label key={refKey(p)}>
+                        {p.label}:{" "}
+                        {figure.populationOverrides?.[s.id]?.[refKey(p)]
+                          ? "explicit mapping"
+                          : trees[s.hierarchyId]
+                            ? resolveFigurePopulation(
+                                p,
+                                trees[s.hierarchyId],
+                                trees,
+                              ).status
+                            : "missing"}
+                        <select
+                          aria-label={`Map ${p.label} in ${s.name}`}
+                          value={
+                            figure.populationOverrides?.[s.id]?.[refKey(p)] ??
+                            ""
+                          }
+                          onChange={(e) =>
+                            editFigure({
+                              populationOverrides: {
+                                ...figure.populationOverrides,
+                                [s.id]: {
+                                  ...figure.populationOverrides?.[s.id],
+                                  [refKey(p)]: e.target.value,
+                                },
+                              },
+                            })
+                          }
+                        >
+                          <option value="">Automatic provenance mapping</option>
+                          {Object.values(
+                            trees[s.hierarchyId]?.populations ?? {},
+                          ).map((pop) => (
+                            <option
+                              key={pop.population_id}
+                              value={pop.population_id}
+                            >
+                              {pop.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ))}
+                  </div>
+                ))}
+              </details>
+              ) : null}
+              <details>
+                <FoldSummary>Saved figures & presets</FoldSummary>
+                <label>
+                  Preset
+                  <select
+                    value={preset}
+                    onChange={(e) => setPreset(e.target.value)}
+                  >
+                    <option value="">Choose…</option>
+                    {presets.map((p) => (
+                      <option key={p.name}>{p.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <div className="gl-figure-actions">
+                  <button
+                    disabled={!preset}
+                    onClick={() => {
+                      const p = presets.find((p) => p.name === preset);
+                      if (p)
+                        change({
+                          ...p.config,
+                          figure: migrateFigure(
+                            p.config,
+                            samples,
+                            trees,
+                            state.active_hierarchy_id,
+                            defaultX,
+                            defaultY,
+                          ),
+                        });
+                    }}
+                  >
+                    Load
+                  </button>
+                  <button
+                    disabled={!preset}
+                    onClick={() => {
+                      onDeletePreset(preset);
+                      setPreset("");
+                    }}
+                  >
+                    Delete preset
+                  </button>
+                </div>
+                <label>
+                  Save as
+                  <input
+                    value={presetName}
+                    onChange={(e) => setPresetName(e.target.value)}
+                  />
+                </label>
+                <button
+                  disabled={!presetName.trim()}
+                  onClick={() => {
+                    configRef.current = config;
+                    onSavePreset(presetName.trim());
+                    setPresetName("");
+                  }}
+                >
+                  Save figure preset
+                </button>
+              </details>
+            </section>
+            <section
+              hidden={section !== "plots"}
+              id="figure-section-plots"
+              role="tabpanel"
+              aria-labelledby="figure-tab-plots"
+            >
+              <h3 title={t("Each plot has its own axes; the plots repeat across the selected files and populations.")}>Plot definitions</h3>
+              {figure.plots.map((plot, index) => (
+                <div className="gl-figure-plot-editor" key={plot.id}>
+                  <label>
+                    Name
+                    <input
+                      value={plot.name}
+                      onChange={(e) =>
+                        editFigure({
+                          plots: figure.plots.map((p) =>
+                            p.id === plot.id
+                              ? { ...p, name: e.target.value }
+                              : p,
+                          ),
+                        })
+                      }
+                    />
+                  </label>
+                  <label>
+                    Type
+                    <select
+                      value={plotTypeValue(plot)}
+                      onChange={(e) =>
+                        editFigure({
+                          plots: figure.plots.map((p) =>
+                            p.id === plot.id ? withPlotType(p, e.target.value) : p,
+                          ),
+                        })
+                      }
+                    >
+                      <option value="biplot">Biplot</option>
+                      <option value="histogram">Histogram</option>
+                      <option value="heatmap">Summary heatmap</option>
+                      <option value="chart:violin">{t("Violin")}</option>
+                      <option value="chart:box">{t("Boxplot")}</option>
+                      <option value="chart:statistic">{t("Statistic per file")}</option>
+                      <option value="chart:proportion">{t("Composition")}</option>
+                    </select>
+                  </label>
+                  {plot.type === "chart" && plot.chart && (
+                    <>
+                      {plot.chart.valueKind === "statistic" && (
+                        <label>
+                          {t("Statistic")}
+                          <select
+                            aria-label={t("Statistic")}
+                            value={plot.chart.statistic ?? "median"}
+                            onChange={(e) => editChart(plot, { statistic: e.target.value as NonNullable<FigureChart["statistic"]> })}
+                          >
+                            <option value="median">{t("Median")}</option>
+                            <option value="mean">{t("Mean")}</option>
+                            <option value="geomean">{t("Geometric mean")}</option>
+                          </select>
+                        </label>
+                      )}
+                      {plot.chart.valueKind === "cells" && plot.chart.plotType === "violin" && (
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={plot.chart.violinBox !== false}
+                            onChange={(e) => editChart(plot, { violinBox: e.target.checked })}
+                          />
+                          {t("Median and quartiles inside")}
+                        </label>
+                      )}
+                      <label title={t("Draw the plot once for the files of its row or column, in one panel across their cells, a mark per file")}>
+                        <input
+                          type="checkbox"
+                          checked={!!plot.chart.summary}
+                          onChange={(e) => editChart(plot, { summary: e.target.checked })}
+                        />
+                        {t("One panel for all files")}
+                      </label>
+                      {plot.chart.summary ? (
+                        <label title={t("Name the files under the panel's marks; off by default where the panel spans columns under the files' headings")}>
+                          <input
+                            type="checkbox"
+                            checked={plot.chart.fileLabels ?? !filesAlongColumns}
+                            onChange={(e) => editChart(plot, { fileLabels: e.target.checked })}
+                          />
+                          {t("Show file labels")}
+                        </label>
+                      ) : (
+                        <label title={t("Name the populations under each panel; untick when the row above has a legend")}>
+                          <input
+                            type="checkbox"
+                            checked={plot.chart.populationLabels !== false}
+                            onChange={(e) => editChart(plot, { populationLabels: e.target.checked })}
+                          />
+                          {t("Show population labels")}
+                        </label>
+                      )}
+                    </>
+                  )}
+                  {(["x", "y"] as const)
+                    .filter((axis) => (axis === "x" || plot.type === "biplot") && !(plot.type === "chart" && plot.chart?.valueKind === "proportion"))
+                    .map((axis) => (
+                      <label key={axis}>
+                        {plot.type === "chart" ? t("Channel") : `${axis.toUpperCase()} channel`}
+                        <SearchableSelect
+                          label={plot.type === "chart" ? t("Channel") : `${axis.toUpperCase()} channel`}
+                          className="gl-searchable-select-field"
+                          value={plot[axis]}
+                          options={[
+                            ...(channels.some(([key]) => key === plot[axis]) ? [] : [{ value: plot[axis], label: "Unavailable channel" }]),
+                            ...channels.map(([key, label]) => ({ value: key, label })),
+                          ]}
+                          onChange={(value) =>
+                            editFigure({
+                              plots: figure.plots.map((p) =>
+                                p.id === plot.id ? { ...p, [axis]: value } : p,
+                              ),
+                            })
+                          }
+                        />
+                      </label>
+                    ))}
+                  <label>
+                    {t("Populations")}
+                    <select
+                      value={plot.together ? TOGETHER : plot.populations ? OVERLAY_CHOSEN : plot.population ? refKey(plot.population) : ""}
+                      onChange={(e) =>
+                        editFigure({
+                          plots: figure.plots.map((p) =>
+                            p.id === plot.id
+                              ? e.target.value === TOGETHER
+                                ? { ...p, population: undefined, populations: undefined, together: true }
+                                : e.target.value === OVERLAY_CHOSEN
+                                ? { ...p, together: undefined, population: undefined, populations: overlayStart(p) }
+                                : {
+                                    ...p,
+                                    together: undefined,
+                                    populations: undefined,
+                                    population: populationOptions.find(
+                                      (ref) => refKey(ref) === e.target.value,
+                                    ),
+                                  }
+                              : p,
+                          ),
+                        })
+                      }
+                    >
+                      <option value="">{t("Each selected population in its own panel")}</option>
+                      <option value={TOGETHER}>{t("The selected populations together in one panel")}</option>
+                      {populationOptions.map((ref) => (
+                        <option key={refKey(ref)} value={refKey(ref)}>
+                          {t("One population: {name}", { name: optionsSpanTrees ? `${ref.label} · ${trees[ref.hierarchyId]?.name}` : ref.label })}
+                        </option>
+                      ))}
+                      <option value={OVERLAY_CHOSEN}>{t("Its own list…")}</option>
+                    </select>
+                  </label>
+                  {(plot.together || (!plot.populations && !plot.population)) && (
+                    <small className="gl-figure-plot-overlay-note">
+                      {t("{count} selected in Data", { count: figure.populations.length })}
+                    </small>
+                  )}
+                  {plot.populations && (
+                    <>
+                    <PopulationChecklist
+                      compact
+                      collapsible={false}
+                      className="gl-figure-plot-overlay"
+                      label={plot.type === "chart" ? `${t("Populations")} · ${plot.name}` : `Populations overlaid in ${plot.name}`}
+                      summary={plot.type === "chart"
+                        ? plot.populations.length
+                          ? t("{count} drawn in each panel, each in its population's colour", { count: String(plot.populations.length) })
+                          : t("Tick the populations to draw in each panel")
+                        : plot.populations.length
+                          ? t("{count} overlaid in each panel, each in its population's colour", { count: String(plot.populations.length) })
+                          : t("Tick the populations to overlay in each panel")}
+                      rows={figurePopulationRows(overlayOptions(plot), (ref) => {
+                        const inWorkspace = populationOptions.some((o) => refKey(o) === refKey(ref));
+                        return (<>
+                          {optionsSpanTrees && <small className="gl-figure-row-meta">{trees[ref.hierarchyId]?.name}</small>}
+                          {!inWorkspace ? (
+                            <small className="gl-figure-row-meta" title={t("This population is no longer in the workspace; untick it to remove it from the overlay")}>
+                              {t("Not in the workspace")}
+                            </small>
+                          ) : applicableFiles(ref).length < selectedSamples.length && (
+                            <small
+                              className="gl-figure-row-meta"
+                              title={t("{count} of {selected} selected files have this population", { count: applicableFiles(ref).length, selected: selectedSamples.length })}
+                            >
+                              {applicableFiles(ref).length}/{selectedSamples.length}
+                            </small>
+                          )}
+                        </>);
+                      })}
+                      selected={plot.populations.map(refKey)}
+                      onToggle={(key) => {
+                        const chosen = plot.populations!.some((p) => refKey(p) === key);
+                        editFigure({
+                          plots: figure.plots.map((p) =>
+                            p.id === plot.id
+                              ? {
+                                  ...p,
+                                  // Kept in tree order, so the legend reads as the tree does.
+                                  populations: overlayOptions(p).filter((option) =>
+                                    refKey(option) === key
+                                      ? !chosen
+                                      : (p.populations ?? []).some((q) => refKey(q) === refKey(option)),
+                                  ),
+                                }
+                              : p,
+                          ),
+                        });
+                      }}
+                    />
+                    <small className="gl-figure-plot-overlay-note">
+                      {t("These populations are this plot's alone and do not follow the tree in Data.")}
+                    </small>
+                    </>
+                  )}
+                  <div className="gl-figure-actions">
+                    <button
+                      disabled={index === 0}
+                      aria-label={`Move ${plot.name} up`}
+                      onClick={() =>
+                        editFigure({ plots: move(figure.plots, index, -1) })
+                      }
+                    >
+                      Up
+                    </button>
+                    <button
+                      disabled={index === figure.plots.length - 1}
+                      aria-label={`Move ${plot.name} down`}
+                      onClick={() =>
+                        editFigure({ plots: move(figure.plots, index, 1) })
+                      }
+                    >
+                      Down
+                    </button>
+                    <button
+                      onClick={() =>
+                        editFigure({
+                          plots: figure.plots.filter((p) => p.id !== plot.id),
+                        })
+                      }
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <button
+                onClick={() =>
+                  editFigure({
+                    plots: [
+                      ...figure.plots,
+                      {
+                        id: crypto.randomUUID(),
+                        name: `Plot ${figure.plots.length + 1}`,
+                        x: channels[0]?.[0] ?? defaultX,
+                        y: channels[1]?.[0] ?? defaultY,
+                        type: "biplot",
+                      },
+                    ],
+                  })
+                }
+              >
+                Add plot
+              </button>
+              <button
+                title={t("One chart across the files, a mark per file, with the selected populations together")}
+                onClick={() => {
+                  // A violin of the first plot's channel where the figure's files have it, else of the first channel they offer.
+                  const first = figure.plots[0]?.x;
+                  const x = first && channels.some(([key]) => key === first) ? first : channels[0]?.[0] ?? defaultX;
+                  editFigure({
+                    plots: [
+                      ...figure.plots,
+                      {
+                        id: crypto.randomUUID(),
+                        name: `Summary ${figure.plots.length + 1}`,
+                        x,
+                        y: x,
+                        type: "chart",
+                        chart: { valueKind: "cells", plotType: "violin", summary: true },
+                        together: true,
+                      },
+                    ],
+                  });
+                }}
+              >
+                {t("Add summary panel")}
+              </button>
+            </section>
+            <section
+              hidden={section !== "arrange"}
+              id="figure-section-arrange"
+              role="tabpanel"
+              aria-labelledby="figure-tab-arrange"
+            >
+              <h3 title="Drag between shelves, or use the placement menus. Earlier dimensions form outer groups.">Arrange dimensions</h3>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={!!figure.overlayPopulations}
+                  onChange={(e) =>
+                    editFigure({ overlayPopulations: e.target.checked })
+                  }
+                />
+                Overlay populations within each panel
+              </label>
+              <p>
+                Overlaid populations can overlap. Their membership counts are
+                not a unique event total.
+              </p>
+              <DimensionShelves
+                dragType="text/gatelab-dimension"
+                shelves={(["rows", "columns", "pages"] as const).map((location) => ({
+                  id: location,
+                  label: location,
+                  chips: figure[location].map((d) => ({
+                    id: d,
+                    label: t(dimensionLabel(d)),
+                    removable: d.startsWith("metadata:") || d.startsWith("popmeta:"),
+                  })),
+                }))}
+                places={[
+                  { value: "rows", label: "Rows" },
+                  { value: "columns", label: "Columns" },
+                  { value: "pages", label: "Pages" },
+                ]}
+                onPlace={(d, location) => place(d as FigureDimension, location as "rows" | "columns" | "pages")}
+                onMoveEarlier={(location, i) => {
+                  const shelf = location as "rows" | "columns" | "pages";
+                  editFigure({ [shelf]: move(figure[shelf], i, -1) });
+                }}
+                onRemove={(d, location) => {
+                  const shelf = location as "rows" | "columns" | "pages";
+                  editFigure({ [shelf]: figure[shelf].filter((x) => x !== d) });
+                }}
+              />
+              <label>
+                Add metadata grouping
+                <select
+                  value=""
+                  onChange={(e) => {
+                    if (e.target.value) place(e.target.value as FigureDimension, "pages");
+                  }}
+                >
+                  <option value="">Choose field…</option>
+                  <optgroup label={t("Files / samples")}>
+                    {metadataFields
+                      .filter((field) => !placedDimensions.includes(`metadata:${field}`))
+                      .map((field) => (
+                        <option key={field} value={`metadata:${field}`}>{field}</option>
+                      ))}
+                  </optgroup>
+                  <optgroup label="Populations">
+                    {populationMetadataFields
+                      .filter((field) => !placedDimensions.includes(`popmeta:${field}`))
+                      .map((field) => (
+                        <option key={field} value={`popmeta:${field}`}>{field}</option>
+                      ))}
+                  </optgroup>
+                </select>
+              </label>
+              <h3 title={platformKeys("Click to choose rows (Cmd or Ctrl adds, Shift takes a range), drag them to where they should go, or sort them all at once.")}>Order populations</h3>
+              <OrderList
+                label="Population order"
+                items={figure.populations}
+                keyOf={refKey}
+                labelOf={(p) => p.label}
+                onReorder={(populations) => editFigure({ populations })}
+                sorts={[
+                  {
+                    label: "Tree order",
+                    title: "As they stand in the population tree",
+                    apply: (items) => [...items].sort((a, b) => populationOptions.findIndex((o) => refKey(o) === refKey(a)) - populationOptions.findIndex((o) => refKey(o) === refKey(b))),
+                  },
+                  { label: "A→Z", title: "By name", apply: (items) => [...items].sort((a, b) => a.label.localeCompare(b.label)) },
+                ]}
+              />
+              <h3 title={platformKeys("Click to choose rows (Cmd or Ctrl adds, Shift takes a range), drag them to where they should go, or sort them all at once.")}>{t("Order files / samples")}</h3>
+              <OrderList
+                label={t("File order")}
+                items={selectedSamples}
+                keyOf={(s) => s.id}
+                labelOf={(s) => s.name}
+                onReorder={(ordered) => editFigure({ sampleIds: ordered.map((s) => s.id) })}
+                sorts={[
+                  { label: t("File list order"), title: t("As the files are listed on the Gating tab"), apply: (items) => fileListOrder(samples, items.map((item) => item.id)) },
+                  { label: "A→Z", title: "By name", apply: (items) => [...items].sort((a, b) => a.name.localeCompare(b.name)) },
+                ]}
+              />
+            </section>
+            <section
+              hidden={section !== "style"}
+              id="figure-section-style"
+              role="tabpanel"
+              aria-labelledby="figure-tab-style"
+            >
+              <h3>Axes & rendering</h3>
+              <label>
+                Axis ranges
+                <select
+                  value={figure.scalePolicy}
+                  disabled={figure.composition !== "separate"}
+                  onChange={(e) =>
+                    editFigure({
+                      scalePolicy: e.target.value as FigureSpec["scalePolicy"],
+                      scalePolicyChosen: true,
+                    })
+                  }
+                >
+                  <option value="shared">Shared by channel</option>
+                  <option value="individual">{t("Fit each file")}</option>
+                  <option value="gating">As on the Gating tab</option>
+                </select>
+              </label>
+              {onFitChannels && (
+                <div className="gl-figure-actions">
+                  <button
+                    type="button"
+                    disabled={figure.composition !== "separate" || !figureChannels.length}
+                    title="Fit every channel this figure plots to its data and the gates on it, on the Gating tab's own range map, and show the figure on those ranges"
+                    onClick={() => { onFitChannels(figureChannels); editFigure({ scalePolicy: "gating", scalePolicyChosen: true }); }}
+                  >
+                    Fit data + gates
+                  </button>
+                </div>
+              )}
+              {figure.scalePolicy === "gating" ? (
+                <p>Axes follow the Gating tab: its transforms and its ranges, as they are now.</p>
+              ) : (
+                <>
+                  <p>
+                    {t("Transforms belong to this figure; shared ranges span all selected files. Choose “As on the Gating tab” to match the Gating tab's axes.")}
+                  </p>
+                  <button onClick={() => editFigure({ transforms: {} })}>
+                    Capture current channel transforms
+                  </button>
+                </>
+              )}
+              {figure.plots.some((p) => p.type === "heatmap") && (
+                <details open>
+                  <FoldSummary>Summary heatmap</FoldSummary>
+                  <label>
+                    Statistic
+                    <select
+                      value={config.heatmapStat ?? "median"}
+                      onChange={(e) =>
+                        style({
+                          heatmapStat: e.target.value as "median" | "mean",
+                        })
+                      }
+                    >
+                      <option value="median">Median</option>
+                      <option value="mean">Mean</option>
+                    </select>
+                  </label>
+                  <label>
+                    Colour scale
+                    <select
+                      value={config.heatmapScale ?? "column_quantile"}
+                      onChange={(e) =>
+                        style({
+                          heatmapScale: e.target
+                            .value as IllustrationConfig["heatmapScale"],
+                        })
+                      }
+                    >
+                      <option value="column_quantile">
+                        Per channel: 1st to 99th percentile of the events
+                      </option>
+                      <option value="column_minmax">
+                        Per channel: minimum–maximum of the summaries
+                      </option>
+                      <option value="row_minmax">
+                        Per row: minimum–maximum
+                      </option>
+                      <option value="column_zscore">Per channel: z-score</option>
+                      <option value="none">Unscaled transformed expression</option>
+                    </select>
+                  </label>
+                  <label>
+                    Cell size
+                    <NumberField
+                      min={12}
+                      max={120}
+                      integer
+                      value={config.heatmapCellSize ?? 28}
+                      onCommit={(heatmapCellSize) => style({ heatmapCellSize })}
+                    />
+                  </label>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={config.heatmapClusterRows === true}
+                      onChange={(e) => style({ heatmapClusterRows: e.target.checked })}
+                    />
+                    Cluster rows (average linkage, with dendrogram); off, rows follow the population order under Arrange
+                  </label>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={config.heatmapClusterColumns === true}
+                      onChange={(e) => style({ heatmapClusterColumns: e.target.checked })}
+                    />
+                    Cluster channels; off, they follow the plot order under Plots
+                  </label>
+                  <label>
+                    Beside the rows
+                    <select
+                      value={config.heatmapBars ?? "counts"}
+                      onChange={(e) => style({ heatmapBars: e.target.value as IllustrationConfig["heatmapBars"] })}
+                    >
+                      <option value="counts">Event counts as bars</option>
+                      <option value="none">Nothing</option>
+                    </select>
+                  </label>
+                  <p>
+                    {t("One matrix per page: a row per population and file, a column per heatmap plot. Statistics use all finite events; the percentile scaling pools the events of every row, so a channel's colours compare across the page. Numbers show the unscaled statistic.")}
+                  </p>
+                </details>
+              )}
+              <label>
+                Display
+                <select
+                  value={
+                    figure.composition === "overlay"
+                      ? "scatter"
+                      : config.displayMode
+                  }
+                  disabled={figure.composition === "overlay"}
+                  onChange={(e) => style({ displayMode: e.target.value })}
+                >
+                  <option value="pseudocolor">Pseudocolour</option>
+                  <option value="scatter">Scatter</option>
+                  <option value="contour">Contour</option>
+                </select>
+              </label>
+              {figure.plots.some((p) => p.type === "heatmap") && (
+                <>
+                  <label>
+                    Heatmap palette
+                    <select
+                      value={config.heatmapPalette ?? "rdylbu"}
+                      onChange={(e) =>
+                        style({
+                          heatmapPalette: e.target
+                            .value as IllustrationConfig["heatmapPalette"],
+                        })
+                      }
+                    >
+                      <option value="rdylbu">Red–yellow–blue (RdYlBu)</option>
+                      <option value="blue_white_yellow_red">
+                        Blue–white–yellow–red
+                      </option>
+                      <option value="viridis">Viridis</option>
+                      <option value="heat">Heat</option>
+                    </select>
+                  </label>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={config.heatmapShowValues !== false}
+                      onChange={(e) =>
+                        style({ heatmapShowValues: e.target.checked })
+                      }
+                    />
+                    Show summary values
+                  </label>
+                </>
+              )}
+              {figure.plots.some((p) => p.type === "histogram") && (
+                <>
+                  <label>
+                    Histogram arrangement
+                    <select
+                      value={config.histLayout}
+                      onChange={(e) => style({ histLayout: e.target.value })}
+                    >
+                      <option value="grid">Density plot</option>
+                      <option value="ridgeline">Stacked ridgelines</option>
+                    </select>
+                  </label>
+                  {config.histLayout === "ridgeline" && (
+                    <>
+                      <p>
+                        {t("Overlay files or populations to stack their distributions within a panel. Each ridge is peak-normalised.")}
+                      </p>
+                      <label>
+                        Ridge overlap
+                        <input
+                          type="range"
+                          min={0}
+                          max={0.95}
+                          step={0.05}
+                          value={config.ridgeOverlap}
+                          onChange={(e) =>
+                            style({ ridgeOverlap: Number(e.target.value) })
+                          }
+                        />
+                      </label>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={config.ridgeGradient}
+                          onChange={(e) =>
+                            style({ ridgeGradient: e.target.checked })
+                          }
+                        />
+                        Intensity gradient
+                      </label>
+                    </>
+                  )}
+                </>
+              )}
+              <label>
+                Preview events per panel
+                <NumberField
+                  min={100}
+                  max={1000000}
+                  step={1000}
+                  integer
+                  value={config.maxEvents}
+                  disabled={!!config.allEvents}
+                  onCommit={(maxEvents) => style({ maxEvents })}
+                />
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  aria-label="Preview all events"
+                  checked={!!config.allEvents}
+                  onChange={(e) => style({ allEvents: e.target.checked })}
+                />
+                All events, within the page budget
+              </label>
+              <p>
+                Preview has a 1,000,000-point page budget, shared by the panels on the page;
+                All events draws every event within it. Counts use every event. Export can
+                draw all events.
+              </p>
+              <label>
+                Point size
+                <NumberField
+                  min={0.25}
+                  max={5}
+                  step={0.25}
+                  value={config.pointSize}
+                  onCommit={(pointSize) => style({ pointSize })}
+                />
+              </label>
+              <label>
+                Opacity {config.pointAlpha}
+                <input
+                  type="range"
+                  min={0.05}
+                  max={1}
+                  step={0.05}
+                  value={config.pointAlpha}
+                  onChange={(e) =>
+                    style({ pointAlpha: Number(e.target.value) })
+                  }
+                />
+              </label>
+              {config.displayMode === "pseudocolor" &&
+                figure.composition !== "overlay" && (
+                  <label>
+                    Density contrast
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={3}
+                      step={0.1}
+                      value={config.densityColorPower}
+                      onChange={(e) =>
+                        style({ densityColorPower: Number(e.target.value) })
+                      }
+                    />
+                  </label>
+                )}
+              {config.displayMode === "contour" && (
+                <>
+                  <label>
+                    Contour %
+                    <NumberField
+                      min={0}
+                      max={50}
+                      value={config.contourThreshold}
+                      onCommit={(contourThreshold) => style({ contourThreshold })}
+                    />
+                  </label>
+                  <label>
+                    Smoothing (0 = automatic)
+                    <NumberField
+                      min={0}
+                      max={14}
+                      step={0.2}
+                      value={config.kdeBandwidth}
+                      onCommit={(kdeBandwidth) => style({ kdeBandwidth })}
+                    />
+                  </label>
+                  <label>Number of contours<NumberField min={2} max={30} integer value={config.contourLevels ?? 10} onCommit={(contourLevels) => style({ contourLevels })} /></label>
+                </>
+              )}
+              {figure.plots.some((p) => p.type === "histogram") && (
+                <details>
+                  <FoldSummary>Histogram style</FoldSummary>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={config.histFill}
+                      onChange={(e) => style({ histFill: e.target.checked })}
+                    />
+                    Fill density
+                  </label>
+                  {config.followFigureStyle ? (
+                    <FigureStyleFollow following onFollow={(followFigureStyle) => style({ followFigureStyle })} />
+                  ) : (
+                  <label>
+                    Line width
+                    <NumberField
+                      min={0.5}
+                      max={5}
+                      step={0.25}
+                      value={config.histLineWidth}
+                      onCommit={(histLineWidth) => style({ histLineWidth })}
+                    />
+                  </label>
+                  )}
+                  <p>Histograms show density, not absolute event counts.</p>
+                </details>
+              )}
+              <h3>Gates</h3>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={figure.showGates}
+                  onChange={(e) => editFigure({ showGates: e.target.checked })}
+                />
+                {t("Show each file’s gates")}
+              </label>
+              <label title={t("Draw on each panel only the gates on its population and its descendants. Unchecked draws every gate sharing the panel's channels, wherever it is in the tree.")}>
+                <input
+                  type="checkbox"
+                  className="gl-figure-branch-gates"
+                  disabled={!figure.showGates}
+                  checked={figure.branchGatesOnly !== false}
+                  onChange={(e) => editFigure({ branchGatesOnly: e.target.checked })}
+                />
+                {t("Only the panel's branch")}
+              </label>
+              <p>
+                {t("Mixed-file panels omit gate outlines. Percentages in single-file panels are relative to the displayed population.")}
+              </p>
+              <label>
+                Edges
+                <select
+                  value={config.gateEdgeMode}
+                  onChange={(e) =>
+                    style({ gateEdgeMode: e.target.value as GateEdgeMode })
+                  }
+                >
+                  {GATE_EDGE_MODES.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label title={t("The workspace's setting, the same as the Gating tab's Display: off draws every gate and its label in black")}>
+                <input
+                  type="checkbox"
+                  className="gl-coloured-gates-mirror"
+                  checked={!config.pubStyle}
+                  onChange={(e) => ink.setColoured(e.target.checked)}
+                />
+                {t("Coloured gates")}
+              </label>
+              <label>
+                Line width
+                <NumberField
+                  min={0.5}
+                  max={5}
+                  step={0.25}
+                  value={config.gateLineWidth}
+                  onCommit={(gateLineWidth) => ink.setLineWidth(gateLineWidth)}
+                />
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={!!config.gateLabelBold}
+                  onChange={(e) => style({ gateLabelBold: e.target.checked })}
+                />
+                Bold gate labels
+              </label>
+              {config.pubStyle && (
+                <label title="A white backing behind each plain gate label, so it reads on a dense pile of points; 0 for none">
+                  Label backing
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={Math.round((config.labelBackground ?? 0.6) * 100)}
+                    onChange={(e) => ink.setLabelBackground(Number(e.target.value) / 100)}
+                  />
+                  {Math.round((config.labelBackground ?? 0.6) * 100)}%
+                </label>
+              )}
+              <label>
+                Gate labels
+                <select
+                  value={config.gateLabelFormat ?? "name-percent"}
+                  onChange={(e) => style({ gateLabelFormat: e.target.value as IllustrationConfig["gateLabelFormat"] })}
+                >
+                  <option value="name-percent">Name and percentage</option>
+                  <option value="percent">Percentage</option>
+                  <option value="number">Number only</option>
+                  <option value="name">Name only</option>
+                  <option value="none">None</option>
+                </select>
+              </label>
+              <details>
+                <FoldSummary>Typography</FoldSummary>
+                <FigureStyleFollow following={!!config.followFigureStyle} onFollow={(followFigureStyle) => style({ followFigureStyle })} />
+                {!config.followFigureStyle && (
+                  ["fontTick", "fontAxis", "fontTitle", "fontGate"] as const
+                ).map((key) => (
+                  <label key={key}>
+                    {
+                      {
+                        fontTick: "Ticks",
+                        fontAxis: "Axes",
+                        fontTitle: "Headings",
+                        fontGate: "Gate labels",
+                      }[key]
+                    }
+                    <NumberField
+                      min={8}
+                      max={24}
+                      integer
+                      value={config[key]}
+                      onCommit={(size) => style({ [key]: size })}
+                    />
+                  </label>
+                ))}
+                <label><input type="checkbox" checked={config.scaleFontsWithPlot} onChange={e => style({ scaleFontsWithPlot: e.target.checked })} />Scale fonts with panel size</label>
+                <p>{config.scaleFontsWithPlot ? "Font sizes are specified at a 280 px panel and scale proportionally." : "Font sizes stay fixed when you resize a panel."}</p>
+                {/* The distance of each axis title from its axis. Left alone, the renderer sets it
+                    from the widest tick label of that axis ("6" on a CyTOF axis, "100K" on a flow
+                    one); set by hand, both are in px at a 280 px panel and scale with the fonts. */}
+                <label
+                  title="Unticked, each axis title sits just past that axis's widest tick label. Ticked, the distances below are used, in px from the axis line."
+                >
+                  <input
+                    type="checkbox"
+                    checked={config.axisTitleOffsetX != null || config.axisTitleOffsetY != null}
+                    onChange={(e) =>
+                      style(
+                        e.target.checked
+                          ? {
+                              axisTitleOffsetX: Math.round(13 + 0.93 * config.fontTick + 0.75 * config.fontAxis),
+                              axisTitleOffsetY: Math.round(3 * 0.62 * config.fontTick + 14 + 0.25 * config.fontAxis),
+                            }
+                          : { axisTitleOffsetX: null, axisTitleOffsetY: null },
+                      )
+                    }
+                  />
+                  Set axis title distances
+                </label>
+                {(config.axisTitleOffsetX != null || config.axisTitleOffsetY != null) && (
+                  <>
+                    <label>
+                      X title distance
+                      <NumberField
+                        min={14}
+                        max={100}
+                        integer
+                        value={config.axisTitleOffsetX ?? Math.round(13 + 0.93 * config.fontTick + 0.75 * config.fontAxis)}
+                        onCommit={(axisTitleOffsetX) => style({ axisTitleOffsetX })}
+                        title="From the x axis line down to the title's baseline, px"
+                      />
+                    </label>
+                    <label>
+                      Y title distance
+                      <NumberField
+                        min={14}
+                        max={100}
+                        integer
+                        value={config.axisTitleOffsetY ?? Math.round(3 * 0.62 * config.fontTick + 14 + 0.25 * config.fontAxis)}
+                        onCommit={(axisTitleOffsetY) => style({ axisTitleOffsetY })}
+                        title="From the y axis line out to the title's baseline, px"
+                      />
+                    </label>
+                  </>
+                )}
+              </details>
+            </section>
+            <section
+              hidden={section !== "export"}
+              id="figure-section-export"
+              role="tabpanel"
+              aria-labelledby="figure-tab-export"
+            >
+              <h3>Export current page</h3>
+              <p>
+                Page {currentPage + 1} of {pages.length || 1}. Export is
+                independent of preview zoom.
+              </p>
+              <label>
+                Format
+                <select
+                  value={exportFormat}
+                  onChange={(e) => setExportFormat(e.target.value)}
+                >
+                  <option value="svg">SVG · vector axes and gates</option>
+                  <option value="png">PNG</option>
+                  <option value="pdf">PDF · high-resolution raster</option>
+                </select>
+              </label>
+              <label>
+                Data-layer resolution
+                <NumberField
+                  min={72}
+                  max={600}
+                  integer
+                  value={exportDpi}
+                  onCommit={setExportDpi}
+                />
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={exportAll}
+                  onChange={(e) => setExportAll(e.target.checked)}
+                />
+                Draw all events in export
+              </label>
+              <p>
+                SVG keeps labels and gate outlines editable. PDF contains a
+                high-resolution image.
+              </p>
+              <button
+                disabled={pending || !validPanels || !!problems.length}
+                onClick={() => void exportPage()}
+              >
+                {exporting ? "Exporting…" : "Export current page"}
+              </button>
+              {problems.length > 0 && (
+                <p role="alert">Resolve unavailable panels before exporting.</p>
+              )}
+            </section>
+          </fieldset>
+        </aside>
+        <div
+          className="gl-figure-inspector-resize"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize the figure inspector"
+          title="Drag to resize"
+          onPointerDown={(event) => {
+            event.currentTarget.setPointerCapture(event.pointerId);
+            inspectorDrag.current = { x: event.clientX, w: inspectorWidth };
+          }}
+          onPointerMove={(event) => {
+            const drag = inspectorDrag.current;
+            if (!drag) return;
+            setInspectorWidth(Math.max(220, Math.min(640, drag.w + event.clientX - drag.x)));
+          }}
+          onPointerUp={() => { inspectorDrag.current = null; }}
+          onPointerCancel={() => { inspectorDrag.current = null; }}
+        />
+        <section className="gl-figure-canvas" aria-label="Figure preview">
+          <div className="gl-figure-arrangement">
+            <button onClick={() => setSection("arrange")}>
+              Rows: {figure.rows.map((d) => t(dimensionLabel(d))).join(" / ") || "—"}
+            </button>
+            <button
+              aria-label="Swap rows and columns"
+              disabled={exporting}
+              onClick={() =>
+                editFigure({ rows: figure.columns, columns: figure.rows })
+              }
+            >
+              Swap
+            </button>
+            <button onClick={() => setSection("arrange")}>
+              Columns: {figure.columns.map((d) => t(dimensionLabel(d))).join(" / ") || "—"}
+            </button>
+            <label>
+              Composition
+              <select
+                disabled={exporting}
+                value={figure.composition}
+                onChange={(e) =>
+                  editFigure({
+                    composition: e.target.value as FigureSpec["composition"],
+                  })
+                }
+              >
+                <option value="separate">Separate panels</option>
+                <option value="overlay">{t("Overlay files")}</option>
+                <option value="pool">Pool events</option>
+              </select>
             </label>
           </div>
-          <span className="gl-ctl-sep" />
-          <label className="gl-field-inline" title="Export resolution for SVG/PDF (72–1200 DPI)">
-            DPI
-            <input type="number" min={72} max={1200} step={1} value={exportDpi} onChange={(e) => setExportDpi(Math.max(72, Math.min(1200, Math.round(+e.target.value) || 300)))} />
-          </label>
-          <button className="gl-mini-btn" onClick={() => exportGridPNG("illustration-grid-container-grid", "illustration")}>PNG</button>
-          <button className="gl-mini-btn" onClick={() => exportGridSVG("illustration-grid-container-grid", "illustration", exportDpi)}>SVG</button>
-          <button className="gl-mini-btn" onClick={() => void exportGridPDF("illustration-grid-container-grid", "illustration", exportDpi)}>PDF</button>
-        </div>
-      </div>
-
-      {/* Responsive, equal-height multi-column channel + population checklists. */}
-      <div className={`gl-illust-pickers${selectionMode === "matrix" ? " is-single" : ""}`}>
-        <CollapsiblePicker
-          className="gl-illust-picker"
-          label={isHeatmap ? t("Channels") : t("X channels")}
-          summary={t("{selected} of {total} selected", { selected: xChannels.length, total: allChannels.length })}
-          actions={(
-            <>
-              <button className="gl-mini-btn" onClick={() => setXChannels(allChannels)}>{t("All")}</button>
-              <button className="gl-mini-btn" onClick={() => setXChannels([defaultX])}>{t("Reset")}</button>
-            </>
-          )}
-        >
-          <MultiColumnChecklist
-            items={allChannels}
-            ariaLabel={isHeatmap ? "Heatmap channels" : "Illustration X channels"}
-            selected={(channel) => xChannels.includes(channel)}
-            onToggle={(channel) => setXChannels((previous) => toggle(previous, channel))}
-            getKey={(channel) => channel}
-            getLabel={(channel) => sample.labelForKey(channel)}
-            visibleRows={15}
-            height={300}
-          />
-        </CollapsiblePicker>
-
-        {selectionMode === "uniform" ? (
-          <CollapsiblePicker
-            className="gl-illust-picker"
-            label={t("Populations")}
-            summary={t("{selected} of {total} selected", { selected: popIds.length, total: order.length })}
-            actions={(
+          <div className="gl-figure-viewbar">
+            <button
+              disabled={exporting}
+              title={t("Build every panel again from the current gates, files and the Gating tab's axes")}
+              onClick={() => setRefreshTick((n) => n + 1)}
+            >
+              Refresh
+            </button>
+            <button
+              disabled={exporting}
+              onClick={() =>
+                editFigure({
+                  rows: ["samples"],
+                  columns: ["populations", "plots"],
+                  pages: [],
+                  composition: "separate",
+                })
+              }
+            >
+              {t("Files down rows")}
+            </button>
+            <button
+              disabled={exporting}
+              onClick={() =>
+                editFigure({
+                  rows: ["populations", "plots"],
+                  columns: ["samples"],
+                  pages: [],
+                  composition: "separate",
+                })
+              }
+            >
+              {t("Files across columns")}
+            </button>
+            {figure.plots.some((p) => p.type === "heatmap") && (
               <>
-                <button className="gl-mini-btn" onClick={() => setPopIds(order.map((o) => o.popId))}>{t("All")}</button>
-                <button className="gl-mini-btn" onClick={() => setPopIds([])}>{t("None")}</button>
+                <button
+                  disabled={exporting}
+                  aria-pressed={config.heatmapClusterRows === true}
+                  title="Order the heatmap's rows by average-linkage clustering, with a dendrogram; off, they follow the population order under Arrange"
+                  onClick={() => style({ heatmapClusterRows: config.heatmapClusterRows !== true })}
+                >
+                  Cluster rows
+                </button>
+                <button
+                  disabled={exporting}
+                  aria-pressed={config.heatmapClusterColumns === true}
+                  title="Order the heatmap's channels by clustering, with a dendrogram; off, they follow the plot order under Plots"
+                  onClick={() => style({ heatmapClusterColumns: config.heatmapClusterColumns !== true })}
+                >
+                  Cluster channels
+                </button>
               </>
             )}
+            <span role="status">
+              {settling
+                ? `Preparing figure${prepared.pending ? ` · ${t("{count} files remaining", { count: prepared.pending })}` : ""}…`
+                : `${t("{shown} of {selected} files on this page", { shown: new Set(page?.panels.flatMap((p) => p.samples) ?? []).size, selected: selectedSamples.length })} · ${validPanels} panels ready${problems.length ? ` · ${problems.length} need attention` : ""}`}
+            </span>
+            {selectedPanels.length > 0 && (
+              <span className="gl-figure-selection" role="group" aria-label="Selected panels">
+                <span>{selectedPanels.length} panel{selectedPanels.length === 1 ? "" : "s"} selected</span>
+                {onAddToLayout && (
+                  <button
+                    type="button"
+                    title={platformKeys("As arranged here: rows stay rows and columns stay columns, however wide the page. Click a panel to select it, or drag across panels; Cmd-click adds or removes one, Shift-click takes the block from the last clicked panel to it; Cmd-A selects all; Escape clears.")}
+                    onClick={() => addPanelsToLayout(selectedPanels)}
+                  >
+                    Add selected panels to the Layout tab
+                  </button>
+                )}
+                <button type="button" onClick={() => setSelectedPanelKeys(new Set())}>Clear</button>
+              </span>
+            )}
+            <span className="gl-figure-flex" />
+            <label>
+              Panel size
+              <NumberField
+                disabled={exporting}
+                aria-label="Figure panel size"
+                min={200}
+                max={600}
+                step={20}
+                integer
+                value={figure.panelSize}
+                onCommit={(panelSize) => editFigure({ panelSize })}
+              />
+              px
+            </label>
+            <label>
+              View
+              <select
+                aria-label="Preview zoom"
+                value={zoom}
+                onChange={(e) => setZoom(e.target.value)}
+              >
+                <option value="fit">Fit width · minimum 50%</option>
+                <option value="0.5">50%</option>
+                <option value="0.75">75%</option>
+                <option value="1">100%</option>
+                <option value="1.5">150%</option>
+                {!["fit", "0.5", "0.75", "1", "1.5"].includes(zoom) && (
+                  <option value={zoom}>{Math.round(Number(zoom) * 100)}%</option>
+                )}
+              </select>
+            </label>
+          </div>
+          {(layout.error || prepared.error || built.error || exportError) && (
+            <div className="gl-figure-warning" role="alert">
+              {layout.error || prepared.error || built.error || exportError}
+            </div>
+          )}
+          {figure.composition !== "separate" && (
+            <div className="gl-figure-note">
+              {figure.composition === "pool"
+                ? t("Events pooled · event-count weighting · gates and percentages pooled where the files' gates agree")
+                : t("Separate coloured file traces · shared axes · gate outlines hidden")}
+            </div>
+          )}
+          {figure.scalePolicy === "individual" &&
+            figure.composition === "separate" && (
+              <div className="gl-figure-note">
+                {t("Axes fit each file independently. Plot positions are not directly comparable.")}
+              </div>
+            )}
+          <div
+            className={marquee ? "gl-figure-viewport is-marquee" : "gl-figure-viewport"}
+            ref={viewport}
+            aria-busy={pending}
+            onMouseDown={startMarquee}
           >
-            <MultiColumnChecklist
-              items={order}
-              ariaLabel="Illustration populations"
-              selected={({ popId }) => popIds.includes(popId)}
-              onToggle={({ popId }) => setPopIds((previous) => toggle(previous, popId))}
-              getKey={({ popId }) => popId}
-              getLabel={({ popId }) => state.populations[popId]?.name ?? popId}
-              getDepth={({ depth }) => depth}
-              distribution="fill-first"
-              visibleRows={15}
-              height={300}
-              renderTrailing={({ popId }) => (
-                popIds.includes(popId) && !isHeatmap && (colorByPop || overlayPops) ? (
-                  <input
-                    type="color"
-                    className="gl-pop-color"
-                    title="Population colour"
-                    value={colorFor(popId)}
-                    onChange={(e) => setPopColors((colors) => ({ ...colors, [popId]: e.target.value }))}
-                  />
-                ) : null
-              )}
-            />
-          </CollapsiblePicker>
-        ) : null}
+            {!shown ? (
+              <div className="gl-figure-empty">
+                <h3>{t("Build a file / sample comparison")}</h3>
+                <p>{t("Select files and populations, then add plots to repeat.")}</p>
+                <button
+                  onClick={() =>
+                    setSection(!figure.plots.length ? "plots" : "data")
+                  }
+                >
+                  Choose {!figure.plots.length ? "plots" : "data"}
+                </button>
+              </div>
+            ) : (
+              <div
+                className="gl-figure-paper"
+                ref={paper}
+                style={{ zoom: scale, opacity: settling ? 0.55 : 1 }}
+              >
+                <FigureGrid
+                  page={shown.page}
+                  panels={shown.panels}
+                  config={config}
+                  size={figure.panelSize}
+                  showGates={figure.showGates}
+                  onPanelContextMenu={openPanelMenu}
+                  onMatrixContextMenu={openMatrixMenu}
+                  selectedPanels={selectedPanelKeys}
+                  onPanelClick={onPanelClick}
+                  onPanelScaleChange={figure.scalePolicy === "gating" ? onScaleChange : undefined}
+                  onLabelMove={(gateId, offset, quadrant, flipped) => {
+                    // The gate id comes from whichever file's tree the panel drew. The placement
+                    // is the gate's own: it goes to the store in the gate's orientation, which
+                    // carries it to every tree the gate is drawn in. A figure with no route to
+                    // the store keeps it under the id the copies descend from.
+                    const owner = Object.values(trees).find((tree) => tree.gates[gateId]);
+                    const key = figureLabelKey(owner ? canonicalGateId(gateId, owner, trees) : gateId, quadrant);
+                    if (onGateLabelMove && owner) {
+                      const move = treeLabelMove(offset, quadrant, !!flipped);
+                      onGateLabelMove(owner.id, gateId, move.offset, move.quadrant);
+                      if (figure.labelOffsets?.[key]) {
+                        const { [key]: _moved, ...rest } = figure.labelOffsets;
+                        editFigure({ labelOffsets: Object.keys(rest).length ? rest : undefined });
+                      }
+                      return;
+                    }
+                    editFigure({ labelOffsets: { ...figure.labelOffsets, [key]: offset } });
+                  }}
+                />
+              </div>
+            )}
+            {marquee && <div className="gl-figure-marquee" aria-hidden="true" style={marquee} />}
+          </div>
+          <ContextMenu menu={panelMenu} onClose={() => setPanelMenu(null)} />
+          <footer className="gl-figure-footer">
+            <span>
+              {t("{count} files · each uses its assigned hierarchy", { count: selectedSamples.length })}
+            </span>
+            <span className="gl-figure-flex" />
+            <button
+              disabled={!currentPage || pending || exporting}
+              onClick={() => setPageIndex(currentPage - 1)}
+            >
+              Previous
+            </button>
+            <span>
+              Page {currentPage + 1} / {pages.length || 1}
+            </span>
+            <button
+              disabled={currentPage >= pages.length - 1 || pending || exporting}
+              onClick={() => setPageIndex(currentPage + 1)}
+            >
+              Next
+            </button>
+          </footer>
+        </section>
       </div>
-
-      {selectionMode === "matrix" ? (
-        <IllustrationSelectionMatrix
-          samples={sampleViews.map((view) => ({
-            id: view.id,
-            name: view.name,
-            eventCount: view.derived.stats.event_count,
-          }))}
-          populations={order.map(({ popId, depth }) => ({
-            id: popId,
-            name: state.populations[popId]?.name ?? popId,
-            depth,
-          }))}
-          value={selectedPopulationsBySample}
-          onChange={setSelectedPopulationsBySample}
-          populationColor={!isHeatmap && (colorByPop || overlayPops) ? colorFor : undefined}
-          onPopulationColorChange={!isHeatmap && (colorByPop || overlayPops)
-            ? (popId, color) => setPopColors((colors) => ({ ...colors, [popId]: color }))
-            : undefined}
-        />
-      ) : null}
-
-      <div id="illustration-grid-container" ref={containerRef} className="gl-mini-grid-container" />
     </div>
   );
 }

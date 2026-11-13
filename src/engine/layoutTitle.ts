@@ -14,6 +14,8 @@ export interface PlotTitleContext {
   /** The plot's own name where it came from, e.g. an Illustration plot's; the channels otherwise. */
   plot?: string;
   count?: number;
+  /** A plot overlaying populations: each one's count, in the order `population` names them; {count} reads these when set. */
+  counts?: readonly number[];
   /** The workspace group the file belongs to, what {group} says. */
   group?: string;
   metadata?: Readonly<Record<string, string>>;
@@ -140,7 +142,9 @@ function fillTitleFields(template: string, context: PlotTitleContext): string {
       case "x": return context.x;
       case "y": return context.y;
       case "plot": return context.plot ?? (context.y ? `${context.x} vs ${context.y}` : context.x);
-      case "count": return typeof context.count === "number" ? context.count.toLocaleString() : "";
+      case "count":
+        if (context.counts?.length) return context.counts.map((count) => count.toLocaleString()).join(", ");
+        return typeof context.count === "number" ? context.count.toLocaleString() : "";
     }
     if (key.startsWith("meta:")) return context.metadata?.[key.slice(5).trim()] ?? "";
     if (key.startsWith("popmeta:")) return context.populationMetadata?.[key.slice(8).trim()] ?? "";

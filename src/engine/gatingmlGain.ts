@@ -165,7 +165,14 @@ export function gatesFromGatingMlScale(
       if (g === 1) return 1;
       if (gate.space !== "display") return g;
       const spec = transforms?.[channel];
-      if (!spec || spec.kind === "identity") return g;
+      if (!spec || spec.kind === "identity") {
+        // An identity axis's bounds are in the same units as its coordinates, and go with them.
+        if (spec?.bounds) {
+          const { min, max } = spec.bounds;
+          transforms![channel] = { ...spec, bounds: { ...(min !== undefined ? { min: min * g } : {}), ...(max !== undefined ? { max: max * g } : {}) } };
+        }
+        return g;
+      }
       // FlowJo's grid, restored from GateLab's mark: FlowJo's own cells on stored values, whatever
       // the ring beside it was written in, so nothing is restated. It was named as not converted.
       if (spec.kind === "flowjoChannels") return 1;
@@ -191,11 +198,12 @@ export function gatesFromGatingMlScale(
       out[id] = { ...gate, ...withTransforms, center: scale(gate.center), ...(arms ? { arms } : {}) };
     } else if (gate.gate_type === "ellipse") {
       const c = gate.covariance;
+      // Both off-diagonal entries are multiplied in the same order, so a symmetric matrix stays exactly symmetric.
       out[id] = {
         ...gate,
         ...withTransforms,
         mean: [gate.mean[0] * kx, gate.mean[1] * ky],
-        covariance: [[c[0][0] * kx * kx, c[0][1] * kx * ky], [c[1][0] * ky * kx, c[1][1] * ky * ky]],
+        covariance: [[c[0][0] * kx * kx, c[0][1] * kx * ky], [c[1][0] * kx * ky, c[1][1] * ky * ky]],
       };
     } else {
       out[id] = {

@@ -12,6 +12,7 @@ import type { StoredHierarchy } from "../engine/hierarchies";
 import type { Sample } from "../engine/sample";
 import { UNASSIGNED_METADATA_VALUE } from "../engine/layoutBatch";
 import type { CoreState, GatingDerived } from "../store";
+import { leftForTurnedLabels } from "./chart/chartLayout";
 
 /** What a chart reads from a file: the file, its gating, and its tree. */
 export interface ChartSource {
@@ -142,10 +143,12 @@ export function LayoutChart({
   const fontTitle = style.fontTitle;
   const groups = data.groups;
   const scale = useMemo(() => axisTicks(data.points.map((p) => p.value)), [data.points]);
-  const left = 8 + fontAxis + 6 + Math.max(...scale.ticks.map((t) => format(t).length), 1) * fontTick * 0.6 + 8;
+  const axisLeft = 8 + fontAxis + 6 + Math.max(...scale.ticks.map((t) => format(t).length), 1) * fontTick * 0.6 + 8;
   const top = 8 + (title ? fontTitle + 6 : 0) + (data.test ? fontTick + 10 : 0);
   const longestLabel = Math.max(0, ...groups.map((g) => g.label.length));
-  const rotate = groups.length > 0 && longestLabel * fontTick * 0.6 > (width - left - 8) / groups.length;
+  const rotate = groups.length > 0 && longestLabel * fontTick * 0.6 > (width - axisLeft - 8) / groups.length;
+  // Turned 45°, the first labels reach left past the plot; the margin makes room for them.
+  const left = rotate ? leftForTurnedLabels(axisLeft, groups.map((g) => g.label.length * fontTick * 0.6), (l) => Math.max(20, width - l - 8), 45) : axisLeft;
   const bottom = 8 + (rotate ? longestLabel * fontTick * 0.45 + 10 : fontTick + 8);
   const plotW = Math.max(20, width - left - 8);
   const plotH = Math.max(20, height - top - bottom);

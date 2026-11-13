@@ -1,4 +1,5 @@
 import type { CoreState, GatingDerived } from "../store";
+import { populationColorOf } from "./palettes";
 import { recomputeGating } from "../store";
 import { canonicalGateId, storeHierarchy, type StoredHierarchy } from "./hierarchies";
 import { drawnRaw, type TransformSpec } from "./models";
@@ -6,6 +7,7 @@ import { transformFromSpec, type Sample } from "./sample";
 import { linearScatterTicks, logicleTicks, scatterTicks, withoutPiledTicks } from "./ticks";
 import { populationTreeOrder } from "./populations";
 import { populationBranchGateOrder } from "./branchGates";
+import { columnValueOrder } from "./levelOrder";
 import {
   buildIllustrationPayload,
   type GateOverlay,
@@ -17,6 +19,7 @@ import { computeRangeFromValues } from "./strategy";
 import type { IllustrationConfig } from "./workspace";
 import { exactMedian } from "./heatmap";
 import { isFigureSpec } from "./figureSchema";
+import type { FigureChartSettings } from "./proportionsSettings";
 import { templateOf } from "./groups";
 import {
   legacyIllustrationLayout,
@@ -28,13 +31,49 @@ export interface FigurePopulation {
   populationId: string;
   label: string;
 }
+/**
+ * What a chart plot draws, as the Plotting tab's settings name it: a channel's value in each cell
+ * (a violin or a box per population), a statistic of the channel in each file (a point per file,
+ * with a box from three files), or the populations' shares of their common parent (a stacked bar
+ * per file). The files and populations are the panel's; the channel is the plot's `x`.
+ */
+export interface FigureChart extends FigureChartSettings {
+  valueKind: "cells" | "statistic" | "proportion";
+  /** violin or box for cells; box for a statistic (points alone under three files); stacked for a proportion. */
+  plotType: "violin" | "box" | "stacked";
+  statistic?: "median" | "mean" | "geomean";
+  /** Draw each violin's median and quartiles inside it; absent means on. */
+  violinBox?: boolean;
+  /** Name the populations under the panel; absent means on. */
+  populationLabels?: boolean;
+  /**
+   * One panel for all files: the plot is drawn once for the files of the row (or column) it would
+   * otherwise draw a panel per file for, its panel spanning their cells. Absent means off.
+   */
+  summary?: boolean;
+  /** Name the files (or groups) under a summary's marks; absent means off where it spans columns under their headings, else on. */
+  fileLabels?: boolean;
+}
 export interface FigurePlot {
   id: string;
   name: string;
   x: string;
   y: string;
-  type: "biplot" | "histogram" | "heatmap";
+  type: "biplot" | "histogram" | "heatmap" | "chart";
+  /** What a plot of type "chart" draws; ignored for the other types. */
+  chart?: FigureChart;
   population?: FigurePopulation;
+  /**
+   * Populations drawn overlaid in each of this plot's panels, each in its own colour, as the four
+   * quadrants of a quadrant gate in one histogram. Set, the plot takes neither `population` nor the
+   * figure's populations, and other plots are unaffected.
+   */
+  populations?: FigurePopulation[];
+  /**
+   * Draw the figure's populations together in each of this plot's panels, as a plot with its own
+   * `populations` draws those, following the figure's selection as it changes. Absent means off.
+   */
+  together?: boolean;
 }
 export type FigureDimension =
   | "samples"
@@ -109,6 +148,15 @@ export interface FigurePanel {
   plot: FigurePlot;
   row: number;
   column: number;
+  /** A summary panel (`chart.summary`): how many of the page's rows and columns it covers, from its own. */
+  span?: { rows: number; columns: number };
+  /**
+   * A summary panel's cells, in the figure's order: each covered cell's heading (its files or
+   * metadata values), its files, and its metadata values where a metadata column is on the shelf.
+   */
+  cells?: { label: string; samples: string[]; group?: string }[];
+  /** A cell a summary panel covers, drawn by it: that panel's key. It draws nothing itself. */
+  coveredBy?: string;
 }
 export interface FigurePage {
   key: string;
@@ -504,6 +552,8 @@ export function layoutFigure(
   trees?: Record<string, StoredHierarchy>,
   /** Per-population metadata, by population id, for `popmeta:` groupings; without it every population is "Unassigned". */
   populationMetadata?: Readonly<Record<string, Readonly<Record<string, string>>>>,
+  /** The metadata columns' own orders of their levels, by column; a column without one is in file order. */
+  columnLevels?: Readonly<Record<string, readonly string[]>>,
 ): FigurePage[] {
   if (
     !figure.sampleIds.length ||
@@ -552,9 +602,8 @@ export function layoutFigure(
       const name = dimension.slice(9);
       values.set(
         dimension,
-        [
-          ...new Set(selected.map((s) => s.metadata?.[name] ?? "Unassigned")),
-        ].map((value) => ({ dimension, id: value, label: value })),
+        columnValueOrder(selected.map((s) => s.metadata?.[name] ?? "Unassigned"), columnLevels?.[name])
+          .map((value) => ({ dimension, id: value, label: value })),
       );
     } else if (dimension.startsWith("popmeta:")) {
       const name = dimension.slice(8);
@@ -591,15 +640,18 @@ export function layoutFigure(
           const plot =
             figure.plots.find((p) => p.id === value("plots")) ??
             figure.plots[0];
+          const own = plot.together ? figure.populations : plot.populations?.length ? plot.populations : undefined;
           const population =
+            own?.[0] ??
             plot.population ??
             figure.populations[Number(value("populations") ?? 0)];
           const populations =
-            figure.overlayPopulations &&
+            own ??
+            (figure.overlayPopulations &&
             !plot.population &&
             !figure.pages.includes("populations")
               ? figure.populations
-              : undefined;
+              : undefined);
           // A population metadata grouping is a property of the population, as file metadata is
           // of a file: a panel whose population is not in the group is empty and trimmed away.
           const populationInGroup = dimensions.every(
@@ -607,7 +659,13 @@ export function layoutFigure(
               !d.dimension.startsWith("popmeta:") ||
               populationValue(population, d.dimension.slice(8)) === d.id,
           );
-          const sampleIds = !populationInGroup ? [] : selected
+          // A plot with its own populations draws the same panel whatever the figure's population:
+          // it is drawn once along that dimension, at its first value, and empty at the others.
+          // A summary panel closes the figure: it is drawn at the dimension's last value, so it
+          // sits under (or right of) every population's plots, not after the first population's.
+          const drawnAt = plot.type === "chart" && plot.chart?.summary ? Math.max(0, (values.get("populations")?.length ?? 1) - 1) : 0;
+          const repeated = !!own && value("populations") !== undefined && Number(value("populations")) !== drawnAt;
+          const sampleIds = !populationInGroup || repeated ? [] : selected
             .filter(
               (s) =>
                 (!value("samples") || s.id === value("samples")) &&
@@ -646,23 +704,71 @@ export function layoutFigure(
       const usedColumns = columns
         .map((_, i) => i)
         .filter((i) => panels.some((p) => p.column === i && p.samples.length));
+      const pageRows = usedRows.map((i) => rows[i]),
+        pageColumns = usedColumns.map((i) => columns[i]);
       return {
         key: JSON.stringify(page),
         label: page.map((v) => v.label).join(" / ") || figure.name,
-        rows: usedRows.map((i) => rows[i]),
-        columns: usedColumns.map((i) => columns[i]),
-        panels: panels
-          .filter(
-            (p) => usedRows.includes(p.row) && usedColumns.includes(p.column),
-          )
-          .map((p) => ({
-            ...p,
-            row: usedRows.indexOf(p.row),
-            column: usedColumns.indexOf(p.column),
-          })),
+        rows: pageRows,
+        columns: pageColumns,
+        panels: withSummaries(
+          panels
+            .filter(
+              (p) => usedRows.includes(p.row) && usedColumns.includes(p.column),
+            )
+            .map((p) => ({
+              ...p,
+              row: usedRows.indexOf(p.row),
+              column: usedColumns.indexOf(p.column),
+            })),
+          pageRows,
+          pageColumns,
+        ),
       };
     })
     .filter((page) => page.panels.length);
+}
+
+/**
+ * A summary chart plot (`chart.summary`) drawn once for the files its panels are spread over: the
+ * cells that differ only in their files (or the files' metadata values) on the rows and columns are
+ * drawn by the first of them, which takes every cell's files in order and spans them; the others
+ * are covered by it. Cells that do not form a block of the grid, or files on pages only, are left
+ * a panel each.
+ */
+function withSummaries(panels: FigurePanel[], rows: FigureValue[][], columns: FigureValue[][]): FigurePanel[] {
+  const spread = (v: FigureValue) => v.dimension === "samples" || v.dimension.startsWith("metadata:");
+  const groups = new Map<string, FigurePanel[]>();
+  for (const p of panels) {
+    if (p.plot.type !== "chart" || !p.plot.chart?.summary) continue;
+    const across = [...rows[p.row], ...columns[p.column]];
+    if (!across.some(spread)) continue;
+    const key = JSON.stringify([p.plot.id, across.filter((v) => !spread(v))]);
+    groups.set(key, [...(groups.get(key) ?? []), p]);
+  }
+  if (!groups.size) return panels;
+  const replaced = new Map<FigurePanel, FigurePanel>();
+  for (const members of groups.values()) {
+    const rowsIn = members.map((p) => p.row), columnsIn = members.map((p) => p.column);
+    const span = {
+      rows: Math.max(...rowsIn) - Math.min(...rowsIn) + 1,
+      columns: Math.max(...columnsIn) - Math.min(...columnsIn) + 1,
+    };
+    if (members.length !== span.rows * span.columns) continue;
+    const lead = members[0];
+    const cells = members.map((p) => {
+      const values = [...rows[p.row], ...columns[p.column]].filter(spread);
+      const metadata = values.filter((v) => v.dimension.startsWith("metadata:"));
+      return {
+        label: values.map((v) => v.label).join(" / "),
+        samples: p.samples,
+        ...(metadata.length ? { group: metadata.map((v) => v.label).join(" / ") } : {}),
+      };
+    });
+    replaced.set(lead, { ...lead, samples: [...new Set(cells.flatMap((c) => c.samples))], span, cells });
+    for (const p of members.slice(1)) replaced.set(p, { ...p, samples: [], coveredBy: lead.key });
+  }
+  return panels.map((p) => replaced.get(p) ?? p);
 }
 
 /**
@@ -819,6 +925,9 @@ export function buildFigurePanel(
   };
   if (!panel.samples.length)
     return { config: null, omitted: true, mappings: [] };
+  // A chart panel is drawn from the masks by the chart components, not as a plot payload.
+  if (panel.plot.type === "chart")
+    return { config: null, mappings: [], problem: "A chart panel is not a flow plot" };
   if (panel.populations && panel.populations.length > 1) {
     if (panel.plot.type === "heatmap")
       return {
@@ -845,12 +954,21 @@ export function buildFigurePanel(
         fullData,
       ),
     );
-    const problem = parts.find((p) => p.problem);
-    if (problem) return problem;
+    // A population that cannot be drawn (one deleted since) is named under the panel and the
+    // others are drawn; the panel shows the problem only when none of them can be.
+    if (!parts.some((p) => p.config))
+      return parts.find((p) => p.problem) ?? { config: null, omitted: true, mappings: [] };
+    const notDrawn = parts.flatMap((p, i) => (p.problem ? [`${panel.populations![i].label} (${p.problem})`] : []));
+    // A population left out of this file keeps its place as an empty trace marked absent, so a
+    // legend number names the same population in every panel of the plot.
+    const absent = panel.samples.length > 1 ? "not in these files" : "not in this file";
     const included = parts.flatMap((data, i) =>
-      data.config ? [{ data, population: panel.populations![i] }] : [],
+      data.config
+        ? [{ data, population: panel.populations![i], absent: false }]
+        : data.omitted
+          ? [{ data: { config: { x: [], y: [], n_events: 0 }, mappings: [] }, population: panel.populations![i], absent: true }]
+          : [],
     );
-    if (!included.length) return { config: null, omitted: true, mappings: [] };
     const colors = [
       "#2671c6",
       "#bc642c",
@@ -859,10 +977,23 @@ export function buildFigurePanel(
       "#15938c",
       "#b74169",
     ];
+    // Each population in its own colour, when each draws one trace and the
+    // colours tell them apart; otherwise (a population drawn per file, or two populations of one
+    // colour) the traces take the palette in turn.
+    // A population's colour is its own, as every tab colours it (populationColorOf).
+    const ownColours = included.map(({ population }) => {
+      const pop = trees[population.hierarchyId]?.populations[population.populationId];
+      if (!pop) return undefined;
+      return populationColorOf(pop);
+    });
+    const byPopulation =
+      included.every(({ data }) => !((data.config!.overlay_traces as unknown[] | undefined)?.length)) &&
+      ownColours.every(Boolean) &&
+      new Set(ownColours).size === ownColours.length;
     const traces = included
-      .flatMap(({ data, population }) => {
+      .flatMap(({ data, population, absent: left }) => {
         const cfg = data.config!,
-          pop = population.label;
+          pop = left ? `${population.label} (${absent})` : population.label;
         const labels = (cfg.legend_entries ?? []) as { name: string }[];
         return [
           {
@@ -879,15 +1010,21 @@ export function buildFigurePanel(
           ).map((t) => ({ ...t, name: `${pop} · ${t.name}` })),
         ];
       })
-      .map((trace, i) => ({ ...trace, color: colors[i % colors.length] }));
+      .map((trace, i) => ({ ...trace, color: byPopulation ? ownColours[i]! : colors[i % colors.length] }));
+    // The plot draws its main trace first and the rest over it, and draws nothing when the main
+    // trace is empty: the first trace with events leads, so a population empty in this file (a
+    // quadrant with no cells) does not blank the others. The legend keeps the chosen order.
+    const lead = Math.max(0, traces.findIndex((trace) => (trace.x as ArrayLike<number> | undefined)?.length));
+    const drawn = [traces[lead], ...traces.filter((_, i) => i !== lead)];
     return {
       mappings: included.flatMap((p) => p.data.mappings),
+      ...(notDrawn.length ? { note: `Not drawn: ${notDrawn.join(", ")}` } : {}),
       config: {
-        ...included[0].data.config,
-        x: traces[0].x,
-        y: traces[0].y,
-        pop_color: traces[0].color,
-        overlay_traces: traces.slice(1),
+        ...included.find((p) => !p.absent)!.data.config,
+        x: drawn[0].x,
+        y: drawn[0].y,
+        pop_color: drawn[0].color,
+        overlay_traces: drawn.slice(1),
         legend_entries: traces.map(({ name, color }) => ({ name, color })),
         gates: [],
         n_events: included.reduce(
@@ -1039,6 +1176,7 @@ export function buildFigurePanel(
         : {},
       {
         ...options,
+        gateOrderIsScope: figure.branchGatesOnly !== false,
         maxEvents: cap,
         includeEmpty: true,
         pointBudget: fullData ? Infinity : 1_000_000,

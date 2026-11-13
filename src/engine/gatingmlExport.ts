@@ -35,7 +35,7 @@ import {
   type FlowJoGridMark, type FlowJoGridSpec,
 } from "./flowjoGrid";
 import { gatingMlGains } from "./gatingmlGain";
-import { isCurvedQuadrant, projectStraightQuadrants } from "./gatingmlQuadrants";
+import { isCurvedQuadrant, projectStraightQuadrants, quadrantRecordLines } from "./gatingmlQuadrants";
 
 const SINH1 = Math.sinh(1); // sinh(log10(e)·ln10) = sinh(1)
 const LOG10E = Math.log10(Math.E); // GatingML fasinh M
@@ -121,6 +121,9 @@ function treeOrder(populations: PopulationMap, rootId: string): string[] {
   return out;
 }
 
+/** Versioned optional result contracts supported by exportGatingML. */
+export const GATINGML_EXPORT_CAPABILITIES = Object.freeze({ populationElementIds: 1 });
+
 export interface GatingMLExportOpts {
   gates: Record<string, Gate>;
   gate_order: string[];
@@ -136,8 +139,9 @@ export interface GatingMLExportOpts {
   /** Explicit acknowledgement that curved quadrant gates and every dependent population branch are omitted. */
   allowQuadrantOmission?: boolean;
   /**
-   * Filled, when given, with population id → the id of the BooleanGate written for it, so a
-   * harness can ask another reader for the same population (scripts/gatingml-flowkit-check.ts).
+   * Given an initially empty map, authoritatively lists emitted population id → BooleanGate id,
+   * so a harness can ask another reader for the same population (scripts/gatingml-flowkit-check.ts).
+   * An empty result means no population was emitted, including when every population was omitted.
    */
   populationElementIds?: Map<string, string>;
   /** Filled, when given, with a sentence for each population the format left out, by name. */
@@ -342,11 +346,15 @@ export function analyzeGatingMLRewrites(
 }
 
 // ── Low-level formatting ─────────────────────────────────────────────────────
+// XML 1.0 has no form for a control character other than tab, line feed and carriage return,
+// not even as a character reference: a gate named with a pasted vertical tab made a file no
+// reader could parse. They are left out, as the FlowJo writer leaves them out.
+const withoutControls = (s: string): string => String(s).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "");
 const escAttr = (s: string): string =>
-  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  withoutControls(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 // Text content: & < > only (Cytobank stores raw JSON here; " must stay literal).
 const escText = (s: string): string =>
-  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  withoutControls(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 /**
  * Base64 of a name (UTF-8 bytes) in the alphabet Cytobank uses for its own gate ids: '+' → '_',
@@ -1002,9 +1010,10 @@ function buildGateExportPlan(
     }
     const def = trDefs.get(axis.trId);
     if (!def) return axis;
-    const trId = `${axis.trId}_gain_${idNum(g)}`;
     // flin, (x + A) / (T + A), is the same of x / g with both T and A divided (as onTime does).
-    if (!trDefs.has(trId)) trDefs.set(trId, def.type === "flin" ? { ...def, T: def.T / g, A: def.A / g } : { ...def, T: def.T / g });
+    // Declared by its own definition: the id rounds the gain to four decimals, and two channels
+    // whose gains agree that far (2.00001 and 2.00004) shared the first one's declaration.
+    const trId = declare(`${axis.trId}_gain_${idNum(g)}`, def.type === "flin" ? { ...def, T: def.T / g, A: def.A / g } : { ...def, T: def.T / g });
     return { ...axis, trId, cofactor: axis.cofactor / g, readScale: (axis.readScale ?? 1) / g, ...(clamp ? { clamp } : {}) };
   };
 
@@ -3257,7 +3266,7 @@ function buildScalesJson(sample: Sample, globalScales: Record<string, [number, n
 export function exportGatingML(opts: GatingMLExportOpts): string {
   const { root_population_id, sample } = opts;
   if (!opts.gates || Object.keys(opts.gates).length === 0) throw new Error("No gates to export.");
-  const { gates, gate_order, populations } = projectStraightQuadrants(opts.gates, opts.gate_order, opts.populations);
+  const { gates, gate_order, populations, regions: quadrantRegions } = projectStraightQuadrants(opts.gates, opts.gate_order, opts.populations);
   const quadrantRectangles = new Set(gate_order.filter((id) => !opts.gates[id]));
   const format = opts.format ?? "cytobank";
   const cytobankMode = format === "cytobank";
@@ -3313,7 +3322,11 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
   const SPECTRUM_ID = `Spill_${EXPORTED_MATRIX_ID}` as const;
   const exportCompensationOn = sample.instrument === "flow" && sample.embeddedCompensationEnabled;
   const exportSpillover = exportCompensationOn ? sample.spillover : null;
-  const referencesSpectrum = !cytobankMode && exportSpillover !== null && sample.spilloverOrigin.kind === "external";
+  // The file's own matrix cut down to the channels this sample keeps (droppedChannels) is not the
+  // file's own in full, and a reader told "FCS" would apply the whole of it, so it is written too.
+  const origin = sample.spilloverOrigin;
+  const referencesSpectrum = !cytobankMode && exportSpillover !== null
+    && (origin.kind === "external" || (origin.droppedChannels?.length ?? 0) > 0);
   // A fluorochrome name must differ from every detector name (§7.2 f) and should not name any
   // other parameter of the FCS either, or a reader resolving names against the file first would
   // take that parameter instead. FlowJo, for one, writes compensated parameters as "Comp-<PnN>".
@@ -3493,6 +3506,10 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
       // A lone vertex's strip is as wide as the values GateLab holds there, and there is none where
       // it holds nothing, however close the vertex's own value comes.
       if (alone && !holds) return NaN;
+      // The precision GateLab holds the gate's own values in on this channel (Sample.pinnedColumn),
+      // as for a rectangle's bound: double for a Hyperlog space, single otherwise.
+      const ownSpec = sample.gateSpace(source) === "raw" ? undefined : source.transforms?.[channel];
+      const round = ownSpec && pinnedInDouble(ownSpec) ? (u: number) => u : Math.fround;
       const bound = (w0: number, v0: number, back: (u: number) => number, toW: (g: number) => number) => {
         if (alone) {
           // GateLab decides on single-precision values, and the vertex's own value can round to one it
@@ -3502,13 +3519,13 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
           // left the strip out, and 2 of 2,494 events of a polygon on the public PBMC file to no
           // reader. The strip starts from the nearest value within 64 single-precision steps of the
           // vertex's that GateLab holds.
-          const g0 = Math.fround(back(w0));
+          const g0 = round(back(w0));
           const step = ulp32(g0);
           for (let j = 0; j <= 128; j++) {
             const g = g0 + (j % 2 ? 1 : -1) * Math.ceil(j / 2) * step;
-            if (!holds!(Math.fround(g))) continue;
+            if (!holds!(round(g))) continue;
             const w1 = j === 0 ? w0 : toW(g);
-            return Number.isFinite(w1) && holds!(Math.fround(back(w1))) ? exactBound(w1, v0, back, side, holds) : NaN;
+            return Number.isFinite(w1) && holds!(round(back(w1))) ? exactBound(w1, v0, back, side, holds, false, round) : NaN;
           }
           return NaN;
         }
@@ -3590,13 +3607,18 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
         // The farthest in of the raw values GateLab places on the clamp, and the nearest beyond it.
         let edge = cv;
         let gap = Infinity;
-        const onClamp = (i: number) => (own ? (side === "lo" ? own[i] <= cf : own[i] >= cf) : (raw[i] - cv) * inward <= 0);
-        for (let i = 0; i < raw.length; i++) if (onClamp(i) && (raw[i] - edge) * inward > 0) edge = raw[i];
+        // The clamp is in the written ring's units (rawClamps), so each event is compared as the
+        // file writes it: its stored value, or its scale value where a gain divides it. Compared
+        // on stored values, the edge of a floor's skirt on a channel with $PnG 5 was written at
+        // five times the floor, and 10 of 339 events above the floor were read into the gate.
+        const written = (i: number) => a.rawToExport(raw[i]);
+        const onClamp = (i: number) => (own ? (side === "lo" ? own[i] <= cf : own[i] >= cf) : (written(i) - cv) * inward <= 0);
+        for (let i = 0; i < raw.length; i++) if (onClamp(i) && (written(i) - edge) * inward > 0) edge = written(i);
         // How far past the edge a reader may read an event GateLab places on the clamp: half the
         // difference readerSlack allows, from the event's own value.
         let reach = 0;
         for (let i = 0; i < raw.length; i++) {
-          const d = (raw[i] - edge) * inward;
+          const d = (written(i) - edge) * inward;
           if (d > 0 && d < gap && !onClamp(i)) gap = d;
           if (slack && onClamp(i)) reach = Math.max(reach, d + slack(i) / 2);
         }
@@ -4019,6 +4041,7 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
             },
           };
     const rect = rectBounds(false);
+    const emptyQuadrantAxis = { x: false, y: false };
     if (rect) {
       // A zero-width half-open rectangle holds nothing, and no bound lies between its events to
       // place: placed one bound at a time, its lower bound can pass its upper one, which is not a
@@ -4033,8 +4056,18 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
         // inverse bound is the table endpoint, which would wrongly admit the raw tail beyond it.
         const empty = (axis: GateAxisExport, [lo, hi]: number[]) =>
           axis.clamp?.lo !== undefined && hi <= axis.clamp.lo || axis.clamp?.hi !== undefined && lo > axis.clamp.hi;
-        if (empty(baseX, edgeSpan(0))) rect.x = { lo: -UNBOUNDED, hi: -UNBOUNDED };
-        if (empty(baseY, edgeSpan(1))) rect.y = { lo: -UNBOUNDED, hi: -UNBOUNDED };
+        // Written as the interval from 0 to 0, which holds no value (min <= x < max). Written
+        // from -UNBOUNDED to -UNBOUNDED, GateLab's own importer read the min as no bound, and an
+        // event a standard flog places at -Infinity (a stored 0) lay below the max: 100 events
+        // came back in a region GateLab holds none in.
+        if (empty(baseX, edgeSpan(0))) {
+          rect.x = { lo: 0, hi: 0 };
+          emptyQuadrantAxis.x = true;
+        }
+        if (empty(baseY, edgeSpan(1))) {
+          rect.y = { lo: 0, hi: 0 };
+          emptyQuadrantAxis.y = true;
+        }
       }
     }
     // A standard reader (min inclusive, max exclusive, in double precision) must decide every event
@@ -4044,20 +4077,27 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     // region: 160 events of a float64 fuzz, for FlowKit. The region is left out instead. GateLab's
     // own re-import reads its record of the rectangle, not this bound.
     if (rect && !cytobankMode && quadrantRectangles.has(gid)) {
-      const decides = (axis: GateAxisExport, channel: string, b: { lo?: number; hi?: number }, [lo, hi]: number[]): boolean => {
+      const decides = (axis: GateAxisExport, channel: string, b: { lo?: number; hi?: number }, [lo, hi]: number[], empty: boolean): boolean => {
         const events = eventsOn(axis, channel);
         const bLo = b.lo !== undefined && !isUnbounded(b.lo) ? b.lo : undefined;
         const bHi = b.hi !== undefined && !isUnbounded(b.hi) ? b.hi : undefined;
+        if (empty && (bLo !== 0 || bHi !== 0)) return false;
         if (!events || (bLo === undefined && bHi === undefined)) return true;
         for (let j = 0; j < events.own.length; j++) {
           const own = events.own[j];
           const written = events.written(j);
-          if (bLo !== undefined && (own >= lo) !== (written >= bLo)) return false;
-          if (bHi !== undefined && (own < hi) !== (written < bHi)) return false;
+          if (empty) {
+            // The clamp proves this whole interval empty. Its canonical [0, 0) must agree as
+            // a conjunction; neither bound alone represents the original divider's half-space.
+            if ((own >= lo && own < hi) !== (written >= bLo! && written < bHi!)) return false;
+          } else {
+            if (bLo !== undefined && (own >= lo) !== (written >= bLo)) return false;
+            if (bHi !== undefined && (own < hi) !== (written < bHi)) return false;
+          }
         }
         return true;
       };
-      if (!decides(xAxis, g.x_channel, rect.x, edgeSpan(0)) || !decides(yAxis, g.y_channel, rect.y, edgeSpan(1))) {
+      if (!decides(xAxis, g.x_channel, rect.x, edgeSpan(0), emptyQuadrantAxis.x) || !decides(yAxis, g.y_channel, rect.y, edgeSpan(1), emptyQuadrantAxis.y)) {
         leaveRegionOut(gid, g.name);
         return;
       }
@@ -4486,6 +4526,9 @@ export function exportGatingML(opts: GatingMLExportOpts): string {
     `      <export_timestamp>${timestamp}</export_timestamp>`,
     "    </cytobank>",
     ...rectangleRecordLines(sample, gates, gate_order, gateToGmlId, gateLines, placedFrom),
+    // Which rectangles are one straight quadrant's regions, for GateLab to read back as the gate.
+    // The Cytobank format writes them as polygons (quadrantPolygon), which this does not cover.
+    ...(cytobankMode ? [] : quadrantRecordLines(opts.gates, quadrantRegions, gateToGmlId)),
     "    <gatelabr_scales>",
     `      <definition>${escText(scalesJson)}</definition>`,
     "    </gatelabr_scales>",

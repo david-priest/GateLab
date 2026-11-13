@@ -12,6 +12,8 @@ import { EditableMetaTable, type MetaRow } from "./EditableMetaTable";
 import { useI18n } from "./i18n";
 import { TabIntro, useTabIntro } from "./TabIntro";
 import type { WorkspaceGroup } from "../store";
+import { columnValueOrder } from "../engine/levelOrder";
+import { columnLevelsAfterReorder, LevelOrderControl } from "./LevelOrderControl";
 
 interface SampleRef {
   id: string;
@@ -27,6 +29,8 @@ interface Props {
   onAddColumn: (name: string) => void;
   onRenameColumn: (oldName: string, newName: string) => void;
   onDeleteColumn: (name: string) => void;
+  /** Set a column's order of its values for every tab, or clear it (undefined) for the file list's order. */
+  onColumnLevels?: (column: string, levels: string[] | undefined) => void;
   onImport: (file: File) => void;
   // Population metadata
   populationRows: MetaRow[];
@@ -44,7 +48,7 @@ interface Props {
 }
 
 export function MetadataTab({
-  samples, metadata, columns, onSetCell, onAddColumn, onRenameColumn, onDeleteColumn, onImport,
+  samples, metadata, columns, onSetCell, onAddColumn, onRenameColumn, onDeleteColumn, onColumnLevels, onImport,
   populationRows, populationMetadata, populationColumns, onSetPopCell, onAddPopColumn, onRenamePopColumn, onDeletePopColumn,
   onWriteSampleMetadataToHost, hostWriteBusy = false, groups = [], fileGroups = {},
 }: Props) {
@@ -104,6 +108,32 @@ export function MetadataTab({
         hint={t("Sample ID (sample_id) is editable and saved with the workspace. It defaults to the filename; filenames are read-only. Import CSV/TSV using filename as the first column and sample_id plus any condition fields after it. Metadata drives Plotting groups, replicate units and facets.")}
         emptyMessage={t("Load one or more FCS files to add sample metadata.")}
       />
+      {onColumnLevels && (() => {
+        // Each column's order of its values, as every tab draws them: set here or on the Plotting tab.
+        const ordered = columns
+          .filter((column) => column.name !== SAMPLE_ID_FIELD)
+          .map((column) => ({ column, values: columnValueOrder(samples.map((file) => metadata[file.id]?.[column.name] ?? "").filter(Boolean), column.levels) }))
+          .filter(({ values }) => values.length > 1);
+        if (!ordered.length) return null;
+        return (
+          <section className="gl-meta-orders" aria-label={t("Order of each column's values")}>
+            <h3>{t("Order of each column's values")}</h3>
+            {ordered.map(({ column, values }) => (
+              <div key={column.name} className="gl-meta-order">
+                <span className="gl-meta-order-name">{column.name}</span>
+                <LevelOrderControl
+                  label={column.name}
+                  levels={values}
+                  customised={!!column.levels?.length}
+                  hint={t("This order applies wherever the column is used.")}
+                  onReorder={(order) => onColumnLevels(column.name, columnLevelsAfterReorder(order, column.levels))}
+                  onReset={() => onColumnLevels(column.name, undefined)}
+                />
+              </div>
+            ))}
+          </section>
+        );
+      })()}
 
       <EditableMetaTable
         title={t("Population metadata")}

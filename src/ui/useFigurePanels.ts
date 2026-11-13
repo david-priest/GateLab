@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { StoredHierarchy } from "../engine/hierarchies";
+import type { CoreState } from "../store";
 import type { Gate } from "../engine/models";
 import { cellLabelOffsets, type GateOverlay } from "../engine/illustration";
 import {
@@ -16,6 +17,7 @@ import {
   defaultIllustrationConfig,
   figureStyle,
 } from "../engine/figureDefaults";
+import { buildFigureChartPanel } from "./figureChartData";
 
 /** A tree's gates without their label placements: what a panel is built from, so a moved label repaints rather than rebuilds. */
 function gateShapes(gates: Record<string, Gate>): unknown[] {
@@ -44,6 +46,8 @@ export function useFigurePanels(
   gatingRanges: Record<string, [number, number]> = {},
   /** Bumped by the Refresh button: every panel is built again. */
   refreshKey: number = 0,
+  /** The workspace a chart panel's models are built from (buildFigureChartPanel). */
+  state: CoreState,
 ) {
   const specsKey = JSON.stringify(figure.transforms);
   // Under the "gating" policy the figure is drawn on the Gating tab's own transforms, as they
@@ -139,7 +143,10 @@ export function useFigurePanels(
       if (cancelled) return;
       try {
         const panel = page!.panels[index++];
-        data[panel.key] = buildFigurePanel(
+        // A chart panel is built by the Plotting tab's builders from the prepared files, not as a flow plot.
+        data[panel.key] = panel.plot.type === "chart"
+          ? buildFigureChartPanel(panel, figure, projected, trees, { ...options, state, gatingSources: sources }, ranges)
+          : buildFigurePanel(
           panel,
           // Built without the figure's label offsets: those only move labels on a built panel,
           // and are put on below, so a label drag repaints its panel rather than rebuilding all.

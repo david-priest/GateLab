@@ -16,6 +16,7 @@ import { proposalSourceLabel } from "./StrategyProposalReview";
 import { provenanceSource } from "../proposals/strategyProposal";
 import { BranchIcon, MoreIcon } from "./icons";
 import { MenuButton, type MenuEntry } from "./MenuButton";
+import { ContextMenu, type ContextMenuState } from "./ContextMenu";
 import { useGateSwatch } from "../plots/gateInk";
 
 /**
@@ -62,13 +63,21 @@ interface Props {
    */
   tailorSwitchOf?: (gateId: string) => TailorSwitch | null;
   onTailorSwitch?: (gateId: string, on: boolean) => void;
-  /** The gate's scope menu (Tailor for…, Revert, Use for…), opened at `client`: from its chip, or a right-click on its row. */
+  /** The gate's scope menu (Tailor for…, Revert, Use for…), opened at `client` from its chip. */
   onScopeMenu?: (gateId: string, client: [number, number]) => void;
+  /**
+   * A row's right-click menu, acting on `targets`: the highlighted gates when the row is one of
+   * them, else the row alone (it is selected first, as Finder and Photos do).
+   */
+  contextMenuOf?: (gateId: string, targets: readonly string[]) => MenuEntry[];
+  /** The right-click menu of the list's empty space: the Gates header's ⋯ menu. */
+  paneMenu?: readonly MenuEntry[];
 }
 
-export function GateList({ state, derived, dispatch, labelForKey = (k) => k, badgeFor, badgeShown, countScope, countHeader, scopeChipOf, tailorSwitchOf, onTailorSwitch, onScopeMenu, rowMenuOf }: Props) {
+export function GateList({ state, derived, dispatch, labelForKey = (k) => k, badgeFor, badgeShown, countScope, countHeader, scopeChipOf, tailorSwitchOf, onTailorSwitch, onScopeMenu, rowMenuOf, contextMenuOf, paneMenu }: Props) {
   const { t } = useI18n();
   const gateSwatch = useGateSwatch();
+  const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const [detailsGateId, setDetailsGateId] = useState<string | null>(null);
   const detailsPanelId = useId();
   /** The row whose proposal details are open: focus goes back to its ⋯ when they close. */
@@ -118,6 +127,12 @@ export function GateList({ state, derived, dispatch, labelForKey = (k) => k, bad
         if (event.target === event.currentTarget && selected_gate_id && highlighted.size > 1) {
           dispatch({ type: "selectGates", gateId: selected_gate_id, gateIds: [] });
         }
+      }}
+      onContextMenu={(event) => {
+        // A right-click on empty space opens the Gates header's ⋯ menu.
+        if (event.target !== event.currentTarget || !paneMenu?.length) return;
+        event.preventDefault();
+        setMenu({ x: event.clientX, y: event.clientY, items: paneMenu, label: t("Gates") });
       }}
     >
       {countHeader && (
@@ -178,7 +193,18 @@ export function GateList({ state, derived, dispatch, labelForKey = (k) => k, bad
             ref={detailsGateId === gid ? (el) => { detailsRow.current = el; } : undefined}
             className={"gate-card" + (isSel ? " selected" : highlighted.has(gid) ? " highlighted" : "")}
             onClick={(event) => { pick(gid, event); event.currentTarget.parentElement?.focus({ preventScroll: true }); }}
-            onContextMenu={onScopeMenu ? (event) => { event.preventDefault(); onScopeMenu(gid, [event.clientX, event.clientY]); } : undefined}
+            onContextMenu={contextMenuOf ? (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              const targets = highlighted.has(gid) ? shown.filter((id) => highlighted.has(id)) : [gid];
+              if (!highlighted.has(gid)) dispatch({ type: "selectGates", gateId: gid, gateIds: [] });
+              const items: MenuEntry[] = [
+                ...contextMenuOf(gid, targets),
+                ...(proposal && targets.length === 1 ? ["separator" as const, rowMenu[rowMenu.length - 1]] : []),
+              ];
+              if (items.length) setMenu({ x: event.clientX, y: event.clientY, items, label: targets.length === 1 ? gate.name : t("{count} gates", { count: targets.length }) });
+              event.currentTarget.parentElement?.focus({ preventScroll: true });
+            } : undefined}
           >
             {gateSwatch(gate.color) && <div className="gate-color-swatch" style={{ background: gateSwatch(gate.color)! }} />}
             {/* The channels are in the tooltip too: a narrow pane drops their column (styles.css). */}
@@ -250,6 +276,7 @@ export function GateList({ state, derived, dispatch, labelForKey = (k) => k, bad
           labelForKey={labelForKey} countScope={countScope}
           onClose={() => { setDetailsGateId(null); detailsRow.current?.querySelector<HTMLButtonElement>(".gate-row-menu .gl-menu-trigger")?.focus(); }} />
       )}
+      <ContextMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
   );
 }

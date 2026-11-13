@@ -6,15 +6,20 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { strFromU8, unzipSync } from "fflate";
 import type { FcsFile } from "./engine/fcs";
 import { buildSyntheticCvw } from "./imaging/cvwFixture";
+import { WAVEFORM_PRESENT_CHANNEL } from "./engine/imagedEvents";
 import { memoryFile } from "./testDirectory";
 
+const plotHarness = vi.hoisted(() => ({ payload: null as null | { display_mode?: string; overlay_mode?: boolean; color_b64?: string } }));
 vi.mock("./plots/GatingPlot", () => ({
   DEFAULT_GATING_FONT_SIZES: { tick: 9, axis: 12, title: 12, gate: 10 },
-  GatingPlot: () => <div data-testid="gating-plot" />,
+  GatingPlot: (props: { payload: typeof plotHarness.payload }) => {
+    plotHarness.payload = props.payload;
+    return <div data-testid="gating-plot" />;
+  },
 }));
 
 const syntheticFcs: FcsFile = {
@@ -127,6 +132,35 @@ describe("attaching cell images", () => {
     expect(host.querySelector('.gl-plot-type[data-mode="dots"]')?.getAttribute("aria-pressed")).toBe("true");
     expect(host.querySelector('button[aria-label="Colour by"]')?.textContent).toContain("Has an image");
     expect(remembered.calls.some(([key, handle]) => key === "cvw:D1.fcs" && handle === aCvw)).toBe(true);
+  });
+
+  it("draws Pseudocolour and Contour with images attached, keeping the colouring for Dots", async () => {
+    // The S8 marks which events it imaged in this column; the Has an image colouring reads it.
+    syntheticFcs.channels.push({ index: 2, name: WAVEFORM_PRESENT_CHANNEL, marker: null, bits: 32, range: 1 });
+    syntheticFcs.columns.push(Float32Array.from([1, 0, 1]));
+    onTestFinished(() => { syntheticFcs.channels.pop(); syntheticFcs.columns.pop(); });
+    installPickers([[fcsHandle("D1.fcs"), handleOf("D1.cvw", cvwBytes(3))]]);
+    act(() => root.render(<App />));
+    await click("Add files…");
+    const modeButton = (mode: string) => host.querySelector<HTMLButtonElement>(`.gl-plot-type[data-mode="${mode}"]`)!;
+    const summary = () => host.querySelector(".gl-display-summary-colour")?.textContent;
+    expect(modeButton("dots").getAttribute("aria-pressed")).toBe("true");
+    expect(plotHarness.payload?.overlay_mode).toBe(true);
+    for (const mode of ["pseudocolor", "contour"]) {
+      act(() => modeButton(mode).click());
+      await settle();
+      expect(modeButton(mode).getAttribute("aria-pressed")).toBe("true");
+      expect(plotHarness.payload?.display_mode).toBe(mode);
+      // The renderer draws any coloured payload as dots, so the density modes get none.
+      expect(plotHarness.payload?.overlay_mode).toBeFalsy();
+      expect(plotHarness.payload?.color_b64).toBeUndefined();
+      expect(host.querySelector('button[aria-label="Colour by"]')?.textContent).toContain("Has an image");
+      expect(summary()).toBe("coloured on Dots");
+    }
+    act(() => modeButton("dots").click());
+    await settle();
+    expect(plotHarness.payload?.overlay_mode).toBe(true);
+    expect(summary()).toBe("coloured");
   });
 
   it("attaches and detaches from the Import menu for the viewed sample", async () => {

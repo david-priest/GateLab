@@ -6,7 +6,7 @@
 // "batch" (the wall) is first in, first out, yielding between items so a cancel can land.
 
 import { type CvwFile, cvwBlockRange, hasImageFlags, openCvw } from "./cvw";
-import { NATIVE_HOP, decodeEvent, type ImagePlanes } from "./cvwDecode";
+import { NATIVE_HOP, decodeEvent, lightLossPlane, type ImagePlanes } from "./cvwDecode";
 import {
   CVW_WORKER_PROTOCOL,
   isCvwWorkerRequest,
@@ -19,7 +19,8 @@ import {
   type RenderedPicture,
   type RenderRequest,
 } from "./cvwProtocol";
-import { MASK_FEATURE_KEYS, OBJECT_CLASS_UNKNOWN, countObjectsWithMask, countedMask, maskFeatures, planeOf, sscSlotOf } from "./objectCount";
+import { MASK_FEATURE_KEYS, OBJECT_CLASS_UNKNOWN, countObjectsWithMask, countedMask, lightLossSlotOf, maskFeatures, planeOf, sscSlotOf } from "./objectCount";
+import { LIGHT_LOSS_FEATURE_KEYS, lightLossFeatures, lightLossMeasure, maskCentre } from "./lightLossMask";
 import { readRange } from "./readRange";
 import { channelRgba, compositeRgba, measureScale, paintOutline, type RenderSpec } from "./render";
 import { readTiffPages } from "./tiff";
@@ -99,6 +100,8 @@ export function createCvwWorkerRuntime(options: CvwWorkerRuntimeOptions): CvwWor
 
   const sources = new Map<string, OpenSource>();
   const opening = new Map<string, Promise<void>>();
+  /** How many times each file has been dropped, so an open can tell that its file was dropped while it ran. */
+  const drops = new Map<string, number>();
   const planes = new Map<string, CachedPlanes>();
   let planesHeld = 0;
   const cancelled = new Set<string>();
@@ -171,7 +174,7 @@ export function createCvwWorkerRuntime(options: CvwWorkerRuntimeOptions): CvwWor
   }
 
   /** A folder of extracted TIFFs: which events have a file, their channels from the first file, and the scale. */
-  async function openTiff(request: OpenSourceRequest): Promise<void> {
+  async function openTiff(request: OpenSourceRequest, live: () => boolean, emit: (response: CvwWorkerResponse) => void): Promise<void> {
     const spec = request.source;
     if (spec.kind !== "tiff-folder" && spec.kind !== "tiff-files") return;
     const flags = new Uint8Array(request.eventCount);
@@ -222,6 +225,7 @@ export function createCvwWorkerRuntime(options: CvwWorkerRuntimeOptions): CvwWor
     }
     const pages = readTiffPages(await blob.arrayBuffer());
     const source: TiffOpenSource = { kind: "tiff", getFile, flags, channelNames: tiffChannelNames(pages), lightLossSlot: tiffLightLossSlot(pages), scale: {} };
+    if (!live()) return;
     sources.set(request.fileKey, source);
     const wanted = request.scaleSample ?? DEFAULT_SCALE_SAMPLE;
     if (wanted > 0) source.scale = await measureSourceScale(source, request.fileKey, wanted, source.lightLossSlot === null ? [] : [source.lightLossSlot]);
@@ -239,10 +243,10 @@ export function createCvwWorkerRuntime(options: CvwWorkerRuntimeOptions): CvwWor
     });
   }
 
-  async function openSource(request: OpenSourceRequest): Promise<void> {
+  async function openSource(request: OpenSourceRequest, live: () => boolean, emit: (response: CvwWorkerResponse) => void): Promise<void> {
     try {
       if (request.source.kind === "tiff-folder" || request.source.kind === "tiff-files") {
-        await openTiff(request);
+        await openTiff(request, live, emit);
         return;
       }
       const file = await openCvw(request.source);
@@ -257,6 +261,7 @@ export function createCvwWorkerRuntime(options: CvwWorkerRuntimeOptions): CvwWor
       }
       const flags = hasImageFlags(file.index);
       const source: CvwOpenSource = { kind: "cvw", file, flags, scale: {} };
+      if (!live()) return;
       sources.set(request.fileKey, source);
       // Full scale per channel, from a spread of imaged events decoded at the thumbnail hop. Light
       // loss is transmitted light: its background is the signal, so no noise floor.
@@ -378,16 +383,22 @@ export function createCvwWorkerRuntime(options: CvwWorkerRuntimeOptions): CvwWor
     const total = flags.length;
     const objectCount = new Uint8Array(total).fill(OBJECT_CLASS_UNKNOWN);
     const objectArea = new Uint32Array(total);
-    const features: Record<string, Float32Array> = Object.fromEntries(MASK_FEATURE_KEYS.map((key) => [key, new Float32Array(total)]));
     const ssc = request.options?.slot ?? sscSlotOf(channelNamesOf(source));
+    // The cell's outline on its LightLoss picture, when the images have that channel.
+    const lightLoss = lightLossSlotOf(channelNamesOf(source));
+    const featureKeys: readonly string[] = lightLoss !== null ? [...MASK_FEATURE_KEYS, ...LIGHT_LOSS_FEATURE_KEYS] : MASK_FEATURE_KEYS;
+    const features: Record<string, Float32Array> = Object.fromEntries(featureKeys.map((key) => [key, new Float32Array(total)]));
     const scale = request.options?.scale?.[ssc] ?? source.scale[ssc] ?? 0;
     if (!(scale > 0)) {
       emit({ ...tag, type: "error", requestId: request.requestId, message: "the file's full scale is not known yet", retryable: true });
       return;
     }
     const slice = 48;
+    // One worker of several counts its own range of the file's events.
+    const from = Math.max(0, Math.min(total, Math.floor(request.options?.range?.start ?? 0)));
+    const to = Math.max(from, Math.min(total, Math.floor(request.options?.range?.end ?? total)));
     try {
-      for (let start = 0; start < total; start += slice) {
+      for (let start = from; start < to; start += slice) {
         if (cancelled.delete(request.requestId)) {
           emit({ ...tag, type: "cancelled", requestId: request.requestId });
           return;
@@ -396,7 +407,7 @@ export function createCvwWorkerRuntime(options: CvwWorkerRuntimeOptions): CvwWor
         while (interactive.length > 0) {
           await render(interactive.shift()!);
         }
-        const end = Math.min(total, start + slice);
+        const end = Math.min(to, start + slice);
         for (let i = start; i < end; i++) {
           if (!flags[i]) continue;
           let image: ImagePlanes | null;
@@ -405,7 +416,7 @@ export function createCvwWorkerRuntime(options: CvwWorkerRuntimeOptions): CvwWor
             const range = cvwBlockRange(source.file, i);
             if (!range) continue;
             const block = await readRange(source.file.source, range.offset, range.length);
-            image = decodeEvent(block, source.file.metadata, { hop: NATIVE_HOP, slots: [ssc] });
+            image = decodeEvent(block, source.file.metadata, { hop: NATIVE_HOP, slots: lightLoss !== null ? [ssc, lightLoss] : [ssc] });
           } else {
             image = await decodeAt(source, request.fileKey, i, NATIVE_HOP);
           }
@@ -417,6 +428,16 @@ export function createCvwWorkerRuntime(options: CvwWorkerRuntimeOptions): CvwWor
           objectArea[i] = result.totalArea;
           const measured = maskFeatures(result.mask, plane, image.rows, image.cols, image.aspect, scale);
           for (const key of MASK_FEATURE_KEYS) features[key][i] = measured[key];
+          if (lightLoss !== null) {
+            let llPlane = planeOf(image.planes, image.slots, lightLoss);
+            // The decoder gives LightLoss with every row on a background of 1; BD's TIFF export does not.
+            if (llPlane && source.kind === "tiff") llPlane = lightLossPlane(llPlane, image.cols);
+            if (llPlane) {
+              const centre = maskCentre(result.mask, image.rows, image.cols, image.aspect);
+              const outline = lightLossFeatures(lightLossMeasure(llPlane, image.rows, image.cols, image.aspect, centre));
+              for (const key of LIGHT_LOSS_FEATURE_KEYS) features[key][i] = outline[key];
+            }
+          }
         }
         emit({ ...tag, type: "classify-progress", requestId: request.requestId, fileKey: request.fileKey, done: end, total });
         await yieldToEventLoop();
@@ -463,7 +484,11 @@ export function createCvwWorkerRuntime(options: CvwWorkerRuntimeOptions): CvwWor
     const request = message as CvwWorkerRequest;
     switch (request.type) {
       case "open-source": {
-        const task = openSource(request).finally(() => { if (opening.get(request.fileKey) === task) opening.delete(request.fileKey); });
+        // An open whose file is dropped before it finishes neither keeps the file nor answers: its
+        // answer would be taken for the answer to the file's next open.
+        const dropsAtOpen = drops.get(request.fileKey) ?? 0;
+        const live = () => (drops.get(request.fileKey) ?? 0) === dropsAtOpen;
+        const task = openSource(request, live, (response) => { if (live()) emit(response); }).finally(() => { if (opening.get(request.fileKey) === task) opening.delete(request.fileKey); });
         opening.set(request.fileKey, task);
         return;
       }
@@ -487,6 +512,7 @@ export function createCvwWorkerRuntime(options: CvwWorkerRuntimeOptions): CvwWor
         return;
       }
       case "drop-source": {
+        drops.set(request.fileKey, (drops.get(request.fileKey) ?? 0) + 1);
         sources.delete(request.fileKey);
         for (const key of [...planes.keys()]) {
           if (key.startsWith(`${request.fileKey}:`)) {

@@ -1,0 +1,21 @@
+/* A Layout text block's inline formatting. Superscript and subscript are drawn at 70 % of the
+   block's size, raised 0.33 em or lowered 0.2 em of the block's size (the em here is the run's
+   own, 70 % of the block's), inside the line: they do not open the line spacing. The export
+   draws them with the same numbers (richText.ts). */
+.gl-layout-text-surface sup,
+.gl-layout-text-surface sub { font-size: 70%; line-height: 0; }
+.gl-layout-text-surface sup { vertical-align: 0.4714em; }
+.gl-layout-text-surface sub { vertical-align: -0.2857em; }
+.gl-layout-text-surface.is-rich-editor { overflow: hidden; }
+
+/* The bar of inline marks above a text block while it is edited. */
+.gl-layout-text-bar {
+  position: absolute; left: 0; bottom: 100%; z-index: 3;
+  display: flex; gap: 2px; padding: 2px; margin-bottom: 2px;
+  background: white; border: 1px solid #cbd5e1; border-radius: 4px;
+  font-family: Arial, Helvetica, sans-serif; font-size: 12px; font-style: normal; font-weight: 400;
+}
+.gl-layout-text-bar .gl-mini-btn { min-width: 22px; padding: 0 4px; line-height: 18px; }
+.gl-layout-text-bar .gl-mini-btn.is-active { background: #e2e8f0; border-color: #64748b; }
+.gl-layout-text-bar sup,
+.gl-layout-text-bar sub { font-size: 70%; }

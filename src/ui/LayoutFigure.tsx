@@ -18,6 +18,7 @@ import { pageContentBox } from "../engine/layoutArrange";
 import type { IllustrationConfig } from "../engine/workspace";
 import type { CoreState } from "../store";
 import { FigureGrid, colourFigureSummaries } from "./FigureGrid";
+import { headOverlaidPopulations } from "./overlayHeading";
 import { useFigurePanels } from "./useFigurePanels";
 
 /** The block's config with every field the grid reads present, and its figure migrated to the files at hand. */
@@ -36,7 +37,7 @@ export function figureOfBlock(
 }
 
 /**
- * A frame for a new figure block: the figure's first page at its natural size, as the
+ * A frame for a new figure block: the figure's page (the first unless named) at its natural size, as the
  * Illustration tab lays it out, within the sheet's page content box. The plot table and the
  * heatmap matrix beneath it are sized apart, as the grid draws them.
  */
@@ -45,11 +46,15 @@ export function figureBlockFrame(
   files: readonly FigureSample[],
   state: CoreState,
   sheet: LayoutSheet,
+  /** The metadata columns' own orders of their values, as the Illustration tab orders them. */
+  columnLevels?: Readonly<Record<string, readonly string[]>>,
+  /** The figure's page the block draws, 0-based. */
+  pageIndex = 0,
 ): { width: number; height: number } {
   const box = pageContentBox(sheet);
   const figure = config.figure;
   if (!figure) return { width: Math.min(520, box.width), height: Math.min(400, box.height) };
-  const page = layoutFigure(figure, files, figureHierarchies(state))[0];
+  const page = layoutFigure(figure, files, figureHierarchies(state), undefined, columnLevels)[pageIndex];
   const { heatmapPanels, table } = page ? splitHeatmapPage(page) : { heatmapPanels: [], table: null };
   const panel = figure.panelSize;
   let width = 0;
@@ -80,8 +85,11 @@ export function LayoutFigureSurface({
   globalScales,
   width,
   height,
+  columnLevels,
 }: Readonly<{
   recipe: LayoutFigureRecipe;
+  /** The metadata columns' own orders of their values, as the Illustration tab orders them. */
+  columnLevels?: Readonly<Record<string, readonly string[]>>;
   files: readonly FigureSample[];
   /** The prepared files, gated under their trees: what the panels are built from. */
   sources: readonly FigureSource[];
@@ -93,7 +101,7 @@ export function LayoutFigureSurface({
   const trees = useMemo(() => figureHierarchies(state), [state]);
   const config = useMemo(() => figureOfBlock(recipe, files, state), [recipe, files, state]);
   const figure = config.figure!;
-  const pages = useMemo(() => layoutFigure(figure, files, trees), [figure, files, trees]);
+  const pages = useMemo(() => layoutFigure(figure, files, trees, undefined, columnLevels).map(headOverlaidPopulations), [figure, files, trees, columnLevels]);
   const page = pages[Math.min(recipe.page, Math.max(0, pages.length - 1))];
   const built = useFigurePanels(
     page,
@@ -104,6 +112,8 @@ export function LayoutFigureSurface({
     config.allEvents ? Infinity : config.maxEvents,
     config.heatmapStat,
     globalScales,
+    0,
+    state,
   );
   const panels = useMemo(
     () => (page ? colourFigureSummaries(page, built.data, config) : built.data),

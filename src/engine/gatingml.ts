@@ -42,6 +42,7 @@ import {
 } from "./flowjoGrid";
 import type { FlowJoGridAxis } from "./models";
 import { cloneArms, validArms, validCurl, type QuadrantCurl } from "./models";
+import { parseQuadrantRecords, restoreStraightQuadrants } from "./gatingmlQuadrants";
 import type { WspDerivedPopulation } from "./flowjoWorkspace";
 import { invertMatrix, type DisplaySpillover } from "./compensation";
 import { DEFAULT_FLOW_SOLVER_SETTINGS, prepareFlowCompensation } from "./flowCompensationEngine";
@@ -1614,10 +1615,13 @@ function parseGateNode(node: Element): RawGate | null {
     // An absent bound is no bound: ±UNBOUNDED, which holds every value on that side, in any space.
     const x = dims[0];
     const y = dims[1] ?? dims[0];
+    // A dimension whose min is above its max holds no value (min <= x < max). Its corners written
+    // as given, the two were read the other way round and the gate held what lay between them; it
+    // is held as the empty interval at its min.
     const xlo = x.min ?? -UNBOUNDED;
-    const xhi = x.max ?? UNBOUNDED;
+    const xhi = x.min !== undefined && x.max !== undefined && x.min > x.max ? x.min : x.max ?? UNBOUNDED;
     const ylo = y.min ?? -UNBOUNDED;
-    const yhi = y.max ?? UNBOUNDED;
+    const yhi = y.min !== undefined && y.max !== undefined && y.min > y.max ? y.min : y.max ?? UNBOUNDED;
     return {
       gml_id: gmlId ?? uuid(),
       name: nm,
@@ -2233,7 +2237,8 @@ function parseSpectrumMatrices(root: Element): Record<string, ParsedSpectrum> {
         "GateLab compensates with a square spillover matrix only.";
     } else if (matrix.length !== detectors.length || matrix.some((r) => r.length !== detectors.length || r.some((v) => !hasNum(v)))) {
       problem = `Spillover matrix ${id} is not a complete ${detectors.length} by ${detectors.length} matrix of numbers.`;
-    } else if ((attrLocal(el, "matrix-inverted-already") ?? "false").trim().toLowerCase() === "true") {
+    } else if (["true", "1"].includes((attrLocal(el, "matrix-inverted-already") ?? "false").trim().toLowerCase())) {
+      // The attribute is an xs:boolean, which "1" also writes as true.
       // The file gives the compensation matrix itself; GateLab holds the spillover, its inverse.
       const spill = invertMatrix(matrix);
       if (spill) matrix = spill;
@@ -2776,6 +2781,18 @@ export function importGatingML(
     if (gate.parent_id && !rawGates[gate.parent_id] && !intersectionIds.has(gate.parent_id)) {
       importProblems.push(`${gate.gml_id} references missing parent gate ${gate.parent_id}.`);
     }
+    // A gate that is its own ancestor is never placed, and it and everything beneath it were
+    // left out without a word. (GateLab's own parent_id format is checked below.)
+    if (gate.parent_id && !format.parentIdHierarchy) {
+      const chain = new Set<string>([gate.gml_id]);
+      for (let up: string | undefined = gate.parent_id; up && rawGates[up]; up = rawGates[up].parent_id) {
+        if (chain.has(up)) {
+          importProblems.push(`${gate.gml_id} (${gate.name}) is its own ancestor: its parent gates form a cycle.`);
+          break;
+        }
+        chain.add(up);
+      }
+    }
     if (format.parentIdHierarchy && !hierarchyNode) {
       importProblems.push(...parentIdHierarchyProblems(gate, rawGates));
     }
@@ -3111,7 +3128,8 @@ export function importGatingML(
       // An ellipse's parameters live in the space its dimensions declare, exactly like polygon
       // vertices. The per-axis unit change (toGateUnits) is affine for every transform GateLab
       // holds, so it acts on the mean through the whole map and on the covariance through its
-      // slope, C'ij = Cij·ki·kj.
+      // slope, C'ij = Cij·ki·kj. Both off-diagonal entries are multiplied in the same order, so a
+      // symmetric matrix stays exactly symmetric.
       if (!(sx && sy)) continue; // cannot happen: the branch above has left such a gate out
       const kx = sx.toGateUnits(1) - sx.toGateUnits(0);
       const ky = sy.toGateUnits(1) - sy.toGateUnits(0);
@@ -3125,7 +3143,7 @@ export function importGatingML(
         mean: [sx.toGateUnits(e.mean[0]), sy.toGateUnits(e.mean[1])],
         covariance: [
           [e.covariance[0][0] * kx * kx, e.covariance[0][1] * kx * ky],
-          [e.covariance[1][0] * ky * kx, e.covariance[1][1] * ky * ky],
+          [e.covariance[1][0] * kx * ky, e.covariance[1][1] * ky * ky],
         ],
         distance_square: e.distance_square,
         color: g.color ?? nextGateColor(Object.keys(appGates).length),
@@ -3263,9 +3281,12 @@ export function importGatingML(
           const seen = new Set<string>();
           for (const r of refGate.refs ?? []) {
             const aid = gmlToApp[r.gate_id];
-            if (!aid || aid === r.gate_id || seen.has(aid)) continue;
-            seen.add(aid);
-            let include = refGate.operation === "not" ? r.complement : !r.complement;
+            if (!aid || aid === r.gate_id) continue;
+            const include = refGate.operation === "not" ? r.complement : !r.complement;
+            // A gate named once as itself and once as its complement is two references: taken as
+            // one, "G1 and not G1" held what G1 holds.
+            if (seen.has(`${aid}|${include}`)) continue;
+            seen.add(`${aid}|${include}`);
             gateRefs.push(newGateRef(aid, include));
           }
           if (complement) {
@@ -3298,6 +3319,9 @@ export function importGatingML(
     buildPopulationsFromBooleans(rawGates, boolOrder, gmlToApp, appGates, gateOrder, populations,
       rootPopId, derivedPopulations, format.tree, skips, cytobankModel, parseOperandGates(root));
   }
+
+  // A straight quadrant GateLab wrote as four rectangles comes back as the one gate it was.
+  restoreStraightQuadrants(parseQuadrantRecords(root), gmlToApp, appGates, gateOrder, populations);
 
   return {
     gates: appGates,
@@ -3591,6 +3615,8 @@ function buildPopulationsFromBooleans(
   const gsidToGml: Record<string, string> = {};
   /** A population's first gate that was not imported; see PopulationSkips. */
   const boolLost: Record<string, string> = {};
+  /** The populations a Boolean gate names (other Boolean gates), included and complemented. */
+  const boolNamed: Record<string, { included: string[]; complemented: string[] }> = {};
 
   for (const bid of boolOrder) {
     const g = rawGates[bid];
@@ -3609,7 +3635,11 @@ function buildPopulationsFromBooleans(
       if (seen.has(`${rid}|${include}`)) continue;
       seen.add(`${rid}|${include}`);
       const rg = rawGates[rid];
-      if (rg && rg.gate_type === "boolean") continue;
+      if (rg && rg.gate_type === "boolean") {
+        const named = (boolNamed[bid] ??= { included: [], complemented: [] });
+        (include ? named.included : named.complemented).push(rid);
+        continue;
+      }
       if (!gmlToApp[rid]) {
         if (skips?.lostGates.has(rid) && !boolLost[bid]) boolLost[bid] = rid;
         continue;
@@ -3868,6 +3898,27 @@ function buildPopulationsFromBooleans(
     parents[bid] = parentBid;
   }
 
+  // A Boolean gate that names another population holds that population's events: its gates and
+  // those of the populations above it. The one it sits under gives them by being its parent; any
+  // other was passed over, and "pop_1 AND pop_2" was read as pop_1 alone. Its gates are added.
+  // GateLab's own files carry their tree and name no population this way.
+  const chain = (bid: string): Set<string> => {
+    const out = new Set<string>();
+    for (let cur: string | null = bid; cur && !out.has(cur); cur = parents[cur] ?? null) out.add(cur);
+    return out;
+  };
+  for (const bid of tree ? [] : Object.keys(boolNames)) {
+    const above = chain(bid);
+    for (const named of boolNamed[bid]?.included ?? []) {
+      for (const other of chain(named)) {
+        if (above.has(other)) continue;
+        for (const lit of boolLits[other] ?? []) {
+          if (!(boolLits[bid] ?? []).some((l) => literal(l) === literal(lit))) (boolLits[bid] ??= []).push(lit);
+        }
+      }
+    }
+  }
+
   const depth = (bid: string): number => {
     let d = 0;
     let cur: string | null = bid;
@@ -3900,6 +3951,13 @@ function buildPopulationsFromBooleans(
     }
     if (rawGates[bid]?.operation === "or") {
       skips?.warnOr(boolNames[bid] ?? bid);
+      unplaced.add(bid);
+      continue;
+    }
+    // The complement of a population is the complement of an AND of gates, which is an OR. It
+    // was read as the population itself: the reference was passed over as naming the parent.
+    if (!tree && boolNamed[bid]?.complemented.length) {
+      skips?.warnNotAnd(boolNames[bid] ?? bid);
       unplaced.add(bid);
       continue;
     }

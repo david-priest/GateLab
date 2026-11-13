@@ -29,7 +29,7 @@ const gB = newGate("B cells", "polygon", "a", "b", [[0, 0], [1, 0], [1, 1]], "#2
 const gT = newGate("T cells", "polygon", "a", "b", [[0, 0], [1, 0], [1, 1]], "#333333");
 const root = newRootPopulation(10);
 const lymph = { ...newPopulation("Lymphocytes", [{ gate_id: gLymph.gate_id, include: true }], root.population_id), population_id: "lymph" };
-const b = { ...newPopulation("B cells", [{ gate_id: gB.gate_id, include: true }], "lymph"), population_id: "b" };
+const b = { ...newPopulation("B cells", [{ gate_id: gB.gate_id, include: true }], "lymph"), population_id: "b", color: "#2a6fdb" };
 const t = { ...newPopulation("T cells", [{ gate_id: gT.gate_id, include: true }], "lymph"), population_id: "t" };
 const populations: PopulationMap = { [root.population_id]: root, lymph, b, t };
 const rows = [
@@ -59,7 +59,7 @@ const type = (input: HTMLInputElement, value: string) => act(() => {
 });
 
 describe("StrategyPopulationPicker", () => {
-  it("lists the tree with the gate's colour and the count, selects, and offers the Gating tab's ticks and the leaves", () => {
+  it("lists the tree with the population's colour and the count, selects, and offers the Gating tab's ticks and the leaves", () => {
     const onChange = vi.fn();
     act(() => {
       reactRoot.render(
@@ -80,8 +80,8 @@ describe("StrategyPopulationPicker", () => {
     const bRow = rowByTitle("B cells");
     expect(bRow.className).toContain("is-selected");
     expect(bRow.querySelector(".gl-strategy-pop-count")?.textContent).toBe("300");
-    // jsdom keeps the colour as written; the swatch is the B gate's.
-    expect((bRow.querySelector(".gl-strategy-pop-swatch") as HTMLElement).getAttribute("style")).toContain("rgb(34, 34, 34)");
+    // The swatch is the population's colour, as every tab colours it (populationColorOf), not its gate's.
+    expect((bRow.querySelector(".gl-strategy-pop-swatch") as HTMLElement).getAttribute("style")).toContain("rgb(42, 111, 219)");
     // The tree: the leaves carry connectors, the top row none.
     expect(rowByTitle("Lymphocytes").querySelector("svg")).toBeNull();
     expect(rowByTitle("T cells").querySelectorAll("svg line").length).toBeGreaterThan(0);

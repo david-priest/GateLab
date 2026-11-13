@@ -8,8 +8,13 @@ import { cellDataUrlAtDpi, rasterizeSvg } from "./gridExport";
 import type { LayoutSheet } from "../engine/layout";
 import { pageOrigins, pageSizeMm, pageSizePx, SCREEN_PX_PER_MM } from "../engine/layout";
 import { sanitizeFilePart } from "../engine/fcsExport";
-import { composeProportionsChartSvg } from "../ui/ProportionsTab";
+import { composeProportionsChartSvg } from "../ui/PlottingTab";
 import { EXPORT_FONT, exportId, finishExportSvg, nameCell, nextTurn, pdfVectorPage, pngBlob } from "./exportSvg";
+import { writeLayoutShape } from "./layoutShapeExport";
+import { writeLayoutImage } from "./layoutImageExport";
+import { formattedTextLines } from "./layoutTextExport";
+import { exportTurn, setTurnTransform, unturnedBox } from "./layoutRotationExport";
+import { objectExportId } from "../ui/layout/objectExportId";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -196,11 +201,16 @@ export function composeLayoutSVG(
   // Items are numbered in stacking order and named by their heading, so an editor's layers
   // panel reads plot-3-Lymphocytes rather than a row of anonymous groups.
   let index = 0;
+  const named = new Set<string>();
   for (const { item, frame } of pageItems(canvas, origin, options.zoom, offset)) {
     // An item wholly outside this page is left to the page it is on.
     if (frame.left >= width || frame.top >= height || frame.left + frame.width <= 0 || frame.top + frame.height <= 0) continue;
     index += 1;
     const heading = item.dataset.title ?? item.querySelector(".gl-layout-item-head span")?.textContent ?? "";
+    // A line or shape is vector art of its own.
+    if (writeLayoutShape(root, item, frame, index, heading)) continue;
+    // An item named in the objects list is its name, which an editor's layers panel shows.
+    const own = objectExportId(item.dataset.objectName, named);
     if (item.classList.contains("has-frame")) {
       const r = document.createElementNS(SVG_NS, "rect");
       r.setAttribute("x", String(Math.round(frame.left) + 0.5));
@@ -212,11 +222,13 @@ export function composeLayoutSVG(
       r.setAttribute("id", exportId("frame", index, heading));
       root.appendChild(r);
     }
+    // A placed image: a placed SVG as vector art, a bitmap as an image.
+    if (writeLayoutImage(root, item, frame, own ?? exportId("image", index, heading))) continue;
     const text = item.querySelector<HTMLTextAreaElement | HTMLElement>(".gl-layout-text-surface");
     if (text) {
       const content = text instanceof HTMLTextAreaElement ? text.value : (text.textContent ?? "");
       const style = getComputedStyle(text);
-      const rect = pageRect(text, origin, options.zoom, offset);
+      const rect = unturnedBox(pageRect(text, origin, options.zoom, offset), frame, exportTurn(item));
       // A zoomed item (data-zoom) draws its text at the size written and scales it as a whole;
       // computed lengths are as written, so the item's zoom is applied here.
       const itemZoom = Number(item.dataset.zoom) || 1;
@@ -226,15 +238,16 @@ export function composeLayoutSVG(
       const lines = wrappedLines(text, content)?.map((line) => ({ text: line.text, left: line.left * itemZoom, top: line.top * itemZoom }))
         ?? content.split("\n").map((line, row) => ({ text: line, left: 0, top: row * fontSize * 1.3 }));
       const block = document.createElementNS(SVG_NS, "g");
-      block.setAttribute("id", exportId("text", index, content.trim().split(/\s+/).slice(0, 4).join(" ")));
-      textLines(block, lines, rect.left + padLeft, rect.top + padTop, fontSize, style);
+      block.setAttribute("id", own ?? exportId("text", index, content.trim().split(/\s+/).slice(0, 4).join(" ")));
+      setTurnTransform(block, frame, exportTurn(item));
+      if (!formattedTextLines(block, text, rect, itemZoom)) textLines(block, lines, rect.left + padLeft, rect.top + padTop, fontSize, style);
       root.appendChild(block);
       continue;
     }
     const host = item.querySelector<HTMLElement>(".gl-layout-plot-host");
     if (!host) continue;
     if ((host as unknown as { __miniPlotCfg?: unknown }).__miniPlotCfg) {
-      addCell(root, host, origin, options.zoom, options.dpi, offset, exportId("plot", index, heading));
+      addCell(root, host, origin, options.zoom, options.dpi, offset, own ?? exportId("plot", index, heading));
       continue;
     }
     // A Plotting chart block is the tab's card: its panels and legend composed as one SVG at the
@@ -246,7 +259,7 @@ export function composeLayoutSVG(
         const rect = pageRect(chart, origin, options.zoom, offset);
         const scale = composed.width > 0 ? rect.width / composed.width : 1;
         const g = document.createElementNS(SVG_NS, "g");
-        g.setAttribute("id", exportId("chart", index, heading));
+        g.setAttribute("id", own ?? exportId("chart", index, heading));
         g.setAttribute("transform", `translate(${rect.left},${rect.top}) scale(${scale})`);
         g.appendChild(composed.root);
         root.appendChild(g);
@@ -263,7 +276,7 @@ export function composeLayoutSVG(
       const zoomed = title.offsetWidth > 0 ? rect.width / title.offsetWidth : 1;
       textLines(root, [{ text, left: 0, top: 0 }], rect.left, rect.top, (parseFloat(style.fontSize) || 12) * zoomed, style);
     });
-    const block = exportId(host.querySelector(".gl-figure-grid") ? "figure" : "strategy", index, heading);
+    const block = own ?? exportId(host.querySelector(".gl-figure-grid") ? "figure" : "strategy", index, heading);
     host.querySelectorAll<HTMLElement>(".mini-plot-cell").forEach((cell, k) => addCell(root, cell, origin, options.zoom, options.dpi, offset, `${block}-panel-${k + 1}`));
     // A strategy block's arrows, drawn over its grid in an SVG of their own: copied over the
     // panels at the same place, scaled as the grid is.

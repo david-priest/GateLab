@@ -31,7 +31,9 @@ export const DIVISION_NA_CODE = 255;
 export function divisionEventCodes(values: ArrayLike<number>, bounds: number[], within: Uint8Array | null): Uint8Array {
   const codes = new Uint8Array(values.length);
   for (let index = 0; index < values.length; index += 1) {
-    codes[index] = within && !within[index] ? DIVISION_NA_CODE : assignDivisionLevel(values[index], bounds);
+    // A NaN has no level (R's findInterval gives NA); compared with the boundaries it was below
+    // every one and was coded as the last division.
+    codes[index] = (within && !within[index]) || Number.isNaN(values[index]) ? DIVISION_NA_CODE : assignDivisionLevel(values[index], bounds);
   }
   return codes;
 }
@@ -42,7 +44,8 @@ export function divisionLevelCounts(values: ArrayLike<number>, bounds: number[])
   const counts = new Array(sorted.length + 1).fill(0);
   for (let i = 0; i < values.length; i++) {
     const v = values[i];
-    if (Number.isFinite(v)) counts[assignDivisionLevel(v, sorted)]++;
+    // Every event that has a level is counted, an infinite one included, as divisionEventCodes codes it.
+    if (!Number.isNaN(v)) counts[assignDivisionLevel(v, sorted)]++;
   }
   return counts;
 }

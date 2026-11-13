@@ -115,8 +115,6 @@
 .gl-figure-facets-fold { margin: 10px 0 6px; }
 .gl-figure-facets-fold > summary { cursor: default; font-size: var(--gl-font-size-caption); font-weight: 600; color: #475569; list-style: none; }
 .gl-figure-facets-fold > summary::-webkit-details-marker { display: none; }
-.gl-figure-facets-fold > summary::before { content: "\25be "; color: #94a3b8; }
-.gl-figure-facets-fold:not([open]) > summary::before { content: "\25b8 "; }
 .gl-figure-facets {
   display: block;
   margin: 4px 0 0;
@@ -219,6 +217,15 @@
   flex-wrap: wrap;
   margin: 6px 0;
 }
+/* A population row keeps its name on its line: under the rule above, a deep row whose tree lines,
+   box and swatch left too little room dropped its name to a line of its own at the panel's left
+   ("CD45RB+ Actmem" in the demo, 2026-11-12). */
+.gl-figure-fields .gl-strategy-pop-row {
+  flex-wrap: nowrap;
+}
+.gl-figure-fields .gl-strategy-pop-name {
+  min-width: 0;
+}
 .gl-figure-fields label > select,
 .gl-figure-fields label > input:not([type="checkbox"]):not([type="range"]) {
   flex: 1 1 130px;
@@ -258,6 +265,9 @@
   cursor: default;
 }
 .gl-figure-list label.gl-figure-row:last-child { border-bottom: 0; }
+/* A plot's own overlaid populations, under its Population picker. */
+.gl-figure-plot-overlay { max-height: 180px; margin-bottom: 6px; }
+.gl-figure-plot-overlay-note { display: block; margin: 2px 0 4px; }
 .gl-figure-list label.gl-figure-row:hover { background: #f6f9fd; }
 .gl-figure-list label.gl-figure-row:has(input:checked) { background: #f0f5fc; }
 .gl-figure-list label.gl-figure-row input[type="checkbox"],
@@ -352,6 +362,9 @@
   border-radius: 4px;
   background: #f5f8fd;
   cursor: grab;
+}
+.gl-figure-dimension.is-fixed {
+  cursor: default;
 }
 .gl-figure-canvas {
   flex: 1;
@@ -532,3 +545,12 @@
 .gl-order-row.drop-after { box-shadow: inset 0 -2px 0 #2f80ed; }
 .gl-order-row-grip { display: inline-flex; color: #b7c1cd; }
 .gl-order-row-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A chart plot's panel: the Plotting chart drawn at the panel's size, without the chart card's
+   frame, so it lines up with the flow plots in its column. */
+.gl-figure-chart { overflow: hidden; }
+.gl-figure-chart .gl-prop-chart { border: none; border-radius: 0; padding: 0; gap: 0; background: transparent; }
+.gl-figure-chart .gl-prop-panels { gap: 0; }
+/* A summary chart spanning columns is drawn wider than its cells and moved left, its value axis in
+   the margin left of the first column (FigureChartPanel's summaryChartPlacement). */
+.gl-figure-chart.gl-figure-summary { overflow: visible; }

@@ -1,25 +1,32 @@
+import { richRunsOf } from "./layout/richText";
+import { renderRuns } from "./layout/richTextDom";
+
 /**
  * The frame a Layout text block needs to show its text whole, measured as the Layout tab draws
  * it: the static text surface (its font, padding, line height and wrapping at spaces) inside the
  * item's one-pixel border. The width is the text's own up to `maxWidth`; past that the text wraps
  * and the height grows, and a word longer than `maxWidth` widens the frame to hold it. Null where
  * nothing is laid out (no layout engine, as under jsdom), so the caller keeps its own size.
+ * A rich block is measured with its formatting, superscripts and all.
  */
 export function fitLayoutText(
   text: string,
   fontSize: number,
   maxWidth: number,
   bold = false,
+  format?: { rich?: boolean; italic?: boolean },
 ): { width: number; height: number } | null {
   if (typeof document === "undefined" || !document.body) return null;
   const surface = document.createElement("div");
   surface.className = "gl-layout-text-surface is-static";
-  surface.textContent = text;
+  if (format?.rich) renderRuns(surface, richRunsOf(text, true));
+  else surface.textContent = text;
   Object.assign(surface.style, {
     position: "fixed", left: "-10000px", top: "0", visibility: "hidden",
     width: "max-content", height: "auto", flex: "none",
     fontSize: `${fontSize}px`, fontWeight: bold ? "700" : "400",
   });
+  if (format?.italic) surface.style.fontStyle = "italic";
   document.body.appendChild(surface);
   try {
     let width = surface.getBoundingClientRect().width;

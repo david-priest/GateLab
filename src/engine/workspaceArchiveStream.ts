@@ -1,4 +1,4 @@
-import { Unzip, UnzipInflate, Zip, ZipPassThrough } from "fflate";
+import { inflateSync, Unzip, UnzipInflate, Zip, ZipPassThrough } from "fflate";
 
 const DEFAULT_CHUNK_BYTES = 1024 * 1024;
 const DEFAULT_UNKNOWN_ENTRY_LIMIT = 64 * 1024 * 1024;
@@ -127,8 +127,153 @@ export interface StreamZipReadOptions {
   readonly totalOutputLimit?: number;
 }
 
-/** Stream selected entries from a File without retaining the complete compressed archive. */
+/** One entry of an archive's central directory. */
+interface ZipDirectoryEntry {
+  readonly path: string;
+  readonly method: number;
+  readonly compressedSize: number;
+  readonly size: number;
+  readonly localOffset: number;
+}
+
+const u16 = (bytes: Uint8Array, at: number): number => bytes[at] | (bytes[at + 1] << 8);
+const u32 = (bytes: Uint8Array, at: number): number => (u16(bytes, at) | (u16(bytes, at + 2) << 16)) >>> 0;
+const sliceBytes = async (file: File, start: number, end: number): Promise<Uint8Array> =>
+  new Uint8Array(await file.slice(start, end).arrayBuffer());
+
+/**
+ * The archive's central directory, or null where it cannot be relied on: no end record, a ZIP64
+ * archive, or a directory that does not sit where the end record says (an archive past 4 GB from
+ * a writer without ZIP64, whose 32-bit offsets have wrapped).
+ */
+async function readZipDirectory(file: File): Promise<{ entries: ZipDirectoryEntry[]; offset: number } | null> {
+  const END_RECORD = 22;
+  if (file.size < END_RECORD) return null;
+  const tailStart = Math.max(0, file.size - END_RECORD - 0xffff);
+  const tail = await sliceBytes(file, tailStart, file.size);
+  let end = -1;
+  for (let at = tail.length - END_RECORD; at >= 0; at--) {
+    if (u32(tail, at) === 0x06054b50 && at + END_RECORD + u16(tail, at + 20) === tail.length) { end = at; break; }
+  }
+  if (end < 0) return null;
+  const count = u16(tail, end + 10);
+  const size = u32(tail, end + 12);
+  const offset = u32(tail, end + 16);
+  if (count === 0xffff || size === 0xffffffff || offset === 0xffffffff) return null;
+  if (u16(tail, end + 4) !== 0 || u16(tail, end + 6) !== 0 || u16(tail, end + 8) !== count) return null;
+  if (offset + size !== tailStart + end) return null;
+  const directory = await sliceBytes(file, offset, offset + size);
+  const entries: ZipDirectoryEntry[] = [];
+  const latin1 = new TextDecoder("latin1");
+  const utf8 = new TextDecoder("utf-8");
+  let at = 0;
+  for (let i = 0; i < count; i++) {
+    if (at + 46 > directory.length || u32(directory, at) !== 0x02014b50) return null;
+    const flags = u16(directory, at + 8);
+    const nameLength = u16(directory, at + 28);
+    const next = at + 46 + nameLength + u16(directory, at + 30) + u16(directory, at + 32);
+    if (next > directory.length) return null;
+    const compressedSize = u32(directory, at + 20);
+    const entrySize = u32(directory, at + 24);
+    const localOffset = u32(directory, at + 42);
+    if (compressedSize === 0xffffffff || entrySize === 0xffffffff || localOffset === 0xffffffff) return null;
+    const name = directory.subarray(at + 46, at + 46 + nameLength);
+    entries.push({
+      path: (flags & 0x800 ? utf8 : latin1).decode(name),
+      method: u16(directory, at + 10),
+      compressedSize,
+      size: entrySize,
+      localOffset,
+    });
+    at = next;
+  }
+  if (at !== directory.length) return null;
+  entries.sort((a, b) => a.localOffset - b.localOffset);
+  return { entries, offset };
+}
+
+/**
+ * Read selected entries from a File without retaining the complete compressed archive.
+ *
+ * An entry's extent is taken from the archive's central directory. The streamed reading below
+ * finds the end of an entry written with a data descriptor (every entry writeStoredZip writes)
+ * by looking for a ZIP signature in the entry's own bytes, so an FCS file holding the four bytes
+ * 50 4B 07 08 was cut short there, and a bundle GateLab had written was refused as not matching
+ * its declared byte length. The streamed reading remains for an archive whose directory cannot be
+ * relied on.
+ */
 export async function readZipFileEntries(
+  file: File,
+  options: StreamZipReadOptions,
+): Promise<Readonly<Record<string, Uint8Array>>> {
+  const directory = await readZipDirectory(file);
+  if (!directory) return readZipFileEntriesStreamed(file, options);
+
+  const unknownEntryLimitFor = (path: string): number => positiveSafeInteger(
+    typeof options.unknownEntryLimit === "function"
+      ? options.unknownEntryLimit(path)
+      : options.unknownEntryLimit ?? DEFAULT_UNKNOWN_ENTRY_LIMIT,
+    "Unknown ZIP entry limit",
+  );
+  const totalOutputLimit = positiveSafeInteger(
+    options.totalOutputLimit ?? Number.MAX_SAFE_INTEGER,
+    "ZIP total output limit",
+  );
+  const entries: Record<string, Uint8Array> = {};
+  const seenPaths = new Set<string>();
+  let totalReceived = 0;
+  // In archive order, each entry complete before the next is read: an earlier entry's onEntry
+  // may supply a later one's expected size.
+  for (const entry of directory.entries) {
+    if (!options.select(entry.path)) continue;
+    if (!safeArchivePath(entry.path) || seenPaths.has(entry.path)) {
+      throw new Error(`Unsafe or duplicate ZIP entry '${entry.path}'.`);
+    }
+    seenPaths.add(entry.path);
+    const expected = options.expectedSize?.(entry.path);
+    if (expected !== undefined && (!Number.isSafeInteger(expected) || expected < 0)) {
+      throw new Error(`Invalid expected byte length for ZIP entry '${entry.path}'.`);
+    }
+    if (entry.method !== 0 && entry.method !== 8) {
+      throw new Error(`ZIP entry '${entry.path}' uses a compression method GateLab does not read.`);
+    }
+    if (expected !== undefined && entry.size > expected) {
+      throw new Error(`ZIP entry '${entry.path}' exceeds its declared byte length.`);
+    }
+    if (expected !== undefined && entry.size !== expected) {
+      throw new Error(`ZIP entry '${entry.path}' does not match its declared byte length.`);
+    }
+    if (expected === undefined && entry.size > unknownEntryLimitFor(entry.path)) {
+      throw new Error(`ZIP metadata entry '${entry.path}' exceeds the safety limit.`);
+    }
+    totalReceived += entry.size;
+    if (!Number.isSafeInteger(totalReceived) || totalReceived > totalOutputLimit) {
+      throw new Error("Selected ZIP contents exceed the aggregate decompressed-byte safety limit.");
+    }
+    const local = await sliceBytes(file, entry.localOffset, entry.localOffset + 30);
+    if (local.length < 30 || u32(local, 0) !== 0x04034b50) {
+      throw new Error(`ZIP entry '${entry.path}' has no local header where the archive's directory places it.`);
+    }
+    const dataStart = entry.localOffset + 30 + u16(local, 26) + u16(local, 28);
+    if (dataStart + entry.compressedSize > directory.offset) {
+      throw new Error(`ZIP entry '${entry.path}' runs past the archive's directory.`);
+    }
+    const stored = await sliceBytes(file, dataStart, dataStart + entry.compressedSize);
+    if (stored.length !== entry.compressedSize) {
+      throw new Error(`ZIP entry '${entry.path}' is cut short.`);
+    }
+    const bytes = entry.method === 0 ? stored : inflateSync(stored, { out: new Uint8Array(entry.size) });
+    if (bytes.length !== entry.size) {
+      throw new Error(`ZIP entry '${entry.path}' does not match its declared byte length.`);
+    }
+    entries[entry.path] = bytes;
+    options.onEntry?.(entry.path, bytes);
+  }
+  return Object.freeze(entries);
+}
+
+/** Stream selected entries, each ended where the stream shows its end. */
+async function readZipFileEntriesStreamed(
   file: File,
   options: StreamZipReadOptions,
 ): Promise<Readonly<Record<string, Uint8Array>>> {

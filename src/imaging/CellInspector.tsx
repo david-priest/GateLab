@@ -6,6 +6,7 @@
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ChevronIcon } from "../ui/icons";
+import { FoldSummary } from "../ui/FoldSummary";
 import type { CellHoverStore, HoveredCell } from "../engine/cellHoverStore";
 import type { Sample } from "../engine/sample";
 import { useI18n } from "../ui/i18n";
@@ -295,7 +296,7 @@ export function CellInspector({
           </div>
           {features.length > 0 && (
             <details className="gl-cell-features">
-              <summary>{t("Image features")}</summary>
+              <FoldSummary>{t("Image features")}</FoldSummary>
               <dl>
                 {features.map((feature) => (
                   <div key={feature.name}>

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FcsFile } from "../engine/fcs";
 import { Sample } from "../engine/sample";
 import { clearPersistedTabState } from "../ui/tabState";
-import { ImagesTab } from "./ImagesTab";
+import { ImagesTab, sizeSummary, type ImagesMeasure } from "./ImagesTab";
 import type { ImageService, RenderResult, SourceInfo } from "./imageService";
 import type { CellImageSource } from "./imageSource";
 import { defaultChannelDisplay } from "./imageWallSettings";
@@ -217,6 +217,154 @@ describe("ImagesTab", () => {
     const recipe = onSendToLayout.mock.calls[0][0];
     expect(recipe).toMatchObject({ events: [2, 3], sortKey: "__class__", sortLabel: "Single cells", tileColours: ["#2ca02c", "#2ca02c"] });
     expect(recipe.legend).toEqual(classes);
+  });
+
+  it("starts the count from the tab and offers Cancel while it runs", async () => {
+    const onStart = vi.fn();
+    const onCancel = vi.fn();
+    const idle: ImagesMeasure = {
+      state: { kind: "idle", measured: 0, fileCount: 1 }, onStart, onCancel, classBy: "cellclass", onClassBy: vi.fn(),
+      strictness: 3, onStrictness: vi.fn(), sizes: [], objectCount: null,
+    };
+    render({ measure: idle });
+    await settle();
+    const start = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Measure cells")!;
+    await act(async () => { start.click(); });
+    expect(onStart).toHaveBeenCalledTimes(1);
+    render({ measure: { ...idle, state: { kind: "running", percent: 40, cancellable: true, fileName: "D1.fcs", fileIndex: 1, fileCount: 1 } } });
+    await settle();
+    expect(host.textContent).toContain("Counting objects… 40%");
+    const cancel = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Cancel")!;
+    await act(async () => { cancel.click(); });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    // Under the plot's own image colouring the count is the plot's, so the tab cannot cancel it.
+    render({ measure: { ...idle, state: { kind: "running", percent: 40, cancellable: false, fileName: "D1.fcs", fileIndex: 1, fileCount: 1 } } });
+    await settle();
+    expect([...host.querySelectorAll("button")].some((b) => b.textContent === "Cancel")).toBe(false);
+  });
+
+  it("measures every file with images: says how many, which one it is on, and what failed", async () => {
+    const onStart = vi.fn();
+    const base: ImagesMeasure = {
+      state: { kind: "idle", measured: 1, fileCount: 3 }, onStart, onCancel: vi.fn(), classBy: "cellclass", onClassBy: vi.fn(),
+      strictness: 3, onStrictness: vi.fn(), sizes: [], objectCount: null,
+    };
+    render({ measure: base });
+    await settle();
+    const row = () => host.querySelector(".gl-images-measure")!;
+    const start = [...row().querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Measure cells in all 3 files")!;
+    expect(row().textContent).toContain("1 of 3 measured");
+    await act(async () => { start.click(); });
+    expect(onStart).toHaveBeenCalledTimes(1);
+    render({ measure: { ...base, state: { kind: "running", percent: 25, cancellable: true, fileName: "D2.fcs", fileIndex: 2, fileCount: 3 } } });
+    await settle();
+    expect(row().textContent).toContain("Measuring D2.fcs (2 of 3)… 25%");
+    // One file failed: the rest are measured, the failure is named, and starting again retries it.
+    render({ measure: { ...base, state: { kind: "idle", measured: 2, fileCount: 3 }, failures: [{ fileName: "D3.fcs", message: "the waveform file is not open" }] } });
+    await settle();
+    expect(row().textContent).toContain("2 of 3 measured");
+    expect(row().textContent).toContain("D3.fcs: the waveform file is not open");
+    render({ measure: { ...base, state: { kind: "done", fileCount: 3 } } });
+    await settle();
+    expect(row().textContent).toContain("Cells measured in all 3 files");
+  });
+
+  it("counts the population's imaged cells per class, and a class chip limits the wall to it", async () => {
+    // Events 0 and 4 are single, 2 and 3 multiple, 5 unknown; 1 has no image.
+    const classIndex: Record<number, number | null> = { 0: 0, 2: 2, 3: 2, 4: 0, 5: null };
+    const classes = [{ label: "single", colour: "#1f77b4" }, { label: "single, irregular", colour: "#ff7f0e" }, { label: "multiple objects", colour: "#2ca02c" }];
+    const measure: ImagesMeasure = {
+      state: { kind: "done", fileCount: 1 }, onStart: vi.fn(), onCancel: vi.fn(), classBy: "cellclass", onClassBy: vi.fn(),
+      strictness: 3, onStrictness: vi.fn(), sizes: [], objectCount: null,
+    };
+    render({ classOf: (e) => classIndex[e] ?? null, classes, classTitle: "Single cells", measure });
+    await settle();
+    const chips = () => [...host.querySelectorAll<HTMLButtonElement>(".gl-images-class-counts button")];
+    expect(chips().map((b) => b.textContent)).toEqual(["single 2 (50.0%)", "single, irregular 0 (0.0%)", "multiple objects 2 (50.0%)"]);
+    // The row stands in for the legend.
+    expect(host.querySelector(".gl-images-legend")).toBeNull();
+    await act(async () => { chips()[2].click(); });
+    await settle();
+    expect(tileIndices()).toEqual(["2", "3"]);
+    // The counts stay those of the whole population while the wall shows one class.
+    expect(chips()[0].textContent).toBe("single 2 (50.0%)");
+    await act(async () => { chips()[2].click(); });
+    await settle();
+    expect(tileIndices()).toEqual(["0", "2", "3", "4", "5"]);
+  });
+
+  it("summarises the measured size of the one-object cells on the wall and sorts by it", async () => {
+    // Diameters per event; event 3 holds two objects and event 1 has no image, so neither counts.
+    const diameter = Float32Array.from([10, 99, 14, 50, 12, 16]);
+    const objectCount = Uint8Array.from([1, 255, 1, 2, 1, 1]);
+    const measure: ImagesMeasure = {
+      state: { kind: "done", fileCount: 1 }, onStart: vi.fn(), onCancel: vi.fn(), classBy: "none", onClassBy: vi.fn(),
+      strictness: 3, onStrictness: vi.fn(), sizes: [{ key: "FSC-A", label: "Diameter", values: diameter }], objectCount,
+    };
+    render({ measure });
+    await settle();
+    const chip = host.querySelector<HTMLButtonElement>(".gl-images-sizes button")!;
+    // Over 10, 12, 14, 16: median 13, quartiles 11.5 and 14.5.
+    expect(chip.textContent).toBe("Diameter 13.0 (11.5–14.5)");
+    expect(host.querySelector(".gl-images-sizes")!.textContent).toContain("n = 4");
+    await act(async () => { chip.click(); });
+    await settle();
+    // FSC-A here falls with the event index, so sorting by it reverses the order.
+    expect(tileIndices()).toEqual(["5", "4", "3", "2", "0"]);
+    expect(chip.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("reads the LightLoss outline's size, sets the scale from beads, and then reads in micrometres", async () => {
+    // Beads on events 0, 2, 4, 5 (one object each); event 3 holds two objects; 1 has no image.
+    const diameter = Float32Array.from([20, 0, 19, 40, 21, 22]);
+    const major = Float32Array.from([26, 0, 25, 50, 27, 28]);
+    const minor = Float32Array.from([20, 0, 19, 30, 21, 22]);
+    const objectCount = Uint8Array.from([1, 255, 1, 2, 1, 1]);
+    const onCalibrate = vi.fn();
+    const measure: ImagesMeasure = {
+      state: { kind: "done", fileCount: 1 }, onStart: vi.fn(), onCancel: vi.fn(), classBy: "none", onClassBy: vi.fn(),
+      strictness: 3, onStrictness: vi.fn(), objectCount, sizeSource: "lightloss", micronsPerPixel: null, calibration: null, onCalibrate,
+      sizes: [{ key: "FSC-A", label: "Diameter", values: diameter }, { key: "SSC-A", label: "Major axis", values: major }, { key: "FSC-A2", label: "Minor axis", values: minor }],
+    };
+    render({ measure });
+    await settle();
+    const row = () => host.querySelector(".gl-images-sizes")!;
+    expect(row().textContent).toContain("Cell size (LightLoss outline), px");
+    expect([...row().querySelectorAll("button.gl-chip")].map((b) => b.textContent)).toEqual(["Diameter 20.5 (19.8–21.3)", "Major axis 26.5 (25.8–27.3)", "Minor axis 20.5 (19.8–21.3)"]);
+    const set = [...row().querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Set scale from beads")!;
+    expect(set.disabled).toBe(true);
+    const input = row().querySelector<HTMLInputElement>('input[aria-label="Bead diameter in micrometres"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "10");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(set.disabled).toBe(false);
+    await act(async () => { set.click(); });
+    // 10 µm beads at a median of 20.5 px; they read 26.5 / 20.5 longer one way.
+    expect(onCalibrate).toHaveBeenCalledWith(10, 20.5, 26.5 / 20.5);
+    // Calibrated: the same cells in micrometres, and the scale said with where it came from.
+    render({ measure: { ...measure, micronsPerPixel: 10 / 20.5, calibration: { beadMicrons: 10, fileName: "beads.fcs", axisRatio: 26.5 / 20.5 } } });
+    await settle();
+    expect(row().textContent).toContain("Cell size (LightLoss outline), µm");
+    expect(row().querySelector("button.gl-chip")!.textContent).toBe("Diameter 10.0 (9.6–10.4)");
+    expect(row().textContent).toContain("0.488 µm per px, from 10 µm beads in beads.fcs");
+    expect(row().textContent).toContain("the beads read 1.29× longer one way than the other");
+    // A scale read back from a saved workspace says so.
+    render({ measure: { ...measure, micronsPerPixel: 0.5, calibration: null } });
+    await settle();
+    expect(row().textContent).toContain("0.500 µm per px, saved with the workspace");
+  });
+
+  it("names the SSC mask when the file was counted before the LightLoss outline, and offers no bead scale", async () => {
+    const measure: ImagesMeasure = {
+      state: { kind: "done", fileCount: 1 }, onStart: vi.fn(), onCancel: vi.fn(), classBy: "none", onClassBy: vi.fn(),
+      strictness: 3, onStrictness: vi.fn(), objectCount: Uint8Array.from([1, 255, 1, 1, 1, 1]), sizeSource: "ssc",
+      sizes: [{ key: "FSC-A", label: "Diameter", values: Float32Array.from([10, 0, 12, 14, 16, 18]) }],
+    };
+    render({ measure });
+    await settle();
+    expect(host.querySelector(".gl-images-sizes")!.textContent).toContain("Cell size (SSC mask), px");
+    expect(host.querySelector('input[aria-label="Bead diameter in micrometres"]')).toBeNull();
   });
 
   it("says so when the viewed file has no images", async () => {
@@ -449,5 +597,14 @@ describe("ImagesTab", () => {
     expect(recipe).toMatchObject({ kind: "cellpanel", sampleId: "D1", fileName: "D1.fcs", exposure: 1 });
     expect(recipe.cells).toEqual([{ event: 2, label: "Event 2 · multiple objects" }, { event: 4, label: "Event 4 · single" }]);
     expect(recipe.columns[0]).toMatchObject({ kind: "channel", slot: 2, grey: true });
+  });
+});
+
+describe("sizeSummary", () => {
+  it("reads only one-object events with a positive size", () => {
+    const values = Float32Array.from([4, 0, 8, 100, 6]);
+    const count = Uint8Array.from([1, 1, 1, 3, 1]);
+    expect(sizeSummary(values, [0, 1, 2, 3, 4], count)).toEqual({ n: 3, q1: 5, median: 6, q3: 7 });
+    expect(sizeSummary(values, [], count).n).toBe(0);
   });
 });

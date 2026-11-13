@@ -590,6 +590,8 @@ export class Sample {
   /** Kept/renamed channels (spectral raw detectors filtered out for flow). */
   readonly channels: ResolvedChannel[];
   private _spillover: DisplaySpillover | null;
+  /** The matrix the file itself carries, as it applies to this file; null when it carries none. */
+  private readonly ownSpillover: DisplaySpillover | null;
   private _spilloverOrigin: SpilloverOrigin = { kind: "fcs" };
   private _externalSource: ExternalSpillover | null = null;
 
@@ -626,7 +628,7 @@ export class Sample {
   restoreSpillover(snapshot: SpilloverSnapshot): void {
     // Compensation off before the matrix beneath it changes, as installExternalSpillover does,
     // so no compensated layer computed from the matrix being discarded survives.
-    if (this.compensationEnabled) this.setCompensation(false);
+    this.discardMatrixLayer();
     this._spillover = snapshot.spillover;
     this._spilloverOrigin = snapshot.origin;
     this._externalSource = snapshot.externalSource ?? null;
@@ -654,6 +656,7 @@ export class Sample {
       isScatterChannel,
       isQcChannel,
     );
+    this.ownSpillover = this._spillover;
     // A matrix naming a parameter the file lacks (or one the channel filter left out) is cut
     // down to the rest by extractDisplaySpillover. Dropping a channel that spills into the
     // others changes the result, so it is recorded as the external path records it, instead of
@@ -1331,7 +1334,7 @@ export class Sample {
     }
     // Compensation must be off before the layer beneath it changes, or the installed compensated
     // layer would keep values derived from the matrix being replaced.
-    if (embedded !== null && this.compensationEnabled) this.setCompensation(false);
+    this.discardMatrixLayer();
     this._spillover = display;
     this._externalSource = {
       label, channels: [...matrix.channels], matrix: matrix.matrix.map((row) => [...row]),
@@ -1341,9 +1344,23 @@ export class Sample {
       kind: "external" as const,
       label,
       droppedChannels: Object.freeze(dropped),
-      replacedEmbedded: embedded !== null,
-      maxDeviationFromEmbedded: embedded === null ? null : maxCoefficientDelta(embedded, display),
+      // Against the file's own matrix, not the one active until now, which may be an earlier
+      // external one: a second external matrix on a file with none of its own was recorded as
+      // replacing the file's.
+      replacedEmbedded: this.ownSpillover !== null,
+      maxDeviationFromEmbedded: this.ownSpillover === null ? null : maxCoefficientDelta(this.ownSpillover, display),
     });
+  }
+
+  /**
+   * Take away the layer computed from the file's or an external matrix, before that matrix is
+   * replaced. The layer can be installed without being active: an instrument-mode change away
+   * from flow and back leaves it so. Left in place then, turning compensation on afterwards
+   * re-activated it, and the file was compensated with the matrix that had been replaced.
+   */
+  private discardMatrixLayer(): void {
+    if (this.compensationEnabled) this.setCompensation(false);
+    if (this.compensatedLayer?.metadata.runtimeIdentity === "legacy-embedded-fcs") this.removeCompensatedLayer();
   }
 
   /** Toggle spillover compensation (applied to raw fluor values before transforms). */
@@ -1460,9 +1477,16 @@ export class Sample {
     this.transformCache.clear();
     this.displayCache.clear();
     this.gatingCache.clear();
+    // A gate's pinned column is keyed by the assay binding, and every embedded or external
+    // matrix shares one binding key, so a matrix replaced by another (or a derived channel
+    // given new values) left the old column in place and the gate kept its old members.
+    this.pinnedCache.clear();
     this.rangeCache.clear();
     this.logicleParamsCache.clear();
     this.biexWidthCache.clear();
+    // The scales shared across files are estimated from every file's values in a context, and
+    // this file's values, or the context it is in, have just changed.
+    this.channelScales?.participantChanged(this);
   }
 
   private freezeProfileMetadata(
@@ -1928,6 +1952,10 @@ export class Sample {
     this.fcs.columns.push(spec.values);
     // Resolution is deterministic in the channel list, so the file's keys and indices stay put.
     const resolved = resolveChannels(this.fcs);
+    // The labels given on the Panel tab are not the file's and are carried across: resolved
+    // anew, every one was lost, and a workspace reopened with a derived channel lost them all.
+    const labels = new Map(this.channels.filter((c) => c.label !== undefined).map((c) => [c.key, c.label]));
+    for (const c of resolved) if (labels.has(c.key)) c.label = labels.get(c.key);
     this.channels.length = 0;
     this.channels.push(...resolved);
     this.byName.clear();
@@ -3016,8 +3044,8 @@ export class Sample {
     // Evict columns pinned under OTHER assay bindings before adding one. Each entry is
     // nEvents x 4 bytes (8 for a Hyperlog column), and nothing else ever clears this cache --
     // a session that toggled compensation while holding several imported .wsp gates accumulated
-    // a full set of pinned columns per layer, forever. Correctness never depended on this (the
-    // binding key already prevents stale hits); it is purely the memory bound.
+    // a full set of pinned columns per layer, forever. This is the memory bound; a change of the
+    // values under one binding key is handled by invalidateAll, which clears the cache.
     for (const k of this.pinnedCache.keys()) {
       if (!k.startsWith(prefix)) this.pinnedCache.delete(k);
     }

@@ -3,7 +3,7 @@
 // image references, no hidden or empty nodes; and the PNG resolution chunk.
 
 import { describe, expect, it } from "vitest";
-import { crc32, exportId, finishExportSvg, nameCell, pngWithResolution, slugId } from "./exportSvg";
+import { crc32, eightBitPngImages, exportId, finishExportSvg, nameCell, pngBitDepth, pngWithResolution, slugId } from "./exportSvg";
 import { SCREEN_PX_PER_MM } from "../engine/layout";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -140,5 +140,47 @@ describe("pngWithResolution", () => {
   it("leaves bytes that are not a PNG alone", () => {
     const bytes = Uint8Array.from([1, 2, 3]);
     expect(pngWithResolution(bytes, 300)).toBe(bytes);
+  });
+});
+
+describe("16-bit PNG images before the PDF writer", () => {
+  // 1 × 1 RGB PNGs, 8 and 16 bits a sample (written with Python's zlib).
+  const PNG8 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC";
+  const PNG16 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABEAIAAADA54+dAAAAC0lEQVR4nGNgAAMAAAcAAbKGrPQAAAAASUVORK5CYII=";
+  const bytes = (uri: string) => Uint8Array.from(atob(uri.split(",")[1]), (c) => c.charCodeAt(0));
+
+  it("reads the bit depth from the PNG header", () => {
+    expect(pngBitDepth(bytes(PNG8))).toBe(8);
+    expect(pngBitDepth(bytes(PNG16))).toBe(16);
+    expect(pngBitDepth(Uint8Array.from([1, 2, 3]))).toBeNull();
+  });
+
+  it("writes only the 16-bit PNG images again, through either href", async () => {
+    const root = new DOMParser().parseFromString(
+      `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">` +
+        `<image id="a" href="${PNG16}"/><image id="b" xlink:href="${PNG16}"/>` +
+        `<image id="c" href="${PNG8}"/><image id="d" href="data:image/jpeg;base64,/9j/4AAQ"/></svg>`,
+      "image/svg+xml",
+    ).documentElement;
+    const seen: string[] = [];
+    const changed = await eightBitPngImages(root, async (uri) => {
+      seen.push(uri);
+      return PNG8;
+    });
+    expect(changed).toBe(2);
+    expect(seen).toEqual([PNG16, PNG16]);
+    const href = (id: string) => {
+      const image = root.querySelector(`#${id}`)!;
+      return image.getAttribute("href") ?? image.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+    };
+    expect([href("a"), href("b"), href("c")]).toEqual([PNG8, PNG8, PNG8]);
+    expect(href("d")).toBe("data:image/jpeg;base64,/9j/4AAQ");
+  });
+
+  it("leaves an image the browser cannot draw as it was", async () => {
+    const root = new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg"><image href="${PNG16}"/></svg>`, "image/svg+xml").documentElement;
+    const changed = await eightBitPngImages(root, () => Promise.reject(new Error("decode")));
+    expect(changed).toBe(0);
+    expect(root.querySelector("image")!.getAttribute("href")).toBe(PNG16);
   });
 });

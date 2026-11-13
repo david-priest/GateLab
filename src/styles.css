@@ -921,6 +921,23 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
 .gl-prop-section-data { grid-column: 2; grid-row: 1; }
 .gl-prop-section-export { grid-column: 3; grid-row: 1; }
 .gl-prop-section-appearance { grid-column: 1 / -1; grid-row: 2; }
+.gl-prop-shelves { flex-basis: 100%; min-width: 0; }
+.gl-prop-shelves > h3 { margin: 4px 0 0; font-size: var(--gl-font-size-secondary); }
+.gl-prop-pager { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: var(--gl-font-size-secondary); }
+.gl-prop-order { flex-basis: 100%; min-width: 0; font-size: var(--gl-font-size-secondary); color: var(--muted); }
+.gl-prop-order > summary { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.gl-prop-order-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.gl-prop-order-list { margin: 4px 0 2px; padding: 0 0 0 18px; display: flex; flex-direction: column; gap: 2px; }
+.gl-prop-order-list li { display: flex; align-items: center; gap: 4px; }
+.gl-prop-order-name { flex: 0 1 auto; min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.gl-prop-order-hint { flex-basis: 100%; margin: 2px 0; font-size: var(--gl-font-size-secondary); color: var(--muted); }
+.gl-prop-order .gl-prop-order-hint { margin-left: 18px; }
+.gl-meta-orders { margin: 8px 0 16px; }
+.gl-meta-orders h3 { margin: 0 0 4px; font-size: var(--gl-font-size-secondary); }
+.gl-meta-order { display: flex; align-items: flex-start; gap: 8px; }
+.gl-meta-order-name { flex: 0 0 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--gl-font-size-secondary); }
+.gl-meta-order .gl-prop-order { flex: 1 1 auto; }
+.gl-prop-order-reset { margin-left: 18px; padding: 0; border: 0; background: none; color: var(--accent, var(--text)); text-decoration: underline; font: inherit; }
 @media (max-width: 760px) {
   .gl-control-sections { grid-template-columns: 1fr; }
   .gl-prop-section-plot, .gl-prop-section-data, .gl-prop-section-export, .gl-prop-section-appearance {
@@ -2258,7 +2275,9 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
 /* Proportions tab — SVG composition chart */
 .gl-prop-chart-scroll { flex: 1; min-height: 0; overflow: auto; }
 .gl-prop-chart { display: flex; flex-direction: column; align-items: stretch; gap: 10px; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 10px; width: max-content; }
-.gl-prop-panels { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
+.gl-prop-panels { display: grid; grid-template-columns: max-content; justify-content: center; align-items: start; gap: 12px; }
+/* A Layout block that holds only the legend draws no panels; the empty grid takes no gap. */
+.gl-prop-panels:empty { display: none; }
 .gl-prop-panel { background: #fff; }
 .gl-prop-legend { display: grid; gap: 4px 12px; font-size: var(--gl-font-size-caption); color: var(--text); border-top: 1px solid #e2e8f0; padding-top: 10px; min-width: 0; }
 .gl-prop-legend-item {
@@ -2267,6 +2286,8 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
   padding: 2px 3px; text-align: left; cursor: default;
 }
 .gl-prop-legend-item:hover, .gl-prop-legend-item.highlighted { background: var(--hover); border-color: #b9d4fb; }
+/* On a Layout sheet and in a figure the legend is a key: nothing answers the pointer. */
+.gl-prop-legend-item.is-static, .gl-prop-legend-item.is-static:hover { background: transparent; border-color: transparent; cursor: default; }
 .gl-prop-legend-item[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 .gl-prop-highlight-note {
   display: flex; align-items: center; gap: 8px; margin: 0 0 8px; padding: 4px 8px; font-size: var(--gl-font-size-caption);
@@ -2418,6 +2439,13 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 }
 .gl-side-disclosure:hover .gl-side-disclosure-mark { color: var(--text); }
 .gl-side-disclosure-mark { display: inline-flex; color: var(--muted); }
+/* A <details> fold's heading (FoldSummary): the side panel's chevron in place of the browser's
+   triangle, turned by the fold's own open attribute. Popover summaries hide the marker themselves. */
+.gl-fold-summary { list-style: none; cursor: default; }
+.gl-fold-summary::-webkit-details-marker { display: none; }
+.gl-fold-mark { display: inline-flex; margin-right: 4px; vertical-align: -2px; color: var(--muted); }
+.gl-fold-summary:hover .gl-fold-mark { color: var(--text); }
+details[open] > .gl-fold-summary .gl-icon-chevron { transform: rotate(90deg); }
 .gl-side-collapsed { margin-bottom: 2px; }
 .gl-tools { display: flex; gap: 3px; }
 .gl-tool {
@@ -2634,6 +2662,17 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
   min-width: clamp(128px, 34%, 150px); max-width: 55%;
 }
 .pop-row-name { font-weight: 500; overflow-wrap: anywhere; white-space: normal; line-height: 1.3; }
+/* The population's colour after its name; the colour input lies unseen over it, so a click opens it.
+   10 px, under the name's line height, so the row keeps its height. */
+.pop-row-swatch {
+  position: relative; flex: none; width: 10px; height: 10px; margin-left: 5px;
+  border-radius: 2px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+.pop-row-swatch.is-locked { cursor: default; }
+.pop-row-swatch > input {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0;
+  opacity: 0; cursor: inherit;
+}
 /* The fold: a small triangle before the name; a leaf keeps the space so names line up. */
 .pop-row-disclosure {
   display: inline-flex; align-items: center; justify-content: center; flex: 0 0 16px; width: 16px; height: 16px;
@@ -3449,7 +3488,10 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 .gl-plotting-head span { color: #64748b; font-size: var(--gl-font-size-secondary); }
 .gl-plotting-inspector { background: white; border-right: 1px solid #d7dee8; padding: 14px; overflow: auto; }
 .gl-plotting-inspector h3 { font-size: var(--gl-font-size-body); margin: 12px 0 8px; }
-.gl-plotting-inspector .gl-control-sections, .gl-plotting-inspector .gl-control-section-body { display: flex; flex-direction: column; align-items: stretch; gap: 12px; }
+/* One column, unwrapped: with the generic body's flex-wrap and a section of definite height, the
+   Grouping controls wrapped into further columns past the panel's right edge (Facet, Replicate
+   unit, Arrange dimensions out of sight, 2026-11-12). */
+.gl-plotting-inspector .gl-control-sections, .gl-plotting-inspector .gl-control-section-body { display: flex; flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 12px; }
 .gl-plotting-inspector .gl-control-section { min-width: 0; width: auto; border: 0; padding: 0; }
 .gl-plotting-inspector .gl-control-section-body .gl-field-inline, .gl-plotting-inspector > section > .gl-field-inline { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
 .gl-plotting-inspector select { max-width: 100%; width: 100%; }
@@ -3457,9 +3499,20 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 .gl-plotting-inspector .gl-ctl-sep { display: none; }
 .gl-plotting-filelist { max-height: max(160px, 40vh); overflow: auto; margin: 6px 0 12px; }
 .gl-plotting-actions { display: flex; align-items: center; gap: 8px; color: #64748b; font-size: var(--gl-font-size-secondary); }
+.gl-plotting-charts { display: flex; flex-direction: column; gap: 6px; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid #d7dee8; }
+.gl-plotting-charts .gl-plotting-actions { flex-wrap: wrap; gap: 6px; }
+.gl-plotting-charts select, .gl-plotting-chart-name { flex: 1 1 auto; min-width: 0; }
 .gl-plotting-inspector .gl-check { display: flex; align-items: flex-start; gap: 7px; margin: 3px 0; white-space: normal; overflow-wrap: anywhere; }
 .gl-plotting-workspace .gl-prop-body { min-width: 0; min-height: 0; overflow: auto; padding: 24px; }
 .gl-plotting-workspace .gl-prop-chart-scroll { overflow: visible; }
+/* The table behind the chart, under it: about twelve rows high, scrolling, its header kept in view. */
+.gl-plotting-data { margin-top: 16px; font-size: var(--gl-font-size-secondary); }
+.gl-plotting-data-body { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.gl-plotting-data-scroll { max-height: calc(13 * 1.9em); overflow: auto; border: 1px solid #d7dee8; background: var(--bg, #fff); }
+.gl-plotting-data-table { border-collapse: collapse; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.gl-plotting-data-table th, .gl-plotting-data-table td { padding: 0 8px; height: 1.9em; text-align: left; border-bottom: 1px solid #edf1f6; }
+.gl-plotting-data-table th { position: sticky; top: 0; z-index: 1; font-weight: 600; background: #f4f6f9; border-bottom-color: #d7dee8; }
+.gl-plotting-data-table .is-number { text-align: right; }
 /* Compensation: the same shell. The head keeps the title, the profile pill and its actions; the
    left pane holds the view, the review scope, the Apply controls and the biplot display; the
    body holds the matrix, the pair inspector, the global gallery and the drawers. */
@@ -3597,15 +3650,6 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 .gl-plotting-workspace .gl-prop-chart { background: white; padding: 24px; box-shadow: 0 1px 4px #0f172a12; }
 .gl-plotting-warning { padding: 12px; color: #854d0e; background: #fffbeb; border: 1px solid #fde68a; }
 .gl-plotting-workspace:not(.section-data) .gl-plotting-files, .gl-plotting-workspace:not(.section-data) .gl-plotting-populations { display: none; }
-/* The populations pane: a third column while the Data section shows populations; one tree in it
-   picks the arm to compose within (the name) and the populations to show (the box). */
-.gl-plotting-workspace.pane-populations { grid-template-columns: 290px minmax(0, 1fr) minmax(320px, 440px); }
-.gl-plotting-inspector-right { border-right: 0; border-left: 1px solid #d7dee8; display: flex; flex-direction: column; min-height: 0; padding: 10px 12px 0; }
-.gl-plotting-inspector-right .gl-plotting-populations { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
-.gl-plotting-inspector-right .gl-plotting-populations > h3 { margin-top: 4px; }
-.gl-plotting-workspace:not(.pane-populations) .gl-plotting-inspector-right { display: none; }
-/* The tree fills the pane to its bottom edge, edge to edge, and scrolls inside itself. */
-.gl-plotting-inspector-right .gl-plotting-tree-picker { flex: 1 1 auto; min-height: 0; max-height: none; margin: 0 -12px 0; border-left: 0; border-right: 0; border-radius: 0; }
 .gl-plotting-tree-picker .gl-plotting-tree-row { display: flex; align-items: center; gap: 6px; padding: 0 6px; cursor: default; }
 .gl-plotting-tree-picker .gl-plotting-tree-row input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
 .gl-plotting-tree-picker .gl-plotting-tree-row input[type="checkbox"]:disabled { visibility: hidden; }
@@ -4088,6 +4132,13 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
 .gl-images-control { display: inline-flex; align-items: center; gap: 4px; }
 .gl-images-control select { font-size: var(--gl-font-size-caption); max-width: 220px; }
 .gl-images-control input[type="range"] { width: 90px; }
+/* The count and what it found: start, classes, the class tallies and the measured size. */
+.gl-images-measure { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 5px 8px; font-size: var(--gl-font-size-caption); color: #4a5361; border-bottom: 1px solid var(--line); }
+.gl-images-measure input[type="number"] { width: 54px; }
+.gl-images-calibrate input[type="number"] { width: 72px; }
+.gl-images-scale { white-space: normal; }
+.gl-images-class-counts, .gl-images-sizes { flex-wrap: wrap; gap: 4px; }
+.gl-images-class-counts .gl-chip, .gl-images-sizes .gl-chip { display: inline-flex; align-items: center; gap: 4px; font-variant-numeric: tabular-nums; }
 .gl-images-histogram { display: inline-flex; align-items: center; gap: 6px; }
 .gl-images-hist-channel { font-size: var(--gl-font-size-caption); max-width: 150px; }
 .gl-wall-histogram { display: block; border: 1px solid var(--line); border-radius: 3px; background: var(--bg); cursor: crosshair; touch-action: none; }
@@ -4203,6 +4254,9 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
   font-size: var(--gl-font-size-secondary);
   color: #475569;
 }
+/* figureStyle.tsx: the line a tab shows while it uses the workspace figure style, and the editor's groups. */
+.gl-figure-style-follow { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 6px 0; font-size: var(--gl-font-size-secondary); }
+.gl-figure-style-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; margin: 8px 0; padding: 6px 8px 8px; border: 1px solid var(--line); border-radius: 4px; }
 .gl-layout-item-style > summary {
   cursor: default;
   font-weight: 600;
@@ -4261,6 +4315,22 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
 .gl-layout-proportions-host .gl-prop-chart {
   border: none;
   border-radius: 0;
+}
+/* A legend line's height is set, not the font's own, so a block's frame can count it (CHART_LEGEND_LINE). */
+.gl-layout-proportions-host .gl-prop-legend { line-height: 1.4; }
+/* A block drawn at the sheet's text sizes in a frame too small for it: clipped, and marked so. */
+.gl-layout-proportions-host { position: relative; }
+.gl-layout-too-small {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 1;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 10px;
+  line-height: 1.3;
 }
 
 /* A menu at the pointer, opened by a right-click; the header menus' look, fixed on screen. */
@@ -4373,6 +4443,8 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
 .gl-strategy-pop-swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12); }
 .gl-strategy-pop-name { overflow: hidden; text-overflow: ellipsis; }
 .gl-strategy-pop-count { margin-left: auto; padding-left: 10px; color: var(--muted); font-size: var(--gl-font-size-caption); font-variant-numeric: tabular-nums; }
+.gl-pop-checklist-pick { width: 100%; border: 0; background: none; font: inherit; text-align: left; }
+.gl-plotting-parent { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; font-size: var(--gl-font-size-secondary); }
 .gl-strategy-pops-empty { padding: 8px; color: var(--muted); font-size: var(--gl-font-size-secondary); }
 /* Compact: one column in the Strategy tab's Data side tab, scrolling within itself. */
 .gl-strategy-pops.is-compact { margin: 0; }
@@ -4597,9 +4669,7 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
    header, and 11 px semibold section titles. The width is the Gating file pane's, shared across
    tabs and resizable from any of them (App's --gl-left-pane-width; Illustration keeps its own). */
 .gl-plotting-workspace { grid-template-columns: var(--gl-left-pane-width, 290px) minmax(0, 1fr); background: var(--gl-surface-canvas); }
-.gl-plotting-workspace.pane-populations { grid-template-columns: var(--gl-left-pane-width, 290px) minmax(0, 1fr) minmax(320px, 440px); }
 .gl-plotting-inspector, .gl-layout-controls { background: var(--panel); border-right: 1px solid var(--line); padding: var(--gl-pane-padding); }
-.gl-plotting-inspector-right { background: var(--panel); border-left: 1px solid var(--line); }
 .gl-layout-controls { width: var(--gl-left-pane-width, 290px); flex: 0 0 var(--gl-left-pane-width, 290px); }
 /* The side tabs: a strip across the top of the pane, the chosen tab tinted with an accent edge. */
 .gl-presentation-tabs {
@@ -4734,12 +4804,6 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
      on; its 700 px of buttons wrap here rather than run out of the centre pane. */
   .gl-pool-toolbar, .gl-pool-toolbar-right { flex-wrap: wrap; }
   .gl-pool-toolbar-right { flex: 1 1 auto; min-width: 0; }
-  /* Plotting's populations pane drops under the other two: as a third column it left the chart
-     2 px at 820 px. */
-  .gl-plotting-workspace.pane-populations { grid-template-columns: var(--gl-left-pane-width, 290px) minmax(0, 1fr); }
-  .gl-plotting-workspace.pane-populations .gl-plotting-inspector-right {
-    grid-column: 1 / -1; max-height: 40vh; border-left: 0; border-top: 1px solid var(--line);
-  }
 }
 
 /* ── Phones: every pane on its own full-width row ─────────────────────────────────
@@ -4774,7 +4838,7 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
   /* Strategy, Plotting, Statistics, Compensation and Division: the settings pane above the content
      rather than beside it, where it left the content 45 px. The settings scroll inside a capped
      pane so the plots begin on the first screen; the page scrolls past both. */
-  .gl-plotting-workspace, .gl-plotting-workspace.pane-populations {
+  .gl-plotting-workspace {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: 46px;
     grid-auto-rows: auto;
@@ -4782,7 +4846,6 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
   }
   .gl-tab-panel.gl-tab-fill.gl-plotting-workspace { overflow: visible; }
   .gl-plotting-inspector { max-height: 45vh; border-right: 0; border-bottom: 1px solid var(--line); }
-  .gl-plotting-workspace.pane-populations .gl-plotting-inspector-right { max-height: 60vh; }
   .gl-plotting-workspace .gl-prop-body { padding: 12px; }
   /* Layout: the same, its controls above the page. */
   .gl-layout-workspace { flex-direction: column; }

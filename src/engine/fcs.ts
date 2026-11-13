@@ -130,9 +130,27 @@ function headInt(buf: Uint8Array, start: number, end: number): number {
   return s ? parseInt(s, 10) : 0;
 }
 
+/**
+ * Whether $BYTEORD names little-endian data: 1,2,3,4 (or 1,2), against 4,3,2,1 (or 2,1). Spaces
+ * within the value are not part of it ("1, 2, 3, 4" was read as big-endian, and every value of the
+ * file came out near zero). An order that is neither, such as 3,4,1,2, which FCS 3.0 allowed, is
+ * refused: read as big-endian it gave values that were not the file's.
+ */
+function byteOrderIsLittleEndian(value: string | undefined): boolean {
+  const text = (value ?? "").replace(/\s/g, "");
+  // $BYTEORD is required (FCS 3.1 §3.2.18). Taken as little-endian where it was absent, a
+  // big-endian file opened with values that were not its own, and no message.
+  if (!text) throw new Error("The FCS file has no $BYTEORD, so the byte order of its data cannot be told.");
+  const order = (text.includes(",") ? text.split(",") : text.split("")).map(Number);
+  if (order.length > 0 && order.every((n, i) => n === i + 1)) return true;
+  if (order.length > 0 && order.every((n, i) => n === order.length - i)) return false;
+  throw new Error(`Unsupported $BYTEORD=${value}: the byte order is 1,2,3,4 (little-endian) or 4,3,2,1 (big-endian).`);
+}
+
 /** Split the TEXT segment into a keyword map. FCS escapes a literal delimiter by
- *  doubling it. Keys are stored upper-cased ($-prefixed for standard keywords). */
-function parseTextSegment(text: string): Record<string, string> {
+ *  doubling it. Keys are stored upper-cased ($-prefixed for standard keywords).
+ *  With `emptyValues`, a doubled delimiter is instead a value left empty (see readKeywords). */
+function parseTextSegment(text: string, emptyValues = false): Record<string, string> {
   const delim = text[0];
   const body = text.slice(1);
   // Split on single delimiter, but a doubled delimiter is a literal delimiter char.
@@ -140,7 +158,7 @@ function parseTextSegment(text: string): Record<string, string> {
   let cur = "";
   for (let i = 0; i < body.length; i++) {
     if (body[i] === delim) {
-      if (body[i + 1] === delim) {
+      if (body[i + 1] === delim && !emptyValues) {
         cur += delim;
         i++;
       } else {
@@ -158,6 +176,28 @@ function parseTextSegment(text: string): Record<string, string> {
     kw[tokens[i].trim().toUpperCase()] = tokens[i + 1];
   }
   return kw;
+}
+
+/**
+ * The primary TEXT segment's keywords. FCS 3 forbids an empty value, and a doubled delimiter is a
+ * delimiter within a value. Some writers leave a value empty all the same
+ * ("/$P1S//$P2N/FL2-A/"), and read by the rule the next keyword became part of this one's name
+ * and was lost. Where the rule's reading does not name the file's parameters and the other does,
+ * the other is the file's.
+ */
+function parsePrimaryText(text: string): Record<string, string> {
+  const kw = parseTextSegment(text);
+  if (namesItsParameters(kw)) return kw;
+  const withEmptyValues = parseTextSegment(text, true);
+  return namesItsParameters(withEmptyValues) ? withEmptyValues : kw;
+}
+
+/** Whether the keywords name every parameter $PAR counts: the least a TEXT segment read rightly holds. */
+function namesItsParameters(kw: Record<string, string>): boolean {
+  const par = parseInt(kw["$PAR"] ?? "", 10);
+  if (!Number.isFinite(par) || par < 0) return false;
+  for (let p = 1; p <= par; p++) if (!(`$P${p}N` in kw)) return false;
+  return true;
 }
 
 /**
@@ -296,7 +336,7 @@ export function readFcsKeywords(buffer: ArrayBuffer): Record<string, string> | n
   if (start <= 0 || end > bytes.length || start >= end) return null;
   // Decoded as parseFcs decodes TEXT (UTF-8, Latin-1 where the bytes are not UTF-8), so a
   // keyword read here compares equal to the same keyword of the loaded file.
-  return parseTextSegment(decodeText(bytes, start, end));
+  return parsePrimaryText(decodeText(bytes, start, end));
 }
 
 /**
@@ -320,6 +360,8 @@ export async function readFcsFileKeywords(file: Blob): Promise<Record<string, st
 
 /** HEADER fields of one data set, as absolute byte offsets into the file. */
 interface DataSetHeader {
+  /** Where the data set's HEADER starts; the offsets its keywords give are relative to it. */
+  base: number;
   version: string;
   textStart: number;
   textEnd: number;
@@ -357,6 +399,7 @@ function readHeader(bytes: Uint8Array, base: number): DataSetHeader {
     );
   }
   return {
+    base,
     version,
     textStart: base + textStart,
     textEnd: base + textEnd,
@@ -366,7 +409,22 @@ function readHeader(bytes: Uint8Array, base: number): DataSetHeader {
 }
 
 function readKeywords(bytes: Uint8Array, header: DataSetHeader): Record<string, string> {
-  return parseTextSegment(decodeText(bytes, header.textStart, header.textEnd + 1));
+  const primary = decodeText(bytes, header.textStart, header.textEnd + 1);
+  const kw = parsePrimaryText(primary);
+  // FCS 3.x lets a writer continue TEXT in a supplemental segment ($BEGINSTEXT, $ENDSTEXT), where
+  // a keyword that did not fit the primary one goes: a $SPILLOVER there was not read at all. It is
+  // read when it lies outside the primary segment, inside the buffer, and opens with the primary
+  // segment's delimiter; a keyword the primary segment gives keeps the primary value.
+  const begin = header.base + parseInt(kw["$BEGINSTEXT"] ?? "", 10);
+  const end = header.base + parseInt(kw["$ENDSTEXT"] ?? "", 10);
+  const outsidePrimary = begin > header.textEnd || end < header.textStart;
+  if (begin > header.base && end > begin && end < bytes.length && outsidePrimary) {
+    const supplemental = decodeText(bytes, begin, end + 1);
+    if (supplemental[0] === primary[0]) {
+      for (const [key, value] of Object.entries(parseTextSegment(supplemental))) if (!(key in kw)) kw[key] = value;
+    }
+  }
+  return kw;
 }
 
 function dataSetLabel(kw: Record<string, string>): string | null {
@@ -545,7 +603,8 @@ function parseDataSet(buffer: ArrayBuffer, base: number): FcsFile {
 
   const get = (k: string) => kw[k.toUpperCase()];
   const par = parseInt(get("$PAR") || "0", 10);
-  const tot = parseInt(get("$TOT") || "0", 10);
+  const declaredTot = (get("$TOT") ?? "").trim();
+  let tot = parseInt(declaredTot || "0", 10);
   const datatype = (get("$DATATYPE") || "F").trim().toUpperCase(); // F=float32, D=float64, I=int, A=ASCII
   if (!["F", "D", "I", "A"].includes(datatype)) {
     throw new Error(`Unsupported $DATATYPE=${datatype}: FCS data are I, F, D or A.`);
@@ -556,14 +615,18 @@ function parseDataSet(buffer: ArrayBuffer, base: number): FcsFile {
     // produce plausible-looking nonsense.
     throw new Error(`Unsupported $MODE=${mode}: only list-mode (L) data can be gated.`);
   }
-  const byteord = (get("$BYTEORD") || "1,2,3,4").trim();
-  const littleEndian = byteord.startsWith("1,2") || byteord === "1234";
+  const littleEndian = byteOrderIsLittleEndian(get("$BYTEORD"));
 
   // Large files: header offsets can be 0 → real offsets live in $BEGINDATA/$ENDDATA.
   let dataStart = header.dataStart;
   let dataEnd = header.dataEnd;
   if (dataStart === 0 && get("$BEGINDATA")) dataStart = parseInt(get("$BEGINDATA")!, 10);
   if (dataEnd === 0 && get("$ENDDATA")) dataEnd = parseInt(get("$ENDDATA")!, 10);
+  // A file that places its DATA nowhere (HEADER offsets of 0 and no $BEGINDATA) was read from
+  // its first byte, and the HEADER's own characters became its events.
+  if (!(dataStart >= 58) && (!declaredTot || tot > 0)) {
+    throw new Error("The FCS file does not say where its DATA segment begins: the HEADER gives 0 and TEXT has no $BEGINDATA.");
+  }
   dataStart += base;
   dataEnd += base;
 
@@ -605,6 +668,17 @@ function parseDataSet(buffer: ArrayBuffer, base: number): FcsFile {
   }
   const nCh = channels.length;
 
+  // $TOT is optional in FCS 2.0. Without it the events are what the DATA segment holds; read as
+  // 0, a file of three events opened empty with no message.
+  if (!declaredTot) {
+    if (datatype === "A") {
+      throw new Error("The FCS file has no $TOT, and the number of events in $DATATYPE=A data cannot be told without it.");
+    }
+    const rowBytes = channels.reduce((sum, c, idx) => sum + (kinds[idx] === "F" ? 4 : kinds[idx] === "D" ? 8 : Math.ceil(c.bits / 8)), 0);
+    const dataBytes = Math.min(dataEnd, bytes.length - 1) - dataStart + 1;
+    tot = rowBytes > 0 && dataBytes > 0 ? Math.floor(dataBytes / rowBytes) : 0;
+  }
+
   // ── DATA segment (list mode, event-major: nEvents × nChannels) ────────────
   const columns: NumericColumn[] = channels.map((channel, c) => {
     const kind = kinds[c];
@@ -623,6 +697,18 @@ function parseDataSet(buffer: ArrayBuffer, base: number): FcsFile {
   } else {
     const widths = channels.map((c, idx) => {
       const kind = kinds[idx];
+      // FCS 3.1 fixes $PnB at 32 for F and 64 for D. A file that declares otherwise contradicts
+      // itself, and reading it at either width would split or merge its values.
+      if (kind === "F" || kind === "D") {
+        const declared = (get(`$P${c.index + 1}B`) ?? "").trim();
+        const expected = kind === "F" ? 32 : 64;
+        if (declared && Number(declared) !== expected) {
+          throw new Error(
+            `$P${c.index + 1}B=${declared} contradicts its data type ${kind} ` +
+              `(${kind === "F" ? "32-bit float" : "64-bit double"}), which has $PnB ${expected}.`,
+          );
+        }
+      }
       if (kind === "F") return 4;
       if (kind === "D") return 8;
       // Integer ($DATATYPE=I) — common for CyTOF. Per-channel bit width from $PnB.
@@ -644,6 +730,17 @@ function parseDataSet(buffer: ArrayBuffer, base: number): FcsFile {
         `The FCS DATA segment is incomplete: ${tot.toLocaleString("en-US")} events of ${nCh} parameters ` +
           `need ${needed.toLocaleString("en-US")} bytes from byte ${dataStart - base}, but the file ` +
           `holds ${(bytes.length - base).toLocaleString("en-US")}.`,
+      );
+    }
+    // The DATA segment ends at $ENDDATA. A $TOT of more events than it holds was read on past
+    // its end, into the CRC or the next data set's HEADER. One byte is allowed for the writers
+    // that give $ENDDATA one short of, or one past, the last byte.
+    const segmentBytes = dataEnd - dataStart + 1;
+    if (declaredTot && dataEnd > dataStart && needed > segmentBytes + 1) {
+      throw new Error(
+        `The FCS file declares $TOT=${tot.toLocaleString("en-US")} events of ${nCh} parameters, which need ` +
+          `${needed.toLocaleString("en-US")} bytes, but its DATA segment (bytes ${dataStart - base}-${dataEnd - base}) holds ` +
+          `${segmentBytes.toLocaleString("en-US")}.`,
       );
     }
     if (kinds.every((k) => k === "F")) {

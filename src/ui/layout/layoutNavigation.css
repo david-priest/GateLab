@@ -1,0 +1,18 @@
+/* Space held over the Layout page: the hand, open while it waits and closed while it drags. */
+.gl-layout-canvas-scroll[data-pan="ready"],
+.gl-layout-canvas-scroll[data-pan="ready"] * { cursor: grab !important; }
+.gl-layout-canvas-scroll[data-pan="active"],
+.gl-layout-canvas-scroll[data-pan="active"] * { cursor: grabbing !important; user-select: none; }
+
+/* A sheet's tab dragged over another: the side it would land on. */
+.gl-layout-sheet-tab[data-drop="before"] { box-shadow: inset 2px 0 0 #3b82f6; }
+.gl-layout-sheet-tab[data-drop="after"] { box-shadow: inset -2px 0 0 #3b82f6; }
+
+/* The Items tab's list of keys. */
+.gl-layout-keys { margin: 6px 0; font-size: var(--gl-font-size-secondary); color: #526071; }
+.gl-layout-keys h4 { margin: 8px 0 2px; font-size: inherit; font-weight: 600; color: #1e293b; }
+.gl-layout-keys dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 0; }
+.gl-layout-keys .gl-layout-key { display: contents; }
+.gl-layout-keys dt { white-space: nowrap; }
+.gl-layout-keys dd { margin: 0; }
+.gl-layout-keys kbd { font: inherit; font-family: var(--gl-font-mono, ui-monospace, monospace); font-size: 0.95em; }

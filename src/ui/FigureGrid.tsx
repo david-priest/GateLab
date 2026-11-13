@@ -9,7 +9,36 @@ import type { IllustrationConfig } from "../engine/workspace";
 import { drawFigurePlot } from "../plots/figurePlot";
 import { buildHeatmapMatrix, splitHeatmapPage } from "../engine/figureHeatmap";
 import { FigureHeatmap } from "./FigureHeatmap";
+import { chartLeftMargin, FigureChartPanel, figureStatisticAxes, summaryChartPlacement, type FigureSummaryFrame } from "./FigureChartPanel";
+import type { FigureChartData } from "./figureChartData";
 import { attachGridPan } from "./gridPan";
+
+/**
+ * An overlaid panel leads with the first population that has events, since a plot draws nothing
+ * when its main trace is empty; the populations before it are empty overlays. A ridgeline draws
+ * each trace on its own row and an empty one as an empty row, so the ridges go back to the
+ * legend's order: the empty overlays that match the legend's first entries, then the lead.
+ */
+function ridgesInLegendOrder(data: Record<string, unknown>): Record<string, unknown> {
+  const legend = (data.legend_entries ?? []) as { name: string; color: string }[];
+  const overlays = (data.overlay_traces ?? []) as { x?: ArrayLike<number>; y?: unknown; name?: string; color?: string }[];
+  if (!(data.x as ArrayLike<number> | undefined)?.length) return {};
+  let lead = 0;
+  while (
+    lead < overlays.length &&
+    !overlays[lead].x?.length &&
+    overlays[lead].name === legend[lead]?.name &&
+    overlays[lead].color === legend[lead]?.color
+  )
+    lead++;
+  if (!lead) return {};
+  const ridges = [
+    ...overlays.slice(0, lead),
+    { x: data.x, y: data.y, name: legend[lead]?.name, color: data.pop_color },
+    ...overlays.slice(lead),
+  ];
+  return { x: ridges[0].x, y: ridges[0].y, pop_color: ridges[0].color, overlay_traces: ridges.slice(1) };
+}
 
 export function styledFigurePlot(
   data: Record<string, unknown>,
@@ -20,6 +49,7 @@ export function styledFigurePlot(
   const fontScale = config.scaleFontsWithPlot ? size / 280 : 1;
   return {
     ...data,
+    ...(config.histLayout === "ridgeline" && !data.y_label && !("figure_summary" in data) ? ridgesInLegendOrder(data) : {}),
     plot_size: size,
     display_mode: ((data.overlay_traces ?? []) as unknown[]).length
       ? "scatter"
@@ -192,13 +222,33 @@ const FigurePlot = memo(function FigurePlot({
         </div>
       )}
       {data.note && (
-        <div className="illustration-row-header gl-figure-tailored">
+        // As wide as the panel, wrapping: the note never sets the column's width.
+        <div className="illustration-row-header gl-figure-tailored" style={{ width: 0, minWidth: "100%" }}>
           {data.note}
         </div>
       )}
     </div>
   );
 });
+
+/** The space between the grid's cells: the table's border-spacing in figure.css. */
+export const FIGURE_GRID_SPACING = 12;
+
+/**
+ * A summary panel's frame over the cells it spans, at the grid's panel size: spanning columns, the
+ * columns' pitch, so its places sit under their columns' centres. Spanning rows only (the files
+ * down the rows), it is one panel high, at the top of its column: a chart stretched down every
+ * row could not be read.
+ */
+export function summaryFrame(panel: FigurePanel, size: number): FigureSummaryFrame | undefined {
+  if (!panel.span) return undefined;
+  const across = (n: number) => n * size + (n - 1) * FIGURE_GRID_SPACING;
+  return {
+    width: across(panel.span.columns),
+    height: panel.span.columns === 1 ? size : across(panel.span.rows),
+    ...(panel.span.rows === 1 ? { columns: { count: panel.span.columns, pitch: size + FIGURE_GRID_SPACING } } : {}),
+  };
+}
 
 function prefix(group: FigureValue[], depth: number) {
   return JSON.stringify(group.slice(0, depth + 1));
@@ -360,6 +410,22 @@ export function FigureGrid({
   const { table } = splitHeatmapPage(page);
   const matrix = buildHeatmapMatrix(page, panels, config);
   const grid = table ?? page;
+  // A chart plot names its populations in their colours once, under its first drawn panel.
+  const chartLegends = new Set<string>();
+  for (const plotId of new Set(grid.panels.filter((p) => p.plot.type === "chart").map((p) => p.plot.id))) {
+    const first = grid.panels.find((p) => p.plot.id === plotId && panels[p.key]?.config);
+    if (first) chartLegends.add(first.key);
+  }
+  // A statistic plot's panels share one value axis while the figure's axes are shared.
+  const statisticAxes = figureStatisticAxes(grid.panels, panels, config);
+  // A summary spanning columns from the first draws its value axis left of that column: the row
+  // headings (or the grid's edge) leave it the room.
+  const hang = Math.max(0, ...grid.panels.map((p) => {
+    const chart = panels[p.key]?.config?.chart as FigureChartData | undefined;
+    const columns = p.column === 0 && p.plot.chart ? summaryFrame(p, size)?.columns : undefined;
+    return columns && chart ? summaryChartPlacement({ left: chartLeftMargin(p.plot.chart!, chart, config, size, statisticAxes.get(p.key)), right: 0 }, size, columns).hang : 0;
+  }));
+  const hangRoom = Math.max(0, Math.ceil(hang) - FIGURE_GRID_SPACING);
   const rowDepth = grid.rows[0]?.length ?? 0;
   const colDepth = Math.max(1, grid.columns[0]?.length ?? 0);
   return (
@@ -371,6 +437,7 @@ export function FigureGrid({
       style={
         {
           "--figure-heading-size": `${config.fontTitle * (config.scaleFontsWithPlot ? size / 280 : 1)}px`,
+          ...(hangRoom && rowDepth === 0 ? { paddingLeft: hangRoom } : {}),
         } as React.CSSProperties
       }
     >
@@ -432,6 +499,7 @@ export function FigureGrid({
                   rowSpan={span}
                   scope="rowgroup"
                   className="illustration-row-header gl-figure-row-heading"
+                  style={hangRoom && depth === rowDepth - 1 ? { paddingRight: hangRoom } : undefined}
                 >
                   {value.label}
                 </th>
@@ -439,7 +507,10 @@ export function FigureGrid({
             })}
             {grid.columns.map((_, column) => {
               const panel = grid.panels[row * grid.columns.length + column];
+              // A cell a summary panel covers is part of that panel's cell.
+              if (panel.coveredBy) return null;
               const data = panels[panel.key];
+              const frame = summaryFrame(panel, size);
               const panelSize =
                 data?.config && "figure_summary" in data.config
                   ? Math.max(50, config.heatmapCellSize ?? 80)
@@ -447,6 +518,7 @@ export function FigureGrid({
               return (
                 <td
                   key={column}
+                  {...(panel.span ? { colSpan: panel.span.columns, rowSpan: panel.span.rows } : {})}
                   data-figure-panel={panel.key}
                   className={selectedPanels?.has(panel.key) ? "is-selected" : undefined}
                   aria-selected={selectedPanels ? selectedPanels.has(panel.key) : undefined}
@@ -454,7 +526,18 @@ export function FigureGrid({
                   onClick={onPanelClick ? (event) => clickPanel(panel, event) : undefined}
                   onContextMenu={onPanelContextMenu ? (event) => onPanelContextMenu(panel, event) : undefined}
                 >
-                  {data ? (
+                  {data?.config && panel.plot.type === "chart" && panel.plot.chart ? (
+                    <FigureChartPanel
+                      chart={panel.plot.chart}
+                      data={data}
+                      config={config}
+                      size={size}
+                      containerId={`${id}-chart-${row}-${column}`}
+                      showLegend={chartLegends.has(panel.key)}
+                      valueAxis={statisticAxes.get(panel.key)}
+                      frame={frame}
+                    />
+                  ) : data ? (
                     <FigurePlot
                       data={data}
                       config={config}

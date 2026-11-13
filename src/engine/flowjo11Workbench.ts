@@ -164,8 +164,12 @@ function spilloverMatrices(analysis: Json): Map<string, Node> {
   return out;
 }
 
+// XML 1.0 has no form for a control character other than tab, line feed and carriage return. An
+// FCS keyword value or a population name holding one made the document built here unparsable,
+// and the workbench, GateLab's own included, was refused as "not valid XML".
 const esc = (s: string): string =>
-  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 const num = (v: number): string => String(v);
 

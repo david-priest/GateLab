@@ -38,10 +38,18 @@ function escapeGateToken(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/,/g, "\\,");
 }
 
+// The suffixes the reader takes off a gate token: a quadrant ("CD4 [Q2]") and a gate id ("CD4 {g0}").
+const QUADRANT_SUFFIX = /\s+\[Q([1-4])\]$/i;
+const GATE_ID_SUFFIX = /\s+\{([^{}]+)\}$/;
+
 function gateNameCounts(gates: Record<string, Gate>): Map<string, number> {
   const counts = new Map<string, number>();
   for (const gate of Object.values(gates)) {
-    counts.set(gate.name, (counts.get(gate.name) ?? 0) + 1);
+    // By the name as a cell holds it. A cell is read back trimmed, so "CD4" and "CD4 " are one
+    // name in the table: counted apart, neither was written with its id, and the population on
+    // the second came back on the first.
+    const name = gate.name.trim();
+    counts.set(name, (counts.get(name) ?? 0) + 1);
   }
   return counts;
 }
@@ -58,7 +66,11 @@ function serializeGateRef(
       `Population table export supports positive AND definitions only; gate "${gate.name}" is negated.`,
     );
   }
-  const disambiguated = (duplicateNames.get(gate.name) ?? 0) > 1
+  // The id form is written when the name alone would not read back as this gate: another gate has
+  // the same name, or the name ends in what the reader takes as a quadrant or gate id suffix.
+  const trimmedName = gate.name.trim();
+  const disambiguated = (duplicateNames.get(trimmedName) ?? 0) > 1 ||
+    QUADRANT_SUFFIX.test(trimmedName) || GATE_ID_SUFFIX.test(trimmedName)
     ? `${gate.name} {${gate.gate_id}}`
     : gate.name;
   if (gate.gate_type === "quadrant") {
@@ -201,20 +213,20 @@ function resolveGateToken(
 ): GateRef {
   let label = token;
   let quadrant: number | undefined;
-  const quadrantMatch = label.match(/\s+\[Q([1-4])\]$/i);
+  const quadrantMatch = label.match(QUADRANT_SUFFIX);
   if (quadrantMatch) {
     quadrant = Number(quadrantMatch[1]);
     label = label.slice(0, quadrantMatch.index).trim();
   }
 
   let gate: Gate | undefined;
-  const idMatch = label.match(/\s+\{([^{}]+)\}$/);
+  const idMatch = label.match(GATE_ID_SUFFIX);
   if (idMatch) {
     const gateId = idMatch[1].trim();
     gate = gates[gateId];
     if (!gate) throw new Error(`Unknown gate id "${gateId}" in "${token}".`);
     const writtenName = label.slice(0, idMatch.index).trim();
-    if (writtenName && writtenName !== gate.name) {
+    if (writtenName && writtenName !== gate.name.trim()) {
       throw new Error(
         `Gate id "${gateId}" is named "${gate.name}", not "${writtenName}". Download a fresh template.`,
       );
@@ -325,9 +337,9 @@ export function parsePopulationEditTable(
 
   const gatesByName = new Map<string, Gate[]>();
   for (const gate of Object.values(state.gates)) {
-    const matches = gatesByName.get(gate.name) ?? [];
+    const matches = gatesByName.get(gate.name.trim()) ?? [];
     matches.push(gate);
-    gatesByName.set(gate.name, matches);
+    gatesByName.set(gate.name.trim(), matches);
   }
 
   const updates: PopulationBulkEditUpdate[] = [];
@@ -348,12 +360,15 @@ export function parsePopulationEditTable(
     seenPopulations.add(popId);
 
     const currentName = record[currentNameIndex]?.trim() ?? "";
-    if (currentName && currentName !== population.name) {
+    // A cell is read back trimmed, so a name is compared as a cell holds it; a new name equal to
+    // the trimmed current name is no rename.
+    if (currentName && currentName !== population.name.trim()) {
       throw new Error(
         `Row ${rowIndex + 1}: population "${popId}" is now named "${population.name}", not "${currentName}". Download a fresh template.`,
       );
     }
-    const name = record[newNameIndex]?.trim() || population.name;
+    const newName = record[newNameIndex]?.trim() ?? "";
+    const name = newName && newName !== population.name.trim() ? newName : population.name;
     const tokens = splitGateNames(record[gateNamesIndex] ?? "");
     if (popId === state.rootPopulationId && tokens.length > 0) {
       throw new Error(`Row ${rowIndex + 1}: the root population cannot contain gate definitions.`);

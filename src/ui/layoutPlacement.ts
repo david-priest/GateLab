@@ -108,11 +108,12 @@ export function placeBlockOnPage(sheet: LayoutSheet, block: readonly LayoutItem[
 
 /**
  * A plot's own style, less what the sheet would give it anyway: a field the sheet already sets
- * alike stays the sheet's, so the sheet's Style still reaches it.
+ * alike stays the sheet's, so the sheet's Style still reaches it. `figure` is the workspace's
+ * figure style, which a sheet that follows it takes.
  */
-export function styleBeyondSheet(sheet: LayoutSheet, style: Partial<LayoutPlotStyle> | undefined): Partial<LayoutPlotStyle> | undefined {
+export function styleBeyondSheet(sheet: LayoutSheet, style: Partial<LayoutPlotStyle> | undefined, figure?: Partial<LayoutPlotStyle> | null): Partial<LayoutPlotStyle> | undefined {
   if (!style) return undefined;
-  const sheetStyle = effectiveLayoutStyle(sheet);
+  const sheetStyle = effectiveLayoutStyle(sheet, null, figure);
   const own = Object.fromEntries(Object.entries(style).filter(([key, value]) => value !== undefined && sheetStyle[key as keyof LayoutPlotStyle] !== value)) as Partial<LayoutPlotStyle>;
   return Object.keys(own).length ? own : undefined;
 }
