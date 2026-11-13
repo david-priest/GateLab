@@ -154,8 +154,10 @@ function coveringRange(column: ArrayLike<number>, declared: number | undefined):
     if (v > max && Number.isFinite(v)) max = v;
   }
   const base = declared !== undefined && Number.isFinite(declared) && declared > 0 ? Math.ceil(declared) : 0;
-  if (max === -Infinity) return base || 1;
-  return base >= max ? base : Math.max(1, Math.ceil(max) + 1);
+  // $PnR is a positive count of values. With no declared range, a column whose values were all
+  // at or below 0 was given $PnR 0.
+  if (max === -Infinity || base >= max) return base || 1;
+  return Math.max(1, Math.ceil(max) + 1);
 }
 
 /**
@@ -309,10 +311,21 @@ function exportSource(sample: Sample, indices: readonly number[], assay: FcsExpo
   const kw = sample.fcs.keywords;
   const byParam = new Map<number, [string, string][]>();
   const fileKeywords: [string, string][] = [];
+  // Source parameter number → its number in the export.
+  const exportedNumber = new Map(indices.map((idx, r) => [sample.channels[idx].columnIndex + 1, r + 1] as const));
   for (const [key, value] of Object.entries(kw)) {
     const upper = key.toUpperCase();
     if (STRUCTURAL.has(upper) || SPILLOVER_KEYS.has(upper) || PEAK_KEYWORD.test(upper)) continue;
     if (upper === "$UNICODE" || upper === "$ORIGINALITY" || upper === "GATELAB_ASSAY" || upper === "GATELAB_SPILLOVER") continue;
+    // FCS 2.0 $DFCiTOj, the compensation from parameter i into parameter j, names both by number:
+    // written under the export's numbers when both are exported, and left out otherwise.
+    const dfc = /^(\$?)DFC(\d+)TO(\d+)$/i.exec(key);
+    if (dfc) {
+      const i = exportedNumber.get(parseInt(dfc[2], 10));
+      const j = exportedNumber.get(parseInt(dfc[3], 10));
+      if (i !== undefined && j !== undefined) fileKeywords.push([`${dfc[1]}DFC${i}TO${j}`, value]);
+      continue;
+    }
     const param = parameterKeyword(key);
     if (param) {
       const list = byParam.get(param.n) ?? [];

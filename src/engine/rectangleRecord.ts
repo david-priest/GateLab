@@ -168,6 +168,9 @@ export function parseTransformSpec(value: unknown): TransformSpec | null {
         kind: "biex", maxValue: v.maxValue as number, pos: v.pos as number, neg: v.neg as number,
         widthBasis: v.widthBasis as number, channelRange: v.channelRange as number,
         ...(table !== undefined ? { tableChannels: table as number } : {}),
+        // cytolib's natural spline in place of FlowJo's table (biex.ts). Dropped here, a gate
+        // written on the spline came back on the table, up to 2.1e-5 display units away.
+        ...(v.spline === true ? { spline: true } : {}),
       };
     }
     case "flowjoChannels": return parseFlowJoGridSpec(v);

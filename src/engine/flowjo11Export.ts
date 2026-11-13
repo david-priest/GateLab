@@ -52,6 +52,7 @@ import { columnsForGate, getGateMask } from "./gates";
 import { strategyStructureKey } from "./tailoredImport";
 import { isScatterChannel } from "./transforms";
 import { FLOWJO11_CURLY_QUAD_CURL } from "./flowjo11Workbench";
+import { refuseCompensationProfile } from "./flowjoExport";
 
 /** One loaded file and the tree it is gated under. */
 export interface FlowJo11ExportSample {
@@ -943,6 +944,7 @@ export function exportFlowJo11Workbench(opts: FlowJo11ExportOpts): FlowJo11Expor
   if (!opts.fcsFolder.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(opts.fcsFolder)) {
     throw new Error("A FlowJo 11 workbench needs the folder the FCS files are in as an absolute path.");
   }
+  refuseCompensationProfile(samples, "FlowJo 11 workbench");
   const lead = samples[0];
   const leadKey = strategyStructureKey(lead);
   const others = samples.filter((s) => strategyStructureKey(s) !== leadKey).map((s) => s.fileName);

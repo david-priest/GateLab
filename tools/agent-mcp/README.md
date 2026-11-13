@@ -38,7 +38,7 @@ Only this computer can reach the relay (it listens on 127.0.0.1), only a tab wit
 
 ## What the agent can and cannot do
 
-Read: the files, the channels as drawn, the tree with counts per sample and pooled, every gate's coordinates, distributions and marker medians, a PNG of the plot or of the Strategy tab's grid. Show: a population on chosen channels on the Gating plot, or the Strategy tab opened on chosen populations (one population's path, or several in one grid) for the user to inspect, export or print; neither changes the gating. Change: create a rectangle, polygon, range or quadrant, edit or rename or delete a gate, rename a population, undo, redo — each with a rationale that is shown on the gate's badge in the tab. Open: FCS files on the agent's computer, as Add files does, and a Gating-ML file, FlowJo workspace or FACSChorus experiment, as Import gating does; the import's own dialog asks the user whenever the app would, and the agent's call waits for their answer (section 6a of `AGENT_SPEC.md`). It saves only a copy the user confirms in the tab (`gatelab_save`): a dialog names the copy, the path and the agent, and nothing is written unless the user presses Save. It never writes the user's own workspace file and cannot write to an SCE. `gatelab_export` writes the current gating and memberships to a file for another process (an R session) to read. A whole strategy at once is a strategy proposal, which the agent reads on a copy of the gating; a host such as GateLabR can send the same kind of proposal, which the user reviews and applies in the tab, and every gate records which source it came from (section 16 of `AGENT_SPEC.md`).
+Read: the files, the channels as drawn, the tree with counts per sample and pooled, every gate's coordinates, distributions and marker medians, a PNG of the plot or of the Strategy tab's grid. Show: a population on chosen channels on the Gating plot, or the Strategy tab opened on chosen populations (one population's path, or several in one grid) with the tab's layout controls (Tree or Wrapped, columns, arrows and their width and anchor) for the user to inspect, export or print; neither changes the gating. Write: the Strategy tab's grid as the SVG file its own SVG export writes, to a path the agent names (`gatelab_render` with `format: "svg"`). Change: create a rectangle, polygon, range or quadrant, edit or rename or delete a gate, rename a population, undo, redo — each with a rationale that is shown on the gate's badge in the tab. Open: FCS files on the agent's computer, as Add files does, and a Gating-ML file, FlowJo workspace or FACSChorus experiment, as Import gating does; the import's own dialog asks the user whenever the app would, and the agent's call waits for their answer (section 6a of `AGENT_SPEC.md`). It saves only a copy the user confirms in the tab (`gatelab_save`): a dialog names the copy, the path and the agent, and nothing is written unless the user presses Save. It never writes the user's own workspace file and cannot write to an SCE. `gatelab_export` writes the current gating and memberships to a file for another process (an R session) to read. A whole strategy at once is a strategy proposal, which the agent reads on a copy of the gating; a host such as GateLabR can send the same kind of proposal, which the user reviews and applies in the tab, and every gate records which source it came from (section 16 of `AGENT_SPEC.md`).
 
 ## Files
 
@@ -48,6 +48,18 @@ Read: the files, the channels as drawn, the tree with counts per sample and pool
 - `tools.mjs` — the tools and their descriptions; keep them in step with `src/agent/commands.ts` and `src/agent/protocol.ts`.
 - `AGENT_SPEC.md` — the specification `gatelab_guide` serves.
 - `relay.test.mjs` — the relay with a stand-in tab, and the MCP framing.
+
+## A publication strategy figure, from the agent
+
+```text
+gatelab_describe                                   → the population ids
+gatelab_view   {strategy: {populationIds: [P1, P2, P3], mode: "multi", layout: "flow", columns: 4,
+                           showArrows: true, arrowWidth: 1.5, arrowAnchor: "label"}}
+gatelab_render                                     → a PNG to check the grid
+gatelab_render {format: "svg", path: "/absolute/path/strategy.svg", dpi: 300}
+```
+
+`layout: "flow"` is the tab's Wrapped layout. The SVG is the file the Strategy tab's Export ▸ SVG writes: vector axes, gates, labels and arrows over each panel's events drawn at `dpi`. Opening the files and importing the gating (Gating-ML, FlowJo, FACSChorus) stay as they are: in the tab, or through `gatelab_open_files` and `gatelab_import_gating`.
 
 ## Context, feedback and audit
 

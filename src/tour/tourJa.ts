@@ -139,7 +139,7 @@ export const TOUR_JA: Readonly<Record<string, string>> = {
   "Add a plot": "プロットを加える",
   "Press “+ Biplot” to add a plot of the active population on the Gating tab's axes. The inspector on the left sets its file, population, channels and whether it pools files.": "「+ 二変量プロット」を押すと、アクティブな集団のプロットが「ゲーティング」タブの軸で加わります。左のインスペクターでファイル、集団、チャンネル、ファイルをプールするかを設定します。",
   "The sheet's style": "シートのスタイル",
-  "Open Style and tick “All events”: every plot on the sheet draws every event rather than a sample of them. Iterate draws the sheet once per file, population or metadata value.": "「スタイル」を開いて「全イベント」にチェックを入れてください。シート上のすべてのプロットが、抽出したイベントではなくすべてのイベントを描きます。「反復」はシートをファイル、集団、またはメタデータの値ごとに 1 回ずつ描きます。",
+  "Open Style and tick “All events”: every plot on the sheet draws every event rather than a sample of them. Pages per file or group are made in Illustration or Plotting and sent here with “Every page, one sheet each”.": "「スタイル」を開いて「全イベント」にチェックを入れてください。シート上のすべてのプロットが、抽出したイベントではなくすべてのイベントを描きます。ファイルやグループごとのページは「図作成」または「Plotting」で作り、「全ページ、1 ページにつき 1 シート」でここへ送ります。",
   "Export the page": "ページを書き出す",
   "Press “Export PDF” to write the sheet as a PDF; the format under Page can be SVG with editable text, or PNG. The file goes to your downloads.": "「PDF を書き出す」を押すとシートが PDF として書き出されます。「ページ」の形式は、文字を編集できる SVG や PNG にもできます。ファイルはダウンロードフォルダーに保存されます。",
 
@@ -147,7 +147,7 @@ export const TOUR_JA: Readonly<Record<string, string>> = {
   "The Plotting tab": "Plotting タブ",
   "Open the Plotting tab. It charts population proportions across files, grouped by a metadata column.": "「Plotting」タブを開いてください。集団の割合をファイル間で、メタデータの列でグループ化してグラフにします。",
   "Choose populations": "集団を選ぶ",
-  "The Populations panel on the right chooses what is charted: the parent, and beneath it the populations whose shares of it are shown for each checked file. Tick or untick one; the chart follows.": "右の「集団」パネルで何をグラフにするかを選びます。親の集団と、その下に、チェックした各ファイルについて親に占める割合を示す集団です。チェックを付けたり外したりすると、グラフが追従します。",
+  "Under Data, the Populations list chooses what is charted: the parent, and beneath it the populations whose shares of it are shown for each checked file. Tick or untick one; the chart follows.": "「データ」の「集団」の一覧で、何をグラフにするかを選びます。親の集団と、その下に、チェックした各ファイルについて親に占める割合を示す集団です。チェックを付けたり外したりすると、グラフが追従します。",
 
   // ── Statistics ──
   "The Statistics tab": "統計タブ",
@@ -157,7 +157,7 @@ export const TOUR_JA: Readonly<Record<string, string>> = {
 
   // ── Metadata ──
   "The Metadata tab": "メタデータタブ",
-  "Open the Metadata tab. Columns of values per file (donor, condition, day) feed the Plotting tab's grouping and the Layout tab's iteration.": "「メタデータ」タブを開いてください。ファイルごとの値の列（ドナー、条件、日）が、「Plotting」タブのグループ化と「レイアウト」タブの反復に使われます。",
+  "Open the Metadata tab. Columns of values per file (donor, condition, day) feed the Plotting tab's grouping and the Illustration tab's rows, columns and pages.": "「メタデータ」タブを開いてください。ファイルごとの値の列（ドナー、条件、日）が、「Plotting」タブのグループ化と「図作成」タブの行、列、ページに使われます。",
   "Add a column": "列を加える",
   "Press “+ Field” to add a column, then give each file a value. The file list then offers the values as chips that check the files carrying them.": "「+ フィールド」を押して列を加え、各ファイルに値を与えてください。ファイル一覧にその値がチップとして現れ、その値を持つファイルにチェックを入れられます。",
 

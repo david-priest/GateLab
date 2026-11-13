@@ -103,7 +103,7 @@ for (let k = 0; k < N / 2; k++) {
  * In-place complex FFT of `re`/`im` (length 256). After the call, bin k is (re[k], im[k]).
  * Exported for the tests, which feed it known sinusoids.
  */
-export function fft256(re: Float32Array, im: Float32Array): void {
+export function fft256(re: Float32Array | Float64Array, im: Float32Array | Float64Array): void {
   for (let i = 0; i < N; i++) {
     const j = bitReverse[i];
     if (j > i) {
@@ -162,10 +162,65 @@ export function stftPlane(
     }
     fft256(re, im);
     for (let k = CARRIER_FIRST_BIN; k <= CARRIER_LAST_BIN; k++) {
-      plane[(k - CARRIER_FIRST_BIN) * cols + c] = Math.hypot(re[k], im[k]);
+      // sqrt, not Math.hypot: the same value here (16-bit samples cannot overflow) at a fraction of the cost.
+      plane[(k - CARRIER_FIRST_BIN) * cols + c] = Math.sqrt(re[k] * re[k] + im[k] * im[k]);
     }
   }
   return plane;
+}
+
+/**
+ * Two channels' planes from one complex FFT per column: the two signals are real, so one goes in
+ * as the real part and the other as the imaginary part, and each spectrum is separated after,
+ * X[k] = (Z[k] + conj Z[N−k]) / 2 and Y[k] = (Z[k] − conj Z[N−k]) / 2i. Half the transforms of
+ * two stftPlane calls. In double precision, so the strong LightLoss carrier leaves no rounding in
+ * a weak channel beside it.
+ */
+export function stftPlanePair(
+  samples: Uint16Array,
+  firstA: number,
+  firstB: number,
+  stride: number,
+  sampleCount: number,
+  hop: number,
+): [Float32Array, Float32Array] {
+  const cols = stftColumns(sampleCount, hop);
+  const a = new Float32Array(IMAGE_ROWS * cols);
+  const b = new Float32Array(IMAGE_ROWS * cols);
+  const re = new Float64Array(N);
+  const im = new Float64Array(N);
+  for (let c = 0; c < cols; c++) {
+    const base = c * hop;
+    let meanA = 0;
+    let meanB = 0;
+    for (let i = 0; i < N; i++) {
+      const at = (base + i) * stride;
+      meanA += samples[at + firstA];
+      meanB += samples[at + firstB];
+    }
+    meanA /= N;
+    meanB /= N;
+    for (let i = 0; i < N; i++) {
+      const at = (base + i) * stride;
+      re[i] = samples[at + firstA] - meanA;
+      im[i] = samples[at + firstB] - meanB;
+    }
+    fft256(re, im);
+    for (let k = CARRIER_FIRST_BIN; k <= CARRIER_LAST_BIN; k++) {
+      const zr = re[k];
+      const zi = im[k];
+      const wr = re[N - k];
+      const wi = im[N - k];
+      const xr = zr + wr;
+      const xi = zi - wi;
+      const yr = zi + wi;
+      const yi = wr - zr;
+      const row = (k - CARRIER_FIRST_BIN) * cols + c;
+      a[row] = 0.5 * Math.sqrt(xr * xr + xi * xi);
+      b[row] = 0.5 * Math.sqrt(yr * yr + yi * yi);
+    }
+  }
+  return [a, b];
 }
 
 /**
@@ -205,10 +260,13 @@ export function decodeEvent(block: ArrayBufferLike, metadata: CvwMetadata, optio
   const samples = new Uint16Array(block, 0, trailer.sampleCount * CVW_CHANNELS);
   const cols = stftColumns(trailer.sampleCount, hop);
   const laser = metadata.lasers[0];
-  const planes = slots.map((slot) => {
-    const plane = stftPlane(samples, slot, CVW_CHANNELS, trailer.sampleCount, hop);
-    return slot === laser.lightlossIndex ? lightLossPlane(plane, cols) : plane;
-  });
+  // Two channels per transform (stftPlanePair); an odd one out alone.
+  const raw: Float32Array[] = [];
+  for (let k = 0; k < slots.length; k += 2) {
+    if (k + 1 < slots.length) raw.push(...stftPlanePair(samples, slots[k], slots[k + 1], CVW_CHANNELS, trailer.sampleCount, hop));
+    else raw.push(stftPlane(samples, slots[k], CVW_CHANNELS, trailer.sampleCount, hop));
+  }
+  const planes = slots.map((slot, k) => (slot === laser.lightlossIndex ? lightLossPlane(raw[k], cols) : raw[k]));
   // The metadata's aspect is for hop 16 (the native column pitch); a larger hop widens the
   // column pitch in proportion.
   const aspect = laser.pixelAspectRatio * (hop / 16);

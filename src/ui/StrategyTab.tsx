@@ -16,6 +16,7 @@ import { computePooledGatingStrategy, computePooledMultiPopStrategy, type Strate
 import { figureHierarchies, resolvePopulationInTree, type FigureSample } from "../engine/figure";
 import { useFigureSources } from "./useFigureSources";
 import { useGateInk } from "../plots/gateInk";
+import { FigureStyleFollow, useFigureStyle } from "./figureStyle";
 import { populationTreeOrder } from "../engine/populations";
 import { sanitizeFilePart } from "../engine/fcsExport";
 import type { LayoutPlotRecipe, LayoutStrategyRecipe } from "../engine/layout";
@@ -23,6 +24,7 @@ import type { StrategyConfig as SavedStrategyConfig } from "../engine/workspace"
 import { ContextMenu, type ContextMenuState } from "./ContextMenu";
 import type { MenuEntry } from "./MenuButton";
 import { StrategyPopulationPicker } from "./StrategyPopulationPicker";
+import { FileChecklist } from "./FileChecklist";
 import { drawStrategyArrows, strategyArrowGap, strategyArrowRowGap, strategyArrows } from "./strategyArrows";
 import { attachGridPan, type PannablePanel } from "./gridPan";
 import { DensityColourControl } from "./DensityColourControl";
@@ -81,6 +83,12 @@ export interface StrategyRequest {
   populationIds: string[];
   /** Single mode; the control is left as it is when absent. */
   fullPath?: boolean;
+  /** The layout controls, checked by the agent handler; each is left as it is when absent. */
+  layout?: "tree" | "flow";
+  columns?: number;
+  showArrows?: boolean;
+  arrowWidth?: number;
+  arrowAnchor?: "label" | "gate";
 }
 
 /**
@@ -177,10 +185,18 @@ export function StrategyTab({
   const gateLineWidth = ink.lineWidth;
   const setGateLineWidth = ink.setLineWidth;
   const [gateEdgeMode, setGateEdgeMode] = useState<GateEdgeMode>(c0?.gateEdgeMode ?? "straight-bow");
-  const [fontTick, setFontTick] = useState(c0?.fontTick ?? 12);
-  const [fontAxis, setFontAxis] = useState(c0?.fontAxis ?? 12);
-  const [fontTitle, setFontTitle] = useState(c0?.fontTitle ?? 12);
-  const [fontGate, setFontGate] = useState(c0?.fontGate ?? 12);
+  const [ownFontTick, setFontTick] = useState(c0?.fontTick ?? 12);
+  const [ownFontAxis, setFontAxis] = useState(c0?.fontAxis ?? 12);
+  const [ownFontTitle, setFontTitle] = useState(c0?.fontTitle ?? 12);
+  const [ownFontGate, setFontGate] = useState(c0?.fontGate ?? 12);
+  // A new strategy uses the workspace's figure style for its four text sizes; one saved before the
+  // style keeps its own, which are kept for when it stops following.
+  const [followFigureStyle, setFollowFigureStyle] = useState(c0 ? c0.followFigureStyle === true : true);
+  const { style: figureStyle } = useFigureStyle();
+  const fontTick = followFigureStyle ? figureStyle.fontTick : ownFontTick;
+  const fontAxis = followFigureStyle ? figureStyle.fontAxis : ownFontAxis;
+  const fontTitle = followFigureStyle ? figureStyle.fontTitle : ownFontTitle;
+  const fontGate = followFigureStyle ? figureStyle.fontGate : ownFontGate;
   const [exportTree, setExportTree] = useState(c0?.exportTree ?? false);
 
   // The files: one file is the file viewed app-wide, chosen in the list here as in the file list.
@@ -262,6 +278,11 @@ export function StrategyTab({
     if (request.mode === "multi") setMultiPops([...request.populationIds]);
     else setPopId(request.populationIds[0]);
     if (request.fullPath !== undefined) setFullPath(request.fullPath);
+    if (request.layout !== undefined) setLayout(request.layout);
+    if (request.columns !== undefined) setNColumns(request.columns);
+    if (request.showArrows !== undefined) setShowArrows(request.showArrows);
+    if (request.arrowWidth !== undefined) setArrowWidth(request.arrowWidth);
+    if (request.arrowAnchor !== undefined) setArrowAnchor(request.arrowAnchor);
   }
 
   // Follow the active population when it changes in the tree; in the commit that took an agent's
@@ -284,7 +305,9 @@ export function StrategyTab({
   const currentConfig: StrategyConfig = {
     mode, exportDpi, multiPops, popId, fullPath, gateView, displayMode, maxEvents, allEvents,
     plotSize, nColumns, fitToColumns, pointSize, pointAlpha, contourThreshold, contourLevels, kdeBandwidth,
-    pubStyle, gateLineWidth, gateEdgeMode, gateLabelBold, labelBackground, showArrows, arrowWidth, arrowAnchor, layout, fontTick, fontAxis, fontTitle, fontGate,
+    pubStyle, gateLineWidth, gateEdgeMode, gateLabelBold, labelBackground, showArrows, arrowWidth, arrowAnchor, layout,
+    fontTick: ownFontTick, fontAxis: ownFontAxis, fontTitle: ownFontTitle, fontGate: ownFontGate,
+    ...(followFigureStyle ? { followFigureStyle } : {}),
     exportTree,
   };
   useEffect(() => {
@@ -645,6 +668,13 @@ export function StrategyTab({
         <strong>{t("Gating strategy")}</strong>
         <span title={headContext}>{headContext}</span>
         <span title={t("Trace a gating path or back-gate selected populations.")}>{t("Trace a gating path or back-gate selected populations.")}</span>
+        {onAddToLayout && (
+          <div className="gl-plotting-head-actions">
+            <button type="button" className="gl-mini-btn" disabled={renderPending || !panelCount || !strategyRecipe()} title={strategyToLayoutTitle} onClick={addStrategyToLayout}>
+              {t("Add to Layout")}
+            </button>
+          </div>
+        )}
       </div>
       {/* The side tabs Illustration and Plotting have: what to draw first, then how it looks. */}
       <aside className="gl-plotting-inspector gl-strategy-inspector" aria-label={t("Strategy controls")}>
@@ -704,13 +734,17 @@ export function StrategyTab({
             <input type="checkbox" checked={pooled} onChange={(e) => setPooled(e.target.checked)} />
             {isSceHost ? t("Pool checked samples") : t("Pool checked files")}
           </label>
-          {pooled && (
-            <div className="gl-figure-actions gl-figure-list-actions">
-              <button type="button" className="gl-mini-btn" onClick={() => setPoolTicks([...checkedSampleIds])}>{t("Use checked files")}</button>
-              <button type="button" className="gl-mini-btn" onClick={() => setPoolTicks(files.map((file) => file.id))}>{t("All")}</button>
-              <button type="button" className="gl-mini-btn" onClick={() => setPoolTicks([])}>{t("None")}</button>
-            </div>
-          )}
+          {/* Pooled: the files ticked to pool, in the picker the Illustration and Plotting tabs
+              use. One file: a choice of the file viewed, as clicking it in the file list makes it. */}
+          {pooled ? (
+            <FileChecklist
+              files={files}
+              selected={poolTicks}
+              onChange={setPoolTicks}
+              checkedIds={checkedSampleIds}
+              listClassName="gl-strategy-files"
+            />
+          ) : (<>
           {files.length > 6 && (
             <input
               type="search"
@@ -721,26 +755,17 @@ export function StrategyTab({
               onChange={(e) => setFileSearch(e.target.value)}
             />
           )}
-          {/* One file: a choice of the file viewed, as clicking it in the file list makes it.
-              Pooled: the files ticked to pool. */}
-          <div className="gl-figure-list gl-strategy-files" role={pooled ? "group" : "radiogroup"} aria-label={t("Files / samples")}>
+          <div className="gl-figure-list gl-strategy-files" role="radiogroup" aria-label={t("Files / samples")}>
             {files
               .filter((file) => `${file.name} ${file.fileName ?? ""}`.toLowerCase().includes(fileSearch.trim().toLowerCase()))
               .map((file) => (
                 <label key={file.id} className="gl-figure-row" title={file.fileName && file.fileName !== file.name ? `${file.name} · ${file.fileName}` : file.name}>
-                  {pooled ? (
-                    <input
-                      type="checkbox"
-                      checked={poolTicks.includes(file.id)}
-                      onChange={() => setPoolTicks((ticks) => (ticks.includes(file.id) ? ticks.filter((id) => id !== file.id) : [...ticks, file.id]))}
-                    />
-                  ) : (
-                    <input type="radio" name="strategy-file" checked={file.id === activeSampleId} onChange={() => onViewFile(file.id)} />
-                  )}
+                  <input type="radio" name="strategy-file" checked={file.id === activeSampleId} onChange={() => onViewFile(file.id)} />
                   <span className="gl-figure-row-name">{file.name}{file.fileName && file.fileName !== file.name && <small>{file.fileName}</small>}</span>
                 </label>
               ))}
           </div>
+          </>)}
           <h3>{t("Gate view")}</h3>
           {(["forward", "back"] as GateView[]).map((v) => (
             <label key={v} className="gl-check">
@@ -917,10 +942,15 @@ export function StrategyTab({
             </select>
           </label>
           <h3>{t("Fonts")}</h3>
-          <label className="gl-field-inline">{t("Tick")}<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 8)} /></label>
-          <label className="gl-field-inline">{t("Axis")}<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 10)} /></label>
-          <label className="gl-field-inline">{t("Title")}<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 10)} /></label>
-          <label className="gl-field-inline">{t("Gate")}<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 8)} /></label>
+          <FigureStyleFollow following={followFigureStyle} onFollow={setFollowFigureStyle} />
+          {!followFigureStyle && (
+            <>
+              <label className="gl-field-inline">{t("Tick")}<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 8)} /></label>
+              <label className="gl-field-inline">{t("Axis")}<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 10)} /></label>
+              <label className="gl-field-inline">{t("Title")}<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 10)} /></label>
+              <label className="gl-field-inline">{t("Gate")}<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 8)} /></label>
+            </>
+          )}
         </section>
         <section className="gl-strategy-section" hidden={section !== "export"} aria-label={t("Export")}>
           <label className="gl-field-inline" title="Export resolution for SVG/PDF (72–1200 DPI)">
@@ -939,11 +969,6 @@ export function StrategyTab({
           <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => void exportStrategy("png")}>PNG</button>
           <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => void exportStrategy("svg")}>SVG</button>
           <button disabled={renderPending || !panelCount} className="gl-mini-btn" onClick={() => void exportStrategy("pdf")}>PDF</button>
-          {onAddToLayout && (
-            <button type="button" className="gl-mini-btn" disabled={renderPending || !panelCount || !strategyRecipe()} title={strategyToLayoutTitle} onClick={addStrategyToLayout}>
-              {t("Add to Layout")}
-            </button>
-          )}
         </section>
       </aside>
       <div className="gl-prop-body gl-strategy-body">

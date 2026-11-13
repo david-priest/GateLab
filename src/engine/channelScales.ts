@@ -118,6 +118,21 @@ export class ChannelScales {
     this.notify();
   }
 
+  /**
+   * A participant's values changed, or the context it is in (its compensation went on or off, an
+   * external matrix replaced its own, a derived channel was given new values). The shared
+   * estimates were kept until a file was added or removed, so a context stayed on a W that was
+   * no longer the largest of its files. No listener is told: the participant publishes its own
+   * change, and the roster version makes every file's transforms read the estimates again.
+   */
+  participantChanged(participant: ChannelScaleParticipant): void {
+    if (!this.participants.has(participant)) return;
+    this.sharedAutoW.clear();
+    this.sharedAutoT.clear();
+    this.sharedAutoBiexW.clear();
+    this.rosterVersion++;
+  }
+
   unregister(participant: ChannelScaleParticipant): void {
     if (!this.participants.delete(participant)) return;
     this.sharedAutoW.clear();

@@ -2,7 +2,7 @@ import type { StoredHierarchy } from "./hierarchies";
 import { isFigureSpec } from "./figureSchema";
 import { describe, expect, it } from "vitest";
 import { coreReducer, initialCoreState } from "../store";
-import { newPopulation, newRootPopulation, newGate } from "./models";
+import { newPopulation, newRootPopulation, newGate, newQuadrantGate } from "./models";
 import { cloneHierarchyTree, storeHierarchy } from "./hierarchies";
 import { Sample } from "./sample";
 import type { FcsFile } from "./fcs";
@@ -27,7 +27,7 @@ import {
   type FigureSpec,
 } from "./figure";
 import { defaultIllustrationConfig, figureStyle } from "./figureDefaults";
-import type { IllustrationOptions } from "./illustration";
+import { buildIllustrationPayload, type IllustrationOptions } from "./illustration";
 
 export function figureFixture() {
   const state = initialCoreState();
@@ -484,6 +484,10 @@ describe("independent figures", () => {
     const figure: FigureSpec = { ...f.figure, pages: ["metadata:condition"] };
     const pages = layoutFigure(figure, f.samples);
     expect(pages.map((p) => p.label)).toEqual(["control", "treated"]);
+    // A column's values follow the files' order, each at its first file, not the values' names.
+    expect(layoutFigure({ ...figure, sampleIds: ["D2", "D1"] }, f.samples).map((p) => p.label)).toEqual(["treated", "control"]);
+    // A column's own order of its levels (the Metadata tab's) heads it, whatever the files' order.
+    expect(layoutFigure({ ...figure, sampleIds: ["D2", "D1"] }, f.samples, undefined, undefined, { condition: ["control", "treated"] }).map((p) => p.label)).toEqual(["control", "treated"]);
     expect(pages[0].panels).toHaveLength(1);
     expect(pages[0].panels[0].samples).toEqual(["D1"]);
     const transposed = layoutFigure(
@@ -577,6 +581,44 @@ describe("pooled panels", () => {
 });
 
 describe("branch gates on a figure panel", () => {
+  it("distinguishes an explicitly empty gate scope from an unordered list of all gates", () => {
+    const f = figureFixture();
+    const source = prepareFigureSource(f.samples[0], figureHierarchies(f.state).main, f.state);
+    const build = (gateOrderIsScope?: boolean) => buildIllustrationPayload(
+      source.sample, source.tree.gates, [], source.tree.populations,
+      source.gating.masks, source.gating.stats.event_count, [f.pop.population_id], ["FSC-A"], "SSC-A",
+      {}, { ...figureStyle(defaultIllustrationConfig()), gateOrderIsScope },
+    ) as { plots: Record<string, { n_events: number }>; gate_overlays: Record<string, { name: string; event_count: number }[]> };
+    const key = `${f.pop.population_id}|FSC-A`;
+    expect(build(true).gate_overlays[key]).toEqual([]);
+    for (const unscoped of [build(), build(false)]) {
+      expect(unscoped.gate_overlays[key]).toEqual([expect.objectContaining({ name: "CD4_positive", event_count: 2 })]);
+    }
+    expect(build(true).plots[key].n_events).toBe(2);
+  });
+
+  it("keeps a leaf panel's events but omits its own and its siblings' gate outlines", () => {
+    const f = figureFixture();
+    const triangle = newGate("Triangle", "polygon", "FSC-A", "SSC-A", [[0, 0], [300, 0], [0, 300]]);
+    const quadrant = newQuadrantGate("Quadrants", "FSC-A", "SSC-A", [150, 150]);
+    for (const gate of [triangle, quadrant]) {
+      const sibling = newPopulation(gate.name, [{ gate_id: gate.gate_id, include: true, ...(gate === quadrant ? { quadrant: 1 } : {}) }], f.root.population_id);
+      f.root.children.push(sibling.population_id);
+      f.state.populations[sibling.population_id] = sibling;
+      f.state.gates[gate.gate_id] = gate;
+      f.state.gate_order.push(gate.gate_id);
+    }
+    const trees = figureHierarchies(f.state);
+    const figure: FigureSpec = { ...f.figure, populations: [{ hierarchyId: "main", populationId: f.pop.population_id, label: "Singlets" }] };
+    const source = prepareFigureSource(f.samples[0], trees.main, f.state);
+    const panel = layoutFigure(figure, f.samples)[0].panels.find((p) => p.samples[0] === "D1")!;
+    const build = (branchGatesOnly: boolean) => buildFigurePanel(panel, { ...figure, branchGatesOnly }, [source], trees, figureStyle(defaultIllustrationConfig()), {});
+    const leaf = build(true);
+    expect(leaf.config).toMatchObject({ n_events: 2, x: [10, 100], y: [10, 100], gates: [] });
+    expect((build(false).config?.gates as { name: string }[]).map((gate) => gate.name)).toEqual(["CD4_positive", "Triangle", "Quadrants"]);
+    expect(source.gating.stats.event_count[f.pop.population_id]).toBe(2);
+  });
+
   /**
    * Two branches under All Events on the same FSC-A × SSC-A pair: Singlets (the fixture's
    * [0,0]–[150,150] rectangle) with a child Mid ([50,50]–[150,150]), and a sibling Large

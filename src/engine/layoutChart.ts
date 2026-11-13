@@ -3,6 +3,8 @@
 // a rank test between the groups in the spirit of ggpubr's stat_compare_means (Wilcoxon rank-sum
 // for two groups, Kruskal–Wallis for more). The statistics live here, pure; LayoutChart.tsx draws.
 
+import { mean, sampleSd } from "./summaryStats";
+
 export interface ChartPoint {
   sampleId: string;
   name: string;
@@ -46,14 +48,12 @@ export function quantile(values: readonly number[], p: number): number {
 export function summarise(label: string, points: ChartPoint[]): ChartGroup {
   const values = points.map((p) => p.value);
   const n = values.length;
-  const mean = n ? values.reduce((a, b) => a + b, 0) / n : NaN;
-  const sd = n > 1 ? Math.sqrt(values.reduce((a, v) => a + (v - mean) ** 2, 0) / (n - 1)) : 0;
   return {
     label,
     points,
     n,
-    mean,
-    sd,
+    mean: mean(values),
+    sd: n > 1 ? sampleSd(values) : 0,
     median: quantile(values, 0.5),
     q1: quantile(values, 0.25),
     q3: quantile(values, 0.75),
@@ -155,9 +155,40 @@ export function chiSquareUpperTail(x: number, df: number): number {
 }
 
 /**
- * The Wilcoxon rank-sum (Mann–Whitney U) test, two-sided, by the normal approximation with the
- * tie correction and a continuity correction, as R's wilcox.test uses for samples with ties or
- * of more than 50. Returns null with fewer than two values on a side.
+ * The probability that the Mann–Whitney U of samples of m and n values without ties is at most
+ * `u`, as R's pwilcox(u, m, n) gives it. The rank sums of every choice of m ranks out of m + n are
+ * counted by adding only, so a count beyond 2^53 keeps its relative precision.
+ */
+function wilcoxonLowerTail(u: number, m: number, n: number): number {
+  if (u < 0) return 0;
+  if (u >= m * n) return 1;
+  const total = m + n;
+  const maxSum = (m * (2 * total - m + 1)) / 2;
+  // ways[k][s]: the number of ways to choose k of the ranks seen so far with sum s.
+  const ways = Array.from({ length: m + 1 }, () => new Float64Array(maxSum + 1));
+  ways[0][0] = 1;
+  for (let rank = 1; rank <= total; rank++) {
+    for (let k = Math.min(m, rank); k >= 1; k--) {
+      const into = ways[k];
+      const from = ways[k - 1];
+      for (let s = maxSum; s >= rank; s--) into[s] += from[s - rank];
+    }
+  }
+  const offset = (m * (m + 1)) / 2;
+  let below = 0;
+  let all = 0;
+  for (let s = offset; s <= maxSum; s++) {
+    all += ways[m][s];
+    if (s - offset <= u) below += ways[m][s];
+  }
+  return below / all;
+}
+
+/**
+ * The Wilcoxon rank-sum (Mann–Whitney U) test, two-sided, as R's wilcox.test computes it by
+ * default: exact when both samples hold fewer than 50 values and no value is tied, otherwise by
+ * the normal approximation with the tie correction and a continuity correction. Returns null with
+ * fewer than two values on a side.
  */
 export function wilcoxonRankSum(a: readonly number[], b: readonly number[]): ChartTest | null {
   if (a.length < 2 || b.length < 2) return null;
@@ -166,6 +197,14 @@ export function wilcoxonRankSum(a: readonly number[], b: readonly number[]): Cha
   const { rank, ties } = ranks([...a, ...b]);
   const r1 = rank.slice(0, n1).reduce((s, r) => s + r, 0);
   const u = r1 - (n1 * (n1 + 1)) / 2;
+  if (n1 < 50 && n2 < 50 && ties === 0) {
+    // R: pwilcox(W - 1, m, n, lower.tail = FALSE) above the centre, pwilcox(W, m, n) below it.
+    // U is symmetric about mn / 2, so P(U >= u) = P(U <= mn - u); taken so, a tiny upper tail is
+    // not lost by subtracting from 1.
+    const tail = u > (n1 * n2) / 2 ? wilcoxonLowerTail(n1 * n2 - u, n1, n2) : wilcoxonLowerTail(u, n1, n2);
+    const p = Math.min(1, 2 * tail);
+    return { name: "Wilcoxon rank-sum", statistic: u, p, label: `Wilcoxon ${formatP(p)}` };
+  }
   const n = n1 + n2;
   const mu = (n1 * n2) / 2;
   const sigma = Math.sqrt(((n1 * n2) / 12) * (n + 1 - ties / (n * (n - 1))));
@@ -210,12 +249,20 @@ export function formatP(p: number): string {
   return `p = ${p < 0.01 ? p.toFixed(3) : p.toFixed(2)}`;
 }
 
-/** A tick scale from 0 (or the minimum, when negative) to just above the maximum, in round steps. */
+/**
+ * A tick scale from 0 (or the minimum, when negative) to just above the maximum, in round steps.
+ * With no spread to scale (every value 0, or none), it runs from 0 to 1; with every value the same
+ * negative number, from below it to 0.
+ */
 export function axisTicks(values: readonly number[], count = 5): { min: number; max: number; ticks: number[] } {
   const finite = values.filter((v) => Number.isFinite(v));
   const lo = Math.min(0, ...finite);
-  const hi = Math.max(...finite, lo + 1e-9);
-  const span = hi - lo || 1;
+  let hi = Math.max(...finite, lo);
+  if (!(hi > lo)) {
+    if (lo === 0) return { min: 0, max: 1, ticks: [0, 0.2, 0.4, 0.6, 0.8, 1] };
+    hi = 0;
+  }
+  const span = hi - lo;
   const rough = span / count;
   const magnitude = 10 ** Math.floor(Math.log10(rough));
   const step = [1, 2, 2.5, 5, 10].map((m) => m * magnitude).find((s) => s >= rough) ?? magnitude * 10;

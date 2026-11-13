@@ -21,10 +21,12 @@ import {
 import type { LayoutWorkspace } from "./layout";
 import type { HierarchyRef } from "./hierarchies";
 import type { IllustrationDimensionLayout } from "./illustrationLayout";
+import type { FigureStyle } from "./figureStyle";
 import { isFigureSpec } from "./figureSchema";
 import { WORKSPACE_VERSION_2_WITH_FEATURES, assertKnownWorkspaceFeatures, stampWorkspaceV2 } from "./workspaceFeatures";
 import { parseFlowJoGridAxis, parseFlowJoGridSpec } from "./flowjoGrid";
 import { parseTransformSpec } from "./rectangleRecord";
+import { isHexColor, ownPopulationColor } from "./palettes";
 
 export const WORKSPACE_EXT = "gatelab";
 export const WORKSPACE_FORMAT = "gatelab-workspace";
@@ -246,7 +248,16 @@ export interface WorkspaceFile {
   hostedChannelTransforms?: Record<string, TransformSpec>;
   /** Renameable freeform plot sheets. Optional for every workspace saved before Layout existed. */
   layout?: LayoutWorkspace;
+  /** The Plotting chart shown when the workspace was saved, as the tab's `prop.` keys; the only chart a workspace saved before named charts holds. */
   plotting?: Record<string, unknown>;
+  /** The Plotting tab's named charts. Absent in a workspace saved before them, which `workspacePlottingCharts` reads as one chart. */
+  plottingCharts?: WorkspacePlottingCharts;
+  /**
+   * The workspace's figure style (figureStyle.ts), which a Layout sheet, a Plotting chart, the
+   * Illustration figure and the Strategy tab follow when they say so. Saved only when it is not the
+   * defaults; absent reads as the defaults.
+   */
+  figureStyle?: FigureStyle;
   /** Ordered metadata field columns (names + optional categorical level order). Shared. */
   metadataColumns?: { name: string; levels?: string[] }[];
   /** Population annotation (Metadata tab, 2nd table): keyed by population_id → { field: value }. */
@@ -347,6 +358,11 @@ export interface IllustrationConfig {
   gateLabelBold?: boolean;
   /** Under publication style, a white backing behind each gate label at this opacity; absent reads as 0.6. */
   labelBackground?: number;
+  /**
+   * Take the text sizes and the histogram line width from the workspace's figure style
+   * (figureStyle.ts) instead of the fields above. A new figure has it on; one saved before it has none.
+   */
+  followFigureStyle?: boolean;
 }
 
 /** The Strategy tab's controls, mirrored into the workspace so a saved strategy comes back as left. */
@@ -392,6 +408,11 @@ export interface StrategyConfig {
   fontAxis: number;
   fontTitle: number;
   fontGate: number;
+  /**
+   * Take the four text sizes from the workspace's figure style (figureStyle.ts) instead of the
+   * fields above. A new strategy has it on; one saved before it has none.
+   */
+  followFigureStyle?: boolean;
 }
 
 export interface IllustrationPreset {
@@ -401,6 +422,48 @@ export interface IllustrationPreset {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A named Plotting chart: its settings in the shape `plotting` has, the tab's `prop.` keys. */
+export interface WorkspacePlottingChart {
+  id: string;
+  name: string;
+  plotting: Record<string, unknown>;
+}
+
+/** The Plotting tab's charts and the one shown. */
+export interface WorkspacePlottingCharts {
+  activeId: string;
+  charts: WorkspacePlottingChart[];
+}
+
+/** The name and id of the one chart a workspace saved before named charts is read as. */
+export const FIRST_PLOTTING_CHART = { id: "chart-1", name: "Chart 1" } as const;
+
+/**
+ * The Plotting charts a workspace holds: its named charts, each with an id, a name and a settings
+ * record, malformed or repeated entries dropped; else, as in a workspace saved before named charts,
+ * one chart named "Chart 1" holding the workspace's `plotting` settings. The settings records are
+ * passed on as saved; the Plotting tab keeps only the fields it knows when it shows a chart.
+ */
+export function workspacePlottingCharts(ws: Pick<WorkspaceFile, "plotting" | "plottingCharts">): WorkspacePlottingCharts {
+  const saved: unknown = ws.plottingCharts;
+  const charts: WorkspacePlottingChart[] = [];
+  if (isRecord(saved) && Array.isArray(saved.charts)) {
+    for (const chart of saved.charts) {
+      if (!isRecord(chart) || typeof chart.id !== "string" || !chart.id || typeof chart.name !== "string" || !isRecord(chart.plotting)) continue;
+      if (charts.some(({ id }) => id === chart.id)) continue;
+      charts.push({ id: chart.id, name: chart.name, plotting: structuredClone(chart.plotting) });
+    }
+  }
+  if (charts.length) {
+    const activeId = isRecord(saved) && charts.some(({ id }) => id === saved.activeId) ? (saved.activeId as string) : charts[0].id;
+    return { activeId, charts };
+  }
+  return {
+    activeId: FIRST_PLOTTING_CHART.id,
+    charts: [{ ...FIRST_PLOTTING_CHART, plotting: isRecord(ws.plotting) ? structuredClone(ws.plotting) : {} }],
+  };
 }
 
 function invalidWorkspace(detail: string): never {
@@ -1058,6 +1121,44 @@ export function migrateWorkspaceToV2(raw: unknown): WorkspaceFile {
     scales: { globalScales: scales.globalScales ?? {} },
     display: r.display as WorkspaceFile["display"],
   };
+}
+
+/**
+ * Move the colours the old Illustration tab kept by population id (IllustrationConfig.popColors:
+ * the workspace's Illustration settings, its Layout figures and its presets, in that order of
+ * precedence) onto the populations of every tree that hold that id and have no colour of their
+ * own, and empty those maps, so a population's colour lives only on the population. A workspace
+ * without such a colour is returned as it is.
+ */
+export function withLegacyPopulationColors<
+  T extends Pick<WorkspaceFile, "gating" | "illustration" | "illustrationPresets" | "layout">,
+>(ws: T): T {
+  const configsOf = (w: T): Partial<IllustrationConfig>[] => [
+    ...(w.illustration ? [w.illustration] : []),
+    ...(w.layout?.sheets ?? []).flatMap((sheet) => (Array.isArray(sheet?.items) ? sheet.items : [])
+      .flatMap((item) => (item?.recipe?.kind === "figure" && item.recipe.illustration ? [item.recipe.illustration] : []))),
+    ...(w.illustrationPresets ?? []).flatMap((preset) => (preset?.config ? [preset.config] : [])),
+  ];
+  const holds = (config: Partial<IllustrationConfig>) =>
+    isRecord(config.popColors) && Object.keys(config.popColors).length > 0;
+  if (!configsOf(ws).some(holds)) return ws;
+  const next = structuredClone(ws);
+  const trees: PopulationMap[] = [
+    next.gating.populations,
+    ...(next.gating.stored_hierarchies ?? []).map((h) => h.populations),
+  ].filter(isRecord) as PopulationMap[];
+  for (const config of configsOf(next)) {
+    if (!holds(config)) continue;
+    for (const [popId, color] of Object.entries(config.popColors!)) {
+      if (!isHexColor(color)) continue;
+      for (const populations of trees) {
+        const pop = populations[popId];
+        if (pop && !ownPopulationColor(pop)) pop.color = color.toLowerCase();
+      }
+    }
+    config.popColors = {};
+  }
+  return next;
 }
 
 /**

@@ -10,8 +10,13 @@
 // They are the store's selected_pop_ids (with the active population).
 // A row's triangle shows on hover, or while its branch is folded; ←/→ fold and unfold the active
 // row, and Option-click on a triangle folds or unfolds the whole branch.
+// A right-click on a row opens its menu (David, 2026-11-10), acting on the highlighted rows when the
+// row is one of them and otherwise selecting the row alone first, as Finder and Photos do; on empty
+// space, the Populations header's ⋯ menu. Delete or Backspace deletes the highlighted rows, with Undo.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { ContextMenu, type ContextMenuState } from "./ContextMenu";
+import { isDeleteShortcut } from "./historyShortcuts";
 import type { CoreState, Derived, Action } from "../store";
 import { wouldCreateCycle, type Gate, type GateRef } from "../engine/models";
 import { TreeConnectors } from "./TreeConnectors";
@@ -23,6 +28,7 @@ import type { QuadrantNaming } from "../engine/quadrantNames";
 import { gateRefLabel, EXCLUDE_HINT } from "./gateRefLabel";
 import { isCopyRef, type HierarchyRef } from "../engine/hierarchies";
 import { BranchIcon, ChevronIcon } from "./icons";
+import { populationColorOf } from "../engine/palettes";
 import { useGateColour, useGateInk, useGateSwatch } from "../plots/gateInk";
 
 /**
@@ -91,6 +97,23 @@ interface Props {
    */
   siblingOverlaps?: ReadonlyMap<string, readonly { name: string; shared: number }[]>;
   overlapFileName?: string;
+  /** What a row's right-click menu and the Delete key need from App; without it there is no menu. */
+  actions?: PopulationRowActions;
+  /** The right-click menu of the tree's empty space: the Populations header's ⋯ menu. */
+  paneMenu?: readonly MenuEntry[];
+  /** Each population's colour drawn after its name; off, as it is unless asked for, the rows show none. */
+  showColours?: boolean;
+  /** Shows or hides the colours, from a row's right-click menu; without it the menu has no such entry. */
+  onShowColours?: (on: boolean) => void;
+}
+
+export interface PopulationRowActions {
+  /** Open the Edit population dialog. */
+  edit: (popId: string) => void;
+  /** Open the Create population dialog with `parentId` as the parent. */
+  addChild: (parentId: string) => void;
+  /** Delete populations: after the confirmation (the menu), or at once with Undo (the Delete key). */
+  remove: (popIds: readonly string[], how: "confirm" | "now") => void;
 }
 
 function focusTreeContainer() {
@@ -275,6 +298,53 @@ interface GatePickerState {
   top: number;
 }
 
+/**
+ * A population's colour after its name. A click opens the browser's colour input, laid unseen over
+ * the swatch; the swatch follows the input as it moves, and the colour is set once, when the input
+ * reports the choice made (its change event), so a choice is one undo step.
+ */
+function PopulationSwatch({ color, label, title, disabled, onPick }: {
+  color: string;
+  label: string;
+  title: string;
+  disabled: boolean;
+  onPick: (color: string) => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const pickRef = useRef(onPick);
+  pickRef.current = onPick;
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    const commit = () => {
+      setDraft(null);
+      pickRef.current(input.value);
+    };
+    input.addEventListener("change", commit);
+    return () => input.removeEventListener("change", commit);
+  }, []);
+  return (
+    <label
+      className={"pop-row-swatch" + (disabled ? " is-locked" : "")}
+      style={{ background: draft ?? color }}
+      title={title}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <input
+        ref={inputRef}
+        type="color"
+        aria-label={label}
+        value={draft ?? color}
+        disabled={disabled}
+        onChange={(event) => setDraft(event.target.value)}
+      />
+    </label>
+  );
+}
+
 function gateRefKey(ref: GateRef): string {
   return `${ref.gate_id}:${ref.quadrant ?? ""}`;
 }
@@ -320,8 +390,9 @@ export function PopulationTree({
   displayContributorCount,
   displayContributorNames,
   perFile,
-  showHierarchyControls = true, tailoredGateIds, alignGates = true, minEvents = null, siblingOverlaps, overlapFileName }: Props) {
+  showHierarchyControls = true, tailoredGateIds, alignGates = true, minEvents = null, siblingOverlaps, overlapFileName, actions, paneMenu, showColours = false, onShowColours }: Props) {
   const { t } = useI18n();
+  const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const gateColour = useGateColour();
   const { coloured: colouredGates } = useGateInk();
   const gateSwatch = useGateSwatch();
@@ -400,6 +471,8 @@ export function PopulationTree({
     active: string | null; highlighted: ReadonlySet<string>; order: readonly string[];
     collapsed: ReadonlySet<string>; populations: CoreState["populations"];
     fold: (popId: string, folded: boolean, whole: boolean) => void;
+    /** Delete the highlighted rows at once; false when there is nothing the key may delete. */
+    deleteHighlighted: () => boolean;
   } | null>(null);
   useEffect(() => {
     const container = document.getElementById("population_tree_container");
@@ -408,6 +481,14 @@ export function PopulationTree({
       const keys = keyState.current;
       if (event.target !== container || !keys?.active) return;
       const { active } = keys;
+      // Delete here means the rows, never the selected gate the Gating tab's window-wide Delete
+      // would take: prevented, the key does not reach that handler (isDeleteShortcut), even when
+      // only the root is highlighted and nothing is deleted.
+      if (isDeleteShortcut(event)) {
+        event.preventDefault();
+        keys.deleteHighlighted();
+        return;
+      }
       if (event.key === "Escape" && keys.highlighted.size > 1) {
         event.preventDefault();
         dispatch({ type: "selectPopulations", activeId: active, popIds: [] });
@@ -580,7 +661,125 @@ export function PopulationTree({
     });
   };
 
-  keyState.current = { active: active_population_id, highlighted, order: orderedPopIds, collapsed, populations, fold: setBranchFolded };
+  /** The highlighted rows in the order the tree shows them, the root left out: what Delete and the menu act on. */
+  const highlightedRows = (): string[] => orderedPopIds.filter((id) => highlighted.has(id) && id !== root_population_id);
+
+  keyState.current = {
+    active: active_population_id, highlighted, order: orderedPopIds, collapsed, populations, fold: setBranchFolded,
+    deleteHighlighted: () => {
+      const ids = highlightedRows();
+      if (!actions || structureLocked || !ids.length) return false;
+      actions.remove(ids, "now");
+      return true;
+    },
+  };
+
+  /** Copy population names to the clipboard, one per line. */
+  const copyNames = (ids: readonly string[]) => {
+    const text = ids.map((id) => populations[id]?.name ?? "").filter(Boolean).join("\n");
+    void navigator.clipboard?.writeText(text).catch(() => undefined);
+  };
+
+  /**
+   * A row's right-click menu. One row: Rename, Edit, New child population, Duplicate, folding its
+   * branch, Copy name, Delete. Several highlighted rows: Duplicate, Copy names and Delete, on all of
+   * them. The root has no Rename, Edit, Duplicate or Delete.
+   */
+  const rowMenu = (popId: string, targets: readonly string[]): MenuEntry[] => {
+    const pop = populations[popId];
+    if (!pop || !actions) return [];
+    const isRoot = popId === root_population_id;
+    const locked = structureLocked ? t("Unlock structure to change populations") : undefined;
+    const many = targets.length > 1;
+    const folding: MenuEntry[] = !many && pop.children.length > 0
+      ? [
+          {
+            label: collapsed.has(popId) ? t("Expand branch") : t("Collapse branch"),
+            className: "pop-row-fold",
+            onClick: () => setBranchFolded(popId, !collapsed.has(popId), false),
+          },
+          {
+            label: collapsed.has(popId) ? t("Expand every branch under it") : t("Collapse every branch under it"),
+            className: "pop-row-fold-all",
+            onClick: () => setBranchFolded(popId, !collapsed.has(popId), true),
+          },
+          "separator",
+        ]
+      : [];
+    const copy: MenuEntry = {
+      label: many ? t("Copy {count} names", { count: targets.length }) : t("Copy name"),
+      className: "pop-row-copy-names",
+      title: t("Copy the names to the clipboard, one per line"),
+      onClick: () => copyNames(many ? targets : [popId]),
+    };
+    if (isRoot) {
+      return [
+        { label: t("New child population…"), className: "pop-row-add-child", disabled: structureLocked, title: locked, onClick: () => actions.addChild(popId) },
+        "separator",
+        ...folding,
+        copy,
+      ];
+    }
+    const duplicate: MenuEntry = {
+      label: many ? t("Duplicate {count} populations", { count: targets.length }) : t("Duplicate"),
+      className: "pop-row-duplicate",
+      disabled: structureLocked,
+      title: locked ?? t("Copy the rows beside the originals, with their gates"),
+      onClick: () => dispatch({ type: "duplicateSelectedPopulations", popIds: [...targets] }),
+    };
+    const remove: MenuEntry = {
+      label: many ? t("Delete {count} populations…", { count: targets.length }) : t("Delete…"),
+      className: "pop-row-delete",
+      danger: true,
+      disabled: structureLocked,
+      title: locked,
+      onClick: () => actions.remove(targets, "confirm"),
+    };
+    if (many) return [duplicate, copy, "separator", remove];
+    return [
+      {
+        label: t("Rename…"), className: "pop-row-rename", disabled: structureLocked, title: locked,
+        onClick: () => setEditingName({ popId, value: pop.name }),
+      },
+      { label: t("Edit…"), className: "pop-row-edit", disabled: structureLocked, title: locked ?? t("Edit the name, parent and gates"), onClick: () => actions.edit(popId) },
+      {
+        label: t("Reset colour"), className: "pop-row-reset-colour", disabled: structureLocked || !pop.color,
+        title: locked ?? t("Go back to the population's automatic colour"),
+        onClick: () => dispatch({ type: "setPopulationColor", popId, color: null }),
+      },
+      ...(onShowColours
+        ? [{
+            label: t("Show population colours"), className: "pop-row-show-colours", checked: showColours,
+            title: t("Show each population's colour after its name. Click a colour to change it."),
+            onClick: () => onShowColours(!showColours),
+          }]
+        : []),
+      { label: t("New child population…"), className: "pop-row-add-child", disabled: structureLocked, title: locked, onClick: () => actions.addChild(popId) },
+      duplicate,
+      "separator",
+      ...folding,
+      copy,
+      "separator",
+      remove,
+    ];
+  };
+
+  const openRowMenu = (event: React.MouseEvent, popId: string): void => {
+    if (!actions) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const isRoot = popId === root_population_id;
+    const keep = !isRoot && highlighted.has(popId);
+    const targets = keep ? highlightedRows() : [popId];
+    if (!keep) dispatch({ type: "selectPopulations", activeId: popId, popIds: [] });
+    const items = rowMenu(popId, targets);
+    if (!items.length) return;
+    focusTreeContainer();
+    setMenu({
+      x: event.clientX, y: event.clientY, items,
+      label: targets.length > 1 ? t("{count} populations", { count: targets.length }) : populations[popId].name,
+    });
+  };
 
   const updatePointerDropTarget = (
     sourceIds: readonly string[],
@@ -673,6 +872,7 @@ export function PopulationTree({
           dispatch({ type: "selectPopulations", activeId: popId, popIds: [] });
           focusTreeContainer();
         }}
+        onContextMenu={actions ? (event) => openRowMenu(event, popId) : undefined}
         onPointerDown={(event) => {
           // A plain drag moves rows. Shift and Cmd/Ctrl are the SELECTION modifiers and never
           // start a drag, so shift-click still highlights a range and cmd-click still toggles a
@@ -801,6 +1001,15 @@ export function PopulationTree({
               {pop.name}
             </span>
           )}
+          {!isRoot && showColours && (
+            <PopulationSwatch
+              color={populationColorOf(pop) ?? "#000000"}
+              label={t("Colour of {name}", { name: pop.name })}
+              title={structureLocked ? t("Unlock structure to change populations") : t("Click to choose the population's colour")}
+              disabled={structureLocked}
+              onPick={(color) => dispatch({ type: "setPopulationColor", popId, color })}
+            />
+          )}
           {siblingOverlaps?.get(popId)?.length ? (
             <span
               className="pop-row-overlap"
@@ -928,7 +1137,14 @@ export function PopulationTree({
             dispatch({ type: "selectPopulations", activeId: active_population_id, popIds: [] });
           }
         }}
+        onContextMenu={(event) => {
+          // A right-click on empty space opens the Populations header's ⋯ menu.
+          if (event.target !== event.currentTarget || !paneMenu?.length) return;
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY, items: paneMenu, label: t("Populations") });
+        }}
       >{rows}</div>
+      <ContextMenu menu={menu} onClose={() => setMenu(null)} />
       {gatePicker && pickerPopulation && (
         <div
           ref={gatePickerRef}

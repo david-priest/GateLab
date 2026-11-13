@@ -77,6 +77,12 @@ const AUTOMATIC = new Set(["Saturated", "Unsaturated"]);
 const ROOT = "0-1";
 /** Points inserted along each raw-straight edge drawn on a biexponential axis. */
 const DENSIFY = 12;
+/**
+ * A display-space edge is traced until Chorus's straight pieces lie within this of it, as a
+ * fraction of the polygon's extent in Chorus's display, in at most 2^TRACE_DEPTH pieces an edge.
+ */
+const TRACE_TOLERANCE = 1e-5;
+const TRACE_DEPTH = 10;
 
 const num = (v: number): number => (Object.is(v, -0) ? 0 : v);
 
@@ -157,15 +163,70 @@ function rawVertices(
     }
     return out;
   };
+  // A display-space polygon's edges are straight in the gate's own display. Where that is the
+  // display Chorus draws the two axes in (a gate carried from the experiment), the corners alone
+  // describe it. Where it is not (a gate drawn in GateLab's logicle, say), an edge is a curve in
+  // Chorus's display, and it is traced: halved in the gate's display until Chorus's straight
+  // pieces lie along it.
+  const inChorus = chorusSpecs.map((s) => (s ? transformFromSpec(s).forward : (v: number) => v));
+  const toChorus = (point: [number, number]): [number, number] => {
+    const raw = toRaw(point);
+    return [inChorus[0](raw[0]), inChorus[1](raw[1])];
+  };
+  const displayOutline = (pts: [number, number][]): { x: number; y: number }[] => {
+    const drawn = pts.map(toChorus);
+    const extent = (axis: 0 | 1): number => {
+      const values = drawn.map((p) => p[axis]).filter(Number.isFinite);
+      return values.length ? Math.max(...values) - Math.min(...values) || 1 : 1;
+    };
+    const scale: [number, number] = [extent(0), extent(1)];
+    const along = (a: [number, number], b: [number, number], t: number): [number, number] => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    // How far, in units of the polygon's extent on each axis, the edge's own points between two
+    // of its points lie from the straight line Chorus would draw between those two.
+    const sag = (p: [number, number], q: [number, number]): number => {
+      const cp = toChorus(p), cq = toChorus(q);
+      const dx = (cq[0] - cp[0]) / scale[0], dy = (cq[1] - cp[1]) / scale[1];
+      const length = Math.hypot(dx, dy);
+      if (!Number.isFinite(length)) return Infinity;
+      let worst = 0;
+      for (const t of [0.25, 0.5, 0.75]) {
+        const cm = toChorus(along(p, q, t));
+        const ex = (cm[0] - cp[0]) / scale[0], ey = (cm[1] - cp[1]) / scale[1];
+        const off = length === 0 ? Math.hypot(ex, ey) : Math.abs(dx * ey - dy * ex) / length;
+        worst = Math.max(worst, Number.isFinite(off) ? off : Infinity);
+      }
+      return worst;
+    };
+    // The points to write between p and q: none where Chorus's line is the edge, else the edge's
+    // midpoint and each half's own, until every piece is within TRACE_TOLERANCE of the edge.
+    const between = (p: [number, number], q: [number, number], depth: number): [number, number][] => {
+      if (depth >= TRACE_DEPTH || sag(p, q) <= TRACE_TOLERANCE) return [];
+      const mid = along(p, q, 0.5);
+      return [...between(p, mid, depth + 1), mid, ...between(mid, q, depth + 1)];
+    };
+    const out: { x: number; y: number }[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      for (const point of [a, ...between(a, b, 0)]) {
+        const [x, y] = toRaw(point);
+        out.push({ x: num(x), y: num(y) });
+      }
+    }
+    return out;
+  };
   switch (gate.gate_type) {
     case "rectangle": {
-      const [p, q] = gate.vertices.map(toRaw);
-      const x0 = Math.min(p[0], q[0]), x1 = Math.max(p[0], q[0]), y0 = Math.min(p[1], q[1]), y1 = Math.max(p[1], q[1]);
+      // A rectangle is held as its four corners (or as two opposite ones), so its sides are the
+      // least and greatest of every vertex: read as "the first two vertices are opposite corners",
+      // four corners gave a rectangle of no height.
+      const corners = gate.vertices.map(toRaw);
+      const xs = corners.map((c) => c[0]), ys = corners.map((c) => c[1]);
+      const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
       // Axis-aligned under monotone axes: the corners alone describe it exactly.
       return [[{ x: num(x0), y: num(y0) }, { x: num(x1), y: num(y0) }, { x: num(x1), y: num(y1) }, { x: num(x0), y: num(y1) }]];
     }
     case "polygon":
-      return [gate.space === "display" ? gate.vertices.map(toRaw).map(([x, y]) => ({ x: num(x), y: num(y) })) : outline(gate.vertices)];
+      return [gate.space === "display" ? displayOutline(gate.vertices) : outline(gate.vertices)];
     case "ellipse": {
       const boundary = ellipseBoundary(gate, 64).map(toRaw);
       warn(`"${gate.name}" is an ellipse, which Chorus does not draw; it is written as a 64-sided polygon on its outline.`);
@@ -268,7 +329,9 @@ export function exportChorusExperiment(input: ChorusExportInput): ChorusExportRe
     const polygons = rawVertices(gate, axes, specs, windows, warn);
     if (!polygons) { skipped.push({ name: pop.name, why: "its gate has no Chorus form" }); return; }
     const quadrant = included[0].quadrant;
-    let polygon = gate.gate_type === "quadrant" ? polygons[quadrant ?? 0] : polygons[0];
+    // A reference names its quadrant 1 to 4 (models.ts GateRef); rawVertices returns Q1 to Q4 in
+    // that order from index 0.
+    let polygon = gate.gate_type === "quadrant" ? polygons[(quadrant ?? 1) - 1] : polygons[0];
     if (!polygon || polygon.length < 3) { skipped.push({ name: pop.name, why: "its gate has fewer than three vertices" }); return; }
     // The importer qualifies a name that recurs under different parents ("Scatter/P1"); Chorus
     // allows the repeat, so the match and the name written are the unqualified one.
@@ -316,7 +379,7 @@ export function exportChorusExperiment(input: ChorusExportInput): ChorusExportRe
       gateKind: "Polygon",
       // Chorus labels a gate apart from its population ("P3" for "CD45RB-IgD+"); a matched gate
       // keeps its label, a new one is labelled as GateLab names it.
-      name: sourceGate?.name ?? (gate.gate_type === "quadrant" ? `${gate.name} Q${(quadrant ?? 0) + 1}` : gate.name),
+      name: sourceGate?.name ?? (gate.gate_type === "quadrant" ? `${gate.name} Q${quadrant ?? 1}` : gate.name),
       gateId,
       parentPopulationId: writtenParent,
       categories: sourceGate?.categories ?? [],

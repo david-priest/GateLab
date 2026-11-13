@@ -291,6 +291,17 @@ describe("GateLab UI localization", () => {
     expect(hasUiTranslation("ja", "Straight edges can look curved here \u2014 gates are stored in raw values, so the curve is where the gate really falls. Gating is unchanged.")).toBe(true);
   });
 
+  it("translates the gating template's menus, its channel dialog and its import notes (2026-11-10)", () => {
+    for (const key of [
+      "Apply gating template…", "Export gating template…", "Import gating template", "a GateLab gating template", "the gating template",
+      "Apply gating template", "Template channel", "Channel in this file", "Found by", "same name", "same detector ($PnN)",
+      "same marker ($PnS)", "name, ignoring case and punctuation", "chosen", "not found; choose one", "more than one matches; choose one",
+      "another template channel has it; choose one", "Channels found other than by name: {pairs}.",
+      "Show this file on the template's axes (scales and ranges). Display only: the gates hold the same events either way.",
+      "The template's spillover matrix is the one this file is compensated with; compensation is already enabled.",
+    ]) expect(hasUiTranslation("ja", key), key).toBe(true);
+  });
+
   it("translates the open dialog's keyword agreement, the import dialog's source and its matrix notes", () => {
     const keys = [
       "confirmed by {keywords}",

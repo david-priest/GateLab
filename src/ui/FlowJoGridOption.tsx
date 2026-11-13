@@ -3,6 +3,7 @@
 // files from the Import menu. One component, so the two cannot say different things.
 
 import { useI18n } from "./i18n";
+import { FoldSummary } from "./FoldSummary";
 
 /** What the option's note says either mode leaves continuous: FlowJo's rule is not established. */
 export const FLOWJO_GRID_NOT_COVERED =
@@ -49,7 +50,7 @@ export function FlowJoGridOption({
         {t(FLOWJO_GRID_OFF_NOTE)}
       </div>
       <details style={{ marginLeft: 22 }}>
-        <summary>{t("What either way leaves continuous")}</summary>
+        <FoldSummary>{t("What either way leaves continuous")}</FoldSummary>
         <div className="gl-modal-note">
           {t(FLOWJO_GRID_NOT_COVERED)}{" "}
           {t(FLOWJO_GRID_GATELAB_POLYGONS)}

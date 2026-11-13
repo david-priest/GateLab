@@ -306,3 +306,9 @@ export function sscSlotOf(channelNames: ReadonlyMap<number, string>): number {
   for (const [slot, name] of channelNames) if (/^SSC/i.test(name)) return slot;
   return 4;
 }
+
+/** The LightLoss (transmitted light) channel's slot, or null when the images have none. */
+export function lightLossSlotOf(channelNames: ReadonlyMap<number, string>): number | null {
+  for (const [slot, name] of channelNames) if (/^LightLoss/i.test(name)) return slot;
+  return null;
+}

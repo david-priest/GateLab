@@ -101,6 +101,7 @@ export function workspaceGatingRecord(state: CoreState): WorkspaceFile["gating"]
       id: h.id,
       name: h.name,
       ...(h.owner_sample_id ? { owner_sample_id: h.owner_sample_id } : {}),
+      ...(h.owner_group_id ? { owner_group_id: h.owner_group_id } : {}),
       ...(h.structure_locked !== undefined ? { structure_locked: h.structure_locked } : {}),
       ...(h.source_hierarchy_id ? { source_hierarchy_id: h.source_hierarchy_id } : {}),
       ...(h.source_gate_ids ? { source_gate_ids: h.source_gate_ids } : {}),

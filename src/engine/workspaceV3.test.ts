@@ -715,6 +715,22 @@ describe("uncompensated v3 validation", () => {
     expect(validated.plotting).toEqual({ "prop.groupSel": "batch", "prop.files": ["s1"] });
   });
 
+  it("accepts and preserves the named Plotting charts the app saves", async () => {
+    const candidate = clone(migrateWorkspaceV2ToV3(workspaceV2())) as unknown as Record<string, unknown>;
+    const plottingCharts = { activeId: "chart-b", charts: [{ id: "chart-a", name: "Chart 1", plotting: {} }, { id: "chart-b", name: "treated", plotting: { "prop.groupSel": "batch" } }] };
+    candidate.plottingCharts = plottingCharts;
+    const validated = await validateWorkspaceV3(JSON.parse(JSON.stringify(candidate)));
+    expect(validated.plottingCharts).toEqual(plottingCharts);
+  });
+
+  it("accepts and preserves the figure style the app saves", async () => {
+    const candidate = clone(migrateWorkspaceV2ToV3(workspaceV2())) as unknown as Record<string, unknown>;
+    const figureStyle = { fontTick: 8, fontAxis: 10, fontTitle: 12, fontLegend: 9, fontGate: 7, histLineWidth: 1.2 };
+    candidate.figureStyle = figureStyle;
+    const validated = await validateWorkspaceV3(JSON.parse(JSON.stringify(candidate)));
+    expect(validated.figureStyle).toEqual(figureStyle);
+  });
+
   // A workspace holding a gate on FlowJo's grid names it (workspaceFeatures.ts): an older GateLab
   // refuses the key, as the test below has it refuse any key it does not know, instead of reading
   // the gate on another axis. This build reads it back, and refuses a feature it does not have.

@@ -181,6 +181,71 @@ describe("gatelab_view on the Strategy tab", () => {
       expect((await view.run({ tab: "strategy" })).isError).toBe(true);
       // Without the Strategy tab the reply is passed on as before.
       expect((await view.run({ populationId: "P1" })).isError).toBeUndefined();
+      // The layout controls go to the tab as given.
+      strategyCore = true;
+      const wrapped = { strategy: { populationIds: ["P1", "P2"], layout: "flow", columns: 3, showArrows: true, arrowWidth: 2, arrowAnchor: "gate" } };
+      expect(JSON.parse((await view.run(wrapped)).content[0].text).asked).toEqual(wrapped);
+    } finally {
+      tab.close();
+      await relay.close();
+    }
+  });
+});
+
+describe("gatelab_render as SVG", () => {
+  const httpOf = (relay, path) => `http://127.0.0.1:${relay.port}${path}?token=${relay.token}`;
+  const svgFile = '<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="420" height="300"><g id="strategy-arrows"/></svg>';
+
+  it("writes the file the tab posts to an upload slot, and refuses an old core, a bad path and PNG-only options", async () => {
+    const relay = await startRelay({ port: 0 });
+    const dir = await mkdtemp(join(tmpdir(), "gatelab-relay-"));
+    let core = "svg";
+    const asked = [];
+    const tab = fakeTab(relay.url, {
+      answer: async (ws, message) => {
+        asked.push(message.params);
+        if (message.params.format === "svg" && core === "svg") {
+          await fetch(httpOf(relay, message.params.upload), { method: "POST", body: svgFile });
+          ws.send(JSON.stringify({ kind: "response", id: message.id, result: { format: "svg", width: 420, height: 300, dpi: message.params.dpi ?? 300, view: { tab: "strategy" }, revision: 7 } }));
+          return;
+        }
+        // An older core, or a PNG asked for: an image in the reply.
+        ws.send(JSON.stringify({ kind: "response", id: message.id, result: { png: "data:image/png;base64,AAAA", width: 10, height: 10, view: { tab: "strategy" }, revision: 7 } }));
+      },
+    });
+    try {
+      await tab.open;
+      await relay.waitForTab(2000);
+      const render = gatelabTools(relay).find((tool) => tool.name === "gatelab_render");
+      const target = join(dir, "strategy.svg");
+      const written = JSON.parse((await render.run({ format: "svg", path: target, dpi: 600 })).content[0].text);
+      expect(written).toEqual({
+        format: "svg", path: target, bytes: Buffer.byteLength(svgFile), sha256: createHash("sha256").update(svgFile).digest("hex"),
+        width: 420, height: 300, dpi: 600, view: { tab: "strategy" }, revision: 7,
+      });
+      expect(asked[0]).toEqual({ format: "svg", dpi: 600, upload: expect.stringMatching(/^\/save\//) });
+      expect(await readFile(target, "utf8")).toBe(svgFile);
+      // There already: refused unless overwrite, before the tab is asked.
+      expect((await render.run({ format: "svg", path: target })).content[0].text).toContain("overwrite");
+      expect(asked).toHaveLength(1);
+      expect(JSON.parse((await render.run({ format: "svg", path: target, overwrite: true })).content[0].text).dpi).toBe(300);
+      expect(asked[1]).toEqual({ format: "svg", upload: expect.stringMatching(/^\/save\//) });
+      // Refused before the tab is asked.
+      for (const args of [{ format: "svg", path: "strategy.svg" }, { format: "svg", path: join(dir, "strategy.png") }, { format: "svg", path: join(dir, "a.svg"), width: 800 }, { path: join(dir, "a.svg") }, { dpi: 300 }, { format: "gif" }]) {
+        expect((await render.run(args)).isError).toBe(true);
+      }
+      expect(asked).toHaveLength(2);
+      // An older core answers with a PNG and posts nothing: refused, the slot closed, no file.
+      core = "old";
+      const old = await render.run({ format: "svg", path: join(dir, "old.svg") });
+      expect(old.isError).toBe(true);
+      expect(old.content[0].text).toContain("predates");
+      expect((await readdir(dir)).sort()).toEqual(["strategy.svg"]);
+      expect(relay.pendingSaves).toBe(0);
+      // The PNG is as it was: an image block, only width passed on.
+      const png = await render.run({ width: 300 });
+      expect(png.content[0]).toMatchObject({ type: "image", mimeType: "image/png", data: "AAAA" });
+      expect(asked.at(-1)).toEqual({ width: 300 });
     } finally {
       tab.close();
       await relay.close();

@@ -9,7 +9,14 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import { populationColorOf } from "../engine/palettes";
+import { PopulationChecklist } from "./PopulationChecklist";
 import { SearchableSelect } from "./SearchableSelect";
+import { FoldSummary } from "./FoldSummary";
+import { addPanelLetters, isPanelLetter, panelLetters, panelLetterState, reconcilePanelLetters, removePanelLetters, setLetterStyle, sheetLetterStyle, withPanelLetterIds } from "./layout/panelLetters";
+import { PanelLetterButtons, PanelLetterInspector, PanelLetterStyleSection } from "./layout/PanelLetterControls";
+import { LayoutObjectsSection } from "./layout/LayoutObjectsSection";
+import { hiddenItemIds, withoutHiddenItems } from "./layout/layoutObjects";
 import Moveable, {
   type OnDrag,
   type OnDragEnd,
@@ -31,11 +38,14 @@ import type { Sample } from "../engine/sample";
 import type { CoreState, GatingDerived } from "../store";
 import {
   figureHierarchies,
+  layoutFigure,
   resolveFigurePopulation, resolvePopulationInTree,
   type FigureSample,
   type FigureSource,
 } from "../engine/figure";
 import { useFigureSources } from "./useFigureSources";
+import { figureChartRecipe, figureLayoutRecipes } from "./figureLayoutRecipes";
+import { overlayHeading } from "./overlayHeading";
 import type { StoredHierarchy } from "../engine/hierarchies";
 import {
   applyLayoutPage,
@@ -47,7 +57,6 @@ import {
   nextLayoutItemPosition,
   copyLayoutItems,
   dropStaleReadsFrom,
-  layoutItemMinimum,
   pageForPreset,
   pageOrigins,
   pageSizeMm,
@@ -109,20 +118,47 @@ import { composeSheetPages, writeComposedPages, type ComposedPage, type LayoutEx
 import { DEFAULT_ITERATION, expandLayoutSheet, fillPlaceholders, followsIteration, itemsBeyondPaper, tilesThatFit, iterationUnits, metadataUnits, populationUnits, sharedMetadataFields, templateFrame, type DescribeBoundPlot, type LayoutIteration, type LayoutPage as ExpandedPage, type LayoutPageItem } from "../engine/layoutBatch";
 import { UNASSIGNED_METADATA_VALUE } from "../engine/layoutBatch";
 import { followSheetIteration } from "./layoutFollow";
-import { automaticTitleTemplate, fieldsFromTemplate, NO_TITLE, plotTitle, plotTitleContext, templateFromFields, titleFields, TITLE_PLACEHOLDERS, TITLE_PRESETS, TITLE_SEPARATORS } from "../engine/layoutTitle";
+import { layoutClipboardShortcut, useLayoutClipboard } from "./layout/layoutClipboard";
+import { automaticTitleTemplate, fieldsFromTemplate, NO_TITLE, plotTitle, plotTitleContext, templateFromFields, titleFields, TITLE_PLACEHOLDERS, TITLE_PRESETS, TITLE_SEPARATORS, type PlotTitleContext } from "../engine/layoutTitle";
 import { alignItems, arrangeUnits, distributeItems, fitContentToPage, fitPageToContent, groupItems, ungroupItems, type AlignHow, type DistributeHow } from "../engine/layoutArrange";
 import { useI18n } from "./i18n";
-import { TabIntro, TabIntroToggle, useTabIntro } from "./TabIntro";
 import { hostWords } from "./hostWording";
 import { historyShortcutAction } from "./historyShortcuts";
 import { NumberField } from "./NumberField";
+import { FigureStyleFollow, useFigureLayoutFields } from "./figureStyle";
 import { ContextMenu, type ContextMenuState } from "./ContextMenu";
 import type { MenuEntry } from "./MenuButton";
 import { CHART_STATISTIC_LABELS, LayoutChart, chartData } from "./LayoutChart";
 import { LayoutFigureSurface, figureBlockFrame } from "./LayoutFigure";
-import { LayoutProportionsSurface, proportionsBlockFrame, proportionsSampleRefs } from "./LayoutProportions";
+import { LayoutFigurePageSelect, LayoutProportionsPageSelect } from "./layout/LayoutBlockPageSelect";
+import { LayoutDimensionFields, LayoutSelectionGeometry, LayoutSpaceButton, useLayoutGeometryPrefs } from "./layout/LayoutGeometryControls";
+import { arrangeInGrid, arrangeUnitCount, matchSizes, spaceItems, unitToPx } from "./layout/layoutGeometry";
+import { LayoutProportionsPanelNote, LayoutProportionsSurface, plottingBlockSizer, proportionsSampleRefs } from "./LayoutProportions";
+import { LayoutChartQuickStart, type QuickStartChoice } from "./LayoutChartQuickStart";
+import { chartToPlottingRecipe, quickStartPlottingRecipe } from "./layoutChartConversion";
+import { statisticTitle } from "./StatisticChart";
 import type { DivisionProfileLike } from "../engine/factors";
-import { buildProportionsModel, type ProportionsSettings } from "../engine/proportionsModel";
+import type { ProportionsSettings } from "../engine/proportionsModel";
+import { describeLayoutBlock, fillSourcePlaceholders, hasSourcePlaceholder, withSourceFields, type BlockSource } from "./layoutSources";
+import { LayoutLegendMark, LayoutSourceHover, LayoutSourcePanel } from "./LayoutSourcePanel";
+import { legendDate, legendTextBlock } from "./layoutLegend";
+import type { LayoutShapeRecipe } from "../engine/shapeBlock";
+import { LayoutShapeDrawLayer, LayoutShapeSvg, shapeSnapLines } from "./layout/LayoutShape";
+import { LayoutRulers, LayoutRulersToggle } from "./layout/LayoutRulers";
+import { LayoutClearGuidesButton, LayoutGuides } from "./layout/LayoutGuides";
+import { addGuide, clearGuides, copiedGuides, guideSnapLines, moveGuide, removeGuide } from "./layout/guideModel";
+import { LayoutShapeInspector, LayoutShapeMenu, shapeItems, shapeMenuEntries, shapeTitle, type ShapePatch } from "./layout/LayoutShapeControls";
+import { applyShapePatch, constrainLineResize, type ShapeTool } from "./layout/shapeGeometry";
+import { imageMenuEntry, LayoutImageButton, LayoutImageInspector, LayoutPlacedImageView, placedImageDrop, usePlacedImageFile } from "./layout/LayoutPlacedImage";
+import { LayoutRotationButtons, LayoutTurned, rotationMenuEntries } from "./layout/LayoutRotationControls";
+import { growTextFrame, turnItems } from "./layout/layoutRotation";
+import { placedImageFrame } from "./layout/placedImage";
+import { LayoutTextEditField, LayoutTextFormatFields, RichTextContent, RichTextFieldHint, applyTextFormat, textBlockStyle, type TextBlockFormat, type TextBlockPatch } from "./layout/LayoutTextFormat";
+import { plainTextOf } from "./layout/richText";
+import { useLayoutNavigation } from "./layout/layoutNavigation";
+import { useLayoutSheetTabs } from "./layout/layoutSheets";
+import { useExportAllSheets } from "./layout/useExportAllSheets";
+import { LayoutKeysHelp } from "./layout/LayoutKeysHelp";
 
 export interface LayoutSampleView {
   id: string;
@@ -165,8 +201,8 @@ interface Props {
   divisionProfiles?: Readonly<Record<string, DivisionProfileLike>>;
   /** The workspace's cell images, for image-wall blocks; null or absent when none are attached. */
   imageService?: ImageService | null;
-  /** Load a chart block's settings into the Plotting tab, to edit them there. */
-  onOpenInPlotting?: (settings: ProportionsSettings) => void;
+  /** Load a chart block's settings into the Plotting tab as a new chart named `name`, to edit them there. */
+  onOpenInPlotting?: (settings: ProportionsSettings, name: string) => void;
   dataRevision: string | number;
   densityColorPower: number;
   onOpenInGating: (recipe: LayoutPlotRecipe | LayoutStrategyRecipe) => void;
@@ -181,7 +217,6 @@ const fontSizesOf = (style: LayoutPlotStyle) => ({
   gate_label: style.fontGate,
   title: style.fontTitle,
 });
-const DIMENSION_LABELS = { x: "X (px)", y: "Y (px)", width: "Width (px)", height: "Height (px)" } as const;
 const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
 const SNAP_GRID = 10;
 /** A stable empty page, so nothing re-renders on its identity. */
@@ -251,12 +286,25 @@ function itemTitle(
   _state: CoreState,
 ): string {
   const recipe = item.recipe;
-  if (recipe.kind === "text") return recipe.text.split("\n")[0] || "Text";
+  if (recipe.kind === "text") return plainTextOf(recipe).split("\n")[0] || "Text";
   if (recipe.title?.trim() && recipe.title.trim() !== NO_TITLE) return recipe.title.trim();
   if (recipe.kind === "figure") return recipe.illustration.figure?.name?.trim() || "Figure";
-  if (recipe.kind === "proportions") return recipe.settings.plotType === "box" ? "Boxplot" : "Composition";
+  if (recipe.kind === "proportions") {
+    const chart = recipe.settings.valueKind === "cells"
+      ? `${recipe.settings.channel || "Channel"} per cell`
+      : recipe.settings.valueKind === "statistic"
+        ? statisticTitle(recipe.settings.statistic, recipe.settings.channel || "channel")
+        : recipe.settings.plotType === "box" ? "Boxplot" : "Composition";
+    // A block of one panel says which: its population, group and facet, as the panel's title does.
+    if (!recipe.panel) return chart;
+    if ("legend" in recipe.panel) return `${chart} · legend`;
+    const which = [recipe.panel.population, recipe.panel.group, recipe.panel.facet, recipe.panel.channel, recipe.panel.page === undefined ? undefined : `page ${recipe.panel.page}`].filter((part) => part !== undefined && part !== "");
+    return which.length ? `${chart} · ${which.join(" · ")}` : chart;
+  }
   if (recipe.kind === "imagewall") return `${recipe.populationName || "Population"} · ${recipe.fileName || "images"}`;
   if (recipe.kind === "cellpanel") return `${recipe.cells.length} ${recipe.cells.length === 1 ? "cell" : "cells"} · ${recipe.fileName || "images"}`;
+  if (recipe.kind === "shape") return shapeTitle(recipe);
+  if (recipe.kind === "image") return recipe.fileName;
   const sample = samples.find(({ id }) => id === recipe.sampleId);
   const population = sample?.tree.populations[recipe.populationId];
   if (recipe.kind === "chart") return `${population?.name ?? "Population"} · ${CHART_STATISTIC_LABELS[recipe.statistic]}`;
@@ -432,6 +480,82 @@ function LayoutPoolPicker({
   );
 }
 
+
+const OVERLAY_PALETTE = ["#2671c6", "#bc642c", "#69882b", "#8855a6", "#15938c", "#b74169"];
+
+/**
+ * One plot of several populations' plots: the first with events as the main trace and the rest
+ * over it, each in its population's colour (populationColorOf), or the palette in turn when two
+ * share one; the legend in the order given. Null when none was drawn.
+ */
+export function overlaidPlot(
+  parts: readonly { plot: Record<string, unknown>; name: string; colorSlot?: number; color?: string }[],
+): { config: Record<string, unknown>; color: string } | null {
+  if (!parts.length) return null;
+  const slotColours = parts.map((part) => populationColorOf(part));
+  const byPopulation = slotColours.every(Boolean) && new Set(slotColours).size === slotColours.length;
+  const traces = parts.map((part, i) => ({
+    x: part.plot.x,
+    y: part.plot.y,
+    name: part.name,
+    color: byPopulation ? slotColours[i]! : OVERLAY_PALETTE[i % OVERLAY_PALETTE.length],
+  }));
+  const lead = Math.max(0, traces.findIndex((trace) => (trace.x as ArrayLike<number> | undefined)?.length));
+  const drawn = [traces[lead], ...traces.filter((_, i) => i !== lead)];
+  return {
+    color: drawn[0].color,
+    config: {
+      ...parts[lead].plot,
+      x: drawn[0].x,
+      y: drawn[0].y,
+      overlay_traces: drawn.slice(1),
+      legend_entries: traces.map(({ name, color }) => ({ name, color })),
+      n_events: parts.reduce((n, part) => n + Number(part.plot.n_events ?? 0), 0),
+      population_memberships: true,
+    },
+  };
+}
+
+/**
+ * The populations a Layout plot overlays, as a checklist of its file's populations in tree order,
+ * each with the colour it is drawn in. Ticking adds a population and unticking removes it, the
+ * list kept in tree order so the legend reads as the tree does.
+ */
+function LayoutOverlayPicker({
+  populations,
+  tree,
+  chosen,
+  onChange,
+}: Readonly<{
+  populations: readonly { popId: string; depth: number; isLastPath: boolean[] }[];
+  tree: StoredHierarchy;
+  chosen: ReadonlySet<string>;
+  onChange: (populationIds: string[]) => void;
+}>) {
+  const { t } = useI18n();
+  return (
+    <PopulationChecklist
+      compact
+      collapsible={false}
+      label={t("Populations overlaid on this plot")}
+      summary={t("{count} populations overlaid, each in its population's colour", { count: String(chosen.size) })}
+      rows={populations.map(({ popId, depth, isLastPath }) => ({
+        key: popId,
+        name: tree.populations[popId]?.name ?? popId,
+        depth,
+        isLastPath,
+        color: populationColorOf(tree.populations[popId]),
+      }))}
+      selected={populations.map((entry) => entry.popId).filter((id) => chosen.has(id))}
+      onToggle={(popId) => {
+        const ticked = chosen.has(popId);
+        const next = populations.map((entry) => entry.popId).filter((id) => (id === popId ? !ticked : chosen.has(id)));
+        if (next.length) onChange(next);
+      }}
+    />
+  );
+}
+
 function LayoutPlotSurface({
   item,
   samples,
@@ -460,7 +584,7 @@ function LayoutPlotSurface({
 }>) {
   const hostRef = useRef<HTMLDivElement>(null);
   // A chart, a figure and a Plotting chart have surfaces of their own; this one takes plots and strategies.
-  const recipe = item.recipe as Exclude<LayoutRecipe, LayoutChartRecipe | LayoutFigureRecipe | LayoutProportionsRecipe | LayoutImageWallRecipe | LayoutCellPanelRecipe>;
+  const recipe = item.recipe as Exclude<LayoutRecipe, LayoutChartRecipe | LayoutFigureRecipe | LayoutProportionsRecipe | LayoutImageWallRecipe | LayoutCellPanelRecipe | LayoutShapeRecipe | import("../engine/placedImageBlock").LayoutPlacedImageRecipe>;
   const styleKey = JSON.stringify(style);
   const trees = useMemo(() => figureHierarchies(activeState), [activeState]);
   const source =
@@ -485,8 +609,21 @@ function LayoutPlotSurface({
   // The population as named, or followed into this file's tree from the tree the id belongs to
   // (a reopened workspace can put the file on another copy of the tree than the one the plot
   // was added from), so a plot never says its population is unavailable while the file has it.
+  // Populations overlaid on one plot, each followed into this file's tree: those the file has,
+  // by the id asked for and the id here. The plot stands for the first of them, so it is
+  // unavailable only when the file has none.
+  const overlayIds = (recipe.kind === "biplot" || recipe.kind === "histogram") && recipe.populationIds && recipe.populationIds.length > 1
+    ? recipe.populationIds
+    : null;
+  const overlaid = overlayIds && source
+    ? overlayIds.flatMap((asked) => {
+        const found = resolvePopulationInTree(asked, source.tree, trees, templateSource?.tree.id);
+        return found.missing ? [] : [{ asked, id: found.id }];
+      })
+    : [];
   const resolvedPopulation = (() => {
     if (recipe.kind === "text" || !source) return { id: recipe.kind === "text" ? "" : recipe.populationId, missing: false };
+    if (overlaid.length) return { id: overlaid[0].id, missing: false };
     return resolvePopulationInTree(recipe.populationId, source.tree, trees, templateSource?.tree.id);
   })();
   const populationId = resolvedPopulation.id;
@@ -497,7 +634,9 @@ function LayoutPlotSurface({
   // The title as drawn, resolved here so the effect below keys on the words and not on the
   // describe callback's identity: the plot is drawn again when its template, file or population
   // changes, and not when the tab renders for a selection.
-  const boundContext = recipe.kind === "text" ? null : describe({ ...recipe, populationId }, undefined, item.unitId);
+  const boundContext = recipe.kind === "text"
+    ? null
+    : describe({ ...recipe, populationId, ...(overlayIds ? { populationIds: overlaid.map((entry) => entry.id) } : {}) }, undefined, item.unitId);
   const fillTitle = (template: string) => (boundContext ? plotTitle(template, boundContext) : template);
   const drawnTitle = fillTitle(titleTemplate);
   const recipeKey = JSON.stringify(recipe);
@@ -656,6 +795,8 @@ function LayoutPlotSurface({
 
       const plotSize = Math.max(120, Math.min(availableWidth, availableHeight));
       const yChannel = recipe.kind === "histogram" ? null : recipe.yChannel;
+      // Overlaid histograms fill where they overlap as the Illustration tab did when the plot was sent.
+      const histOverlayMode = recipe.kind === "histogram" && recipe.histOverlayMode ? recipe.histOverlayMode : "front_opaque";
       const options: IllustrationOptions = {
         displayMode: recipe.displayMode,
         maxEvents: style.maxEvents,
@@ -673,7 +814,7 @@ function LayoutPlotSurface({
         histLineWidth: style.histLineWidth,
         histFill: style.histFill,
         histFillAlpha: style.histFillAlpha,
-        histOverlayMode: "front_opaque",
+        histOverlayMode,
         histLayout: "grid",
         ridgeOverlap: 0.7,
         ridgeColGap: 8,
@@ -687,7 +828,7 @@ function LayoutPlotSurface({
         // draws it, rather than replaced by a message.
         includeEmpty: true,
       };
-      const draw = (plot: Record<string, unknown>, gates: unknown[]) =>
+      const draw = (plot: Record<string, unknown>, gates: unknown[], popColor = "#334155") =>
         loadMiniPlots().renderMiniPlot(host, {
           ...plot,
           display_mode: recipe.displayMode,
@@ -701,19 +842,60 @@ function LayoutPlotSurface({
           hist_line_width: style.histLineWidth,
           hist_fill: style.histFill,
           hist_fill_alpha: style.histFillAlpha,
-          hist_overlay_mode: "front_opaque",
+          hist_overlay_mode: histOverlayMode,
           title: drawnTitle,
           contour_levels: style.contourLevels,
           font_sizes: fontSizesOf(style),
           gate_style: { pub_style: style.pubStyle, line_width: style.gateLineWidth, label_format: style.gateLabels },
-          pop_color: "#334155",
+          pop_color: popColor,
           gates,
         });
+      // Populations overlaid on one plot (an Illustration plot's overlay carried here): those this
+      // file has, drawn in their own colours with a legend, the first with events leading, as the
+      // Illustration tab overlays them. A pooled plot draws each over the pooled files.
+      const drawnOverlay = overlaid.filter((entry) => state.populations[entry.id]);
+      if (drawnOverlay.length > 1) {
+        const parts = memberViews
+          ? drawnOverlay.flatMap(({ asked, id }) => {
+              const { members } = resolvePoolMembers({ ...recipe, populationId: asked }, samples, trees, templateSource?.tree.id);
+              const pooled = members.length ? buildPooledPlotPayload(members, recipe.xChannel, yChannel, globalScales, options, trees) : null;
+              const population = state.populations[id];
+              return pooled ? [{ plot: pooled.config, name: population.name, colorSlot: population.colorSlot, color: population.color }] : [];
+            })
+          : (() => {
+              const ids = drawnOverlay.map((entry) => entry.id);
+              const payload = buildIllustrationPayload(
+                source.sample,
+                state.gates,
+                populationBranchGateOrder(state.populations, state.gates, state.gate_order, ids[0]),
+                state.populations,
+                source.derived.masks,
+                source.derived.stats.event_count,
+                ids,
+                [recipe.xChannel],
+                yChannel,
+                globalScales,
+                { ...options, gateOrderIsScope: true },
+                source.derived.gateMasks,
+              ) as { plots?: Record<string, Record<string, unknown>> };
+              return ids.flatMap((id) => {
+                const plot = payload.plots?.[`${id}|${recipe.xChannel}`];
+                const population = state.populations[id];
+                return plot && population ? [{ plot, name: population.name, colorSlot: population.colorSlot, color: population.color }] : [];
+              });
+            })();
+        const merged = overlaidPlot(parts);
+        if (merged) {
+          draw(merged.config, [], merged.color);
+          return;
+        }
+      }
       if (memberViews) {
         // The pooled files' events on one plot, by the rules the Illustration tab pools by: the
         // reference file's axes, the cap shared out, the counts summed, the gates the files hold
         // alike labelled with the pooled percentage.
-        const { members } = resolvePoolMembers(recipe, samples, trees, templateSource?.tree.id);
+        // An overlay of which this file has one population is drawn as that one.
+        const { members } = resolvePoolMembers(overlaid.length ? { ...recipe, populationId: overlaid[0].asked } : recipe, samples, trees, templateSource?.tree.id);
         const pooled = members.length
           ? buildPooledPlotPayload(members, recipe.xChannel, yChannel, globalScales, options, trees)
           : null;
@@ -738,7 +920,7 @@ function LayoutPlotSurface({
         [recipe.xChannel],
         yChannel,
         globalScales,
-        options,
+        { ...options, gateOrderIsScope: true },
         source.derived.gateMasks,
       ) as {
         plots?: Record<string, Record<string, unknown>>;
@@ -802,6 +984,7 @@ function LayoutPlotSurface({
 function LayoutItemFrame({
   item,
   templateText,
+  chartFiles,
   selected,
   samples,
   state,
@@ -813,6 +996,7 @@ function LayoutItemFrame({
   describe,
   checkedSampleIds,
   metadataById,
+  metadataLevels,
   files,
   sources,
   divisionProfiles,
@@ -829,6 +1013,8 @@ function LayoutItemFrame({
   canvasScale: number;
   /** The text as written on the template, with its placeholders, for editing. */
   templateText?: string;
+  /** A Plotting block's files as written on the template, before the iteration narrows them. */
+  chartFiles?: readonly string[];
   selected: boolean;
   samples: readonly LayoutSampleView[];
   state: CoreState;
@@ -842,6 +1028,8 @@ function LayoutItemFrame({
   /** What a chart draws from: the files checked in the Samples pane and each file's metadata. */
   checkedSampleIds: readonly string[];
   metadataById: Readonly<Record<string, Readonly<Record<string, string>> | undefined>>;
+  /** The metadata columns' own orders of their values, for a Plotting block's groups and facets. */
+  metadataLevels?: Readonly<Record<string, readonly string[]>>;
   /** The workspace's files as the Illustration tab sees them, and the prepared sources, for a figure block. */
   files: readonly FigureSample[];
   sources: readonly FigureSource[];
@@ -849,7 +1037,7 @@ function LayoutItemFrame({
   divisionProfiles: Readonly<Record<string, DivisionProfileLike>>;
   imageService: ImageService | null;
   /** The text as committed, with the height its lines need, so the frame can grow to show them. */
-  onTextChange: (text: string, contentHeight: number) => void;
+  onTextChange: (text: string, contentHeight: number, rich?: boolean) => void;
   /** The text editor took focus: a click on a text block's words selects the block. */
   onTextFocus: () => void;
   /** Whether this text block's editor is open; a double-click or Enter opens it, leaving it closes it. */
@@ -869,6 +1057,8 @@ function LayoutItemFrame({
       data-item-id={item.id}
       data-template-id={item.templateId}
       data-zoom={zoom === 1 ? undefined : zoom}
+      data-object-name={item.name || undefined}
+      data-rotation={item.rotation}
       title={`${item.locked ? `${t("Locked")} · ` : ""}${itemTitle(item, samples, state)}`}
       data-title={itemTitle(item, samples, state)}
       onDoubleClick={onIsolate ? (event) => { event.stopPropagation(); onIsolate(); } : undefined}
@@ -883,17 +1073,20 @@ function LayoutItemFrame({
     >
       <div className="gl-layout-item-body" style={zoom === 1 ? undefined : { zoom, width: inner.width, height: inner.height }}>
       {item.recipe.kind === "text" ? (
+        <LayoutTurned turn={item.rotation} width={inner.width} height={inner.height}>
         <LayoutTextEditor
           text={item.recipe.text}
           templateText={templateText ?? item.recipe.text}
           fontSize={item.recipe.fontSize}
           bold={item.recipe.bold}
+          format={item.recipe}
           editing={textEditing}
           onEditStart={onTextEditStart}
           onEditEnd={onTextEditEnd}
           onCommit={onTextChange}
           onFocus={onTextFocus}
         />
+        </LayoutTurned>
       ) : item.recipe.kind === "figure" ? (
         <LayoutFigureSurface
           recipe={item.recipe}
@@ -903,6 +1096,7 @@ function LayoutItemFrame({
           globalScales={globalScales}
           width={Math.max(120, inner.width - 8)}
           height={Math.max(80, inner.height - 8)}
+          columnLevels={metadataLevels}
         />
       ) : item.recipe.kind === "proportions" ? (
         <LayoutProportionsSurface
@@ -914,7 +1108,16 @@ function LayoutItemFrame({
           width={Math.max(120, inner.width - 8)}
           height={Math.max(80, inner.height - 8)}
           containerId={`layout-proportions-${item.id}`}
+          globalScales={globalScales}
+          chartFiles={chartFiles}
+          dataRevision={dataRevision}
+          metadataLevels={metadataLevels}
+          sheetStyle={style}
         />
+      ) : item.recipe.kind === "shape" ? (
+        <LayoutShapeSvg recipe={item.recipe} width={inner.width} height={inner.height} />
+      ) : item.recipe.kind === "image" ? (
+        <LayoutTurned turn={item.rotation} width={inner.width} height={inner.height}><LayoutPlacedImageView recipe={item.recipe} /></LayoutTurned>
       ) : item.recipe.kind === "cellpanel" ? (
         <Suspense fallback={<div className="gl-layout-plot-host" />}>
           <LayoutCellPanelLazy
@@ -978,6 +1181,7 @@ const LAYOUT_STYLE_NUMBERS: readonly { key: LayoutStyleNumber; label: string; st
   { key: "fontAxis", label: "Axis font", step: 1 },
   { key: "fontTitle", label: "Title font", step: 1 },
   { key: "fontGate", label: "Gate label font", step: 1 },
+  { key: "fontLegend", label: "Chart legend font", step: 1 },
 ];
 
 /**
@@ -985,6 +1189,10 @@ const LAYOUT_STYLE_NUMBERS: readonly { key: LayoutStyleNumber; label: string; st
  * marked. Used for the sheet's style and, under Items, for an item's own values over it.
  */
 const LAYOUT_FONT_KEYS = ["fontTick", "fontAxis", "fontTitle", "fontGate"] as const;
+/** What a sheet that uses the workspace figure style leaves out: the fields that style sets. */
+const FIGURE_STYLE_OMIT = [...LAYOUT_FONT_KEYS, "fontLegend", "gateLineWidth", "histLineWidth", "pubStyle"] as const;
+/** What a plot's own style leaves out: its fonts, shown elsewhere, and the chart legend's size, which only a Plotting block reads. */
+const PLOT_STYLE_OMIT = [...LAYOUT_FONT_KEYS, "fontLegend"] as const;
 /** The Fonts group's short names; "Plot title", so it is not taken for the plot's Title field. */
 const FONT_FIELD_NAMES: Record<string, string> = { fontTick: "Tick", fontAxis: "Axis", fontTitle: "Plot title", fontGate: "Gate label" };
 
@@ -1006,9 +1214,9 @@ function LayoutFontFields({
   /** Whether any of the plots draws a title. */
   showTitle?: boolean;
   /** Each selected text block's font. */
-  texts?: readonly { fontSize: number; bold: boolean }[];
+  texts?: readonly ({ fontSize: number; bold: boolean } & TextBlockFormat)[];
   onChange: (patch: Partial<LayoutPlotStyle>) => void;
-  onTextChange?: (patch: { fontSize?: number; bold?: boolean }) => void;
+  onTextChange?: (patch: TextBlockPatch) => void;
 }>) {
   const { t } = useI18n();
   if (!styles.length && !texts.length) return null;
@@ -1045,6 +1253,7 @@ function LayoutFontFields({
             <input type="checkbox" checked={texts.every((text) => text.bold)} onChange={(event) => onTextChange({ bold: event.target.checked })} />
             {t("Bold")}
           </label>
+          <LayoutTextFormatFields texts={texts} onChange={onTextChange} />
         </>
       )}
     </fieldset>
@@ -1109,14 +1318,14 @@ function LayoutStyleFields({
           <option value="none">{t("None")}</option>
         </select>
       </label>
-      <label className={"gl-check" + ("pubStyle" in own ? " is-own" : "")}>
+      {!omit.includes("pubStyle") && <label className={"gl-check" + ("pubStyle" in own ? " is-own" : "")}>
         <input
           type="checkbox"
           checked={effective.pubStyle}
           onChange={(event) => onChange({ pubStyle: event.target.checked })}
         />
         {t("Publication style (black gates and labels)")}
-      </label>
+      </label>}
       <label className={"gl-check" + ("histFill" in own ? " is-own" : "")}>
         <input
           type="checkbox"
@@ -1140,6 +1349,7 @@ function LayoutTextEditor({
   templateText,
   fontSize,
   bold,
+  format,
   editing,
   onEditStart,
   onEditEnd,
@@ -1152,10 +1362,12 @@ function LayoutTextEditor({
   templateText: string;
   fontSize: number;
   bold?: boolean;
+  /** Italic, colour, alignment, and whether the text holds inline formatting. */
+  format?: TextBlockFormat;
   editing: boolean;
   onEditStart: () => void;
   onEditEnd: () => void;
-  onCommit: (text: string, contentHeight: number) => void;
+  onCommit: (text: string, contentHeight: number, rich?: boolean) => void;
   onFocus: () => void;
 }) {
   const { t } = useI18n();
@@ -1171,7 +1383,7 @@ function LayoutTextEditor({
     // The editor opens on the template as it is then; what it holds after is the draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing]);
-  const style = { fontSize, fontWeight: bold ? 700 : 400 };
+  const style = { fontSize, fontWeight: bold ? 700 : 400, ...textBlockStyle(format) };
   if (!editing) {
     return (
       <div
@@ -1183,27 +1395,21 @@ function LayoutTextEditor({
           onEditStart();
         }}
       >
-        {text}
+        <RichTextContent text={text} rich={format?.rich} />
       </div>
     );
   }
   return (
-    <textarea
-      ref={areaRef}
-      className="gl-layout-text-surface"
-      aria-label="Layout text"
-      value={draft}
+    <LayoutTextEditField
+      areaRef={areaRef}
+      draft={draft}
+      setDraft={setDraft}
+      templateText={templateText}
+      rich={format?.rich}
       style={style}
-      onChange={(event) => setDraft(event.target.value)}
+      onCommit={onCommit}
+      onEditEnd={onEditEnd}
       onFocus={onFocus}
-      onBlur={(event) => {
-        if (draft !== templateText) onCommit(draft, event.currentTarget.scrollHeight);
-        onEditEnd();
-      }}
-      onKeyDown={(event) => {
-        event.stopPropagation();
-        if (event.key === "Escape") event.currentTarget.blur();
-      }}
     />
   );
 }
@@ -1237,11 +1443,14 @@ export function LayoutTab({
   onExported,
 }: Readonly<Props>) {
   const { t } = useI18n();
-  const keysIntro = useTabIntro("layout");
+  /** The workspace's figure style, which a sheet that follows it is drawn with. */
+  const figureFields = useFigureLayoutFields();
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   /** The text block whose editor is open, by its page id. */
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const [snapToGrid, setSnapToGrid] = useState(true);
+  const [showRulers, setShowRulers] = useState(true);
+  const geometry = useLayoutGeometryPrefs();
   // The elements Moveable acts on and snaps to are read from the page after each commit.
   const [pageEl, setPageEl] = useState<HTMLElement | null>(null);
   const [canvasEl, setCanvasEl] = useState<HTMLDivElement | null>(null);
@@ -1255,6 +1464,7 @@ export function LayoutTab({
     activeSampleId ?? files[0]?.id ?? "",
   );
   const [section, setSection] = useState("item");
+  const [objectsOpen, setObjectsOpen] = useState(true);
   const [preview, setPreview] = useState(false);
   // The modifier keys as held, read on the window so a gesture under way changes with them:
   // Shift keeps a resize's proportions and holds a drag to 45° steps, Cmd turns snapping off.
@@ -1334,6 +1544,9 @@ export function LayoutTab({
     workspace.sheets.find(({ id }) => id === workspace.activeSheetId) ??
     workspace.sheets[0];
   const iteration: LayoutIteration = activeSheet?.iteration ?? DEFAULT_ITERATION;
+  // Iteration is retired from Layout: only a sheet saved with one shows the Iterate tab, and an
+  // inspector left on that tab shows Items once the sheet shown does not iterate.
+  if (section === "iterate" && iteration.mode === "off") setSection("item");
   // A population iteration draws on one file: that of the first item that follows it, else the
   // file new plots take.
   const iterationSource = useMemo(() => {
@@ -1369,6 +1582,23 @@ export function LayoutTab({
     }
     const population = view?.tree.populations[populationId];
     const pool = poolOf(recipe);
+    // A plot overlaying populations reads as the populations it draws: {population} their names
+    // and {count} their counts, in the same order.
+    const overlayTreeId = templateSampleId && templateSampleId !== recipe.sampleId ? samples.find(({ id }) => id === templateSampleId)?.tree.id : undefined;
+    const overlaid = recipe.kind !== "strategy" && recipe.populationIds && recipe.populationIds.length > 1 && view
+      ? recipe.populationIds.flatMap((asked) => {
+          const found = resolvePopulationInTree(asked, view.tree, trees, overlayTreeId);
+          const named = found.missing ? undefined : view.tree.populations[found.id];
+          if (!named) return [];
+          const count = pool
+            ? resolvePoolMembers({ ...recipe, populationId: asked }, samples, trees, templateSampleId ? samples.find(({ id }) => id === templateSampleId)?.tree.id : undefined)
+                .members.reduce((total, member) => total + (member.gating.stats.event_count[member.populationId] ?? 0), 0)
+            : (view.derived.stats.event_count[found.id] ?? 0);
+          return [{ name: named.name, count }];
+        })
+      : [];
+    const overlayNames = (context: PlotTitleContext): PlotTitleContext =>
+      overlaid.length ? { ...context, population: overlayHeading(overlaid.map((entry) => entry.name), recipe.kind === "strategy" ? undefined : recipe.label), counts: overlaid.map((entry) => entry.count) } : context;
     if (pool && recipe.kind !== "strategy") {
       // A pool reads as its files: how many, the metadata they share, and the population's
       // events over all of them.
@@ -1376,27 +1606,33 @@ export function LayoutTab({
       const pooledCount = members.reduce((total, member) => total + (member.gating.stats.event_count[member.populationId] ?? 0), 0);
       // A pool drawn for a metadata value is named by the value; a hand-picked one by its size.
       const unit = unitId ? units.find((candidate) => candidate.id === unitId) : undefined;
-      return plotTitleContext(
+      return overlayNames(plotTitleContext(
         recipe,
         { name: unit?.sampleIds ? unit.name : `${pool.length} files`, fileName: `${pool.length} files`, metadata: unit?.sampleIds ? unit.metadata : sharedMetadataFields(pool.map((id) => metadataById[id])) },
         population ? { id: populationId, name: population.name } : null,
         members.length ? pooledCount : undefined,
         populationMetadata,
-      );
+      ));
     }
     const count = view?.derived.stats.event_count[populationId];
     const groupName = file ? groups.find((group) => group.id === fileGroups[file.id])?.name : undefined;
-    return plotTitleContext(
+    return overlayNames(plotTitleContext(
       recipe.kind === "strategy" ? {} : recipe,
       file ? { name: file.name, fileName: file.fileName ?? file.name, groupName, metadata: file.metadata } : null,
       population ? { id: populationId, name: population.name } : null,
       typeof count === "number" ? count : undefined,
       populationMetadata,
-    );
+    ));
   }, [files, samples, state, populationMetadata, trees, metadataById, units, groups, fileGroups]);
   const pages: ExpandedPage[] = useMemo(
-    () => (activeSheet ? expandLayoutSheet(activeSheet, units, describePlot) : []),
+    () => (activeSheet ? withoutHiddenItems(expandLayoutSheet(activeSheet, units, describePlot), activeSheet) : []),
     [activeSheet, units, describePlot],
+  );
+  /** Where a block on the page takes its data from: its files, populations, n and tests (layoutSources.ts). */
+  const sourceOfPageItem = useCallback(
+    (item: LayoutPageItem): BlockSource | null =>
+      describeLayoutBlock(item, { files, samples, state, metadataById, checkedSampleIds, divisionProfiles, dataRevision, describePlot }),
+    [files, samples, state, metadataById, checkedSampleIds, divisionProfiles, dataRevision, describePlot],
   );
   const [pageIndex, setPageIndex] = useState(0);
   /** "Custom template…" chosen under Style: the builder shows even while its text still matches a preset. */
@@ -1448,15 +1684,16 @@ export function LayoutTab({
       }
     });
   /** The selected text blocks' fonts. */
-  const selectedTexts = selectedItems.flatMap((item) => (item.recipe.kind === "text" ? [{ fontSize: item.recipe.fontSize, bold: item.recipe.bold === true }] : []));
+  const selectedTexts = selectedItems.flatMap((item) => (item.recipe.kind === "text" && !isPanelLetter(item) ? [{ fontSize: item.recipe.fontSize, bold: item.recipe.bold === true, italic: item.recipe.italic, color: item.recipe.color, align: item.recipe.align, rich: item.recipe.rich }] : []));
   /** A font size or weight set on every selected text block. */
-  const setSelectedTextFont = (patch: { fontSize?: number; bold?: boolean }) =>
+  const setSelectedTextFont = (patch: TextBlockPatch) =>
     mutateActiveSheet((sheet) => {
       for (const item of sheet.items) {
         if (!selectedTemplateIds.includes(item.id) || item.recipe.kind !== "text") continue;
         const next = { ...item.recipe, ...(patch.fontSize !== undefined ? { fontSize: patch.fontSize } : {}) };
         if (patch.bold === true) next.bold = true;
         else if (patch.bold === false) delete next.bold;
+        applyTextFormat(next, patch);
         item.recipe = next;
       }
     });
@@ -1469,6 +1706,7 @@ export function LayoutTab({
       }
     });
   const selectedPageItem = selectedItem ? currentPage.items.find((item) => item.templateId === selectedItem.id) ?? null : null;
+  const selectedBlockSource = useMemo(() => (selectedPageItem ? sourceOfPageItem(selectedPageItem) : null), [selectedPageItem, sourceOfPageItem]);
   const selectedChartRecipe = selectedItem?.recipe.kind === "chart" ? selectedItem.recipe : null;
   /** The files a selected chart draws no point for, and why, for the inspector. */
   const selectedChartSkips = useMemo(() => {
@@ -1522,9 +1760,11 @@ export function LayoutTab({
   // click it would undo the selection just made. Cleared by the next press.
   const handedOffRef = useRef(false);
 
+  // A hidden item stays selectable from the objects list, though it is not on the page.
+  const hiddenIds = hiddenItemIds(activeSheet);
   useEffect(() => {
-    if (selectedIds.length && selectedIds.some((id) => !currentPage.items.some((item) => item.id === id))) {
-      setSelectedIds((current) => current.filter((id) => currentPage.items.some((item) => item.id === id)));
+    if (selectedIds.length && selectedIds.some((id) => !currentPage.items.some((item) => item.id === id) && !hiddenIds.has(id))) {
+      setSelectedIds((current) => current.filter((id) => currentPage.items.some((item) => item.id === id) || hiddenIds.has(id)));
     }
   }, [currentPage, selectedIds]);
   // After the page's items have been laid out again, the frame is measured again as well: the
@@ -1558,7 +1798,7 @@ export function LayoutTab({
       ].slice(0, 30);
       redoRef.current = [];
     }
-    onChange(next);
+    onChange(reconcilePanelLetters(workspace, next));
   };
 
   const mutate = (change: (draft: LayoutWorkspace) => void) => {
@@ -1577,6 +1817,8 @@ export function LayoutTab({
   /** Where the next item goes, when the page's menu asked for it at the pointer; consumed by addItem. */
   const placeAtRef = useRef<{ x: number; y: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  /** The "+ Shape" tool armed: the next drag on the page draws one (layout/LayoutShape.tsx). */
+  const [shapeTool, setShapeTool] = useState<ShapeTool | null>(null);
   const addItem = (
     recipe: LayoutRecipe,
     frame?: { width: number; height: number },
@@ -1644,28 +1886,80 @@ export function LayoutTab({
     });
   };
 
-  const addChart = () => {
-    if (!defaultSource || !defaultPopulation) {
+  /**
+   * "+ Chart": the quick start's popover, at a point on the screen; `at` is where on the page the
+   * chart goes when the page's menu asked for it.
+   */
+  const [chartStart, setChartStart] = useState<{ x: number; y: number; at: { x: number; y: number } | null } | null>(null);
+  const closeChartStart = useCallback(() => setChartStart(null), []);
+  /** The fonts a chart made here takes: the sheet's, as a summary chart drew with them. */
+  const sheetChartFonts = (recipe?: LayoutRecipe) => {
+    const style = effectiveLayoutStyle(activeSheet, recipe, figureFields);
+    return { fontTick: style.fontTick, fontAxis: style.fontAxis };
+  };
+  /** The quick start's chart: a Plotting chart block of one population, statistic and grouping. */
+  const addQuickStartChart = (choice: QuickStartChoice) => {
+    const at = chartStart?.at ?? null;
+    setChartStart(null);
+    if (!defaultSource || !activeSheet) {
       setMessage(t("Check an FCS file and select a population first."));
       return;
     }
-    addItem(
-      {
-        kind: "chart",
-        sampleId: defaultSource.id,
-        populationId: defaultPopulation,
-        statistic: "percent_of_parent",
-        files: "checked",
-        groupBy: metadataColumns[0] ?? "",
-        chartType: "bars",
-        showPoints: true,
-        test: true,
-      },
-      { width: 320, height: 240 },
+    const recipe = quickStartPlottingRecipe(
+      { sampleId: defaultSource.id, ...choice },
+      defaultSource.tree,
+      { all: files.map((file) => file.id), checked: checkedSampleIds },
+      sheetChartFonts(),
     );
+    const sizer = plottingBlockSizer(recipe.settings, proportionsSampleRefs(files), state, metadataById, divisionProfiles, globalScales, recipe.panel);
+    placeAtRef.current = at;
+    addItem(recipe, sizer ? sizer(activeSheet, figureFields) : { width: 320, height: 240 });
+  };
+  /** The quick start's other path: the Plotting tab's current chart, as "+ Plotting chart" took it. */
+  const takePlottingChart = () => {
+    placeAtRef.current = chartStart?.at ?? null;
+    setChartStart(null);
+    addProportionsBlock();
+    placeAtRef.current = null;
   };
 
   const addText = () => addItem({ kind: "text", text: "Text", fontSize: 18 }, { width: 160, height: 32 });
+  /** A shape drawn with the armed tool, at the frame drawn, and selected; the tool is put down. */
+  const addShape = ({ recipe, frame }: { recipe: LayoutShapeRecipe; frame: { x: number; y: number; width: number; height: number } }) => {
+    setShapeTool(null);
+    placeAtRef.current = { x: frame.x, y: frame.y };
+    addItem(recipe, frame);
+  };
+  /** A change from the shape fields, set on every selected shape that has the field. */
+  const setSelectedShapes = (patch: ShapePatch) =>
+    mutateActiveSheet((sheet) => {
+      for (const item of sheet.items) if (selectedTemplateIds.includes(item.id) && item.recipe.kind === "shape") item.recipe = applyShapePatch(item.recipe, patch);
+    });
+  /** A placed image from "+ Image…", the page's menu or a dropped file: its natural size, fitted to the margins (layout/LayoutPlacedImage.tsx). */
+  const placeImageFile = usePlacedImageFile<{ x: number; y: number } | null>((read, at) => {
+    if ("error" in read) return setMessage(read.error);
+    placeAtRef.current = at;
+    addItem(read.recipe, placedImageFrame(read.recipe, activeSheet.page));
+  });
+  /** "Replace…": another file in the image's frame. */
+  const replaceImageFile = usePlacedImageFile<string>((read, id) => ("error" in read ? setMessage(read.error) : updateRecipeOf(id, (recipe) => (recipe.kind === "image" ? read.recipe : recipe))));
+  /** A legend for the page's blocks, as a text block under its content; a new block each time. */
+  /** Each lettered item's panel letter on the sheet, for the legend to name it by. */
+  const legendLetterOf = () => {
+    const texts = panelLetters(activeSheet);
+    const byItem = new Map(activeSheet.items.flatMap((item) => (isPanelLetter(item) && texts.has(item.id) ? [[item.recipe.letterFor, texts.get(item.id)!] as const] : [])));
+    // A page of an iterated sheet draws copies of the sheet's items, each naming its template.
+    return (item: { id: string; templateId?: string }) => byItem.get(item.id) ?? (item.templateId ? byItem.get(item.templateId) : undefined);
+  };
+  const addLegend = () => {
+    const block = legendTextBlock(currentPage.items, sourceOfPageItem, Math.max(24, mmToPx(activeSheet.page.marginMm)), undefined, legendLetterOf());
+    if (!block) {
+      setMessage(t("Nothing on this page draws data to write a legend from."));
+      return;
+    }
+    placeAtRef.current = { x: block.frame.x, y: block.frame.y };
+    addItem(block.recipe, block.frame);
+  };
   const updateRecipeOf = (id: string, change: (recipe: LayoutRecipe) => LayoutRecipe) => {
     mutateActiveSheet((sheet) => {
       const item = sheet.items.find((candidate) => candidate.id === id);
@@ -1694,19 +1988,26 @@ export function LayoutTab({
       const plotLike = isPlotLikeRecipe(item.recipe);
       const items: MenuEntry[] = [
         { label: many ? t("Duplicate {n} items", { n: ids.length }) : t("Duplicate"), onClick: () => duplicateItems(ids) },
+        { label: t("Copy"), onClick: () => clipboard.copy(ids) },
+        { label: t("Cut"), onClick: () => clipboard.cut(ids) },
+        { label: t("Paste"), disabled: !clipboard.canPaste, onClick: () => clipboard.paste(false) },
+        { label: t("Paste in place"), disabled: !clipboard.canPaste, onClick: () => clipboard.paste(true) },
+        { label: t("Zoom to selection"), onClick: () => navigation.zoomToSelection(ids) },
         { label: t("Bring to front"), onClick: () => restackItems(ids, "front") },
         { label: t("Bring forward"), onClick: () => restackItems(ids, "forward") },
         { label: t("Send backward"), onClick: () => restackItems(ids, "backward") },
         { label: t("Send to back"), onClick: () => restackItems(ids, "back") },
         { label: item.locked ? t("Unlock") : t("Lock"), onClick: () => setLocked(ids, !item.locked) },
+        ...rotationMenuEntries(t, (activeSheet?.items ?? []).filter(({ id }) => ids.includes(id)), (direction) => mutateActiveSheet((sheet) => { turnItems(sheet, ids, direction); })),
         ...(inSelection && selectedUnitCount > 1 ? [{ label: t("Group"), onClick: groupSelected } satisfies MenuEntry] : []),
         ...(item.group ? [{ label: t("Ungroup"), onClick: () => mutateActiveSheet((sheet) => ungroupItems(sheet, ids)) } satisfies MenuEntry] : []),
+        ...(activeSheet ? [{ label: t("Panel letters"), disabled: !panelLetterState(activeSheet, ids).canAdd, onClick: () => mutateActiveSheet((sheet) => { addPanelLetters(sheet, ids); }) }, { label: t("Remove panel letters"), disabled: !panelLetterState(activeSheet, ids).canRemove, onClick: () => mutateActiveSheet((sheet) => { removePanelLetters(sheet, ids); }) }] satisfies MenuEntry[] : []),
         "separator",
-        ...(iteration.mode !== "off" && plotLike
+        ...(iteration.mode !== "off" && (plotLike || (iteration.mode !== "populations" && item.recipe.kind === "proportions" && item.recipe.panel))
           ? [
               {
                 label: "iterated" in item.recipe && item.recipe.iterated ? t("Stop following the iteration") : t("Follow the iteration"),
-                onClick: () => updateRecipeOf(item.id, (recipe) => (isPlotLikeRecipe(recipe) ? { ...recipe, iterated: !recipe.iterated } : recipe)),
+                onClick: () => updateRecipeOf(item.id, (recipe) => (isPlotLikeRecipe(recipe) || recipe.kind === "proportions" ? { ...recipe, iterated: !recipe.iterated } : recipe)),
               } satisfies MenuEntry,
               "separator" as const,
             ]
@@ -1716,7 +2017,7 @@ export function LayoutTab({
           ? [{ label: t("Edit in Illustration"), onClick: () => onOpenInIllustration(structuredClone((item.recipe as LayoutFigureRecipe).illustration)) } satisfies MenuEntry]
           : []),
         ...(item.recipe.kind === "proportions" && onOpenInPlotting
-          ? [{ label: t("Edit in Plotting"), onClick: () => onOpenInPlotting(structuredClone((item.recipe as LayoutProportionsRecipe).settings)) } satisfies MenuEntry]
+          ? [{ label: t("Edit in Plotting"), onClick: () => onOpenInPlotting(structuredClone((item.recipe as LayoutProportionsRecipe).settings), item.name?.trim() || itemTitle(item, samples, state)) } satisfies MenuEntry]
           : []),
         { label: many ? t("Remove {n} items", { n: ids.length }) : t("Remove"), onClick: () => removeItems(ids) },
       ];
@@ -1737,11 +2038,14 @@ export function LayoutTab({
         { label: t("+ Biplot"), disabled: !ready, onClick: here(() => addPlot("biplot")) },
         { label: t("+ Histogram"), disabled: !ready, onClick: here(() => addPlot("histogram")) },
         { label: t("+ Gating strategy"), disabled: !ready, onClick: here(addStrategy) },
-        { label: t("+ Chart"), disabled: !ready, onClick: here(addChart) },
+        { label: t("+ Chart"), disabled: !ready, onClick: () => setChartStart({ x: event.clientX, y: event.clientY, at }) },
         { label: t("+ Text"), onClick: here(addText) },
         { label: t("+ Illustration figure"), disabled: !ready || !illustrationConfig?.figure, onClick: here(addFigureBlock) },
-        { label: t("+ Plotting chart"), disabled: !ready || !plottingSettings, onClick: here(addProportionsBlock) },
+        imageMenuEntry(t, (file) => placeImageFile(file, at)),
+        ...shapeMenuEntries(t, shapeTool, setShapeTool),
         "separator",
+        { label: t("Paste"), disabled: !clipboard.canPaste, onClick: () => clipboard.paste(false) },
+        { label: t("Paste in place"), disabled: !clipboard.canPaste, onClick: () => clipboard.paste(true) },
         // With a selection on the page, the menu on blank paper offers what the selection's own menu does for grouping, as Illustrator's does.
         ...(selectedUnitCount > 1 ? [{ label: t("Group"), onClick: groupSelected } satisfies MenuEntry] : []),
         ...(selectedItems.some((item) => item.group) ? [{ label: t("Ungroup"), onClick: ungroupSelected } satisfies MenuEntry] : []),
@@ -1757,19 +2061,19 @@ export function LayoutTab({
       return;
     }
     if (!activeSheet) return;
-    addItem({ kind: "figure", illustration: structuredClone(illustrationConfig), page: 0 }, figureBlockFrame(illustrationConfig, files, state, activeSheet));
+    addItem({ kind: "figure", illustration: structuredClone(illustrationConfig), page: 0 }, figureBlockFrame(illustrationConfig, files, state, activeSheet, metadataLevels));
   };
 
   /** The Plotting tab's current chart as one block, drawn as it is there. */
   const addProportionsBlock = () => {
     if (!plottingSettings || !activeSheet) return;
     const settings = plottingSettings();
-    const model = buildProportionsModel(settings, proportionsSampleRefs(files), state, metadataById, divisionProfiles);
-    if (!model.catLevels.length || !model.perSample.length) {
-      setMessage(t("Choose files and populations on the Plotting tab first."));
+    const sizer = plottingBlockSizer(settings, proportionsSampleRefs(files), state, metadataById, divisionProfiles, globalScales);
+    if (!sizer) {
+      setMessage(settings.valueKind !== "proportion" ? t("Choose files, populations and a channel on the Plotting tab first.") : t("Choose files and populations on the Plotting tab first."));
       return;
     }
-    addItem({ kind: "proportions", settings }, proportionsBlockFrame(settings, model, activeSheet));
+    addItem({ kind: "proportions", settings, textSize: "sheet" }, sizer(activeSheet, figureFields));
   };
 
   const addStrategy = () => {
@@ -1812,51 +2116,47 @@ export function LayoutTab({
       );
       return;
     }
-    const sourceById = new Map(samples.map((sample) => [sample.id, sample]));
-    const combinations: {
-      sampleId: string;
-      populationId: string;
-      xChannel: string;
-      yChannel?: string;
-      type?: "biplot" | "histogram";
-    }[] = [];
+    // A figure's plots go as the Illustration tab's own "Add … to the Layout tab" sends its
+    // panels, by the same conversion: an overlay of populations as one plot of them, and a chart
+    // panel as a Plotting block of one panel.
     const figure = illustrationConfig.figure;
-    for (const source of samples) {
-      if (figure) {
-        if (!figure.sampleIds.includes(source.id)) continue;
-        for (const plot of figure.plots) {
-          if (plot.type === "heatmap") continue;
-          for (const ref of plot.population
-            ? [plot.population]
-            : (figure.samplePopulations?.[source.id] ?? figure.populations)) {
-            const mapped = resolveFigurePopulation(
-              ref,
-              source.tree,
-              figureHierarchies(state),
-            );
-            if (mapped.id && mapped.status !== "changed")
-              combinations.push({
-                sampleId: source.id,
-                populationId: mapped.id,
-                xChannel: plot.x,
-                yChannel: plot.y,
-                type: plot.type,
-              });
-          }
-        }
-        continue;
+    let recipes: (LayoutPlotRecipe | LayoutProportionsRecipe)[] = [];
+    if (figure) {
+      try {
+        const panels = layoutFigure(figure, files, trees, populationMetadata, metadataLevels).flatMap((figurePage) => figurePage.panels);
+        recipes = panels.flatMap<LayoutPlotRecipe | LayoutProportionsRecipe>((panel) =>
+          panel.plot.type === "chart"
+            ? (figureChartRecipe(panel, figure, illustrationConfig, (sampleId) => samples.some(({ id }) => id === sampleId), trees) ?? [])
+            : figureLayoutRecipes([panel], figure, illustrationConfig, (sampleId) => samples.find(({ id }) => id === sampleId), trees),
+        );
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : String(error));
+        return;
       }
-      const popIds =
-        illustrationConfig.selectionMode === "matrix"
-          ? (illustrationConfig.selectedPopulationsBySample?.[source.id] ?? [])
-          : illustrationConfig.popIds;
-      for (const populationId of popIds) {
-        for (const xChannel of illustrationConfig.xChannels) {
-          combinations.push({ sampleId: source.id, populationId, xChannel });
+    } else {
+      for (const source of samples) {
+        const popIds =
+          illustrationConfig.selectionMode === "matrix"
+            ? (illustrationConfig.selectedPopulationsBySample?.[source.id] ?? [])
+            : illustrationConfig.popIds;
+        for (const populationId of popIds) {
+          for (const xChannel of illustrationConfig.xChannels) {
+            const kind = illustrationConfig.plotType === "histogram" ? "histogram" : "biplot";
+            recipes.push({
+              kind,
+              sampleId: source.id,
+              populationId,
+              xChannel,
+              yChannel: kind === "histogram" ? null : illustrationConfig.yChannel,
+              displayMode: (illustrationConfig.displayMode === "dots"
+                ? "scatter"
+                : illustrationConfig.displayMode) as LayoutDisplayMode,
+            });
+          }
         }
       }
     }
-    const accepted = combinations.slice(0, 60);
+    const accepted = recipes.slice(0, 60);
     if (accepted.length === 0) {
       setMessage(
         t("The current Illustration selection has no plot combinations."),
@@ -1864,30 +2164,7 @@ export function LayoutTab({
       return;
     }
     mutateActiveSheet((sheet) => {
-      const recipes: LayoutPlotRecipe[] = [];
-      for (const combination of accepted) {
-        const source = sourceById.get(combination.sampleId);
-        if (!source) continue;
-        const kind =
-          combination.type ??
-          (illustrationConfig.plotType === "histogram"
-            ? "histogram"
-            : "biplot");
-        recipes.push({
-          kind,
-          sampleId: combination.sampleId,
-          populationId: combination.populationId,
-          xChannel: combination.xChannel,
-          yChannel:
-            kind === "histogram"
-              ? null
-              : (combination.yChannel ?? illustrationConfig.yChannel),
-          displayMode: (illustrationConfig.displayMode === "dots"
-            ? "scatter"
-            : illustrationConfig.displayMode) as LayoutDisplayMode,
-        });
-      }
-      for (const recipe of followSheetIteration(sheet, recipes)) {
+      for (const recipe of followSheetIteration(sheet, accepted)) {
         sheet.items.push({
           id: crypto.randomUUID(),
           ...nextLayoutItemPosition(sheet),
@@ -1896,7 +2173,7 @@ export function LayoutTab({
       }
     });
     setMessage(
-      combinations.length > accepted.length
+      recipes.length > accepted.length
         ? t(
             "Added the first {count} Illustration plots; refine the selection before adding more.",
             {
@@ -1993,7 +2270,7 @@ export function LayoutTab({
     mutateActiveSheet((sheet) => {
       let z = Math.max(0, ...sheet.items.map((item) => item.z));
       // Copies of a group's members make a group of their own, and a heading copied with its plot reads the copy.
-      const sources = ids.flatMap((id) => sheet.items.filter((item) => item.id === id));
+      const sources = withPanelLetterIds(sheet, ids).flatMap((id) => sheet.items.filter((item) => item.id === id));
       const { copies } = copyLayoutItems(sources);
       copies.forEach((copy, index) => {
         const source = sources[index];
@@ -2005,6 +2282,7 @@ export function LayoutTab({
     if (created.length) selectMany(created);
     return created;
   };
+  const clipboard = useLayoutClipboard({ sheet: activeSheet, mutateActiveSheet, removeItems, selectMany });
   const nudgeItems = (ids: readonly string[], dx: number, dy: number) => {
     mutateActiveSheet((sheet) => {
       for (const item of sheet.items) {
@@ -2196,6 +2474,9 @@ export function LayoutTab({
     beginGesture(targets, e.datas.alt ? leaveGhosts(targets) : undefined);
   };
   const applyResize = (e: OnResize) => {
+    // A line resized with Shift held lies at 0°, 45° or 90°.
+    const line = constrainLineResize(currentPage.items.find((candidate) => candidate.id === (e.target as HTMLElement).dataset.itemId)?.recipe, e, !!e.inputEvent?.shiftKey);
+    if (line) e = { ...e, width: line.width, height: line.height, drag: { ...e.drag, left: line.left, top: line.top } };
     e.target.style.width = `${e.width}px`;
     e.target.style.height = `${e.height}px`;
     e.target.style.left = `${e.drag.left}px`;
@@ -2291,6 +2572,9 @@ export function LayoutTab({
       vertical.push(origin.x, origin.x + margin, origin.x + one.width / 2, origin.x + one.width - margin, origin.x + one.width);
       horizontal.push(origin.y, origin.y + margin, origin.y + one.height / 2, origin.y + one.height - margin, origin.y + one.height);
     }
+    const own = guideSnapLines(activeSheet);
+    vertical.push(...own.vertical);
+    horizontal.push(...own.horizontal);
     return { vertical: [...new Set(vertical)], horizontal: [...new Set(horizontal)] };
   })();
   /** The zoom at which the whole page is in view; nothing changes where the pane has no size. */
@@ -2377,6 +2661,13 @@ export function LayoutTab({
       setExporting(false);
     }
   };
+  const navigation = useLayoutNavigation({ canvasEl, zoom, setZoom, fitZoom, stepZoom, items: currentPage.items, selected: selectedTemplateIds });
+  const sheetTabs = useLayoutSheetTabs({ workspace, mutate, rename: setRenamingSheetId, openMenu: setContextMenu, clearSelection: () => setSelectedIds([]) });
+  const allSheets = useExportAllSheets({
+    workspace, pages, pageIndex: currentPageIndex, setPageIndex, zoom, setZoom, canvas: canvasRef.current, page: pageRef.current,
+    showSheet: (id) => commit({ ...workspace, activeSheetId: id }, false), settle: settleRender, format: exportFormat,
+    crop: exportCrop ? { paddingMm: exportPaddingMm } : undefined, exporting, setExporting, selectedIds, setSelectedIds, onError: setMessage, onExported,
+  });
   const setIteration = (next: LayoutIteration) => {
     mutateActiveSheet((sheet) => {
       if (next.mode === "off") {
@@ -2424,13 +2715,20 @@ export function LayoutTab({
     }
     if (meta && event.key.toLowerCase() === "a") {
       event.preventDefault();
-      selectMany((activeSheet?.items ?? []).filter((item) => !item.locked).map((item) => item.id));
+      selectMany((activeSheet?.items ?? []).filter((item) => !item.locked && !hiddenIds.has(item.id)).map((item) => item.id));
+      return;
+    }
+    // Cmd-C, Cmd-X, Cmd-V and Shift-Cmd-V: the tab's own clipboard, never while a text block is edited.
+    const clipboardAction = layoutClipboardShortcut(event);
+    if (clipboardAction && !editingTextId) {
+      event.preventDefault();
+      clipboard.run(clipboardAction, selectedTemplateIds);
       return;
     }
     if (!selectedIds.length) return;
     if (event.key === "Enter" && selectedIds.length === 1) {
       const item = currentPage.items.find((candidate) => candidate.id === selectedIds[0]);
-      if (item?.recipe.kind === "text") {
+      if (item?.recipe.kind === "text" && !isPanelLetter(item)) {
         event.preventDefault();
         setEditingTextId(item.id);
         return;
@@ -2597,7 +2895,8 @@ export function LayoutTab({
                 role="tab"
                 aria-selected={workspace.activeSheetId === sheet.id}
                 className={`gl-layout-sheet-tab${workspace.activeSheetId === sheet.id ? " active" : ""}`}
-                title={t("Double-click to rename")}
+                title={t("Drag to reorder; double-click to rename; right-click for more")}
+                {...sheetTabs.tabProps(sheet.id)}
                 onClick={() =>
                   mutate((draft) => {
                     draft.activeSheetId = sheet.id;
@@ -2615,10 +2914,11 @@ export function LayoutTab({
           className="gl-layout-sheet-add"
           title={t("New blank layout")}
           onClick={() => {
-            const next = createLayoutSheet(
+            // A new sheet uses the workspace's figure style.
+            const next = { ...createLayoutSheet(
               `Layout ${workspace.sheets.length + 1}`,
               { ...activeSheet.page },
-            );
+            ), followFigureStyle: true };
             mutate((draft) => {
               draft.sheets.push(next);
               draft.activeSheetId = next.id;
@@ -2648,9 +2948,6 @@ export function LayoutTab({
           <button className="gl-mini-btn" type="button" onClick={addStrategy} disabled={!ready} title={ready ? t("Add the gating steps that lead to a population, as a strip of plots") : t("Preparing the files…")}>
             {t("+ Gating strategy")}
           </button>
-          <button className="gl-mini-btn" type="button" onClick={addChart} disabled={!ready} title={ready ? t("Add a summary chart: one statistic of a population per file, grouped by a metadata column, with a test between the groups") : t("Preparing the files…")}>
-            {t("+ Chart")}
-          </button>
           <button
             className="gl-mini-btn"
             type="button"
@@ -2659,15 +2956,46 @@ export function LayoutTab({
           >
             {t("+ Text")}
           </button>
+          <LayoutShapeMenu armed={shapeTool} onArm={setShapeTool} />
+          <LayoutImageButton onFile={(file) => placeImageFile(file, null)} />
           <button className="gl-mini-btn" type="button" onClick={addIllustrationSelection} disabled={!ready} title={t("Add one plot per file and plot of the Illustration tab's current selection")}>
             {t("Add Illustration selection")}
           </button>
           <button className="gl-mini-btn" type="button" onClick={addFigureBlock} disabled={!ready} title={t("Add the Illustration tab's current figure as one block, drawn here as it is there")}>
             {t("+ Illustration figure")}
           </button>
-          <button className="gl-mini-btn" type="button" onClick={addProportionsBlock} disabled={!ready || !plottingSettings} title={t("Add the Plotting tab's current chart as one block, drawn here as it is there")}>
-            {t("+ Plotting chart")}
+          <button
+            className="gl-mini-btn"
+            type="button"
+            onClick={(event) => {
+              const box = event.currentTarget.getBoundingClientRect();
+              setChartStart({ x: box.left, y: box.bottom + 4, at: null });
+            }}
+            disabled={!ready}
+            title={ready ? t("Add a chart: one statistic of a population per file, grouped by a metadata column, or the Plotting tab's current chart") : t("Preparing the files…")}
+          >
+            {t("+ Chart")}
           </button>
+          <button className="gl-mini-btn" type="button" onClick={addLegend} disabled={!ready || !activeSheet.items.length} title={t("Add a text block under the sheet's content: a legend with a sentence group per block, in reading order, giving n, the centre and spread drawn, and the tests")}>
+            {t("Write legend")}
+          </button>
+          <PanelLetterButtons {...panelLetterState(activeSheet, selectedTemplateIds)} onAdd={() => mutateActiveSheet((sheet) => { addPanelLetters(sheet, selectedTemplateIds); })} onRemove={() => mutateActiveSheet((sheet) => { removePanelLetters(sheet, selectedTemplateIds); })} />
+          {chartStart && (
+            <LayoutChartQuickStart
+              x={chartStart.x}
+              y={chartStart.y}
+              populations={defaultSource
+                ? populationTreeOrder(defaultSource.tree.populations, defaultSource.tree.root_population_id ?? "")
+                    .filter(({ popId }) => popId !== defaultSource.tree.root_population_id)
+                    .map(({ popId, depth }) => ({ popId, depth: Math.max(0, depth - 1), name: defaultSource.tree.populations[popId]?.name ?? popId }))
+                : []}
+              defaultPopulation={defaultPopulation !== defaultSource?.tree.root_population_id ? defaultPopulation : ""}
+              metadataColumns={metadataColumns}
+              onAdd={addQuickStartChart}
+              onTakePlotting={plottingSettings ? takePlottingChart : undefined}
+              onClose={closeChartStart}
+            />
+          )}
         </div>
         <div className="gl-layout-toolbar-group gl-layout-arrange" role="group" aria-label={t("Arrange")}>
           {ALIGNMENTS.map(({ how, label, title }) => (
@@ -2676,9 +3004,11 @@ export function LayoutTab({
           {DISTRIBUTIONS.map(({ how, label, title }) => (
             <button key={how} className="gl-mini-btn" type="button" onClick={() => spread(how)} disabled={selectedUnitCount < 3 || preview} title={t(title)}>{t(label)}</button>
           ))}
+          <LayoutSpaceButton unitCount={activeSheet ? arrangeUnitCount(activeSheet, selectedTemplateIds) : 0} disabled={preview} prefs={geometry} onSpace={(gapMm, direction) => mutateActiveSheet((sheet) => spaceItems(sheet, selectedTemplateIds, unitToPx(gapMm, "mm"), direction))} />
           <button className="gl-mini-btn" type="button" aria-pressed={snapToGrid} onClick={() => setSnapToGrid((was) => !was)} title={t("Snap moves and resizes to a 10 px grid; edges and centres of other items and the page snap always")}>
             {t("Snap grid")}
           </button>
+          <LayoutRulersToggle on={showRulers} onToggle={() => setShowRulers((was) => !was)} />
         </div>
         <div className="gl-layout-toolbar-group">
           <button className="gl-mini-btn" type="button" aria-pressed={preview} onClick={() => setPreview(!preview)} title={t("Show the page as it exports, without grid, margins or handles")}>
@@ -2700,6 +3030,7 @@ export function LayoutTab({
                 id: crypto.randomUUID(),
                 page: { ...activeSheet.page },
                 ...(activeSheet.iteration ? { iteration: structuredClone(activeSheet.iteration) } : {}),
+                ...copiedGuides(activeSheet),
                 name: `${activeSheet.name} copy`,
                 // Headings that read from a plot read the copy's plot, not the original sheet's.
                 items: copyLayoutItems(activeSheet.items).copies,
@@ -2770,7 +3101,7 @@ export function LayoutTab({
       <div className="gl-layout-workspace">
         <aside className="gl-layout-controls" aria-label="Layout controls">
           <nav className="gl-presentation-tabs" aria-label="Layout inspector">
-            {(["item", "page", "iterate", "style"] as const).map((tab) => (
+            {(["item", "page", "iterate", "style"] as const).filter((tab) => tab !== "iterate" || iteration.mode !== "off").map((tab) => (
               <button
                 key={tab}
                 aria-pressed={section === tab}
@@ -2800,6 +3131,18 @@ export function LayoutTab({
                 {t("Placed plots keep their own file and hierarchy, independently of the Gating selection.")}
               </p>
               {sourceResult.error && <p role="alert">{sourceResult.error}</p>}
+              <LayoutObjectsSection
+                sheet={activeSheet}
+                selectedIds={selectedTemplateIds}
+                samples={samples}
+                open={objectsOpen}
+                onOpenChange={setObjectsOpen}
+                onSelect={(ids) => {
+                  setSelectedIds(ids.map((id) => currentPage.items.find((item) => item.templateId === id)?.id ?? id));
+                  if (ids.length === 1) scrollItemIntoView(ids[0]);
+                }}
+                onChange={mutateActiveSheet}
+              />
               {selectedItems.length > 1 && (
                 <div className="gl-layout-inspector" aria-label={t("Selected layout items")}>
                   <strong>{selectionGrouped ? t("{count} items selected, one group", { count: selectedItems.length }) : t("{count} items selected", { count: selectedItems.length })}</strong>
@@ -2812,9 +3155,11 @@ export function LayoutTab({
                     <button type="button" className="gl-mini-btn" onClick={() => setLocked(selectedTemplateIds, !selectionLocked)} title={t("Lock or unlock the selected items")}>{selectionLocked ? t("Unlock") : t("Lock")}</button>
                     <button type="button" className="gl-mini-btn" onClick={() => removeItems(selectedTemplateIds)} title={t("Remove the selected items (Delete)")}>{t("Remove")}</button>
                   </div>
+                  <LayoutRotationButtons items={selectedItems} onTurn={(direction) => mutateActiveSheet((sheet) => { turnItems(sheet, selectedTemplateIds, direction); })} />
+                  <LayoutSelectionGeometry itemCount={selectedItems.filter((item) => !isPanelLetter(item)).length} unitCount={activeSheet ? arrangeUnitCount(activeSheet, selectedTemplateIds) : 0} prefs={geometry} onMatch={(how) => mutateActiveSheet((sheet) => { matchSizes(sheet, selectedTemplateIds, how); })} onGrid={({ columns, gapMm, order }) => mutateActiveSheet((sheet) => arrangeInGrid(sheet, selectedTemplateIds, { columns, gapPx: unitToPx(gapMm, "mm"), order }))} />
                   <p className="gl-hint">{t("Align and distribute them with the toolbar; drag any of them to move them together; Cmd-G makes them one group.")}</p>
                   <LayoutFontFields
-                    styles={selectedPlots.map((item) => effectiveLayoutStyle(activeSheet, item.recipe))}
+                    styles={selectedPlots.map((item) => effectiveLayoutStyle(activeSheet, item.recipe, figureFields))}
                     showTitle={selectedPlots.some(drawsTitle)}
                     texts={selectedTexts}
                     onChange={setSelectedPlotsStyle}
@@ -2824,11 +3169,11 @@ export function LayoutTab({
                     // A field set here is set on every selected plot, so a grid sent from the
                     // Illustration tab is tuned together, not one plot at a time.
                     <details className="gl-layout-item-style">
-                      <summary>{t("Style of the {count} selected plots", { count: selectedPlots.length })}</summary>
+                      <FoldSummary>{t("Style of the {count} selected plots", { count: selectedPlots.length })}</FoldSummary>
                       <LayoutStyleFields
-                        effective={effectiveLayoutStyle(activeSheet, selectedPlots[0].recipe)}
+                        effective={effectiveLayoutStyle(activeSheet, selectedPlots[0].recipe, figureFields)}
                         own={selectedPlots[0].recipe.style ?? {}}
-                        omit={LAYOUT_FONT_KEYS}
+                        omit={PLOT_STYLE_OMIT}
                         onChange={setSelectedPlotsStyle}
                       />
                       {selectedPlots.some((item) => Object.keys(item.recipe.style ?? {}).length > 0) && (
@@ -2855,11 +3200,11 @@ export function LayoutTab({
               )}
               {!selectedItems.length && (
                 <>
-                  <TabIntro intro={keysIntro} className="gl-hint">
-                    {t("Click an item to select it, drag empty page to select several, Shift-click to add or remove. Drag to move, Shift holds the direction; drag a corner handle or an edge to resize, Shift keeps the proportions, Option resizes from the centre; Cmd turns snapping off; Option-drag copies. Delete removes, arrows nudge (Shift: 10 px), Cmd-D duplicates, Cmd-A selects all, Cmd-] and Cmd-[ bring forward and send backward (Shift: to the front or back), Cmd-G groups and Shift-Cmd-G ungroups, Shift-Cmd-L locks, Cmd-Z undoes.")}
-                  </TabIntro>
-                  <TabIntroToggle intro={keysIntro} />
+                  <LayoutKeysHelp />
                 </>
+              )}
+              {!selectedItem && shapeItems(selectedItems).length > 0 && (
+                <LayoutShapeInspector shapes={shapeItems(selectedItems).map((item) => item.recipe)} onChange={setSelectedShapes} />
               )}
               {selectedItem && (
                 <div
@@ -2868,13 +3213,13 @@ export function LayoutTab({
                 >
                   <strong>{t("Selected")}</strong>
                   <LayoutFontFields
-                    styles={selectedPlots.map((item) => effectiveLayoutStyle(activeSheet, item.recipe))}
+                    styles={selectedPlots.map((item) => effectiveLayoutStyle(activeSheet, item.recipe, figureFields))}
                     showTitle={selectedPlots.some(drawsTitle)}
                     texts={selectedTexts}
                     onChange={setSelectedPlotsStyle}
                     onTextChange={setSelectedTextFont}
                   />
-                  <label className="gl-check">
+                  {selectedItem.recipe.kind !== "shape" && <label className="gl-check">
                     <input
                       type="checkbox"
                       checked={selectedItem.showFrame === true}
@@ -2888,13 +3233,14 @@ export function LayoutTab({
                       }
                     />
                     Surrounding frame
-                  </label>
+                  </label>}
                   <div className="gl-layout-item-actions">
                     <button type="button" className="gl-mini-btn" onClick={() => duplicateItems([selectedItem.id])} title={t("A copy 20 px down and right (Cmd-D); Option-drag an item to copy it where you drop it")}>{t("Duplicate")}</button>
                     <button type="button" className="gl-mini-btn" onClick={() => restackItems([selectedItem.id], "front")} title={t("Draw this item over every other")}>{t("Bring to front")}</button>
                     <button type="button" className="gl-mini-btn" onClick={() => restackItems([selectedItem.id], "back")} title={t("Draw this item under every other")}>{t("Send to back")}</button>
                     <button type="button" className="gl-mini-btn" onClick={() => removeItems([selectedItem.id])} title={t("Remove this item from the page (Delete)")}>{t("Remove")}</button>
                   </div>
+                  <LayoutRotationButtons items={[selectedItem]} onTurn={(direction) => mutateActiveSheet((sheet) => { turnItems(sheet, [selectedItem.id], direction); })} />
                   <label className="gl-check" title={t("A locked item keeps its place and size; it can still be selected to unlock it")}>
                     <input
                       type="checkbox"
@@ -2903,39 +3249,37 @@ export function LayoutTab({
                     />
                     {t("Locked")}
                   </label>
-                  <div className="gl-layout-dimensions">
-                    {(["x", "y", "width", "height"] as const).map((field) => (
-                      <label key={field}>
-                        {DIMENSION_LABELS[field]}
-                        <NumberField
-                          aria-label={`Item ${field}`}
-                          min={
-                            field === "width" || field === "height"
-                              ? layoutItemMinimum(selectedItem.recipe.kind)[
-                                  field
-                                ]
-                              : 0
-                          }
-                          integer
-                          value={selectedItem[field]}
-                          onCommit={(value) =>
-                            mutateActiveSheet((sheet) => {
-                              const item = sheet.items.find(
-                                (item) => item.id === selectedItem.id,
-                              );
-                              if (item) item[field] = value;
-                            })
-                          }
-                        />
-                      </label>
-                    ))}
-                  </div>
-                  {selectedItem.recipe.kind === "text" ? (
+                  <LayoutDimensionFields
+                    item={selectedItem}
+                    prefs={geometry}
+                    onCommit={(patch) =>
+                      mutateActiveSheet((sheet) => {
+                        const item = sheet.items.find(
+                          (item) => item.id === selectedItem.id,
+                        );
+                        if (item) Object.assign(item, patch);
+                      })
+                    }
+                  />
+                  <LayoutSourcePanel source={selectedBlockSource} />
+                  {selectedItem.recipe.kind === "text" && selectedItem.recipe.legendGenerated && (
+                    <LayoutLegendMark
+                      date={selectedItem.recipe.legendGenerated}
+                      onRegenerate={() => {
+                        const block = legendTextBlock(currentPage.items.filter((item) => item.templateId !== selectedItem.id), sourceOfPageItem, 0, undefined, legendLetterOf());
+                        updateSelectedRecipe((recipe) => (recipe.kind === "text" && block ? { ...recipe, text: block.recipe.text, legendGenerated: legendDate() } : recipe));
+                      }}
+                    />
+                  )}
+                  {isPanelLetter(selectedItem) ? (
+                    <PanelLetterInspector owner={((owner) => (owner ? itemTitle(owner, samples, state) : ""))(activeSheet.items.find(({ id }) => id === selectedItem.recipe.letterFor))} style={sheetLetterStyle(activeSheet)} onChange={(patch) => mutateActiveSheet((sheet) => setLetterStyle(sheet, patch))} />
+                  ) : selectedItem.recipe.kind === "text" ? (
                     <>
                       <label className="gl-field-inline">
                         {t("Text")}
                         <input
-                          value={selectedItem.recipe.text}
+                          value={selectedItem.recipe.rich ? plainTextOf(selectedItem.recipe) : selectedItem.recipe.text}
+                          readOnly={selectedItem.recipe.rich}
                           onChange={(event) =>
                             updateSelectedRecipe((recipe) =>
                               recipe.kind === "text"
@@ -2945,6 +3289,7 @@ export function LayoutTab({
                           }
                         />
                       </label>
+                      {selectedItem.recipe.rich && <RichTextFieldHint />}
                       <label className="gl-field-inline">
                         {t("Reads from")}
                         <select
@@ -2961,7 +3306,7 @@ export function LayoutTab({
                           }
                         >
                           <option value="">{t("Nothing: plain text")}</option>
-                          {activeSheet.items.filter((candidate) => isPlotLikeRecipe(candidate.recipe)).map((candidate) => (
+                          {activeSheet.items.filter((candidate) => candidate.recipe.kind !== "text").map((candidate) => (
                             <option key={candidate.id} value={candidate.id}>{itemTitle(candidate, samples, state)}</option>
                           ))}
                         </select>
@@ -2975,16 +3320,13 @@ export function LayoutTab({
                       <p className="gl-hint">
                         {t("An Illustration figure, drawn here as it is there. To change it, edit it on the Illustration tab and put it back with the button below.")}
                       </p>
-                      <label className="gl-field-inline">
-                        {t("Figure page")}
-                        <NumberField
-                          aria-label={t("Figure page")}
-                          value={selectedItem.recipe.page + 1}
-                          min={1}
-                          integer
-                          onCommit={(value) => updateSelectedRecipe((recipe) => (recipe.kind === "figure" ? { ...recipe, page: Math.max(0, value - 1) } : recipe))}
-                        />
-                      </label>
+                      <LayoutFigurePageSelect
+                        recipe={selectedItem.recipe}
+                        files={files}
+                        state={state}
+                        columnLevels={metadataLevels}
+                        onChange={(page) => updateSelectedRecipe((recipe) => (recipe.kind === "figure" ? { ...recipe, page } : recipe))}
+                      />
                       <label className="gl-field-inline gl-layout-title-field">
                         {t("Title")}
                         <input
@@ -3017,6 +3359,10 @@ export function LayoutTab({
                         {t("Replace with the current Illustration figure")}
                       </button>
                     </>
+                  ) : selectedItem.recipe.kind === "shape" ? (
+                    <LayoutShapeInspector shapes={[selectedItem.recipe]} onChange={setSelectedShapes} />
+                  ) : selectedItem.recipe.kind === "image" ? (
+                    <LayoutImageInspector recipe={selectedItem.recipe} onReplace={(file) => replaceImageFile(file, selectedItem.id)} />
                   ) : selectedItem.recipe.kind === "cellpanel" ? (
                     <LayoutCellPanelEditor
                       recipe={selectedItem.recipe}
@@ -3061,6 +3407,48 @@ export function LayoutTab({
                       <p className="gl-hint">
                         {t("A Plotting chart, drawn here as it is there. To change it, edit it on the Plotting tab and put it back with the button below.")}
                       </p>
+                      <LayoutProportionsPanelNote
+                        recipe={(selectedPageItem?.recipe.kind === "proportions" ? selectedPageItem.recipe : selectedItem.recipe) as LayoutProportionsRecipe}
+                        samples={files}
+                        state={state}
+                        metadataById={metadataById}
+                        divisionProfiles={divisionProfiles}
+                        dataRevision={dataRevision}
+                      />
+                      <LayoutProportionsPageSelect
+                        recipe={selectedItem.recipe}
+                        samples={files}
+                        state={state}
+                        metadataById={metadataById}
+                        divisionProfiles={divisionProfiles}
+                        dataRevision={dataRevision}
+                        metadataLevels={metadataLevels}
+                        onChange={(panel) => updateSelectedRecipe((recipe) => {
+                          if (recipe.kind !== "proportions") return recipe;
+                          const { panel: _was, ...rest } = recipe;
+                          return panel ? { ...rest, panel } : rest;
+                        })}
+                      />
+                      {selectedItem.recipe.panel && iteration.mode !== "off" && iteration.mode !== "populations" && (
+                        <label className="gl-check" title={iteration.mode === "metadata" ? t("Drawn once per value of {column}, from that value's files; unticked, it shows its own files on every page", { column: iteration.column ?? "" }) : t("Drawn once per file of the iteration, from that file; unticked, it shows its own files on every page")}>
+                          <input
+                            type="checkbox"
+                            checked={selectedItem.recipe.iterated === true}
+                            onChange={(event) => updateSelectedRecipe((recipe) => (recipe.kind === "proportions" ? { ...recipe, iterated: event.target.checked } : recipe))}
+                          />
+                          {t("Follows the iteration")}
+                        </label>
+                      )}
+                      <label className="gl-field-inline" title={t("The sheet's style: drawn at the frame's size with the sheet's tick, axis, title and legend sizes. The chart's own: its Plotting sizes, scaled to fit the frame.")}>
+                        {t("Text size")}
+                        <select
+                          value={selectedItem.recipe.textSize === "sheet" ? "sheet" : "chart"}
+                          onChange={(event) => updateSelectedRecipe((recipe) => (recipe.kind === "proportions" ? { ...recipe, textSize: event.target.value === "sheet" ? "sheet" : "chart" } : recipe))}
+                        >
+                          <option value="sheet">{t("sheet style")}</option>
+                          <option value="chart">{t("chart's own (scaled)")}</option>
+                        </select>
+                      </label>
                       <label className="gl-field-inline gl-layout-title-field">
                         {t("Title")}
                         <input
@@ -3073,8 +3461,8 @@ export function LayoutTab({
                         <button
                           type="button"
                           className="gl-mini-btn"
-                          title={t("Load this chart's settings into the Plotting tab")}
-                          onClick={() => onOpenInPlotting(structuredClone((selectedItem.recipe as LayoutProportionsRecipe).settings))}
+                          title={t("Open this chart's settings in the Plotting tab as a new chart")}
+                          onClick={() => onOpenInPlotting(structuredClone((selectedItem.recipe as LayoutProportionsRecipe).settings), selectedItem.name?.trim() || itemTitle(selectedItem, samples, state))}
                         >
                           {t("Edit in Plotting")}
                         </button>
@@ -3209,6 +3597,23 @@ export function LayoutTab({
                           onChange={(event) => updateSelectedRecipe((recipe) => (recipe.kind === "chart" ? { ...recipe, title: event.target.value } : recipe))}
                         />
                       </label>
+                      <button
+                        type="button"
+                        className="gl-mini-btn"
+                        disabled={!selectedSource}
+                        title={t("Replace this chart with a Plotting chart of the same files, population, statistic, grouping, plot type and test, in the same frame")}
+                        onClick={() => {
+                          const source = selectedSource;
+                          if (!source) return;
+                          updateSelectedRecipe((recipe) =>
+                            recipe.kind === "chart"
+                              ? chartToPlottingRecipe(recipe, source.tree, { all: files.map((file) => file.id), checked: checkedSampleIds }, sheetChartFonts(recipe))
+                              : recipe,
+                          );
+                        }}
+                      >
+                        {t("Convert to a Plotting chart")}
+                      </button>
                     </>
                   ) : (
                     <>
@@ -3219,7 +3624,7 @@ export function LayoutTab({
                           value={selectedItem.recipe.sampleId}
                           onChange={(event) =>
                             updateSelectedRecipe((recipe) => {
-                              if (recipe.kind === "text" || recipe.kind === "figure" || recipe.kind === "proportions" || recipe.kind === "imagewall" || recipe.kind === "cellpanel") return recipe;
+                              if (recipe.kind === "text" || recipe.kind === "figure" || recipe.kind === "proportions" || recipe.kind === "imagewall" || recipe.kind === "cellpanel" || recipe.kind === "shape" || recipe.kind === "image") return recipe;
                               const target = samples.find(
                                 (file) => file.id === event.target.value,
                               );
@@ -3283,6 +3688,22 @@ export function LayoutTab({
                           onChange={setSelectedPool}
                         />
                       )}
+                      {(selectedItem.recipe.kind === "biplot" || selectedItem.recipe.kind === "histogram") && selectedSource && (selectedItem.recipe.populationIds?.length ?? 0) > 1 ? (
+                        // An overlay is edited as its populations; down to one, it is a plot of that one.
+                        <LayoutOverlayPicker
+                          populations={selectedPopulations}
+                          tree={selectedSource.tree}
+                          chosen={new Set((selectedItem.recipe.populationIds ?? []).map((id) => resolvePopulationInTree(id, selectedSource.tree, trees).id))}
+                          onChange={(populationIds) =>
+                            updateSelectedRecipe((recipe) => {
+                              if (recipe.kind !== "biplot" && recipe.kind !== "histogram") return recipe;
+                              if (populationIds.length > 1) return { ...recipe, populationId: populationIds[0], populationIds };
+                              const { populationIds: _overlay, ...rest } = recipe;
+                              return { ...rest, populationId: populationIds[0] };
+                            })
+                          }
+                        />
+                      ) : (
                       <label className="gl-field-inline">
                         {t("Population")}
                         <select
@@ -3307,6 +3728,7 @@ export function LayoutTab({
                           ))}
                         </select>
                       </label>
+                      )}
                       {selectedItem.recipe.kind !== "strategy" && (
                         <>
                           <label className="gl-field-inline">
@@ -3467,7 +3889,7 @@ export function LayoutTab({
                           value={selectedItem.recipe.title ?? ""}
                           onChange={(event) =>
                             updateSelectedRecipe((recipe) =>
-                              recipe.kind === "text"
+                              recipe.kind === "text" || recipe.kind === "shape" || recipe.kind === "image"
                                 ? recipe
                                 : { ...recipe, title: event.target.value },
                             )
@@ -3475,14 +3897,14 @@ export function LayoutTab({
                         />
                       </label>
                       <details className="gl-layout-item-style">
-                        <summary>
+                        <FoldSummary>
                           {t("Style")}
                           {Object.keys((selectedItem.recipe as LayoutPlotRecipe | LayoutStrategyRecipe).style ?? {}).length > 0 ? ` · ${t("Own style")}` : ""}
-                        </summary>
+                        </FoldSummary>
                         <LayoutStyleFields
-                          effective={effectiveLayoutStyle(activeSheet, selectedItem.recipe)}
+                          effective={effectiveLayoutStyle(activeSheet, selectedItem.recipe, figureFields)}
                           own={selectedItem.recipe.style ?? {}}
-                          omit={LAYOUT_FONT_KEYS}
+                          omit={PLOT_STYLE_OMIT}
                           onChange={(patch) =>
                             updateSelectedRecipe((recipe) =>
                               !isPlotLikeRecipe(recipe)
@@ -3598,6 +4020,7 @@ export function LayoutTab({
               <div className="gl-layout-item-actions">
                 <button type="button" className="gl-mini-btn" onClick={pageToContent} disabled={!activeSheet.items.length} title={t("Make the page a custom size that holds every item inside the margin, as one page")}>{t("Fit page to content")}</button>
                 <button type="button" className="gl-mini-btn" onClick={contentToPage} disabled={!activeSheet.items.length} title={t("Scale and centre every item, as one group, to fill the first page inside its margin")}>{t("Fit content to page")}</button>
+                <LayoutClearGuidesButton count={activeSheet.guides?.length ?? 0} onClear={() => mutateActiveSheet(clearGuides)} />
               </div>
               <h3>{t("Export")}</h3>
               <label className="gl-field-inline">
@@ -3632,6 +4055,9 @@ export function LayoutTab({
               <button className="gl-mini-btn" type="button" onClick={() => void exportSheet()} disabled={exporting || !activeSheet.items.length}>
                 {exporting ? t("Exporting…") : t("Export sheet")}
               </button>
+              <button className="gl-mini-btn" type="button" onClick={() => void allSheets.exportAll()} disabled={exporting || !allSheets.canExport} title={t("Write every sheet that has items: as PDF one file with each sheet's pages in sheet order; as SVG or PNG one zip with a folder per sheet")}>
+                {allSheets.progress ? t("Sheet {n} of {count}", allSheets.progress) : t("Export all sheets")}
+              </button>
               <p className="gl-hint">
                 {exportCrop
                   ? t("The export is cut down to the items on each page plus the padding, so a figure comes out without the paper around it; a grid of pages is written as one PDF page each, or one SVG or PNG file each in a zip. The data layer is drawn at the resolution above.")
@@ -3642,6 +4068,7 @@ export function LayoutTab({
           {section === "iterate" && (
             <>
               <h3>{t("Iterate")}</h3>
+              <p className="gl-hint">{t("Iteration is being retired from Layout. Pages per file or group are now made in Illustration or Plotting and sent here with “Every page, one sheet each”. This sheet keeps working as it is.")}</p>
               <label className="gl-field-inline">
                 {t("Draw the sheet")}
                 <select
@@ -3936,18 +4363,22 @@ export function LayoutTab({
                 );
               })()}
               <p className="gl-hint">{t("What every plot is called unless it has a title of its own under Items. Placeholders: {list}. \"What differs across the page\" names the population when the page is one file's populations, the file when it is one population's files, both otherwise; on an iterated sheet it looks across every page, so each page is titled alike and names what it is drawn for.", { list: TITLE_PLACEHOLDERS })}</p>
-              <LayoutFontFields
+              <FigureStyleFollow
+                following={activeSheet.followFigureStyle === true}
+                onFollow={(follow) => mutateActiveSheet((sheet) => { if (follow) sheet.followFigureStyle = true; else delete sheet.followFigureStyle; })}
+              />
+              {activeSheet.followFigureStyle !== true && <LayoutFontFields
                 styles={(() => {
                   const plots = activeSheet.items.filter((item) => isPlotLikeRecipe(item.recipe));
-                  return plots.length ? plots.map((item) => effectiveLayoutStyle(activeSheet, item.recipe)) : [effectiveLayoutStyle(activeSheet)];
+                  return plots.length ? plots.map((item) => effectiveLayoutStyle(activeSheet, item.recipe, figureFields)) : [effectiveLayoutStyle(activeSheet, null, figureFields)];
                 })()}
                 showTitle={!activeSheet.items.some((item) => isPlotLikeRecipe(item.recipe)) || activeSheet.items.some(drawsTitle)}
                 onChange={setSheetStyle}
-              />
+              />}
               <LayoutStyleFields
-                effective={effectiveLayoutStyle(activeSheet)}
+                effective={effectiveLayoutStyle(activeSheet, null, figureFields)}
                 own={activeSheet.style ?? {}}
-                omit={LAYOUT_FONT_KEYS}
+                omit={activeSheet.followFigureStyle === true ? FIGURE_STYLE_OMIT : LAYOUT_FONT_KEYS}
                 onChange={setSheetStyle}
               />
               {Object.keys(activeSheet.style ?? {}).length > 0 && (
@@ -3959,11 +4390,16 @@ export function LayoutTab({
                   {t("Reset to defaults")}
                 </button>
               )}
+              <PanelLetterStyleSection style={sheetLetterStyle(activeSheet)} onChange={(patch) => mutateActiveSheet((sheet) => setLetterStyle(sheet, patch))} />
             </>
           )}
         </aside>
         <ContextMenu menu={contextMenu} onClose={() => setContextMenu(null)} />
+        <LayoutSourceHover container={pageEl} describe={(id) => { const item = currentPage.items.find((candidate) => candidate.id === id); return item ? sourceOfPageItem(item) : null; }} />
 
+        {!preview && showRulers && (
+          <LayoutRulers scroller={canvasEl} page={pageEl} zoom={zoom} selected={selectedItems} onAddGuide={(guide) => mutateActiveSheet((sheet) => addGuide(sheet, guide))} />
+        )}
         <div
           ref={(el) => { (canvasRef as { current: HTMLDivElement | null }).current = el; setCanvasEl(el); }}
           className="gl-layout-canvas-scroll"
@@ -3983,7 +4419,7 @@ export function LayoutTab({
               toggleContinueSelect={["shift"]}
               hitRate={0}
               ratio={0}
-              dragCondition={(e) => !(e.inputEvent?.target as HTMLElement | undefined)?.closest?.("textarea, input, select, button")}
+              dragCondition={(e) => !(e.inputEvent?.target as HTMLElement | undefined)?.closest?.("textarea, input, select, button, [contenteditable]")}
               onDragStart={onSelectoDragStart}
               onSelectEnd={onSelectEnd}
             />
@@ -3997,6 +4433,7 @@ export function LayoutTab({
             className="gl-layout-canvas"
             aria-label={activeSheet.name}
             onContextMenu={openCanvasMenu}
+            {...placedImageDrop(zoom, placeImageFile)}
             // The grid's lines are drawn 1/zoom thick, so the scale leaves them one screen pixel
             // at any zoom while their spacing, the page's, scales with it.
             style={{
@@ -4029,25 +4466,27 @@ export function LayoutTab({
             {currentPage.items.map((item) => (
               <LayoutItemFrame
                 key={item.id}
-                item={item}
+                item={withSourceFields(item, currentPage.items, sourceOfPageItem)}
                 templateText={(() => { const template = activeSheet.items.find((candidate) => candidate.id === item.templateId); return template?.recipe.kind === "text" ? template.recipe.text : undefined; })()}
+                chartFiles={(() => { const template = activeSheet.items.find((candidate) => candidate.id === item.templateId); return template?.recipe.kind === "proportions" ? template.recipe.settings.files : undefined; })()}
                 selected={selectedIds.includes(item.id)}
                 samples={samples}
                 state={state}
                 globalScales={globalScales}
                 dataRevision={dataRevision}
                 densityColorPower={densityColorPower}
-                style={effectiveLayoutStyle(activeSheet, item.recipe)}
-                titleTemplate={fillPlaceholders(ownTitleOf(item, item.templateSampleId) || sheetTitleTemplate, (item.unitId && units.find((unit) => unit.id === item.unitId)) || null, item.position.n, item.position.total)}
+                style={effectiveLayoutStyle(activeSheet, item.recipe, figureFields)}
+                titleTemplate={((title) => (hasSourcePlaceholder(title) ? fillSourcePlaceholders(title, sourceOfPageItem(item)) : title))(fillPlaceholders(ownTitleOf(item, item.templateSampleId) || sheetTitleTemplate, (item.unitId && units.find((unit) => unit.id === item.unitId)) || null, item.position.n, item.position.total))}
                 describe={describePlot}
                 checkedSampleIds={checkedSampleIds}
                 metadataById={metadataById}
+                metadataLevels={metadataLevels}
                 files={files}
                 sources={sourceResult.sources}
                 divisionProfiles={divisionProfiles}
                 imageService={imageService}
                 canvasScale={canvasScale}
-                onTextChange={(text, contentHeight) => {
+                onTextChange={(text, contentHeight, rich) => {
                   // A block left with no words is removed, as the editors remove an empty text; undo brings it back.
                   if (!text.trim()) { removeItems([item.templateId]); return; }
                   mutateActiveSheet((sheet) => {
@@ -4056,13 +4495,15 @@ export function LayoutTab({
                     );
                     if (target?.recipe.kind !== "text") return;
                     target.recipe.text = text;
+                    if (rich === true) target.recipe.rich = true;
+                    else if (rich === false) delete target.recipe.rich;
                     // A block grows to show every line it was given; it never shrinks on its own.
-                    if (contentHeight > 0) target.height = Math.max(target.height, Math.ceil(contentHeight) + 4);
+                    if (contentHeight > 0) growTextFrame(target, contentHeight);
                   });
                 }}
                 onTextFocus={() => { if (!selectedIds.includes(item.id) || selectedIds.length > 1) setSelectedIds([item.id]); }}
                 textEditing={editingTextId === item.id}
-                onTextEditStart={() => { setSelectedIds([item.id]); setEditingTextId(item.id); }}
+                onTextEditStart={() => { setSelectedIds([item.id]); if (!isPanelLetter(item)) setEditingTextId(item.id); }}
                 // Double-click on a member of a selected group takes the member alone, as Excalidraw and Penpot do.
                 onIsolate={item.group && selectedIds.includes(item.id) && selectedIds.length > 1 ? () => setSelectedIds([item.id]) : undefined}
                 // The block stays selected and the page takes the keyboard back.
@@ -4085,7 +4526,7 @@ export function LayoutTab({
                 // inspector edit moves an item by its style, so the targets are watched for that.
                 useMutationObserver
                 useResizeObserver
-                keepRatio={modifiers.shift}
+                keepRatio={(geometry.keepRatio !== modifiers.shift) && !selectedItems.some((item) => item.recipe.kind === "shape" && item.recipe.shape === "line")}
                 throttleDragRotate={modifiers.shift ? 45 : 0}
                 snappable={!modifiers.meta}
                 snapThreshold={6}
@@ -4130,6 +4571,12 @@ export function LayoutTab({
                 }}
                 onClickGroup={(e: OnClickGroup) => { selectoRef.current?.clickTarget(e.inputEvent, e.inputTarget); }}
               />
+            )}
+            {!preview && shapeTool && (
+              <LayoutShapeDrawLayer tool={shapeTool} zoom={zoom} snap={shapeSnapLines(snapToGrid ? SNAP_GRID : 0, pageGuides, currentPage.items)} onDraw={addShape} onCancel={() => setShapeTool(null)} />
+            )}
+            {!preview && activeSheet.guides && (
+              <LayoutGuides guides={activeSheet.guides} width={activeSheet.width} height={activeSheet.height} zoom={zoom} scroller={canvasEl} onMove={(index, at) => mutateActiveSheet((sheet) => moveGuide(sheet, index, at))} onRemove={(index) => mutateActiveSheet((sheet) => removeGuide(sheet, index))} />
             )}
           </section>
           </div>

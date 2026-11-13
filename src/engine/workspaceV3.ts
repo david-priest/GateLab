@@ -30,6 +30,7 @@ import {
   type WorkspaceSample,
 } from "./workspace";
 import { assertKnownWorkspaceFeatures, stampWorkspaceV3 } from "./workspaceFeatures";
+import { fitsInZip, formatByteSize, storedZipBytes, ZIP_MAX_BYTES } from "./flowjoExportFolder";
 
 export const WORKSPACE_VERSION_3 = 3 as const;
 
@@ -140,6 +141,9 @@ const WORKSPACE_V3_ALLOWED_KEYS = [
   "workspaceId",
   "illustration",
   "illustrationPresets",
+  // The Strategy tab's controls (workspace.ts). Left off this list, a workspace with a
+  // compensation profile refused to reopen once the Strategy tab had been opened.
+  "strategy",
   "layout",
   "metadataColumns",
   "populationMetadata",
@@ -147,6 +151,11 @@ const WORKSPACE_V3_ALLOWED_KEYS = [
   // The Plotting tab's saved state (#217). Every top-level key the saver writes must be listed
   // here, or a workspace with a compensation profile refuses to reopen with "Unexpected: …".
   "plotting",
+  // The Plotting tab's named charts (workspace.ts WorkspacePlottingCharts).
+  "plottingCharts",
+  // The workspace's figure style (figureStyle.ts), written only when it is not the defaults.
+  // Display only: nothing in gating reads it.
+  "figureStyle",
   // What the workspace needs of the GateLab that opens it (workspaceFeatures.ts). GateLab 0.8.3
   // does not list it, and so refuses a workspace it would otherwise misread.
   "requiredFeatures",
@@ -192,6 +201,10 @@ const SAMPLE_V3_ALLOWED_KEYS = [
   "identity",
   // A matrix the file is compensated with that is not its own (WorkspaceSample.externalSpillover).
   "externalSpillover",
+  // Channels GateLab computed for the file, and its attached cell images (workspaceRecords.ts).
+  // Left off this list, a workspace with either refused to reopen: "Unexpected: derived".
+  "derived",
+  "images",
 ] as const;
 
 /**
@@ -499,5 +512,14 @@ export async function writePortableWorkspaceV3Archive(
   sink: ZipChunkSink,
   options: StreamZipWriteOptions = {},
 ): Promise<void> {
+  // Refused before a byte is written where it would not fit: fflate writes no ZIP64, so an
+  // archive past 4 GB would be corrupt and could not be reopened.
+  const size = storedZipBytes(plan.entries.map((e) => ({ path: e.path, byteLength: e.bytes.byteLength })));
+  if (!fitsInZip({ zipBytes: size, fileCount: plan.entries.length - 1 })) {
+    throw new Error(
+      `The workspace bundle comes to ${formatByteSize(size)} in ${plan.entries.length} files, more than one .zip can hold ` +
+        `(${formatByteSize(ZIP_MAX_BYTES)}, ${0xffff} files); nothing was written.`,
+    );
+  }
   await writeStoredZip(plan.entries, sink, options);
 }

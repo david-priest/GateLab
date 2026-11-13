@@ -176,7 +176,10 @@ function detectDelimiter(headerLine: string): "," | "\t" | ";" {
 /** Parse "# plane: 195Pt x 194Pt" or "# plane: 103Rh(display) x 89Y". */
 function parsePlaneDeclaration(text: string, line: number): PlaneDeclaration | string {
   const body = text.replace(/^#\s*planes?\s*:\s*/i, "").trim();
-  const parts = body.split(/\s*(?:x|×|\/|,)\s*/i).filter(Boolean);
+  // The separator as it is written, an "x" standing alone, before any "x": "103Rh(axis) x 89Y"
+  // was cut inside "axis" and refused, and a channel with an x in its name lost the letter.
+  const spaced = body.split(/\s+[x×]\s+/i).filter(Boolean);
+  const parts = spaced.length === 2 ? spaced : body.split(/\s*(?:x|×|\/|,)\s*/i).filter(Boolean);
   if (parts.length !== 2) {
     return `Line ${line}: a plane declaration names two channels separated by "x", as in "# plane: 195Pt x 194Pt" (got "${body}").`;
   }
@@ -1011,13 +1014,24 @@ export function buildBarcodeGating(
     };
     const dx = key(d.x);
     const dy = key(d.y);
+    // The gate is held in arcsinh at this sample's cofactor (asinhSpace), so the line's own scale
+    // is brought to it: raw values through the arcsinh, and arcsinh written at another cofactor
+    // rescaled, as qcGateFor rescales a QC gate. Taken as written, a "raw" line was read as
+    // arcsinh units, and a line at cofactor 5 on a sample at 4 held other raw values.
+    const toSample = (axis: "x" | "y"): ((v: number) => number) => {
+      if (d.space === "raw" || d.transforms[axis] === "identity") return (v) => Math.asinh(v / cofactor);
+      const written = d.cofactors?.[axis];
+      return written === undefined || written === cofactor ? (v) => v : (v) => Math.asinh((Math.sinh(v) * written) / cofactor);
+    };
+    const sx = toSample("x");
+    const sy = toSample("y");
     if (dx === plane.x && dy === plane.y) {
       usedDeclarations.add(d.name);
-      return d.vertices.map(([x, y]) => [x, y] as Vertex);
+      return d.vertices.map(([x, y]) => [sx(x), sy(y)] as Vertex);
     }
     if (dx === plane.y && dy === plane.x) {
       usedDeclarations.add(d.name);
-      return d.vertices.map(([x, y]) => [y, x] as Vertex);
+      return d.vertices.map(([x, y]) => [sy(y), sx(x)] as Vertex);
     }
     return null;
   };
@@ -1384,6 +1398,18 @@ function populationLine(pop: QcPopulationTemplate): string {
   return `# population: ${pop.name}${pop.parent ? ` < ${pop.parent}` : ""} = ${gates}`;
 }
 
+/**
+ * Why a gate name would not read back as itself from the "# gate:" and "# population:" lines,
+ * which have no quoting, or null when it reads back. Matches parseGateDeclaration and
+ * parsePopulationDeclaration.
+ */
+function unreadableGateName(name: string): string | null {
+  if (name.includes("|")) return 'a gate name holding "|" is read as two fields of a "# gate:" line';
+  if (/[,;&]|\s+and\s+/i.test(name)) return 'a gate name holding ",", ";", "&" or " and " is read as two gates on a "# population:" line';
+  if (/^\s*(?:not\s|!)/i.test(name)) return 'a gate name starting with "not " or "!" is read as an excluded gate on a "# population:" line';
+  return null;
+}
+
 export interface HierarchyCsvExport {
   csv: string;
   nGates: number;
@@ -1426,6 +1452,11 @@ export function exportHierarchyCsv(
   for (const g of gates) {
     if (g.gate_type !== "polygon" && g.gate_type !== "rectangle") {
       notes.push(`${g.name}: a ${g.gate_type} gate cannot be written as a "# gate:" line.`);
+      continue;
+    }
+    const unreadable = unreadableGateName(g.name);
+    if (unreadable) {
+      notes.push(`"${g.name}": ${unreadable}; rename the gate to write it.`);
       continue;
     }
     const resolved = resolveGateSpace(g, options.context, cofactor);
@@ -1487,7 +1518,8 @@ export function exportHierarchyCsv(
       const ys = vertices.map((v) => v[1]);
       written.set(g.gate_id, `# gate: ${g.name} | rectangle | ${chans} | ${scale} | x ${rangeText(Math.min(...xs), Math.max(...xs), rule)} | y ${rangeText(Math.min(...ys), Math.max(...ys), rule)}`);
     } else {
-      written.set(g.gate_id, `# gate: ${g.name} | polygon | ${chans} | ${scale} | ${vertices.map(([x, y]) => `(${fmt(x)},${fmt(y)})`).join(" ")}`);
+      // Every digit a vertex needs: one rounded to seven digits moves an edge past events lying on it.
+      written.set(g.gate_id, `# gate: ${g.name} | polygon | ${chans} | ${scale} | ${vertices.map(([x, y]) => `(${exactFmt(x)},${exactFmt(y)})`).join(" ")}`);
     }
   }
   const gateById = new Map(gates.map((g) => [g.gate_id, g]));

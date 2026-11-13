@@ -35,6 +35,13 @@ describe("parseMetadataTable", () => {
 });
 
 describe("lookupMetadataRow", () => {
+  it("matches a row whose name holds a dot and no .fcs to its own file only", () => {
+    const p = parseMetadataTable("file,cond\nS1.d7,stim\nS1.d14,ctrl\n");
+    expect(lookupMetadataRow(p, "S1.d7.fcs")).toEqual({ cond: "stim" });
+    expect(lookupMetadataRow(p, "S1.d14.fcs")).toEqual({ cond: "ctrl" });
+    expect(lookupMetadataRow(p, "S1.fcs")).toBeNull();
+  });
+
   const p = parseMetadataTable("file,cond\nSample_A.fcs,stim\n");
   it("matches exactly", () => {
     expect(lookupMetadataRow(p, "Sample_A.fcs")).toEqual({ cond: "stim" });

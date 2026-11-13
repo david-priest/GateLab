@@ -50,9 +50,10 @@ function ModalShell({ title, onClose, children }: { title: string; onClose: () =
 }
 
 /** What a gating import was read from. Every kind arrives as Gating-ML, but the user chose a file. */
-export type GatingImportSourceKind = "gatingml" | "flowjo" | "chorus" | "diva";
+export type GatingImportSourceKind = "gatingml" | "flowjo" | "chorus" | "diva" | "template";
 const IMPORT_TITLES: Record<GatingImportSourceKind, string> = {
   gatingml: "Import Gating-ML",
+  template: "Import gating template",
   flowjo: "Import FlowJo workspace",
   chorus: "Import FACSChorus gates",
   diva: "Import FACSDiva gates",
@@ -1192,12 +1193,15 @@ export function ConfirmModal({
   confirmLabel = "Delete",
   onConfirm,
   onCancel,
+  alternative,
 }: {
   title: string;
   message: string;
   confirmLabel?: string;
   onConfirm: () => void;
   onCancel: () => void;
+  /** A second way on, drawn as an ordinary button before the confirming one (New Workspace's "Save first"). */
+  alternative?: { label: string; onClick: () => void };
 }) {
   const { t } = useI18n();
   return (
@@ -1205,6 +1209,7 @@ export function ConfirmModal({
       <p style={{ fontSize: 13, color: "#555", margin: "2px 0 14px", lineHeight: 1.4 }}>{message}</p>
       <div className="gl-modal-actions">
         <button className="gl-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
+        {alternative && <button className="gl-btn" onClick={alternative.onClick}>{t(alternative.label)}</button>}
         <button className="gl-btn gl-btn-danger" onClick={onConfirm}>{t(confirmLabel)}</button>
       </div>
     </ModalShell>
@@ -1486,10 +1491,16 @@ export function EditPopModal({
 
 export function CreatePopModal({
   state,
+  initialParentId,
+  initialGateIds,
   onConfirm,
   onCancel,
 }: {
   state: CoreState;
+  /** The parent to start from; the active population when absent. */
+  initialParentId?: string;
+  /** Gates ticked to start with, as a gate row's "New population from this gate…" asks. */
+  initialGateIds?: readonly string[];
   onConfirm: (a: Action) => void;
   onCancel: () => void;
 }) {
@@ -1501,11 +1512,15 @@ export function CreatePopModal({
   );
   const [name, setName] = useState("");
   const [parentId, setParentId] = useState(
-    state.active_population_id && state.populations[state.active_population_id]
-      ? state.active_population_id
-      : state.root_population_id ?? "",
+    initialParentId && state.populations[initialParentId]
+      ? initialParentId
+      : state.active_population_id && state.populations[state.active_population_id]
+        ? state.active_population_id
+        : state.root_population_id ?? "",
   );
-  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [checked, setChecked] = useState<Set<string>>(
+    () => new Set((initialGateIds ?? []).filter((gid) => state.gates[gid] && state.gates[gid].gate_type !== "quadrant")),
+  );
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
   const ids = (state.gate_order.length ? state.gate_order : Object.keys(state.gates))
     .filter((gid) => state.gates[gid]?.gate_type !== "quadrant");

@@ -2,8 +2,9 @@
 // of the box. Synthetic state throughout.
 
 import { describe, it, expect } from "vitest";
-import { coreReducer, initialCoreState, type CoreState } from "./store";
-import type { QuadrantArms, QuadrantGate } from "./engine/models";
+import { coreReducer, initialCoreState, spiderBoxGrowth, type CoreState } from "./store";
+import { gateMaskQuadrant } from "./engine/gates";
+import { spiderBox, type QuadrantArms, type QuadrantGate } from "./engine/models";
 
 const ARMS: QuadrantArms = { down: [1000, 0], right: [4000, 1000], up: [1000, 4000], left: [0, 1000] };
 
@@ -45,16 +46,63 @@ describe("a spider quadrant in the store", () => {
     expect(coreReducer(state, { type: "moveQuadrantCenter", gateId: id, center: [1000, 0] })).toBe(state);
   });
 
-  it("slides an arm's end along its own edge, held within the box", () => {
+  it("slides an arm's end along its own edge, held within the box; dropped inside, the edge stays", () => {
     const { state, id } = withSpider();
-    // Dropped above and beyond the box: the down end stays on the bottom edge, at the box's right.
+    // Dropped above the bottom edge and past the box's right: the down end stays on the bottom
+    // edge, at the box's right. A drag never pulls an edge in.
     let next = coreReducer(state, { type: "setQuadrantArm", gateId: id, arm: "down", end: [9000, 2500] });
     expect(gate(next, id).arms!.down).toEqual([4000, 0]);
-    next = coreReducer(next, { type: "setQuadrantArm", gateId: id, arm: "left", end: [-50, 3000] });
+    next = coreReducer(next, { type: "setQuadrantArm", gateId: id, arm: "left", end: [50, 3000] });
     expect(gate(next, id).arms!.left).toEqual([0, 3000]);
     expect(gate(next, id).arms!.up).toEqual(ARMS.up);
     expect(gate(next, id).arms!.right).toEqual(ARMS.right);
     expect(gate(next, id).center).toEqual([1000, 1000]);
+  });
+
+  it("takes an edge out with an end dropped beyond it, the box growing (David, 2026-11-10)", () => {
+    const { state, id } = withSpider();
+    let next = coreReducer(state, { type: "setQuadrantArm", gateId: id, arm: "up", end: [2000, 9000] });
+    expect(gate(next, id).arms!.up).toEqual([2000, 9000]);
+    next = coreReducer(next, { type: "setQuadrantArm", gateId: id, arm: "left", end: [-500, 3000] });
+    expect(gate(next, id).arms!.left).toEqual([-500, 3000]);
+    // The other ends stay where they were, on edges of the grown box.
+    expect(gate(next, id).arms!.down).toEqual(ARMS.down);
+    expect(gate(next, id).arms!.right).toEqual(ARMS.right);
+    expect(spiderBox(gate(next, id).arms!)).toEqual([-500, 4000, 0, 9000]);
+  });
+
+  it("grows the box about the centre to cover a range, no arm turning", () => {
+    const { state, id } = withSpider();
+    // Centre (1000, 1000); the box is 0-4000 both ways. To reach y 10000 the ends go out 3 times as far.
+    const next = coreReducer(state, { type: "growSpiderBox", gateId: id, box: [0, 4000, 0, 10000] });
+    expect(gate(next, id).arms).toEqual({ down: [1000, -2000], right: [10000, 1000], up: [1000, 10000], left: [-2000, 1000] });
+    expect(next.undo.length).toBe(state.undo.length + 1);
+    expect(spiderBoxGrowth(gate(next, id), [0, 4000, 0, 10000])).toBe(1);
+    // Already covered: nothing changes.
+    expect(coreReducer(state, { type: "growSpiderBox", gateId: id, box: [100, 3000, 100, 3000] })).toBe(state);
+  });
+
+  it("draws and counts: an event beyond the top edge joins its quadrant once the box grows", () => {
+    // A leaning spider: centre (1000, 1000), up arm to (2000, 4000), right arm to (4000, 1500).
+    const arms: QuadrantArms = { down: [800, 0], right: [4000, 1500], up: [2000, 4000], left: [0, 900] };
+    let state = coreReducer(initialCoreState(), { type: "loadSample", nEvents: 4 });
+    state = coreReducer(state, { type: "addQuadrant", xChannel: "FSC-A", yChannel: "SSC-A", center: [1000, 1000], prefix: "D1", parentId: state.root_population_id!, arms });
+    const id = Object.values(state.gates).find((g) => g.gate_type === "quadrant")!.gate_id;
+    // Above the box (y 6000), right of the up arm's line extended (x 3500 > 1000 + 1000 * 5000 / 3000);
+    // above the box, left of it; inside the upper-right quadrant; inside the upper-left.
+    const xs = [3500, 1500, 3000, 500], ys = [6000, 6000, 3000, 3000];
+    const counts = (s: CoreState) => [1, 2, 3, 4].map((q) => {
+      const g = gate(s, id);
+      return Array.from(gateMaskQuadrant(xs, ys, g.center, q, undefined, g.arms)).reduce((a, b) => a + b, 0);
+    });
+    // Q1 upper-left, Q2 upper-right: before, the two events above the box are in no quadrant.
+    expect(counts(state)).toEqual([1, 1, 0, 0]);
+    // Dragging the up end to y 6500 along its own line: the top edge goes out to 6500.
+    let next = coreReducer(state, { type: "setQuadrantArm", gateId: id, arm: "up", end: [2833.33, 6500] });
+    expect(counts(next)).toEqual([2, 2, 0, 0]);
+    // Extend to edges, from the original: the same two events join, by the box growing about the centre.
+    next = coreReducer(state, { type: "growSpiderBox", gateId: id, box: [0, 4000, 0, 7000] });
+    expect(counts(next)).toEqual([2, 2, 0, 0]);
   });
 
   it("leaves a quadrant without arms alone when an arm is set", () => {

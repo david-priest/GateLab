@@ -150,4 +150,51 @@ describe("hidden tabs and gating-only updates", () => {
     await settle();
     expect(gateCountCalls.count).toBeGreaterThanOrEqual(onGatingTab);
   });
+
+  it("does not reach the Plotting tab's charts from a gating-only update, however many charts it holds", async () => {
+    act(() => root.render(<App />));
+    const directInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(directInput, "files", {
+      configurable: true,
+      value: [testFile("sample-a.fcs", 1), testFile("sample-b.fcs", 2), testFile("sample-c.fcs", 3)],
+    });
+    await act(async () => {
+      directInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await settle();
+
+    // Three charts on the Plotting tab, then back to Gating.
+    act(() => buttonWithText("Plotting")!.click());
+    await settle();
+    act(() => buttonWithText("New chart")!.click());
+    act(() => buttonWithText("Duplicate")!.click());
+    await settle();
+    const names = () => [...host.querySelectorAll<HTMLSelectElement>('select[aria-label="Chart"] option')].map((option) => option.textContent);
+    expect(names()).toEqual(["Chart 1", "Chart 2", "Chart 2 copy"]);
+    act(() => buttonWithText("Gating")!.click());
+    await settle();
+    expect(host.querySelector(".gl-plotting-charts")).toBeNull();
+
+    gateCountCalls.count = 0;
+    act(() => plotHarness.props!.onNewGate({
+      gate_type: "rectangle",
+      vertices: [[0, 0], [1000, 1000]],
+      x_channel: "FSC-A",
+      y_channel: "SSC-A",
+    }));
+    const createPopulation = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+      .find((input) => input.parentElement?.textContent?.includes("Also create a population"))!;
+    act(() => createPopulation.click());
+    act(() => buttonWithText("Create")!.click());
+    await settle();
+    // The active sample's own counts only, as with one chart.
+    expect(gateCountCalls.count).toBe(1);
+
+    // The charts are as they were left.
+    act(() => buttonWithText("Plotting")!.click());
+    await settle();
+    expect(names()).toEqual(["Chart 1", "Chart 2", "Chart 2 copy"]);
+  });
 });

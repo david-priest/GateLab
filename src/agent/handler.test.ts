@@ -8,7 +8,7 @@ import { coreReducer, initialCoreState, recomputeGating, type Action, type CoreS
 import { newRootPopulation } from "../engine/models";
 import { createAgentHandler, DEFAULT_PROPOSAL_STEP_LIMIT, valleysOf, type AgentAdapter, type AgentHandlerOptions, type AgentSampleView } from "./handler";
 import { StrategyMovedError, provenanceSource, type StrategyProposal } from "../proposals/strategyProposal";
-import type { AgentApplied, AgentDescribe, AgentDistribution, AgentMemberships, AgentPreview, AgentRequest, AgentResponse, AgentStats, AgentView } from "./protocol";
+import type { AgentApplied, AgentDescribe, AgentDistribution, AgentMemberships, AgentPreview, AgentRenderedSvg, AgentRequest, AgentResponse, AgentStats, AgentView } from "./protocol";
 
 function flowSample(values: Record<string, number[]>): Sample {
   const names = Object.keys(values);
@@ -340,6 +340,66 @@ describe("the agent handler", () => {
     const deaf = createAgentHandler({ ...adapter, setView: async () => {} });
     const missed = await deaf.handle({ kind: "request", id: "deaf", method: "view", params: { strategy: { populationIds: [parent] } } });
     expect(missed.error).toMatchObject({ code: "failed", message: "The Strategy tab did not take the selection." });
+  });
+
+  it("sets the Strategy tab's layout controls as the tab offers them, and writes its grid as SVG to an upload slot", async () => {
+    const { call, refusal, adapter, getState, dispatched } = fixture();
+    const root = getState().root_population_id!;
+    const range = (name: string, parentId: string, low: number) => call<AgentApplied>("apply", {
+      command: { type: "createRange", name, parentId, x: "FSC-A", y: "SSC-A", space: "display", xBounds: [low, null], yBounds: [null, null] },
+      rationale: "A threshold.",
+    });
+    const parent = (await range("CD4_positive", root, 500)).created.populationIds[0];
+    const child = (await range("CD4_high", parent, 1500)).created.populationIds[0];
+    dispatched.length = 0;
+
+    // Wrapped, two columns, arrows from the gate centres: passed to the tab and read back.
+    const controls = { layout: "flow", columns: 2, showArrows: true, arrowWidth: 2.5, arrowAnchor: "gate" } as const;
+    const wrapped = await call<AgentView>("view", { strategy: { populationIds: [parent, child], ...controls } });
+    expect(wrapped.strategy).toEqual({ mode: "multi", populationIds: [parent, child], ...controls });
+    // One population drawn as a grid takes them too; a single strip takes only the columns.
+    expect((await call<AgentView>("view", { strategy: { populationIds: [child], mode: "multi", layout: "tree" } })).strategy).toEqual({ mode: "multi", populationIds: [child], layout: "tree" });
+    expect((await call<AgentView>("view", { strategy: { populationIds: [child], columns: 3 } })).strategy).toEqual({ mode: "single", populationIds: [child], columns: 3 });
+    expect(dispatched).toEqual([]);
+
+    const refused = async (params: unknown) => (await refusal("view", params))?.message ?? "";
+    expect(await refused({ strategy: { populationIds: [child], layout: "flow" } })).toContain('pass mode "multi"');
+    expect(await refused({ strategy: { populationIds: [child], showArrows: true } })).toContain("strategy.showArrows is for the multi-population grid");
+    expect(await refused({ strategy: { populationIds: [parent, child], layout: "wrapped" } })).toContain('"tree" or "flow"');
+    for (const columns of [0, 13, 2.5, "4"]) expect(await refused({ strategy: { populationIds: [parent, child], columns } })).toContain("1 to 12");
+    for (const arrowWidth of [0.25, 7, "2"]) expect(await refused({ strategy: { populationIds: [parent, child], arrowWidth } })).toContain("0.5 to 6");
+    expect(await refused({ strategy: { populationIds: [parent, child], showArrows: "yes" } })).toContain("showArrows must be");
+    expect(await refused({ strategy: { populationIds: [parent, child], arrowAnchor: "centre" } })).toContain('"label" or "gate"');
+    expect(await refused({ strategy: { populationIds: [parent, child], showArrows: false, arrowWidth: 2 } })).toContain("leave them out with showArrows false");
+
+    // A tab that holds other controls than asked is a failure, not a reply.
+    const stale = createAgentHandler({ ...adapter, setView: async (params) => adapter.setView({ ...params, strategy: { ...params.strategy!, layout: "tree" } }) });
+    const missed = await stale.handle({ kind: "request", id: "stale", method: "view", params: { strategy: { populationIds: [parent, child], layout: "flow" } } });
+    expect(missed.error).toMatchObject({ code: "failed", message: "The Strategy tab did not take the selection." });
+
+    // SVG: refused without the means, off the Strategy tab, or with what sizes a PNG; written otherwise.
+    const svg = { format: "svg", upload: "/save/slot-1" };
+    expect((await refusal("render", svg))?.message).toContain("cannot write the Strategy grid as SVG");
+    const written: { dpi?: number; upload: string }[] = [];
+    const svgCore = createAgentHandler({ ...adapter, renderSvg: async (params) => { written.push(params); return { width: 420, height: 300, dpi: params.dpi ?? 300 }; } });
+    const svgCall = async (params: unknown) => svgCore.handle({ kind: "request", id: "svg", method: "render", params });
+    await call<AgentView>("view", { tab: "gating" });
+    expect((await svgCall(svg)).error?.message).toContain("open the Strategy tab first");
+    await call<AgentView>("view", { strategy: { populationIds: [parent, child], layout: "flow" } });
+    expect((await svgCall({ ...svg, width: 800 })).error?.message).toContain("width and height size the PNG");
+    for (const dpi of [50, 1500, 300.5]) expect((await svgCall({ ...svg, dpi })).error?.message).toContain("72 to 1200");
+    expect((await svgCall({ format: "svg", upload: "/file/x" })).error?.message).toContain("upload must be a slot");
+    expect((await svgCall({ format: "pdf" })).error?.message).toContain('"png" or "svg"');
+    expect((await svgCall({ dpi: 300 })).error?.message).toContain('for format "svg"');
+    expect(written).toEqual([]);
+    const reply = (await svgCall({ ...svg, dpi: 600 })).result as AgentRenderedSvg;
+    expect(reply).toMatchObject({ format: "svg", width: 420, height: 300, dpi: 600, view: { tab: "strategy" } });
+    expect(written).toEqual([{ upload: "/save/slot-1", dpi: 600 }]);
+    expect(((await svgCall(svg)).result as AgentRenderedSvg).dpi).toBe(300);
+    expect(written[1]).toEqual({ upload: "/save/slot-1" });
+    // The PNG is as it was.
+    expect(await call<{ png: string }>("render", {})).toMatchObject({ png: "data:image/png;base64,AAAA" });
+    expect(dispatched).toEqual([]);
   });
 });
 

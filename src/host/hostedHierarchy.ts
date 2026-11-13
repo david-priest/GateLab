@@ -390,7 +390,17 @@ export function translateGatingSetHierarchy(
         continue;
       }
       const refs: GateRef[] = [];
+      const held = new Set<string>();
+      const hold = (ref: GateRef): void => {
+        const key = `${ref.gate_id}|${ref.include}|${ref.quadrant ?? ""}`;
+        if (!held.has(key)) refs.push(ref);
+        held.add(key);
+      };
+      // The populations this node's events already lie in: its parent and the parents above it.
+      const within = new Set<string>();
+      for (let at: string | null = parentPath; at !== null && at !== ROOT_POPULATION_ID; at = populations[at].parent_id) within.add(at);
       let unresolved: string | null = null;
+      let named = 0;
       for (const entry of list(spec.refs, `references of ${label}`)) {
         const ref = record(entry, `reference of ${label}`);
         const target = text(ref.path, `reference path of ${label}`);
@@ -400,7 +410,21 @@ export function translateGatingSetHierarchy(
           unresolved = dropped.has(target) ? `names '${target}', which was left out` : `names '${target}', which has no gate of its own`;
           break;
         }
-        refs.push({ ...resolved, include: include === resolved.include });
+        named++;
+        // A boolean names a population, and cytolib tests an event against that population: its
+        // gate and the gates of every node above it. With the named node's own gate alone, a
+        // boolean naming a node in another branch held events that node's parents exclude.
+        const above: string[] = [];
+        for (let at = populations[target].parent_id; at !== null && at !== ROOT_POPULATION_ID; at = populations[at].parent_id) {
+          if (!within.has(at)) above.push(at);
+        }
+        if (!include && above.length > 0) {
+          // NOT (parent AND node) is NOT parent OR NOT node, which a population cannot hold.
+          unresolved = `excludes '${target}', which lies under '${above[0]}' and not under this node's own parents; that is an OR, which GateLab does not hold`;
+          break;
+        }
+        for (const at of above) for (const parentRef of populations[at].gate_refs) hold(parentRef);
+        hold({ ...resolved, include: include === resolved.include });
       }
       if (unresolved) {
         drop(path, unresolved);
@@ -413,7 +437,9 @@ export function translateGatingSetHierarchy(
       // NOT (A AND B) is NOT A OR NOT B. A population ANDs its references, so negating each one
       // would hold NOT A AND NOT B, which is fewer events; such a node is not held.
       if (negated && refs.length > 1) {
-        drop(path, "a NOT of an AND of several nodes, which a GateLab population cannot hold");
+        drop(path, named > 1
+          ? "a NOT of an AND of several nodes, which a GateLab population cannot hold"
+          : "a NOT of a node with the gates of the nodes above it, which a GateLab population cannot hold");
         continue;
       }
       addPopulation(path, name, parentPath, negated ? refs.map((ref) => ({ ...ref, include: !ref.include })) : refs);

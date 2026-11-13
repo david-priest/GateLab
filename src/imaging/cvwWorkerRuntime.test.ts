@@ -235,7 +235,13 @@ describe("cvw worker runtime", () => {
     expect(done.objectArea[0]).toBeGreaterThan(20);
     expect(done.objectArea[2]).toBe(0);
     // The mask's measurements ride along: the blob has a boundary and a shape, the empty event none.
-    expect(Object.keys(done.features)).toEqual(["perimeter", "circularity", "majorAxis", "minorAxis", "axisRatio", "diameter", "meanIntensity", "sdIntensity"]);
+    // The images have a LightLoss channel, so the outline's measures come too; this file carries no
+    // beam on it, so there is no outline to read (lightLossMask.test.ts draws the rings).
+    expect(Object.keys(done.features)).toEqual([
+      "perimeter", "circularity", "majorAxis", "minorAxis", "axisRatio", "diameter", "meanIntensity", "sdIntensity",
+      "llDiameter", "llMajorAxis", "llMinorAxis", "llCircularity", "llLightLost",
+    ]);
+    expect(Array.from(done.features.llDiameter)).toEqual([0, 0, 0]);
     expect(done.features.perimeter[0]).toBeGreaterThan(8);
     expect(done.features.axisRatio[0]).toBeGreaterThan(0.2);
     expect(done.features.axisRatio[0]).toBeLessThanOrEqual(1);

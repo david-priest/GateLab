@@ -144,7 +144,11 @@ export function strategyStepMasks(
   if (!pop) return [];
 
   // Ordered gate refs (root→pop if fullPath, else this pop's).
-  const allRefs: { ref: GateRef; popName: string }[] = [];
+  const allRefs: { ref: GateRef; popName: string; popId: string; or: boolean }[] = [];
+  // A population that ORs its references (populations.ts honours gate_logic) holds an event any
+  // of them holds. Applied in turn like the rest, its references were ANDed, and the last step's
+  // count was not the population's.
+  const entry = (ref: GateRef, of: PopulationMap[string]) => ({ ref, popName: of.name, popId: of.population_id, or: of.gate_logic === "or" });
   if (fullPath) {
     const ancestry: string[] = [];
     let cur: string | null = populationId;
@@ -154,10 +158,10 @@ export function strategyStepMasks(
     }
     for (const ancId of ancestry) {
       const anc = populations[ancId];
-      for (const ref of anc?.gate_refs ?? []) allRefs.push({ ref, popName: anc.name });
+      for (const ref of anc?.gate_refs ?? []) allRefs.push(entry(ref, anc));
     }
   } else {
-    for (const ref of pop.gate_refs ?? []) allRefs.push({ ref, popName: pop.name });
+    for (const ref of pop.gate_refs ?? []) allRefs.push(entry(ref, pop));
   }
   if (allRefs.length === 0) return [];
 
@@ -166,23 +170,29 @@ export function strategyStepMasks(
   let running = new Uint8Array(n).fill(1);
   const steps: StrategyStepMask[] = [];
 
-  for (const { ref, popName } of allRefs) {
+  // For an OR population: the events it started from, and those any reference so far holds.
+  let either: { popId: string; base: Uint8Array; held: Uint8Array } | null = null;
+  for (const { ref, popName, popId, or } of allRefs) {
     const gate = gates[ref.gate_id];
     if (!gate) continue;
+    if (either && either.popId !== popId) either = null;
+    if (or && !either) either = { popId, base: running, held: new Uint8Array(n) };
+    const before = either ? either.base : running;
 
     let nBefore = 0;
-    for (let i = 0; i < n; i++) if (running[i]) nBefore++;
+    for (let i = 0; i < n; i++) if (before[i]) nBefore++;
 
     const gm = getGateMask(gate, columnsForGate(data, gate), ref.quadrant);
     const newMask = new Uint8Array(n);
     let nAfter = 0;
     for (let i = 0; i < n; i++) {
       const pass = ref.include ? gm[i] : !gm[i];
-      const v = running[i] && pass ? 1 : 0;
+      if (either && pass) either.held[i] = 1;
+      const v = before[i] && (either ? either.held[i] : pass) ? 1 : 0;
       newMask[i] = v;
       if (v) nAfter++;
     }
-    steps.push({ gate, ref, popName, before: running, nBefore, nAfter });
+    steps.push({ gate, ref, popName, before, nBefore, nAfter });
     running = newMask;
   }
 

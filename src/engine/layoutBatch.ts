@@ -4,14 +4,14 @@
 // a pure function from the template and the units to concrete pages, so the tab renders one page
 // and the export writes them all.
 
-import { DEFAULT_ITERATION, isPlotLikeRecipe, mmToPx, type LayoutItem, type LayoutIteration, type LayoutPlotRecipe, type LayoutSheet, type LayoutStrategyRecipe } from "./layout";
+import { DEFAULT_ITERATION, followsIteration, isPlotLikeRecipe, mmToPx, type LayoutItem, type LayoutIteration, type LayoutPlotRecipe, type LayoutSheet, type LayoutStrategyRecipe } from "./layout";
 import { contentBounds } from "./layoutArrange";
 import { plotTitle, type PlotTitleContext } from "./layoutTitle";
 import { compareMetadataValues } from "./metadata";
 import type { PopulationMap } from "./models";
 import { populationTreeOrder } from "./populations";
 
-export { DEFAULT_ITERATION, normalizeIteration, type LayoutIteration } from "./layout";
+export { DEFAULT_ITERATION, followsIteration, normalizeIteration, type LayoutIteration } from "./layout";
 
 /** The files with no value in the column, drawn last under a metadata iteration, named as the Illustration tab names them. */
 export const UNASSIGNED_METADATA_VALUE = "Unassigned";
@@ -61,11 +61,6 @@ export interface LayoutPage {
   items: LayoutPageItem[];
 }
 
-/** Whether an item is drawn once per unit; text never is, but its placeholders are filled. */
-export function followsIteration(item: LayoutItem): boolean {
-  return isPlotLikeRecipe(item.recipe) && item.recipe.iterated === true;
-}
-
 /**
  * Fill `{sample}`, `{file}`, `{group}`, `{n}`, `{N}` and `{meta:<column>}` from a unit, and
  * `{population}` from a population unit. `{n}` is the unit's 1-based position and `{N}` the
@@ -94,11 +89,25 @@ function bindItem(item: LayoutItem, unit: LayoutUnit | null, n: number, total: n
   // the unit fills only {n} and {N} for it, so an unknown column is not blanked first.
   if (recipe.kind === "text") recipe.text = fillPlaceholders(recipe.text, recipe.readsFrom ? null : unit, n, total);
   else {
-    if (follows && unit && unit.populationId) {
+    if (follows && unit && recipe.kind === "proportions") {
+      // A Plotting panel drawn for the unit's files: a file unit's file, a metadata unit's files;
+      // the unit's files make the panel, so its group and facet no longer pick among them. A
+      // population unit leaves it as it is.
+      const files = unit.sampleIds ?? (unit.populationId ? null : [unit.id]);
+      if (files) {
+        recipe.settings = { ...recipe.settings, files: [...files] };
+        if (recipe.panel && !("legend" in recipe.panel)) {
+          const { group: _group, facet: _facet, ...rest } = recipe.panel;
+          recipe.panel = rest;
+        }
+      }
+    } else if (follows && unit && unit.populationId) {
       // A population unit: the same file, drawn for this population. A multi-population
-      // strategy grid is drawn as the steps to this one population.
+      // strategy grid is drawn as the steps to this one population, an overlay as this population.
       if ("populationId" in recipe) recipe.populationId = unit.populationId;
       if (recipe.kind === "strategy" && recipe.populationIds?.length) recipe.populationIds = [unit.populationId];
+      // An overlay of populations is drawn as this one population.
+      if ((recipe.kind === "biplot" || recipe.kind === "histogram") && recipe.populationIds) delete recipe.populationIds;
     } else if (follows && unit && unit.sampleIds) {
       // A metadata unit: its files pooled on a plot; a strategy, which cannot pool, is drawn
       // for the first of them. The template file stays the reference while it is among them.

@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import { parseCvwHeader, parseCvwMetadata, parseCvwIndex } from "./cvw";
 import {
   CARRIER_FIRST_BIN,
+  CVW_CHANNELS,
   IMAGE_ROWS,
   decodeEvent,
   fft256,
   parseBlockTrailer,
   stftColumns,
+  stftPlane,
+  stftPlanePair,
 } from "./cvwDecode";
 import { buildSyntheticBlock, buildSyntheticCvw, gaussianBlob } from "./cvwFixture";
 
@@ -139,5 +142,33 @@ describe("decodeEvent", () => {
     const image = decodeEvent(blockOf(file, 0), metadata, { hop: 16, slots: [3, 4] });
     expect(image.slots).toEqual([3, 4]);
     expect(image.planes).toHaveLength(2);
+  });
+});
+
+describe("stftPlanePair", () => {
+  it("gives each of two channels the plane stftPlane gives it alone", () => {
+    // Two channels with carriers of very different strength, as LightLoss and SSC are, plus noise.
+    const sampleCount = 1024;
+    const samples = new Uint16Array(sampleCount * CVW_CHANNELS);
+    let x = 7;
+    for (let t = 0; t < sampleCount; t++) {
+      x = (x * 1103515245 + 12345) % 2147483648;
+      const noise = (x / 2147483648 - 0.5) * 20;
+      samples[t * CVW_CHANNELS + 2] = Math.round(30000 + 20000 * Math.cos((2 * Math.PI * 40 * t) / 256) + noise);
+      samples[t * CVW_CHANNELS + 4] = Math.round(2048 + 300 * Math.cos((2 * Math.PI * 60 * t) / 256 + 0.7) * Math.exp(-((t - 512) ** 2) / 20000) + noise);
+    }
+    const [a, b] = stftPlanePair(samples, 2, 4, CVW_CHANNELS, sampleCount, 64);
+    const aloneA = stftPlane(samples, 2, CVW_CHANNELS, sampleCount, 64);
+    const aloneB = stftPlane(samples, 4, CVW_CHANNELS, sampleCount, 64);
+    const worst = (p: Float32Array, q: Float32Array) => {
+      let peak = 0;
+      let diff = 0;
+      for (let i = 0; i < p.length; i++) { peak = Math.max(peak, Math.abs(q[i])); diff = Math.max(diff, Math.abs(p[i] - q[i])); }
+      return diff / peak;
+    };
+    expect(a.length).toBe(aloneA.length);
+    expect(worst(a, aloneA)).toBeLessThan(1e-5);
+    // The weak channel keeps its own picture beside the strong one.
+    expect(worst(b, aloneB)).toBeLessThan(1e-4);
   });
 });

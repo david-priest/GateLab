@@ -20,6 +20,7 @@
 // wrong files, and nothing downstream would flag it.
 
 import { distinctValues, type MetadataColumn } from "./metadata";
+import { columnValueOrder } from "./levelOrder";
 
 /** Per-sample metadata, keyed by sample id then field — the shape App holds in `metadata`. */
 export type SampleMetadata = Record<string, Record<string, string>>;
@@ -111,13 +112,11 @@ export function facetColumns(
  * The chips for one column, each carrying the samples it covers.
  *
  * `MetadataColumn.levels` is honoured when present so an ordered factor keeps its own order rather
- * than first-seen order; levels naming no sample are dropped.
+ * than first-seen order, as every tab orders the column (columnValueOrder); levels naming no sample
+ * are dropped, and values the levels do not name follow in first-seen order.
  */
 export function facetValues(metadata: SampleMetadata, column: MetadataColumn): FacetValue[] {
-  const present = distinctValues(metadata, column.name);
-  const ordered = column.levels
-    ? column.levels.filter((level) => present.includes(level))
-    : present;
+  const ordered = columnValueOrder(distinctValues(metadata, column.name), column.levels);
   return ordered.map((value) => ({
     value,
     sampleIds: Object.keys(metadata).filter((id) => metadata[id]?.[column.name] === value),

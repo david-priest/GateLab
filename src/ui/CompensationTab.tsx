@@ -12,6 +12,7 @@ import {
 } from "react";
 import { SearchableSelect } from "./SearchableSelect";
 import { ChevronIcon } from "./icons";
+import { FoldSummary } from "./FoldSummary";
 import { pickFilesOrInput } from "../engine/fsAccess";
 import { DEFAULT_DENSITY_COLOR_POWER } from "../engine/pseudocolor";
 import {
@@ -3087,7 +3088,7 @@ function CompensationTabImpl({
                     })}
                   </span>
                   <details>
-                    <summary>{t("Details")}</summary>
+                    <FoldSummary>{t("Details")}</FoldSummary>
                     <p>{embeddedFlowProfileMatrix.error}</p>
                   </details>
                 </div>

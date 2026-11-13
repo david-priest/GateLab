@@ -480,8 +480,10 @@ export function gateMaskQuadrant(
     let xdiv = cx;
     let ydiv = cy;
     if (bent) {
-      if (y > cy) xdiv = cx + curl!.ky * Math.pow(y - cy, curl!.power);
-      if (x > cx) ydiv = cy + curl!.kx * Math.pow(x - cx, curl!.power);
+      // An arm with no bend stays on the centre line, also at an infinite coordinate, where
+      // 0 * Infinity is NaN and the event fell below a divider it lies above.
+      if (y > cy && curl!.ky !== 0) xdiv = cx + curl!.ky * Math.pow(y - cy, curl!.power);
+      if (x > cx && curl!.kx !== 0) ydiv = cy + curl!.kx * Math.pow(x - cx, curl!.power);
     } else if (arms) {
       // Within the box every coordinate is finite, and an arm on its axis gives the centre exactly.
       xdiv = cx + (y - cy) * (y > cy ? upRun : downRun);

@@ -105,6 +105,18 @@ export function composeGridSVG(gridId: string, dpi: number): { root: SVGSVGEleme
     root.appendChild(g);
   });
 
+  // An Illustration chart panel (a violin, box, statistic or composition) is vector throughout:
+  // its SVG is copied as drawn, at its place in the grid.
+  grid.querySelectorAll<SVGSVGElement>(".gl-figure-chart svg.gl-prop-panel").forEach((svg, index) => {
+    const r = svg.getBoundingClientRect();
+    const g = document.createElementNS(SVG_NS, "g");
+    g.setAttribute("transform", `translate(${Math.round(r.left - gridRect.left)},${Math.round(r.top - gridRect.top)})`);
+    g.setAttribute("font-family", getComputedStyle(svg).fontFamily || "Arial, Helvetica, sans-serif");
+    g.appendChild(svg.cloneNode(true));
+    g.setAttribute("id", exportId("chart", index + 1, svg.closest<HTMLElement>(".gl-figure-chart")?.getAttribute("aria-label")?.split(";")[0] ?? ""));
+    root.appendChild(g);
+  });
+
   // The Strategy tab's parent–child arrows, drawn over the grid in their own SVG; copied over
   // the panels at the same place.
   grid.querySelectorAll<SVGSVGElement>("svg.gl-strategy-arrows").forEach((overlay) => {
@@ -140,12 +152,19 @@ export async function exportComposedPNG(page: ComposedPage, filename: string, dp
   downloadBlob(await pngBlob(canvas, dpi), filename + ".png");
 }
 
+/** The SVG file the grid's SVG export writes, as text, with the grid's size in CSS pixels. */
+export function gridSvgFile(gridId: string, dpi = 300): { xml: string; width: number; height: number } | null {
+  const composed = composeGridSVG(gridId, dpi);
+  if (!composed) return null;
+  const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(composed.root);
+  return { xml, width: composed.width, height: composed.height };
+}
+
 /** Composite SVG download: per-cell vector axes/gates over the data layer re-rendered at `dpi`. */
 export function exportGridSVG(gridId: string, filename: string, dpi = 300) {
-  const composed = composeGridSVG(gridId, dpi);
-  if (!composed) return;
-  const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(composed.root);
-  downloadBlob(new Blob([xml], { type: "image/svg+xml" }), filename + ".svg");
+  const file = gridSvgFile(gridId, dpi);
+  if (!file) return;
+  downloadBlob(new Blob([file.xml], { type: "image/svg+xml" }), filename + ".svg");
 }
 
 /** The composed SVG drawn onto a canvas at `dpi`: what the PNG export writes, and what a PDF page falls back to. */

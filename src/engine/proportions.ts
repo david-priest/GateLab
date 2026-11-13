@@ -4,6 +4,7 @@
 // Facet scalars (GateLab's per-sample factor model), so it never needs a combined per-event index.
 
 import type { PopulationMap } from "./models";
+import { quantileSorted } from "./summaryStats";
 
 export interface SampleComposition {
   unit: string;
@@ -16,6 +17,10 @@ export interface SampleComposition {
    * selection claims in `catCounts`. Absent for division categories, which are a partition.
    */
   popCounts?: number[];
+  /** The events in the file's root population, as the Statistics tab's "% of total" divides by; absent for division categories. */
+  totalCount?: number;
+  /** The population categories the file does not draw (its tree lacks them, or holds them changed): no share is taken of them in it. Absent when it draws every one. */
+  missing?: number[];
 }
 
 /** One rect in a nested stacked bar: a selected population's SUBTREE extent (cumulative fractions). */
@@ -86,7 +91,8 @@ export interface UnitRow {
   /**
    * Each category's whole share of the unit: a population with every event it holds, as the gate
    * list counts it, where `props` gives an event to one category only. Equal to `props` for a
-   * partition (the rest, division levels).
+   * partition (the rest, division levels). Taken over the unit's files that draw the category
+   * (`SampleComposition.missing`), numerator and denominator alike; NaN when none of them does.
    */
   shares: number[];
   nEvents: number;
@@ -98,27 +104,37 @@ const SEP = "\0";
  * Pool events by Unit within each Group and Facet, and normalise each to sum 1. A unit is one
  * observation per group it has files in: a donor with a reference and a stimulated file is a
  * point in each condition, never one point of both conditions' events pooled.
+ *
+ * `value` sets what `shares` holds: each population's whole share of the parent (the default), its
+ * share of the unit's files' root populations ("total"), or its events ("count").
  */
-export function perUnitProps(samples: SampleComposition[], nCat: number): UnitRow[] {
-  const byUnit = new Map<string, { unit: string; group: string; facet: string | null; counts: number[]; whole: number[]; n: number }>();
+export function perUnitProps(samples: SampleComposition[], nCat: number, value: "parent" | "total" | "count" = "parent"): UnitRow[] {
+  const byUnit = new Map<string, { unit: string; group: string; facet: string | null; counts: number[]; whole: number[]; n: number; total: number; drawnN: number[]; drawnTotal: number[]; drawn: boolean[] }>();
   for (const s of samples) {
     const key = s.unit + SEP + s.group + SEP + (s.facet ?? "");
     let u = byUnit.get(key);
-    if (!u) { u = { unit: s.unit, group: s.group, facet: s.facet, counts: new Array(nCat).fill(0), whole: new Array(nCat).fill(0), n: 0 }; byUnit.set(key, u); }
+    if (!u) { u = { unit: s.unit, group: s.group, facet: s.facet, counts: new Array(nCat).fill(0), whole: new Array(nCat).fill(0), n: 0, total: 0, drawnN: new Array(nCat).fill(0), drawnTotal: new Array(nCat).fill(0), drawn: new Array(nCat).fill(false) }; byUnit.set(key, u); }
     const sN = s.catCounts.reduce((a, b) => a + b, 0);
     for (let c = 0; c < nCat; c++) {
       u.counts[c] += s.catCounts[c];
+      // A category the file does not draw takes nothing from it towards its share, not even the denominator.
+      if (s.missing?.includes(c)) continue;
       u.whole[c] += s.popCounts?.[c] ?? s.catCounts[c];
+      u.drawnN[c] += sN;
+      u.drawnTotal[c] += s.totalCount ?? sN;
+      u.drawn[c] = true;
     }
     u.n += sN;
+    u.total += s.totalCount ?? sN;
   }
-  // A unit with no events in the parent has no composition: left out, not averaged in as 0%.
-  return [...byUnit.values()].filter((u) => u.n > 0).map((u) => ({
+  // A unit with no events in the parent has no composition: left out, not averaged in as 0%. A
+  // share of the total or a count needs only events in the file.
+  return [...byUnit.values()].filter((u) => (value === "parent" ? u.n > 0 : u.total > 0)).map((u) => ({
     unit: u.unit,
     group: u.group,
     facet: u.facet,
-    props: u.counts.map((c) => c / u.n),
-    shares: u.whole.map((c) => c / u.n),
+    props: u.counts.map((c) => (u.n > 0 ? c / u.n : 0)),
+    shares: u.whole.map((c, cat) => (!u.drawn[cat] ? NaN : value === "count" ? c : value === "total" ? c / u.drawnTotal[cat] : c / u.drawnN[cat])),
     nEvents: u.n,
   }));
 }
@@ -195,13 +211,7 @@ export interface BoxDatum {
 
 /** Type-7 quantile (R default). `sorted` must be ascending. */
 export function quantile(sorted: number[], p: number): number {
-  const n = sorted.length;
-  if (n === 0) return 0;
-  if (n === 1) return sorted[0];
-  const h = (n - 1) * p;
-  const lo = Math.floor(h);
-  const hi = Math.min(n - 1, lo + 1);
-  return sorted[lo] + (sorted[hi] - sorted[lo]) * (h - lo);
+  return sorted.length === 0 ? 0 : quantileSorted(sorted, p);
 }
 function boxStats(vals: number[]): BoxStats {
   const s = [...vals].sort((a, b) => a - b);
@@ -222,11 +232,13 @@ function boxStats(vals: number[]): BoxStats {
 /**
  * Boxplot data: per-unit shares grouped by (Category, Group[, Facet]). A box is a population's
  * whole share in each unit, as the gate list counts it, not the part a stacked bar can give it.
+ * A unit without a share of a population (none of its files draws it) is not in that box.
  */
 export function computeBoxes(units: UnitRow[], nCat: number, hasFacet: boolean): BoxDatum[] {
   const map = new Map<string, BoxDatum>();
   for (const u of units) {
     for (let c = 0; c < nCat; c++) {
+      if (!Number.isFinite(u.shares[c])) continue;
       const key = c + SEP + u.group + SEP + (hasFacet ? u.facet ?? "" : "");
       let d = map.get(key);
       if (!d) { d = { cat: c, group: u.group, facet: hasFacet ? u.facet : null, values: [], units: [], stats: { min: 0, q1: 0, med: 0, q3: 0, max: 0, lo: 0, hi: 0 } }; map.set(key, d); }

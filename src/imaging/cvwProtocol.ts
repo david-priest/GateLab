@@ -87,6 +87,11 @@ export interface ClassifyRequest extends Tagged {
     readonly smoothing?: number;
     /** The file's full scale per slot when the main thread already knows it (a lane opened without measuring has none). */
     readonly scale?: Readonly<Record<number, number>>;
+    /**
+     * Count only the events from `start` up to (not including) `end`, for one worker of several
+     * sharing a file; the answer still holds every event, the others unknown (255) and 0.
+     */
+    readonly range?: { readonly start: number; readonly end: number };
   };
 }
 

@@ -942,10 +942,12 @@ function channelMapForTransformElement(el: Element): ChannelMap | null {
       return { offset: min, scale: (max - min) / FLOWJO_DISPLAY_CHANNELS };
     }
     case "biex": {
-      // biexTransform is built with channelRange = length, so its forward already returns
-      // FlowJo channel numbers. The two spaces are the same one; nothing to convert.
+      // biexTransform is built with channelRange = length, so its forward returns channels of
+      // that length, and an ellipse is written in FLOWJO_DISPLAY_CHANNELS of them: at length 256
+      // the two are one space, and at any other a display channel is length / 256 of the
+      // transform's. The ratio was held the other way up, which is the same number only at 256.
       const length = Math.trunc(n("length"));
-      return length > 1 ? { offset: 0, scale: FLOWJO_DISPLAY_CHANNELS / length } : null;
+      return length > 1 ? { offset: 0, scale: length / FLOWJO_DISPLAY_CHANNELS } : null;
     }
     case "log":
     case "logicle":
@@ -1635,6 +1637,22 @@ function qualifiedPopulationNames(roots: Element[]): Map<Element, string> {
       items.push({ pop, path });
       return true;
     });
+  }
+  // Two siblings of one name have one path, which no number of parents tells apart: both were
+  // given the one name, and FlowJo's count for the second replaced the first's in everything
+  // keyed by it. The later ones are numbered first, as GateLab's own FlowJo export numbers
+  // siblings of one name: "CD3+", "CD3+ (2)".
+  const paths = new Set(items.map((it) => JSON.stringify(it.path)));
+  const met = new Set<string>();
+  for (const it of items) {
+    const key = JSON.stringify(it.path);
+    if (!met.has(key)) { met.add(key); continue; }
+    const leaf = it.path[it.path.length - 1];
+    let k = 2;
+    const numbered = (): string => JSON.stringify([...it.path.slice(0, -1), `${leaf} (${k})`]);
+    while (paths.has(numbered())) k++;
+    paths.add(numbered());
+    it.path = [...it.path.slice(0, -1), `${leaf} (${k})`];
   }
   const depth = items.map(() => 1);
   let names = items.map((it) => it.path[it.path.length - 1]);
@@ -2681,7 +2699,10 @@ function sampleCompensation(sampleNode: Element): SampleCompensation {
   const all = Array.from(doc.getElementsByTagNameNS(TRANSFORMS_NS, "spilloverMatrix"))
     .map(readSpilloverMatrix)
     .flatMap((r) => (r.kind === "matrix" ? [r.spill] : []));
-  const distinct = new Map(all.map((m) => [m.name, m]));
+  // One candidate means one matrix, by its channels and coefficients. Counted by name, two files'
+  // different matrices, each called "Acquisition-defined", were one candidate, and the last was
+  // applied to a file that had none.
+  const distinct = new Map(all.map((m) => [JSON.stringify([m.prefix, m.suffix, m.matrix.channels, m.matrix.matrix]), m]));
   return { spill: distinct.size === 1 ? [...distinct.values()][0] : null, identity: null, declined: null };
 }
 
@@ -3103,7 +3124,16 @@ export function flowJoWorkspaceToGatingML(
         own.channelMaps.get(ch) ?? own.channelMaps.get(ch.replace(/^Comp-/, ""));
       const mx = axes ? mapFor(axes[0]) : undefined;
       const my = axes ? mapFor(axes[1]) : undefined;
-      if (!axes || !mx || !my || !sx || !sy || !convertFlowJoEllipsoid(out, copy, mx, my)) {
+      // A Time axis with a $TIMESTEP is drawn in seconds, and the file stores ticks: a rectangle
+      // or polygon on it is divided by the step below, and so is an ellipse, through its axis map.
+      // Left in seconds, an ellipse centred at 125 s was placed at tick 125 where 12,500 is right.
+      // Only on a linear Time axis, whose map gives seconds: on a non-linear one (asinh, biex) the
+      // map gives that transform's display, which the step does not scale.
+      const inTicks = (map: ChannelMap | undefined, step: number): ChannelMap | undefined =>
+        map && step !== 1 ? { offset: map.offset / step, scale: map.scale / step } : map;
+      const tx = inTicks(mx, sx?.kind === "identity" ? stepX : 1);
+      const ty = inTicks(my, sy?.kind === "identity" ? stepY : 1);
+      if (!axes || !tx || !ty || !sx || !sy || !convertFlowJoEllipsoid(out, copy, tx, ty)) {
         warnings.push(
           `"${name}" is an ellipse on an axis whose display the workspace does not declare, so ` +
           `its coordinates cannot be placed; it and anything below it were skipped.`,

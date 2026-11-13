@@ -275,7 +275,8 @@ describe("the Strategy tab and the Layout tab", () => {
         kind: "strategy", sampleId: "D1", populationId: fx.bcellsId, fullPath: true, displayMode: "pseudocolor",
         populationIds: [fx.bcellsId], layout: "tree", columns: 4, showArrows: true, arrowWidth: 1.5, title: "{sample}",
         plotSize: 200, labelBackground: 0.85,
-        style: expect.objectContaining({ pointSize: 1.2, pointAlpha: 0.35, contourLevels: 10, pubStyle: false, fontGate: 12 }),
+        // A new strategy uses the workspace's figure style: its gate labels at the style's 9 px.
+        style: expect.objectContaining({ pointSize: 1.2, pointAlpha: 0.35, contourLevels: 10, pubStyle: false, fontGate: 9 }),
       }),
       { width: 244, height: 250 },
     );
@@ -335,7 +336,9 @@ describe("the Strategy tab's controls", () => {
     expect(shown()[0].textContent).toContain("Gate edges");
     open("Export");
     expect(shown()[0].textContent).toContain("With gating tree");
-    expect([...shown()[0].querySelectorAll("button")].map((b) => b.textContent)).toEqual(["PNG", "SVG", "PDF", "Add to Layout"]);
+    expect([...shown()[0].querySelectorAll("button")].map((b) => b.textContent)).toEqual(["PNG", "SVG", "PDF"]);
+    // Add to Layout is in the tab's header row, as on the Illustration and Plotting tabs.
+    expect([...host.querySelectorAll(".gl-plotting-head .gl-plotting-head-actions button")].map((b) => b.textContent)).toEqual(["Add to Layout"]);
     expect(shown()).toHaveLength(1);
     // The old stacked rows and the Appearance fold are gone.
     expect(host.querySelector(".gl-strategy-controls")).toBeNull();

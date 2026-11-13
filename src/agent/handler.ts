@@ -23,11 +23,15 @@ import {
   type AgentApplied, type AgentApplyParams, type AgentAxisDistribution, type AgentChannel, type AgentDescribe,
   type AgentDistribution, type AgentDistributionParams, type AgentDistributionSeries, type AgentError, type AgentGate,
   type AgentHostInfo, type AgentMemberships, type AgentMembershipsParams, type AgentPopulation, type AgentPopulationStats,
-  type AgentPreview, type AgentPreviewParams, type AgentRender, type AgentRenderParams, type AgentRequest, type AgentResponse,
+  type AgentPreview, type AgentPreviewParams, type AgentRender, type AgentRenderParams, type AgentRenderedSvg, type AgentRequest, type AgentStrategySelection, type AgentResponse,
   type AgentSampleInfo, type AgentSeriesSelection, type AgentStats, type AgentStatsParams, type AgentView, type AgentViewParams,
   type AgentWorkspace, type AgentDataContext, type AgentGatingTask, type StrategyProposalParams, type AgentGateEditing,
   type AgentImportedGating, type AgentOfferedFile, type AgentOpenedFiles, type AgentSaveParams, type AgentSaved,
 } from "./protocol";
+
+/** The Strategy tab's layout controls an agent may set with its selection. */
+const STRATEGY_CONTROLS = ["layout", "columns", "showArrows", "arrowWidth", "arrowAnchor"] as const;
+type StrategyControl = typeof STRATEGY_CONTROLS[number];
 
 /** One loaded file or SCE sample, as the app holds it. */
 export interface AgentSampleView {
@@ -89,6 +93,11 @@ export interface AgentAdapter {
    * on their yes, write it through the relay. Resolves with what the user chose.
    */
   saveCopy?(params: AgentSaveParams): Promise<{ outcome: AgentSaved["outcome"] }>;
+  /**
+   * Compose the Strategy grid as the tab's SVG export does (at `dpi`, the tab's Export DPI when
+   * absent) and post it to the relay's upload slot. Absent on a core that cannot.
+   */
+  renderSvg?(params: { dpi?: number; upload: string }): Promise<{ width: number; height: number; dpi: number }>;
 }
 
 export interface AgentHandler {
@@ -601,7 +610,22 @@ export function createAgentHandler(adapter: AgentAdapter, options: AgentHandlerO
     if (mode === "single" && ids.length !== 1) throw new AgentCommandError('A single strategy traces one population; use mode "multi" for several.');
     if (strategy.fullPath !== undefined && typeof strategy.fullPath !== "boolean") throw new AgentCommandError("strategy.fullPath must be true or false.");
     if (mode === "multi" && strategy.fullPath !== undefined) throw new AgentCommandError("fullPath is for a single strategy; the multi-population grid always draws every gate from the root.");
-    return { tab, strategy: { mode, populationIds: ids, ...(strategy.fullPath === undefined ? {} : { fullPath: strategy.fullPath }) } };
+    // The layout controls, each as the tab offers it: Layout, Arrows, Arrow width and Arrows from
+    // are on the multi-population grid only, and the last two only while the arrows are drawn.
+    if (mode === "single") {
+      for (const field of ["layout", "showArrows", "arrowWidth", "arrowAnchor"] as const) {
+        if (strategy[field] !== undefined) throw new AgentCommandError(`strategy.${field} is for the multi-population grid; pass mode "multi" (one population may be drawn that way too).`);
+      }
+    }
+    if (strategy.layout !== undefined && strategy.layout !== "tree" && strategy.layout !== "flow") throw new AgentCommandError('strategy.layout must be "tree" or "flow" (the tab\'s Wrapped).');
+    if (strategy.columns !== undefined && !(Number.isInteger(strategy.columns) && (strategy.columns as number) >= 1 && (strategy.columns as number) <= 12)) throw new AgentCommandError("strategy.columns must be a whole number from 1 to 12, as the tab's Columns field.");
+    if (strategy.showArrows !== undefined && typeof strategy.showArrows !== "boolean") throw new AgentCommandError("strategy.showArrows must be true or false.");
+    if (strategy.arrowWidth !== undefined && !(typeof strategy.arrowWidth === "number" && strategy.arrowWidth >= 0.5 && strategy.arrowWidth <= 6)) throw new AgentCommandError("strategy.arrowWidth must be a number of px from 0.5 to 6, as the tab's Arrow width field.");
+    if (strategy.arrowAnchor !== undefined && strategy.arrowAnchor !== "label" && strategy.arrowAnchor !== "gate") throw new AgentCommandError('strategy.arrowAnchor must be "label" or "gate".');
+    if (strategy.showArrows === false && (strategy.arrowWidth !== undefined || strategy.arrowAnchor !== undefined)) throw new AgentCommandError("arrowWidth and arrowAnchor set the arrows; leave them out with showArrows false.");
+    const controls = Object.fromEntries(STRATEGY_CONTROLS
+      .filter((field) => strategy[field] !== undefined).map((field) => [field, strategy[field]])) as Pick<AgentStrategySelection, StrategyControl>;
+    return { tab, strategy: { mode, populationIds: ids, ...(strategy.fullPath === undefined ? {} : { fullPath: strategy.fullPath }), ...controls } };
   };
 
   const view = async (raw: unknown): Promise<AgentView> => {
@@ -628,7 +652,8 @@ export function createAgentHandler(adapter: AgentAdapter, options: AgentHandlerO
       const shown = after.strategy;
       const same = after.tab === "strategy" && !!shown && shown.mode === strategy.mode
         && shown.populationIds.length === strategy.populationIds.length && shown.populationIds.every((id, i) => id === strategy.populationIds[i])
-        && (strategy.fullPath === undefined || shown.fullPath === strategy.fullPath);
+        && (strategy.fullPath === undefined || shown.fullPath === strategy.fullPath)
+        && STRATEGY_CONTROLS.every((field) => strategy[field] === undefined || shown[field] === strategy[field]);
       if (!same) throw new Error("The Strategy tab did not take the selection.");
       return after;
     }
@@ -670,10 +695,24 @@ export function createAgentHandler(adapter: AgentAdapter, options: AgentHandlerO
     return adapter.view();
   };
 
-  const render = async (raw: unknown): Promise<AgentRender> => {
+  const render = async (raw: unknown): Promise<AgentRender | AgentRenderedSvg> => {
     const params = record(raw) as AgentRenderParams;
-    const image = await adapter.render(params);
-    return { revision: revision(), view: adapter.view(), ...image };
+    const format = params.format ?? "png";
+    if (format !== "png" && format !== "svg") throw new AgentCommandError('format must be "png" or "svg".');
+    if (format === "png") {
+      if (params.dpi !== undefined || params.upload !== undefined) throw new AgentCommandError('dpi and upload are for format "svg".');
+      const image = await adapter.render(params);
+      return { revision: revision(), view: adapter.view(), ...image };
+    }
+    // The Strategy grid as the tab's own SVG export writes it, posted to the relay rather than
+    // carried in the reply: its events are images at the export's resolution, megabytes at 300 dpi.
+    if (!adapter.renderSvg) throw new AgentCommandError("This core cannot write the Strategy grid as SVG for an agent; update it.");
+    if (adapter.view().tab !== "strategy") throw new AgentCommandError("An SVG is of the Strategy grid: open the Strategy tab first (view with strategy).");
+    if (params.width !== undefined || params.height !== undefined) throw new AgentCommandError("width and height size the PNG; the SVG is the grid at its own size, its events drawn at dpi.");
+    if (params.dpi !== undefined && !(Number.isInteger(params.dpi) && params.dpi >= 72 && params.dpi <= 1200)) throw new AgentCommandError("dpi must be a whole number from 72 to 1200, as the Export section's DPI field.");
+    if (typeof params.upload !== "string" || !/^\/save\/[A-Za-z0-9_-]+$/.test(params.upload)) throw new AgentCommandError("upload must be a slot the relay opened: \"/save/<id>\".");
+    const written = await adapter.renderSvg({ upload: params.upload, ...(params.dpi === undefined ? {} : { dpi: params.dpi }) });
+    return { revision: revision(), view: adapter.view(), format: "svg", ...written };
   };
 
   const membershipsOf = (state: CoreState, all: ReturnType<typeof loaded>, wanted?: string[]): AgentMemberships => {

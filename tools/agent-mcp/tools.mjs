@@ -28,7 +28,7 @@ For iterative work use gatelab_fit_start, gatelab_fit_candidate and gatelab_fit_
 7. A shape traced from density: a convex hull bulges, so on a cloud with a tail toward an axis (PD-1-negative cells along PD-1 = 0) cut the tail at its valley before taking the hull, or the "high" gate holds the low cells too.
 8. To start from files on this computer: gatelab_open_files with absolute paths opens FCS files in the tab as its Add files button does, and gatelab_import_gating imports a Gating-ML file, a FlowJo workspace or a FACSChorus experiment onto them as its Import gating does. The import asks the user in its dialog whenever the app would (an existing strategy to merge or replace, a compensation choice, FlowJo's grid); the call waits for their answer and says whether they applied or cancelled it.
 9. To save the work: gatelab_save asks the user, in the tab, to confirm saving a copy of the workspace to an absolute path on this computer ("linked": the workspace file alone, which finds its FCS files by name; "portable": one file holding the workspace and every FCS file, to send to someone). Nothing is written unless they press Save; the call waits for their answer. It never writes the user's own workspace file and never presses Save to SCE.
-10. To show the user a gating strategy to inspect or print: gatelab_view with strategy {populationIds} opens the Strategy tab on those populations (one: its path; several: one grid from the root); gatelab_render then returns that grid. It changes no gate and selects nothing in the tree.
+10. To show the user a gating strategy to inspect or print: gatelab_view with strategy {populationIds} opens the Strategy tab on those populations (one: its path; several: one grid from the root), and strategy's layout, columns, showArrows, arrowWidth and arrowAnchor set the tab's own layout controls (layout "flow" is the tab's Wrapped); gatelab_render then returns that grid, as a PNG to look at or, with format "svg" and a path, as the SVG file the tab's own export writes. It changes no gate and selects nothing in the tree.
 
 Rules: coordinates in commands are in the space you say — "display" is the axes as drawn, the same units gatelab_distribution reports; "raw" is raw channel values. A gate is drawn only on plots with its own x and y, so put x and y the way the user's gates on the same channels have them. A null range bound is the edge of the data (not an infinite edge), so a range is always drawn within the chart. Name parents and gates by the ids gatelab_describe gives. You save only through gatelab_save, a copy the user confirms in the tab; you cannot write their own workspace file or the SCE. gatelab_export writes a file of the current gating and memberships for another process to read.`;
 
@@ -66,6 +66,25 @@ export function gatelabTools(relay) {
   };
   // One fit session per server, shared with gatelab_evaluate so a search's held-out samples stay unscored.
   const fit = createGatingFit(relay);
+  // The Strategy grid as the tab's SVG export writes it, through an upload slot like a save's: the
+  // file holds each panel's events as an image at the export's dpi, too large for a reply.
+  const renderSvg = async (args) => {
+    let slot;
+    try {
+      if (args.width !== undefined) throw new Error("width sizes the PNG; the SVG is the grid at its own size, its events drawn at dpi.");
+      if (typeof args.path !== "string" || !isAbsolute(args.path) || !/\.svg$/i.test(args.path)) throw new Error("path must be an absolute path ending in .svg.");
+      slot = await relay.receiveFile(args.path, { overwrite: args.overwrite === true });
+      const result = await relay.call("render", { format: "svg", upload: slot.path, ...(args.dpi === undefined ? {} : { dpi: args.dpi }) }, { timeoutMs: LONG_CALL_MS });
+      // A core from before the SVG ignores the format and answers with a PNG, posting nothing.
+      if (result?.format !== "svg") throw new Error("unknown-method: the tab's core predates writing the Strategy grid as SVG (it answered with a PNG); update the core, then gatelab_reload.");
+      const written = await slot.written;
+      return json({ format: "svg", ...written, width: result.width, height: result.height, dpi: result.dpi, view: result.view, revision: result.revision });
+    } catch (error) {
+      return refused(error);
+    } finally {
+      slot?.cancel();
+    }
+  };
   return [
     ...fit.tools.map((tool) => ({ ...tool, run: async (args) => { try { return json(await tool.run(args)); } catch (error) { return refused(error); } } })),
     {
@@ -269,7 +288,7 @@ export function gatelabTools(relay) {
     },
     {
       name: "gatelab_view",
-      description: "Put a population, a sample and two channels on the user's Gating plot, so they see what you are looking at, and set the axes: fit: true fits them as the Fit button does (the viewed file's 0.1st to 99.9th percentiles, widened to the gates); fit: \"data\" fits them to every event of every sample, 2% past the last, widened to the gates, so nothing is cut off; xRange/yRange hold an axis at a range in display units. The reply reports the ranges shown. gatelab_render then draws that plot. With strategy (or tab: \"strategy\") it opens the Strategy tab instead, drawing the gating strategy of the populations named, for the user to inspect, export or print: one population is its path (fullPath: true from the root); several, or mode \"multi\", are one grid laid out as the tree from the root. The ids must be populations of the active tree, not the root, each once. strategy changes only the tab's controls: no gate, no selection in the tree, and the revision does not move. x, y, fit and the ranges are for the Gating plot and are refused with the Strategy tab. The reply's strategy is what the tab now holds.",
+      description: "Put a population, a sample and two channels on the user's Gating plot, so they see what you are looking at, and set the axes: fit: true fits them as the Fit button does (the viewed file's 0.1st to 99.9th percentiles, widened to the gates); fit: \"data\" fits them to every event of every sample, 2% past the last, widened to the gates, so nothing is cut off; xRange/yRange hold an axis at a range in display units. The reply reports the ranges shown. gatelab_render then draws that plot. With strategy (or tab: \"strategy\") it opens the Strategy tab instead, drawing the gating strategy of the populations named, for the user to inspect, export or print: one population is its path (fullPath: true from the root); several, or mode \"multi\", are one grid from the root, laid out as a tree (a column per depth) or, with layout \"flow\" (the tab's Wrapped), walked depth first and wrapped into rows of `columns` panels, with arrows from each gate to the panel it makes (showArrows, arrowWidth, arrowAnchor). The ids must be populations of the active tree, not the root, each once. strategy changes only the tab's controls, as the user sets them, and they stay set: no gate, no selection in the tree, and the revision does not move. x, y, fit and the ranges are for the Gating plot and are refused with the Strategy tab. The reply's strategy is what the tab now holds, every layout control included.",
       inputSchema: {
         type: "object",
         properties: {
@@ -285,6 +304,11 @@ export function gatelabTools(relay) {
               populationIds: { type: "array", items: { type: "string" }, minItems: 1, uniqueItems: true, description: "Population ids from gatelab_describe, in the active tree; not the root." },
               mode: { type: "string", enum: ["single", "multi"], description: "\"single\": one population's path (exactly one id). \"multi\": the populations together in one grid. Default: single for one id, multi for more." },
               fullPath: { type: "boolean", description: "Single mode only: draw every gate from the root, not only the population's own. Left as the tab has it when absent." },
+              layout: { type: "string", enum: ["tree", "flow"], description: "Multi mode only, the tab's Layout: \"tree\", a column per depth and a row per traced population; \"flow\" (shown as Wrapped), the tree walked depth first and wrapped into rows of `columns` panels. Left as the tab has it when absent." },
+              columns: { type: "integer", minimum: 1, maximum: 12, description: "The tab's Columns: panels per row of a single strip and of the Wrapped layout (a tree has a column per depth). Left as the tab has it when absent." },
+              showArrows: { type: "boolean", description: "Multi mode only: an arrow from each gate to the panel of the population it makes, routed between the panels and kept in the exports. Left as the tab has it when absent." },
+              arrowWidth: { type: "number", minimum: 0.5, maximum: 6, description: "Multi mode, arrows on: their line width in px; the heads grow with it. Left as the tab has it when absent." },
+              arrowAnchor: { type: "string", enum: ["label", "gate"], description: "Multi mode, arrows on: where an arrow leaves its panel, level with the gate's label or with the gate's centre. Left as the tab has it when absent." },
             },
             required: ["populationIds"],
             additionalProperties: false,
@@ -307,11 +331,24 @@ export function gatelabTools(relay) {
     },
     {
       name: "gatelab_render",
-      description: "A PNG of the plot the user sees: on the Gating tab, the events of the active population on the current axes with the gates drawn; on the Strategy tab, the strategy grid as its exports compose it (every panel, the arrows, the title), once the tab has finished drawing. Set the view first with gatelab_view. The reply's view.tab says which.",
-      inputSchema: { type: "object", properties: { width: { type: "integer", minimum: 100, maximum: 4000, description: "Pixels wide; the plot's (or the grid's) own size when absent." } }, additionalProperties: false },
-      run: async (args) => {
+      description: "A PNG of the plot the user sees: on the Gating tab, the events of the active population on the current axes with the gates drawn; on the Strategy tab, the strategy grid as its exports compose it (every panel, the arrows, the title), once the tab has finished drawing. Set the view first with gatelab_view. The reply's view.tab says which. With format \"svg\" and an absolute path ending in .svg, on the Strategy tab only, it writes instead the file the tab's own SVG export writes: axes, gates, labels, arrows and title as vector, each panel's events an image at dpi (the tab's Export DPI when absent). The folder must exist; a file already there is refused unless overwrite is true. Returns the path, bytes, SHA-256, the grid's size in px and the dpi. The gating tree the export can add as a second file is not written.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          width: { type: "integer", minimum: 100, maximum: 4000, description: "PNG only: pixels wide; the plot's (or the grid's) own size when absent." },
+          format: { type: "string", enum: ["png", "svg"], description: "\"png\" (default): an image in the reply. \"svg\": the Strategy grid written to path." },
+          path: { type: "string", description: "SVG only: absolute path of the file, ending in .svg." },
+          dpi: { type: "integer", minimum: 72, maximum: 1200, description: "SVG only: the resolution each panel's events are drawn at; the Strategy tab's Export DPI when absent." },
+          overwrite: { type: "boolean", description: "SVG only: replace a file already at path." },
+        },
+        additionalProperties: false,
+      },
+      run: async (args = {}) => {
+        if ((args.format ?? "png") === "svg") return renderSvg(args);
+        if (args.format !== undefined && args.format !== "png") return refused(new Error("format must be \"png\" or \"svg\"."));
+        if (args.path !== undefined || args.dpi !== undefined || args.overwrite !== undefined) return refused(new Error("path, dpi and overwrite are for format \"svg\"."));
         try {
-          const result = await relay.call("render", args);
+          const result = await relay.call("render", args.width === undefined ? {} : { width: args.width });
           const data = String(result.png).replace(/^data:image\/png;base64,/, "");
           return { content: [{ type: "image", data, mimeType: "image/png" }, { type: "text", text: JSON.stringify({ view: result.view, width: result.width, height: result.height, revision: result.revision }) }] };
         } catch (error) {

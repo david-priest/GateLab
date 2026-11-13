@@ -176,13 +176,34 @@ export interface AgentStrategySelection {
   mode?: "single" | "multi";
   /** Single mode: every gate from the root rather than the population's own. Unchanged when absent. */
   fullPath?: boolean;
+  /**
+   * The tab's own layout controls, each left as the tab has it when absent. Multi mode only:
+   * `layout` ("tree", a column per depth; "flow", the tab's Wrapped: the tree walked depth first
+   * and wrapped into rows of `columns`), `showArrows`, `arrowWidth` (px, 0.5 to 6) and
+   * `arrowAnchor` (where an arrow leaves its panel: the gate's label or the gate's centre).
+   * `columns` (1 to 12) is the tab's Columns field, read by a single strip and by Wrapped.
+   */
+  layout?: StrategyLayout;
+  columns?: number;
+  showArrows?: boolean;
+  arrowWidth?: number;
+  arrowAnchor?: StrategyArrowAnchor;
 }
+
+export type StrategyLayout = "tree" | "flow";
+export type StrategyArrowAnchor = "label" | "gate";
 
 export interface AgentStrategyView {
   mode: "single" | "multi";
   /** Single mode: the one population traced. Multi mode: the populations selected, in their order. */
   populationIds: string[];
   fullPath: boolean;
+  /** The layout controls as the tab holds them; absent on older cores. */
+  layout?: StrategyLayout;
+  columns?: number;
+  showArrows?: boolean;
+  arrowWidth?: number;
+  arrowAnchor?: StrategyArrowAnchor;
 }
 
 export interface AgentDescribe {
@@ -375,9 +396,18 @@ export interface AgentViewParams {
 export type AgentViewTab = "gating" | "strategy";
 
 export interface AgentRenderParams {
-  /** Pixels; the plot's own size when absent. */
+  /** Pixels; the plot's own size when absent. PNG only. */
   width?: number;
   height?: number;
+  /**
+   * "png" (absent): an image in the reply. "svg": the Strategy grid as the tab's SVG export writes
+   * it, posted to `upload`; the Strategy tab only.
+   */
+  format?: "png" | "svg";
+  /** SVG: the resolution the events are drawn at, 72 to 1200, as the Export section's DPI field; the tab's when absent. */
+  dpi?: number;
+  /** SVG: "/save/<id>" on the relay, where the tab posts the file. */
+  upload?: string;
 }
 
 export interface AgentRender {
@@ -387,6 +417,18 @@ export interface AgentRender {
   png: string;
   width: number;
   height: number;
+}
+
+/** The Strategy grid written as SVG: the file went to the upload slot, not into the reply. */
+export interface AgentRenderedSvg {
+  revision: number;
+  view: AgentView;
+  format: "svg";
+  /** The grid's size in CSS pixels, the SVG's width and height. */
+  width: number;
+  height: number;
+  /** The resolution the events were drawn at. */
+  dpi: number;
 }
 
 export interface AgentMembershipsParams {

@@ -68,7 +68,7 @@ const COMPARE_METRICS: { key: "count" | "pct_parent" | "pct_total"; label: strin
  * comma in it shifted every later column. A field that starts or ends in white space is quoted as
  * well: read.csv strips unquoted white space from the header line, which holds the sample names.
  */
-function csvText(records: readonly (readonly (string | number)[])[]): string {
+export function csvText(records: readonly (readonly (string | number)[])[]): string {
   const field = (value: string | number) => {
     const text = String(value);
     return /[",\r\n]|^\s|\s$/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;

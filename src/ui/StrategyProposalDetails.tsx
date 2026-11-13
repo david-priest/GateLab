@@ -5,6 +5,7 @@ import type { Gate, Population } from "../engine/models";
 import { provenanceSource } from "../proposals/strategyProposal";
 import { proposalSourceLabel } from "./StrategyProposalReview";
 import { useI18n } from "./i18n";
+import { FoldSummary } from "./FoldSummary";
 
 /** Reads the current UI state only; opening details never dispatches a gating action. */
 export function StrategyProposalDetails({ id, gate, state, labelForKey, countScope, onClose }: {
@@ -77,7 +78,7 @@ export function StrategyProposalDetails({ id, gate, state, labelForKey, countSco
       </li>)}</ul> : <p>{t("This gate is not used by a population.")}</p>}
       <p>{t("Population counts include their ancestor gates. A gate's count on the current plot can differ from its population count.")}</p>
       <details>
-        <summary>{t("Coordinates and recorded transforms")}</summary>
+        <FoldSummary>{t("Coordinates and recorded transforms")}</FoldSummary>
         <pre>{JSON.stringify({ ...coordinates, transforms: gate.transforms ?? null }, null, 2)}</pre>
         <p>{t("Model version, source inputs, edit history and reference-label accuracy are not recorded in this proposal metadata.")}</p>
       </details>

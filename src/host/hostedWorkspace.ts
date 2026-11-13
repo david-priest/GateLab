@@ -374,11 +374,13 @@ function hostedSamples(
   existing: readonly WorkspaceSample[] = [],
 ): WorkspaceSample[] {
   return dataset.samples.map((sample, index) => {
-    const prior = existing.find(
-      (candidate) =>
-        candidate.sampleId === `${dataset.id}:${sample.id}` ||
-        candidate.fileName === sample.label,
-    ) ?? existing[index];
+    // The saved sample with this sample's id, else one with its label; the saved sample at the
+    // same place only when that one has no id, so no sample takes another's state.
+    const positional = existing[index];
+    const prior =
+      existing.find((candidate) => candidate.sampleId === `${dataset.id}:${sample.id}`) ??
+      existing.find((candidate) => candidate.fileName === sample.label) ??
+      (positional && !positional.sampleId ? positional : undefined);
     return {
       ...(prior ?? {}),
       sampleId: `${dataset.id}:${sample.id}`,
@@ -412,11 +414,12 @@ function remapCanonicalWorkspaceV3(
   dataset: GateLabHostDatasetDescriptor,
 ): WorkspaceFileV3 {
   const samples = dataset.samples.map((sample, index) => {
-    const prior = workspace.samples.find(
-      (candidate) =>
-        candidate.sampleId === `${dataset.id}:${sample.id}` ||
-        candidate.fileName === sample.label,
-    ) ?? workspace.samples[index];
+    // Paired as hostedSamples pairs them: by id, then by label, by place only without an id.
+    const positional = workspace.samples[index];
+    const prior =
+      workspace.samples.find((candidate) => candidate.sampleId === `${dataset.id}:${sample.id}`) ??
+      workspace.samples.find((candidate) => candidate.fileName === sample.label) ??
+      (positional && !positional.sampleId ? positional : undefined);
     if (!prior) {
       throw new Error(
         `Saved GateLab workspace has no assay state for '${sample.label}'.`,

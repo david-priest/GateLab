@@ -85,6 +85,8 @@ export function parseChorusStatistics(text: string): ChorusStatistics {
   for (const row of rows) {
     const key = (row[0] ?? "").trim();
     if (!key) { columns = null; continue; }
+    // A Recording Name row starts the next recording's block even with no blank line before it.
+    if (key === "Recording Name") columns = null;
     if (columns && recording) {
       const events = num(row[columns.indexOf("Events")]);
       if (events === null) { columns = null; continue; }

@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { composeProportionsChartSvg, ProportionsChart } from "./ProportionsTab";
+import { composeProportionsChartSvg, ProportionsChart } from "./PlottingTab";
 
 let root: Root;
 let host: HTMLDivElement;
@@ -185,10 +185,10 @@ describe("Proportions legend interaction", () => {
   });
 });
 
-// A 224-sample SCE's samples are named 1 to 224, and the composition chart ordered them as text:
-// 1, 10, 100, 101, …, 11, 110, …. Groups and facets are ordered as people read them.
+// Groups are drawn in the chart's order of them, the file list's unless the user set another, as
+// Illustration draws files; a label sort put files 1, 10, 100 apart from the order they are listed.
 describe("Proportions chart ordering", () => {
-  it("orders sample groups numerically where their names carry numbers", () => {
+  it("draws the groups in the chart's order of them, else in the order the files give them", () => {
     const names = ["1", "10", "2", "D10", "D2", "100"];
     const chartHost = document.createElement("div");
     document.body.appendChild(chartHost);
@@ -212,7 +212,28 @@ describe("Proportions chart ordering", () => {
     const ticks = [...chartHost.querySelectorAll("svg text")]
       .map((text) => [...text.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join(""))
       .filter((text) => names.includes(text));
-    expect(ticks).toEqual(["1", "2", "10", "100", "D2", "D10"]);
+    expect(ticks).toEqual(names);
+    const ordered = ["D2", "D10", "1", "2", "10", "100"];
+    act(() => chartRoot.render(
+      <ProportionsChart
+        plotType="stacked"
+        model={{
+          catLevels: ["B cells", "T cells"],
+          perSample: names.map((name) => ({ unit: name, group: name, facet: null, catCounts: [60, 40] })),
+          hasFacet: false,
+        }}
+        catColors={["#2f80ed", "#e15759"]}
+        palette="paired"
+        groupLevels={ordered}
+        averagePerUnit
+        populations={{}}
+        fonts={{ tick: 9, axis: 10, legend: 11 }}
+      />,
+    ));
+    const reordered = [...chartHost.querySelectorAll("svg text")]
+      .map((text) => [...text.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join(""))
+      .filter((text) => names.includes(text));
+    expect(reordered).toEqual(ordered);
     act(() => chartRoot.unmount());
     chartHost.remove();
   });

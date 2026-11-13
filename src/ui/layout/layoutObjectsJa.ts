@@ -1,0 +1,35 @@
+// layoutObjectsJa.ts — the Layout tab's objects list in Japanese, keyed by the English the
+// interface is written in; src/ui/i18n.tsx spreads this table into its own. Words the app already
+// translates (Plot, Chart, Text, Move up, Rename …) are not repeated here.
+
+export const LAYOUT_OBJECTS_JA: Readonly<Record<string, string>> = {
+  "Objects": "オブジェクト",
+  "Objects on the sheet, top of the stack first": "シート上のオブジェクト（重なりの上から順）",
+  "Nothing on the sheet yet.": "シートにはまだ何もありません。",
+  "Letter": "記号",
+  "Figure": "図",
+  "Cell panel": "細胞パネル",
+  "Panel letter {letter}": "パネル記号 {letter}",
+  "{channel} per cell": "細胞ごとの {channel}",
+  "legend": "凡例",
+  "images": "画像",
+  "{count} cells": "{count} 細胞",
+  "{population} strategy": "{population} のゲーティング戦略",
+  "Show {name}": "{name} を表示",
+  "Hide {name}": "{name} を非表示",
+  "Show: draw it on the page and in the export": "表示：ページと書き出しに描きます",
+  "Hide: not drawn, selected on the page or exported": "非表示：描かず、ページで選択されず、書き出されません",
+  "Lock {name}": "{name} をロック",
+  "Unlock {name}": "{name} のロックを解除",
+  "Lock: it keeps its place and size": "ロック：位置と大きさを固定します",
+  "Unlock: it can be moved and resized again": "ロック解除：再び移動・サイズ変更できます",
+  "Name of {name}": "{name} の名前",
+  "Click to select it on the page, Shift-click to add or remove; double-click to rename": "クリックでページ上で選択、Shift-クリックで追加・解除、ダブルクリックで名前を変更",
+  "Click to select the group on the page, Shift-click to add or remove it": "クリックでグループをページ上で選択、Shift-クリックで追加・解除",
+  "Actions for {name}": "{name} の操作",
+  "Group of {count}": "{count} 項目のグループ",
+  "Fold {name}": "{name} を折りたたむ",
+  "Unfold {name}": "{name} を展開",
+  "Draw it over the row above": "上の行より手前に描きます",
+  "Draw it under the row below": "下の行より奥に描きます",
+};

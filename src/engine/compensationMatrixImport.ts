@@ -297,6 +297,12 @@ export function parseCompensationMatrixTable(
     throw new CompensationMatrixTableError("empty-file", "The compensation matrix file is empty.");
   }
 
+  // A delimiter closing every line, as some spreadsheets write it, is not a column: read as one,
+  // it was a receiver with no name, and the file was refused for the coefficient missing under it.
+  if (records.every((record) => record.cells.length > 2 && record.cells[record.cells.length - 1].trim() === "")) {
+    for (const record of records) record.cells.pop();
+  }
+
   const header = records[0];
   if (header.cells.length < 2) {
     throw new CompensationMatrixTableError(

@@ -1,0 +1,5 @@
+/* A turned text block or placed image (LayoutRotationControls.tsx): its content laid out in a box
+   with the frame's width and height swapped for a quarter turn, turned about the frame's centre.
+   A placed image fills the box as it fills an upright frame. */
+.gl-layout-turned { position: relative; flex: none; transform-origin: 50% 50%; }
+.gl-layout-item:has(> .gl-layout-item-body > .gl-layout-turned > .gl-layout-placed-image) { min-width: 0; min-height: 0; }

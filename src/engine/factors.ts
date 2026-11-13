@@ -92,14 +92,38 @@ export function partitionCountsWithin(
 /**
  * A population's name for a list or legend: its own name, or "Parent › name" where another
  * population in the tree has the same name, so the same quadrant under two parents reads as two.
+ * Where the parents share a name too, as many ancestors are named as tell the populations apart
+ * ("B1 › CD4_positive › Ki67_positive").
  */
 export function populationDisplayNames(populations: PopulationMap): Record<string, string> {
-  const byName = new Map<string, number>();
-  for (const pop of Object.values(populations)) byName.set(pop.name, (byName.get(pop.name) ?? 0) + 1);
+  const byName = new Map<string, string[]>();
+  for (const pop of Object.values(populations)) byName.set(pop.name, [...(byName.get(pop.name) ?? []), pop.population_id]);
+  /** The names of a population's ancestors, its parent first. */
+  const ancestors = (popId: string): string[] => {
+    const out: string[] = [];
+    const seen = new Set([popId]);
+    let at = populations[popId]?.parent_id;
+    while (at && populations[at] && !seen.has(at)) {
+      seen.add(at);
+      out.push(populations[at].name);
+      at = populations[at].parent_id;
+    }
+    return out;
+  };
   const out: Record<string, string> = {};
-  for (const pop of Object.values(populations)) {
-    const parent = pop.parent_id ? populations[pop.parent_id] : null;
-    out[pop.population_id] = (byName.get(pop.name) ?? 0) > 1 && parent ? `${parent.name} › ${pop.name}` : pop.name;
+  for (const [name, ids] of byName) {
+    const paths = new Map(ids.map((id) => [id, ancestors(id)]));
+    const prefix = (path: string[], n: number) => path.slice(0, n).join("\0");
+    for (const id of ids) {
+      const own = paths.get(id)!;
+      if (ids.length < 2 || !own.length) {
+        out[id] = name;
+        continue;
+      }
+      let n = 1;
+      while (n < own.length && ids.some((other) => other !== id && prefix(paths.get(other)!, n) === prefix(own, n))) n++;
+      out[id] = [...own.slice(0, n).reverse(), name].join(" › ");
+    }
   }
   return out;
 }

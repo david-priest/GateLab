@@ -229,6 +229,8 @@ export async function pdfVectorPage(pdf: jsPDF, root: SVGSVGElement, size: { wid
   const { svg2pdf } = await import("svg2pdf.js");
   // The PDF's fonts set WinAnsi only; a name with a Unicode minus came out letter-spaced.
   pdfTextInSvg(root);
+  // The PDF writer misreads a PNG of 16 bits a sample and draws it as stripes.
+  await eightBitPngImages(root);
   const holder = document.createElement("div");
   holder.style.cssText = "position:fixed;left:-100000px;top:0;visibility:hidden";
   holder.appendChild(root);
@@ -242,6 +244,52 @@ export async function pdfVectorPage(pdf: jsPDF, root: SVGSVGElement, size: { wid
   } finally {
     holder.remove();
   }
+}
+
+const PNG_DATA = "data:image/png;base64,";
+
+/** A PNG's bits per sample, from its header (IHDR's ninth byte); null when the bytes are not a PNG. */
+export function pngBitDepth(bytes: Uint8Array): number | null {
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (bytes.length < 25 || signature.some((byte, i) => bytes[i] !== byte)) return null;
+  if (String.fromCharCode(...bytes.subarray(12, 16)) !== "IHDR") return null;
+  return bytes[24];
+}
+
+/** A PNG data URI drawn again at 8 bits a sample, through a canvas. */
+async function canvasEightBit(uri: string): Promise<string> {
+  const image = new Image();
+  image.src = uri;
+  await image.decode();
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  canvas.getContext("2d")!.drawImage(image, 0, 0);
+  return canvas.toDataURL("image/png");
+}
+
+/**
+ * Every PNG image in the SVG stored at 16 bits a sample, a placed microscopy image say, written
+ * again at 8: jsPDF's PNG reader takes the 16-bit samples as 8-bit ones and the image comes out as
+ * coloured stripes. Other images are left as they are. `reencode` is the canvas's, for a test to replace.
+ */
+export async function eightBitPngImages(root: Element, reencode: (uri: string) => Promise<string> = canvasEightBit): Promise<number> {
+  let changed = 0;
+  for (const image of Array.from(root.querySelectorAll("image"))) {
+    const attribute = image.hasAttribute("href") ? "href" : "xlink:href";
+    const uri = image.getAttribute(attribute) ?? image.getAttributeNS(XLINK_NS, "href") ?? "";
+    if (!uri.startsWith(PNG_DATA)) continue;
+    // The header is in the first 33 bytes: 44 base64 characters.
+    const head = Uint8Array.from(atob(uri.slice(PNG_DATA.length, PNG_DATA.length + 44)), (c) => c.charCodeAt(0));
+    if (pngBitDepth(head) !== 16) continue;
+    try {
+      image.setAttribute(attribute, await reencode(uri));
+      changed++;
+    } catch {
+      // An image the browser cannot draw is left for the writer, as before.
+    }
+  }
+  return changed;
 }
 
 /** A turn of the event loop between pages, so a long export leaves the page responsive. */

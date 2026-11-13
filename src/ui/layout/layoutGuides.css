@@ -1,0 +1,42 @@
+/* Rulers and guides on the Layout page (LayoutRulers.tsx, LayoutGuides.tsx). The rulers hang from a
+   zero-size box placed just before the canvas pane, so they stay along its top and left edges
+   while the page scrolls under them, above the page and its handles. */
+.gl-layout-rulers { position: relative; flex: 0 0 0; width: 0; height: 0; z-index: 4; }
+.gl-layout-ruler {
+  position: absolute; left: 0; top: 0; overflow: hidden; background: #f8fafc; cursor: default;
+  user-select: none;
+}
+.gl-layout-ruler.is-top { border-bottom: 1px solid #cbd5e1; box-sizing: border-box; cursor: row-resize; }
+.gl-layout-ruler.is-left { border-right: 1px solid #cbd5e1; box-sizing: border-box; cursor: col-resize; }
+.gl-layout-ruler svg { display: block; }
+.gl-layout-ruler line { stroke: #94a3b8; stroke-width: 1; shape-rendering: crispEdges; }
+.gl-layout-ruler text { fill: #64748b; font: 9px/1 Arial, Helvetica, sans-serif; }
+.gl-layout-ruler-selection { fill: rgb(47 128 237 / 16%); }
+.gl-layout-ruler line.gl-layout-ruler-pointer { stroke: #e11d48; }
+.gl-layout-ruler-corner {
+  position: absolute; left: 0; top: 0; width: 18px; height: 18px; box-sizing: border-box;
+  border-right: 1px solid #cbd5e1; border-bottom: 1px solid #cbd5e1; background: #f1f5f9;
+  color: #94a3b8; font: 8px/17px Arial, Helvetica, sans-serif; text-align: center; user-select: none;
+}
+.gl-layout-guide-draft { position: absolute; pointer-events: none; background: #06b6d4; }
+.gl-layout-guide-draft.is-y { left: 0; height: 1px; }
+.gl-layout-guide-draft.is-x { top: 0; width: 1px; }
+
+/* Guides: above the items (whose z is their stacking order), below Moveable's handles (10000). */
+.gl-layout-guides { position: absolute; inset: 0; z-index: 9990; pointer-events: none; }
+.gl-layout-guide { position: absolute; pointer-events: auto; outline: none; }
+.gl-layout-guide.is-x { cursor: col-resize; }
+.gl-layout-guide.is-y { cursor: row-resize; }
+.gl-layout-guide::after { content: ""; position: absolute; background: #06b6d4; }
+.gl-layout-guide.is-x::after { left: 50%; top: 0; bottom: 0; width: var(--gl-hair, 1px); }
+.gl-layout-guide.is-y::after { top: 50%; left: 0; right: 0; height: var(--gl-hair, 1px); }
+.gl-layout-guide:focus::after { background: #0e7490; box-shadow: 0 0 0 var(--gl-hair, 1px) #0e7490; }
+.gl-layout-guide-field {
+  position: absolute; z-index: 1; display: flex; align-items: center; gap: 4px; padding: 3px 5px;
+  transform-origin: 0 0; background: white; border: 1px solid #cbd5e1; border-radius: 3px;
+  box-shadow: 0 2px 8px rgb(15 23 42 / 12%); font-size: 11px; color: #334155; pointer-events: auto;
+  white-space: nowrap;
+}
+.gl-layout-guide-field input { width: 64px; }
+.gl-layout-tab.is-preview .gl-layout-guides,
+.gl-layout-tab.is-preview .gl-layout-rulers { display: none; }

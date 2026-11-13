@@ -10,6 +10,7 @@ import { initialCoreState, recompute, type CoreState } from "../store";
 import { buildProportionsModel, defaultProportionsSettings, divisionFittedPopulation, type ProportionsSampleRef } from "./proportionsModel";
 import { DIVISION_NA_CODE, divisionEventCodes } from "./division";
 import { computeBoxes, computeStackedBars, perUnitProps } from "./proportions";
+import { BASE_PROPORTIONS_SETTINGS, consistentPlotType, normalizeProportionsSettings } from "./proportionsSettings";
 
 // Gates in raw scatter units: A holds FSC below 55, B (inside A) SSC below 25, C FSC from 65,
 // and D, beside A and C under the root, FSC 35 to 75, which overlaps both.
@@ -267,5 +268,50 @@ describe("Division calls written to colData", () => {
   it("leave a file out when its tree no longer holds the population", () => {
     const fx = tree();
     expect(divisionFittedPopulation(FILES[0], { ...profile, populationId: "pop-deleted", hierarchyId: DEFAULT_HIERARCHY_ID }, fx.state)).toBe("excluded");
+  });
+});
+
+describe("A proportion chart's value: % of parent, % of total or events", () => {
+  it("gives each file the Statistics tab's number for the population, whichever is chosen", () => {
+    const fx = tree();
+    // B within A: % of parent is B over A, % of total B over every event, the count B's events.
+    const settings = { ...defaultProportionsSettings(FILES, fx.state, []), parent: fx.a, selectedPops: [fx.b] };
+    const model = buildProportionsModel(settings, FILES, fx.state, METADATA, {});
+    const of = (value: "parent" | "total" | "count") => perUnitProps(model.perSample, model.catLevels.length, value);
+    for (const entry of FILES) {
+      const stats = recompute(entry.sample, fx.state).stats;
+      const share = (value: "parent" | "total" | "count") => of(value).find((row) => row.unit === entry.id)!.shares[0];
+      expect(model.perSample.find((row) => row.unit === entry.id)!.totalCount).toBe(entry.sample.fcs.nEvents);
+      // The Statistics tab rounds its percentages to two decimals.
+      expect(Math.round(share("parent") * 10000) / 100).toBe(stats.percent_of_parent[fx.b]);
+      expect(Math.round(share("total") * 10000) / 100).toBe(stats.percent_of_total[fx.b]);
+      expect(share("count")).toBe(stats.event_count[fx.b]);
+    }
+    // B's events per file, and so its share of the ten events of each, as the fixture's comments give them.
+    expect(FILES.map((entry) => of("count").find((row) => row.unit === entry.id)!.shares[0])).toEqual([2, 1, 3, 1]);
+    expect(FILES.map((entry) => of("total").find((row) => row.unit === entry.id)!.shares[0])).toEqual([0.2, 0.1, 0.3, 0.1]);
+    // The default is today's share of the parent.
+    expect(perUnitProps(model.perSample, model.catLevels.length)).toEqual(of("parent"));
+  });
+
+  it("pools a replicate unit's files: events summed, over the summed totals", () => {
+    const fx = tree();
+    const settings = { ...defaultProportionsSettings(FILES, fx.state, []), selectedPops: [fx.c], unitSel: "donor", groupSel: "donor" };
+    const model = buildProportionsModel(settings, FILES, fx.state, METADATA, {});
+    const units = perUnitProps(model.perSample, model.catLevels.length, "count");
+    // C holds 4 and 6 events in D1's files, 4 and 5 in D2's.
+    expect(units.map((row) => [row.unit, row.shares[0]])).toEqual([["D1", 10], ["D2", 9]]);
+    const totals = perUnitProps(model.perSample, model.catLevels.length, "total");
+    expect(totals.map((row) => row.shares[0])).toEqual([0.5, 0.45]);
+  });
+
+  it("reads a setting saved before the choice as % of parent, and keeps a saved choice", () => {
+    const { proportionValue: _dropped, ...older } = BASE_PROPORTIONS_SETTINGS;
+    expect(normalizeProportionsSettings(older).proportionValue).toBe("parent");
+    expect(normalizeProportionsSettings({ ...older, proportionValue: "count" }).proportionValue).toBe("count");
+    expect(normalizeProportionsSettings({ ...older, proportionValue: "median" }).proportionValue).toBe("parent");
+    // Bars and points of proportions are kept as saved.
+    expect(consistentPlotType({ ...BASE_PROPORTIONS_SETTINGS, plotType: "bar" }).plotType).toBe("bar");
+    expect(consistentPlotType({ ...BASE_PROPORTIONS_SETTINGS, plotType: "dots" }).plotType).toBe("dots");
   });
 });

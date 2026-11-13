@@ -8,7 +8,7 @@ import { cloneHierarchyTree, storeHierarchy } from "../engine/hierarchies";
 import { Sample } from "../engine/sample";
 import { createDefaultLayoutWorkspace, normalizeLayoutWorkspace } from "../engine/layout";
 import { LayoutTab } from "./LayoutTab";
-import { ProportionsTab } from "./ProportionsTab";
+import { PlottingTab } from "./PlottingTab";
 import { MetadataTab } from "./MetadataTab";
 import { clearPersistedTabState, restorePlottingState, savedPlottingState } from "./tabState";
 import { styledFigurePlot } from "./FigureGrid";
@@ -58,7 +58,7 @@ describe("presentation workspaces", () => {
   it("plots each file's tailored memberships and facets by file, without pooling replicates", () => {
     const f = fixture();
     restorePlottingState({ "prop.facetSel": "__sample__" });
-    act(() => root.render(<ProportionsTab samples={f.files} activeSampleId="D1" state={f.state} derived={recompute(f.files[0].sample, f.state)} metadata={{ D1: { condition: "control" }, D2: { condition: "treated" } }} metadataColumns={[]} divisionProfiles={{}} dataRevisionKey="0" />));
+    act(() => root.render(<PlottingTab samples={f.files} activeSampleId="D1" state={f.state} derived={recompute(f.files[0].sample, f.state)} metadata={{ D1: { condition: "control" }, D2: { condition: "treated" } }} metadataColumns={[]} divisionProfiles={{}} dataRevisionKey="0" />));
     expect(host.querySelectorAll("svg.gl-prop-panel")).toHaveLength(2);
     const titles = [...host.querySelectorAll(".gl-prop-mark title")].map(node => node.textContent);
     expect(titles).toContain("CD4_positive: 66.7% (1 replicate unit)"); expect(titles).toContain("CD4_positive: 33.3% (1 replicate unit)");

@@ -1466,8 +1466,9 @@ export class CompensationManager {
     );
     const solveBindings = orderedBindings.filter(({ included }) => included);
     const receiverResolvedIndices = solveBindings.map((binding) => {
+      // The report names channels in Unicode NFC; the file's $PnN may be in another form.
       const resolved = sample.channels.findIndex(
-        ({ pnn, columnIndex }) => pnn === binding.pnn && columnIndex === binding.fcsColumnIndex,
+        ({ pnn, columnIndex }) => pnn.normalize("NFC") === binding.pnn && columnIndex === binding.fcsColumnIndex,
       );
       if (resolved < 0) {
         throw new CompensationManagerError("stale-channel-binding", `Sample channel '${binding.pnn}' is no longer exact.`);

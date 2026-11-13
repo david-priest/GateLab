@@ -164,6 +164,8 @@ describe("a portable copy of a compensated FlowJo import", () => {
     expect(workspace.requiredFeatures).toContain("external-spillover");
     expect(workspace.samples[0].externalSpillover).toEqual({ label: "Matrix_A", channels: ["BV786-A", "APC-A", "PE-A"], matrix: [[1, 0.25, 0], [0.05, 1, 0], [0.1, 0, 1]] });
     await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("strategy-bundle.gatelab", bundle)]);
+    // The import was saved as a copy, which leaves the workspace unsaved: asked about first.
+    await clickButton("Open Without Saving");
     expect(host.textContent).toContain("Opened strategy-bundle.gatelab");
     // Under the file's own matrix the gate holds one event.
     expect(countOf("CD8_positive")).toBe("2");
@@ -183,6 +185,7 @@ describe("a portable copy of a compensated FlowJo import", () => {
     workspace.samples[0].externalSpillover.channels = ["BV786-A", "APC-X", "PE-A"];
     const edited = zipSync({ ...entries, "workspace.json": strToU8(JSON.stringify(workspace)) });
     await feed('input[accept=".gatelab,.wsp,.flowjo,.cef"]', [fileOf("edited-bundle.gatelab", edited as Uint8Array<ArrayBuffer>)]);
+    await clickButton("Open Without Saving");
     expect(host.textContent).toContain(`was compensated with the spillover matrix "Matrix_A", saved with the workspace, which cannot be applied to it: "Matrix_A" no longer applies to this file as it did when the workspace was saved: APC-X is not a fluorescence parameter of this file.`);
     expect(host.textContent).toContain("The current workspace was not changed.");
     expect(host.textContent).not.toContain("Opened edited-bundle.gatelab");

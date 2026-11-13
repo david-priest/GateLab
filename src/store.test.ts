@@ -342,6 +342,27 @@ describe("store: gate + population flow", () => {
     expect(undone.tree_version).toBe(renamed.tree_version + 1);
   });
 
+  it("setPopulationColor sets and resets a population's own colour, undoably, and a duplicate does not take it", () => {
+    const { state } = withGate();
+    const population = Object.values(state.populations).find((p) => p.name === "FSClo")!;
+    const id = population.population_id;
+    const coloured = coreReducer(state, { type: "setPopulationColor", popId: id, color: "#ABCDEF" });
+    expect(coloured.populations[id].color).toBe("#abcdef");
+    expect(coloured.populations[id].colorSlot).toBe(population.colorSlot);
+    expect(coloured.gate_version).toBe(state.gate_version);
+    expect(coloured.tree_version).toBe(state.tree_version + 1);
+    expect(coloured.undo).toHaveLength(state.undo.length + 1);
+    expect(coreReducer(coloured, { type: "setPopulationColor", popId: id, color: "#abcdef" })).toBe(coloured);
+    expect(coreReducer(coloured, { type: "setPopulationColor", popId: id, color: "red" })).toBe(coloured);
+    expect(coreReducer(coloured, { type: "setPopulationColor", popId: state.root_population_id!, color: "#000000" })).toBe(coloured);
+    expect(coreReducer(coloured, { type: "undo" }).populations[id].color).toBeUndefined();
+    const reset = coreReducer(coloured, { type: "setPopulationColor", popId: id, color: null });
+    expect("color" in reset.populations[id]).toBe(false);
+    const duplicated = coreReducer(coloured, { type: "duplicateSelectedPopulations", popIds: [id] });
+    const copy = Object.values(duplicated.populations).find((p) => p.name === "FSClo copy")!;
+    expect(copy.color).toBeUndefined();
+  });
+
   it("preserves presentation-only undo markers across an intervening scientific undo/redo", () => {
     const { state } = withGate();
     const population = state.active_population_id!;

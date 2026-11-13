@@ -153,6 +153,52 @@ describe("Gating tab keyboard and layout", () => {
     expect(plotHarness.props!.payload.gates).toHaveLength(0);
   });
 
+  it("opens each list's right-click menu, and Delete in the tree deletes populations, not the gate", async () => {
+    await openTwoFiles();
+    drawRectangle();
+    act(() => button("Create")!.click());
+    await settle();
+    const rightClick = (el: Element) => act(() => { el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 20, clientY: 20 })); });
+    const item = (cls: string) => host.querySelector<HTMLButtonElement>(`.gl-context-menu .${cls}`)!;
+    const rows = () => [...host.querySelectorAll<HTMLElement>(".pop-row")];
+    const dialogButton = (label: string) => [...host.querySelectorAll<HTMLButtonElement>(".gl-modal button")].find((b) => b.textContent?.trim() === label)!;
+
+    // The gate's menu: New population from it opens the dialog with the gate ticked.
+    const gateName = plotHarness.props!.payload.gates[0].name;
+    const before = rows().length;
+    rightClick(host.querySelector(".gate-card")!);
+    expect(item("gate-row-delete")).not.toBeNull();
+    act(() => item("gate-row-new-population").click());
+    await settle();
+    const ticked = [...host.querySelectorAll<HTMLInputElement>(".gl-modal input[type=checkbox]")].filter((box) => box.checked);
+    expect(ticked).toHaveLength(1);
+    expect(ticked[0].closest("div")?.textContent).toContain(gateName);
+    act(() => dialogButton("Create").click());
+    await settle();
+    expect(rows()).toHaveLength(before + 1);
+    const added = rows()[rows().length - 1];
+
+    // A population's menu: Delete asks first.
+    rightClick(added);
+    act(() => item("pop-row-delete").click());
+    await settle();
+    expect(host.textContent).toContain("Delete populations?");
+    act(() => dialogButton("Cancel").click());
+    await settle();
+
+    // Delete in the focused tree deletes the highlighted row at once; the gate stays; Undo restores.
+    act(() => rows()[rows().length - 1].click());
+    const tree = host.querySelector<HTMLElement>("#population_tree_container")!;
+    expect(key({ key: "Delete" }, tree).defaultPrevented).toBe(true);
+    await settle();
+    expect(rows()).toHaveLength(before);
+    expect(plotHarness.props!.payload.gates).toHaveLength(1);
+    expect(host.querySelector(".gl-action-note")?.textContent).toContain("Deleted population");
+    key({ key: "z", metaKey: true });
+    await settle();
+    expect(rows()).toHaveLength(before + 1);
+  });
+
   it("hides the Gates and Populations pane on the Panel and Metadata tabs", async () => {
     await openTwoFiles();
     const side = () => host.querySelector<HTMLElement>("aside.gl-side")!;

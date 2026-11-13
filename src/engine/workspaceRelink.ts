@@ -169,7 +169,10 @@ export function planWorkspaceFcsRelink<T extends WorkspaceFcsCandidate>(
     );
     // Of files the identity cannot tell apart, the one whose name matches exactly.
     const exactFirst = (list: readonly T[]): T[] => {
-      const exact = list.filter((candidate) => candidate.name === fileName);
+      // Exactly, as the user reads it: a name is one name in either Unicode form, and a folder
+      // copied through another file system holds the other. Compared by code unit, the copy whose
+      // form matched was taken over its twin in another folder without the two being offered.
+      const exact = list.filter((candidate) => candidate.name.normalize("NFC") === fileName.normalize("NFC"));
       return exact.length > 0 ? exact : [...list];
     };
     let possible = exactFirst(named);

@@ -1,0 +1,17 @@
+/* Lines and shapes on a Layout page (LayoutShape.tsx). A shape's item is its frame and nothing
+   else: no minimum size (a level line has no height), no edge, and no press of its own, so a
+   press inside a diagonal line's frame but off the line reaches the page. The shape is taken by
+   its invisible outline (.gl-layout-shape-hit). */
+.gl-layout-item:has(> .gl-layout-item-body > .gl-layout-shape) {
+  min-width: 0; min-height: 0; border-width: 0; pointer-events: none;
+}
+.gl-layout-shape { display: block; flex: 0 0 auto; overflow: visible; }
+.gl-layout-shape-hit:hover { stroke: rgb(47 128 237 / 22%); }
+.gl-layout-item.is-selected .gl-layout-shape-hit { cursor: move; }
+.gl-layout-tab.is-preview .gl-layout-shape-hit { display: none; }
+/* The page while a shape tool is armed: it takes every press. */
+.gl-layout-shape-draw { position: absolute; inset: 0; z-index: 10001; cursor: crosshair; }
+.gl-layout-shape-preview { position: absolute; pointer-events: none; }
+.gl-layout-shape-fields { display: flex; flex-direction: column; gap: 8px; }
+.gl-layout-shape-fields .gl-layout-shape-colour { display: flex; align-items: center; gap: 8px; }
+.gl-layout-shape-fields input[type="color"] { width: 44px !important; height: 24px; padding: 0 2px; }

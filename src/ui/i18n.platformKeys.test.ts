@@ -32,7 +32,7 @@ describe("the app's text names keys for the user's keyboard", () => {
     // values, and the few titles written outside the translation function.
     const mac = /⌘|⌥|\bCmd\b|\bOption(?![A-Za-z])/;
     const literals: string[] = [];
-    for (const file of ["i18n.tsx", "FigureWorkspace.tsx", "LayoutTab.tsx", "PopulationTree.tsx", "SampleManager.tsx", "OrderList.tsx", "../App.tsx"]) {
+    for (const file of ["i18n.tsx", "IllustrationTab.tsx", "LayoutTab.tsx", "PopulationTree.tsx", "SampleManager.tsx", "OrderList.tsx", "../App.tsx"]) {
       const source = readFileSync(fileURLToPath(new URL(file, import.meta.url)), "utf8");
       for (const match of source.matchAll(/"((?:[^"\\\n]|\\.)*)"/g)) if (mac.test(match[1])) literals.push(match[1]);
     }

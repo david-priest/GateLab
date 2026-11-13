@@ -137,7 +137,10 @@ export function buildChorusTimeline(
   const treeSigs = experiment
     ? trees.map((t) => {
         const sort = t.kind === "sort" ? experiment.sorts.find((s) => s.startedAt === t.sortedAt && t.label.startsWith(s.name)) : null;
-        return { index: t.index, label: sort ? sort.name : t.label, sig: t.kind === "current" ? treeSignature(experiment.panels[0].gates) : treeSignature(sort?.gates ?? []) };
+        // The current trees come first, one per panel in the panels' order (listChorusTrees), so a
+        // current tree's index is its panel's. Each was given the first panel's gates, and a
+        // recording made in the second panel matched no tree while one made in the first matched both.
+        return { index: t.index, label: sort ? sort.name : t.label, sig: t.kind === "current" ? treeSignature(experiment.panels[t.index]?.gates ?? []) : treeSignature(sort?.gates ?? []) };
       })
     : [];
   // A recording names the panel it was made in as its association, or the experiment itself.
@@ -194,7 +197,9 @@ export function buildChorusTimeline(
     };
   });
   for (const r of recs) {
-    for (const s of sorts) if (r.matchesTrees.includes(s.name)) s.recordedWith.push(r.fileName);
+    // By the tree, not its name: sorts Chorus left unnamed are all "Sort", and a recording made
+    // under one of them was listed with every one.
+    for (const s of sorts) if (r.matchesTreeIndices.includes(s.treeIndex)) s.recordedWith.push(r.fileName);
   }
 
   const items: ChorusTimelineItem[] = [...sorts, ...recs].sort((a, b) => (chorusTime(a.startedAt) ?? 0) - (chorusTime(b.startedAt) ?? 0));

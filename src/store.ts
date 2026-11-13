@@ -48,6 +48,7 @@ import { populationTreeOrder } from "./engine/populations";
 import { DEFAULT_HIERARCHY_ID, DEFAULT_HIERARCHY_NAME, storeHierarchy, selectionAcrossHierarchies, correspondingHierarchyId, canonicalGateId, type HierarchyRef, type StoredHierarchy, isCopyRef, fileHierarchyId, cloneHierarchyTree, newHierarchyId, hierarchyColour } from "./engine/hierarchies";
 import { syncLockedCopy, gateGeometryEquals, copyInStepOnTemplateChannels, copyOnOwnChannels, withGeometryOf, type TemplateTree } from "./engine/templateSync";
 import { onChannels } from "./engine/tailoredImport";
+import { isHexColor } from "./engine/palettes";
 import type { Sample } from "./engine/sample";
 import { realignFlowJoVertices } from "./engine/flowjoGrid";
 
@@ -337,6 +338,8 @@ export type Action =
   | { type: "setQuadrantCurl"; gateId: string; curl: QuadrantCurl | null } // bend or straighten the arms
   /** Lean one arm of a spider quadrant: its end moves along its own edge to `end`'s place there, in the gate's own space. */
   | { type: "setQuadrantArm"; gateId: string; arm: keyof QuadrantArms; end: [number, number] }
+  /** Grow a spider quadrant's box about its centre, no arm turning, until it holds `box` ([x0, x1, y0, y1], gate space). */
+  | { type: "growSpiderBox"; gateId: string; box: [number, number, number, number] }
   | { type: "addPopulation"; name: string; parentId: string; gateRefs: GateRef[] }
   | { type: "setActivePopulation"; popId: string }
   /** The lists' one selection: the active row (or selected gate) and the other highlighted rows with it. */
@@ -365,6 +368,8 @@ export type Action =
   | { type: "renamePopulation"; popId: string; name: string }
   /** Several populations renamed at once, by id, as one undo step. */
   | { type: "renamePopulations"; names: Record<string, string> }
+  /** A population's own colour ("#rrggbb"), or null to go back to its slot's colour. */
+  | { type: "setPopulationColor"; popId: string; color: string | null }
   | { type: "setPopulationGateRefs"; popId: string; gateRefs: GateRef[] }
   | {
       type: "movePopulation";
@@ -532,7 +537,7 @@ export type Action =
 
 const LOCKED_STRUCTURE_ACTIONS = new Set<Action["type"]>([
   "addGate", "addEllipse", "addQuadrant", "addPopulation",
-  "renameGate", "renamePopulation", "renamePopulations", "setPopulationGateRefs",
+  "renameGate", "renamePopulation", "renamePopulations", "setPopulationColor", "setPopulationGateRefs",
   "movePopulation", "movePopulations", "copyPopulations", "editPopulation",
   "deletePopulations", "bulkRenamePopulations", "bulkEditPopulations",
   "moveSelectedPopulations", "duplicateSelectedPopulations", "deleteGates",
@@ -547,8 +552,22 @@ const LOCKED_STRUCTURE_ACTIONS = new Set<Action["type"]>([
 const PROPAGATED_ACTIONS = new Set<Action["type"]>([
   ...LOCKED_STRUCTURE_ACTIONS,
   "editGate", "editGates", "moveEllipse", "reshapeEllipse", "moveQuadrantCenter", "setQuadrantCurl",
-  "setQuadrantArm", "sortGatesAlpha", "sortPopulationsAlpha",
+  "setQuadrantArm", "growSpiderBox", "sortGatesAlpha", "sortPopulationsAlpha",
 ]);
+
+/**
+ * The factor a spider quadrant's arm ends move out by, about its centre, for its box to hold `box`
+ * ([x0, x1, y0, y1], gate space): 1 when it holds it already, or for a gate without arms.
+ */
+export function spiderBoxGrowth(gate: Gate, box: readonly [number, number, number, number]): number {
+  if (gate.gate_type !== "quadrant" || !gate.arms) return 1;
+  const [x0, x1, y0, y1] = spiderBox(gate.arms);
+  const [cx, cy] = gate.center;
+  const [bx0, bx1, by0, by1] = box;
+  const ratio = (want: number, have: number) => (Number.isFinite(want) && have > 0 ? want / have : 1);
+  const s = Math.max(1, ratio(cx - bx0, cx - x0), ratio(bx1 - cx, x1 - cx), ratio(cy - by0, cy - y0), ratio(by1 - cy, y1 - cy));
+  return Number.isFinite(s) ? s : 1;
+}
 
 export function coreReducer(state: CoreState, action: Action): CoreState {
   const next = reduceCore(state, action);
@@ -841,6 +860,15 @@ function routeAdditionToTemplate(state: CoreState, action: Action): CoreState | 
     if (!parentId) return null;
     routed = { ...action, parentId };
   }
+  // A population's gates, named in the copy's ids, in the template's.
+  if (routed.type === "addPopulation") {
+    const gateRefs = routed.gateRefs.map((ref) => {
+      const gateId = copy.source_gate_ids?.[ref.gate_id];
+      return gateId ? { ...ref, gate_id: gateId } : null;
+    });
+    if (gateRefs.some((ref) => !ref)) return null;
+    routed = { ...routed, gateRefs: gateRefs as GateRef[] };
+  }
   // The template live, the copy parked, the addition made and carried to every copy that
   // follows, then the copy live again with the new gate selected in its own ids.
   const stored = { ...all };
@@ -988,6 +1016,7 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       let selected_pop: string | null = null;
       if (action.createPop) {
         const pop = newPopulation(action.createPop.name, [newGateRef(gateId, true)], action.createPop.parentId);
+        pop.colorSlot = pickPopColorSlot(populations); // stable colour, before this pop is in the map
         populations = linkChildToParent(
           { ...populations, [pop.population_id]: pop }, pop.population_id, action.createPop.parentId);
         selected_pop = pop.population_id;
@@ -1240,15 +1269,32 @@ function reduceCore(state: CoreState, action: Action): CoreState {
     case "setQuadrantArm": {
       const g = state.gates[action.gateId];
       if (!g || g.gate_type !== "quadrant" || !g.arms) return state;
-      // The end slides along its own edge of the box, held within it: the box does not move.
+      // The end slides along its own edge of the box, held within it. Dropped beyond that edge,
+      // it takes the edge out with it, so the box grows to hold events past it (David,
+      // 2026-11-10); dropped inside, it stays on the edge: a drag never shrinks the box.
       const [x0, x1, y0, y1] = spiderBox(g.arms);
       const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
       const end: [number, number] =
-        action.arm === "down" ? [clamp(action.end[0], x0, x1), y0]
-          : action.arm === "up" ? [clamp(action.end[0], x0, x1), y1]
-            : action.arm === "left" ? [x0, clamp(action.end[1], y0, y1)]
-              : [x1, clamp(action.end[1], y0, y1)];
+        action.arm === "down" ? [clamp(action.end[0], x0, x1), Math.min(y0, action.end[1])]
+          : action.arm === "up" ? [clamp(action.end[0], x0, x1), Math.max(y1, action.end[1])]
+            : action.arm === "left" ? [Math.min(x0, action.end[0]), clamp(action.end[1], y0, y1)]
+              : [Math.max(x1, action.end[0]), clamp(action.end[1], y0, y1)];
       const arms = { ...cloneArms(g.arms), [action.arm]: end };
+      if (!validArms(g.center, arms)) return state;
+      const gates = { ...state.gates, [action.gateId]: { ...g, arms } };
+      return { ...state, ...pushUndo(state), gates, gate_version: state.gate_version + 1 };
+    }
+
+    case "growSpiderBox": {
+      const g = state.gates[action.gateId];
+      if (!g || g.gate_type !== "quadrant" || !g.arms) return state;
+      // Every end moves out along its own arm by one factor about the centre, so no arm turns and
+      // the box keeps the shape of the old one, as large as it must be to hold `box`.
+      const s = spiderBoxGrowth(g, action.box);
+      if (!(s > 1)) return state;
+      const [cx, cy] = g.center;
+      const out = (e: [number, number]): [number, number] => [cx + (e[0] - cx) * s, cy + (e[1] - cy) * s];
+      const arms = { down: out(g.arms.down), right: out(g.arms.right), up: out(g.arms.up), left: out(g.arms.left) };
       if (!validArms(g.center, arms)) return state;
       const gates = { ...state.gates, [action.gateId]: { ...g, arms } };
       return { ...state, ...pushUndo(state), gates, gate_version: state.gate_version + 1 };
@@ -1273,6 +1319,18 @@ function reduceCore(state: CoreState, action: Action): CoreState {
       }
       const populations = clonePops(state.populations);
       populations[action.popId].name = name;
+      return { ...state, ...pushUndo(state, false), populations, tree_version: state.tree_version + 1 };
+    }
+
+    case "setPopulationColor": {
+      const pop = state.populations[action.popId];
+      if (!pop || action.popId === state.root_population_id) return state;
+      const color = action.color === null ? undefined : action.color.toLowerCase();
+      if (color !== undefined && !isHexColor(color)) return state;
+      if (pop.color === color) return state;
+      const populations = clonePops(state.populations);
+      if (color === undefined) delete populations[action.popId].color;
+      else populations[action.popId].color = color;
       return { ...state, ...pushUndo(state, false), populations, tree_version: state.tree_version + 1 };
     }
 

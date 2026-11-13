@@ -425,6 +425,10 @@ export interface Population {
   // colorSlot); the root/ungated has none. Optional for backward-compat — ensurePopColorSlots()
   // backfills populations loaded from a pre-colorSlot workspace. See [[freeze-colours]].
   colorSlot?: number;
+  // A colour the user picked for the population, as "#rrggbb"; absent means the colour of its
+  // slot. Read via populationColorOf(). Display only: no gate, count or exported file reads it,
+  // and a duplicated population does not take it.
+  color?: string;
 }
 
 export type PopulationMap = Record<string, Population>;

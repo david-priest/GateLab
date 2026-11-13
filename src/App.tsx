@@ -5,16 +5,21 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type SetStateAction } from "react";
 import { usePopoverDismissal } from "./ui/usePopoverDismissal";
 import { BiexAxisControl } from "./ui/BiexAxisControl";
-import { figureBlockFrame } from "./ui/LayoutFigure";
-import { proportionsBlockFrame } from "./ui/LayoutProportions";
-import { followSheetIteration } from "./ui/layoutFollow";
-import { buildProportionsModel, defaultProportionsSettings, divisionFittedPopulation, type ProportionsSettings } from "./engine/proportionsModel";
+import { FoldSummary } from "./ui/FoldSummary";
+import { addFigureBlock } from "./ui/layoutHandoff/fromIllustration";
+import { addPlottingPanelBlocks, addProportionsBlock } from "./ui/layoutHandoff/fromPlotting";
+import { addStrategyBlock } from "./ui/layoutHandoff/fromStrategy";
+import { addChartPageSheets, addChartPanelPageSheets, addFigurePageSheets, addPanelPageSheets, type PanelPage } from "./ui/layoutHandoff/everyPage";
+import { addPlotsToSheet } from "./ui/layoutHandoff/shared";
+import { plottingBlockSizer } from "./ui/LayoutProportions";
+import type { PlottingPanelBlock } from "./ui/plottingPanels";
+import { defaultProportionsSettings, divisionFittedPopulation, type ProportionsSettings } from "./engine/proportionsModel";
 import pkg from "../package.json";
 import brandWordmark from "./assets/brand/gatelab-wordmark.png";
 import brandLogo from "./assets/brand/gatelab-logo.jpg";
 import brandWordmarkR from "./assets/brand/gatelabr-wordmark.png";
 import brandLogoR from "./assets/brand/gatelabr-logo.jpg";
-import { clearPersistedTabState, readPersistedTabValues, readProportionsSettings, restorePlottingState, savedPlottingState, writeProportionsSettings } from "./ui/tabState";
+import { clearPersistedTabState, openPlottingSettingsAsChart, plottingCharts, readPersistedTabValues, readProportionsSettings, restorePlottingCharts, savedPlottingState } from "./ui/tabState";
 import { historyShortcutAction, isDeleteShortcut } from "./ui/historyShortcuts";
 import { ModalEscape } from "./ui/useModalEscape";
 import { ActionNote } from "./ui/ActionNote";
@@ -85,7 +90,7 @@ import type { DisplaySpillover } from "./engine/compensation";
 import { parseCompensationMatrixTable } from "./engine/compensationMatrixImport";
 import { populationTreeOrder } from "./engine/populations";
 import { resolvePartitionLevels, partitionAssign } from "./engine/factors";
-import { paletteColors, populationColor, UNGATED_COLOR, OVERLAY_PALETTES, MARKER_PALETTES, DEFAULT_MARKER_PALETTE, type PaletteName } from "./engine/palettes";
+import { paletteColors, populationOverlayColor, UNGATED_COLOR, OVERLAY_PALETTES, MARKER_PALETTES, DEFAULT_MARKER_PALETTE, type PaletteName } from "./engine/palettes";
 import {
   DEFAULT_MARKER_COLOR_POWER,
   MARKER_MISSING_LEVEL,
@@ -144,8 +149,10 @@ import {
   packWorkspaceReference,
   readWorkspaceEnvelopeFromFile,
   migrateWorkspaceToV2,
+  withLegacyPopulationColors,
   validateWorkspace,
   WORKSPACE_EXT,
+  workspacePlottingCharts,
   type WorkspaceFile,
   type WorkspaceEnvelope,
   type WorkspaceStorage,
@@ -250,6 +257,7 @@ import { WorkspaceHistoryModal } from "./ui/WorkspaceHistoryModal";
 import {
   coreReducer,
   initialCoreState,
+  spiderBoxGrowth,
   type CoreState,
   derivePopulationDisplaySelection,
   derivePopulationView,
@@ -288,7 +296,8 @@ import { readTailoringReasons, savedTailoringReasons, tailoredFileIds, tailoring
 import { PanelTab } from "./ui/PanelTab";
 import { MetadataTab } from "./ui/MetadataTab";
 import type { MetaRow } from "./ui/EditableMetaTable";
-import { ProportionsTab } from "./ui/ProportionsTab";
+import { resolveCellChannel } from "./ui/PlottingTab";
+import { PlottingChartsTab } from "./ui/PlottingCharts";
 import { DivisionTab, type DivisionProfile } from "./ui/DivisionTab";
 import { parseMetadataTable, lookupMetadataRow, sampleDisplayId, SAMPLE_ID_FIELD, type MetadataColumn } from "./engine/metadata";
 import { DEFAULT_CONTOUR_THRESHOLD, DEFAULT_DISPLAY_MODE, DEFAULT_MAX_EVENTS, workspaceGatingRecord, workspaceSampleRecord } from "./workspaceRecords";
@@ -317,7 +326,7 @@ import {
   type MatrixNumbers,
 } from "./ui/compensationLibrary";
 import { GRID_ID as STRATEGY_GRID_ID, StrategyTab, type StrategyConfig, type StrategyRequest } from "./ui/StrategyTab";
-import { FigureWorkspace } from "./ui/FigureWorkspace";
+import { IllustrationTab } from "./ui/IllustrationTab";
 import {
   allowedByLocks,
   checkedValues,
@@ -346,10 +355,9 @@ import {
   DEFAULT_DENSITY_COLOR_POWER,
   normalizeDensityColorPower,
 } from "./engine/pseudocolor";
-import { fitLayoutText } from "./ui/layoutTextFit";
-import { placeBlockOnPage, styleBeyondSheet } from "./ui/layoutPlacement";
-import { plotTitle, plotTitleContext } from "./engine/layoutTitle";
-import { createDefaultLayoutWorkspace, effectiveLayoutStyle, layoutGridFrames, normalizeLayoutStyle, normalizeLayoutWorkspace, type LayoutGridCell, type LayoutPlotRecipe, type LayoutPlotStyle, type LayoutStrategyRecipe, type LayoutWorkspace, cloneLayoutWorkspace, nextLayoutItemPosition, type LayoutGridHeading, type LayoutGridHeadings } from "./engine/layout";
+import { FigureStyleProvider, figureLayoutFields, newFigureLayoutWorkspace } from "./ui/figureStyle";
+import { DEFAULT_FIGURE_STYLE, isDefaultFigureStyle, normalizeFigureStyle, type FigureStyle } from "./engine/figureStyle";
+import { effectiveLayoutStyle, normalizeLayoutWorkspace, type LayoutGridCell, type LayoutPlotRecipe, type LayoutPlotStyle, type LayoutStrategyRecipe, type LayoutWorkspace, cloneLayoutWorkspace, nextLayoutItemPosition, type LayoutGridHeadings, type LayoutProportionsRecipe, type LayoutProportionsPanel } from "./engine/layout";
 import { ArrowLeftIcon, ArrowRightIcon, RedoIcon, RefreshIcon, ResetIcon, UndoIcon } from "./ui/icons";
 import { workspaceShortcutAction, type WorkspaceShortcutAction } from "./ui/historyShortcuts";
 import { DensityColourControl } from "./ui/DensityColourControl";
@@ -357,6 +365,11 @@ import { MarkerColourBar, type MarkerColourBarTick } from "./ui/MarkerColourBar"
 import { MarkerColourControl } from "./ui/MarkerColourControl";
 import { SearchableSelect, type SearchableOption } from "./ui/SearchableSelect";
 import type { GatingImportSourceKind } from "./ui/CrudModals";
+import { GatingTemplateModal } from "./ui/GatingTemplateModal";
+import {
+  GATING_TEMPLATE_ACCEPT, GATING_TEMPLATE_EXTENSION, buildGatingTemplate, planTemplateChannels, readGatingTemplateBytes,
+  serializeGatingTemplate, templateCompensationFor, templateImportResult, type GatingTemplate,
+} from "./gatingTemplate";
 import { UI_LANGUAGE_OPTIONS, useI18n, type UiLanguage } from "./ui/i18n";
 import { hostObjectName, hostWords } from "./ui/hostWording";
 import { useTour } from "./tour/useTour";
@@ -411,7 +424,7 @@ import { StrategyMovedError, type StrategyReview } from "./proposals/strategyPro
 import { hostProposalId, parseHostProposal, type HostProposalChannel, type HostStrategyProposal } from "./proposals/hostProposals";
 import { StrategyProposalReview } from "./ui/StrategyProposalReview";
 import { AgentMenu } from "./agent/AgentMenu";
-import { renderGridPng, renderPlotPng } from "./agent/renderPlot";
+import { renderGridPng, renderGridSvg, renderPlotPng } from "./agent/renderPlot";
 import type { AgentView as AgentViewState, AgentViewParams, AgentGatingTask, AgentOfferedFile, AgentSaveParams, AgentSaved } from "./agent/protocol";
 import { AgentSaveConfirm } from "./agent/AgentSaveConfirm";
 import { AgentCommandError } from "./agent/commands";
@@ -434,6 +447,7 @@ import type { CellImageSource } from "./imaging/imageSource";
 import type { CellRef, HoverHit } from "./imaging/cellTypes";
 import type { ImageService } from "./imaging/imageService";
 import type { CellImageView, CellInspectorEntry } from "./imaging/CellInspector";
+import type { ImagesClassBy, ImagesMeasure } from "./imaging/ImagesTab";
 import type { Classification } from "./imaging/imageService";
 import type { PlottedPoints } from "./engine/sample";
 import { createCellHoverStore, type HoveredCell } from "./engine/cellHoverStore";
@@ -444,7 +458,7 @@ import { cellPanelNaturalSize, defaultCellPanel, type LayoutCellPanelRecipe } fr
 import { rankSeparatingPairs, type PairScore, type SeparationColumn } from "./engine/separation";
 import { imagingPlotPresets } from "./engine/imagingPresets";
 import {
-  DERIVED_CELL_CLASS, DERIVED_MASK_FEATURES, DERIVED_OBJECT_AREA, DERIVED_OBJECT_COUNT,
+  DERIVED_CELL_CLASS, DERIVED_LIGHT_LOSS_MICRONS, DERIVED_MASK_FEATURES, DERIVED_OBJECT_AREA, DERIVED_OBJECT_COUNT,
   countFromDerivedChannels, decodeDerivedChannel,
 } from "./engine/derivedChannels";
 
@@ -500,6 +514,47 @@ const PlotThumbnails = lazy(lazyChunk("PlotThumbnails", async () => {
 /** The classes an image's object count falls in, for the plot's legend. */
 const OBJECT_CLASS_LABELS = ["no object", "one object", "two objects", "three or more"] as const;
 
+/** The derived channel a mask feature key is written to, as an index of the sample, when the sample has it. */
+function maskFeatureChannel(sample: Sample, key: string): number | undefined {
+  const name = DERIVED_MASK_FEATURES.find(([k]) => k === key)?.[1];
+  const idx = name ? sample.index(name) : undefined;
+  return idx !== undefined && sample.isDerivedChannel(idx) ? idx : undefined;
+}
+
+/**
+ * Write the LightLoss outline's lengths in micrometres, at `micronsPerPixel`, as channels of the
+ * sample (they save with the workspace by value). False when the sample has no outline to scale.
+ */
+function writeMicronChannels(sample: Sample, micronsPerPixel: number): boolean {
+  let wrote = false;
+  for (const [key, name, feature] of DERIVED_LIGHT_LOSS_MICRONS) {
+    const idx = maskFeatureChannel(sample, key);
+    if (idx === undefined) continue;
+    const px = sample.rawColumnData(idx);
+    const um = new Float32Array(px.length);
+    let top = 0;
+    for (let e = 0; e < px.length; e++) {
+      um[e] = px[e] * micronsPerPixel;
+      if (um[e] > top) top = um[e];
+    }
+    sample.addDerivedChannel({ name, feature, range: Math.max(1, Math.ceil(top) + 1), values: um });
+    wrote = true;
+  }
+  return wrote;
+}
+
+/** The scale a reopened workspace's micrometre channels were written at, read back from them; null when it has none. */
+function micronsPerPixelOf(sample: Sample): number | null {
+  const [key, name] = DERIVED_LIGHT_LOSS_MICRONS[0];
+  const pxIdx = maskFeatureChannel(sample, key);
+  const umIdx = sample.index(name);
+  if (pxIdx === undefined || umIdx === undefined || !sample.isDerivedChannel(umIdx)) return null;
+  const px = sample.rawColumnData(pxIdx);
+  const um = sample.rawColumnData(umIdx);
+  for (let e = 0; e < px.length; e++) if (px[e] > 0 && um[e] > 0) return um[e] / px[e];
+  return null;
+}
+
 const FCS_FILE_ACCEPT = { "application/octet-stream": [".fcs"] };
 /** FCS files and the waveform files a FACSDiscover S8 writes beside them, for pickers that pair the two. */
 const FCS_WITH_IMAGES_ACCEPT = { "application/octet-stream": [".fcs", ".cvw"] };
@@ -508,6 +563,8 @@ const CVW_FILE_ACCEPT = { "application/octet-stream": [".cvw"] };
 /** Picker types for the tables and workspaces the sidebar imports through pickFilesOrInput. */
 const GATING_IMPORT_ACCEPT = { "application/xml": [".xml", ".wsp"], "application/zip": [".cef", ".flowjo"] };
 const TABLE_FILE_ACCEPT = { "text/csv": [".csv", ".tsv", ".txt"] };
+/** A gating template, or a saved workspace read as one. */
+const TEMPLATE_PICKER_ACCEPT = { "application/json": [GATING_TEMPLATE_EXTENSION, ".json"], "application/zip": [".gatelab"] };
 
 
 /** A JSON text parsed, or null when it is not JSON: a hosted workspace's top-level fields its validated form does not carry. */
@@ -551,10 +608,13 @@ const CENTRE_RESERVE = 600;
 const INACTIVE_GATING_SLICE_MS = 12;
 
 type CrudModal =
-  | { kind: "createPop" }
+  /** `parentId` and `gateIds` preset the dialog, as a row's right-click menu asks. */
+  | { kind: "createPop"; parentId?: string; gateIds?: readonly string[] }
   | { kind: "renameGate"; id: string; initial: string }
   | { kind: "editPop"; id: string }
   | { kind: "confirmNewWorkspace" }
+  /** A .gatelab workspace chosen while the open one has unsaved changes, held until answered. */
+  | { kind: "confirmOpenWorkspace"; file: File; handle: FileSystemFileHandle | null; name: string }
   | { kind: "confirmDelete"; what: "gates" | "pops"; ids: string[] }
   | { kind: "bulkRename" }
   | { kind: "exportSceColData" };
@@ -1517,17 +1577,41 @@ export default function App({ hostProposals = null }: {
     useState<CompensationApplyUiStatus | null>(null);
   const [scaleCacheEpoch, setScaleCacheEpoch] = useState(0);
   const [lockScalesBetweenFiles, setLockScalesBetweenFiles] = useState(false);
-  const [dirty, setDirty] = useState(false);
+  const [dirty, setDirtyState] = useState(false);
+  /**
+   * Whether the changes since the workspace was opened or saved include one made after the user
+   * did something. `dirty` does not say: restoring and fitting the axes marks a workspace changed
+   * moments after it opens, with nobody touching it. Read before another workspace takes this
+   * one's place.
+   */
+  const userEditedRef = useRef(false);
+  /** Whether the user has clicked, typed, scrolled or dropped anything since the last open or save. */
+  const userActedRef = useRef(false);
+  const setDirty = useCallback((next: boolean) => {
+    if (!next) {
+      userEditedRef.current = false;
+      userActedRef.current = false;
+    }
+    setDirtyState(next);
+  }, []);
+  useEffect(() => {
+    const acted = () => { userActedRef.current = true; };
+    // "click" as well: one made from the keyboard, a script or assistive technology has no pointerdown.
+    const kinds = ["pointerdown", "keydown", "click", "wheel", "drop", "paste", "input", "change"] as const;
+    for (const kind of kinds) window.addEventListener(kind, acted, true);
+    return () => { for (const kind of kinds) window.removeEventListener(kind, acted, true); };
+  }, []);
   const [workspaceEditRevision, setWorkspaceEditRevision] = useState(0);
   const workspaceEditRevisionRef = useRef(0);
   const markWorkspaceDirty = useCallback(() => {
+    if (userActedRef.current) userEditedRef.current = true;
     setDirty(true);
     setWorkspaceEditRevision((current) => {
       const next = current + 1;
       workspaceEditRevisionRef.current = next;
       return next;
     });
-  }, []);
+  }, [setDirty]);
   const [hostWorkspaceRevision, setHostWorkspaceRevision] = useState(0);
   const hostWorkspaceRevisionRef = useRef(0);
   const [hostWorkspaceStatus, setHostWorkspaceStatus] = useState<
@@ -1635,7 +1719,8 @@ export default function App({ hostProposals = null }: {
   /** The menu a right-click on a polygon's vertex or edge opens: remove that vertex, or add one there. */
   const [plotMenu, setPlotMenu] = useState<ContextMenuState | null>(null);
   /** A gate's colour popover, opened from its menu at the pointer. */
-  const [gateColourPick, setGateColourPick] = useState<{ gateId: string; at: [number, number] } | null>(null);
+  /** The gate whose colour is being picked; with `gateIds`, every one of them takes the colour picked. */
+  const [gateColourPick, setGateColourPick] = useState<{ gateId: string; gateIds?: readonly string[]; at: [number, number] } | null>(null);
   /** Where the pointer last went down: a menu item's popover opens there. */
   const lastPointer = useRef<[number, number]>([200, 200]);
   useEffect(() => {
@@ -1743,7 +1828,7 @@ export default function App({ hostProposals = null }: {
     return seed;
   }, []);
   const [layoutWorkspace, setLayoutWorkspace] = useState<LayoutWorkspace>(
-    () => createDefaultLayoutWorkspace(),
+    () => newFigureLayoutWorkspace(),
   );
   // Bumped when a workspace is opened or a new one begun: the Layout tab is mounted afresh, so its
   // undo history and selection never carry one workspace's sheets into another.
@@ -1774,6 +1859,9 @@ export default function App({ hostProposals = null }: {
   // `fileIds`: the files a "new" group is made from, when not the checked files (a right-click on a row).
   const [groupModal, setGroupModal] = useState<{ mode: "new" | "rename" | "delete" | "fromMetadata"; groupId?: string; fileIds?: readonly string[] } | null>(null);
   const [pendingGatingMlImport, setPendingGatingMlImport] = useState<PendingGatingMLImport | null>(null);
+  /** A gating template read and waiting for its channels to be confirmed (GatingTemplateModal). */
+  const [pendingTemplate, setPendingTemplate] = useState<{ template: GatingTemplate; fileName: string; manual: Record<string, string>; withScales: boolean } | null>(null);
+  const templateRef = useRef<HTMLInputElement>(null);
   /** Steps of a gating import now running; an agent's import waits until none is (see importGating). */
   const gatingImportStepsRef = useRef(0);
   const trackGatingImportStep = <T,>(step: Promise<T>): Promise<T> => {
@@ -2374,6 +2462,11 @@ export default function App({ hostProposals = null }: {
     setLineWidth: (next) => setGateLineWidth(restoredGateLineWidth(next)),
     setLabelBackground: (next) => setGateLabelBackground(restoredGateLabelBackground(next)),
   }), [colouredGates, gateLineWidth, gateLabelBackground]);
+  // The workspace's figure style (figureStyle.ts): the text sizes and line widths of the Layout
+  // sheets, Plotting charts, Illustration figure and Strategy view that follow it. Display only.
+  const [figureStyle, setFigureStyle] = useState<FigureStyle>(() => ({ ...DEFAULT_FIGURE_STYLE }));
+  /** What a Layout sheet that follows the figure style takes: its sizes, and the gate ink. */
+  const figureLayout = useMemo(() => figureLayoutFields(figureStyle, gateInk), [figureStyle, gateInk]);
   // The population list's gate badges in one column after the longest name, or each after its own
   // name. A preference of the machine, kept across workspaces.
   const [alignPopulationGates, setAlignPopulationGates] = useState(() => {
@@ -2382,6 +2475,14 @@ export default function App({ hostProposals = null }: {
   useEffect(() => {
     try { localStorage.setItem("gatelab.alignPopulationGates", alignPopulationGates ? "1" : "0"); } catch { /* private mode */ }
   }, [alignPopulationGates]);
+  // The population list's colour after each name: hidden unless asked for. A preference of the
+  // machine, kept across workspaces.
+  const [showPopulationColours, setShowPopulationColours] = useState(() => {
+    try { return localStorage.getItem("gatelab.showPopulationColours") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("gatelab.showPopulationColours", showPopulationColours ? "1" : "0"); } catch { /* private mode */ }
+  }, [showPopulationColours]);
   const [overlayPalette, setOverlayPalette] = useState<PaletteName>("default");
   /**
    * Kept apart from `overlayPalette` because the two choices are not interchangeable: the
@@ -3024,33 +3125,58 @@ export default function App({ hostProposals = null }: {
   // Objects counted per file by the worker, and the count's progress while it runs.
   const [imageObjects, setImageObjects] = useState<Record<string, Classification>>({});
   const [objectsProgress, setObjectsProgress] = useState<Record<string, { done: number; total: number } | { error: string }>>({});
+  // Measuring, once asked for from the Images tab, is for the whole workspace (David, 2026-11-10):
+  // a channel only some files have cannot be gated across them, so every file with images is
+  // counted in turn, the viewed one first, files added later included, until cancelled. The
+  // plot's image colourings count the viewed file as before. A file whose count failed is not
+  // retried until measuring is asked for again.
+  const [measureAll, setMeasureAll] = useState(false);
+  const overlayWantsCount = overlayBy === "objects" || overlayBy === "cellclass";
+  const imagedEntries = useMemo(() => samples.filter((e) => e.images), [samples]);
+  const countTarget = useMemo<string | null>(() => {
+    const ready = (id: string) => {
+      const progress = objectsProgress[id];
+      return !imageObjects[id] && !(progress && "error" in progress);
+    };
+    if (activeEntry?.images && (overlayWantsCount || measureAll) && ready(activeEntry.id)) return activeEntry.id;
+    if (!measureAll) return null;
+    return imagedEntries.find((e) => ready(e.id))?.id ?? null;
+  }, [activeEntry, overlayWantsCount, measureAll, imagedEntries, imageObjects, objectsProgress]);
   useEffect(() => {
-    if ((overlayBy !== "objects" && overlayBy !== "cellclass") || !imageService || !activeEntry?.images) return;
-    const id = activeEntry.id;
-    if (imageObjects[id]) return;
+    if (!countTarget || !imageService) return;
+    const id = countTarget;
     const known = imageService.classification(id);
     if (known) {
       setImageObjects((prev) => ({ ...prev, [id]: known }));
       return;
     }
+    let settled = false;
     const handle = imageService.classify(id, (done, total) => setObjectsProgress((prev) => ({ ...prev, [id]: { done, total } })));
     handle.promise.then(
       (result) => {
+        settled = true;
         setImageObjects((prev) => ({ ...prev, [id]: result }));
         setObjectsProgress((prev) => { const next = { ...prev }; delete next[id]; return next; });
       },
       (error: unknown) => {
+        settled = true;
         if (error instanceof Error && error.name === "RenderCancelled") return;
         setObjectsProgress((prev) => ({ ...prev, [id]: { error: error instanceof Error ? error.message : String(error) } }));
       },
     );
-    return () => handle.cancel();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overlayBy, imageService, activeEntry?.id, activeEntry?.images]);
+    return () => {
+      handle.cancel();
+      // A count stopped part way leaves no progress behind to be read as running.
+      if (!settled) setObjectsProgress((prev) => { const p = prev[id]; if (!p || "error" in p) return prev; const next = { ...prev }; delete next[id]; return next; });
+    };
+  }, [countTarget, imageService]);
   useEffect(() => {
     // A file's objects are its own; a new service (new workspace) starts over.
     setImageObjects({});
     setObjectsProgress({});
+    setMeasureAll(false);
+    setMicronsPerPixel(null);
+    setBeadCalibration(null);
   }, [imageService]);
   const objectCountOf = useCallback((cell: HoveredCell): number | null => {
     const count = imageObjects[cell.sampleId]?.objectCount[cell.eventIndex];
@@ -3080,7 +3206,18 @@ export default function App({ hostProposals = null }: {
   // a saved workspace reopens with them (David, 2026-10-14). An event without an image counts 0
   // objects and 0 area, as Chorus's own features read on it; its class is "no image" (4). The
   // class follows the strictness, so changing it rewrites that channel.
-  const derivedDoneRef = useRef(new Map<string, { objects: Classification; strictness: number }>());
+  const derivedDoneRef = useRef(new Map<string, { objects: Classification; strictness: number; micronsPerPixel: number | null }>());
+  // The workspace's micrometres per image pixel, set from a bead tube on the Images tab. It lives in
+  // the micrometre channels it writes, so a reopened workspace reads it back from them.
+  const [micronsPerPixel, setMicronsPerPixel] = useState<number | null>(null);
+  const [beadCalibration, setBeadCalibration] = useState<{ beadMicrons: number; fileName: string; axisRatio: number | null } | null>(null);
+  useEffect(() => {
+    if (micronsPerPixel !== null) return;
+    for (const entry of samples) {
+      const found = entry.images ? micronsPerPixelOf(entry.sample) : null;
+      if (found !== null) { setMicronsPerPixel(found); return; }
+    }
+  }, [samples, micronsPerPixel]);
   // A reopened workspace carries the count as channels: take it from there, so the colourings, the
   // class and the wall's borders need no second count. The class channel is rewritten below at the
   // current strictness, which may differ from the one it was saved at.
@@ -3099,7 +3236,7 @@ export default function App({ hostProposals = null }: {
       const objects = imageObjects[entry.id];
       if (!objects || !entry.images) continue;
       const done = derivedDoneRef.current.get(entry.id);
-      if (done && done.objects === objects && done.strictness === cellStrictness) continue;
+      if (done && done.objects === objects && done.strictness === cellStrictness && done.micronsPerPixel === micronsPerPixel) continue;
       const maskSlot = entry.images.mask?.slot;
       const maskChannel = maskSlot !== undefined ? entry.images.channelNames.get(maskSlot) : undefined;
       const classes = classifyCells(entry.sample.fcs, objects.objectCount, imagedFlagsBySample.get(entry.id) ?? null, {
@@ -3126,15 +3263,16 @@ export default function App({ hostProposals = null }: {
           for (let e = 0; e < n; e++) if (values[e] > top) top = values[e];
           entry.sample.addDerivedChannel({ name, feature, range: Math.max(1, Math.ceil(top) + 1), values });
         }
+        if (micronsPerPixel !== null) writeMicronChannels(entry.sample, micronsPerPixel);
       } catch (cause) {
         console.warn(`${entry.name}: ${cause instanceof Error ? cause.message : String(cause)}`);
         continue;
       }
-      derivedDoneRef.current.set(entry.id, { objects, strictness: cellStrictness });
+      derivedDoneRef.current.set(entry.id, { objects, strictness: cellStrictness, micronsPerPixel });
       touched.add(entry.id);
     }
     if (touched.size > 0) setSamples((prev) => prev.map((e) => (touched.has(e.id) ? { ...e } : e)));
-  }, [imageObjects, cellStrictness, imagedFlagsBySample]);
+  }, [imageObjects, cellStrictness, imagedFlagsBySample, micronsPerPixel]);
   const [thumbnailsOn, setThumbnailsOn] = usePersistedTabState<boolean>("cell.thumbnails", false);
   const [thumbnailCount, setThumbnailCount] = usePersistedTabState<number>("cell.thumbnailCount", 40);
   const [thumbnailSize, setThumbnailSize] = usePersistedTabState<number>("cell.thumbnailSize", 44);
@@ -3381,7 +3519,7 @@ export default function App({ hostProposals = null }: {
     }
     markWorkspaceDirty();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.gate_version, state.tree_version, scalesVersion, sampleDataRevisionKey, instrumentMode, globalScales, mode, maxEvents, contourThreshold, contourLevels, densityColorPower, xIdx, yIdx, gatingFontSizes, workspaceCompensation, layoutWorkspace]);
+  }, [state.gate_version, state.tree_version, scalesVersion, sampleDataRevisionKey, instrumentMode, globalScales, mode, maxEvents, contourThreshold, contourLevels, densityColorPower, xIdx, yIdx, gatingFontSizes, workspaceCompensation, layoutWorkspace, figureStyle]);
 
   // Autosave lightweight reference workspaces only. Repacking every embedded FCS on each
   // edit would stall large bundled workspaces; bundles retain their format via manual Save.
@@ -3436,6 +3574,25 @@ export default function App({ hostProposals = null }: {
   const reportCheckpointRefusal = (error: unknown) => {
     if (error instanceof WorkspaceUnwritableError) setError(error.message);
   };
+
+  /**
+   * New Workspace's "Save first": the workspace is saved as Save saves it (in place, to the lab
+   * Drive, or through the save dialog) and the new one starts only when it was written and marked
+   * saved; a cancelled dialog, a refused write or a download leaves the workspace open.
+   */
+  async function saveThenStartNewWorkspace(): Promise<void> {
+    setCrud(null);
+    if (await saveWorkspace()) await startNewWorkspace();
+  }
+
+  /**
+   * Open Workspace's "Save first": as New Workspace's, the chosen workspace opens only when the
+   * open one was written and marked saved.
+   */
+  async function saveThenOpenWorkspace(held: { file: File; handle: FileSystemFileHandle | null; name: string }): Promise<void> {
+    setCrud(null);
+    if (await saveWorkspace()) await openWorkspaceFromFile(held.file, held.handle, held.name, true);
+  }
 
   async function startNewWorkspace(): Promise<void> {
     setCrud(null);
@@ -3521,7 +3678,8 @@ export default function App({ hostProposals = null }: {
     strategyConfigRef.current = null;
     setIllustrationPresets([]);
     setIllustVersion((version) => version + 1);
-    setLayoutWorkspace(createDefaultLayoutWorkspace());
+    setLayoutWorkspace(newFigureLayoutWorkspace());
+    setFigureStyle({ ...DEFAULT_FIGURE_STYLE });
     setLayoutEpoch((epoch) => epoch + 1);
     layoutUndoSeedRef.current = null;
     setMetadata({});
@@ -6636,6 +6794,168 @@ export default function App({ hostProposals = null }: {
     }
   }
 
+  /**
+   * The tree every file follows -- the live tree's template where a file's or a group's tailored
+   * copy is live -- written as a gating template (gatingTemplate.ts), as the viewed file gates it.
+   */
+  function exportGatingTemplate() {
+    if (!sample) return;
+    try {
+      const ref = templateOf(state.active_hierarchy_id, state.hierarchies);
+      const stored = ref && ref.id !== state.active_hierarchy_id ? state.stored_hierarchies[ref.id] : null;
+      const tree = stored ?? state;
+      if (!tree.root_population_id || Object.keys(tree.gates).length === 0) throw new Error("There is no gating tree to export.");
+      const template = buildGatingTemplate({
+        tree: {
+          name: ref?.name ?? activeHierarchy?.name ?? "Main",
+          gates: tree.gates,
+          gate_order: tree.gate_order,
+          populations: tree.populations,
+          root_population_id: tree.root_population_id,
+        },
+        sample,
+        globalScales,
+        app: `GateLab ${pkg.version}`,
+        workspaceId,
+        fileName: fileName || null,
+        files: samples.length,
+      });
+      const base = sanitizeFilePart((wsName || fileName || "gating").replace(/\.[^.]+$/, ""));
+      downloadText(`${base}${GATING_TEMPLATE_EXTENSION}`, serializeGatingTemplate(template), "application/json");
+      setImportMsg(
+        t("Saved the gating template \"{tree}\": {gates} gate(s), {populations} population(s).", {
+          tree: template.tree.name,
+          gates: Object.keys(template.tree.gates).length,
+          populations: Object.keys(template.tree.populations).length - 1,
+        }) +
+        (template.fixed_transforms.length
+          ? " " + t("The display transforms of {gates} were written into them, so they hold the same events on any axes.", { gates: template.fixed_transforms.map((n) => `"${n}"`).join(", ") })
+          : ""),
+      );
+      setError(template.notes.length ? template.notes.join("\n") : null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** A gating template, or a saved workspace read as one, read and set out for its channels to be confirmed. */
+  async function openGatingTemplate(file: File) {
+    if (!sample) return;
+    try {
+      const template = readGatingTemplateBytes(new Uint8Array(await file.arrayBuffer()), file.name);
+      setPendingTemplate({ template, fileName: file.name, manual: {}, withScales: template.scales !== null });
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** The pending template's channels found in the viewed file, with the hand-picked ones. */
+  function pendingTemplatePlan() {
+    if (!pendingTemplate || !sample) return null;
+    return planTemplateChannels(pendingTemplate.template.channels, sample.channels, sample.instrument, pendingTemplate.manual);
+  }
+
+  /** What the template's compensation does to the viewed file, said before anything changes. */
+  function templateCompensationNote(template: GatingTemplate): string | null {
+    if (!sample) return null;
+    const comp = templateCompensationFor(template, sample);
+    const source = t("the gating template");
+    if (comp.target === null) return null;
+    if (comp.target === false) {
+      return sample.compensationEnabled
+        ? t("This strategy was gated without compensation, so importing will disable the current compensation setting.")
+        : t("This strategy was gated without compensation; the current data are already uncompensated.");
+    }
+    if (comp.unavailable) {
+      return t("The template's gates were drawn on compensated data, and neither this FCS nor the template carries a spillover matrix, so the template cannot be applied to it as drawn.");
+    }
+    if (comp.offer && comp.offer.differsFromEmbedded) {
+      return t(
+        "This FCS and {source} each carry a spillover matrix, and they are not the same: coefficients differ by up to {delta}. " +
+        "The FCS's is typically the matrix recorded at acquisition; the one in {source} is the compensation in force when these gates were drawn. " +
+        "Compensation will be enabled either way, and which matrix is used changes where every fluorescence gate falls.",
+        { source, delta: (comp.offer.maxDelta ?? 0).toFixed(4) },
+      );
+    }
+    if (comp.offer) {
+      return t(
+        "These gates were drawn on compensated data, and this FCS carries no spillover matrix. Importing will apply the matrix \"{label}\" from {source} to {count} channel(s) and enable compensation.",
+        { label: comp.offer.label, source, count: comp.offer.matrix.channels.length - comp.offer.dropped.length },
+      );
+    }
+    if (!template.compensation?.matrix) {
+      return t("The template's gates were drawn on compensated data under a matrix it does not carry; importing will compensate this file with its own matrix.");
+    }
+    return sample.compensationEnabled
+      ? t("The template's spillover matrix is the one this file is compensated with; compensation is already enabled.")
+      : t("The template's spillover matrix matches this file's, so importing will enable compensation.");
+  }
+
+  /**
+   * The confirmed template staged as every gating import is (PendingGatingMLImport), so that the
+   * import dialog's Replace and Merge, its targets and its matrix choice, the checkpoint and the
+   * result line are the ones every import has.
+   */
+  function stageGatingTemplate() {
+    if (!sample || !activeSampleId || !pendingTemplate) return;
+    const plan = pendingTemplatePlan();
+    if (!plan?.ok) return;
+    const { template, fileName: templateFile, withScales } = pendingTemplate;
+    try {
+      const res = templateImportResult(template, plan, withScales, sample.gatingSpace);
+      const comp = templateCompensationFor(template, sample);
+      if (comp.unavailable) throw new Error(templateCompensationNote(template) ?? "No spillover matrix to compensate with.");
+      const compensation: GatingMLCompensationResolution = {
+        target: comp.target,
+        source: "embedded",
+        requiresConfirmation: comp.target !== null && comp.target !== sample.compensationEnabled,
+      };
+      const existingStrategy = state.root_population_id !== null && hasGatingStrategy({
+        gates: state.gates, populations: state.populations, root_population_id: state.root_population_id,
+      });
+      const mergeBlockedReason = gatingMergeSpaceConflict({
+        hasExistingStrategy: existingStrategy,
+        isFlow: sample.instrument === "flow",
+        currentCompensation: sample.compensationEnabled,
+        importedCompensationTarget: comp.target,
+        currentCytofCofactor: sample.arcsinhCofactor,
+        importedCytofCofactor: res.cytof_cofactor,
+      });
+      const otherwise = plan.rows.filter((r) => r.by !== "key");
+      const notes = [
+        ...template.notes,
+        ...(otherwise.length
+          ? [t("Channels found other than by name: {pairs}.", { pairs: otherwise.map((r) => `${r.channel.key} → ${r.target}`).join(", ") })]
+          : []),
+        ...([...template.fixed_transforms, ...res.fixed_at_apply].length
+          ? [t("The display transforms of {gates} are fixed in the template, so they hold the same events on any axes.", { gates: [...template.fixed_transforms, ...res.fixed_at_apply].map((n) => `"${n}"`).join(", ") })]
+          : []),
+      ];
+      setPendingTemplate(null);
+      setPendingGatingMlImport({
+        result: res,
+        sourceKind: "template",
+        compensation,
+        sampleId: activeSampleId,
+        siblingTrees: [],
+        mergeBlockedReason,
+        compensationNote: templateCompensationNote(template),
+        sourceNote: ` · from the gating template ${templateFile}`,
+        externalSpillover: comp.offer
+          ? { ...comp.offer, matrix: { channels: comp.offer.matrix.channels, matrix: comp.offer.matrix.matrix }, source: "workspace" }
+          : null,
+        // The file's own matrix unless the user chooses the template's (plan D4); a file with none
+        // takes the template's, the only one that places the gates.
+        matrixChoice: comp.offer?.differsFromEmbedded ? "file" : "workspace",
+        ...(notes.length ? { notes } : {}),
+      });
+      setError(notes.length ? notes.join("\n") : null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   function exportGating(format: GatingMLFormat) {
     if (!sample || !state.root_population_id) return;
     try {
@@ -7890,7 +8210,7 @@ export default function App({ hostProposals = null }: {
       sample.setFluorCofactor(job.idx, job.cofactor);
       // The visible range is in asinh display units, which move with the cofactor: without a
       // refit the data walks off the axis as the slider is dragged.
-      pendingScaleRefit.current = true;
+      pendingScaleRefit.current.add(job.key);
       bumpScales();
       setPendingFluorCofactor((prev) => {
         const next = { ...prev };
@@ -8071,6 +8391,15 @@ export default function App({ hostProposals = null }: {
       }
       return out;
     });
+    markWorkspaceDirty();
+  };
+  /** Set a column's order of its values for every tab, or clear it for the file list's order. */
+  const setMetadataColumnLevels = (name: string, levels: string[] | undefined) => {
+    setMetadataColumns((cols) => cols.map((c) => {
+      if (c.name !== name) return c;
+      const { levels: _old, ...rest } = c;
+      return levels?.length ? { ...rest, levels: [...levels] } : rest;
+    }));
     markWorkspaceDirty();
   };
   const deleteMetadataColumn = (name: string) => {
@@ -8551,11 +8880,11 @@ export default function App({ hostProposals = null }: {
               dataset,
               entries.map(({ sample: hostedSample }) => hostedSample),
             );
-            const workspace = convertHostedGateSpace(
+            const workspace = withLegacyPopulationColors(convertHostedGateSpace(
               restored.workspace,
               entries[0].sample,
               restored.sourceGateSpace,
-            );
+            ));
             const activeIdx = Math.min(
               Math.max(0, workspace.activeSample),
               entries.length - 1,
@@ -8614,7 +8943,8 @@ export default function App({ hostProposals = null }: {
             setIllustrationPresets(workspace.illustrationPresets ?? []);
             setIllustVersion((version) => version + 1);
             clearPersistedTabState();
-            restorePlottingState(workspace.plotting);
+            restorePlottingCharts(workspacePlottingCharts(workspace));
+            setFigureStyle(normalizeFigureStyle(workspace.figureStyle));
             setLockScalesBetweenFiles(restoredScaleLock);
             setScaleCacheEpoch((epoch) => epoch + 1);
             setInstrumentMode(active.instrumentMode);
@@ -8771,7 +9101,7 @@ export default function App({ hostProposals = null }: {
     if (!sample || !activeSampleId || !state.active_population_id) return;
     // The plot is drawn there as it is here: the display settings the sheet's style does not
     // already hold become the plot's own.
-    const sheetStyle = effectiveLayoutStyle(layoutWorkspace.sheets.find((s0) => s0.id === layoutWorkspace.activeSheetId) ?? layoutWorkspace.sheets[0]);
+    const sheetStyle = effectiveLayoutStyle(layoutWorkspace.sheets.find((s0) => s0.id === layoutWorkspace.activeSheetId) ?? layoutWorkspace.sheets[0], null, figureLayout);
     const own: Partial<LayoutPlotStyle> = {};
     // 0 is every event here and there alike.
     if (maxEvents !== sheetStyle.maxEvents) own.maxEvents = maxEvents;
@@ -8803,17 +9133,7 @@ export default function App({ hostProposals = null }: {
     }
     setLayoutWorkspace((current) => {
       layoutUndoSeedRef.current = current;
-      const next = cloneLayoutWorkspace(current);
-      const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
-      if (!sheet) return current;
-      // A multi-population grid is framed at the size it was drawn on the Strategy tab, so it
-      // arrives as it was made; the sheet grows to show it, and its frame can be dragged smaller,
-      // which scales the block as a whole.
-      const frame = nextLayoutItemPosition(sheet, size?.width ?? 600, size?.height ?? 320);
-      sheet.items.push({ id: crypto.randomUUID(), ...frame, recipe: followSheetIteration(sheet, [recipe])[0] });
-      sheet.width = Math.max(sheet.width, frame.x + frame.width + 48);
-      sheet.height = Math.max(sheet.height, frame.y + frame.height + 48);
-      return next;
+      return addStrategyBlock(current, recipe, size);
     });
     markWorkspaceDirty();
     setActiveTab("layout");
@@ -8918,42 +9238,103 @@ export default function App({ hostProposals = null }: {
     }));
   }
 
-  /** The Illustration tab's figure as one Layout block, and the Layout tab shown. */
-  function addFigureToLayout(config: IllustrationConfig): void {
+  /** The Illustration tab's figure as one Layout block drawing the page given, and the Layout tab shown. */
+  function addFigureToLayout(config: IllustrationConfig, page?: number): void {
     setLayoutWorkspace((current) => {
       layoutUndoSeedRef.current = current;
-      const next = cloneLayoutWorkspace(current);
-      const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
-      if (!sheet) return current;
-      const files = samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id), metadata: metadata[entry.id] }));
-      const size = figureBlockFrame(config, files, state, sheet);
-      const frame = nextLayoutItemPosition(sheet, size.width, size.height);
-      const item = { id: crypto.randomUUID(), ...frame, recipe: { kind: "figure" as const, illustration: config, page: 0 } };
-      sheet.items.push(item);
-      placeBlockOnPage(sheet, [item]);
-      sheet.width = Math.max(sheet.width, item.x + item.width + 48);
-      sheet.height = Math.max(sheet.height, item.y + item.height + 48);
-      return next;
+      return addFigureBlock(current, config, { samples, metadata, hierarchyOfFile, state }, page);
     });
     markWorkspaceDirty();
     setActiveTab("layout");
   }
 
-  /** The Plotting tab's chart as one Layout block, at its natural size, on the active sheet. */
-  function addProportionsToLayout(settings: ProportionsSettings): void {
-    const files = samples.map((entry) => ({ id: entry.id, name: entry.name, sample: entry.sample, hierarchyId: hierarchyOfFile(entry.id) }));
-    const model = buildProportionsModel(settings, files, state, metadata, compatibleDivisionProfiles);
+  /** The Illustration figure's pages, a new Layout sheet each, as one undo step, and the Layout tab shown on the first. */
+  function addFigurePagesToLayout(config: IllustrationConfig, labels: readonly string[]): void {
     setLayoutWorkspace((current) => {
       layoutUndoSeedRef.current = current;
-      const next = cloneLayoutWorkspace(current);
-      const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
-      if (!sheet) return current;
-      const size = proportionsBlockFrame(settings, model, sheet);
-      const frame = nextLayoutItemPosition(sheet, size.width, size.height);
-      sheet.items.push({ id: crypto.randomUUID(), ...frame, recipe: { kind: "proportions", settings } });
-      sheet.width = Math.max(sheet.width, frame.x + frame.width + 48);
-      sheet.height = Math.max(sheet.height, frame.y + frame.height + 48);
-      return next;
+      return addFigurePageSheets(current, config, labels, { samples, metadata, hierarchyOfFile, state });
+    });
+    markWorkspaceDirty();
+    setActiveTab("layout");
+  }
+
+  /** The Illustration figure's panels, a new Layout sheet per page, as one undo step, and the Layout tab shown on the first. */
+  function addPanelPagesToLayout(pages: readonly PanelPage[], panelSize?: number): void {
+    if (!pages.length) return;
+    setLayoutWorkspace((current) => {
+      layoutUndoSeedRef.current = current;
+      return addPanelPageSheets(current, pages, panelSize, { samples, metadata, hierarchyOfFile, treeOf, populationMetadata, figureLayout });
+    });
+    markWorkspaceDirty();
+    setActiveTab("layout");
+  }
+
+  /** A per-cell chart's channels' ranges on the Gating tab, each channel's, when its axis is the Gating tab's. */
+  function plottingScales(settings: ProportionsSettings): Record<string, [number, number]> | undefined {
+    if (settings.valueKind !== "cells" || settings.cellRange !== "gating") return undefined;
+    const keys = settings.channels.length ? settings.channels : [settings.channel];
+    const scales = Object.fromEntries(keys.flatMap((key) => {
+      const range = plottingGatingRange(key);
+      return range ? [[key, range] as const] : [];
+    }));
+    return Object.keys(scales).length ? scales : undefined;
+  }
+
+  /** The Plotting tab's chart as one Layout block, at its natural size, on the active sheet. */
+  function addProportionsToLayout(settings: ProportionsSettings, panel?: LayoutProportionsPanel): void {
+    const files = samples.map((entry) => ({ id: entry.id, name: entry.name, sample: entry.sample, hierarchyId: hierarchyOfFile(entry.id) }));
+    const sizer = plottingBlockSizer(settings, files, state, metadata, compatibleDivisionProfiles, plottingScales(settings), panel);
+    setLayoutWorkspace((current) => {
+      layoutUndoSeedRef.current = current;
+      return addProportionsBlock(current, settings, sizer, figureLayout, panel);
+    });
+    markWorkspaceDirty();
+    setActiveTab("layout");
+  }
+
+  /**
+   * A Plotting chart as a block per panel on the Layout tab's current sheet, in the arrangement the
+   * tab draws them in, below what the sheet holds, with the legend as a block of its own below
+   * them. The blocks follow the sheet's file or metadata iteration when they differ only in their
+   * populations; panels of different files or facets keep their own, since following would draw
+   * them all alike.
+   */
+  function addPlottingPanelsToLayout(settings: ProportionsSettings, blocks: readonly PlottingPanelBlock[]): void {
+    if (!blocks.length) return;
+    const files = samples.map((entry) => ({ id: entry.id, name: entry.name, sample: entry.sample, hierarchyId: hierarchyOfFile(entry.id) }));
+    const scales = plottingScales(settings);
+    const panelSizer = plottingBlockSizer(settings, files, state, metadata, compatibleDivisionProfiles, scales, blocks[0].panel);
+    const legendSizer = settings.legend ? plottingBlockSizer(settings, files, state, metadata, compatibleDivisionProfiles, scales, { legend: true }) : null;
+    setLayoutWorkspace((current) => {
+      layoutUndoSeedRef.current = current;
+      return addPlottingPanelBlocks(current, settings, blocks, panelSizer, legendSizer, figureLayout);
+    });
+    markWorkspaceDirty();
+    setActiveTab("layout");
+  }
+
+  /** A Plotting chart's pages, a new Layout sheet each holding a block of that page, as one undo step. */
+  function addPlottingPagesToLayout(settings: ProportionsSettings, pages: readonly { label: string; page: string }[]): void {
+    if (!pages.length) return;
+    const files = samples.map((entry) => ({ id: entry.id, name: entry.name, sample: entry.sample, hierarchyId: hierarchyOfFile(entry.id) }));
+    const scales = plottingScales(settings);
+    setLayoutWorkspace((current) => {
+      layoutUndoSeedRef.current = current;
+      return addChartPageSheets(current, settings, pages, (page) => plottingBlockSizer(settings, files, state, metadata, compatibleDivisionProfiles, scales, { page }), figureLayout);
+    });
+    markWorkspaceDirty();
+    setActiveTab("layout");
+  }
+
+  /** A Plotting chart's panels, a new Layout sheet per page with that page's blocks and the legend, as one undo step. */
+  function addPlottingPanelPagesToLayout(settings: ProportionsSettings, pages: readonly { label: string; blocks: PlottingPanelBlock[] }[]): void {
+    if (!pages.some((page) => page.blocks.length)) return;
+    const files = samples.map((entry) => ({ id: entry.id, name: entry.name, sample: entry.sample, hierarchyId: hierarchyOfFile(entry.id) }));
+    const scales = plottingScales(settings);
+    const legendSizer = settings.legend ? plottingBlockSizer(settings, files, state, metadata, compatibleDivisionProfiles, scales, { legend: true }) : null;
+    setLayoutWorkspace((current) => {
+      layoutUndoSeedRef.current = current;
+      return addChartPanelPageSheets(current, settings, pages, (blocks) => plottingBlockSizer(settings, files, state, metadata, compatibleDivisionProfiles, scales, blocks[0].panel), legendSizer, figureLayout);
     });
     markWorkspaceDirty();
     setActiveTab("layout");
@@ -8964,83 +9345,11 @@ export default function App({ hostProposals = null }: {
    * arrangement they had where they came from, as a grid below what the sheet holds; without,
    * each takes the next free place on the page.
    */
-  function addPlotsToLayout(recipes: LayoutPlotRecipe[], cells?: readonly LayoutGridCell[], headings?: LayoutGridHeadings, panelSize?: number): void {
+  function addPlotsToLayout(recipes: (LayoutPlotRecipe | LayoutProportionsRecipe)[], cells?: readonly LayoutGridCell[], headings?: LayoutGridHeadings, panelSize?: number): void {
     if (!recipes.length) return;
     setLayoutWorkspace((current) => {
       layoutUndoSeedRef.current = current;
-      const next = cloneLayoutWorkspace(current);
-      const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
-      if (!sheet) return current;
-      // A grid from the Illustration tab keeps its panels' size: the frame holds the plot drawn at
-      // that size inside the plot host's 8 px inset.
-      const cellSize = panelSize && panelSize > 0 ? panelSize + 8 : null;
-      const frames = cells && cells.length === recipes.length
-        ? (cellSize ? layoutGridFrames(sheet, cells, cellSize, cellSize) : layoutGridFrames(sheet, cells))
-        : null;
-      const firstIn = (pick: (cell: LayoutGridCell) => boolean, order: (cell: LayoutGridCell) => number): number => {
-        let best = -1;
-        cells?.forEach((cell, index) => { if (pick(cell) && (best < 0 || order(cell) < order(cells[best]))) best = index; });
-        return best;
-      };
-      // Headings sit above the columns and left of the rows, so the grid moves down and right to
-      // leave them room; each reads the first plot of its column or row. Each heading's frame is
-      // sized to the text the Layout tab will draw in it (its template filled from that plot), so
-      // none arrives clipped: a row heading takes its text's width, wrapping past 320 px, and a
-      // column heading wraps within its column and grows down.
-      const headingFontSize = 14;
-      const drawnHeading = (heading: LayoutGridHeading, index: number): string => {
-        const recipe = recipes[index];
-        const entry = recipe && samples.find(({ id }) => id === recipe.sampleId);
-        if (!heading.template || !entry) return heading.text;
-        const population = treeOf(hierarchyOfFile(entry.id))?.populations[recipe.populationId];
-        const file = { name: sampleDisplayId(entry.name, metadata[entry.id]), fileName: entry.name, metadata: metadata[entry.id] };
-        return plotTitle(heading.template, plotTitleContext(recipe, file, population ? { id: recipe.populationId, name: population.name } : null, undefined, populationMetadata)) || heading.text;
-      };
-      const columnFirst = (headings?.columns ?? []).map((_, column) => firstIn((cell) => cell.column === column, (cell) => cell.row));
-      const rowFirst = (headings?.rows ?? []).map((_, row) => firstIn((cell) => cell.row === row, (cell) => cell.column));
-      const columnFits = frames ? (headings?.columns ?? []).map((heading, column) => fitLayoutText(drawnHeading(heading, columnFirst[column]), headingFontSize, frames[0].width)) : [];
-      const rowFits = frames ? (headings?.rows ?? []).map((heading, row) => fitLayoutText(drawnHeading(heading, rowFirst[row]), headingFontSize, 320)) : [];
-      const columnHeight = Math.max(28, ...columnFits.map((fit) => fit?.height ?? 0));
-      const rowWidth = rowFits.every(Boolean) ? Math.max(0, ...rowFits.map((fit) => fit!.width)) : 138;
-      const headRoom = frames && headings?.columns.length ? columnHeight + 6 : 0;
-      const sideRoom = frames && headings?.rows.length ? rowWidth + 12 : 0;
-      if (frames) for (const frame of frames) { frame.y += headRoom; frame.x += sideRoom; }
-      const ids: string[] = [];
-      const firstAdded = sheet.items.length;
-      followSheetIteration(sheet, recipes).forEach((recipe, index) => {
-        const frame = frames ? frames[index] : nextLayoutItemPosition(sheet);
-        const id = crypto.randomUUID();
-        ids.push(id);
-        const style = styleBeyondSheet(sheet, recipe.style && normalizeLayoutStyle(recipe.style));
-        const { style: _given, ...rest } = recipe;
-        const item = { id, ...frame, recipe: style ? { ...rest, style } : rest };
-        sheet.items.push(item);
-        // A plot placed alone goes onto a page; a grid goes as one block, below.
-        if (!frames) placeBlockOnPage(sheet, [item]);
-      });
-      if (frames && cells && headings) {
-        let z = Math.max(0, ...sheet.items.map((item) => item.z));
-        const label = (heading: LayoutGridHeading, index: number, frame: { x: number; y: number; width: number; height: number }) => {
-          sheet.items.push({
-            id: crypto.randomUUID(), ...frame, z: ++z,
-            recipe: { kind: "text", text: heading.template ?? heading.text, fontSize: headingFontSize, ...(heading.template ? { readsFrom: ids[index] } : {}) },
-          });
-        };
-        headings.columns.forEach((heading, column) => {
-          const index = columnFirst[column];
-          if (index >= 0) label(heading, index, { x: frames[index].x, y: frames[index].y - headRoom, width: Math.max(frames[index].width, columnFits[column]?.width ?? 0), height: columnFits[column]?.height ?? 28 });
-        });
-        headings.rows.forEach((heading, row) => {
-          const index = rowFirst[row];
-          if (index >= 0) label(heading, index, { x: frames[index].x - sideRoom, y: frames[index].y, width: sideRoom - 12, height: Math.max(28, rowFits[row]?.height ?? 0) });
-        });
-      }
-      if (frames) placeBlockOnPage(sheet, sheet.items.slice(firstAdded));
-      for (const item of sheet.items.slice(firstAdded)) {
-        sheet.width = Math.max(sheet.width, item.x + item.width + 48);
-        sheet.height = Math.max(sheet.height, item.y + item.height + 48);
-      }
-      return next;
+      return addPlotsToSheet(current, recipes, cells, headings, panelSize, { samples, metadata, hierarchyOfFile, treeOf, populationMetadata, figureLayout });
     });
     markWorkspaceDirty();
     setActiveTab("layout");
@@ -9514,6 +9823,9 @@ export default function App({ hostProposals = null }: {
       strategy: strategyConfigRef.current ?? undefined,
       layout: layoutWorkspace,
       plotting: savedPlottingState(),
+      plottingCharts: plottingCharts(),
+      // Only when set: a workspace on the defaults stays readable by a GateLab without the field.
+      ...(isDefaultFigureStyle(figureStyle) ? {} : { figureStyle }),
       metadataColumns: [{ name: SAMPLE_ID_FIELD }, ...metadataColumns.filter(column => column.name !== SAMPLE_ID_FIELD)],
       populationMetadata,
       populationMetaColumns,
@@ -10190,13 +10502,14 @@ export default function App({ hostProposals = null }: {
 
   // Save in place without changing the current workspace's bundle/reference storage mode.
   // If no writable workspace handle exists, fall back to Save As.
-  async function saveWorkspace() {
+  /** Resolves true when the workspace was written and is marked saved. */
+  async function saveWorkspace(): Promise<boolean> {
     if (driveTargetRef.current) {
       await saveToDrive();
-      return;
+      return driveSavedEditRevisionRef.current === workspaceEditRevisionRef.current;
     }
     const ws = buildWorkspaceFile();
-    if (!ws) return;
+    if (!ws) return false;
     setBusy(true);
     try {
       if (supportsFileSystemAccess() && wsHandle) {
@@ -10226,25 +10539,28 @@ export default function App({ hostProposals = null }: {
           setWsHandle(null);
           setImportMsg(`${outcome.message} The workspace is not marked saved.`);
           tourSignals.current.workspaceSaves++;
-          return;
+          return false;
         }
         await rememberAllHandles();
         setDirty(false);
         setImportMsg(`Saved ${wsStorage === "bundle" ? "bundle" : "workspace"} · ${wsName}`);
         tourSignals.current.workspaceSaves++;
+        return true;
       } else {
-        await saveWorkspaceAs();
+        return await saveWorkspaceAs();
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setBusy(false);
     }
   }
 
-  async function saveWorkspaceAs() {
+  /** Resolves true when the workspace was written to the chosen file and is marked saved. */
+  async function saveWorkspaceAs(): Promise<boolean> {
     const ws = buildWorkspaceFile();
-    if (!ws) return;
+    if (!ws) return false;
     const base = sanitizeFilePart((fileName || "workspace").replace(/\.[^.]+$/, ""));
     try {
       const data = packReferenceWorkspace(ws);
@@ -10263,7 +10579,7 @@ export default function App({ hostProposals = null }: {
           // Nothing of the chosen file is kept: no handle, no recent entry, not marked saved.
           setImportMsg(`${outcome.message}${driveTargetRef.current ? "" : " The workspace is not marked saved."}`);
           tourSignals.current.workspaceSaves++;
-          return;
+          return false;
         }
         if (outcome.kind === "written") {
           const h = outcome.handle;
@@ -10274,7 +10590,7 @@ export default function App({ hostProposals = null }: {
           if (open) {
             setImportMsg(`Saved a copy on this computer · ${f.name} · Save still writes to ${open.experiment}/${open.name} in the lab Drive`);
             tourSignals.current.workspaceSaves++;
-            return;
+            return false;
           }
           setWsHandle(h);
           setWsName(f.name);
@@ -10284,13 +10600,21 @@ export default function App({ hostProposals = null }: {
           noteRecentWorkspace(h, f.name);
           setImportMsg(`Saved · ${f.name}`);
           tourSignals.current.workspaceSaves++;
+          return true;
         }
+        return false;
       } else {
+        // A download is not a saved workspace: the workspace is not marked saved.
         downloadBlob(`${base}.${WORKSPACE_EXT}`, new Blob([data as BlobPart], { type: "application/json" }));
+        // Said in the status line: New Workspace's Save first otherwise leaves the workspace open
+        // without a word.
+        setImportMsg(`Downloaded ${base}.${WORKSPACE_EXT}.${driveTargetRef.current ? "" : " The workspace is not marked saved."}`);
         tourSignals.current.workspaceSaves++;
+        return false;
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return false;
     }
   }
 
@@ -11014,6 +11338,8 @@ export default function App({ hostProposals = null }: {
     file: File,
     wsH: FileSystemFileHandle | null,
     wsFileName: string,
+    /** The user has agreed to close an open workspace that has unsaved changes. */
+    replaceConfirmed = false,
   ) {
     setBusy(true);
     setError(null);
@@ -11087,6 +11413,13 @@ export default function App({ hostProposals = null }: {
           flowJoGrid: true,
         });
         setImportMsg(null);
+        return;
+      }
+      // A .gatelab workspace takes the place of the one open (a .wsp or .cef above adds gates to
+      // it). Changes made since it was opened or saved are asked about first, from every way
+      // in: the picker, the recent list and the demo.
+      if (!replaceConfirmed && sample && dirty && userEditedRef.current) {
+        setCrud({ kind: "confirmOpenWorkspace", file, handle: wsH, name: wsFileName });
         return;
       }
       const envelope = await readWorkspaceEnvelopeFromFile(file);
@@ -11494,6 +11827,7 @@ export default function App({ hostProposals = null }: {
       }
       if (!driveTarget) queueCheckpoint("after-workspace-open");
       skipDirtyRef.current = true;
+      ws = withLegacyPopulationColors(ws);
       const activeIdx = Math.min(Math.max(0, ws.activeSample), entries.length - 1);
       const active = entries[activeIdx].sample;
       restoreWorkspaceTransforms(entries, ws, activeIdx);
@@ -11539,7 +11873,8 @@ export default function App({ hostProposals = null }: {
       setLayoutEpoch((epoch) => epoch + 1);
       layoutUndoSeedRef.current = null;
       clearPersistedTabState(); // drop old selections so a new workspace's tabs start clean
-      restorePlottingState(ws.plotting);
+      restorePlottingCharts(workspacePlottingCharts(ws));
+      setFigureStyle(normalizeFigureStyle(ws.figureStyle));
       setDivisionProfiles(nextDivision);
       setLockScalesBetweenFiles(restoredScaleLock);
       setScaleCacheEpoch((epoch) => epoch + 1);
@@ -11767,6 +12102,8 @@ export default function App({ hostProposals = null }: {
       wsName || "workspace",
     );
     if (!opened) return;
+    // The checkpoint's state is in no workspace file until it is saved.
+    userEditedRef.current = true;
     const which = `${CHECKPOINT_REASON_LABELS[checkpoint.reason] ?? checkpoint.reason} · ${checkpointAge(checkpoint.createdAt)}`;
     if (wsHandle && storage !== "bundle") {
       setDirty(true);
@@ -12013,7 +12350,12 @@ export default function App({ hostProposals = null }: {
         populationId: state.active_population_id, sampleId: activeSampleId, x: xKey, y: yKey, tab: activeTab,
         ranges: { x: shown(xRange, xKey, workspaceAutomaticRanges?.xRange), y: shown(yRange, yKey, workspaceAutomaticRanges?.yRange) },
         strategy: strategy
-          ? { mode: strategy.mode, populationIds: strategy.mode === "multi" ? [...strategy.multiPops] : strategy.popId ? [strategy.popId] : [], fullPath: strategy.fullPath }
+          ? {
+            mode: strategy.mode, populationIds: strategy.mode === "multi" ? [...strategy.multiPops] : strategy.popId ? [strategy.popId] : [], fullPath: strategy.fullPath,
+            // Absent in a config saved before the control; read as the tab reads it.
+            layout: strategy.layout ?? "tree", columns: strategy.nColumns, showArrows: strategy.showArrows ?? true,
+            arrowWidth: strategy.arrowWidth ?? 1.5, arrowAnchor: strategy.arrowAnchor ?? "label",
+          }
           : null,
       };
     },
@@ -12034,6 +12376,11 @@ export default function App({ hostProposals = null }: {
         setAgentStrategyRequest({
           nonce, mode: strategy.mode ?? (strategy.populationIds.length === 1 ? "single" : "multi"), populationIds: [...strategy.populationIds],
           ...(strategy.fullPath === undefined ? {} : { fullPath: strategy.fullPath }),
+          ...(strategy.layout === undefined ? {} : { layout: strategy.layout }),
+          ...(strategy.columns === undefined ? {} : { columns: strategy.columns }),
+          ...(strategy.showArrows === undefined ? {} : { showArrows: strategy.showArrows }),
+          ...(strategy.arrowWidth === undefined ? {} : { arrowWidth: strategy.arrowWidth }),
+          ...(strategy.arrowAnchor === undefined ? {} : { arrowAnchor: strategy.arrowAnchor }),
         });
       }
       setActiveTab(params.tab === "strategy" ? "strategy" : "gating");
@@ -12064,6 +12411,18 @@ export default function App({ hostProposals = null }: {
       const area = plotAreaRef.current;
       if (!area) throw new Error("The Gating tab's plot is not on screen.");
       return renderPlotPng(area, params);
+    },
+    renderSvg: async ({ dpi, upload }) => {
+      // The file the Export section's SVG button writes, at the DPI asked or the tab's own.
+      const container = activeTab === "strategy" ? document.getElementById("strategy-grid-container") : null;
+      if (!container) throw new Error("The Strategy tab is not on screen.");
+      const resolution = dpi ?? strategyConfigRef.current?.exportDpi ?? 300;
+      const file = await renderGridSvg(container, STRATEGY_GRID_ID, { dpi: resolution });
+      const url = agentLinkRef.current?.relayHttpUrl(upload);
+      if (!url) throw new Error("The agent disconnected before the SVG could be written.");
+      const response = await fetch(url, { method: "POST", body: new Blob([file.xml], { type: "image/svg+xml" }) });
+      if (!response.ok) throw new Error((await response.text()).trim() || `The relay refused the SVG (HTTP ${response.status}).`);
+      return { width: file.width, height: file.height, dpi: resolution };
     },
     workspaceJson: () => {
       const ws = buildWorkspaceFile();
@@ -12142,6 +12501,7 @@ export default function App({ hostProposals = null }: {
       view: () => agentAdapterRef.current.view(),
       setView: (params) => agentAdapterRef.current.setView(params),
       render: (params) => agentAdapterRef.current.render(params),
+      renderSvg: (params) => agentAdapterRef.current.renderSvg!(params),
       workspaceJson: () => agentAdapterRef.current.workspaceJson(),
       fit: () => agentAdapterRef.current.fit(),
       setAxisRange: (channel, range) => agentAdapterRef.current.setAxisRange(channel, range),
@@ -13027,7 +13387,7 @@ export default function App({ hostProposals = null }: {
       for (let e = 0; e < n; e++) colors[e] = assign[e] < 0 ? ungated : assign[e];
       // Colour each population by its STABLE slot (frozen — adding/removing a population never
       // reshuffles the others); the ungated remainder gets the fixed grey, not a moving palette slot.
-      const palette = [...levels.map((l) => populationColor(overlayPalette, state.populations[l.popId]?.colorSlot)), UNGATED_COLOR];
+      const palette = [...levels.map((l) => populationOverlayColor(overlayPalette, state.populations[l.popId])), UNGATED_COLOR];
       return { colors, palette, labels: [...levels.map((l) => l.name), "ungated"] };
     }
     if (overlayBy === "channel") {
@@ -13720,6 +14080,7 @@ export default function App({ hostProposals = null }: {
     { label: t("Bulk edit via CSV…"), className: "gl-pops-bulk", title: t("Bulk-edit population names and gate definitions via CSV"), disabled: Object.keys(state.populations).length < 2 || gatesStructureLocked, onClick: () => setCrud({ kind: "bulkRename" }) },
     "separator",
     { label: t("Align gates"), className: "gl-pops-align", checked: alignPopulationGates, title: t("Line the gate badges up in one column after the longest population name. Unchecked, each row's badges follow its own name."), onClick: () => setAlignPopulationGates((on) => !on) },
+    { label: t("Show population colours"), className: "gl-pops-colours", checked: showPopulationColours, title: t("Show each population's colour after its name. Click a colour to change it."), onClick: () => setShowPopulationColours((on) => !on) },
     { label: t("Mark siblings that share events"), className: "gl-pops-overlap", checked: showSiblingOverlap, title: t("Mark populations under one parent that hold some of the same events, as two gates drawn on separate plots can, with the number shared in the viewed file."), onClick: () => setShowSiblingOverlap((on) => !on) },
     // The tree has no row of its own: its rename, quadrant naming, ways back and legacy entries.
     "separator",
@@ -13733,6 +14094,22 @@ export default function App({ hostProposals = null }: {
    * colour, the edge tools (once on the strip above the plot), delete. The edge tools act on the
    * plot's axes, so they wait for a gate drawn there.
    */
+  /**
+   * The plotted range in a spider quadrant's own space, [x0, x1, y0, y1], whichever plot axis
+   * carries each of its channels; null when the plot does not show both.
+   */
+  const spiderBoxForPlot = (gate: Gate, s: Sample, shown: { x_range?: [number, number]; y_range?: [number, number] }): [number, number, number, number] | null => {
+    const xKey = s.channels[xIdx]?.key, yKey = s.channels[yIdx]?.key;
+    const rangeOf = (channel: string) => (channel === xKey ? shown.x_range : channel === yKey ? shown.y_range : undefined);
+    const xr = rangeOf(gate.x_channel), yr = rangeOf(gate.y_channel);
+    if (!xr || !yr) return null;
+    const span = (channel: string, r: [number, number]): [number, number] => {
+      const a = s.displayToGate(gate, channel, r[0]), b = s.displayToGate(gate, channel, r[1]);
+      return [Math.min(a, b), Math.max(a, b)];
+    };
+    const [x0, x1] = span(gate.x_channel, xr), [y0, y1] = span(gate.y_channel, yr);
+    return [x0, x1, y0, y1].every(Number.isFinite) ? [x0, x1, y0, y1] : null;
+  };
   const gateActionItems = (gateId: string, at?: [number, number]): MenuEntry[] => {
     const gate = state.gates[gateId];
     if (!gate) return [];
@@ -13751,13 +14128,27 @@ export default function App({ hostProposals = null }: {
         onClick: () => setGateColourPick({ gateId, at: at ?? lastPointer.current }),
       },
       "separator",
-      {
-        label: t("Extend to edges"),
-        className: "gate-row-extend",
-        disabled: !onPlot,
-        title: onPlot ? t("Each side of the gate moves outward until it meets another gate's edge, landing on it, or reaches the plot's edge where nothing is in the way, so nothing at the edges is missed") : notHere,
-        onClick: () => { if (!gatingPlotActions.current?.extendSelectedGateToEdges(gateId)) setImportMsg(t("{gate} already touches its neighbours and the plot's edges.", { gate: gate.name })); },
-      },
+      gate.gate_type === "quadrant" && gate.arms
+        ? {
+            // A spider quadrant's box grows about its centre, no arm turning, to cover the plot,
+            // so no event in view is left outside every quadrant (David, 2026-11-10).
+            label: t("Extend to edges"),
+            className: "gate-row-extend",
+            disabled: !drawn.has(gateId),
+            title: drawn.has(gateId) ? t("Grow the box the arms span until it covers the whole plot, each arm keeping its angle, so every event in view falls in a quadrant") : notHere,
+            onClick: () => {
+              const box = sample && displayed ? spiderBoxForPlot(gate, sample, displayed) : null;
+              if (box && spiderBoxGrowth(gate, box) > 1) dispatch({ type: "growSpiderBox", gateId, box });
+              else setImportMsg(t("{gate} already covers the plot.", { gate: gate.name }));
+            },
+          }
+        : {
+            label: t("Extend to edges"),
+            className: "gate-row-extend",
+            disabled: !onPlot,
+            title: onPlot ? t("Each side of the gate moves outward until it meets another gate's edge, landing on it, or reaches the plot's edge where nothing is in the way, so nothing at the edges is missed") : notHere,
+            onClick: () => { if (!gatingPlotActions.current?.extendSelectedGateToEdges(gateId)) setImportMsg(t("{gate} already touches its neighbours and the plot's edges.", { gate: gate.name })); },
+          },
       {
         label: t("Close gaps with neighbours"),
         className: "gate-row-close-gaps",
@@ -13780,6 +14171,101 @@ export default function App({ hostProposals = null }: {
   const gateRowMenu = (gateId: string): MenuEntry[] => {
     if (!state.gates[gateId]) return [];
     return [...tailoringSection(gateId), ...gateActionItems(gateId)];
+  };
+  /** Highlight the populations that use any of `gateIds` in the tree, the first scrolled into view. */
+  const showPopulationsUsing = (gateIds: readonly string[]) => {
+    const using = new Set(gateIds);
+    const order = populationTreeOrder(state.populations, state.root_population_id).map((o) => o.popId);
+    const popIds = order.filter((id) => state.populations[id]?.gate_refs.some((ref) => using.has(ref.gate_id)));
+    if (!popIds.length) return;
+    const activeId = popIds.includes(state.active_population_id ?? "") ? state.active_population_id! : popIds[0];
+    dispatch({ type: "selectPopulations", activeId, popIds });
+    requestAnimationFrame(() => document.querySelector(`.pop-row[data-pop-id="${popIds[0]}"]`)?.scrollIntoView({ block: "nearest" }));
+  };
+  /**
+   * A gate row's right-click menu (David, 2026-11-10). On one gate: its ⋯ menu, with New population
+   * from it and the populations that use it before Delete. On several highlighted gates: what acts
+   * on all of them.
+   */
+  const gateContextMenu = (gateId: string, targets: readonly string[]): MenuEntry[] => {
+    const gate = state.gates[gateId];
+    if (!gate) return [];
+    const ids = targets.filter((id) => state.gates[id]);
+    const used = (list: readonly string[]) => Object.values(state.populations).some((pop) => pop.gate_refs.some((ref) => list.includes(ref.gate_id)));
+    const at = lastPointer.current;
+    if (ids.length <= 1) {
+      const items = gateRowMenu(gateId);
+      const quadrant = gate.gate_type === "quadrant";
+      const extra: MenuEntry[] = [
+        {
+          label: t("New population from this gate…"), className: "gate-row-new-population",
+          disabled: gatesStructureLocked || quadrant,
+          title: quadrant ? t("A quadrant gate's four populations are made with it") : t("Create a population gated by {gate}", { gate: gate.name }),
+          // Under the parent the gate is already used beneath, if any: that is where it was drawn.
+          onClick: () => {
+            const order = populationTreeOrder(state.populations, state.root_population_id).map((o) => o.popId);
+            const user = order.find((id) => state.populations[id]?.gate_refs.some((ref) => ref.gate_id === gate.gate_id));
+            setCrud({ kind: "createPop", gateIds: [gate.gate_id], parentId: (user && state.populations[user]?.parent_id) || undefined });
+          },
+        },
+        {
+          label: t("Show populations using this gate"), className: "gate-row-show-populations",
+          disabled: !used([gate.gate_id]),
+          title: t("Highlight the populations that use {gate} in the population tree", { gate: gate.name }),
+          onClick: () => showPopulationsUsing([gate.gate_id]),
+        },
+      ];
+      // Before the last separator, which leads to Delete.
+      const cut = items.lastIndexOf("separator");
+      return cut < 0 ? [...items, "separator", ...extra] : [...items.slice(0, cut), "separator", ...extra, ...items.slice(cut)];
+    }
+    const drawn = new Set(mainPlotGates.map((plotted) => plotted.gate_id));
+    const shaped = (g: Gate | undefined) => !!g && (g.gate_type === "polygon" || g.gate_type === "rectangle");
+    const checked = ids.filter((id) => drawn.has(id) && shaped(state.gates[id]));
+    return [
+      { label: t("Colour {count} gates…", { count: ids.length }), className: "gate-row-colour", onClick: () => setGateColourPick({ gateId, gateIds: ids, at }) },
+      {
+        label: t("Close gaps between the selected gates"),
+        className: "gate-row-close-checked",
+        disabled: checked.length < 2,
+        title: t("Move the facing edges of the highlighted gates onto shared lines, so they touch with no gap and no overlap"),
+        onClick: () => { if (!gatingPlotActions.current?.closeGateGaps(checked)) setImportMsg(t("No neighbouring gate edges were close enough to join.")); },
+      },
+      {
+        label: t("Show populations using these gates"), className: "gate-row-show-populations",
+        disabled: !used(ids),
+        title: t("Highlight the populations that use any of these gates in the population tree"),
+        onClick: () => showPopulationsUsing(ids),
+      },
+      "separator",
+      {
+        label: t("Delete {count} gates…", { count: ids.length }), className: "gate-row-delete", danger: true,
+        disabled: gatesStructureLocked,
+        title: gatesStructureLocked ? t("Unlock structure to delete gates") : undefined,
+        onClick: () => setCrud({ kind: "confirmDelete", what: "gates", ids: [...ids] }),
+      },
+    ];
+  };
+  /**
+   * A population row's right-click menu entries that need App: Edit, New child population and the
+   * delete confirmation. The tree adds its own (Rename, Duplicate, folding, Copy names).
+   */
+  const populationActions = {
+    edit: (popId: string) => setCrud({ kind: "editPop", id: popId }),
+    addChild: (parentId: string) => setCrud({ kind: "createPop", parentId }),
+    remove: (popIds: readonly string[], how: "confirm" | "now") => {
+      const ids = popIds.filter((id) => id !== state.root_population_id && state.populations[id]);
+      if (!ids.length || gatesStructureLocked) return;
+      if (how === "confirm") { setCrud({ kind: "confirmDelete", what: "pops", ids: [...ids] }); return; }
+      // The Delete key, as for gates: no question, a checkpoint first, and Undo brings them back.
+      const deleted = ids.length === 1
+        ? t("Deleted population {name}. Undo restores it.", { name: state.populations[ids[0]]?.name ?? ids[0] })
+        : t("Deleted {count} populations. Undo restores them.", { count: ids.length });
+      void checkpointCurrentWorkspace("before-population-delete").then(() => {
+        dispatch({ type: "deletePopulations", popIds: ids });
+        setImportMsg(deleted);
+      });
+    },
   };
   /** A gate's tailoring choices under their label, then a separator: first in its row's ⋯ and its right-click menu alike (David, 2026-10-23). */
   function tailoringSection(gateId: string): MenuEntry[] {
@@ -13931,6 +14417,24 @@ export default function App({ hostProposals = null }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sample, activeSampleId, fileName, sampleDataRevisionKey, globalScales, scalesVersion, instrumentMode, activeTab]);
 
+  /**
+   * One channel's range on the Gating tab, as figureGatingRanges gives it for every channel: for
+   * the Plotting tab's per-cell chart, which asks for the one channel it draws, only when it
+   * frames its axis on it.
+   */
+  const plottingGatingRange = useCallback(
+    (channel: string): [number, number] | undefined => {
+      if (!sample) return undefined;
+      const explicit = globalScales[channel];
+      if (explicit) return explicit;
+      const idx = sample.index(channel);
+      if (idx === undefined) return undefined;
+      return buildWorkspaceAxisRanges([{ id: activeSampleId ?? "active", name: fileName, sample, xIndex: idx, yIndex: idx, mask: null }])?.xRange;
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sample, activeSampleId, fileName, sampleDataRevisionKey, globalScales, scalesVersion, instrumentMode],
+  );
+
   // ── Size by: a channel's value as each point's radius, for every event or for one class of the colouring. ──
   const [sizeByKey, setSizeByKey] = useState<string | null>(null);
   const [sizeByClass, setSizeByClass] = useState<string>("all");
@@ -14041,14 +14545,105 @@ export default function App({ hostProposals = null }: {
   const chooseImagesPopulation = useCallback((popId: string) => {
     if (state.populations[popId]) dispatch({ type: "setActivePopulation", popId });
   }, [state.populations, dispatch]);
-  const imagesClasses = useMemo(
-    () => (overlayBy === "objects" || overlayBy === "cellclass"
-      ? thumbnailClassLabels.map((label, i) => ({ label, colour: paletteColors(overlayPalette, 4)[i] ?? "#888888" }))
-      : undefined),
-    [overlayBy, thumbnailClassLabels, overlayPalette],
-  );
-  const imagesClassOf = useCallback((eventIndex: number) => thumbnailClassOf(null, eventIndex), [thumbnailClassOf]);
-  const imagesClassTitle = overlayBy === "objects" ? t("Objects in image") : overlayBy === "cellclass" ? t("Single cells") : undefined;
+  // The Images tab classes its wall by the count's results on its own, whatever the plot is
+  // coloured by (David, 2026-11-10): the classes show once the viewed file is counted.
+  const [imagesClassBy, setImagesClassBy] = usePersistedTabState<ImagesClassBy>("images.classBy", "cellclass");
+  const activeObjects = activeEntry ? imageObjects[activeEntry.id] ?? null : null;
+  const imagesClasses = useMemo(() => {
+    if (!activeObjects || imagesClassBy === "none") return undefined;
+    const labels = imagesClassBy === "objects" ? OBJECT_CLASS_LABELS : CELL_CLASS_LABELS.slice(0, 4);
+    const colours = paletteColors(overlayPalette, 4);
+    return labels.map((label, i) => ({ label: t(label), colour: colours[i] ?? "#888888" }));
+  }, [activeObjects, imagesClassBy, overlayPalette, t]);
+  const imagesClassOf = useCallback((eventIndex: number): number | null => {
+    if (!activeObjects) return null;
+    if (imagesClassBy === "objects") {
+      const count = activeObjects.objectCount[eventIndex];
+      return count === undefined || count === 255 ? null : count <= 0 ? 0 : count === 1 ? 1 : count === 2 ? 2 : 3;
+    }
+    if (imagesClassBy === "cellclass") {
+      const cls = cellClasses?.classes[eventIndex];
+      return cls === undefined || cls === 4 ? null : cls;
+    }
+    return null;
+  }, [activeObjects, imagesClassBy, cellClasses]);
+  const imagesClassTitle = imagesClasses ? (imagesClassBy === "objects" ? t("Objects in image") : t("Single cells")) : undefined;
+  // The count as the Images tab starts and reads it, and the cell size it measured on each
+  // event's own SSC picture (the GateLab mask channels), for the wall's size summary.
+  const imagesMeasure = useMemo<ImagesMeasure | null>(() => {
+    if (!activeEntry?.images) return null;
+    // The workspace's files with images: how many are measured, which one is being measured, and which failed.
+    const fileCount = imagedEntries.length;
+    const measured = imagedEntries.filter((e) => imageObjects[e.id]).length;
+    const failures = imagedEntries.flatMap((e) => {
+      const p = objectsProgress[e.id];
+      return p && "error" in p ? [{ fileName: e.name, message: p.error }] : [];
+    });
+    const runningEntry = countTarget ? imagedEntries.find((e) => e.id === countTarget) ?? null : null;
+    const runningProgress = runningEntry ? objectsProgress[runningEntry.id] : undefined;
+    const state: ImagesMeasure["state"] = runningEntry
+      ? {
+        kind: "running",
+        percent: runningProgress && !("error" in runningProgress) ? Math.round((100 * runningProgress.done) / Math.max(1, runningProgress.total)) : 0,
+        // Under the plot's image colourings the viewed file's count is the plot's.
+        cancellable: measureAll && !(overlayWantsCount && runningEntry.id === activeEntry.id),
+        fileName: runningEntry.name,
+        fileIndex: measured + 1,
+        fileCount,
+      }
+      : measured === fileCount
+        ? { kind: "done", fileCount }
+        : { kind: "idle", measured, fileCount };
+    const sample = activeEntry.sample;
+    // The size row reads the LightLoss outline (the cell's own edge) when the count measured it,
+    // else the SSC mask (a file counted before the outline existed).
+    const sizes: { key: string; label: string; values: ArrayLike<number> }[] = [];
+    let sizeSource: ImagesMeasure["sizeSource"] = "lightloss";
+    if (activeObjects) {
+      const read = (keys: readonly (readonly [string, string])[]) => {
+        const out: typeof sizes = [];
+        for (const [featureKey, label] of keys) {
+          const idx = maskFeatureChannel(sample, featureKey);
+          if (idx === undefined) continue;
+          out.push({ key: sample.channels[idx].key, label: t(label), values: sample.rawColumnData(idx) });
+        }
+        return out;
+      };
+      const fromLightLoss = read([["llDiameter", "Diameter"], ["llMajorAxis", "Major axis"], ["llMinorAxis", "Minor axis"]]);
+      if (fromLightLoss.length > 0) sizes.push(...fromLightLoss);
+      else {
+        sizes.push(...read([["diameter", "Diameter"], ["majorAxis", "Major axis"], ["minorAxis", "Minor axis"]]));
+        sizeSource = "ssc";
+      }
+    }
+    return {
+      state,
+      failures,
+      onStart: () => {
+        // A fresh start retries the files that failed.
+        setObjectsProgress((prev) => Object.fromEntries(Object.entries(prev).filter(([, p]) => !("error" in p))));
+        setMeasureAll(true);
+      },
+      onCancel: () => setMeasureAll(false),
+      classBy: imagesClassBy,
+      onClassBy: setImagesClassBy,
+      strictness: cellStrictness,
+      onStrictness: setCellStrictness,
+      sizes,
+      sizeSource,
+      objectCount: activeObjects?.objectCount ?? null,
+      micronsPerPixel,
+      calibration: beadCalibration,
+      onCalibrate: sizeSource === "lightloss"
+        ? (beadMicrons: number, medianPixels: number, axisRatio: number | null) => {
+          if (!(beadMicrons > 0) || !(medianPixels > 0)) return;
+          setBeadCalibration({ beadMicrons, fileName: activeEntry.name, axisRatio });
+          setMicronsPerPixel(beadMicrons / medianPixels);
+        }
+        : undefined,
+    };
+    // activeDataRevision: the mask channels are added to the sample after the count lands.
+  }, [activeEntry, activeObjects, imagedEntries, imageObjects, objectsProgress, countTarget, measureAll, overlayWantsCount, imagesClassBy, setImagesClassBy, cellStrictness, setCellStrictness, activeDataRevision, micronsPerPixel, beadCalibration, t]);
   /**
    * A population of cells picked on the image wall (an image set): the picks become a 0/1 channel
    * of the file, saved with the workspace by value, and the population is a rectangle on it under
@@ -14173,7 +14768,9 @@ export default function App({ hostProposals = null }: {
       effectiveYRange,
       maxEvents <= 0 ? Infinity : maxEvents,
       contourThreshold,
-      overlaySpec,
+      // A colouring is drawn on dots only: Pseudocolour and Contour draw density, which the
+      // renderer would otherwise give up for coloured dots (David, 2026-11-10).
+      plotMode === "dots" ? overlaySpec : null,
       { plotted: true, sizes: pointSizes },
     );
 
@@ -14264,7 +14861,7 @@ export default function App({ hostProposals = null }: {
       const ungated = levels.length;
       colorPalette = [
         ...levels.map((level) =>
-          populationColor(overlayPalette, state.populations[level.popId]?.colorSlot)),
+          populationOverlayColor(overlayPalette, state.populations[level.popId])),
         UNGATED_COLOR,
       ];
       colorLabels = [...levels.map(({ name }) => name), "ungated"];
@@ -14357,6 +14954,7 @@ export default function App({ hostProposals = null }: {
       { origins: true },
     );
     const contributors = cloud.sampleEventCounts.filter(({ eventCount }) => eventCount > 0);
+    const coloured = cloud.colors !== null && plotMode === "dots";
     const plotted: PlottedPoints = {
       indices: cloud.eventIndex ?? null,
       xd: cloud.x,
@@ -14373,10 +14971,11 @@ export default function App({ hostProposals = null }: {
       sample_scope_count: cloud.sampleEventCounts.length,
       sample_contributor_count: contributors.length,
       sample_contributor_names: contributors.map(({ name }) => name),
-      overlay_mode: cloud.colors !== null,
-      color_b64: cloud.colors ? encodeUint8Base64(cloud.colors) : undefined,
-      color_palette: cloud.colors ? colorPalette : undefined,
-      color_labels: cloud.colors ? colorLabels : undefined,
+      // As for one file: the colouring is drawn on dots only.
+      overlay_mode: coloured,
+      color_b64: coloured ? encodeUint8Base64(cloud.colors!) : undefined,
+      color_palette: coloured ? colorPalette : undefined,
+      color_labels: coloured ? colorLabels : undefined,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -14660,12 +15259,15 @@ export default function App({ hostProposals = null }: {
     }
   }, [fitGate, activeSampleId, state.active_population_id, state.gate_version]);
 
-  const fitDataAndGates = useCallback(() => {
+  // Transform changes fit only the channels whose display units changed. An explicit Fit
+  // request omits the filter and still fits every axis shown on the current plot.
+  const fitPlotAxes = useCallback((channelKeys?: ReadonlySet<string>) => {
     if (!sample) return;
     const xKey = sample.channels[xIdx]?.key;
     const yKey = sample.channels[yIdx]?.key;
     if (!xKey || !yKey) return;
     if (histogramView) {
+      if (channelKeys && !channelKeys.has(xKey)) return;
       // The histogram has one axis: X fits its data and the ranges drawn on it; Y is not touched.
       // Only the ranges' geometry counts. Their label offsets are the scatter plot's (the
       // histogram places its labels in its own terms), and for a range with an open end they lie
@@ -14677,13 +15279,18 @@ export default function App({ hostProposals = null }: {
       return;
     }
     const onAxes = plotGatesInPlotOrientation(mainPlotGates);
-    setGlobalScale(xKey, includePlotGatesInAxisRange(
-      workspaceAutomaticRanges?.xRange ?? sample.displayRange(xIdx), onAxes, "x"));
-    setGlobalScale(yKey, includePlotGatesInAxisRange(
-      workspaceAutomaticRanges?.yRange ?? sample.displayRange(yIdx), onAxes, "y"));
-    setXRange(null);
-    setYRange(null);
+    if (!channelKeys || channelKeys.has(xKey)) {
+      setGlobalScale(xKey, includePlotGatesInAxisRange(
+        workspaceAutomaticRanges?.xRange ?? sample.displayRange(xIdx), onAxes, "x"));
+      setXRange(null);
+    }
+    if (!channelKeys || channelKeys.has(yKey)) {
+      setGlobalScale(yKey, includePlotGatesInAxisRange(
+        workspaceAutomaticRanges?.yRange ?? sample.displayRange(yIdx), onAxes, "y"));
+      setYRange(null);
+    }
   }, [sample, xIdx, yIdx, workspaceAutomaticRanges, mainPlotGates, histogramView, histogramGates, setGlobalScale]);
+  const fitDataAndGates = useCallback(() => fitPlotAxes(), [fitPlotAxes]);
 
   /**
    * The zoom buttons: one step on each axis the plot shows, the bottom-left corner held where it
@@ -14763,19 +15370,20 @@ export default function App({ hostProposals = null }: {
   // the old frame with the data collapsed against one edge. Refit explicitly instead of relying
   // on that, and do it in an effect so the automatic ranges have recomputed at the new transform
   // first -- computing them in the change handler would fit to the scale being replaced.
-  const pendingScaleRefit = useRef(false);
+  const pendingScaleRefit = useRef(new Set<string>());
   useEffect(() => {
-    if (!pendingScaleRefit.current) return;
+    if (pendingScaleRefit.current.size === 0) return;
     // Nothing to fit against -- no sample, or the channels are not both present. Clear the
     // intent rather than holding it: the flag also suppresses painting (see `displayed`), so a
     // request that can never be satisfied would freeze the plot instead of merely deferring it.
     if (!workspaceAutomaticRanges) {
-      pendingScaleRefit.current = false;
+      pendingScaleRefit.current.clear();
       return;
     }
-    pendingScaleRefit.current = false;
-    fitDataAndGates();
-  }, [scalesVersion, workspaceAutomaticRanges, fitDataAndGates]);
+    const channelKeys = pendingScaleRefit.current;
+    pendingScaleRefit.current = new Set<string>();
+    fitPlotAxes(channelKeys);
+  }, [scalesVersion, workspaceAutomaticRanges, fitPlotAxes]);
 
   /**
    * The last payload sent, so a gates-only change can be recognised.
@@ -14802,7 +15410,7 @@ export default function App({ hostProposals = null }: {
   const lastDisplayed = useRef<Record<string, unknown> | null>(null);
   const displayed = useMemo(() => {
     if (!payload || !sample) return payload;
-    if (pendingScaleRefit.current && lastDisplayed.current) return lastDisplayed.current;
+    if (pendingScaleRefit.current.size > 0 && lastDisplayed.current) return lastDisplayed.current;
     const lbl = (k: string) => sample.labelForKey(k);
     // Everything that changes what is drawn on the canvas, as opposed to over it.
     const sig = JSON.stringify([
@@ -14906,6 +15514,8 @@ export default function App({ hostProposals = null }: {
   return (
     // Every tab reads the gates' look from here (gateInk.ts).
     <GateInkContext.Provider value={gateInk}>
+    {/* And the figure style (figureStyle.tsx), with its editor. */}
+    <FigureStyleProvider style={figureStyle} onChange={setFigureStyle}>
     <div className="gl-app" style={{ "--gl-left-pane-width": `${leftWidth}px` } as React.CSSProperties}>
       <header className="gl-header">
         {/* Hovering the name explains what the app is and, more usefully, the one design choice
@@ -15111,6 +15721,11 @@ export default function App({ hostProposals = null }: {
                 onClick: () => setChorusPicker({ experiment: null, trees: [] }),
               },
               {
+                label: t("Apply gating template…"),
+                title: "Apply a gating template (.gatelabtree), or the tree of a saved workspace (.gatelab), to the loaded files: every gate kind as it was drawn, curly and spider quadrants included, with each channel its gates read matched to this file's before anything changes.",
+                onClick: () => void pickFilesOrInput(templateRef.current, TEMPLATE_PICKER_ACCEPT, "Gating template or GateLab workspace").then((files) => { if (files?.[0]) void openGatingTemplate(files[0]); }),
+              },
+              {
                 label: t("Import hierarchy CSV…"),
                 title: "Import a hierarchy from a CSV: gate lines, population lines naming their parents, and, for a CyTOF debarcoding scheme, a table with one row per sample and one 0/1 column per barcode channel. Gates come from the file or from a template, so you tweak them rather than draw them.",
                 onClick: () => void pickFilesOrInput(barcodeRef.current, TABLE_FILE_ACCEPT, "Barcode scheme table").then((files) => { if (files?.[0]) void prepareBarcodeImport(files[0]); }),
@@ -15160,6 +15775,12 @@ export default function App({ hostProposals = null }: {
                 title: "Open the GatingML export dialog: choose standard GateLab/GateLabR or Cytobank-compatible format and review fidelity warnings.",
                 disabled: Object.keys(state.gates).length === 0,
                 onClick: () => setGatingMlExportOpen(true),
+              },
+              {
+                label: t("Export gating template…"),
+                title: "Write the tree every file follows as a gating template (.gatelabtree): every gate kind exactly as drawn, curly and spider quadrants included, the populations, the channels the gates read, the viewed file's axes and its compensation. Apply it to another experiment's files from Import.",
+                disabled: Object.keys(state.gates).length === 0,
+                onClick: () => exportGatingTemplate(),
               },
               {
                 label: t("Export FlowJo workspace…"),
@@ -15697,6 +16318,17 @@ export default function App({ hostProposals = null }: {
                 }}
               />
               <input
+                ref={templateRef}
+                type="file"
+                accept={GATING_TEMPLATE_ACCEPT}
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void openGatingTemplate(f);
+                  e.target.value = "";
+                }}
+              />
+              <input
                 ref={barcodeRef}
                 type="file"
                 accept=".csv,.tsv,.txt"
@@ -15955,7 +16587,8 @@ export default function App({ hostProposals = null }: {
               <details className="gl-display-popover gl-popover">
                 <summary title={t("Point opacity and size, density colour, how many events to draw, colouring, and the plot's font sizes")}>
                   {t("Display")} · <span className="gl-display-summary-events">{maxEvents ? t("{count} events", { count: maxEvents.toLocaleString() }) : t("all events")}</span>
-                  {overlayBy !== "none" && <> · <span className="gl-display-summary-colour">{t("coloured")}</span></>}
+                  {/* A colouring is drawn on dots only; under Pseudocolour or Contour it waits for Dots. */}
+                  {overlayBy !== "none" && <> · <span className="gl-display-summary-colour">{mode === "dots" ? t("coloured") : t("coloured on Dots")}</span></>}
                   {controlEntry && <> · <span className="gl-display-summary-control">{t("control")}</span></>}
                 </summary>
                 <div className="gl-display-popover-body">
@@ -16087,23 +16720,34 @@ export default function App({ hostProposals = null }: {
                       } else {
                         setOverlayBy(value as Exclude<typeof overlayBy, "coldata" | "channel">);
                       }
-                      // A colouring is not visible under pseudocolour, so choosing one shows dots (David, 2026-10-13).
-                      if (value !== "none" && mode === "pseudocolor") setMode("dots");
+                      // A colouring is drawn on dots only, so choosing one shows dots (David, 2026-10-13);
+                      // Pseudocolour or Contour chosen after it draws density again (2026-11-10).
+                      if (value !== "none" && mode !== "dots") setMode("dots");
                     }}
                   />
                 </span>
                 {overlayBy === "coldata" && overlayColDataColumn && !overlayColDataValues && (
                   <span className="gl-muted">{t("loading {column}…", { column: overlayColDataColumn })}</span>
                 )}
-                {(overlayBy === "objects" || overlayBy === "cellclass") && activeEntry && objectsProgress[activeEntry.id] && (
-                  <span className="gl-muted">
-                    {"error" in objectsProgress[activeEntry.id]
-                      ? (objectsProgress[activeEntry.id] as { error: string }).error
-                      : t("Counting objects… {percent}%", {
-                          percent: Math.round((100 * (objectsProgress[activeEntry.id] as { done: number; total: number }).done) /
-                            Math.max(1, (objectsProgress[activeEntry.id] as { done: number; total: number }).total)),
-                        })}
-                  </span>
+                {countTarget && (() => {
+                  const progress = objectsProgress[countTarget];
+                  const percent = progress && !("error" in progress) ? Math.round((100 * progress.done) / Math.max(1, progress.total)) : 0;
+                  const name = samples.find((e) => e.id === countTarget)?.name ?? "";
+                  return (
+                    <span className="gl-muted">
+                      {measureAll && imagedEntries.length > 1
+                        ? t("Measuring cells: {file} ({index} of {count})… {percent}%", {
+                          file: name,
+                          index: imagedEntries.filter((e) => imageObjects[e.id]).length + 1,
+                          count: imagedEntries.length,
+                          percent,
+                        })
+                        : t("Counting objects… {percent}%", { percent })}
+                    </span>
+                  );
+                })()}
+                {(overlayBy === "objects" || overlayBy === "cellclass") && activeEntry && objectsProgress[activeEntry.id] && "error" in objectsProgress[activeEntry.id] && (
+                  <span className="gl-muted">{(objectsProgress[activeEntry.id] as { error: string }).error}</span>
                 )}
                 {overlayBy === "cellclass" && (
                   <label
@@ -16494,7 +17138,7 @@ export default function App({ hostProposals = null }: {
                         {axis} · {sample.channelLabel(idx)}
                       </span>
                       <ChannelTransformSelect sample={sample} idx={idx} label={axis} onChanged={() => {
-                        pendingScaleRefit.current = true;
+                        pendingScaleRefit.current.add(sample.channels[idx].key);
                         bumpScales();
                       }} />
                       <span className="gl-scale-params">
@@ -16583,7 +17227,7 @@ export default function App({ hostProposals = null }: {
                                 delete next[sample.channels[idx].key];
                                 return next;
                               });
-                              pendingScaleRefit.current = true;
+                              pendingScaleRefit.current.add(sample.channels[idx].key);
                               bumpScales();
                             }}
                           >
@@ -17036,13 +17680,17 @@ export default function App({ hostProposals = null }: {
                 <ColourPopover
                   x={gateColourPick.at[0]}
                   y={gateColourPick.at[1]}
-                  label={colouredGates
-                    ? t("Colour of {name}", { name: state.gates[gateColourPick.gateId].name })
-                    : t("Colour of {name} (gates are drawn in black while Coloured gates is off)", { name: state.gates[gateColourPick.gateId].name })}
+                  label={(() => {
+                    const count = gateColourPick.gateIds?.length ?? 1;
+                    const name = count > 1 ? t("{count} gates", { count }) : state.gates[gateColourPick.gateId].name;
+                    return colouredGates
+                      ? t("Colour of {name}", { name })
+                      : t("Colour of {name} (gates are drawn in black while Coloured gates is off)", { name });
+                  })()}
                   value={state.gates[gateColourPick.gateId].color}
                   palette={GATE_COLORS}
                   onPick={(colour, close) => {
-                    dispatch({ type: "setGateColour", gateId: gateColourPick.gateId, colour });
+                    for (const gateId of gateColourPick.gateIds ?? [gateColourPick.gateId]) dispatch({ type: "setGateColour", gateId, colour });
                     markWorkspaceDirty();
                     if (close) setGateColourPick(null);
                   }}
@@ -17109,7 +17757,7 @@ export default function App({ hostProposals = null }: {
               />
             )}
             {activeTab === "proportions" && (
-              <ProportionsTab
+              <PlottingChartsTab
                 key={illustVersion}
                 samples={samples.map(entry => ({ ...entry, hierarchyId: hierarchyOfFile(entry.id) }))}
                 activeSampleId={activeSampleId}
@@ -17121,6 +17769,12 @@ export default function App({ hostProposals = null }: {
                 dataRevisionKey={sampleDataRevisionKey}
                 onConfigChange={markWorkspaceDirty}
                 onAddToLayout={LAYOUT_TAB_AVAILABLE ? addProportionsToLayout : undefined}
+                onAddPanelsToLayout={LAYOUT_TAB_AVAILABLE ? addPlottingPanelsToLayout : undefined}
+                onAddPagesToLayout={LAYOUT_TAB_AVAILABLE ? addPlottingPagesToLayout : undefined}
+                onAddPanelPagesToLayout={LAYOUT_TAB_AVAILABLE ? addPlottingPanelPagesToLayout : undefined}
+                gatingRange={plottingGatingRange}
+                illustrationPanelSize={illustConfigRef.current?.figure?.panelSize}
+                onColumnLevels={setMetadataColumnLevels}
               />
             )}
             {activeTab === "division" && (
@@ -17149,6 +17803,7 @@ export default function App({ hostProposals = null }: {
                 onAddColumn={addMetadataColumn}
                 onRenameColumn={renameMetadataColumn}
                 onDeleteColumn={deleteMetadataColumn}
+                onColumnLevels={setMetadataColumnLevels}
                 onImport={importMetadata}
                 populationRows={populationRows}
                 populationMetadata={populationMetadata}
@@ -17189,7 +17844,7 @@ export default function App({ hostProposals = null }: {
                 onTransformChanged={(key) => {
                   // A plotted axis is fitted again as the Transforms row fits it; another channel's
                   // range, in the old transform's units, is cleared and fitted when next drawn.
-                  if (key === activeXChannelKey || key === activeYChannelKey) pendingScaleRefit.current = true;
+                  if (key === activeXChannelKey || key === activeYChannelKey) pendingScaleRefit.current.add(key);
                   else if (globalScales[key]) setGlobalScale(key, null);
                   bumpScales();
                 }}
@@ -17225,9 +17880,10 @@ export default function App({ hostProposals = null }: {
               />
             )}
             {activeTab === "illustration" && (
-              <FigureWorkspace
+              <IllustrationTab
                 key={illustVersion}
                 populationMetadata={populationMetadata}
+                metadataLevels={metadataLevels}
                 samples={samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id), metadata: metadata[entry.id] }))}
                 checkedSampleIds={checkedSamples.map(entry => entry.id)}
                 state={state}
@@ -17245,6 +17901,8 @@ export default function App({ hostProposals = null }: {
                 onFitChannels={fitChannels}
                 onAddToLayout={LAYOUT_TAB_AVAILABLE ? addPlotsToLayout : undefined}
                 onAddFigureToLayout={LAYOUT_TAB_AVAILABLE ? addFigureToLayout : undefined}
+                onAddFigurePagesToLayout={LAYOUT_TAB_AVAILABLE ? addFigurePagesToLayout : undefined}
+                onAddPanelPagesToLayout={LAYOUT_TAB_AVAILABLE ? addPanelPagesToLayout : undefined}
                 onOpenInGating={openLayoutRecipeInGating}
                 onGateLabelMove={(hierarchyId, gateId, offset, quadrant) => {
                   dispatch({ type: "moveGateLabel", hierarchyId, gateId, labelOffset: offset, ...(quadrant !== undefined ? { quadrant } : {}) });
@@ -17275,9 +17933,16 @@ export default function App({ hostProposals = null }: {
                   defaultY={sample.channels[yIdx].key}
                   illustrationConfig={illustConfigRef.current}
                   divisionProfiles={compatibleDivisionProfiles}
-                  plottingSettings={() => readProportionsSettings(defaultProportionsSettings(samples, state, metadataColumns))}
-                  onOpenInPlotting={(settings) => {
-                    writeProportionsSettings(settings);
+                  plottingSettings={() => {
+                    // A per-cell or statistic chart holds the channel chosen, which a ticked file may lack; the block takes the one the tab draws.
+                    const settings = readProportionsSettings(defaultProportionsSettings(samples, state, metadataColumns));
+                    if (settings.valueKind === "proportion") return settings;
+                    const ticked = samples.filter((entry) => settings.files.includes(entry.id));
+                    return { ...settings, channel: resolveCellChannel(settings.channel, ticked.length ? ticked : samples) };
+                  }}
+                  onOpenInPlotting={(settings, name) => {
+                    // A chart of its own, named after the block, so the chart shown is never replaced unasked.
+                    openPlottingSettingsAsChart(settings, name);
                     markWorkspaceDirty();
                     setActiveTab("proportions");
                   }}
@@ -17323,6 +17988,7 @@ export default function App({ hostProposals = null }: {
                     classOf={imagesClasses ? imagesClassOf : undefined}
                     classes={imagesClasses}
                     classTitle={imagesClassTitle}
+                    measure={imagesMeasure ?? undefined}
                     onMakePopulation={makeImageSetPopulation}
                     onFindSimilar={findSimilarCells}
                   />
@@ -17458,7 +18124,9 @@ export default function App({ hostProposals = null }: {
               tailorSwitchOf={tailorSwitchOf}
               onTailorSwitch={switchTailoring}
               onScopeMenu={openScopeMenu}
-              rowMenuOf={gateRowMenu} />
+              rowMenuOf={gateRowMenu}
+              contextMenuOf={gateContextMenu}
+              paneMenu={gatesPaneMenu} />
           </Pane>
           {!gatesCollapsed && (
             <div
@@ -17512,9 +18180,13 @@ export default function App({ hostProposals = null }: {
                 state={state}
                 derived={populationTreeDerived}
                 dispatch={uiDispatch}
+                actions={populationActions}
+                paneMenu={populationsPaneMenu}
                 tailoredGateIds={viewedTailoredGateIds}
                 showHierarchyControls={false}
                 alignGates={alignPopulationGates}
+                showColours={showPopulationColours}
+                onShowColours={setShowPopulationColours}
                 perFile={treeControls}
                 statsPending={populationStatsPending}
                 statsSampleCount={includedSamples.length}
@@ -17674,6 +18346,8 @@ export default function App({ hostProposals = null }: {
       {crud?.kind === "createPop" && (
         <CreatePopModal
           state={state}
+          initialParentId={crud.parentId}
+          initialGateIds={crud.gateIds}
           onCancel={() => setCrud(null)}
           onConfirm={(a) => {
             dispatch(a);
@@ -17826,6 +18500,26 @@ export default function App({ hostProposals = null }: {
           confirmLabel="Start New Workspace"
           onCancel={() => setCrud(null)}
           onConfirm={() => void startNewWorkspace()}
+          // Unsaved work can be saved from here; the new workspace starts only once it is saved.
+          alternative={(driveTarget ? dirty : dirty || !wsHandle) ? { label: "Save first", onClick: () => void saveThenStartNewWorkspace() } : undefined}
+        />
+      )}
+      {crud?.kind === "confirmOpenWorkspace" && (
+        <ConfirmModal
+          title="Open another workspace?"
+          message={
+            driveTarget
+              ? `Opening ${crud.name} closes ${driveTarget.name}. Its changes are not saved to the lab Drive, and GateLab keeps no copy of a Drive workspace in this browser, so they are lost. Save first to keep them.`
+              : `Opening ${crud.name} closes the current samples, gates, populations, and settings, which have changes that are not saved. GateLab will keep a local recovery checkpoint. Save first if you want a normal workspace file.`
+          }
+          confirmLabel="Open Without Saving"
+          onCancel={() => setCrud(null)}
+          onConfirm={() => {
+            const held = crud;
+            setCrud(null);
+            void openWorkspaceFromFile(held.file, held.handle, held.name, true);
+          }}
+          alternative={{ label: "Save first", onClick: () => void saveThenOpenWorkspace(crud) }}
         />
       )}
       {crud?.kind === "confirmDelete" && (
@@ -17904,7 +18598,7 @@ export default function App({ hostProposals = null }: {
                 </div>
                 {reasonWasCut(latest.why) && (
                   <details className="gl-modal-reason-full">
-                    <summary>{t("The full reason")}</summary>
+                    <FoldSummary>{t("The full reason")}</FoldSummary>
                     <div className="gl-modal-reason-text">{latest.why}</div>
                   </details>
                 )}
@@ -18883,6 +19577,42 @@ export default function App({ hostProposals = null }: {
           onCancel={() => { agentSave.resolve({ outcome: "cancelled" }); agentSaveRef.current = null; setAgentSave(null); }}
         />
       )}
+      {pendingTemplate && sample && (() => {
+        const plan = pendingTemplatePlan()!;
+        const mapped = new Set(plan.map.values());
+        const template = pendingTemplate.template;
+        return (
+          <GatingTemplateModal
+            fileName={pendingTemplate.fileName}
+            treeName={template.tree.name}
+            nGates={Object.keys(template.tree.gates).length}
+            nPopulations={Object.keys(template.tree.populations).length - 1}
+            sourceFileName={template.source.fileName}
+            savedAt={template.savedAt}
+            rows={plan.rows}
+            channels={sample.channels.map((c) => ({ key: c.key, label: c.label ?? c.key }))}
+            filesMissing={samples.filter((entry) => entry.id !== activeSampleId).flatMap((entry) => {
+              const has = new Set(entry.sample.channels.map((c) => c.key));
+              const lacking = [...mapped].filter((k) => !has.has(k));
+              return lacking.length ? [{ file: calledLoaded(entry.name, entry.id), channels: lacking }] : [];
+            })}
+            scalesAvailable={template.scales !== null}
+            withScales={pendingTemplate.withScales}
+            compensationNote={templateCompensationNote(template)}
+            notes={template.notes}
+            onPick={(key, target) => setPendingTemplate((cur) => {
+              if (!cur) return cur;
+              const manual = { ...cur.manual };
+              if (target) manual[key] = target;
+              else delete manual[key];
+              return { ...cur, manual };
+            })}
+            onScales={(withScales) => setPendingTemplate((cur) => cur && { ...cur, withScales })}
+            onContinue={() => stageGatingTemplate()}
+            onCancel={() => setPendingTemplate(null)}
+          />
+        );
+      })()}
       {pendingGatingMlImport && gatingImportNeedsDecision(pendingGatingMlImport, state, samples.length) && (
         <GatingMlImportModal
           nGates={pendingGatingMlImport.result.n_gates_imported}
@@ -18895,6 +19625,8 @@ export default function App({ hostProposals = null }: {
                 ? "a FACSChorus experiment"
                 : pendingGatingMlImport.sourceKind === "diva"
                   ? "a FACSDiva experiment"
+                  : pendingGatingMlImport.sourceKind === "template"
+                    ? "a GateLab gating template"
                   : pendingGatingMlImport.result.source === "gatelabr"
                     ? "a GateLab / GateLabR export"
                     : pendingGatingMlImport.result.source === "cytobank"
@@ -19213,6 +19945,7 @@ export default function App({ hostProposals = null }: {
         />
       )}
     </div>
+    </FigureStyleProvider>
     </GateInkContext.Provider>
   );
 

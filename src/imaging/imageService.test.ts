@@ -50,7 +50,7 @@ class RuntimeWorker implements ImageWorkerLike {
     yieldToEventLoop: async () => undefined,
     makeBitmap: async () => null,
   });
-  constructor(readonly lane: RenderLane) {}
+  constructor(readonly lane: RenderLane | "count") {}
   postMessage(message: unknown): void {
     this.sent.push(message);
     this.runtime.dispatch(message);
@@ -64,6 +64,8 @@ function serviceWithWorkers(options: ConstructorParameters<typeof ImageService>[
   const service = new ImageService({
     workerFactory: (lane) => { const w = new RuntimeWorker(lane); workers.push(w); return w; },
     timeoutMs: 0,
+    // One worker unless a test asks for the pool: the lane tests count workers by lane.
+    countWorkers: 1,
     ...options,
   });
   return { service, workers };
@@ -243,6 +245,63 @@ describe("ImageService", () => {
     expect((batch.sent.find((m) => (m as { type: string }).type === "open-source") as { scaleSample?: number }).scaleSample).toBe(0);
     const sent = batch.sent.find((m) => (m as { type: string }).type === "classify") as { options?: { scale?: Record<number, number> } };
     expect(sent.options?.scale?.[4]).toBeGreaterThan(0);
+  });
+
+  it("splits a count over a pool of workers, a range each, and joins it to what one worker finds", async () => {
+    // 600 events: a blob, no waveform, an empty picture, over and over.
+    const many = buildSyntheticCvw(Array.from({ length: 600 }, (_, i) => (i % 3 === 0
+      ? { samples: 1024, carriers: Array.from({ length: 20 }, (_, r) => ({ slot: 4, row: 40 + r, amplitude: sscBlob(40 + r) })) }
+      : i % 3 === 1 ? { noWaveform: true } : { samples: 768 })));
+    const big = (): CvwImageSource => ({ ...source(), fileName: "tube B.cvw", file: memoryFile("tube B.cvw", many), eventCount: 600 });
+    const alone = serviceWithWorkers();
+    alone.service.attach("f1", big());
+    const one = await alone.service.classify("f1").promise;
+    const pooled = serviceWithWorkers({ countWorkers: 3 });
+    pooled.service.attach("f1", big());
+    const progress: number[] = [];
+    const split = await pooled.service.classify("f1", (done) => progress.push(done)).promise;
+    // Three pool workers, each counting its own third; the batch lane only opened the file.
+    const count = pooled.workers.filter((w) => w.lane === "count");
+    expect(count).toHaveLength(3);
+    const ranges = count.map((w) => (w.sent.find((m) => (m as { type: string }).type === "classify") as { options: { range: { start: number; end: number } } }).options.range);
+    expect(ranges).toEqual([{ start: 0, end: 200 }, { start: 200, end: 400 }, { start: 400, end: 600 }]);
+    expect(pooled.workers.find((w) => w.lane === "batch")!.sent.some((m) => (m as { type: string }).type === "classify")).toBe(false);
+    // The joined answer is the single worker's, event for event.
+    expect(Array.from(split.objectCount)).toEqual(Array.from(one.objectCount));
+    expect(Array.from(split.objectArea)).toEqual(Array.from(one.objectArea));
+    expect(Object.keys(split.features!).sort()).toEqual(Object.keys(one.features!).sort());
+    for (const key of Object.keys(one.features!)) expect(Array.from(split.features![key])).toEqual(Array.from(one.features![key]));
+    expect(split.objectCount[0]).toBe(1);
+    expect(split.objectCount[1]).toBe(255);
+    expect(progress.at(-1)).toBe(600);
+    expect(progress.every((d, k) => k === 0 || d >= progress[k - 1] - 200)).toBe(true);
+    // A second file reuses the pool.
+    pooled.service.attach("f2", big());
+    await pooled.service.classify("f2").promise;
+    expect(pooled.workers.filter((w) => w.lane === "count")).toHaveLength(3);
+  });
+
+  it("stops every share of a split count when it is cancelled", async () => {
+    const many = buildSyntheticCvw(Array.from({ length: 600 }, () => ({ samples: 768 })));
+    const { service, workers } = serviceWithWorkers({ countWorkers: 2 });
+    service.attach("f1", { ...source(), file: memoryFile("tube C.cvw", many), eventCount: 600 });
+    const handle = service.classify("f1");
+    // Let the shares start, then cancel.
+    for (let i = 0; i < 10_000 && workers.filter((w) => w.lane === "count" && w.sent.some((m) => (m as { type: string }).type === "classify")).length < 2; i++) {
+      await Promise.resolve();
+    }
+    handle.cancel();
+    await expect(handle.promise).rejects.toBeInstanceOf(RenderCancelled);
+    const pool = workers.filter((w) => w.lane === "count");
+    expect(pool).toHaveLength(2);
+    for (const w of pool) {
+      const classify = w.sent.find((m) => (m as { type: string }).type === "classify") as { requestId: string };
+      const cancel = w.sent.find((m) => (m as { type: string }).type === "cancel") as { requestIds: string[] } | undefined;
+      expect(cancel?.requestIds).toContain(classify.requestId);
+    }
+    expect(service.classification("f1")).toBeNull();
+    service.dispose();
+    expect(pool.every((w) => w.terminated)).toBe(true);
   });
 
   it("stops a classification when its last caller cancels", async () => {

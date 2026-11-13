@@ -13,6 +13,25 @@ const reference = (v: unknown) =>
 const positive = (v: unknown) =>
   typeof v === "number" && Number.isFinite(v) && v > 0;
 
+/** The plot types each kind of chart plot draws. */
+const CHART_PLOT_TYPES: Record<string, readonly string[]> = {
+  cells: ["violin", "box"],
+  statistic: ["box"],
+  proportion: ["stacked"],
+};
+function isFigureChart(v: unknown): boolean {
+  return (
+    record(v) &&
+    typeof v.valueKind === "string" &&
+    (CHART_PLOT_TYPES[v.valueKind]?.includes(String(v.plotType)) ?? false) &&
+    (v.statistic === undefined || ["median", "mean", "geomean"].includes(String(v.statistic))) &&
+    (v.violinBox === undefined || typeof v.violinBox === "boolean") &&
+    (v.populationLabels === undefined || typeof v.populationLabels === "boolean") &&
+    (v.summary === undefined || typeof v.summary === "boolean") &&
+    (v.fileLabels === undefined || typeof v.fileLabels === "boolean")
+  );
+}
+
 /** Structural validation only. Missing files/populations remain repairable figure warnings. */
 export function isFigureSpec(v: unknown): v is FigureSpec {
   if (
@@ -31,8 +50,11 @@ export function isFigureSpec(v: unknown): v is FigureSpec {
         typeof p.name === "string" &&
         typeof p.x === "string" &&
         typeof p.y === "string" &&
-        ["biplot", "histogram", "heatmap"].includes(String(p.type)) &&
-        (p.population === undefined || reference(p.population)),
+        ["biplot", "histogram", "heatmap", "chart"].includes(String(p.type)) &&
+        (p.chart === undefined ? p.type !== "chart" : isFigureChart(p.chart)) &&
+        (p.population === undefined || reference(p.population)) &&
+        (p.populations === undefined || (Array.isArray(p.populations) && p.populations.every(reference))) &&
+        (p.together === undefined || typeof p.together === "boolean"),
     ) ||
     !strings(v.rows) ||
     !strings(v.columns) ||

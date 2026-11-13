@@ -103,10 +103,11 @@ function buildGatesForChannels(
   yCh: string | null,
   xRange: [number, number],
   yRange: [number, number] | null,
+  gateOrderIsScope: boolean,
 ): GateOverlay[] {
   if (!yCh) return [];
   const out: GateOverlay[] = [];
-  const ids = gateOrder.length ? gateOrder : Object.keys(gates);
+  const ids = gateOrderIsScope || gateOrder.length ? gateOrder : Object.keys(gates);
   for (const gid of ids) {
     const gate = gates[gid];
     if (!gate) continue;
@@ -205,6 +206,8 @@ export interface IllustrationOptions {
   pointBudget?: number;
   /** Independent figure grids retain a valid axes frame for genuine zero-event populations. */
   includeEmpty?: boolean;
+  /** The ordered ids are a visibility scope: an empty list draws no gates, rather than every gate. */
+  gateOrderIsScope?: boolean;
   displayMode: string;
   maxEvents: number;
   nColumns: number;
@@ -359,6 +362,7 @@ export function buildIllustrationPayload(
         yChannel,
         xr,
         yRange,
+        opts.gateOrderIsScope === true,
       );
     }
   }

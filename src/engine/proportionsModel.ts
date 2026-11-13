@@ -17,9 +17,11 @@ import {
 } from "./factors";
 import { nestedBarLayout, type SampleComposition } from "./proportions";
 import type { PopulationMap } from "./models";
+import type { StoredHierarchy } from "./hierarchies";
 import { paletteColors, plottingPopulationColors, UNGATED_COLOR } from "./palettes";
 import { SAMPLE_ID_FIELD, sampleDisplayId } from "./metadata";
 import { figureHierarchies, resolveFigurePopulation } from "./figure";
+import { fileListOrder } from "./levelOrder";
 import {
   BASE_PROPORTIONS_SETTINGS,
   PROPORTIONS_NO_FACTOR,
@@ -43,8 +45,10 @@ export interface ProportionsModel {
   hasFacet: boolean;
   /** Population categories with their depth, so the chart nests daughters inside parents. */
   levels?: { popId: string; depth: number }[];
-  /** Files left out: their tree lacks a selected population, or holds it changed. */
+  /** Files left out whole: their tree is unknown, lacks the parent or holds it changed, or has none of the selected populations. */
   excluded?: string[];
+  /** Files drawn without some selected populations their tree lacks or holds changed: each file's name and those populations' names, in file order. */
+  partial?: { file: string; populations: string[] }[];
   /** Division categories: the populations the drawn files' divisions were fitted in, by name; null for all events. */
   divisionWithin?: (string | null)[];
   /**
@@ -81,6 +85,33 @@ export function defaultProportionsSettings(
     selectedPops: activeState.populations[parent]?.children.filter((id) => activeState.populations[id]) ?? [],
     groupSel: metadataColumns[0]?.name ?? PROPORTIONS_SAMPLE_FACTOR,
   };
+}
+
+/** For a file named here, where each selected population of the settings' tree is found in the file's own tree: its id there, or null when the file does not draw it. A file not named, and a population not named for a file, is found by provenance as before. */
+export type FilePopulations = Readonly<Record<string, Readonly<Record<string, string | null>>>>;
+
+export interface ProportionsModelOptions {
+  filePopulations?: FilePopulations;
+}
+
+/**
+ * A selected population in a file's own tree: the id the file's entry in the map gives (null when
+ * the file's tree does not hold it, or the map says null), else the same population by provenance
+ * (null when the tree lacks it or holds it changed).
+ */
+export function filePopulationId(
+  level: { popId: string; name: string },
+  treeId: string,
+  own: StoredHierarchy,
+  trees: Record<string, StoredHierarchy>,
+  named: Readonly<Record<string, string | null>> | undefined,
+): string | null {
+  if (named && Object.prototype.hasOwnProperty.call(named, level.popId)) {
+    const id = named[level.popId];
+    return id && own.populations[id] ? id : null;
+  }
+  const match = resolveFigurePopulation({ hierarchyId: treeId, populationId: level.popId, label: level.name }, own, trees);
+  return match.id && match.status !== "changed" ? match.id : null;
 }
 
 function parseFactor(value: string): PerSampleFactor | null {
@@ -149,9 +180,12 @@ export function divisionFittedPopulation(
 
 /**
  * The composition model: one row per file drawn, with its counts per category. Population
- * categories are resolved in each file's own tree by provenance; a file whose tree lacks one, or
- * holds it changed, is listed as excluded rather than drawn wrong. Division categories come from
- * the files with a division profile; without any, the population categories are drawn.
+ * categories are resolved in each file's own tree by provenance (or as `filePopulations` names
+ * them); a population a file's tree lacks, or holds changed, counts 0 in that file and is listed in
+ * `partial`, its events falling to the rest of the parent. A file whose tree is unknown, lacks the
+ * parent or holds it changed, or has none of the populations, is listed as excluded rather than
+ * drawn wrong. Division categories come from the files with a division profile; without any, the
+ * population categories are drawn.
  */
 export function buildProportionsModel(
   settings: ProportionsSettings,
@@ -159,12 +193,13 @@ export function buildProportionsModel(
   activeState: CoreState,
   metadata: Readonly<Record<string, Readonly<Record<string, string>> | undefined>>,
   divisionProfiles: Readonly<Record<string, DivisionProfileLike>>,
+  options: ProportionsModelOptions = {},
 ): ProportionsModel {
   const trees = figureHierarchies(activeState);
   const tree = trees[settings.hierarchy] ?? trees[activeState.active_hierarchy_id];
   const state = { ...activeState, ...tree };
   const rootId = state.root_population_id ?? "";
-  const samples = files.filter((file) => settings.files.includes(file.id));
+  const samples = fileListOrder(files, settings.files);
   const groupSpec = parseFactor(settings.groupSel) ?? { kind: "sample" as const };
   const unitSpec = parseFactor(settings.unitSel) ?? { kind: "sample" as const };
   const facetSpec = parseFactor(settings.facetSel);
@@ -208,6 +243,7 @@ export function buildProportionsModel(
     ? [...levels.map((level) => displayNames[level.popId] ?? level.name), restName]
     : levels.map((level) => displayNames[level.popId] ?? level.name);
   const excluded: string[] = [];
+  const partial: { file: string; populations: string[] }[] = [];
   const overlapping = new Set<string>();
   const perSample: SampleComposition[] = samples.flatMap((entry) => {
     const own = trees[entry.hierarchyId ?? tree.id];
@@ -215,23 +251,20 @@ export function buildProportionsModel(
       excluded.push(entry.name);
       return [];
     }
-    const matches = levels.map((level) =>
-      resolveFigurePopulation({ hierarchyId: tree.id, populationId: level.popId, label: level.name }, own, trees),
-    );
-    if (matches.some((match) => !match.id || match.status === "changed")) {
-      excluded.push(entry.name);
-      return [];
-    }
-    const localLevels = levels.map((level, index) => ({ ...level, popId: matches[index].id! }));
-    const masks = recompute(entry.sample, { ...activeState, ...own }).masks;
+    const ids = levels.map((level) => filePopulationId(level, tree.id, own, trees, options.filePopulations?.[entry.id]));
     // The parent in this file's own tree: the same population by provenance.
     const localParent = parentId === rootId
       ? null
       : resolveFigurePopulation({ hierarchyId: tree.id, populationId: parentId, label: state.populations[parentId]?.name ?? "" }, own, trees);
-    if (parentId !== rootId && (!localParent?.id || localParent.status === "changed")) {
+    if ((parentId !== rootId && (!localParent?.id || localParent.status === "changed")) || ids.every((id) => !id)) {
       excluded.push(entry.name);
       return [];
     }
+    if (ids.some((id) => !id)) partial.push({ file: entry.name, populations: levels.flatMap((_, cat) => (ids[cat] ? [] : [catLevels[cat]])) });
+    // A population the file does not draw has no mask: it counts 0, its events fall to the rest.
+    const localLevels = levels.map((level, index) => ({ ...level, popId: ids[index] ?? `\0missing${index}` }));
+    const derived = recompute(entry.sample, { ...activeState, ...own });
+    const masks = derived.masks;
     const nEvents = entry.sample.fcs.nEvents;
     const parentMask = localParent?.id ? masks[localParent.id] ?? null : null;
     const { counts, rest } = partitionCountsWithin(masks, localLevels, localParent?.id ?? null, nEvents);
@@ -250,7 +283,10 @@ export function buildProportionsModel(
       state.populations,
     );
     for (const node of drawn) if (popCounts[node.cat] > node.y1 - node.y0) overlapping.add(catLevels[node.cat]);
-    return [{ ...scalar(entry), catCounts: settings.includeUngated ? [...counts, rest] : counts, popCounts }];
+    // The file's root population, as the Statistics tab's "% of total" divides by.
+    const totalCount = derived.stats.event_count[own.root_population_id ?? ""] ?? nEvents;
+    const missing = levels.flatMap((_, cat) => (ids[cat] ? [] : [cat]));
+    return [{ ...scalar(entry), catCounts: settings.includeUngated ? [...counts, rest] : counts, popCounts, totalCount, ...(missing.length ? { missing } : {}) }];
   });
   return {
     catLevels,
@@ -258,14 +294,16 @@ export function buildProportionsModel(
     hasFacet: !!facetSpec,
     levels: levels.map((level) => ({ popId: level.popId, depth: level.depth })),
     excluded,
+    partial,
     overlapping: [...overlapping],
   };
 }
 
 /**
- * The categories' colours. Population categories take each population's stable colour slot from
- * the Plotting chart's 24 colours, no two alike in one chart (plottingPopulationColors), with the
- * rest in fixed grey; division categories are a fixed ladder and take the palette in order.
+ * The categories' colours. Population categories take each population's own colour, else its
+ * stable colour slot from the Plotting chart's 24 colours of the default palette, no two alike in
+ * one chart (plottingPopulationColors), with the rest in fixed grey; the settings' palette does not
+ * apply to them. Division categories are a fixed ladder and take the palette in order.
  */
 export function proportionsCategoryColors(
   model: Pick<ProportionsModel, "catLevels" | "levels">,
@@ -274,7 +312,11 @@ export function proportionsCategoryColors(
 ): string[] {
   if (model.levels) {
     return [
-      ...plottingPopulationColors(settings.palette, model.levels.map((level) => populations[level.popId]?.colorSlot)),
+      ...plottingPopulationColors(
+        "default",
+        model.levels.map((level) => populations[level.popId]?.colorSlot),
+        model.levels.map((level) => populations[level.popId]?.color),
+      ),
       ...(settings.includeUngated ? [UNGATED_COLOR] : []),
     ];
   }
