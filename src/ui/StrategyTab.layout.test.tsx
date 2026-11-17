@@ -202,7 +202,16 @@ describe("the Strategy tab and the Layout tab", () => {
     // Full path from root is off by default: the strip is the population's own gate.
     expect(host.querySelectorAll(".mini-plot-cell")).toHaveLength(1);
     act(() => button("Add to Layout")!.click());
-    expect(onAddToLayout).toHaveBeenLastCalledWith({ kind: "strategy", sampleId: "D1", populationId: fx.bcellsId, fullPath: false, displayMode: "pseudocolor" });
+    // As drawn here: its columns, fonts, event cap and appearance travel with it, and its frame
+    // holds its panels at the size they were drawn (one 200 px panel, its title and the inset).
+    expect(onAddToLayout).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        kind: "strategy", sampleId: "D1", populationId: fx.bcellsId, fullPath: false, displayMode: "pseudocolor",
+        columns: 1, labelBackground: 0.85,
+        style: expect.objectContaining({ pointSize: 1.2, pointAlpha: 0.35, contourLevels: 10, pubStyle: false, maxEvents: 10000, fontGate: 9 }),
+      }),
+      { width: 208, height: 234 },
+    );
 
     // The full path: two steps, and a right-click on the second offers that step's plot and the Gating tab.
     const fullPath = [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.includes("Full path from root"))!.querySelector("input")!;
@@ -224,10 +233,59 @@ describe("the Strategy tab and the Layout tab", () => {
     // The strip from the menu carries the full path now.
     act(() => { cells[0].dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 40 })); });
     act(() => menuItem("Add the strategy to the Layout tab")!.click());
-    expect(onAddToLayout).toHaveBeenLastCalledWith({ kind: "strategy", sampleId: "D1", populationId: fx.bcellsId, fullPath: true, displayMode: "pseudocolor" });
+    expect(onAddToLayout).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: "strategy", sampleId: "D1", populationId: fx.bcellsId, fullPath: true, displayMode: "pseudocolor", columns: 2 }),
+      { width: 416, height: 234 },
+    );
     // Away from a cell, the menu offers the strip and the exports but no step.
     act(() => { host.querySelector<HTMLElement>("#strategy-grid-container")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 40 })); });
     expect(menuItems().map((b) => b.textContent)).toEqual(["Add the strategy to the Layout tab", "Fit data + gates", "Export PNG", "Export SVG", "Export PDF"]);
+    // A panel of the multi-population grid has the renderer's own right-click handler, which stops
+    // the event; the tab's menu opens all the same, and the renderer's does not.
+    act(() => { document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); });
+    let rendererMenus = 0;
+    cells[1].oncontextmenu = (event) => { event.stopPropagation(); rendererMenus += 1; };
+    act(() => { cells[1].dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 40 })); });
+    expect(rendererMenus).toBe(0);
+    expect(menuItems().map((b) => b.textContent)).toContain("Add this plot to the Layout tab");
+  });
+
+  it("sends the gates' edge style with the strip, and nothing for the default", async () => {
+    const fx = fixture();
+    const onAddToLayout = vi.fn();
+    act(() => root.render(
+      <I18nProvider>
+        <StrategyTab
+          state={fx.state as CoreState}
+          sample={fx.files[0].sample}
+          sampleName="D1.fcs"
+          derived={{ masks: {} } as Derived}
+          globalScales={{}}
+          configRef={{ current: null }}
+          dataRevision={0}
+          densityColorPower={1}
+          onDensityColorPowerChange={vi.fn()}
+          onFitChannels={vi.fn()}
+          files={fx.files}
+          poolIds={null}
+          checkedSampleIds={[]}
+          onViewFile={vi.fn()}
+          activeSampleId="D1"
+          onAddToLayout={onAddToLayout}
+        />
+      </I18nProvider>,
+    ));
+    await flush();
+    act(() => button("Add to Layout")!.click());
+    expect(onAddToLayout.mock.calls.at(-1)![0]).not.toHaveProperty("gateEdgeMode");
+    const edges = [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.startsWith("Gate edges"))!.querySelector("select")!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(edges, "bowed");
+      edges.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await flush();
+    act(() => button("Add to Layout")!.click());
+    expect(onAddToLayout.mock.calls.at(-1)![0]).toMatchObject({ kind: "strategy", gateEdgeMode: "bowed" });
   });
 
   it("offers the strategy of several populations as one Layout block, arrows and layout included", async () => {

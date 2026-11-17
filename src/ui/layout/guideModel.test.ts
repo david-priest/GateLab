@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { createLayoutSheet, SCREEN_PX_PER_MM } from "../../engine/layout";
 import { snapCoordinate, shapeSnapLines } from "./LayoutShape";
-import { addGuide, clearGuides, copiedGuides, guideSnapLines, moveGuide, overOwnRuler, removeGuide, RULER_SIZE, rulerSteps, rulerTicks } from "./guideModel";
+import { addGuide, clearGuides, copiedGuides, guideSnapLines, moveGuide, overOwnRuler, pageRulerTicks, removeGuide, RULER_SIZE, rulerSteps, rulerTicks } from "./guideModel";
 
 describe("Ruler ticks", () => {
   it("spaces ticks and labels by zoom so labels never crowd", () => {
@@ -27,6 +27,37 @@ describe("Ruler ticks", () => {
     expect(scrolled[0].mm).toBe(30);
     expect(scrolled[0].at).toBeCloseTo(-100 + 30 * SCREEN_PX_PER_MM);
     expect(scrolled.every((tick) => tick.at >= 0 && tick.at <= 400)).toBe(true);
+  });
+});
+
+describe("Ruler ticks on a sheet of several pages", () => {
+  const labels = (ticks: { mm: number; major: boolean }[]) => ticks.filter((tick) => tick.major).map((tick) => tick.mm);
+
+  it("counts each page from 0 at its own edge, with the spacing of one page", () => {
+    // A4 landscape, two pages across (1123 px each), at zoom 1 with the first page's edge 18 px in.
+    const ticks = pageRulerTicks(18, 3000, 1, 1123, 2);
+    const second = ticks.findIndex((tick) => tick.at >= 18 + 1123);
+    expect(ticks[second]).toEqual({ at: 18 + 1123, mm: 0, major: true });
+    expect(labels(ticks.slice(0, second)).slice(-2)).toEqual([280, 290]);
+    expect(labels(ticks.slice(second)).slice(0, 3)).toEqual([0, 10, 20]);
+    expect(ticks.slice(0, second).every((tick) => tick.mm <= 297)).toBe(true);
+    // One page: the same ticks as before.
+    expect(pageRulerTicks(18, 400, 1, 1123, 1)).toEqual(rulerTicks(18, 400, 1));
+    // Past the last page the ruler runs on from it, and before the first it counts back.
+    expect(pageRulerTicks(18, 1000, 1, 794, 1).at(-1)!.mm).toBeGreaterThan(210);
+    expect(pageRulerTicks(30, 400, 1, 1123, 2)[0].mm).toBe(-5);
+  });
+
+  it("leaves off a label that would run into the next page's 0, at every zoom", () => {
+    // Two A4 landscape pages down (794 px, 210.1 mm each): 210 mm falls 0.3 px before the next page.
+    const ticks = pageRulerTicks(18, 4000, 1, 794, 2);
+    const second = ticks.findIndex((tick) => tick.at >= 18 + 794);
+    expect(ticks[second - 1]).toMatchObject({ mm: 210, major: false });
+    expect(labels(ticks).slice(19, 23)).toEqual([190, 200, 0, 10]);
+    for (const zoom of [0.1, 0.25, 0.5, 1, 2, 4]) {
+      const at = pageRulerTicks(0, 1123 * 3 * zoom + 10, zoom, 1123, 3).filter((tick) => tick.major).map((tick) => tick.at);
+      at.slice(1).forEach((x, i) => expect(x - at[i]).toBeGreaterThanOrEqual(4 + 3 * 6 - 1e-6));
+    }
   });
 });
 

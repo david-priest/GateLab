@@ -17,18 +17,27 @@ describe("Quarter turns of a Layout item", () => {
   it("swaps the frame's width and height about its centre for 90° and 270°, and not for 180°", () => {
     const item = text();
     const start = centre(item);
+    // 160 and 33 differ by an odd number: the frame stays on whole pixels, its centre within half a pixel.
     turnItem(item, "right");
-    expect(frame(item)).toEqual({ x: 163.5, y: -13.5, width: 33, height: 160, rotation: 90 });
-    expect(centre(item)).toEqual(start);
+    expect(frame(item)).toEqual({ x: 163, y: -13, width: 33, height: 160, rotation: 90 });
+    expect(centre(item)).toEqual([start[0] - 0.5, start[1] + 0.5]);
     turnItem(item, "right");
     expect(frame(item)).toEqual({ x: 100, y: 50, width: 160, height: 33, rotation: 180 });
     turnItem(item, "right");
-    expect(frame(item)).toMatchObject({ width: 33, height: 160, rotation: 270 });
-    expect(centre(item)).toEqual(start);
+    expect(frame(item)).toMatchObject({ x: 163, y: -13, width: 33, height: 160, rotation: 270 });
 
     const left = text();
     turnItem(left, "left");
-    expect(frame(left)).toEqual({ x: 163.5, y: -13.5, width: 33, height: 160, rotation: 270 });
+    expect(frame(left)).toEqual({ x: 163, y: -13, width: 33, height: 160, rotation: 270 });
+    // An even difference keeps the centre exactly.
+    const even = text({ height: 40 });
+    turnItem(even, "right");
+    expect(frame(even)).toEqual({ x: 160, y: -10, width: 40, height: 160, rotation: 90 });
+    expect(centre(even)).toEqual(centre(text({ height: 40 })));
+    // A frame left off whole pixels by an earlier turn is put back on them.
+    const half = text({ x: 163.5, y: -13.5, width: 33, height: 160, rotation: 90 });
+    turnItem(half, "left");
+    expect(frame(half)).toEqual({ x: 100, y: 50, width: 160, height: 33, rotation: undefined });
   });
 
   it("returns the item to its start after four right turns, or a right and a left, with no turn stored", () => {
@@ -56,7 +65,7 @@ describe("Quarter turns of a Layout item", () => {
     const plot: LayoutItem = { id: "p", x: 0, y: 0, width: 260, height: 280, z: 2, recipe: { kind: "biplot", sampleId: "D1", populationId: "p", xChannel: "FSC-A", yChannel: "SSC-A", displayMode: "pseudocolor" } };
     sheet.items = [text(), image(), { ...text({ id: "locked", locked: true }) }, plot];
     expect(turnItems(sheet, ["t", "i", "locked", "p"], "right")).toBe(true);
-    expect(frame(sheet.items[0])).toEqual({ x: 163.5, y: -13.5, width: 33, height: 160, rotation: 90 });
+    expect(frame(sheet.items[0])).toEqual({ x: 163, y: -13, width: 33, height: 160, rotation: 90 });
     expect(frame(sheet.items[1])).toEqual({ x: 30, y: -10, width: 40, height: 80, rotation: 90 });
     expect(frame(sheet.items[2])).toEqual(frame(text()));
     expect(sheet.items[3]).toEqual(plot);
@@ -65,31 +74,32 @@ describe("Quarter turns of a Layout item", () => {
 
   it("grows a turned text block away from its first line, and an upright one downward", () => {
     const upright = text();
-    growTextFrame(upright, 60);
+    growTextFrame(upright, 31);
     expect(frame(upright)).toEqual({ x: 100, y: 50, width: 160, height: 64, rotation: undefined });
     const ninety = text({ rotation: 90, width: 33, height: 160 });
-    growTextFrame(ninety, 60);
+    growTextFrame(ninety, 31);
     expect(frame(ninety)).toEqual({ x: 69, y: 50, width: 64, height: 160, rotation: 90 });
     const twoSeventy = text({ rotation: 270, width: 33, height: 160 });
-    growTextFrame(twoSeventy, 60);
+    growTextFrame(twoSeventy, 31);
     expect(frame(twoSeventy)).toEqual({ x: 100, y: 50, width: 64, height: 160, rotation: 270 });
     const half = text({ rotation: 180 });
-    growTextFrame(half, 60);
+    growTextFrame(half, 31);
     expect(frame(half)).toEqual({ x: 100, y: 19, width: 160, height: 64, rotation: 180 });
     // It never shrinks.
-    growTextFrame(half, 10);
+    growTextFrame(half, 0);
+    growTextFrame(half, -10);
     expect(half.height).toBe(64);
   });
 
   it("lays a turned item's content out in a box with the frame's sides swapped, centred and turned", () => {
     expect(turnedBoxStyle(0, 33, 160)).toBeUndefined();
     expect(turnedBoxStyle(90, 33, 160)).toEqual({
-      width: "calc(160px - 2 * var(--gl-hair, 1px))",
-      height: "calc(33px - 2 * var(--gl-hair, 1px))",
+      width: 160,
+      height: 33,
       marginLeft: -63.5,
       marginTop: 63.5,
       transform: "rotate(90deg)",
     });
-    expect(turnedBoxStyle(180, 160, 33)).toMatchObject({ width: "calc(160px - 2 * var(--gl-hair, 1px))", marginLeft: 0, marginTop: 0, transform: "rotate(180deg)" });
+    expect(turnedBoxStyle(180, 160, 33)).toMatchObject({ width: 160, marginLeft: 0, marginTop: 0, transform: "rotate(180deg)" });
   });
 });

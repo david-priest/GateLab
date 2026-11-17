@@ -4,7 +4,7 @@
 // Distribute buttons. The geometry itself is in layoutGeometry.ts.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { layoutItemMinimum, type LayoutItem } from "../../engine/layout";
+import { layoutItemMinimum, layoutItemZoom, type LayoutItem } from "../../engine/layout";
 import { useI18n } from "../i18n";
 import { NumberField } from "../NumberField";
 import {
@@ -30,28 +30,41 @@ export type LayoutGeometryPrefs = ReturnType<typeof useLayoutGeometryPrefs>;
 
 const FIELD_LABELS: Record<FrameField, string> = { x: "X", y: "Y", width: "Width", height: "Height" };
 
-/** The selected item's X, Y, width and height in the chosen unit; a typed value is one commit. */
+/**
+ * The selected item's X, Y, width and height in the chosen unit; a typed value is one commit. X and
+ * Y are shown, and read, from `origin`, the top-left corner of the page the item is on (sheet px).
+ */
 export function LayoutDimensionFields({
   item,
   prefs,
+  ratioLocked = false,
+  origin = { x: 0, y: 0 },
   onCommit,
 }: Readonly<{
   item: Pick<LayoutItem, FrameField | "recipe">;
   prefs: LayoutGeometryPrefs;
+  /** The item is drawn scaled as a whole, so its frame keeps its proportions whatever the checkbox says. */
+  ratioLocked?: boolean;
+  /** The top-left corner of the item's page, in sheet px. */
+  origin?: { x: number; y: number };
   onCommit: (patch: Partial<Record<FrameField, number>>) => void;
 }>) {
   const { t } = useI18n();
-  const { unit, setUnit, keepRatio, setKeepRatio } = prefs;
+  const { unit, setUnit, setKeepRatio } = prefs;
+  const keepRatio = prefs.keepRatio || ratioLocked;
   const minimum = layoutItemMinimum(item.recipe.kind);
+  const shift = (name: FrameField) => (name === "x" ? origin.x : name === "y" ? origin.y : 0);
   const field = (name: FrameField) => (
     <label key={name}>
       {t(FIELD_LABELS[name])} ({unit})
+      {/* A field begun on one page is not read again from another: once the item changes page the field starts over. */}
       <NumberField
+        key={shift(name)}
         aria-label={`Item ${name}`}
-        min={name === "width" || name === "height" ? pxToUnit(minimum[name], unit) : 0}
+        min={name === "width" || name === "height" ? pxToUnit(minimum[name], unit) : -pxToUnit(shift(name), unit)}
         step={unit === "mm" ? 0.1 : 1}
-        value={pxToUnit(item[name], unit)}
-        onCommit={(value) => onCommit(framePatch(item, name, unitToPx(value, unit), keepRatio))}
+        value={pxToUnit(item[name] - shift(name), unit)}
+        onCommit={(value) => onCommit(framePatch(item, name, shift(name) + unitToPx(value, unit), keepRatio))}
       />
     </label>
   );
@@ -65,7 +78,7 @@ export function LayoutDimensionFields({
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <label className="gl-check" title={t("Typing a width sets the height to keep the item's proportions, and the reverse; dragging a handle keeps them too, and Shift frees them")}>
-          <input type="checkbox" checked={keepRatio} onChange={(event) => setKeepRatio(event.target.checked)} />
+          <input type="checkbox" checked={keepRatio} disabled={ratioLocked} onChange={(event) => setKeepRatio(event.target.checked)} />
           {t("Keep proportions")}
         </label>
         <span role="group" aria-label={t("Unit")} style={{ display: "inline-flex", gap: 2 }}>
@@ -77,6 +90,20 @@ export function LayoutDimensionFields({
         </span>
       </div>
     </>
+  );
+}
+
+/** The scale the items are shown at, when it is not 100%, and a button that draws them unscaled. */
+export function LayoutScaleReset({ items, onReset }: Readonly<{ items: readonly Pick<LayoutItem, "zoom" | "locked">[]; onReset: () => void }>) {
+  const { t } = useI18n();
+  const scaled = items.filter((item) => layoutItemZoom(item) !== 1);
+  if (!scaled.length) return null;
+  const percents = new Set(scaled.map((item) => Math.round(layoutItemZoom(item) * 100)));
+  return (
+    <div className="gl-layout-item-actions">
+      <span className="gl-hint">{percents.size === 1 && scaled.length === items.length ? t("Shown at {percent}%", { percent: [...percents][0] }) : t("Shown at several scales")}</span>
+      <button type="button" className="gl-mini-btn" disabled={scaled.every((item) => item.locked)} onClick={onReset} title={t("Draw unscaled: the frame becomes the size the item is drawn at, its top-left corner kept; locked items are not changed")}>{t("Reset scale")}</button>
+    </div>
   );
 }
 

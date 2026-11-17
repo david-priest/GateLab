@@ -7,7 +7,7 @@
 import { useRef, useState } from "react";
 import type { LayoutWorkspace } from "../../engine/layout";
 import type { LayoutPage as ExpandedPage } from "../../engine/layoutBatch";
-import { composeSheetPages, type ComposedPage, type LayoutExportFormat } from "../../plots/layoutExport";
+import { composeSheetPages, type ComposedPage, type ExportReport, type LayoutExportFormat } from "../../plots/layoutExport";
 import { writeAllSheets, type ComposedSheet } from "./layoutExportAll";
 
 interface ExportAllOptions {
@@ -22,8 +22,8 @@ interface ExportAllOptions {
   page: HTMLElement | null;
   /** Shows a sheet without making an undo step. */
   showSheet: (id: string) => void;
-  /** Waits until the page's plots have drawn. */
-  settle: () => Promise<void>;
+  /** Waits until the page's plots have drawn; false when it stopped waiting with blocks still drawing. */
+  settle: () => Promise<boolean>;
   format: LayoutExportFormat;
   crop: { paddingMm: number } | undefined;
   exporting: boolean;
@@ -32,6 +32,8 @@ interface ExportAllOptions {
   setSelectedIds: (ids: string[]) => void;
   onError: (message: string) => void;
   onExported?: () => void;
+  /** What the write did otherwise than asked, for the tab's message. */
+  onWritten?: (report: ExportReport | undefined, unfinished: boolean) => void;
 }
 
 export function useExportAllSheets(options: ExportAllOptions) {
@@ -55,19 +57,20 @@ export function useExportAllSheets(options: ExportAllOptions) {
       selected: [...start.selectedIds],
     };
     start.setExporting(true);
+    let unfinished = false;
     try {
       const composed: ComposedSheet[] = [];
       for (const [index, sheet] of sheets.entries()) {
         setProgress({ n: index + 1, count: sheets.length });
         if (latest.current.workspace.activeSheetId !== sheet.id) latest.current.showSheet(sheet.id);
         latest.current.setPageIndex(0);
-        await latest.current.settle();
+        if (!(await latest.current.settle())) unfinished = true;
         const pages: ComposedPage[] = [];
         const expanded = latest.current.pages;
         for (let pageIndex = 0; pageIndex < Math.max(1, expanded.length); pageIndex++) {
           if (expanded.length > 1) {
             latest.current.setPageIndex(pageIndex);
-            await latest.current.settle();
+            if (!(await latest.current.settle())) unfinished = true;
           }
           const now = latest.current;
           if (!now.page) throw new Error("The page went away during the export.");
@@ -77,8 +80,9 @@ export function useExportAllSheets(options: ExportAllOptions) {
         }
         composed.push({ sheet, pages });
       }
-      await writeAllSheets(composed, start.format);
+      const report = await writeAllSheets(composed, start.format);
       latest.current.onExported?.();
+      latest.current.onWritten?.(report, unfinished);
     } catch (error) {
       latest.current.onError(error instanceof Error ? error.message : String(error));
     } finally {

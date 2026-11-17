@@ -86,8 +86,11 @@ export function LayoutFigureSurface({
   width,
   height,
   columnLevels,
+  containerId,
 }: Readonly<{
   recipe: LayoutFigureRecipe;
+  /** The grid's id, from which its chart panels' ids and clip paths are made: one of the block's own, so two blocks of one figure page do not share them. */
+  containerId?: string;
   /** The metadata columns' own orders of their values, as the Illustration tab orders them. */
   columnLevels?: Readonly<Record<string, readonly string[]>>;
   files: readonly FigureSample[];
@@ -99,7 +102,10 @@ export function LayoutFigureSurface({
   height: number;
 }>) {
   const trees = useMemo(() => figureHierarchies(state), [state]);
-  const config = useMemo(() => figureOfBlock(recipe, files, state), [recipe, files, state]);
+  // Keyed on the figure the block holds, which an edit to the sheet leaves as it is, and not on the
+  // recipe, which the sheet's pages copy on every edit: figureOfBlock reads only the figure.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const config = useMemo(() => figureOfBlock(recipe, files, state), [recipe.illustration, files, state]);
   const figure = config.figure!;
   const pages = useMemo(() => layoutFigure(figure, files, trees, undefined, columnLevels).map(headOverlaidPopulations), [figure, files, trees, columnLevels]);
   const page = pages[Math.min(recipe.page, Math.max(0, pages.length - 1))];
@@ -150,10 +156,11 @@ export function LayoutFigureSurface({
     );
   }
   return (
-    <div className="gl-layout-plot-host gl-layout-figure-host" style={{ width, height }}>
+    // Marked while its panels are being built, so a page's export waits for the figure.
+    <div className="gl-layout-plot-host gl-layout-figure-host" style={{ width, height }} data-layout-pending={built.pending ? "1" : undefined}>
       <div ref={gridRef} className="gl-layout-figure-zoom" style={{ zoom, width: "max-content" }}>
         <FigureGrid
-          id={`layout-figure-${recipe.page}-${figure.name.replace(/[^a-z0-9]+/gi, "-")}`}
+          id={containerId ?? `layout-figure-${recipe.page}-${figure.name.replace(/[^a-z0-9]+/gi, "-")}`}
           page={page}
           panels={panels}
           config={config}

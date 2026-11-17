@@ -352,6 +352,107 @@ describe("The Layout tab's objects list", () => {
     expect(rows()).toEqual(["group:G", "T2", "T1", "P"]);
   });
 
+  it("moves, aligns and deletes a group's hidden member with the group", async () => {
+    const changes = mount(stacked([
+      { id: "G1", x: 100, y: 500, width: 160, height: 32, z: 3, group: "G", recipe: { kind: "text", text: "D1", fontSize: 18 } },
+      { id: "G2", x: 300, y: 500, width: 160, height: 32, z: 4, group: "G", hidden: true, recipe: { kind: "text", text: "D2", fontSize: 18 } },
+    ]));
+    await flush();
+    const at = (id: string) => { const item = items(changes).find((candidate) => candidate.id === id)!; return { x: item.x, y: item.y }; };
+    select("G1");
+    act(() => {
+      const el = element("G1");
+      const datas: Record<string, unknown> = {};
+      draws.moveable!.onDragStart({ target: el, datas, inputEvent: {} });
+      draws.moveable!.onDrag({ target: el, left: 150, top: 520, datas });
+      draws.moveable!.onDragEnd({ target: el, isDrag: true, datas });
+    });
+    expect(at("G1")).toEqual({ x: 150, y: 520 });
+    expect(at("G2")).toEqual({ x: 350, y: 520 });
+    act(() => host.querySelector<HTMLButtonElement>('button[title^="Align the top edges"]')!.click());
+    expect(at("G2").y).toBe(at("G1").y);
+    expect(at("G2").x - at("G1").x).toBe(200);
+    expect(at("G1").y).not.toBe(520);
+    key({ key: "Delete" });
+    expect(items(changes).map((item) => item.id).sort()).toEqual(["P", "T1", "T2"]);
+  });
+
+  it("nudges and resizes a group's hidden member with the group", async () => {
+    const changes = mount(stacked([
+      { id: "G1", x: 100, y: 500, width: 160, height: 32, z: 3, group: "G", recipe: { kind: "text", text: "D1", fontSize: 18 } },
+      { id: "G2", x: 300, y: 500, width: 160, height: 32, z: 4, group: "G", hidden: true, recipe: { kind: "text", text: "D2", fontSize: 18 } },
+    ]));
+    await flush();
+    const frame = (id: string) => { const item = items(changes).find((candidate) => candidate.id === id)!; return { x: item.x, y: item.y, width: item.width, height: item.height }; };
+    select("G1");
+    // Arrow keys: the hidden member takes each step, and a run of presses is one Undo step.
+    key({ key: "ArrowRight" });
+    key({ key: "ArrowDown", shiftKey: true });
+    expect(frame("G1")).toMatchObject({ x: 101, y: 510 });
+    expect(frame("G2")).toMatchObject({ x: 301, y: 510 });
+    key({ key: "z", metaKey: true });
+    expect(frame("G2")).toMatchObject({ x: 300, y: 500 });
+    // A resize from the west handle, twice as wide and tall: the hidden member is scaled about the same point.
+    act(() => {
+      const el = element("G1");
+      draws.moveable!.onResize({ target: el, width: 320, height: 64, drag: { left: 80, top: 500 } });
+      draws.moveable!.onResizeEnd({ target: el, isDrag: true, datas: {} });
+    });
+    expect(frame("G1")).toEqual({ x: 80, y: 500, width: 320, height: 64 });
+    expect(frame("G2")).toEqual({ x: 480, y: 500, width: 320, height: 64 });
+  });
+
+  it("leaves a locked item in place on Delete and Cut, and says so; Copy takes it", async () => {
+    const changes = mount(stacked());
+    await flush();
+    click(toggle("T1", "Lock"));
+    const ids = () => items(changes).map((item) => item.id).sort();
+    const status = () => host.querySelector(".gl-layout-message")?.textContent ?? "";
+    select("T1");
+    key({ key: "Delete" });
+    expect(ids()).toEqual(["P", "T1", "T2"]);
+    expect(status()).toContain("1 locked item was left in place.");
+    key({ key: "x", metaKey: true });
+    expect(ids()).toEqual(["P", "T1", "T2"]);
+    // Copy of a locked item stays allowed.
+    key({ key: "c", metaKey: true });
+    key({ key: "v", metaKey: true });
+    expect(items(changes).filter((item) => item.recipe.kind === "text" && item.recipe.text === "control")).toHaveLength(2);
+    // A mixed selection: the unlocked item is cut, the locked one stays.
+    act(() => { draws.selecto!.onSelectEnd({ selected: [element("T1"), element("T2")], isDragStart: false, isClick: true, inputEvent: {} }); });
+    key({ key: "x", metaKey: true });
+    expect(items(changes).some((item) => item.id === "T1")).toBe(true);
+    expect(items(changes).some((item) => item.id === "T2")).toBe(false);
+    key({ key: "v", metaKey: true });
+    expect(items(changes).filter((item) => item.recipe.kind === "text" && item.recipe.text === "treated")).toHaveLength(1);
+    expect(items(changes).filter((item) => item.recipe.kind === "text" && item.recipe.text === "control")).toHaveLength(2);
+  });
+
+  it("shows a copy of a hidden item made by Duplicate or Paste, and keeps a group copy's hidden member hidden", async () => {
+    const changes = mount(stacked([
+      { id: "G1", x: 100, y: 500, width: 160, height: 32, z: 3, group: "G", recipe: { kind: "text", text: "D1", fontSize: 18 } },
+      { id: "G2", x: 300, y: 500, width: 160, height: 32, z: 4, group: "G", hidden: true, recipe: { kind: "text", text: "D2", fontSize: 18 } },
+    ]));
+    await flush();
+    const copiesOf = (words: string) => items(changes).filter((item) => item.recipe.kind === "text" && item.recipe.text === words && !["T1", "G2"].includes(item.id));
+    click(toggle("T1", "Hide"));
+    click(nameButton("T1"));
+    key({ key: "d", metaKey: true });
+    expect(copiesOf("control")).toHaveLength(1);
+    expect(copiesOf("control")[0]).not.toHaveProperty("hidden");
+    click(nameButton("T1"));
+    key({ key: "c", metaKey: true });
+    key({ key: "v", metaKey: true });
+    expect(copiesOf("control")).toHaveLength(2);
+    for (const copy of copiesOf("control")) expect(copy).not.toHaveProperty("hidden");
+    // The group copied whole: its hidden member comes too, hidden as in the group copied.
+    select("G1");
+    key({ key: "d", metaKey: true });
+    const [copy] = copiesOf("D2");
+    expect(copy).toMatchObject({ x: 320, y: 520, hidden: true });
+    expect(copy.group).toBe(items(changes).find((item) => item.recipe.kind === "text" && item.recipe.text === "D1" && item.id !== "G1")!.group);
+  });
+
   it("opens a sheet saved without names or hidden items unchanged", async () => {
     const changes = mount(stacked());
     await flush();

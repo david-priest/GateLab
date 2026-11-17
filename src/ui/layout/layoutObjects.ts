@@ -139,6 +139,77 @@ export function withoutHiddenItems<P extends { items: readonly { templateId: str
   return hidden.size ? pages.map((page) => ({ ...page, items: page.items.filter((item) => !hidden.has(item.templateId)) })) : pages;
 }
 
+/**
+ * The ids given with the hidden members of each group they take whole (every member the page
+ * shows named), so a group moved, aligned, copied or removed takes its hidden members with it. A
+ * member taken alone (a double-click on a selected group) brings none.
+ */
+export function withHiddenGroupMembers(sheet: Pick<LayoutSheet, "items">, ids: readonly string[]): string[] {
+  const out = [...ids];
+  const hidden = hiddenItemIds(sheet);
+  if (!hidden.size) return out;
+  const groups = new Set(sheet.items.filter((item) => item.group && ids.includes(item.id)).map((item) => item.group!));
+  for (const group of groups) {
+    const members = sheet.items.filter((item) => item.group === group);
+    if (!members.every((item) => hidden.has(item.id) || ids.includes(item.id))) continue;
+    for (const item of members) if (hidden.has(item.id) && !out.includes(item.id)) out.push(item.id);
+  }
+  return out;
+}
+
+/**
+ * A group moved or resized on the page by `frames` (new frames by item id, before they are set):
+ * its hidden members, which the page does not draw, take the same step and scale, provided every
+ * member moved took one step and one scale about one point. A locked member stays, as it does in
+ * any move.
+ */
+export function moveHiddenGroupMembers(sheet: Pick<LayoutSheet, "items">, frames: Readonly<Record<string, { x: number; y: number; width: number; height: number }>>): void {
+  // Along each axis a frame's position and size go to scale * before + shift, and scale * before.
+  type Axis = { scale: number; shift: number };
+  const axis = (at: number, size: number, newAt: number, newSize: number): Axis => {
+    const scale = Math.abs(newSize - size) < 0.5 ? 1 : newSize / size;
+    return { scale, shift: newAt - scale * at };
+  };
+  // Frames are whole pixels, so a scaled member may land up to a pixel from the others' transform.
+  const agrees = (a: Axis, at: number, size: number, newAt: number, newSize: number) =>
+    Math.abs(a.scale * at + a.shift - newAt) < 1 && Math.abs(a.scale * size - newSize) < 1;
+  const steps = new Map<string, { x: Axis; y: Axis } | null>();
+  for (const item of sheet.items) {
+    const frame = frames[item.id];
+    if (!frame || !item.group) continue;
+    const before = steps.get(item.group);
+    if (before === undefined) {
+      steps.set(item.group, { x: axis(item.x, item.width, frame.x, frame.width), y: axis(item.y, item.height, frame.y, frame.height) });
+    } else if (before && !(agrees(before.x, item.x, item.width, frame.x, frame.width) && agrees(before.y, item.y, item.height, frame.y, frame.height))) {
+      steps.set(item.group, null);
+    }
+  }
+  const mates = withHiddenGroupMembers(sheet, Object.keys(frames));
+  for (const item of sheet.items) {
+    const step = item.group ? steps.get(item.group) : null;
+    if (!step || frames[item.id] || item.locked || !mates.includes(item.id)) continue;
+    if (step.x.scale === 1 && step.y.scale === 1) {
+      item.x += step.x.shift;
+      item.y += step.y.shift;
+      continue;
+    }
+    item.x = Math.round(step.x.scale * item.x + step.x.shift);
+    item.y = Math.round(step.y.scale * item.y + step.y.shift);
+    item.width = Math.max(1, Math.round(step.x.scale * item.width));
+    item.height = Math.max(1, Math.round(step.y.scale * item.height));
+  }
+}
+
+/**
+ * Copies made by Duplicate or Paste, in place: a copy of a hidden item is shown, since a copy the
+ * page does not draw cannot be seen, placed or found on the page. A hidden member copied with a
+ * group whose copy shows other members stays hidden, as it is in the group copied.
+ */
+export function showHiddenCopies(copies: LayoutItem[]): void {
+  const shownGroups = new Set(copies.filter((copy) => copy.group && !copy.hidden).map((copy) => copy.group));
+  for (const copy of copies) if (copy.hidden && !(copy.group && shownGroups.has(copy.group))) delete copy.hidden;
+}
+
 /** A row of the list: an item, or a group with its members, each list top of the stack first. */
 export type ObjectEntry =
   | { kind: "item"; key: string; item: LayoutItem }

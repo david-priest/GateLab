@@ -167,12 +167,23 @@ export function exportGridSVG(gridId: string, filename: string, dpi = 300) {
   downloadBlob(new Blob([file.xml], { type: "image/svg+xml" }), filename + ".svg");
 }
 
+/**
+ * The highest dpi, at most 1200, at which a page of `width` by `height` CSS pixels can be drawn
+ * as one image: browsers draw no canvas over 16,384 pixels a side or 64 megapixels in all.
+ */
+export function maxRasterDpi(width: number, height: number): number {
+  const side = 16384 / Math.max(1, width, height);
+  const area = Math.sqrt(64_000_000 / Math.max(1, width * height));
+  return Math.min(1200, Math.floor(96 * Math.min(side, area)));
+}
+
 /** The composed SVG drawn onto a canvas at `dpi`: what the PNG export writes, and what a PDF page falls back to. */
 export async function rasterizeSvg(composed: { root: SVGSVGElement; width: number; height: number }, dpi: number): Promise<HTMLCanvasElement> {
   const { width, height } = composed;
   const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(composed.root);
   const url = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml" }));
-  const scale = Math.max(1, Math.min(1200, dpi) / 96);
+  // Below 96 dpi too the image is drawn at the dpi written into it, so it opens at the page's size.
+  const scale = Math.min(1200, dpi) / 96;
   if (width * scale > 16384 || height * scale > 16384 || width * height * scale * scale > 64_000_000) {
     URL.revokeObjectURL(url);
     throw new Error("Export exceeds the image size limit. Reduce DPI or panel size.");

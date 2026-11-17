@@ -1,12 +1,14 @@
 // LayoutGuides.tsx — a sheet's guides drawn on the Layout page: thin coloured lines across the
 // sheet, above the items and below the selection handles, never printed or exported. A guide is
 // dragged to move it; dragged back onto its ruler, or selected and Delete pressed, it is removed;
-// a double-click opens a field to type its position in mm. Each change is one commit, so one undo
+// a double-click opens a field to type its position in mm, from the edge of the page it is on
+// (as the rulers count). Each change is one commit, so one undo
 // step. The presses are taken here, before the page's marquee (Selecto listens on the pane).
 
 import { useEffect, useRef, useState } from "react";
-import type { LayoutGuide } from "../../engine/layout";
+import type { LayoutGuide, LayoutPage } from "../../engine/layout";
 import { useI18n } from "../i18n";
+import { pageOriginAt } from "../layoutPlacement";
 import { pxToUnit, unitToPx } from "./layoutGeometry";
 import { overOwnRuler } from "./guideModel";
 import "./layoutGuides.css";
@@ -14,10 +16,15 @@ import "./layoutGuides.css";
 /** A guide's grab area, in screen px either side of its line. */
 const GRAB_PX = 4;
 
+/** The edge of the page a guide at `at` is on, in sheet px: a position shown is measured from it. */
+const pageEdge = (pages: LayoutPage, axis: LayoutGuide["axis"], at: number) =>
+  axis === "x" ? pageOriginAt(pages, at, 0).x : pageOriginAt(pages, 0, at).y;
+
 export function LayoutGuides({
   guides,
   width,
   height,
+  pages,
   zoom,
   scroller,
   onMove,
@@ -27,6 +34,8 @@ export function LayoutGuides({
   /** The sheet in px: a guide runs across all of it. */
   width: number;
   height: number;
+  /** The sheet's page size and grid: a guide's position is shown from the edge of its page. */
+  pages: LayoutPage;
   zoom: number;
   /** The canvas pane, whose top and left bands are the rulers a guide is dragged back onto. */
   scroller: HTMLElement | null;
@@ -91,7 +100,7 @@ export function LayoutGuides({
     <div ref={layerRef} className="gl-layout-guides" aria-label={t("Guides")}>
       {guides.map((guide, index) => {
         const at = draft?.index === index ? draft.at : guide.at;
-        const mm = pxToUnit(at, "mm");
+        const mm = pxToUnit(at - pageEdge(pages, guide.axis, at), "mm");
         return (
           <div
             key={index}
@@ -123,6 +132,7 @@ export function LayoutGuides({
       {editing !== null && guides[editing] && (
         <GuideField
           guide={guides[editing]}
+          edge={pageEdge(pages, guides[editing].axis, guides[editing].at)}
           zoom={zoom}
           onCommit={(at) => { setEditing(null); if (at !== guides[editing].at) onMove(editing, at); }}
           onCancel={() => setEditing(null)}
@@ -132,9 +142,10 @@ export function LayoutGuides({
   );
 }
 
-/** The field a double-click opens on a guide: its position in mm, from the first page's corner. */
-function GuideField({ guide, zoom, onCommit, onCancel }: Readonly<{
+/** The field a double-click opens on a guide: its position in mm, from `edge`, its page's edge in sheet px. */
+function GuideField({ guide, edge, zoom, onCommit, onCancel }: Readonly<{
   guide: LayoutGuide;
+  edge: number;
   zoom: number;
   onCommit: (at: number) => void;
   onCancel: () => void;
@@ -146,7 +157,7 @@ function GuideField({ guide, zoom, onCommit, onCancel }: Readonly<{
     done.current = true;
     const value = Number(raw);
     if (raw.trim() === "" || !Number.isFinite(value)) onCancel();
-    else onCommit(unitToPx(value, "mm"));
+    else onCommit(edge + unitToPx(value, "mm"));
   };
   const place = guide.axis === "x" ? { left: guide.at + 4 / zoom, top: 4 / zoom } : { top: guide.at + 4 / zoom, left: 4 / zoom };
   return (
@@ -157,7 +168,7 @@ function GuideField({ guide, zoom, onCommit, onCancel }: Readonly<{
         step={0.1}
         autoFocus
         aria-label={t("Guide position (mm)")}
-        defaultValue={pxToUnit(guide.at, "mm")}
+        defaultValue={pxToUnit(guide.at - edge, "mm")}
         onKeyDown={(event) => {
           event.stopPropagation();
           if (event.key === "Enter") finish(event.currentTarget.value);

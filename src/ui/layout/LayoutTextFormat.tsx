@@ -24,6 +24,15 @@ import "./layoutText.css";
 /** The whole-block formatting a text block carries beside its size and weight. */
 export type TextBlockFormat = Pick<LayoutTextRecipe, "italic" | "color" | "align" | "rich">;
 
+/**
+ * How far a text block's frame grows (frame px) to show the text its editor holds: by what the
+ * text runs past the editor's box (`overflow`, the editor's scrollHeight less its clientHeight, in
+ * the block's drawn px), scaled by the item's zoom; 0 when the text fits.
+ */
+export function textFrameGrowth(overflow: number, zoom: number): number {
+  return overflow > 0 ? Math.ceil(overflow * zoom) : 0;
+}
+
 /** The style of a block's surface for its whole-block formatting; nothing for a block without any, so older blocks draw as before. */
 export function textBlockStyle(format: TextBlockFormat | undefined): CSSProperties {
   return {
@@ -120,7 +129,7 @@ export function LayoutTextEditField({
   templateText: string;
   rich?: boolean;
   style: CSSProperties;
-  onCommit: (text: string, contentHeight: number, rich?: boolean) => void;
+  onCommit: (text: string, overflow: number, rich?: boolean) => void;
   onEditEnd: () => void;
   onFocus: () => void;
 }>) {
@@ -161,7 +170,7 @@ export function LayoutTextEditField({
         onFocus={onFocus}
         onBlur={(event) => {
           if (switching.current) return;
-          if (draft !== templateText) onCommit(draft, event.currentTarget.scrollHeight);
+          if (draft !== templateText) onCommit(draft, event.currentTarget.scrollHeight - event.currentTarget.clientHeight);
           onEditEnd();
         }}
         onKeyDown={(event) => {
@@ -193,7 +202,7 @@ function RichTextEditor({
   templateText: string;
   wasRich: boolean;
   style: CSSProperties;
-  onCommit: (text: string, contentHeight: number, rich?: boolean) => void;
+  onCommit: (text: string, overflow: number, rich?: boolean) => void;
   onEditEnd: () => void;
   onFocus: () => void;
 }>) {
@@ -304,7 +313,7 @@ function RichTextEditor({
         }}
         onBlur={(event) => {
           const saved = textOfRuns(runs.current);
-          if (saved.text !== templateText || saved.rich !== wasRich) onCommit(saved.text, event.currentTarget.scrollHeight, saved.rich);
+          if (saved.text !== templateText || saved.rich !== wasRich) onCommit(saved.text, event.currentTarget.scrollHeight - event.currentTarget.clientHeight, saved.rich);
           onEditEnd();
         }}
         onKeyDown={(event) => {

@@ -11,6 +11,7 @@ import { addPlottingPanelBlocks, addProportionsBlock } from "./ui/layoutHandoff/
 import { addStrategyBlock } from "./ui/layoutHandoff/fromStrategy";
 import { addChartPageSheets, addChartPanelPageSheets, addFigurePageSheets, addPanelPageSheets, type PanelPage } from "./ui/layoutHandoff/everyPage";
 import { addPlotsToSheet } from "./ui/layoutHandoff/shared";
+import { addItemOnPage, addPagesToHoldItems } from "./ui/layoutPlacement";
 import { plottingBlockSizer } from "./ui/LayoutProportions";
 import type { PlottingPanelBlock } from "./ui/plottingPanels";
 import { defaultProportionsSettings, divisionFittedPopulation, type ProportionsSettings } from "./engine/proportionsModel";
@@ -357,7 +358,7 @@ import {
 } from "./engine/pseudocolor";
 import { FigureStyleProvider, figureLayoutFields, newFigureLayoutWorkspace } from "./ui/figureStyle";
 import { DEFAULT_FIGURE_STYLE, isDefaultFigureStyle, normalizeFigureStyle, type FigureStyle } from "./engine/figureStyle";
-import { effectiveLayoutStyle, normalizeLayoutWorkspace, type LayoutGridCell, type LayoutPlotRecipe, type LayoutPlotStyle, type LayoutStrategyRecipe, type LayoutWorkspace, cloneLayoutWorkspace, nextLayoutItemPosition, type LayoutGridHeadings, type LayoutProportionsRecipe, type LayoutProportionsPanel } from "./engine/layout";
+import { effectiveLayoutStyle, normalizeLayoutWorkspace, type LayoutGridCell, type LayoutPlotRecipe, type LayoutPlotStyle, type LayoutStrategyRecipe, type LayoutWorkspace, cloneLayoutWorkspace, type LayoutGridHeadings, type LayoutProportionsRecipe, type LayoutProportionsPanel } from "./engine/layout";
 import { ArrowLeftIcon, ArrowRightIcon, RedoIcon, RefreshIcon, ResetIcon, UndoIcon } from "./ui/icons";
 import { workspaceShortcutAction, type WorkspaceShortcutAction } from "./ui/historyShortcuts";
 import { DensityColourControl } from "./ui/DensityColourControl";
@@ -1819,7 +1820,7 @@ export default function App({ hostProposals = null }: {
   const [illustVersion, setIllustVersion] = useState(0); // bump to remount IllustrationTab on workspace load
   /**
    * The layout as it was before another tab last added to it. The Layout tab is mounted afresh
-   * when an add opens it, with no history of its own; it takes this as its first Undo step, once.
+   * when an add opens it; it takes this as its next Undo step, once.
    */
   const layoutUndoSeedRef = useRef<LayoutWorkspace | null>(null);
   const takeLayoutUndoSeed = useCallback(() => {
@@ -1833,6 +1834,12 @@ export default function App({ hostProposals = null }: {
   // Bumped when a workspace is opened or a new one begun: the Layout tab is mounted afresh, so its
   // undo history and selection never carry one workspace's sheets into another.
   const [layoutEpoch, setLayoutEpoch] = useState(0);
+  // The Layout tab's Undo and Redo stacks, held here so a visit to another tab keeps them; a new
+  // pair with each epoch, so an opened or new workspace starts with no history. Never saved.
+  const layoutHistory = useMemo(
+    () => ({ undo: { current: [] as LayoutWorkspace[] }, redo: { current: [] as LayoutWorkspace[] } }),
+    [layoutEpoch],
+  );
   const [fcsAssay, setFcsAssay] = useState<FcsExportAssay>("original");
   const [fcsScope, setFcsScope] = useState<"active" | "combined" | "split">("split");
   const [fcsMinimumEvents, setFcsMinimumEvents] = useState(0);
@@ -2895,6 +2902,17 @@ export default function App({ hostProposals = null }: {
     (id: string) => fileHierarchyId(fileHierarchies[id], state.hierarchies),
     [fileHierarchies, state.hierarchies],
   );
+  /**
+   * The files as the Layout tab takes them, the same list while nothing about them changes, so
+   * its figure and Plotting blocks are not laid out again on every render. The Strategy and
+   * Illustration tabs take the same list. The revision, panel and scales versions say when a file
+   * changed in place.
+   */
+  const layoutFiles = useMemo(
+    () => samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id), metadata: metadata[entry.id] })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [samples, metadata, hierarchyOfFile, sampleDataRevisionKey, panelVersion, scalesVersion],
+  );
   /** Every tailored gate a loaded file is gated with: the tailoring table, and the Gating-ML export's notice. */
   const tailoredGates = useMemo(
     () => tailoringReport(state, samples.map((entry) => ({ fileId: entry.id, treeId: hierarchyOfFile(entry.id) }))),
@@ -2905,6 +2923,8 @@ export default function App({ hostProposals = null }: {
     () => samples.filter((s) => !excludedSampleIds.has(s.id)),
     [samples, excludedSampleIds, sampleDataRevisionKey],
   );
+  /** The checked files' ids, the same list while the checked files are, for the tabs that take them. */
+  const checkedSampleIds = useMemo(() => checkedSamples.map((entry) => entry.id), [checkedSamples]);
   /**
    * Panel identity: the ordered channel keys with their markers.
    *
@@ -9151,18 +9171,14 @@ export default function App({ hostProposals = null }: {
     setActiveTab("gating");
   }
 
-  /** An image wall from the Images tab as one Layout block, at its natural size, and the Layout tab shown. */
+  /** An image wall from the Images tab as one Layout block on a page, at its natural size or scaled to fit the page, and the Layout tab shown. */
   function addImageWallToLayout(recipe: LayoutImageWallRecipe): void {
     setLayoutWorkspace((current) => {
       layoutUndoSeedRef.current = current;
       const next = cloneLayoutWorkspace(current);
       const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
       if (!sheet) return current;
-      const size = imageWallNaturalSize(recipe);
-      const frame = nextLayoutItemPosition(sheet, size.width, size.height);
-      sheet.items.push({ id: crypto.randomUUID(), ...frame, recipe });
-      sheet.width = Math.max(sheet.width, frame.x + frame.width + 48);
-      sheet.height = Math.max(sheet.height, frame.y + frame.height + 48);
+      addItemOnPage(sheet, recipe, imageWallNaturalSize(recipe));
       return next;
     });
     markWorkspaceDirty();
@@ -9178,11 +9194,7 @@ export default function App({ hostProposals = null }: {
       const next = cloneLayoutWorkspace(current);
       const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
       if (!sheet) return current;
-      const size = cellPanelNaturalSize(recipe);
-      const frame = nextLayoutItemPosition(sheet, size.width, size.height);
-      sheet.items.push({ id, ...frame, recipe });
-      sheet.width = Math.max(sheet.width, frame.x + frame.width + 48);
-      sheet.height = Math.max(sheet.height, frame.y + frame.height + 48);
+      addItemOnPage(sheet, recipe, cellPanelNaturalSize(recipe), id);
       return next;
     });
     lastCellPanelRef.current.set(recipe.sampleId, id);
@@ -9216,7 +9228,8 @@ export default function App({ hostProposals = null }: {
             item.recipe = recipe;
             item.width = Math.round(size.width * grow);
             item.height = Math.round(size.height * grow);
-            sheet.height = Math.max(sheet.height, item.y + item.height + 48);
+            // A panel grown past the last page's foot gets the page it runs on to.
+            addPagesToHoldItems(sheet);
           }
           return next;
         }
@@ -17863,9 +17876,9 @@ export default function App({ hostProposals = null }: {
                 dataRevision={activeDataRevision}
                 densityColorPower={densityColorPower}
                 onDensityColorPowerChange={changeDensityColorPower}
-                files={samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id), metadata: metadata[entry.id] }))}
+                files={layoutFiles}
                 poolIds={poolSelection ? (plotPool?.ids ?? []) : null}
-                checkedSampleIds={checkedSamples.map(entry => entry.id)}
+                checkedSampleIds={checkedSampleIds}
                 isSceHost={isSceHost}
                 onViewFile={inspectSample}
                 activeSampleId={activeSampleId}
@@ -17884,8 +17897,8 @@ export default function App({ hostProposals = null }: {
                 key={illustVersion}
                 populationMetadata={populationMetadata}
                 metadataLevels={metadataLevels}
-                samples={samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id), metadata: metadata[entry.id] }))}
-                checkedSampleIds={checkedSamples.map(entry => entry.id)}
+                samples={layoutFiles}
+                checkedSampleIds={checkedSampleIds}
                 state={state}
                 defaultX={sample.channels[xIdx].key}
                 defaultY={sample.channels[yIdx].key}
@@ -17917,9 +17930,10 @@ export default function App({ hostProposals = null }: {
                   workspace={layoutWorkspace}
                   onChange={setLayoutWorkspace}
                   takeUndoSeed={takeLayoutUndoSeed}
+                  history={layoutHistory}
                   imageService={imageService}
-                  samples={samples.map(entry => ({ ...entry, fileName: entry.name, name: sampleDisplayId(entry.name, metadata[entry.id]), hierarchyId: hierarchyOfFile(entry.id), metadata: metadata[entry.id] }))}
-                  checkedSampleIds={samples.filter((entry) => !excludedSampleIds.has(entry.id)).map((entry) => entry.id)}
+                  samples={layoutFiles}
+                  checkedSampleIds={checkedSampleIds}
                   groups={state.groups}
                   fileGroups={state.file_groups}
                   metadataColumns={metadataColumnNames}

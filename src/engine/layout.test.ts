@@ -15,6 +15,7 @@ import {
   pageForPreset,
   pageSizeMm,
   pageSizePx,
+  mmToPx,
 } from "./layout";
 
 describe("layout workspace persistence", () => {
@@ -103,6 +104,37 @@ describe("layout workspace persistence", () => {
     expect((workspace.sheets[0].items[0].recipe as { pool: { sampleIds: string[] } }).pool.sampleIds).toEqual(["D1", "D2"]);
   });
 
+  it("keeps a strategy's pool of files through a save, a load, a clone and a copy", () => {
+    const strategy = { kind: "strategy" as const, sampleId: "D1", populationId: "CD4_positive", fullPath: true, displayMode: "pseudocolor" as const };
+    const loaded = (pool: unknown) => normalizeLayoutWorkspace({
+      version: 2,
+      activeSheetId: "s",
+      sheets: [{ id: "s", name: "Pooled", width: 900, height: 700, items: [{ id: "g", x: 0, y: 0, width: 600, height: 300, z: 1, recipe: { ...strategy, pool } }] }],
+    }).sheets[0].items[0].recipe;
+    expect(loaded({ sampleIds: ["D1", "D2", "D1", ""] })).toMatchObject({ kind: "strategy", pool: { sampleIds: ["D1", "D2"] } });
+    expect(loaded({ sampleIds: [] })).not.toHaveProperty("pool");
+    expect(loaded(undefined)).not.toHaveProperty("pool");
+    const workspace = createDefaultLayoutWorkspace();
+    workspace.sheets[0].items.push({ id: "g", x: 0, y: 0, width: 600, height: 300, z: 1, recipe: { ...strategy, pool: { sampleIds: ["D1", "D2"] } } });
+    const cloned = cloneLayoutWorkspace(workspace).sheets[0].items[0].recipe as typeof strategy & { pool: { sampleIds: string[] } };
+    cloned.pool.sampleIds.push("D3");
+    const copied = copyLayoutItems(workspace.sheets[0].items, () => "copy").copies[0].recipe as typeof strategy & { pool: { sampleIds: string[] } };
+    copied.pool.sampleIds.push("D3");
+    expect((workspace.sheets[0].items[0].recipe as { pool: { sampleIds: string[] } }).pool.sampleIds).toEqual(["D1", "D2"]);
+  });
+
+  it("keeps a strategy's gate edge style through a save and a load, and drops one it does not know", () => {
+    const loaded = (gateEdgeMode: unknown) => normalizeLayoutWorkspace({
+      version: 2,
+      activeSheetId: "s",
+      sheets: [{ id: "s", name: "Edges", width: 900, height: 700, items: [{ id: "g", x: 0, y: 0, width: 600, height: 300, z: 1, recipe: { kind: "strategy", sampleId: "D1", populationId: "CD4_positive", fullPath: true, displayMode: "pseudocolor", gateEdgeMode } }] }],
+    }).sheets[0].items[0].recipe;
+    expect(loaded("bowed")).toMatchObject({ gateEdgeMode: "bowed" });
+    expect(loaded("straight")).toMatchObject({ gateEdgeMode: "straight" });
+    expect(loaded("curved")).not.toHaveProperty("gateEdgeMode");
+    expect(loaded(undefined)).not.toHaveProperty("gateEdgeMode");
+  });
+
   it("keeps a multi-population strategy block's populations, layout and arrows through a save and a load", () => {
     const recipe = (extra: Record<string, unknown>) => normalizeLayoutWorkspace({
       version: 2,
@@ -141,6 +173,35 @@ describe("layout workspace persistence", () => {
     expect(normalizeLayoutStyle({ maxEvents: 0 }).maxEvents).toBe(0);
     expect(normalizeLayoutStyle({ maxEvents: 100 }).maxEvents).toBe(500);
     expect(DEFAULT_LAYOUT_STYLE.maxEvents).toBe(50000);
+  });
+
+  it("opens every frame the tab can save as it was saved, and still repairs a broken one", () => {
+    const plot = { kind: "biplot", sampleId: "sample_A", populationId: "CD4_positive", xChannel: "FSC-A", yChannel: "SSC-A", displayMode: "pseudocolor" };
+    const sheet = createLayoutSheet("Sheet");
+    const typedWidth = Math.round(52.3 * (96 / 25.4) * 100) / 100;
+    sheet.items = [
+      // A plot a fit scaled under the plot minimum: the frame is half the drawn size.
+      { id: "fitted", x: 30, y: 40, width: 100, height: 90, zoom: 0.5, z: 0, showFrame: false, locked: false, recipe: { ...plot } as never },
+      // An item placed partly off the left and top edges.
+      { id: "off", x: -20, y: -12, width: 200, height: 180, z: 1, showFrame: false, locked: false, recipe: { ...plot } as never },
+      // A width typed in mm: fractional in px.
+      { id: "typed", x: 12.34, y: 56.78, width: typedWidth, height: 150.25, z: 2, showFrame: false, locked: false, recipe: { kind: "text", text: "Note", fontSize: 18 } },
+    ];
+    const json = JSON.parse(JSON.stringify({ version: 2, activeSheetId: sheet.id, sheets: [sheet] }));
+    // A broken item: no number for its width, no height at all.
+    json.sheets[0].items.push({ id: "broken", x: 10, y: 10, width: null, height: 0, z: 3, recipe: { ...plot } });
+    json.sheets[0].items.push({ id: "nan", x: Number.NaN, y: 10, width: Number.NaN, height: -5, z: 4, recipe: { ...plot } });
+    const items = normalizeLayoutWorkspace(json).sheets[0].items;
+    const frame = (id: string) => {
+      const { x, y, width, height, zoom } = items.find((item) => item.id === id)!;
+      return { x, y, width, height, zoom };
+    };
+    expect(frame("fitted")).toEqual({ x: 30, y: 40, width: 100, height: 90, zoom: 0.5 });
+    expect(frame("off")).toEqual({ x: -20, y: -12, width: 200, height: 180, zoom: undefined });
+    expect(frame("typed")).toEqual({ x: 12.34, y: 56.78, width: typedWidth, height: 150.25, zoom: undefined });
+    expect(Math.round((frame("typed").width / (96 / 25.4)) * 10) / 10).toBe(52.3);
+    expect(frame("broken")).toEqual({ x: 10, y: 10, width: 260, height: 140, zoom: undefined });
+    expect(frame("nan")).toEqual({ x: 24 + (4 % 3) * 280, y: 10, width: 260, height: 140, zoom: undefined });
   });
 
   it("recovers malformed presentation state without touching scientific workspace data", () => {
@@ -210,6 +271,20 @@ describe("layout pages", () => {
     applyLayoutPage(sheet, { ...pageForPreset("custom", "portrait", { ...sheet.page, dpi: 600 }), widthMm: 50, heightMm: 60 });
     expect(sheet.page).toMatchObject({ preset: "custom", dpi: 600 });
     expect([sheet.width, sheet.height]).toEqual([189, 227]);
+  });
+
+  it("opens a saved margin that leaves no room inside the page at the largest that does, as the Page controls allow", () => {
+    const opened = (page: Record<string, unknown>) => normalizeLayoutWorkspace({ sheets: [{ id: "s", name: "S", width: 500, height: 400, items: [], page }] }).sheets[0].page;
+    // An 85 mm wide page: 42 mm each side leaves a sliver, 43 mm none.
+    const narrow = opened({ preset: "journal-1", orientation: "portrait", widthMm: 85, heightMm: 110, marginMm: 60, dpi: 300 });
+    expect(narrow.marginMm).toBe(42);
+    expect(2 * mmToPx(narrow.marginMm)).toBeLessThan(pageSizePx(narrow).width);
+    expect(2 * mmToPx(43)).toBeGreaterThanOrEqual(pageSizePx(narrow).width);
+    // The shorter side sets it, landscape included.
+    expect(opened({ preset: "journal-1", orientation: "landscape", widthMm: 85, heightMm: 110, marginMm: 100, dpi: 300 }).marginMm).toBe(42);
+    // A margin that leaves room is kept as saved.
+    expect(opened({ preset: "a4", orientation: "landscape", widthMm: 210, heightMm: 297, marginMm: 15, dpi: 300 }).marginMm).toBe(15);
+    expect(opened({ preset: "a4", orientation: "portrait", widthMm: 210, heightMm: 297, marginMm: 100, dpi: 300 }).marginMm).toBe(100);
   });
 
   it("drops an unknown preset or an out-of-range size to the fallback", () => {

@@ -3366,6 +3366,11 @@ details[open] > .gl-fold-summary .gl-icon-chevron { transform: rotate(90deg); }
   margin-left: auto; color: #64748b; font-size: var(--gl-font-size-caption); white-space: nowrap;
 }
 .gl-hint.gl-layout-warning { color: #7a3e00; }
+.gl-layout-export-warning {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin: 2px 0 8px; padding: 6px 8px;
+  border: 1px solid #f59e0b; border-radius: 4px; background: #fffbeb; color: #78350f;
+  font-size: var(--gl-font-size-secondary);
+}
 .gl-layout-message {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 5px 11px; color: #334155;
@@ -3407,14 +3412,17 @@ details[open] > .gl-fold-summary .gl-icon-chevron { transform: rotate(90deg); }
 .gl-layout-item {
   position: absolute; display: flex; flex-direction: column;
   min-width: 24px; min-height: 24px; overflow: visible;
-  /* One screen pixel at any zoom: the canvas is scaled, so its hairline is 1/zoom (--gl-hair). */
-  border: var(--gl-hair, 1px) solid transparent; border-radius: 0; background: transparent;
+  /* One screen pixel at any zoom: the canvas is scaled, so its hairline is 1/zoom (--gl-hair).
+     The edge is drawn as an inset shadow, not a border, so it takes no room: the contents sit
+     at the frame's corner at every zoom, where the export writes them. */
+  --gl-edge: transparent; --gl-edge-width: var(--gl-hair, 1px);
+  border: 0; box-shadow: inset 0 0 0 var(--gl-edge-width) var(--gl-edge); border-radius: 0; background: transparent;
 }
-.gl-layout-item:hover { border-color: #94a3b8; }
-.gl-layout-item.is-selected { border-color: var(--gl-select); }
+.gl-layout-item:hover { --gl-edge: #94a3b8; }
+.gl-layout-item.is-selected { --gl-edge: var(--gl-select); }
 /* Moveable draws a selected item's frame; the item's own edge under it would double the line. A
    locked item has no Moveable frame and keeps its edge. */
-.gl-layout-item.is-selected:not(.is-locked) { border-color: transparent; }
+.gl-layout-item.is-selected:not(.is-locked) { --gl-edge: transparent; }
 .gl-layout-plot-host {
   display: grid; flex: 1 1 auto; min-width: 0; min-height: 0;
   place-items: start center; overflow: auto; padding: 4px;
@@ -3473,15 +3481,15 @@ details[open] > .gl-fold-summary .gl-icon-chevron { transform: rotate(90deg); }
 .gl-layout-dimensions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .gl-layout-dimensions label { display: grid; gap: 4px; }
 .gl-layout-item.is-text { min-width: 24px; min-height: 20px; }
-.gl-layout-item.has-frame { border-color: #94a3b8; border-width: 1px; }
+.gl-layout-item.has-frame { --gl-edge: #94a3b8; --gl-edge-width: 1px; }
 .gl-layout-text-surface { display: block; width: 100%; height: 100%; padding: 2px; margin: 0; border: 0; outline: none; resize: none; background: transparent; font-family: Arial, Helvetica, sans-serif; box-sizing: border-box; }
 /* As placed, the words are static and the block is taken by its body; the editor opens on a double-click or Enter. */
 .gl-layout-text-surface.is-static { user-select: none; cursor: default; overflow: hidden; }
 .gl-layout-item.is-selected .gl-layout-text-surface.is-static { cursor: move; }
 /* Editing, an item dragged past the page's edge overhangs it, still in reach; Preview clips to the page, as the export does. */
 .gl-layout-tab.is-preview .gl-layout-canvas { background-image: none; overflow: hidden; }
-.gl-layout-tab.is-preview .gl-layout-item { pointer-events: none; border-color: transparent; }
-.gl-layout-tab.is-preview .gl-layout-item.has-frame { border-color: #94a3b8; }
+.gl-layout-tab.is-preview .gl-layout-item { pointer-events: none; --gl-edge: transparent; }
+.gl-layout-tab.is-preview .gl-layout-item.has-frame { --gl-edge: #94a3b8; }
 
 .gl-plotting-workspace { display: grid !important; grid-template-columns: 290px minmax(0, 1fr); grid-template-rows: 46px minmax(0, 1fr); padding: 0 !important; overflow: hidden; background: #f3f5f8; }
 .gl-plotting-head { grid-column: 1 / -1; display: flex; align-items: center; gap: 18px; padding: 0 16px; border-bottom: 1px solid #d7dee8; background: white; }

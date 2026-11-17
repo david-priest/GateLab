@@ -1,9 +1,9 @@
 /* Placed images on a Layout page (LayoutPlacedImage.tsx). The image fills its item's frame, over
-   the item's hairline edge, so the page shows it where the export writes it; it has no minimum size. */
+   the item's hairline edge (which takes no room), so the page shows it where the export writes it;
+   it has no minimum size. */
 .gl-layout-item:has(> .gl-layout-item-body > .gl-layout-placed-image) { min-width: 0; min-height: 0; }
 .gl-layout-placed-image {
-  position: absolute; inset: calc(-1 * var(--gl-hair, 1px));
-  width: calc(100% + 2 * var(--gl-hair, 1px)); height: calc(100% + 2 * var(--gl-hair, 1px));
+  position: absolute; inset: 0; width: 100%; height: 100%;
   display: block; object-fit: fill; user-select: none; -webkit-user-drag: none;
 }
 .gl-layout-image-fields { display: flex; flex-direction: column; gap: 8px; }

@@ -6,7 +6,7 @@ export const LAYOUT_GUIDES_JA: Readonly<Record<string, string>> = {
   "Show rulers in mm along the top and left of the page; drag from a ruler to place a guide": "ページの上端と左端に mm 単位の定規を表示します。定規からドラッグしてガイドを置きます",
   "Drag onto the page to place a horizontal guide": "ページ上へドラッグして水平ガイドを置きます",
   "Drag onto the page to place a vertical guide": "ページ上へドラッグして垂直ガイドを置きます",
-  "Rulers in mm from the first page's top-left corner": "定規は最初のページの左上隅からの mm です",
+  "Rulers in mm from each page's top-left corner": "定規は各ページの左上隅からの mm です",
   "Guides": "ガイド",
   "Vertical guide at {mm} mm": "垂直ガイド {mm} mm",
   "Horizontal guide at {mm} mm": "水平ガイド {mm} mm",

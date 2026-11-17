@@ -10,6 +10,7 @@ import { NATIVE_HOP } from "./cvwDecode";
 import type { RenderSpecMessage, RenderedPicture } from "./cvwProtocol";
 import type { ImageService, RenderResult, SourceInfo } from "./imageService";
 import { drawTile } from "./LayoutImageWall";
+import { fillLabel, keepLayoutCanvas, type CanvasLabel } from "../plots/layoutCanvasExport";
 
 export interface LayoutCellPanelProps {
   readonly recipe: LayoutCellPanelRecipe;
@@ -40,6 +41,8 @@ export function LayoutCellPanel({ recipe, service, width, height }: LayoutCellPa
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [info, setInfo] = useState<{ fileKey: string; info: SourceInfo | null; error: string | null } | null>(null);
   const [pictures, setPictures] = useState<Map<number, Cell>>(() => new Map());
+  // Events whose render failed: shown as empty tiles, and no longer waited for.
+  const [failed, setFailed] = useState<ReadonlySet<number>>(() => new Set());
   const fileKey = recipe.sampleId;
   const attached = !!service?.hasSource(fileKey);
 
@@ -78,6 +81,8 @@ export function LayoutCellPanel({ recipe, service, width, height }: LayoutCellPa
   useEffect(() => {
     if (!service || !spec) return;
     const next = new Map<number, Cell>();
+    const lost = new Set<number>();
+    let live = true;
     const take = (eventIndex: number, result: RenderResult) => {
       const image = result.kind === "image" ? result.image : null;
       next.set(eventIndex, { composite: image?.composite ?? null, channels: image?.channels ?? {}, cols: image?.cols ?? 1, rows: image?.rows ?? 1, aspect: image?.aspect ?? 1 });
@@ -85,17 +90,19 @@ export function LayoutCellPanel({ recipe, service, width, height }: LayoutCellPa
     let timer: ReturnType<typeof setTimeout> | null = null;
     const schedule = () => {
       if (timer) return;
-      timer = setTimeout(() => { timer = null; setPictures(new Map(next)); }, 60);
+      timer = setTimeout(() => { timer = null; setPictures(new Map(next)); setFailed(new Set(lost)); }, 60);
     };
     const handles = [...new Set(recipe.cells.map((c) => c.event))].map((eventIndex) => {
       const cached = service.cached(fileKey, eventIndex, spec);
       if (cached) { take(eventIndex, cached); return null; }
       const handle = service.render(fileKey, eventIndex, spec, "batch");
-      handle.promise.then((result) => { take(eventIndex, result); schedule(); }, () => undefined);
+      handle.promise.then((result) => { take(eventIndex, result); schedule(); }, () => { if (live) { lost.add(eventIndex); schedule(); } });
       return handle;
     });
     setPictures(new Map(next));
+    setFailed(new Set(lost));
     return () => {
+      live = false;
       if (timer) clearTimeout(timer);
       for (const handle of handles) handle?.cancel();
     };
@@ -114,64 +121,73 @@ export function LayoutCellPanel({ recipe, service, width, height }: LayoutCellPa
     canvas.style.height = `${cssH}px`;
     canvas.width = Math.round(cssW * dpr);
     canvas.height = Math.round(cssH * dpr);
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(0, 0, g.width, g.height);
-    const tile = recipe.tile;
-    const step = tile + 3;
-    if (g.titleHeight > 0) {
-      ctx.fillStyle = "#1a1a1a";
-      ctx.font = `600 12px ${FONT}`;
+    const screen = canvas.getContext("2d");
+    if (!screen) return;
+    screen.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
+    // The drawing at the natural size; the page's export draws it again with its words as text.
+    const paint = (ctx: CanvasRenderingContext2D, labels: CanvasLabel[] | null) => {
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, g.width, g.height);
+      const tile = recipe.tile;
+      const step = tile + 3;
+      if (g.titleHeight > 0) {
+        ctx.fillStyle = "#1a1a1a";
+        ctx.font = `600 12px ${FONT}`;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "alphabetic";
+        fillLabel(ctx, labels, fitText(ctx, recipe.title!.trim(), g.width - 2 * CELL_PANEL_PADDING), CELL_PANEL_PADDING, CELL_PANEL_PADDING + 12);
+      }
+      const transpose = recipe.transpose === true;
+      const shown = visibleColumns(recipe);
+      const topTexts = transpose ? recipe.cells.map((c) => c.label) : shown.map((c) => c.header);
+      const sideTexts = transpose ? shown.map((c) => c.header) : recipe.cells.map((c) => c.label);
+      // Headers over the grid, centred on their tiles and cut to the tile's width.
+      if (g.headerHeight > 0) {
+        ctx.fillStyle = "#333";
+        ctx.font = `10px ${FONT}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        topTexts.forEach((text, c) => fillLabel(ctx, labels, fitText(ctx, text, tile), g.gridX + c * step + tile / 2, g.gridY - 3));
+      }
+      // Labels beside the rows, right-aligned against the grid.
+      if (g.labelWidth > 0) {
+        ctx.fillStyle = "#333";
+        ctx.font = `10px ${FONT}`;
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+        sideTexts.forEach((text, r) => fillLabel(ctx, labels, fitText(ctx, text, g.labelWidth - 6), g.gridX - 5, g.gridY + r * step + tile / 2));
+      }
       ctx.textAlign = "left";
-      ctx.textBaseline = "alphabetic";
-      ctx.fillText(fitText(ctx, recipe.title!.trim(), g.width - 2 * CELL_PANEL_PADDING), CELL_PANEL_PADDING, CELL_PANEL_PADDING + 12);
-    }
-    const transpose = recipe.transpose === true;
-    const shown = visibleColumns(recipe);
-    const topTexts = transpose ? recipe.cells.map((c) => c.label) : shown.map((c) => c.header);
-    const sideTexts = transpose ? shown.map((c) => c.header) : recipe.cells.map((c) => c.label);
-    // Headers over the grid, centred on their tiles and cut to the tile's width.
-    if (g.headerHeight > 0) {
-      ctx.fillStyle = "#333";
-      ctx.font = `10px ${FONT}`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "bottom";
-      topTexts.forEach((text, c) => ctx.fillText(fitText(ctx, text, tile), g.gridX + c * step + tile / 2, g.gridY - 3));
-    }
-    // Labels beside the rows, right-aligned against the grid.
-    if (g.labelWidth > 0) {
-      ctx.fillStyle = "#333";
-      ctx.font = `10px ${FONT}`;
-      ctx.textAlign = "right";
-      ctx.textBaseline = "middle";
-      sideTexts.forEach((text, r) => ctx.fillText(fitText(ctx, text, g.labelWidth - 6), g.gridX - 5, g.gridY + r * step + tile / 2));
-    }
-    ctx.textAlign = "left";
-    if (!attached || info?.error) {
-      ctx.fillStyle = "#666";
-      ctx.font = `10px ${FONT}`;
-      ctx.textBaseline = "alphabetic";
-      ctx.fillText(info?.error ?? t("The file's cell images are not attached"), g.gridX, g.gridY + 14);
-      return;
-    }
-    recipe.cells.forEach((cell, i) => {
-      shown.forEach((column, j) => {
-        const r = transpose ? j : i;
-        const c = transpose ? i : j;
-        const x = g.gridX + c * step;
-        const y = g.gridY + r * step;
-        const got = pictures.get(cell.event);
-        if (!got) { ctx.fillStyle = "#e6e6e6"; ctx.fillRect(x, y, tile, tile); return; }
-        const picture = column.kind === "merge" ? got.composite : column.slot !== undefined ? got.channels[column.slot] ?? null : null;
-        drawTile(ctx, picture, got.cols, got.rows, got.aspect, x, y, tile);
+      if (!attached || info?.error) {
+        ctx.fillStyle = "#666";
+        ctx.font = `10px ${FONT}`;
+        ctx.textBaseline = "alphabetic";
+        fillLabel(ctx, labels, info?.error ?? t("The file's cell images are not attached"), g.gridX, g.gridY + 14);
+        return;
+      }
+      recipe.cells.forEach((cell, i) => {
+        shown.forEach((column, j) => {
+          const r = transpose ? j : i;
+          const c = transpose ? i : j;
+          const x = g.gridX + c * step;
+          const y = g.gridY + r * step;
+          const got = pictures.get(cell.event);
+          if (!got) { ctx.fillStyle = "#e6e6e6"; ctx.fillRect(x, y, tile, tile); return; }
+          const picture = column.kind === "merge" ? got.composite : column.slot !== undefined ? got.channels[column.slot] ?? null : null;
+          drawTile(ctx, picture, got.cols, got.rows, got.aspect, x, y, tile);
+        });
       });
-    });
+    };
+    paint(screen, null);
+    keepLayoutCanvas(canvas, { width: g.width, height: g.height, draw: paint });
   }, [recipe, pictures, width, height, attached, info, t]);
 
+  // Marked while the file's scale or any cell's images are still coming, so a page's export waits for the panel;
+  // a cell whose render failed is not coming.
+  const loading = attached && !info?.error && pictures.size + failed.size < new Set(recipe.cells.map((c) => c.event)).size;
+
   return (
-    <div className="gl-layout-cellpanel" data-cells={recipe.cells.length} data-ready={pictures.size}>
+    <div className="gl-layout-cellpanel" data-cells={recipe.cells.length} data-ready={pictures.size} data-layout-pending={loading ? "1" : undefined}>
       <canvas ref={canvasRef} />
     </div>
   );

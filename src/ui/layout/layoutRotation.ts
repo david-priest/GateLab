@@ -27,16 +27,21 @@ export function canTurnAll(items: readonly Pick<LayoutItem, "recipe">[]): boolea
   return items.length > 0 && items.every(canTurn);
 }
 
+/**
+ * A position moved by half the difference of a frame's sides, kept on whole pixels: where the
+ * sides differ by an odd number the shift is cut toward zero, so the centre moves half a pixel at
+ * most and the next quarter turn moves it back; one off whole pixels is rounded onto them.
+ */
+const turnShift = (at: number, by: number) => (Number.isInteger(at) ? at + Math.trunc(by) : Math.round(at + by));
+
 /** Turn one item a quarter turn about its frame's centre, the frame's width and height swapped. */
 export function turnItem(item: LayoutItem, direction: TurnDirection): void {
   const next = ((turnOf(item) + (direction === "right" ? 90 : 270)) % 360) as LayoutTurn;
-  const centreX = item.x + item.width / 2;
-  const centreY = item.y + item.height / 2;
   const { width, height } = item;
   item.width = height;
   item.height = width;
-  item.x = centreX - item.width / 2;
-  item.y = centreY - item.height / 2;
+  item.x = turnShift(item.x, (width - height) / 2);
+  item.y = turnShift(item.y, (height - width) / 2);
   if (next) item.rotation = next;
   else delete item.rotation;
 }
@@ -53,22 +58,21 @@ export function turnItems(sheet: LayoutSheet, ids: readonly string[], direction:
 }
 
 /**
- * A text block grown to show every line it was given, as an upright one grows downward: the
- * growth is along the turned text's own height, away from its first line, so a block turned 90°
- * grows to the left, one turned 270° to the right, and one turned 180° upward. It never shrinks.
+ * A text block grown by `growth` (frame px, see textFrameGrowth) to show every line it was given,
+ * as an upright one grows downward: the growth is along the turned text's own height, away from
+ * its first line, so a block turned 90° grows to the left, one turned 270° to the right, and one
+ * turned 180° upward. It never shrinks.
  */
-export function growTextFrame(item: LayoutItem, contentHeight: number): void {
-  const need = Math.ceil(contentHeight) + 4;
+export function growTextFrame(item: LayoutItem, growth: number): void {
+  if (!(growth > 0)) return;
   const turn = turnOf(item);
   if (turn === 90 || turn === 270) {
-    if (need <= item.width) return;
-    if (turn === 90) item.x -= need - item.width;
-    item.width = need;
+    if (turn === 90) item.x -= growth;
+    item.width += growth;
     return;
   }
-  if (need <= item.height) return;
-  if (turn === 180) item.y -= need - item.height;
-  item.height = need;
+  if (turn === 180) item.y -= growth;
+  item.height += growth;
 }
 
 /**
@@ -82,8 +86,8 @@ export function turnedBoxStyle(turn: LayoutTurn, width: number, height: number):
   const boxWidth = sideways ? height : width;
   const boxHeight = sideways ? width : height;
   return {
-    width: `calc(${boxWidth}px - 2 * var(--gl-hair, 1px))`,
-    height: `calc(${boxHeight}px - 2 * var(--gl-hair, 1px))`,
+    width: boxWidth,
+    height: boxHeight,
     marginLeft: (width - boxWidth) / 2,
     marginTop: (height - boxHeight) / 2,
     transform: `rotate(${turn}deg)`,

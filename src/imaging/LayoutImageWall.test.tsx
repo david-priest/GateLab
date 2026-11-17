@@ -73,3 +73,43 @@ describe("LayoutImageWall", () => {
     expect(host.querySelector("canvas")).toBeTruthy();
   });
 });
+
+describe("LayoutImageWall while it loads", () => {
+  it("is marked pending until every cell's image has come, so a page's export waits for it", async () => {
+    const { service } = fakeService(true);
+    const answers: ((result: RenderResult) => void)[] = [];
+    (service as unknown as { render: unknown }).render = () => ({ promise: new Promise<RenderResult>((resolve) => answers.push(resolve)), cancel: () => undefined });
+    act(() => root.render(<LayoutImageWall recipe={recipe} service={service} width={300} height={200} />));
+    await settle();
+    const block = () => host.querySelector(".gl-layout-imagewall")!;
+    expect(block().getAttribute("data-layout-pending")).toBe("1");
+    expect(answers.length).toBeGreaterThan(0);
+    answers.forEach((answer) => answer({ kind: "no-image" }));
+    await settle();
+    expect(block().hasAttribute("data-layout-pending")).toBe(false);
+  });
+
+  it("is no longer pending once every image has either come or failed", async () => {
+    const { service } = fakeService(true);
+    const answers: { resolve: (result: RenderResult) => void; reject: (error: Error) => void }[] = [];
+    (service as unknown as { render: unknown }).render = () => ({ promise: new Promise<RenderResult>((resolve, reject) => answers.push({ resolve, reject })), cancel: () => undefined });
+    act(() => root.render(<LayoutImageWall recipe={recipe} service={service} width={300} height={200} />));
+    await settle();
+    const block = () => host.querySelector(".gl-layout-imagewall")!;
+    expect(block().getAttribute("data-layout-pending")).toBe("1");
+    expect(answers.length).toBeGreaterThan(1);
+    answers.slice(1).forEach((answer) => answer.resolve({ kind: "no-image" }));
+    await settle();
+    expect(block().getAttribute("data-layout-pending")).toBe("1");
+    answers[0].reject(new Error("render failed"));
+    await settle();
+    expect(block().hasAttribute("data-layout-pending")).toBe(false);
+  });
+
+  it("is not marked when the file's images are not attached", async () => {
+    const { service } = fakeService(false);
+    act(() => root.render(<LayoutImageWall recipe={recipe} service={service} width={300} height={200} />));
+    await settle();
+    expect(host.querySelector(".gl-layout-imagewall")!.hasAttribute("data-layout-pending")).toBe(false);
+  });
+});

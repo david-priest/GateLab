@@ -133,6 +133,21 @@ describe("a pooled Strategy tab", () => {
     expect(props.onViewFile).toHaveBeenCalledWith("D2");
   });
 
+  it("sends the pool to the Layout tab, the first pooled file the reference, and the viewed file once the pool is off", async () => {
+    const fx = fixture();
+    const onAddToLayout = vi.fn();
+    const addButton = () => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Add to Layout")!;
+    act(() => root.render(<I18nProvider><StrategyTab {...propsOf(fx)} activeSampleId="D2" poolIds={["D1", "D2"]} onAddToLayout={onAddToLayout} /></I18nProvider>));
+    await flush();
+    act(() => addButton().click());
+    expect(onAddToLayout.mock.calls.at(-1)![0]).toMatchObject({ kind: "strategy", sampleId: "D1", populationId: fx.childId, pool: { sampleIds: ["D1", "D2"] } });
+    act(() => poolBox().click());
+    await flush();
+    act(() => addButton().click());
+    expect(onAddToLayout.mock.calls.at(-1)![0]).toMatchObject({ kind: "strategy", sampleId: "D2" });
+    expect(onAddToLayout.mock.calls.at(-1)![0]).not.toHaveProperty("pool");
+  });
+
   it("says when nothing is pooled, and takes the checked files on request", async () => {
     const fx = fixture();
     act(() => root.render(<I18nProvider><StrategyTab {...propsOf(fx, ["D2"])} poolIds={[]} /></I18nProvider>));

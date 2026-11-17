@@ -185,18 +185,27 @@ function strategySource(item: SourceItem, recipe: LayoutStrategyRecipe, ctx: Blo
   const trees = figureHierarchies(ctx.state);
   const templateTreeId = item.templateSampleId && item.templateSampleId !== recipe.sampleId ? ctx.samples.find((entry) => entry.id === item.templateSampleId)?.tree.id : undefined;
   const asked = recipe.populationIds?.length ? recipe.populationIds : [recipe.populationId];
+  // A pooled strategy counts each population over the pooled files.
+  const pool = recipe.pool && recipe.pool.sampleIds.length > 1 ? recipe.pool.sampleIds : null;
+  const pooledViews = (pool ?? []).flatMap((id) => ctx.samples.filter((entry) => entry.id === id));
   const found = view
     ? asked.flatMap((id) => {
         const resolved = resolvePopulationInTree(id, view.tree, trees, templateTreeId);
         const population = resolved.missing ? undefined : view.tree.populations[resolved.id];
-        return population ? [{ name: population.name, count: view.derived.stats.event_count[resolved.id] ?? 0 }] : [];
+        const count = pool
+          ? pooledViews.reduce((total, entry) => {
+              const inFile = resolvePopulationInTree(id, entry.tree, trees, templateTreeId);
+              return total + (inFile.missing ? 0 : entry.derived.stats.event_count[inFile.id] ?? 0);
+            }, 0)
+          : view.derived.stats.event_count[resolved.id] ?? 0;
+        return population ? [{ name: population.name, count }] : [];
       })
     : [];
   const file = name(recipe.sampleId);
   return {
     kind: "strategy",
-    shows: `Gating steps leading to ${listWords(found.map((entry) => entry.name)) || "the population"} in ${file}`,
-    files: [file],
+    shows: `Gating steps leading to ${listWords(found.map((entry) => entry.name)) || "the population"} in ${pool ? `${pool.length} files pooled` : file}`,
+    files: pool ? pool.map(name) : [file],
     populations: found.map((entry) => entry.name),
     channels: [],
     counts: found.map((entry) => entry.count),

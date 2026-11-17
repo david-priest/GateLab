@@ -186,6 +186,78 @@ describe("Rulers on the Layout page", () => {
   });
 });
 
+/** A blank sheet of A4 landscape pages, `columns` across and `rows` down, in a pane wide and tall enough to show them all. */
+function mountPages(columns: number, rows: number) {
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (this.classList.contains("gl-layout-canvas-scroll")) return rect(0, 0, 3000, 3000);
+    if (this.matches(".gl-layout-canvas, .gl-layout-guides, .gl-layout-shape-draw")) return rect(18, 18, 1123 * columns, 794 * rows);
+    return rect(0, 0, 0, 0);
+  });
+  const saved = JSON.parse(JSON.stringify(createDefaultLayoutWorkspace()));
+  saved.sheets[0].page = { ...saved.sheets[0].page, columns, rows };
+  saved.sheets[0].width = 1123 * columns;
+  saved.sheets[0].height = 794 * rows;
+  return mount(normalizeLayoutWorkspace(saved));
+}
+const labelsOf = (which: "top" | "left") => [...ruler(which)!.querySelectorAll("text")].map((text) => ({ mm: text.textContent, x: Number(text.getAttribute(which === "top" ? "x" : "y")) }));
+
+describe("Rulers on a sheet of several pages", () => {
+  it("starts the top ruler at 0 again at the second page's left edge", () => {
+    mountPages(2, 1);
+    const top = labelsOf("top");
+    const second = top.findIndex((label) => label.x > 18 + 1123);
+    expect(top.slice(second - 2, second + 3).map((label) => label.mm)).toEqual(["280", "290", "0", "10", "20"]);
+    expect(top[second].x).toBeCloseTo(18 + 1123 + 2);
+    // The side ruler, one page down, reads as before.
+    expect(labelsOf("left").map((label) => label.mm).slice(0, 3)).toEqual(["0", "10", "20"]);
+  });
+
+  it("starts the side ruler at 0 again at the second page's top edge", () => {
+    mountPages(1, 2);
+    const left = labelsOf("left");
+    const second = left.findIndex((label) => label.x > 18 + 794);
+    // 210 mm falls 0.3 px before the second page, so its label is left off.
+    expect(left.slice(second - 2, second + 2).map((label) => label.mm)).toEqual(["190", "200", "0", "10"]);
+    expect(left[second].x).toBeCloseTo(18 + 794 + 2);
+    expect(labelsOf("top").map((label) => label.mm)).toContain("300");
+  });
+});
+
+describe("Guide positions on a sheet of several pages", () => {
+  const field = () => host.querySelector<HTMLInputElement>('input[aria-label="Guide position (mm)"]')!;
+  const typeInto = (input: HTMLInputElement, value: string) => act(() => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  });
+
+  it("shows and takes a vertical guide's position from the left edge of the second page across", () => {
+    const changes = mountPages(2, 1);
+    drag(ruler("left")!, [8, 300], [18 + 1123 + 100, 300]);
+    // Kept from the first page's corner; shown from the second page's edge.
+    expect(guides(changes)).toEqual([{ axis: "x", at: 1223 }]);
+    expect(guideEls()[0].getAttribute("aria-label")).toBe(`Vertical guide at ${pxToUnit(100, "mm")} mm`);
+    act(() => { guideEls()[0].dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); });
+    expect(Number(field().value)).toBe(pxToUnit(100, "mm"));
+    typeInto(field(), "40");
+    expect(guides(changes)![0].at).toBeCloseTo(1123 + 40 * (96 / 25.4), 1);
+    expect(guideEls()[0].getAttribute("aria-label")).toBe("Vertical guide at 40 mm");
+    // On the first page, as before.
+    drag(ruler("left")!, [8, 300], [18 + 100, 300]);
+    expect(guideEls()[1].getAttribute("aria-label")).toBe(`Vertical guide at ${pxToUnit(100, "mm")} mm`);
+  });
+
+  it("shows and takes a horizontal guide's position from the top edge of the second page down", () => {
+    const changes = mountPages(1, 2);
+    drag(ruler("top")!, [300, 8], [300, 18 + 794 + 60]);
+    expect(guides(changes)).toEqual([{ axis: "y", at: 854 }]);
+    expect(guideEls()[0].getAttribute("aria-label")).toBe(`Horizontal guide at ${pxToUnit(60, "mm")} mm`);
+    act(() => { guideEls()[0].dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); });
+    expect(Number(field().value)).toBe(pxToUnit(60, "mm"));
+    typeInto(field(), "25");
+    expect(guides(changes)![0].at).toBeCloseTo(794 + 25 * (96 / 25.4), 1);
+  });
+});
+
 describe("Guides on the Layout page", () => {
   it("makes a horizontal guide from the top ruler and a vertical one from the left, each one undo step", () => {
     const changes = mount();

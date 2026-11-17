@@ -4,11 +4,11 @@
 // sheet by sheet by the tab, as one sheet's export composes them.
 
 import { zipSync, strToU8 } from "fflate";
-import { rasterizeSvg } from "../../plots/gridExport";
+import { maxRasterDpi, rasterizeSvg } from "../../plots/gridExport";
 import type { LayoutSheet } from "../../engine/layout";
 import { sanitizeFilePart } from "../../engine/fcsExport";
 import { nextTurn, pdfVectorPage, pngBlob } from "../../plots/exportSvg";
-import type { ComposedPage, LayoutExportFormat } from "../../plots/layoutExport";
+import type { ComposedPage, ExportReport, LayoutExportFormat } from "../../plots/layoutExport";
 
 export interface ComposedSheet {
   sheet: LayoutSheet;
@@ -53,9 +53,17 @@ export function allSheetsPaths(sheets: readonly ComposedSheet[], extension: stri
 
 const serialize = (root: SVGSVGElement) => '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(root);
 
-export async function writeAllSheets(sheets: readonly ComposedSheet[], format: LayoutExportFormat): Promise<void> {
+export async function writeAllSheets(sheets: readonly ComposedSheet[], format: LayoutExportFormat): Promise<ExportReport> {
+  const report: ExportReport = { loweredDpi: null, rasterPages: [] };
+  // As for one sheet: a page drawn as one image at the sheet's dpi, or at the most a browser draws it at.
+  const rasterDpi = (page: ComposedPage, dpi: number) => {
+    const most = maxRasterDpi(page.width, page.height);
+    if (dpi <= most) return dpi;
+    report.loweredDpi = Math.min(report.loweredDpi ?? most, most);
+    return most;
+  };
   const written = sheets.filter(({ pages }) => pages.length > 0);
-  if (!written.length) return;
+  if (!written.length) return report;
   if (format === "svg" || format === "png") {
     const paths = allSheetsPaths(written, format);
     const files: Record<string, Uint8Array> = {};
@@ -65,14 +73,15 @@ export async function writeAllSheets(sheets: readonly ComposedSheet[], format: L
         if (format === "svg") files[path] = strToU8(serialize(page.root));
         else {
           // One raster at a time, let go before the next is drawn.
-          const raster = await rasterizeSvg(page, sheet.page.dpi);
-          files[path] = new Uint8Array(await (await pngBlob(raster, sheet.page.dpi)).arrayBuffer());
+          const at = rasterDpi(page, sheet.page.dpi);
+          const raster = await rasterizeSvg(page, at);
+          files[path] = new Uint8Array(await (await pngBlob(raster, at)).arrayBuffer());
           await nextTurn();
         }
       }
     }
     downloadBlob(new Blob([zipSync(files) as BlobPart], { type: "application/zip" }), `${ALL_SHEETS_FILENAME}.zip`);
-    return;
+    return report;
   }
   // As one sheet's PDF is written (plots/layoutExport.ts): each page at its physical size, in points,
   // vector where the writer can take it and a raster at the sheet's dpi where it cannot.
@@ -90,11 +99,13 @@ export async function writeAllSheets(sheets: readonly ComposedSheet[], format: L
       if (count > 0) pdf.addPage([width, height], orientation);
       count += 1;
       if (!(await pdfVectorPage(pdf, page.root, { width, height }))) {
-        const raster = await rasterizeSvg(page, sheet.page.dpi);
+        const raster = await rasterizeSvg(page, rasterDpi(page, sheet.page.dpi));
         pdf.addImage(raster, "PNG", 0, 0, width, height, undefined, "FAST");
+        report.rasterPages.push(count);
       }
       await nextTurn();
     }
   }
   pdf.save(`${ALL_SHEETS_FILENAME}.pdf`);
+  return report;
 }

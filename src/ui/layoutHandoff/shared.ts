@@ -7,7 +7,6 @@
 import {
   cloneLayoutWorkspace,
   layoutGridFrames,
-  nextLayoutItemPosition,
   normalizeLayoutStyle,
   type LayoutGridCell,
   type LayoutGridHeading,
@@ -20,7 +19,7 @@ import {
 import { plotTitle, plotTitleContext } from "../../engine/layoutTitle";
 import { sampleDisplayId } from "../../engine/metadata";
 import { followSheetIteration } from "../layoutFollow";
-import { placeBlockOnPage, styleBeyondSheet } from "../layoutPlacement";
+import { nextItemFrame, placeBlockOnPage, styleBeyondSheet } from "../layoutPlacement";
 import { fitLayoutText } from "../layoutTextFit";
 
 /** The workspace's figure style as Layout style fields (figureLayoutFields in figureStyle.tsx). */
@@ -107,7 +106,7 @@ export function addPlotsToSheet(
   const ids: string[] = [];
   const firstAdded = sheet.items.length;
   followSheetIteration(sheet, recipes).forEach((recipe, index) => {
-    const frame = frames ? frames[index] : nextLayoutItemPosition(sheet);
+    const frame = frames ? frames[index] : nextItemFrame(sheet);
     const id = crypto.randomUUID();
     ids.push(id);
     const style = recipe.kind === "proportions" ? undefined : styleBeyondSheet(sheet, recipe.style && normalizeLayoutStyle(recipe.style), figureLayout);
@@ -137,9 +136,5 @@ export function addPlotsToSheet(
     });
   }
   if (frames) placeBlockOnPage(sheet, sheet.items.slice(firstAdded));
-  for (const item of sheet.items.slice(firstAdded)) {
-    sheet.width = Math.max(sheet.width, item.x + item.width + 48);
-    sheet.height = Math.max(sheet.height, item.y + item.height + 48);
-  }
   return next;
 }
