@@ -228,7 +228,7 @@ export function StrategyTab({
   const containerRef = useRef<HTMLDivElement>(null);
   /** The channels and ranges of each drawn panel, by its cell key, for the navigate drag. */
   const panelsRef = useRef<Map<string, PannablePanel>>(new Map());
-  /** The multi-population grid's shape and panel size as last drawn, for the Layout block. */
+  /** The multi-population grid's or the strip's shape and panel size as last drawn, for the Layout block. */
   const gridShapeRef = useRef<{ rows: number; cols: number; plotSize: number; gap: number; rowGap: number; fonts: { tick: number; axis_label: number; gate_label: number; title: number } } | null>(null);
   /** The panel size the multi-population grid was last drawn at, shown beside Plot size when Fit made it smaller. */
   const [drawnSize, setDrawnSize] = useState<number | null>(null);
@@ -431,6 +431,11 @@ export function StrategyTab({
       const fontScale = fitted < plotSize ? fitted / plotSize : 1;
       const scaled = (size: number) => Math.max(5, Math.round(size * fontScale * 10) / 10);
       setDrawnSize(fitted);
+      const stripFonts = fontScale < 1
+        ? { tick: scaled(fontSizes.tick), axis_label: scaled(fontSizes.axis_label), gate_label: scaled(fontSizes.gate_label), title: scaled(fontSizes.title) }
+        : fontSizes;
+      // The strip's shape, so the Layout block arrives with these columns, panels and fonts.
+      gridShapeRef.current = { rows: Math.ceil(Math.max(1, steps.length) / columns), cols: columns, plotSize: fitted, fonts: stripFonts, gap: 8, rowGap: 8 };
       const payloadOptions = {
         gateView,
         displayMode: effMode,
@@ -450,9 +455,7 @@ export function StrategyTab({
         pubStyle,
         gateLineWidth,
         gateEdgeMode,
-        fontSizes: fontScale < 1
-          ? { tick: scaled(fontSizes.tick), axis_label: scaled(fontSizes.axis_label), gate_label: scaled(fontSizes.gate_label), title: scaled(fontSizes.title) }
-          : fontSizes,
+        fontSizes: stripFonts,
         // The grid's title names what it draws, so an export says which file or pool it was.
         contextTitle: pool
           ? `${state.populations[popId]?.name ?? ""} · ${pool.drawn.length} ${isSceHost ? "samples" : "files"} pooled`
@@ -538,14 +541,19 @@ export function StrategyTab({
   const layoutDisplayMode = displayMode === "contour" ? "contour" : displayMode === "scatter" ? "scatter" : "pseudocolor";
   /** The strategy as a Layout block: this file's path to the population, drawn as it is here. */
   const strategyRecipe = (): LayoutStrategyRecipe | null => {
-    if (!activeSampleId) return null;
+    // Pooled, the block pools the same files, the first of them the reference file, as drawn here.
+    const sampleId = pooled ? poolList[0] : activeSampleId;
+    if (!sampleId) return null;
+    const pool = pooled && poolList.length > 1 ? { pool: { sampleIds: [...poolList] } } : {};
+    // The gates' edges as drawn here; the default is the renderer's own, so it is not written.
+    const edges = gateEdgeMode !== "straight-bow" ? { gateEdgeMode } : {};
     if (mode === "multi") {
       const ids = multiPops.filter((id) => !!state.populations[id] && id !== rootId);
       // As drawn here: the panel size, the layout, the arrows and the appearance, which the block
       // keeps as its own settings over the sheet's.
       return ids.length
         ? {
-            kind: "strategy", sampleId: activeSampleId, populationId: ids[0], fullPath: true, displayMode: layoutDisplayMode,
+            kind: "strategy", sampleId, populationId: ids[0], fullPath: true, displayMode: layoutDisplayMode, ...pool, ...edges,
             populationIds: ids, layout, columns: nColumns, showArrows, arrowWidth, ...(arrowAnchor === "gate" ? { arrowAnchor } : {}), title: "{sample}",
             plotSize: gridShapeRef.current?.plotSize ?? plotSize,
             ...(gateLabelBold ? { gateLabelBold: true } : {}),
@@ -561,17 +569,41 @@ export function StrategyTab({
           }
         : null;
     }
-    return state.populations[popId] && popId !== rootId
-      ? { kind: "strategy", sampleId: activeSampleId, populationId: popId, fullPath, displayMode: layoutDisplayMode }
-      : null;
+    if (!state.populations[popId] || popId === rootId) return null;
+    // As drawn here: the columns, the panels' fonts, the event cap and the appearance, which the
+    // block keeps as its own settings over the sheet's; its frame carries the panel size.
+    const strip = gridShapeRef.current;
+    return {
+      kind: "strategy", sampleId, populationId: popId, fullPath, displayMode: layoutDisplayMode, ...pool, ...edges,
+      ...(strip ? { columns: strip.cols } : {}),
+      ...(gateLabelBold ? { gateLabelBold: true } : {}),
+      labelBackground,
+      style: {
+        pointSize, pointAlpha, maxEvents: allEvents ? 0 : maxEvents, contourThreshold, contourLevels, kdeBandwidth,
+        gateLineWidth, pubStyle,
+        fontTick: strip?.fonts.tick ?? fontTick,
+        fontAxis: strip?.fonts.axis_label ?? fontAxis,
+        fontTitle: strip?.fonts.title ?? fontTitle,
+        fontGate: strip?.fonts.gate_label ?? fontGate,
+      },
+    };
   };
   const addStrategyToLayout = () => {
     const recipe = strategyRecipe();
     if (!recipe || !onAddToLayout) return;
     // A multi-population block is framed at the size it is drawn here: the grid as measured,
     // with its title, else as its shape and panel size make it.
-    const shape = recipe.populationIds?.length ? gridShapeRef.current : null;
+    const shape = gridShapeRef.current;
     if (!shape) { onAddToLayout(recipe); return; }
+    // A strip is framed so the Layout tab fits its panels at the size they are drawn here: its
+    // columns and rows, the 8 px between them, its title's 26 px and the frame's 8 px inset.
+    if (!recipe.populationIds?.length) {
+      onAddToLayout(recipe, {
+        width: shape.cols * shape.plotSize + (shape.cols - 1) * 8 + 8,
+        height: shape.rows * shape.plotSize + (shape.rows - 1) * 8 + 26 + 8,
+      });
+      return;
+    }
     // As measured, the grid holds its own right and bottom gutters, where the arrows run.
     const gap = shape.gap, trailing = showArrows ? gap : 4;
     const rowGap = shape.rowGap, trailingBelow = showArrows ? rowGap : 4;
@@ -581,11 +613,16 @@ export function StrategyTab({
     const height = (grid && grid.offsetHeight > 0 ? grid.offsetHeight : shape.rows * shape.plotSize + (shape.rows - 1) * rowGap + 4 + trailingBelow) + (title && title.offsetHeight > 0 ? title.offsetHeight + 6 : 26);
     onAddToLayout(recipe, { width: width + 12, height: height + 12 });
   };
+  const sentPooled = pooled && poolList.length > 1;
   const strategyToLayoutTitle = mode === "multi"
     ? (multiPops.length
-      ? t("The strategy to these {count} populations on this file, as a block the Layout tab keeps drawing from the live gates, arrows included", { count: multiPops.length })
+      ? (sentPooled
+        ? t("The strategy to these {count} populations over the pooled files, as a block the Layout tab keeps drawing from the live gates, arrows included", { count: multiPops.length })
+        : t("The strategy to these {count} populations on this file, as a block the Layout tab keeps drawing from the live gates, arrows included", { count: multiPops.length }))
       : t("Choose populations first"))
-    : t("The path to {population} on this file, as a strip of plots the Layout tab keeps drawing from the live gates", { population: state.populations[popId]?.name ?? "" });
+    : sentPooled
+      ? t("The path to {population} over the pooled files, as a strip of plots the Layout tab keeps drawing from the live gates", { population: state.populations[popId]?.name ?? "" })
+      : t("The path to {population} on this file, as a strip of plots the Layout tab keeps drawing from the live gates", { population: state.populations[popId]?.name ?? "" });
   /**
    * The menu a right-click on the grid opens: the strategy to the Layout tab; for the step under
    * the pointer, that plot (the events it shows on its gate's channels) to the Layout tab or to
@@ -977,6 +1014,15 @@ export function StrategyTab({
         {/* data-state tells an agent's render when the grid is finished, or why there is none. */}
         <div
           id="strategy-grid-container" ref={containerRef} aria-busy={renderPending} style={{ opacity: renderPending ? .5 : 1 }} className="gl-mini-grid-container" onContextMenu={openGridMenu}
+          // A panel of the multi-population grid carries the renderer's own right-click menu ("Copy
+          // image", "Download PNG"), which stops the event and so kept this tab's menu from opening
+          // on a panel; its entries do nothing here, since the menu closes on the press that would
+          // choose one. Taken before it reaches the panel, the right-click opens this tab's menu.
+          onContextMenuCapture={(event) => {
+            if (!(event.target as HTMLElement).closest?.(".mini-plot-cell")) return;
+            event.stopPropagation();
+            openGridMenu(event);
+          }}
           data-state={renderPending ? "drawing" : !poolReady ? "preparing" : renderError ? "error" : panelCount ? "drawn" : "empty"}
         />
       </div>

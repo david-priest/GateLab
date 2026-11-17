@@ -26,4 +26,8 @@ export const LAYOUT_GEOMETRY_JA: Readonly<Record<string, string>> = {
   "Direction": "方向",
   "Across": "横",
   "Down": "縦",
+  "Shown at {percent}%": "{percent}% で表示",
+  "Shown at several scales": "複数の倍率で表示",
+  "Reset scale": "倍率をリセット",
+  "Draw unscaled: the frame becomes the size the item is drawn at, its top-left corner kept; locked items are not changed": "拡大縮小なしで描きます。枠は項目を描く大きさになり、左上の位置は変わりません。ロックした項目は変更しません",
 };

@@ -26,6 +26,8 @@ describe("followSheetIteration", () => {
     expect(followSheetIteration(sheet("populations"), [plot("D1", "p1"), plot("D1", "p2")]).map((recipe) => recipe.iterated)).toEqual([undefined, undefined]);
     expect(followSheetIteration(sheet("files"), [plot("D1", "p1", ["D1", "D2"])])[0].iterated).toBeUndefined();
     expect(followSheetIteration(sheet("metadata"), [plot("D1", "p1", ["D1", "D2"])])[0].iterated).toBe(true);
+    // A pooled strategy keeps its pool under a file iteration, as a pooled plot does.
+    expect(followSheetIteration(sheet("files"), [{ ...strategy, pool: { sampleIds: ["D1", "D2"] } }])[0].iterated).toBeUndefined();
   });
 
   it("draws a strategy added to a file-iterating sheet once for each file", () => {

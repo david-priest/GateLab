@@ -233,6 +233,22 @@ describe("Panel letters on the Layout tab", () => {
     for (const letter of copiedLetters) expect(ids.has(letter.recipe.letterFor)).toBe(true);
   });
 
+  it("copies a plot's letter with it on Copy and Paste, as Duplicate does", async () => {
+    const changes = await threePlotsAndText();
+    const [p1] = items(changes);
+    act(() => button("Panel letters").click());
+    const letter = letterFor(changes, p1.id);
+    select(p1.id);
+    key({ key: "c", metaKey: true });
+    key({ key: "v", metaKey: true });
+    expect(letters(changes)).toHaveLength(4);
+    const copies = items(changes).filter((item) => item.recipe.kind === "biplot");
+    expect(copies).toHaveLength(4);
+    for (const plot of copies) expect(letterFor(changes, plot.id)).toBeDefined();
+    const pasted = copies.find((plot) => plot.x === p1.x + 20 && plot.y === p1.y + 20)!;
+    expect(letterFor(changes, pasted.id)).toMatchObject({ x: letter.x + 20, y: letter.y + 20 });
+  });
+
   it("does not edit a letter as text: a double-click and Enter open nothing, and the inspector names its item", async () => {
     const changes = await threePlotsAndText();
     const [p1] = items(changes);

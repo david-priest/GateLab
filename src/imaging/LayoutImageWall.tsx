@@ -9,6 +9,7 @@ import { useI18n } from "../ui/i18n";
 import { NATIVE_HOP } from "./cvwDecode";
 import type { RenderSpecMessage, RenderedPicture } from "./cvwProtocol";
 import type { ImageService, RenderResult, SourceInfo } from "./imageService";
+import { fillLabel, keepLayoutCanvas, type CanvasLabel } from "../plots/layoutCanvasExport";
 
 export interface LayoutImageWallProps {
   readonly recipe: LayoutImageWallRecipe;
@@ -52,6 +53,8 @@ export function LayoutImageWall({ recipe, service, width, height }: LayoutImageW
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [info, setInfo] = useState<{ fileKey: string; info: SourceInfo | null; error: string | null } | null>(null);
   const [tiles, setTiles] = useState<Map<number, Tile>>(() => new Map());
+  // Events whose render failed: shown as empty tiles, and no longer waited for.
+  const [failed, setFailed] = useState<ReadonlySet<number>>(() => new Set());
   const fileKey = recipe.sampleId;
   const attached = !!service?.hasSource(fileKey);
 
@@ -78,6 +81,8 @@ export function LayoutImageWall({ recipe, service, width, height }: LayoutImageW
   useEffect(() => {
     if (!service || !spec) return;
     const next = new Map<number, Tile>();
+    const lost = new Set<number>();
+    let live = true;
     setTiles(next);
     const handles = recipe.events.map((eventIndex) => {
       const cached = service.cached(fileKey, eventIndex, spec);
@@ -87,16 +92,18 @@ export function LayoutImageWall({ recipe, service, width, height }: LayoutImageW
       };
       if (cached) { take(cached); return null; }
       const handle = service.render(fileKey, eventIndex, spec, "batch");
-      handle.promise.then((result) => { take(result); schedule(); }, () => undefined);
+      handle.promise.then((result) => { take(result); schedule(); }, () => { if (live) { lost.add(eventIndex); schedule(); } });
       return handle;
     });
     let timer: ReturnType<typeof setTimeout> | null = null;
     const schedule = () => {
       if (timer) return;
-      timer = setTimeout(() => { timer = null; setTiles(new Map(next)); }, 60);
+      timer = setTimeout(() => { timer = null; setTiles(new Map(next)); setFailed(new Set(lost)); }, 60);
     };
     setTiles(new Map(next));
+    setFailed(new Set(lost));
     return () => {
+      live = false;
       if (timer) clearTimeout(timer);
       for (const handle of handles) handle?.cancel();
     };
@@ -116,57 +123,66 @@ export function LayoutImageWall({ recipe, service, width, height }: LayoutImageW
     canvas.style.height = `${cssH}px`;
     canvas.width = Math.round(cssW * dpr);
     canvas.height = Math.round(cssH * dpr);
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(0, 0, natural.width, natural.height);
-    const [title, detail] = imageWallCaption(recipe, t);
-    ctx.fillStyle = "#1a1a1a";
-    ctx.textBaseline = "alphabetic";
-    ctx.font = "600 12px Helvetica Neue, Helvetica, Arial, sans-serif";
-    ctx.fillText(title, IMAGE_WALL_PADDING, IMAGE_WALL_PADDING + 12, natural.width - 2 * IMAGE_WALL_PADDING);
-    ctx.fillStyle = "#444";
-    ctx.font = "10px Helvetica Neue, Helvetica, Arial, sans-serif";
-    ctx.fillText(detail, IMAGE_WALL_PADDING, IMAGE_WALL_PADDING + 26, natural.width - 2 * IMAGE_WALL_PADDING);
-    if (recipe.legend && recipe.legend.length > 0) {
-      // The colouring's classes, as chips with their names, on one line under the caption.
-      let x = IMAGE_WALL_PADDING;
-      const y = IMAGE_WALL_PADDING + IMAGE_WALL_CAPTION + 6;
-      ctx.font = "9px Helvetica Neue, Helvetica, Arial, sans-serif";
-      for (const entry of recipe.legend) {
-        ctx.fillStyle = entry.colour;
-        ctx.fillRect(x, y - 1, 8, 8);
-        ctx.fillStyle = "#444";
-        ctx.fillText(entry.label, x + 11, y + 7);
-        x += 11 + ctx.measureText(entry.label).width + 12;
-        if (x > natural.width - IMAGE_WALL_PADDING) break;
+    const screen = canvas.getContext("2d");
+    if (!screen) return;
+    screen.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
+    // The drawing at the natural size; the page's export draws it again with its words as text.
+    const paint = (ctx: CanvasRenderingContext2D, labels: CanvasLabel[] | null) => {
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, natural.width, natural.height);
+      const [title, detail] = imageWallCaption(recipe, t);
+      ctx.fillStyle = "#1a1a1a";
+      ctx.textBaseline = "alphabetic";
+      ctx.font = "600 12px Helvetica Neue, Helvetica, Arial, sans-serif";
+      fillLabel(ctx, labels, title, IMAGE_WALL_PADDING, IMAGE_WALL_PADDING + 12, natural.width - 2 * IMAGE_WALL_PADDING);
+      ctx.fillStyle = "#444";
+      ctx.font = "10px Helvetica Neue, Helvetica, Arial, sans-serif";
+      fillLabel(ctx, labels, detail, IMAGE_WALL_PADDING, IMAGE_WALL_PADDING + 26, natural.width - 2 * IMAGE_WALL_PADDING);
+      if (recipe.legend && recipe.legend.length > 0) {
+        // The colouring's classes, as chips with their names, on one line under the caption.
+        let x = IMAGE_WALL_PADDING;
+        const y = IMAGE_WALL_PADDING + IMAGE_WALL_CAPTION + 6;
+        ctx.font = "9px Helvetica Neue, Helvetica, Arial, sans-serif";
+        for (const entry of recipe.legend) {
+          ctx.fillStyle = entry.colour;
+          ctx.fillRect(x, y - 1, 8, 8);
+          ctx.fillStyle = "#444";
+          fillLabel(ctx, labels, entry.label, x + 11, y + 7);
+          x += 11 + ctx.measureText(entry.label).width + 12;
+          if (x > natural.width - IMAGE_WALL_PADDING) break;
+        }
       }
-    }
-    const columns = Math.max(1, recipe.columns);
-    const top = IMAGE_WALL_PADDING + imageWallHeader(recipe);
-    if (!attached || info?.error) {
-      ctx.fillStyle = "#666";
-      ctx.fillText(info?.error ?? t("The file's cell images are not attached"), IMAGE_WALL_PADDING, top + 14);
-      return;
-    }
-    recipe.events.forEach((eventIndex, k) => {
-      const x = IMAGE_WALL_PADDING + (k % columns) * (recipe.tile + IMAGE_WALL_GAP);
-      const y = top + Math.floor(k / columns) * (recipe.tile + IMAGE_WALL_GAP);
-      const tile = tiles.get(eventIndex);
-      if (tile) drawTile(ctx, tile.picture, tile.cols, tile.rows, tile.aspect, x, y, recipe.tile);
-      else { ctx.fillStyle = "#e6e6e6"; ctx.fillRect(x, y, recipe.tile, recipe.tile); }
-      const colour = recipe.tileColours?.[k];
-      if (colour) {
-        ctx.strokeStyle = colour;
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(x + 0.75, y + 0.75, recipe.tile - 1.5, recipe.tile - 1.5);
+      const columns = Math.max(1, recipe.columns);
+      const top = IMAGE_WALL_PADDING + imageWallHeader(recipe);
+      if (!attached || info?.error) {
+        ctx.fillStyle = "#666";
+        fillLabel(ctx, labels, info?.error ?? t("The file's cell images are not attached"), IMAGE_WALL_PADDING, top + 14);
+        return;
       }
-    });
+      recipe.events.forEach((eventIndex, k) => {
+        const x = IMAGE_WALL_PADDING + (k % columns) * (recipe.tile + IMAGE_WALL_GAP);
+        const y = top + Math.floor(k / columns) * (recipe.tile + IMAGE_WALL_GAP);
+        const tile = tiles.get(eventIndex);
+        if (tile) drawTile(ctx, tile.picture, tile.cols, tile.rows, tile.aspect, x, y, recipe.tile);
+        else { ctx.fillStyle = "#e6e6e6"; ctx.fillRect(x, y, recipe.tile, recipe.tile); }
+        const colour = recipe.tileColours?.[k];
+        if (colour) {
+          ctx.strokeStyle = colour;
+          ctx.lineWidth = 1.5;
+          ctx.strokeRect(x + 0.75, y + 0.75, recipe.tile - 1.5, recipe.tile - 1.5);
+        }
+      });
+    };
+    paint(screen, null);
+    keepLayoutCanvas(canvas, { width: natural.width, height: natural.height, draw: paint });
   }, [recipe, tiles, width, height, attached, info, t]);
 
+  // Marked while the file's scale or any tile is still coming, so a page's export waits for the wall;
+  // a tile whose render failed is not coming.
+  const loading = attached && !info?.error && tiles.size + failed.size < new Set(recipe.events).size;
+
   return (
-    <div className="gl-layout-imagewall" data-events={recipe.events.length} data-ready={tiles.size}>
+    <div className="gl-layout-imagewall" data-events={recipe.events.length} data-ready={tiles.size} data-layout-pending={loading ? "1" : undefined}>
       <canvas ref={canvasRef} />
     </div>
   );

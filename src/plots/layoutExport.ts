@@ -4,14 +4,16 @@
 // own <svg>, and text blocks and titles become <text>. The page is the sheet's physical size.
 
 import { zipSync, strToU8 } from "fflate";
-import { cellDataUrlAtDpi, rasterizeSvg } from "./gridExport";
+import { cellDataUrlAtDpi, maxRasterDpi, rasterizeSvg } from "./gridExport";
 import type { LayoutSheet } from "../engine/layout";
 import { pageOrigins, pageSizeMm, pageSizePx, SCREEN_PX_PER_MM } from "../engine/layout";
 import { sanitizeFilePart } from "../engine/fcsExport";
 import { composeProportionsChartSvg } from "../ui/PlottingTab";
 import { EXPORT_FONT, exportId, finishExportSvg, nameCell, nextTurn, pdfVectorPage, pngBlob } from "./exportSvg";
 import { writeLayoutShape } from "./layoutShapeExport";
+import { headingLineBoxes, placeHeadingLines, writeHeadingLines, type HeadingBox } from "./layoutHeadingExport";
 import { writeLayoutImage } from "./layoutImageExport";
+import { writeLayoutCanvas } from "./layoutCanvasExport";
 import { formattedTextLines } from "./layoutTextExport";
 import { exportTurn, setTurnTransform, unturnedBox } from "./layoutRotationExport";
 import { objectExportId } from "../ui/layout/objectExportId";
@@ -119,7 +121,16 @@ function addCell(root: SVGSVGElement, cell: HTMLElement, origin: DOMRect, zoom: 
     img.setAttribute("y", "0");
     img.setAttribute("width", String(Math.round(size.width || rect.width)));
     img.setAttribute("height", String(Math.round(size.height || rect.height)));
-    img.setAttribute("href", cellDataUrlAtDpi(cell, dpi, Math.round(size.width || rect.width)) ?? canvas.toDataURL("image/png"));
+    // A cell shown scaled (an item's zoom, or a block fitted to its frame) was drawn at its own
+    // size and is shown smaller or larger as a whole. Its data layer is drawn again at that same
+    // size, where the events sit under the axes and gates exactly as on screen, and the image is
+    // placed at the size shown; drawn at the size shown instead, the renderer's fixed margins and
+    // point size take another share of the panel, and the events leave their gates. The
+    // resolution asked for is that of the image as placed.
+    const placed = size.width || rect.width;
+    const drawn = canvas.offsetWidth || placed;
+    const shown = drawn > 0 ? placed / drawn : 1;
+    img.setAttribute("href", cellDataUrlAtDpi(cell, dpi * shown, Math.round(drawn)) ?? canvas.toDataURL("image/png"));
     g.appendChild(img);
   }
   const svg = cell.querySelector("svg");
@@ -182,7 +193,9 @@ export function composeLayoutSVG(
 ): ComposedPage {
   const page = pageSizePx(sheet.page);
   const pageOrigin = pageOrigins(sheet.page)[options.pageIndex ?? 0] ?? { x: 0, y: 0 };
-  const origin = canvas.getBoundingClientRect();
+  // Items are placed from inside the page's edge line, so the export measures from there too.
+  const box = canvas.getBoundingClientRect();
+  const origin = new DOMRect(box.left + canvas.clientLeft * options.zoom, box.top + canvas.clientTop * options.zoom, box.width, box.height);
   const crop = options.crop ? cropBox(pageItems(canvas, origin, options.zoom, pageOrigin), page.width, page.height, options.crop.paddingMm) : null;
   const offset = crop ? { x: pageOrigin.x + crop.x, y: pageOrigin.y + crop.y } : pageOrigin;
   const width = crop ? crop.width : page.width;
@@ -207,10 +220,10 @@ export function composeLayoutSVG(
     if (frame.left >= width || frame.top >= height || frame.left + frame.width <= 0 || frame.top + frame.height <= 0) continue;
     index += 1;
     const heading = item.dataset.title ?? item.querySelector(".gl-layout-item-head span")?.textContent ?? "";
-    // A line or shape is vector art of its own.
-    if (writeLayoutShape(root, item, frame, index, heading)) continue;
     // An item named in the objects list is its name, which an editor's layers panel shows.
     const own = objectExportId(item.dataset.objectName, named);
+    // A line or shape is vector art of its own.
+    if (writeLayoutShape(root, item, frame, index, heading, own)) continue;
     if (item.classList.contains("has-frame")) {
       const r = document.createElementNS(SVG_NS, "rect");
       r.setAttribute("x", String(Math.round(frame.left) + 0.5));
@@ -244,6 +257,8 @@ export function composeLayoutSVG(
       root.appendChild(block);
       continue;
     }
+    // An image wall or a cell panel: its tiles as an image, its caption and labels as text.
+    if (writeLayoutCanvas(root, item, (el) => pageRect(el, origin, options.zoom, offset), options.dpi, own, index, heading)) continue;
     const host = item.querySelector<HTMLElement>(".gl-layout-plot-host");
     if (!host) continue;
     if ((host as unknown as { __miniPlotCfg?: unknown }).__miniPlotCfg) {
@@ -268,13 +283,23 @@ export function composeLayoutSVG(
     }
     // A strategy block is a grid of cells with an HTML title; a figure block is the Illustration
     // grid with its HTML row and column headings, drawn under a zoom that the placed size shows.
+    // Each heading is written where the page shows its words: line by line as it wraps, centred
+    // or set right as it is, below its padding.
     host.querySelectorAll<HTMLElement>(".strategy-context-title, .illustration-row-header").forEach((title) => {
       const text = (title.textContent ?? "").trim();
       if (!text) return;
       const style = getComputedStyle(title);
       const rect = pageRect(title, origin, options.zoom, offset);
       const zoomed = title.offsetWidth > 0 ? rect.width / title.offsetWidth : 1;
-      textLines(root, [{ text, left: 0, top: 0 }], rect.left, rect.top, (parseFloat(style.fontSize) || 12) * zoomed, style);
+      const fontSize = (parseFloat(style.fontSize) || 12) * zoomed;
+      const padding = {
+        left: (parseFloat(style.paddingLeft) || 0) * zoomed,
+        right: (parseFloat(style.paddingRight) || 0) * zoomed,
+        top: (parseFloat(style.paddingTop) || 0) * zoomed,
+      };
+      const toPage = (box: HeadingBox) => ({ left: (box.left - origin.left) / options.zoom - offset.x, top: (box.top - origin.top) / options.zoom - offset.y, width: box.width / options.zoom, height: box.height / options.zoom });
+      const lines = placeHeadingLines(text, headingLineBoxes(title), { box: rect, padding, align: style.textAlign, fontSize }, toPage);
+      writeHeadingLines(root, lines, fontSize, style);
     });
     const block = own ?? exportId(host.querySelector(".gl-figure-grid") ? "figure" : "strategy", index, heading);
     host.querySelectorAll<HTMLElement>(".mini-plot-cell").forEach((cell, k) => addCell(root, cell, origin, options.zoom, options.dpi, offset, `${block}-panel-${k + 1}`));
@@ -288,6 +313,20 @@ export function composeLayoutSVG(
       g.setAttribute("transform", `translate(${Math.round(rect.left)},${Math.round(rect.top)}) scale(${scale})`);
       Array.from(overlay.childNodes).forEach((node) => g.appendChild(node.cloneNode(true)));
       nameCell(g, `${block}-arrows`);
+      root.appendChild(g);
+    });
+    // A figure block's chart panels (a violin, box, statistic or composition), vector throughout,
+    // as the Illustration export writes them (gridExport.ts): each SVG copied as drawn at its
+    // place in the grid, scaled as the grid is.
+    host.querySelectorAll<SVGSVGElement>(".gl-figure-chart svg.gl-prop-panel").forEach((svg, k) => {
+      const rect = pageRect(svg, origin, options.zoom, offset);
+      const natural = Number(svg.getAttribute("width")) || svg.clientWidth || rect.width;
+      const scale = natural > 0 ? rect.width / natural : 1;
+      const g = document.createElementNS(SVG_NS, "g");
+      g.setAttribute("transform", `translate(${Math.round(rect.left)},${Math.round(rect.top)}) scale(${scale})`);
+      g.setAttribute("font-family", getComputedStyle(svg).fontFamily || EXPORT_FONT);
+      g.appendChild(svg.cloneNode(true));
+      g.setAttribute("id", `${block}-chart-${k + 1}`);
       root.appendChild(g);
     });
   }
@@ -334,39 +373,58 @@ function pageFileName(filename: string, page: ComposedPage, index: number, exten
   return `${filename}-p${index + 1}${label ? `-${label}` : ""}.${extension}`;
 }
 
+/** What a write did otherwise than asked, for the export's message. */
+export interface ExportReport {
+  /** The lowest dpi a page was drawn at as an image where the sheet's dpi would have made an image larger than a browser draws; null when none was lowered. */
+  loweredDpi: number | null;
+  /** The PDF's pages, numbered from 1, that the writer could not take as vector art and that are drawn as one image each. */
+  rasterPages: number[];
+}
+
 /**
  * Write composed pages as the chosen format; the file is named after the sheet. One page is one
  * file; several are one PDF with a page each, or a zip of one SVG or PNG each.
  */
-export async function writeComposedPages(composed: readonly ComposedPage[], sheet: LayoutSheet, format: LayoutExportFormat): Promise<void> {
+export async function writeComposedPages(composed: readonly ComposedPage[], sheet: LayoutSheet, format: LayoutExportFormat): Promise<ExportReport> {
   const dpi = sheet.page.dpi;
+  const report: ExportReport = { loweredDpi: null, rasterPages: [] };
+  // A page drawn as one image is drawn at the sheet's dpi, or at the most a browser draws a page
+  // of its size at, and the report says so, rather than the whole export failing.
+  const rasterDpi = (page: ComposedPage) => {
+    const most = maxRasterDpi(page.width, page.height);
+    if (dpi <= most) return dpi;
+    report.loweredDpi = Math.min(report.loweredDpi ?? most, most);
+    return most;
+  };
   const filename = sanitizeFilePart(sheet.name) || "layout";
-  if (!composed.length) return;
+  if (!composed.length) return report;
   if (format === "svg") {
     if (composed.length === 1) {
       downloadBlob(new Blob([serialize(composed[0].root)], { type: "image/svg+xml" }), `${filename}.svg`);
-      return;
+      return report;
     }
     const files: Record<string, Uint8Array> = {};
     composed.forEach((page, index) => { files[pageFileName(filename, page, index, "svg")] = strToU8(serialize(page.root)); });
     downloadBlob(new Blob([zipSync(files) as BlobPart], { type: "application/zip" }), `${filename}.zip`);
-    return;
+    return report;
   }
   // One page at a time: a page's raster is tens of megabytes at print resolution, and it is let
   // go before the next is drawn; a turn of the event loop between pages keeps the tab responsive.
   if (format === "png") {
     if (composed.length === 1) {
-      downloadBlob(await pngBlob(await rasterizeSvg(composed[0], dpi), dpi), `${filename}.png`);
-      return;
+      const at = rasterDpi(composed[0]);
+      downloadBlob(await pngBlob(await rasterizeSvg(composed[0], at), at), `${filename}.png`);
+      return report;
     }
     const files: Record<string, Uint8Array> = {};
     for (const [index, page] of composed.entries()) {
-      const raster = await rasterizeSvg(page, dpi);
-      files[pageFileName(filename, composed[index], index, "png")] = new Uint8Array(await (await pngBlob(raster, dpi)).arrayBuffer());
+      const at = rasterDpi(page);
+      const raster = await rasterizeSvg(page, at);
+      files[pageFileName(filename, composed[index], index, "png")] = new Uint8Array(await (await pngBlob(raster, at)).arrayBuffer());
       await nextTurn();
     }
     downloadBlob(new Blob([zipSync(files) as BlobPart], { type: "application/zip" }), `${filename}.zip`);
-    return;
+    return report;
   }
   // The PDF page is the physical page, each page at its own size once cropped. It is written as
   // vector art, axes, gates and text as such and the events image embedded at the sheet's dpi;
@@ -386,12 +444,14 @@ export async function writeComposedPages(composed: readonly ComposedPage[], shee
     const { width, height, orientation } = pageSize(page);
     if (index > 0) pdf.addPage([width, height], orientation);
     if (!(await pdfVectorPage(pdf, page.root, { width, height }))) {
-      const raster = await rasterizeSvg(page, dpi);
+      const raster = await rasterizeSvg(page, rasterDpi(page));
       pdf.addImage(raster, "PNG", 0, 0, width, height, undefined, "FAST");
+      report.rasterPages.push(index + 1);
     }
     await nextTurn();
   }
   pdf.save(`${filename}.pdf`);
+  return report;
 }
 
 /** Write the sheet as it is on the canvas now, every page of its grid. */

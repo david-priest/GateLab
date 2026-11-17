@@ -1,7 +1,8 @@
 // guideModel.ts — the Layout tab's rulers and guides, as pure functions: the ruler's tick and
 // label spacing at a zoom, the ticks in view, the snap lines a sheet's guides add, and the edits
 // to a sheet's guides. A guide is kept on the sheet in px from the first page's top-left corner
-// (engine/layout.ts LayoutGuide); the rulers measure in mm from the same corner. Guides are never
+// (engine/layout.ts LayoutGuide); the rulers, and a guide's position shown, measure in mm from
+// the corner of the page each point is on (pageOriginAt, layoutPlacement.ts). Guides are never
 // printed or exported: they are not items, and the export reads items only.
 
 import { SCREEN_PX_PER_MM, type LayoutGuide, type LayoutSheet } from "../../engine/layout";
@@ -45,6 +46,32 @@ export function rulerTicks(origin: number, length: number, zoom: number): RulerT
   for (let mm = first; mm <= last && ticks.length < 2000; mm += tickMm) {
     const whole = Math.round(mm) || 0;
     ticks.push({ at: origin + whole * pxPerMm, mm: whole, major: whole % labelMm === 0 });
+  }
+  return ticks;
+}
+
+/** A label's width on the ruler, per digit, in screen px (9 px Arial), with room either side. */
+const LABEL_DIGIT_PX = 6;
+
+/**
+ * The ticks along a ruler across a sheet of `pages` pages, each `pagePx` sheet px long this way,
+ * whose first page's edge is `origin` screen px from the ruler's start: each page counts from 0 at
+ * its own edge. Before the first page the ruler counts back from it, and past the last page it
+ * runs on from that page. A label that would run into the next page's 0 is left off; its tick stays.
+ */
+export function pageRulerTicks(origin: number, length: number, zoom: number, pagePx: number, pages: number): RulerTick[] {
+  const span = pagePx * zoom;
+  const ticks: RulerTick[] = [];
+  for (let page = 0; page < pages; page++) {
+    const start = origin + page * span;
+    const last = page === pages - 1;
+    const end = last ? Infinity : start + span;
+    if (end < 0 || (page > 0 && start > length)) continue;
+    for (const tick of rulerTicks(start, length, zoom)) {
+      if ((page > 0 && tick.at < start) || tick.at >= end) continue;
+      const crowded = !last && tick.major && end - tick.at < 4 + String(tick.mm).length * LABEL_DIGIT_PX;
+      ticks.push(crowded ? { ...tick, major: false } : tick);
+    }
   }
   return ticks;
 }

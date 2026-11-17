@@ -3,7 +3,7 @@
    press inside a diagonal line's frame but off the line reaches the page. The shape is taken by
    its invisible outline (.gl-layout-shape-hit). */
 .gl-layout-item:has(> .gl-layout-item-body > .gl-layout-shape) {
-  min-width: 0; min-height: 0; border-width: 0; pointer-events: none;
+  min-width: 0; min-height: 0; --gl-edge-width: 0px; pointer-events: none;
 }
 .gl-layout-shape { display: block; flex: 0 0 auto; overflow: visible; }
 .gl-layout-shape-hit:hover { stroke: rgb(47 128 237 / 22%); }

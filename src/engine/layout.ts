@@ -3,6 +3,7 @@ import { normalizeCellPanelRecipe, type LayoutCellPanelRecipe } from "./cellPane
 import { normalizeShapeRecipe, type LayoutShapeRecipe } from "./shapeBlock";
 import { normalizePlacedImageRecipe, type LayoutPlacedImageRecipe } from "./placedImageBlock";
 import { normalizeProportionsSettings, type ProportionsSettings } from "./proportionsSettings";
+import type { StrategyPayloadOptions } from "./strategy";
 
 export const LAYOUT_WORKSPACE_VERSION = 2 as const;
 
@@ -220,6 +221,13 @@ export interface LayoutStrategyRecipe {
   /** This item's own settings; anything unset follows the sheet. */
   style?: Partial<LayoutPlotStyle>;
   iterated?: boolean;
+  /**
+   * The files whose events the strategy pools, as on the Strategy tab, in file order; `sampleId`
+   * is the reference file among them. Absent: the strategy is drawn for `sampleId` alone.
+   */
+  pool?: { sampleIds: string[] };
+  /** How a gate's edge is drawn, as on the Strategy tab; absent, the renderer's default (straight with the true edge). */
+  gateEdgeMode?: StrategyPayloadOptions["gateEdgeMode"];
 }
 
 export type LayoutChartStatistic = "percent_of_parent" | "percent_of_total" | "count" | "median";
@@ -728,6 +736,8 @@ function normalizeRecipe(value: unknown): LayoutRecipe | null {
       title: typeof candidate.title === "string" ? candidate.title : undefined,
       ...(candidate.iterated === true ? { iterated: true } : {}),
       ...styleField(candidate.style),
+      ...poolField(candidate.pool),
+      ...(candidate.gateEdgeMode === "straight" || candidate.gateEdgeMode === "straight-bow" || candidate.gateEdgeMode === "bowed" ? { gateEdgeMode: candidate.gateEdgeMode } : {}),
     };
   }
   if (candidate.kind === "biplot" || candidate.kind === "histogram") {
@@ -809,6 +819,16 @@ function styleField(value: unknown): { style?: Partial<LayoutPlotStyle> } {
   return Object.keys(style).length ? { style } : {};
 }
 
+/**
+ * An item's position or size as saved, kept exactly when it is at least the floor: a frame the tab
+ * made, scaled small by a fit, partly off the page or typed in mm, opens as it was left. A finite
+ * value under the floor (a zero or negative size) becomes the repair; anything else the fallback.
+ */
+function savedLength(value: unknown, floor: number, repair: number, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return value >= floor ? value : repair;
+}
+
 function normalizeItem(value: unknown, index: number): LayoutItem | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Record<string, unknown>;
@@ -816,10 +836,10 @@ function normalizeItem(value: unknown, index: number): LayoutItem | null {
   if (!recipe) return null;
   return {
     id: nonBlank(candidate.id, `layout-item-${index + 1}`),
-    x: finiteAtLeast(candidate.x, 0, 24 + (index % 3) * 280),
-    y: finiteAtLeast(candidate.y, 0, 24 + Math.floor(index / 3) * 280),
-    width: finiteAtLeast(candidate.width, layoutItemMinimum(recipe.kind).width, recipe.kind === "strategy" ? 560 : 260),
-    height: finiteAtLeast(candidate.height, layoutItemMinimum(recipe.kind).height, recipe.kind === "text" ? 32 : recipe.kind === "strategy" ? 300 : 280),
+    x: savedLength(candidate.x, -Infinity, 0, 24 + (index % 3) * 280),
+    y: savedLength(candidate.y, -Infinity, 0, 24 + Math.floor(index / 3) * 280),
+    width: savedLength(candidate.width, recipe.kind === "shape" ? 0 : 1, layoutItemMinimum(recipe.kind).width, recipe.kind === "strategy" ? 560 : 260),
+    height: savedLength(candidate.height, recipe.kind === "shape" ? 0 : 1, layoutItemMinimum(recipe.kind).height, recipe.kind === "text" ? 32 : recipe.kind === "strategy" ? 300 : 280),
     showFrame: candidate.showFrame === true,
     locked: candidate.locked === true,
     ...(typeof candidate.group === "string" && candidate.group.trim() ? { group: candidate.group } : {}),
@@ -856,7 +876,7 @@ function normalizePage(value: unknown, widthPx: number, heightPx: number): Layou
     : "custom") as LayoutPagePreset;
   const orientation: LayoutOrientation = candidate.orientation === "landscape" ? "landscape" : "portrait";
   const page = preset === "custom" ? fallback : pageForPreset(preset, orientation);
-  return {
+  const normalized: LayoutPage = {
     preset,
     orientation,
     widthMm: finiteBetween(candidate.widthMm, MIN_PAGE_MM, MAX_PAGE_MM, page.widthMm),
@@ -866,6 +886,15 @@ function normalizePage(value: unknown, widthPx: number, heightPx: number): Layou
     columns: finiteAtLeast(candidate.columns, 1, 1) > MAX_PAGE_GRID ? MAX_PAGE_GRID : finiteAtLeast(candidate.columns, 1, 1),
     rows: finiteAtLeast(candidate.rows, 1, 1) > MAX_PAGE_GRID ? MAX_PAGE_GRID : finiteAtLeast(candidate.rows, 1, 1),
   };
+  // A margin that leaves no room inside the page opens at the largest whole millimetre that does,
+  // the limit the Page controls hold it to (largestMarginMm in ui/layoutPlacement.ts).
+  const side = Math.min(pageSizePx(normalized).width, pageSizePx(normalized).height);
+  if (2 * mmToPx(normalized.marginMm) >= side) {
+    let margin = 100;
+    while (margin > 0 && 2 * mmToPx(margin) >= side) margin -= 1;
+    normalized.marginMm = margin;
+  }
+  return normalized;
 }
 
 function normalizeSheet(value: unknown, index: number): LayoutSheet | null {

@@ -387,7 +387,7 @@ describe("Export all sheets", () => {
       const changes = mount(threeSheets());
       await flush();
       const el = sizeScroller();
-      act(() => button("Page").click());
+      act(() => button("Export").click());
       const formatSelect = [...host.querySelectorAll<HTMLSelectElement>("select")].find((s) => [...s.options].some((o) => o.value === "svg"))!;
       act(() => {
         Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(formatSelect, format);
@@ -399,7 +399,7 @@ describe("Export all sheets", () => {
       press(scroller(), { key: "1", metaKey: true });
       el.scrollLeft = 120;
       el.scrollTop = 40;
-      act(() => button("Page").click());
+      act(() => button("Export").click());
       const undoable = changes.length;
       const progress = new Set<string>();
       act(() => { button("Export all sheets").click(); });

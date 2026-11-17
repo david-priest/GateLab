@@ -3,7 +3,7 @@
 // layer as an image and the cell's own vector overlay, finished for an editor.
 
 import { describe, expect, it, vi } from "vitest";
-import { composeGridSVG } from "./gridExport";
+import { composeGridSVG, maxRasterDpi, rasterizeSvg } from "./gridExport";
 
 vi.mock("./loadPlots", () => ({
   loadMiniPlots: () => ({
@@ -61,6 +61,47 @@ describe("composeGridSVG", () => {
       expect(cells[0].querySelector("svg > text")!.getAttribute("font-family")).toBe("Arial, Helvetica, sans-serif");
     } finally {
       grid.remove();
+    }
+  });
+});
+
+describe("rasterizeSvg", () => {
+  /** jsdom draws nothing: an image loads as soon as it is given a source, and a canvas has a context that records nothing. */
+  function stubDrawing() {
+    vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: () => "blob:page", revokeObjectURL: () => {} }));
+    vi.stubGlobal("Image", class { onload: (() => void) | null = null; set src(_url: string) { setTimeout(() => this.onload?.()); } });
+    const context = { fillStyle: "", fillRect: () => {}, scale: () => {}, drawImage: () => {} };
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context as unknown as CanvasRenderingContext2D);
+  }
+
+  it("draws a page below 96 dpi at that dpi, so the image is the page's size at the dpi written into it", async () => {
+    stubDrawing();
+    try {
+      const root = document.createElementNS(SVG_NS, "svg") as SVGSVGElement;
+      // An A4 landscape page, 1123 by 794 CSS pixels, at 72 dpi: 842 by 595 pixels.
+      const canvas = await rasterizeSvg({ root, width: 1123, height: 794 }, 72);
+      expect([canvas.width, canvas.height]).toEqual([842, 595]);
+      const at300 = await rasterizeSvg({ root, width: 1123, height: 794 }, 300);
+      expect([at300.width, at300.height]).toEqual([3509, 2481]);
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("maxRasterDpi", () => {
+  it("is the highest dpi a browser draws a page of this size at as one image", () => {
+    // A4 landscape, A3 landscape and A1 landscape at 96 CSS pixels to the inch.
+    expect(maxRasterDpi(1123, 794)).toBe(813);
+    expect(maxRasterDpi(1587, 1123)).toBe(575);
+    expect(maxRasterDpi(3179, 2245)).toBe(287);
+    // A long strip is held by its side rather than its area; a small page by the field's 1200.
+    expect(maxRasterDpi(8000, 100)).toBe(196);
+    expect(maxRasterDpi(200, 200)).toBe(1200);
+    for (const [width, height] of [[1587, 1123], [3179, 2245], [8000, 100]]) {
+      const scale = maxRasterDpi(width, height) / 96;
+      expect(width * scale <= 16384 && height * scale <= 16384 && width * height * scale * scale <= 64_000_000).toBe(true);
     }
   });
 });

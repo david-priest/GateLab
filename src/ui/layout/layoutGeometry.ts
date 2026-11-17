@@ -4,7 +4,7 @@
 // over the sheet's items, so the tab's controls are thin and the geometry is tested here. Panel
 // letters are left out of every operation: the tab's commit puts each back beside its item.
 
-import { SCREEN_PX_PER_MM, layoutItemMinimum, type LayoutItem, type LayoutSheet } from "../../engine/layout";
+import { SCREEN_PX_PER_MM, layoutItemMinimum, layoutItemZoom, type LayoutItem, type LayoutSheet } from "../../engine/layout";
 import { arrangeUnits, contentBounds, type Box } from "../../engine/layoutArrange";
 import { isPanelLetter, readingOrder } from "./panelLetters";
 
@@ -84,6 +84,20 @@ export function matchSizes(sheet: LayoutSheet, ids: readonly string[], how: Matc
     if (how !== "width") item.height = Math.max(minimum.height, reference.height);
   }
   return reference.id;
+}
+
+/**
+ * Each unlocked item of `ids` drawn unscaled: its zoom dropped and its frame the size it is drawn
+ * at (the frame divided by the zoom, as the page draws it), its top-left corner kept.
+ */
+export function resetScale(sheet: LayoutSheet, ids: readonly string[]): void {
+  for (const item of sheet.items) {
+    const zoom = layoutItemZoom(item);
+    if (!ids.includes(item.id) || item.locked || zoom === 1) continue;
+    item.width = Math.max(1, Math.round(item.width / zoom));
+    item.height = Math.max(1, Math.round(item.height / zoom));
+    delete item.zoom;
+  }
 }
 
 /** The default number of columns for a grid of this many units: the ceiling of the square root. */

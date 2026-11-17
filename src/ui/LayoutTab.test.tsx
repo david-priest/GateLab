@@ -23,7 +23,12 @@ import type { IllustrationConfig } from "../engine/workspace";
 const draws = vi.hoisted(() => ({
   plots: [] as { host: HTMLElement; config: Record<string, unknown> }[],
   strategies: [] as { id: string; payload: unknown }[],
+  multiStrategies: [] as { id: string; payload: unknown }[],
   exports: [] as { name: string; format: string; pages: number }[],
+  /** What the export writer reports back, for a test that needs it to have done otherwise than asked. */
+  writeReport: undefined as unknown,
+  /** The zoom each composition of the export was given. */
+  composedZooms: [] as number[],
   moveable: null as Record<string, any> | null,
   selecto: null as Record<string, any> | null,
   frameUpdates: 0,
@@ -31,23 +36,62 @@ const draws = vi.hoisted(() => ({
   stopDrags: 0,
   selectoTargets: [] as Element[],
   selectoClicks: [] as { shift: boolean; target: Element }[],
+  /** Set, the plot renderer throws this message, as a drawing that fails does. */
+  fail: null as string | null,
+  /** How many times a figure has been laid out into pages. */
+  figureLayouts: 0,
+  /** How many exact medians have been taken. */
+  medians: 0,
 }));
+vi.mock("../engine/heatmap", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../engine/heatmap")>();
+  return {
+    ...actual,
+    exactMedian: (values: number[]) => {
+      draws.medians += 1;
+      return actual.exactMedian(values);
+    },
+  };
+});
+vi.mock("../engine/figure", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../engine/figure")>();
+  return {
+    ...actual,
+    layoutFigure: (...args: Parameters<typeof actual.layoutFigure>) => {
+      draws.figureLayouts += 1;
+      return actual.layoutFigure(...args);
+    },
+  };
+});
 vi.mock("../plots/loadPlots", () => ({
   loadMiniPlots: () => ({
     renderMiniPlot: (host: HTMLElement, config: Record<string, unknown>) => {
+      if (draws.fail) throw new Error(draws.fail);
       draws.plots.push({ host, config });
       host.setAttribute("style", "position: relative; width: 200px; height: 200px; flex: 0 0 auto; display: inline-block;");
     },
     renderStrategyGrid: (id: string, payload: unknown) => {
       draws.strategies.push({ id, payload });
+      const container = document.getElementById(id);
+      if (container) container.innerHTML = '<div class="strategy-context-title"></div><div class="mini-plot-grid strategy-grid"></div>';
+    },
+    // The multi-population grid as the renderer lays it out: its title, then a grid 216 px wide.
+    renderMultiStrategyGrid: (id: string, payload: unknown) => {
+      draws.multiStrategies.push({ id, payload });
+      const container = document.getElementById(id)!;
+      container.innerHTML = '<div class="strategy-context-title"></div><div class="mini-plot-grid multi-strategy-grid"></div>';
+      Object.defineProperty(container.querySelector(".multi-strategy-grid")!, "offsetWidth", { value: 216 });
     },
   }),
 }));
 vi.mock("../plots/layoutExport", () => ({
-  composeSheetPages: (_canvas: HTMLElement, sheet: { page: { columns: number; rows: number } }) =>
-    Array.from({ length: sheet.page.columns * sheet.page.rows }, () => ({ root: null, width: 0, height: 0 })),
+  composeSheetPages: (_canvas: HTMLElement, sheet: { page: { columns: number; rows: number } }, options: { zoom: number }) => {
+    draws.composedZooms.push(options.zoom);
+    return Array.from({ length: sheet.page.columns * sheet.page.rows }, () => ({ root: null, width: 0, height: 0 }));
+  },
   writeComposedPages: async (composed: unknown[], sheet: { name: string }, format: string) => {
     draws.exports.push({ name: sheet.name, format, pages: composed.length });
+    return draws.writeReport;
   },
 }));
 vi.mock("react-moveable", () => ({
@@ -82,7 +126,10 @@ beforeEach(() => {
   vi.useFakeTimers();
   draws.plots = [];
   draws.strategies = [];
+  draws.multiStrategies = [];
   draws.exports = [];
+  draws.writeReport = undefined;
+  draws.composedZooms = [];
   draws.moveable = null;
   draws.selecto = null;
   draws.selectoTargets = [];
@@ -343,6 +390,83 @@ describe("LayoutTab plots", () => {
     // One panel per file: two cells drawn by the same renderer the Illustration tab uses.
     expect(grid.querySelectorAll("td[data-figure-panel]")).toHaveLength(2);
     expect(draws.plots.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("marks a figure block pending until its panels are built, so an export waits for them", async () => {
+    const fx = fixture();
+    const config = {
+      ...defaultIllustrationConfig(),
+      figure: {
+        version: 1 as const, name: "Comparison", sampleIds: ["D1", "D2"], populations: [{ hierarchyId: DEFAULT_HIERARCHY_ID, populationId: fx.rootId, label: "All Events" }],
+        plots: [{ id: "p1", name: "FSC-A", x: "FSC-A", y: "SSC-A", type: "biplot" as const }],
+        rows: ["populations" as const, "plots" as const], columns: ["samples" as const], pages: [], composition: "separate" as const, scalePolicy: "gating" as const, transforms: {}, showGates: true, panelSize: 200,
+      },
+    };
+    mount(fx, {}, config);
+    await flush();
+    act(() => button("+ Illustration figure").click());
+    const block = () => host.querySelector(".gl-layout-figure-host")!;
+    expect(block().hasAttribute("data-layout-pending")).toBe(true);
+    await flush();
+    expect(block().querySelectorAll("td[data-figure-panel]")).toHaveLength(2);
+    expect(block().hasAttribute("data-layout-pending")).toBe(false);
+  });
+
+  it("gives two blocks of the same figure page ids of their own", async () => {
+    const fx = fixture();
+    const config = {
+      ...defaultIllustrationConfig(),
+      figure: {
+        version: 1 as const, name: "Comparison", sampleIds: ["D1", "D2"], populations: [{ hierarchyId: DEFAULT_HIERARCHY_ID, populationId: fx.rootId, label: "All Events" }],
+        plots: [{ id: "p1", name: "FSC-A", x: "FSC-A", y: "SSC-A", type: "biplot" as const }],
+        rows: ["populations" as const, "plots" as const], columns: ["samples" as const], pages: [], composition: "separate" as const, scalePolicy: "gating" as const, transforms: {}, showGates: true, panelSize: 200,
+      },
+    };
+    mount(fx, {}, config);
+    await flush();
+    act(() => button("+ Illustration figure").click());
+    act(() => button("+ Illustration figure").click());
+    await flush();
+    const grids = [...host.querySelectorAll(".gl-layout-figure-host .gl-figure-grid")];
+    expect(grids).toHaveLength(2);
+    // The grid's id is what its chart panels' ids and clip paths are made from.
+    const ids = [...host.querySelectorAll(".gl-layout-canvas [id]")].map((el) => el.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(grids[0].id).not.toBe(grids[1].id);
+  });
+
+  it("does not lay a figure block out again for an edit to another item", async () => {
+    const fx = fixture();
+    const config = {
+      ...defaultIllustrationConfig(),
+      figure: {
+        version: 1 as const, name: "Comparison", sampleIds: ["D1", "D2"], populations: [{ hierarchyId: DEFAULT_HIERARCHY_ID, populationId: fx.rootId, label: "All Events" }],
+        plots: [{ id: "p1", name: "FSC-A", x: "FSC-A", y: "SSC-A", type: "biplot" as const }],
+        rows: ["populations" as const, "plots" as const], columns: ["samples" as const], pages: [], composition: "separate" as const, scalePolicy: "gating" as const, transforms: {}, showGates: true, panelSize: 200,
+      },
+    };
+    mount(fx, {}, config);
+    await flush();
+    act(() => button("+ Illustration figure").click());
+    await flush();
+    const before = draws.figureLayouts;
+    act(() => button("+ Text").click());
+    await flush();
+    expect(host.querySelectorAll(".gl-layout-figure-host .gl-figure-grid")).toHaveLength(1);
+    expect(draws.figureLayouts).toBe(before);
+  });
+
+  it("takes a chart block's medians once, not again on a render that changes nothing it draws", async () => {
+    const fx = fixture();
+    mount(fx, {}, null, {}, olderSheetWithChart(fx, { statistic: "median", channel: "FSC-A" }));
+    await flush();
+    expect(host.querySelectorAll(".gl-layout-chart svg circle")).toHaveLength(2);
+    const before = draws.medians;
+    expect(before).toBeGreaterThan(0);
+    act(() => button("Snap grid").click());
+    await flush();
+    expect(draws.medians).toBe(before);
+    expect(host.querySelectorAll(".gl-layout-chart svg circle")).toHaveLength(2);
   });
 
   it("draws a summary chart saved on an older sheet, of a population across the files, grouped by a metadata column", async () => {
@@ -789,6 +913,108 @@ describe("LayoutTab moving, copying and arranging", () => {
     expect(button("Redo").disabled).toBe(false);
   });
 
+  it("keeps its undo history through a visit to another tab, and takes a hand-off made meanwhile as a step on top", () => {
+    const fx = fixture();
+    const changes: LayoutWorkspace[] = [];
+    let show: (shown: boolean) => void = () => {};
+    let handOff: () => void = () => {};
+    // Held by the parent, as App holds it, so the tab's history outlives the tab.
+    const history = { undo: { current: [] as LayoutWorkspace[] }, redo: { current: [] as LayoutWorkspace[] } };
+    let seed: LayoutWorkspace | null = null;
+    const takeUndoSeed = () => { const taken = seed; seed = null; return taken; };
+    function Parent() {
+      const [workspace, setWorkspace] = useState(() => createDefaultLayoutWorkspace());
+      const [shown, setShown] = useState(true);
+      show = setShown;
+      handOff = () => setWorkspace((current) => {
+        seed = current;
+        const next = normalizeLayoutWorkspace(JSON.parse(JSON.stringify(current)));
+        next.sheets[0].items.push({ id: "handed", x: 300, y: 300, width: 160, height: 32, z: 9, recipe: { kind: "text", text: "Handed", fontSize: 18 } });
+        changes.push(next);
+        return next;
+      });
+      return (
+        <I18nProvider>
+          {shown ? (
+            <LayoutTab
+              workspace={workspace}
+              onChange={(next) => { changes.push(next); setWorkspace(next); }}
+              history={history}
+              takeUndoSeed={takeUndoSeed}
+              samples={fx.samples}
+              checkedSampleIds={["D1", "D2"]}
+              activeSampleId="D1"
+              activePopulationId={fx.rootId}
+              state={fx.state as CoreState}
+              globalScales={{}}
+              defaultX="FSC-A"
+              defaultY="SSC-A"
+              illustrationConfig={null}
+              dataRevision={0}
+              densityColorPower={1.6}
+              onOpenInGating={vi.fn()}
+            />
+          ) : null}
+        </I18nProvider>
+      );
+    }
+    act(() => root.render(<Parent />));
+    act(() => button("+ Text").click());
+    expect(items(changes)).toHaveLength(1);
+    // Away to another tab, and back: the add made before is still undone.
+    act(() => show(false));
+    act(() => show(true));
+    expect(button("Undo").disabled).toBe(false);
+    act(() => button("Undo").click());
+    expect(items(changes)).toHaveLength(0);
+    act(() => button("Redo").click());
+    expect(items(changes)).toHaveLength(1);
+    // Away again; another tab hands an item over, which opens the tab: its undo comes first, then the earlier add's.
+    act(() => show(false));
+    act(() => handOff());
+    act(() => show(true));
+    expect(items(changes).map(({ id }) => id)).toContain("handed");
+    expect(button("Redo").disabled).toBe(true);
+    act(() => button("Undo").click());
+    expect(items(changes)).toHaveLength(1);
+    expect(items(changes).map(({ id }) => id)).not.toContain("handed");
+    act(() => button("Undo").click());
+    expect(items(changes)).toHaveLength(0);
+    expect(button("Undo").disabled).toBe(true);
+  });
+
+  it("records nothing when the sheet already shown is clicked", () => {
+    const changes = mount(fixture());
+    act(() => button("+ Text").click());
+    act(() => button("Undo").click());
+    const recorded = changes.length;
+    expect(button("Redo").disabled).toBe(false);
+    act(() => host.querySelector<HTMLButtonElement>(".gl-layout-sheet-tab.active")!.click());
+    expect(changes).toHaveLength(recorded);
+    expect(button("Redo").disabled).toBe(false);
+  });
+
+  it("takes a run of arrow-key nudges on one selection as one undo step", () => {
+    const changes = mount(fixture());
+    act(() => button("+ Text").click());
+    const first = items(changes)[0];
+    select(first.id);
+    key({ key: "ArrowRight" });
+    for (let i = 0; i < 4; i++) key({ key: "ArrowRight", repeat: true });
+    key({ key: "ArrowDown" });
+    expect(items(changes)[0]).toMatchObject({ x: first.x + 5, y: first.y + 1 });
+    key({ key: "z", metaKey: true });
+    expect(items(changes)[0]).toMatchObject({ x: first.x, y: first.y });
+    key({ key: "z", metaKey: true, shiftKey: true });
+    expect(items(changes)[0]).toMatchObject({ x: first.x + 5, y: first.y + 1 });
+    // After a pause, a press begins a run of its own.
+    act(() => { vi.advanceTimersByTime(2000); });
+    key({ key: "ArrowRight" });
+    expect(items(changes)[0].x).toBe(first.x + 6);
+    key({ key: "z", metaKey: true });
+    expect(items(changes)[0]).toMatchObject({ x: first.x + 5, y: first.y + 1 });
+  });
+
   it("undoes and redoes the layout from anywhere on the window while the tab is shown, leaving a field's own undo alone", () => {
     const changes = mount(fixture());
     act(() => button("+ Text").click());
@@ -1044,6 +1270,25 @@ describe("LayoutTab moving, copying and arranging", () => {
     expect(selected()).toEqual([c.id]);
     expect(host.textContent).toContain("Locked");
   });
+  it("applies a menu's choice made after an undo to the workspace as it is now", () => {
+    const changes = mount(fixture());
+    act(() => button("+ Text").click());
+    act(() => button("+ Text").click());
+    const [a, b] = items(changes);
+    select(b.id);
+    key({ key: "Delete" });
+    expect(items(changes).map((item) => item.id)).toEqual([a.id]);
+    const menuItem = (label: string) => [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((entry) => entry.textContent === label)!;
+    act(() => { element(a.id).dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 200, clientY: 150 })); });
+    // Undo while the menu is open (the keyboard is in the menu): b comes back.
+    act(() => { menuItem("Lock").dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "z", metaKey: true })); });
+    expect(items(changes).map((item) => item.id)).toEqual([a.id, b.id]);
+    act(() => menuItem("Lock").click());
+    expect(items(changes).map((item) => [item.id, !!item.locked])).toEqual([[a.id, true], [b.id, false]]);
+    // That choice is one undo step on what was there.
+    key({ key: "z", metaKey: true });
+    expect(items(changes).map((item) => [item.id, !!item.locked])).toEqual([[a.id, false], [b.id, false]]);
+  });
 });
 
 describe("LayoutTab text blocks", () => {
@@ -1137,8 +1382,20 @@ describe("LayoutTab page, zoom and export", () => {
     act(() => button("Fit page to content").click());
     expect(changes.at(-1)?.sheets[0].page.preset).toBe("custom");
     expect(items(changes).map(({ x, y }) => [x, y])).toEqual([[57, 57], [457, 357]]);
+    // With nothing selected, the page's items are fitted to it as one group.
+    select();
     act(() => button("Fit content to page").click());
     expect(items(changes).map(({ x, y }) => [x, y])).toEqual([[57, 57], [457, 357]]); // already filling the page
+    // With an item selected, that item alone is fitted to the page it is on; the other stays.
+    const other = items(changes)[0];
+    select(b.id);
+    act(() => button("Fit selection to page").click());
+    const [first, fitted] = items(changes);
+    expect(first).toMatchObject({ x: other.x, y: other.y, width: other.width, height: other.height });
+    const page = changes.at(-1)!.sheets[0];
+    expect(fitted.x).toBeGreaterThanOrEqual(57);
+    expect(fitted.x + fitted.width).toBeLessThanOrEqual(page.width - 57 + 1);
+    expect(fitted.width).toBeGreaterThan(b.width);
   });
 
   it("zooms with Option-scroll, Shift-scroll or a pinch, and scrolls with a plain wheel", async () => {
@@ -1229,12 +1486,96 @@ describe("LayoutTab page, zoom and export", () => {
     // Moveable is told the page's scale so its handles keep their size.
     select(items(changes)[0].id);
     expect(draws.moveable!.zoom).toBeCloseTo(1 / 0.75);
-    act(() => button("Page").click());
+    act(() => button("Export").click());
     change(selectField("Format"), "svg");
-    await act(async () => { button("Export SVG").click(); });
+    // A sheet of one page is waited for too, so a plot drawn a moment ago is not written half drawn.
+    await act(async () => { button("Export SVG").click(); await vi.runAllTimersAsync(); });
     expect(draws.exports).toEqual([{ name: "Layout 1", format: "svg", pages: 1 }]);
-    await act(async () => { button("Export sheet").click(); });
+    await act(async () => { button("Export sheet").click(); await vi.runAllTimersAsync(); });
     expect(draws.exports).toHaveLength(2);
+  });
+});
+
+describe("LayoutTab page commands and the page an item is on", () => {
+  /** A sheet of one page across and two down, with a text block on the second page. */
+  function itemOnSecondPage(): LayoutWorkspace {
+    const workspace = createDefaultLayoutWorkspace();
+    const sheet = workspace.sheets[0];
+    Object.assign(sheet, { page: { ...sheet.page, rows: 2 }, height: 2 * 794 });
+    sheet.items.push({ id: "second", x: 300, y: 794 + 300, width: 200, height: 60, z: 1, recipe: { kind: "text", text: "note", fontSize: 14 } });
+    return workspace;
+  }
+
+  it("aligns one item to the margin of the page it is on, not the first page", () => {
+    const changes = mount(fixture(), {}, null, {}, itemOnSecondPage());
+    select("second");
+    act(() => button("Top").click());
+    expect(items(changes)[0]).toMatchObject({ x: 300, y: 794 + 57 });
+    act(() => button("Left").click());
+    expect(items(changes)[0]).toMatchObject({ x: 57, y: 794 + 57 });
+  });
+
+  const selectField = (label: string) => [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.startsWith(label))?.querySelector("select")!;
+  const inputField = (label: string) => [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.startsWith(label))?.querySelector("input")!;
+  const change = (el: HTMLSelectElement | HTMLInputElement, value: string) => act(() => {
+    const proto = el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, "value")!.set!.call(el, value);
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+
+  it("holds the margin to one that leaves room on the page, and the field shows what is kept", () => {
+    const changes = mount(fixture(), {}, null, {}, itemOnSecondPage());
+    act(() => button("Page").click());
+    change(selectField("Size"), "journal-1"); // 110 x 85 mm, 416 x 321 px
+    change(inputField("Margin (mm)"), "60");
+    expect(changes.at(-1)!.sheets[0].page.marginMm).toBe(42);
+    expect(inputField("Margin (mm)").value).toBe("42");
+    // A smaller page takes the margin down with it.
+    change(host.querySelector<HTMLInputElement>('input[aria-label="Height (mm)"]')!, "40");
+    expect(changes.at(-1)!.sheets[0].page.marginMm).toBe(19);
+    expect(inputField("Margin (mm)").value).toBe("19");
+  });
+
+  it("says under Page when a change of page leaves items off the pages, and adds the pages that hold them", () => {
+    const workspace = createDefaultLayoutWorkspace();
+    workspace.sheets[0].items.push({ id: "right", x: 800, y: 100, width: 200, height: 60, z: 1, recipe: { kind: "text", text: "note", fontSize: 14 } });
+    const changes = mount(fixture(), {}, null, {}, workspace);
+    act(() => button("Page").click());
+    const warning = () => host.querySelector<HTMLElement>(".gl-layout-export-warning");
+    expect(warning()).toBeNull();
+    change(selectField("Orientation"), "portrait"); // 794 px wide: the item now runs past the page
+    expect(warning()?.textContent).toContain("1 item lies partly or wholly outside the sheet's pages");
+    act(() => button("Add pages to hold them").click());
+    const sheet = changes.at(-1)!.sheets[0];
+    expect([sheet.page.columns, sheet.page.rows]).toEqual([2, 1]);
+    expect(sheet.items[0]).toMatchObject({ x: 800, y: 100 });
+    expect(warning()).toBeNull();
+  });
+
+  it("fits the page to the shown items, moves the guides with them, and says when the page is as large as it may be", () => {
+    const note = (id: string, x: number, y: number, hidden?: boolean) => ({ id, x, y, width: 200, height: 60, z: 1, ...(hidden ? { hidden } : {}), recipe: { kind: "text" as const, text: id, fontSize: 14 } });
+    const workspace = createDefaultLayoutWorkspace();
+    workspace.sheets[0].items.push(note("a", 300, 200), note("b", 700, 500), note("h", 5000, 5000, true));
+    workspace.sheets[0].guides = [{ axis: "x", at: 300 }];
+    const changes = mount(fixture(), {}, null, {}, workspace);
+    act(() => button("Page").click());
+    act(() => button("Fit page to content").click());
+    let sheet = changes.at(-1)!.sheets[0];
+    expect(sheet.items.slice(0, 2).map(({ x, y }) => [x, y])).toEqual([[57, 57], [457, 357]]);
+    expect(sheet.page).toMatchObject({ widthMm: 188.9, heightMm: 125.4 }); // the hidden item is not counted
+    expect(sheet.guides).toEqual([{ axis: "x", at: 57 }]);
+    expect(host.querySelector(".gl-layout-message")).toBeNull();
+
+    // Content wider than the largest page: the page stops there and the content is scaled to stay on it.
+    act(() => button("+ Text").click());
+    const added = items(changes).at(-1)!;
+    select(added.id); drag(added.id, { x: 9000, y: 100 });
+    act(() => button("Page").click());
+    act(() => button("Fit page to content").click());
+    sheet = changes.at(-1)!.sheets[0];
+    expect(sheet.page.widthMm).toBeLessThanOrEqual(2000);
+    expect(sheet.items.filter((item) => !item.hidden).every((item) => item.x + item.width <= sheet.width)).toBe(true);
+    expect(host.querySelector(".gl-layout-message")?.textContent).toContain("2000 mm");
   });
 });
 
@@ -1270,6 +1611,47 @@ describe("LayoutTab iteration", () => {
     expect(title()).toBe("");
   });
 
+  it("draws a strip from the Strategy tab with the columns and appearance it was sent with", async () => {
+    // A two-step path: All Events › Lymphocytes › CD4_positive.
+    const fx = gatedFixture();
+    const cd4 = newPopulation("CD4_positive", [], fx.childId);
+    const cd4Gate = newGate("CD4_gate", "rectangle", "FSC-A", "SSC-A", [[0, 0], [40, 40]]);
+    cd4.gate_refs = [{ gate_id: cd4Gate.gate_id, include: true }];
+    fx.state.gates[cd4Gate.gate_id] = cd4Gate;
+    fx.state.gate_order.push(cd4Gate.gate_id);
+    fx.state.populations[cd4.population_id] = cd4;
+    fx.state.populations[fx.childId].children = [cd4.population_id];
+    const strip = { kind: "strategy" as const, sampleId: "D1", populationId: cd4.population_id, fullPath: true, displayMode: "pseudocolor" as const };
+    const workspace = createDefaultLayoutWorkspace();
+    workspace.sheets[0].items.push({ id: "strip", x: 57, y: 57, width: 600, height: 320, z: 1, recipe: strip });
+    mount(fx, {}, null, {}, workspace);
+    await flush();
+    // Fitted to the frame, two steps side by side draw largest.
+    const drawn = () => draws.strategies.at(-1)!.payload as { n_columns: number; plot_size: number; contour_levels: number; gate_style: Record<string, unknown> };
+    expect(drawn().n_columns).toBe(2);
+    // Sent as one column, bold labels on a light backing and 4 contour levels, it is drawn so.
+    const sent = createDefaultLayoutWorkspace();
+    sent.sheets[0].items.push({ id: "strip", x: 57, y: 57, width: 600, height: 320, z: 1, recipe: { ...strip, columns: 1, gateLabelBold: true, labelBackground: 0.3, style: { contourLevels: 4 } } });
+    draws.strategies = [];
+    act(() => root.unmount());
+    root = createRoot(host);
+    mount(fx, {}, null, {}, sent);
+    await flush();
+    expect(drawn()).toMatchObject({ n_columns: 1, plot_size: Math.floor((320 - 8 - 26 - 8) / 2), contour_levels: 4, gate_style: { label_weight: "bold", label_background: 0.3 } });
+  });
+
+  it("draws a strip in a small frame at the smallest panel, shown scaled to fit rather than scrolling", async () => {
+    const fx = gatedFixture();
+    const strip = { kind: "strategy" as const, sampleId: "D1", populationId: fx.childId, fullPath: true, displayMode: "pseudocolor" as const };
+    const workspace = createDefaultLayoutWorkspace();
+    // 150 px tall: the one panel fits at 150 - 8 - 26 = 116 px, under the renderer's 120.
+    workspace.sheets[0].items.push({ id: "strip", x: 57, y: 57, width: 300, height: 150, z: 1, recipe: strip });
+    mount(fx, {}, null, {}, workspace);
+    await flush();
+    expect((draws.strategies.at(-1)!.payload as { plot_size: number }).plot_size).toBe(120);
+    expect(Number(element("strip").querySelector<HTMLElement>(".strategy-grid")!.style.zoom)).toBeCloseTo(116 / 120, 4);
+  });
+
   it("marks a plot as pending until it has drawn, which the export waits for", async () => {
     mount(fixture());
     await flush();
@@ -1278,6 +1660,35 @@ describe("LayoutTab iteration", () => {
     await flush();
     expect(draws.plots.length).toBeGreaterThan(0);
     expect(host.querySelector("[data-layout-pending]")).toBeNull();
+  });
+
+  it("says in the block when a plot could not be drawn, holds no export for it, and draws it once the cause is gone", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    mount(fixture());
+    await flush();
+    draws.fail = "synthetic drawing failure";
+    try {
+      act(() => button("+ Biplot").click());
+      await flush();
+      const plot = host.querySelector<HTMLElement>(".gl-layout-plot-host")!;
+      expect(plot.textContent).toContain("This block could not be drawn");
+      expect(plot.textContent).toContain("synthetic drawing failure");
+      expect(plot.classList.contains("is-missing")).toBe(true);
+      expect(host.querySelector("[data-layout-pending]")).toBeNull();
+      expect(logged).toHaveBeenCalled();
+    } finally {
+      draws.fail = null;
+    }
+    // The cause gone, the next drawing of the block is the plot.
+    draws.plots = [];
+    act(() => button("Style").click());
+    change(host.querySelector<HTMLSelectElement>('select[aria-label="Plot titles"]')!, "none");
+    await flush();
+    const plot = host.querySelector<HTMLElement>(".gl-layout-plot-host")!;
+    expect(draws.plots.length).toBeGreaterThan(0);
+    expect(plot.textContent).not.toContain("This block could not be drawn");
+    expect(plot.classList.contains("is-missing")).toBe(false);
+    logged.mockRestore();
   });
 
   it("starts tiles at as many as fit the paper, and says when a grid asked for runs off it", async () => {
@@ -1375,7 +1786,7 @@ describe("LayoutTab iteration", () => {
 
     // Export writes every page of the iteration (one page per file: two).
     change(selectField("Arrangement"), "page-per-unit");
-    act(() => button("Page").click());
+    act(() => button("Export").click());
     await act(async () => { button("Export sheet").click(); await vi.runAllTimersAsync(); });
     expect(draws.exports.at(-1)).toEqual({ name: "Layout 1", format: "pdf", pages: 2 });
   });
@@ -1468,6 +1879,45 @@ describe("pooled Layout plots", () => {
     expect(draws.plots.at(-1)!.config.x).toHaveLength(3);
   });
 
+  it("draws a pooled strategy, strip or grid, from every pooled file's events and names the pool", async () => {
+    const fx = gatedFixture();
+    const workspace = createDefaultLayoutWorkspace();
+    const pool = { sampleIds: ["D1", "D2"] };
+    workspace.sheets[0].items.push(
+      { id: "strip", x: 57, y: 57, width: 400, height: 300, z: 1, recipe: { kind: "strategy", sampleId: "D1", populationId: fx.childId, fullPath: true, displayMode: "pseudocolor", pool } },
+      { id: "grid", x: 57, y: 400, width: 600, height: 300, z: 2, recipe: { kind: "strategy", sampleId: "D1", populationId: fx.childId, populationIds: [fx.childId], fullPath: true, displayMode: "pseudocolor", title: "{sample}", pool } },
+    );
+    mount(fx, { "FSC-A": [0, 40], "SSC-A": [0, 40] }, null, {}, workspace);
+    await flush();
+    const strip = draws.strategies.at(-1)!.payload as { steps: { n_before: number; n_after: number; x: number[] }[]; strategy_context_title: string };
+    // Both files' three events on the step; the gate holds one of each.
+    expect(strip.steps).toHaveLength(1);
+    expect(strip.steps[0]).toMatchObject({ n_before: 6, n_after: 2 });
+    expect(strip.steps[0].x).toHaveLength(6);
+    expect(strip.strategy_context_title).toBe("Lymphocytes · 2 files");
+    const grid = draws.multiStrategies.at(-1)!.payload as { nodes: { n_events: number; x: number[] }[]; strategy_context_title: string };
+    expect(grid.nodes.map((node) => [node.n_events, node.x.length])).toEqual([[6, 6]]);
+    expect(grid.strategy_context_title).toBe("2 files");
+  });
+
+  it("draws a strategy's gate edges as the Strategy tab sent them, and the default when it sent none", async () => {
+    const fx = gatedFixture();
+    const workspace = createDefaultLayoutWorkspace();
+    const strip = { kind: "strategy" as const, sampleId: "D1", populationId: fx.childId, fullPath: true, displayMode: "pseudocolor" as const };
+    workspace.sheets[0].items.push(
+      { id: "plain", x: 57, y: 57, width: 400, height: 300, z: 1, recipe: strip },
+      { id: "edged", x: 57, y: 400, width: 400, height: 300, z: 2, recipe: { ...strip, gateEdgeMode: "straight" } },
+      { id: "grid", x: 500, y: 57, width: 600, height: 300, z: 3, recipe: { ...strip, populationIds: [fx.childId], gateEdgeMode: "bowed" } },
+    );
+    mount(fx, { "FSC-A": [0, 40], "SSC-A": [0, 40] }, null, {}, workspace);
+    await flush();
+    const edgeOf = (id: string, drawn: { id: string; payload: unknown }[]) =>
+      (drawn.filter((entry) => entry.id === `layout-strategy-${id}`).at(-1)!.payload as { gate_style: { gate_edge_mode: string } }).gate_style.gate_edge_mode;
+    expect(edgeOf("plain", draws.strategies)).toBe("straight-bow");
+    expect(edgeOf("edged", draws.strategies)).toBe("straight");
+    expect(edgeOf("grid", draws.multiStrategies)).toBe("bowed");
+  });
+
   it("picks the pool with the metadata chips, in file order", async () => {
     const changes = mount(gatedFixture(true), { "FSC-A": [0, 40], "SSC-A": [0, 40] }, null, { checkedSampleIds: ["D1", "D2", "D3"] });
     await flush();
@@ -1538,7 +1988,7 @@ describe("pooled Layout plots", () => {
     expect(host.querySelectorAll(".gl-layout-item")).toHaveLength(4);
     // Export writes one page per value.
     change(selectField("Arrangement"), "page-per-unit");
-    act(() => button("Page").click());
+    act(() => button("Export").click());
     await act(async () => { button("Export sheet").click(); await vi.runAllTimersAsync(); });
     expect(draws.exports.at(-1)).toEqual({ name: "Layout 1", format: "pdf", pages: 2 });
     void plot;
@@ -1818,6 +2268,7 @@ describe("LayoutTab titles, bound text and zoom", () => {
     act(() => button("Page").click());
     const size = [...host.querySelectorAll<HTMLSelectElement>("select")].find((el) => [...el.options].some((o) => o.value === "journal-1"))!;
     setSelect(size, "journal-1");
+    select();
     act(() => button("Fit content to page").click());
     await flush();
     const [plot, text] = items(changes);
@@ -1896,5 +2347,225 @@ describe("LayoutTab sources and legends", () => {
     confirm.mockReturnValue(true);
     act(() => button("Regenerate").click());
     expect((items(changes)[1].recipe as { text: string }).text).toBe((legend.recipe as { text: string }).text);
+  });
+});
+
+describe("LayoutTab pages hold what is exported", () => {
+  /** A sheet of one page with a text block below it, as sheets were left when an added block grew the sheet and not its pages. */
+  function withItemBelowThePage(): LayoutWorkspace {
+    const workspace = createDefaultLayoutWorkspace();
+    workspace.sheets[0].items.push({ id: "below", x: 57, y: 900, width: 200, height: 60, z: 1, recipe: { kind: "text", text: "note", fontSize: 14 } });
+    return workspace;
+  }
+
+  it("says under Export when an item lies off the pages, and adds the pages that hold it", () => {
+    const changes = mount(fixture(), {}, null, {}, withItemBelowThePage());
+    act(() => button("Export").click());
+    const warning = () => host.querySelector<HTMLElement>(".gl-layout-export-warning");
+    expect(host.textContent).toContain("This sheet is one page.");
+    expect(warning()?.textContent).toContain("1 item lies partly or wholly outside the sheet's pages");
+    act(() => button("Add pages to hold them").click());
+    const sheet = changes.at(-1)!.sheets[0];
+    expect([sheet.page.columns, sheet.page.rows]).toEqual([1, 2]);
+    expect(sheet.height).toBe(2 * 794);
+    expect(sheet.items[0]).toMatchObject({ x: 57, y: 900 }); // nothing moved
+    expect(warning()).toBeNull();
+    expect(host.textContent).toContain("This sheet is 2 pages: 1 across and 2 down.");
+    expect(host.querySelectorAll(".gl-layout-page")).toHaveLength(2);
+  });
+
+  it("says after an export what lay off the pages", async () => {
+    mount(fixture(), {}, null, {}, withItemBelowThePage());
+    await act(async () => { button("Export PDF").click(); await vi.runAllTimersAsync(); });
+    expect(draws.exports).toEqual([{ name: "Layout 1", format: "pdf", pages: 1 }]);
+    expect(host.querySelector(".gl-layout-message")?.textContent).toContain("1 item lies outside the sheet's pages");
+  });
+
+  it("shows beside the resolution the most an image of the page can take, and says after an export when it was lowered to it", async () => {
+    const workspace = createDefaultLayoutWorkspace();
+    workspace.sheets[0].items.push({ id: "note", x: 57, y: 57, width: 200, height: 60, z: 1, recipe: { kind: "text", text: "note", fontSize: 14 } });
+    mount(fixture(), {}, null, {}, workspace);
+    act(() => button("Export").click());
+    // An A4 landscape page, 1123 by 794 CSS pixels: 813 dpi before the image passes 64 megapixels.
+    expect(host.textContent).toContain("a page of this size can be drawn at 813 dpi at most");
+    draws.writeReport = { loweredDpi: 813, rasterPages: [] };
+    await act(async () => { button("Export sheet").click(); await vi.runAllTimersAsync(); });
+    expect(draws.exports).toHaveLength(1);
+    expect(host.querySelector(".gl-layout-message")?.textContent).toContain("Exported. The resolution was lowered to 813 dpi");
+  });
+
+  it("says after an export that blocks had not finished drawing when the wait for them ran out", async () => {
+    mount(fixture(), {}, null, {}, withItemBelowThePage());
+    await flush();
+    // A block that never finishes drawing, as a plot whose renderer hangs.
+    const stuck = document.createElement("div");
+    stuck.dataset.layoutPending = "1";
+    host.querySelector(".gl-layout-canvas")!.appendChild(stuck);
+    await act(async () => { button("Export PDF").click(); await vi.runAllTimersAsync(); });
+    expect(draws.exports).toHaveLength(1);
+    expect(host.querySelector(".gl-layout-message")?.textContent).toContain("Some blocks had not finished drawing after 20 s");
+  });
+
+  it("keeps a plot marked as not drawn while its file is missing, and does not hold an export for a file that is gone", async () => {
+    const fx = fixture();
+    const workspace = createDefaultLayoutWorkspace();
+    workspace.sheets[0].items.push({ id: "gone", x: 57, y: 57, width: 300, height: 300, z: 1, recipe: { kind: "biplot", sampleId: "D9", populationId: fx.rootId, xChannel: "FSC-A", yChannel: "SSC-A", displayMode: "pseudocolor" } });
+    mount(fx, {}, null, {}, workspace);
+    await flush();
+    const plot = element("gone").querySelector<HTMLElement>(".gl-layout-plot-host")!;
+    expect(plot.textContent).toBe("The referenced file is unavailable or still loading.");
+    expect(plot.dataset.layoutPending).toBe("source");
+    const started = Date.now();
+    await act(async () => { button("Export PDF").click(); await vi.runAllTimersAsync(); });
+    expect(draws.exports).toHaveLength(1);
+    // Every file is prepared, so the missing one will not come: the export did not wait 20 s for it.
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(host.querySelector(".gl-layout-message")).toBeNull();
+  });
+
+  it("takes no input while an export runs, and composes at the zoom the page is drawn at then", async () => {
+    mount(fixture(), {}, null, {}, withItemBelowThePage());
+    await flush();
+    const tab = host.querySelector<HTMLElement>(".gl-layout-tab")!;
+    expect(tab.hasAttribute("inert")).toBe(false);
+    act(() => button("Export PDF").click());
+    expect(tab.hasAttribute("inert")).toBe(true);
+    expect(tab.getAttribute("aria-busy")).toBe("true");
+    // jsdom does not honour inert, so a zoom still reaches the page: the export is to use it.
+    const before = host.querySelector(".gl-layout-zoom-level")!.textContent;
+    act(() => { page().dispatchEvent(new WheelEvent("wheel", { deltaY: -200, ctrlKey: true, bubbles: true, cancelable: true })); });
+    const now = Number(host.querySelector(".gl-layout-zoom-level")!.textContent!.replace("%", "")) / 100;
+    expect(host.querySelector(".gl-layout-zoom-level")!.textContent).not.toBe(before);
+    await act(async () => { await vi.runAllTimersAsync(); });
+    expect(draws.composedZooms).toHaveLength(1);
+    expect(draws.composedZooms[0]).toBeCloseTo(now, 2);
+    expect(tab.hasAttribute("inert")).toBe(false);
+  });
+
+  it("acts on no key while an export runs, and gives the page its keyboard back after", async () => {
+    const changes = mount(fixture(), {}, null, {}, withItemBelowThePage());
+    await flush();
+    select("below");
+    key({ key: "ArrowRight" });
+    const before = changes.length;
+    const x = changes.at(-1)!.sheets[0].items[0].x;
+    act(() => page().focus());
+    act(() => button("Export PDF").click());
+    // The tab is inert now; a browser drops the focus it held, which jsdom does not.
+    act(() => (document.activeElement as HTMLElement).blur());
+    key({ key: "ArrowRight" });
+    key({ key: "Delete" });
+    key({ key: "d", metaKey: true });
+    const undo = new KeyboardEvent("keydown", { key: "z", metaKey: true, cancelable: true });
+    act(() => { window.dispatchEvent(undo); });
+    // Taken, so the app's own undo does not act on the gating instead.
+    expect(undo.defaultPrevented).toBe(true);
+    expect(changes).toHaveLength(before);
+    await act(async () => { await vi.runAllTimersAsync(); });
+    expect(draws.exports).toHaveLength(1);
+    expect(changes.at(-1)!.sheets[0].items).toHaveLength(1);
+    expect(changes.at(-1)!.sheets[0].items[0].x).toBe(x);
+    expect(document.activeElement).toBe(page());
+    key({ key: "ArrowRight" });
+    expect(changes.at(-1)!.sheets[0].items[0].x).toBe(x + 1);
+  });
+
+  it("says after a PDF export which pages the writer drew as an image", async () => {
+    mount(fixture(), {}, null, {}, withItemBelowThePage());
+    draws.writeReport = { loweredDpi: null, rasterPages: [2] };
+    await act(async () => { button("Export PDF").click(); await vi.runAllTimersAsync(); });
+    const message = host.querySelector(".gl-layout-message")?.textContent ?? "";
+    expect(message).toContain("1 item lies outside the sheet's pages");
+    expect(message).toContain("The PDF writer could not take page 2 as vector art; it is written as one image.");
+  });
+
+  it("opens the item's menu on a right-click on a strategy panel, not the renderer's own", async () => {
+    const changes = mount(fixture());
+    await flush();
+    act(() => button("+ Biplot").click());
+    await flush();
+    // A panel as the renderer makes one in a multi-population grid: its own handler stops the event.
+    const panel = document.createElement("div");
+    panel.className = "mini-plot-cell";
+    let rendererMenus = 0;
+    panel.oncontextmenu = (event) => { event.stopPropagation(); rendererMenus += 1; };
+    element(items(changes)[0].id).querySelector(".gl-layout-plot-host")!.appendChild(panel);
+    act(() => { panel.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 200, clientY: 150 })); });
+    expect(rendererMenus).toBe(0);
+    expect([...host.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent)).toContain("Duplicate");
+  });
+
+  it("holds a multi-population block to its grid's width, so a long title is cut to the grid", async () => {
+    const fx = gatedFixture();
+    const workspace = createDefaultLayoutWorkspace();
+    workspace.sheets[0].items.push({ id: "grid", x: 57, y: 57, width: 600, height: 300, z: 1, recipe: { kind: "strategy", sampleId: "D1", populationId: fx.childId, populationIds: [fx.childId], fullPath: true, displayMode: "pseudocolor", title: "a long file name that is wider than the grid" } });
+    mount(fx, {}, null, {}, workspace);
+    await flush();
+    expect(draws.multiStrategies.length).toBeGreaterThan(0);
+    const inner = element("grid").querySelector<HTMLElement>(".multi-strategy-grid")!.parentElement!;
+    expect(inner.style.width).toBe(`${216}px`);
+  });
+
+  it("draws a multi-population block scaled to its frame once it knows its size, and measures it only the first time", async () => {
+    // The grid as laid out: 400 by 200 px, in a 600 by 300 frame, so it is shown at 1.46 and the
+    // frame is drawn in to it; the block is drawn again for the new frame.
+    const sizes = { scrollWidth: 400, scrollHeight: 200 };
+    for (const [name, value] of Object.entries(sizes)) {
+      Object.defineProperty(HTMLElement.prototype, name, { configurable: true, get(this: HTMLElement) { return this.id.startsWith("layout-strategy-") ? value : 0; } });
+    }
+    try {
+      const fx = gatedFixture();
+      const workspace = createDefaultLayoutWorkspace();
+      workspace.sheets[0].items.push({ id: "grid", x: 57, y: 57, width: 600, height: 300, z: 1, recipe: { kind: "strategy", sampleId: "D1", populationId: fx.childId, populationIds: [fx.childId], fullPath: true, displayMode: "pseudocolor" } });
+      const changes = mount(fx, {}, null, {}, workspace);
+      await flush();
+      expect(items(changes)[0]).toMatchObject({ width: 592, height: 300 });
+      const scales = draws.multiStrategies.map((entry) => (entry.payload as { canvas_scale: number }).canvas_scale);
+      // The first drawing measures the grid, the second is at the scale it is shown at; drawn
+      // again for the frame drawn in, it is drawn once, at that scale.
+      expect(scales).toHaveLength(3);
+      expect(scales[2]).toBeCloseTo(scales[1]);
+      expect(scales[1] / scales[0]).toBeCloseTo(1.46);
+    } finally {
+      for (const name of Object.keys(sizes)) delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name];
+    }
+  });
+
+  it("leaves room for arrows round a multi-population block only when an arrow is drawn", async () => {
+    // All Events › Lymphocytes › CD4_positive: CD4_positive's strategy is two panels and an arrow
+    // between them; Lymphocytes' alone is one panel and none.
+    const fx = gatedFixture();
+    const cd4 = newPopulation("CD4_positive", [], fx.childId);
+    const cd4Gate = newGate("CD4_gate", "rectangle", "FSC-A", "SSC-A", [[0, 0], [40, 40]]);
+    cd4.gate_refs = [{ gate_id: cd4Gate.gate_id, include: true }];
+    fx.state.gates[cd4Gate.gate_id] = cd4Gate;
+    fx.state.gate_order.push(cd4Gate.gate_id);
+    fx.state.populations[cd4.population_id] = cd4;
+    fx.state.populations[fx.childId].children = [cd4.population_id];
+    const workspace = createDefaultLayoutWorkspace();
+    const block = (id: string, y: number, populationId: string) => ({ id, x: 57, y, width: 600, height: 300, z: 1, recipe: { kind: "strategy" as const, sampleId: "D1", populationId, populationIds: [populationId], fullPath: true, displayMode: "pseudocolor" as const } });
+    workspace.sheets[0].items.push(block("one", 57, fx.childId), block("two", 400, cd4.population_id));
+    mount(fx, {}, null, {}, workspace);
+    await flush();
+    const gutter = (id: string) => element(id).querySelector<HTMLElement>(".multi-strategy-grid")!.style.paddingRight;
+    expect(gutter("one")).toBe("");
+    expect(gutter("two")).not.toBe("");
+  });
+
+  it("keeps the proportions of a block that is scaled as a whole", () => {
+    const fx = fixture();
+    const workspace = createDefaultLayoutWorkspace();
+    workspace.sheets[0].items.push(
+      { id: "grid", x: 57, y: 57, width: 600, height: 300, z: 1, recipe: { kind: "strategy", sampleId: "D1", populationId: fx.rootId, populationIds: [fx.rootId], fullPath: true, displayMode: "pseudocolor" } },
+      { id: "note", x: 57, y: 400, width: 200, height: 60, z: 2, recipe: { kind: "text", text: "note", fontSize: 14 } },
+    );
+    mount(fx, {}, null, {}, workspace);
+    const keep = () => [...host.querySelectorAll<HTMLLabelElement>("label")].find((label) => label.textContent === "Keep proportions")!.querySelector("input")!;
+    select("note");
+    expect(draws.moveable!.keepRatio).toBe(false);
+    expect([keep().checked, keep().disabled]).toEqual([false, false]);
+    select("grid");
+    expect(draws.moveable!.keepRatio).toBe(true);
+    expect([keep().checked, keep().disabled]).toEqual([true, true]);
   });
 });

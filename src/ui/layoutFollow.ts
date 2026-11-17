@@ -18,7 +18,7 @@ export function followSheetIteration<R extends LayoutRecipe>(sheet: Pick<LayoutS
   if (varies) return [...recipes];
   return recipes.map((recipe) => {
     if (!isPlotLikeRecipe(recipe)) return recipe;
-    if (mode === "files" && recipe.kind !== "strategy" && recipe.pool && recipe.pool.sampleIds.length > 1) return recipe;
+    if (mode === "files" && recipe.pool && recipe.pool.sampleIds.length > 1) return recipe;
     return { ...recipe, iterated: true };
   });
 }

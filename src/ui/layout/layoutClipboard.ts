@@ -1,8 +1,11 @@
 // layoutClipboard.ts — the Layout tab's own clipboard: copy, cut and paste of items, between the
 // sheets of a workspace. Held in memory only; the system clipboard is never read or written.
 
+import { useRef } from "react";
 import { copyLayoutItems, dropStaleReadsFrom, isPlotLikeRecipe, sheetSizePx, type LayoutItem, type LayoutSheet } from "../../engine/layout";
 import { followSheetIteration } from "../layoutFollow";
+import { showHiddenCopies, withHiddenGroupMembers } from "./layoutObjects";
+import { withPanelLetterIds } from "./panelLetters";
 import { usePersistedTabState } from "../tabState";
 
 /** How far each paste on the sheet the items came from steps from the one before, in px. */
@@ -29,9 +32,14 @@ export function layoutClipboardShortcut(event: Pick<KeyboardEvent, "key" | "meta
   return null;
 }
 
-/** The items of `sheet` named by `ids`, copied as they are now in stacking order; null when none is there. */
+/**
+ * The items of `sheet` named by `ids`, copied as they are now in stacking order, with what
+ * Duplicate takes with them (their panel letters, and the hidden members of a group taken whole);
+ * null when none is there.
+ */
 export function copyToLayoutClipboard(sheet: LayoutSheet, ids: readonly string[]): LayoutClipboard | null {
-  const items = sheet.items.filter((item) => ids.includes(item.id)).sort((a, b) => a.z - b.z);
+  const taken = withPanelLetterIds(sheet, withHiddenGroupMembers(sheet, ids));
+  const items = sheet.items.filter((item) => taken.includes(item.id)).sort((a, b) => a.z - b.z);
   if (!items.length) return null;
   return { sheetId: sheet.id, items: structuredClone(items), pastes: {} };
 }
@@ -41,7 +49,8 @@ export function copyToLayoutClipboard(sheet: LayoutSheet, ids: readonly string[]
  * items' ids and the clipboard with this paste counted. Copies are made as Duplicate makes them
  * (copyLayoutItems): new ids, groups of their own, and a text block copied with its plot reads the
  * copy. A text block whose plot was not copied keeps reading the original where that is still on
- * the sheet, and becomes plain text elsewhere. A locked item stays locked.
+ * the sheet, and becomes plain text elsewhere. A locked item stays locked; a hidden one is shown
+ * (showHiddenCopies).
  *
  * On the sheet the items came from, paste n (from 1) is n × 20 px right and down from the
  * originals; on another sheet the first lands at the originals' place, moved onto the sheet if it
@@ -56,6 +65,7 @@ export function pasteLayoutClipboard(
   const sameSheet = sheet.id === clipboard.sheetId;
   const count = clipboard.pastes[sheet.id] ?? 0;
   const { copies } = copyLayoutItems(clipboard.items, newId);
+  showHiddenCopies(copies);
   let dx = 0;
   let dy = 0;
   if (!inPlace) {
@@ -90,20 +100,26 @@ export function pasteLayoutClipboard(
  * it outlives a visit to another tab and a change of sheet, and is emptied when another workspace
  * is opened (clearPersistedTabState). Each action that changes the sheet is one undo step.
  */
-export function useLayoutClipboard({ sheet, mutateActiveSheet, removeItems, selectMany }: {
+export function useLayoutClipboard({ sheet, mutateActiveSheet, removeItems, selectMany, removable }: {
   sheet: LayoutSheet | undefined;
   mutateActiveSheet: (change: (sheet: LayoutSheet) => void) => void;
   removeItems: (ids: readonly string[]) => void;
   selectMany: (ids: string[]) => void;
+  /** What a cut takes of the items named, as Delete does (the Layout tab leaves locked items); all of them without it. */
+  removable?: (ids: readonly string[]) => string[];
 }) {
   const [clipboard, setClipboard] = usePersistedTabState<LayoutClipboard | null>("layout.clipboard", null);
+  // Copy from a menu left open across an undo copies the sheet as it is now.
+  const sheetRef = useRef(sheet);
+  sheetRef.current = sheet;
   const copy = (ids: readonly string[]) => {
-    const held = sheet ? copyToLayoutClipboard(sheet, ids) : null;
+    const held = sheetRef.current ? copyToLayoutClipboard(sheetRef.current, ids) : null;
     if (held) setClipboard(held);
     return held !== null;
   };
   const cut = (ids: readonly string[]) => {
-    if (copy(ids)) removeItems(ids);
+    const taken = removable ? removable(ids) : ids;
+    if (taken.length && copy(taken)) removeItems(taken);
   };
   const paste = (inPlace: boolean) => {
     if (!clipboard) return;

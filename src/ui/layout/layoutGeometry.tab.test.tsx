@@ -7,7 +7,7 @@
 import { act, forwardRef, useImperativeHandle, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDefaultLayoutWorkspace, type LayoutWorkspace } from "../../engine/layout";
+import { createDefaultLayoutWorkspace, normalizeLayoutWorkspace, type LayoutWorkspace } from "../../engine/layout";
 import { DEFAULT_HIERARCHY_ID } from "../../engine/hierarchies";
 import { newPopulation, newRootPopulation } from "../../engine/models";
 import { Sample } from "../../engine/sample";
@@ -16,7 +16,7 @@ import type { FigureSample } from "../../engine/figure";
 import { initialCoreState, type CoreState } from "../../store";
 import { I18nProvider } from "../i18n";
 import { LayoutTab } from "../LayoutTab";
-import { unitToPx } from "./layoutGeometry";
+import { pxToUnit, unitToPx } from "./layoutGeometry";
 
 const draws = vi.hoisted(() => ({
   moveable: null as Record<string, any> | null,
@@ -287,5 +287,154 @@ describe("Geometry on the Layout tab", () => {
     act(() => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
     undo();
     expect(frameOf(changes, ids[1])).toMatchObject({ x: 500, y: 140 });
+  });
+});
+
+describe("X and Y on a sheet of several pages", () => {
+  /** A sheet of A4 landscape pages (1123 x 794 px), `columns` across and `rows` down, holding one text item. */
+  function onSheet(columns: number, rows: number, at: { x: number; y: number }) {
+    const saved = JSON.parse(JSON.stringify(createDefaultLayoutWorkspace()));
+    saved.sheets[0].page = { ...saved.sheets[0].page, columns, rows };
+    saved.sheets[0].width = 1123 * columns;
+    saved.sheets[0].height = 794 * rows;
+    saved.sheets[0].items = [{ id: "T1", ...at, width: 160, height: 32, z: 0, recipe: { kind: "text", text: "control", fontSize: 18 } }];
+    return mount(normalizeLayoutWorkspace(saved));
+  }
+
+  it("shows and reads X from the left edge of the second page across", async () => {
+    const changes = onSheet(2, 1, { x: 1123 + 76, y: 57 });
+    await flush();
+    select("T1");
+    expect(input("Item x").value).toBe(String(pxToUnit(76, "mm")));
+    expect(input("Item y").value).toBe(String(pxToUnit(57, "mm")));
+    type(input("Item x"), "10");
+    expect(frameOf(changes, "T1").x).toBeCloseTo(1123 + unitToPx(10, "mm"), 2);
+    expect(input("Item x").value).toBe("10");
+    type(input("Item x"), "0");
+    expect(frameOf(changes, "T1").x).toBe(1123);
+    act(() => button("px").click());
+    expect(input("Item x").value).toBe("0");
+    type(input("Item x"), "40");
+    expect(frameOf(changes, "T1").x).toBe(1163);
+    // The first page reads from its own corner, as before.
+    type(input("Item x"), "-1123");
+    expect(frameOf(changes, "T1").x).toBe(0);
+    expect(input("Item x").value).toBe("0");
+  });
+
+  it("reads a typed X once when it takes the item to another page", async () => {
+    const changes = onSheet(2, 1, { x: 76, y: 57 });
+    await flush();
+    select("T1");
+    const field = input("Item x");
+    act(() => {
+      field.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(field, "300");
+      field.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    expect(frameOf(changes, "T1").x).toBeCloseTo(unitToPx(300, "mm"), 2);
+    // Leaving the field afterwards does not read the 300 again, from the second page's edge.
+    act(() => {
+      field.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      input("Item x").dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+    expect(frameOf(changes, "T1").x).toBeCloseTo(unitToPx(300, "mm"), 2);
+    expect(input("Item x").value).toBe(String(pxToUnit(unitToPx(300, "mm") - 1123, "mm")));
+  });
+
+  it("shows and reads Y from the top edge of the second page down", async () => {
+    const changes = onSheet(1, 2, { x: 57, y: 794 + 100 });
+    await flush();
+    select("T1");
+    expect(input("Item x").value).toBe(String(pxToUnit(57, "mm")));
+    expect(input("Item y").value).toBe(String(pxToUnit(100, "mm")));
+    type(input("Item y"), "30");
+    expect(frameOf(changes, "T1").y).toBeCloseTo(794 + unitToPx(30, "mm"), 2);
+    expect(input("Item y").value).toBe("30");
+  });
+});
+
+describe("An item's scale on the Layout tab", () => {
+  const resize = (id: string, width: number, height: number, end: { cancel?: boolean; dist?: number[] } = {}) => act(() => {
+    const el = element(id);
+    const [x, y] = [parseFloat(el.style.left), parseFloat(el.style.top)];
+    draws.moveable!.onResizeStart({ target: el, inputEvent: {}, setFixedDirection: () => {} });
+    draws.moveable!.onResize({ target: el, width, height, drag: { left: x, top: y } });
+    if (end.cancel) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+    draws.moveable!.onResizeEnd({ target: el, isDrag: true, datas: {}, lastEvent: { dist: end.dist ?? [width, height] } });
+  });
+  const zoomOf = (changes: LayoutWorkspace[], id: string) => items(changes).find((item) => item.id === id)!.zoom;
+  const bodyStyle = (id: string) => element(id).querySelector<HTMLElement>(":scope > .gl-layout-item-body")!.getAttribute("style") || "";
+
+  it("shows a plot made smaller than it is drawn scaled, and unscaled again once it is made large enough", async () => {
+    const { changes, ids } = await threePlots();
+    select(ids[0]);
+    resize(ids[0], 64, 64);
+    expect(zoomOf(changes, ids[0])).toBe(0.5);
+    // Still below the smallest a plot is drawn: drawn at that size and shown scaled to the frame.
+    resize(ids[0], 100, 100);
+    expect(zoomOf(changes, ids[0])).toBe(0.781);
+    resize(ids[0], 256, 256);
+    expect(frameOf(changes, ids[0])).toMatchObject({ width: 256, height: 256 });
+    expect(zoomOf(changes, ids[0])).toBeUndefined();
+  });
+
+  it("keeps the scale of a plot drawn larger than the smallest when it is resized", async () => {
+    const { changes, ids } = await threePlots();
+    const scaled = structuredClone(changes.at(-1)!);
+    Object.assign(scaled.sheets[0].items.find((item) => item.id === ids[0])!, { width: 150, height: 150, zoom: 0.5 });
+    act(() => root.unmount());
+    root = createRoot(host);
+    const again = mount(scaled);
+    await flush();
+    select(ids[0]);
+    resize(ids[0], 200, 200);
+    expect(zoomOf(again, ids[0])).toBe(0.5);
+  });
+
+  it("shows a scaled item's scale and resets it to unscaled, keeping its top-left corner, for one item or each of several", async () => {
+    const { changes, ids } = await threePlots();
+    select(ids[0]);
+    expect(button("Reset scale")).toBeUndefined();
+    resize(ids[0], 64, 64);
+    expect(host.querySelector(".gl-layout-inspector")!.textContent).toContain("Shown at 50%");
+    const count = changes.length;
+    act(() => button("Reset scale").click());
+    expect(changes.length).toBe(count + 1);
+    expect(frameOf(changes, ids[0])).toEqual({ x: 100, y: 100, width: 128, height: 128 });
+    expect(zoomOf(changes, ids[0])).toBeUndefined();
+    expect(button("Reset scale")).toBeUndefined();
+    undo();
+    expect(zoomOf(changes, ids[0])).toBe(0.5);
+    select(ids[1]);
+    resize(ids[1], 32, 32);
+    select(...ids);
+    expect(host.querySelector(".gl-layout-inspector")!.textContent).toContain("Shown at several scales");
+    act(() => button("Reset scale").click());
+    expect(ids.map((id) => zoomOf(changes, id))).toEqual([undefined, undefined, undefined]);
+    expect(frameOf(changes, ids[0])).toMatchObject({ width: 128, height: 128 });
+    expect(frameOf(changes, ids[1])).toEqual({ x: 500, y: 140, width: 128, height: 128 });
+  });
+
+  it("draws an item exactly as before after a resize cancelled with Escape or one of less than 3 px", async () => {
+    const { changes, ids } = await threePlots();
+    select(ids[0]);
+    const before = { style: bodyStyle(ids[0]), frame: frameOf(changes, ids[0]) };
+    const count = changes.length;
+    resize(ids[0], 64, 64, { cancel: true });
+    expect(changes.length).toBe(count);
+    expect(bodyStyle(ids[0])).toBe(before.style);
+    expect(element(ids[0]).style.width).toBe(`${before.frame.width}px`);
+    resize(ids[0], before.frame.width - 1, 64, { dist: [1, 1] });
+    expect(changes.length).toBe(count);
+    expect(bodyStyle(ids[0])).toBe(before.style);
+    // A zoomed item goes back to its own zoom.
+    resize(ids[0], 64, 64);
+    const zoomed = { style: bodyStyle(ids[0]), count: changes.length };
+    expect(zoomed.style).toContain("zoom: 0.5");
+    resize(ids[0], 32, 32, { cancel: true });
+    expect(changes.length).toBe(zoomed.count);
+    expect(bodyStyle(ids[0])).toBe(zoomed.style);
   });
 });

@@ -1,14 +1,14 @@
 // LayoutRulers.tsx — the Layout tab's rulers along the top and left of the canvas pane, in mm from
-// the first page's top-left corner, following scroll and zoom; a marker on each follows the pointer
+// each page's left and top edges, following scroll and zoom; a marker on each follows the pointer
 // and the selection's extent is shaded. A drag from the top ruler onto the page makes a horizontal
 // guide, from the left ruler a vertical one. The rulers sit outside the scrolling pane, in a
 // zero-size box placed just before it, so they stay put while the page scrolls under them.
 
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
-import type { LayoutGuide } from "../../engine/layout";
+import { pageSizePx, type LayoutGuide, type LayoutPage } from "../../engine/layout";
 import { contentBounds, type Box } from "../../engine/layoutArrange";
 import { useI18n } from "../i18n";
-import { RULER_SIZE, rulerTicks } from "./guideModel";
+import { pageRulerTicks, RULER_SIZE } from "./guideModel";
 import "./layoutGuides.css";
 
 interface View {
@@ -26,12 +26,15 @@ export function LayoutRulers({
   scroller,
   page,
   zoom,
+  pages,
   selected,
   onAddGuide,
 }: Readonly<{
   scroller: HTMLElement | null;
   page: HTMLElement | null;
   zoom: number;
+  /** The sheet's page size and grid: each page's ruler counts from 0 at its edge. */
+  pages: LayoutPage;
   /** The selected items, in sheet px; their extent is shaded on both rulers. */
   selected: readonly Box[];
   onAddGuide: (guide: LayoutGuide) => void;
@@ -118,7 +121,10 @@ export function LayoutRulers({
     const across = axis === "top";
     const length = across ? view.width : view.height;
     const origin = across ? view.originX : view.originY;
-    const ticks = rulerTicks(origin, length, zoom);
+    const pageSize = pageSizePx(pages);
+    const ticks = across
+      ? pageRulerTicks(origin, length, zoom, pageSize.width, pages.columns)
+      : pageRulerTicks(origin, length, zoom, pageSize.height, pages.rows);
     const shade = selection
       ? { from: origin + scaled(across ? selection.x : selection.y), size: scaled(across ? selection.width : selection.height) }
       : null;
@@ -137,12 +143,12 @@ export function LayoutRulers({
           {ticks.map((tick) => {
             const reach = tick.major ? RULER_SIZE : tick.mm % 5 === 0 ?RULER_SIZE * 0.45 : RULER_SIZE * 0.3;
             return across
-              ? <line key={tick.mm} x1={tick.at} x2={tick.at} y1={RULER_SIZE - reach} y2={RULER_SIZE} />
-              : <line key={tick.mm} y1={tick.at} y2={tick.at} x1={RULER_SIZE - reach} x2={RULER_SIZE} />;
+              ? <line key={tick.at} x1={tick.at} x2={tick.at} y1={RULER_SIZE - reach} y2={RULER_SIZE} />
+              : <line key={tick.at} y1={tick.at} y2={tick.at} x1={RULER_SIZE - reach} x2={RULER_SIZE} />;
           })}
           {ticks.filter((tick) => tick.major).map((tick) => (across
-            ? <text key={`l${tick.mm}`} x={tick.at + 2} y={9}>{tick.mm}</text>
-            : <text key={`l${tick.mm}`} x={9} y={tick.at + 2} transform={`rotate(-90 9 ${tick.at + 2})`} textAnchor="end">{tick.mm}</text>))}
+            ? <text key={`l${tick.at}`} x={tick.at + 2} y={9}>{tick.mm}</text>
+            : <text key={`l${tick.at}`} x={9} y={tick.at + 2} transform={`rotate(-90 9 ${tick.at + 2})`} textAnchor="end">{tick.mm}</text>))}
           {mark !== null && (across
             ? <line className="gl-layout-ruler-pointer" x1={mark} x2={mark} y1={0} y2={RULER_SIZE} />
             : <line className="gl-layout-ruler-pointer" y1={mark} y2={mark} x1={0} x2={RULER_SIZE} />)}
@@ -155,7 +161,7 @@ export function LayoutRulers({
     <div className="gl-layout-rulers" data-testid="layout-rulers">
       {ruler("top")}
       {ruler("left")}
-      <div className="gl-layout-ruler-corner" title={t("Rulers in mm from the first page's top-left corner")}>mm</div>
+      <div className="gl-layout-ruler-corner" title={t("Rulers in mm from each page's top-left corner")}>mm</div>
       {draft && (draft.axis === "y"
         ? <div className="gl-layout-guide-draft is-y" style={{ top: draft.y, width: view.width }} />
         : <div className="gl-layout-guide-draft is-x" style={{ left: draft.x, height: view.height }} />)}

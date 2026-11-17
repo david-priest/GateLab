@@ -107,6 +107,14 @@ describe("A Layout block's source", () => {
     expect(source.counts).toEqual([1]);
   });
 
+  it("of a pooled strategy names every pooled file and counts the population over them", () => {
+    const fx = fixture();
+    const source = describeLayoutBlock(item({ kind: "strategy", sampleId: "D1", populationId: fx.cd4, fullPath: true, displayMode: "pseudocolor", pool: { sampleIds: ["D1", "D2"] } }), fx.ctx)!;
+    expect(source).toMatchObject({ kind: "strategy", files: ["D1.fcs", "D2.fcs"], populations: ["CD4 SP"], counts: [fx.counted("D1", fx.cd4) + fx.counted("D2", fx.cd4)] });
+    expect(source.counts).toEqual([3]);
+    expect(source.shows).toContain("in 2 files pooled");
+  });
+
   it("of a statistic chart gives n replicate units per group and the rank test's p", () => {
     const fx = fixture();
     const settings: ProportionsSettings = { ...fx.settings, valueKind: "statistic", plotType: "box", xAxis: "groups", test: true };

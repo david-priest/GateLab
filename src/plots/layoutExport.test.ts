@@ -5,6 +5,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { composeLayoutSVG, writeComposedPages } from "./layoutExport";
 import { createLayoutSheet, pageForPreset } from "../engine/layout";
+import { fillLabel, keepLayoutCanvas } from "./layoutCanvasExport";
 
 const pdfSpy = vi.hoisted(() => ({
   documents: [] as unknown[],
@@ -14,9 +15,10 @@ const pdfSpy = vi.hoisted(() => ({
   svg: vi.fn(),
   rasters: [] as unknown[],
 }));
-vi.mock("./gridExport", () => ({
+vi.mock("./gridExport", async (original) => ({
+  maxRasterDpi: (await original<typeof import("./gridExport")>()).maxRasterDpi,
   cellDataUrlAtDpi: (_cell: HTMLElement, dpi: number, size: number) => `data:cell/${dpi}/${size}`,
-  rasterizeSvg: async (page: { root: Element }) => { const raster = { canvasFor: page.root }; pdfSpy.rasters.push(raster); return raster; },
+  rasterizeSvg: async (page: { root: Element }, dpi: number) => { const raster = { canvasFor: page.root, dpi }; pdfSpy.rasters.push(raster); return raster; },
 }));
 vi.mock("jspdf", () => ({
   jsPDF: class {
@@ -116,6 +118,37 @@ describe("composeLayoutSVG", () => {
     ]);
   });
 
+  it.each([1, 0.5])("measures from inside the page's edge line, where the items are placed from, at zoom %s", (zoom) => {
+    const canvas = page(zoom);
+    // The page's 1 px edge line lies outside what is placed on it.
+    Object.defineProperty(canvas, "clientLeft", { value: 1 });
+    Object.defineProperty(canvas, "clientTop", { value: 1 });
+    rect(canvas, 100 - zoom, 50 - zoom, 1125 * zoom, 796 * zoom);
+    const { root } = composeLayoutSVG(canvas, createLayoutSheet("Figure 1"), { dpi: 300, zoom });
+    expect(root.children[2].getAttribute("transform")).toBe("translate(28,28)");
+    expect(root.querySelector("text")!.getAttribute("x")).toBe("402");
+  });
+
+  it("draws the data layer of a plot shown scaled at the size the plot was drawn at, where its events sit under its gates", () => {
+    // A 252 px plot shown at half size: an item's zoom, or a strategy block fitted to its frame.
+    const canvas = page(1);
+    const host = canvas.querySelector<HTMLElement>(".gl-layout-plot-host")!;
+    const plotCanvas = host.querySelector("canvas")!;
+    rect(host, 100 + 28, 50 + 28, 126, 126);
+    rect(plotCanvas, 100 + 28, 50 + 28, 126, 126);
+    // Layout sizes are before any zoom.
+    Object.defineProperty(plotCanvas, "offsetWidth", { value: 252 });
+    Object.defineProperty(host.querySelector("svg")!, "clientWidth", { value: 252 });
+    const { root } = composeLayoutSVG(canvas, createLayoutSheet("Figure 1"), { dpi: 300, zoom: 1 });
+    const group = root.querySelector("g#plot-1-Lymphocytes-D1")!;
+    const image = group.querySelector("image")!;
+    // Drawn at 252 px, as on screen, with half the pixels to the inch a 252 px image would need,
+    // and placed at the 126 px it is shown at; the axes and gates are the plot's own, scaled alike.
+    expect(image.getAttributeNS("http://www.w3.org/1999/xlink", "href")).toBe("data:cell/150/252");
+    expect([image.getAttribute("width"), image.getAttribute("height")]).toEqual(["126", "126"]);
+    expect(group.querySelector("g[transform='scale(0.5)'] > svg")).not.toBeNull();
+  });
+
   it("sizes the page from the sheet, not from the DOM", () => {
     const sheet = createLayoutSheet("Panel", pageForPreset("journal-1", "portrait"));
     const { width, height, widthMm, heightMm } = composeLayoutSVG(page(1), sheet, { dpi: 300, zoom: 1 });
@@ -206,6 +239,34 @@ describe("writeComposedPages as PDF", () => {
     expect(pdfSpy.images).toEqual([[pdfSpy.rasters[0], "PNG", 0, 0, a4.width, a4.height, undefined, "FAST"]]);
     expect(pdfSpy.rasters).toHaveLength(1);
   });
+
+  it("reports which pages it drew as an image, for the export's message", async () => {
+    pdfSpy.svg.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("no"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await writeComposedPages(composed(), createLayoutSheet("Figure 1"), "pdf")).toEqual({ loweredDpi: null, rasterPages: [2] });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("draws a page as an image at the most a browser can draw, not failing the export, and says so", async () => {
+    pdfSpy.svg.mockRejectedValue(new Error("no"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sheet = createLayoutSheet("Figure 1");
+    sheet.page = { ...sheet.page, dpi: 600 };
+    const a3 = { root: document.createElementNS(svgNs, "svg") as SVGSVGElement, width: 1587, height: 1123, widthMm: 420, heightMm: 297 };
+    let report;
+    try {
+      report = await writeComposedPages([composed()[0], a3], sheet, "pdf");
+    } finally {
+      warn.mockRestore();
+    }
+    // The A4 page fits at 600 dpi; the A3 page, 1587 by 1123 CSS pixels, is drawn at 575.
+    expect(pdfSpy.rasters.map((raster) => (raster as { dpi: number }).dpi)).toEqual([600, 575]);
+    expect(pdfSpy.saved).toEqual(["Figure_1.pdf"]);
+    expect(report).toEqual({ loweredDpi: 575, rasterPages: [1, 2] });
+  });
 });
 
 describe("composeLayoutSVG on a grid of pages", () => {
@@ -228,6 +289,83 @@ describe("composeLayoutSVG on a grid of pages", () => {
   });
 });
 
+describe("composeLayoutSVG, a figure block's headings", () => {
+  // jsdom lays nothing out and measures no line boxes: each heading is placed from its own box,
+  // padding and alignment, as the page shows a heading on one line.
+  function figure(zoom: number) {
+    const canvas = document.createElement("section");
+    rect(canvas, 100, 50, 1123 * zoom, 794 * zoom);
+    const item = document.createElement("article");
+    item.className = "gl-layout-item";
+    item.style.zIndex = "1";
+    item.dataset.title = "Figure";
+    const host = document.createElement("div");
+    host.className = "gl-layout-plot-host";
+    const table = document.createElement("table");
+    table.className = "gl-figure-grid";
+    const column = document.createElement("th");
+    column.className = "illustration-row-header";
+    column.textContent = "CD4_positive";
+    Object.assign(column.style, { textAlign: "center", padding: "0px 4px", fontSize: "12px" });
+    const row = document.createElement("th");
+    row.className = "illustration-row-header gl-figure-row-heading";
+    row.textContent = "D1";
+    Object.assign(row.style, { textAlign: "left", paddingTop: "20px", paddingLeft: "0px", fontSize: "12px" });
+    table.append(column, row);
+    host.appendChild(table);
+    item.appendChild(host);
+    canvas.appendChild(item);
+    rect(item, 100 + 20 * zoom, 50 + 20 * zoom, 400 * zoom, 300 * zoom);
+    // Laid out at 200 and 100 px wide, before the canvas zoom.
+    Object.defineProperty(column, "offsetWidth", { value: 200 });
+    Object.defineProperty(row, "offsetWidth", { value: 100 });
+    rect(column, 100 + 140 * zoom, 50 + 30 * zoom, 200 * zoom, 20 * zoom);
+    rect(row, 100 + 30 * zoom, 50 + 60 * zoom, 100 * zoom, 120 * zoom);
+    return canvas;
+  }
+
+  it.each([1, 0.5])("writes a centred heading at its centre and a row heading below its padding, at zoom %s", (zoom) => {
+    const { root } = composeLayoutSVG(figure(zoom), createLayoutSheet("Figure 1"), { dpi: 96, zoom });
+    const texts = [...root.querySelectorAll("text")].map((t) => [t.textContent, t.getAttribute("x"), t.getAttribute("y"), t.getAttribute("text-anchor")]);
+    expect(texts).toEqual([
+      ["CD4_positive", "240", String(30 + 12 * 0.82), "middle"],
+      ["D1", "30", String(60 + 20 + 12 * 0.82), null],
+    ]);
+  });
+});
+
+describe("composeLayoutSVG, a named shape", () => {
+  const svgNs = "http://www.w3.org/2000/svg";
+  function shape(name: string | undefined, z: number) {
+    const item = document.createElement("article");
+    item.className = "gl-layout-item";
+    item.style.zIndex = String(z);
+    if (name) item.dataset.objectName = name;
+    item.dataset.title = "Line";
+    const svg = document.createElementNS(svgNs, "svg");
+    svg.setAttribute("class", "gl-layout-shape");
+    const art = document.createElementNS(svgNs, "g");
+    art.setAttribute("class", "gl-layout-shape-art");
+    art.appendChild(document.createElementNS(svgNs, "line"));
+    svg.appendChild(art);
+    item.appendChild(svg);
+    rect(item, 100 + 10 * z, 50 + 10, 40, 20);
+    return item;
+  }
+
+  it("takes its name as its id, made unique within the file; an unnamed shape keeps the export's own id", () => {
+    const canvas = document.createElement("section");
+    rect(canvas, 100, 50, 1123, 794);
+    canvas.append(shape("Arrow to CD4_positive", 1), shape("Arrow to CD4_positive", 2), shape(undefined, 3));
+    const { root } = composeLayoutSVG(canvas, createLayoutSheet("Figure 1"), { dpi: 96, zoom: 1 });
+    expect([...root.querySelectorAll("g")].map((g) => g.getAttribute("id"))).toEqual([
+      "Arrow-to-CD4_positive",
+      "Arrow-to-CD4_positive-2",
+      "shape-3-Line",
+    ]);
+  });
+});
+
 describe("writeComposedPages as a zip", () => {
   it("names each page of an iteration by what it is drawn for", async () => {
     const svgNs = "http://www.w3.org/2000/svg";
@@ -236,5 +374,138 @@ describe("writeComposedPages as a zip", () => {
     await writeComposedPages([page("D1.fcs"), page("day 7 / D2"), page()], createLayoutSheet("Figure 1"), "svg");
     expect(zipSpy.names).toEqual(["Figure_1-p1-D1.fcs.svg", "Figure_1-p2-day_7___D2.svg", "Figure_1-p3.svg"]);
     vi.unstubAllGlobals();
+  });
+});
+
+describe("composeLayoutSVG with an image wall or a cell panel", () => {
+  const xlink = "http://www.w3.org/1999/xlink";
+  /** A canvas context that records what is drawn on it; jsdom has none of its own. */
+  function fakeContext() {
+    const calls: string[] = [];
+    const ctx = {
+      font: "10px sans-serif", fillStyle: "#000000", strokeStyle: "#000000", lineWidth: 1, textAlign: "start", textBaseline: "alphabetic",
+      setTransform: (...args: number[]) => calls.push(`setTransform(${args.join(",")})`),
+      fillRect: (...args: number[]) => calls.push(`fillRect(${args.join(",")})`),
+      fillText: (text: string) => calls.push(`fillText(${text})`),
+      measureText: (text: string) => ({ width: text.length * 6 }),
+    };
+    return { ctx: ctx as unknown as CanvasRenderingContext2D, calls };
+  }
+
+  /** A page with one image wall drawn at 400 × 300 and shown at half that, at (50, 60) on the page. */
+  function wallPage(kind: "imagewall" | "cellpanel", drawn: boolean) {
+    const canvas = document.createElement("section");
+    rect(canvas, 0, 0, 1123, 794);
+    const item = document.createElement("article");
+    item.className = "gl-layout-item";
+    item.dataset.title = "Cells of sample_A";
+    item.dataset.zoom = "0.5";
+    const host = document.createElement("div");
+    host.className = `gl-layout-${kind}`;
+    const wall = document.createElement("canvas");
+    wall.toDataURL = () => "data:shown";
+    host.appendChild(wall);
+    item.appendChild(host);
+    canvas.appendChild(item);
+    rect(item, 46, 56, 208, 158);
+    rect(wall, 50, 60, 200, 150);
+    if (drawn) {
+      keepLayoutCanvas(wall, {
+        width: 400,
+        height: 300,
+        draw: (ctx, labels) => {
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(0, 0, 400, 300);
+          ctx.fillStyle = "#1a1a1a";
+          ctx.font = "600 12px Helvetica Neue, Helvetica, Arial, sans-serif";
+          fillLabel(ctx, labels, "CD4_positive", 8, 20);
+          ctx.fillStyle = "#333";
+          ctx.font = "10px Helvetica Neue, Helvetica, Arial, sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          fillLabel(ctx, labels, "D1", 100, 50);
+        },
+      });
+    }
+    return canvas;
+  }
+
+  it.each(["imagewall", "cellpanel"] as const)("writes a %s where it is shown: its tiles drawn again at the page's dpi, its words as text", (kind) => {
+    const { ctx, calls } = fakeContext();
+    const made: HTMLCanvasElement[] = [];
+    const create = document.createElement.bind(document);
+    const spy = vi.spyOn(document, "createElement").mockImplementation(((tag: string) => {
+      const el = create(tag);
+      if (tag === "canvas") {
+        (el as HTMLCanvasElement).getContext = (() => ctx) as unknown as HTMLCanvasElement["getContext"];
+        (el as HTMLCanvasElement).toDataURL = () => "data:tiles";
+        made.push(el as HTMLCanvasElement);
+      }
+      return el;
+    }) as typeof document.createElement);
+    try {
+      const { root } = composeLayoutSVG(wallPage(kind, true), createLayoutSheet("Figure 1"), { dpi: 300, zoom: 1 });
+      const group = root.querySelector(`g#${kind}-1-Cells-of-sample_A`)!;
+      expect(group.getAttribute("transform")).toBe("translate(50,60)");
+      const image = group.querySelector("image")!;
+      expect([image.getAttribute("width"), image.getAttribute("height")]).toEqual(["200", "150"]);
+      expect(image.getAttributeNS(xlink, "href")).toBe("data:tiles");
+      // Shown at half its natural size, at 300 dpi: 1.5625 pixels to the drawing's unit.
+      expect([made.at(-1)!.width, made.at(-1)!.height]).toEqual([625, 469]);
+      expect(calls[0]).toBe("setTransform(1.5625,0,0,1.5625,0,0)");
+      expect(calls.some((call) => call.startsWith("fillText"))).toBe(false);
+      // The words at the natural size, scaled with the drawing.
+      const words = group.querySelector("g[transform='scale(0.5)']")!;
+      const texts = [...words.querySelectorAll("text")].map((t) => [t.textContent, t.getAttribute("x"), t.getAttribute("y"), t.getAttribute("font-size"), t.getAttribute("font-weight"), t.getAttribute("text-anchor"), t.getAttribute("fill")]);
+      expect(texts).toEqual([
+        ["CD4_positive", "8", "20", "12", "bold", null, "#1a1a1a"],
+        ["D1", "100", "53.5", "10", "normal", "middle", "#333"],
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("writes a wall not drawn yet as the canvas shows it", () => {
+    const { root } = composeLayoutSVG(wallPage("imagewall", false), createLayoutSheet("Figure 1"), { dpi: 300, zoom: 1 });
+    const image = root.querySelector("g#imagewall-1-Cells-of-sample_A image")!;
+    expect(image.getAttributeNS(xlink, "href")).toBe("data:shown");
+    expect(root.querySelectorAll("text")).toHaveLength(0);
+  });
+});
+
+describe("composeLayoutSVG with a chart panel in a figure block", () => {
+  it("copies a violin, box, statistic or composition panel as vector art where the zoomed grid shows it", () => {
+    const svgNs = "http://www.w3.org/2000/svg";
+    const canvas = document.createElement("section");
+    rect(canvas, 0, 0, 1123, 794);
+    const item = document.createElement("article");
+    item.className = "gl-layout-item";
+    item.dataset.title = "Figure";
+    const host = document.createElement("div");
+    host.className = "gl-layout-plot-host gl-layout-figure-host";
+    const grid = document.createElement("div");
+    grid.className = "gl-figure-grid";
+    const chart = document.createElement("div");
+    chart.className = "gl-figure-chart";
+    chart.setAttribute("aria-label", "CD4_positive; 120 cells");
+    const panel = document.createElementNS(svgNs, "svg");
+    panel.setAttribute("class", "gl-prop-panel");
+    panel.setAttribute("width", "200");
+    panel.setAttribute("height", "160");
+    panel.appendChild(document.createElementNS(svgNs, "path"));
+    chart.appendChild(panel);
+    grid.appendChild(chart);
+    host.appendChild(grid);
+    item.appendChild(host);
+    canvas.appendChild(item);
+    rect(item, 10, 10, 300, 300);
+    // The grid is zoomed to half its size to fit the block's frame.
+    rect(panel, 40, 30, 100, 80);
+    const { root } = composeLayoutSVG(canvas, createLayoutSheet("Figure 1"), { dpi: 300, zoom: 1 });
+    const group = root.querySelector("g#figure-1-Figure-chart-1")!;
+    expect(group).not.toBeNull();
+    expect(group.getAttribute("transform")).toBe("translate(40,30) scale(0.5)");
+    expect(group.querySelector("svg path")).not.toBeNull();
   });
 });

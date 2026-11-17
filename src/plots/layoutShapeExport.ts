@@ -9,7 +9,7 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 /**
  * Write the shape `item` draws, if it is one, into `root` at `frame` (page px, relative to the
  * page being written), scaled by the item's zoom as it is on the page. False when the item is
- * not a shape.
+ * not a shape. `id` is the group's id when the item has a name of its own.
  */
 export function writeLayoutShape(
   root: Element,
@@ -17,12 +17,13 @@ export function writeLayoutShape(
   frame: { left: number; top: number },
   index: number,
   heading: string,
+  id?: string | null,
 ): boolean {
   const art = item.querySelector("svg.gl-layout-shape > .gl-layout-shape-art");
   if (!art) return false;
   const zoom = Number(item.dataset.zoom) || 1;
   const g = document.createElementNS(SVG_NS, "g");
-  g.setAttribute("id", exportId("shape", index, heading));
+  g.setAttribute("id", id ?? exportId("shape", index, heading));
   g.setAttribute("transform", `translate(${round(frame.left)},${round(frame.top)})${zoom === 1 ? "" : ` scale(${zoom})`}`);
   for (const element of [...art.children]) {
     const copy = element.cloneNode(true) as Element;

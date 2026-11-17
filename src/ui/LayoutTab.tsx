@@ -16,7 +16,7 @@ import { FoldSummary } from "./FoldSummary";
 import { addPanelLetters, isPanelLetter, panelLetters, panelLetterState, reconcilePanelLetters, removePanelLetters, setLetterStyle, sheetLetterStyle, withPanelLetterIds } from "./layout/panelLetters";
 import { PanelLetterButtons, PanelLetterInspector, PanelLetterStyleSection } from "./layout/PanelLetterControls";
 import { LayoutObjectsSection } from "./layout/LayoutObjectsSection";
-import { hiddenItemIds, withoutHiddenItems } from "./layout/layoutObjects";
+import { hiddenItemIds, moveHiddenGroupMembers, showHiddenCopies, withHiddenGroupMembers, withoutHiddenItems } from "./layout/layoutObjects";
 import Moveable, {
   type OnDrag,
   type OnDragEnd,
@@ -54,7 +54,6 @@ import {
   LAYOUT_PAGE_PRESETS,
   MAX_PAGE_GRID,
   mmToPx,
-  nextLayoutItemPosition,
   copyLayoutItems,
   dropStaleReadsFrom,
   pageForPreset,
@@ -89,7 +88,7 @@ import { buildIllustrationPayload, type IllustrationOptions } from "../engine/il
 import { populationBranchGateOrder } from "../engine/branchGates";
 import { buildPooledPlotPayload, poolCompatibility, pooledGateAgreement, type PooledMember } from "../engine/pooledPlot";
 import { facetColumns, groupCheckedCount, toggleGroupChecked } from "../engine/sampleFacets";
-import type { CSSProperties } from "react";
+import type { CSSProperties, MutableRefObject } from "react";
 import { lazy, Suspense } from "react";
 import { lazyChunk } from "./lazyChunk";
 import type { ImageService } from "../imaging/imageService";
@@ -108,19 +107,22 @@ const LayoutCellPanelLazy = lazy(lazyChunk("LayoutCellPanel", async () => {
 }));
 import {
   computeGatingStrategy,
-  buildStrategyPayload,
+  buildPooledStrategyPayload,
 } from "../engine/strategy";
 import { buildMultiStrategyPayload, computeMultiPopStrategy, flowLayout, tidyLayout } from "../engine/multiStrategy";
+import { computePooledGatingStrategy, computePooledMultiPopStrategy, type StrategyMember } from "../engine/pooledStrategy";
 import { drawStrategyArrows, reserveArrowGutters, strategyArrowGap, strategyArrowRowGap, strategyArrows } from "./strategyArrows";
 import { populationTreeOrder } from "../engine/populations";
 import { loadMiniPlots } from "../plots/loadPlots";
-import { composeSheetPages, writeComposedPages, type ComposedPage, type LayoutExportFormat } from "../plots/layoutExport";
+import { composeSheetPages, writeComposedPages, type ComposedPage, type ExportReport, type LayoutExportFormat } from "../plots/layoutExport";
+import { maxRasterDpi } from "../plots/gridExport";
 import { DEFAULT_ITERATION, expandLayoutSheet, fillPlaceholders, followsIteration, itemsBeyondPaper, tilesThatFit, iterationUnits, metadataUnits, populationUnits, sharedMetadataFields, templateFrame, type DescribeBoundPlot, type LayoutIteration, type LayoutPage as ExpandedPage, type LayoutPageItem } from "../engine/layoutBatch";
 import { UNASSIGNED_METADATA_VALUE } from "../engine/layoutBatch";
 import { followSheetIteration } from "./layoutFollow";
 import { layoutClipboardShortcut, useLayoutClipboard } from "./layout/layoutClipboard";
 import { automaticTitleTemplate, fieldsFromTemplate, NO_TITLE, plotTitle, plotTitleContext, templateFromFields, titleFields, TITLE_PLACEHOLDERS, TITLE_PRESETS, TITLE_SEPARATORS, type PlotTitleContext } from "../engine/layoutTitle";
-import { alignItems, arrangeUnits, distributeItems, fitContentToPage, fitPageToContent, groupItems, ungroupItems, type AlignHow, type DistributeHow } from "../engine/layoutArrange";
+import { arrangeUnits, distributeItems, groupItems, ungroupItems, type AlignHow, type DistributeHow } from "../engine/layoutArrange";
+import { addItemOnPage, addPagesToHoldItems, alignOnTheirPage, fitItemsToTheirPages, fitPageToShownContent, itemsOffPages, largestMarginMm, nextItemFrame, pageOriginAt, pageWithRoom } from "./layoutPlacement";
 import { useI18n } from "./i18n";
 import { hostWords } from "./hostWording";
 import { historyShortcutAction } from "./historyShortcuts";
@@ -131,8 +133,8 @@ import type { MenuEntry } from "./MenuButton";
 import { CHART_STATISTIC_LABELS, LayoutChart, chartData } from "./LayoutChart";
 import { LayoutFigureSurface, figureBlockFrame } from "./LayoutFigure";
 import { LayoutFigurePageSelect, LayoutProportionsPageSelect } from "./layout/LayoutBlockPageSelect";
-import { LayoutDimensionFields, LayoutSelectionGeometry, LayoutSpaceButton, useLayoutGeometryPrefs } from "./layout/LayoutGeometryControls";
-import { arrangeInGrid, arrangeUnitCount, matchSizes, spaceItems, unitToPx } from "./layout/layoutGeometry";
+import { LayoutDimensionFields, LayoutScaleReset, LayoutSelectionGeometry, LayoutSpaceButton, useLayoutGeometryPrefs } from "./layout/LayoutGeometryControls";
+import { arrangeInGrid, arrangeUnitCount, matchSizes, resetScale, spaceItems, unitToPx } from "./layout/layoutGeometry";
 import { LayoutProportionsPanelNote, LayoutProportionsSurface, plottingBlockSizer, proportionsSampleRefs } from "./LayoutProportions";
 import { LayoutChartQuickStart, type QuickStartChoice } from "./LayoutChartQuickStart";
 import { chartToPlottingRecipe, quickStartPlottingRecipe } from "./layoutChartConversion";
@@ -153,7 +155,7 @@ import { imageMenuEntry, LayoutImageButton, LayoutImageInspector, LayoutPlacedIm
 import { LayoutRotationButtons, LayoutTurned, rotationMenuEntries } from "./layout/LayoutRotationControls";
 import { growTextFrame, turnItems } from "./layout/layoutRotation";
 import { placedImageFrame } from "./layout/placedImage";
-import { LayoutTextEditField, LayoutTextFormatFields, RichTextContent, RichTextFieldHint, applyTextFormat, textBlockStyle, type TextBlockFormat, type TextBlockPatch } from "./layout/LayoutTextFormat";
+import { LayoutTextEditField, LayoutTextFormatFields, RichTextContent, RichTextFieldHint, applyTextFormat, textBlockStyle, textFrameGrowth, type TextBlockFormat, type TextBlockPatch } from "./layout/LayoutTextFormat";
 import { plainTextOf } from "./layout/richText";
 import { useLayoutNavigation } from "./layout/layoutNavigation";
 import { useLayoutSheetTabs } from "./layout/layoutSheets";
@@ -177,6 +179,12 @@ interface Props {
    * is undone here like an edit made here.
    */
   takeUndoSeed?: () => LayoutWorkspace | null;
+  /**
+   * The Undo and Redo stacks, held by the parent so they outlive the tab: a visit to another tab
+   * unmounts it. The parent starts a new pair for each workspace opened or begun. Without it the
+   * tab keeps its own, lost when it unmounts.
+   */
+  history?: { undo: MutableRefObject<LayoutWorkspace[]>; redo: MutableRefObject<LayoutWorkspace[]> };
   samples: readonly FigureSample[];
   /** The files checked in the Samples pane, the workspace's groups and their membership, and the metadata columns: what an iteration draws from. */
   checkedSampleIds?: readonly string[];
@@ -272,12 +280,25 @@ const SMALLEST_DRAWN_PLOT = 128;
 /**
  * An item's zoom once resized to a frame. The zoom is kept, so a plot is drawn again to fill the
  * frame with its fonts the size they look; but a plot is never drawn smaller than it can be, so
- * one made smaller than that is drawn at that size and shown scaled to the frame.
+ * one made smaller than that is drawn at that size and shown scaled to the frame. A plot held at
+ * that size (`item` is its frame before the resize) is scaled back up as its frame grows, to
+ * unscaled once the frame is that size again, so making it larger undoes making it smaller.
  */
 function resizedFrame(item: LayoutItem, width: number, height: number): { zoom?: number } {
   const zoom = layoutItemZoom(item);
   if (item.recipe.kind !== "biplot" && item.recipe.kind !== "histogram") return zoomField(zoom);
-  return zoomField(Math.min(zoom, Math.min(width, height) / SMALLEST_DRAWN_PLOT));
+  const fits = Math.min(width, height) / SMALLEST_DRAWN_PLOT;
+  const held = zoom < 1 && Math.min(item.width, item.height) / zoom <= SMALLEST_DRAWN_PLOT + 1;
+  return zoomField(held ? Math.min(1, fits) : Math.min(zoom, fits));
+}
+
+/**
+ * Whether an item is drawn at one size and scaled as a whole to its frame, as a multi-population
+ * strategy block is. Such a frame keeps its proportions when it is resized: one of another shape
+ * would only stand empty beside the block, its handles far from what is drawn.
+ */
+export function scaledAsAWhole(recipe: LayoutRecipe): boolean {
+  return recipe.kind === "strategy" && !!recipe.populationIds?.length;
 }
 
 function itemTitle(
@@ -316,11 +337,32 @@ function itemTitle(
   return `${population?.name ?? "Population"} · ${sample?.name ?? "FCS"}`;
 }
 
-/** The files a plot pools, when it pools more than one; null for a plot of one file. */
+/** The files a plot or a strategy pools, when it pools more than one; null for one file. */
 function poolOf(recipe: LayoutRecipe): string[] | null {
-  return (recipe.kind === "biplot" || recipe.kind === "histogram") && recipe.pool && recipe.pool.sampleIds.length > 1
+  return (recipe.kind === "biplot" || recipe.kind === "histogram" || recipe.kind === "strategy") && recipe.pool && recipe.pool.sampleIds.length > 1
     ? recipe.pool.sampleIds
     : null;
+}
+
+/**
+ * The files a pooled strategy draws, the reference file first, each with the strategy's population
+ * followed into its own tree ("" where it has none), as the Strategy tab prepares its pool; the
+ * pooled strategy leaves out the files that cannot join it (engine/pooledStrategy.ts).
+ */
+function strategyPoolMembers(
+  recipe: LayoutStrategyRecipe,
+  samples: readonly LayoutSampleView[],
+  trees: Record<string, StoredHierarchy>,
+  templateTreeId?: string,
+): StrategyMember[] {
+  const ids = recipe.pool?.sampleIds ?? [recipe.sampleId];
+  const ordered = ids.includes(recipe.sampleId) ? [recipe.sampleId, ...ids.filter((id) => id !== recipe.sampleId)] : ids;
+  return ordered.flatMap((id) => {
+    const view = samples.find((candidate) => candidate.id === id);
+    if (!view) return [];
+    const resolved = resolvePopulationInTree(recipe.populationId, view.tree, trees, templateTreeId);
+    return [{ id: view.id, name: view.name, sample: view.sample, tree: view.tree, gating: view.derived, populationId: resolved.missing ? "" : resolved.id }];
+  });
 }
 
 /**
@@ -567,6 +609,7 @@ function LayoutPlotSurface({
   canvasScale,
   titleTemplate,
   describe,
+  onContentBox,
 }: Readonly<{
   item: LayoutPageItem;
   samples: readonly LayoutSampleView[];
@@ -574,6 +617,11 @@ function LayoutPlotSurface({
   globalScales: Record<string, [number, number]>;
   dataRevision: string | number;
   densityColorPower: number;
+  /**
+   * A block scaled as a whole was drawn into a box smaller than the one it was given (its frame
+   * has another shape than the block): the box it fills, in the units of `item`'s size.
+   */
+  onContentBox?: (width: number, height: number) => void;
   /** Canvas pixels per CSS pixel: the display's ratio times the page zoom, so a zoomed page stays sharp. */
   canvasScale: number;
   /** The sheet's style with this item's own values over it. */
@@ -582,7 +630,13 @@ function LayoutPlotSurface({
   titleTemplate: string;
   describe: DescribeBoundPlot;
 }>) {
+  const { t } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
+  // Read when the block has drawn, so a new callback each render does not draw it again.
+  const onContentBoxRef = useRef(onContentBox);
+  onContentBoxRef.current = onContentBox;
+  /** A multi-population block's size as last measured, unscaled: the scale its next drawing is made at. */
+  const measuredGridRef = useRef<{ width: number; height: number } | null>(null);
   // A chart, a figure and a Plotting chart have surfaces of their own; this one takes plots and strategies.
   const recipe = item.recipe as Exclude<LayoutRecipe, LayoutChartRecipe | LayoutFigureRecipe | LayoutProportionsRecipe | LayoutImageWallRecipe | LayoutCellPanelRecipe | LayoutShapeRecipe | import("../engine/placedImageBlock").LayoutPlacedImageRecipe>;
   const styleKey = JSON.stringify(style);
@@ -652,6 +706,9 @@ function LayoutPlotSurface({
         host.textContent =
           hostWords("The referenced file is unavailable or still loading.");
         host.className = "gl-layout-plot-host is-missing";
+        // Not drawn with its data yet: the plot is drawn again once its file is prepared, and an
+        // export waits for that while the files are being prepared.
+        host.dataset.layoutPending = "source";
         return;
       }
       const population = state.populations[populationId];
@@ -679,7 +736,10 @@ function LayoutPlotSurface({
           .map((id) => resolvePopulationInTree(id, tree, trees, templateSource?.tree.id))
           .filter((resolved) => !resolved.missing)
           .map((resolved) => resolved.id);
-        const computed = computeMultiPopStrategy(source.sample, tree.gates, tree.populations, rootId, source.derived.masks, ids, { maxEvents: style.maxEvents, globalScales });
+        // Pooled, every step is drawn from the pooled files' events together, as on the Strategy tab.
+        const computed = memberViews
+          ? computePooledMultiPopStrategy(strategyPoolMembers(recipe, samples, trees, templateSource?.tree.id), recipe.populationIds, templateSource?.tree.id ?? tree.id, trees, { maxEvents: style.maxEvents, globalScales }).nodes
+          : computeMultiPopStrategy(source.sample, tree.gates, tree.populations, rootId, source.derived.masks, ids, { maxEvents: style.maxEvents, globalScales });
         const columnsAsked = Math.max(1, recipe.columns ?? 4);
         const nodes = recipe.layout === "flow" ? flowLayout(computed, columnsAsked, tree.populations) : tidyLayout(computed, tree.populations);
         if (!nodes.length) {
@@ -713,6 +773,7 @@ function LayoutPlotSurface({
             kdeBandwidth: style.kdeBandwidth,
             pubStyle: style.pubStyle,
             gateLineWidth: style.gateLineWidth,
+            gateEdgeMode: recipe.gateEdgeMode,
             gateLabelFormat: style.gateLabels,
             gateLabelBold: recipe.gateLabelBold,
             labelBackground: recipe.labelBackground,
@@ -724,24 +785,48 @@ function LayoutPlotSurface({
           });
           loadMiniPlots().renderMultiStrategyGrid(inner.id, payload);
         };
-        draw(1);
-        // Measured with the right and bottom gutters the arrows run in, so the frame holds them.
-        if (showArrows) reserveArrowGutters(inner);
-        const naturalWidth = inner.scrollWidth, naturalHeight = inner.scrollHeight;
-        const fit = naturalWidth > 0 && naturalHeight > 0
-          ? Math.max(0.1, Math.min(4, availableWidth / naturalWidth, availableHeight / naturalHeight))
+        // The limits are on the scale the block is shown at, which is this fit times the item's own
+        // zoom: held to the fit alone, a block carrying a small zoom stopped growing with its frame,
+        // and its selection box ran far beyond what was drawn.
+        const itemZoom = layoutItemZoom(item);
+        const fitOf = (width: number, height: number) => width > 0 && height > 0
+          ? Math.max(0.1 / itemZoom, Math.min(4 / itemZoom, availableWidth / width, availableHeight / height))
           : 1;
-        if (Math.abs(fit - 1) > 0.01) {
-          inner.style.zoom = String(fit);
-          // Redrawn at the zoomed resolution, so the points stay sharp.
-          draw(fit);
-        }
+        // Drawn at the resolution it is shown at, so the points stay sharp.
+        const scaleOf = (fit: number) => (Math.abs(fit - 1) > 0.01 ? Math.max(0.1, Math.min(4, fit * itemZoom)) : 1);
+        // The size is known only once the grid is drawn: the first drawing is at 1 and measured, and
+        // a later one (the frame resized or drawn in to the block) is made at the scale the last
+        // measured size gives, so it is drawn once unless the size has changed since.
+        const known = measuredGridRef.current;
+        const drawnAt = known ? scaleOf(fitOf(known.width, known.height)) : 1;
+        draw(drawnAt);
+        // Measured with the right and bottom gutters the arrows run in, so the frame holds them;
+        // with no arrow to draw, there are none, as on the Strategy tab.
+        if (arrows.length) reserveArrowGutters(inner);
+        // The grid sets the block's width; the title, on one line, is cut to it, as on the Strategy tab.
+        const gridWidth = inner.querySelector<HTMLElement>(".multi-strategy-grid")?.offsetWidth ?? 0;
+        if (gridWidth > 0) inner.style.width = `${gridWidth}px`;
+        const naturalWidth = inner.scrollWidth, naturalHeight = inner.scrollHeight;
+        measuredGridRef.current = { width: naturalWidth, height: naturalHeight };
+        const fit = fitOf(naturalWidth, naturalHeight);
+        if (Math.abs(fit - 1) > 0.01) inner.style.zoom = String(fit);
+        if (scaleOf(fit) !== drawnAt) draw(scaleOf(fit));
         drawStrategyArrows(inner, arrows, { color: recipe.arrowColor ?? (style.pubStyle ? "#444444" : null), width: recipe.arrowWidth ?? 1.5, anchor: recipe.arrowAnchor ?? "label" });
+        // The block keeps its shape, so a frame of another shape stands empty beside or below it;
+        // the frame is told the box the block fills, and is drawn in to it.
+        const filledWidth = naturalWidth * fit + 8, filledHeight = naturalHeight * fit + 8;
+        if (naturalWidth > 0 && naturalHeight > 0 && ((item.width - filledWidth) * itemZoom > 2 || (item.height - filledHeight) * itemZoom > 2)) {
+          onContentBoxRef.current?.(Math.min(item.width, filledWidth), Math.min(item.height, filledHeight));
+        }
         return;
       }
 
       if (recipe.kind === "strategy") {
-        const steps = computeGatingStrategy(
+        // Pooled, every step is drawn from the pooled files' events together, as on the Strategy tab.
+        const pooled = memberViews
+          ? computePooledGatingStrategy(strategyPoolMembers(recipe, samples, trees, templateSource?.tree.id), trees, { fullPath: recipe.fullPath, maxEvents: style.maxEvents })
+          : null;
+        const steps = pooled ? pooled.steps : computeGatingStrategy(
           source.sample,
           state.gates,
           state.populations,
@@ -754,19 +839,23 @@ function LayoutPlotSurface({
         // stacks them and draws them larger; resizing the frame scales the strip.
         const gap = 8, titleHeight = 26;
         const stepCount = Math.max(1, steps.length);
+        // A strip sent from the Strategy tab keeps the columns it had there.
+        const keptColumns = recipe.columns ? Math.min(recipe.columns, stepCount) : 0;
         let columns = 1, plotSize = 0;
-        for (let candidate = 1; candidate <= stepCount; candidate++) {
+        for (let candidate = keptColumns || 1; candidate <= (keptColumns || stepCount); candidate++) {
           const rows = Math.ceil(stepCount / candidate);
           const cellWidth = Math.floor((availableWidth - gap * (candidate - 1)) / candidate);
           const cellHeight = Math.floor((availableHeight - titleHeight - gap * (rows - 1)) / rows);
           const size = Math.min(cellWidth, cellHeight);
           if (size > plotSize) { plotSize = size; columns = candidate; }
         }
-        plotSize = Math.max(100, Math.min(800, plotSize));
-        const payload = buildStrategyPayload(
-          source.sample,
+        // The renderer draws no panel under 120 px: a strip whose panels fit smaller is drawn at 120
+        // and its grid shown scaled to fit, so it never scrolls inside its frame.
+        const shownAt = plotSize < 120 ? Math.max(1, plotSize) / 120 : 1;
+        plotSize = Math.max(120, Math.min(800, plotSize));
+        const payload = buildPooledStrategyPayload(
+          pooled ? pooled.drawn.map((member) => ({ sample: member.sample, finalMask: null })) : [{ sample: source.sample, finalMask: null }],
           steps,
-          null,
           globalScales,
           {
             gateView: ["forward"],
@@ -776,13 +865,17 @@ function LayoutPlotSurface({
             plotSize,
             fitToColumns: false,
             contourThreshold: style.contourThreshold,
+            contourLevels: style.contourLevels,
             pointAlpha: style.pointAlpha,
             densityColorPower,
             pointSize: style.pointSize,
             kdeBandwidth: style.kdeBandwidth,
             pubStyle: style.pubStyle,
             gateLineWidth: style.gateLineWidth,
+            gateEdgeMode: recipe.gateEdgeMode,
             gateLabelFormat: style.gateLabels,
+            gateLabelBold: recipe.gateLabelBold,
+            labelBackground: recipe.labelBackground,
             fontSizes: fontSizesOf(style),
             contextTitle: drawnTitle,
           },
@@ -790,6 +883,8 @@ function LayoutPlotSurface({
         host.id = `layout-strategy-${item.id}`;
         for (const plot of Object.values((payload as { plots?: Record<string, Record<string, unknown>> }).plots ?? {})) plot.canvas_scale = canvasScale;
         loadMiniPlots().renderStrategyGrid(host.id, payload);
+        const stripGrid = shownAt < 1 ? host.querySelector<HTMLElement>(".strategy-grid") : null;
+        if (stripGrid) stripGrid.style.zoom = String(shownAt);
         return;
       }
 
@@ -939,8 +1034,15 @@ function LayoutPlotSurface({
     const timer = window.setTimeout(() => {
       try {
         paint();
+      } catch (error) {
+        // The block says it could not be drawn rather than standing blank; the next drawing
+        // (paint clears the host first) replaces the message once the cause is gone.
+        console.error(error);
+        host.innerHTML = "";
+        host.textContent = `${t("This block could not be drawn")}: ${error instanceof Error ? error.message : String(error)}`;
+        host.className = "gl-layout-plot-host is-missing";
       } finally {
-        delete host.dataset.layoutPending;
+        if (host.dataset.layoutPending === "1") delete host.dataset.layoutPending;
       }
     }, 80);
     return () => window.clearTimeout(timer);
@@ -1008,8 +1110,11 @@ function LayoutItemFrame({
   onTextEditStart,
   onTextEditEnd,
   onIsolate,
+  onHug,
 }: Readonly<{
   item: LayoutPageItem;
+  /** The frame a block scaled as a whole fills, in sheet pixels, when its frame is larger than that. */
+  onHug?: (width: number, height: number) => void;
   canvasScale: number;
   /** The text as written on the template, with its placeholders, for editing. */
   templateText?: string;
@@ -1036,8 +1141,8 @@ function LayoutItemFrame({
   /** The files' division profiles, for a chart block of division categories. */
   divisionProfiles: Readonly<Record<string, DivisionProfileLike>>;
   imageService: ImageService | null;
-  /** The text as committed, with the height its lines need, so the frame can grow to show them. */
-  onTextChange: (text: string, contentHeight: number, rich?: boolean) => void;
+  /** The text as committed, with how far it runs past the editor's box (drawn px), so the frame can grow to show it. */
+  onTextChange: (text: string, overflow: number, rich?: boolean) => void;
   /** The text editor took focus: a click on a text block's words selects the block. */
   onTextFocus: () => void;
   /** Whether this text block's editor is open; a double-click or Enter opens it, leaving it closes it. */
@@ -1052,6 +1157,16 @@ function LayoutItemFrame({
   // shrank keeps its fonts, gates and margins in proportion; the frame is the zoomed size.
   const zoom = layoutItemZoom(item);
   const inner = zoom === 1 ? item : { ...item, width: Math.max(1, Math.round(item.width / zoom)), height: Math.max(1, Math.round(item.height / zoom)) };
+  // A chart's values (a median takes every event of every file) are taken again only when the
+  // chart or what it reads changes, not on each render of the tab. The scales and the data
+  // revision change when a file's values change in place.
+  const chartKey = item.recipe.kind === "chart" ? JSON.stringify(item.recipe) : "";
+  const checkedKey = checkedSampleIds.join("\u0000");
+  const chart = useMemo(
+    () => (item.recipe.kind === "chart" ? chartData(item.recipe, samples, metadataById, checkedSampleIds, state) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [chartKey, samples, metadataById, checkedKey, state, globalScales, dataRevision],
+  );
   return (
     <article
       data-item-id={item.id}
@@ -1097,6 +1212,7 @@ function LayoutItemFrame({
           width={Math.max(120, inner.width - 8)}
           height={Math.max(80, inner.height - 8)}
           columnLevels={metadataLevels}
+          containerId={`layout-figure-${item.id}`}
         />
       ) : item.recipe.kind === "proportions" ? (
         <LayoutProportionsSurface
@@ -1119,7 +1235,7 @@ function LayoutItemFrame({
       ) : item.recipe.kind === "image" ? (
         <LayoutTurned turn={item.rotation} width={inner.width} height={inner.height}><LayoutPlacedImageView recipe={item.recipe} /></LayoutTurned>
       ) : item.recipe.kind === "cellpanel" ? (
-        <Suspense fallback={<div className="gl-layout-plot-host" />}>
+        <Suspense fallback={<div className="gl-layout-plot-host" data-layout-pending="1" />}>
           <LayoutCellPanelLazy
             recipe={item.recipe}
             service={imageService ?? null}
@@ -1128,7 +1244,7 @@ function LayoutItemFrame({
           />
         </Suspense>
       ) : item.recipe.kind === "imagewall" ? (
-        <Suspense fallback={<div className="gl-layout-plot-host" />}>
+        <Suspense fallback={<div className="gl-layout-plot-host" data-layout-pending="1" />}>
           <LayoutImageWallLazy
             recipe={item.recipe}
             service={imageService ?? null}
@@ -1139,7 +1255,7 @@ function LayoutItemFrame({
       ) : item.recipe.kind === "chart" ? (
         <div className="gl-layout-plot-host gl-layout-chart-host">
           <LayoutChart
-            data={chartData(item.recipe, samples, metadataById, checkedSampleIds, state)}
+            data={chart!}
             recipe={item.recipe}
             style={style}
             width={Math.max(120, inner.width - 8)}
@@ -1159,6 +1275,7 @@ function LayoutItemFrame({
           canvasScale={canvasScale}
           titleTemplate={titleTemplate}
           describe={describe}
+          onContentBox={onHug ? (width, height) => onHug(Math.round(width * zoom), Math.round(height * zoom)) : undefined}
         />
       )}
       </div>
@@ -1367,7 +1484,7 @@ function LayoutTextEditor({
   editing: boolean;
   onEditStart: () => void;
   onEditEnd: () => void;
-  onCommit: (text: string, contentHeight: number, rich?: boolean) => void;
+  onCommit: (text: string, overflow: number, rich?: boolean) => void;
   onFocus: () => void;
 }) {
   const { t } = useI18n();
@@ -1418,6 +1535,7 @@ export function LayoutTab({
   workspace,
   onChange,
   takeUndoSeed,
+  history,
   samples: files,
   checkedSampleIds = [],
   groups = [],
@@ -1502,6 +1620,20 @@ export function LayoutTab({
   const [exportPaddingMm, setExportPaddingMm] = useState(3);
   const [exporting, setExporting] = useState(false);
   const canvasRef = useRef<HTMLDivElement>(null);
+  // What had the keyboard when an export began: the tab is inert while it runs, which takes the
+  // focus away, and it is given back when the export ends (to the page, if that element is gone).
+  const exportFocusRef = useRef<Element | null | undefined>(undefined);
+  const startExporting = (value: boolean) => {
+    if (value) exportFocusRef.current = document.activeElement;
+    setExporting(value);
+  };
+  useEffect(() => {
+    if (exporting || exportFocusRef.current === undefined) return;
+    const previous = exportFocusRef.current;
+    exportFocusRef.current = undefined;
+    const target = previous instanceof HTMLElement && previous.isConnected && previous !== document.body ? previous : canvasRef.current;
+    target?.focus({ preventScroll: true });
+  }, [exporting]);
   const pageRef = useRef<HTMLElement>(null);
   /** Selecting also focuses the page, so the keyboard acts on the selection at once. */
   const selectMany = (ids: string[]) => {
@@ -1516,9 +1648,16 @@ export function LayoutTab({
     dataRevision,
   );
   // One view per prepared source, held while the sources are: the plot surfaces key their
-  // drawing on these objects, so a render of the tab must not hand them new ones.
+  // drawing on these objects, so a render of the tab must not hand them new ones. While the files
+  // are prepared one by one, a source already prepared keeps its view, so its plots are not drawn
+  // again as each later file arrives; a file prepared again is a new source and gets a new view.
+  const viewsRef = useRef(new WeakMap<FigureSource, LayoutSampleView>());
   const samples: LayoutSampleView[] = useMemo(
-    () => (sourceResult.current ? sourceResult.sources.map((source) => ({ ...source, derived: source.gating })) : []),
+    () => (sourceResult.current ? sourceResult.sources.map((source) => {
+      let view = viewsRef.current.get(source);
+      if (!view) viewsRef.current.set(source, (view = { ...source, derived: source.gating }));
+      return view;
+    }) : []),
     [sourceResult.current, sourceResult.sources],
   );
   const metadataById = useMemo(
@@ -1528,8 +1667,10 @@ export function LayoutTab({
   const trees = useMemo(() => figureHierarchies(state), [state]);
   /** The per-file sources are prepared off the render path; until then nothing can be placed. */
   const ready = files.length === 0 || (sourceResult.current && sourceResult.pending === 0);
-  const undoRef = useRef<LayoutWorkspace[]>([]);
-  const redoRef = useRef<LayoutWorkspace[]>([]);
+  const ownUndoRef = useRef<LayoutWorkspace[]>([]);
+  const ownRedoRef = useRef<LayoutWorkspace[]>([]);
+  const undoRef = history?.undo ?? ownUndoRef;
+  const redoRef = history?.redo ?? ownRedoRef;
   // An add from another tab arrives as a new workspace from outside; what it replaced becomes an
   // Undo step. Read on mount (an add opens this tab) and on every change while it is open.
   const [, setSeedTaken] = useState(0);
@@ -1599,15 +1740,16 @@ export function LayoutTab({
       : [];
     const overlayNames = (context: PlotTitleContext): PlotTitleContext =>
       overlaid.length ? { ...context, population: overlayHeading(overlaid.map((entry) => entry.name), recipe.kind === "strategy" ? undefined : recipe.label), counts: overlaid.map((entry) => entry.count) } : context;
-    if (pool && recipe.kind !== "strategy") {
+    if (pool) {
       // A pool reads as its files: how many, the metadata they share, and the population's
       // events over all of them.
-      const { members } = resolvePoolMembers(recipe, samples, trees, templateSampleId ? samples.find(({ id }) => id === templateSampleId)?.tree.id : undefined);
+      const poolTreeId = templateSampleId ? samples.find(({ id }) => id === templateSampleId)?.tree.id : undefined;
+      const members: Pick<StrategyMember, "gating" | "populationId">[] = recipe.kind === "strategy" ? strategyPoolMembers(recipe, samples, trees, poolTreeId) : resolvePoolMembers(recipe, samples, trees, poolTreeId).members;
       const pooledCount = members.reduce((total, member) => total + (member.gating.stats.event_count[member.populationId] ?? 0), 0);
       // A pool drawn for a metadata value is named by the value; a hand-picked one by its size.
       const unit = unitId ? units.find((candidate) => candidate.id === unitId) : undefined;
       return overlayNames(plotTitleContext(
-        recipe,
+        recipe.kind === "strategy" ? {} : recipe,
         { name: unit?.sampleIds ? unit.name : `${pool.length} files`, fileName: `${pool.length} files`, metadata: unit?.sampleIds ? unit.metadata : sharedMetadataFields(pool.map((id) => metadataById[id])) },
         population ? { id: populationId, name: population.name } : null,
         members.length ? pooledCount : undefined,
@@ -1801,11 +1943,40 @@ export function LayoutTab({
     onChange(reconcilePanelLetters(workspace, next));
   };
 
-  const mutate = (change: (draft: LayoutWorkspace) => void) => {
+  /**
+   * A block scaled as a whole fills less than its frame (a frame dragged to another shape before
+   * such frames kept their proportions, or a strategy whose tree has since changed): the frame is
+   * drawn in to the block, about the block's centre line, so its handles sit on what is drawn. It
+   * is the same picture in a truer frame, so it is no Undo step. Several blocks report in one
+   * turn, so each builds on the workspace the last one left.
+   */
+  const latestWorkspaceRef = useRef(workspace);
+  latestWorkspaceRef.current = workspace;
+  const hugFrame = (templateId: string, width: number, height: number) => {
+    const base = latestWorkspaceRef.current;
+    const next = cloneLayoutWorkspace(base);
+    const item = next.sheets.find(({ id }) => id === next.activeSheetId)?.items.find(({ id }) => id === templateId);
+    if (!item || !scaledAsAWhole(item.recipe) || width < 1 || height < 1) return;
+    if (item.width - width <= 2 && item.height - height <= 2) return;
+    // The block is drawn at the top of its frame, centred across it.
+    item.x += Math.round((item.width - Math.min(item.width, width)) / 2);
+    item.width = Math.min(item.width, width);
+    item.height = Math.min(item.height, height);
+    latestWorkspaceRef.current = next;
+    onChange(reconcilePanelLetters(base, next));
+  };
+
+  const mutateNow = (change: (draft: LayoutWorkspace) => void) => {
     const next = cloneLayoutWorkspace(workspace);
     change(next);
     commit(next);
   };
+  // A change asked for by a closure an earlier render made (a context menu left open across an
+  // undo or a redo, which takes the keyboard on the window) is made by the latest render's, on the
+  // workspace as it is now rather than as it was when the menu opened.
+  const mutateRef = useRef(mutateNow);
+  mutateRef.current = mutateNow;
+  const mutate = (change: (draft: LayoutWorkspace) => void) => mutateRef.current(change);
 
   const mutateActiveSheet = (change: (sheet: LayoutSheet) => void) => {
     mutate((draft) => {
@@ -1828,14 +1999,14 @@ export function LayoutTab({
     placeAtRef.current = null;
     mutateActiveSheet((sheet) => {
       createdId = crypto.randomUUID();
-      const placed = nextLayoutItemPosition(sheet, frame?.width, frame?.height);
-      if (at) {
-        placed.x = Math.max(0, Math.round(at.x));
-        placed.y = Math.max(0, Math.round(at.y));
-      }
+      // Asked for at the pointer, the item goes there; otherwise onto a page, in the first free
+      // place one has, scaled to fit when it is larger than the page, on a new page when none has room.
+      if (!at) { addItemOnPage(sheet, recipe, frame, createdId); return; }
       sheet.items.push({
         id: createdId,
-        ...placed,
+        ...nextItemFrame(sheet, frame?.width, frame?.height),
+        x: Math.max(0, Math.round(at.x)),
+        y: Math.max(0, Math.round(at.y)),
         recipe,
       });
     });
@@ -2019,7 +2190,7 @@ export function LayoutTab({
         ...(item.recipe.kind === "proportions" && onOpenInPlotting
           ? [{ label: t("Edit in Plotting"), onClick: () => onOpenInPlotting(structuredClone((item.recipe as LayoutProportionsRecipe).settings), item.name?.trim() || itemTitle(item, samples, state)) } satisfies MenuEntry]
           : []),
-        { label: many ? t("Remove {n} items", { n: ids.length }) : t("Remove"), onClick: () => removeItems(ids) },
+        { label: many ? t("Remove {n} items", { n: ids.length }) : t("Remove"), onClick: () => deleteItems(ids) },
       ];
       setContextMenu({ x: event.clientX, y: event.clientY, items, label: itemTitle(item, samples, state) });
       return;
@@ -2164,13 +2335,7 @@ export function LayoutTab({
       return;
     }
     mutateActiveSheet((sheet) => {
-      for (const recipe of followSheetIteration(sheet, accepted)) {
-        sheet.items.push({
-          id: crypto.randomUUID(),
-          ...nextLayoutItemPosition(sheet),
-          recipe,
-        });
-      }
+      for (const recipe of followSheetIteration(sheet, accepted)) addItemOnPage(sheet, recipe);
     });
     setMessage(
       recipes.length > accepted.length
@@ -2264,33 +2429,67 @@ export function LayoutTab({
     });
     setSelectedIds((current) => current.filter((id) => !ids.includes(id)));
   };
+  /**
+   * What Delete and Cut take of the items named: a group taken whole goes with its hidden members,
+   * and a locked item stays, as it does in a move; the status line says how many stayed.
+   */
+  const removableIds = (ids: readonly string[]): string[] => {
+    const sheet = latestWorkspaceRef.current.sheets.find(({ id }) => id === latestWorkspaceRef.current.activeSheetId);
+    if (!sheet) return [...ids];
+    const all = withHiddenGroupMembers(sheet, ids);
+    const locked = all.filter((id) => sheet.items.some((item) => item.id === id && item.locked));
+    if (locked.length) setMessage(locked.length === 1 ? t("1 locked item was left in place.") : t("{count} locked items were left in place.", { count: locked.length }));
+    return all.filter((id) => !locked.includes(id));
+  };
+  /** Delete, from the keyboard, the inspector and the menu. */
+  const deleteItems = (ids: readonly string[]) => {
+    const taken = removableIds(ids);
+    if (taken.length) removeItems(taken);
+  };
   /** Copies 20 px down and right, or at the frames given (an Option-drag), on top of the stack. */
   const duplicateItems = (ids: readonly string[], frames?: Record<string, { x: number; y: number; width: number; height: number }>) => {
     const created: string[] = [];
     mutateActiveSheet((sheet) => {
       let z = Math.max(0, ...sheet.items.map((item) => item.z));
       // Copies of a group's members make a group of their own, and a heading copied with its plot reads the copy.
-      const sources = withPanelLetterIds(sheet, ids).flatMap((id) => sheet.items.filter((item) => item.id === id));
+      // A group's hidden members are copied with it, and step where its dragged members did.
+      const sources = withPanelLetterIds(sheet, withHiddenGroupMembers(sheet, ids)).flatMap((id) => sheet.items.filter((item) => item.id === id));
       const { copies } = copyLayoutItems(sources);
+      showHiddenCopies(copies);
       copies.forEach((copy, index) => {
         const source = sources[index];
         created.push(copy.id);
-        const frame = frames?.[source.id] ?? { x: source.x + 20, y: source.y + 20, width: source.width, height: source.height };
+        const mate = frames && source.group ? sources.find((other) => other.group === source.group && frames[other.id]) : undefined;
+        const step = mate ? { x: frames![mate.id].x - mate.x, y: frames![mate.id].y - mate.y } : { x: 20, y: 20 };
+        const frame = frames?.[source.id] ?? { x: source.x + step.x, y: source.y + step.y, width: source.width, height: source.height };
         sheet.items.push({ ...copy, ...frame, locked: false, z: ++z });
       });
     });
     if (created.length) selectMany(created);
     return created;
   };
-  const clipboard = useLayoutClipboard({ sheet: activeSheet, mutateActiveSheet, removeItems, selectMany });
+  const clipboard = useLayoutClipboard({ sheet: activeSheet, mutateActiveSheet, removeItems, selectMany, removable: removableIds });
+  // A run of nudges on one selection (a held key, or presses less than a second apart) is one Undo
+  // step: a press continues the run while the step it began is still the last one recorded.
+  const nudgeRunRef = useRef<{ ids: string; at: number; step: LayoutWorkspace | undefined } | null>(null);
   const nudgeItems = (ids: readonly string[], dx: number, dy: number) => {
-    mutateActiveSheet((sheet) => {
+    const now = Date.now();
+    const run = nudgeRunRef.current;
+    const key = ids.join("\n");
+    const continues = !!run && run.ids === key && now - run.at < 1000 && run.step !== undefined && undoRef.current[0] === run.step;
+    const next = cloneLayoutWorkspace(workspace);
+    const sheet = next.sheets.find(({ id }) => id === next.activeSheetId);
+    if (sheet) {
+      // A selected group's hidden members take the step too; the run is still keyed by the selection.
+      const moving = withHiddenGroupMembers(sheet, ids);
       for (const item of sheet.items) {
-        if (!ids.includes(item.id) || item.locked) continue;
+        if (!moving.includes(item.id) || item.locked) continue;
         item.x += dx;
         item.y += dy;
       }
-    });
+    }
+    commit(next, !continues);
+    nudgeRunRef.current = { ids: key, at: now, step: undoRef.current[0] };
   };
   /**
    * Move items to the top or the bottom of the stack, or one step up or down past the nearest
@@ -2337,10 +2536,10 @@ export function LayoutTab({
     });
   };
   const arrange = (how: AlignHow) => {
-    mutateActiveSheet((sheet) => alignItems(sheet, selectedTemplateIds.filter((id) => !sheet.items.find((item) => item.id === id)?.locked), how));
+    mutateActiveSheet((sheet) => alignOnTheirPage(sheet, withHiddenGroupMembers(sheet, selectedTemplateIds).filter((id) => !sheet.items.find((item) => item.id === id)?.locked), how));
   };
   const spread = (how: DistributeHow) => {
-    mutateActiveSheet((sheet) => distributeItems(sheet, selectedTemplateIds.filter((id) => !sheet.items.find((item) => item.id === id)?.locked), how));
+    mutateActiveSheet((sheet) => distributeItems(sheet, withHiddenGroupMembers(sheet, selectedTemplateIds).filter((id) => !sheet.items.find((item) => item.id === id)?.locked), how));
   };
   /** What Moveable moved or resized becomes the items' frames; an Option-drag leaves the originals and makes copies there. */
   const commitFrames = (targets: readonly Element[], asCopies: boolean) => {
@@ -2366,11 +2565,12 @@ export function LayoutTab({
       return;
     }
     mutateActiveSheet((sheet) => {
+      moveHiddenGroupMembers(sheet, frames);
       for (const item of sheet.items) {
         const frame = frames[item.id];
         if (!frame) continue;
-        Object.assign(item, frame);
         const { zoom } = resizedFrame(item, frame.width, frame.height);
+        Object.assign(item, frame);
         if (zoom === undefined) delete item.zoom;
         else item.zoom = zoom;
       }
@@ -2403,11 +2603,20 @@ export function LayoutTab({
   const removeGhosts = (ghosts: unknown) => {
     if (Array.isArray(ghosts)) for (const ghost of ghosts) (ghost as HTMLElement).remove();
   };
-  /** Put elements back where their items are: what a cancelled or negligible drag leaves. */
+  /**
+   * Put elements back where their items are: what a cancelled or negligible drag or resize leaves.
+   * A resize also set the body's zoom and drawing area (applyResize), so those go back as rendered.
+   */
   const restoreFrames = (targets: readonly Element[]) => {
     for (const el of targets) {
       const item = currentPage.items.find((candidate) => candidate.id === (el as HTMLElement).dataset.itemId);
-      if (item) Object.assign((el as HTMLElement).style, { left: `${item.x}px`, top: `${item.y}px`, width: `${item.width}px`, height: `${item.height}px` });
+      if (!item) continue;
+      Object.assign((el as HTMLElement).style, { left: `${item.x}px`, top: `${item.y}px`, width: `${item.width}px`, height: `${item.height}px` });
+      const body = el.querySelector<HTMLElement>(":scope > .gl-layout-item-body");
+      const zoom = layoutItemZoom(item);
+      if (body) Object.assign(body.style, zoom === 1
+        ? { zoom: "", width: "", height: "" }
+        : { zoom: String(zoom), width: `${Math.max(1, Math.round(item.width / zoom))}px`, height: `${Math.max(1, Math.round(item.height / zoom))}px` });
     }
   };
   const restoreRef = useRef(restoreFrames);
@@ -2558,10 +2767,15 @@ export function LayoutTab({
     });
   };
   const setPage = (page: LayoutPage) => {
-    mutateActiveSheet((sheet) => applyLayoutPage(sheet, page));
+    mutateActiveSheet((sheet) => applyLayoutPage(sheet, pageWithRoom(page)));
   };
-  const pageToContent = () => mutateActiveSheet((sheet) => fitPageToContent(sheet));
-  const contentToPage = () => mutateActiveSheet((sheet) => fitContentToPage(sheet));
+  const pageToContent = () => {
+    let limited = false;
+    mutateActiveSheet((sheet) => { limited = fitPageToShownContent(sheet); });
+    if (limited) setMessage(t("The page stopped at 2000 mm, the largest a page may be, and the content was scaled down to fit on it."));
+  };
+  // The selection, each page's part of it to its own page; with nothing selected, every item.
+  const contentToPage = () => mutateActiveSheet((sheet) => fitItemsToTheirPages(sheet, selectedTemplateIds));
   /** Snap lines of the page grid: every page's edges, margins and centre lines. */
   const pageGuides = (() => {
     const vertical: number[] = [], horizontal: number[] = [];
@@ -2622,38 +2836,68 @@ export function LayoutTab({
       : [...ZOOM_STEPS].reverse().find((step) => step < zoom - 0.001);
     if (next) setZoom(next);
   };
+  const sourcesReadyRef = useRef(ready);
+  sourcesReadyRef.current = ready;
   /**
    * The plots of a page draw shortly after it is shown; the export waits until every plot on it
-   * has drawn (a large pool or strategy takes longer than any fixed wait), up to 20 s.
+   * has drawn (a large pool or strategy takes longer than any fixed wait), up to 20 s. A plot
+   * whose file is still being prepared is waited for until the files are prepared; one whose file
+   * is gone is not. False when the 20 s ran out with blocks still drawing.
    */
-  const settleRender = async () => {
+  const settleRender = async (): Promise<boolean> => {
     const frame = () => new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    const drawing = () => [...(pageRef.current?.querySelectorAll<HTMLElement>("[data-layout-pending]") ?? [])]
+      .some((block) => block.dataset.layoutPending !== "source" || !sourcesReadyRef.current);
     await new Promise<void>((resolve) => window.setTimeout(resolve, 150));
     const started = Date.now();
-    while (pageRef.current?.querySelector("[data-layout-pending]") && Date.now() - started < 20000) {
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+    for (;;) {
+      while (drawing() && Date.now() - started < 20000) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+      }
+      await frame();
+      await frame();
+      // A block that began drawing again meanwhile (its file just prepared) is waited for too.
+      if (!drawing()) return true;
+      if (Date.now() - started >= 20000) return false;
     }
-    await frame();
-    await frame();
+  };
+  /** What an export did otherwise than asked, as sentences for its message. */
+  const exportNotes = (report: ExportReport | undefined, unfinished: boolean) => {
+    const notes: string[] = [];
+    if (unfinished) notes.push(t("Some blocks had not finished drawing after 20 s and may be written blank or incomplete."));
+    if (report?.loweredDpi) notes.push(t("The resolution was lowered to {dpi} dpi, the most a browser can draw a page of this size at as one image.", { dpi: report.loweredDpi }));
+    const raster = report?.rasterPages ?? [];
+    if (raster.length) notes.push(raster.length === 1
+      ? t("The PDF writer could not take page {pages} as vector art; it is written as one image.", { pages: raster[0] })
+      : t("The PDF writer could not take pages {pages} as vector art; they are written as one image each.", { pages: raster.join(", ") }));
+    return notes;
   };
   const exportSheet = async () => {
     const canvas = pageRef.current;
     if (!canvas || !activeSheet || exporting) return;
-    setExporting(true);
+    startExporting(true);
     const shownPage = currentPageIndex;
+    let unfinished = false;
     try {
       const composed: ComposedPage[] = [];
       for (let index = 0; index < pages.length; index++) {
-        if (pages.length > 1) {
-          setPageIndex(index);
-          await settleRender();
-        }
+        if (pages.length > 1) setPageIndex(index);
+        // Also for a sheet of one page: a plot drawn again a moment ago (a style change, a sheet
+        // just shown) is waited for, not written half drawn.
+        if (!(await settleRender())) unfinished = true;
         // A page of an iteration is named, in a zip, by what it is drawn for.
         const label = pages[index]?.units.length === 1 ? pages[index].units[0].name : undefined;
-        composed.push(...composeSheetPages(canvas, activeSheet, { zoom, crop: exportCrop ? { paddingMm: exportPaddingMm } : undefined }).map((page) => (label ? { ...page, label } : page)));
+        // The zoom as the page is drawn now, not as it was when the export was clicked.
+        composed.push(...composeSheetPages(canvas, activeSheet, { zoom: zoomRef.current, crop: exportCrop ? { paddingMm: exportPaddingMm } : undefined }).map((page) => (label ? { ...page, label } : page)));
       }
-      await writeComposedPages(composed, activeSheet, exportFormat);
+      const report = await writeComposedPages(composed, activeSheet, exportFormat);
       onExported?.();
+      const left = itemsOffPages(activeSheet).length;
+      const notes = exportNotes(report, unfinished);
+      if (left) setMessage([left === 1
+        ? t("Exported. 1 item lies outside the sheet's pages and was cut off or left out; Export has a button that adds the pages to hold it.")
+        : t("Exported. {count} items lie outside the sheet's pages and were cut off or left out; Export has a button that adds the pages to hold them.", { count: left }), ...notes].join(" "));
+      else if (notes.length) setMessage([t("Exported."), ...notes].join(" "));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2661,12 +2905,14 @@ export function LayoutTab({
       setExporting(false);
     }
   };
+  const offPageCount = activeSheet ? itemsOffPages(activeSheet).length : 0;
   const navigation = useLayoutNavigation({ canvasEl, zoom, setZoom, fitZoom, stepZoom, items: currentPage.items, selected: selectedTemplateIds });
   const sheetTabs = useLayoutSheetTabs({ workspace, mutate, rename: setRenamingSheetId, openMenu: setContextMenu, clearSelection: () => setSelectedIds([]) });
   const allSheets = useExportAllSheets({
     workspace, pages, pageIndex: currentPageIndex, setPageIndex, zoom, setZoom, canvas: canvasRef.current, page: pageRef.current,
     showSheet: (id) => commit({ ...workspace, activeSheetId: id }, false), settle: settleRender, format: exportFormat,
-    crop: exportCrop ? { paddingMm: exportPaddingMm } : undefined, exporting, setExporting, selectedIds, setSelectedIds, onError: setMessage, onExported,
+    crop: exportCrop ? { paddingMm: exportPaddingMm } : undefined, exporting, setExporting: startExporting, selectedIds, setSelectedIds, onError: setMessage, onExported,
+    onWritten: (report, unfinished) => { const notes = exportNotes(report, unfinished); if (notes.length) setMessage([t("Exported."), ...notes].join(" ")); },
   });
   const setIteration = (next: LayoutIteration) => {
     mutateActiveSheet((sheet) => {
@@ -2700,6 +2946,8 @@ export function LayoutTab({
     return { kind: "checked" };
   };
   const onCanvasKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    // While an export runs the sheet is not changed: it would be written half changed.
+    if (exporting) return;
     const history = historyShortcutAction(event.nativeEvent);
     if (history) {
       event.preventDefault();
@@ -2736,7 +2984,7 @@ export function LayoutTab({
     }
     if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
-      removeItems(selectedTemplateIds);
+      deleteItems(selectedTemplateIds);
       return;
     }
     if (meta && event.key.toLowerCase() === "d") {
@@ -2818,8 +3066,8 @@ export function LayoutTab({
   // toolbar or inspector click the page no longer has it, and the app's own listener would undo
   // the last gating edit instead. Taken on the window in the capture phase, so it comes first; a
   // field keeps its own undo.
-  const historyRef = useRef({ undo, redo });
-  historyRef.current = { undo, redo };
+  const historyRef = useRef({ undo, redo, exporting });
+  historyRef.current = { undo, redo, exporting };
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       // Escape while a drag or resize is under way cancels it: the elements go back and nothing is
@@ -2840,6 +3088,8 @@ export function LayoutTab({
       if ((event.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable='true']")) return;
       event.preventDefault();
       event.stopPropagation();
+      // Taken but not acted on while an export runs: the sheet would be written half changed.
+      if (historyRef.current.exporting) return;
       if (action === "undo") historyRef.current.undo();
       else historyRef.current.redo();
     };
@@ -2858,6 +3108,9 @@ export function LayoutTab({
   return (
     <div
       className={`gl-tab-panel gl-tab-fill gl-layout-tab${preview ? " is-preview" : ""}`}
+      // While an export shows its pages and sheets in turn, the tab takes no clicks, scrolls or
+      // keys: a zoom, page or sheet changed meanwhile would be written instead.
+      {...(exporting ? { inert: "", "aria-busy": true } : {})}
     >
       <div
         className="gl-layout-sheet-tabs"
@@ -2897,11 +3150,13 @@ export function LayoutTab({
                 className={`gl-layout-sheet-tab${workspace.activeSheetId === sheet.id ? " active" : ""}`}
                 title={t("Drag to reorder; double-click to rename; right-click for more")}
                 {...sheetTabs.tabProps(sheet.id)}
-                onClick={() =>
+                onClick={() => {
+                  // The sheet already shown: nothing changes, so nothing is recorded.
+                  if (workspace.activeSheetId === sheet.id) return;
                   mutate((draft) => {
                     draft.activeSheetId = sheet.id;
-                  })
-                }
+                  });
+                }}
                 onDoubleClick={() => setRenamingSheetId(sheet.id)}
               >
                 {sheet.name}
@@ -3080,7 +3335,7 @@ export function LayoutTab({
           </div>
         )}
         <div className="gl-layout-toolbar-group">
-          <button className="gl-mini-btn" type="button" onClick={() => void exportSheet()} disabled={exporting || !activeSheet.items.length} title={pages.length > 1 ? t("Write every page of the iteration; the format is chosen under Page") : t("Write this sheet at its page size; the format is chosen under Page")}>
+          <button className="gl-mini-btn" type="button" onClick={() => void exportSheet()} disabled={exporting || !activeSheet.items.length} title={pages.length > 1 ? t("Write every page of the iteration; the format is chosen under Export") : t("Write every page of this sheet at its page size; the format is chosen under Export")}>
             {exporting ? t("Exporting…") : t("Export {format}", { format: exportFormat.toUpperCase() })}
           </button>
         </div>
@@ -3101,14 +3356,14 @@ export function LayoutTab({
       <div className="gl-layout-workspace">
         <aside className="gl-layout-controls" aria-label="Layout controls">
           <nav className="gl-presentation-tabs" aria-label="Layout inspector">
-            {(["item", "page", "iterate", "style"] as const).filter((tab) => tab !== "iterate" || iteration.mode !== "off").map((tab) => (
+            {(["item", "page", "iterate", "style", "export"] as const).filter((tab) => tab !== "iterate" || iteration.mode !== "off").map((tab) => (
               <button
                 key={tab}
                 aria-pressed={section === tab}
-                title={tab === "item" ? t("The selected item, or the file new plots take") : tab === "page" ? t("Page size, margins, pages and export") : tab === "iterate" ? t("Draw the sheet once per file: which files, and pages or tiles") : t("How the sheet's plots are drawn: points, contours, histograms, gates and fonts")}
+                title={tab === "item" ? t("The selected item, or the file new plots take") : tab === "page" ? t("Page size, margin and the number of pages") : tab === "iterate" ? t("Draw the sheet once per file: which files, and pages or tiles") : tab === "export" ? t("Write the sheet's pages as PDF, SVG or PNG") : t("How the sheet's plots are drawn: points, contours, histograms, gates and fonts")}
                 onClick={() => setSection(tab)}
               >
-                {tab === "item" ? t("Items") : tab === "page" ? t("Page") : tab === "iterate" ? t("Iterate") : t("Style")}
+                {tab === "item" ? t("Items") : tab === "page" ? t("Page") : tab === "iterate" ? t("Iterate") : tab === "export" ? t("Export") : t("Style")}
               </button>
             ))}
           </nav>
@@ -3153,10 +3408,11 @@ export function LayoutTab({
                     <button type="button" className="gl-mini-btn" onClick={() => restackItems(selectedTemplateIds, "front")} title={t("Draw the selected items over every other")}>{t("Bring to front")}</button>
                     <button type="button" className="gl-mini-btn" onClick={() => restackItems(selectedTemplateIds, "back")} title={t("Draw the selected items under every other")}>{t("Send to back")}</button>
                     <button type="button" className="gl-mini-btn" onClick={() => setLocked(selectedTemplateIds, !selectionLocked)} title={t("Lock or unlock the selected items")}>{selectionLocked ? t("Unlock") : t("Lock")}</button>
-                    <button type="button" className="gl-mini-btn" onClick={() => removeItems(selectedTemplateIds)} title={t("Remove the selected items (Delete)")}>{t("Remove")}</button>
+                    <button type="button" className="gl-mini-btn" onClick={() => deleteItems(selectedTemplateIds)} title={t("Remove the selected items (Delete)")}>{t("Remove")}</button>
                   </div>
                   <LayoutRotationButtons items={selectedItems} onTurn={(direction) => mutateActiveSheet((sheet) => { turnItems(sheet, selectedTemplateIds, direction); })} />
                   <LayoutSelectionGeometry itemCount={selectedItems.filter((item) => !isPanelLetter(item)).length} unitCount={activeSheet ? arrangeUnitCount(activeSheet, selectedTemplateIds) : 0} prefs={geometry} onMatch={(how) => mutateActiveSheet((sheet) => { matchSizes(sheet, selectedTemplateIds, how); })} onGrid={({ columns, gapMm, order }) => mutateActiveSheet((sheet) => arrangeInGrid(sheet, selectedTemplateIds, { columns, gapPx: unitToPx(gapMm, "mm"), order }))} />
+                  <LayoutScaleReset items={selectedItems} onReset={() => mutateActiveSheet((sheet) => resetScale(sheet, selectedTemplateIds))} />
                   <p className="gl-hint">{t("Align and distribute them with the toolbar; drag any of them to move them together; Cmd-G makes them one group.")}</p>
                   <LayoutFontFields
                     styles={selectedPlots.map((item) => effectiveLayoutStyle(activeSheet, item.recipe, figureFields))}
@@ -3238,7 +3494,7 @@ export function LayoutTab({
                     <button type="button" className="gl-mini-btn" onClick={() => duplicateItems([selectedItem.id])} title={t("A copy 20 px down and right (Cmd-D); Option-drag an item to copy it where you drop it")}>{t("Duplicate")}</button>
                     <button type="button" className="gl-mini-btn" onClick={() => restackItems([selectedItem.id], "front")} title={t("Draw this item over every other")}>{t("Bring to front")}</button>
                     <button type="button" className="gl-mini-btn" onClick={() => restackItems([selectedItem.id], "back")} title={t("Draw this item under every other")}>{t("Send to back")}</button>
-                    <button type="button" className="gl-mini-btn" onClick={() => removeItems([selectedItem.id])} title={t("Remove this item from the page (Delete)")}>{t("Remove")}</button>
+                    <button type="button" className="gl-mini-btn" onClick={() => deleteItems([selectedItem.id])} title={t("Remove this item from the page (Delete)")}>{t("Remove")}</button>
                   </div>
                   <LayoutRotationButtons items={[selectedItem]} onTurn={(direction) => mutateActiveSheet((sheet) => { turnItems(sheet, [selectedItem.id], direction); })} />
                   <label className="gl-check" title={t("A locked item keeps its place and size; it can still be selected to unlock it")}>
@@ -3252,6 +3508,8 @@ export function LayoutTab({
                   <LayoutDimensionFields
                     item={selectedItem}
                     prefs={geometry}
+                    ratioLocked={scaledAsAWhole(selectedItem.recipe)}
+                    origin={pageOriginAt(activeSheet.page, selectedItem.x + selectedItem.width / 2, selectedItem.y + selectedItem.height / 2)}
                     onCommit={(patch) =>
                       mutateActiveSheet((sheet) => {
                         const item = sheet.items.find(
@@ -3261,6 +3519,7 @@ export function LayoutTab({
                       })
                     }
                   />
+                  <LayoutScaleReset items={[selectedItem]} onReset={() => mutateActiveSheet((sheet) => resetScale(sheet, [selectedItem.id]))} />
                   <LayoutSourcePanel source={selectedBlockSource} />
                   {selectedItem.recipe.kind === "text" && selectedItem.recipe.legendGenerated && (
                     <LayoutLegendMark
@@ -4001,7 +4260,7 @@ export function LayoutTab({
                 {t("Margin (mm)")}
                 <NumberField
                   min={0}
-                  max={100}
+                  max={largestMarginMm(activeSheet.page)}
                   step={1}
                   value={activeSheet.page.marginMm}
                   onCommit={(marginMm) => setPage({ ...activeSheet.page, marginMm })}
@@ -4017,12 +4276,41 @@ export function LayoutTab({
                   <NumberField min={1} max={MAX_PAGE_GRID} step={1} integer aria-label={t("Pages down")} value={activeSheet.page.rows} onCommit={(rows) => setPage({ ...activeSheet.page, rows })} />
                 </label>
               </div>
+              {offPageCount > 0 && (
+                <div className="gl-layout-export-warning" role="alert">
+                  <span>
+                    {offPageCount === 1
+                      ? t("1 item lies partly or wholly outside the sheet's pages. An export writes the pages only, so it would be cut off or left out.")
+                      : t("{count} items lie partly or wholly outside the sheet's pages. An export writes the pages only, so they would be cut off or left out.", { count: offPageCount })}
+                  </span>
+                  <button type="button" className="gl-mini-btn" onClick={() => mutateActiveSheet(addPagesToHoldItems)} title={t("Add rows and columns of pages until every item is on one; no item moves")}>{t("Add pages to hold them")}</button>
+                </div>
+              )}
               <div className="gl-layout-item-actions">
                 <button type="button" className="gl-mini-btn" onClick={pageToContent} disabled={!activeSheet.items.length} title={t("Make the page a custom size that holds every item inside the margin, as one page")}>{t("Fit page to content")}</button>
-                <button type="button" className="gl-mini-btn" onClick={contentToPage} disabled={!activeSheet.items.length} title={t("Scale and centre every item, as one group, to fill the first page inside its margin")}>{t("Fit content to page")}</button>
+                <button type="button" className="gl-mini-btn" onClick={contentToPage} disabled={!activeSheet.items.length} title={selectedTemplateIds.length ? t("Scale and centre the selected items to fill the page they are on, inside its margin; items selected on several pages are each fitted to their own page") : t("Scale and centre the items on each page to fill that page inside its margin; select items to fit those alone")}>{selectedTemplateIds.length ? t("Fit selection to page") : t("Fit content to page")}</button>
                 <LayoutClearGuidesButton count={activeSheet.guides?.length ?? 0} onClear={() => mutateActiveSheet(clearGuides)} />
               </div>
+            </>
+          )}
+          {section === "export" && (
+            <>
               <h3>{t("Export")}</h3>
+              <p className="gl-hint">
+                {activeSheet.page.columns * activeSheet.page.rows === 1
+                  ? t("This sheet is one page.")
+                  : t("This sheet is {count} pages: {columns} across and {rows} down.", { count: activeSheet.page.columns * activeSheet.page.rows, columns: activeSheet.page.columns, rows: activeSheet.page.rows })}
+              </p>
+              {offPageCount > 0 && (
+                <div className="gl-layout-export-warning" role="alert">
+                  <span>
+                    {offPageCount === 1
+                      ? t("1 item lies partly or wholly outside the sheet's pages. An export writes the pages only, so it would be cut off or left out.")
+                      : t("{count} items lie partly or wholly outside the sheet's pages. An export writes the pages only, so they would be cut off or left out.", { count: offPageCount })}
+                  </span>
+                  <button type="button" className="gl-mini-btn" onClick={() => mutateActiveSheet(addPagesToHoldItems)} title={t("Add rows and columns of pages until every item is on one; no item moves")}>{t("Add pages to hold them")}</button>
+                </div>
+              )}
               <label className="gl-field-inline">
                 {t("Format")}
                 <select value={exportFormat} onChange={(event) => setExportFormat(event.target.value as LayoutExportFormat)}>
@@ -4042,6 +4330,9 @@ export function LayoutTab({
                   onCommit={(dpi) => setPage({ ...activeSheet.page, dpi })}
                 />
               </label>
+              <p className="gl-hint">
+                {t("As one image (a PNG, or a PDF page the writer cannot take as vector art), a page of this size can be drawn at {dpi} dpi at most; a higher resolution is lowered to it.", { dpi: maxRasterDpi(pageSizePx(activeSheet.page).width, pageSizePx(activeSheet.page).height) })}
+              </p>
               <label className="gl-field-inline">
                 <input type="checkbox" checked={exportCrop} onChange={(event) => setExportCrop(event.target.checked)} />
                 {t("Crop to content")}
@@ -4398,7 +4689,7 @@ export function LayoutTab({
         <LayoutSourceHover container={pageEl} describe={(id) => { const item = currentPage.items.find((candidate) => candidate.id === id); return item ? sourceOfPageItem(item) : null; }} />
 
         {!preview && showRulers && (
-          <LayoutRulers scroller={canvasEl} page={pageEl} zoom={zoom} selected={selectedItems} onAddGuide={(guide) => mutateActiveSheet((sheet) => addGuide(sheet, guide))} />
+          <LayoutRulers scroller={canvasEl} page={pageEl} zoom={zoom} pages={activeSheet.page} selected={selectedItems} onAddGuide={(guide) => mutateActiveSheet((sheet) => addGuide(sheet, guide))} />
         )}
         <div
           ref={(el) => { (canvasRef as { current: HTMLDivElement | null }).current = el; setCanvasEl(el); }}
@@ -4433,6 +4724,15 @@ export function LayoutTab({
             className="gl-layout-canvas"
             aria-label={activeSheet.name}
             onContextMenu={openCanvasMenu}
+            // A panel of a multi-population strategy block carries the renderer's own right-click
+            // menu ("Copy image", "Download PNG"), which acts on that one panel as it lies on the
+            // screen and keeps the page's menu from opening. Taken here before it reaches the panel,
+            // the right-click opens the item's menu, as it does on every other item.
+            onContextMenuCapture={(event) => {
+              if (!(event.target as HTMLElement).closest?.(".mini-plot-cell")) return;
+              event.stopPropagation();
+              openCanvasMenu(event);
+            }}
             {...placedImageDrop(zoom, placeImageFile)}
             // The grid's lines are drawn 1/zoom thick, so the scale leaves them one screen pixel
             // at any zoom while their spacing, the page's, scales with it.
@@ -4486,7 +4786,7 @@ export function LayoutTab({
                 divisionProfiles={divisionProfiles}
                 imageService={imageService}
                 canvasScale={canvasScale}
-                onTextChange={(text, contentHeight, rich) => {
+                onTextChange={(text, overflow, rich) => {
                   // A block left with no words is removed, as the editors remove an empty text; undo brings it back.
                   if (!text.trim()) { removeItems([item.templateId]); return; }
                   mutateActiveSheet((sheet) => {
@@ -4498,7 +4798,7 @@ export function LayoutTab({
                     if (rich === true) target.recipe.rich = true;
                     else if (rich === false) delete target.recipe.rich;
                     // A block grows to show every line it was given; it never shrinks on its own.
-                    if (contentHeight > 0) growTextFrame(target, contentHeight);
+                    growTextFrame(target, textFrameGrowth(overflow, layoutItemZoom(target)));
                   });
                 }}
                 onTextFocus={() => { if (!selectedIds.includes(item.id) || selectedIds.length > 1) setSelectedIds([item.id]); }}
@@ -4506,6 +4806,8 @@ export function LayoutTab({
                 onTextEditStart={() => { setSelectedIds([item.id]); if (!isPanelLetter(item)) setEditingTextId(item.id); }}
                 // Double-click on a member of a selected group takes the member alone, as Excalidraw and Penpot do.
                 onIsolate={item.group && selectedIds.includes(item.id) && selectedIds.length > 1 ? () => setSelectedIds([item.id]) : undefined}
+                // Not on an iterated sheet, where one frame is drawn for several files whose blocks differ.
+                onHug={iteration.mode === "off" && item.id === item.templateId && scaledAsAWhole(item.recipe) ? (width, height) => hugFrame(item.templateId, width, height) : undefined}
                 // The block stays selected and the page takes the keyboard back.
                 onTextEditEnd={() => { setEditingTextId((current) => (current === item.id ? null : current)); canvasRef.current?.focus({ preventScroll: true }); }}
               />
@@ -4526,7 +4828,7 @@ export function LayoutTab({
                 // inspector edit moves an item by its style, so the targets are watched for that.
                 useMutationObserver
                 useResizeObserver
-                keepRatio={(geometry.keepRatio !== modifiers.shift) && !selectedItems.some((item) => item.recipe.kind === "shape" && item.recipe.shape === "line")}
+                keepRatio={(selectedItems.some((item) => scaledAsAWhole(item.recipe)) || geometry.keepRatio !== modifiers.shift) && !selectedItems.some((item) => item.recipe.kind === "shape" && item.recipe.shape === "line")}
                 throttleDragRotate={modifiers.shift ? 45 : 0}
                 snappable={!modifiers.meta}
                 snapThreshold={6}
@@ -4576,7 +4878,7 @@ export function LayoutTab({
               <LayoutShapeDrawLayer tool={shapeTool} zoom={zoom} snap={shapeSnapLines(snapToGrid ? SNAP_GRID : 0, pageGuides, currentPage.items)} onDraw={addShape} onCancel={() => setShapeTool(null)} />
             )}
             {!preview && activeSheet.guides && (
-              <LayoutGuides guides={activeSheet.guides} width={activeSheet.width} height={activeSheet.height} zoom={zoom} scroller={canvasEl} onMove={(index, at) => mutateActiveSheet((sheet) => moveGuide(sheet, index, at))} onRemove={(index) => mutateActiveSheet((sheet) => removeGuide(sheet, index))} />
+              <LayoutGuides guides={activeSheet.guides} width={activeSheet.width} height={activeSheet.height} pages={activeSheet.page} zoom={zoom} scroller={canvasEl} onMove={(index, at) => mutateActiveSheet((sheet) => moveGuide(sheet, index, at))} onRemove={(index) => mutateActiveSheet((sheet) => removeGuide(sheet, index))} />
             )}
           </section>
           </div>

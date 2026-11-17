@@ -19,6 +19,7 @@ import { I18nProvider } from "../i18n";
 import { LayoutTab } from "../LayoutTab";
 import { fitLayoutText } from "../layoutTextFit";
 import { selectOffsets } from "./richTextDom";
+import { textFrameGrowth } from "./LayoutTextFormat";
 
 const draws = vi.hoisted(() => ({ selecto: null as Record<string, any> | null }));
 vi.mock("../../plots/loadPlots", () => ({ loadMiniPlots: () => ({ renderMiniPlot: () => {}, renderStrategyGrid: () => {} }) }));
@@ -247,5 +248,39 @@ describe("fitLayoutText with formatting", () => {
     measured.length = 0;
     fitLayoutText("CD4<sup>+</sup>", 12, 320);
     expect(measured[0]).toBe("CD4&lt;sup&gt;+&lt;/sup&gt;|");
+  });
+});
+
+describe("A text block's frame after an edit", () => {
+  it("grows by what the text runs past the editor's box, in the frame's own px, and not when it fits", () => {
+    expect(textFrameGrowth(0, 1)).toBe(0);
+    expect(textFrameGrowth(-4, 0.5)).toBe(0);
+    expect(textFrameGrowth(16, 1)).toBe(16);
+    expect(textFrameGrowth(16, 0.5)).toBe(8);
+    expect(textFrameGrowth(15, 0.5)).toBe(8);
+    expect(textFrameGrowth(16, 2)).toBe(32);
+  });
+
+  it("keeps a zoomed block's frame through edits whose text fits, and grows it by the zoomed overflow", () => {
+    // The editor's box is the drawn (unzoomed) size: 200 / 0.5 = 400 px tall; jsdom has no layout, so it is stood in for.
+    let scroll = 60;
+    vi.spyOn(HTMLTextAreaElement.prototype, "scrollHeight", "get").mockImplementation(() => scroll);
+    vi.spyOn(HTMLTextAreaElement.prototype, "clientHeight", "get").mockReturnValue(60);
+    const changes = mount([text("t1", "CD4_positive", {}), { ...text("t2", "D1"), zoom: 0.5, height: 30 }]);
+    const edit = (words: string) => {
+      select("t2");
+      openEditor("t2");
+      const area = element("t2").querySelector<HTMLTextAreaElement>("textarea")!;
+      act(() => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(area, words);
+        area.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      act(() => area.blur());
+      return changes.at(-1)!.sheets[0].items.find((item) => item.id === "t2")!;
+    };
+    expect(edit("D1 a")).toMatchObject({ y: 100, height: 30 });
+    expect(edit("D1 b")).toMatchObject({ y: 100, height: 30 });
+    scroll = 80;
+    expect(edit("D1 b\nD2")).toMatchObject({ y: 100, height: 40 });
   });
 });

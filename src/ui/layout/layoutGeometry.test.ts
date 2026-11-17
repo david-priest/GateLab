@@ -24,6 +24,7 @@ import {
   matchReference,
   matchSizes,
   pxToUnit,
+  resetScale,
   spaceItems,
   unitToPx,
 } from "./layoutGeometry";
@@ -241,5 +242,23 @@ describe("panel letters follow their items", () => {
     expect(offsets()).toEqual(before);
     edit((s) => { matchSizes(s, all, "size"); });
     expect(offsets()).toEqual(before);
+  });
+});
+
+describe("Resetting an item's scale", () => {
+  it("gives each unlocked item its drawn size and no zoom, its top-left corner kept", () => {
+    const sheet = sheetOf([
+      plot("a", 10, 20, 100, 50, { zoom: 0.5 }),
+      plot("b", 300, 20, 99, 99, { zoom: 0.781 }),
+      plot("locked", 10, 300, 100, 100, { zoom: 0.5, locked: true }),
+      plot("plain", 300, 300),
+    ]);
+    resetScale(sheet, ["a", "b", "locked", "plain"]);
+    const [a, b, locked, plain] = sheet.items;
+    expect(a).toMatchObject({ x: 10, y: 20, width: 200, height: 100 });
+    expect("zoom" in a).toBe(false);
+    expect(b).toMatchObject({ x: 300, y: 20, width: 127, height: 127 });
+    expect(locked).toMatchObject({ width: 100, height: 100, zoom: 0.5 });
+    expect(plain).toEqual(plot("plain", 300, 300));
   });
 });

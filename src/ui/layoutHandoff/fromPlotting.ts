@@ -3,16 +3,16 @@
  * per panel with its legend below. App.tsx makes the sizers (plottingBlockSizer in
  * LayoutProportions.tsx) from the files and the gating ranges it holds.
  */
-import { cloneLayoutWorkspace, layoutGridFrames, nextLayoutItemPosition, type LayoutProportionsPanel, type LayoutSheet, type LayoutWorkspace } from "../../engine/layout";
+import { cloneLayoutWorkspace, layoutGridFrames, type LayoutProportionsPanel, type LayoutSheet, type LayoutWorkspace } from "../../engine/layout";
 import type { ProportionsSettings } from "../../engine/proportionsSettings";
-import { placeBlockOnPage } from "../layoutPlacement";
+import { addItemOnPage, placeBlockOnPage } from "../layoutPlacement";
 import type { PlottingPanelBlock } from "../plottingPanels";
 import type { FigureLayout } from "./shared";
 
 /** A block's frame size on a sheet, as plottingBlockSizer returns it. */
 export type PlottingBlockSizer = (sheet: LayoutSheet, figure?: FigureLayout | null) => { width: number; height: number };
 
-/** The Plotting tab's chart as one Layout block, at its natural size, on the active sheet; with `panel`, the page it names. */
+/** The Plotting tab's chart as one Layout block on a page of the active sheet, at its natural size or scaled to fit the page; with `panel`, the page it names. */
 export function addProportionsBlock(
   current: LayoutWorkspace,
   settings: ProportionsSettings,
@@ -24,10 +24,7 @@ export function addProportionsBlock(
   const sheet = next.sheets.find((s0) => s0.id === next.activeSheetId) ?? next.sheets[0];
   if (!sheet) return current;
   const size = sizer?.(sheet, figureLayout) ?? { width: 360, height: 280 };
-  const frame = nextLayoutItemPosition(sheet, size.width, size.height);
-  sheet.items.push({ id: crypto.randomUUID(), ...frame, recipe: { kind: "proportions", settings, ...(panel ? { panel } : {}), textSize: "sheet" } });
-  sheet.width = Math.max(sheet.width, frame.x + frame.width + 48);
-  sheet.height = Math.max(sheet.height, frame.y + frame.height + 48);
+  addItemOnPage(sheet, { kind: "proportions", settings, ...(panel ? { panel } : {}), textSize: "sheet" }, size);
   return next;
 }
 
@@ -69,9 +66,5 @@ export function addPlottingPanelBlocks(
     });
   }
   placeBlockOnPage(sheet, sheet.items.slice(firstAdded));
-  for (const item of sheet.items.slice(firstAdded)) {
-    sheet.width = Math.max(sheet.width, item.x + item.width + 48);
-    sheet.height = Math.max(sheet.height, item.y + item.height + 48);
-  }
   return next;
 }
