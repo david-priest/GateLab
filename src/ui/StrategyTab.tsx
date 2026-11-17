@@ -31,6 +31,7 @@ import { DensityColourControl } from "./DensityColourControl";
 import { useI18n } from "./i18n";
 import { usePersistedTabState } from "./tabState";
 import { composeStrategyTree, strategyTreeRows } from "./strategyTree";
+import { strategyFrames } from "./strategyFrames";
 
 interface Props {
   sample: Sample;
@@ -334,6 +335,8 @@ export function StrategyTab({
       if (pooled && !members) { containerRef.current?.replaceChildren(); setPanelCount(0); setPoolReport(null); return; }
       const fontSizes = { tick: fontTick, axis_label: fontAxis, gate_label: fontGate, title: fontTitle };
       const cap = allEvents ? Infinity : maxEvents;
+      // A channel no global scale sets is framed as the Gating tab frames it, not on its outermost events.
+      const frames = strategyFrames(sample, state.gates, globalScales);
       // A dragged label goes to the gate itself, as on the Illustration tab: the offset is in
       // the gate's own orientation, since a strategy panel draws a gate on its own channels.
       const onLabelMove = labelsMovable
@@ -342,11 +345,11 @@ export function StrategyTab({
 
       if (mode === "multi") {
         const pool = members
-          ? computePooledMultiPopStrategy(members, multiPops, state.active_hierarchy_id, trees, { maxEvents: cap, globalScales })
+          ? computePooledMultiPopStrategy(members, multiPops, state.active_hierarchy_id, trees, { maxEvents: cap, globalScales: frames })
           : null;
         const computed = pool ? pool.nodes : computeMultiPopStrategy(sample, state.gates, state.populations, rootId, derived.masks, multiPops, {
           maxEvents: cap,
-          globalScales,
+          globalScales: frames,
         });
         const nodes = layout === "flow" ? flowLayout(computed, nColumns, state.populations) : tidyLayout(computed, state.populations);
         // Fit ticked: the panels are sized so the grid's columns fill the width (fitPanelSize). Where
@@ -463,8 +466,8 @@ export function StrategyTab({
       };
       if (pool && !parts.length) { containerRef.current?.replaceChildren(); setPanelCount(0); setPoolReport({ drawn: 0, omittedGates: [], leftOut: pool.leftOut }); return; }
       const payload = pool
-        ? buildPooledStrategyPayload(parts, steps, globalScales, payloadOptions)
-        : buildStrategyPayload(sample, steps, finalMask, globalScales, payloadOptions);
+        ? buildPooledStrategyPayload(parts, steps, frames, payloadOptions)
+        : buildStrategyPayload(sample, steps, finalMask, frames, payloadOptions);
       loadMiniPlots().renderStrategyGrid("strategy-grid-container", payload);
       panelsRef.current = new Map(
         ((payload as { steps?: { gate_id: string; x_range: [number, number]; y_range: [number, number] }[] }).steps ?? []).map((drawn, index) => [

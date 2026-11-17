@@ -112,6 +112,7 @@ import {
 import { buildMultiStrategyPayload, computeMultiPopStrategy, flowLayout, tidyLayout } from "../engine/multiStrategy";
 import { computePooledGatingStrategy, computePooledMultiPopStrategy, type StrategyMember } from "../engine/pooledStrategy";
 import { drawStrategyArrows, reserveArrowGutters, strategyArrowGap, strategyArrowRowGap, strategyArrows } from "./strategyArrows";
+import { strategyFrames } from "./strategyFrames";
 import { populationTreeOrder } from "../engine/populations";
 import { loadMiniPlots } from "../plots/loadPlots";
 import { composeSheetPages, writeComposedPages, type ComposedPage, type ExportReport, type LayoutExportFormat } from "../plots/layoutExport";
@@ -736,10 +737,11 @@ function LayoutPlotSurface({
           .map((id) => resolvePopulationInTree(id, tree, trees, templateSource?.tree.id))
           .filter((resolved) => !resolved.missing)
           .map((resolved) => resolved.id);
+        const frames = strategyFrames(source.sample, tree.gates, globalScales);
         // Pooled, every step is drawn from the pooled files' events together, as on the Strategy tab.
         const computed = memberViews
-          ? computePooledMultiPopStrategy(strategyPoolMembers(recipe, samples, trees, templateSource?.tree.id), recipe.populationIds, templateSource?.tree.id ?? tree.id, trees, { maxEvents: style.maxEvents, globalScales }).nodes
-          : computeMultiPopStrategy(source.sample, tree.gates, tree.populations, rootId, source.derived.masks, ids, { maxEvents: style.maxEvents, globalScales });
+          ? computePooledMultiPopStrategy(strategyPoolMembers(recipe, samples, trees, templateSource?.tree.id), recipe.populationIds, templateSource?.tree.id ?? tree.id, trees, { maxEvents: style.maxEvents, globalScales: frames }).nodes
+          : computeMultiPopStrategy(source.sample, tree.gates, tree.populations, rootId, source.derived.masks, ids, { maxEvents: style.maxEvents, globalScales: frames });
         const columnsAsked = Math.max(1, recipe.columns ?? 4);
         const nodes = recipe.layout === "flow" ? flowLayout(computed, columnsAsked, tree.populations) : tidyLayout(computed, tree.populations);
         if (!nodes.length) {
@@ -856,7 +858,7 @@ function LayoutPlotSurface({
         const payload = buildPooledStrategyPayload(
           pooled ? pooled.drawn.map((member) => ({ sample: member.sample, finalMask: null })) : [{ sample: source.sample, finalMask: null }],
           steps,
-          globalScales,
+          strategyFrames(source.sample, state.gates, globalScales),
           {
             gateView: ["forward"],
             displayMode: recipe.displayMode,
